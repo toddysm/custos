@@ -96,7 +96,7 @@ graph TD
         DSEC[Dapr Secrets API]
     end
 
-    subgraph In-Cluster Dependencies (Default)
+    subgraph "In-Cluster Dependencies (Default)"
         SQL[(In-cluster PostgreSQL)]
         REDIS[(In-cluster Redis)]
         ART[(Kubernetes-backed Artifact Store)]
