@@ -1,7 +1,7 @@
 # Requirements: Custos
 
-Last Updated: 2026-05-13
-Version: 1
+Last Updated: 2026-05-14
+Version: 2
 
 ## Project Goal
 
@@ -48,6 +48,9 @@ Workflows can be authored programmatically (YAML/SDK) or visually (designer UI).
 | REQ-027 | Cancel a running workflow run | High | Open | 2026-05-13 |
 | REQ-028 | Re-run a completed workflow run (with same or modified inputs) | Medium | Open | 2026-05-13 |
 | REQ-029 | Workflow definitions can be stored as OCI artifacts in a registry (versioning by digest/tag) | Medium | Open | 2026-05-13 |
+| REQ-073 | The workflow platform must provide first-class workflow primitives for eventing, orchestration, and common control constructs such as branches, loops, fan-out/fan-in, conditions, retries, and step coordination | High | Open | 2026-05-14 |
+| REQ-074 | The platform must provide an extensible connector model so initial connections can target OCI registries and later be extended to storage accounts, databases, and other external systems without redesigning the core platform | High | Open | 2026-05-14 |
+| REQ-075 | Activities must be independently pluggable, packaged, versioned, and deployable so new activities can be added without requiring a platform upgrade or code change in the core orchestrator | High | Open | 2026-05-14 |
 
 ## Non-Functional Requirements
 
@@ -127,8 +130,8 @@ Custos is deployed as a set of containerized microservices on **Kubernetes**, wi
 
 | Milestone | Target | Scope | Dependencies |
 |---|---|---|---|
-| M1 — Core engine | +3 months (≈ 2026-08-13) | Dapr-Workflow-backed engine; YAML-defined DAG workflows (REQ-001, REQ-007–010, REQ-025); manual API trigger (REQ-004); 2 built-in actions (vuln scan REQ-016, signature verify REQ-018); OCI container action runtime (REQ-013, REQ-022, REQ-023); run inspection (REQ-026, REQ-027); minimal auth (REQ-035 API tokens); Postgres + Redis + S3 (REQ-048–050); basic logs + Prometheus metrics (REQ-040, REQ-042); Helm chart (subset of REQ-052); audit log skeleton (REQ-038) | None |
-| M2 — Triggers & action breadth | +6 months | Scheduled trigger (REQ-005); registry webhook trigger (REQ-006); SBOM action (REQ-017); attestation action (REQ-019); policy eval action with OPA backend (REQ-020, REQ-062, REQ-066); image promotion action (REQ-021); generic webhook + Slack notifications (REQ-067, REQ-068); OpenTelemetry tracing (REQ-043); SDK for action authors (REQ-022 hardening) | M1 |
+| M1 — Core engine | +3 months (≈ 2026-08-13) | Dapr-Workflow-backed engine; YAML-defined DAG workflows and core workflow primitives (REQ-001, REQ-007–010, REQ-025, REQ-073); manual API trigger (REQ-004); 2 built-in actions (vuln scan REQ-016, signature verify REQ-018); OCI container action runtime and independently pluggable activities (REQ-013, REQ-022, REQ-023, REQ-075); run inspection (REQ-026, REQ-027); minimal auth (REQ-035 API tokens); Postgres + Redis + S3 (REQ-048–050); basic logs + Prometheus metrics (REQ-040, REQ-042); Helm chart (subset of REQ-052); audit log skeleton (REQ-038) | None |
+| M2 — Triggers & action breadth | +6 months | Scheduled trigger (REQ-005); registry webhook trigger (REQ-006); extensible connector model beyond registries (REQ-074); SBOM action (REQ-017); attestation action (REQ-019); policy eval action with OPA backend (REQ-020, REQ-062, REQ-066); image promotion action (REQ-021); generic webhook + Slack notifications (REQ-067, REQ-068); OpenTelemetry tracing (REQ-043); SDK for action authors (REQ-022 hardening) | M1 |
 | M3 — UX, security, multi-tenancy | +9–12 months | Visual designer (REQ-003); OIDC for users (REQ-034, REQ-056); RBAC (REQ-036); full secrets backend pluggability via Dapr (REQ-037, REQ-061); approval gates (REQ-012); loops (REQ-011); HTTP webhook action runtime (REQ-014); workflow defs as OCI artifacts (REQ-029, REQ-051); remaining notification channels; remaining policy engines; SPIFFE/SPIRE (REQ-059); GitHub OIDC and Entra ID (REQ-057, REQ-058) | M2 |
 | M4+ — Hardening & advanced | beyond | WebAssembly action runtime (REQ-015); re-run with modified inputs (REQ-028); full SLA achievement (REQ-032); scale testing to upper bound of REQ-030 | M3 |
 
@@ -148,3 +151,4 @@ Custos is deployed as a set of containerized microservices on **Kubernetes**, wi
 |---|---|---|
 | 2026-05-13 | Initial requirements | #2 |
 | 2026-05-14 | Verified Dapr Workflow Python SDK parity and closed TODO-001 | #3 |
+| 2026-05-14 | Added workflow primitives, extensible connectors, and independently pluggable activity requirements | #8 |

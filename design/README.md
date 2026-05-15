@@ -1,6 +1,6 @@
 # Custos — Design Documentation
 
-Last Updated: 2026-05-13
+Last Updated: 2026-05-14
 
 ## Overview
 
@@ -10,7 +10,7 @@ Custos is a pluggable workflow orchestrator for supply-chain security operations
 
 | Phase | Status | Last Updated |
 |---|---|---|
-| Requirements | In Progress (initial draft) | 2026-05-13 |
+| Requirements | In Progress (revision 2) | 2026-05-14 |
 | Architecture | Not Started | — |
 | Component Designs | Not Started | — |
 | Implementation | Not Started | — |
@@ -25,4 +25,5 @@ Custos is a pluggable workflow orchestrator for supply-chain security operations
 
 | Date | Change | Issue |
 |---|---|---|
+| 2026-05-14 | Added workflow primitives, extensible connectors, and pluggable activity requirements | #8 |
 | 2026-05-13 | Initial requirements drafted | #2 |
