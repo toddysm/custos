@@ -1,7 +1,7 @@
 # Requirements: Custos
 
 Last Updated: 2026-05-14
-Version: 2
+Version: 3
 
 ## Project Goal
 
@@ -51,6 +51,7 @@ Workflows can be authored programmatically (YAML/SDK) or visually (designer UI).
 | REQ-073 | The workflow platform must provide first-class workflow primitives for eventing, orchestration, and common control constructs such as branches, loops, fan-out/fan-in, conditions, retries, and step coordination | High | Open | 2026-05-14 |
 | REQ-074 | The platform must provide an extensible connector model so initial connections can target OCI registries and later be extended to storage accounts, databases, and other external systems without redesigning the core platform | High | Open | 2026-05-14 |
 | REQ-075 | Activities must be independently pluggable, packaged, versioned, and deployable so new activities can be added without requiring a platform upgrade or code change in the core orchestrator | High | Open | 2026-05-14 |
+| REQ-076 | The platform must support workflow templates: users can create workflows from templates by filling required placeholders, and can create templates from existing workflows by removing selected configuration and saving the result as a reusable template | High | Open | 2026-05-14 |
 
 ## Non-Functional Requirements
 
@@ -79,24 +80,27 @@ Workflows can be authored programmatically (YAML/SDK) or visually (designer UI).
 | REQ-045 | Orchestrator and built-in actions implemented in Python | Team familiarity; matches Dapr Python SDK | 2026-05-13 |
 | REQ-046 | Workflow engine built on Dapr Workflow (durable execution actor model) | Provides durability, replay, and pluggable state stores out of the box | 2026-05-13 |
 | REQ-047 | Frontend implemented in React + TypeScript | Modern ecosystem; required for visual designer (React Flow / similar) | 2026-05-13 |
-| REQ-048 | Persistent state: PostgreSQL (workflow defs, run metadata, audit log, RBAC) | Mature relational store; strong durability | 2026-05-13 |
+| REQ-048 | Persistent state abstraction: platform core must be datastore-agnostic for definitions, catalog, and metadata; v1 default implementation may use PostgreSQL running in-cluster | Enables portability and future pluggable backends while keeping v1 simple | 2026-05-14 |
 | REQ-049 | Ephemeral state / queues: Redis (Dapr state and pub/sub component) | Standard Dapr-supported backend | 2026-05-13 |
-| REQ-050 | Large artifacts and step logs: S3-compatible object storage | Cheap, durable storage for variable-sized blobs | 2026-05-13 |
+| REQ-050 | Artifact storage abstraction: platform must support pluggable artifact/payload storage backends; v1 default runs in-cluster on Kubernetes-backed storage, with optional external/cloud backends later | Supports single-cluster deployment now and extensibility later | 2026-05-14 |
 | REQ-051 | Workflow definitions MAY be stored as OCI artifacts in an OCI registry | Enables registry-native workflow distribution | 2026-05-13 |
 | REQ-052 | All services run on Kubernetes (any conformant cluster, including AKS/EKS/GKE) | Required by Dapr sidecar model; cloud-agnostic | 2026-05-13 |
 | REQ-053 | Cloud-agnostic: no hard dependency on any single cloud provider's services | Portability across Azure / AWS / GCP / on-prem | 2026-05-13 |
 | REQ-054 | Open source under Apache 2.0 from day one | Maximize adoption and contribution | 2026-05-13 |
+| REQ-077 | Single-cluster operation: Custos must run fully self-contained on one Kubernetes cluster with no mandatory off-cluster dependencies (databases, object storage, or managed cloud services), while remaining extensible to external/cloud services as optional integrations | Hard portability baseline for self-hosted deployments | 2026-05-14 |
 
 ## Deployment Model
 
 Custos is deployed as a set of containerized microservices on **Kubernetes**, with **Dapr sidecars** providing workflow durability, state management, pub/sub, and secrets abstraction.
 
 - **Target environments:** any conformant Kubernetes cluster, including managed offerings (AKS, EKS, GKE) and self-managed (vanilla, k3s, OpenShift).
-- **Cloud posture:** cloud-agnostic. No hard dependency on a single cloud's proprietary services. Cloud-specific integrations (managed Postgres, managed Redis, S3-vs-Blob-vs-GCS, secrets backends) are configured through Dapr components.
+- **Hard baseline:** single-cluster self-contained deployment. All required runtime dependencies must be deployable in the same cluster (REQ-077).
+- **Cloud posture:** cloud-agnostic. No hard dependency on a single cloud's proprietary services. Cloud-specific integrations are optional extensions.
 - **Distribution:**
   - Container images per service (orchestrator, API, UI, webhook receiver, scheduler, etc.)
   - Helm chart for installation
   - Dapr component manifests (state store, pub/sub, secrets) shipped as templates
+- **Default in-cluster dependencies:** PostgreSQL (or compatible SQL store), Redis, and Kubernetes-backed storage/logging stack. External managed services remain optional.
 - **Target OCI registries:** any OCI-compliant registry (Docker Hub, GHCR, ACR, ECR, GAR, Harbor, Zot, etc.). Distribution spec v1.1 with Referrers API preferred; v1.0 fallback supported via subject-manifest tag scheme.
 
 ## Integrations
@@ -110,6 +114,7 @@ Custos is deployed as a set of containerized microservices on **Kubernetes**, wi
 | REQ-059 | SPIFFE / SPIRE workload identity | Service-to-service identity inside the cluster | Open | 2026-05-13 |
 | REQ-060 | Kubernetes Secrets (baseline secrets backend) | Default secrets store | Open | 2026-05-13 |
 | REQ-061 | Dapr Secrets API (abstracts Vault, Key Vault, AWS SM, GCP SM, etc.) | Pluggable secrets backends without code changes | Open | 2026-05-13 |
+| REQ-078 | Kubernetes-native logging/audit stack (for example OpenTelemetry collector + Loki/ELK style backend) | Default backend for workflow and audit logs; external/cloud logging backends are optional via pluggable exporters | Open | 2026-05-14 |
 | REQ-062 | OPA (Rego) policy engine | Built-in policy-eval action backend | Open | 2026-05-13 |
 | REQ-063 | CUE policy engine | Alternative policy backend | Open | 2026-05-13 |
 | REQ-064 | CEL policy engine | Alternative policy backend | Open | 2026-05-13 |
@@ -130,9 +135,9 @@ Custos is deployed as a set of containerized microservices on **Kubernetes**, wi
 
 | Milestone | Target | Scope | Dependencies |
 |---|---|---|---|
-| M1 — Core engine | +3 months (≈ 2026-08-13) | Dapr-Workflow-backed engine; YAML-defined DAG workflows and core workflow primitives (REQ-001, REQ-007–010, REQ-025, REQ-073); manual API trigger (REQ-004); 2 built-in actions (vuln scan REQ-016, signature verify REQ-018); OCI container action runtime and independently pluggable activities (REQ-013, REQ-022, REQ-023, REQ-075); run inspection (REQ-026, REQ-027); minimal auth (REQ-035 API tokens); Postgres + Redis + S3 (REQ-048–050); basic logs + Prometheus metrics (REQ-040, REQ-042); Helm chart (subset of REQ-052); audit log skeleton (REQ-038) | None |
+| M1 — Core engine | +3 months (≈ 2026-08-13) | Dapr-Workflow-backed engine; YAML-defined DAG workflows and core workflow primitives (REQ-001, REQ-007–010, REQ-025, REQ-073); workflow templates baseline (REQ-076); manual API trigger (REQ-004); 2 built-in actions (vuln scan REQ-016, signature verify REQ-018); OCI container action runtime and independently pluggable activities (REQ-013, REQ-022, REQ-023, REQ-075); run inspection (REQ-026, REQ-027); minimal auth (REQ-035 API tokens); datastore and artifact abstractions with in-cluster defaults (REQ-048, REQ-050, REQ-077); basic logs + Prometheus metrics (REQ-040, REQ-042, REQ-078); Helm chart (subset of REQ-052); audit log skeleton (REQ-038) | None |
 | M2 — Triggers & action breadth | +6 months | Scheduled trigger (REQ-005); registry webhook trigger (REQ-006); extensible connector model beyond registries (REQ-074); SBOM action (REQ-017); attestation action (REQ-019); policy eval action with OPA backend (REQ-020, REQ-062, REQ-066); image promotion action (REQ-021); generic webhook + Slack notifications (REQ-067, REQ-068); OpenTelemetry tracing (REQ-043); SDK for action authors (REQ-022 hardening) | M1 |
-| M3 — UX, security, multi-tenancy | +9–12 months | Visual designer (REQ-003); OIDC for users (REQ-034, REQ-056); RBAC (REQ-036); full secrets backend pluggability via Dapr (REQ-037, REQ-061); approval gates (REQ-012); loops (REQ-011); HTTP webhook action runtime (REQ-014); workflow defs as OCI artifacts (REQ-029, REQ-051); remaining notification channels; remaining policy engines; SPIFFE/SPIRE (REQ-059); GitHub OIDC and Entra ID (REQ-057, REQ-058) | M2 |
+| M3 — UX, security, multi-tenancy | +9–12 months | Visual designer (REQ-003); advanced template authoring UX (REQ-076); OIDC for users (REQ-034, REQ-056); RBAC (REQ-036); full secrets backend pluggability via Dapr (REQ-037, REQ-061); approval gates (REQ-012); loops (REQ-011); HTTP webhook action runtime (REQ-014); workflow defs as OCI artifacts (REQ-029, REQ-051); remaining notification channels; remaining policy engines; SPIFFE/SPIRE (REQ-059); GitHub OIDC and Entra ID (REQ-057, REQ-058) | M2 |
 | M4+ — Hardening & advanced | beyond | WebAssembly action runtime (REQ-015); re-run with modified inputs (REQ-028); full SLA achievement (REQ-032); scale testing to upper bound of REQ-030 | M3 |
 
 ## Open TODOs
@@ -152,3 +157,4 @@ Custos is deployed as a set of containerized microservices on **Kubernetes**, wi
 | 2026-05-13 | Initial requirements | #2 |
 | 2026-05-14 | Verified Dapr Workflow Python SDK parity and closed TODO-001 | #3 |
 | 2026-05-14 | Added workflow primitives, extensible connectors, and independently pluggable activity requirements | #8 |
+| 2026-05-14 | Added workflow templates and single-cluster self-contained deployment/storage/logging requirements | pending |
