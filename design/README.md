@@ -10,7 +10,7 @@ Custos is a pluggable workflow orchestrator for supply-chain security operations
 
 | Phase | Status | Last Updated |
 |---|---|---|
-| Requirements | In Progress (revision 3) | 2026-05-14 |
+| Requirements | In Progress (revision 4) | 2026-05-14 |
 | Architecture | In Progress (revision 2, detailed) | 2026-05-14 |
 | Component Designs | Not Started | — |
 | Implementation | Not Started | — |
@@ -25,6 +25,7 @@ Custos is a pluggable workflow orchestrator for supply-chain security operations
 
 | Date | Change | Issue |
 |---|---|---|
+| 2026-05-14 | Added hybrid push/pull trigger ingestion requirement (REQ-079) and aligned trigger pipeline | _pending_ |
 | 2026-05-14 | Detailed architecture: principles, domain model, schemas, contracts, security/observability/trigger pipeline | — |
 | 2026-05-14 | Added workflow templates and single-cluster deployment/storage/logging requirements | _pending_ |
 | 2026-05-14 | Added workflow primitives, extensible connectors, and pluggable activity requirements | #8 |

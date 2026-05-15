@@ -418,6 +418,13 @@ sequenceDiagram
 
 Vendor-specific knowledge about OCI registries (Docker Hub, GHCR, ACR, ECR, GAR, Harbor, …) lives only in receivers and connector plugins (ADR-013). The rest of the pipeline operates on a normalized event schema.
 
+Receivers come in two flavors for **every** source category, not just registries (REQ-079):
+
+- **Push receivers** — inbound webhooks / event subscriptions / pub-sub consumers. Used when the source can reliably emit events.
+- **Pull receivers (pollers)** — long-poll or interval-poll loops driven by a connector’s `listen()` implementation. Used when the source cannot push, or when push delivery is unreliable.
+
+Both flavors emit into the same `Normalizer → Matcher → Dedup → Dispatcher` chain, so downstream code is mode-agnostic. Connector types declare supported modes (`push`, `pull`, or both) in `describe()`, and trigger configuration selects the active mode per instance. Pollers persist their cursor / last-seen state via the `MetadataStoreProvider` so polling is durable across restarts.
+
 ## Failure Modes
 
 | Failure | Detection | Containment | Recovery |
@@ -544,3 +551,4 @@ sequenceDiagram
 |---|---|---|
 | 2026-05-14 | Initial architecture draft with single-cluster baseline, templates, and provider abstractions | — |
 | 2026-05-14 | Detailed architecture revision: principles, domain model, schema, execution model, activity/connector/storage contracts, security, observability, trigger pipeline, failure modes, install model, ADR-007 through ADR-013 | — |
+| 2026-05-14 | Clarified trigger pipeline supports hybrid push/pull receivers for every source category (REQ-079) | — |

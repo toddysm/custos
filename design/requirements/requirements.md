@@ -1,7 +1,7 @@
 # Requirements: Custos
 
 Last Updated: 2026-05-14
-Version: 3
+Version: 4
 
 ## Project Goal
 
@@ -52,6 +52,7 @@ Workflows can be authored programmatically (YAML/SDK) or visually (designer UI).
 | REQ-074 | The platform must provide an extensible connector model so initial connections can target OCI registries and later be extended to storage accounts, databases, and other external systems without redesigning the core platform | High | Open | 2026-05-14 |
 | REQ-075 | Activities must be independently pluggable, packaged, versioned, and deployable so new activities can be added without requiring a platform upgrade or code change in the core orchestrator | High | Open | 2026-05-14 |
 | REQ-076 | The platform must support workflow templates: users can create workflows from templates by filling required placeholders, and can create templates from existing workflows by removing selected configuration and saving the result as a reusable template | High | Open | 2026-05-14 |
+| REQ-079 | Trigger ingestion must support both push (event/webhook) and pull (polling) modes for any external source that can fire workflows (OCI registries, storage, databases, generic HTTP endpoints, etc.); mode is selectable per trigger; polling is the fallback when the source does not reliably push events; both modes deliver into the same normalized event pipeline and the same dedup/idempotency layer | High | Open | 2026-05-14 |
 
 ## Non-Functional Requirements
 
@@ -158,3 +159,4 @@ Custos is deployed as a set of containerized microservices on **Kubernetes**, wi
 | 2026-05-14 | Verified Dapr Workflow Python SDK parity and closed TODO-001 | #3 |
 | 2026-05-14 | Added workflow primitives, extensible connectors, and independently pluggable activity requirements | #8 |
 | 2026-05-14 | Added workflow templates and single-cluster self-contained deployment/storage/logging requirements | pending |
+| 2026-05-14 | Added hybrid push/pull trigger ingestion requirement (REQ-079) | pending |
