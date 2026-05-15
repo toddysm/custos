@@ -134,13 +134,17 @@ Custos is deployed as a set of containerized microservices on **Kubernetes**, wi
 
 ## Open TODOs
 
-- [ ] TODO-001: Confirm Dapr Workflow's Python SDK feature parity with the .NET/Go SDKs (suspend/resume, sub-orchestrations, continue-as-new) before locking in REQ-046 — to be revisited in architecture phase (added 2026-05-13, issue #3)
 - [ ] TODO-002: Decide action sandbox technology (gVisor, Kata, plain runc with seccomp/AppArmor, or Kubernetes Jobs only) — REQ-039 (added 2026-05-13, issue #4)
 - [ ] TODO-003: Decide trigger receiver design for REQ-006 — pull (poll) vs. push (webhook from registry) per registry vendor; not all registries push events uniformly (added 2026-05-13, issue #5)
 - [ ] TODO-004: Define minimal viable action contract schema (inputs, outputs, secrets injection, log streaming, exit codes) — REQ-023; this is the most load-bearing contract in the system (added 2026-05-13, issue #6)
+
+## Resolved TODOs
+
+- [x] TODO-001: Confirm Dapr Workflow's Python SDK feature parity with the .NET/Go SDKs (suspend/resume, sub-orchestrations, continue-as-new) before locking in REQ-046 — verified and closed on 2026-05-14 (issue #3)
 
 ## Change History
 
 | Date | Change | GitHub Issue |
 |---|---|---|
 | 2026-05-13 | Initial requirements | #2 |
+| 2026-05-14 | Verified Dapr Workflow Python SDK parity and closed TODO-001 | #3 |
