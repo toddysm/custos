@@ -1,9 +1,9 @@
 ---
 name: app-design-manager
-description: Interactive application design and implementation management skill. Guides you through requirements gathering, high-level architecture, detailed component design, and implementation tracking. Manages GitHub issues, Mermaid diagrams, and version-controlled design documents. Triggered by phrases like "start design session", "add requirements", "design component <name>", "implementation plan for <component>", "show design status", or directly via /app-design-manager.
+description: Interactive application design, implementation management, and documentation skill. Guides you through requirements gathering, high-level architecture, detailed component design, implementation tracking, and producing three audiences of documentation (contributors, plugin/activity/connection developers, and end users). Manages GitHub issues, Mermaid diagrams, and version-controlled design and docs. Triggered by phrases like "start design session", "add requirements", "design component <name>", "implementation plan for <component>", "write contributors docs", "write developer docs", "write user docs", "show design status", or directly via /app-design-manager.
 user-invocable: true
 metadata:
-  version: 1.0.0
+  version: 1.1.0
 ---
 
 # App Design Manager Skill
@@ -23,7 +23,11 @@ The user invokes this skill via `/app-design-manager [subcommand]`:
 | `architecture` | Open high-level architecture session |
 | `component <name>` | Open detailed design session for a specific component |
 | `impl <name>` | Open implementation planning session for a component |
-| `status` | Print project summary, open issues, recent changes |
+| `docs contributors` | Open contributors' documentation session |
+| `docs developers` | Open plugin/connections/activities developer documentation session |
+| `docs users` | Open end-user documentation session |
+| `docs status` | Show documentation coverage across all three audiences |
+| `status` | Print full project summary: design phases, docs coverage, open issues |
 | `close <issue-number>` | Close a GitHub issue and mark the related item done |
 
 ---
@@ -55,8 +59,20 @@ The user invokes this skill via `/app-design-manager [subcommand]`:
 | Per-component design | `design/components/<component-slug>/design.md` |
 | Per-component TODOs | `design/components/<component-slug>/todos.md` |
 | Per-component changes | `design/components/<component-slug>/changes/` |
+| All documentation | `docs/` (repo root) |
+| Docs master index | `docs/README.md` |
+| Contributors docs | `docs/contributors/` |
+| Contributors overview | `docs/contributors/README.md` |
+| Developer docs | `docs/developers/` |
+| Developer overview | `docs/developers/README.md` |
+| Developer examples | `docs/developers/examples/` |
+| User docs | `docs/users/` |
+| User overview | `docs/users/README.md` |
+| User guides | `docs/users/guides/` |
+| User reference | `docs/users/reference/` |
 | Skill definition | `.github/skills/app-design-manager/` |
 | Skill templates | `.github/skills/app-design-manager/templates/` |
+| Docs templates | `.github/skills/app-design-manager/templates/docs/` |
 
 ---
 
@@ -85,8 +101,11 @@ Branch type map:
 | architecture | `design/architecture-` |
 | component design | `design/component-` |
 | implementation | `design/impl-` |
+| contributors docs | `docs/contributors-` |
+| developer docs | `docs/developers-` |
+| user docs | `docs/users-` |
 
-Example: `design/requirements-20260513-initial` or `design/component-20260514-auth-service`
+Example: `design/requirements-20260513-initial` or `docs/contributors-20260515-getting-started`
 
 The slug is derived from the session topic (e.g., component name, or "initial" for first-time phases).
 
@@ -111,11 +130,20 @@ At the end of every session, before committing:
    - Title: `[Design] <session type>: <short description>`
    - Body: summarize what changed, link to all created issues
 
+For design sessions:
 ```bash
 git add design/
 git commit -m "design(<type>): <description>"
 git push -u origin design/<type>-YYYYMMDD-<slug>
 gh pr create --title "[Design] <type>: <description>" --body "..."
+```
+
+For documentation sessions (also update root README.md if changed):
+```bash
+git add docs/ README.md
+git commit -m "docs(<audience>): <description>"
+git push -u origin docs/<audience>-YYYYMMDD-<slug>
+gh pr create --title "[Docs] <audience>: <description>" --body "..."
 ```
 
 ---
@@ -138,6 +166,13 @@ Before creating any issues, ensure these labels exist. Use `gh label create` to 
 | `change:delta` | `#E4E669` | Post-initial modification |
 | `status:open` | `#D73A4A` | Active |
 | `status:closed` | `#6E7781` | Done |
+
+| `type:docs` | `#1D76DB` | Any documentation item |
+| `docs:contributors` | `#BFD4F2` | Contributors doc task |
+| `docs:developers` | `#D4C5F9` | Developer/plugin doc task |
+| `docs:users` | `#C2E0C6` | User-facing doc task |
+| `docs:new` | `#0E8A16` | New documentation section |
+| `docs:update` | `#E4E669` | Update to existing docs |
 
 Component labels are created dynamically as components are defined:
 
@@ -774,8 +809,22 @@ As of: YYYY-MM-DD
 
 Collect open issues via:
 ```bash
-gh issue list --label "type:requirement,type:architecture,type:component-design,type:implementation" --state open --json number,title,labels
+gh issue list --label "type:requirement,type:architecture,type:component-design,type:implementation,type:docs" --state open --json number,title,labels
 ```
+
+The full status report also includes a documentation coverage block:
+
+```markdown
+## Documentation
+
+| Audience | Sections Complete | Missing | Open Issues |
+|---|---|---|---|
+| Contributors | 5 of 8 | debugging.md, release.md, ci-cd.md | 2 |
+| Developers | 2 of 7 | connections-api.md, activities-api.md, sdk-reference.md, publishing.md, examples/ | 0 |
+| Users | 0 of 7 | all | 0 |
+```
+
+The `docs status` subcommand prints only the documentation block above.
 
 ---
 
@@ -830,6 +879,428 @@ Last Updated: YYYY-MM-DD
 
 ---
 
+## Documentation Workflows
+
+All three documentation workflows share the same session git workflow (pull main, fresh dated branch, commit + push + PR at close). The PR title format is `[Docs] <audience>: <short description>`.
+
+### Auto-Draft Protocol
+
+Before asking any questions for a section, check whether the content can be derived from existing design artefacts:
+
+| Doc section | Source to read first |
+|---|---|
+| `contributors/architecture.md` | `design/architecture/overview.md` |
+| `developers/plugin-api.md` | Component designs flagged as plugin API surface in `design/architecture/components.md` |
+| `developers/connections-api.md` | Component designs flagged as connection API surface |
+| `developers/activities-api.md` | Component designs flagged as activity API surface |
+| `developers/sdk-reference.md` | All component public interface tables |
+
+If source material exists, auto-draft the section and present it to the user with:
+
+```
+I've drafted <section> based on the existing design docs. Please review and tell me what to change, add, or remove.
+```
+
+Only ask questions for sections with no derivable source material.
+
+### Root README.md Update Protocol
+
+At the end of every documentation session, check whether the root `README.md` already has a Documentation section. If it does not, add one. If it does, update the row for the audience covered in this session.
+
+The Documentation section format:
+
+```markdown
+## Documentation
+
+| Audience | Overview |
+|---|---|
+| [Contributors](docs/contributors/README.md) | Dev setup, conventions, CI/CD, release process |
+| [Plugin & Activity Developers](docs/developers/README.md) | SDK, plugin/connection/activity APIs, publishing |
+| [Users](docs/users/README.md) | Getting started, guides, reference, troubleshooting |
+```
+
+Only add rows for audiences that have at least a `README.md` written. Add the remaining rows incrementally as each audience's session completes.
+
+---
+
+### Docs Workflow 1 — Contributors
+
+#### Entry Conditions
+- Invoked with `docs contributors` subcommand
+
+#### Step 1 — Read Existing State
+
+Check which files already exist under `docs/contributors/`. For each existing file, note its last-updated date. For missing files, mark them as pending.
+
+#### Step 2 — Initialize Structure
+
+If `docs/contributors/` does not exist, create the full folder structure:
+
+```
+docs/contributors/
+├── README.md
+├── getting-started.md
+├── architecture.md
+├── code-conventions.md
+├── testing.md
+├── ci-cd.md
+├── contributing.md
+├── release.md
+└── debugging.md
+```
+
+Also ensure `docs/README.md` exists. If not, create it from the Docs Master Index template.
+
+#### Step 3 — Session Scope
+
+Ask the user which sections to work on in this session. Default: all missing sections. The user can narrow to one or several.
+
+#### Step 4 — Per-Section Workflow
+
+For each section in scope, in order:
+
+**`architecture.md`** — auto-draft from `design/architecture/overview.md` and `design/architecture/components.md`. Summarize the architecture for a contributor audience (implementation details, not product framing). Present draft for approval.
+
+**`getting-started.md`** — ask:
+- What OS/tools are required (languages, runtimes, package managers)?
+- How does a contributor clone and build the project?
+- Are there any environment variables or secrets needed to run locally?
+- What does "first build success" look like?
+
+**`code-conventions.md`** — ask:
+- What languages are used? Any formatters or linters enforced?
+- Naming conventions for files, functions, variables?
+- File and folder organization rules?
+- Any prohibited patterns (e.g., no global state, no raw SQL)?
+
+**`testing.md`** — ask:
+- Unit / integration / e2e split? Which frameworks?
+- How do you run each test suite locally?
+- Minimum coverage expectations?
+- Are tests required for every PR?
+
+**`contributing.md`** — ask:
+- Branch naming rules?
+- PR size preferences and expectations?
+- Who reviews PRs? Any required approvers?
+- How are merge conflicts handled?
+- Is there a code freeze or release branch strategy?
+
+**`ci-cd.md`** — ask:
+- What does CI run on every PR (lint, test, build, security scan)?
+- How do you interpret and fix CI failures?
+- Are there required status checks before merge?
+- How does CD work (auto-deploy, manual trigger, environments)?
+
+**`release.md`** — ask:
+- Who cuts releases?
+- Versioning scheme (semver, calver, custom)?
+- How is the changelog produced?
+- What does the release checklist look like?
+
+**`debugging.md`** — ask:
+- What local debugging tools are available?
+- What are the most common failure modes contributors encounter?
+- How do you read logs locally vs. in production?
+- Any known gotchas for the development environment?
+
+#### Step 5 — Save
+
+Write each approved section to its file. Update `docs/contributors/README.md` with the coverage table. Update root `README.md` Documentation section.
+
+#### Contributors README Template
+
+```markdown
+# Contributors Guide: <Project Name>
+
+Last Updated: YYYY-MM-DD
+
+## Welcome
+
+<1-2 sentence welcome statement for new contributors>
+
+## Sections
+
+| Section | Description |
+|---|---|
+| [Getting Started](getting-started.md) | Dev environment setup, first build |
+| [Architecture](architecture.md) | System overview for contributors |
+| [Code Conventions](code-conventions.md) | Languages, formatting, naming |
+| [Testing](testing.md) | Test strategy and how to run tests |
+| [Contributing](contributing.md) | PR process, branch strategy, review |
+| [CI/CD](ci-cd.md) | Pipeline overview and how to fix failures |
+| [Release Process](release.md) | Versioning, changelog, release steps |
+| [Debugging](debugging.md) | Local tooling and common issues |
+
+## Quick Start
+
+1. Read [Getting Started](getting-started.md) to set up your environment
+2. Read [Code Conventions](code-conventions.md) before writing any code
+3. Read [Contributing](contributing.md) before opening a PR
+```
+
+---
+
+### Docs Workflow 2 — Developers (Plugins, Connections, Activities)
+
+#### Entry Conditions
+- Invoked with `docs developers` subcommand
+
+#### Step 1 — Read Existing State
+
+Check which files already exist under `docs/developers/`. Note existing files and pending ones.
+
+#### Step 2 — Initialize Structure
+
+If `docs/developers/` does not exist, create the full folder structure:
+
+```
+docs/developers/
+├── README.md
+├── getting-started.md
+├── plugin-api.md
+├── connections-api.md
+├── activities-api.md
+├── sdk-reference.md
+├── publishing.md
+└── examples/
+    └── README.md
+```
+
+#### Step 3 — Session Scope
+
+Ask the user which sections to work on this session. Default: all missing sections. The user can narrow to one or several.
+
+#### Step 4 — Per-Section Workflow
+
+For each section in scope, in order:
+
+**`plugin-api.md`** — auto-draft from any component designs in `design/components/` whose registry entry lists "plugin" in its responsibility or tech stack. Then ask:
+- What is the plugin lifecycle (registration, initialization, teardown)?
+- What configuration schema must a plugin provide?
+- How does the host application discover plugins (file path, registry, remote)?
+- What sandboxing or permission model applies to plugins?
+
+**`connections-api.md`** — auto-draft from connection-related component designs. Then ask:
+- What is a connection? What systems can be connected?
+- How does a connection authenticate with an external system?
+- What data contract must a connection implement (input types, output types)?
+- How are connection errors surfaced to the host?
+- What retry / timeout behavior is expected?
+
+**`activities-api.md`** — auto-draft from activity-related component designs. Then ask:
+- What is an activity? What can it do?
+- What is the input/output contract for an activity?
+- How does an activity report progress or intermediate results?
+- How are errors and timeouts handled?
+- Can activities be composed or chained?
+
+**`sdk-reference.md`** — auto-draft by collecting all public interface tables from every component design file. Organize by module/package. Present for review and ask:
+- Are there any interfaces missing from the design docs that should be listed here?
+- Are there deprecated APIs that should be noted?
+
+**`getting-started.md`** — ask:
+- Is there an SDK package developers install? How?
+- What is the minimal scaffold for a new plugin / connection / activity?
+- Is there a CLI tool or template generator?
+- What does "hello world" look like for each extension type?
+
+**`publishing.md`** — ask:
+- How does a developer package their plugin/activity/connection for distribution?
+- Is there a marketplace or registry to publish to?
+- What metadata is required (name, version, description, icon)?
+- Are there any review or approval steps before publishing?
+
+**`examples/README.md`** — ask:
+- Are there any reference example plugins, connections, or activities already built?
+- What scenarios should examples cover?
+- Where should example source code live (in this repo, external repos, gists)?
+
+#### Step 5 — Save
+
+Write each approved section. Update `docs/developers/README.md`. Update root `README.md` Documentation section.
+
+#### Developers README Template
+
+```markdown
+# Developer Guide: <Project Name> — Plugins, Connections & Activities
+
+Last Updated: YYYY-MM-DD
+
+## Overview
+
+<2-3 sentences: what can developers extend, and what value does the extension system provide>
+
+## Extension Types
+
+| Type | Purpose | API Reference |
+|---|---|---|
+| Plugin | <description> | [plugin-api.md](plugin-api.md) |
+| Connection | <description> | [connections-api.md](connections-api.md) |
+| Activity | <description> | [activities-api.md](activities-api.md) |
+
+## Sections
+
+| Section | Description |
+|---|---|
+| [Getting Started](getting-started.md) | SDK install, scaffold first extension |
+| [Plugin API](plugin-api.md) | Plugin lifecycle, registration, config schema |
+| [Connections API](connections-api.md) | Connection model, auth, data contracts |
+| [Activities API](activities-api.md) | Activity inputs/outputs, errors, chaining |
+| [SDK Reference](sdk-reference.md) | Full SDK method reference |
+| [Publishing](publishing.md) | Package and distribute your extension |
+| [Examples](examples/README.md) | Reference implementations |
+
+## Quick Start
+
+1. Read [Getting Started](getting-started.md) to install the SDK and scaffold your first extension
+2. Choose your extension type and read its API reference
+3. See [Examples](examples/README.md) for reference implementations
+4. Read [Publishing](publishing.md) when ready to distribute
+```
+
+---
+
+### Docs Workflow 3 — Users
+
+#### Entry Conditions
+- Invoked with `docs users` subcommand
+
+#### Step 1 — Read Existing State
+
+Check which files already exist under `docs/users/`. Note existing files and pending ones. Also read `design/requirements/requirements.md` to understand the user personas and core flows before drafting anything.
+
+#### Step 2 — Initialize Structure
+
+If `docs/users/` does not exist, create the full folder structure:
+
+```
+docs/users/
+├── README.md
+├── getting-started.md
+├── guides/
+│   └── README.md
+├── reference/
+│   ├── README.md
+│   ├── configuration.md
+│   └── commands.md
+├── troubleshooting.md
+└── faq.md
+```
+
+#### Step 3 — Session Scope
+
+Ask the user which sections to work on this session. Default: all missing sections. The user can narrow to one or several.
+
+#### Step 4 — Per-Section Workflow
+
+For each section in scope, in order:
+
+**`getting-started.md`** — ask:
+- How does a user install or access the application (download, cloud sign-up, CLI install)?
+- What is the first meaningful action a new user should take?
+- What does a successful "hello world" look like for a user?
+- Are there prerequisites (account, subscription, OS requirement)?
+
+**`guides/`** — ask:
+- What are the 3-5 most important tasks a user needs to accomplish with this app?
+- For each task: what is the goal, what are the steps, what does success look like?
+- Each task becomes one guide file: `docs/users/guides/<task-slug>.md`
+- Update `docs/users/guides/README.md` as an index of all guides.
+
+**`reference/configuration.md`** — ask:
+- What settings can users configure?
+- For each setting: name, valid values, default, effect.
+- Auto-draft from any configuration tables found in component design files.
+
+**`reference/commands.md`** — ask (only if the app has a CLI or command palette):
+- What are the commands or keyboard shortcuts available?
+- For each command: name, syntax, description, example.
+- Auto-draft from any interface definition tables in component design files.
+
+**`troubleshooting.md`** — ask:
+- What are the top 5 things that go wrong for users?
+- For each problem: symptom, likely cause, step-by-step fix.
+
+**`faq.md`** — ask:
+- What questions do users ask most frequently?
+- List 5-10 Q&A pairs.
+
+#### Step 5 — Save
+
+Write each approved section. Update `docs/users/README.md`. Update root `README.md` Documentation section.
+
+#### Users README Template
+
+```markdown
+# User Documentation: <Project Name>
+
+Last Updated: YYYY-MM-DD
+
+## Welcome
+
+<2-3 sentence welcome and value proposition for users>
+
+## Sections
+
+| Section | Description |
+|---|---|
+| [Getting Started](getting-started.md) | Install, configure, and take your first action |
+| [Guides](guides/README.md) | Step-by-step how-to guides for key tasks |
+| [Reference](reference/README.md) | Configuration options and command reference |
+| [Troubleshooting](troubleshooting.md) | Common problems and how to fix them |
+| [FAQ](faq.md) | Frequently asked questions |
+
+## New Here?
+
+Start with [Getting Started](getting-started.md).
+```
+
+#### Users Guides Index Template (`guides/README.md`)
+
+```markdown
+# How-To Guides: <Project Name>
+
+Last Updated: YYYY-MM-DD
+
+| Guide | Description |
+|---|---|
+| [Guide Title](guide-slug.md) | One-line description |
+```
+
+#### Users Reference Index Template (`reference/README.md`)
+
+```markdown
+# Reference: <Project Name>
+
+Last Updated: YYYY-MM-DD
+
+| Reference | Description |
+|---|---|
+| [Configuration](configuration.md) | All configuration options and their defaults |
+| [Commands](commands.md) | CLI commands and keyboard shortcuts |
+```
+
+---
+
+### Docs Master Index Template (`docs/README.md`)
+
+```markdown
+# Documentation: <Project Name>
+
+Last Updated: YYYY-MM-DD
+
+## Audiences
+
+| Audience | Description | Overview |
+|---|---|---|
+| Contributors | Building and maintaining the project | [contributors/README.md](contributors/README.md) |
+| Plugin & Activity Developers | Extending the platform | [developers/README.md](developers/README.md) |
+| Users | Using the application | [users/README.md](users/README.md) |
+```
+
+---
+
 ## Error Handling
 
 | Situation | Action |
@@ -839,3 +1310,6 @@ Last Updated: YYYY-MM-DD
 | `gh issue create` fails | Show error, save issue body to a local `.pending-issues.md` in the design folder so it can be retried |
 | Design file already exists (initial session) | Warn the user, ask whether to overwrite or treat as a change session |
 | Component slug not found | List available components, ask user to confirm the name |
+| Docs section file already exists | Warn the user, ask whether to overwrite or open as an update session |
+| No design artefacts to auto-draft from | Skip auto-draft, proceed with questions instead — note the gap to the user |
+| Root `README.md` has no Documentation section | Add the Documentation section at the end of the file; never overwrite existing content |
