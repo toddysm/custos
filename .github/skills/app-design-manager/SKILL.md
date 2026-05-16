@@ -1294,9 +1294,11 @@ Last Updated: YYYY-MM-DD
 
 | Audience | Description | Overview |
 |---|---|---|
-| Contributors | Building and maintaining the project | [contributors/README.md](contributors/README.md) |
-| Plugin & Activity Developers | Extending the platform | [developers/README.md](developers/README.md) |
-| Users | Using the application | [users/README.md](users/README.md) |
+<!-- Add a row only for each audience overview file that has been created in this session. -->
+<!-- Append additional rows as more audience docs are generated. -->
+<!-- Example: | Contributors | Building and maintaining the project | [contributors/README.md](contributors/README.md) | -->
+<!-- Example: | Plugin & Activity Developers | Extending the platform | [developers/README.md](developers/README.md) | -->
+<!-- Example: | Users | Using the application | [users/README.md](users/README.md) | -->
 ```
 
 ---
