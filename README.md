@@ -90,6 +90,14 @@ Target cluster environments: AKS, EKS, GKE, k3s, OpenShift, and vanilla Kubernet
 | [design/architecture/components.md](design/architecture/components.md) | Detailed component map and descriptions |
 | [design/README.md](design/README.md) | Design documentation index and status |
 
+## User and developer documentation
+
+| Document | Description |
+|---|---|
+| [docs/README.md](docs/README.md) | Documentation index across audiences |
+| [docs/developers/README.md](docs/developers/README.md) | Plugin, connection, and activity developer guide |
+| [docs/developers/connections-api.md](docs/developers/connections-api.md) | Connector Manifest v1 reference for connection developers |
+
 ## License
 
 Apache 2.0 — see [LICENSE](LICENSE).
