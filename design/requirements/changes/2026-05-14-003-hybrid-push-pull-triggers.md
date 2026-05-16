@@ -15,7 +15,7 @@ This generalizes TODO-003 (which was scoped to OCI registries) to a platform-wid
 
 | ID | Requirement | Priority | Status | Added |
 |---|---|---|---|---|
-| REQ-079 | Trigger ingestion must support both push (event/webhook) and pull (polling) modes for any external source that can fire workflows (OCI registries, storage, databases, generic HTTP endpoints, etc.). Mode is selectable per trigger; polling is the fallback when the source does not reliably push events. Both modes deliver into the same normalized event pipeline and the same dedup/idempotency layer. | High | Open | 2026-05-14 |
+| REQ-079 | Trigger ingestion must support both push (event/webhook) and pull (polling) modes for any external source that can fire workflows (OCI registries, storage, databases, generic HTTP endpoints, etc.); mode is selectable per trigger; polling is the fallback when the source does not reliably push events; both modes deliver into the same normalized event pipeline and the same dedup/idempotency layer. | High | Open | 2026-05-14 |
 
 ## Rationale
 
