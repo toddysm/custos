@@ -186,16 +186,30 @@
           "type": "object",
           "additionalProperties": false,
           "required": [
+            "delivery",
             "produced"
           ],
           "properties": {
+            "delivery": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "push",
+                  "pull"
+                ]
+              },
+              "description": "Delivery mechanisms the Trigger Service must wire up: push (target delivers to us) and/or pull (we poll the target)."
+            },
             "produced": {
               "type": "array",
               "minItems": 1,
               "uniqueItems": true,
               "items": {
                 "$ref": "#/$defs/eventType"
-              }
+              },
+              "description": "Catalog of normalized event types this connector emits. Workflow triggers reference these names."
             }
           }
         }

@@ -11,9 +11,7 @@
     "capabilities": [
       "oci.pull",
       "oci.push",
-      "oci.referrers",
-      "event.push",
-      "event.pull"
+      "oci.referrers"
     ],
     "target": {
       "kind": "oci-registry",
@@ -31,6 +29,10 @@
       }
     },
     "events": {
+      "delivery": [
+        "push",
+        "pull"
+      ],
       "produced": [
         "oci.image.pushed",
         "oci.tag.updated"

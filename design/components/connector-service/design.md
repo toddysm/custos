@@ -2,7 +2,7 @@
 
 Slug: connector-service
 Last Updated: 2026-05-16
-Version: 4
+Version: 5
 Status: Draft
 
 ## Responsibility
@@ -98,8 +98,6 @@ spec:
   capabilities:
     - oci.pull
     - oci.push
-    - event.push
-    - event.pull
   target:
     kind: oci-registry
     endpoint: https://ghcr.io
@@ -114,6 +112,9 @@ spec:
       audience: https://ghcr.io
       subjectTemplate: repo:my-org/my-repo:ref:{ref}
   events:
+    delivery:
+      - push
+      - pull
     produced:
       - oci.image.pushed
       - oci.tag.updated
@@ -138,7 +139,61 @@ Validation requirements:
 - `credentials.authentication` is interpreted according to `credentials.authenticationType` and remains extensible for future auth types.
 - Manifest payload is self-contained; target and credential requirements are defined inline.
 - Identity category (KMS-backed, workload, federated) is derived from `credentials.authenticationType` by the Connector Service; manifests do not declare it. Vendor `x-*` auth types register their category at plugin-registration time, out of band.
-- Capability/event tokens follow dot-delimited lowercase naming rules.
+- `capabilities` enumerates **data-plane verbs** the connector can perform (e.g. `oci.pull`, `s3.read`). `event.*` tokens MUST NOT appear in `capabilities` — event-stream concerns live entirely in `events`.
+- `events.delivery` enumerates the **delivery mechanisms** the Trigger Service must wire up: `push` (target delivers events to us) and/or `pull` (we poll the target). At least one entry is required.
+- `events.produced` enumerates the **catalog of normalized event types** the connector emits. Workflow trigger definitions reference these names.
+- Capability and event tokens follow dot-delimited lowercase naming rules.
+
+## Capabilities and Events
+
+`capabilities` and `events` answer separate questions for different consumers and at different points in the system lifecycle.
+
+### `capabilities` — data-plane verbs
+
+A flat list of operations the connector type can perform against its target. Tokens are dot-delimited lowercase, e.g. `oci.pull`, `oci.push`, `oci.copy`, `s3.read`, `s3.write`, `blob.read`, `blob.write`.
+
+Consumed by:
+
+- **Activity authors** — activities declare their required capabilities per connector input.
+- **Binder (Connector Service)** — at step bind time, validates that each named connector advertises all required capabilities. Missing capability ⇒ bind failure before the activity runs.
+- **Catalog / UI** — surfaces filterable verb metadata when authoring workflows.
+
+`capabilities` is purely about data-plane operations. Event-stream concerns are not expressed here.
+
+### `events.delivery` — how events arrive
+
+An array drawn from `["push", "pull"]`. Declares the delivery mechanisms the connector supports:
+
+- `push`: target pushes events to the platform (webhook, message bus, change-feed subscription).
+- `pull`: the platform polls/lists the target on a cadence to detect new events.
+
+Consumed by:
+
+- **Listen Manager (Connector Service)** — selects the runtime wiring per delivery mode at trigger activation: spin up a webhook receiver, a polling loop, or a message-bus consumer.
+- **Operator audit** — confirms which delivery surfaces are exposed by a given connector type version.
+
+A single connector type may support both modes. The same `events.produced` catalog is available through any declared delivery mode; per-event delivery mapping is intentionally out of scope for v1.
+
+### `events.produced` — event catalog
+
+A flat list of normalized event types the connector emits, e.g. `oci.image.pushed`, `oci.tag.updated`, `s3.object.created`, `blob.object.deleted`.
+
+Consumed by:
+
+- **Workflow validator** — at workflow save time, confirms every trigger reference resolves to an event produced by some connector type in the workspace.
+- **Trigger Service** — subscribes to these event types and matches them to workflow triggers at runtime.
+- **Trigger UI / CLI** — autocomplete and discovery.
+- **Audit / Catalog Service** — record of which event types are emitted by which connector type version.
+
+### Why capabilities and events are kept separate
+
+| Field | What it encodes | Primary consumer | When consumed |
+|---|---|---|---|
+| `capabilities` | Data-plane verbs (nouns: operations) | Binder | Step bind time |
+| `events.delivery` | Event delivery mechanisms | Listen Manager | Trigger activation |
+| `events.produced` | Event-type catalog (nouns: event names) | Workflow validator, Trigger Service | Workflow save + trigger runtime |
+
+These are orthogonal axes. Knowing a connector can `oci.pull` images does not tell you whether it can deliver `oci.image.pushed` events, and vice versa. Conflating them into one list would force every consumer to filter by token prefix to recover the dimension it actually cares about.
 
 ## Connection to Workflows and Activities
 
@@ -282,3 +337,4 @@ sequenceDiagram
 | 2026-05-16 | Refactor `target` to separate common fields from kind-specific `config` property bag | — |
 | 2026-05-16 | Remove `identityModels` and `federatedProviders`; derive identity category from `credentials.authenticationType` | — |
 | 2026-05-16 | Remove `supportedModes`; trigger delivery direction is already encoded by `event.push` / `event.pull` capabilities | — |
+| 2026-05-16 | Move event delivery direction out of `capabilities` into `events.delivery`; document Capabilities and Events semantics | — |

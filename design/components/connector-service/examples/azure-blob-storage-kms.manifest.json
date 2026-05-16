@@ -10,8 +10,7 @@
     "description": "Azure Blob Storage connector using KMS-backed credentials.",
     "capabilities": [
       "blob.read",
-      "blob.write",
-      "event.pull"
+      "blob.write"
     ],
     "target": {
       "kind": "azure-blob-storage",
@@ -30,6 +29,9 @@
       }
     },
     "events": {
+      "delivery": [
+        "pull"
+      ],
       "produced": [
         "blob.object.created",
         "blob.object.deleted"
