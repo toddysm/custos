@@ -1,0 +1,44 @@
+{
+  "apiVersion": "custos.dev/connector-manifest/v1",
+  "kind": "ConnectorManifest",
+  "metadata": {
+    "type": "amazon-s3-bucket",
+    "version": "1.0.0-irsa.1",
+    "contractVersion": "1"
+  },
+  "spec": {
+    "description": "Amazon S3 connector using workload identity (IRSA).",
+    "capabilities": [
+      "s3.read",
+      "s3.write",
+      "event.pull"
+    ],
+    "supportedModes": [
+      "pull"
+    ],
+    "target": {
+      "kind": "amazon-s3-bucket",
+      "endpoint": "https://s3.us-east-1.amazonaws.com",
+      "s3Bucket": "custos-artifacts-prod",
+      "s3Region": "us-east-1",
+      "verifyTls": true
+    },
+    "credentials": {
+      "sourceType": "workload",
+      "workload": {
+        "provider": "aws-irsa",
+        "identityRef": "aws://iam-role/custos-s3-connector-role",
+        "audience": "sts.amazonaws.com"
+      }
+    },
+    "identityModels": [
+      "workload"
+    ],
+    "events": {
+      "produced": [
+        "s3.object.created",
+        "s3.object.deleted"
+      ]
+    }
+  }
+}

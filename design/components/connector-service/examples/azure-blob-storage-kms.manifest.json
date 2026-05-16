@@ -1,0 +1,44 @@
+{
+  "apiVersion": "custos.dev/connector-manifest/v1",
+  "kind": "ConnectorManifest",
+  "metadata": {
+    "type": "azure-blob-storage",
+    "version": "1.0.0-akv.1",
+    "contractVersion": "1"
+  },
+  "spec": {
+    "description": "Azure Blob Storage connector using KMS-backed credentials.",
+    "capabilities": [
+      "blob.read",
+      "blob.write",
+      "event.pull"
+    ],
+    "supportedModes": [
+      "pull"
+    ],
+    "target": {
+      "kind": "azure-blob-storage",
+      "endpoint": "https://custosstorage.blob.core.windows.net",
+      "azureStorageAccount": "custosstorage",
+      "azureContainer": "supply-chain-artifacts",
+      "verifyTls": true
+    },
+    "credentials": {
+      "sourceType": "kms",
+      "kms": {
+        "provider": "azure-key-vault",
+        "secretRef": "https://custos-akv.vault.azure.net/secrets/blob-storage-credentials",
+        "connectorIdentity": "azure://managed-identity/custos-connector-mi"
+      }
+    },
+    "identityModels": [
+      "kms"
+    ],
+    "events": {
+      "produced": [
+        "blob.object.created",
+        "blob.object.deleted"
+      ]
+    }
+  }
+}

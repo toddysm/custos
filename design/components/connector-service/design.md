@@ -103,17 +103,47 @@ spec:
   supportedModes:
     - push
     - pull
-  configSchemaRef: oci://schemas/config@sha256:...
-  secretSchemaRef: oci://schemas/secrets@sha256:...
+  target:
+    kind: oci-registry
+    endpoint: https://ghcr.io
+    repositoryPrefix: my-org
+    verifyTls: true
+  credentials:
+    sourceType: federated
+    federated:
+      provider: oidc
+      issuer: https://token.actions.githubusercontent.com
+      audience: https://ghcr.io
+      subjectTemplate: repo:my-org/my-repo:ref:{ref}
   identityModels:
-    - kms
-    - workload
     - federated
+  federatedProviders:
+    - oidc
   events:
     produced:
       - oci.image.pushed
       - oci.tag.updated
 ```
+
+### Normative JSON Schema
+
+The strict schema for this manifest is defined in `design/components/connector-service/schemas/connector-manifest.v1.schema.json`.
+Concrete examples are maintained in `design/components/connector-service/examples/` and must be updated whenever the schema changes.
+
+Validation requirements:
+- Closed objects (`additionalProperties: false`) at all levels.
+- Strict constants for `apiVersion`, `kind`, and `metadata.contractVersion`.
+- SemVer validation for `metadata.version`.
+- Inline `target` block defines the endpoint and resource type (`oci-registry`, `azure-blob-storage`, or `amazon-s3-bucket`).
+- Per-kind target requirements are enforced:
+  - `oci-registry` requires `repositoryPrefix`.
+  - `azure-blob-storage` requires `azureStorageAccount` and `azureContainer`.
+  - `amazon-s3-bucket` requires `s3Bucket` and `s3Region`.
+- Inline `credentials` block defines where auth material comes from (`kms`, `workload`, or `federated`).
+- `credentials.sourceType` requires the matching credential details block and forbids sibling model blocks.
+- Manifest payload is self-contained; target and credential requirements are defined inline.
+- `federatedProviders` is required when `identityModels` contains `federated`.
+- Capability/event tokens follow dot-delimited lowercase naming rules.
 
 ## Connection to Workflows and Activities
 

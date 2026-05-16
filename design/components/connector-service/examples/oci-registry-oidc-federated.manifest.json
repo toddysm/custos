@@ -1,0 +1,50 @@
+{
+  "apiVersion": "custos.dev/connector-manifest/v1",
+  "kind": "ConnectorManifest",
+  "metadata": {
+    "type": "oci-registry",
+    "version": "2.3.1-oidc.1",
+    "contractVersion": "1"
+  },
+  "spec": {
+    "description": "OCI registry connector using federated OIDC identity.",
+    "capabilities": [
+      "oci.pull",
+      "oci.push",
+      "oci.referrers",
+      "event.push",
+      "event.pull"
+    ],
+    "supportedModes": [
+      "push",
+      "pull"
+    ],
+    "target": {
+      "kind": "oci-registry",
+      "endpoint": "https://ghcr.io",
+      "repositoryPrefix": "my-org",
+      "verifyTls": true
+    },
+    "credentials": {
+      "sourceType": "federated",
+      "federated": {
+        "provider": "oidc",
+        "issuer": "https://token.actions.githubusercontent.com",
+        "audience": "https://ghcr.io",
+        "subjectTemplate": "repo:my-org/my-repo:ref:{ref}"
+      }
+    },
+    "identityModels": [
+      "federated"
+    ],
+    "federatedProviders": [
+      "oidc"
+    ],
+    "events": {
+      "produced": [
+        "oci.image.pushed",
+        "oci.tag.updated"
+      ]
+    }
+  }
+}

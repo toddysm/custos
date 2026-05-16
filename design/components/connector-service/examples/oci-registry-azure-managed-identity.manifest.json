@@ -1,0 +1,46 @@
+{
+  "apiVersion": "custos.dev/connector-manifest/v1",
+  "kind": "ConnectorManifest",
+  "metadata": {
+    "type": "oci-registry",
+    "version": "2.3.1-azmi.1",
+    "contractVersion": "1"
+  },
+  "spec": {
+    "description": "OCI registry connector using Azure managed identity for workload authentication.",
+    "capabilities": [
+      "oci.pull",
+      "oci.push",
+      "oci.referrers",
+      "event.push",
+      "event.pull"
+    ],
+    "supportedModes": [
+      "push",
+      "pull"
+    ],
+    "target": {
+      "kind": "oci-registry",
+      "endpoint": "https://myorg.azurecr.io",
+      "repositoryPrefix": "platform",
+      "verifyTls": true
+    },
+    "credentials": {
+      "sourceType": "workload",
+      "workload": {
+        "provider": "azure-managed-identity",
+        "identityRef": "azure://managed-identity/custos-runtime-mi",
+        "audience": "https://management.azure.com/"
+      }
+    },
+    "identityModels": [
+      "workload"
+    ],
+    "events": {
+      "produced": [
+        "oci.image.pushed",
+        "oci.tag.updated"
+      ]
+    }
+  }
+}

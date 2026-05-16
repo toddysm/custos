@@ -1,0 +1,524 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://custos.dev/schemas/connector-manifest.v1.schema.json",
+  "title": "Custos Connector Manifest v1",
+  "description": "Strict schema for ConnectorManifest v1 artifact payload.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "properties": {
+    "apiVersion": {
+      "const": "custos.dev/connector-manifest/v1"
+    },
+    "kind": {
+      "const": "ConnectorManifest"
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "version",
+        "contractVersion"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "pattern": "^[a-z0-9](?:[a-z0-9-]{1,62})$",
+          "description": "Connector type slug, for example oci-registry."
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?(?:\\+([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?$",
+          "description": "SemVer for the connector type version descriptor."
+        },
+        "contractVersion": {
+          "const": "1",
+          "description": "Connector contract version supported by this manifest."
+        }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "description",
+        "capabilities",
+        "supportedModes",
+        "target",
+        "credentials",
+        "identityModels",
+        "events"
+      ],
+      "properties": {
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "capabilities": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/capability"
+          }
+        },
+        "supportedModes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "push",
+              "pull"
+            ]
+          }
+        },
+        "target": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "endpoint"
+          ],
+          "properties": {
+            "kind": {
+              "enum": [
+                "oci-registry",
+                "azure-blob-storage",
+                "amazon-s3-bucket"
+              ]
+            },
+            "endpoint": {
+              "type": "string",
+              "pattern": "^https://[^\\s/$.?#].[^\\s]*$",
+              "description": "Base endpoint for the selected target kind."
+            },
+            "repositoryPrefix": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
+            "azureStorageAccount": {
+              "type": "string",
+              "pattern": "^[a-z0-9]{3,24}$"
+            },
+            "azureContainer": {
+              "type": "string",
+              "pattern": "^[a-z0-9](?:[a-z0-9-]{1,61})[a-z0-9]$"
+            },
+            "s3Bucket": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
+            },
+            "s3Region": {
+              "type": "string",
+              "pattern": "^[a-z]{2}-[a-z]+-[0-9]$"
+            },
+            "verifyTls": {
+              "type": "boolean",
+              "default": true
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "kind": {
+                    "const": "oci-registry"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "repositoryPrefix"
+                ],
+                "properties": {
+                  "azureStorageAccount": false,
+                  "azureContainer": false,
+                  "s3Bucket": false,
+                  "s3Region": false
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "kind": {
+                    "const": "azure-blob-storage"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "azureStorageAccount",
+                  "azureContainer"
+                ],
+                "properties": {
+                  "repositoryPrefix": false,
+                  "s3Bucket": false,
+                  "s3Region": false
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "kind": {
+                    "const": "amazon-s3-bucket"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "s3Bucket",
+                  "s3Region"
+                ],
+                "properties": {
+                  "repositoryPrefix": false,
+                  "azureStorageAccount": false,
+                  "azureContainer": false
+                }
+              }
+            }
+          ]
+        },
+        "credentials": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "sourceType"
+          ],
+          "properties": {
+            "sourceType": {
+              "enum": [
+                "kms",
+                "workload",
+                "federated"
+              ]
+            },
+            "kms": {
+              "$ref": "#/$defs/kmsSource"
+            },
+            "workload": {
+              "$ref": "#/$defs/workloadSource"
+            },
+            "federated": {
+              "$ref": "#/$defs/federatedSource"
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "sourceType": {
+                    "const": "kms"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "kms"
+                ],
+                "properties": {
+                  "workload": false,
+                  "federated": false
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "sourceType": {
+                    "const": "workload"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "workload"
+                ],
+                "properties": {
+                  "kms": false,
+                  "federated": false
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "sourceType": {
+                    "const": "federated"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "federated"
+                ],
+                "properties": {
+                  "kms": false,
+                  "workload": false
+                }
+              }
+            }
+          ]
+        },
+        "identityModels": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/identityModel"
+          }
+        },
+        "federatedProviders": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/providerName"
+          },
+          "description": "Required when identityModels contains federated."
+        },
+        "events": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "produced"
+          ],
+          "properties": {
+            "produced": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/eventType"
+              }
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "credentials": {
+                "properties": {
+                  "sourceType": {
+                    "const": "kms"
+                  }
+                },
+                "required": [
+                  "sourceType"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "identityModels": {
+                "contains": {
+                  "const": "kms"
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "credentials": {
+                "properties": {
+                  "sourceType": {
+                    "const": "workload"
+                  }
+                },
+                "required": [
+                  "sourceType"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "identityModels": {
+                "contains": {
+                  "const": "workload"
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "credentials": {
+                "properties": {
+                  "sourceType": {
+                    "const": "federated"
+                  }
+                },
+                "required": [
+                  "sourceType"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "identityModels": {
+                "contains": {
+                  "const": "federated"
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "identityModels": {
+                "contains": {
+                  "const": "federated"
+                }
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "federatedProviders"
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "capability": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*(?:\\.[a-z0-9][a-z0-9-]*)+$",
+      "description": "Dot-delimited capability token, for example oci.pull or event.push."
+    },
+    "eventType": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*(?:\\.[a-z0-9][a-z0-9-]*)+$",
+      "description": "Dot-delimited normalized event type token."
+    },
+    "providerName": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{1,63}$",
+      "description": "Federation provider identifier, for example oidc, spiffe, saml-bridge."
+    },
+    "identityModel": {
+      "anyOf": [
+        {
+          "enum": [
+            "kms",
+            "workload",
+            "federated"
+          ]
+        },
+        {
+          "type": "string",
+          "pattern": "^x-[a-z0-9][a-z0-9.-]{1,63}$",
+          "description": "Vendor extension identity model."
+        }
+      ]
+    },
+    "kmsSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "secretRef",
+        "connectorIdentity"
+      ],
+      "properties": {
+        "provider": {
+          "enum": [
+            "azure-key-vault",
+            "aws-secrets-manager",
+            "hashicorp-vault",
+            "x-custom-kms"
+          ]
+        },
+        "secretRef": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "connectorIdentity": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "description": "Identity used by connector workload to read KMS secrets."
+        }
+      }
+    },
+    "workloadSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "identityRef"
+      ],
+      "properties": {
+        "provider": {
+          "enum": [
+            "azure-managed-identity",
+            "aws-irsa",
+            "gcp-workload-identity",
+            "spiffe",
+            "x-custom-workload"
+          ]
+        },
+        "identityRef": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "audience": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      }
+    },
+    "federatedSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "issuer",
+        "audience",
+        "subjectTemplate"
+      ],
+      "properties": {
+        "provider": {
+          "$ref": "#/$defs/providerName"
+        },
+        "issuer": {
+          "type": "string",
+          "pattern": "^https://[^\\s/$.?#].[^\\s]*$"
+        },
+        "audience": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "subjectTemplate": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      }
+    }
+  }
+}
