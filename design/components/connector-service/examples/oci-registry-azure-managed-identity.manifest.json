@@ -28,7 +28,6 @@
     "credentials": {
       "authenticationType": "azure-managed-identity",
       "authentication": {
-        "provider": "azure-managed-identity",
         "identityRef": "azure://managed-identity/custos-runtime-mi",
         "audience": "https://management.azure.com/"
       }

@@ -26,7 +26,6 @@
     "credentials": {
       "authenticationType": "azure-key-vault",
       "authentication": {
-        "provider": "azure-key-vault",
         "secretRef": "https://custos-akv.vault.azure.net/secrets/blob-storage-credentials",
         "connectorIdentity": "azure://managed-identity/custos-connector-mi"
       }
