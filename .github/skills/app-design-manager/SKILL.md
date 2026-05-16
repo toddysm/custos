@@ -809,7 +809,7 @@ As of: YYYY-MM-DD
 
 Collect open issues via:
 ```bash
-gh issue list --label "type:requirement,type:architecture,type:component-design,type:implementation,type:docs" --state open --json number,title,labels
+gh issue list --search 'state:open (label:"type:requirement" OR label:"type:architecture" OR label:"type:component-design" OR label:"type:implementation" OR label:"type:docs")' --json number,title,labels
 ```
 
 The full status report also includes a documentation coverage block:
