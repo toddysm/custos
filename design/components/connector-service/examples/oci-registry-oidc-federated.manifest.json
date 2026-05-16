@@ -35,12 +35,6 @@
         "subjectTemplate": "repo:my-org/my-repo:ref:{ref}"
       }
     },
-    "identityModels": [
-      "federated"
-    ],
-    "federatedProviders": [
-      "oidc"
-    ],
     "events": {
       "produced": [
         "oci.image.pushed",

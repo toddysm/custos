@@ -52,7 +52,6 @@
         "supportedModes",
         "target",
         "credentials",
-        "identityModels",
         "events"
       ],
       "properties": {
@@ -195,23 +194,6 @@
             }
           }
         },
-        "identityModels": {
-          "type": "array",
-          "minItems": 1,
-          "uniqueItems": true,
-          "items": {
-            "$ref": "#/$defs/identityModel"
-          }
-        },
-        "federatedProviders": {
-          "type": "array",
-          "minItems": 1,
-          "uniqueItems": true,
-          "items": {
-            "$ref": "#/$defs/providerName"
-          },
-          "description": "Required when identityModels contains federated."
-        },
         "events": {
           "type": "object",
           "additionalProperties": false,
@@ -229,103 +211,7 @@
             }
           }
         }
-      },
-      "allOf": [
-        {
-          "if": {
-            "properties": {
-              "credentials": {
-                "properties": {
-                  "authenticationType": {
-                    "enum": [
-                      "azure-key-vault",
-                      "amazon-kms"
-                    ]
-                  }
-                },
-                "required": [
-                  "authenticationType"
-                ]
-              }
-            }
-          },
-          "then": {
-            "properties": {
-              "identityModels": {
-                "contains": {
-                  "const": "kms"
-                }
-              }
-            }
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "credentials": {
-                "properties": {
-                  "authenticationType": {
-                    "const": "azure-managed-identity"
-                  }
-                },
-                "required": [
-                  "authenticationType"
-                ]
-              }
-            }
-          },
-          "then": {
-            "properties": {
-              "identityModels": {
-                "contains": {
-                  "const": "workload"
-                }
-              }
-            }
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "credentials": {
-                "properties": {
-                  "authenticationType": {
-                    "const": "oidc"
-                  }
-                },
-                "required": [
-                  "authenticationType"
-                ]
-              }
-            }
-          },
-          "then": {
-            "properties": {
-              "identityModels": {
-                "contains": {
-                  "const": "federated"
-                }
-              }
-            }
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "identityModels": {
-                "contains": {
-                  "const": "federated"
-                }
-              }
-            }
-          },
-          "then": {
-            "required": [
-              "federatedProviders"
-            ]
-          }
-        }
-      ]
+      }
     }
   },
   "$defs": {
@@ -388,27 +274,6 @@
       "type": "string",
       "pattern": "^[a-z][a-z0-9-]*(?:\\.[a-z0-9][a-z0-9-]*)+$",
       "description": "Dot-delimited normalized event type token."
-    },
-    "providerName": {
-      "type": "string",
-      "pattern": "^[a-z][a-z0-9-]{1,63}$",
-      "description": "Federation provider identifier, for example oidc, spiffe, saml-bridge."
-    },
-    "identityModel": {
-      "anyOf": [
-        {
-          "enum": [
-            "kms",
-            "workload",
-            "federated"
-          ]
-        },
-        {
-          "type": "string",
-          "pattern": "^x-[a-z0-9][a-z0-9.-]{1,63}$",
-          "description": "Vendor extension identity model."
-        }
-      ]
     }
   }
 }

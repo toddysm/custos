@@ -32,9 +32,6 @@
         "connectorIdentity": "azure://managed-identity/custos-connector-mi"
       }
     },
-    "identityModels": [
-      "kms"
-    ],
     "events": {
       "produced": [
         "blob.object.created",

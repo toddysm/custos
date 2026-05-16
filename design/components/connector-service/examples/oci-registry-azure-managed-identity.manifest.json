@@ -34,9 +34,6 @@
         "audience": "https://management.azure.com/"
       }
     },
-    "identityModels": [
-      "workload"
-    ],
     "events": {
       "produced": [
         "oci.image.pushed",

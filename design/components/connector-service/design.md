@@ -2,7 +2,7 @@
 
 Slug: connector-service
 Last Updated: 2026-05-16
-Version: 2
+Version: 3
 Status: Draft
 
 ## Responsibility
@@ -116,10 +116,6 @@ spec:
       issuer: https://token.actions.githubusercontent.com
       audience: https://ghcr.io
       subjectTemplate: repo:my-org/my-repo:ref:{ref}
-  identityModels:
-    - federated
-  federatedProviders:
-    - oidc
   events:
     produced:
       - oci.image.pushed
@@ -144,7 +140,7 @@ Validation requirements:
 - Inline `credentials` block defines auth mode via concrete `authenticationType` (`azure-key-vault`, `amazon-kms`, `azure-managed-identity`, `oidc`) and a generic `authentication` property bag.
 - `credentials.authentication` is interpreted according to `credentials.authenticationType` and remains extensible for future auth types.
 - Manifest payload is self-contained; target and credential requirements are defined inline.
-- `federatedProviders` is required when `identityModels` contains `federated`.
+- Identity category (KMS-backed, workload, federated) is derived from `credentials.authenticationType` by the Connector Service; manifests do not declare it. Vendor `x-*` auth types register their category at plugin-registration time, out of band.
 - Capability/event tokens follow dot-delimited lowercase naming rules.
 
 ## Connection to Workflows and Activities
@@ -176,16 +172,26 @@ Binding rules:
 
 ## Identity and Credential Model
 
-All three models are supported from v1:
+All three identity categories are supported from v1. The category for a given connector instance is **derived** by the Connector Service from `credentials.authenticationType`; it is not declared in the manifest.
 
-1. KMS-backed credentials (`kms`)
+| Identity category | Concrete `authenticationType` values |
+|---|---|
+| `kms` (KMS-backed credentials) | `azure-key-vault`, `amazon-kms` |
+| `workload` (workload identity) | `azure-managed-identity` |
+| `federated` (federated identity) | `oidc` |
+
+Behavior per category:
+
+1. KMS-backed credentials
    - Connector workload identity must be provisioned and authorized to read from KMS.
    - Examples: Azure Key Vault, AWS Secrets Manager, Vault.
-2. Workload identity (`workload`)
+2. Workload identity
    - Connector uses managed/workload identity directly to access upstream systems.
-3. Federated identity (`federated`)
+3. Federated identity
    - OIDC is first implementation.
    - Contract remains extensible to non-OIDC federation methods later.
+
+Vendor extension auth types (`x-*` `authenticationType`) declare their identity category at plugin-registration time as out-of-band metadata; the manifest payload itself remains a single source of truth for the auth mechanism.
 
 ## Secret and Token Flow to Activities
 
@@ -277,3 +283,4 @@ sequenceDiagram
 |---|---|---|
 | 2026-05-15 | Initial component design | — |
 | 2026-05-16 | Refactor `target` to separate common fields from kind-specific `config` property bag | — |
+| 2026-05-16 | Remove `identityModels` and `federatedProviders`; derive identity category from `credentials.authenticationType` | — |
