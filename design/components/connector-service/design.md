@@ -106,11 +106,11 @@ spec:
   target:
     kind: oci-registry
     endpoint: https://ghcr.io
-    repositoryPrefix: my-org
+    repositoryNamespace: my-org
     verifyTls: true
   credentials:
-    sourceType: federated
-    federated:
+    authenticationType: oidc
+    authentication:
       provider: oidc
       issuer: https://token.actions.githubusercontent.com
       audience: https://ghcr.io
@@ -134,13 +134,13 @@ Validation requirements:
 - Closed objects (`additionalProperties: false`) at all levels.
 - Strict constants for `apiVersion`, `kind`, and `metadata.contractVersion`.
 - SemVer validation for `metadata.version`.
-- Inline `target` block defines the endpoint and resource type (`oci-registry`, `azure-blob-storage`, or `amazon-s3-bucket`).
+- Inline `target` block defines the endpoint URI and resource type (`oci-registry`, `azure-blob-storage`, or `amazon-s3-bucket`).
 - Per-kind target requirements are enforced:
-  - `oci-registry` requires `repositoryPrefix`.
+  - `oci-registry` requires `repositoryNamespace`.
   - `azure-blob-storage` requires `azureStorageAccount` and `azureContainer`.
   - `amazon-s3-bucket` requires `s3Bucket` and `s3Region`.
-- Inline `credentials` block defines where auth material comes from (`kms`, `workload`, or `federated`).
-- `credentials.sourceType` requires the matching credential details block and forbids sibling model blocks.
+- Inline `credentials` block defines auth mode via concrete `authenticationType` (`azure-key-vault`, `amazon-kms`, `azure-managed-identity`, `oidc`) and a generic `authentication` property bag.
+- `credentials.authentication` is interpreted according to `credentials.authenticationType` and remains extensible for future auth types.
 - Manifest payload is self-contained; target and credential requirements are defined inline.
 - `federatedProviders` is required when `identityModels` contains `federated`.
 - Capability/event tokens follow dot-delimited lowercase naming rules.

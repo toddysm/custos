@@ -22,12 +22,12 @@
     "target": {
       "kind": "oci-registry",
       "endpoint": "https://ghcr.io",
-      "repositoryPrefix": "my-org",
+      "repositoryNamespace": "my-org",
       "verifyTls": true
     },
     "credentials": {
-      "sourceType": "federated",
-      "federated": {
+      "authenticationType": "oidc",
+      "authentication": {
         "provider": "oidc",
         "issuer": "https://token.actions.githubusercontent.com",
         "audience": "https://ghcr.io",

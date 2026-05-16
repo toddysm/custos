@@ -24,11 +24,11 @@
       "verifyTls": true
     },
     "credentials": {
-      "sourceType": "workload",
-      "workload": {
-        "provider": "aws-irsa",
-        "identityRef": "aws://iam-role/custos-s3-connector-role",
-        "audience": "sts.amazonaws.com"
+      "authenticationType": "amazon-kms",
+      "authentication": {
+        "provider": "amazon-kms",
+        "secretRef": "arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012",
+        "connectorIdentity": "aws://iam-role/custos-s3-connector-role"
       }
     },
     "identityModels": [
