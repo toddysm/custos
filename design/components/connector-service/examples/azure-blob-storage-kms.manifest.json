@@ -13,9 +13,6 @@
       "blob.write",
       "event.pull"
     ],
-    "supportedModes": [
-      "pull"
-    ],
     "target": {
       "kind": "azure-blob-storage",
       "endpoint": "https://custosstorage.blob.core.windows.net",

@@ -13,9 +13,6 @@
       "s3.write",
       "event.pull"
     ],
-    "supportedModes": [
-      "pull"
-    ],
     "target": {
       "kind": "amazon-s3-bucket",
       "endpoint": "https://s3.us-east-1.amazonaws.com",

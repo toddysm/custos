@@ -2,7 +2,7 @@
 
 Slug: connector-service
 Last Updated: 2026-05-16
-Version: 3
+Version: 4
 Status: Draft
 
 ## Responsibility
@@ -100,9 +100,6 @@ spec:
     - oci.push
     - event.push
     - event.pull
-  supportedModes:
-    - push
-    - pull
   target:
     kind: oci-registry
     endpoint: https://ghcr.io
@@ -284,3 +281,4 @@ sequenceDiagram
 | 2026-05-15 | Initial component design | — |
 | 2026-05-16 | Refactor `target` to separate common fields from kind-specific `config` property bag | — |
 | 2026-05-16 | Remove `identityModels` and `federatedProviders`; derive identity category from `credentials.authenticationType` | — |
+| 2026-05-16 | Remove `supportedModes`; trigger delivery direction is already encoded by `event.push` / `event.pull` capabilities | — |
