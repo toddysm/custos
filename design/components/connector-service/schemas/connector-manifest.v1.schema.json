@@ -1,0 +1,281 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://custos.dev/schemas/connector-manifest.v1.schema.json",
+  "title": "Custos Connector Manifest v1",
+  "description": "Strict schema for ConnectorManifest v1 artifact payload.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "properties": {
+    "apiVersion": {
+      "const": "custos.dev/connector-manifest/v1"
+    },
+    "kind": {
+      "const": "ConnectorManifest"
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "version",
+        "contractVersion"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "pattern": "^[a-z0-9](?:[a-z0-9-]{1,62})$",
+          "description": "Connector type slug, for example oci-registry."
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?(?:\\+([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?$",
+          "description": "SemVer for the connector type version descriptor."
+        },
+        "contractVersion": {
+          "const": "1",
+          "description": "Connector contract version supported by this manifest."
+        }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "description",
+        "capabilities",
+        "target",
+        "credentials",
+        "events"
+      ],
+      "properties": {
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "capabilities": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/capability"
+          }
+        },
+        "target": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "endpoint",
+            "config"
+          ],
+          "properties": {
+            "kind": {
+              "enum": [
+                "oci-registry",
+                "azure-blob-storage",
+                "amazon-s3-bucket"
+              ]
+            },
+            "endpoint": {
+              "type": "string",
+              "pattern": "^https://[^\\s/$.?#].[^\\s]*$",
+              "description": "Base endpoint URI for the selected target kind."
+            },
+            "verifyTls": {
+              "type": "boolean",
+              "default": true
+            },
+            "config": {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": true,
+              "description": "Target-specific configuration bag interpreted based on target.kind."
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "kind": {
+                    "const": "oci-registry"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "config": {
+                    "$ref": "#/$defs/ociRegistryConfig"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "kind": {
+                    "const": "azure-blob-storage"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "config": {
+                    "$ref": "#/$defs/azureBlobStorageConfig"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "kind": {
+                    "const": "amazon-s3-bucket"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "config": {
+                    "$ref": "#/$defs/amazonS3BucketConfig"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "credentials": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "authenticationType",
+            "authentication"
+          ],
+          "properties": {
+            "authenticationType": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "azure-key-vault",
+                    "amazon-kms",
+                    "azure-managed-identity",
+                    "oidc"
+                  ]
+                },
+                {
+                  "type": "string",
+                  "pattern": "^x-[a-z0-9][a-z0-9.-]{1,63}$"
+                }
+              ]
+            },
+            "authentication": {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": true,
+              "description": "Authentication property bag interpreted based on credentials.authenticationType."
+            }
+          }
+        },
+        "events": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "delivery",
+            "produced"
+          ],
+          "properties": {
+            "delivery": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "push",
+                  "pull"
+                ]
+              },
+              "description": "Delivery mechanisms the Trigger Service must wire up: push (target delivers to us) and/or pull (we poll the target)."
+            },
+            "produced": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/eventType"
+              },
+              "description": "Catalog of normalized event types this connector emits. Workflow triggers reference these names."
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "ociRegistryConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repositoryNamespace"
+      ],
+      "properties": {
+        "repositoryNamespace": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      }
+    },
+    "azureBlobStorageConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "storageAccount",
+        "container"
+      ],
+      "properties": {
+        "storageAccount": {
+          "type": "string",
+          "pattern": "^[a-z0-9]{3,24}$"
+        },
+        "container": {
+          "type": "string",
+          "pattern": "^[a-z0-9](?:[a-z0-9-]{1,61})[a-z0-9]$"
+        }
+      }
+    },
+    "amazonS3BucketConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bucket",
+        "region"
+      ],
+      "properties": {
+        "bucket": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
+        },
+        "region": {
+          "type": "string",
+          "pattern": "^[a-z]{2}-[a-z]+-[0-9]$"
+        }
+      }
+    },
+    "capability": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*(?:\\.[a-z0-9][a-z0-9-]*)+$",
+      "description": "Dot-delimited capability token, for example oci.pull or event.push."
+    },
+    "eventType": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*(?:\\.[a-z0-9][a-z0-9-]*)+$",
+      "description": "Dot-delimited normalized event type token."
+    }
+  }
+}

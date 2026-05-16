@@ -1,6 +1,6 @@
 # Custos — Design Documentation
 
-Last Updated: 2026-05-14
+Last Updated: 2026-05-15
 
 ## Overview
 
@@ -12,7 +12,7 @@ Custos is a pluggable workflow orchestrator for supply-chain security operations
 |---|---|---|
 | Requirements | In Progress (revision 4) | 2026-05-14 |
 | Architecture | In Progress (revision 2, detailed) | 2026-05-14 |
-| Component Designs | Not Started | — |
+| Component Designs | In Progress | 2026-05-15 |
 | Implementation | Not Started | — |
 
 ## Quick Links
@@ -21,10 +21,15 @@ Custos is a pluggable workflow orchestrator for supply-chain security operations
 - [Architecture Overview](architecture/overview.md)
 - [Component Registry](architecture/components.md)
 
+## Active Component Design Sessions
+
+- Connector Service: [components/connector-service/design.md](components/connector-service/design.md)
+
 ## Recent Changes
 
 | Date | Change | Issue |
 |---|---|---|
+| 2026-05-15 | Connector Service component design draft (plugin manifest, identity model) | — |
 | 2026-05-14 | Added hybrid push/pull trigger ingestion requirement (REQ-079) and aligned trigger pipeline | _pending_ |
 | 2026-05-14 | Detailed architecture: principles, domain model, schemas, contracts, security/observability/trigger pipeline | — |
 | 2026-05-14 | Added workflow templates and single-cluster deployment/storage/logging requirements | _pending_ |
