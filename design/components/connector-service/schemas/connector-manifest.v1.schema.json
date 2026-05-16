@@ -85,7 +85,8 @@
           "additionalProperties": false,
           "required": [
             "kind",
-            "endpoint"
+            "endpoint",
+            "config"
           ],
           "properties": {
             "kind": {
@@ -100,30 +101,15 @@
               "pattern": "^https://[^\\s/$.?#].[^\\s]*$",
               "description": "Base endpoint URI for the selected target kind."
             },
-            "repositoryNamespace": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 512
-            },
-            "azureStorageAccount": {
-              "type": "string",
-              "pattern": "^[a-z0-9]{3,24}$"
-            },
-            "azureContainer": {
-              "type": "string",
-              "pattern": "^[a-z0-9](?:[a-z0-9-]{1,61})[a-z0-9]$"
-            },
-            "s3Bucket": {
-              "type": "string",
-              "pattern": "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
-            },
-            "s3Region": {
-              "type": "string",
-              "pattern": "^[a-z]{2}-[a-z]+-[0-9]$"
-            },
             "verifyTls": {
               "type": "boolean",
               "default": true
+            },
+            "config": {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": true,
+              "description": "Target-specific configuration bag interpreted based on target.kind."
             }
           },
           "allOf": [
@@ -136,14 +122,10 @@
                 }
               },
               "then": {
-                "required": [
-                  "repositoryNamespace"
-                ],
                 "properties": {
-                  "azureStorageAccount": false,
-                  "azureContainer": false,
-                  "s3Bucket": false,
-                  "s3Region": false
+                  "config": {
+                    "$ref": "#/$defs/ociRegistryConfig"
+                  }
                 }
               }
             },
@@ -156,14 +138,10 @@
                 }
               },
               "then": {
-                "required": [
-                  "azureStorageAccount",
-                  "azureContainer"
-                ],
                 "properties": {
-                  "repositoryNamespace": false,
-                  "s3Bucket": false,
-                  "s3Region": false
+                  "config": {
+                    "$ref": "#/$defs/azureBlobStorageConfig"
+                  }
                 }
               }
             },
@@ -176,14 +154,10 @@
                 }
               },
               "then": {
-                "required": [
-                  "s3Bucket",
-                  "s3Region"
-                ],
                 "properties": {
-                  "repositoryNamespace": false,
-                  "azureStorageAccount": false,
-                  "azureContainer": false
+                  "config": {
+                    "$ref": "#/$defs/amazonS3BucketConfig"
+                  }
                 }
               }
             }
@@ -355,6 +329,56 @@
     }
   },
   "$defs": {
+    "ociRegistryConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repositoryNamespace"
+      ],
+      "properties": {
+        "repositoryNamespace": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      }
+    },
+    "azureBlobStorageConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "storageAccount",
+        "container"
+      ],
+      "properties": {
+        "storageAccount": {
+          "type": "string",
+          "pattern": "^[a-z0-9]{3,24}$"
+        },
+        "container": {
+          "type": "string",
+          "pattern": "^[a-z0-9](?:[a-z0-9-]{1,61})[a-z0-9]$"
+        }
+      }
+    },
+    "amazonS3BucketConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bucket",
+        "region"
+      ],
+      "properties": {
+        "bucket": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
+        },
+        "region": {
+          "type": "string",
+          "pattern": "^[a-z]{2}-[a-z]+-[0-9]$"
+        }
+      }
+    },
     "capability": {
       "type": "string",
       "pattern": "^[a-z][a-z0-9-]*(?:\\.[a-z0-9][a-z0-9-]*)+$",

@@ -19,9 +19,11 @@
     "target": {
       "kind": "amazon-s3-bucket",
       "endpoint": "https://s3.us-east-1.amazonaws.com",
-      "s3Bucket": "custos-artifacts-prod",
-      "s3Region": "us-east-1",
-      "verifyTls": true
+      "verifyTls": true,
+      "config": {
+        "bucket": "custos-artifacts-prod",
+        "region": "us-east-1"
+      }
     },
     "credentials": {
       "authenticationType": "amazon-kms",

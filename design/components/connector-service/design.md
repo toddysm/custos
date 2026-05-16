@@ -1,8 +1,8 @@
 # Component Design: Connector Service
 
 Slug: connector-service
-Last Updated: 2026-05-15
-Version: 1
+Last Updated: 2026-05-16
+Version: 2
 Status: Draft
 
 ## Responsibility
@@ -106,8 +106,9 @@ spec:
   target:
     kind: oci-registry
     endpoint: https://ghcr.io
-    repositoryNamespace: my-org
     verifyTls: true
+    config:
+      repositoryNamespace: my-org
   credentials:
     authenticationType: oidc
     authentication:
@@ -135,10 +136,11 @@ Validation requirements:
 - Strict constants for `apiVersion`, `kind`, and `metadata.contractVersion`.
 - SemVer validation for `metadata.version`.
 - Inline `target` block defines the endpoint URI and resource type (`oci-registry`, `azure-blob-storage`, or `amazon-s3-bucket`).
-- Per-kind target requirements are enforced:
-  - `oci-registry` requires `repositoryNamespace`.
-  - `azure-blob-storage` requires `azureStorageAccount` and `azureContainer`.
-  - `amazon-s3-bucket` requires `s3Bucket` and `s3Region`.
+- Common target fields (`kind`, `endpoint`, `verifyTls`) are kind-agnostic; type-specific fields live inside a generic `target.config` property bag interpreted by `target.kind`.
+- Per-kind `target.config` schemas are enforced:
+  - `oci-registry` requires `config.repositoryNamespace`.
+  - `azure-blob-storage` requires `config.storageAccount` and `config.container`.
+  - `amazon-s3-bucket` requires `config.bucket` and `config.region`.
 - Inline `credentials` block defines auth mode via concrete `authenticationType` (`azure-key-vault`, `amazon-kms`, `azure-managed-identity`, `oidc`) and a generic `authentication` property bag.
 - `credentials.authentication` is interpreted according to `credentials.authenticationType` and remains extensible for future auth types.
 - Manifest payload is self-contained; target and credential requirements are defined inline.
@@ -268,3 +270,10 @@ sequenceDiagram
 - Capability namespace governance model (strict curated list vs extensible custom prefixes).
 - Fallback tag naming finalization and normalization edge cases for non-sha256 digests.
 - Sidecar API details (path, protocol, token refresh semantics, cache policy).
+
+## Change History
+
+| Date | Change | GitHub Issue |
+|---|---|---|
+| 2026-05-15 | Initial component design | — |
+| 2026-05-16 | Refactor `target` to separate common fields from kind-specific `config` property bag | — |

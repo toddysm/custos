@@ -19,9 +19,11 @@
     "target": {
       "kind": "azure-blob-storage",
       "endpoint": "https://custosstorage.blob.core.windows.net",
-      "azureStorageAccount": "custosstorage",
-      "azureContainer": "supply-chain-artifacts",
-      "verifyTls": true
+      "verifyTls": true,
+      "config": {
+        "storageAccount": "custosstorage",
+        "container": "supply-chain-artifacts"
+      }
     },
     "credentials": {
       "authenticationType": "azure-key-vault",

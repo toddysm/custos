@@ -22,8 +22,10 @@
     "target": {
       "kind": "oci-registry",
       "endpoint": "https://ghcr.io",
-      "repositoryNamespace": "my-org",
-      "verifyTls": true
+      "verifyTls": true,
+      "config": {
+        "repositoryNamespace": "my-org"
+      }
     },
     "credentials": {
       "authenticationType": "oidc",

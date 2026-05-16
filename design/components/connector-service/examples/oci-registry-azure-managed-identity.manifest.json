@@ -22,8 +22,10 @@
     "target": {
       "kind": "oci-registry",
       "endpoint": "https://myorg.azurecr.io",
-      "repositoryNamespace": "platform",
-      "verifyTls": true
+      "verifyTls": true,
+      "config": {
+        "repositoryNamespace": "platform"
+      }
     },
     "credentials": {
       "authenticationType": "azure-managed-identity",
