@@ -86,38 +86,50 @@ Manifest selection algorithm:
 
 ## Plugin Manifest v1 (artifact payload)
 
-```yaml
-apiVersion: custos.dev/connector-manifest/v1
-kind: ConnectorManifest
-metadata:
-  type: oci-registry
-  version: 2.3.1
-  contractVersion: "1"
-spec:
-  description: OCI registry connector
-  capabilities:
-    - oci.pull
-    - oci.push
-  target:
-    kind: oci-registry
-    endpoint: https://ghcr.io
-    verifyTls: true
-    config:
-      repositoryNamespace: my-org
-  credentials:
-    authenticationType: oidc
-    authentication:
-      provider: oidc
-      issuer: https://token.actions.githubusercontent.com
-      audience: https://ghcr.io
-      subjectTemplate: repo:my-org/my-repo:ref:{ref}
-  events:
-    delivery:
-      - push
-      - pull
-    produced:
-      - oci.image.pushed
-      - oci.tag.updated
+```json
+{
+  "apiVersion": "custos.dev/connector-manifest/v1",
+  "kind": "ConnectorManifest",
+  "metadata": {
+    "type": "oci-registry",
+    "version": "2.3.1",
+    "contractVersion": "1"
+  },
+  "spec": {
+    "description": "OCI registry connector",
+    "capabilities": [
+      "oci.pull",
+      "oci.push"
+    ],
+    "target": {
+      "kind": "oci-registry",
+      "endpoint": "https://ghcr.io",
+      "verifyTls": true,
+      "config": {
+        "repositoryNamespace": "my-org"
+      }
+    },
+    "credentials": {
+      "authenticationType": "oidc",
+      "authentication": {
+        "provider": "oidc",
+        "issuer": "https://token.actions.githubusercontent.com",
+        "audience": "https://ghcr.io",
+        "subjectTemplate": "repo:my-org/my-repo:ref:{ref}"
+      }
+    },
+    "events": {
+      "delivery": [
+        "push",
+        "pull"
+      ],
+      "produced": [
+        "oci.image.pushed",
+        "oci.tag.updated"
+      ]
+    }
+  }
+}
 ```
 
 ### Normative JSON Schema

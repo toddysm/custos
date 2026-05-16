@@ -1,0 +1,42 @@
+{
+  "apiVersion": "custos.dev/connector-manifest/v1",
+  "kind": "ConnectorManifest",
+  "metadata": {
+    "type": "oci-registry",
+    "version": "2.3.1-akv.1",
+    "contractVersion": "1"
+  },
+  "spec": {
+    "description": "OCI registry connector using Azure Key Vault for secret material.",
+    "capabilities": [
+      "oci.pull",
+      "oci.push",
+      "oci.tag"
+    ],
+    "target": {
+      "kind": "oci-registry",
+      "endpoint": "https://myorg.azurecr.io",
+      "verifyTls": true,
+      "config": {
+        "repositoryNamespace": "team-a"
+      }
+    },
+    "credentials": {
+      "authenticationType": "azure-key-vault",
+      "authentication": {
+        "secretRef": "https://custos-akv.vault.azure.net/secrets/registry-token",
+        "connectorIdentity": "azure://managed-identity/custos-connector-mi"
+      }
+    },
+    "events": {
+      "delivery": [
+        "push",
+        "pull"
+      ],
+      "produced": [
+        "oci.image.pushed",
+        "oci.tag.updated"
+      ]
+    }
+  }
+}
