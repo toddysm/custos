@@ -915,7 +915,7 @@ The Documentation section format:
 | Audience | Overview |
 |---|---|
 | [Contributors](docs/contributors/README.md) | Dev setup, conventions, CI/CD, release process |
-| [Plugin & Activity Developers](docs/developers/README.md) | SDK, plugin/connection/activity APIs, publishing |
+| [Plugin, Activity & Connection Developers](docs/developers/README.md) | SDK, plugin/connection/activity APIs, publishing |
 | [Users](docs/users/README.md) | Getting started, guides, reference, troubleshooting |
 ```
 
