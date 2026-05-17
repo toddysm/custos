@@ -1,7 +1,7 @@
 # Architecture Overview: Custos
 
 Last Updated: 2026-05-17
-Version: 8
+Version: 9
 Status: Draft
 
 ## Summary
@@ -115,6 +115,7 @@ graph TD
     API --> WF
     API --> Trig
     API --> Cat
+    API --> Conn
 
     WF --> DWF
     Trig --> DPUB
@@ -169,6 +170,8 @@ graph LR
     Store --> OptStore[Optional External Storage/DB]
     Obs --> OptLog[Optional External Log Sinks]
 ```
+
+In the Deployment Model, `API --> <svc>` edges describe deployment topology and ingress reachability across the cluster (Dapr sidecar adjacency, network paths the gateway *can* reach), not the set of services that currently expose user-facing REST through the gateway. The Component Map above is authoritative for "which services route REST through the API Gateway today" — at time of writing that is Auth, Workflow Service, Trigger Service, Catalog Service, and Connector Service. Additional services will earn Component Map edges once their component designs declare public interfaces.
 
 ## Workflow and Template Schema
 
@@ -276,7 +279,7 @@ Activities receive inputs and a `ConnectorContext` and return typed outputs plus
 |---|---|
 | `/custos/in/inputs.json` | Resolved step inputs |
 | `/custos/in/ctx.json` | `ConnectorContext` (opaque handles, endpoints, capabilities) |
-| `/custos/in/secrets/<name>` | Mounted secret materials (per binding, never logged) |
+| `/custos/in/secrets/<connector-name>/<key>` | Mounted secret materials, namespaced by activity-manifest connector slot name (matches `spec.connectors[].name`). One file per key. Read-only tmpfs. Never logged. |
 | `/custos/out/outputs.json` | Typed step outputs |
 | `/custos/out/artifacts/` | Files captured as `ArtifactRef`s |
 | `/custos/out/audit.jsonl` | Optional structured activity audit events |
@@ -635,3 +638,5 @@ sequenceDiagram
 | 2026-05-17 | INCON-004: ConnectorContext capabilities now use dot-namespaced data-plane verbs (`oci.pull`, `oci.push`, ...); clarified that event delivery modes live in `events.delivery`, not `capabilities` | #29 |
 | 2026-05-17 | INCON-005: Replaced trigger pipeline sequence diagram with REQ-080/REQ-081-aligned version showing Classifier, Start/Resume Matchers, Internal Event Receiver, and `StartRun` + `RaiseExternalEvent` dispatch paths; updated mode-declaration text to reference `events.delivery` instead of `describe()` | #30 |
 | 2026-05-17 | INCON-008 + INCON-016: Expanded `describe()` hook description to include `events.delivery` and `events.produced`; removed stale "opaque secret handles" from `bind()` description; clarified that delivery modes are declared statically in the plugin manifest at registration time | #33, #42 |
+| 2026-05-17 | INCON-009: Activity sandbox secret path corrected to `/custos/in/secrets/<connector-name>/<key>` (matches activity manifest `spec.connectors[].name` and ARM's normative two-level layout) | #34 |
+| 2026-05-17 | INCON-007: Added `API --> Conn` edge to Component Map so the diagram matches the documented Connector Service REST API surface; clarified that Deployment Model edges describe topology and not user-facing REST routing | #32 |

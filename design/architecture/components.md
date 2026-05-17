@@ -173,6 +173,7 @@ Audit is structurally separate so it can carry stronger retention and tamper-evi
 | COMP-001 | COMP-002 | Delegates authentication and authorization checks |
 | COMP-001 | COMP-003 | Starts and manages workflow runs |
 | COMP-001 | COMP-004 | Registers and manages trigger configurations |
+| COMP-001 | COMP-005 | Manages connector type registration and connector instance lifecycle |
 | COMP-001 | COMP-007 | Creates/reads workflow definitions and templates |
 | COMP-003 | COMP-005 | Resolves and uses connector instances |
 | COMP-003 | COMP-006 | Schedules and observes activity execution |
