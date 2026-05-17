@@ -1,7 +1,7 @@
 # Architecture Overview: Custos
 
 Last Updated: 2026-05-17
-Version: 6
+Version: 7
 Status: Draft
 
 ## Summary
@@ -457,29 +457,48 @@ Audit event examples: `run.started`, `step.completed`, `activity.failed`, `conne
 ```mermaid
 sequenceDiagram
     participant Src as Event Source
-    participant Recv as Receiver (per type)
+    participant Recv as Receiver (push / pull / scheduler / manual / internal)
     participant Norm as Normalizer
-    participant Match as Trigger Matcher
+    participant Cls as Classifier
+    participant MS as Start Matcher
+    participant MR as Resume Matcher
     participant Dedup as Dedup / Idempotency
     participant Disp as Dispatcher
     participant WF as Workflow Service
 
-    Src->>Recv: raw event (webhook / poll / cron / manual)
+    Src->>Recv: raw event (webhook / poll / cron / manual / internal)
     Recv->>Norm: vendor-specific payload
-    Norm->>Match: normalized event
-    Match->>Dedup: matched triggers
-    Dedup->>Disp: deduped, idempotent run requests
-    Disp->>WF: start run(workflowVersion, inputs)
+    Norm->>Cls: NormalizedEvent
+    par Workflow start path
+        Cls->>MS: classify as start candidate
+        MS->>Dedup: matched start subscriptions
+        Dedup->>Disp: deduped start requests
+        Disp->>WF: StartRun(workflowVersion, inputs)
+    and Step resume path
+        Cls->>MR: classify as resume candidate
+        MR->>Dedup: matched (runId, stepId, eventKey) tuples
+        Dedup->>Disp: deduped resume signals
+        Disp->>WF: RaiseExternalEvent(runId, stepId, eventName, payload)
+    end
 ```
 
 Vendor-specific knowledge about OCI registries (Docker Hub, GHCR, ACR, ECR, GAR, Harbor, …) lives only in receivers and connector plugins (ADR-013). The rest of the pipeline operates on a normalized event schema.
 
-Receivers come in two flavors for **every** source category, not just registries (REQ-079):
+Receivers cover every source category (REQ-079, REQ-080):
 
 - **Push receivers** — inbound webhooks / event subscriptions / pub-sub consumers. Used when the source can reliably emit events.
-- **Pull receivers (pollers)** — long-poll or interval-poll loops driven by a connector’s `listen()` implementation. Used when the source cannot push, or when push delivery is unreliable.
+- **Pull receivers (pollers)** — long-poll or interval-poll loops driven by a connector's `listen()` implementation. Used when the source cannot push, or when push delivery is unreliable.
+- **Scheduler / Manual receivers** — cron-style and user-initiated runs.
+- **Internal Event Receiver** (REQ-080) — subscribes to the `custos.workflow.events` Dapr Pub/Sub topic where the Workflow Service publishes lifecycle events (`workflow.completed`, `workflow.failed`, custom emit). These re-enter the normalized pipeline and can start downstream workflows or resume parents waiting on children.
 
-Both flavors emit into the same `Normalizer → Matcher → Dedup → Dispatcher` chain, so downstream code is mode-agnostic. Connector types declare supported modes (`push`, `pull`, or both) in `describe()`, and trigger configuration selects the active mode per instance. Pollers persist their cursor / last-seen state via the `MetadataStoreProvider` so polling is durable across restarts.
+After normalization, the **Classifier** routes each `NormalizedEvent` to one or both matchers (REQ-081):
+
+- **Start Matcher** — finds active `start`-kind subscriptions whose selector matches the event; produces `StartRun` dispatches.
+- **Resume Matcher** — finds `resume`-kind subscriptions registered by the Workflow Service for in-flight steps waiting on external signals; produces `RaiseExternalEvent` dispatches. The Workflow Service owns the `RegisterResumeSubscription` / `CancelResumeSubscription` lifecycle for these.
+
+A single event can match both paths simultaneously — a `workflow.completed` event can start a chained workflow *and* resume a parent waiting on its child. Both flavors of receiver emit into the same `Normalizer → Classifier → Matcher(s) → Dedup → Dispatcher` chain, so downstream code is mode-agnostic. Connector types declare delivery modes in `events.delivery` on the connector manifest (`push`, `pull`, or both); trigger configuration selects the active mode per instance. Pollers persist their cursor / last-seen state via the `MetadataStoreProvider` so polling is durable across restarts.
+
+The normative trigger pipeline specification — receiver inventory, classifier rules, subscription lifecycle, dispatch contracts — lives in `design/components/trigger-service/design.md`.
 
 ## Failure Modes
 
@@ -612,3 +631,4 @@ sequenceDiagram
 | 2026-05-17 | INCON-002: Updated workflow and template YAML examples to fully-qualified activity refs (`<namespace>/<type>@<major>`); added note that short-form aliases are deferred post-M1 | #27 |
 | 2026-05-17 | INCON-003: Removed `secrets` field from ConnectorContext example; documented sidecar API + `/custos/in/secrets/` filesystem mount as the two credential delivery paths, with forward references to Connector Service and ARM designs | #28 |
 | 2026-05-17 | INCON-004: ConnectorContext capabilities now use dot-namespaced data-plane verbs (`oci.pull`, `oci.push`, ...); clarified that event delivery modes live in `events.delivery`, not `capabilities` | #29 |
+| 2026-05-17 | INCON-005: Replaced trigger pipeline sequence diagram with REQ-080/REQ-081-aligned version showing Classifier, Start/Resume Matchers, Internal Event Receiver, and `StartRun` + `RaiseExternalEvent` dispatch paths; updated mode-declaration text to reference `events.delivery` instead of `describe()` | #30 |
