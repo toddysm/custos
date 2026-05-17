@@ -1,7 +1,7 @@
 # Architecture Overview: Custos
 
-Last Updated: 2026-05-14
-Version: 2
+Last Updated: 2026-05-17
+Version: 3
 Status: Draft
 
 ## Summary
@@ -288,30 +288,76 @@ Result codes (ADR-008):
 | 2 | Permanent failure (invalid input, policy violation) |
 | 3 | Cancelled or timed out |
 
-Example manifest for a built-in activity:
+Example manifest for a built-in activity (illustrative; full normative spec lives in the ARM component design):
 
 ```yaml
 apiVersion: custos.dev/v1
-kind: ActivityType
+kind: ActivityManifest
 metadata:
-  name: vuln-scan
+  type: scan-image
+  version: 1.2.0
+  namespace: custos.builtin
+  description: "Scan an OCI image for vulnerabilities using Trivy."
+  labels:
+    category: security
+    engine: trivy
+  owner: "custos-maintainers"
 spec:
-  versions:
-    - version: 2
-      runtime: oci-container
-      image: ghcr.io/custos/activities/vuln-scan:2.3.1
-      requiresConnectorTypes: [oci-registry]
-      inputsSchema: ./schemas/vuln-scan.inputs.json
-      outputsSchema: ./schemas/vuln-scan.outputs.json
-      capabilities:
-        produces: [sbom, vuln-report]
-      resources:
-        cpu: 1
-        memory: 1Gi
-      timeoutSeconds: 900
+  contractVersion: "1"
+  runtime:
+    kind: oci-container
+    image: ghcr.io/custos/scan-image:1.2.0
+    digest: sha256:abc...             # required; pinned at publish time
+    isolation:
+      minTier: microvm                # process | vm | microvm
+      preferred: microvm-firecracker
+  inputs:
+    schema:
+      $schema: "https://json-schema.org/draft/2020-12/schema"
+      type: object
+      required: [image]
+      properties:
+        image:    { $ref: "custos://types/ImageRef" }
+        severity: { type: string, enum: [low, medium, high, critical], default: high }
+  outputs:
+    schema:
+      $schema: "https://json-schema.org/draft/2020-12/schema"
+      type: object
+      required: [findings, reportRef]
+      properties:
+        findings: { type: integer }
+        reportRef: { $ref: "custos://types/ArtifactRef" }
+    artifacts:
+      - name: report
+        mediaType: application/vnd.cyclonedx+json
+        required: true
+  connectors:
+    - name: registry
+      type: oci-registry
+      required: true
+      capabilities: [pull]
+  resources:
+    cpu:    { request: "500m", limit: "2" }
+    memory: { request: "512Mi", limit: "2Gi" }
+    timeout: PT15M                    # required (ISO-8601 duration)
+  errors:
+    - code: registry.unauthorized
+      class: permanent
 ```
 
-_Note: deeper specification (schema details, versioning rules, capability negotiation, manifest validation) is deferred to a dedicated component-design session — see issue #6 / TODO-004 and Open TODOs below._
+Key contract points (see [Activity Runtime Manager design — Activity Manifest v1](../components/activity-runtime-manager/design.md#activity-manifest-v1) for the normative specification):
+
+- `kind` is `ActivityManifest`; JSON is the on-disk and wire format (YAML for examples only).
+- `(metadata.namespace, metadata.type, metadata.version)` is the primary key; each version is a separate manifest artifact.
+- Three namespace tiers — `custos.builtin`, `<vendor>`, `<workspaceId>` — with reserved prefixes (`custos.*`, `system.*`, `platform.*`, `builtin.*`).
+- `runtime.digest` is **required**; tag drift cannot silently change activity behavior.
+- `runtime.isolation.minTier` and `isolation.preferred` carry RuntimeClass hints (`process` / `vm` / `microvm`).
+- Input/output schemas are inline JSON Schema (Draft 2020-12) and may `$ref` platform types via `custos://types/<Name>`.
+- File outputs are declared separately in `spec.outputs.artifacts[]`.
+- Connector slots are named with `name`, `type`, `required`, and capability list.
+- `spec.resources.timeout` is **required** and ISO-8601 (`PT15M`); `cpu`/`memory` are optional.
+- `spec.errors[]` documents per-activity error codes; ADR-008 exit codes still apply.
+- v1 workflow/template references are fully qualified (`acme/scan-image@1`); short-form resolution is deferred.
 
 ## Connector Contract v1
 
@@ -552,3 +598,4 @@ sequenceDiagram
 | 2026-05-14 | Initial architecture draft with single-cluster baseline, templates, and provider abstractions | — |
 | 2026-05-14 | Detailed architecture revision: principles, domain model, schema, execution model, activity/connector/storage contracts, security, observability, trigger pipeline, failure modes, install model, ADR-007 through ADR-013 | — |
 | 2026-05-14 | Clarified trigger pipeline supports hybrid push/pull receivers for every source category (REQ-079) | — |
+| 2026-05-17 | INCON-001: Replaced stale Activity Contract v1 manifest example with ARM-aligned `ActivityManifest` schema; added forward reference to ARM design as normative source | #26 |
