@@ -1,6 +1,6 @@
 # Component Registry: Custos
 
-Last Updated: 2026-05-16
+Last Updated: 2026-05-17
 
 ## Components
 
@@ -53,15 +53,19 @@ graph LR
     ManualR[Manual Receiver] --> Norm[Event Normalizer]
     SchedR[Scheduler Receiver] --> Norm
     GenericWH[Generic Webhook Receiver] --> Norm
-    RegistryWH[Registry Webhook Receivers] --> Norm
-    Poller[Registry Pollers] --> Norm
-    Norm --> Match[Trigger Matcher]
-    Match --> Dedup[Dedup / Idempotency]
+    VendorPush[Vendor Push Receivers] --> Norm
+    Pollers[Pull Receivers / Pollers] --> Norm
+    Internal[Internal Event Receiver] --> Norm
+    Norm --> Cls{Classifier}
+    Cls --> MatchStart[Start Matcher]
+    Cls --> MatchResume[Resume Matcher]
+    MatchStart --> Dedup[Dedup / Idempotency]
+    MatchResume --> Dedup
     Dedup --> Dispatch[Dispatcher]
     Dispatch --> WF[Workflow Service]
 ```
 
-Vendor-specific receivers are loaded dynamically from configured connectors that implement `listen()` (ADR-013).
+Vendor-specific push and pull receivers are loaded dynamically from configured connectors that implement `listen()` (ADR-013); receivers are source-agnostic per REQ-079. The Internal Event Receiver subscribes to the `custos.workflow.events` Dapr Pub/Sub topic and feeds workflow lifecycle events into the same pipeline (REQ-080). The Classifier routes each normalized event onto the start path, the resume path, or both, supporting REQ-081 dual-purpose delivery.
 
 ### COMP-005 Connector Service
 

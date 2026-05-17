@@ -2,7 +2,7 @@
 
 Slug: connector-service
 Last Updated: 2026-05-17
-Version: 6
+Version: 7
 Status: Draft
 
 ## Responsibility
@@ -294,6 +294,18 @@ Behavior per category:
 
 Vendor extension auth types (`x-*` `authenticationType`) declare their identity category at plugin-registration time as out-of-band metadata; the manifest payload itself remains a single source of truth for the auth mechanism.
 
+## Cursor Ownership
+
+Pull-mode event streams require a durable cursor representing "the last position we have consumed against the upstream API". This cursor is owned by the **Connector Service**, keyed per `ConnectorInstance`, and persisted via `MetadataStoreProvider` (see `ConnectorCursor` in the Data Models section).
+
+**Granularity is per-instance, not per-subscription.** A single `ConnectorInstance` may be referenced by multiple Trigger Service `Subscription`s (e.g. two workflows both listening for `oci.image.pushed` from the same registry connector). The Connector Service runs **one** pull loop per active `ConnectorInstance` against the upstream API, reads/advances the single cursor, and fans normalized events out to every subscribing receiver via the `listen(mode=pull)` channel. This avoids N×M upstream polling load when N subscriptions consume from M instances.
+
+**The Trigger Service holds no cursor state.** Its Pull Receivers are stateless w.r.t. upstream position; they drive `listen(mode=pull)` ticks against the Connector Service and consume the events it yields. Per-subscription progress against *delivered* events is handled by Trigger Service's existing `DedupKey` store, not a cursor — cursor (upstream position) and dedup (per-subscription delivery exactness) are orthogonal concerns and remain split along the component boundary.
+
+**Reset / replay semantics.** An operator who needs to reprocess events from an earlier position calls a Connector Service admin operation that rewinds the per-instance cursor; every subscription consuming that instance sees the replay. Per-subscription dedup keys are independently cleared by Trigger Service if a true replay (re-firing dispatches) is desired.
+
+This division resolves INCON-011: there is exactly one cursor per stream, owned by the component that talks to the upstream API.
+
 ## Secret and Token Flow to Activities
 
 The connector runtime authenticates to upstream systems and obtains short-lived token material as needed.
@@ -388,3 +400,4 @@ sequenceDiagram
 | 2026-05-16 | Remove `supportedModes`; trigger delivery direction is already encoded by `event.push` / `event.pull` capabilities | — |
 | 2026-05-16 | Move event delivery direction out of `capabilities` into `events.delivery`; document Capabilities and Events semantics | — |
 | 2026-05-17 | INCON-012: `events` block is optional — sink/data-plane-only connectors omit it; when present, `events.delivery` and `events.produced` each require at least one entry. Added sink connector example | #37 |
+| 2026-05-17 | INCON-011: Documented Cursor Ownership — Connector Service owns one `ConnectorCursor` per `ConnectorInstance`; Trigger Service holds no cursor state. One pull loop per instance fans events out to multiple subscriptions | #36 |
