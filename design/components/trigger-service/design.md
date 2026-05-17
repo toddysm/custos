@@ -1,8 +1,8 @@
 # Component Design: Trigger Service
 
 Slug: `trigger-service`
-Last Updated: 2026-05-16
-Version: 1
+Last Updated: 2026-05-17
+Version: 2
 Status: Draft
 
 ## Responsibility
@@ -18,8 +18,10 @@ It owns ingestion. It does **not** own orchestration control flow.
   - Resume subscriptions (in-flight `(runId, stepId)` waiting on an external signal).
   - Receiver runtime for manual, scheduled, generic webhook, vendor push, polling, and internal sources.
   - Event normalization, classification, matching, dedup, and dispatch.
-  - Poller cursors and schedule state, persisted via `MetadataStoreProvider`.
+  - Schedule state for cron-based triggers, persisted via `MetadataStoreProvider`.
+  - Subscription, dedup, and resume-subscription state.
 - **Does NOT own**:
+  - Connector pull cursors. Pull cursors are owned by the Connector Service and keyed per `ConnectorInstance` (see Connector Service design § Cursor Ownership). Pull Receivers drive `listen(mode=pull)` against the Connector Service and consume the normalized events it emits; the Connector Service reads and advances the cursor against the upstream API on the platform's behalf.
   - Orchestration state machine, retries, fan-out, approval gates — those remain in Workflow Service (ADR-007).
   - Connector plugin loading, credential resolution, or context issuance — those belong to Connector Service. Vendor push receivers and pollers are *driven by* connector `listen()` (ADR-013) but the runtime host is Trigger Service.
   - Activity execution — Activity Runtime Manager.
@@ -50,18 +52,16 @@ graph LR
 
     subgraph State
         Subs[(Subscriptions Store)]
-        Cursors[(Cursor Store)]
         DedupStore[(Dedup Store)]
         Sched2[(Schedule Store)]
     end
     MatchStart --> Subs
     MatchResume --> Subs
-    Pollers --> Cursors
     Sched --> Sched2
     Dedup --> DedupStore
 
     VendorPush -.driven by.-> ConnSvc[Connector Service listen-push]
-    Pollers -.driven by.-> ConnSvc2[Connector Service listen-pull]
+    Pollers -.driven by.-> ConnSvc2[Connector Service listen-pull + cursor]
     Internal -.published by.-> WF2[Workflow Service]
 ```
 
@@ -75,7 +75,7 @@ Receivers are uniform in shape: each accepts source-specific input and emits a `
 | Scheduler Receiver | Owns cron evaluation per active schedule; fires normalized events at scheduled times. Uses `Schedule Store` for the durable schedule set. |
 | Generic Webhook Receiver | Accepts `POST /triggers/webhook/{subscriptionId}` with HMAC or token auth; emits a normalized event with raw body + headers. |
 | Vendor Push Receivers | Host process for connector `listen(mode=push)` streams. Receives push events from connector plugins via the Connector Service's listen channel. |
-| Pull Receivers / Pollers | Host process for connector `listen(mode=pull)` streams. Drives interval polls per configured pull subscription, advances cursor on success. |
+| Pull Receivers / Pollers | Host process for connector `listen(mode=pull)` streams. Drives interval polls per configured pull subscription; the Connector Service reads and advances its own per-instance cursor before returning normalized events to the receiver. |
 | Internal Event Receiver | Subscribes to `custos.workflow.events` topic where Workflow Service publishes workflow lifecycle events (`workflow.completed`, `workflow.failed`, custom emit). Emits them as normalized events. |
 | Event Normalizer | Converts source-specific payloads into the `NormalizedEvent` schema. |
 | Classifier | Routes normalized events to Start Matcher and/or Resume Matcher. Both can match (e.g. a `workflow.completed` event starts a chained workflow *and* resumes a parent waiting on its child). |
@@ -116,14 +116,14 @@ sequenceDiagram
     participant TS as Trigger Service
     participant CR as Connector Runtime (pull)
     participant Ext as External System (e.g. registry without webhooks)
-    participant Cursor as Cursor Store
+    participant Cursor as Cursor Store (Connector Service)
     participant Subs as Subscriptions
     participant Dedup as Dedup Store
     participant WF as Workflow Service
 
     loop poll interval (per subscription)
         TS->>CR: listen-pull tick (subscriptionId)
-        CR->>Cursor: read(position)
+        CR->>Cursor: read(position by connectorInstanceId)
         CR->>Ext: list since position (e.g. tags, objects, records)
         Ext-->>CR: items
         CR->>Cursor: advance(newPosition)
@@ -140,7 +140,7 @@ sequenceDiagram
     end
 ```
 
-This is the polling fallback for sources without reliable push (REQ-079). The cursor advances *before* dispatch is confirmed, but the dedup key prevents duplicate run starts on cursor replay after a crash. Cursors and dedup keys are both durable in `MetadataStoreProvider`.
+This is the polling fallback for sources without reliable push (REQ-079). The cursor lives in the Connector Service (one per `ConnectorInstance`, not per subscription) and is advanced by the Connector Runtime against the upstream API before the events are handed off. The cursor advances *before* dispatch is confirmed, but the per-subscription dedup key (still owned by Trigger Service) prevents duplicate run starts on cursor replay after a crash.
 
 ### Operation: Resume in-flight activity from polled state change
 
@@ -151,7 +151,7 @@ sequenceDiagram
     participant CR as Connector Runtime (pull)
     participant GH as GitHub
     participant Subs as Subscriptions
-    participant Cursor as Cursor Store
+    participant Cursor as Cursor Store (Connector Service)
 
     Note over WF,TS: Step enters "wait for external event"
     WF->>TS: RegisterResumeSubscription(runId, stepId, eventKey, selector)
@@ -199,7 +199,6 @@ erDiagram
     Subscription ||--o{ SubscriptionSelector : has
     Subscription ||--o{ DedupKey : produces
     Schedule ||--|| Subscription : drives
-    Cursor ||--|| Subscription : checkpoints
     ResumeSubscription ||--|| Run : "waits for"
 
     Subscription {
@@ -230,12 +229,6 @@ erDiagram
         timestamp nextFireAt
     }
 
-    Cursor {
-        string subscriptionId FK
-        json position
-        timestamp updatedAt
-    }
-
     DedupKey {
         string key PK
         string subscriptionId
@@ -250,6 +243,8 @@ erDiagram
         timestamp expiresAt
     }
 ```
+
+**Pull cursor state is intentionally not modeled here.** Pull cursors are owned by the Connector Service (`ConnectorCursor` keyed per `ConnectorInstance`) — one cursor per connector instance, shared across all subscriptions that pull from that instance. The Trigger Service has no cursor entity. See `design/components/connector-service/design.md` § Cursor Ownership for the authoritative model.
 
 ### NormalizedEvent schema (envelope)
 
@@ -294,7 +289,16 @@ erDiagram
 | `CancelResumeSubscription(runId, stepId, eventKey)` | WF → TS | Cancel a wait (timeout, run cancelled). |
 | `StartRun(workflowVersionId, inputs, idempotencyKey)` | TS → WF | Dispatch a workflow start. |
 | `RaiseExternalEvent(runId, stepId, eventName, payload, idempotencyKey)` | TS → WF | Deliver a resume signal into Dapr Workflow. |
-| `PublishWorkflowEvent(event)` | WF → Bus | Internal lifecycle event publication consumed by Trigger Service's Internal Event Receiver. |
+
+### Dapr Pub/Sub subscriptions
+
+The Trigger Service's Internal Event Receiver consumes workflow lifecycle events via Dapr Pub/Sub. This is an **asynchronous, broker-mediated** interface — not a direct RPC. The Workflow Service publishes; Dapr buffers and retries delivery; the Trigger Service subscribes on its own schedule.
+
+| Topic | Direction | Publisher | Subscriber | Purpose |
+|---|---|---|---|---|
+| `custos.workflow.events` | WF → Bus → TS | Workflow Service | Trigger Service Internal Event Receiver | Workflow lifecycle events (`workflow.completed`, `workflow.failed`, custom emitted events). Feeds the Internal Event Receiver for REQ-080 (internal workflow-to-workflow triggers) and REQ-081 (step-resume on workflow-lifecycle events). |
+
+Message envelope (subset): `{ workflowVersionId, runId, status, outputs, occurredAt, … }`. Delivery semantics: **at-least-once** — Dapr retries on subscriber failure. The Trigger Service relies on its existing dedup store (`hash(subscriptionId, source.eventId)`) to absorb duplicates. Topic provisioning is a deployment-time Dapr component configuration; operators provisioning Dapr Pub/Sub for the platform must include `custos.workflow.events`.
 
 ### Declarative trigger syntax (in workflow YAML)
 
@@ -360,7 +364,7 @@ spec:
 |---|---|---|
 | Connector Service | Runtime | `listen(push)` and `listen(pull)` streams per connector instance (ADR-013). |
 | Workflow Service | Runtime | `StartRun`, `RaiseExternalEvent`, publisher of internal workflow events. |
-| MetadataStoreProvider | Runtime | Persistence for Subscription, Schedule, Cursor, DedupKey, ResumeSubscription. |
+| MetadataStoreProvider | Runtime | Persistence for Subscription, Schedule, DedupKey, ResumeSubscription. (Pull cursors live with the Connector Service, not here.) |
 | Dapr Pub/Sub | Runtime | Internal transport for `custos.triggers.normalized` and `custos.workflow.events`. |
 | Observability/Audit | Runtime | Emit `trigger.matched`, `trigger.deduped`, `trigger.dispatched`, `resume.delivered` audit events. |
 | Auth Service | Runtime | Webhook receiver HMAC/token verification; manual trigger RBAC. |
@@ -390,3 +394,6 @@ spec:
 | Date | Change | GitHub Issue |
 |---|---|---|
 | 2026-05-16 | Initial design covering ingestion broker model, workflow-start and step-resume paths, internal workflow-to-workflow triggers, polling for resume signals, schedule/cursor/dedup state, declarative YAML trigger types | #17 |
+| 2026-05-17 | INCON-011: Pull cursors are owned by Connector Service per `ConnectorInstance`, not by Trigger Service per `Subscription`; removed `Cursor` entity from data model and state subgraph; updated sequence diagrams and dependencies | #36 |
+| 2026-05-17 | INCON-014: `PublishWorkflowEvent` removed from Internal RPC table; replaced with explicit Dapr Pub/Sub Subscriptions section documenting `custos.workflow.events` topic, publisher (Workflow Service), subscriber (Internal Event Receiver), envelope, delivery semantics | #39 |
+| 2026-05-17 | INCON-013: TODO-001 scope expanded — taxonomy work is unified with ARM TODO-009 and Observability/Audit; one dot-namespaced `kind` namespace covers connector events + activity/step lifecycle audit events | #38 |
