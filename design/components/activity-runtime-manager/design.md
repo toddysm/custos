@@ -315,9 +315,256 @@ Workflow authors match on `code` prefix or `class` in `on_error` blocks:
 - **`cause` max depth:** 3.
 - **`retryAfter` semantics:** lower-bound hint, clamped by workflow backoff policy.
 
+## Activity Manifest v1
+
+The **activity manifest** is the contract document for an activity — everything the platform needs to know about it without running it. The Catalog Service reads it at publish time, the Workflow Service reads it at compile time to type-check workflows, and ARM reads it at execution time to wire up the sandbox.
+
+The manifest is the **only** place an activity declares: what inputs it accepts, what outputs it produces, what connectors it needs, what runtime it requires, what resources it wants, and what version of the contract it speaks.
+
+### On-disk and wire format
+
+- **JSON** on disk and on the wire. YAML may be used for documentation/examples only.
+- Catalog stores normalized JSON; manifests attached as OCI Referrers are JSON artifacts.
+
+### Where the manifest lives
+
+Two distribution modes, same schema:
+
+1. **Co-located with the OCI image** — manifest is attached to the activity's container image as an OCI Referrer (subject = image digest, artifactType = `application/vnd.custos.activity.manifest.v1+json`). Canonical publication path.
+2. **Catalog-registered directly** — uploaded to the Catalog Service. Fallback for registries without Referrers API support (v1.0 with subject-manifest tag scheme).
+
+Discovery from a workflow always goes through the Catalog Service. The Referrer attachment is the **publication** mechanism; the Catalog is the **lookup** index.
+
+### Namespace model
+
+`(namespace, type, version)` is the primary key for an activity. Three distinct tiers:
+
+| Tier | Format | Owner | Publish gate | Default trust |
+|---|---|---|---|---|
+| Platform | `custos.builtin` | Custos maintainers | Release pipeline only | High |
+| Vendor | `<vendor>` (e.g. `snyk`, `aquasec`) | Verified third-party orgs | Verified-vendor onboarding flow | Medium |
+| Workspace | `<workspaceId>` | One tenant | Workspace admin | Low |
+
+**Reserved prefixes** (only the platform may publish into these): `custos.*`, `system.*`, `platform.*`, `builtin.*`.
+
+**v1 workflow references are fully qualified** — `acme/scan-image@1`, never `scan-image@1`. Short-form resolution is deferred to a later milestone.
+
+### Versioning (semver)
+
+| Change | Bump |
+|---|---|
+| Add optional input field | minor |
+| Add optional output field | minor |
+| Remove or rename any field | major |
+| Tighten input validation (narrower enum, smaller max) | major |
+| Loosen input validation (wider enum, larger max) | minor |
+| Change `runtime.image` digest, same behavior | patch |
+| Change `spec.contractVersion` | major (always) |
+| Change `runtime.kind` | major |
+
+Workflows pin majors (`@1`). Catalog resolves to the latest non-deprecated minor/patch by default; pinning exact `@1.2.0` is allowed.
+
+### Manifest schema
+
+```yaml
+# Authoring example (YAML for readability; JSON is the actual format).
+apiVersion: custos.dev/v1
+kind: ActivityManifest
+metadata:
+  type: scan-image
+  version: 1.2.0
+  namespace: custos.builtin
+  description: "Scan an OCI image for vulnerabilities using Trivy."
+  labels:
+    category: security
+    engine: trivy
+  owner: "custos-maintainers"
+
+spec:
+  contractVersion: "1"
+
+  runtime:
+    kind: oci-container               # v1: oci-container only
+    image: ghcr.io/custos/scan-image:1.2.0
+    digest: sha256:abc...             # required; pinned at publish time
+    isolation:
+      minTier: microvm                # process | vm | microvm
+      preferred: microvm-firecracker  # optional concrete hint
+
+  inputs:
+    schema:
+      $schema: "https://json-schema.org/draft/2020-12/schema"
+      type: object
+      required: [image]
+      properties:
+        image:    { $ref: "custos://types/ImageRef" }
+        severity: { type: string, enum: [low, medium, high, critical], default: high }
+
+  outputs:
+    schema:
+      $schema: "https://json-schema.org/draft/2020-12/schema"
+      type: object
+      required: [findings, reportRef]
+      properties:
+        findings: { type: integer }
+        reportRef: { $ref: "custos://types/ArtifactRef" }
+    artifacts:
+      - name: report
+        mediaType: application/vnd.cyclonedx+json
+        required: true
+
+  connectors:
+    - name: registry
+      type: oci-registry
+      required: true
+      capabilities: [pull]            # advisory; connector enforces
+
+  resources:
+    cpu:    { request: "500m", limit: "2" }      # optional
+    memory: { request: "512Mi", limit: "2Gi" }   # optional; warn at publish if absent for security category
+    ephemeralStorage: { limit: "5Gi" }           # optional
+    timeout: PT15M                                # REQUIRED
+
+  errors:
+    - code: registry.unauthorized
+      class: permanent
+    - code: scan.engine_failed
+      class: retryable
+
+  determinism: side-effecting         # pure | side-effecting (default)
+  idempotency: by-input-hash          # by-input-hash | none (default none)
+```
+
+### Field reference
+
+#### `metadata`
+
+| Field | Required | Purpose |
+|---|---|---|
+| `type` | yes | Activity type, unique within its namespace. |
+| `version` | yes | Semver. |
+| `namespace` | yes | One of `custos.builtin` / `<vendor>` / `<workspaceId>`. |
+| `description` | yes | Human-readable summary. |
+| `labels` | no | Free-form key/value pairs. Used for catalog filtering, Web UI grouping, and category-based linter rules (e.g. `category: security` triggers stricter publish-time checks). |
+| `owner` | yes | Contact/team identifier. |
+
+#### `spec.runtime`
+
+| Field | Required | Purpose |
+|---|---|---|
+| `kind` | yes | `oci-container` in v1. `http`, `wasm`, `hyperlight` reserved for later milestones. |
+| `image` | yes | OCI image reference (registry/repo:tag form). |
+| `digest` | yes | Image pinned by digest at publish time. Tag drift cannot silently change activity behavior. |
+| `isolation.minTier` | no | Sandbox lower bound: `process` (runc + seccomp/AppArmor), `vm` (Kata with shared-kernel hypervisors like CLH/MSHV), `microvm` (Kata + Firecracker). Defaults to the cluster-configured default tier. |
+| `isolation.preferred` | no | Soft hint at a specific operator-mapped RuntimeClass (e.g. `microvm-firecracker`). ARM falls back to any class meeting `minTier` if unavailable. |
+
+**No `workdir` and no `command`/`args`.** v1 is one-image-one-activity; ARM runs the image as built using its `ENTRYPOINT` + `CMD`.
+
+#### `spec.inputs`
+
+- `schema` — JSON Schema Draft 2020-12 describing the `inputs` field inside `inputs.json`. May `$ref` platform types via `custos://types/<Name>`.
+- Inputs MUST NOT include credentials. Secrets do not appear in `inputs.json`.
+- Connector references reach the activity via `ctx.json`, not `inputs`.
+
+#### `spec.outputs`
+
+- `schema` — JSON Schema for the `outputs` field inside `outputs.json` (structured data, small values, refs).
+- `artifacts[]` — declared file outputs written to `/custos/out/artifacts/`. Each entry: `name`, `mediaType`, `required`. ARM uploads via `ArtifactStoreProvider` and emits an `ArtifactRef` per file. `required: true` + missing file on success → `output.invalid_artifact_ref` (permanent).
+- Per-artifact content schema validation (e.g. CycloneDX schema URL) is **deferred to M2**.
+
+#### `spec.connectors[]`
+
+Declares connector slots the activity needs. Workflow binds concrete connector instances to these slots at compile time. ARM mounts only the bound instances.
+
+| Field | Required | Purpose |
+|---|---|---|
+| `name` | yes | Logical slot name referenced from the workflow's `connectors:` binding. |
+| `type` | yes | Connector type (e.g. `oci-registry`, `github`). |
+| `required` | yes | Whether the workflow must bind an instance. |
+| `capabilities` | no | Advisory list (e.g. `[pull]`, `[push]`); the connector itself enforces. |
+
+#### No `spec.secrets[]` in v1
+
+All credentials flow through connectors in v1. Standalone secret slots (cosign signing keys, license tokens, HMAC secrets) are **deferred to M2** when attestation creation (REQ-019) lands.
+
+The `/custos/in/secrets/` directory in the Activity Contract still exists, but in v1 is populated only by connector-borne credentials when the connector type requires materialized creds, at `/custos/in/secrets/<connector-name>/<key>`.
+
+#### `spec.resources`
+
+Optional layered defaults; **only `timeout` is required.**
+
+Hierarchy (each layer can only tighten within the layer above):
+
+```
+Cluster LimitRange / ResourceQuota (operator policy)   ← absolute ceiling
+        ↓
+Platform defaults (Custos config)                       ← applied when manifest silent
+        ↓
+Manifest spec.resources                                 ← activity author's recommendation
+        ↓
+Workflow step.resources override                        ← per-step tuning
+        ↓
+Kubernetes Pod resources at scheduling                  ← what actually runs
+```
+
+| Field | v1 manifest | If absent |
+|---|---|---|
+| `cpu.request` | optional | platform default |
+| `cpu.limit` | optional | platform default |
+| `memory.request` | optional | platform default |
+| `memory.limit` | optional (publish-time linter warns for `category: security`) | platform default |
+| `ephemeralStorage.limit` | optional | platform default |
+| `timeout` | **required** | — |
+
+Workflow may upgrade `isolation.minTier` per step but cannot downgrade below the manifest's floor.
+
+#### `spec.errors[]`
+
+Documented error codes the activity may emit. Surfaced in run inspection and `on_error` autocomplete. Not enforced — activities can still emit other codes, but undocumented codes raise a publish-time warning.
+
+#### `spec.determinism`
+
+- `pure` — same inputs ⇒ same outputs (e.g. `policy-eval`). Enables result caching in M2+.
+- `side-effecting` (default) — no caching assumptions.
+
+#### `spec.idempotency`
+
+- `by-input-hash` — ARM may skip re-execution when `(activity, inputs)` already succeeded. Gives Workflow Service a memoization hook.
+- `none` (default) — always execute.
+
+### Publishing flow
+
+```mermaid
+sequenceDiagram
+    participant Author as Activity Author
+    participant CLI as custos CLI
+    participant Reg as OCI Registry
+    participant Cat as Catalog Service
+
+    Author->>CLI: custos activity publish manifest.json
+    CLI->>CLI: validate schema, lint inputs/outputs, resolve $refs
+    CLI->>Reg: push image (returns digest)
+    CLI->>CLI: bake digest into manifest
+    CLI->>Reg: push manifest as Referrer of image
+    CLI->>Cat: POST /catalog/activities { manifest, referrerRef }
+    Cat->>Cat: validate, dedup by (namespace, type, version)
+    Cat->>Reg: verify Referrer exists at digest (proof of publish)
+    Cat-->>CLI: 201 Created
+```
+
+The OCI registry is the source of truth; the Catalog is a derived, query-friendly index.
+
+### Deferred to later milestones
+
+- **Manifest signing** (cosign-signed Referrer with Catalog verification before accepting publish): deferred to M2+.
+- **Per-artifact content schema validation**: deferred to M2.
+- **`spec.secrets[]` for standalone secret slots**: deferred to M2 (driven by REQ-019 attestation creation).
+- **`runtime.kind: http | wasm | hyperlight`**: deferred to M3/M4+.
+- **Short-form (non-fully-qualified) activity references**: deferred to a later milestone.
+
 ## Internal Structure (pending)
 
-The sub-module breakdown (Scheduler, Runtime Driver dispatcher, OCI Container Driver, I/O Broker, Artifact Store Client, Log Streamer, Result Mapper, Resource Limiter, Secret Injector — per components.md COMP-006) will be filled out after the activity manifest is locked in.
+The sub-module breakdown (Scheduler, Runtime Driver dispatcher, OCI Container Driver, I/O Broker, Artifact Store Client, Log Streamer, Result Mapper, Resource Limiter, Secret Injector — per components.md COMP-006) will be filled out in the next iteration.
 
 ## Key Operations (pending)
 
@@ -356,12 +603,15 @@ Internal RPC surface (Workflow Service ⇄ ARM):
 
 ## Open TODOs
 
-- [ ] TODO-002: Define activity manifest v1 (schema, versioning, OCI Referrers-based discovery) (added 2026-05-16)
-- [ ] TODO-003: Decide sandbox technology per REQ-039 / TODO-002 in requirements (gVisor, Kata, runc+seccomp, or Kubernetes Jobs only) (added 2026-05-16).
-- [ ] TODO-004: Specify Runtime Driver dispatcher contract; OCI Container Driver for v1, HTTP/WASM later (added 2026-05-16).
-- [ ] TODO-005: Sub-module deep dive (Scheduler, I/O Broker, Artifact Store Client, Log Streamer, Result Mapper, Resource Limiter, Secret Injector) (added 2026-05-16).
-- [ ] TODO-006: Finalize platform event taxonomy mapping for activity lifecycle events with Observability (added 2026-05-16).
-- [ ] TODO-007: Lock the canonical built-in `policy-eval@1` activity manifest (filter/gate modes) as the reference for the Layer-3 filter pattern (added 2026-05-16).
+- [ ] TODO-002: Manifest signing (cosign-signed Referrer with Catalog verification) — deferred to M2+ (added 2026-05-16).
+- [ ] TODO-003: Per-artifact content schema validation (e.g. CycloneDX schema URL) — deferred to M2 (added 2026-05-16).
+- [ ] TODO-004: `spec.secrets[]` for standalone secret slots — deferred to M2 alongside REQ-019 attestation creation (added 2026-05-16).
+- [ ] TODO-005: Short-form (non-fully-qualified) activity references — deferred to a later milestone (added 2026-05-16).
+- [ ] TODO-006: Decide sandbox technology per REQ-039 / TODO-002 in requirements (gVisor, Kata-CLH, Kata-MSHV, Kata-FC, runc+seccomp, or Kubernetes Jobs only) — manifest surface (`isolation.minTier`, `isolation.preferred`) is locked; concrete RuntimeClass set and cluster-default tier still pending (added 2026-05-16).
+- [ ] TODO-007: Specify Runtime Driver dispatcher contract; OCI Container Driver for v1, HTTP/WASM/Hyperlight later (added 2026-05-16).
+- [ ] TODO-008: Sub-module deep dive (Scheduler, I/O Broker, Artifact Store Client, Log Streamer, Result Mapper, Resource Limiter, Secret Injector) (added 2026-05-16).
+- [ ] TODO-009: Finalize platform event taxonomy mapping for activity lifecycle events with Observability (added 2026-05-16).
+- [ ] TODO-010: Lock the canonical built-in `policy-eval@1` activity manifest (filter/gate modes) as the reference for the Layer-3 filter pattern (added 2026-05-16).
 
 ## Change History
 
@@ -369,3 +619,4 @@ Internal RPC surface (Workflow Service ⇄ ARM):
 |---|---|---|
 | 2026-05-16 | Initial draft: Activity Contract v1 (file-based), platform types (`ImageRef`, `OciDescriptor`, `ConnectorRef`, `ArtifactRef`, `Duration`), three-layer pattern for transforms and filters, `let` as first-class step, `where:` sugar on `forEach`, push-down selector convention, filter/policy-eval unification, Custos CEL function set and determinism rules, connector metadata exposure surface | pending |
 | 2026-05-16 | Locked Error Envelope & Exit Codes: 4-state exit codes, envelope-wins resolution rules, error code namespaces, ARM behavior per terminal state, default uncategorized exit → retryable, 4 KiB `details` cap, `cause` depth 3, `retryAfter` as lower-bound hint | pending |
+| 2026-05-16 | Locked Activity Manifest v1: JSON on-disk format, three-tier namespace (`custos.builtin` / `<vendor>` / `<workspaceId>`) with reserved prefixes, fully-qualified workflow refs, OCI Referrer publication + Catalog index, full field reference (no `workdir`/`command`, no `spec.secrets[]` in v1), `runtime.isolation.minTier`/`preferred` for sandbox tier selection, `timeout` required + other resources optional, semver versioning rules; manifest signing, per-artifact content schema validation, standalone secrets, and short-form refs deferred to later milestones | pending |
