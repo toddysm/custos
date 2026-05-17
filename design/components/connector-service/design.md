@@ -1,8 +1,8 @@
 # Component Design: Connector Service
 
 Slug: connector-service
-Last Updated: 2026-05-16
-Version: 5
+Last Updated: 2026-05-17
+Version: 6
 Status: Draft
 
 ## Responsibility
@@ -132,6 +132,41 @@ Manifest selection algorithm:
 }
 ```
 
+#### Sink connector example (no `events` block)
+
+A connector whose only role is to receive data — for example, a Slack/Teams notifier or a write-only object-storage sink — omits the `events` block entirely. The Listen Manager skips trigger wiring for such connector type versions; the Binder still validates `capabilities` at step bind time.
+
+```json
+{
+  "apiVersion": "custos.dev/connector-manifest/v1",
+  "kind": "ConnectorManifest",
+  "metadata": {
+    "type": "slack-notifier",
+    "version": "1.0.0",
+    "contractVersion": "1"
+  },
+  "spec": {
+    "description": "Slack notification sink",
+    "capabilities": [
+      "slack.post"
+    ],
+    "target": {
+      "kind": "slack-webhook",
+      "endpoint": "https://hooks.slack.com",
+      "verifyTls": true,
+      "config": {}
+    },
+    "credentials": {
+      "authenticationType": "azure-key-vault",
+      "authentication": {
+        "vaultUri": "https://kv.example.com",
+        "secretName": "slack-webhook-token"
+      }
+    }
+  }
+}
+```
+
 ### Normative JSON Schema
 
 The strict schema for this manifest is defined in `design/components/connector-service/schemas/connector-manifest.v1.schema.json`.
@@ -152,8 +187,10 @@ Validation requirements:
 - Manifest payload is self-contained; target and credential requirements are defined inline.
 - Identity category (KMS-backed, workload, federated) is derived from `credentials.authenticationType` by the Connector Service; manifests do not declare it. Vendor `x-*` auth types register their category at plugin-registration time, out of band.
 - `capabilities` enumerates **data-plane verbs** the connector can perform (e.g. `oci.pull`, `s3.read`). `event.*` tokens MUST NOT appear in `capabilities` — event-stream concerns live entirely in `events`.
-- `events.delivery` enumerates the **delivery mechanisms** the Trigger Service must wire up: `push` (target delivers events to us) and/or `pull` (we poll the target). At least one entry is required.
-- `events.produced` enumerates the **catalog of normalized event types** the connector emits. Workflow trigger definitions reference these names.
+- The `events` block is **optional**. Sink/data-plane-only connectors (e.g. Slack, Teams, Email notification connectors, write-only blob targets) omit it entirely. The Listen Manager treats connector type versions with no `events` block as non-event-producing and skips trigger wiring for them.
+- When the `events` block is present:
+  - `events.delivery` enumerates the **delivery mechanisms** the Trigger Service must wire up: `push` (target delivers events to us) and/or `pull` (we poll the target). At least one entry is required.
+  - `events.produced` enumerates the **catalog of normalized event types** the connector emits. Workflow trigger definitions reference these names. At least one entry is required.
 - Capability and event tokens follow dot-delimited lowercase naming rules.
 
 ## Capabilities and Events
@@ -174,7 +211,7 @@ Consumed by:
 
 ### `events.delivery` — how events arrive
 
-An array drawn from `["push", "pull"]`. Declares the delivery mechanisms the connector supports:
+The `events` block as a whole is optional; connectors that do not produce events (sinks, notification targets, write-only data planes) omit it. When present, `events.delivery` is an array drawn from `["push", "pull"]` and declares the delivery mechanisms the connector supports:
 
 - `push`: target pushes events to the platform (webhook, message bus, change-feed subscription).
 - `pull`: the platform polls/lists the target on a cadence to detect new events.
@@ -350,3 +387,4 @@ sequenceDiagram
 | 2026-05-16 | Remove `identityModels` and `federatedProviders`; derive identity category from `credentials.authenticationType` | — |
 | 2026-05-16 | Remove `supportedModes`; trigger delivery direction is already encoded by `event.push` / `event.pull` capabilities | — |
 | 2026-05-16 | Move event delivery direction out of `capabilities` into `events.delivery`; document Capabilities and Events semantics | — |
+| 2026-05-17 | INCON-012: `events` block is optional — sink/data-plane-only connectors omit it; when present, `events.delivery` and `events.produced` each require at least one entry. Added sink connector example | #37 |
