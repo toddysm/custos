@@ -96,7 +96,7 @@ The `inputs` field is shaped by the activity's declared input JSON Schema (Draft
 }
 ```
 
-`error.class` aligns with ADR-008 exit-code semantics (`retryable`, `permanent`). Detailed error envelope and exit-code mapping is the next topic and lives in **§Error Envelope & Exit Codes (pending)**.
+`error.class` aligns with ADR-008 exit-code semantics. Full envelope and exit-code mapping is in **§Error Envelope & Exit Codes** below.
 
 ### Schema validation
 
@@ -220,9 +220,104 @@ When `connector("name")` is used in an expression, the resolved object exposes a
 
 Credentials are never reachable from expressions. Activities that need to authenticate receive secrets via `/custos/in/secrets/` only.
 
+## Error Envelope & Exit Codes
+
+The error envelope is the structured failure surface every activity produces; exit codes are the coarse signal the sandbox returns. They have to agree because the orchestrator needs a deterministic answer to one question per attempt: **retry, fail permanently, or treat as cancelled.**
+
+### Exit code semantics (ADR-008, 4 states)
+
+| Code | Meaning | Orchestrator behavior |
+|---|---|---|
+| `0` | Success | Step succeeds; `outputs.json` MUST be present with `status: "success"`. |
+| `1` | Retryable failure | Apply retry policy (backoff, max attempts). Examples: registry 5xx, transient network, rate-limit. |
+| `2` | Permanent failure | No retry. Step fails. Examples: schema mismatch, auth denied, invalid input, image not found. |
+| `3` | Cancelled / timed out | Treated as cancelled. No retry; depending on context counts as `cancelled` (run cancel) or `timeout` (deadline exceeded). |
+
+Any other exit code (including SIGKILL/137, SIGSEGV/139, OOM) is mapped to **`1` (retryable)** by default — an uncategorized crash is more likely transient than logically permanent. Activity authors who know better override the default via `outputs.json`.
+
+### Source of truth: `outputs.json` wins when present
+
+The exit code is the **fallback** signal. The authoritative answer is `outputs.json.error.class` when a valid envelope is written. Resolution rules:
+
+1. Exit `0` + valid `outputs.json` with `status: "success"` → **success**.
+2. Exit non-zero + valid `outputs.json` with `status: "failure"` → use `error.class` from the envelope. Exit code is logged but not interpreted.
+3. Exit non-zero with **no** valid `outputs.json` → fall back to exit-code mapping. ARM synthesizes a minimal envelope with `code: "activity.no_output"` and `class` derived from exit code.
+4. Exit `0` but `outputs.json` is missing or invalid → **permanent failure** (`code: "activity.contract_violation"`). A clean exit without a parseable envelope is a contract bug, not a transient.
+5. Exit `0` with `status: "failure"` in envelope → trust the envelope; the activity self-reported a failure but exited cleanly. Class from envelope.
+
+### Error envelope schema
+
+```json
+{
+  "code": "registry.unauthorized",
+  "class": "permanent",
+  "message": "no credentials for ghcr.io/acme/app",
+  "details": { "registry": "ghcr.io", "repo": "acme/app" },
+  "retryAfter": "PT30S",
+  "cause": {
+    "code": "http.401",
+    "message": "unauthorized"
+  }
+}
+```
+
+| Field | Required | Purpose |
+|---|---|---|
+| `code` | yes | Stable, machine-readable identifier. Dot-namespaced: `<domain>.<reason>`. Used by workflows for `on_error` matching and by Observability for grouping. |
+| `class` | yes | One of `retryable`, `permanent`, `cancelled`. Drives orchestrator behavior. |
+| `message` | yes | Human-readable short summary. Shown in run inspection. |
+| `details` | no | Free-form structured context. MUST NOT contain secrets. Size cap: **4 KiB**. Larger context belongs in an artifact. |
+| `retryAfter` | no | ISO-8601 duration. **Lower-bound hint** to the retry scheduler; clamped by the workflow's backoff policy. Only meaningful when `class: retryable`. |
+| `cause` | no | Nested envelope for the underlying error. Preserves chains (e.g. transport → HTTP → API error) without flattening. Max depth: **3**. |
+
+### Error code namespaces
+
+A small set of platform-reserved namespaces; everything else is activity-defined.
+
+| Namespace | Owner | Examples |
+|---|---|---|
+| `activity.*` | ARM-synthesized | `activity.no_output`, `activity.contract_violation`, `activity.timeout`, `activity.cancelled`, `activity.oom_killed`, `activity.image_pull_failed` |
+| `input.*` | ARM-synthesized | `input.schema_violation`, `input.missing_secret`, `input.missing_connector` |
+| `output.*` | ARM-synthesized | `output.schema_violation`, `output.too_large`, `output.invalid_artifact_ref` |
+| `system.*` | ARM-synthesized | `system.sandbox_failure`, `system.runtime_unavailable` |
+| `registry.*`, `scan.*`, `sbom.*`, `signature.*`, `attestation.*`, `policy.*`, `promotion.*` | activity-defined; built-ins set the precedent | `registry.unauthorized`, `scan.engine_failed`, `signature.invalid` |
+| `<vendor>.<...>` | third-party activity authors | `acme.quota_exceeded` |
+
+Workflow authors match on `code` prefix or `class` in `on_error` blocks:
+
+```yaml
+- id: scan
+  activity: scan-image@1
+  with: { image: ${{ item }} }
+  on_error:
+    - match: { codePrefix: "registry." }
+      do: skip
+    - match: { class: "retryable" }
+      do: retry
+      maxAttempts: 5
+```
+
+### ARM behavior per terminal state
+
+| State | ARM actions |
+|---|---|
+| Success | Validate outputs schema → upload artifacts → return result to Workflow Service. |
+| Retryable failure | Persist attempt record + envelope → return to Workflow Service with `class: retryable`. Workflow Service applies retry policy (ARM does not retry). |
+| Permanent failure | Same persistence, return with `class: permanent`. No further attempts unless workflow overrides via `on_error`. |
+| Cancelled / timeout | If ARM initiated (deadline exceeded, cancel requested): synthesize envelope with `activity.timeout` or `activity.cancelled`. If activity self-reported exit `3`: trust it. Either way, no retry. |
+| Output schema violation | ARM rewrites the envelope to `output.schema_violation`, class `permanent`. The activity's claimed outputs are discarded. |
+| OOM / SIGKILL / uncategorized crash | Synthesize `activity.oom_killed` or `activity.sandbox_failure`, class `retryable`. |
+
+### Locked defaults
+
+- **Default class for uncategorized non-zero exit:** `retryable`.
+- **`details` size cap:** 4 KiB. Larger context belongs in an artifact referenced by `ArtifactRef`.
+- **`cause` max depth:** 3.
+- **`retryAfter` semantics:** lower-bound hint, clamped by workflow backoff policy.
+
 ## Internal Structure (pending)
 
-The sub-module breakdown (Scheduler, Runtime Driver dispatcher, OCI Container Driver, I/O Broker, Artifact Store Client, Log Streamer, Result Mapper, Resource Limiter, Secret Injector — per components.md COMP-006) will be filled out after the error envelope and activity manifest are locked in.
+The sub-module breakdown (Scheduler, Runtime Driver dispatcher, OCI Container Driver, I/O Broker, Artifact Store Client, Log Streamer, Result Mapper, Resource Limiter, Secret Injector — per components.md COMP-006) will be filled out after the activity manifest is locked in.
 
 ## Key Operations (pending)
 
@@ -261,8 +356,7 @@ Internal RPC surface (Workflow Service ⇄ ARM):
 
 ## Open TODOs
 
-- [ ] TODO-001: Define error envelope details and exit-code mapping per ADR-008 (added 2026-05-16).
-- [ ] TODO-002: Define activity manifest v1 (schema, versioning, OCI Referrers-based discovery) (added 2026-05-16).
+- [ ] TODO-002: Define activity manifest v1 (schema, versioning, OCI Referrers-based discovery) (added 2026-05-16)
 - [ ] TODO-003: Decide sandbox technology per REQ-039 / TODO-002 in requirements (gVisor, Kata, runc+seccomp, or Kubernetes Jobs only) (added 2026-05-16).
 - [ ] TODO-004: Specify Runtime Driver dispatcher contract; OCI Container Driver for v1, HTTP/WASM later (added 2026-05-16).
 - [ ] TODO-005: Sub-module deep dive (Scheduler, I/O Broker, Artifact Store Client, Log Streamer, Result Mapper, Resource Limiter, Secret Injector) (added 2026-05-16).
@@ -274,3 +368,4 @@ Internal RPC surface (Workflow Service ⇄ ARM):
 | Date | Change | GitHub Issue |
 |---|---|---|
 | 2026-05-16 | Initial draft: Activity Contract v1 (file-based), platform types (`ImageRef`, `OciDescriptor`, `ConnectorRef`, `ArtifactRef`, `Duration`), three-layer pattern for transforms and filters, `let` as first-class step, `where:` sugar on `forEach`, push-down selector convention, filter/policy-eval unification, Custos CEL function set and determinism rules, connector metadata exposure surface | pending |
+| 2026-05-16 | Locked Error Envelope & Exit Codes: 4-state exit codes, envelope-wins resolution rules, error code namespaces, ARM behavior per terminal state, default uncategorized exit → retryable, 4 KiB `details` cap, `cause` depth 3, `retryAfter` as lower-bound hint | pending |
