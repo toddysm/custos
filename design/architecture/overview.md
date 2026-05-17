@@ -1,7 +1,7 @@
 # Architecture Overview: Custos
 
 Last Updated: 2026-05-17
-Version: 3
+Version: 4
 Status: Draft
 
 ## Summary
@@ -191,13 +191,13 @@ spec:
       type: string
   steps:
     - id: scan
-      activity: vuln-scan@2
+      activity: custos.builtin/vuln-scan@2
       connector: prod-registry
       with:
         image: ${{ inputs.image }}
     - id: gate
       if: ${{ steps.scan.outputs.critical > 0 }}
-      activity: quarantine@1
+      activity: custos.builtin/quarantine@1
       connector: prod-registry
       with:
         image: ${{ inputs.image }}
@@ -220,7 +220,7 @@ spec:
     - name: scanActivity
       type: activityRef
       activityType: vuln-scan
-      default: vuln-scan@2
+      default: custos.builtin/vuln-scan@2
   workflow:
     triggers:
       - type: registry.push
@@ -230,6 +230,8 @@ spec:
         activity: ${{ placeholders.scanActivity }}
         connector: ${{ placeholders.registryConnector }}
 ```
+
+_Activity references are **fully qualified** in v1: `<namespace>/<type>@<major>` (e.g. `custos.builtin/vuln-scan@2`, `snyk/container-scan@1`, `acme-corp/custom-gate@1`). Short-form aliases (e.g. `vuln-scan@2` resolving to the highest-trust namespace match) are a planned post-M1 feature — see ARM design § Activity Manifest v1 for the namespace model._
 
 ## Execution Model
 
@@ -599,3 +601,4 @@ sequenceDiagram
 | 2026-05-14 | Detailed architecture revision: principles, domain model, schema, execution model, activity/connector/storage contracts, security, observability, trigger pipeline, failure modes, install model, ADR-007 through ADR-013 | — |
 | 2026-05-14 | Clarified trigger pipeline supports hybrid push/pull receivers for every source category (REQ-079) | — |
 | 2026-05-17 | INCON-001: Replaced stale Activity Contract v1 manifest example with ARM-aligned `ActivityManifest` schema; added forward reference to ARM design as normative source | #26 |
+| 2026-05-17 | INCON-002: Updated workflow and template YAML examples to fully-qualified activity refs (`<namespace>/<type>@<major>`); added note that short-form aliases are deferred post-M1 | #27 |
