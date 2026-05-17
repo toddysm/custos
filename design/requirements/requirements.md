@@ -53,6 +53,8 @@ Workflows can be authored programmatically (YAML/SDK) or visually (designer UI).
 | REQ-075 | Activities must be independently pluggable, packaged, versioned, and deployable so new activities can be added without requiring a platform upgrade or code change in the core orchestrator | High | Open | 2026-05-14 |
 | REQ-076 | The platform must support workflow templates: users can create workflows from templates by filling required placeholders, and can create templates from existing workflows by removing selected configuration and saving the result as a reusable template | High | Open | 2026-05-14 |
 | REQ-079 | Trigger ingestion must support both push (event/webhook) and pull (polling) modes for any external source that can fire workflows (OCI registries, storage, databases, generic HTTP endpoints, etc.); mode is selectable per trigger; polling is the fallback when the source does not reliably push events; both modes deliver into the same normalized event pipeline and the same dedup/idempotency layer | High | Open | 2026-05-14 |
+| REQ-080 | Internal workflow-to-workflow triggering: a workflow run can declaratively trigger another workflow on terminal status or on emitted events; the emitting workflow does not need to know consumer identities; subscriptions are configured on the consumer side as a first-class trigger type (e.g. `type: workflow.completed`) | High | Open | 2026-05-16 |
+| REQ-081 | Pollers and push receivers must be able to deliver events either as workflow-start signals or as resume signals to in-flight activities/sub-orchestrations waiting on external state (e.g. GitHub PR merged, signing service callback); the same normalized event pipeline serves both cases and the Workflow Service registers/unregisters resume subscriptions over its step lifecycle | High | Open | 2026-05-16 |
 
 ## Non-Functional Requirements
 
@@ -160,3 +162,4 @@ Custos is deployed as a set of containerized microservices on **Kubernetes**, wi
 | 2026-05-14 | Added workflow primitives, extensible connectors, and independently pluggable activity requirements | #8 |
 | 2026-05-14 | Added workflow templates and single-cluster self-contained deployment/storage/logging requirements | pending |
 | 2026-05-14 | Added hybrid push/pull trigger ingestion requirement (REQ-079) | pending |
+| 2026-05-16 | Added internal workflow-to-workflow trigger (REQ-080) and dual-purpose event delivery for workflow start vs. in-flight resume (REQ-081) | #15, #16 |

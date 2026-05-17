@@ -1,6 +1,6 @@
 # Custos — Design Documentation
 
-Last Updated: 2026-05-15
+Last Updated: 2026-05-16
 
 ## Overview
 
@@ -24,11 +24,13 @@ Custos is a pluggable workflow orchestrator for supply-chain security operations
 ## Active Component Design Sessions
 
 - Connector Service: [components/connector-service/design.md](components/connector-service/design.md)
+- Trigger Service: [components/trigger-service/design.md](components/trigger-service/design.md)
 
 ## Recent Changes
 
 | Date | Change | Issue |
 |---|---|---|
+| 2026-05-16 | Trigger Service component design draft; added REQ-080 (internal workflow-to-workflow trigger) and REQ-081 (dual-purpose event delivery for start and resume) | _pending_ |
 | 2026-05-15 | Connector Service component design draft (plugin manifest, identity model) | — |
 | 2026-05-14 | Added hybrid push/pull trigger ingestion requirement (REQ-079) and aligned trigger pipeline | _pending_ |
 | 2026-05-14 | Detailed architecture: principles, domain model, schemas, contracts, security/observability/trigger pipeline | — |

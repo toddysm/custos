@@ -1,0 +1,392 @@
+# Component Design: Trigger Service
+
+Slug: `trigger-service`
+Last Updated: 2026-05-16
+Version: 1
+Status: Draft
+
+## Responsibility
+
+The Trigger Service is the platform's **event ingestion and dispatch broker**. It receives signals from all sources that can cause work to happen — humans (manual), the clock (schedules), external systems (webhooks, pub/sub, polling), and other workflows (internal events) — normalizes them, deduplicates them, correlates them to either a workflow definition or an in-flight run+step, and dispatches them to the Workflow Service.
+
+It owns ingestion. It does **not** own orchestration control flow.
+
+## Boundaries
+
+- **Owns**:
+  - Trigger configuration (subscriptions tying sources to target workflows).
+  - Resume subscriptions (in-flight `(runId, stepId)` waiting on an external signal).
+  - Receiver runtime for manual, scheduled, generic webhook, vendor push, polling, and internal sources.
+  - Event normalization, classification, matching, dedup, and dispatch.
+  - Poller cursors and schedule state, persisted via `MetadataStoreProvider`.
+- **Does NOT own**:
+  - Orchestration state machine, retries, fan-out, approval gates — those remain in Workflow Service (ADR-007).
+  - Connector plugin loading, credential resolution, or context issuance — those belong to Connector Service. Vendor push receivers and pollers are *driven by* connector `listen()` (ADR-013) but the runtime host is Trigger Service.
+  - Activity execution — Activity Runtime Manager.
+  - Audit storage — events are emitted to Observability/Audit, not stored here.
+
+## Internal Structure
+
+```mermaid
+graph LR
+    subgraph Receivers
+        Manual[Manual Receiver]
+        Sched[Scheduler Receiver]
+        WebPush[Generic Webhook Receiver]
+        VendorPush[Vendor Push Receivers]
+        Pollers[Pull Receivers / Pollers]
+        Internal[Internal Event Receiver]
+    end
+
+    Receivers --> Norm[Event Normalizer]
+    Norm --> Classify{Classifier}
+    Classify -->|workflow start| MatchStart[Start Matcher]
+    Classify -->|step resume| MatchResume[Resume Matcher]
+    MatchStart --> Dedup[Dedup / Idempotency]
+    MatchResume --> Dedup
+    Dedup --> Dispatch[Dispatcher]
+    Dispatch -->|StartRun| WF[Workflow Service]
+    Dispatch -->|RaiseExternalEvent| WF
+
+    subgraph State
+        Subs[(Subscriptions Store)]
+        Cursors[(Cursor Store)]
+        DedupStore[(Dedup Store)]
+        Sched2[(Schedule Store)]
+    end
+    MatchStart --> Subs
+    MatchResume --> Subs
+    Pollers --> Cursors
+    Sched --> Sched2
+    Dedup --> DedupStore
+
+    VendorPush -.driven by.-> ConnSvc[Connector Service listen-push]
+    Pollers -.driven by.-> ConnSvc2[Connector Service listen-pull]
+    Internal -.published by.-> WF2[Workflow Service]
+```
+
+Receivers are uniform in shape: each accepts source-specific input and emits a `NormalizedEvent` onto the internal Dapr Pub/Sub topic `custos.triggers.normalized`. From there a single linear pipeline (Classify → Match → Dedup → Dispatch) processes every event regardless of origin.
+
+### Module responsibilities
+
+| Module | Responsibility |
+|---|---|
+| Manual Receiver | Accepts `POST /triggers/manual` from API Gateway; emits a normalized event with `source.type = manual`. |
+| Scheduler Receiver | Owns cron evaluation per active schedule; fires normalized events at scheduled times. Uses `Schedule Store` for the durable schedule set. |
+| Generic Webhook Receiver | Accepts `POST /triggers/webhook/{subscriptionId}` with HMAC or token auth; emits a normalized event with raw body + headers. |
+| Vendor Push Receivers | Host process for connector `listen(mode=push)` streams. Receives push events from connector plugins via the Connector Service's listen channel. |
+| Pull Receivers / Pollers | Host process for connector `listen(mode=pull)` streams. Drives interval polls per configured pull subscription, advances cursor on success. |
+| Internal Event Receiver | Subscribes to `custos.workflow.events` topic where Workflow Service publishes workflow lifecycle events (`workflow.completed`, `workflow.failed`, custom emit). Emits them as normalized events. |
+| Event Normalizer | Converts source-specific payloads into the `NormalizedEvent` schema. |
+| Classifier | Routes normalized events to Start Matcher and/or Resume Matcher. Both can match (e.g. a `workflow.completed` event starts a chained workflow *and* resumes a parent waiting on its child). |
+| Start Matcher | Finds all `Subscription` rows of kind `start` whose selector matches the event. |
+| Resume Matcher | Finds all `Subscription` rows of kind `resume` whose `(runId, stepId, eventKey)` matches the event. |
+| Dedup / Idempotency | Computes dedup key = `hash(subscriptionId, source.eventId)`; rejects duplicates within retention window. |
+| Dispatcher | For start matches: calls Workflow Service `StartRun(workflowVersionId, inputs)`. For resume matches: calls Workflow Service `RaiseExternalEvent(runId, stepId, eventName, payload)`. Retries on transient errors with exponential backoff. |
+
+## Key Operations
+
+### Operation: Start workflow from external push event
+
+```mermaid
+sequenceDiagram
+    participant Ext as External System
+    participant CR as Connector Runtime (push)
+    participant TS as Trigger Service
+    participant Subs as Subscriptions
+    participant Dedup as Dedup Store
+    participant WF as Workflow Service
+
+    Ext->>CR: webhook payload
+    CR->>TS: NormalizedEvent (via listen-push stream)
+    TS->>TS: Classify -> start
+    TS->>Subs: lookup start subscriptions matching selector
+    Subs-->>TS: [sub-A]
+    TS->>Dedup: check(hash(sub-A, eventId))
+    Dedup-->>TS: unseen
+    TS->>WF: StartRun(workflowVersion=sub-A.target, inputs=mapped(event))
+    WF-->>TS: runId
+    TS->>Dedup: record(hash, ttl)
+```
+
+### Operation: Start workflow from polled external system
+
+```mermaid
+sequenceDiagram
+    participant TS as Trigger Service
+    participant CR as Connector Runtime (pull)
+    participant Ext as External System (e.g. registry without webhooks)
+    participant Cursor as Cursor Store
+    participant Subs as Subscriptions
+    participant Dedup as Dedup Store
+    participant WF as Workflow Service
+
+    loop poll interval (per subscription)
+        TS->>CR: listen-pull tick (subscriptionId)
+        CR->>Cursor: read(position)
+        CR->>Ext: list since position (e.g. tags, objects, records)
+        Ext-->>CR: items
+        CR->>Cursor: advance(newPosition)
+        loop each new item
+            CR->>TS: NormalizedEvent (source.type=pull)
+            TS->>TS: Classify -> start
+            TS->>Subs: lookup start subs matching selector
+            Subs-->>TS: [sub-A]
+            TS->>Dedup: check(hash(sub-A, eventId))
+            Dedup-->>TS: unseen
+            TS->>WF: StartRun(sub-A.target, inputs=mapped(event))
+            TS->>Dedup: record(hash, ttl)
+        end
+    end
+```
+
+This is the polling fallback for sources without reliable push (REQ-079). The cursor advances *before* dispatch is confirmed, but the dedup key prevents duplicate run starts on cursor replay after a crash. Cursors and dedup keys are both durable in `MetadataStoreProvider`.
+
+### Operation: Resume in-flight activity from polled state change
+
+```mermaid
+sequenceDiagram
+    participant WF as Workflow Service
+    participant TS as Trigger Service
+    participant CR as Connector Runtime (pull)
+    participant GH as GitHub
+    participant Subs as Subscriptions
+    participant Cursor as Cursor Store
+
+    Note over WF,TS: Step enters "wait for external event"
+    WF->>TS: RegisterResumeSubscription(runId, stepId, eventKey, selector)
+    TS->>Subs: insert resume sub
+
+    loop poll interval
+        TS->>CR: listen-pull tick (subscription)
+        CR->>GH: GET /repos/.../pulls/123
+        GH-->>CR: PR state
+        CR->>Cursor: advance(lastSeenState)
+        alt state changed to "merged"
+            CR->>TS: NormalizedEvent
+            TS->>TS: Classify -> resume
+            TS->>Subs: match(runId, stepId, eventKey)
+            Subs-->>TS: hit
+            TS->>WF: RaiseExternalEvent(runId, stepId, "pr.merged", payload)
+            TS->>Subs: delete resume sub (one-shot)
+        end
+    end
+```
+
+### Operation: Internal workflow-to-workflow trigger
+
+```mermaid
+sequenceDiagram
+    participant WF as Workflow Service
+    participant Bus as custos.workflow.events
+    participant TS as Trigger Service
+    participant Subs as Subscriptions
+    participant WF2 as Workflow Service (start)
+
+    WF->>Bus: publish workflow.completed { workflowId, runId, status, outputs }
+    Bus->>TS: deliver to Internal Event Receiver
+    TS->>TS: Normalize + Classify -> start (selector matches workflow.completed)
+    TS->>Subs: lookup
+    Subs-->>TS: [downstream workflow sub-B]
+    TS->>WF2: StartRun(sub-B.target, inputs = mapped(event.outputs))
+```
+
+## Data Models
+
+```mermaid
+erDiagram
+    Workspace ||--o{ Subscription : contains
+    Subscription ||--o{ SubscriptionSelector : has
+    Subscription ||--o{ DedupKey : produces
+    Schedule ||--|| Subscription : drives
+    Cursor ||--|| Subscription : checkpoints
+    ResumeSubscription ||--|| Run : "waits for"
+
+    Subscription {
+        string id PK
+        string workspaceId
+        string kind "start | resume"
+        string sourceType "manual|scheduled|webhook|vendor-push|pull|internal"
+        string targetWorkflowVersionId "kind=start only"
+        string runId "kind=resume only"
+        string stepId "kind=resume only"
+        string eventKey "kind=resume only"
+        json inputMapping
+        string state "active|paused|expired"
+        timestamp createdAt
+    }
+
+    SubscriptionSelector {
+        string subscriptionId FK
+        string fieldPath
+        string matchType "eq|prefix|regex|jsonpath"
+        string value
+    }
+
+    Schedule {
+        string subscriptionId FK
+        string cronExpr
+        string timezone
+        timestamp nextFireAt
+    }
+
+    Cursor {
+        string subscriptionId FK
+        json position
+        timestamp updatedAt
+    }
+
+    DedupKey {
+        string key PK
+        string subscriptionId
+        timestamp seenAt
+        timestamp expiresAt
+    }
+
+    ResumeSubscription {
+        string subscriptionId FK
+        bool oneShot
+        timestamp registeredAt
+        timestamp expiresAt
+    }
+```
+
+### NormalizedEvent schema (envelope)
+
+```json
+{
+  "schemaVersion": "1",
+  "eventId": "<source-provided or generated UUID>",
+  "source": {
+    "type": "vendor-push|pull|webhook|manual|scheduled|internal",
+    "connectorInstanceId": "prod-registry",
+    "subscriptionId": "sub-...",
+    "vendor": "ghcr|github|cron|...",
+    "occurredAt": "2026-05-16T12:00:00Z"
+  },
+  "kind": "registry.push|registry.tag|pr.merged|workflow.completed|cron.tick|manual.fire|...",
+  "subject": "ghcr.io/acme/app@sha256:...",
+  "data": { },
+  "raw": { "headers": {}, "body": "..." }
+}
+```
+
+`kind` is the platform-level event taxonomy used by selectors. `data` is the normalized, vendor-agnostic payload. `raw` is retained for audit and to let connector-aware activities re-parse if needed.
+
+## Public Interface
+
+### REST API (mounted under API Gateway)
+
+| Method | Path | Request | Response | Description |
+|---|---|---|---|---|
+| POST | `/triggers` | `SubscriptionCreate` | `Subscription` | Create a start subscription (manual, scheduled, webhook, vendor-push, pull, internal). |
+| GET | `/triggers/{id}` | — | `Subscription` | Read one subscription. |
+| PATCH | `/triggers/{id}` | `SubscriptionPatch` | `Subscription` | Update state, selector, mapping, schedule. |
+| DELETE | `/triggers/{id}` | — | `204` | Remove subscription. |
+| POST | `/triggers/manual/{id}/fire` | `{ inputs }` | `{ runId }` | Manual trigger; returns started run id. |
+| POST | `/triggers/webhook/{id}` | raw body + headers | `202` | Generic inbound webhook ingest. |
+
+### Internal RPC (Workflow Service ⇄ Trigger Service)
+
+| Method | Direction | Purpose |
+|---|---|---|
+| `RegisterResumeSubscription(runId, stepId, eventKey, selector, ttl)` | WF → TS | Register a one-shot resume wait. |
+| `CancelResumeSubscription(runId, stepId, eventKey)` | WF → TS | Cancel a wait (timeout, run cancelled). |
+| `StartRun(workflowVersionId, inputs, idempotencyKey)` | TS → WF | Dispatch a workflow start. |
+| `RaiseExternalEvent(runId, stepId, eventName, payload, idempotencyKey)` | TS → WF | Deliver a resume signal into Dapr Workflow. |
+| `PublishWorkflowEvent(event)` | WF → Bus | Internal lifecycle event publication consumed by Trigger Service's Internal Event Receiver. |
+
+### Declarative trigger syntax (in workflow YAML)
+
+```yaml
+spec:
+  triggers:
+    - type: manual
+
+    - type: scheduled
+      cron: "0 */6 * * *"
+      timezone: UTC
+
+    # Push mode: registry emits webhooks to us.
+    - type: registry.push
+      connector: ghcr-prod
+      mode: push
+      selector:
+        repository: prefix:ghcr.io/acme/
+
+    # Pull mode: registry has no reliable webhook; we poll it.
+    # Same trigger type, same selector model — only `mode` and `pollInterval` differ.
+    - type: registry.push
+      connector: acr-prod
+      mode: pull
+      pollInterval: 5m
+      selector:
+        repository: prefix:acme.azurecr.io/
+
+    # Pull mode against a non-registry source.
+    - type: github.pr
+      connector: github-acme
+      mode: pull
+      pollInterval: 1m
+      selector:
+        repo: acme/app
+        state: closed
+        merged: true
+
+    # Internal: another workflow's completion drives this one.
+    - type: workflow.completed
+      workflow: build-and-sign
+      onStatus: [succeeded]
+      inputMapping:
+        image: ${{ event.data.outputs.image }}
+```
+
+`mode: pull` is available on **any** trigger type whose connector implements `listen(pull)`. The platform makes no distinction between "registry trigger" and "any other pollable source" at the pipeline level — that's a connector-author concern. `type: workflow.completed` is the first-class internal trigger surface for REQ-080.
+
+## Configuration
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `TRIGGER_WEBHOOK_BASE_URL` | Yes | — | External base URL for webhook receiver. |
+| `TRIGGER_DEDUP_TTL_SECONDS` | No | `86400` | Dedup window. |
+| `TRIGGER_POLLER_DEFAULT_INTERVAL_SECONDS` | No | `60` | Default pull interval when not specified per subscription. |
+| `TRIGGER_RESUME_DEFAULT_TTL_SECONDS` | No | `604800` | Default expiry for resume subscriptions (7 days). |
+| `TRIGGER_DISPATCH_MAX_RETRIES` | No | `5` | Max retries dispatching to Workflow Service. |
+| `TRIGGER_SCHEDULER_LEADER_LEASE_SECONDS` | No | `30` | Scheduler leader lock TTL (single-fire guarantee across replicas). |
+
+## Dependencies
+
+| Dependency | Type | Purpose |
+|---|---|---|
+| Connector Service | Runtime | `listen(push)` and `listen(pull)` streams per connector instance (ADR-013). |
+| Workflow Service | Runtime | `StartRun`, `RaiseExternalEvent`, publisher of internal workflow events. |
+| MetadataStoreProvider | Runtime | Persistence for Subscription, Schedule, Cursor, DedupKey, ResumeSubscription. |
+| Dapr Pub/Sub | Runtime | Internal transport for `custos.triggers.normalized` and `custos.workflow.events`. |
+| Observability/Audit | Runtime | Emit `trigger.matched`, `trigger.deduped`, `trigger.dispatched`, `resume.delivered` audit events. |
+| Auth Service | Runtime | Webhook receiver HMAC/token verification; manual trigger RBAC. |
+
+## Failure Modes
+
+| Failure | Detection | Containment | Recovery |
+|---|---|---|---|
+| Workflow Service unreachable on dispatch | RPC timeout | Event remains in retry queue; dedup key not committed | Exponential backoff up to `TRIGGER_DISPATCH_MAX_RETRIES`, then dead-letter with `trigger.dispatch.failed` audit event |
+| Duplicate inbound event | Dedup key hit | No dispatch | N/A |
+| Poller falls behind | `nextFireAt < now - threshold` metric | Subscription marked `degraded`; alert | Operator increases interval or scales pod |
+| Resume subscription expires before event arrives | TTL sweeper | Wait cancelled via `CancelResumeSubscription` callback | Workflow step takes its timeout branch (ADR-007) |
+| Scheduler split-brain across replicas | Leader lease | Only leader fires schedules; non-leaders wait | Lease auto-renews; on failover next replica acquires within `LEADER_LEASE_SECONDS` |
+| Internal event loop (workflow A starts B starts A) | Per-tenant fan-out depth counter | Reject dispatch when depth > limit | Audit `trigger.loop.detected`; operator inspects subscription graph |
+
+## Open TODOs
+
+- [ ] TODO-001: Define the platform event taxonomy (canonical `kind` values for registry.*, pr.*, workflow.*, scan.* etc.) — required before connector authors can target events deterministically (added 2026-05-16).
+- [ ] TODO-002: Decide selector language (subset of JSONPath vs. CEL vs. simple field/match-type tuples) — currently sketched as tuples, may need CEL parity with ADR-011 (added 2026-05-16).
+- [ ] TODO-003: Specify scheduler leader-election mechanism (Dapr distributed lock vs. Postgres advisory lock vs. Kubernetes lease) — REQ-005 (added 2026-05-16).
+- [ ] TODO-004: Specify resume-subscription registration as a Workflow Service responsibility in that component's design (cross-component) — REQ-081 (added 2026-05-16).
+- [ ] TODO-005: Define dead-letter handling and replay UX for dispatch failures (added 2026-05-16).
+- [ ] TODO-006: Decide whether webhook signing/HMAC keys are owned by Trigger Service per subscription or come from Connector Service per instance (added 2026-05-16).
+
+## Change History
+
+| Date | Change | GitHub Issue |
+|---|---|---|
+| 2026-05-16 | Initial design covering ingestion broker model, workflow-start and step-resume paths, internal workflow-to-workflow triggers, polling for resume signals, schedule/cursor/dedup state, declarative YAML trigger types | #17 |
