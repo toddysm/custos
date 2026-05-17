@@ -2,7 +2,7 @@
 
 Slug: `trigger-service`
 Last Updated: 2026-05-17
-Version: 2
+Version: 3
 Status: Draft
 
 ## Responsibility
@@ -285,8 +285,8 @@ erDiagram
 
 | Method | Direction | Purpose |
 |---|---|---|
-| `RegisterResumeSubscription(runId, stepId, eventKey, selector, ttl)` | WF → TS | Register a one-shot resume wait. |
-| `CancelResumeSubscription(runId, stepId, eventKey)` | WF → TS | Cancel a wait (timeout, run cancelled). |
+| `RegisterResumeSubscription(runId, stepId, eventKey, selector, ttl)` | WF → TS | Register a one-shot resume wait. Idempotent on `(runId, stepId, eventKey)` — re-registration returns the existing `subscriptionId` rather than creating a duplicate. On divergent `selector` between original and replay, original wins and TS emits a `resume.subscription.divergent` audit event. After `expiresAt` TS GCs the subscription; a re-registration after TTL expiry is treated as a fresh registration. See Workflow Service design § Resume Subscription Replay Protocol for the full WF-side protocol. |
+| `CancelResumeSubscription(runId, stepId, eventKey)` | WF → TS | Cancel a wait (timeout, run cancelled). Idempotent — cancelling an unknown or already-expired key is a no-op. |
 | `StartRun(workflowVersionId, inputs, idempotencyKey)` | TS → WF | Dispatch a workflow start. |
 | `RaiseExternalEvent(runId, stepId, eventName, payload, idempotencyKey)` | TS → WF | Deliver a resume signal into Dapr Workflow. |
 
@@ -385,9 +385,12 @@ spec:
 - [ ] TODO-001: Define the platform event taxonomy (canonical `kind` values for registry.*, pr.*, workflow.*, scan.* etc.) — required before connector authors can target events deterministically (added 2026-05-16).
 - [ ] TODO-002: Decide selector language (subset of JSONPath vs. CEL vs. simple field/match-type tuples) — currently sketched as tuples, may need CEL parity with ADR-011 (added 2026-05-16).
 - [ ] TODO-003: Specify scheduler leader-election mechanism (Dapr distributed lock vs. Postgres advisory lock vs. Kubernetes lease) — REQ-005 (added 2026-05-16).
-- [ ] TODO-004: Specify resume-subscription registration as a Workflow Service responsibility in that component's design (cross-component) — REQ-081 (added 2026-05-16).
 - [ ] TODO-005: Define dead-letter handling and replay UX for dispatch failures (added 2026-05-16).
 - [ ] TODO-006: Decide whether webhook signing/HMAC keys are owned by Trigger Service per subscription or come from Connector Service per instance (added 2026-05-16).
+
+## Closed TODOs
+
+- [x] TODO-004: Specify resume-subscription registration as a Workflow Service responsibility in that component's design (cross-component) — REQ-081. Resolved 2026-05-17 by Workflow Service design (`design/components/workflow-service/design.md` § Step Resume on External Event and § Resume Subscription Replay Protocol). Idempotent re-registration semantics also documented on the TS Internal RPC table above.
 
 ## Change History
 
@@ -397,3 +400,4 @@ spec:
 | 2026-05-17 | INCON-011: Pull cursors are owned by Connector Service per `ConnectorInstance`, not by Trigger Service per `Subscription`; removed `Cursor` entity from data model and state subgraph; updated sequence diagrams and dependencies | #36 |
 | 2026-05-17 | INCON-014: `PublishWorkflowEvent` removed from Internal RPC table; replaced with explicit Dapr Pub/Sub Subscriptions section documenting `custos.workflow.events` topic, publisher (Workflow Service), subscriber (Internal Event Receiver), envelope, delivery semantics | #39 |
 | 2026-05-17 | INCON-013: TODO-001 scope expanded — taxonomy work is unified with ARM TODO-009 and Observability/Audit; one dot-namespaced `kind` namespace covers connector events + activity/step lifecycle audit events | #38 |
+| 2026-05-17 | Workflow Service design landed: idempotent re-registration semantics documented on `RegisterResumeSubscription` / `CancelResumeSubscription` Internal RPC rows; TS-TODO-004 closed (WF owns the registration lifecycle) | #40 |
