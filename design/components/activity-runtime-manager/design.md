@@ -592,9 +592,8 @@ Internal RPC surface (Workflow Service ⇄ ARM):
 | Dependency | Type | Purpose |
 |---|---|---|
 | Workflow Service | Runtime | Scheduling source and completion sink. |
-| Connector Service | Runtime | Resolves `ConnectorRef` → `ConnectorContext` (handles, not credentials). |
+| Connector Service | Runtime | Resolves `ConnectorRef` → `ConnectorContext` (handles, not credentials) and provides scoped sidecar/API access to resolved connector material for activities. |
 | Storage Provider Layer | Runtime | Artifact upload via `ArtifactStoreProvider`; step output persistence via `MetadataStoreProvider`. |
-| Dapr Secrets API | Runtime | Resolves secret handles to plaintext for sandbox injection. |
 | Observability/Audit | Runtime | Log streaming and audit event emission. |
 | Catalog Service | Runtime | Activity type/version resolution and schema retrieval. |
 | Kubernetes API | Runtime | Sandbox lifecycle (Jobs/Pods) for OCI Container Driver. |
