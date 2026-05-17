@@ -1,7 +1,7 @@
 # Architecture Overview: Custos
 
 Last Updated: 2026-05-17
-Version: 5
+Version: 6
 Status: Draft
 
 ## Summary
@@ -379,7 +379,7 @@ A connector plugin implements four hooks:
   "connectorType": "oci-registry",
   "instanceId": "prod-registry",
   "endpoints": { "api": "https://registry.example.com" },
-  "capabilities": ["push", "pull", "tag", "copy"],
+  "capabilities": ["oci.pull", "oci.push", "oci.tag", "oci.copy"],
   "version": "1"
 }
 ```
@@ -390,6 +390,8 @@ A connector plugin implements four hooks:
 - **Filesystem mount** — for materialized connector-borne credentials. Plaintext appears only at `/custos/in/secrets/<connector-name>/<key>` (read-only tmpfs). Never appears in `ctx.json` or `inputs.json`.
 
 The full ConnectorContext shape and the normative secrets delivery model are specified in `design/components/connector-service/design.md` § Secret and Token Flow to Activities and `design/components/activity-runtime-manager/design.md` § Activity Contract v1.
+
+`capabilities` lists only **data-plane verbs** in dot-delimited lowercase form (e.g. `oci.pull`, `oci.push`, `s3.read`, `blob.write`). Event-stream concerns — including whether a connector delivers trigger events via inbound webhook or polling — live in a separate `events.delivery` field on the connector manifest and **must not** appear in `capabilities`. See `design/components/connector-service/design.md` § Capabilities and Events for the full treatment.
 
 _Note: deeper specification (capability negotiation, listen-stream semantics, error model, lifecycle, plugin packaging) is deferred to a dedicated component-design session — see Open TODOs below._
 
@@ -609,3 +611,4 @@ sequenceDiagram
 | 2026-05-17 | INCON-001: Replaced stale Activity Contract v1 manifest example with ARM-aligned `ActivityManifest` schema; added forward reference to ARM design as normative source | #26 |
 | 2026-05-17 | INCON-002: Updated workflow and template YAML examples to fully-qualified activity refs (`<namespace>/<type>@<major>`); added note that short-form aliases are deferred post-M1 | #27 |
 | 2026-05-17 | INCON-003: Removed `secrets` field from ConnectorContext example; documented sidecar API + `/custos/in/secrets/` filesystem mount as the two credential delivery paths, with forward references to Connector Service and ARM designs | #28 |
+| 2026-05-17 | INCON-004: ConnectorContext capabilities now use dot-namespaced data-plane verbs (`oci.pull`, `oci.push`, ...); clarified that event delivery modes live in `events.delivery`, not `capabilities` | #29 |
