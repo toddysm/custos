@@ -1,8 +1,8 @@
 # Component Design: Activity Runtime Manager
 
 Slug: `activity-runtime-manager`
-Last Updated: 2026-05-16
-Version: 0 (in progress)
+Last Updated: 2026-05-17
+Version: 1
 Status: Draft
 
 > This document captures the design decisions locked in so far. Sections marked **(pending)** will be filled out in subsequent design iterations.
@@ -470,7 +470,7 @@ spec:
     - name: registry
       type: oci-registry
       required: true
-      capabilities: [pull]            # advisory; connector enforces
+      capabilities: [oci.pull]        # advisory; connector enforces. Tokens MUST be dot-namespaced.
 
   resources:
     cpu:    { request: "500m", limit: "2" }      # optional
@@ -534,7 +534,7 @@ Declares connector slots the activity needs. Workflow binds concrete connector i
 | `name` | yes | Logical slot name referenced from the workflow's `connectors:` binding. |
 | `type` | yes | Connector type (e.g. `oci-registry`, `github`). |
 | `required` | yes | Whether the workflow must bind an instance. |
-| `capabilities` | no | Advisory list (e.g. `[pull]`, `[push]`); the connector itself enforces. |
+| `capabilities` | no | Advisory list of **data-plane verbs** the activity needs from the bound connector (e.g. `[oci.pull]`, `[oci.push, oci.tag]`, `[s3.read]`). Tokens MUST follow the dot-delimited lowercase convention defined by the Connector Service. The connector itself enforces; the Binder fails bind if a required capability is missing on the bound connector type version. `event.*` and bare tokens like `pull`/`push` are not valid here. |
 
 #### No `spec.secrets[]` in v1
 
@@ -673,3 +673,4 @@ Internal RPC surface (Workflow Service ⇄ ARM):
 | 2026-05-16 | Locked Error Envelope & Exit Codes: 4-state exit codes, envelope-wins resolution rules, error code namespaces, ARM behavior per terminal state, default uncategorized exit → retryable, 4 KiB `details` cap, `cause` depth 3, `retryAfter` as lower-bound hint | pending |
 | 2026-05-16 | Locked Activity Manifest v1: JSON on-disk format, three-tier namespace (`custos.builtin` / `<vendor>` / `<workspaceId>`) with reserved prefixes, fully-qualified workflow refs, OCI Referrer publication + Catalog index, full field reference (no `workdir`/`command`, no `spec.secrets[]` in v1), `runtime.isolation.minTier`/`preferred` for sandbox tier selection, `timeout` required + other resources optional, semver versioning rules; manifest signing, per-artifact content schema validation, standalone secrets, and short-form refs deferred to later milestones | pending |
 | 2026-05-16 | Fixed Activity Contract v1: activities reference artifacts by manifest-declared name (`{ kind: ArtifactRef, name }`), and ARM performs two-phase output finalization — uploads artifacts, rewrites every ArtifactRef to include `id`/`digest`/`mediaType`/`size`, synthesizes `produced[]`, then validates the finalized envelope against the output schema. Producers can now satisfy the envelope deterministically | pending |
+| 2026-05-17 | INCON-010: Activity Manifest v1 `spec.connectors[].capabilities` must use dot-delimited tokens (e.g. `oci.pull`) matching the Connector Service naming rule; bare tokens like `pull`/`push` are no longer valid | #35 |
