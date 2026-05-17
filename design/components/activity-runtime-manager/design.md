@@ -42,7 +42,7 @@ The contract between the orchestrator and an activity is **file-based**. The orc
 | `/custos/in/ctx.json` | orchestrator → activity | ARM writes | Execution context: `runId`, `stepId`, `attempt`, `workspaceId`, activity type/version, connector handles (no credentials), deadline. Read-only. |
 | `/custos/in/secrets/<name>` | orchestrator → activity | ARM writes | One file per injected secret. Plaintext credentials live ONLY here, never in `inputs.json`. Read-only, tmpfs-mounted. |
 | `/custos/out/outputs.json` | activity → orchestrator | activity writes | Outputs envelope (see below). Required at success. |
-| `/custos/out/artifacts/` | activity → orchestrator | activity writes | Files produced by the activity (SBOMs, scan reports, signed manifests, etc.). ARM uploads to artifact store and references by `ArtifactRef` in `outputs.json`. |
+| `/custos/out/artifacts/` | activity → orchestrator | activity writes | Files produced by the activity (SBOMs, scan reports, signed manifests, etc.). Activity writes at `/custos/out/artifacts/<name>` keyed by `spec.outputs.artifacts[].name` from its manifest. ARM uploads to artifact store after the sandbox exits and rewrites `outputs.json` to insert store-assigned IDs (see §Two-phase output finalization). |
 | `/custos/out/audit.jsonl` | activity → orchestrator | activity appends | Optional structured audit lines. Forwarded to Observability/Audit. |
 
 ### `inputs.json` envelope
@@ -62,7 +62,9 @@ The contract between the orchestrator and an activity is **file-based**. The orc
 
 The `inputs` field is shaped by the activity's declared input JSON Schema (Draft 2020-12). Secrets MUST NOT appear in `inputs` — they are injected via `/custos/in/secrets/`. The activity references a secret by logical name (declared in its manifest), and ARM mounts the resolved value file.
 
-### `outputs.json` envelope — success
+### `outputs.json` envelope — success (as written by activity)
+
+The activity cannot know artifact-store IDs at write time — ARM assigns them after the sandbox exits. The activity therefore references its artifacts by their **manifest-declared `name`**, and ARM rewrites the envelope before schema validation (see §Two-phase output finalization below).
 
 ```json
 {
@@ -70,14 +72,41 @@ The `inputs` field is shaped by the activity's declared input JSON Schema (Draft
   "contractVersion": "1",
   "status": "success",
   "outputs": {
-    "reportDigest": "sha256:...",
-    "findings": 12
+    "findings": 12,
+    "reportRef": { "kind": "ArtifactRef", "name": "report" }
+  }
+}
+```
+
+After ARM finalization (what Workflow Service sees):
+
+```json
+{
+  "schemaVersion": "1",
+  "contractVersion": "1",
+  "status": "success",
+  "outputs": {
+    "findings": 12,
+    "reportRef": {
+      "kind": "ArtifactRef",
+      "name": "report",
+      "id": "art-9f3a...",
+      "mediaType": "application/vnd.cyclonedx+json",
+      "digest": "sha256:...",
+      "size": 84231
+    }
   },
   "produced": [
-    { "kind": "ArtifactRef", "id": "art-...", "mediaType": "application/vnd.cyclonedx+json" }
+    { "kind": "ArtifactRef", "name": "report", "id": "art-9f3a...",
+      "mediaType": "application/vnd.cyclonedx+json",
+      "digest": "sha256:...", "size": 84231 }
   ]
 }
 ```
+
+`produced[]` is **ARM-synthesized**, never written by the activity. The activity is responsible only for:
+1. Writing files into `/custos/out/artifacts/<name>` (file) or `/custos/out/artifacts/<name>/` (tree), where `<name>` matches a `spec.outputs.artifacts[].name` in its manifest.
+2. Referencing those artifacts inside `outputs` by `{ "kind": "ArtifactRef", "name": "<name>" }`.
 
 ### `outputs.json` envelope — failure
 
@@ -98,12 +127,36 @@ The `inputs` field is shaped by the activity's declared input JSON Schema (Draft
 
 `error.class` aligns with ADR-008 exit-code semantics. Full envelope and exit-code mapping is in **§Error Envelope & Exit Codes** below.
 
+### Two-phase output finalization
+
+ARM owns artifact-store ID assignment. The activity cannot — it would need to read its own output back. So the contract has two phases:
+
+**Phase 1 — Activity writes (sandbox active):**
+- Activity writes structured data into `outputs.outputs`, referencing artifacts by `{ kind: "ArtifactRef", name: "<manifest-name>" }`.
+- Activity writes files at `/custos/out/artifacts/<name>` (or a directory `<name>/` for trees).
+- Activity exits.
+
+**Phase 2 — ARM finalizes (sandbox exited):**
+1. ARM reads `outputs.json` and parses it (syntactic validation only; **schema validation deferred**).
+2. ARM walks `spec.outputs.artifacts[]` from the manifest. For each declared artifact:
+   - Locates the matching file/tree at `/custos/out/artifacts/<name>`.
+   - If `required: true` and missing → rewrite envelope to `output.invalid_artifact_ref`, class `permanent`. Stop.
+   - Computes digest, size, mediaType (declared, sniffed if absent).
+   - Uploads via `ArtifactStoreProvider`. Receives store-assigned `id`.
+3. ARM rewrites the envelope in two ways:
+   - Walks `outputs` recursively. Every `ArtifactRef` with a `name` matching a manifest artifact is **expanded in place** to include `id`, `digest`, `mediaType`, `size`.
+   - Appends a fully-populated `produced[]` enumerating all uploaded artifacts.
+4. **Now** ARM validates the rewritten envelope's `outputs` against the activity's output JSON Schema. Any reference to an `ArtifactRef.name` not declared in the manifest fails as `output.invalid_artifact_ref`, class `permanent`.
+5. ARM returns the finalized envelope to Workflow Service.
+
+The activity-author surface stays simple ("declare your artifacts in the manifest, write the files, reference by name"). The orchestrator-facing schema stays strict (every `ArtifactRef` is fully populated when Workflow Service sees it).
+
 ### Schema validation
 
 Activity input and output schemas are validated **twice**:
 
 1. **At publish time** (when an activity is registered into the Catalog) — schema is parsed and structurally validated. This is the compile-time gate.
-2. **At runtime** — ARM validates the materialized `inputs.json` against the activity's input schema before starting the sandbox, and validates `outputs.json` against the output schema before returning to Workflow Service. Defense-in-depth: a broken activity that emits malformed outputs is caught at the ARM boundary, not propagated into the orchestrator.
+2. **At runtime** — ARM validates the materialized `inputs.json` against the activity's input schema before starting the sandbox, and validates the **finalized** `outputs.json` (post-rewrite, with ArtifactRef IDs populated) against the output schema before returning to Workflow Service. Defense-in-depth: a broken activity that emits malformed outputs is caught at the ARM boundary, not propagated into the orchestrator.
 
 ## Platform Types
 
@@ -469,7 +522,7 @@ spec:
 #### `spec.outputs`
 
 - `schema` — JSON Schema for the `outputs` field inside `outputs.json` (structured data, small values, refs).
-- `artifacts[]` — declared file outputs written to `/custos/out/artifacts/`. Each entry: `name`, `mediaType`, `required`. ARM uploads via `ArtifactStoreProvider` and emits an `ArtifactRef` per file. `required: true` + missing file on success → `output.invalid_artifact_ref` (permanent).
+- `artifacts[]` — declared file outputs written to `/custos/out/artifacts/<name>`. Each entry: `name`, `mediaType`, `required`. The activity references artifacts by `name` only; ARM uploads via `ArtifactStoreProvider` post-exit, assigns store IDs, and rewrites every `ArtifactRef` in the envelope to include `id`, `digest`, `mediaType`, `size` before output-schema validation (see §Two-phase output finalization in the Activity Contract). `required: true` + missing file on success → `output.invalid_artifact_ref` (permanent).
 - Per-artifact content schema validation (e.g. CycloneDX schema URL) is **deferred to M2**.
 
 #### `spec.connectors[]`
@@ -619,3 +672,4 @@ Internal RPC surface (Workflow Service ⇄ ARM):
 | 2026-05-16 | Initial draft: Activity Contract v1 (file-based), platform types (`ImageRef`, `OciDescriptor`, `ConnectorRef`, `ArtifactRef`, `Duration`), three-layer pattern for transforms and filters, `let` as first-class step, `where:` sugar on `forEach`, push-down selector convention, filter/policy-eval unification, Custos CEL function set and determinism rules, connector metadata exposure surface | pending |
 | 2026-05-16 | Locked Error Envelope & Exit Codes: 4-state exit codes, envelope-wins resolution rules, error code namespaces, ARM behavior per terminal state, default uncategorized exit → retryable, 4 KiB `details` cap, `cause` depth 3, `retryAfter` as lower-bound hint | pending |
 | 2026-05-16 | Locked Activity Manifest v1: JSON on-disk format, three-tier namespace (`custos.builtin` / `<vendor>` / `<workspaceId>`) with reserved prefixes, fully-qualified workflow refs, OCI Referrer publication + Catalog index, full field reference (no `workdir`/`command`, no `spec.secrets[]` in v1), `runtime.isolation.minTier`/`preferred` for sandbox tier selection, `timeout` required + other resources optional, semver versioning rules; manifest signing, per-artifact content schema validation, standalone secrets, and short-form refs deferred to later milestones | pending |
+| 2026-05-16 | Fixed Activity Contract v1: activities reference artifacts by manifest-declared name (`{ kind: ArtifactRef, name }`), and ARM performs two-phase output finalization — uploads artifacts, rewrites every ArtifactRef to include `id`/`digest`/`mediaType`/`size`, synthesizes `produced[]`, then validates the finalized envelope against the output schema. Producers can now satisfy the envelope deterministically | pending |
