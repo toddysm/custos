@@ -188,7 +188,7 @@ Need to adapt data between activities?
 
 ## Custos CEL Function Set
 
-Expressions in `with:`, `let`, `where:`, and trigger selectors use CEL (Common Expression Language) extended with a Custos-specific function library. The full set is defined in ADR-011; the v1 surface is grouped into six categories:
+Expressions in `with:`, `let`, and `where:` use CEL (Common Expression Language) extended with a Custos-specific function library. Trigger selector syntax is defined by the Trigger Service design and is intentionally not fixed by this document. The full set is defined in ADR-011; the v1 surface is grouped into six categories:
 
 | Category | Functions |
 |---|---|
