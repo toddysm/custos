@@ -1,7 +1,7 @@
 # Architecture Overview: Custos
 
 Last Updated: 2026-05-17
-Version: 7
+Version: 8
 Status: Draft
 
 ## Summary
@@ -367,10 +367,12 @@ A connector plugin implements four hooks:
 
 | Hook | Purpose |
 |---|---|
-| `describe()` | Return connector type, supported capabilities, config schema |
+| `describe()` | Return connector type, data-plane capabilities (dot-namespaced verbs), event delivery modes (`events.delivery`), event catalog (`events.produced`), and config schema |
 | `validate(config)` | Validate an instance configuration and required secrets |
-| `bind(instance) -> ConnectorContext` | Produce a context activities can use (endpoints, opaque secret handles, capabilities) |
+| `bind(instance) -> ConnectorContext` | Produce a context activities can use (endpoints, capabilities, metadata). Credential material is **not** placed in the context — it flows via the connector sidecar API or `/custos/in/secrets/` mount (see § ConnectorContext below) |
 | `listen(instance) -> EventStream` | Optional: emit normalized trigger events for this instance |
+
+The normative definition of the connector manifest (capabilities, `events.delivery`, `events.produced`, config schema) lives in `design/components/connector-service/design.md` § Capabilities and Events.
 
 `ConnectorContext` shape (illustrative):
 
@@ -496,7 +498,7 @@ After normalization, the **Classifier** routes each `NormalizedEvent` to one or 
 - **Start Matcher** — finds active `start`-kind subscriptions whose selector matches the event; produces `StartRun` dispatches.
 - **Resume Matcher** — finds `resume`-kind subscriptions registered by the Workflow Service for in-flight steps waiting on external signals; produces `RaiseExternalEvent` dispatches. The Workflow Service owns the `RegisterResumeSubscription` / `CancelResumeSubscription` lifecycle for these.
 
-A single event can match both paths simultaneously — a `workflow.completed` event can start a chained workflow *and* resume a parent waiting on its child. Both flavors of receiver emit into the same `Normalizer → Classifier → Matcher(s) → Dedup → Dispatcher` chain, so downstream code is mode-agnostic. Connector types declare delivery modes in `events.delivery` on the connector manifest (`push`, `pull`, or both); trigger configuration selects the active mode per instance. Pollers persist their cursor / last-seen state via the `MetadataStoreProvider` so polling is durable across restarts.
+A single event can match both paths simultaneously — a `workflow.completed` event can start a chained workflow *and* resume a parent waiting on its child. Both flavors of receiver emit into the same `Normalizer → Classifier → Matcher(s) → Dedup → Dispatcher` chain, so downstream code is mode-agnostic. Connector types declare their supported delivery modes (`push`, `pull`, or both) in the plugin manifest's `events.delivery` field, registered once at plugin registration time and static for the lifetime of a `ConnectorTypeVersion`. Trigger configuration selects the active mode per subscription, constrained to the modes the connector type version declares; workflow authors specify `mode: push` or `mode: pull` per trigger. Pollers persist their cursor / last-seen state via the `MetadataStoreProvider` so polling is durable across restarts. See `design/components/connector-service/design.md` § Capabilities and Events for the full treatment.
 
 The normative trigger pipeline specification — receiver inventory, classifier rules, subscription lifecycle, dispatch contracts — lives in `design/components/trigger-service/design.md`.
 
@@ -632,3 +634,4 @@ sequenceDiagram
 | 2026-05-17 | INCON-003: Removed `secrets` field from ConnectorContext example; documented sidecar API + `/custos/in/secrets/` filesystem mount as the two credential delivery paths, with forward references to Connector Service and ARM designs | #28 |
 | 2026-05-17 | INCON-004: ConnectorContext capabilities now use dot-namespaced data-plane verbs (`oci.pull`, `oci.push`, ...); clarified that event delivery modes live in `events.delivery`, not `capabilities` | #29 |
 | 2026-05-17 | INCON-005: Replaced trigger pipeline sequence diagram with REQ-080/REQ-081-aligned version showing Classifier, Start/Resume Matchers, Internal Event Receiver, and `StartRun` + `RaiseExternalEvent` dispatch paths; updated mode-declaration text to reference `events.delivery` instead of `describe()` | #30 |
+| 2026-05-17 | INCON-008 + INCON-016: Expanded `describe()` hook description to include `events.delivery` and `events.produced`; removed stale "opaque secret handles" from `bind()` description; clarified that delivery modes are declared statically in the plugin manifest at registration time | #33, #42 |
