@@ -1,5 +1,8 @@
 # Custos
 
+![GitHub issues](https://img.shields.io/github/issues-raw/toddysm/custos?link=https%3A%2F%2Fgithub.com%2Ftoddysm%2Fcustos%2Fissues)
+![GitHub pull requests](https://img.shields.io/github/issues-pr-raw/toddysm/custos?link=https%3A%2F%2Fgithub.com%2Ftoddysm%2Fcustos%2Fpulls)
+
 > **Custos** (Latin: *guardian*, *keeper*) — *Custos verifies, isolates, and orchestrates.*
 
 Custos is a **pluggable workflow orchestrator for supply-chain security operations on OCI artifacts**. Security analysts, DevOps engineers, and developers define workflows in YAML (or via a visual designer) that operate on container images and other cloud-native artifacts stored in OCI-compliant registries. The orchestrator executes them durably on top of [Dapr Workflow](https://docs.dapr.io/developing-applications/building-blocks/workflow/); all real work happens inside independently versioned and deployable *actions* that conform to a stable orchestrator–action contract.
