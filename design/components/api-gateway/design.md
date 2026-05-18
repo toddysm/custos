@@ -142,15 +142,16 @@ Applies to every write endpoint (`POST`, `PUT`, `PATCH`, `DELETE`). The client S
 key = (workspaceId, principalId, route, idempotencyKey)
 ```
 
-Lookup against `MetadataStoreProvider.getIdempotencyRecord(key)`:
+Atomic reserve-or-read via `MetadataStoreProvider.reserveIdempotencyRecord(key, requestHash, ttlSeconds)`. The method returns one of four outcomes; the gateway acts as follows:
 
-| State | Action |
+| Outcome | Action |
 |---|---|
-| Not found | Reserve the key (insert row with `requestHash`, `status=in-progress`, `expiresAt=now+24h`), proceed with the request, then update the row with `responseSnapshot` and `status=completed`. |
-| Found, `status=completed`, `requestHash` matches | Return the stored response. |
-| Found, `status=in-progress` | Return `409 IdempotencyInFlight` with `Retry-After`. |
-| Found, `status=completed`, `requestHash` differs | Return `409 IdempotencyKeyReuse`. |
-| Found, expired | Treat as not found; overwrite. |
+| `Reserved` | The row is newly inserted as `status=in-progress`. Proceed with the request, then call `completeIdempotencyRecord(key, responseSnapshot)` to record the response and flip `status=completed`. |
+| `ExistingCompleted(response)` (stored `requestHash` matches) | Return the stored `responseSnapshot`. |
+| `ExistingInFlight` (row exists with `status=in-progress`) | Return `409 IdempotencyInFlight` with `Retry-After`. |
+| `KeyReuse` (stored `requestHash` differs from the current request) | Return `409 IdempotencyKeyReuse`. |
+
+Expired rows are treated as absent by `reserveIdempotencyRecord` itself (the adapter overwrites them in the same atomic step); the gateway never observes an expired row.
 
 `requestHash` is `SHA-256(method || route || workspaceId || sorted-headers-subset || body)`. Default TTL is 24h. Storage lives in the SPL via a new `IdempotencyRecord` entity on `MetadataStoreProvider` (delta on COMP-008).
 
