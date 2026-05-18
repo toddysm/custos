@@ -3,7 +3,7 @@
 Date: 2026-05-17
 Type: component-design
 Component: connector-service
-Sequence: 002
+Sequence: 007
 GitHub Issue: #57
 Status: open
 

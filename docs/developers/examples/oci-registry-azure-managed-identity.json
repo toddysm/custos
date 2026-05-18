@@ -36,7 +36,11 @@
       "produced": [
         "oci.image.pushed",
         "oci.tag.updated"
-      ]
+      ],
+      "pull": {
+        "cursorEncoding": "oci-list-tags-v1",
+        "initialCursorBehavior": "now"
+      }
     }
   }
 }
