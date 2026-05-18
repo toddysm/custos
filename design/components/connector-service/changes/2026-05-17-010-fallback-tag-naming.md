@@ -4,7 +4,7 @@ Date: 2026-05-17
 Type: component-design
 Component: connector-service
 Sequence: 010
-GitHub Issue: pending
+GitHub Issue: #62
 Status: open
 
 ## Summary

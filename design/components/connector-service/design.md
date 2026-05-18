@@ -614,6 +614,38 @@ Revocation flows through a **separate ARM → sidecar control channel**, not the
 
 This split keeps the activity-facing API a pure pull surface — there is no callback or server-push from the sidecar into the activity.
 
+#### Sidecar revoke control-channel API
+
+The control channel is a separate listener on the sidecar pod, used by ARM and by operator-initiated revoke flows from Connector Service.
+
+- **Transport**: HTTPS on a dedicated port (default `9443`), pod-local. Not exposed outside the pod's network namespace.
+- **Authentication**: mTLS. ARM and Connector Service present workload certs issued by the same identity provider that mints the bootstrap token. SPIFFE/SPIRE identity model defers to M3 per REQ-059; v1 uses cluster-issued certs rotated per pod.
+- **API**:
+
+  ```
+  POST /sidecar-admin/v1/revoke
+  Content-Type: application/json
+  Body: {
+    "leaseIds": ["lease_01HX...", "..."],
+    "reason": "operator-revoke" | "run-cancelled" | "step-terminal" | "<free-text>"
+  }
+  ```
+
+- **Response** (per-lease ack, operation is idempotent):
+
+  ```json
+  {
+    "results": [
+      { "leaseId": "lease_01HX...", "status": "revoked" },
+      { "leaseId": "lease_01HY...", "status": "not-found" },
+      { "leaseId": "lease_01HZ...", "status": "already-expired" }
+    ]
+  }
+  ```
+
+- **Side effects**: each successfully revoked lease fires `lease.revoked` (per the audit taxonomy already established). Subsequent activity-facing requests against those `leaseId`s return 410 Gone with the recorded reason.
+- **Failure modes**: 401 (mTLS rejected), 503 (sidecar shutting down — caller retries or treats as terminal-revoke success since the activity is exiting anyway).
+
 ### Audit
 
 Every lease state transition emits a structured event via the Observability Client. Event kinds:
@@ -623,6 +655,7 @@ Every lease state transition emits a structured event via the Observability Clie
 | `lease.issued` | Successful `GET /v1/token` |
 | `lease.refreshed` | Successful `POST /v1/token/refresh` |
 | `lease.released` | Explicit `POST /v1/token/release` |
+| `lease.revoke-requested` | Operator called a revoke endpoint; fires *before* the sidecar control-channel call. Carries `reason`, operator identity, selector (lease IDs, instance, or run). |
 | `lease.revoked` | ARM revoke signal |
 | `lease.expired` | TTL reached without refresh or release |
 | `lease.denied` | Request rejected (403/410/429) |
@@ -716,6 +749,15 @@ sequenceDiagram
 | GET | /v1/workspaces/{ws}/connectors/{id}/health | Probe health |
 | GET | /v1/workspaces/{ws}/connectors/{id}/cursor | Get current pull cursor envelope (admin) |
 | POST | /v1/workspaces/{ws}/connectors/{id}/cursor:rewind | Rewind cursor to `now`, `beginning`, or explicit envelope (admin) |
+| GET | /v1/workspaces/{ws}/connectors/{id}/leases | List currently-active leases on an instance (admin) |
+| GET | /v1/workspaces/{ws}/runs/{runId}/leases | List currently-active leases for a run (admin) |
+| POST | /v1/workspaces/{ws}/leases/{leaseId}:revoke | Revoke a single lease (admin) |
+| POST | /v1/workspaces/{ws}/connectors/{id}/leases:revoke-all | Revoke every active lease on an instance (admin) |
+| POST | /v1/workspaces/{ws}/runs/{runId}/leases:revoke-all | Revoke every active lease for a run (admin) |
+| POST | /v1/workspaces/{ws}/connectors/{id}/pull-loop:pause | Stop scheduling pull ticks for an instance (admin) |
+| POST | /v1/workspaces/{ws}/connectors/{id}/pull-loop:resume | Resume pull ticks for an instance (admin) |
+| POST | /v1/workspaces/{ws}/connectors/{id}:force-health-check | Synchronously probe upstream health (admin) |
+| GET | /v1/workspaces/{ws}/audit/leases | Query lease audit history (audit:read) |
 
 ### Internal RPCs
 
@@ -768,6 +810,77 @@ sequenceDiagram
     ARM-->>WF: Ready to run activity
 ```
 
+## Operator Admin Surface
+
+The admin endpoints listed in § Public Interface form a coherent operator-facing surface. This section ties them together with the live-state vs audit-history split, the permission model, and the audit events they produce.
+
+### Live state vs audit history
+
+Operator queries split along a deliberate boundary:
+
+- **Live state** is read from sidecars via a Connector Service fan-out RPC. Eventually consistent during sidecar restarts; fast; no history.
+  - `GET .../connectors/{id}/leases`
+  - `GET .../runs/{runId}/leases`
+  - `GET .../connectors/{id}/cursor`
+  - `GET .../connectors/{id}/health`
+- **Audit history** is read from the Observability Service's audit store. Durable; queryable; slower; carries every state transition Connector Service has ever emitted.
+  - `GET .../audit/leases` with filters: `runId`, `stepId`, `connectorInstanceId`, `leaseId`, `eventKind`, time range. Returns paginated event records.
+
+The audit query endpoint is a thin wrapper over the Observability Service's general audit query API (which Observability already needs for REQ-038). Connector Service does not maintain its own audit store.
+
+At M1 scale (tens of concurrent runs per workspace) the live-state fan-out RPC is bounded and fast. If we ever hit thousands of concurrent leases needing sub-100ms list latency, an aggregator becomes a worthwhile addition; v1 does not anticipate this.
+
+### Revoke flows
+
+Three revoke selectors, each backed by a corresponding endpoint:
+
+| Selector | Endpoint | Use case |
+|---|---|---|
+| Single lease | `POST .../leases/{leaseId}:revoke` | Targeted revoke (e.g. a specific lease flagged as compromised) |
+| All leases on an instance | `POST .../connectors/{id}/leases:revoke-all` | Instance secret rotated / instance suspected compromised |
+| All leases for a run | `POST .../runs/{runId}/leases:revoke-all` | Run cancellation that did not flow through ARM's normal cancel path |
+
+All revoke endpoints accept a JSON body `{ "reason": "<operator-supplied text>" }`. `reason` is **mandatory**; empty or missing returns 400. The reason flows to:
+1. The `lease.revoke-requested` audit event (fired immediately).
+2. The sidecar control-channel `POST /sidecar-admin/v1/revoke` call.
+3. The per-lease `lease.revoked` audit events fired by the sidecar.
+
+For aggregate selectors, Connector Service resolves the selector to a list of `leaseId`s via the live-state fan-out, then issues one control-channel call per affected sidecar. The operation is best-effort: leases that no longer exist (already-expired, already-revoked, sidecar gone) are reported as `not-found` or `already-expired` in the per-lease response and do not fail the operator request.
+
+### Pull-loop lifecycle operations
+
+Three operator endpoints control an instance's pull loop independent of revoke:
+
+| Endpoint | Effect | Audit event |
+|---|---|---|
+| `POST .../pull-loop:pause` | Stop scheduling pull ticks for the instance. Existing in-flight tick completes; no new ticks are scheduled. Cursor is preserved. | `connector.pull-loop.paused` |
+| `POST .../pull-loop:resume` | Resume tick scheduling from the last committed cursor. | `connector.pull-loop.resumed` |
+| `POST .../connectors/{id}:force-health-check` | Synchronously call the plugin's health probe and return the result. Does not change scheduling. | `connector.health-check.invoked` |
+
+Pause does **not** revoke active leases — running activities continue against their existing tokens until step terminal. Pause + cursor-rewind is the operator recipe for "stop pulling, then reset position, then resume" without restarting any in-flight activity.
+
+### Permission model
+
+Permissions named here, defined by COMP-002 (Auth Service):
+
+| Permission | Endpoints |
+|---|---|
+| `connector:read` | All `GET` endpoints for live state (`/leases`, `/cursor`, `/health`) |
+| `audit:read` | `GET .../audit/leases` |
+| `admin:connector` | All `:revoke`, `:revoke-all`, `:pause`, `:resume`, `:force-health-check`, `:rewind`, `:enable`, `:disable` endpoints |
+
+This design declares the permission names; the role hierarchy and assignment rules belong to COMP-002. Connector Service enforces by name only.
+
+### Audit events introduced by this section
+
+| Event | Trigger |
+|---|---|
+| `lease.revoke-requested` | Operator called a revoke endpoint. Carries `reason`, operator identity, selector. Fires before the sidecar control-channel call; per-lease `lease.revoked` fires after the sidecar acks. |
+| `connector.pull-loop.paused` | Operator called `:pause`. Carries operator identity, optional reason. |
+| `connector.pull-loop.resumed` | Operator called `:resume`. Carries operator identity. |
+| `connector.health-check.invoked` | Operator called `:force-health-check`. Carries result. |
+
+
 ## Open Questions
 
 _(none — all v1 design questions resolved)_
@@ -785,5 +898,6 @@ _(none — all v1 design questions resolved)_
 | 2026-05-17 | INCON-011: Documented Cursor Ownership — Connector Service owns one `ConnectorCursor` per `ConnectorInstance`; Trigger Service holds no cursor state. One pull loop per instance fans events out to multiple subscriptions | #36 |
 | 2026-05-17 | Sidecar Secret/Token API contract: UDS transport, bootstrap-token auth, three-endpoint API (`GET /v1/token`, `POST /v1/token/refresh`, `POST /v1/token/release`), 10-min default TTL with 4-level precedence and step-deadline cap, 16-lease concurrent cap, ARM control-channel revocation, `extras` opaque bag, full failure-mode table, sidecar internal lifecycle diagram | #57 |
 | 2026-05-17 | Pull Cursor Model: cursor envelope `{encoding, value, advancedAt}`; at-least-once delivery with Trigger Service `DedupKey` absorbing dups; normative `eventId` emission rule; DB-row-lease single-writer enforcement; admin rewind endpoint; `cursor.advanced`/`cursor.expired`/`cursor.encoding_mismatch` audit events; manifest fields `events.pull.cursorEncoding` and `events.pull.initialCursorBehavior` | #59 |
-| 2026-05-17 | Capability namespace governance: two-tier namespace (curated Tier 1 core prefixes + `x-<vendor>.<verb>` Tier 2 extensions); strict-superset semver compatibility policy within a major; deprecation flow; new curated registry at `design/architecture/capabilities.md`; `connector.registration.rejected` and `connector.capability.deprecated` audit events | pending |
-| 2026-05-17 | Fallback tag naming: lock v1 tag format `custos-connector-manifest-v1_<algorithm>-<hex>` with `_` separator; v1 sha256-only via registered-algorithms set; algorithm-agnostic format supports sha512/others in M2+ behind scheme version bump if length budget allows; full digest normalization rules; `connector.manifest.fallback-used`/`fallback-ignored`/`fallback-rejected` audit events | pending |
+| 2026-05-17 | Capability namespace governance: two-tier namespace (curated Tier 1 core prefixes + `x-<vendor>.<verb>` Tier 2 extensions); strict-superset semver compatibility policy within a major; deprecation flow; new curated registry at `design/architecture/capabilities.md`; `connector.registration.rejected` and `connector.capability.deprecated` audit events | #61 |
+| 2026-05-17 | Fallback tag naming: lock v1 tag format `custos-connector-manifest-v1_<algorithm>-<hex>` with `_` separator; v1 sha256-only via registered-algorithms set; algorithm-agnostic format supports sha512/others in M2+ behind scheme version bump if length budget allows; full digest normalization rules; `connector.manifest.fallback-used`/`fallback-ignored`/`fallback-rejected` audit events | #62 |
+| 2026-05-17 | Lease expiry and revocation operator UX: 11 new admin REST endpoints (revoke single/instance/run, list active leases by instance/run, pause/resume pull loop, force health check, audit query); sidecar revoke control-channel API (mTLS, `POST /sidecar-admin/v1/revoke` with per-lease idempotent acks); live-state-fan-out vs audit-history split; permission model (`connector:read`/`audit:read`/`admin:connector`); `lease.revoke-requested` plus three `connector.*` operator audit events | #63 |
