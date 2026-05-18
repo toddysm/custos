@@ -13,8 +13,11 @@ spec:
     metadata:
       labels:
         {{- include "svc.selectorLabels" . | nindent 8 }}
+      {{- $daprAnnotations := include "svc.daprAnnotations" . }}
+      {{- with $daprAnnotations }}
       annotations:
-        {{- include "svc.daprAnnotations" . | nindent 8 }}
+        {{- . | nindent 8 }}
+      {{- end }}
     spec:
       serviceAccountName: {{ include "svc.fullname" . }}
       containers:
