@@ -1,0 +1,6 @@
+apiVersion: v2
+name: workflow-service
+description: Custos workflow-service component chart.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

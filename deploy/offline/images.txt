@@ -1,0 +1,26 @@
+# Images required for an offline Custos install.
+# Format: <image>:<tag>
+# This list is consumed by `make bundle` to produce `docker save` archives.
+
+# Custos services
+ghcr.io/toddysm/custos/api-gateway:dev
+ghcr.io/toddysm/custos/auth-service:dev
+ghcr.io/toddysm/custos/workflow-service:dev
+ghcr.io/toddysm/custos/trigger-service:dev
+ghcr.io/toddysm/custos/connector-service:dev
+ghcr.io/toddysm/custos/activity-runtime-manager:dev
+ghcr.io/toddysm/custos/catalog-service:dev
+ghcr.io/toddysm/custos/observability-audit-service:dev
+ghcr.io/toddysm/custos/custos-migrate:dev
+ghcr.io/toddysm/custos/custos-bootstrap:dev
+
+# Platform dependencies
+ghcr.io/cloudnative-pg/postgresql:16.4
+minio/minio:RELEASE.2025-01-01T00-00-00Z
+ghcr.io/external-secrets/external-secrets:v0.10.0
+quay.io/keycloak/keycloak:25.0
+docker.io/grafana/loki:3.0.0
+docker.io/prom/prometheus:v2.55.0
+otel/opentelemetry-collector-contrib:0.110.0
+docker.io/envoyproxy/envoy:v1.32.0
+ghcr.io/dapr/daprd:1.14.0

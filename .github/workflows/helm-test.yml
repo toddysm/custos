@@ -1,0 +1,22 @@
+name: helm-test
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'deploy/helm/**'
+      - '.github/workflows/helm-test.yml'
+
+jobs:
+  template-snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2
+      - name: render all profiles
+        run: make template
+      - name: snapshot diff (TODO)
+        run: |
+          echo "TODO: compare rendered manifests against committed snapshots."

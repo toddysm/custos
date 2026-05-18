@@ -1,0 +1,41 @@
+# Profile: connected + HA
+# 3 replicas per service, CNPG 3-node Postgres, MinIO 4-node object store, ESO.
+
+topology: connected
+profile: ha
+
+global:
+  replicaCount: 3
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+postgres:
+  embedded: true
+  instances: 3
+  storageSize: 100Gi
+
+objectStorage:
+  embedded: true
+  nodes: 4
+  driveSize: 200Gi
+
+secrets:
+  backend: eso
+  eso:
+    enabled: true
+    provider: vault
+  sealed:
+    enabled: false
+
+oidc:
+  mode: external
+  issuer: https://login.microsoftonline.com/<tenant>/v2.0
+  clientId: ""
+
+gateway:
+  hostname: custos.example.com

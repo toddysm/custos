@@ -1,0 +1,6 @@
+apiVersion: v2
+name: minio
+description: MinIO distributed object storage for Custos (HA profiles only). Wraps the upstream MinIO Tenant pattern via plain StatefulSet for portability.
+type: application
+version: 0.1.0
+appVersion: "2025.01.01"

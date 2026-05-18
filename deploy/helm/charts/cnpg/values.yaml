@@ -1,0 +1,14 @@
+instances: 1
+storageSize: 20Gi
+storageClass: ""
+database: custos
+superuser: postgres
+imageName: ghcr.io/cloudnative-pg/postgresql:16.4
+# Note: the CNPG operator auto-generates a Secret named `<cluster>-app`
+# (here `custos-app`) holding the application user's credentials.
+# Consumers reference it via the umbrella's `postgres.secretName`. CNPG
+# owns the secret lifecycle, so this subchart does not template a secret.
+backup:
+  enabled: false
+  destinationPath: ""
+  endpointURL: ""

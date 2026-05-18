@@ -1,0 +1,37 @@
+# trigger-service — leave image.repository/tag/pullPolicy and replicaCount/resources
+# empty to inherit umbrella global.* values. Set them here only to override
+# the umbrella for this one subchart.
+
+enabled: true
+
+replicaCount: ""
+
+image:
+  repository: ""
+  tag: ""
+  pullPolicy: ""
+
+service:
+  type: ClusterIP
+  port: 8080
+
+resources: {}
+
+env: []
+
+dapr:
+  enabled: true
+  appPort: 8080
+  appProtocol: http
+  logLevel: info
+
+serviceMonitor:
+  enabled: false
+
+externalSecret:
+  enabled: false
+  refreshInterval: 1h
+  secretStoreRef:
+    name: custos-secret-store
+    kind: ClusterSecretStore
+  data: []

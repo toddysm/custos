@@ -1,0 +1,31 @@
+# Profile: connected + eval
+# Small footprint, single replica, external OIDC (GitHub/Entra), ESO for secrets.
+
+topology: connected
+profile: eval
+
+global:
+  replicaCount: 1
+
+postgres:
+  embedded: true
+  instances: 1
+
+objectStorage:
+  embedded: false
+
+secrets:
+  backend: eso
+  eso:
+    enabled: true
+    provider: vault
+  sealed:
+    enabled: false
+
+oidc:
+  mode: external
+  issuer: https://github.com/login/oauth
+  clientId: ""
+
+gateway:
+  hostname: custos.local

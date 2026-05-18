@@ -1,0 +1,61 @@
+apiVersion: v2
+name: custos
+description: Custos — pluggable workflow orchestrator for OCI supply-chain security. Umbrella chart.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.28.0-0"
+home: https://github.com/toddysm/custos
+sources:
+  - https://github.com/toddysm/custos
+maintainers:
+  - name: Toddy Mladenov
+    url: https://github.com/toddysm
+
+dependencies:
+  # Custos services
+  - name: api-gateway
+    version: 0.1.0
+    repository: "file://../charts/api-gateway"
+    condition: api-gateway.enabled
+  - name: auth-service
+    version: 0.1.0
+    repository: "file://../charts/auth-service"
+    condition: auth-service.enabled
+  - name: workflow-service
+    version: 0.1.0
+    repository: "file://../charts/workflow-service"
+    condition: workflow-service.enabled
+  - name: trigger-service
+    version: 0.1.0
+    repository: "file://../charts/trigger-service"
+    condition: trigger-service.enabled
+  - name: connector-service
+    version: 0.1.0
+    repository: "file://../charts/connector-service"
+    condition: connector-service.enabled
+  - name: activity-runtime-manager
+    version: 0.1.0
+    repository: "file://../charts/activity-runtime-manager"
+    condition: activity-runtime-manager.enabled
+  - name: catalog-service
+    version: 0.1.0
+    repository: "file://../charts/catalog-service"
+    condition: catalog-service.enabled
+  - name: observability-audit-service
+    version: 0.1.0
+    repository: "file://../charts/observability-audit-service"
+    condition: observability-audit-service.enabled
+  # Platform dependencies
+  - name: cnpg
+    version: 0.1.0
+    repository: "file://../charts/cnpg"
+    condition: postgres.embedded
+  - name: minio
+    version: 0.1.0
+    repository: "file://../charts/minio"
+    condition: objectStorage.embedded
+  - name: eso
+    version: 0.1.0
+    repository: "file://../charts/eso"
+    condition: secrets.eso.enabled

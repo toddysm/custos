@@ -1,0 +1,44 @@
+{{- if .Values.migrate.enabled -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: custos-migrate
+  namespace: {{ include "custos.namespace" . }}
+  labels:
+    {{- include "custos.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.migrate.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "custos.labels" . | nindent 8 }}
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      serviceAccountName: custos-migrate
+      containers:
+        - name: migrate
+          image: "{{ .Values.migrate.image.repository }}:{{ .Values.migrate.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          # Postgres connection details are read from the secret the CNPG
+          # operator generates for the application user (default name
+          # `<cluster>-app`; configurable via postgres.secretName). The
+          # secret exposes username/password/host/port/dbname/uri keys.
+          envFrom:
+            - secretRef:
+                name: {{ .Values.postgres.secretName | quote }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: custos-migrate
+  namespace: {{ include "custos.namespace" . }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-1"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+{{- end }}
