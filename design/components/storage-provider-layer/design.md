@@ -7,15 +7,15 @@ Status: Draft
 
 ## Responsibility
 
-The Storage Provider Layer (SPL) defines five small, stable interfaces — `DefinitionStoreProvider`, `CatalogStoreProvider`, `MetadataStoreProvider`, `ArtifactStoreProvider`, `AuthStoreProvider` — and routes all platform persistence through them. The rest of Custos has no compile-time or run-time dependency on Postgres, OCI registries, S3, or any other concrete backend. Adapters implement the interfaces; the platform is unaware of them.
+The Storage Provider Layer (SPL) defines seven small, stable interfaces — `DefinitionStoreProvider`, `CatalogStoreProvider`, `MetadataStoreProvider`, `ArtifactStoreProvider`, `AuthStoreProvider`, `LogQueryProvider`, `MetricsQueryProvider` — and routes all platform persistence and observability-query access through them. The rest of Custos has no compile-time or run-time dependency on Postgres, OCI registries, S3, or any other concrete backend. Adapters implement the interfaces; the platform is unaware of them.
 
 SPL also owns the migration runner that gates platform startup against schema-revision compatibility.
 
 ## Boundaries
 
 - Owns:
-  - The five provider interface contracts (operation shapes, error taxonomy, immutability rules).
-  - The workspace-scoping middleware that enforces multi-tenant boundaries on every call to the four workspace-scoped interfaces (`AuthStoreProvider` is exempt — it owns the workspace records themselves).
+  - The seven provider interface contracts (operation shapes, error taxonomy, immutability rules).
+  - The workspace-scoping middleware that enforces multi-tenant boundaries on every call to the four workspace-scoped storage interfaces (`AuthStoreProvider` is exempt — it owns the workspace records themselves; `LogQueryProvider` and `MetricsQueryProvider` are query facades and take `workspaceId` explicitly but hold no state, so the lint rule applies trivially).
   - The audit partition enforcer that keeps audit physically separate from ops state.
   - The migration runner and the schema-revision negotiation that gates startup.
   - The audit outbox protocol (writer side) — readers belong to Observability Service.
@@ -46,6 +46,8 @@ graph LR
         MetaIfc[MetadataStoreProvider]
         ArtIfc[ArtifactStoreProvider]
         AuthIfc[AuthStoreProvider]
+        LogQIfc[LogQueryProvider]
+        MetricsQIfc[MetricsQueryProvider]
         Scope[Workspace Scoping Middleware]
         AuditPart[Audit Partition Enforcer]
         Mig[Migration Runner]
@@ -56,6 +58,8 @@ graph LR
     CT --> CatIfc
     AR --> ArtIfc
     AU --> AuthIfc
+    OB --> LogQIfc
+    OB --> MetricsQIfc
 
     DefIfc --> PgDef[Postgres adapter]
     DefIfc -. M2+ .-> OciDef[OCI Registry adapter]
@@ -65,6 +69,11 @@ graph LR
     ArtIfc --> CsiArt[CSI/PVC adapter]
     ArtIfc -. opt .-> S3Art[S3 adapter]
     AuthIfc --> PgAuth[Postgres adapter]
+    LogQIfc --> LokiQ[Loki adapter]
+    LogQIfc --> OsQ[OpenSearch adapter]
+    LogQIfc --> NoopL[noop adapter]
+    MetricsQIfc --> PromQ[Prometheus adapter]
+    MetricsQIfc --> NoopM[noop adapter]
 
     DefIfc & CatIfc & MetaIfc & ArtIfc --> Scope
     MetaIfc --> AuditPart
@@ -96,9 +105,11 @@ erDiagram
 |---|---|
 | DefinitionStoreProvider | `Workflow`, `WorkflowVersion`, `WorkflowTemplate`, `WorkflowTemplateVersion` |
 | CatalogStoreProvider | `ActivityType`, `ActivityTypeVersion`, `ConnectorType`, `ConnectorTypeVersion` |
-| MetadataStoreProvider | `Run`, `Step`, `StepAttempt`, `ConnectorInstance`, `ConnectorCursor`, `Subscription`, `SubscriptionSelector`, `ResumeSubscription`, `DedupKey`, `Schedule`, `ArtifactUse` (backref), `IdempotencyRecord`, `DeviceCodeSession`, `AuditEvent`, `AuditOutboxRow` |
+| MetadataStoreProvider | `Run`, `Step`, `StepAttempt`, `ConnectorInstance`, `ConnectorCursor`, `Subscription`, `SubscriptionSelector`, `ResumeSubscription`, `DedupKey`, `Schedule`, `ArtifactUse` (backref), `IdempotencyRecord`, `DeviceCodeSession`, `AuditEvent`, `AuditOutboxRow`, `AuditOutboxCursor` |
 | ArtifactStoreProvider | `ArtifactBlob` (content-addressed; metadata lives in MetadataStore's `ArtifactUse` backref) |
 | AuthStoreProvider | `Tenant`, `Workspace`, `Principal` (User / ServiceAccount discriminator), `OidcIdentity`, `ServiceToken`, `Role`, `Permission`, `RoleBinding` |
+| LogQueryProvider | _(none — stateless query facade over the customer's chosen log backend)_ |
+| MetricsQueryProvider | _(none — stateless query facade over the customer's chosen metrics backend)_ |
 
 ### Tenancy
 
@@ -195,6 +206,14 @@ Grouped by entity family. All methods take `workspaceId` first (omitted from sig
 | `appendAudit(event)` | **Writes to the audit outbox table in the same transaction as the state mutation** when the caller provides a transaction handle (see Transaction Model below); otherwise standalone. Returns void; no read handle. |
 | `queryAudit(filter)` | Read-only. Used by Observability Service and the Connector Service lease-audit wrapper. |
 
+**Audit outbox drain (reader side, Observability Service only)**
+
+| Method | Notes |
+|---|---|
+| `streamAuditOutbox(cursor, batchSize)` → `AuditOutboxBatch` | Returns up to `batchSize` rows from `AuditOutboxRow` with `id > cursor`, in `id` ascending order. Idempotent and side-effect-free. The drainer is expected to call `commitAuditOutboxCursor` after persisting the batch downstream. |
+| `commitAuditOutboxCursor(pipelineId, cursor)` | Persists the high-water-mark cursor for a named pipeline (`audit-store`, `audit-alert`, ...). Each pipeline maintains its own cursor in `AuditOutboxCursor` so a slow consumer cannot block faster consumers. |
+| `listenAuditOutbox()` → `AsyncIterator<NotifyEvent>` | Optional optimization. Postgres adapter implements via `LISTEN outbox_notify`; adapters that lack a notify primitive return `NotSupported` and the drainer falls back to polling at `CUSTOS_AUDIT_OUTBOX_POLL_INTERVAL_S`. |
+
 ### ArtifactStoreProvider
 
 | Method | Semantics |
@@ -262,6 +281,43 @@ Persists the identity, tenancy, and RBAC entities owned by Auth Service (COMP-00
 **Immutability and audit**
 
 `OidcIdentity` rows are write-once (rebinding requires explicit delete + re-put with audit trail). `ServiceToken.hash` is immutable. All mutating methods participate in the audit outbox via the same transaction handle contract as `MetadataStoreProvider` (`appendAudit` is reachable from any provider's transaction).
+
+### LogQueryProvider
+
+A **query facade** over the customer's chosen log backend. Holds no persistent state, owns no schema, and runs no migration. Exists so the Custos UI/API per-run log tail and search can read from Loki, OpenSearch/Elasticsearch, or a `noop` pointer adapter without the rest of the platform knowing which.
+
+Concern separation: outbound log streaming (Custos → customer's sinks) is handled entirely by the OTel Collector configured by Observability Service. This interface is **only** the inbound read-back path.
+
+| Method | Semantics |
+|---|---|
+| `queryRunLogs(workspaceId, runId, filter, cursor)` → `LogPage` | Paged historical query. `filter` carries `stepId?`, `from?`, `to?`, `severity?`. `cursor` is opaque to the caller; the adapter encodes/decodes its backend-specific pagination token. |
+| `tailRunLogs(workspaceId, runId, fromCursor)` → `AsyncIterator<LogRecord>` | Live tail. The adapter MUST stream new records as they arrive and MUST honor the caller's cancellation. |
+| `queryStepLogs(workspaceId, runId, stepId, filter, cursor)` → `LogPage` | Step-scoped paged query. Same `filter` shape as `queryRunLogs` minus `stepId`. |
+
+**Failure surface**: `BackendUnavailable` (retry with backoff), `QueryUnsupported` (returned by `noop` adapter; UI shows the `CUSTOS_LOGS_EXTERNAL_URL` pointer), `WorkspaceMismatch` (404).
+
+Adapters (M1):
+- `loki` — translates `workspaceId`/`runId`/`stepId` to Loki label selectors; uses `query_range` for history and `tail` for streaming.
+- `opensearch` — same shape over the OpenSearch query DSL.
+- `noop` — always returns `QueryUnsupported`. Required when the customer's log backend has no OpenSource adapter (Splunk, Datadog, etc.); the UI links out to `CUSTOS_LOGS_EXTERNAL_URL`.
+
+### MetricsQueryProvider
+
+A **query facade** over the customer's chosen metrics backend. Same shape, same rationale, same outbound/inbound split as `LogQueryProvider`.
+
+Concern separation: outbound metric scraping (customer's Prometheus pulls component `/metrics`) is handled by Prometheus directly. This interface is the inbound read-back path used by the run-scoped metrics view in the Custos UI.
+
+| Method | Semantics |
+|---|---|
+| `queryRunMetrics(workspaceId, runId, metricSelector, range)` → `MetricSeries` | Returns time-bucketed values for a run-scoped metric. `metricSelector` carries `name` and an optional `labelMatchers` map; the adapter is responsible for adding the workspace/run filter. `range` is `{from, to, stepSeconds}`. |
+| `queryWorkspaceMetrics(workspaceId, metricSelector, range)` → `MetricSeries` | Workspace-scoped variant (no run filter). |
+| `queryInstantMetric(workspaceId, metricSelector, at)` → `MetricSample` | Single-point lookup; used by dashboards that show a "right-now" value. |
+
+**Failure surface**: same as `LogQueryProvider`.
+
+Adapters (M1):
+- `prometheus` — works for Prometheus, Mimir, Thanos, Cortex, VictoriaMetrics, Grafana Cloud's Prom-compatible endpoint, and any other PromQL-speaking backend. Single adapter covers the entire Prom-compatible ecosystem.
+- `noop` — same pattern; UI links to `CUSTOS_METRICS_EXTERNAL_URL`.
 
 ## Cross-cutting concerns
 
@@ -349,8 +405,11 @@ Each interface has a monotonically increasing **schema revision number** owned b
 | MetadataStoreProvider | 1 | initial v1 schema |
 | MetadataStoreProvider | 2 | adds `ConnectorCursor.encoding` |
 | MetadataStoreProvider | 3 | adds `IdempotencyRecord` and `DeviceCodeSession` entities (API Gateway short-lived state) |
+| MetadataStoreProvider | 4 | adds `AuditOutboxCursor` and per-pipeline drain cursors; required for Observability Service outbox drain |
 | DefinitionStoreProvider | 1 | initial v1 schema |
 | AuthStoreProvider | 1 | initial v1 schema (tenants, workspaces, principals, OIDC identities, service tokens, roles, permissions, role bindings) |
+| LogQueryProvider | 1 | initial; stateless — revision tracks contract version only |
+| MetricsQueryProvider | 1 | initial; stateless — revision tracks contract version only |
 
 Each adapter declares the set of revisions it implements at registration time:
 
@@ -378,6 +437,8 @@ Migrations are forward-only in v1. Down-migrations require explicit operator bac
 | `CUSTOS_METADATA_STORE` | Yes | `postgres` | Adapter identifier for MetadataStoreProvider. |
 | `CUSTOS_ARTIFACT_STORE` | Yes | `csi-pvc` | Adapter identifier for ArtifactStoreProvider. |
 | `CUSTOS_AUTH_STORE` | Yes | `postgres` | Adapter identifier for AuthStoreProvider. |
+| `CUSTOS_LOG_QUERY_PROVIDER` | Yes | `loki` | Adapter identifier for LogQueryProvider. `loki` / `opensearch` / `noop`. |
+| `CUSTOS_METRICS_QUERY_PROVIDER` | Yes | `prometheus` | Adapter identifier for MetricsQueryProvider. `prometheus` / `noop`. |
 | `CUSTOS_POSTGRES_DSN` | Conditional | — | Required when any Postgres adapter is active. |
 | `CUSTOS_AUDIT_SCHEMA` | No | `custos_audit` | Postgres schema for the audit partition. |
 | `CUSTOS_STATE_SCHEMA` | No | `custos_state` | Postgres schema for ops state. |
@@ -424,3 +485,4 @@ _(none — all v1 design questions resolved this session.)_
 | 2026-05-17 | Initial component design: four provider interfaces (Definition/Catalog/Metadata/Artifact), workspace-scoping middleware, audit partition enforcer with outbox pattern, abstract lease primitive, migration runner with `strict` startup policy, M2+ deferral of OCI-registry adapter, MetadataStore-owned artifact backrefs | #64 |
 | 2026-05-17 | Add `AuthStoreProvider` interface for Auth Service persistence (tenants, workspaces, principals, OIDC identities, service tokens, roles, permissions, role bindings). Exempt from workspace-scoping middleware. Adds `CUSTOS_AUTH_STORE` config and migration revision `AuthStoreProvider:1`. | #66 |
 | 2026-05-17 | Add `IdempotencyRecord` and `DeviceCodeSession` entities to `MetadataStoreProvider` for API Gateway short-lived state. Adds atomic `reserveIdempotencyRecord`/`completeIdempotencyRecord` for write-endpoint dedup, and device-code-session CRUD for the OIDC device-code flow. Bumps `MetadataStoreProvider` revision to 3. | #70 |
+| 2026-05-17 | Add `LogQueryProvider` and `MetricsQueryProvider` query-facade interfaces for the Observability Service inbound read-back path (Concern B), explicitly separated from outbound telemetry streaming via OTel Collector (Concern A). Add audit outbox drain protocol (`streamAuditOutbox`, `commitAuditOutboxCursor`, `listenAuditOutbox`) to `MetadataStoreProvider`. Bumps `MetadataStoreProvider` to revision 4. Adds `CUSTOS_LOG_QUERY_PROVIDER` and `CUSTOS_METRICS_QUERY_PROVIDER` config. | #73 |
