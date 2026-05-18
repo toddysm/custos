@@ -24,9 +24,13 @@ spec:
         - name: migrate
           image: "{{ .Values.migrate.image.repository }}:{{ .Values.migrate.image.tag }}"
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
-          env:
-            - name: CUSTOS_POSTGRES_SECRET
-              value: {{ .Values.postgres.secretName | quote }}
+          # Postgres connection details are read from the secret the CNPG
+          # operator generates for the application user (default name
+          # `<cluster>-app`; configurable via postgres.secretName). The
+          # secret exposes username/password/host/port/dbname/uri keys.
+          envFrom:
+            - secretRef:
+                name: {{ .Values.postgres.secretName | quote }}
 ---
 apiVersion: v1
 kind: ServiceAccount

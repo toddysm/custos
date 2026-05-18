@@ -49,8 +49,15 @@ postgres:
   storageClass: ""
   database: custos
   superuser: postgres
-  # connection secret name (created by ESO/Sealed Secrets or referenced if external)
-  secretName: custos-postgres
+  # Connection secret consumed by the SPL migration Job and by every service
+  # that needs DB credentials. Defaults to the Secret CloudNativePG creates
+  # automatically for the application user of the Cluster named `custos`
+  # (CNPG convention: <cluster-name>-app). The secret carries the keys
+  # `username`, `password`, `host`, `port`, `dbname`, `uri`.
+  #
+  # If postgres.embedded=false (bring-your-own DB), set secretName to a
+  # Secret you provision out-of-band with the same six keys.
+  secretName: custos-app
 
 # Object storage (MinIO) — only HA profiles enable this
 objectStorage:
