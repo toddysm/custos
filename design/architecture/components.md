@@ -13,7 +13,7 @@ Last Updated: 2026-05-17
 | COMP-005 | Connector Service | connector-service | Connector runtime and connector plugin loading/execution | Python plugin runtime, Dapr Secrets | Designed |
 | COMP-006 | Activity Runtime Manager | activity-runtime-manager | Activity resolution, execution, lifecycle, and result mapping | Python, Kubernetes Jobs, Dapr | Designed |
 | COMP-007 | Definition/Template/Catalog Service | catalog-service | Workflow definitions, template lifecycle, activity/connector catalog metadata | Python, provider abstractions | Designed |
-| COMP-008 | Storage Provider Layer | storage-provider-layer | Abstraction and adapters for definitions, metadata, catalog, and artifacts | Python interfaces, provider plugins | Defined |
+| COMP-008 | Storage Provider Layer | storage-provider-layer | Abstraction and adapters for definitions, metadata, catalog, and artifacts | Python interfaces, provider plugins | Designed |
 | COMP-009 | Observability and Audit Service | observability-audit-service | Structured execution events, audit records, logs/traces/metrics export | OpenTelemetry, Kubernetes logging stack | Defined |
 | COMP-010 | Web UI and Template Designer | web-ui | Workflow authoring, template authoring, run inspection and ops UX | React, TypeScript | Defined |
 
