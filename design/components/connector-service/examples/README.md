@@ -14,7 +14,7 @@ These examples are concrete `ConnectorManifest` payloads that conform to `schema
 ## Notes
 
 - Examples cover three `target.kind` values: `oci-registry` (four files), `azure-blob-storage` (`azure-blob-storage-kms.manifest.json`), and `amazon-s3-bucket` (`amazon-s3-bucket-amazon-kms.manifest.json`).
-- Target configuration is defined inline at `spec.target` as a `{kind, config}` property bag (see change 001).
+- Target configuration is defined inline at `spec.target` as a property bag with common fields `kind`, required `endpoint`, optional `verifyTls`, and required `config` (see change 001).
 - Credential mode is defined inline at `spec.credentials.authenticationType`.
 - Credential details are provided inline at `spec.credentials.authentication`.
 - Manifest payload is self-contained and does not require external config/secret schema references.
