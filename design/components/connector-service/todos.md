@@ -1,12 +1,17 @@
 # Connector Service TODOs
 
-Last Updated: 2026-05-15
+Last Updated: 2026-05-17
 
-- [x] Define strict JSON schema for ConnectorManifest v1 fields and validation errors.
+## Open
+
 - [ ] Specify capability namespace governance and compatibility policy.
 - [ ] Finalize fallback tag naming for manifest discovery and digest normalization algorithm.
-- [ ] Define sidecar secret/token API contract (request/response, auth, lease binding, refresh).
 - [ ] Define lease expiry and revocation behavior for running activities.
 - [ ] Define pull cursor model and dedup key strategy for trigger streams.
 - [ ] Define connector test harness and conformance criteria.
 - [ ] Keep example manifests synchronized with schema updates.
+
+## Closed
+
+- [x] Define strict JSON schema for ConnectorManifest v1 fields and validation errors.
+- [x] Define sidecar secret/token API contract (request/response, auth, lease binding, refresh). Closed 2026-05-17 — see `design.md` § Secret and Token Flow to Activities.
