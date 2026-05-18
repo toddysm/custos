@@ -63,16 +63,19 @@ graph LR
     TLS --> CORS --> Val
     Val --> AuthMW
     Val -. webhook routes .-> WHPath
+    Val -. auth-bootstrap routes .-> DevCode
     AuthMW -->|verifyAndAuthorize| AuthSvc[Auth Service]
     AuthMW --> WsRes --> Idem --> RL --> CtxMint
     CtxMint -->|callctx.sign| AuthSvc
-    DevCode <--> AuthSvc
+    DevCode <-->|OIDC verify + token mint| AuthSvc
+    DevCode <-->|session state| Meta[(SPL MetadataStore)]
     CtxMint --> Router
     Router -->|Dapr service invocation| Downstream[Downstream Components]
     WHPath -->|forward unauth| Trigger[Trigger Service]
     Router --> Shape --> Tel
     WHPath --> Shape
-    Idem <-->|read/write| Meta[(SPL MetadataStore)]
+    DevCode --> Shape
+    Idem <-->|read/write| Meta
 ```
 
 ## URL Shape and Workspace Addressing
@@ -106,7 +109,18 @@ The Workspace Resolver extracts `{workspaceId}` from the path and supplies it to
 
 ## AuthN / AuthZ Path
 
-Every request except webhook ingress and the OIDC callback runs through:
+Two route families bypass `AuthN/AuthZ Middleware` entirely (they are anonymous at the gateway boundary by design):
+
+1. **Webhook ingress** — `POST /v1/webhooks/{connectorInstanceId}`. The Validator detects the route prefix and dispatches directly to the Webhook Pass-through; signature verification belongs to Trigger Service / the connector plugin.
+2. **Auth-bootstrap routes** — the endpoints a caller hits *before* they have a bearer token to present:
+   - `POST /v1/auth/login/oidc/callback` (server-side OIDC callback from the issuer)
+   - `POST /v1/auth/login/device` (start a device-code session)
+   - `POST /v1/auth/login/device/{deviceCode}/poll` (CLI polling)
+   - `GET /v1/auth/login/device/{userCode}` (browser landing page)
+
+   The Validator dispatches these to the Device-Code Session Manager, which mediates with Auth Service for OIDC verification and token minting. No call context is signed for these requests — the caller is not yet a known principal.
+
+Every other request runs through:
 
 ```mermaid
 sequenceDiagram
