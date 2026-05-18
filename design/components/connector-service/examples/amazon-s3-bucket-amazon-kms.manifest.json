@@ -35,7 +35,11 @@
       "produced": [
         "s3.object.created",
         "s3.object.deleted"
-      ]
+      ],
+      "pull": {
+        "cursorEncoding": "s3-list-objects-v1",
+        "initialCursorBehavior": "now"
+      }
     }
   }
 }

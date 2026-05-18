@@ -210,8 +210,55 @@
                 "$ref": "#/$defs/eventType"
               },
               "description": "Catalog of normalized event types this connector emits. Workflow triggers reference these names."
+            },
+            "pull": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "cursorEncoding",
+                "initialCursorBehavior"
+              ],
+              "properties": {
+                "cursorEncoding": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9-]*(?:\\.[a-z0-9][a-z0-9-]*)*$",
+                  "minLength": 1,
+                  "maxLength": 64,
+                  "description": "Connector-type-declared cursor envelope identifier. Bumping this value triggers the encoding-migration flow."
+                },
+                "initialCursorBehavior": {
+                  "enum": [
+                    "now",
+                    "beginning",
+                    "custom"
+                  ],
+                  "description": "Starting position on first tick when no operator-supplied initial cursor exists."
+                }
+              },
+              "description": "Pull-mode cursor semantics. Required when delivery contains \"pull\"."
             }
-          }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "delivery": {
+                    "contains": {
+                      "const": "pull"
+                    }
+                  }
+                },
+                "required": [
+                  "delivery"
+                ]
+              },
+              "then": {
+                "required": [
+                  "pull"
+                ]
+              }
+            }
+          ]
         }
       }
     }
