@@ -1,0 +1,53 @@
+apiVersion: v2
+name: custos
+description: Custos — pluggable workflow orchestrator for OCI supply-chain security. Umbrella chart.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.28.0-0"
+home: https://github.com/toddysm/custos
+sources:
+  - https://github.com/toddysm/custos
+maintainers:
+  - name: Toddy Mladenov
+    url: https://github.com/toddysm
+
+dependencies:
+  # Custos services
+  - name: api-gateway
+    version: 0.1.0
+    repository: "file://../charts/api-gateway"
+  - name: auth-service
+    version: 0.1.0
+    repository: "file://../charts/auth-service"
+  - name: workflow-service
+    version: 0.1.0
+    repository: "file://../charts/workflow-service"
+  - name: trigger-service
+    version: 0.1.0
+    repository: "file://../charts/trigger-service"
+  - name: connector-service
+    version: 0.1.0
+    repository: "file://../charts/connector-service"
+  - name: activity-runtime-manager
+    version: 0.1.0
+    repository: "file://../charts/activity-runtime-manager"
+  - name: catalog-service
+    version: 0.1.0
+    repository: "file://../charts/catalog-service"
+  - name: observability-audit-service
+    version: 0.1.0
+    repository: "file://../charts/observability-audit-service"
+  # Platform dependencies
+  - name: cnpg
+    version: 0.1.0
+    repository: "file://../charts/cnpg"
+    condition: postgres.embedded
+  - name: minio
+    version: 0.1.0
+    repository: "file://../charts/minio"
+    condition: objectStorage.embedded
+  - name: eso
+    version: 0.1.0
+    repository: "file://../charts/eso"
+    condition: secrets.eso.enabled

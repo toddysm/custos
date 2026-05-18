@@ -1,0 +1,6 @@
+apiVersion: v2
+name: eso
+description: External Secrets Operator ClusterSecretStore for Custos. Operator install is out-of-band (CRDs must exist).
+type: application
+version: 0.1.0
+appVersion: "0.10.0"

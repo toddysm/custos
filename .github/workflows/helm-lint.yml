@@ -1,0 +1,37 @@
+name: helm-lint
+
+on:
+  pull_request:
+    paths:
+      - 'deploy/helm/**'
+      - 'scripts/lint-charts.sh'
+      - '.github/workflows/helm-lint.yml'
+  push:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        profile:
+          - connected-eval
+          - connected-ha
+          - airgapped-eval
+          - airgapped-ha
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2
+      - name: helm dependency update
+        run: cd deploy/helm/custos && helm dependency update
+      - name: helm lint
+        run: cd deploy/helm/custos && helm lint . -f values-${{ matrix.profile }}.yaml
+      - name: helm template
+        run: cd deploy/helm/custos && helm template custos . -f values-${{ matrix.profile }}.yaml > /tmp/render-${{ matrix.profile }}.yaml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rendered-${{ matrix.profile }}
+          path: /tmp/render-${{ matrix.profile }}.yaml

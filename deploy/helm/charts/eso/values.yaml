@@ -1,0 +1,14 @@
+clusterSecretStoreName: custos-secret-store
+provider: vault   # vault | aws | azure | gcp
+vault:
+  server: ""
+  path: secret
+  version: v2
+  authMountPath: kubernetes
+  authRole: custos
+aws:
+  region: ""
+azure:
+  vaultUrl: ""
+gcp:
+  projectID: ""

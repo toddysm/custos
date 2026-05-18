@@ -1,0 +1,6 @@
+apiVersion: v2
+name: cnpg
+description: CloudNativePG Cluster CR for Custos Postgres. Assumes the CNPG operator and CRDs are pre-installed.
+type: application
+version: 0.1.0
+appVersion: "1.24.0"

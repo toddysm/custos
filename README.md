@@ -101,6 +101,46 @@ Target cluster environments: AKS, EKS, GKE, k3s, OpenShift, and vanilla Kubernet
 | [docs/developers/README.md](docs/developers/README.md) | Plugin, connection, and activity developer guide |
 | [docs/developers/connections-api.md](docs/developers/connections-api.md) | Connector Manifest v1 reference for connection developers |
 
+## Repository layout
+
+```
+custos/
+├── design/              # design documents (requirements, architecture, components)
+├── docs/                # user / developer / contributor documentation
+├── src/
+│   ├── services/        # one folder per deployable service (8 services)
+│   ├── libs/            # shared Python libraries (SPL, common, callctx)
+│   └── jobs/            # Helm-invoked Jobs (migrate, bootstrap)
+├── deploy/
+│   ├── helm/
+│   │   ├── custos/      # umbrella chart (4 profile values files)
+│   │   └── charts/      # per-component + dependency subcharts
+│   ├── offline/         # air-gapped install bundle recipe
+│   └── alert-rules/     # default observability alert rules
+├── tests/               # helm-render + integration tests
+├── scripts/             # helper scripts
+└── .github/workflows/   # CI (helm lint/test)
+```
+
+## Helm
+
+The umbrella chart at `deploy/helm/custos/` installs the full platform — Custos services, CloudNativePG, MinIO (HA only), External Secrets Operator (connected) or Sealed Secrets (airgapped), plus Envoy Gateway resources, the SPL migration Job, and the bootstrap Job.
+
+Four profile values files cover the supported topologies (see [design/architecture/reference-deployment.md](design/architecture/reference-deployment.md)):
+
+| File | Topology | Profile |
+|---|---|---|
+| `values-connected-eval.yaml` | Connected | Eval (single replica, no MinIO) |
+| `values-connected-ha.yaml` | Connected | HA (3 replicas, MinIO) |
+| `values-airgapped-eval.yaml` | Air-gapped | Eval (Keycloak, Sealed Secrets) |
+| `values-airgapped-ha.yaml` | Air-gapped | HA (Keycloak, Sealed Secrets, MinIO) |
+
+```bash
+make lint        # helm lint umbrella chart against all 4 profiles
+make template    # render manifests into build/ for all 4 profiles
+make bundle      # build air-gapped offline tarball (stub)
+```
+
 ## License
 
 Apache 2.0 — see [LICENSE](LICENSE).

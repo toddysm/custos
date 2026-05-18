@@ -1,0 +1,138 @@
+# Custos umbrella chart — baseline defaults.
+#
+# This file holds defaults common across all profiles. Profile-specific overrides
+# live in values-<topology>-<profile>.yaml.
+
+global:
+  namespace: custos-system
+  imageRegistry: ghcr.io/toddysm/custos
+  imageTag: dev
+  imagePullPolicy: IfNotPresent
+  imagePullSecrets: []
+  # correlationId header name minted by API Gateway and propagated downstream
+  correlationIdHeader: x-correlation-id
+
+# Topology: connected | airgapped
+topology: connected
+# Profile: eval | ha
+profile: eval
+
+# Postgres (CloudNativePG)
+postgres:
+  embedded: true        # set false to bring your own
+  instances: 1          # 1 for eval, 3 for HA
+  storageSize: 20Gi
+  storageClass: ""
+  database: custos
+  superuser: postgres
+  # connection secret name (created by ESO/Sealed Secrets or referenced if external)
+  secretName: custos-postgres
+
+# Object storage (MinIO) — only HA profiles enable this
+objectStorage:
+  embedded: false
+  nodes: 4
+  driveSize: 100Gi
+  buckets:
+    - custos-artifacts
+    - custos-postgres-backups
+    - custos-loki
+
+# Secrets management
+secrets:
+  # Backend: eso | sealed
+  backend: eso
+  eso:
+    enabled: true
+    # ESO provider: vault | aws | azure | gcp
+    provider: vault
+    clusterSecretStoreName: custos-secret-store
+  sealed:
+    enabled: false
+
+# OIDC identity provider
+oidc:
+  # external (GitHub/Entra) for connected; in-cluster Keycloak for airgapped
+  mode: external
+  issuer: ""
+  clientId: ""
+  clientSecretRef:
+    name: custos-oidc
+    key: clientSecret
+  keycloak:
+    enabled: false
+
+# Envoy Gateway + Gateway API
+gateway:
+  className: envoy
+  hostname: custos.local
+  tlsSecretName: custos-gateway-tls
+
+# Dapr sidecar injection (Dapr installed out-of-band)
+dapr:
+  enabled: true
+  logLevel: info
+  appProtocol: http
+
+# Observability backends
+observability:
+  loki:
+    enabled: true
+    url: http://loki:3100
+  prometheus:
+    enabled: true
+    url: http://prometheus-server
+  otelCollector:
+    enabled: true
+
+# Default resource requests/limits applied to services without overrides
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# Default replica count
+replicaCount: 1
+
+# Pre-install/upgrade SPL migration Job
+migrate:
+  enabled: true
+  image:
+    repository: ghcr.io/toddysm/custos/custos-migrate
+    tag: dev
+  backoffLimit: 3
+
+# Post-install bootstrap Job (tenant-default, workspace-default, admin binding)
+bootstrap:
+  enabled: true
+  image:
+    repository: ghcr.io/toddysm/custos/custos-bootstrap
+    tag: dev
+  adminPrincipalIdRef:
+    name: custos-bootstrap
+    key: adminPrincipalId
+
+# NetworkPolicies — default deny-all + explicit allow per service
+networkPolicies:
+  enabled: true
+
+# Subchart toggles (when umbrella renders subcharts)
+api-gateway:
+  enabled: true
+auth-service:
+  enabled: true
+workflow-service:
+  enabled: true
+trigger-service:
+  enabled: true
+connector-service:
+  enabled: true
+activity-runtime-manager:
+  enabled: true
+catalog-service:
+  enabled: true
+observability-audit-service:
+  enabled: true

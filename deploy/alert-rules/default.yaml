@@ -1,0 +1,24 @@
+# Default alert rules consumed by the Observability and Audit Service.
+# Schema reference: design/components/observability-audit-service/design.md (TODO-001).
+# Each rule matches on eventName, severity, and component, then dispatches via configured sinks.
+
+rules:
+  - name: audit-drain-lagging
+    eventName: obs.outbox.lagging
+    severity: warning
+    sinks:
+      - webhook
+
+  - name: exporter-config-rejected
+    eventName: obs.exporter.config.rejected
+    severity: error
+    sinks:
+      - webhook
+
+  - name: authz-deny-burst
+    eventName: authz.decision
+    match:
+      decision: deny
+    throttle: 5m
+    sinks:
+      - webhook

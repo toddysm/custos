@@ -1,0 +1,44 @@
+{{- if .Values.bootstrap.enabled -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: custos-bootstrap
+  namespace: {{ include "custos.namespace" . }}
+  labels:
+    {{- include "custos.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install
+    "helm.sh/hook-weight": "10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        {{- include "custos.labels" . | nindent 8 }}
+        app.kubernetes.io/component: bootstrap
+    spec:
+      restartPolicy: Never
+      serviceAccountName: custos-bootstrap
+      containers:
+        - name: bootstrap
+          image: "{{ .Values.bootstrap.image.repository }}:{{ .Values.bootstrap.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          env:
+            - name: CUSTOS_ADMIN_PRINCIPAL_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.bootstrap.adminPrincipalIdRef.name | quote }}
+                  key: {{ .Values.bootstrap.adminPrincipalIdRef.key | quote }}
+                  optional: true
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: custos-bootstrap
+  namespace: {{ include "custos.namespace" . }}
+  annotations:
+    "helm.sh/hook": post-install
+    "helm.sh/hook-weight": "9"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+{{- end }}

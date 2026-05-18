@@ -1,0 +1,46 @@
+# Profile: airgapped + HA
+# 3 replicas, CNPG 3-node, MinIO 4-node, Sealed Secrets, in-cluster Keycloak.
+
+topology: airgapped
+profile: ha
+
+replicaCount: 3
+
+global:
+  imageRegistry: registry.internal/custos
+  imageTag: dev
+
+postgres:
+  embedded: true
+  instances: 3
+  storageSize: 100Gi
+
+objectStorage:
+  embedded: true
+  nodes: 4
+  driveSize: 200Gi
+
+secrets:
+  backend: sealed
+  eso:
+    enabled: false
+  sealed:
+    enabled: true
+
+oidc:
+  mode: keycloak
+  issuer: http://keycloak.custos-system.svc.cluster.local/realms/custos
+  clientId: custos
+  keycloak:
+    enabled: true
+
+gateway:
+  hostname: custos.internal
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi

@@ -1,0 +1,35 @@
+# Profile: airgapped + eval
+# Single replica, Sealed Secrets (no ESO), in-cluster Keycloak for OIDC.
+
+topology: airgapped
+profile: eval
+
+replicaCount: 1
+
+global:
+  imageRegistry: registry.internal/custos
+  imageTag: dev
+
+postgres:
+  embedded: true
+  instances: 1
+
+objectStorage:
+  embedded: false
+
+secrets:
+  backend: sealed
+  eso:
+    enabled: false
+  sealed:
+    enabled: true
+
+oidc:
+  mode: keycloak
+  issuer: http://keycloak.custos-system.svc.cluster.local/realms/custos
+  clientId: custos
+  keycloak:
+    enabled: true
+
+gateway:
+  hostname: custos.internal

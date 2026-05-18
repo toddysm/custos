@@ -1,0 +1,11 @@
+instances: 1
+storageSize: 20Gi
+storageClass: ""
+database: custos
+superuser: postgres
+imageName: ghcr.io/cloudnative-pg/postgresql:16.4
+secretName: custos-postgres
+backup:
+  enabled: false
+  destinationPath: ""
+  endpointURL: ""
