@@ -65,7 +65,7 @@ erDiagram
 - ConnectorTypeVersion: immutable plugin version descriptor.
 - ConnectorInstance: workspace-scoped configured connection.
 - ConnectorBinding: runtime binding between a step and one connector instance.
-- ConnectorCursor: durable cursor/checkpoint for pull streams and reconnect. Fields: `encoding` (string, from manifest), `value` (opaque, plugin-managed, nullable), `advancedAt` (timestamp), `leaseHolder` (string, single-writer enforcement), `leaseExpiresAt` (timestamp). See § Pull Cursor Model.
+- ConnectorCursor: durable cursor/checkpoint for pull streams and reconnect. Fields: `encoding` (string, from manifest), `value` (opaque, plugin-managed, nullable; `null` is the uninitialized sentinel), `advancedAt` (timestamp of the last cursor write — initialization, advance, or operator rewind; never null once the row exists), `leaseHolder` (string, single-writer enforcement), `leaseExpiresAt` (timestamp). See § Pull Cursor Model.
 - IdentitySource: one of KMS-backed secret, workload identity, federated identity.
 
 ## Plugin Packaging and Discovery
@@ -445,11 +445,11 @@ A `ConnectorCursor` is a structured envelope around an opaque, connector-type-de
 
 - `encoding` — connector-type-declared string, registered in the manifest under `events.pull.cursorEncoding`. Allows a connector type to evolve its cursor representation without colliding with persisted state from older versions.
 - `value` — opaque to Connector Service core; only the plugin reads and writes it. The platform never parses or compares it. `null` is the well-defined "uninitialized" sentinel.
-- `advancedAt` — platform-managed timestamp of the last successful advance. Used by operator UI (e.g. "cursor last moved 3h ago" surfaces a stalled stream).
+- `advancedAt` — platform-managed timestamp of the last cursor write (initialization, successful advance, or operator rewind). It is set on cursor creation and updated on every committed write thereafter; the field is therefore never null once the row exists. "Last advance" semantics for operator UI ("cursor last moved 3h ago" surfaces a stalled stream) hold because an uninitialized cursor that never advances still shows monotonically growing age relative to its initialization, which is itself a stalled-stream signal. Distinguishing "advanced at least once" from "still at the initial value" is derivable from `value` (the initial write sets `value: null`; any subsequent commit produces a non-null value), so a separate `hasAdvanced` boolean is not part of the envelope.
 
 ### Initial value
 
-On the first pull tick for a new `ConnectorInstance`, Connector Service writes `{ encoding: <from-manifest>, value: null, advancedAt: <now> }`. The plugin's first `listen(mode=pull)` call observes `cursor.value == null` and chooses its starting position per its declared `events.pull.initialCursorBehavior` (one of `now`, `beginning`, `custom`). Operators may override the initial position via the admin rewind operation (see below).
+On the first pull tick for a new `ConnectorInstance`, Connector Service writes `{ encoding: <from-manifest>, value: null, advancedAt: <now> }`. This initialization write is what `advancedAt` records — see the field definition above for why "last cursor write" rather than "last successful advance" is the precise semantics. The plugin's first `listen(mode=pull)` call observes `cursor.value == null` and chooses its starting position per its declared `events.pull.initialCursorBehavior` (one of `now`, `beginning`, `custom`). Operators may override the initial position via the admin rewind operation (see below).
 
 ### Advancement and commit semantics
 
