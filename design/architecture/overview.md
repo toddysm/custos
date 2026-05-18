@@ -173,6 +173,8 @@ graph LR
 
 In the Deployment Model, `API --> <svc>` edges describe deployment topology and ingress reachability across the cluster (Dapr sidecar adjacency, network paths the gateway *can* reach), not the set of services that currently expose user-facing REST through the gateway. The Component Map above is authoritative for "which services route REST through the API Gateway today" — at time of writing that is Auth, Workflow Service, Trigger Service, Catalog Service, and Connector Service. Additional services will earn Component Map edges once their component designs declare public interfaces.
 
+The diagram above is the **logical** deployment model. For the concrete reference deployment — Helm chart layout, topology variants (`connected` vs `airgapped`), profiles (`eval` vs `HA`), image inventory, ingress (Envoy Gateway), Postgres (CloudNativePG), secrets (External Secrets Operator + Vault/cloud-vault), and the air-gapped offline-install bundle — see [reference-deployment.md](./reference-deployment.md).
+
 ## Workflow and Template Schema
 
 Workflows and templates share one YAML schema. Templates declare `placeholders` that must be supplied when a workflow is materialized from the template (ADR-009). Expressions use a pure CEL-like language; arbitrary Python `eval` is never used at orchestration time (ADR-011).
