@@ -506,11 +506,11 @@ This writes the new cursor envelope, fires `cursor.advanced` (with reason `admin
 
 | Event | Trigger |
 |---|---|
-| `cursor.advanced` | Cursor successfully committed after a tick or admin rewind. Carries `from`/`to` envelopes (encoding + truncated value), `reason` (`tick` \| `admin-rewind`), `eventCount`. |
-| `cursor.expired` | Plugin returned `CursorExpired`. Carries last-known cursor, upstream error detail. |
+| `cursor.advanced` | Cursor successfully committed after a tick or admin rewind. Carries `from`/`to` audit envelopes (`encoding`, `valueFingerprint`, and optional `valueLength`; never raw `value`), `reason` (`tick` \| `admin-rewind`), `eventCount`. |
+| `cursor.expired` | Plugin returned `CursorExpired`. Carries the last-known cursor in the same audit-envelope form (`encoding`, `valueFingerprint`, and optional `valueLength`; never raw `value`), upstream error detail. |
 | `cursor.encoding_mismatch` | Plugin returned `CursorEncodingMismatch`. Carries persisted `encoding`, plugin-declared `encoding`. |
 
-Audit events never carry secret material; `value` is truncated to a fixed prefix (default 32 chars) when logged.
+Audit events never carry raw cursor `value`. Cursor values are opaque and MUST NOT embed secrets, tokens, credentials, or other sensitive material. For audit/logging, implementations MUST emit only a non-reversible fingerprint of `value` (for example, a stable hash) and MAY include non-sensitive metadata such as `encoding` and value length; truncating and logging any prefix of `value` is not permitted.
 
 ## Secret and Token Flow to Activities
 
