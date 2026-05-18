@@ -12,7 +12,7 @@ Custos is a pluggable workflow orchestrator for supply-chain security operations
 |---|---|---|
 | Requirements | In Progress (revision 5) | 2026-05-18 |
 | Architecture | In Progress (revision 3, detailed) | 2026-05-18 |
-| Component Designs | In Progress | 2026-05-17 |
+| Component Designs | In Progress | 2026-05-18 |
 | Implementation | Started (scaffold + Helm) | 2026-05-18 |
 
 ## Quick Links
