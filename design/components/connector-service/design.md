@@ -209,6 +209,46 @@ Consumed by:
 
 `capabilities` is purely about data-plane operations. Event-stream concerns are not expressed here.
 
+#### Namespace governance
+
+Capability tokens are governed by a two-tier namespace:
+
+**Tier 1 — Reserved core prefixes (curated).** Owned by the platform; defined in `design/architecture/capabilities.md`. Initial reserved prefixes: `oci.*`, `s3.*`, `blob.*`, `http.*`, `sql.*`, `event.*`, `notification.*`. Adding a new core prefix or a new verb within a core prefix is a platform-level change that goes through the architecture change process.
+
+**Tier 2 — Vendor extension prefix `x-<vendor>.<verb>`.** Anything matching `^x-[a-z][a-z0-9-]*\.[a-z][a-z0-9.-]*$` is accepted. No platform-side validation beyond syntax. Activities requiring `x-*` capabilities are explicitly coupling themselves to that vendor's connector type; the coupling is surfaced in catalog/UI and bind audit.
+
+**Plugin-registration validation:**
+
+| Check | Failure code |
+|---|---|
+| Tier 1 token is in the curated registry | `unknown-core-capability` |
+| Token matches the `x-*` syntax (if not Tier 1) | `invalid-capability-syntax` |
+| Capabilities set is a strict superset of the prior `ConnectorTypeVersion` within the same major (semver patch/minor bump) | `capability-regression` |
+
+Failed registrations emit `connector.registration.rejected` with the failure code and the offending token.
+
+#### Compatibility policy (semver-aligned)
+
+- **Patch or minor version bump** (`2.3.0 → 2.3.1`, `2.3.0 → 2.4.0`): the new version's capabilities set MUST be a strict superset of the prior version's. Dropping a capability is forbidden — registration is rejected with `capability-regression`.
+- **Major version bump** (`2.x.x → 3.0.0`): capabilities may change freely. The major bump is the signal that bindings must be re-validated. Activities pinning a connector type's major version see no surprises mid-major.
+- The regression check runs at registration time as a SQL diff against the prior `ConnectorTypeVersion` row.
+
+#### Deprecation flow
+
+A capability may be marked `deprecated: true` within a major version. Deprecated capabilities still bind but emit `connector.capability.deprecated` on each bind. Removal of a deprecated capability is only permitted on the next major version bump.
+
+Manifest example with a deprecated capability:
+
+```json
+"capabilities": [
+  "oci.pull",
+  "oci.push",
+  { "name": "oci.legacy-copy", "deprecated": true, "since": "2.4.0", "removeIn": "3.0.0" }
+]
+```
+
+A capability entry may be either a plain string (live) or an object with `name`, `deprecated`, optional `since`, optional `removeIn`. The Binder treats both equivalently for matching; the difference is audit emission.
+
 ### `events.delivery` — how events arrive
 
 The `events` block as a whole is optional; connectors that do not produce events (sinks, notification targets, write-only data planes) omit it. When present, `events.delivery` is an array drawn from `["push", "pull"]` and declares the delivery mechanisms the connector supports:
@@ -663,7 +703,6 @@ sequenceDiagram
 
 ## Open Questions
 
-- Capability namespace governance model (strict curated list vs extensible custom prefixes).
 - Fallback tag naming finalization and normalization edge cases for non-sha256 digests.
 
 ## Change History
@@ -679,3 +718,4 @@ sequenceDiagram
 | 2026-05-17 | INCON-011: Documented Cursor Ownership — Connector Service owns one `ConnectorCursor` per `ConnectorInstance`; Trigger Service holds no cursor state. One pull loop per instance fans events out to multiple subscriptions | #36 |
 | 2026-05-17 | Sidecar Secret/Token API contract: UDS transport, bootstrap-token auth, three-endpoint API (`GET /v1/token`, `POST /v1/token/refresh`, `POST /v1/token/release`), 10-min default TTL with 4-level precedence and step-deadline cap, 16-lease concurrent cap, ARM control-channel revocation, `extras` opaque bag, full failure-mode table, sidecar internal lifecycle diagram | #57 |
 | 2026-05-17 | Pull Cursor Model: cursor envelope `{encoding, value, advancedAt}`; at-least-once delivery with Trigger Service `DedupKey` absorbing dups; normative `eventId` emission rule; DB-row-lease single-writer enforcement; admin rewind endpoint; `cursor.advanced`/`cursor.expired`/`cursor.encoding_mismatch` audit events; manifest fields `events.pull.cursorEncoding` and `events.pull.initialCursorBehavior` | #59 |
+| 2026-05-17 | Capability namespace governance: two-tier namespace (curated Tier 1 core prefixes + `x-<vendor>.<verb>` Tier 2 extensions); strict-superset semver compatibility policy within a major; deprecation flow; new curated registry at `design/architecture/capabilities.md`; `connector.registration.rejected` and `connector.capability.deprecated` audit events | pending |
