@@ -4,7 +4,10 @@
 # live in values-<topology>-<profile>.yaml.
 
 global:
-  namespace: custos-system
+  # Note: chart resources are namespaced via .Release.Namespace; pass the
+  # target namespace at install time with `helm install -n <ns>` (or
+  # `--create-namespace`). The chart itself does NOT create the namespace
+  # by default — see the `namespace.create` toggle below.
   imageRegistry: ghcr.io/toddysm/custos
   imageTag: dev
   imagePullPolicy: IfNotPresent
@@ -22,6 +25,16 @@ global:
     limits:
       cpu: 500m
       memory: 512Mi
+
+# Namespace management. By default the chart does NOT create the namespace
+# (and therefore does not require cluster-scoped permissions); pass
+# `--namespace custos-system --create-namespace` to `helm install` instead.
+# Set namespace.create=true only when you want the chart itself to manage
+# the namespace resource (and accept that the installer needs cluster-scoped
+# RBAC and that helm install --create-namespace will conflict).
+namespace:
+  create: false
+  name: ""
 
 # Topology: connected | airgapped
 topology: connected

@@ -3,7 +3,7 @@ Common helpers for the Custos umbrella chart.
 */}}
 
 {{- define "custos.namespace" -}}
-{{- default "custos-system" .Values.global.namespace -}}
+{{- .Release.Namespace -}}
 {{- end -}}
 
 {{- define "custos.labels" -}}

@@ -1,6 +1,8 @@
+{{- if .Values.namespace.create -}}
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: {{ include "custos.namespace" . }}
+  name: {{ .Values.namespace.name | default .Release.Namespace }}
   labels:
     {{- include "custos.labels" . | nindent 4 }}
+{{- end }}
