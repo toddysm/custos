@@ -20,7 +20,7 @@ The COMP-001 API Gateway design session (2026-05-17) locked two decisions that r
 
 ## Impact
 
-- **MetadataStoreProvider contract**: gains five idempotency methods (`reserveIdempotencyRecord`, `completeIdempotencyRecord`, `deleteExpiredIdempotencyRecords`) and four device-code methods (`putDeviceCodeSession`, `getDeviceCodeSessionByDeviceCode`, `getDeviceCodeSessionByUserCode`, `completeDeviceCodeSession`, `deleteExpiredDeviceCodeSessions`). All workspace-scoped except `DeviceCodeSession`, which is keyed by `(deviceCode)` / `(userCode)` because the session predates the user picking a workspace.
+- **MetadataStoreProvider contract**: gains three idempotency methods (`reserveIdempotencyRecord`, `completeIdempotencyRecord`, `deleteExpiredIdempotencyRecords`) and five device-code methods (`putDeviceCodeSession`, `getDeviceCodeSessionByDeviceCode`, `getDeviceCodeSessionByUserCode`, `completeDeviceCodeSession`, `deleteExpiredDeviceCodeSessions`). All workspace-scoped except `DeviceCodeSession`, which is keyed by `(deviceCode)` / `(userCode)` because the session predates the user picking a workspace.
 - **Schema revision**: `MetadataStoreProvider:3` covers both entities. The migration runner refuses startup if the active adapter does not declare revision 3.
 - **Reserve semantics**: `reserveIdempotencyRecord` is atomic — it both inserts the in-progress row and reports back whether the key was already taken (and in what state). Postgres adapter implements via `INSERT ... ON CONFLICT DO NOTHING RETURNING ...` paired with a follow-up read; other backends may use compare-and-swap.
 - **Sweeper**: both entity families need a TTL sweep. Reuses the existing sweeper pattern from `deleteExpiredServiceTokens` / `deleteResumeSubscription`.
