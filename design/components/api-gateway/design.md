@@ -169,7 +169,7 @@ V1 implementation is in-memory per replica: an N-replica deployment grants up to
 - The limit's purpose is to protect Workflow Service and Connector Service from runaway clients, not to bill or strictly enforce quotas.
 - Switching to a Dapr-state-backed coordinated limiter (or Redis) is a drop-in replacement: the interface stays `tryConsume(bucketKey, cost) -> Allow | Deny + RetryAfter`. Deferred to M2.
 
-On deny: `429 Too Many Requests` with `Retry-After` and the `RateLimit-*` headers (RFC 9239).
+On deny: `429 Too Many Requests` with `Retry-After` and the `RateLimit-*` headers.
 
 ## Call-Context Minting
 
