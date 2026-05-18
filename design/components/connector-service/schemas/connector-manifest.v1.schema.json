@@ -50,8 +50,7 @@
         "description",
         "capabilities",
         "target",
-        "credentials",
-        "events"
+        "credentials"
       ],
       "properties": {
         "description": {
@@ -317,7 +316,7 @@
     "capability": {
       "type": "string",
       "pattern": "^[a-z][a-z0-9-]*(?:\\.[a-z0-9][a-z0-9-]*)+$",
-      "description": "Dot-delimited capability token, for example oci.pull or event.push."
+      "description": "Dot-delimited capability token, for example oci.pull or s3.read. Event-delivery verbs (push, pull) belong in events.delivery, not here."
     },
     "eventType": {
       "type": "string",

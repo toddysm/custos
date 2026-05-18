@@ -262,6 +262,8 @@ The connector manifest does not embed actual secret material. `secretRef`-style 
 
 Declares how the connector emits events and what events it produces. The Trigger Service uses this to wire up event listeners and to validate workflow trigger references.
 
+`spec.events` is **optional** — sink/data-plane-only connectors that never deliver events may omit the block entirely (see change record `2026-05-17-005-incon-012-events-block-optional.md`). When present, the rules below apply.
+
 ```json
 "events": {
   "delivery": [
@@ -271,14 +273,19 @@ Declares how the connector emits events and what events it produces. The Trigger
   "produced": [
     "oci.image.pushed",
     "oci.tag.updated"
-  ]
+  ],
+  "pull": {
+    "cursorEncoding": "oci-list-tags-v1",
+    "initialCursorBehavior": "now"
+  }
 }
 ```
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `delivery` | array | Yes | Delivery mechanisms the connector supports. At least one. Each item is one of `push` or `pull`. `uniqueItems: true`. |
-| `produced` | array | Yes | Catalog of normalized event types the connector emits. At least one. Tokens follow the dot-delimited lowercase pattern. `uniqueItems: true`. |
+| `delivery` | array | Yes (when `events` is present) | Delivery mechanisms the connector supports. At least one. Each item is one of `push` or `pull`. `uniqueItems: true`. |
+| `produced` | array | Yes (when `events` is present) | Catalog of normalized event types the connector emits. At least one. Tokens follow the dot-delimited lowercase pattern. `uniqueItems: true`. |
+| `pull` | object | Yes whenever `delivery` contains `"pull"` | Pull-mode cursor contract. See `events.pull` below. |
 
 ### `events.delivery`
 
@@ -299,6 +306,26 @@ A flat list of normalized event type names. Each follows the dot-delimited lower
 - **Trigger Service** — subscribes to these event types and matches them to workflow triggers at runtime.
 - **Trigger UI / CLI** — autocomplete and discovery.
 - **Audit / Catalog Service** — record of which event types are emitted by which connector type version.
+
+### `events.pull`
+
+Required whenever `events.delivery` contains `"pull"`. Locks the cursor contract the Connector Service uses to drive pull-mode polling.
+
+```json
+"pull": {
+  "cursorEncoding": "oci-list-tags-v1",
+  "initialCursorBehavior": "now"
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `cursorEncoding` | string | Yes | Connector-type-declared identifier for the cursor envelope shape. Pattern: `^[a-z][a-z0-9-]*$`. The Connector Service treats this value as opaque; only the connector type author understands its layout. Bumping the value triggers the Connector Service encoding-migration flow for all instances of this connector type, so it functions as the cursor schema version. |
+| `initialCursorBehavior` | string | Yes | First-tick position when no operator-supplied cursor exists. One of `now` (skip everything before activation), `beginning` (replay from the earliest available event), or `custom` (the connector type declares its own start position; the operator must supply a cursor at instance creation time). |
+
+**Migration semantics.** When a connector type publishes a new manifest version with a changed `cursorEncoding`, the Connector Service marks all existing connector instances for cursor re-anchoring before the new version starts polling. The connector plugin must accept the old encoding once for the migration handoff and then refuse it.
+
+See change record `2026-05-17-008-pull-cursor-model.md` for the full cursor lifecycle.
 
 ---
 
@@ -330,8 +357,9 @@ Before publishing, verify your manifest meets all of the following:
 - [ ] `spec.credentials.authenticationType` is recognized (or is a registered `x-*` vendor type).
 - [ ] `spec.credentials.authentication` carries the fields expected for the chosen `authenticationType`.
 - [ ] `spec.capabilities` contains only data-plane verbs — no `event.*` tokens.
-- [ ] `spec.events.delivery` has at least one of `push` or `pull`.
-- [ ] `spec.events.produced` lists at least one normalized event type and matches the dot-delimited pattern.
+- [ ] If `spec.events` is present: `spec.events.delivery` has at least one of `push` or `pull`.
+- [ ] If `spec.events` is present: `spec.events.produced` lists at least one normalized event type and matches the dot-delimited pattern.
+- [ ] If `spec.events.delivery` contains `"pull"`: `spec.events.pull.cursorEncoding` and `spec.events.pull.initialCursorBehavior` are both set.
 - [ ] No unknown top-level or nested fields (`additionalProperties: false` is enforced).
 
 ---
