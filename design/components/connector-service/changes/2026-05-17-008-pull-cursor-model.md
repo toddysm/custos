@@ -34,7 +34,7 @@ This left activity-side authors of pull-mode connectors without a contract for c
 
 `ConnectorCursor` data-model entry updated with the five field names (`encoding`, `value`, `advancedAt`, `leaseHolder`, `leaseExpiresAt`).
 
-Plugin manifest gains a new optional block `events.pull`:
+Plugin manifest gains a new conditionally-required block `events.pull` — omitted by connectors that do not declare `pull` in `events.delivery` (sinks, push-only event connectors, data-plane-only connectors that omit `events` entirely), required by every connector whose `events.delivery` includes `pull`. The schema enforces this via JSON Schema `if/then` on `events.delivery contains "pull"`.
 
 ```json
 "events": {
