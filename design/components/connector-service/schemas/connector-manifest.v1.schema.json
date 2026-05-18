@@ -316,7 +316,10 @@
     "capability": {
       "type": "string",
       "pattern": "^[a-z][a-z0-9-]*(?:\\.[a-z0-9][a-z0-9-]*)+$",
-      "description": "Dot-delimited capability token, for example oci.pull or s3.read. Event-delivery verbs (push, pull) belong in events.delivery, not here."
+      "not": {
+        "pattern": "^event\\."
+      },
+      "description": "Dot-delimited capability token, for example oci.pull or s3.read. Tokens in the event.* namespace MUST NOT appear in capabilities; event-delivery verbs belong in events.delivery."
     },
     "eventType": {
       "type": "string",
