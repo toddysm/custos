@@ -323,7 +323,7 @@ Required whenever `events.delivery` contains `"pull"`. Locks the cursor contract
 | `cursorEncoding` | string | Yes | Connector-type-declared identifier for the cursor envelope shape. Pattern: `^[a-z][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)*$`. The Connector Service treats this value as opaque; only the connector type author understands its layout. Bumping the value triggers the Connector Service encoding-migration flow for all instances of this connector type, so it functions as the cursor schema version. |
 | `initialCursorBehavior` | string | Yes | First-tick position when no operator-supplied cursor exists. One of `now` (skip everything before activation), `beginning` (replay from the earliest available event), or `custom` (the connector type declares its own start position; the operator must supply a cursor at instance creation time). |
 
-**Migration semantics.** When a connector type publishes a new manifest version with a changed `cursorEncoding`, the Connector Service marks all existing connector instances for cursor re-anchoring before the new version starts polling. The connector plugin must accept the old encoding once for the migration handoff and then refuse it.
+**Migration semantics.** When a connector type publishes a new manifest version with a changed `cursorEncoding`, existing instances do not automatically re-anchor and the connector plugin must not accept the previous encoding as a one-time handoff. Instead, the Connector Service returns `CursorEncodingMismatch`, marks the instance `cursorMigrationRequired`, halts further ticks for that instance, and requires an operator-admin rewind before polling can resume under the new encoding.
 
 See change record `2026-05-17-008-pull-cursor-model.md` for the full cursor lifecycle.
 
