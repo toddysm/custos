@@ -65,7 +65,7 @@ erDiagram
 - ConnectorTypeVersion: immutable plugin version descriptor.
 - ConnectorInstance: workspace-scoped configured connection.
 - ConnectorBinding: runtime binding between a step and one connector instance.
-- ConnectorCursor: durable cursor/checkpoint for pull streams and reconnect.
+- ConnectorCursor: durable cursor/checkpoint for pull streams and reconnect. Fields: `encoding` (string, from manifest), `value` (opaque, plugin-managed, nullable), `advancedAt` (timestamp), `leaseHolder` (string, single-writer enforcement), `leaseExpiresAt` (timestamp). See § Pull Cursor Model.
 - IdentitySource: one of KMS-backed secret, workload identity, federated identity.
 
 ## Plugin Packaging and Discovery
@@ -223,6 +223,24 @@ Consumed by:
 
 A single connector type may support both modes. The same `events.produced` catalog is available through any declared delivery mode; per-event delivery mapping is intentionally out of scope for v1.
 
+When `pull` is included in `events.delivery`, the manifest MUST also include an `events.pull` block declaring cursor semantics:
+
+```json
+"events": {
+  "delivery": ["pull"],
+  "pull": {
+    "cursorEncoding": "oci-list-tags-v1",
+    "initialCursorBehavior": "now"
+  },
+  "produced": [ "oci.image.pushed", "oci.tag.updated" ]
+}
+```
+
+- `events.pull.cursorEncoding` — string identifier the plugin uses to validate persisted cursor envelopes. Bumping this value triggers the encoding-migration flow (see § Pull Cursor Model → Encoding migration).
+- `events.pull.initialCursorBehavior` — one of `now` (start from current upstream time), `beginning` (replay all history the upstream retains), `custom` (plugin computes its own starting position on first tick).
+
+Pull-mode connectors MUST emit events with a stable `eventId` field (see § Pull Cursor Model → Event emission requirement).
+
 ### `events.produced` — event catalog
 
 A flat list of normalized event types the connector emits, e.g. `oci.image.pushed`, `oci.tag.updated`, `s3.object.created`, `blob.object.deleted`.
@@ -294,17 +312,98 @@ Behavior per category:
 
 Vendor extension auth types (`x-*` `authenticationType`) declare their identity category at plugin-registration time as out-of-band metadata; the manifest payload itself remains a single source of truth for the auth mechanism.
 
-## Cursor Ownership
+## Pull Cursor Model
 
-Pull-mode event streams require a durable cursor representing "the last position we have consumed against the upstream API". This cursor is owned by the **Connector Service**, keyed per `ConnectorInstance`, and persisted via `MetadataStoreProvider` (see `ConnectorCursor` in the Data Models section).
+Pull-mode event streams require a durable cursor representing "the last position we have consumed against the upstream API". The cursor is owned by the **Connector Service**, keyed per `ConnectorInstance`, and persisted via `MetadataStoreProvider` (see `ConnectorCursor` in the Data Models section).
+
+### Ownership and granularity
 
 **Granularity is per-instance, not per-subscription.** A single `ConnectorInstance` may be referenced by multiple Trigger Service `Subscription`s (e.g. two workflows both listening for `oci.image.pushed` from the same registry connector). The Connector Service runs **one** pull loop per active `ConnectorInstance` against the upstream API, reads/advances the single cursor, and fans normalized events out to every subscribing receiver via the `listen(mode=pull)` channel. This avoids N×M upstream polling load when N subscriptions consume from M instances.
 
 **The Trigger Service holds no cursor state.** Its Pull Receivers are stateless w.r.t. upstream position; they drive `listen(mode=pull)` ticks against the Connector Service and consume the events it yields. Per-subscription progress against *delivered* events is handled by Trigger Service's existing `DedupKey` store, not a cursor — cursor (upstream position) and dedup (per-subscription delivery exactness) are orthogonal concerns and remain split along the component boundary.
 
-**Reset / replay semantics.** An operator who needs to reprocess events from an earlier position calls a Connector Service admin operation that rewinds the per-instance cursor; every subscription consuming that instance sees the replay. Per-subscription dedup keys are independently cleared by Trigger Service if a true replay (re-firing dispatches) is desired.
-
 This division resolves INCON-011: there is exactly one cursor per stream, owned by the component that talks to the upstream API.
+
+### Cursor shape
+
+A `ConnectorCursor` is a structured envelope around an opaque, connector-type-defined value:
+
+```json
+{
+  "encoding": "oci-list-tags-v1",
+  "value": "<base64-or-string-opaque-to-platform>",
+  "advancedAt": "2026-05-17T12:34:56Z"
+}
+```
+
+- `encoding` — connector-type-declared string, registered in the manifest under `events.pull.cursorEncoding`. Allows a connector type to evolve its cursor representation without colliding with persisted state from older versions.
+- `value` — opaque to Connector Service core; only the plugin reads and writes it. The platform never parses or compares it. `null` is the well-defined "uninitialized" sentinel.
+- `advancedAt` — platform-managed timestamp of the last successful advance. Used by operator UI (e.g. "cursor last moved 3h ago" surfaces a stalled stream).
+
+### Initial value
+
+On the first pull tick for a new `ConnectorInstance`, Connector Service writes `{ encoding: <from-manifest>, value: null, advancedAt: <now> }`. The plugin's first `listen(mode=pull)` call observes `cursor.value == null` and chooses its starting position per its declared `events.pull.initialCursorBehavior` (one of `now`, `beginning`, `custom`). Operators may override the initial position via the admin rewind operation (see below).
+
+### Advancement and commit semantics
+
+Connector Service guarantees **at-least-once delivery** of pull-mode events to Trigger Service. Per tick:
+
+1. Plugin returns a batch `(events[], nextCursor)`.
+2. Connector Service publishes each normalized event onto the pull-receiver fan-out channel (Dapr Pub/Sub).
+3. **After publish-ack for every event in the batch**, Connector Service commits `nextCursor` to `MetadataStoreProvider`.
+4. Tick returns.
+
+If Connector Service crashes between publish and commit, the next tick re-emits already-published events from the previously committed cursor. Trigger Service's `DedupKey` store absorbs the duplicates per subscription. The platform does **not** wait for Trigger Service to ACK; cursor advance is decoupled from per-subscription delivery progress, matching the per-instance ownership model.
+
+### Event emission requirement (normative)
+
+Every pull-mode event emitted by a connector plugin **MUST** include a stable `eventId` field, typically `sha256(upstreamEventNaturalKey)`. Trigger Service computes its `DedupKey = sha256(eventId + subscriptionId)`. Plugins that cannot produce a deterministic natural key MUST document a fallback algorithm in their manifest and accept that downstream dedup is only as strong as that algorithm.
+
+### Single-writer safety
+
+Exactly one Connector Service replica may advance the cursor for a given `ConnectorInstance` at a time. v1 uses **DB-row-level leases** rather than external leader election:
+
+- `ConnectorCursor` carries `leaseHolder` (worker identifier) and `leaseExpiresAt` columns.
+- Before a tick, a worker performs `SELECT ... FOR UPDATE` (or an equivalent provider-level optimistic CAS) on the row, claims a 60-second lease, runs the tick, and clears the lease on success.
+- A crashed worker's lease expires; another replica picks the instance up on the next tick scheduler pass.
+- Tick frequency in v1 is bounded to ≥10s per instance, so a 60s lease window is comfortable.
+
+No Raft, etcd, or external coordinator dependency.
+
+### Crash recovery and cursor expiry
+
+On restart, Connector Service reads the last committed cursor from `MetadataStoreProvider` and resumes ticks. There is no replay-window cap in v1: if the upstream allows old positions, replay just works; if the upstream has retired the position (TTL'd webhooks, expired change tokens), the plugin returns a `CursorExpired` error. Connector Service fires a `cursor.expired` audit event and halts ticks for that instance pending operator action.
+
+### Encoding migration
+
+When a connector type bumps `events.pull.cursorEncoding` (e.g. `oci-list-tags-v1` → `oci-list-tags-v2`), the plugin sees the old envelope and returns `CursorEncodingMismatch`. Connector Service:
+
+1. Marks the instance state as `cursorMigrationRequired`.
+2. Fires `cursor.encoding_mismatch` audit event.
+3. Halts ticks for that instance.
+
+The operator resolves by calling admin rewind (below) to seed a v2-compatible starting position. **No automatic in-place migration in v1** — the explicit ops step keeps blast radius observable.
+
+### Admin rewind / replay
+
+A workspace admin may rewind any instance's cursor via:
+
+```
+POST /v1/workspaces/{ws}/connectors/{id}/cursor:rewind
+Body: { "to": "now" | "beginning" | { "encoding": "...", "value": "..." } }
+```
+
+This writes the new cursor envelope, fires `cursor.advanced` (with reason `admin-rewind`), and resumes ticks. Every subscription consuming this instance sees the replayed events. To prevent re-firing downstream dispatches, the operator clears matching Trigger Service `DedupKey` entries via that service's own admin API; the two operations are independent by design.
+
+### Cursor audit events
+
+| Event | Trigger |
+|---|---|
+| `cursor.advanced` | Cursor successfully committed after a tick or admin rewind. Carries `from`/`to` envelopes (encoding + truncated value), `reason` (`tick` \| `admin-rewind`), `eventCount`. |
+| `cursor.expired` | Plugin returned `CursorExpired`. Carries last-known cursor, upstream error detail. |
+| `cursor.encoding_mismatch` | Plugin returned `CursorEncodingMismatch`. Carries persisted `encoding`, plugin-declared `encoding`. |
+
+Audit events never carry secret material; `value` is truncated to a fixed prefix (default 32 chars) when logged.
 
 ## Secret and Token Flow to Activities
 
@@ -508,6 +607,8 @@ sequenceDiagram
 | POST | /v1/workspaces/{ws}/connectors/{id}:enable | Enable connector |
 | POST | /v1/workspaces/{ws}/connectors/{id}:disable | Disable connector |
 | GET | /v1/workspaces/{ws}/connectors/{id}/health | Probe health |
+| GET | /v1/workspaces/{ws}/connectors/{id}/cursor | Get current pull cursor envelope (admin) |
+| POST | /v1/workspaces/{ws}/connectors/{id}/cursor:rewind | Rewind cursor to `now`, `beginning`, or explicit envelope (admin) |
 
 ### Internal RPCs
 
@@ -577,3 +678,4 @@ sequenceDiagram
 | 2026-05-17 | INCON-012: `events` block is optional — sink/data-plane-only connectors omit it; when present, `events.delivery` and `events.produced` each require at least one entry. Added sink connector example | #37 |
 | 2026-05-17 | INCON-011: Documented Cursor Ownership — Connector Service owns one `ConnectorCursor` per `ConnectorInstance`; Trigger Service holds no cursor state. One pull loop per instance fans events out to multiple subscriptions | #36 |
 | 2026-05-17 | Sidecar Secret/Token API contract: UDS transport, bootstrap-token auth, three-endpoint API (`GET /v1/token`, `POST /v1/token/refresh`, `POST /v1/token/release`), 10-min default TTL with 4-level precedence and step-deadline cap, 16-lease concurrent cap, ARM control-channel revocation, `extras` opaque bag, full failure-mode table, sidecar internal lifecycle diagram | #57 |
+| 2026-05-17 | Pull Cursor Model: cursor envelope `{encoding, value, advancedAt}`; at-least-once delivery with Trigger Service `DedupKey` absorbing dups; normative `eventId` emission rule; DB-row-lease single-writer enforcement; admin rewind endpoint; `cursor.advanced`/`cursor.expired`/`cursor.encoding_mismatch` audit events; manifest fields `events.pull.cursorEncoding` and `events.pull.initialCursorBehavior` | #59 |
