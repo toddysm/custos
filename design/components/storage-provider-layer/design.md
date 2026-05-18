@@ -96,7 +96,7 @@ erDiagram
 |---|---|
 | DefinitionStoreProvider | `Workflow`, `WorkflowVersion`, `WorkflowTemplate`, `WorkflowTemplateVersion` |
 | CatalogStoreProvider | `ActivityType`, `ActivityTypeVersion`, `ConnectorType`, `ConnectorTypeVersion` |
-| MetadataStoreProvider | `Run`, `Step`, `StepAttempt`, `ConnectorInstance`, `ConnectorCursor`, `Subscription`, `SubscriptionSelector`, `ResumeSubscription`, `DedupKey`, `Schedule`, `ArtifactUse` (backref), `AuditEvent`, `AuditOutboxRow` |
+| MetadataStoreProvider | `Run`, `Step`, `StepAttempt`, `ConnectorInstance`, `ConnectorCursor`, `Subscription`, `SubscriptionSelector`, `ResumeSubscription`, `DedupKey`, `Schedule`, `ArtifactUse` (backref), `IdempotencyRecord`, `DeviceCodeSession`, `AuditEvent`, `AuditOutboxRow` |
 | ArtifactStoreProvider | `ArtifactBlob` (content-addressed; metadata lives in MetadataStore's `ArtifactUse` backref) |
 | AuthStoreProvider | `Tenant`, `Workspace`, `Principal` (User / ServiceAccount discriminator), `OidcIdentity`, `ServiceToken`, `Role`, `Permission`, `RoleBinding` |
 
@@ -175,6 +175,18 @@ Grouped by entity family. All methods take `workspaceId` first (omitted from sig
 |---|---|
 | `appendArtifactUse(runId, stepId, artifactRef)` | Append-only. Records that a run cited an artifact. |
 | `listArtifactUses(artifactId)` | Used by the retention sweeper to refuse deletion of refs cited by live runs. |
+
+**Gateway short-lived state**
+
+| Method | Notes |
+|---|---|
+| `reserveIdempotencyRecord(key, requestHash, ttlSeconds)` → `Reserved \| ExistingCompleted(response) \| ExistingInFlight \| KeyReuse` | Atomic reserve-or-read. `key = (workspaceId, principalId, route, idempotencyKey)`. `ExistingCompleted` returns the stored `responseSnapshot` when `requestHash` matches; `KeyReuse` when the hash differs from the stored row; `ExistingInFlight` when status is still in-progress. |
+| `completeIdempotencyRecord(key, responseSnapshot)` | Marks an in-progress reservation completed and stores the response. Fails with `NotReserved` if the row is not in-progress under this caller. |
+| `deleteExpiredIdempotencyRecords(before)` | Sweeper-only. |
+| `putDeviceCodeSession(deviceCode, userCode, issuerAlias, expiresAt)` | Creates a pending OIDC device-code session. `userCode` is unique within its TTL window. |
+| `getDeviceCodeSessionByDeviceCode(deviceCode)` / `getDeviceCodeSessionByUserCode(userCode)` | Polling and landing-page lookups. |
+| `completeDeviceCodeSession(deviceCode, tokenBundle)` | Called by the gateway after the user finishes the browser flow; subsequent polls return the bundle. |
+| `deleteExpiredDeviceCodeSessions(before)` | Sweeper-only. |
 
 **Audit (writer side)**
 
@@ -336,6 +348,7 @@ Each interface has a monotonically increasing **schema revision number** owned b
 |---|---|---|
 | MetadataStoreProvider | 1 | initial v1 schema |
 | MetadataStoreProvider | 2 | adds `ConnectorCursor.encoding` |
+| MetadataStoreProvider | 3 | adds `IdempotencyRecord` and `DeviceCodeSession` entities (API Gateway short-lived state) |
 | DefinitionStoreProvider | 1 | initial v1 schema |
 | AuthStoreProvider | 1 | initial v1 schema (tenants, workspaces, principals, OIDC identities, service tokens, roles, permissions, role bindings) |
 
@@ -410,3 +423,4 @@ _(none — all v1 design questions resolved this session.)_
 |---|---|---|
 | 2026-05-17 | Initial component design: four provider interfaces (Definition/Catalog/Metadata/Artifact), workspace-scoping middleware, audit partition enforcer with outbox pattern, abstract lease primitive, migration runner with `strict` startup policy, M2+ deferral of OCI-registry adapter, MetadataStore-owned artifact backrefs | #64 |
 | 2026-05-17 | Add `AuthStoreProvider` interface for Auth Service persistence (tenants, workspaces, principals, OIDC identities, service tokens, roles, permissions, role bindings). Exempt from workspace-scoping middleware. Adds `CUSTOS_AUTH_STORE` config and migration revision `AuthStoreProvider:1`. | #66 |
+| 2026-05-17 | Add `IdempotencyRecord` and `DeviceCodeSession` entities to `MetadataStoreProvider` for API Gateway short-lived state. Adds atomic `reserveIdempotencyRecord`/`completeIdempotencyRecord` for write-endpoint dedup, and device-code-session CRUD for the OIDC device-code flow. Bumps `MetadataStoreProvider` revision to 3. | #70 |
