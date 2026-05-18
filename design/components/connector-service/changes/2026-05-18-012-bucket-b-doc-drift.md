@@ -55,6 +55,6 @@ Bucket B of the design-inconsistency cleanup: bring the connector manifest JSON 
 ## Related Change Records
 
 - `2026-05-16-002-remove-identity-models-and-federated-providers.md`
-- `2026-05-17-004-events-delivery-and-capabilities-separation.md`
+- `2026-05-16-004-events-delivery-and-capabilities-separation.md`
 - `2026-05-17-005-incon-012-events-block-optional.md`
 - `2026-05-17-008-pull-cursor-model.md`
