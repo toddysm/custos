@@ -80,9 +80,76 @@ Connector plugins are OCI images. Connector metadata is not embedded in the imag
 
 Manifest selection algorithm:
 1. Query referrers filtered by `artifactType = application/vnd.custos.connector.manifest.v1+json`.
-2. If referrers are unsupported or unavailable, fetch fallback tag `<digest>.custos-connector-manifest-v1` where digest is normalized `sha256-<hex>`.
-3. If both sources produce manifests, referrer result wins; fallback is ignored and audited.
+2. If referrers are unsupported or unavailable, fetch the fallback tag (see § Fallback tag naming below).
+3. If both sources produce manifests, referrer result wins; fallback is ignored and `connector.manifest.fallback-ignored` is audited.
 4. Zero or multiple valid manifests is a hard validation failure.
+
+### Fallback tag naming
+
+When the OCI Referrers API is unsupported or returns no results, Connector Service computes a deterministic tag from the image digest and resolves the manifest via that tag.
+
+**Tag format (v1):**
+
+```
+custos-connector-manifest-v1_<algorithm>-<hex>
+```
+
+- The `custos-connector-manifest-v1` prefix is the scheme version. Changing the format (different separator, different algorithm support set, different normalization) requires bumping to `custos-connector-manifest-v2_...` and a transition window during which both schemes coexist.
+- `_` separator (not `.`) to avoid collisions with file-extension parsers in registry tooling.
+- `<algorithm>-<hex>` mirrors the OCI digest format with `:` replaced by `-`. Example: digest `sha256:abc123...def` → tag `custos-connector-manifest-v1_sha256-abc123...def`.
+
+**Digest normalization rules:**
+
+1. Lowercase the hex portion.
+2. Replace the `:` separator with `-`.
+3. Reject if the hex portion contains characters outside `[0-9a-f]` after lowercasing → `invalid-digest-format`.
+4. Reject if the hex portion length does not match the algorithm's expected length (sha256 = 64, sha512 = 128) → `invalid-digest-format`.
+
+**Algorithm support (v1):**
+
+The platform maintains an internal **registered digest algorithms** set. In v1 this set contains **`sha256` only**. An image whose primary digest uses any other algorithm is rejected at plugin-load time with `unsupported-digest-algorithm`.
+
+The platform does **not** compute its own hash to substitute for an unsupported algorithm — the fallback tag must match the digest the registry advertises, otherwise the tag points to a manifest the registry cannot resolve.
+
+**Extending the algorithm set (M2+):**
+
+The tag format `<algorithm>-<hex>` is intentionally algorithm-agnostic. Adding `sha512` (or any future algorithm) requires only:
+
+1. Adding the algorithm name and expected hex length to the registered algorithms set in Connector Service config.
+2. Confirming the resulting tag length stays within the OCI distribution-spec 128-char cap. Budget per algorithm:
+
+   | Algorithm | Hex len | Tag length | Within 128? |
+   |---|---|---|---|
+   | sha256 | 64 | 101 | ✅ |
+   | sha512 | 128 | 165 | ❌ — requires scheme bump to v2 |
+   | sha384 | 96 | 133 | ❌ — requires scheme bump to v2 |
+
+Algorithms whose tag length exceeds 128 cannot use the v1 scheme; supporting them is a v2 scheme task (different format, e.g. base32-truncated hex or a two-tag indirection). v1 stays sha256-only by construction.
+
+**Length budget for sha256 (v1):**
+
+```
+custos-connector-manifest-v1_sha256-<64 hex chars>
+└────────── 29 ──────────┘└─┘└─ 7 ─┘└──── 64 ────┘ = 101 chars
+                          │
+                          └ '_' separator
+```
+
+OCI distribution-spec tag cap is 128. v1 leaves 27 chars of headroom for future minor additions within the scheme.
+
+**Collision policy:**
+
+A single image digest yields exactly one fallback tag by construction. The platform does not introspect multiple manifests under the same tag — the OCI registry returns at most one. If for any reason multiple valid manifests resolve through the combined Referrers + fallback paths, the "exactly one valid manifest" rule in the selection algorithm catches it as a hard validation failure (already documented above).
+
+**Audit events:**
+
+| Event | Trigger |
+|---|---|
+| `connector.manifest.fallback-used` | Referrers API was unavailable/empty; fallback tag was successfully resolved. Carries registry endpoint, image reference, normalized digest, computed tag. |
+| `connector.manifest.fallback-ignored` | Both Referrers and fallback produced manifests; the fallback was discarded in favor of Referrers. |
+| `connector.manifest.fallback-rejected` | Fallback failed validation. Carries failure code: `unsupported-digest-algorithm` \| `invalid-digest-format` \| `tag-not-found`. |
+
+A sudden spike in `connector.manifest.fallback-used` is an operational signal that a registry has regressed in its Referrers API support.
 
 ## Plugin Manifest v1 (artifact payload)
 
@@ -703,7 +770,7 @@ sequenceDiagram
 
 ## Open Questions
 
-- Fallback tag naming finalization and normalization edge cases for non-sha256 digests.
+_(none — all v1 design questions resolved)_
 
 ## Change History
 
@@ -719,3 +786,4 @@ sequenceDiagram
 | 2026-05-17 | Sidecar Secret/Token API contract: UDS transport, bootstrap-token auth, three-endpoint API (`GET /v1/token`, `POST /v1/token/refresh`, `POST /v1/token/release`), 10-min default TTL with 4-level precedence and step-deadline cap, 16-lease concurrent cap, ARM control-channel revocation, `extras` opaque bag, full failure-mode table, sidecar internal lifecycle diagram | #57 |
 | 2026-05-17 | Pull Cursor Model: cursor envelope `{encoding, value, advancedAt}`; at-least-once delivery with Trigger Service `DedupKey` absorbing dups; normative `eventId` emission rule; DB-row-lease single-writer enforcement; admin rewind endpoint; `cursor.advanced`/`cursor.expired`/`cursor.encoding_mismatch` audit events; manifest fields `events.pull.cursorEncoding` and `events.pull.initialCursorBehavior` | #59 |
 | 2026-05-17 | Capability namespace governance: two-tier namespace (curated Tier 1 core prefixes + `x-<vendor>.<verb>` Tier 2 extensions); strict-superset semver compatibility policy within a major; deprecation flow; new curated registry at `design/architecture/capabilities.md`; `connector.registration.rejected` and `connector.capability.deprecated` audit events | pending |
+| 2026-05-17 | Fallback tag naming: lock v1 tag format `custos-connector-manifest-v1_<algorithm>-<hex>` with `_` separator; v1 sha256-only via registered-algorithms set; algorithm-agnostic format supports sha512/others in M2+ behind scheme version bump if length budget allows; full digest normalization rules; `connector.manifest.fallback-used`/`fallback-ignored`/`fallback-rejected` audit events | pending |
