@@ -112,13 +112,17 @@ Bindings outside the allowed scope are rejected by the role-binding endpoint wit
 
 ## Identity Sources
 
-| Source | Status v1 | Use |
-|---|---|---|
-| OIDC (generic, RFC-compliant) | **M1** | Human users via API Gateway / UI |
-| Platform-issued service tokens | **M1** | CI, automation, service accounts |
-| Azure AD / Entra ID OIDC preset | M1 | Enterprise option (REQ-058) |
-| GitHub OIDC workload tokens | **M3** | REQ-057 |
-| SPIFFE / SPIRE workload identity | **M3** | REQ-059 — replaces the v1 signed-JWT internal call-context |
+GitHub and Azure Entra ID are the **priority OIDC presets** for v1 — they ship first, are exercised end-to-end before any other identity source is enabled, and drive the shape of the generic OIDC configuration. Every other identity source builds on the contract these two prove out.
+
+| Source | Status v1 | Priority | Use |
+|---|---|---|---|
+| **GitHub OIDC preset** (human login + GitHub Actions workload tokens) | **M1** | **P0** | Default human identity and CI workload identity (REQ-057) |
+| **Azure Entra ID OIDC preset** (human login + workload identity) | **M1** | **P0** | Default enterprise human identity and workload identity (REQ-058) |
+| OIDC (generic, RFC-compliant) | **M1** | P1 | Any other RFC-compliant issuer; configured per-tenant once the GitHub/Entra presets are proven |
+| Platform-issued service tokens | **M1** | P1 | Fallback for CI/automation that cannot present an OIDC token |
+| SPIFFE / SPIRE workload identity | **M3** | — | REQ-059 — replaces the v1 signed-JWT internal call-context |
+
+**Implementation order within M1**: GitHub preset → Entra preset → generic OIDC → service tokens. The two presets are not optional add-ons; they are the first concrete configurations the platform supports, and the generic OIDC path is hardened by anything the presets uncover.
 
 ### OIDC provisioning policy
 
@@ -328,7 +332,8 @@ All events flow through the SPL audit outbox in the same transaction as the stat
 
 - [ ] Define the exact JWT claim shape for signed call contexts (claim names, audience, signing algorithm — proposed EdDSA).
 - [ ] Specify the OIDC issuer config schema for `CUSTOS_AUTH_OIDC_ISSUERS` (per-issuer provisioning policy options).
-- [ ] Specify the Azure AD / Entra ID preset (default audiences, group-to-role mapping rules — likely M2 once group claims are scoped).
+- [ ] Specify the **GitHub OIDC preset** (default issuer URL, JWKS endpoint, audience claim shape, GitHub Actions `aud`/`sub`/`repository` claim handling for workload tokens, human-login vs workload-token distinction — **M1, P0**).
+- [ ] Specify the **Azure Entra ID OIDC preset** (default authority URL, tenant-vs-multitenant audience handling, group-claim → role-binding mapping rules — **M1, P0**).
 - [ ] Cross-region replication strategy for Auth Service state (multi-region M2+).
 - [ ] Custom role authoring API (M2+).
 - [ ] SPIFFE/SPIRE cutover plan (M2/M3).
@@ -341,4 +346,4 @@ _(none — all v1 design questions resolved this session.)_
 
 | Date | Change | GitHub Issue |
 |---|---|---|
-| 2026-05-17 | Initial component design: built-in v1 roles (workspace.viewer/author/operator/admin + tenant.admin + platform.admin), permission registry ingested from per-component `permissions.yaml`, OIDC provisioning policy "create with zero bindings", signed-JWT call context (with SPIFFE migration path via `CUSTOS_AUTH_INTERNAL_IDENTITY_MODE`), every-call `authz.decision` audit, workspace/tenant/platform scope hierarchy, new `AuthStoreProvider` interface in SPL, immediate cache eviction via `custos.auth.token-revoked` and `custos.auth.binding-changed` pub/sub events | #67 |
+| 2026-05-17 | Initial component design: built-in v1 roles (workspace.viewer/author/operator/admin + tenant.admin + platform.admin), permission registry ingested from per-component `permissions.yaml`, OIDC provisioning policy "create with zero bindings", **GitHub and Azure Entra ID OIDC presets prioritized as P0 in M1** (both human login and workload tokens; generic OIDC and service tokens follow), signed-JWT call context (with SPIFFE migration path via `CUSTOS_AUTH_INTERNAL_IDENTITY_MODE`), every-call `authz.decision` audit, workspace/tenant/platform scope hierarchy, new `AuthStoreProvider` interface in SPL, immediate cache eviction via `custos.auth.token-revoked` and `custos.auth.binding-changed` pub/sub events | #67 |
