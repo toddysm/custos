@@ -7,7 +7,7 @@ Last Updated: 2026-05-17
 | ID | Name | Slug | Responsibility | Tech Stack | Status |
 |---|---|---|---|---|---|
 | COMP-001 | API Gateway | api-gateway | Unified entrypoint for UI, CLI, SDK, and automation APIs | Python, FastAPI, Dapr sidecar | Defined |
-| COMP-002 | AuthN/AuthZ Service | auth-service | OIDC login, service token auth, RBAC enforcement | Python, OIDC libs, Dapr | Defined |
+| COMP-002 | AuthN/AuthZ Service | auth-service | OIDC login, service token auth, RBAC enforcement | Python, OIDC libs, Dapr | Designed |
 | COMP-003 | Workflow Service | workflow-service | Workflow validation, versioning, orchestration lifecycle | Python, Dapr Workflow | Designed |
 | COMP-004 | Trigger Service | trigger-service | Generic push/pull trigger ingestion, normalization, and dispatch across source categories | Python, Dapr Pub/Sub | Designed |
 | COMP-005 | Connector Service | connector-service | Connector runtime and connector plugin loading/execution | Python plugin runtime, Dapr Secrets | Designed |

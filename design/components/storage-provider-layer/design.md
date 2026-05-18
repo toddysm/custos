@@ -7,15 +7,15 @@ Status: Draft
 
 ## Responsibility
 
-The Storage Provider Layer (SPL) defines four small, stable interfaces — `DefinitionStoreProvider`, `CatalogStoreProvider`, `MetadataStoreProvider`, `ArtifactStoreProvider` — and routes all platform persistence through them. The rest of Custos has no compile-time or run-time dependency on Postgres, OCI registries, S3, or any other concrete backend. Adapters implement the interfaces; the platform is unaware of them.
+The Storage Provider Layer (SPL) defines five small, stable interfaces — `DefinitionStoreProvider`, `CatalogStoreProvider`, `MetadataStoreProvider`, `ArtifactStoreProvider`, `AuthStoreProvider` — and routes all platform persistence through them. The rest of Custos has no compile-time or run-time dependency on Postgres, OCI registries, S3, or any other concrete backend. Adapters implement the interfaces; the platform is unaware of them.
 
 SPL also owns the migration runner that gates platform startup against schema-revision compatibility.
 
 ## Boundaries
 
 - Owns:
-  - The four provider interface contracts (operation shapes, error taxonomy, immutability rules).
-  - The workspace-scoping middleware that enforces multi-tenant boundaries on every call.
+  - The five provider interface contracts (operation shapes, error taxonomy, immutability rules).
+  - The workspace-scoping middleware that enforces multi-tenant boundaries on every call to the four workspace-scoped interfaces (`AuthStoreProvider` is exempt — it owns the workspace records themselves).
   - The audit partition enforcer that keeps audit physically separate from ops state.
   - The migration runner and the schema-revision negotiation that gates startup.
   - The audit outbox protocol (writer side) — readers belong to Observability Service.
@@ -37,6 +37,7 @@ graph LR
         CT[Catalog Service]
         AR[Activity Runtime Mgr]
         OB[Observability/Audit]
+        AU[Auth Service]
     end
 
     subgraph SPL[Storage Provider Layer]
@@ -44,6 +45,7 @@ graph LR
         CatIfc[CatalogStoreProvider]
         MetaIfc[MetadataStoreProvider]
         ArtIfc[ArtifactStoreProvider]
+        AuthIfc[AuthStoreProvider]
         Scope[Workspace Scoping Middleware]
         AuditPart[Audit Partition Enforcer]
         Mig[Migration Runner]
@@ -53,6 +55,7 @@ graph LR
     CT --> DefIfc
     CT --> CatIfc
     AR --> ArtIfc
+    AU --> AuthIfc
 
     DefIfc --> PgDef[Postgres adapter]
     DefIfc -. M2+ .-> OciDef[OCI Registry adapter]
@@ -61,10 +64,11 @@ graph LR
     MetaIfc --> PgMeta[Postgres adapter]
     ArtIfc --> CsiArt[CSI/PVC adapter]
     ArtIfc -. opt .-> S3Art[S3 adapter]
+    AuthIfc --> PgAuth[Postgres adapter]
 
     DefIfc & CatIfc & MetaIfc & ArtIfc --> Scope
     MetaIfc --> AuditPart
-    PgDef & PgCat & PgMeta --> Mig
+    PgDef & PgCat & PgMeta & PgAuth --> Mig
 ```
 
 ## Data Models
@@ -94,10 +98,11 @@ erDiagram
 | CatalogStoreProvider | `ActivityType`, `ActivityTypeVersion`, `ConnectorType`, `ConnectorTypeVersion` |
 | MetadataStoreProvider | `Run`, `Step`, `StepAttempt`, `ConnectorInstance`, `ConnectorCursor`, `Subscription`, `SubscriptionSelector`, `ResumeSubscription`, `DedupKey`, `Schedule`, `ArtifactUse` (backref), `AuditEvent`, `AuditOutboxRow` |
 | ArtifactStoreProvider | `ArtifactBlob` (content-addressed; metadata lives in MetadataStore's `ArtifactUse` backref) |
+| AuthStoreProvider | `Tenant`, `Workspace`, `Principal` (User / ServiceAccount discriminator), `OidcIdentity`, `ServiceToken`, `Role`, `Permission`, `RoleBinding` |
 
 ### Tenancy
 
-Every row carries `workspaceId NOT NULL`. The `Workspace` and `Tenant` tables themselves are owned by Auth Service (COMP-002); SPL references `workspaceId` as an opaque string and never resolves it. Cross-workspace reads are not expressible through the interfaces (see Workspace Scoping Middleware).
+Every row in the workspace-scoped interfaces (`DefinitionStoreProvider`, `CatalogStoreProvider`, `MetadataStoreProvider`, `ArtifactStoreProvider`) carries `workspaceId NOT NULL`. The `Workspace` and `Tenant` tables themselves are owned by `AuthStoreProvider` and are exempt from workspace-scoping middleware — they describe workspaces rather than living inside one. Cross-workspace reads on the four workspace-scoped interfaces are not expressible (see Workspace Scoping Middleware).
 
 ## Public Interface
 
@@ -189,17 +194,74 @@ Grouped by entity family. All methods take `workspaceId` first (omitted from sig
 
 The artifact's user-facing metadata (`runId`, `stepId`, `name`) lives in `MetadataStoreProvider.appendArtifactUse`. The blob store itself only knows `{workspaceId, id, digest, mediaType, size, content}`.
 
+### AuthStoreProvider
+
+Persists the identity, tenancy, and RBAC entities owned by Auth Service (COMP-002). This interface does **not** take `workspaceId` as a leading argument — its entities either describe workspaces (`Tenant`, `Workspace`) or scope themselves via an explicit `scope` field on the row (`RoleBinding.scope ∈ {workspaceId, tenantId, "*"}`). The workspace-scoping middleware does not wrap this interface; Auth Service is the sole caller and enforces its own authorization rules before invoking it.
+
+**Tenancy and workspace records**
+
+| Method | Notes |
+|---|---|
+| `putTenant(tenant)` / `getTenant(id)` / `listTenants(filter)` | |
+| `putWorkspace(workspace)` / `getWorkspace(id)` / `listWorkspaces(filter)` | `workspace.tenantId` is a required FK. |
+
+**Principals (User + ServiceAccount discriminated union)**
+
+| Method | Notes |
+|---|---|
+| `putPrincipal(principal)` / `getPrincipal(id)` / `listPrincipals(filter)` | `principal.kind ∈ {"user", "serviceAccount"}` discriminates the row variant. |
+| `disablePrincipal(id, actor, reason)` | Soft-disable; preserves audit trail. |
+
+**OIDC identity binding**
+
+| Method | Notes |
+|---|---|
+| `putOidcIdentity(issuer, subject, userId)` | Write-once. 409 if `(issuer, subject)` already bound. |
+| `getOidcIdentity(issuer, subject)` → `userId \| None` | Verifier path. |
+| `listOidcIdentitiesForUser(userId)` | |
+
+**Service tokens**
+
+| Method | Notes |
+|---|---|
+| `putServiceToken(token)` | Stores `{tokenId, serviceAccountId, hash, issuedAt, expiresAt, revokedAt?}`. Plaintext is never persisted; Auth Service hashes before calling. |
+| `getServiceTokenByHash(hash)` → `ServiceToken \| None` | Verifier path (hot path; adapter should index on `hash`). |
+| `revokeServiceToken(tokenId, actor, reason)` | Sets `revokedAt`; never deletes. |
+| `listServiceTokensForServiceAccount(serviceAccountId)` | |
+| `deleteExpiredServiceTokens(before)` | Sweeper-only; physically removes rows past expiry + retention. |
+
+**Permissions and roles**
+
+| Method | Notes |
+|---|---|
+| `upsertPermission(permission)` | Called at platform startup for every declared permission. `(name)` is the primary key. |
+| `listPermissions()` | |
+| `putRole(role)` / `getRole(id)` / `listRoles()` | v1 roles are seeded at startup; mutation API reserved for M2+ custom roles. |
+
+**Role bindings**
+
+| Method | Notes |
+|---|---|
+| `putRoleBinding(binding)` | `binding.scope ∈ {workspaceId, tenantId, "*"}`. Adapter MUST index on `(principalId, scope)` for the authorization hot path. |
+| `deleteRoleBinding(bindingId, actor, reason)` | |
+| `listRoleBindingsForPrincipal(principalId, scopes)` | Returns all bindings for the principal at the supplied set of scopes (used by `authorize`). |
+| `listRoleBindingsForScope(scope, filter)` | Admin views. |
+
+**Immutability and audit**
+
+`OidcIdentity` rows are write-once (rebinding requires explicit delete + re-put with audit trail). `ServiceToken.hash` is immutable. All mutating methods participate in the audit outbox via the same transaction handle contract as `MetadataStoreProvider` (`appendAudit` is reachable from any provider's transaction).
+
 ## Cross-cutting concerns
 
 ### Workspace Scoping Middleware
 
-Every provider method is wrapped in middleware that:
+Every provider method on the four workspace-scoped interfaces (`DefinitionStoreProvider`, `CatalogStoreProvider`, `MetadataStoreProvider`, `ArtifactStoreProvider`) is wrapped in middleware that:
 
 1. Requires `workspaceId` as the first argument (type system enforces).
 2. Adapters MUST add `workspaceId = ?` to every `WHERE` clause; this is enforced by a static check on adapter code (SPL ships a lint rule that fails CI for any SQL query missing the workspace filter).
 3. Cross-workspace operations are not expressible: there is no `*` workspace, no admin bypass, no cross-workspace join in the interface contract.
 
-Auth Service (COMP-002) decides who may call a given method on behalf of which workspace; SPL trusts the `workspaceId` it receives.
+`AuthStoreProvider` is exempt because its entities define workspaces and span tenancy levels by design. Auth Service is the sole caller and is responsible for authorization on every method invocation before reaching the adapter.
 
 ### Audit Partition Enforcer
 
@@ -275,6 +337,7 @@ Each interface has a monotonically increasing **schema revision number** owned b
 | MetadataStoreProvider | 1 | initial v1 schema |
 | MetadataStoreProvider | 2 | adds `ConnectorCursor.encoding` |
 | DefinitionStoreProvider | 1 | initial v1 schema |
+| AuthStoreProvider | 1 | initial v1 schema (tenants, workspaces, principals, OIDC identities, service tokens, roles, permissions, role bindings) |
 
 Each adapter declares the set of revisions it implements at registration time:
 
@@ -301,6 +364,7 @@ Migrations are forward-only in v1. Down-migrations require explicit operator bac
 | `CUSTOS_CATALOG_STORE` | Yes | `postgres` | Adapter identifier for CatalogStoreProvider. |
 | `CUSTOS_METADATA_STORE` | Yes | `postgres` | Adapter identifier for MetadataStoreProvider. |
 | `CUSTOS_ARTIFACT_STORE` | Yes | `csi-pvc` | Adapter identifier for ArtifactStoreProvider. |
+| `CUSTOS_AUTH_STORE` | Yes | `postgres` | Adapter identifier for AuthStoreProvider. |
 | `CUSTOS_POSTGRES_DSN` | Conditional | — | Required when any Postgres adapter is active. |
 | `CUSTOS_AUDIT_SCHEMA` | No | `custos_audit` | Postgres schema for the audit partition. |
 | `CUSTOS_STATE_SCHEMA` | No | `custos_state` | Postgres schema for ops state. |
@@ -345,3 +409,4 @@ _(none — all v1 design questions resolved this session.)_
 | Date | Change | GitHub Issue |
 |---|---|---|
 | 2026-05-17 | Initial component design: four provider interfaces (Definition/Catalog/Metadata/Artifact), workspace-scoping middleware, audit partition enforcer with outbox pattern, abstract lease primitive, migration runner with `strict` startup policy, M2+ deferral of OCI-registry adapter, MetadataStore-owned artifact backrefs | #64 |
+| 2026-05-17 | Add `AuthStoreProvider` interface for Auth Service persistence (tenants, workspaces, principals, OIDC identities, service tokens, roles, permissions, role bindings). Exempt from workspace-scoping middleware. Adds `CUSTOS_AUTH_STORE` config and migration revision `AuthStoreProvider:1`. | #66 |
