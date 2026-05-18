@@ -35,7 +35,11 @@
       "produced": [
         "blob.object.created",
         "blob.object.deleted"
-      ]
+      ],
+      "pull": {
+        "cursorEncoding": "azure-blob-list-v1",
+        "initialCursorBehavior": "now"
+      }
     }
   }
 }
