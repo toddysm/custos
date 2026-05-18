@@ -1,14 +1,14 @@
 # Reference Deployment: Custos
 
-Last Updated: 2026-05-17
-Version: 1
+Last Updated: 2026-05-18
+Version: 2
 Status: Draft
 
 ## Summary
 
-The reference deployment ships Custos as a single Helm chart with two topology variants — **connected** and **air-gapped** — and two sizing profiles per topology — **eval** and **HA**. The chart deploys all ten control-plane components (COMP-001..010) plus their direct infrastructure dependencies onto a Kubernetes cluster. Cloud-provider IaC (Terraform/Bicep modules) is out of scope for M1 and deferred to M2+.
+The reference deployment ships Custos as a single Helm chart with two topology variants — **connected** and **air-gapped** — and two sizing profiles per topology — **eval** and **HA**. In M1 the chart deploys the nine in-scope control-plane components (COMP-001..009) plus their direct infrastructure dependencies onto a Kubernetes cluster. The Web UI (COMP-010) is contract-defined but deferred to M2+ and is **not** deployed in M1 (`web-ui.enabled` defaults to `false`). Cloud-provider IaC (Terraform/Bicep modules) is out of scope for M1 and deferred to M2+.
 
-The goal: an operator can go from "git clone" to "running Custos" in one `helm install` command on any conformant Kubernetes cluster, with no manual prerequisite provisioning beyond the cluster itself and an OIDC issuer.
+The goal: an operator can go from "git clone" to "running Custos" in one `helm install` command on any conformant Kubernetes cluster, with no manual prerequisite provisioning beyond the cluster itself. An OIDC issuer is contract-locked but **not** an M1 prerequisite — M1 uses pre-provisioned API tokens (REQ-035) and the OIDC code paths in Auth Service / API Gateway are disabled; an OIDC issuer becomes a prerequisite at M3 (REQ-034/056/057/058).
 
 ## Scope and Non-Goals
 

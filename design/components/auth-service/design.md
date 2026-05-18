@@ -114,6 +114,8 @@ Bindings outside the allowed scope are rejected by the role-binding endpoint wit
 
 GitHub and Azure Entra ID are the **priority OIDC presets** for v1 — they ship first, are exercised end-to-end before any other identity source is enabled, and drive the shape of the generic OIDC configuration. Every other identity source builds on the contract these two prove out.
 
+> **M1 implementation note (added 2026-05-18):** the v1 **contract** for OIDC (generic + GitHub + Entra presets) and RBAC is locked in this document and the `AuthStoreProvider` migrations ship in M1. The **first implementation milestone**, however, follows the requirements timeline: M1 ships API tokens + service tokens (REQ-035) only; OIDC code paths are present but disabled (the M1 reference deployment does not require an OIDC issuer); generic OIDC, GitHub/Entra presets, and RBAC land in M3 (REQ-034 / REQ-036 / REQ-056 / REQ-057 / REQ-058). The `Status v1` column below tracks the **contract milestone**, not the implementation milestone.
+
 | Source | Status v1 | Priority | Use |
 |---|---|---|---|
 | **GitHub OIDC preset** (human login + GitHub Actions workload tokens) | **M1** | **P0** | Default human identity and CI workload identity (REQ-057) |

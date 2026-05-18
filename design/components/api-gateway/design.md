@@ -241,7 +241,9 @@ The gateway's "public interface" is the union of every other component's externa
 - `maxBodyBytes` (default 1 MB; workflow/template publish overridden to 5 MB)
 - `rateLimitClass` (`write` | `read` | `webhook` | `auth`)
 
-### Route registry (M1 set)
+### Route registry (M1 contract set)
+
+> **M1 implementation note (added 2026-05-18):** the table below is the **v1 contract** set — every route is defined and stable across milestones. Implementation follows the requirements timeline: in M1 the device-code flow routes (`/v1/auth/login/device*`) and the OIDC-only Auth-Service-backed routes are wired into the gateway but the underlying handlers return `503 Service Unavailable` while OIDC is disabled (REQ-035 ships API tokens only). The OIDC device-code flow becomes live in M3 alongside REQ-034 / REQ-056..058.
 
 | Source | Prefix | Notes |
 |---|---|---|
