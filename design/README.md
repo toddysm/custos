@@ -42,7 +42,7 @@ Custos is a pluggable workflow orchestrator for supply-chain security operations
 
 | Date | Change | Issue |
 |---|---|---|
-| 2026-05-18 | Bucket A design alignment: design/README.md refresh, REQ-080/081 assigned to M2, SPL documented as 7 interfaces, M1 scope reconciliation (contract vs implementation) | _pending_ |
+| 2026-05-18 | Bucket A design alignment: design/README.md refresh, REQ-080/081 assigned to M2, SPL documented as 7 interfaces, M1 scope reconciliation (contract vs implementation) | #87, #91, #96, #97 |
 | 2026-05-18 | Repository scaffold + Helm umbrella chart and 11 subcharts | #77 |
 | 2026-05-17 | Reference Deployment doc; Capabilities Registry; architecture overview updates for connector/trigger/activity contracts | _pending_ |
 | 2026-05-17 | Observability and Audit Service component design | _pending_ |
