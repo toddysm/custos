@@ -308,16 +308,192 @@ This division resolves INCON-011: there is exactly one cursor per stream, owned 
 
 ## Secret and Token Flow to Activities
 
-The connector runtime authenticates to upstream systems and obtains short-lived token material as needed.
-Activities do not receive raw static credentials directly.
+The connector runtime authenticates to upstream systems and obtains short-lived token material as needed. Activities never receive raw static credentials directly — they receive a `ConnectorContext` containing opaque slot handles and request resolved token material at runtime from a local **connector sidecar** over a pod-local Unix domain socket.
 
-Delivery model: sidecar approach.
+This section is the normative contract for the sidecar API. The sidecar is co-deployed with each activity pod by ARM (see `design/components/activity-runtime-manager/design.md` § Sandbox Layout).
 
-- Activity receives `ConnectorContext` with opaque handles and metadata.
-- Activity requests resolved secret/token material via local sidecar API.
-- Sidecar enforces lease scope (workflow run id, step id, ttl) and audit logging.
+### Transport
 
-This keeps secrets ephemeral, scoped, and auditable.
+- **Unix domain socket** at `/custos/run/connector.sock`, bind-mounted into the activity container.
+- **HTTP/1.1 over UDS**, JSON request/response bodies.
+- No TCP listener, no network interface. The socket is `0600`, owner = sidecar UID, group = activity UID (group-readable). Pod sandbox prevents cross-pod access.
+
+Rejected alternatives: loopback TCP (risks leaking to neighbor sidecars or cloud metadata services), gRPC over UDS (call volume per step is single-digit; an extra runtime dependency on every activity image is not justified).
+
+### Authentication (activity → sidecar)
+
+ARM writes a short-lived bootstrap token to a separate file at `/custos/in/sidecar-token` before the activity container starts:
+
+- `0400`, owner = activity UID, on tmpfs (never persisted to disk).
+- Token is bound to `(runId, stepId, attempt)` and signed by ARM with a key the sidecar has been issued at pod start.
+- Activity reads the file once and includes the token in every sidecar request via the `Custos-Sidecar-Token` header.
+- Sidecar verifies signature and triple match on every request; mismatch → 401.
+
+This avoids requiring SPIFFE/SPIRE in M1 (deferred to M3 per REQ-059) while still preventing a compromised neighbor sidecar from impersonating the activity — the bootstrap token never leaves the pod sandbox.
+
+### API surface
+
+Three endpoints. Errors are RFC 7807 `application/problem+json`.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/v1/token?slot=<name>&purpose=<verb>` | Acquire a token for a connector slot and capability. |
+| `POST` | `/v1/token/refresh` | Refresh by `leaseId` before expiry; `leaseId` remains stable. |
+| `POST` | `/v1/token/release` | Voluntary release. Best-effort — sidecar GCs at step end regardless. |
+
+**Request: `GET /v1/token?slot=source&purpose=oci.pull`**
+
+| Parameter | Meaning |
+|---|---|
+| `slot` | Connector slot name from activity manifest `spec.connectors[].name`. |
+| `purpose` | Capability verb the activity will perform (e.g. `oci.pull`, `s3.read`). Sidecar verifies the bound connector instance declares this capability; mismatch → 403. |
+
+**Response (200)**:
+
+```json
+{
+  "leaseId": "lease_01HX...",
+  "tokenType": "bearer",
+  "token": "eyJhbGciOi...",
+  "expiresAt": "2026-05-17T12:34:56Z",
+  "scope": {
+    "connectorSlot": "source",
+    "connectorInstanceId": "prod-registry",
+    "capability": "oci.pull",
+    "runId": "...",
+    "stepId": "...",
+    "attempt": 1
+  },
+  "endpoint": "https://registry.example.com",
+  "extras": { }
+}
+```
+
+Field semantics:
+
+| Field | Notes |
+|---|---|
+| `leaseId` | Stable identifier across refreshes; the unit of audit and revocation. |
+| `tokenType` | Open-ended string: `bearer`, `basic`, `aws-sigv4`, `azure-sas`, ... Connector-type defines its set. |
+| `token` | Primary credential material. For non-token auth (e.g. `aws-sigv4`) may be empty; consumers read `extras`. |
+| `expiresAt` | RFC3339 UTC. Activity should refresh before this time if still in use. |
+| `scope` | Echoed back for activity-side defensive checks and structured logging. |
+| `endpoint` | Convenience copy of the upstream endpoint from `ConnectorContext`. |
+| `extras` | Per-connector-type opaque bag (see § `extras` shape). |
+
+### Lease lifecycle
+
+- **TTL default**: `10 min`. The activity does **not** refresh on a schedule — it refreshes only when expiry approaches and the activity is still using the token. Most activities run under one minute and never refresh.
+- **TTL precedence** (most specific wins; all subject to the step-deadline cap):
+
+  | Level | Field | Purpose |
+  |---|---|---|
+  | Sidecar default | `CONN_SIDECAR_DEFAULT_TTL` | Platform-wide default (10 min in v1). |
+  | Connector type manifest | `credentials.maxLeaseTtl` | Vendor connector ceiling. Sidecar caps any longer request down to this. |
+  | Connector instance config | `lease.ttl` | Operator override (must be ≤ connector-type max). |
+  | Hard cap | `step.deadline - safetyBuffer` | Lease never outlives the step. If the step deadline is closer than the requested TTL, the issued lease matches the deadline. |
+
+- **Refresh** is **pull-based and explicit**: `POST /v1/token/refresh { "leaseId": "..." }` returns a new envelope with the same `leaseId` but new `token` and `expiresAt`. The sidecar may transparently re-mint upstream credentials between refresh calls; the activity caches one stable identifier.
+- **Release**: explicit `POST /v1/token/release { "leaseId": "..." }`. Best-effort — the sidecar releases all leases for `(runId, stepId)` at step end regardless. Activities are encouraged but not required to release explicitly.
+- **Concurrent lease cap per step-attempt**: **16**. Beyond that, `GET /v1/token` returns **429 Too Many Requests**. Rationale: typical multi-connector activities (e.g. `image-promote@1` with source + destination, each with pull + push = 4 leases) fit comfortably; a runaway loop is caught early without spamming audit. Configurable per connector-type if a legitimate workload needs more, via `credentials.maxConcurrentLeasesPerStep`.
+
+### Revocation
+
+Revocation flows through a **separate ARM → sidecar control channel**, not the activity-facing UDS:
+
+- On cancel-run or step terminal, ARM signals the sidecar (over a pod-local control socket distinct from the activity-facing one).
+- Sidecar marks all leases for `(runId, stepId)` revoked.
+- Subsequent activity requests against revoked leases return **410 Gone**.
+- Audit event `lease.revoked` emitted with reason.
+
+This split keeps the activity-facing API a pure pull surface — there is no callback or server-push from the sidecar into the activity.
+
+### Audit
+
+Every lease state transition emits a structured event via the Observability Client. Event kinds:
+
+| Event | Trigger |
+|---|---|
+| `lease.issued` | Successful `GET /v1/token` |
+| `lease.refreshed` | Successful `POST /v1/token/refresh` |
+| `lease.released` | Explicit `POST /v1/token/release` |
+| `lease.revoked` | ARM revoke signal |
+| `lease.expired` | TTL reached without refresh or release |
+| `lease.denied` | Request rejected (403/410/429) |
+
+Each event carries `leaseId`, `connectorInstanceId`, `connectorSlot`, `capability`, `runId`, `stepId`, `attempt`, `tokenType` (never the token itself), and timestamp. This satisfies the REQ-038 audit obligation for secret access.
+
+### `extras` shape
+
+Some upstream auth needs more than a single token string. Examples:
+
+- **AWS sigv4**: `accessKeyId` + `secretAccessKey` + `sessionToken`.
+- **Azure storage SAS**: signed URL or SAS parameters.
+- **GCP service account**: token + project ID + scopes.
+
+`extras` is a **per-connector-type opaque JSON bag**. The activity image is already coupled to a specific connector type via the activity manifest `spec.connectors[].type` field, so it knows which fields to expect. v1 does **not** enforce a schema on `extras` — connector-type-declared `extras` schemas with sidecar-side validation are a planned M2+ hardening item.
+
+Example for `aws-sigv4`:
+
+```json
+{
+  "tokenType": "aws-sigv4",
+  "token": "",
+  "extras": {
+    "accessKeyId": "AKIA...",
+    "secretAccessKey": "...",
+    "sessionToken": "...",
+    "region": "us-east-1"
+  }
+}
+```
+
+### Activity-visible failure modes
+
+| Condition | Status | Class | Activity expectation |
+|---|---|---|---|
+| Slot not declared in activity manifest `connectors[]` | 404 | Permanent | Manifest/workflow mismatch. Fail step. |
+| Capability `purpose` not declared on bound connector | 403 | Permanent | Fail step. |
+| Connector instance disabled or unhealthy | 503 | Retryable | Backoff and retry. |
+| Upstream identity provider unreachable (KMS / OIDC) | 502 | Retryable | Backoff and retry. |
+| Lease revoked or step cancelled | 410 | Permanent | Exit step promptly. |
+| Refresh against unknown / expired `leaseId` | 404 | (re-acquire) | Activity must re-acquire via `GET /v1/token`. |
+| Concurrent lease cap exceeded | 429 | (caller-fix) | Release an unused lease before retrying. |
+| Bootstrap token invalid | 401 | Permanent | Should never occur — indicates a platform bug. |
+
+Activities map these to the standard exit codes (ADR-008): 1 for retryable, 2 for permanent.
+
+### Sidecar internal lifecycle
+
+```mermaid
+sequenceDiagram
+    participant ARM as Activity Runtime Manager
+    participant Sidecar as Connector Sidecar
+    participant CS as Connector Service
+    participant Act as Activity Container
+    participant KMS as KMS / IdP
+
+    ARM->>Sidecar: start(runId, stepId, attempt, ConnectorContexts, bootstrapToken)
+    Sidecar->>CS: BindForStep validation handshake
+    CS-->>Sidecar: ok
+    ARM->>Act: start
+    Act->>Sidecar: GET /v1/token?slot=source&purpose=oci.pull (header: bootstrap)
+    Sidecar->>KMS: mint short-lived credential
+    KMS-->>Sidecar: token + expiry
+    Sidecar->>Sidecar: record lease, emit lease.issued
+    Sidecar-->>Act: { leaseId, token, expiresAt, ... }
+    Act->>Act: do work
+    opt refresh before expiry
+        Act->>Sidecar: POST /v1/token/refresh { leaseId }
+        Sidecar->>KMS: re-mint
+        KMS-->>Sidecar: new token
+        Sidecar-->>Act: { same leaseId, new token, new expiresAt }
+    end
+    Act->>Sidecar: POST /v1/token/release { leaseId } (best-effort)
+    Sidecar->>Sidecar: emit lease.released
+    ARM->>Sidecar: step terminal — revoke all leases for (runId, stepId)
+    Sidecar->>Sidecar: emit lease.expired/revoked for any open
+```
 
 ## Public Interface
 
@@ -388,7 +564,6 @@ sequenceDiagram
 
 - Capability namespace governance model (strict curated list vs extensible custom prefixes).
 - Fallback tag naming finalization and normalization edge cases for non-sha256 digests.
-- Sidecar API details (path, protocol, token refresh semantics, cache policy).
 
 ## Change History
 
@@ -401,3 +576,4 @@ sequenceDiagram
 | 2026-05-16 | Move event delivery direction out of `capabilities` into `events.delivery`; document Capabilities and Events semantics | — |
 | 2026-05-17 | INCON-012: `events` block is optional — sink/data-plane-only connectors omit it; when present, `events.delivery` and `events.produced` each require at least one entry. Added sink connector example | #37 |
 | 2026-05-17 | INCON-011: Documented Cursor Ownership — Connector Service owns one `ConnectorCursor` per `ConnectorInstance`; Trigger Service holds no cursor state. One pull loop per instance fans events out to multiple subscriptions | #36 |
+| 2026-05-17 | Sidecar Secret/Token API contract: UDS transport, bootstrap-token auth, three-endpoint API (`GET /v1/token`, `POST /v1/token/refresh`, `POST /v1/token/release`), 10-min default TTL with 4-level precedence and step-deadline cap, 16-lease concurrent cap, ARM control-channel revocation, `extras` opaque bag, full failure-mode table, sidecar internal lifecycle diagram | #57 |
