@@ -129,9 +129,13 @@ bootstrap:
     name: custos-bootstrap
     key: adminPrincipalId
 
-# NetworkPolicies — default deny-all + explicit allow per service
+# NetworkPolicies — default deny-all + explicit allow per service.
+# DISABLED BY DEFAULT until the per-service allow set is implemented:
+# enabling the deny-all alone blocks all ingress/egress (including DNS) and
+# breaks the platform. Tracked in reference-deployment.md (TODO-004: network
+# policy matrix). Set to true only after the allow policies are merged.
 networkPolicies:
-  enabled: true
+  enabled: false
 
 # Subchart toggles (when umbrella renders subcharts)
 api-gateway:
