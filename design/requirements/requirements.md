@@ -1,7 +1,7 @@
 # Requirements: Custos
 
-Last Updated: 2026-05-14
-Version: 4
+Last Updated: 2026-05-18
+Version: 5
 
 ## Project Goal
 
@@ -136,10 +136,12 @@ Custos is deployed as a set of containerized microservices on **Kubernetes**, wi
 
 > **Scope-vs-capacity note:** with a solo nights-and-weekends team, the full requirements set above is realistically a multi-quarter program. v1 (M1) MUST stay limited to the items marked High and required for an end-to-end demo. Items marked Medium/Low are scoped into M2/M3.
 
+> **Contract vs implementation (added 2026-05-18):** Component design documents define **v1 contracts** — the locked interface surface, schemas, audit events, and storage migrations a component will own across all milestones. The milestone table below tracks the **first implementation milestone** for each requirement. A requirement may therefore be _contract-locked in v1_ (its interfaces/schemas appear in component designs and the Storage Provider Layer's migration set) while its _implementation_ is deferred to a later milestone (its code paths are stubbed, its routes 404, its dispatcher arms are no-ops, its tables exist but are unused). Reviewers reconciling this document with component designs should read mismatches through that lens: a feature mentioned in a component design but not in M1 below is contract-locked but not yet implemented.
+
 | Milestone | Target | Scope | Dependencies |
 |---|---|---|---|
-| M1 — Core engine | +3 months (≈ 2026-08-13) | Dapr-Workflow-backed engine; YAML-defined DAG workflows and core workflow primitives (REQ-001, REQ-007–010, REQ-025, REQ-073); workflow templates baseline (REQ-076); manual API trigger (REQ-004); 2 built-in actions (vuln scan REQ-016, signature verify REQ-018); OCI container action runtime and independently pluggable activities (REQ-013, REQ-022, REQ-023, REQ-075); run inspection (REQ-026, REQ-027); minimal auth (REQ-035 API tokens); datastore and artifact abstractions with in-cluster defaults (REQ-048, REQ-050, REQ-077); basic logs + Prometheus metrics (REQ-040, REQ-042, REQ-078); Helm chart (subset of REQ-052); audit log skeleton (REQ-038) | None |
-| M2 — Triggers & action breadth | +6 months | Scheduled trigger (REQ-005); registry webhook trigger (REQ-006); extensible connector model beyond registries (REQ-074); SBOM action (REQ-017); attestation action (REQ-019); policy eval action with OPA backend (REQ-020, REQ-062, REQ-066); image promotion action (REQ-021); generic webhook + Slack notifications (REQ-067, REQ-068); OpenTelemetry tracing (REQ-043); SDK for action authors (REQ-022 hardening) | M1 |
+| M1 — Core engine | +3 months (≈ 2026-08-13) | Dapr-Workflow-backed engine; YAML-defined DAG workflows and core workflow primitives (REQ-001, REQ-007–010, REQ-025, REQ-073); workflow templates baseline (REQ-076); manual API trigger (REQ-004); 2 built-in actions (vuln scan REQ-016, signature verify REQ-018); OCI container action runtime and independently pluggable activities (REQ-013, REQ-022, REQ-023, REQ-075); run inspection (REQ-026, REQ-027); minimal auth (REQ-035 API tokens — OIDC/RBAC contract-locked but disabled, see Auth Service design); datastore and artifact abstractions with in-cluster defaults (REQ-048, REQ-050, REQ-077); basic logs + Prometheus metrics (REQ-040, REQ-042, REQ-078) — **traces deferred to M2**; Helm chart (subset of REQ-052); audit log skeleton (REQ-038). Web UI (COMP-010) **not deployed in M1**. | None |
+| M2 — Triggers & action breadth | +6 months | Scheduled trigger (REQ-005); registry webhook trigger (REQ-006); extensible connector model beyond registries (REQ-074); internal workflow-to-workflow triggers (REQ-080); dual-purpose event delivery for start and resume (REQ-081); SBOM action (REQ-017); attestation action (REQ-019); policy eval action with OPA backend (REQ-020, REQ-062, REQ-066); image promotion action (REQ-021); generic webhook + Slack notifications (REQ-067, REQ-068); OpenTelemetry tracing (REQ-043); SDK for action authors (REQ-022 hardening); Web UI initial deployment (COMP-010 baseline). | M1 |
 | M3 — UX, security, multi-tenancy | +9–12 months | Visual designer (REQ-003); advanced template authoring UX (REQ-076); OIDC for users (REQ-034, REQ-056); RBAC (REQ-036); full secrets backend pluggability via Dapr (REQ-037, REQ-061); approval gates (REQ-012); loops (REQ-011); HTTP webhook action runtime (REQ-014); workflow defs as OCI artifacts (REQ-029, REQ-051); remaining notification channels; remaining policy engines; SPIFFE/SPIRE (REQ-059); GitHub OIDC and Entra ID (REQ-057, REQ-058) | M2 |
 | M4+ — Hardening & advanced | beyond | WebAssembly action runtime (REQ-015); re-run with modified inputs (REQ-028); full SLA achievement (REQ-032); scale testing to upper bound of REQ-030 | M3 |
 
@@ -163,3 +165,4 @@ Custos is deployed as a set of containerized microservices on **Kubernetes**, wi
 | 2026-05-14 | Added workflow templates and single-cluster self-contained deployment/storage/logging requirements | pending |
 | 2026-05-14 | Added hybrid push/pull trigger ingestion requirement (REQ-079) | pending |
 | 2026-05-16 | Added internal workflow-to-workflow trigger (REQ-080) and dual-purpose event delivery for workflow start vs. in-flight resume (REQ-081) | #15, #16 |
+| 2026-05-18 | Assigned REQ-080/REQ-081 to M2; added contract-vs-implementation framing; clarified M1 scope (OIDC contract-locked but API-tokens-only, traces deferred to M2, Web UI not deployed in M1) | #91, #96 |

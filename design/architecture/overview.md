@@ -1,7 +1,7 @@
 # Architecture Overview: Custos
 
-Last Updated: 2026-05-17
-Version: 9
+Last Updated: 2026-05-18
+Version: 10
 Status: Draft
 
 ## Summary
@@ -134,6 +134,9 @@ graph TD
     Store --> REDIS
     Store --> ART
     Obs --> LOG
+
+    Auth --> Store
+    Obs --> Store
 
     Conn --> DSEC
     Act --> DSEC
@@ -404,7 +407,7 @@ _Note: deeper specification (capability negotiation, listen-stream semantics, er
 
 ## Storage Provider Contract
 
-Four small interfaces isolate the platform from any specific backend (ADR-003):
+Seven small interfaces isolate the platform from any specific backend (ADR-003). The first four define the original "definition / catalog / metadata / artifact" surface; `AuthStoreProvider` was added with the Auth Service to keep identity state under the same migration discipline; `LogQueryProvider` and `MetricsQueryProvider` were added so the Observability Service can read back logs and metrics from whichever backend the deployment uses without leaking backend-specific clients into other services.
 
 | Interface | Owns | v1 adapter | M2+ options |
 |---|---|---|---|
@@ -412,8 +415,11 @@ Four small interfaces isolate the platform from any specific backend (ADR-003):
 | `CatalogStoreProvider` | Activity types, connector types, capability metadata | PostgreSQL | OCI registry |
 | `MetadataStoreProvider` | Runs, steps, audit events, trigger state | PostgreSQL | Managed Postgres, cloud DBs |
 | `ArtifactStoreProvider` | Step artifacts (SBOMs, scan reports, attestations) | CSI/PVC | S3-compatible, OCI artifact store |
+| `AuthStoreProvider` | Principals, sessions, API tokens, RBAC bindings, device-code sessions | PostgreSQL | Managed Postgres, cloud DBs |
+| `LogQueryProvider` | Read-side query over structured logs (run/step correlation) | Loki | Cloud log services, OpenSearch |
+| `MetricsQueryProvider` | Read-side query over metrics for the UI/API | Prometheus | Managed metrics backends |
 
-Migrations live with the interface, not with adapters; adapters declare which migration revisions they implement.
+Migrations live with the interface, not with adapters; adapters declare which migration revisions they implement. See `design/components/storage-provider-layer/design.md` for the full per-interface contract and migration model.
 
 ## Security Architecture
 
@@ -445,7 +451,7 @@ Four independent pipelines share correlation fields (`run_id`, `step_id`, `workf
 |---|---|---|
 | Logs | In-cluster Loki/ELK via OTel Collector | Cloud log services |
 | Metrics | Prometheus / OpenMetrics scrape | Managed metrics backends |
-| Traces | OTel Collector → in-cluster Tempo/Jaeger | OTLP exporters |
+| Traces (M2+) | OTel Collector → in-cluster Tempo/Jaeger | OTLP exporters |
 | Audit | MetadataStoreProvider (append-only) | External SIEM exporters |
 
 v1 metrics (illustrative):

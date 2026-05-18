@@ -1,6 +1,6 @@
 # Component Registry: Custos
 
-Last Updated: 2026-05-17
+Last Updated: 2026-05-18
 
 ## Components
 
@@ -13,7 +13,7 @@ Last Updated: 2026-05-17
 | COMP-005 | Connector Service | connector-service | Connector runtime and connector plugin loading/execution | Python plugin runtime, Dapr Secrets | Designed |
 | COMP-006 | Activity Runtime Manager | activity-runtime-manager | Activity resolution, execution, lifecycle, and result mapping | Python, Kubernetes Jobs, Dapr | Designed |
 | COMP-007 | Definition/Template/Catalog Service | catalog-service | Workflow definitions, template lifecycle, activity/connector catalog metadata | Python, provider abstractions | Designed |
-| COMP-008 | Storage Provider Layer | storage-provider-layer | Abstraction and adapters for definitions, metadata, catalog, and artifacts | Python interfaces, provider plugins | Designed |
+| COMP-008 | Storage Provider Layer | storage-provider-layer | Abstraction and adapters for definitions, metadata, catalog, artifacts, auth state, and log/metric query | Python interfaces, provider plugins | Designed |
 | COMP-009 | Observability and Audit Service | observability-audit-service | Structured execution events, audit records, logs/traces/metrics export | OpenTelemetry, Kubernetes logging stack | Designed |
 | COMP-010 | Web UI and Template Designer | web-ui | Workflow authoring, template authoring, run inspection and ops UX | React, TypeScript | Defined |
 
@@ -133,6 +133,9 @@ graph LR
         CatIfc[CatalogStoreProvider]
         MetaIfc[MetadataStoreProvider]
         ArtIfc[ArtifactStoreProvider]
+        AuthIfc[AuthStoreProvider]
+        LogQIfc[LogQueryProvider]
+        MetricsQIfc[MetricsQueryProvider]
     end
     DefIfc --> PgDef[Postgres adapter]
     CatIfc --> PgCat[Postgres adapter]
@@ -140,11 +143,15 @@ graph LR
     MetaIfc --> PgMeta[Postgres adapter]
     ArtIfc --> CSI[CSI/PVC adapter]
     ArtIfc --> S3[S3 adapter optional]
+    AuthIfc --> PgAuth[Postgres adapter]
+    LogQIfc --> Loki[Loki adapter]
+    MetricsQIfc --> Prom[Prometheus adapter]
     DefIfc --> Mig[Migration Runner]
     MetaIfc --> Mig
+    AuthIfc --> Mig
 ```
 
-Each interface is small and stable. New backends are adapters; the rest of the platform is unaware of them.
+Each interface is small and stable. New backends are adapters; the rest of the platform is unaware of them. The Auth Service consumes `AuthStoreProvider` exclusively for principal/session/RBAC state; the Observability and Audit Service consumes `LogQueryProvider` and `MetricsQueryProvider` for read-back into the UI/API without binding other services to backend-specific clients.
 
 ### COMP-009 Observability and Audit Service
 

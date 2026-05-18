@@ -11,6 +11,8 @@ The Trigger Service is the platform's **event ingestion and dispatch broker**. I
 
 It owns ingestion. It does **not** own orchestration control flow.
 
+> **M1 implementation note (added 2026-05-18):** this document defines the **v1 contract** for all six source categories (manual, scheduled, generic webhook, vendor push, pull/poll, internal). Implementation follows the requirements timeline: M1 ships the **manual API trigger** only (REQ-004); scheduled (REQ-005), registry webhook (REQ-006), generic webhook, vendor push, polling (REQ-074), and internal workflow-to-workflow (REQ-080) sources are contract-locked — their tables and dispatcher arms exist in the v1 schema — but their receivers are stubbed until M2. Dual-purpose start/resume routing (REQ-081) is contract-locked in M1 and goes live in M2.
+
 ## Boundaries
 
 - **Owns**:
