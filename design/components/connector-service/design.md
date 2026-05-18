@@ -464,7 +464,7 @@ If Connector Service crashes between publish and commit, the next tick re-emits 
 
 ### Event emission requirement (normative)
 
-Every pull-mode event emitted by a connector plugin **MUST** include a stable `eventId` field, typically `sha256(upstreamEventNaturalKey)`. Trigger Service computes its `DedupKey = sha256(eventId + subscriptionId)`. Plugins that cannot produce a deterministic natural key MUST document a fallback algorithm in their manifest and accept that downstream dedup is only as strong as that algorithm.
+Every pull-mode event emitted by a connector plugin **MUST** include a stable `eventId` field, typically `sha256(upstreamEventNaturalKey)`. Trigger Service computes its `DedupKey` from the tuple `(subscriptionId, source.eventId)` using an unambiguous canonical encoding; for v1 this is `sha256(subscriptionId || 0x00 || eventId)`, where `0x00` is a single-byte separator and `eventId` is the emitted source event identifier. Plugins that cannot produce a deterministic natural key MUST document a fallback algorithm in their manifest and accept that downstream dedup is only as strong as that algorithm.
 
 ### Single-writer safety
 
