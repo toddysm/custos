@@ -124,16 +124,18 @@ custos/
 
 ## Helm
 
-The umbrella chart at `deploy/helm/custos/` installs the full platform — Custos services, CloudNativePG, MinIO (HA only), External Secrets Operator (connected) or Sealed Secrets (airgapped), plus Envoy Gateway resources, the SPL migration Job, and the bootstrap Job.
+The umbrella chart at `deploy/helm/custos/` installs the currently wired platform components — Custos services, CloudNativePG, MinIO where enabled by the selected values file, External Secrets Operator, plus Envoy Gateway resources, the SPL migration Job, and the bootstrap Job.
 
 Four profile values files cover the supported topologies (see [design/architecture/reference-deployment.md](design/architecture/reference-deployment.md)):
 
 | File | Topology | Profile |
 |---|---|---|
-| `values-connected-eval.yaml` | Connected | Eval (single replica, no MinIO) |
-| `values-connected-ha.yaml` | Connected | HA (3 replicas, MinIO) |
-| `values-airgapped-eval.yaml` | Air-gapped | Eval (Keycloak, Sealed Secrets) |
-| `values-airgapped-ha.yaml` | Air-gapped | HA (Keycloak, Sealed Secrets, MinIO) |
+| `values-connected-eval.yaml` | Connected | Eval defaults |
+| `values-connected-ha.yaml` | Connected | HA-oriented defaults with MinIO enabled |
+| `values-airgapped-eval.yaml` | Air-gapped | Eval defaults for air-gapped environments |
+| `values-airgapped-ha.yaml` | Air-gapped | HA-oriented defaults for air-gapped environments with MinIO enabled |
+
+Replica counts are configured per service/subchart values; selecting an HA profile does not by itself force every Custos service to run 3 replicas.
 
 ```bash
 make lint        # helm lint umbrella chart against all 4 profiles
