@@ -4,7 +4,7 @@ Date: 2026-05-18
 Type: component-design
 Component: connector-service
 Sequence: 012
-GitHub Issues: #79, #80, #81, #82, #83, #84
+GitHub Issue: #79, #80, #81, #82, #83, #84
 Status: open
 
 ## Summary
