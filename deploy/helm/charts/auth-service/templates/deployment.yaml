@@ -5,7 +5,7 @@ metadata:
   labels:
     {{- include "svc.labels" . | nindent 4 }}
 spec:
-  replicas: {{ .Values.replicaCount }}
+  replicas: {{ include "svc.replicaCount" . }}
   selector:
     matchLabels:
       {{- include "svc.selectorLabels" . | nindent 6 }}
@@ -17,10 +17,14 @@ spec:
         {{- include "svc.daprAnnotations" . | nindent 8 }}
     spec:
       serviceAccountName: {{ include "svc.fullname" . }}
+      {{- with (.Values.global).imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: {{ .Chart.Name }}
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ include "svc.image" . | quote }}
+          imagePullPolicy: {{ include "svc.imagePullPolicy" . }}
           ports:
             - name: http
               containerPort: {{ .Values.service.port }}
@@ -33,7 +37,7 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           resources:
-            {{- toYaml .Values.resources | nindent 12 }}
+            {{- include "svc.resources" . | nindent 12 }}
           livenessProbe:
             httpGet:
               path: /healthz

@@ -4,11 +4,10 @@
 topology: airgapped
 profile: eval
 
-replicaCount: 1
-
 global:
   imageRegistry: registry.internal/custos
   imageTag: dev
+  replicaCount: 1
 
 postgres:
   embedded: true

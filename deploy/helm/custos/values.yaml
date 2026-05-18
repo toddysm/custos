@@ -11,6 +11,17 @@ global:
   imagePullSecrets: []
   # correlationId header name minted by API Gateway and propagated downstream
   correlationIdHeader: x-correlation-id
+  # Default replicas and resources for every service subchart. Each subchart
+  # uses .Values.global.replicaCount / .Values.global.resources when its local
+  # values are empty, so umbrella profiles can scale all services in one knob.
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
 
 # Topology: connected | airgapped
 topology: connected
@@ -85,7 +96,10 @@ observability:
   otelCollector:
     enabled: true
 
-# Default resource requests/limits applied to services without overrides
+# Default resource requests/limits applied to services without overrides.
+# Subcharts read from .Values.global.resources via the umbrella, with
+# .Values.resources here serving as the source for that propagation.
+# (Local subchart overrides still win.)
 resources:
   requests:
     cpu: 100m
@@ -94,7 +108,7 @@ resources:
     cpu: 500m
     memory: 512Mi
 
-# Default replica count
+# Default replica count. Subcharts read .Values.global.replicaCount.
 replicaCount: 1
 
 # Pre-install/upgrade SPL migration Job

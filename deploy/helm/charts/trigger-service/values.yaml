@@ -1,23 +1,21 @@
-# trigger-service — defaults are overridden via the umbrella chart's global values when rendered together.
+# trigger-service — leave image.repository/tag/pullPolicy and replicaCount/resources
+# empty to inherit umbrella global.* values. Set them here only to override
+# the umbrella for this one subchart.
 
-replicaCount: 1
+enabled: true
+
+replicaCount: ""
 
 image:
-  repository: ghcr.io/toddysm/custos/trigger-service
-  tag: dev
-  pullPolicy: IfNotPresent
+  repository: ""
+  tag: ""
+  pullPolicy: ""
 
 service:
   type: ClusterIP
   port: 8080
 
-resources:
-  requests:
-    cpu: 100m
-    memory: 256Mi
-  limits:
-    cpu: 500m
-    memory: 512Mi
+resources: {}
 
 env: []
 

@@ -4,7 +4,15 @@
 topology: connected
 profile: ha
 
-replicaCount: 3
+global:
+  replicaCount: 3
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
 
 postgres:
   embedded: true
@@ -31,11 +39,3 @@ oidc:
 
 gateway:
   hostname: custos.example.com
-
-resources:
-  requests:
-    cpu: 250m
-    memory: 512Mi
-  limits:
-    cpu: 1000m
-    memory: 1Gi

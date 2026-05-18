@@ -4,7 +4,8 @@
 topology: connected
 profile: eval
 
-replicaCount: 1
+global:
+  replicaCount: 1
 
 postgres:
   embedded: true

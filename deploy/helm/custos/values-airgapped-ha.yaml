@@ -4,11 +4,17 @@
 topology: airgapped
 profile: ha
 
-replicaCount: 3
-
 global:
   imageRegistry: registry.internal/custos
   imageTag: dev
+  replicaCount: 3
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
 
 postgres:
   embedded: true
@@ -36,11 +42,3 @@ oidc:
 
 gateway:
   hostname: custos.internal
-
-resources:
-  requests:
-    cpu: 250m
-    memory: 512Mi
-  limits:
-    cpu: 1000m
-    memory: 1Gi
