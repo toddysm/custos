@@ -7,7 +7,8 @@ box and pass it back unchanged on the next page request.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass, field
 from typing import Generic, TypeVar
 
 T = TypeVar("T")
@@ -29,12 +30,24 @@ class Page(Generic[T]):
     """A single page of results plus the cursor to fetch the next page.
 
     `next_cursor` is `None` iff this page is the last one. An empty
-    `items` list with a non-`None` `next_cursor` is legal — it means
+    `items` tuple with a non-`None` `next_cursor` is legal — it means
     "no matches in this window, keep paging".
+
+    `items` is stored as a `tuple` so the Page is deeply immutable: a
+    caller cannot mutate the page contents after the fact, and a list
+    handed in to the constructor is snapshotted (not aliased).
     """
 
-    items: list[T]
-    next_cursor: Cursor | None
+    items: tuple[T, ...] = field(default=())
+    next_cursor: Cursor | None = None
+
+    def __init__(
+        self,
+        items: Iterable[T] = (),
+        next_cursor: Cursor | None = None,
+    ) -> None:
+        object.__setattr__(self, "items", tuple(items))
+        object.__setattr__(self, "next_cursor", next_cursor)
 
 
 __all__ = ["Cursor", "Page"]
