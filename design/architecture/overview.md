@@ -1,7 +1,7 @@
 # Architecture Overview: Custos
 
 Last Updated: 2026-05-18
-Version: 11
+Version: 12
 Status: Draft
 
 ## Summary
@@ -45,7 +45,7 @@ erDiagram
     Workspace ||--o{ Workflow : contains
     Workspace ||--o{ WorkflowTemplate : contains
     Workspace ||--o{ ConnectorInstance : contains
-    Workspace ||--o{ Trigger : contains
+    Workspace ||--o{ Subscription : contains
     Workspace ||--o{ Run : contains
 
     Workflow ||--o{ WorkflowVersion : has
@@ -59,9 +59,9 @@ erDiagram
     ActivityType ||--o{ ActivityVersion : has
     ActivityVersion }o--o{ ConnectorType : mayRequire
 
-    Trigger }o--|| WorkflowVersion : starts
-    Trigger }o--o| ConnectorInstance : sourcedFrom
-    Schedule }o--|| Trigger : drives
+    Subscription }o--|| WorkflowVersion : starts
+    Subscription }o--o| ConnectorInstance : sourcedFrom
+    Schedule }o--|| Subscription : drives
 
     Run }o--|| WorkflowVersion : executes
     Run ||--o{ Step : contains
@@ -72,6 +72,8 @@ erDiagram
 ```
 
 `Tenant` and `Workspace` are present in the data model from day one even though multi-tenancy ships in M3 (ADR-012). `WorkflowVersion` and `WorkflowTemplateVersion` are immutable. `ArtifactRef` is always content-addressed; blobs never live inline in metadata.
+
+The data-model entity is `Subscription` (with `kind = start | resume`); the public REST resource is `/triggers` for ergonomic reasons. Both names refer to the same thing — earlier prose in this document and the Trigger Pipeline section below use "trigger" colloquially when referring to the user-facing concept, but the authoritative entity name is `Subscription`. See `design/components/trigger-service/design.md` § Data Models.
 
 ## Component Map
 
@@ -689,3 +691,4 @@ sequenceDiagram
 | 2026-05-17 | INCON-009: Activity sandbox secret path corrected to `/custos/in/secrets/<connector-name>/<key>` (matches activity manifest `spec.connectors[].name` and ARM's normative two-level layout) | #34 |
 | 2026-05-17 | INCON-007: Added `API --> Conn` edge to Component Map so the diagram matches the documented Connector Service REST API surface; clarified that Deployment Model edges describe topology and not user-facing REST routing | #32 |
 | 2026-05-18 | INCON-027 + INCON-028: Extended Workflow and Template Schema with `let`, `forEach` (+ `where:`), `on_error`, and the multi-connector `connectors:` map form, plus a step-form reference table and cross-component implications paragraph | #89, #90 |
+| 2026-05-18 | INCON-026: Aligned Domain Model on `Subscription` (was `Trigger`); the REST resource is still `/triggers` for ergonomic reasons. Added a naming-reconciliation note pointing at the Trigger Service data model as authoritative | #88 |
