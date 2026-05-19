@@ -3,7 +3,7 @@
 Slug: `workflow-service`
 Component ID: COMP-003
 Last Updated: 2026-05-18
-Version: 2
+Version: 3
 Status: Draft
 
 ## Responsibility
@@ -330,9 +330,11 @@ The Workflow Service Step Coordinator recognizes the following step kinds. The w
 
 The contract is locked in v1 because the boundary matters: a `let` step must never have side effects, must never require a `ConnectorContext`, and must never trigger a `(runId, stepId, attempt)` ARM scheduling key. Implementation is flagged for M2 per the requirements timeline.
 
-**Compilation strategy**: `let` expressions are parsed and type-checked at workflow **compile time** (Definition Compiler pass) and the compiled AST is cached on `ExecutionGraph` alongside the rest of the workflow's expressions. Parse errors fail the workflow at `StartRun` time (Validator rejects the request before a `runId` is issued). Evaluation errors fail the specific step at run time with status `permanent` — the AST is well-formed but a binding produced an incompatible value.
+**Compilation strategy**: CEL **syntactic** validation is the Catalog Service's responsibility at workflow **publish time** — Catalog parses every CEL expression (`if`, `when`, `with`, `for`, `let`) and rejects the publish with parse error and position before a `WorkflowVersion` is created. The Workflow Service therefore never observes a syntactically invalid `WorkflowVersion`. `WorkflowVersion.document` stores the normalized definition with the original CEL **source strings**, not a pre-built AST.
 
-This matches the compilation model for all other expressions (`if`, `when`, `with`, loop `for`): parse-once at compile, evaluate-many at step boundaries. There is no first-execution / lazy compilation path.
+The Definition Compiler runs at `StartRun` time: it re-parses each CEL source string from `WorkflowVersion.document`, **type-checks** the AST against the bound input/output schemas and the step graph, and caches the resulting typed AST on `ExecutionGraph` alongside the wired step topology. Type errors fail the workflow at `StartRun` (Validator rejects the request before a `runId` is issued). Defensive re-parse failures at this stage are a contract violation (Catalog gate bypassed or document tampered) and surface as a permanent compile error on the request, not as a parse error to the user. Evaluation errors fail the specific step at run time with status `permanent` — the AST is well-formed but a binding produced an incompatible value.
+
+This matches the compilation model for all expressions (`if`, `when`, `with`, loop `for`, `let`): syntax gated once at publish (Catalog), type-checked and parsed-into-AST once per run at StartRun (WF Definition Compiler), evaluated many times at step boundaries. There is no first-execution / lazy compilation path.
 
 Example:
 
@@ -530,3 +532,4 @@ Delivery semantics: **at-least-once**. Producer-side dedup on `(runId, eventKind
 |---|---|---|
 | 2026-05-17 | Initial component design covering sub-modules, key operations (start/step/resume/sub-orchestration/cancel/replay), Dapr Workflow binding, expression evaluator scope, idempotency model, public interface (REST + internal RPC + Pub/Sub publications), data model, failure modes; resolves INCON-015 | #40 |
 | 2026-05-18 | INCON-018 + INCON-021: Step Coordinator is now the only caller of Connector Service `BindForStep(stepKey, slots[])`; renamed outbound RPC `Resolve` → `BindForStep`; `ScheduleActivity` signature changed from `connectorRefs` to pre-resolved named `connectorContexts` (the sidecar bootstrap token continues to be minted by ARM per the locked sidecar contract); clarified that activity completion uses the native Dapr activity-task return path (no `custos.activity.events` topic in v1) | #98, #101 |
+| 2026-05-18 | INCON-022: Clarified the CEL parse-error surface and AST storage location — Catalog is the sole syntactic gate at publish time; `WorkflowVersion.document` stores normalized CEL source strings (not a pre-built AST); WF's Definition Compiler at StartRun re-parses, type-checks, and caches the typed AST on `ExecutionGraph`; type errors fail StartRun, parse errors at this stage are a contract violation surfaced as compile errors | #100 |

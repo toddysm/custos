@@ -1,8 +1,8 @@
 # Component Design: API Gateway
 
 Slug: `api-gateway`
-Last Updated: 2026-05-17
-Version: 1
+Last Updated: 2026-05-18
+Version: 2
 Status: Draft
 
 ## Responsibility
@@ -248,7 +248,7 @@ The gateway's "public interface" is the union of every other component's externa
 | Source | Prefix | Notes |
 |---|---|---|
 | Auth Service | `/v1/auth/*`, `/v1/principals/*`, `/v1/tenants/*`, `/v1/workspaces/*` (mgmt subset), `/v1/service-accounts/*`, `/v1/roles`, `/v1/permissions` | Auth-management routes; some unscoped, some tenant-scoped. |
-| Catalog Service | `/v1/workspaces/{ws}/workflows/*`, `/v1/workspaces/{ws}/templates/*`, `/v1/workspaces/{ws}/activity-types/*`, `/v1/workspaces/{ws}/connector-types/*` | Workflow and template authoring; activity/connector type registry reads. |
+| Catalog Service | `/v1/workspaces/{ws}/workflows/*`, `/v1/workspaces/{ws}/templates/*`, `/v1/workspaces/{ws}/activity-types/*`, `/v1/workspaces/{ws}/connector-types/*` | Workflow and template authoring; activity-type registry reads and writes (`POST /v1/workspaces/{ws}/activity-types` is the Author CLI publishing path — see Catalog Service design § Operation: Register Activity Type); connector type registry reads. |
 | Workflow Service | `/v1/workspaces/{ws}/runs/*` | Start, inspect, cancel, re-run; idempotent on `Idempotency-Key`. |
 | Trigger Service | `/v1/workspaces/{ws}/triggers/*`, `/v1/workspaces/{ws}/triggers/{id}:fire` | Trigger CRUD and manual-fire. |
 | Connector Service | `/v1/workspaces/{ws}/connectors/*`, `/v1/workspaces/{ws}/connectors/{id}/leases/*`, `/v1/workspaces/{ws}/connectors/{id}/cursor` | Instance lifecycle, lease admin, cursor rewind. |
@@ -360,3 +360,4 @@ _(none — all v1 design questions resolved this session.)_
 | Date | Change | GitHub Issue |
 |---|---|---|
 | 2026-05-17 | Initial component design: thin gateway with TLS termination, request validation, Auth Service delegation for every authn/authz decision, signed call-context minting at ingress, idempotency-key dedup backed by SPL MetadataStore, per-principal + per-workspace token-bucket rate limiting (in-memory v1), webhook pass-through without signature validation, OIDC device-code flow for CLI (M1), OpenAPI 3.1 emission, RFC 7807 error envelope with correlation and audit event ids, workspace-in-URL addressing | #69 |
+| 2026-05-18 | INCON-023: Clarified Catalog Service route entry so the `/v1/workspaces/{ws}/activity-types/*` prefix covers both read and write — `POST /v1/workspaces/{ws}/activity-types` is the Author CLI publishing path that replaces Catalog's previous `POST /v1/catalog/activities`; activity-type registration now traverses the API Gateway (was a direct Catalog call) | #105 |

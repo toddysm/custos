@@ -2,8 +2,8 @@
 
 Slug: `catalog-service`
 Component ID: COMP-007
-Last Updated: 2026-05-17
-Version: 1
+Last Updated: 2026-05-18
+Version: 2
 Status: Draft
 
 ## Responsibility
@@ -17,7 +17,7 @@ The Catalog Service owns **workflow definitions, workflow templates, and the rea
   - Workflow / template **publish-time validation**: YAML schema, placeholder schema (ADR-009), reference resolution (activity type, connector type, sub-workflow), CEL expression parsing (not evaluation).
   - **Template materialization**: producing a new `WorkflowVersion` from a `WorkflowTemplateVersion` + placeholder bindings (REQ-076).
   - **Template extraction**: producing a new `WorkflowTemplateVersion` from an existing `WorkflowVersion` + a placeholder-selector set (REQ-076).
-  - **Activity-type catalog index** (`ActivityTypeRef`): names, versions, namespaces, manifest digests, deprecation flags. The index is a *read-side projection* — ARM is the writer.
+  - **Activity-type catalog index** (`ActivityTypeRef`): names, versions, namespaces, manifest digests, deprecation flags. The index is a *read-side projection* — the Author CLI is the writer (via API Gateway).
   - **Connector-type catalog index** (`ConnectorTypeRef`): names, versions, declared capabilities, `events.delivery`, `events.produced`. The index is a *read-side projection* — Connector Service is the writer.
   - Semver resolution rules for `<namespace>/<type>@<major>` pins.
   - Deprecation lifecycle for activity types, connector types, and workflow versions (forward-only flag; existing runs unaffected).
@@ -37,7 +37,7 @@ The Catalog Service owns **workflow definitions, workflow templates, and the rea
 | Domain object | Writer | Catalog role |
 |---|---|---|
 | `WorkflowVersion`, `WorkflowTemplateVersion` | Catalog Service | Source of truth |
-| Activity manifest (`ActivityManifestv1` document) | Activity Runtime Manager (`POST /catalog/activities`) | Read-side index; Catalog persists a normalized projection (name, version, namespace, digest, input/output schemas, declared connector slots, deprecation flag) |
+| Activity manifest (`ActivityManifestv1` document) | Author CLI via API Gateway (`POST /v1/workspaces/{ws}/activity-types`) | Read-side index; Catalog persists a normalized projection (name, version, namespace, digest, input/output schemas, declared connector slots, deprecation flag) |
 | Connector manifest (`ConnectorManifestv1` document) | Connector Service (registers `ConnectorTypeVersion` on plugin load) | Read-side index; Catalog persists a normalized projection (type, version, capabilities, `events.delivery`, `events.produced`, deprecation flag) |
 | Connector instance configuration | Connector Service | Catalog does **not** index instances. Workflow references like `connector: prod-registry` resolve against Connector Service at workflow publish time for existence checks only. |
 
@@ -72,7 +72,7 @@ Sub-module responsibilities (matches `design/architecture/components.md` § COMP
 | Template Engine | Materializes a `WorkflowTemplateVersion` + placeholder bindings into a normalized `WorkflowVersion` document. Substitution is **textual at the YAML AST level**, not CEL evaluation — placeholders are typed slots, not expressions. |
 | Template-from-Workflow Extractor | Consumes a `WorkflowVersion` + a selector set (which concrete values to abstract) and emits a `WorkflowTemplateVersion` with declared `placeholders[]`. Round-trip: re-materializing with the original values reproduces the source workflow byte-for-byte (after canonicalization). |
 | Placeholder Schema Validator | Validates that placeholder bindings supplied at materialization match the placeholder declarations: required vs. optional, type compatibility (`connectorRef`, `activityRef`, `string`, `int`, `bool`, enum). |
-| Activity Type Registry | Read-side index of activity types and versions. **Writer is ARM** via `POST /catalog/activities`. Resolves `<namespace>/<type>@<major>` references at workflow publish time. Indexes manifest digest so digest-pinned references are validated end-to-end. |
+| Activity Type Registry | Read-side index of activity types and versions. **Writer is the Author CLI** via API Gateway → Catalog (`POST /v1/workspaces/{ws}/activity-types`); ARM is runtime-only and neither writes nor proxies activity-type registrations. Resolves `<namespace>/<type>@<major>` references at workflow publish time. Indexes manifest digest so digest-pinned references are validated end-to-end. |
 | Connector Type Registry | Read-side index of connector types and versions. **Writer is Connector Service** at plugin-load time. Resolves `connectorType` references and `events.produced` lookups for trigger validation. |
 | Definition Store Provider client | Persists `WorkflowVersion` and `WorkflowTemplateVersion` documents via `DefinitionStoreProvider` (REQ-048; Postgres in v1, OCI registry adapter in M2+). |
 | Catalog Store Provider client | Persists activity-type and connector-type index rows via `CatalogStoreProvider` (Postgres in v1). |
@@ -175,22 +175,25 @@ Round-trip property (ADR-009): for any `(workflow, selectors)`, materializing th
 
 ```mermaid
 sequenceDiagram
-    participant ARM as Activity Runtime Manager
+    participant CLI as Author CLI
+    participant GW as API Gateway
     participant API as API Adapter
     participant ATR as Activity Type Registry
     participant Store as CatalogStoreProvider
 
-    ARM->>API: POST /v1/catalog/activities { manifest, referrerRef }
+    CLI->>GW: POST /v1/workspaces/{ws}/activity-types { manifest, referrerRef }
+    GW->>API: forward (signed call-context)
     API->>ATR: register(manifest)
     ATR->>ATR: validate namespace tier rules (custos.builtin / <vendor> / <workspaceId>)
     ATR->>ATR: enforce (namespace, type, version) immutability
     ATR->>Store: PutActivityTypeVersion(...)
     Store-->>ATR: stored (or 409 if exists with different digest)
     ATR-->>API: ActivityTypeRef { namespace, type, version, digest }
-    API-->>ARM: 201
+    API-->>GW: 201
+    GW-->>CLI: 201
 ```
 
-ARM is the writer for activity-type metadata; Catalog only receives the registration call and persists the normalized index entry. The OCI registry (when used) remains the source of truth for the manifest blob — Catalog stores the projection plus a referrer pointer (ARM design § Activity Catalog).
+The Author CLI is the writer for activity-type metadata; Catalog receives the registration call through API Gateway and persists the normalized index entry. ARM is runtime-only and does not write to Catalog. The OCI registry (when used) remains the source of truth for the manifest blob — Catalog stores the projection plus a referrer pointer (ARM design § Activity Catalog covers the runtime resolution side only).
 
 `(namespace, type, version)` is the primary key. A second registration with the same key but a different `runtime.digest` is rejected with 409 — versions are immutable end-to-end.
 
@@ -241,7 +244,7 @@ sequenceDiagram
     participant ATR as Activity Type Registry
     participant Store as CatalogStoreProvider
 
-    Caller->>API: POST /v1/catalog/activities/{ref}:deprecate { reason }
+    Caller->>API: POST /v1/workspaces/{ws}/activity-types/{ref}:deprecate { reason }
     API->>ATR: deprecate(ref, reason)
     ATR->>Store: UpdateActivityTypeVersion(deprecated=true, deprecatedAt, reason)
     Store-->>ATR: ok
@@ -257,7 +260,7 @@ Deprecation is a flag, not a delete — the row remains for in-flight runs and f
 The Web UI (COMP-010) and CLI list activity types when an author is composing a workflow. Catalog exposes filterable queries:
 
 ```
-GET /v1/catalog/activities?namespace=custos.builtin&deprecated=false&capability=oci.pull
+GET /v1/workspaces/{ws}/activity-types?namespace=custos.builtin&deprecated=false&capability=oci.pull
 ```
 
 Filters include `namespace`, `category` (from manifest `metadata.labels.category`), `deprecated`, and required capability slot. The response paginates by `(namespace, type, version)`.
@@ -355,10 +358,10 @@ Both providers are abstractions per REQ-048; the OCI registry adapter for `Defin
 | POST | `/v1/workspaces/{ws}/templates` | `{ definition }` | `WorkflowTemplateVersionRef` (201) | Publish a template version directly. |
 | GET | `/v1/workspaces/{ws}/templates/{name}@{version}` | — | `WorkflowTemplateVersion` | Fetch a template version. |
 | POST | `/v1/workspaces/{ws}/templates/{templateVersionId}:materialize` | `{ bindings, targetName }` | `WorkflowVersionRef` (201) | Materialize a template into a workflow version. |
-| POST | `/v1/catalog/activities` | `{ manifest, referrerRef? }` | `ActivityTypeRef` (201) | Register an activity type version. (Writer: ARM) |
-| GET | `/v1/catalog/activities` | filters | `[ActivityTypeRef]` | List activity types. |
-| GET | `/v1/catalog/activities/{namespace}/{type}@{version}` | — | `ActivityTypeVersion` | Fetch an activity type version's normalized manifest. |
-| POST | `/v1/catalog/activities/{namespace}/{type}@{version}:deprecate` | `{ reason }` | 200 | Deprecate an activity type version. |
+| POST | `/v1/workspaces/{ws}/activity-types` | `{ manifest, referrerRef? }` | `ActivityTypeRef` (201) | Register an activity type version. (Writer: Author CLI via API Gateway) |
+| GET | `/v1/workspaces/{ws}/activity-types` | filters | `[ActivityTypeRef]` | List activity types. |
+| GET | `/v1/workspaces/{ws}/activity-types/{namespace}/{type}@{version}` | — | `ActivityTypeVersion` | Fetch an activity type version's normalized manifest. |
+| POST | `/v1/workspaces/{ws}/activity-types/{namespace}/{type}@{version}:deprecate` | `{ reason }` | 200 | Deprecate an activity type version. |
 | POST | `/v1/catalog/connector-types` | `{ manifest }` | `ConnectorTypeRef` (201) | Register a connector type version. (Writer: Connector Service) |
 | GET | `/v1/catalog/connector-types` | filters | `[ConnectorTypeRef]` | List connector types. |
 | GET | `/v1/catalog/connector-types/{type}@{version}` | — | `ConnectorTypeVersion` | Fetch a connector type version. |
@@ -453,3 +456,4 @@ Catalog has **no runtime dependency on Workflow Service**: it produces and serve
 | Date | Change | GitHub Issue |
 |---|---|---|
 | 2026-05-17 | Initial component design covering responsibility/boundaries (with source-of-truth split table), sub-modules, key operations (publish, materialize, extract, register-activity, resolve-ref, deprecate, list, register-connector, pod-restart), data model, REST + Internal RPC surface, publish-time validation scope, configuration, dependencies, failure modes; resolves COMP-007 design gap and answers WF-TODO-003 (#53) with the `workflow:`-only-references-WorkflowVersion rule | #55 |
+| 2026-05-18 | INCON-023: Flipped activity-manifest writer from ARM to Author CLI; write path now `POST /v1/workspaces/{ws}/activity-types` through API Gateway → Catalog (replacing `POST /v1/catalog/activities`); all `/v1/catalog/activities*` paths re-homed under `/v1/workspaces/{ws}/activity-types*`; updated register-activity sequence diagram and source-of-truth table. ARM is runtime-only and does not write to Catalog | #105 |
