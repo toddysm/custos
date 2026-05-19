@@ -249,7 +249,7 @@ spec:
 
 Cross-component implications surfaced by these forms:
 - **`forEach` fan-out** is realized via the Workflow Service Sub-Orchestration Manager (COMP-003 sub-module) — each iteration is a child workflow attempt under the parent run.
-- **`connectors:` map binding** is validated by the Workflow Service Binder at compile time (every alias must match an `spec.connectors[].name` on the activity manifest, with required capabilities satisfied by the bound connector type) and resolved by ARM at execution time. The Connector Service issues one lease per alias, subject to the per-step concurrent-lease cap (default 16, see Connector Service design).
+- **`connectors:` map binding** is validated by the Workflow Service Binder at compile time (every alias must match an `spec.connectors[].name` on the activity manifest, with required capabilities satisfied by the bound connector type) and resolved by ARM at execution time. The Connector Service issues one lease per alias, subject to the per step-attempt concurrent-lease cap (default 16, see Connector Service design).
 - **`on_error` matching** uses the namespaced error-code scheme owned by ARM (`activity.*`, `input.*`, `output.*`, `system.*`, plus connector- and activity-defined namespaces). The Workflow Service Step Coordinator applies the handler before passing terminal state to the Dapr Workflow runtime.
 
 Equivalent template:
