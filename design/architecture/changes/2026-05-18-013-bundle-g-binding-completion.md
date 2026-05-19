@@ -34,15 +34,18 @@ The diagram now shows:
 
 ```
 WF->>Conn: BindForStep(stepKey, slots[])
-Conn-->>WF: ConnectorContexts (named) + sidecarBootstrapToken
-WF->>Dapr: schedule activity(stepKey, activityRef, inputs, connectorContexts, sidecarBootstrapToken)
-Dapr->>ARM: invoke(stepKey, activityRef, inputs, connectorContexts, sidecarBootstrapToken)
+Conn-->>WF: ConnectorContexts (named, opaque slot handles)
+WF->>Dapr: schedule activity(stepKey, activityRef, inputs, connectorContexts)
+Dapr->>ARM: invoke(stepKey, activityRef, inputs, connectorContexts)
+ARM->>ARM: write/sign sidecarBootstrapToken at pod start
 ARM->>Driver: run(activity image/module, inputs, ctx)
 Driver-->>ARM: result (exitCode, outputs, artifacts)
 ARM->>Audit: emit step events + artifacts
 ARM-->>Dapr: typed result (activity-task return)
 Dapr-->>WF: continue / branch / retry
 ```
+
+The sidecar bootstrap token is **not** part of the `BindForStep` response or the `ScheduleActivity` inputs. ARM continues to mint and sign that token at sidecar start, as locked in the Connector Service § Secret and Token Flow to Activities. `BindForStep` returns only named `ConnectorContexts` — opaque slot handles — and those are what flow from WF to ARM via `ScheduleActivity`.
 
 Header bumped: Version 12 → 13; Change History row added.
 

@@ -9,7 +9,7 @@ Status: open
 
 ## Summary
 
-Bundle G (component-side, Workflow Service half). Locks the "Workflow Service preflights, ARM consumes" pattern in the WF design: the Step Coordinator is the only caller of Connector Service for step binding, the outbound RPC is renamed `Resolve` → `BindForStep(stepKey, slots[])`, and `ScheduleActivity` carries pre-resolved `connectorContexts` plus a `sidecarBootstrapToken` instead of unresolved `connectorRefs`. Completion remains on the native Dapr activity-task return path (already documented; reinforced in the change history for issue #101).
+Bundle G (component-side, Workflow Service half). Locks the "Workflow Service preflights, ARM consumes" pattern in the WF design: the Step Coordinator is the only caller of Connector Service for step binding, the outbound RPC is renamed `Resolve` → `BindForStep(stepKey, slots[])`, and `ScheduleActivity` carries pre-resolved named `connectorContexts` (opaque slot handles) instead of unresolved `connectorRefs`. The sidecar bootstrap token contract is unchanged — ARM continues to mint and sign it at sidecar start per the Connector Service § Secret and Token Flow to Activities contract; it does not flow through `BindForStep` or `ScheduleActivity`. Completion remains on the native Dapr activity-task return path (already documented; reinforced in the change history for issue #101).
 
 ## Before
 
@@ -17,12 +17,14 @@ Operation: Execute Step diagram and Internal RPC table named the outbound bind a
 
 ## After
 
-- Step Coordinator sequence diagram: `SC->>CC: BindForStep(stepKey, slots[])`, `CC->>Conn: BindForStep(stepKey, slots[])`, `Conn-->>CC: ConnectorContexts (named) + sidecarBootstrapToken`, `SC->>AC: ScheduleActivity(... connectorContexts, sidecarBootstrapToken ...)`.
+- Step Coordinator sequence diagram: `SC->>CC: BindForStep(stepKey, slots[])`, `CC->>Conn: BindForStep(stepKey, slots[])`, `Conn-->>CC: ConnectorContexts (named, opaque slot handles)`, `SC->>AC: ScheduleActivity(... connectorContexts ...)`.
 - Internal RPC (outbound) table:
   - `Resolve(connectorRef, runId, stepId)` → `BindForStep(stepKey, slots[])` with purpose updated.
-  - `ScheduleActivity(... connectorRefs ...)` → `ScheduleActivity(... connectorContexts, sidecarBootstrapToken ...)` with a note that ARM consumes the pre-resolved contexts.
+  - `ScheduleActivity(... connectorRefs ...)` → `ScheduleActivity(... connectorContexts ...)` with a note that ARM consumes the pre-resolved contexts and mints the sidecar bootstrap token at sidecar start per the locked sidecar auth contract (token is **not** a `ScheduleActivity` parameter).
 - Failure Modes table: `Connector Service unreachable on Resolve` → `Connector Service unreachable on BindForStep`.
 - Header bumped: Version 1 → 2; Change History row added covering both #98 (binding) and #101 (completion clarification).
+
+The sidecar bootstrap token contract is unchanged: ARM mints/signs the bootstrap token and writes it to `/custos/in/sidecar-token` before the activity container starts (Connector Service § Secret and Token Flow to Activities). `BindForStep` returns only named `ConnectorContexts`; the bootstrap token never flows through WF.
 
 The existing prose at § Operation: Execute Step that already named "native Dapr activity-task return path" as canonical is unchanged — issue #101 was a cross-doc consistency fix, and the WF design was the authoritative version it pointed at.
 

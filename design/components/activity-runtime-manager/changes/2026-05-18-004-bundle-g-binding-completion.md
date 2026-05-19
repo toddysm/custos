@@ -11,7 +11,7 @@ Status: open
 
 Bundle G (component-side, Activity Runtime Manager half). Two related fixes:
 
-- **#98 (binding):** ARM's Public Interface and Dependencies sections still implied that ARM resolves `connectorRefs` against the Connector Service at step start. The agreed pattern (locked in the Workflow Service design and confirmed across CS, WF, and the architecture overview) is that the Workflow Service's Step Coordinator calls Connector Service `BindForStep` and passes the resulting `ConnectorContexts` + `sidecarBootstrapToken` to ARM via `ScheduleActivity`. ARM only calls Connector Service directly for `RefreshLease` on long-running steps.
+- **#98 (binding):** ARM's Public Interface and Dependencies sections still implied that ARM resolves `connectorRefs` against the Connector Service at step start. The agreed pattern (locked in the Workflow Service design and confirmed across CS, WF, and the architecture overview) is that the Workflow Service's Step Coordinator calls Connector Service `BindForStep` and passes the resulting named `ConnectorContexts` (opaque slot handles) to ARM via `ScheduleActivity`. ARM only calls Connector Service directly for `RefreshLease` on long-running steps. The sidecar bootstrap token is unchanged: ARM still mints and signs it at sidecar start per the Connector Service § Secret and Token Flow to Activities contract — it is **not** a `BindForStep` response field or a `ScheduleActivity` parameter.
 - **#101 (completion):** ARM's Public Interface section listed completion as a vague "callback delivery to Workflow Service". The canonical mechanism is the native Dapr activity-task return path documented in the Workflow Service design.
 
 ## Before
@@ -31,12 +31,12 @@ Internal RPC surface (Workflow Service ⇄ ARM):
 
 Public Interface (pending) section:
 
-- `ScheduleActivity(... connectorContexts, sidecarBootstrapToken ...)` — ARM consumes the pre-resolved `ConnectorContexts` and bootstrap token produced by the Workflow Service's `BindForStep` call; it does not call Connector Service for the initial bind.
+- `ScheduleActivity(... connectorContexts ...)` — ARM consumes the pre-resolved named `ConnectorContexts` produced by the Workflow Service's `BindForStep` call; it does not call Connector Service for the initial bind. ARM mints and writes the sidecar bootstrap token (`/custos/in/sidecar-token`) at sidecar start per the Connector Service § Secret and Token Flow to Activities contract — the bootstrap token is not a `ScheduleActivity` input.
 - Activity completion: native Dapr activity-task return path (the orchestrator invokes ARM through Dapr Workflow's activity-task primitive; ARM's return value is the typed result envelope). No `custos.activity.events` topic in v1. Cross-link added to `design/components/workflow-service/design.md` § Operation: Execute Step as authoritative.
 
 Dependencies table:
 
-- Connector Service row rewritten: "ARM consumes the pre-resolved named `ConnectorContexts` and `sidecarBootstrapToken` produced by the Workflow Service's `BindForStep` call (handles, not credentials). ARM calls Connector Service directly only for `RefreshLease` on long-running steps."
+- Connector Service row rewritten: "ARM consumes pre-resolved named `ConnectorContexts` (opaque slot handles) produced by the Workflow Service's `BindForStep` call — ARM does not call CS for the initial bind. ARM mints the sidecar bootstrap token at sidecar start per the Connector Service § Secret and Token Flow to Activities contract. ARM calls Connector Service directly only for `RefreshLease` on long-running steps."
 
 Header bumped: Version 2 → 3; Change History row added covering both issues.
 

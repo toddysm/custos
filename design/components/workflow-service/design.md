@@ -119,10 +119,10 @@ sequenceDiagram
     IT-->>SC: attempt=1
     SC->>CC: BindForStep(stepKey, slots[])
     CC->>Conn: BindForStep(stepKey, slots[])
-    Conn-->>CC: ConnectorContexts (named) + sidecarBootstrapToken
-    CC-->>SC: ConnectorContexts + sidecarBootstrapToken
+    Conn-->>CC: ConnectorContexts (named, opaque slot handles)
+    CC-->>SC: ConnectorContexts
     SC->>Obs: emit step.started
-    SC->>AC: ScheduleActivity(runId, stepId, attempt=1, activityRef, inputs, connectorContexts, sidecarBootstrapToken, deadline)
+    SC->>AC: ScheduleActivity(runId, stepId, attempt=1, activityRef, inputs, connectorContexts, deadline)
     AC->>ARM: ScheduleActivity(...)
     ARM-->>AC: activity result envelope (success | retryable | permanent | cancelled)
     AC-->>SC: result envelope
@@ -443,8 +443,8 @@ Two layers:
 
 | RPC | Callee | Purpose |
 |---|---|---|
-| `BindForStep(stepKey, slots[])` | Connector Service | Acquire named `ConnectorContexts` and a `sidecarBootstrapToken` covering every connector slot a step references. Called by the Step Coordinator before `ScheduleActivity` for both single- and multi-connector steps. |
-| `ScheduleActivity(runId, stepId, attempt, activityRef, inputs, connectorContexts, sidecarBootstrapToken, deadline)` | Activity Runtime Manager | Schedule an activity step. Idempotent on `(runId, stepId, attempt)`. ARM consumes the pre-resolved contexts; it does not re-bind. |
+| `BindForStep(stepKey, slots[])` | Connector Service | Acquire named `ConnectorContexts` (opaque slot handles) covering every connector slot a step references. Called by the Step Coordinator before `ScheduleActivity` for both single- and multi-connector steps. |
+| `ScheduleActivity(runId, stepId, attempt, activityRef, inputs, connectorContexts, deadline)` | Activity Runtime Manager | Schedule an activity step. Idempotent on `(runId, stepId, attempt)`. ARM consumes the pre-resolved contexts; it does not re-bind. ARM mints the sidecar bootstrap token at sidecar start per the locked sidecar contract. |
 | `CancelActivity(runId, stepId)` | Activity Runtime Manager | Cancel an in-flight activity step (used by cancel-run path). |
 | `RegisterResumeSubscription(runId, stepId, eventKey, selector, ttl)` | Trigger Service | Register a one-shot resume wait. Idempotent on `(runId, stepId, eventKey)`. |
 | `CancelResumeSubscription(runId, stepId, eventKey)` | Trigger Service | Cancel a resume registration on step or run terminal. |
@@ -495,7 +495,7 @@ Delivery semantics: **at-least-once**. Producer-side dedup on `(runId, eventKind
 | Dapr Pub/Sub | Runtime | Publication of `custos.workflow.events`. |
 | Activity Runtime Manager (COMP-006) | Runtime | `ScheduleActivity`, `CancelActivity`. |
 | Trigger Service (COMP-004) | Runtime | `RegisterResumeSubscription`, `CancelResumeSubscription`. Consumer of `custos.workflow.events`. |
-| Connector Service (COMP-005) | Runtime | `BindForStep(stepKey, slots[])` for credential leases and `sidecarBootstrapToken` issuance. |
+| Connector Service (COMP-005) | Runtime | `BindForStep(stepKey, slots[])` for credential leases and named `ConnectorContext` issuance. |
 | Catalog Service (COMP-007) | Runtime (read-only) | Source of `WorkflowVersion` records at run start. Compiled graph is cached on the Run, so Catalog outages do not pause in-flight runs. |
 | MetadataStoreProvider (COMP-008) | Runtime | Persistence of `Run`, `Step`, `StepAttempt`, `ResumeSubscriptionMirror`. |
 | Observability/Audit Service (COMP-009) | Runtime | Execution event sink, audit emission. |
@@ -529,4 +529,4 @@ Delivery semantics: **at-least-once**. Producer-side dedup on `(runId, eventKind
 | Date | Change | GitHub Issue |
 |---|---|---|
 | 2026-05-17 | Initial component design covering sub-modules, key operations (start/step/resume/sub-orchestration/cancel/replay), Dapr Workflow binding, expression evaluator scope, idempotency model, public interface (REST + internal RPC + Pub/Sub publications), data model, failure modes; resolves INCON-015 | #40 |
-| 2026-05-18 | INCON-018 + INCON-021: Step Coordinator is now the only caller of Connector Service `BindForStep(stepKey, slots[])`; renamed outbound RPC `Resolve` → `BindForStep`; `ScheduleActivity` signature changed from `connectorRefs` to `connectorContexts` + `sidecarBootstrapToken`; clarified that activity completion uses the native Dapr activity-task return path (no `custos.activity.events` topic in v1) | #98, #101 |
+| 2026-05-18 | INCON-018 + INCON-021: Step Coordinator is now the only caller of Connector Service `BindForStep(stepKey, slots[])`; renamed outbound RPC `Resolve` → `BindForStep`; `ScheduleActivity` signature changed from `connectorRefs` to pre-resolved named `connectorContexts` (the sidecar bootstrap token continues to be minted by ARM per the locked sidecar contract); clarified that activity completion uses the native Dapr activity-task return path (no `custos.activity.events` topic in v1) | #98, #101 |
