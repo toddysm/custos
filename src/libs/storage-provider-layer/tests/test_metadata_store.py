@@ -231,6 +231,17 @@ def test_protocol_methods_are_async(method: str) -> None:
     assert inspect.iscoroutinefunction(fn), f"{method} must be async"
 
 
+def test_listen_audit_outbox_is_not_a_coroutine_function() -> None:
+    """`listen_audit_outbox` must return an `AsyncIterator` directly, not a coroutine.
+
+    Pinned so a future refactor that accidentally writes
+    `async def listen_audit_outbox` (which would make it a coroutine
+    returning the iterator after one `await`) is caught — adapters
+    expect to implement it as a plain `def` returning an async generator.
+    """
+    assert not inspect.iscoroutinefunction(MetadataStoreProvider.listen_audit_outbox)
+
+
 # ----- Workspace-scoping rule -----
 
 
