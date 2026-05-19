@@ -279,7 +279,7 @@ erDiagram
 
 ### REST API (mounted under API Gateway)
 
-All paths are workspace-scoped and routed by the API Gateway under the `/v1/workspaces/{ws}/triggers/*` prefix. Webhook ingest is gateway-owned at `POST /v1/webhooks/{connectorInstanceId}` (connector-instance-scoped, not subscription-scoped) and is forwarded to this service after gateway-side TLS termination only; signature verification and subscription demux happen here.
+All paths are workspace-scoped and routed by the API Gateway under the `/v1/workspaces/{ws}/triggers/*` prefix. Webhook ingest is gateway-owned at `POST /v1/webhooks/{connectorInstanceId}` (connector-instance-scoped, not subscription-scoped) and is forwarded to this service after gateway-side pass-through processing (including TLS termination and other ingress handling defined by the API Gateway); the gateway does not add authn/call-context or perform signature verification for this route, and signature verification plus subscription demux happen here.
 
 | Method | Path | Request | Response | Description |
 |---|---|---|---|---|
