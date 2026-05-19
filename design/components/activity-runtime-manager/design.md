@@ -2,7 +2,7 @@
 
 Slug: `activity-runtime-manager`
 Last Updated: 2026-05-18
-Version: 2
+Version: 3
 Status: Draft
 
 > This document captures the design decisions locked in so far. Sections marked **(pending)** will be filled out in subsequent design iterations.
@@ -635,9 +635,9 @@ To be filled out: activity execution record, attempt record, artifact record rel
 ## Public Interface (pending)
 
 Internal RPC surface (Workflow Service ⇄ ARM):
-- `ScheduleActivity(runId, stepId, attempt, activityRef, inputs, connectorRefs, deadline)`
+- `ScheduleActivity(runId, stepId, attempt, activityRef, inputs, connectorContexts, sidecarBootstrapToken, deadline)` — ARM consumes the pre-resolved `ConnectorContexts` and bootstrap token produced by the Workflow Service's `BindForStep` call; it does not call Connector Service for the initial bind.
 - `CancelActivity(runId, stepId)`
-- Activity completion callback delivery to Workflow Service.
+- Activity completion: native Dapr activity-task return path (the orchestrator invokes ARM through Dapr Workflow's activity-task primitive; ARM's return value is the typed result envelope). No `custos.activity.events` topic in v1. See `design/components/workflow-service/design.md` § Operation: Execute Step for the authoritative completion path.
 
 ## Configuration (pending)
 
@@ -646,7 +646,7 @@ Internal RPC surface (Workflow Service ⇄ ARM):
 | Dependency | Type | Purpose |
 |---|---|---|
 | Workflow Service | Runtime | Scheduling source and completion sink. |
-| Connector Service | Runtime | Resolves `ConnectorRef` → `ConnectorContext` (handles, not credentials) and provides scoped sidecar/API access to resolved connector material for activities. |
+| Connector Service | Runtime | ARM consumes the pre-resolved named `ConnectorContexts` and `sidecarBootstrapToken` produced by the Workflow Service's `BindForStep` call (handles, not credentials). ARM calls Connector Service directly only for `RefreshLease` on long-running steps. |
 | Storage Provider Layer | Runtime | Artifact upload via `ArtifactStoreProvider`; step output persistence via `MetadataStoreProvider`. |
 | Observability/Audit | Runtime | Log streaming and audit event emission. |
 | Catalog Service | Runtime | Activity type/version resolution and schema retrieval. |
@@ -678,3 +678,4 @@ Internal RPC surface (Workflow Service ⇄ ARM):
 | 2026-05-17 | INCON-013: TODO-009 scope expanded — activity lifecycle event taxonomy is unified with Trigger Service TODO-001 (#18) so connector event kinds and ARM-emitted audit event kinds share one dot-namespaced namespace | #38 |
 | 2026-05-17 | INCON-009: Sandbox filesystem layout `/custos/in/secrets/<name>` corrected to `/custos/in/secrets/<connector-name>/<key>`, matching the normative description in § No `spec.secrets[]` in v1 and the activity manifest `spec.connectors[].name` slot | #34 |
 | 2026-05-18 | INCON-023 + INCON-030 + INCON-031: added `/custos/in/sidecar-token` to the Activity Contract v1 filesystem layout (per connector-service change 007); pinned WASM (`runtime.kind: wasm`) to M4+ to match REQ-015; removed the reserved micro-VM runtime kind from the `runtime.kind` enum (no backing requirement) | #85, #92, #93 |
+| 2026-05-18 | INCON-018 + INCON-021: `ScheduleActivity` signature now takes `connectorContexts` + `sidecarBootstrapToken` (pre-resolved by Workflow Service's `BindForStep`); ARM no longer calls Connector Service for the initial bind (only `RefreshLease` for long-running steps); completion documented as native Dapr activity-task return path with cross-link to Workflow Service design | #98, #101 |

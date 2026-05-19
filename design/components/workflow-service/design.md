@@ -2,8 +2,8 @@
 
 Slug: `workflow-service`
 Component ID: COMP-003
-Last Updated: 2026-05-17
-Version: 1
+Last Updated: 2026-05-18
+Version: 2
 Status: Draft
 
 ## Responsibility
@@ -61,7 +61,7 @@ Sub-module responsibilities (matches `design/architecture/components.md` § COMP
 | Sub-Orchestration Manager | Spawns child Dapr Workflow instances for dynamic loops and approval gates (ADR-007). Parent awaits via `when_all` (loop) or `when_any` (approval with timeout). Merges child outputs back into parent state. |
 | Idempotency Tracker | Issues `(runId, stepId, attempt)` triples, deterministic under Dapr replay. The triple is the Dapr activity task id, the ARM scheduling key, and the audit correlation key. |
 | Activity Runtime Client | Outbound RPC client for ARM: `ScheduleActivity`, `CancelActivity`. Activity completion arrives via the native Dapr activity-task return path, not via a topic. |
-| Connector Client | Outbound RPC client for Connector Service: `Resolve(connectorRef, runId, stepId)` for pre-flight credential leases and capability checks. |
+| Connector Client | Outbound RPC client for Connector Service: `BindForStep(stepKey, slots[])` for pre-flight credential leases, capability checks, and `sidecarBootstrapToken` issuance. |
 | Observability Client | Emits structured execution events (`run.*`, `step.*`, `workflow.*`) into Observability/Audit. Also publishes workflow lifecycle events to the `custos.workflow.events` Dapr Pub/Sub topic for REQ-080 internal triggering and REQ-081 dual-purpose resume delivery. |
 
 ## Key Operations
@@ -117,12 +117,12 @@ sequenceDiagram
     EE-->>SC: resolved inputs
     SC->>IT: next_attempt(runId, stepId)
     IT-->>SC: attempt=1
-    SC->>CC: Resolve(connectorRef, runId, stepId)
-    CC->>Conn: Resolve(connectorRef, runId, stepId)
-    Conn-->>CC: ConnectorContext (opaque handles)
-    CC-->>SC: ConnectorContext
+    SC->>CC: BindForStep(stepKey, slots[])
+    CC->>Conn: BindForStep(stepKey, slots[])
+    Conn-->>CC: ConnectorContexts (named) + sidecarBootstrapToken
+    CC-->>SC: ConnectorContexts + sidecarBootstrapToken
     SC->>Obs: emit step.started
-    SC->>AC: ScheduleActivity(runId, stepId, attempt=1, activityRef, inputs, connectorRefs, deadline)
+    SC->>AC: ScheduleActivity(runId, stepId, attempt=1, activityRef, inputs, connectorContexts, sidecarBootstrapToken, deadline)
     AC->>ARM: ScheduleActivity(...)
     ARM-->>AC: activity result envelope (success | retryable | permanent | cancelled)
     AC-->>SC: result envelope
@@ -247,7 +247,7 @@ When a Workflow Service pod restarts, Dapr Workflow replays each in-flight insta
 
 - `ScheduleActivity` calls — ARM dedups on `(runId, stepId, attempt)`.
 - `RegisterResumeSubscription` calls — TS dedups on `(runId, stepId, eventKey)`.
-- `Resolve(connectorRef, runId, stepId)` — Connector Service issues a fresh credential lease per replay; the previous lease is allowed to expire on its own TTL.
+- `BindForStep(stepKey, slots[])` — Connector Service issues a fresh credential lease per replay; the previous lease is allowed to expire on its own TTL.
 - `custos.workflow.events` publications — guarded by producer-side dedup on `(runId, eventKind, occurredAt)`.
 
 The compiled `ExecutionGraph` is persisted on the `Run` row, so replay does not re-call the Catalog Service. This isolates in-flight runs from Catalog Service outages.
@@ -443,8 +443,8 @@ Two layers:
 
 | RPC | Callee | Purpose |
 |---|---|---|
-| `Resolve(connectorRef, runId, stepId)` | Connector Service | Acquire `ConnectorContext` and credential lease for a step. |
-| `ScheduleActivity(runId, stepId, attempt, activityRef, inputs, connectorRefs, deadline)` | Activity Runtime Manager | Schedule an activity step. Idempotent on `(runId, stepId, attempt)`. |
+| `BindForStep(stepKey, slots[])` | Connector Service | Acquire named `ConnectorContexts` and a `sidecarBootstrapToken` covering every connector slot a step references. Called by the Step Coordinator before `ScheduleActivity` for both single- and multi-connector steps. |
+| `ScheduleActivity(runId, stepId, attempt, activityRef, inputs, connectorContexts, sidecarBootstrapToken, deadline)` | Activity Runtime Manager | Schedule an activity step. Idempotent on `(runId, stepId, attempt)`. ARM consumes the pre-resolved contexts; it does not re-bind. |
 | `CancelActivity(runId, stepId)` | Activity Runtime Manager | Cancel an in-flight activity step (used by cancel-run path). |
 | `RegisterResumeSubscription(runId, stepId, eventKey, selector, ttl)` | Trigger Service | Register a one-shot resume wait. Idempotent on `(runId, stepId, eventKey)`. |
 | `CancelResumeSubscription(runId, stepId, eventKey)` | Trigger Service | Cancel a resume registration on step or run terminal. |
@@ -495,7 +495,7 @@ Delivery semantics: **at-least-once**. Producer-side dedup on `(runId, eventKind
 | Dapr Pub/Sub | Runtime | Publication of `custos.workflow.events`. |
 | Activity Runtime Manager (COMP-006) | Runtime | `ScheduleActivity`, `CancelActivity`. |
 | Trigger Service (COMP-004) | Runtime | `RegisterResumeSubscription`, `CancelResumeSubscription`. Consumer of `custos.workflow.events`. |
-| Connector Service (COMP-005) | Runtime | `Resolve(connectorRef, runId, stepId)` for credential leases. |
+| Connector Service (COMP-005) | Runtime | `BindForStep(stepKey, slots[])` for credential leases and `sidecarBootstrapToken` issuance. |
 | Catalog Service (COMP-007) | Runtime (read-only) | Source of `WorkflowVersion` records at run start. Compiled graph is cached on the Run, so Catalog outages do not pause in-flight runs. |
 | MetadataStoreProvider (COMP-008) | Runtime | Persistence of `Run`, `Step`, `StepAttempt`, `ResumeSubscriptionMirror`. |
 | Observability/Audit Service (COMP-009) | Runtime | Execution event sink, audit emission. |
@@ -509,7 +509,7 @@ Delivery semantics: **at-least-once**. Producer-side dedup on `(runId, eventKind
 | ARM unreachable on `ScheduleActivity` | RPC timeout | Step Coordinator applies workflow-level retry policy | Exponential backoff; permanent fail after policy exhaustion |
 | ARM returns retryable failure | Result envelope `class: retryable` | Step Coordinator applies workflow-level retry policy | Workflow-level retry; ARM never retries internally |
 | TS unreachable on `RegisterResumeSubscription` | RPC timeout | Wait step held in retry loop, bounded by `WF_REGISTER_SUB_MAX_RETRIES` | After exhaustion, step fails `class: retryable` so workflow-level policy decides |
-| Connector Service unreachable on `Resolve` | RPC timeout | Step Coordinator retries with backoff; bounded by workflow-level retry policy | Step fails if exhausted |
+| Connector Service unreachable on `BindForStep` | RPC timeout | Step Coordinator retries with backoff; bounded by workflow-level retry policy | Step fails if exhausted |
 | Catalog Service unavailable mid-run | (does not happen — compiled graph cached) | In-flight runs unaffected; new `StartRun` requests fail | Restore Catalog; new runs resume |
 | Expression timeout | Evaluator | Step fails permanent | Operator fixes expression; user re-runs |
 | Expression replay divergence | Dapr non-determinism error | Run fails with `expression.divergence` audit event | Investigate; operator decides re-run or abandon |
@@ -529,3 +529,4 @@ Delivery semantics: **at-least-once**. Producer-side dedup on `(runId, eventKind
 | Date | Change | GitHub Issue |
 |---|---|---|
 | 2026-05-17 | Initial component design covering sub-modules, key operations (start/step/resume/sub-orchestration/cancel/replay), Dapr Workflow binding, expression evaluator scope, idempotency model, public interface (REST + internal RPC + Pub/Sub publications), data model, failure modes; resolves INCON-015 | #40 |
+| 2026-05-18 | INCON-018 + INCON-021: Step Coordinator is now the only caller of Connector Service `BindForStep(stepKey, slots[])`; renamed outbound RPC `Resolve` → `BindForStep`; `ScheduleActivity` signature changed from `connectorRefs` to `connectorContexts` + `sidecarBootstrapToken`; clarified that activity completion uses the native Dapr activity-task return path (no `custos.activity.events` topic in v1) | #98, #101 |
