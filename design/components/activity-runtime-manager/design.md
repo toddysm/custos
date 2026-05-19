@@ -2,7 +2,7 @@
 
 Slug: `activity-runtime-manager`
 Last Updated: 2026-05-18
-Version: 3
+Version: 4
 Status: Draft
 
 > This document captures the design decisions locked in so far. Sections marked **(pending)** will be filled out in subsequent design iterations.
@@ -588,11 +588,14 @@ Documented error codes the activity may emit. Surfaced in run inspection and `on
 
 ### Publishing flow
 
+The Activity Runtime Manager does **not** participate in the activity-publishing path. ARM is runtime-only — it consumes published `ActivityTypeVersion` records from Catalog at step-execution time. The authoritative publish flow is owned by the Author CLI and goes through the API Gateway to the Catalog Service. The diagram is reproduced here for cross-component context only; see `design/components/catalog-service/design.md` § Operation: Register Activity Type for the authoritative version.
+
 ```mermaid
 sequenceDiagram
     participant Author as Activity Author
     participant CLI as custos CLI
     participant Reg as OCI Registry
+    participant GW as API Gateway
     participant Cat as Catalog Service
 
     Author->>CLI: custos activity publish manifest.json
@@ -600,10 +603,12 @@ sequenceDiagram
     CLI->>Reg: push image (returns digest)
     CLI->>CLI: bake digest into manifest
     CLI->>Reg: push manifest as Referrer of image
-    CLI->>Cat: POST /catalog/activities { manifest, referrerRef }
+    CLI->>GW: POST /v1/workspaces/{ws}/activity-types { manifest, referrerRef }
+    GW->>Cat: forward (signed call-context)
     Cat->>Cat: validate, dedup by (namespace, type, version)
     Cat->>Reg: verify Referrer exists at digest (proof of publish)
-    Cat-->>CLI: 201 Created
+    Cat-->>GW: 201 Created
+    GW-->>CLI: 201 Created
 ```
 
 The OCI registry is the source of truth; the Catalog is a derived, query-friendly index.
@@ -679,3 +684,4 @@ Internal RPC surface (Workflow Service ⇄ ARM):
 | 2026-05-17 | INCON-009: Sandbox filesystem layout `/custos/in/secrets/<name>` corrected to `/custos/in/secrets/<connector-name>/<key>`, matching the normative description in § No `spec.secrets[]` in v1 and the activity manifest `spec.connectors[].name` slot | #34 |
 | 2026-05-18 | INCON-023 + INCON-030 + INCON-031: added `/custos/in/sidecar-token` to the Activity Contract v1 filesystem layout (per connector-service change 007); pinned WASM (`runtime.kind: wasm`) to M4+ to match REQ-015; removed the reserved micro-VM runtime kind from the `runtime.kind` enum (no backing requirement) | #85, #92, #93 |
 | 2026-05-18 | INCON-018 + INCON-021: `ScheduleActivity` signature now takes pre-resolved named `connectorContexts` (produced by Workflow Service's `BindForStep`); ARM no longer calls Connector Service for the initial bind (only `RefreshLease` for long-running steps). ARM continues to mint the sidecar bootstrap token at sidecar start per the locked sidecar auth contract — it is not a `ScheduleActivity` parameter. Completion documented as native Dapr activity-task return path with cross-link to Workflow Service design | #98, #101 |
+| 2026-05-18 | INCON-023: Publishing flow updated to reflect that the Author CLI writes activity manifests directly to Catalog through the API Gateway (`POST /v1/workspaces/{ws}/activity-types`); the diagram is reproduced for context only — ARM is runtime-only and does not write to or proxy Catalog for activity-type registration | #105 |

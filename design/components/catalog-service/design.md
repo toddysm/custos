@@ -2,8 +2,8 @@
 
 Slug: `catalog-service`
 Component ID: COMP-007
-Last Updated: 2026-05-17
-Version: 1
+Last Updated: 2026-05-18
+Version: 3
 Status: Draft
 
 ## Responsibility
@@ -17,7 +17,7 @@ The Catalog Service owns **workflow definitions, workflow templates, and the rea
   - Workflow / template **publish-time validation**: YAML schema, placeholder schema (ADR-009), reference resolution (activity type, connector type, sub-workflow), CEL expression parsing (not evaluation).
   - **Template materialization**: producing a new `WorkflowVersion` from a `WorkflowTemplateVersion` + placeholder bindings (REQ-076).
   - **Template extraction**: producing a new `WorkflowTemplateVersion` from an existing `WorkflowVersion` + a placeholder-selector set (REQ-076).
-  - **Activity-type catalog index** (`ActivityTypeRef`): names, versions, namespaces, manifest digests, deprecation flags. The index is a *read-side projection* — ARM is the writer.
+  - **Activity-type catalog index** (`ActivityTypeRef`): names, versions, namespaces, manifest digests, deprecation flags. The index is a *read-side projection* — the Author CLI is the writer (via API Gateway).
   - **Connector-type catalog index** (`ConnectorTypeRef`): names, versions, declared capabilities, `events.delivery`, `events.produced`. The index is a *read-side projection* — Connector Service is the writer.
   - Semver resolution rules for `<namespace>/<type>@<major>` pins.
   - Deprecation lifecycle for activity types, connector types, and workflow versions (forward-only flag; existing runs unaffected).
@@ -37,7 +37,7 @@ The Catalog Service owns **workflow definitions, workflow templates, and the rea
 | Domain object | Writer | Catalog role |
 |---|---|---|
 | `WorkflowVersion`, `WorkflowTemplateVersion` | Catalog Service | Source of truth |
-| Activity manifest (`ActivityManifestv1` document) | Activity Runtime Manager (`POST /catalog/activities`) | Read-side index; Catalog persists a normalized projection (name, version, namespace, digest, input/output schemas, declared connector slots, deprecation flag) |
+| Activity manifest (`ActivityManifestv1` document) | Author CLI via API Gateway (`POST /v1/workspaces/{ws}/activity-types`) | Read-side index; Catalog persists a normalized projection (name, version, namespace, digest, input/output schemas, declared connector slots, deprecation flag) |
 | Connector manifest (`ConnectorManifestv1` document) | Connector Service (registers `ConnectorTypeVersion` on plugin load) | Read-side index; Catalog persists a normalized projection (type, version, capabilities, `events.delivery`, `events.produced`, deprecation flag) |
 | Connector instance configuration | Connector Service | Catalog does **not** index instances. Workflow references like `connector: prod-registry` resolve against Connector Service at workflow publish time for existence checks only. |
 
@@ -72,7 +72,7 @@ Sub-module responsibilities (matches `design/architecture/components.md` § COMP
 | Template Engine | Materializes a `WorkflowTemplateVersion` + placeholder bindings into a normalized `WorkflowVersion` document. Substitution is **textual at the YAML AST level**, not CEL evaluation — placeholders are typed slots, not expressions. |
 | Template-from-Workflow Extractor | Consumes a `WorkflowVersion` + a selector set (which concrete values to abstract) and emits a `WorkflowTemplateVersion` with declared `placeholders[]`. Round-trip: re-materializing with the original values reproduces the source workflow byte-for-byte (after canonicalization). |
 | Placeholder Schema Validator | Validates that placeholder bindings supplied at materialization match the placeholder declarations: required vs. optional, type compatibility (`connectorRef`, `activityRef`, `string`, `int`, `bool`, enum). |
-| Activity Type Registry | Read-side index of activity types and versions. **Writer is ARM** via `POST /catalog/activities`. Resolves `<namespace>/<type>@<major>` references at workflow publish time. Indexes manifest digest so digest-pinned references are validated end-to-end. |
+| Activity Type Registry | Read-side index of activity types and versions. **Writer is the Author CLI** via API Gateway → Catalog (`POST /v1/workspaces/{ws}/activity-types`); ARM is runtime-only and neither writes nor proxies activity-type registrations. Resolves `<namespace>/<type>@<major>` references at workflow publish time. Indexes manifest digest so digest-pinned references are validated end-to-end. |
 | Connector Type Registry | Read-side index of connector types and versions. **Writer is Connector Service** at plugin-load time. Resolves `connectorType` references and `events.produced` lookups for trigger validation. |
 | Definition Store Provider client | Persists `WorkflowVersion` and `WorkflowTemplateVersion` documents via `DefinitionStoreProvider` (REQ-048; Postgres in v1, OCI registry adapter in M2+). |
 | Catalog Store Provider client | Persists activity-type and connector-type index rows via `CatalogStoreProvider` (Postgres in v1). |
@@ -103,7 +103,7 @@ sequenceDiagram
     DM->>Conn: ExistsConnectorInstance(workspace, name)
     Conn-->>DM: ok | unknown
     DM->>CEL: parse if/when/with/for/let expressions
-    CEL-->>DM: AST set (no evaluation)
+    CEL-->>DM: parse OK (AST discarded; not stored on WorkflowVersion)
     DM->>VM: next_version(workspace, name)
     VM-->>DM: version = N
     DM->>Store: PutWorkflowVersion(workflowVersionId, normalized doc, frozen=true)
@@ -112,9 +112,21 @@ sequenceDiagram
     API-->>Caller: 201 { workflowVersionId }
 ```
 
-Publish-time validation is the **only** validation gate before runtime. Once a `WorkflowVersion` exists, Workflow Service trusts it: the Validator (WF design § Validator) does not re-validate the document, only the `StartRun` request envelope. This means Catalog must be exhaustive at publish — any class of error caught only at run time would have been catchable here.
+Catalog and Workflow Service together form a **two-gate validation model** — publish-time validation in Catalog, and StartRun validation in Workflow Service — with the responsibilities cleanly split:
 
-**CEL parsing, not evaluation.** Expression bindings at publish time are unknown (`steps.scan.outputs.critical` does not exist yet), so Catalog cannot evaluate. It parses each expression with the same grammar the WF Expression Evaluator uses and rejects syntactic errors at publish. Type-binding errors (referencing a step that does not exist in the workflow, or a placeholder that is not declared) **are** caught at publish, because both the step graph and the placeholder set are known.
+| Gate | Owner | Scope |
+|---|---|---|
+| **Publish-time** | Catalog Service | YAML/JSON schema conformance; CEL **syntactic** parse (`if`, `when`, `with`, `for`, `let`); **name-binding** checks against the workflow's own structure (`steps.<id>`, `inputs.<n>`, `placeholders.<n>`); reference resolution against the activity-type, connector-type, connector-instance, and sub-workflow registries; digest pinning into the normalized document; placeholder-declaration well-formedness; trigger event-name existence. |
+| **StartRun** | Workflow Service Definition Compiler | CEL **type-checking** of every expression's AST against bound input/output schemas (activity input schemas, connector outputs, run input envelope); production of the typed AST cached on `ExecutionGraph`. |
+
+Catalog's publish-time gate is exhaustive **for everything catchable without runtime bindings or external schemas resolved**. Once a `WorkflowVersion` exists, Workflow Service trusts that the document is syntactically valid and that all references resolve — the WF Validator does not re-validate the document, only the `StartRun` request envelope. Workflow Service does, however, **re-parse and type-check** every CEL expression at `StartRun` against the bound input/output schemas. Two error classes are therefore unavoidably observable only after publish:
+
+1. **CEL type errors** against bound activity/connector schemas — Catalog never sees those schemas joined to the workflow at publish time, so type-checking is structurally impossible at the publish gate and lands at StartRun.
+2. **Runtime evaluation errors** — depend on actual values produced at run time; fail the specific step with status `permanent`.
+
+Catalog guarantees what is catchable at publish; WF owns what is catchable only at StartRun.
+
+**CEL parsing, not evaluation, and not stored.** Expression bindings at publish time are unknown (`steps.scan.outputs.critical` does not exist yet), so Catalog cannot evaluate. It parses each expression with the same grammar the WF Expression Evaluator uses and rejects syntactic errors at publish. The parsed AST is **discarded after validation** — `WorkflowVersion.document` stores the normalized **CEL source strings**, not a pre-built AST. WF re-parses from source at StartRun. Name-binding errors against the workflow's own structure (referencing a step that does not exist in the workflow, or a placeholder that is not declared) **are** caught at publish, because both the step graph and the placeholder set are known at that point; type-binding errors against external schemas (activity input schemas, connector outputs) are caught at StartRun where the schemas are resolved together with the call sites.
 
 ### Operation: Materialize Workflow from Template
 
@@ -175,22 +187,25 @@ Round-trip property (ADR-009): for any `(workflow, selectors)`, materializing th
 
 ```mermaid
 sequenceDiagram
-    participant ARM as Activity Runtime Manager
+    participant CLI as Author CLI
+    participant GW as API Gateway
     participant API as API Adapter
     participant ATR as Activity Type Registry
     participant Store as CatalogStoreProvider
 
-    ARM->>API: POST /v1/catalog/activities { manifest, referrerRef }
+    CLI->>GW: POST /v1/workspaces/{ws}/activity-types { manifest, referrerRef }
+    GW->>API: forward (signed call-context)
     API->>ATR: register(manifest)
     ATR->>ATR: validate namespace tier rules (custos.builtin / <vendor> / <workspaceId>)
     ATR->>ATR: enforce (namespace, type, version) immutability
     ATR->>Store: PutActivityTypeVersion(...)
     Store-->>ATR: stored (or 409 if exists with different digest)
     ATR-->>API: ActivityTypeRef { namespace, type, version, digest }
-    API-->>ARM: 201
+    API-->>GW: 201
+    GW-->>CLI: 201
 ```
 
-ARM is the writer for activity-type metadata; Catalog only receives the registration call and persists the normalized index entry. The OCI registry (when used) remains the source of truth for the manifest blob — Catalog stores the projection plus a referrer pointer (ARM design § Activity Catalog).
+The Author CLI is the writer for activity-type metadata; Catalog receives the registration call through API Gateway and persists the normalized index entry. ARM is runtime-only and does not write to Catalog. The OCI registry (when used) remains the source of truth for the manifest blob — Catalog stores the projection plus a referrer pointer (ARM design § Activity Catalog covers the runtime resolution side only).
 
 `(namespace, type, version)` is the primary key. A second registration with the same key but a different `runtime.digest` is rejected with 409 — versions are immutable end-to-end.
 
@@ -241,7 +256,7 @@ sequenceDiagram
     participant ATR as Activity Type Registry
     participant Store as CatalogStoreProvider
 
-    Caller->>API: POST /v1/catalog/activities/{ref}:deprecate { reason }
+    Caller->>API: POST /v1/workspaces/{ws}/activity-types/{ref}:deprecate { reason }
     API->>ATR: deprecate(ref, reason)
     ATR->>Store: UpdateActivityTypeVersion(deprecated=true, deprecatedAt, reason)
     Store-->>ATR: ok
@@ -257,7 +272,7 @@ Deprecation is a flag, not a delete — the row remains for in-flight runs and f
 The Web UI (COMP-010) and CLI list activity types when an author is composing a workflow. Catalog exposes filterable queries:
 
 ```
-GET /v1/catalog/activities?namespace=custos.builtin&deprecated=false&capability=oci.pull
+GET /v1/workspaces/{ws}/activity-types?namespace=custos.builtin&deprecated=false&capability=oci.pull
 ```
 
 Filters include `namespace`, `category` (from manifest `metadata.labels.category`), `deprecated`, and required capability slot. The response paginates by `(namespace, type, version)`.
@@ -355,10 +370,10 @@ Both providers are abstractions per REQ-048; the OCI registry adapter for `Defin
 | POST | `/v1/workspaces/{ws}/templates` | `{ definition }` | `WorkflowTemplateVersionRef` (201) | Publish a template version directly. |
 | GET | `/v1/workspaces/{ws}/templates/{name}@{version}` | — | `WorkflowTemplateVersion` | Fetch a template version. |
 | POST | `/v1/workspaces/{ws}/templates/{templateVersionId}:materialize` | `{ bindings, targetName }` | `WorkflowVersionRef` (201) | Materialize a template into a workflow version. |
-| POST | `/v1/catalog/activities` | `{ manifest, referrerRef? }` | `ActivityTypeRef` (201) | Register an activity type version. (Writer: ARM) |
-| GET | `/v1/catalog/activities` | filters | `[ActivityTypeRef]` | List activity types. |
-| GET | `/v1/catalog/activities/{namespace}/{type}@{version}` | — | `ActivityTypeVersion` | Fetch an activity type version's normalized manifest. |
-| POST | `/v1/catalog/activities/{namespace}/{type}@{version}:deprecate` | `{ reason }` | 200 | Deprecate an activity type version. |
+| POST | `/v1/workspaces/{ws}/activity-types` | `{ manifest, referrerRef? }` | `ActivityTypeRef` (201) | Register an activity type version. (Writer: Author CLI via API Gateway) |
+| GET | `/v1/workspaces/{ws}/activity-types` | filters | `[ActivityTypeRef]` | List activity types. |
+| GET | `/v1/workspaces/{ws}/activity-types/{namespace}/{type}@{version}` | — | `ActivityTypeVersion` | Fetch an activity type version's normalized manifest. |
+| POST | `/v1/workspaces/{ws}/activity-types/{namespace}/{type}@{version}:deprecate` | `{ reason }` | 200 | Deprecate an activity type version. |
 | POST | `/v1/catalog/connector-types` | `{ manifest }` | `ConnectorTypeRef` (201) | Register a connector type version. (Writer: Connector Service) |
 | GET | `/v1/catalog/connector-types` | filters | `[ConnectorTypeRef]` | List connector types. |
 | GET | `/v1/catalog/connector-types/{type}@{version}` | — | `ConnectorTypeVersion` | Fetch a connector type version. |
@@ -392,12 +407,12 @@ The publish-time validation pipeline runs every check that can be done without r
 | Connector type reference resolution | Connector Type Registry | Reject if unresolved or deprecated. |
 | Connector instance existence | Connector Service `ExistsConnectorInstance` | Reject if `connector: <name>` refers to no instance in the workspace. |
 | Sub-workflow reference resolution | Definition Manager (this service) | Reject if `workflowVersionId` does not exist, is deprecated, or is cross-workspace without permission. |
-| CEL expression parse (`if`, `when`, `with`, `for`, `let`) | Shared CEL grammar with WF Expression Evaluator | Reject with parse error and position. **No evaluation** — runtime bindings unknown. |
+| CEL expression parse (`if`, `when`, `with`, `for`, `let`) | Shared CEL grammar with WF Expression Evaluator | Reject with parse error and position. **No evaluation, AST not stored** — runtime bindings unknown; document stores normalized source strings; WF re-parses at StartRun. |
 | Expression name-binding (refs to `steps.<id>`, `inputs.<n>`, `placeholders.<n>`) | Workflow's own step graph + placeholder block | Reject if a reference points to a non-existent step or undeclared placeholder. |
 | Placeholder schema (templates only) | Placeholder Schema Validator | Reject malformed placeholder declarations. |
 | `triggers:` blocks | Connector Type Registry's `events.produced` | Reject trigger event names not declared by the referenced connector type version. |
 
-The publish-time validator is exhaustive: any failure that *could* be caught here must be caught here, not deferred to run time. This is the single most important design property of Catalog — it is the engine's compile-time gate.
+Catalog's publish-time validator owns syntactic and **name-binding** checks: it is exhaustive for everything catchable without runtime bindings or external schemas joined to the workflow — any such failure must be caught here, not deferred. Two error classes belong to Workflow Service's StartRun gate, not to Catalog: (1) CEL **type errors** against bound activity/connector schemas, since those schemas are joined to the workflow only at StartRun; (2) runtime evaluation errors, which depend on actual values. Together the two gates form the engine's full compile-time pipeline — Catalog handles syntax + name-binding + reference resolution at publish; WF Definition Compiler handles type-checking at StartRun.
 
 ## Configuration
 
@@ -453,3 +468,6 @@ Catalog has **no runtime dependency on Workflow Service**: it produces and serve
 | Date | Change | GitHub Issue |
 |---|---|---|
 | 2026-05-17 | Initial component design covering responsibility/boundaries (with source-of-truth split table), sub-modules, key operations (publish, materialize, extract, register-activity, resolve-ref, deprecate, list, register-connector, pod-restart), data model, REST + Internal RPC surface, publish-time validation scope, configuration, dependencies, failure modes; resolves COMP-007 design gap and answers WF-TODO-003 (#53) with the `workflow:`-only-references-WorkflowVersion rule | #55 |
+| 2026-05-18 | INCON-023: Flipped activity-manifest writer from ARM to Author CLI; write path now `POST /v1/workspaces/{ws}/activity-types` through API Gateway → Catalog (replacing `POST /v1/catalog/activities`); all `/v1/catalog/activities*` paths re-homed under `/v1/workspaces/{ws}/activity-types*`; updated register-activity sequence diagram and source-of-truth table. ARM is runtime-only and does not write to Catalog | #105 |
+| 2026-05-18 | INCON-022: Clarified CEL parse-error surface and AST storage. Catalog is the **sole syntactic gate**, but the parsed AST is **discarded after validation** — `WorkflowVersion.document` stores normalized CEL **source strings**, not AST. WF re-parses + type-checks at StartRun. Loosened the "publish-time validation is the only gate" wording: Catalog catches everything except CEL **type errors** against bound activity/connector schemas (deferred to StartRun where the schemas resolve) and runtime evaluation errors. Updated publish sequence diagram and validation-scope table | #100 |
+| 2026-05-18 | INCON-022 (refinement): Reframed publish-time validation as half of a **two-gate validation model** — added a Catalog-vs-WF gate-ownership table (publish-time: schema + CEL **syntax** + **name-binding** + reference resolution + digest pinning; StartRun: CEL **type-checking** against bound schemas). Updated the post-table "exhaustive at publish" sentence to attribute the type-check explicitly to the WF Definition Compiler so the two designs agree on ownership | #100 |
