@@ -32,6 +32,15 @@ from custos_spl.ids import (
     WorkflowTemplateId,
     WorkspaceId,
 )
+from custos_spl.interfaces import (
+    ActivityTypeVersion,
+    CatalogStoreProvider,
+    ConnectorTypeVersion,
+    DefinitionListFilter,
+    DefinitionStoreProvider,
+    WorkflowTemplateVersion,
+    WorkflowVersion,
+)
 from custos_spl.pagination import Cursor, Page
 
 try:
@@ -41,12 +50,17 @@ except PackageNotFoundError:
 
 __all__ = [
     "ActivityTypeId",
+    "ActivityTypeVersion",
     "ArtifactId",
     "BackendUnavailable",
+    "CatalogStoreProvider",
     "ConflictDigest",
     "ConnectorInstanceId",
     "ConnectorTypeId",
+    "ConnectorTypeVersion",
     "Cursor",
+    "DefinitionListFilter",
+    "DefinitionStoreProvider",
     "ImmutableViolation",
     "InvalidTransactionHandle",
     "LeaseBusy",
@@ -63,6 +77,8 @@ __all__ = [
     "TenantId",
     "WorkflowId",
     "WorkflowTemplateId",
+    "WorkflowTemplateVersion",
+    "WorkflowVersion",
     "WorkspaceId",
     "WorkspaceMismatch",
     "__version__",

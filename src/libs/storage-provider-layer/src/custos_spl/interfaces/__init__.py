@@ -7,3 +7,25 @@ Populated by:
 - SPL-006 — AuthStoreProvider
 - SPL-007 — LogQueryProvider + MetricsQueryProvider
 """
+
+from custos_spl.interfaces.catalog_store import (
+    ActivityTypeVersion,
+    CatalogStoreProvider,
+    ConnectorTypeVersion,
+)
+from custos_spl.interfaces.definition_store import (
+    DefinitionListFilter,
+    DefinitionStoreProvider,
+    WorkflowTemplateVersion,
+    WorkflowVersion,
+)
+
+__all__ = [
+    "ActivityTypeVersion",
+    "CatalogStoreProvider",
+    "ConnectorTypeVersion",
+    "DefinitionListFilter",
+    "DefinitionStoreProvider",
+    "WorkflowTemplateVersion",
+    "WorkflowVersion",
+]
