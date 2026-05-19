@@ -9,13 +9,13 @@ Status: open
 
 ## Summary
 
-Aligned Trigger Service public REST API with the workspace-scoped URL convention `/v1/workspaces/{workspaceId}/...`, and relocated the public webhook ingress description to the API Gateway design (single source of truth for gateway-mounted public paths). The Generic Webhook Receiver inside Trigger Service is now described as the downstream demux: API Gateway accepts `POST /v1/webhooks/{connectorInstanceId}`, validates HMAC/token per connector instance, then routes to the Trigger Service receiver which fans out to all matching subscriptions.
+Aligned Trigger Service public REST API with the workspace-scoped URL convention `/v1/workspaces/{workspaceId}/...`, and relocated the public webhook ingress description to the API Gateway design (single source of truth for gateway-mounted public paths). The Generic Webhook Receiver inside Trigger Service is now described as the subscription demux: API Gateway accepts `POST /v1/webhooks/{connectorInstanceId}`, terminates TLS, and **forwards anonymously** (no call-context, no HMAC/token verification). HMAC or token verification is performed by Trigger Service's Generic Webhook Receiver (or its connector plugin per TODO-006) against the connector-instance config, and then the receiver fans the validated payload out to all matching subscriptions on that instance.
 
 ## Before
 
 - Trigger CRUD endpoints in the Public Interface section were rooted at `/v1/triggers/...` with workspace passed implicitly via call context, inconsistent with workspace-scoped paths used by other components.
 - The webhook ingress row sat in the Trigger Service REST table as if Trigger Service owned the public mount point, conflicting with the API Gateway design which terminates `/v1/webhooks/{connectorInstanceId}` at the gateway.
-- Module Responsibilities described the Generic Webhook Receiver as the public HTTP entry, ambiguous about which component validates HMAC/token versus which performs subscription demux.
+- Module Responsibilities described the Generic Webhook Receiver as the public HTTP entry, blurring where the public mount lives (gateway vs. Trigger Service) and where HMAC/token verification runs.
 
 ## After
 
@@ -26,7 +26,7 @@ Aligned Trigger Service public REST API with the workspace-scoped URL convention
   - `DELETE /v1/workspaces/{ws}/triggers/{id}`
   - `POST   /v1/workspaces/{ws}/triggers/{id}:fire`
 - The webhook ingest row is removed from the Trigger Service REST table; a short paragraph points to API Gateway design § Webhook Pass-through as authoritative.
-- Module Responsibilities split the responsibility cleanly: API Gateway owns the connector-instance-scoped public URL and HMAC/token validation; Trigger Service's Generic Webhook Receiver consumes the validated payload and demultiplexes to matching subscriptions.
+- Module Responsibilities split the responsibility cleanly: API Gateway owns the connector-instance-scoped public URL, terminates TLS, and forwards the request anonymously (no call-context, no signature checks) — matching the gateway design's Webhook Pass-through section. Trigger Service's Generic Webhook Receiver owns HMAC/token verification against the connector-instance config (or delegates to the connector plugin per TODO-006) and then de-multiplexes the validated payload to all matching subscriptions on that instance.
 
 ## Impact
 
