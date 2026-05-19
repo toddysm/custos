@@ -9,8 +9,10 @@ Owns the seven entity families described in
 3. Connector pull cursors (`ConnectorCursor` + lease primitive)
 4. Artifact backrefs (`ArtifactUse`)
 5. Gateway short-lived state (`IdempotencyRecord`, `DeviceCodeSession`)
-6. Audit writer + outbox drain (`AuditEvent`, `AuditOutboxRow`,
-   `AuditOutboxCursor`)
+6. Audit writer + outbox drain (`AuditEvent`, `AuditOutboxRow`; the
+   per-pipeline high-water mark is stored in the adapter's
+   `audit_outbox_cursor` table and is exposed to callers only as the
+   opaque `int` cursor passed to `commit_audit_outbox_cursor`)
 7. Intra-provider transactions (`with_transaction`)
 
 All methods are workspace-scoped; `workspace_id` is the first arg on every
@@ -398,7 +400,7 @@ class MetadataStoreProvider(Protocol):
     Observability Service across all workspaces and therefore omit it.
 
     The schema revision required by this build is `SCHEMA_REVISION = 4`
-    (includes `AuditOutboxCursor` per-pipeline drain support).
+    (adds the `audit_outbox_cursor` table for per-pipeline drain).
     """
 
     SCHEMA_REVISION: ClassVar[int] = 4
@@ -658,8 +660,8 @@ class MetadataStoreProvider(Protocol):
         """Persist the high-water-mark cursor for a named drain pipeline.
 
         Each pipeline (`audit-store`, `audit-alert`, …) keeps its own
-        cursor in `AuditOutboxCursor`; slow consumers cannot block fast
-        ones.
+        cursor in the adapter's `audit_outbox_cursor` table; slow
+        consumers cannot block fast ones.
         """
         ...
 
