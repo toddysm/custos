@@ -157,11 +157,13 @@ class CatalogStoreProvider(Protocol):
         type: str,
         semver_range: str,
     ) -> ActivityTypeVersion | None:
-        """Resolve a semver range to the latest matching non-deprecated activity-type version.
+        """Resolve a semver range to the latest matching activity-type version.
 
-        Returns `None` if no matching version exists. SPL does not
-        interpret deprecation transitively; only the version-level row
-        plus parent-deprecated flag are consulted.
+        Returns `None` if no matching version exists or if the parent
+        activity type is deprecated. The deprecation model exposed by
+        this interface is parent-type only via
+        `set_activity_type_deprecated`; callers should not assume
+        version-level deprecation affects resolution.
         """
         ...
 
