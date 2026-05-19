@@ -3,7 +3,7 @@
 Slug: `catalog-service`
 Component ID: COMP-007
 Last Updated: 2026-05-18
-Version: 2
+Version: 3
 Status: Draft
 
 ## Responsibility
@@ -103,7 +103,7 @@ sequenceDiagram
     DM->>Conn: ExistsConnectorInstance(workspace, name)
     Conn-->>DM: ok | unknown
     DM->>CEL: parse if/when/with/for/let expressions
-    CEL-->>DM: AST set (no evaluation)
+    CEL-->>DM: parse OK (AST discarded; not stored on WorkflowVersion)
     DM->>VM: next_version(workspace, name)
     VM-->>DM: version = N
     DM->>Store: PutWorkflowVersion(workflowVersionId, normalized doc, frozen=true)
@@ -112,9 +112,9 @@ sequenceDiagram
     API-->>Caller: 201 { workflowVersionId }
 ```
 
-Publish-time validation is the **only** validation gate before runtime. Once a `WorkflowVersion` exists, Workflow Service trusts it: the Validator (WF design § Validator) does not re-validate the document, only the `StartRun` request envelope. This means Catalog must be exhaustive at publish — any class of error caught only at run time would have been catchable here.
+Publish-time validation is the **only syntactic gate** before runtime. Once a `WorkflowVersion` exists, Workflow Service trusts that the document is syntactically valid and that all references resolve — the WF Validator does not re-validate the document, only the `StartRun` request envelope. Workflow Service does, however, **re-parse and type-check** every CEL expression at `StartRun` (WF Definition Compiler) against the bound input/output schemas, and caches the typed AST on `ExecutionGraph`. Catalog therefore guarantees: (a) syntactic well-formedness of every CEL expression, (b) all references (activity / connector type / connector instance / sub-workflow / placeholder / step ID) resolve, (c) digest pins are locked into the normalized document. Type errors and runtime evaluation errors are observable only at StartRun and run time respectively.
 
-**CEL parsing, not evaluation.** Expression bindings at publish time are unknown (`steps.scan.outputs.critical` does not exist yet), so Catalog cannot evaluate. It parses each expression with the same grammar the WF Expression Evaluator uses and rejects syntactic errors at publish. Type-binding errors (referencing a step that does not exist in the workflow, or a placeholder that is not declared) **are** caught at publish, because both the step graph and the placeholder set are known.
+**CEL parsing, not evaluation, and not stored.** Expression bindings at publish time are unknown (`steps.scan.outputs.critical` does not exist yet), so Catalog cannot evaluate. It parses each expression with the same grammar the WF Expression Evaluator uses and rejects syntactic errors at publish. The parsed AST is **discarded after validation** — `WorkflowVersion.document` stores the normalized **CEL source strings**, not a pre-built AST. WF re-parses from source at StartRun. Type-binding errors against the workflow's own structure (referencing a step that does not exist in the workflow, or a placeholder that is not declared) **are** caught at publish, because both the step graph and the placeholder set are known; type-binding errors against external schemas (activity input schemas, connector outputs) are caught at StartRun where the schemas are resolved together with the call sites.
 
 ### Operation: Materialize Workflow from Template
 
@@ -395,12 +395,12 @@ The publish-time validation pipeline runs every check that can be done without r
 | Connector type reference resolution | Connector Type Registry | Reject if unresolved or deprecated. |
 | Connector instance existence | Connector Service `ExistsConnectorInstance` | Reject if `connector: <name>` refers to no instance in the workspace. |
 | Sub-workflow reference resolution | Definition Manager (this service) | Reject if `workflowVersionId` does not exist, is deprecated, or is cross-workspace without permission. |
-| CEL expression parse (`if`, `when`, `with`, `for`, `let`) | Shared CEL grammar with WF Expression Evaluator | Reject with parse error and position. **No evaluation** — runtime bindings unknown. |
+| CEL expression parse (`if`, `when`, `with`, `for`, `let`) | Shared CEL grammar with WF Expression Evaluator | Reject with parse error and position. **No evaluation, AST not stored** — runtime bindings unknown; document stores normalized source strings; WF re-parses at StartRun. |
 | Expression name-binding (refs to `steps.<id>`, `inputs.<n>`, `placeholders.<n>`) | Workflow's own step graph + placeholder block | Reject if a reference points to a non-existent step or undeclared placeholder. |
 | Placeholder schema (templates only) | Placeholder Schema Validator | Reject malformed placeholder declarations. |
 | `triggers:` blocks | Connector Type Registry's `events.produced` | Reject trigger event names not declared by the referenced connector type version. |
 
-The publish-time validator is exhaustive: any failure that *could* be caught here must be caught here, not deferred to run time. This is the single most important design property of Catalog — it is the engine's compile-time gate.
+The publish-time validator is exhaustive for everything *catchable without runtime bindings or external schemas resolved*: any failure that *could* be caught here must be caught here, not deferred. Two error classes are unavoidably deferred to StartRun: (1) CEL **type errors** against bound activity/connector schemas, since those schemas are joined to the workflow only at StartRun; (2) runtime evaluation errors, which depend on actual values. This is the single most important design property of Catalog — it is the engine's compile-time gate, and the only one before WF's StartRun type-check.
 
 ## Configuration
 
@@ -457,3 +457,4 @@ Catalog has **no runtime dependency on Workflow Service**: it produces and serve
 |---|---|---|
 | 2026-05-17 | Initial component design covering responsibility/boundaries (with source-of-truth split table), sub-modules, key operations (publish, materialize, extract, register-activity, resolve-ref, deprecate, list, register-connector, pod-restart), data model, REST + Internal RPC surface, publish-time validation scope, configuration, dependencies, failure modes; resolves COMP-007 design gap and answers WF-TODO-003 (#53) with the `workflow:`-only-references-WorkflowVersion rule | #55 |
 | 2026-05-18 | INCON-023: Flipped activity-manifest writer from ARM to Author CLI; write path now `POST /v1/workspaces/{ws}/activity-types` through API Gateway → Catalog (replacing `POST /v1/catalog/activities`); all `/v1/catalog/activities*` paths re-homed under `/v1/workspaces/{ws}/activity-types*`; updated register-activity sequence diagram and source-of-truth table. ARM is runtime-only and does not write to Catalog | #105 |
+| 2026-05-18 | INCON-022: Clarified CEL parse-error surface and AST storage. Catalog is the **sole syntactic gate**, but the parsed AST is **discarded after validation** — `WorkflowVersion.document` stores normalized CEL **source strings**, not AST. WF re-parses + type-checks at StartRun. Loosened the "publish-time validation is the only gate" wording: Catalog catches everything except CEL **type errors** against bound activity/connector schemas (deferred to StartRun where the schemas resolve) and runtime evaluation errors. Updated publish sequence diagram and validation-scope table | #100 |
