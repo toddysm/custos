@@ -1,9 +1,3 @@
----
-name: bundle-g-binding-completion
-description: Workflow Service Step Coordinator is the only caller of Connector Service BindForStep; ScheduleActivity carries connectorContexts + sidecarBootstrapToken
-type: component-design
----
-
 # Change: bundle-g-binding-completion
 
 Date: 2026-05-18
