@@ -309,9 +309,10 @@ sequenceDiagram
     participant Audit as Observability/Audit
 
     WF->>Conn: BindForStep(stepKey, slots[])
-    Conn-->>WF: ConnectorContexts (named) + sidecarBootstrapToken
-    WF->>Dapr: schedule activity(stepKey, activityRef, inputs, connectorContexts, sidecarBootstrapToken)
-    Dapr->>ARM: invoke(stepKey, activityRef, inputs, connectorContexts, sidecarBootstrapToken)
+    Conn-->>WF: ConnectorContexts (named)
+    WF->>Dapr: schedule activity(stepKey, activityRef, inputs, connectorContexts)
+    Dapr->>ARM: invoke(stepKey, activityRef, inputs, connectorContexts)
+    ARM->>ARM: write/sign sidecarBootstrapToken at pod start
     ARM->>Driver: run(activity image/module, inputs, ctx)
     Driver-->>ARM: result (exitCode, outputs, artifacts)
     ARM->>Audit: emit step events + artifacts
