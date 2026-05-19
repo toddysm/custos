@@ -1,8 +1,8 @@
 # Component Design: Connector Service
 
 Slug: connector-service
-Last Updated: 2026-05-17
-Version: 7
+Last Updated: 2026-05-18
+Version: 8
 Status: Draft
 
 ## Responsibility
@@ -763,7 +763,7 @@ sequenceDiagram
 
 | RPC | Caller | Purpose |
 |---|---|---|
-| BindForStep | Activity Runtime Manager | Get connector context for a step |
+| BindForStep | Workflow Service | Resolve every connector slot a step references and return named `ConnectorContexts`. Called by the Step Coordinator before `ScheduleActivity`; ARM uses those resolved contexts to mint the sidecar bootstrap token per the sidecar auth contract. |
 | ValidateConnector | Catalog/Workflow services | Preflight capability and config validation |
 | SubscribeEvents | Trigger Service | Consume connector push/pull event stream |
 | RefreshLease | Activity Runtime Manager | Extend lease for long-running step |
@@ -803,11 +803,12 @@ sequenceDiagram
     participant KMS as KMS / Identity Provider
     participant ARM as Activity Runtime Manager
 
-    WF->>CS: Bind(step, connectors map, required capabilities)
-    CS->>CS: Validate capability coverage per named connector
+    WF->>CS: BindForStep(stepKey, slots[] — named connectors + required capabilities)
+    CS->>CS: Validate capability coverage per named slot
     CS->>KMS: Resolve identity/secret/token material
-    CS-->>ARM: ConnectorContexts (named)
-    ARM-->>WF: Ready to run activity
+    CS-->>WF: ConnectorContexts (named, opaque slot handles)
+    WF->>ARM: ScheduleActivity(..., connectorContexts)
+    ARM->>ARM: mint sidecar bootstrap token at sidecar start (per § Secret and Token Flow to Activities)
 ```
 
 ## Operator Admin Surface
@@ -901,3 +902,4 @@ _(none — all v1 design questions resolved)_
 | 2026-05-17 | Capability namespace governance: two-tier namespace (curated Tier 1 core prefixes + `x-<vendor>.<verb>` Tier 2 extensions); strict-superset semver compatibility policy within a major; deprecation flow; new curated registry at `design/architecture/capabilities.md`; `connector.registration.rejected` and `connector.capability.deprecated` audit events | #61 |
 | 2026-05-17 | Fallback tag naming: lock v1 tag format `custos-connector-manifest-v1_<algorithm>-<hex>` with `_` separator; v1 sha256-only via registered-algorithms set; algorithm-agnostic format supports sha512/others in M2+ behind scheme version bump if length budget allows; full digest normalization rules; `connector.manifest.fallback-used`/`fallback-ignored`/`fallback-rejected` audit events | #62 |
 | 2026-05-17 | Lease expiry and revocation operator UX: 11 new admin REST endpoints (revoke single/instance/run, list active leases by instance/run, pause/resume pull loop, force health check, audit query); sidecar revoke control-channel API (mTLS, `POST /sidecar-admin/v1/revoke` with per-lease idempotent acks); live-state-fan-out vs audit-history split; permission model (`connector:read`/`audit:read`/`admin:connector`); `lease.revoke-requested` plus three `connector.*` operator audit events | #63 |
+| 2026-05-18 | INCON-018: `BindForStep` is called by the Workflow Service (not ARM); multi-connector bind diagram updated so CS returns named `ConnectorContexts` (opaque slot handles) to WF, which then hands them to ARM via `ScheduleActivity`. ARM continues to mint the sidecar bootstrap token at sidecar start per the locked sidecar auth contract, and continues to call `RefreshLease` for long-running steps | #98 |

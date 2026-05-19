@@ -1,7 +1,7 @@
 # Architecture Overview: Custos
 
 Last Updated: 2026-05-18
-Version: 12
+Version: 13
 Status: Draft
 
 ## Summary
@@ -308,13 +308,15 @@ sequenceDiagram
     participant Driver as Runtime Driver
     participant Audit as Observability/Audit
 
-    WF->>Dapr: schedule activity(stepKey, activityRef, inputs)
-    Dapr->>ARM: invoke(stepKey, activityRef, inputs)
-    ARM->>Conn: resolve(connectorRef) -> ConnectorContext
+    WF->>Conn: BindForStep(stepKey, slots[])
+    Conn-->>WF: ConnectorContexts (named)
+    WF->>Dapr: schedule activity(stepKey, activityRef, inputs, connectorContexts)
+    Dapr->>ARM: invoke(stepKey, activityRef, inputs, connectorContexts)
+    ARM->>ARM: write/sign sidecarBootstrapToken at pod start
     ARM->>Driver: run(activity image/module, inputs, ctx)
     Driver-->>ARM: result (exitCode, outputs, artifacts)
     ARM->>Audit: emit step events + artifacts
-    ARM-->>Dapr: typed result
+    ARM-->>Dapr: typed result (activity-task return)
     Dapr-->>WF: continue / branch / retry
 ```
 
@@ -692,3 +694,4 @@ sequenceDiagram
 | 2026-05-17 | INCON-007: Added `API --> Conn` edge to Component Map so the diagram matches the documented Connector Service REST API surface; clarified that Deployment Model edges describe topology and not user-facing REST routing | #32 |
 | 2026-05-18 | INCON-027 + INCON-028: Extended Workflow and Template Schema with `let`, `forEach` (+ `where:`), `on_error`, and the multi-connector `connectors:` map form, plus a step-form reference table and cross-component implications paragraph | #89, #90 |
 | 2026-05-18 | INCON-026: Aligned Domain Model on `Subscription` (was `Trigger`); the REST resource is still `/triggers` for ergonomic reasons. Added a naming-reconciliation note pointing at the Trigger Service data model as authoritative | #88 |
+| 2026-05-18 | INCON-018 + INCON-021: Step-execution sequence updated to "Workflow Service preflights, ARM consumes" pattern — WF calls `BindForStep(stepKey, slots[])` on Connector Service and passes the resulting named `ConnectorContexts` to ARM via `ScheduleActivity`; ARM no longer calls CS for the initial bind. ARM continues to mint the sidecar bootstrap token at sidecar start per the locked sidecar contract. Completion uses the native Dapr activity-task return path | #98, #101 |
