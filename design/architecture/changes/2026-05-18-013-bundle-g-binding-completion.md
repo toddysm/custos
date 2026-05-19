@@ -1,9 +1,3 @@
----
-name: bundle-g-binding-completion
-description: Architecture overview step-execution sequence updated — WF preflights bind, ARM consumes; completion via Dapr activity-task return
-type: architecture
----
-
 # Change: bundle-g-binding-completion
 
 Date: 2026-05-18
