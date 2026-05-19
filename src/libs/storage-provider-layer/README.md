@@ -40,7 +40,7 @@ pip install -e ".[dev,postgres]"
 
 ruff check .
 ruff format --check .
-mypy src
+mypy src tests
 pytest
 ```
 
