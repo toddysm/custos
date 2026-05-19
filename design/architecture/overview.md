@@ -203,16 +203,16 @@ spec:
       connector: prod-registry
       with:
         image: ${{ inputs.image }}
-    - id: normalize
+    - id: resolve-host
       let:
-        targets: ${{ steps.list-manifests.outputs.items |> map(d => imageRef(d.ref, connector("prod-registry").host)) }}
+        registryHost: ${{ connector("prod-registry").host }}
     - id: scan
-      forEach: ${{ steps.normalize.outputs.targets }}
+      forEach: ${{ steps.list-manifests.outputs.items }}
       where: ${{ item.mediaType == "application/vnd.oci.image.manifest.v1+json" }}
       activity: custos.builtin/vuln-scan@2
       connector: prod-registry
       with:
-        image: ${{ item }}
+        image: ${{ imageRef(item.ref, steps.resolve-host.outputs.registryHost) }}
       on_error:
         - match: { codePrefix: "registry." }
           do: skip

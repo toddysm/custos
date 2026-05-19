@@ -16,7 +16,7 @@ The §Workflow and Template Schema example workflow exercised only single-connec
 
 ## After
 
-- The example workflow is rewritten as one realistic supply-chain flow that exercises every step form: `let` for input normalization, `forEach` + `where:` for filtered fan-out, `on_error` for retry/skip policy, an `if:`-gated quarantine branch, and an `image-promote` step that uses the multi-connector `connectors:` map (`source` / `destination` aliases).
+- The example workflow is rewritten as one realistic supply-chain flow that exercises every step form: `let` to bind the resolved registry host once for reuse downstream, `forEach` + `where:` filtering descriptors by `mediaType` for fan-out, `on_error` for retry/skip policy, an `if:`-gated quarantine branch, and an `image-promote` step that uses the multi-connector `connectors:` map (`source` / `destination` aliases). The `forEach` iterates the original descriptor list (so `where:` can match on `item.mediaType`) and constructs the `ImageRef` inside `with:` — keeping the predicate well-typed against the descriptor schema.
 - A new **Step forms** subsection lists every form with a one-line definition and a pointer to the authoritative design (ARM design for `let`, `forEach`/`where:`, `on_error`, and `spec.connectors[]`; Connector Service design for the multi-connector binding example).
 - A short cross-component implications paragraph documents the architectural seams the new forms touch:
   - `forEach` fan-out → Workflow Service Sub-Orchestration Manager (COMP-003 sub-module).
