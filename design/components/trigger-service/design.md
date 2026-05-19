@@ -1,8 +1,8 @@
 # Component Design: Trigger Service
 
 Slug: `trigger-service`
-Last Updated: 2026-05-17
-Version: 3
+Last Updated: 2026-05-18
+Version: 4
 Status: Draft
 
 ## Responsibility
@@ -201,7 +201,7 @@ erDiagram
     Subscription ||--o{ SubscriptionSelector : has
     Subscription ||--o{ DedupKey : produces
     Schedule ||--|| Subscription : drives
-    ResumeSubscription ||--|| Run : "waits for"
+    Subscription ||--o| ResumeSubscription : "specialized as (kind=resume)"
 
     Subscription {
         string id PK
@@ -240,11 +240,16 @@ erDiagram
 
     ResumeSubscription {
         string subscriptionId FK
+        string runId "opaque ref to Workflow Service Run"
+        string stepId "opaque ref to Workflow Service Step"
+        string eventKey
         bool oneShot
         timestamp registeredAt
         timestamp expiresAt
     }
 ```
+
+**Cross-service references are scalar IDs, not ER relationships.** `ResumeSubscription.runId` and `ResumeSubscription.stepId` are opaque identifiers that reference the Workflow Service-owned `Run` and `Step` entities (COMP-003). The Trigger Service holds no foreign key to those tables and never reads them — the only interaction is via the `RegisterResumeSubscription` / `CancelResumeSubscription` Internal RPCs and the dispatch back to `RaiseExternalEvent`. `Run` is intentionally not drawn as an entity in this diagram.
 
 **Pull cursor state is intentionally not modeled here.** Pull cursors are owned by the Connector Service (`ConnectorCursor` keyed per `ConnectorInstance`) — one cursor per connector instance, shared across all subscriptions that pull from that instance. The Trigger Service has no cursor entity. See `design/components/connector-service/design.md` § Cursor Ownership for the authoritative model.
 
@@ -403,3 +408,4 @@ spec:
 | 2026-05-17 | INCON-014: `PublishWorkflowEvent` removed from Internal RPC table; replaced with explicit Dapr Pub/Sub Subscriptions section documenting `custos.workflow.events` topic, publisher (Workflow Service), subscriber (Internal Event Receiver), envelope, delivery semantics | #39 |
 | 2026-05-17 | INCON-013: TODO-001 scope expanded — taxonomy work is unified with ARM TODO-009 and Observability/Audit; one dot-namespaced `kind` namespace covers connector events + activity/step lifecycle audit events | #38 |
 | 2026-05-17 | Workflow Service design landed: idempotent re-registration semantics documented on `RegisterResumeSubscription` / `CancelResumeSubscription` Internal RPC rows; TS-TODO-004 closed (WF owns the registration lifecycle) | #40 |
+| 2026-05-18 | INCON-024: ER diagram no longer draws `Run` as a participant in a Trigger-Service-owned relationship. `ResumeSubscription` now exposes `runId` / `stepId` as scalar opaque references to the Workflow Service-owned `Run` / `Step` entities, with a paragraph clarifying that cross-service references are by ID, not by FK | #86 |
