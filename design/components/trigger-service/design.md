@@ -2,7 +2,7 @@
 
 Slug: `trigger-service`
 Last Updated: 2026-05-18
-Version: 4
+Version: 5
 Status: Draft
 
 ## Responsibility
@@ -73,9 +73,9 @@ Receivers are uniform in shape: each accepts source-specific input and emits a `
 
 | Module | Responsibility |
 |---|---|
-| Manual Receiver | Accepts `POST /triggers/manual` from API Gateway; emits a normalized event with `source.type = manual`. |
+| Manual Receiver | Accepts `POST /v1/workspaces/{ws}/triggers/{id}:fire` from API Gateway; emits a normalized event with `source.type = manual`. |
 | Scheduler Receiver | Owns cron evaluation per active schedule; fires normalized events at scheduled times. Uses `Schedule Store` for the durable schedule set. |
-| Generic Webhook Receiver | Accepts `POST /triggers/webhook/{subscriptionId}` with HMAC or token auth; emits a normalized event with raw body + headers. |
+| Generic Webhook Receiver | Accepts inbound webhooks forwarded by the API Gateway pass-through (`POST /v1/webhooks/{connectorInstanceId}`); validates HMAC or token auth per connector-instance config, then **de-multiplexes** to all matching subscriptions on that connector instance (selector + payload match). Webhook URLs are connector-instance-scoped, not subscription-scoped — one URL is shared by all subscriptions attached to a given instance. Emits a normalized event per matched subscription with raw body + headers. |
 | Vendor Push Receivers | Host process for connector `listen(mode=push)` streams. Receives push events from connector plugins via the Connector Service's listen channel. |
 | Pull Receivers / Pollers | Host process for connector `listen(mode=pull)` streams. Drives interval polls per configured pull subscription; the Connector Service reads and advances its own per-instance cursor before returning normalized events to the receiver. |
 | Internal Event Receiver | Subscribes to `custos.workflow.events` topic where Workflow Service publishes workflow lifecycle events (`workflow.completed`, `workflow.failed`, custom emit). Emits them as normalized events. |
@@ -279,14 +279,17 @@ erDiagram
 
 ### REST API (mounted under API Gateway)
 
+All paths are workspace-scoped and routed by the API Gateway under the `/v1/workspaces/{ws}/triggers/*` prefix. Webhook ingest is gateway-owned at `POST /v1/webhooks/{connectorInstanceId}` (connector-instance-scoped, not subscription-scoped) and is forwarded to this service after gateway-side pass-through processing (including TLS termination and other ingress handling defined by the API Gateway); the gateway does not add authn/call-context or perform signature verification for this route, and signature verification plus subscription demux happen here.
+
 | Method | Path | Request | Response | Description |
 |---|---|---|---|---|
-| POST | `/triggers` | `SubscriptionCreate` | `Subscription` | Create a start subscription (manual, scheduled, webhook, vendor-push, pull, internal). |
-| GET | `/triggers/{id}` | — | `Subscription` | Read one subscription. |
-| PATCH | `/triggers/{id}` | `SubscriptionPatch` | `Subscription` | Update state, selector, mapping, schedule. |
-| DELETE | `/triggers/{id}` | — | `204` | Remove subscription. |
-| POST | `/triggers/manual/{id}/fire` | `{ inputs }` | `{ runId }` | Manual trigger; returns started run id. |
-| POST | `/triggers/webhook/{id}` | raw body + headers | `202` | Generic inbound webhook ingest. |
+| POST | `/v1/workspaces/{ws}/triggers` | `SubscriptionCreate` | `Subscription` | Create a start subscription (manual, scheduled, webhook, vendor-push, pull, internal). |
+| GET | `/v1/workspaces/{ws}/triggers/{id}` | — | `Subscription` | Read one subscription. |
+| PATCH | `/v1/workspaces/{ws}/triggers/{id}` | `SubscriptionPatch` | `Subscription` | Update state, selector, mapping, schedule. |
+| DELETE | `/v1/workspaces/{ws}/triggers/{id}` | — | `204` | Remove subscription. |
+| POST | `/v1/workspaces/{ws}/triggers/{id}:fire` | `{ inputs }` | `{ runId }` | Manual trigger; returns started run id. |
+
+Webhook ingest does not appear in this table because it is an unauthenticated gateway-owned route (`POST /v1/webhooks/{connectorInstanceId}`) that the gateway forwards to Trigger Service via Dapr invocation with no call-context. See the API Gateway design § Webhook Pass-through for the inbound contract; this service's § Generic Webhook Receiver owns HMAC/token verification and subscription demux per connector instance.
 
 ### Internal RPC (Workflow Service ⇄ Trigger Service)
 
@@ -409,3 +412,4 @@ spec:
 | 2026-05-17 | INCON-013: TODO-001 scope expanded — taxonomy work is unified with ARM TODO-009 and Observability/Audit; one dot-namespaced `kind` namespace covers connector events + activity/step lifecycle audit events | #38 |
 | 2026-05-17 | Workflow Service design landed: idempotent re-registration semantics documented on `RegisterResumeSubscription` / `CancelResumeSubscription` Internal RPC rows; TS-TODO-004 closed (WF owns the registration lifecycle) | #40 |
 | 2026-05-18 | INCON-024: ER diagram no longer draws `Run` as a participant in a Trigger-Service-owned relationship. `ResumeSubscription` now exposes `runId` / `stepId` as scalar opaque references to the Workflow Service-owned `Run` / `Step` entities, with a paragraph clarifying that cross-service references are by ID, not by FK | #86 |
+| 2026-05-18 | INCON-025: Public REST routes rewritten to gateway-mounted workspace-scoped form (`/v1/workspaces/{ws}/triggers/*`); manual-fire renamed `POST /triggers/manual/{id}/fire` → `POST /v1/workspaces/{ws}/triggers/{id}:fire`; subscription-scoped webhook route `POST /triggers/webhook/{id}` removed in favor of the gateway-owned connector-instance-scoped `POST /v1/webhooks/{connectorInstanceId}` with downstream subscription demux owned by the Generic Webhook Receiver | #99 |
