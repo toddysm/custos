@@ -1,9 +1,3 @@
----
-name: bundle-g-binding-completion
-description: ARM consumes pre-resolved ConnectorContexts + sidecarBootstrapToken from Workflow Service; activity completion is the native Dapr activity-task return
-type: component-design
----
-
 # Change: bundle-g-binding-completion
 
 Date: 2026-05-18
