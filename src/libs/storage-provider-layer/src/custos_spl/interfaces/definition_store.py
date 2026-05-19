@@ -67,12 +67,16 @@ class DefinitionListFilter:
     """Optional filter for `list_*` calls.
 
     `published_after` / `published_before` are half-open: `>= after`,
-    `< before`. `parent_deprecated=None` means "either"; the filter
-    operates on the parent `Workflow` / `WorkflowTemplate` row's flag
-    (versions themselves are not independently deprecatable in v1).
+    `< before`.
+
+    There is intentionally no `deprecated` filter here: `list_*` is
+    already scoped to a single `workflow_id` / `template_id`, and
+    deprecation is parent-level (v1 has no version-level deprecation),
+    so every row in a result set shares the same `parent_deprecated`
+    value. Callers that want to skip a deprecated workflow inspect
+    `parent_deprecated` on any returned `WorkflowVersion`.
     """
 
-    parent_deprecated: bool | None = None
     published_after: datetime | None = None
     published_before: datetime | None = None
 

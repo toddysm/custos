@@ -53,9 +53,19 @@ def test_workflow_template_version_is_frozen() -> None:
 
 def test_definition_list_filter_defaults_are_open() -> None:
     f = DefinitionListFilter()
-    assert f.parent_deprecated is None
     assert f.published_after is None
     assert f.published_before is None
+
+
+def test_definition_list_filter_has_no_deprecated_field() -> None:
+    """list_* is scoped to one workflow_id, so parent_deprecated would be uniform.
+
+    Pinned so a future refactor that re-adds the redundant field is
+    caught — adapter authors would have to disambiguate it.
+    """
+    f = DefinitionListFilter()
+    assert not hasattr(f, "deprecated")
+    assert not hasattr(f, "parent_deprecated")
 
 
 # ----- Protocol shape -----
