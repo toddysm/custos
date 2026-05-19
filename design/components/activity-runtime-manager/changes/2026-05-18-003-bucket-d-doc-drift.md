@@ -1,9 +1,3 @@
----
-name: bucket-d-doc-drift
-description: ARM design fixes for Bucket D — add /custos/in/sidecar-token to filesystem layout, pin WASM to M4+, remove unbacked hyperlight runtime kind
-type: component-design
----
-
 # Change: bucket-d-doc-drift
 
 Date: 2026-05-18
