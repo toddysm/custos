@@ -4,7 +4,7 @@ Date: 2026-05-18
 Type: component-design
 Component: activity-runtime-manager
 Sequence: 003
-GitHub Issues: #85, #92, #93
+GitHub Issue: #85, #92, #93
 Status: open
 
 ## Summary
