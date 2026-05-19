@@ -9,7 +9,7 @@ type: architecture
 Date: 2026-05-18
 Type: architecture
 Sequence: 012
-GitHub Issues: #88
+GitHub Issue: #88
 Status: open
 
 ## Summary
