@@ -763,7 +763,7 @@ sequenceDiagram
 
 | RPC | Caller | Purpose |
 |---|---|---|
-| BindForStep | Workflow Service | Resolve every connector slot a step references and return named `ConnectorContexts` plus a `sidecarBootstrapToken`. Called by the Step Coordinator before `ScheduleActivity`. |
+| BindForStep | Workflow Service | Resolve every connector slot a step references and return named `ConnectorContexts`. Called by the Step Coordinator before `ScheduleActivity`; ARM uses those resolved contexts to mint the sidecar bootstrap token per the sidecar auth contract. |
 | ValidateConnector | Catalog/Workflow services | Preflight capability and config validation |
 | SubscribeEvents | Trigger Service | Consume connector push/pull event stream |
 | RefreshLease | Activity Runtime Manager | Extend lease for long-running step |
