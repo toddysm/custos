@@ -6,6 +6,7 @@ See `design/components/storage-provider-layer/design.md` for the full contract.
 from importlib.metadata import PackageNotFoundError, version
 
 from custos_spl.errors import (
+    ArtifactNotFound,
     BackendUnavailable,
     ConflictDigest,
     ImmutableViolation,
@@ -34,6 +35,8 @@ from custos_spl.ids import (
 )
 from custos_spl.interfaces import (
     ActivityTypeVersion,
+    ArtifactDescriptor,
+    ArtifactStoreProvider,
     ArtifactUse,
     AuditEvent,
     AuditFilter,
@@ -80,7 +83,10 @@ except PackageNotFoundError:
 __all__ = [
     "ActivityTypeId",
     "ActivityTypeVersion",
+    "ArtifactDescriptor",
     "ArtifactId",
+    "ArtifactNotFound",
+    "ArtifactStoreProvider",
     "ArtifactUse",
     "AuditEvent",
     "AuditFilter",

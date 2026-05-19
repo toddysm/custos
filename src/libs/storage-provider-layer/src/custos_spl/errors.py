@@ -145,7 +145,18 @@ class NotReserved(SPLError):
     """
 
 
+class ArtifactNotFound(SPLError):
+    """`ArtifactStoreProvider.get` was called on an absent artifact ID.
+
+    Distinct from `WorkspaceMismatch` so adapters can distinguish "no
+    such row anywhere" from "exists in a different workspace". Both
+    surface as HTTP 404 at the caller — never disclose cross-workspace
+    existence.
+    """
+
+
 __all__ = [
+    "ArtifactNotFound",
     "BackendUnavailable",
     "ConflictDigest",
     "ImmutableViolation",
