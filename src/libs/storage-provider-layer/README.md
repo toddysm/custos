@@ -14,7 +14,7 @@ Custos has no compile-time or run-time dependency on any concrete backend.
 | `LogQueryProvider` | Loki / OpenSearch / noop |
 | `MetricsQueryProvider` | Prometheus / noop |
 
-Full design: [`design/components/storage-provider-layer/design.md`](../../../design/components/storage-provider-layer/design.md).
+Full design: [`design/components/storage-provider-layer/design.md`](https://github.com/toddysm/custos/blob/main/design/components/storage-provider-layer/design.md).
 
 ## Layout
 
@@ -48,4 +48,4 @@ pytest
 
 Implementation tracked under GitHub label
 [`component:storage-provider-layer`](https://github.com/toddysm/custos/labels/component%3Astorage-provider-layer).
-The TODO list lives in [`design/components/storage-provider-layer/todos.md`](../../../design/components/storage-provider-layer/todos.md).
+The TODO list lives in [`design/components/storage-provider-layer/todos.md`](https://github.com/toddysm/custos/blob/main/design/components/storage-provider-layer/todos.md).
