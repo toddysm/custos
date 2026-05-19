@@ -25,27 +25,40 @@ from custos_spl.pagination import Cursor, Page
 
 @dataclass(frozen=True, slots=True)
 class WorkflowVersion:
-    """A single immutable workflow version row."""
+    """A single immutable workflow version row.
+
+    `parent_deprecated` is a **denormalized read of the parent `Workflow`
+    row's `deprecated` flag** at fetch time — it is NOT a property of
+    the version itself. The version row is immutable; toggling
+    deprecation via `set_workflow_deprecated` mutates the parent only,
+    which means the value of `parent_deprecated` on two `WorkflowVersion`
+    instances for the same `(workflow_id, version)` can differ across
+    fetches. There is no version-level deprecation in v1.
+    """
 
     workspace_id: WorkspaceId
     workflow_id: WorkflowId
     version: str
     normalized_doc: Mapping[str, Any]
     derived_from_template_version_id: str | None
-    deprecated: bool
+    parent_deprecated: bool
     published_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
 class WorkflowTemplateVersion:
-    """A single immutable workflow-template version row."""
+    """A single immutable workflow-template version row.
+
+    `parent_deprecated` denormalizes the parent `WorkflowTemplate` row's
+    `deprecated` flag — see `WorkflowVersion` for the rationale.
+    """
 
     workspace_id: WorkspaceId
     template_id: WorkflowTemplateId
     version: str
     normalized_doc: Mapping[str, Any]
     derived_from_workflow_version_id: str | None
-    deprecated: bool
+    parent_deprecated: bool
     published_at: datetime
 
 
@@ -54,10 +67,12 @@ class DefinitionListFilter:
     """Optional filter for `list_*` calls.
 
     `published_after` / `published_before` are half-open: `>= after`,
-    `< before`. `deprecated=None` means "either".
+    `< before`. `parent_deprecated=None` means "either"; the filter
+    operates on the parent `Workflow` / `WorkflowTemplate` row's flag
+    (versions themselves are not independently deprecatable in v1).
     """
 
-    deprecated: bool | None = None
+    parent_deprecated: bool | None = None
     published_after: datetime | None = None
     published_before: datetime | None = None
 

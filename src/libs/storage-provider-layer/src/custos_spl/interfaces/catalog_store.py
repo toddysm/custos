@@ -29,6 +29,13 @@ class ActivityTypeVersion:
     Primary key is `(namespace, type, version)`. `digest` is the content
     address of `normalized_manifest`; mismatches on the same key surface
     as `ConflictDigest`.
+
+    `parent_deprecated` is a **denormalized read of the parent
+    `ActivityType` row's `deprecated` flag** at fetch time — it is NOT
+    a property of the version. Deprecation toggles via
+    `set_activity_type_deprecated` mutate the parent only; the version
+    row itself is the immutable manifest+digest binding. There is no
+    version-level deprecation in v1.
     """
 
     namespace: str
@@ -36,7 +43,7 @@ class ActivityTypeVersion:
     version: str
     digest: str
     normalized_manifest: Mapping[str, Any]
-    deprecated: bool
+    parent_deprecated: bool
     published_at: datetime
 
 
@@ -45,14 +52,16 @@ class ConnectorTypeVersion:
     """A single connector-type version row.
 
     Primary key is `(type, version)`. Same digest semantics as
-    `ActivityTypeVersion`.
+    `ActivityTypeVersion`. `parent_deprecated` denormalizes the parent
+    `ConnectorType` row's `deprecated` flag — see `ActivityTypeVersion`
+    for the rationale.
     """
 
     type: str
     version: str
     digest: str
     normalized_manifest: Mapping[str, Any]
-    deprecated: bool
+    parent_deprecated: bool
     published_at: datetime
 
 

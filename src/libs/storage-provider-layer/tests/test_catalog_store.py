@@ -29,7 +29,7 @@ def test_activity_type_version_is_frozen() -> None:
         version="1.0.0",
         digest="sha256:abc",
         normalized_manifest={"capabilities": []},
-        deprecated=False,
+        parent_deprecated=False,
         published_at=_now(),
     )
     with pytest.raises(FrozenInstanceError):
@@ -42,11 +42,11 @@ def test_connector_type_version_is_frozen() -> None:
         version="1.0.0",
         digest="sha256:abc",
         normalized_manifest={},
-        deprecated=False,
+        parent_deprecated=False,
         published_at=_now(),
     )
     with pytest.raises(FrozenInstanceError):
-        ctv.deprecated = True  # type: ignore[misc]
+        ctv.parent_deprecated = True  # type: ignore[misc]
 
 
 # ----- Protocol shape -----

@@ -30,7 +30,7 @@ def test_workflow_version_is_frozen() -> None:
         version="1.0.0",
         normalized_doc={"steps": []},
         derived_from_template_version_id=None,
-        deprecated=False,
+        parent_deprecated=False,
         published_at=_now(),
     )
     with pytest.raises(FrozenInstanceError):
@@ -44,16 +44,16 @@ def test_workflow_template_version_is_frozen() -> None:
         version="1.0.0",
         normalized_doc={},
         derived_from_workflow_version_id=None,
-        deprecated=False,
+        parent_deprecated=False,
         published_at=_now(),
     )
     with pytest.raises(FrozenInstanceError):
-        tv.deprecated = True  # type: ignore[misc]
+        tv.parent_deprecated = True  # type: ignore[misc]
 
 
 def test_definition_list_filter_defaults_are_open() -> None:
     f = DefinitionListFilter()
-    assert f.deprecated is None
+    assert f.parent_deprecated is None
     assert f.published_after is None
     assert f.published_before is None
 
