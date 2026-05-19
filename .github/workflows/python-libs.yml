@@ -1,5 +1,8 @@
 name: python-libs
 
+permissions:
+  contents: read
+
 on:
   pull_request:
     paths:
