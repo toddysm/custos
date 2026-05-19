@@ -10,7 +10,7 @@ Date: 2026-05-18
 Type: component-design
 Component: trigger-service
 Sequence: 003
-GitHub Issues: #86
+GitHub Issue: #86
 Status: open
 
 ## Summary
