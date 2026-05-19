@@ -2,7 +2,7 @@
 
 Slug: `trigger-service`
 Last Updated: 2026-05-18
-Version: 5
+Version: 6
 Status: Draft
 
 ## Responsibility
@@ -397,6 +397,7 @@ spec:
 - [ ] TODO-003: Specify scheduler leader-election mechanism (Dapr distributed lock vs. Postgres advisory lock vs. Kubernetes lease) — REQ-005 (added 2026-05-16).
 - [ ] TODO-005: Define dead-letter handling and replay UX for dispatch failures (added 2026-05-16).
 - [ ] TODO-006: Decide whether webhook signing/HMAC keys are owned by Trigger Service per subscription or come from Connector Service per instance (added 2026-05-16).
+- [ ] TODO-007: Selective `DedupKey` clear admin API (e.g. `POST /v1/workspaces/{ws}/triggers/dedup:clear` with selectors over `subscriptionId`, `connectorInstanceId`, `eventId`, time window) — needed so operators can re-fire downstream dispatches after a Connector Service cursor rewind without waiting for the dedup TTL window to expire. Deferred to M2+; v1 rewind procedure documents the workaround (wait for TTL, or rewind past the dedup window) (added 2026-05-18, #103).
 
 ## Closed TODOs
 
@@ -413,3 +414,4 @@ spec:
 | 2026-05-17 | Workflow Service design landed: idempotent re-registration semantics documented on `RegisterResumeSubscription` / `CancelResumeSubscription` Internal RPC rows; TS-TODO-004 closed (WF owns the registration lifecycle) | #40 |
 | 2026-05-18 | INCON-024: ER diagram no longer draws `Run` as a participant in a Trigger-Service-owned relationship. `ResumeSubscription` now exposes `runId` / `stepId` as scalar opaque references to the Workflow Service-owned `Run` / `Step` entities, with a paragraph clarifying that cross-service references are by ID, not by FK | #86 |
 | 2026-05-18 | INCON-025: Public REST routes rewritten to gateway-mounted workspace-scoped form (`/v1/workspaces/{ws}/triggers/*`); manual-fire renamed `POST /triggers/manual/{id}/fire` → `POST /v1/workspaces/{ws}/triggers/{id}:fire`; subscription-scoped webhook route `POST /triggers/webhook/{id}` removed in favor of the gateway-owned connector-instance-scoped `POST /v1/webhooks/{connectorInstanceId}` with downstream subscription demux owned by the Generic Webhook Receiver | #99 |
+| 2026-05-18 | INCON-027: Added TODO-007 for a selective `DedupKey` clear admin API (deferred to M2+). Connector Service cursor rewind no longer documents a Trigger admin step that does not exist; until TODO-007 ships, re-firing after rewind is governed by Trigger's existing dedup TTL window | #103 |

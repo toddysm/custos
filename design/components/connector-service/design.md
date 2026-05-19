@@ -2,7 +2,7 @@
 
 Slug: connector-service
 Last Updated: 2026-05-18
-Version: 8
+Version: 9
 Status: Draft
 
 ## Responsibility
@@ -500,13 +500,14 @@ POST /v1/workspaces/{ws}/connectors/{id}/cursor:rewind
 Body: { "to": "now" | "beginning" | { "encoding": "...", "value": "..." } }
 ```
 
-This writes the new cursor envelope, fires `cursor.advanced` (with reason `admin-rewind`), and resumes ticks. Every subscription consuming this instance sees the replayed events. To prevent re-firing downstream dispatches, the operator clears matching Trigger Service `DedupKey` entries via that service's own admin API; the two operations are independent by design.
+This writes the new cursor envelope through SPL's `rewindCursor(instanceId, newValue, actor, reason)` (which is the audit emitter), and ticks resume on the next scheduling interval. SPL records a single `cursor.rewound` audit event for the operation. Every subscription consuming this instance will see the replayed events. In v1 there is **no admin API to clear Trigger Service `DedupKey` entries**: any event whose `hash(subscriptionId, source.eventId)` is still within Trigger's dedup retention window will be suppressed at the trigger layer and will not re-fire a downstream dispatch. Operators who need re-fire either wait for the dedup TTL to expire, or rewind to a position older than the dedup window. A future admin API for selective dedup-key clearing is tracked under Trigger Service TODO-007.
 
 ### Cursor audit events
 
 | Event | Trigger |
 |---|---|
-| `cursor.advanced` | Cursor successfully committed after a tick or admin rewind. Carries `from`/`to` audit envelopes (`encoding`, `valueFingerprint`, and optional `valueLength`; never raw `value`), `reason` (`tick` \| `admin-rewind`), `eventCount`. |
+| `cursor.advanced` | Cursor successfully committed after a tick. Carries `from`/`to` audit envelopes (`encoding`, `valueFingerprint`, and optional `valueLength`; never raw `value`), `reason` (`tick`), `eventCount`. |
+| `cursor.rewound` | Operator-initiated rewind via `cursor:rewind`. Emitted by SPL's `rewindCursor` (the audit emitter for this operation, see SPL design § Connector pull cursors). Carries `from`/`to` audit envelopes, `actor`, `reason`. |
 | `cursor.expired` | Plugin returned `CursorExpired`. Carries the last-known cursor in the same audit-envelope form (`encoding`, `valueFingerprint`, and optional `valueLength`; never raw `value`), upstream error detail. |
 | `cursor.encoding_mismatch` | Plugin returned `CursorEncodingMismatch`. Carries persisted `encoding`, plugin-declared `encoding`. |
 
@@ -903,3 +904,4 @@ _(none — all v1 design questions resolved)_
 | 2026-05-17 | Fallback tag naming: lock v1 tag format `custos-connector-manifest-v1_<algorithm>-<hex>` with `_` separator; v1 sha256-only via registered-algorithms set; algorithm-agnostic format supports sha512/others in M2+ behind scheme version bump if length budget allows; full digest normalization rules; `connector.manifest.fallback-used`/`fallback-ignored`/`fallback-rejected` audit events | #62 |
 | 2026-05-17 | Lease expiry and revocation operator UX: 11 new admin REST endpoints (revoke single/instance/run, list active leases by instance/run, pause/resume pull loop, force health check, audit query); sidecar revoke control-channel API (mTLS, `POST /sidecar-admin/v1/revoke` with per-lease idempotent acks); live-state-fan-out vs audit-history split; permission model (`connector:read`/`audit:read`/`admin:connector`); `lease.revoke-requested` plus three `connector.*` operator audit events | #63 |
 | 2026-05-18 | INCON-018: `BindForStep` is called by the Workflow Service (not ARM); multi-connector bind diagram updated so CS returns named `ConnectorContexts` (opaque slot handles) to WF, which then hands them to ARM via `ScheduleActivity`. ARM continues to mint the sidecar bootstrap token at sidecar start per the locked sidecar auth contract, and continues to call `RefreshLease` for long-running steps | #98 |
+| 2026-05-18 | INCON-027: Admin cursor rewind now emits `cursor.rewound` (was `cursor.advanced` with `reason=admin-rewind`) — SPL's `rewindCursor` is the audit emitter, so the names align across designs. Removed the documented "operator clears matching Trigger Service `DedupKey` entries via that service's own admin API" step from the rewind procedure: no such admin API exists in v1; re-fire is governed by Trigger's existing dedup TTL window (operators wait out the window or rewind past it). Tracked the future dedup-clear admin API under Trigger Service TODO-007 | #103 |

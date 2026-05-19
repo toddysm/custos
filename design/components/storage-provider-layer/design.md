@@ -1,8 +1,8 @@
 # Component Design: Storage Provider Layer
 
 Slug: `storage-provider-layer`
-Last Updated: 2026-05-17
-Version: 1
+Last Updated: 2026-05-18
+Version: 2
 Status: Draft
 
 ## Responsibility
@@ -358,11 +358,17 @@ sequenceDiagram
     Meta->>Pg: INSERT audit_outbox
     Meta->>Pg: COMMIT
     Note over Obs: Tails audit_outbox (LISTEN/NOTIFY or polling)
-    Obs->>Pg: SELECT * FROM audit_outbox WHERE delivered_at IS NULL
-    Obs->>Pg: ship to audit pipeline, mark delivered
+    Obs->>Meta: streamAuditOutbox(cursor=<pipeline-cursor>, batchSize)
+    Meta->>Pg: SELECT * FROM audit_outbox WHERE id > cursor ORDER BY id LIMIT batchSize
+    Pg-->>Meta: batch
+    Meta-->>Obs: batch
+    Note over Obs: ship to pipeline (audit-store / audit-alert / ...)
+    Obs->>Meta: commitAuditOutboxCursor(pipelineId, cursor=max(id))
 ```
 
-`appendAudit` accepts an optional transaction handle; when present, the outbox insert participates in the caller's transaction. Failure of the audit write rolls back the state mutation. Observability Service is the sole consumer of the outbox.
+`appendAudit` accepts an optional transaction handle; when present, the outbox insert participates in the caller's transaction. Failure of the audit write rolls back the state mutation. Observability Service is the sole consumer of the outbox; each named pipeline maintains its own high-water-mark cursor in `AuditOutboxCursor` so a slow consumer cannot block faster ones.
+
+**Drain state is cursor-only.** `AuditOutboxRow` carries no `deliveredAt` and no per-row delivery flag — drain progress is per-pipeline, not per-row. Outbox rows are garbage-collected by a retention worker (Observability Service) once `id < min(cursor across all registered pipelines)` AND the row's age exceeds `CUSTOS_AUDIT_OUTBOX_RETENTION_MARGIN` (default 24h). A stuck pipeline therefore keeps rows around indefinitely; operators observe this via `obs.outbox.lagging` and act on the slow pipeline rather than letting the outbox table grow silently.
 
 ### Transaction Model
 
@@ -486,3 +492,4 @@ _(none — all v1 design questions resolved this session.)_
 | 2026-05-17 | Add `AuthStoreProvider` interface for Auth Service persistence (tenants, workspaces, principals, OIDC identities, service tokens, roles, permissions, role bindings). Exempt from workspace-scoping middleware. Adds `CUSTOS_AUTH_STORE` config and migration revision `AuthStoreProvider:1`. | #66 |
 | 2026-05-17 | Add `IdempotencyRecord` and `DeviceCodeSession` entities to `MetadataStoreProvider` for API Gateway short-lived state. Adds atomic `reserveIdempotencyRecord`/`completeIdempotencyRecord` for write-endpoint dedup, and device-code-session CRUD for the OIDC device-code flow. Bumps `MetadataStoreProvider` revision to 3. | #70 |
 | 2026-05-17 | Add `LogQueryProvider` and `MetricsQueryProvider` query-facade interfaces for the Observability Service inbound read-back path (Concern B), explicitly separated from outbound telemetry streaming via OTel Collector (Concern A). Add audit outbox drain protocol (`streamAuditOutbox`, `commitAuditOutboxCursor`, `listenAuditOutbox`) to `MetadataStoreProvider`. Bumps `MetadataStoreProvider` to revision 4. Adds `CUSTOS_LOG_QUERY_PROVIDER` and `CUSTOS_METRICS_QUERY_PROVIDER` config. | #73 |
+| 2026-05-18 | INCON-028: Audit outbox drain state model is normatively cursor-only — per-pipeline `AuditOutboxCursor` is the sole drain-progress representation. Removed `WHERE delivered_at IS NULL` + "mark delivered" from the audit-write sequence diagram; removed per-row `deliveredAt` field semantics. Outbox rows are GC'd when `id < min(cursor across all registered pipelines)` AND age > `CUSTOS_AUDIT_OUTBOX_RETENTION_MARGIN` (default 24h); stuck-pipeline visibility via `obs.outbox.lagging`. | #104 |
