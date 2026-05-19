@@ -1,8 +1,8 @@
 # Component Design: Activity Runtime Manager
 
 Slug: `activity-runtime-manager`
-Last Updated: 2026-05-17
-Version: 1
+Last Updated: 2026-05-18
+Version: 2
 Status: Draft
 
 > This document captures the design decisions locked in so far. Sections marked **(pending)** will be filled out in subsequent design iterations.
@@ -32,7 +32,7 @@ It owns activity execution. It does **not** own orchestration control flow, conn
 
 ## Activity Contract v1
 
-The contract between the orchestrator and an activity is **file-based**. The orchestrator never speaks to activity code in-process: it writes inputs to a known filesystem location, starts the activity sandbox, and reads outputs back when the activity exits. This keeps activities language-agnostic and runtime-agnostic (OCI container today; HTTP, WASM later).
+The contract between the orchestrator and an activity is **file-based**. The orchestrator never speaks to activity code in-process: it writes inputs to a known filesystem location, starts the activity sandbox, and reads outputs back when the activity exits. This keeps activities language-agnostic and runtime-agnostic (OCI container in v1; HTTP and WASM in later milestones).
 
 ### Sandbox filesystem layout
 
@@ -41,6 +41,7 @@ The contract between the orchestrator and an activity is **file-based**. The orc
 | `/custos/in/inputs.json` | orchestrator → activity | ARM writes | Inputs envelope (see below). Read-only to activity. |
 | `/custos/in/ctx.json` | orchestrator → activity | ARM writes | Execution context: `runId`, `stepId`, `attempt`, `workspaceId`, activity type/version, connector handles (no credentials), deadline. Read-only. |
 | `/custos/in/secrets/<connector-name>/<key>` | orchestrator → activity | ARM writes | One file per injected secret, namespaced under the activity-manifest connector slot name (matches `spec.connectors[].name`). Plaintext credentials live ONLY here, never in `inputs.json`. Read-only, tmpfs-mounted. See § No `spec.secrets[]` in v1 for the populating-rule. |
+| `/custos/in/sidecar-token` | orchestrator → activity | ARM writes | Bootstrap token for authenticating to the sidecar Connector API. Single file on a dedicated tmpfs mount, permissions `0400` (readable only by the activity process user). Scoped to `(runId, stepId, attempt)` and revoked on step completion, retry, or cancellation. The activity MUST send this value in the `Custos-Sidecar-Token` header on every sidecar API request. See `design/components/connector-service/changes/2026-05-17-007-sidecar-secret-token-api-contract.md` for the full contract. |
 | `/custos/out/outputs.json` | activity → orchestrator | activity writes | Outputs envelope (see below). Required at success. |
 | `/custos/out/artifacts/` | activity → orchestrator | activity writes | Files produced by the activity (SBOMs, scan reports, signed manifests, etc.). Activity writes at `/custos/out/artifacts/<name>` keyed by `spec.outputs.artifacts[].name` from its manifest. ARM uploads to artifact store after the sandbox exits and rewrites `outputs.json` to insert store-assigned IDs (see §Two-phase output finalization). |
 | `/custos/out/audit.jsonl` | activity → orchestrator | activity appends | Optional structured audit lines. Forwarded to Observability/Audit. |
@@ -505,7 +506,7 @@ spec:
 
 | Field | Required | Purpose |
 |---|---|---|
-| `kind` | yes | `oci-container` in v1. `http`, `wasm`, `hyperlight` reserved for later milestones. |
+| `kind` | yes | `oci-container` in v1. `http` and `wasm` reserved for later milestones. |
 | `image` | yes | OCI image reference (registry/repo:tag form). |
 | `digest` | yes | Image pinned by digest at publish time. Tag drift cannot silently change activity behavior. |
 | `isolation.minTier` | no | Sandbox lower bound: `process` (runc + seccomp/AppArmor), `vm` (Kata with shared-kernel hypervisors like CLH/MSHV), `microvm` (Kata + Firecracker). Defaults to the cluster-configured default tier. |
@@ -612,7 +613,7 @@ The OCI registry is the source of truth; the Catalog is a derived, query-friendl
 - **Manifest signing** (cosign-signed Referrer with Catalog verification before accepting publish): deferred to M2+.
 - **Per-artifact content schema validation**: deferred to M2.
 - **`spec.secrets[]` for standalone secret slots**: deferred to M2 (driven by REQ-019 attestation creation).
-- **`runtime.kind: http | wasm | hyperlight`**: deferred to M3/M4+.
+- **`runtime.kind: http | wasm`**: `http` deferred to M3 (REQ-014); `wasm` deferred to M4+ (REQ-015).
 - **Short-form (non-fully-qualified) activity references**: deferred to a later milestone.
 
 ## Internal Structure (pending)
@@ -660,7 +661,7 @@ Internal RPC surface (Workflow Service ⇄ ARM):
 - [ ] TODO-004: `spec.secrets[]` for standalone secret slots — deferred to M2 alongside REQ-019 attestation creation (added 2026-05-16).
 - [ ] TODO-005: Short-form (non-fully-qualified) activity references — deferred to a later milestone (added 2026-05-16).
 - [ ] TODO-006: Decide sandbox technology per REQ-039 / TODO-002 in requirements (gVisor, Kata-CLH, Kata-MSHV, Kata-FC, runc+seccomp, or Kubernetes Jobs only) — manifest surface (`isolation.minTier`, `isolation.preferred`) is locked; concrete RuntimeClass set and cluster-default tier still pending (added 2026-05-16).
-- [ ] TODO-007: Specify Runtime Driver dispatcher contract; OCI Container Driver for v1, HTTP/WASM/Hyperlight later (added 2026-05-16).
+- [ ] TODO-007: Specify Runtime Driver dispatcher contract; OCI Container Driver for v1, HTTP and WASM later (added 2026-05-16).
 - [ ] TODO-008: Sub-module deep dive (Scheduler, I/O Broker, Artifact Store Client, Log Streamer, Result Mapper, Resource Limiter, Secret Injector) (added 2026-05-16).
 - [ ] TODO-009: Finalize platform event taxonomy mapping for activity lifecycle events with Observability. **Coordinated with Trigger Service TODO-001 (#18)** — the trigger `kind` namespace and the ARM-emitted activity lifecycle audit event namespace MUST share one taxonomy so cross-cutting events like `workflow.completed`, `step.completed`, `activity.failed` carry one canonical name from emission through trigger matching, audit storage, and consumer dashboards. See INCON-013 (#38). (added 2026-05-16, scope expanded 2026-05-17).
 - [ ] TODO-010: Lock the canonical built-in `policy-eval@1` activity manifest (filter/gate modes) as the reference for the Layer-3 filter pattern (added 2026-05-16).
@@ -676,3 +677,4 @@ Internal RPC surface (Workflow Service ⇄ ARM):
 | 2026-05-17 | INCON-010: Activity Manifest v1 `spec.connectors[].capabilities` must use dot-delimited tokens (e.g. `oci.pull`) matching the Connector Service naming rule; bare tokens like `pull`/`push` are no longer valid | #35 |
 | 2026-05-17 | INCON-013: TODO-009 scope expanded — activity lifecycle event taxonomy is unified with Trigger Service TODO-001 (#18) so connector event kinds and ARM-emitted audit event kinds share one dot-namespaced namespace | #38 |
 | 2026-05-17 | INCON-009: Sandbox filesystem layout `/custos/in/secrets/<name>` corrected to `/custos/in/secrets/<connector-name>/<key>`, matching the normative description in § No `spec.secrets[]` in v1 and the activity manifest `spec.connectors[].name` slot | #34 |
+| 2026-05-18 | INCON-023 + INCON-030 + INCON-031: added `/custos/in/sidecar-token` to the Activity Contract v1 filesystem layout (per connector-service change 007); pinned WASM (`runtime.kind: wasm`) to M4+ to match REQ-015; removed the reserved micro-VM runtime kind from the `runtime.kind` enum (no backing requirement) | #85, #92, #93 |
