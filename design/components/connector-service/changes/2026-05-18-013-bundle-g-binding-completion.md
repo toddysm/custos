@@ -1,9 +1,3 @@
----
-name: bundle-g-binding-completion
-description: Connector Service BindForStep is called by Workflow Service (not ARM); multi-connector bind diagram updated to return contexts to WF
-type: component-design
----
-
 # Change: bundle-g-binding-completion
 
 Date: 2026-05-18
