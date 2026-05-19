@@ -61,7 +61,7 @@ Sub-module responsibilities (matches `design/architecture/components.md` § COMP
 | Sub-Orchestration Manager | Spawns child Dapr Workflow instances for dynamic loops and approval gates (ADR-007). Parent awaits via `when_all` (loop) or `when_any` (approval with timeout). Merges child outputs back into parent state. |
 | Idempotency Tracker | Issues `(runId, stepId, attempt)` triples, deterministic under Dapr replay. The triple is the Dapr activity task id, the ARM scheduling key, and the audit correlation key. |
 | Activity Runtime Client | Outbound RPC client for ARM: `ScheduleActivity`, `CancelActivity`. Activity completion arrives via the native Dapr activity-task return path, not via a topic. |
-| Connector Client | Outbound RPC client for Connector Service: `BindForStep(stepKey, slots[])` for pre-flight credential leases, capability checks, and `sidecarBootstrapToken` issuance. |
+| Connector Client | Outbound RPC client for Connector Service: `BindForStep(stepKey, slots[])` for pre-flight credential leases, capability checks, and returning the connector contexts needed by the step. |
 | Observability Client | Emits structured execution events (`run.*`, `step.*`, `workflow.*`) into Observability/Audit. Also publishes workflow lifecycle events to the `custos.workflow.events` Dapr Pub/Sub topic for REQ-080 internal triggering and REQ-081 dual-purpose resume delivery. |
 
 ## Key Operations
