@@ -14,6 +14,9 @@ on:
       - "src/libs/**"
       - ".github/workflows/python-libs.yml"
 
+permissions:
+  contents: read
+
 jobs:
   storage-provider-layer:
     name: storage-provider-layer (lint + types + tests)
