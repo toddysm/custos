@@ -1,8 +1,8 @@
 # Component Design: Auth Service
 
 Slug: `auth-service`
-Last Updated: 2026-05-17
-Version: 1
+Last Updated: 2026-05-18
+Version: 2
 Status: Draft
 
 ## Responsibility
@@ -162,7 +162,7 @@ Hard-coded in the Auth Service binary; not editable at runtime in v1. Custom-rol
 
 | Role | Scope | Permissions |
 |---|---|---|
-| `workspace.viewer` | workspace | `workflow:read`, `template:read`, `connector:read`, `audit:read`, `run:read` |
+| `workspace.viewer` | workspace | `workflow:read`, `template:read`, `connector:read`, `audit:read`, `run:read`, `logs:read`, `metrics:read` |
 | `workspace.author` | workspace | viewer + `workflow:create`, `template:create`, `workflow:execute`, `run:cancel` |
 | `workspace.operator` | workspace | author + `admin:connector`, `admin:trigger` |
 | `workspace.admin` | workspace | operator + `admin:role-binding`, `admin:service-account` |
@@ -349,3 +349,4 @@ _(none — all v1 design questions resolved this session.)_
 | Date | Change | GitHub Issue |
 |---|---|---|
 | 2026-05-17 | Initial component design: built-in v1 roles (workspace.viewer/author/operator/admin + tenant.admin + platform.admin), permission registry ingested from per-component `permissions.yaml`, OIDC provisioning policy "create with zero bindings", **GitHub and Azure Entra ID OIDC presets prioritized as P0 in M1** (both human login and workload tokens; generic OIDC and service tokens follow), signed-JWT call context (with SPIFFE migration path via `CUSTOS_AUTH_INTERNAL_IDENTITY_MODE`), every-call `authz.decision` audit, workspace/tenant/platform scope hierarchy, new `AuthStoreProvider` interface in SPL, immediate cache eviction via `custos.auth.token-revoked` and `custos.auth.binding-changed` pub/sub events | #67 |
+| 2026-05-18 | INCON-026: Added `logs:read` and `metrics:read` to `workspace.viewer` built-in role so role bindings cover the log/metric read permissions in the Observability Service registry. Kept the permissions distinct (not folded into `run:read`) so service accounts can be granted tighter scopes later | #102 |
