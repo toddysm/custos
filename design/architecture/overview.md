@@ -1,7 +1,7 @@
 # Architecture Overview: Custos
 
 Last Updated: 2026-05-18
-Version: 10
+Version: 11
 Status: Draft
 
 ## Summary
@@ -198,11 +198,27 @@ spec:
     image:
       type: string
   steps:
-    - id: scan
-      activity: custos.builtin/vuln-scan@2
+    - id: list-manifests
+      activity: custos.builtin/oci-list@1
       connector: prod-registry
       with:
         image: ${{ inputs.image }}
+    - id: resolve-host
+      let:
+        registryHost: ${{ connector("prod-registry").host }}
+    - id: scan
+      forEach: ${{ steps.list-manifests.outputs.items }}
+      where: ${{ item.mediaType == "application/vnd.oci.image.manifest.v1+json" }}
+      activity: custos.builtin/vuln-scan@2
+      connector: prod-registry
+      with:
+        image: ${{ imageRef(item.ref, steps.resolve-host.outputs.registryHost) }}
+      on_error:
+        - match: { codePrefix: "registry." }
+          do: skip
+        - match: { class: "retryable" }
+          do: retry
+          maxAttempts: 5
     - id: gate
       if: ${{ steps.scan.outputs.critical > 0 }}
       activity: custos.builtin/quarantine@1
@@ -210,7 +226,31 @@ spec:
       with:
         image: ${{ inputs.image }}
         reason: ${{ steps.scan.outputs.summary }}
+    - id: promote
+      if: ${{ steps.scan.outputs.critical == 0 }}
+      activity: custos.builtin/image-promote@1
+      connectors:
+        source: prod-registry
+        destination: public-registry
+      with:
+        image: ${{ inputs.image }}
 ```
+
+### Step forms
+
+| Form | Purpose | Authoritative definition |
+|---|---|---|
+| `activity:` + `connector:` | Run a containerized activity bound to one connector instance. | ARM design § Activity Manifest v1 |
+| `activity:` + `connectors:` map | Activity that needs more than one connector (e.g. `image-promote@1` with named `source` / `destination` aliases). Mutually exclusive with `connector:`. | ARM design § `spec.connectors[]`, Connector Service design § Multi-connector example |
+| `let:` | Pure-data step, evaluated in the Workflow Service Expression Evaluator. No ARM call, no I/O, output is durable like any other step. | ARM design § Layer 2 — `let` step |
+| `forEach:` (optional `where:`) | Fan-out primitive: expands the step over a list and schedules N parallel attempts. `where:` is sugar for an inline CEL pre-filter on the input list. | ARM design § `forEach` and `where:` clause |
+| `if:` | Skip predicate. Step is elided from the run if the expression evaluates to false. | — |
+| `on_error:` | Per-step (or workflow-scoped) error handler. Matches on `code`, `codePrefix`, or `class` against the ARM error envelope and selects `skip` / `retry` / `fail`. | ARM design § Error envelope and namespaces |
+
+Cross-component implications surfaced by these forms:
+- **`forEach` fan-out** is realized via the Workflow Service Sub-Orchestration Manager (COMP-003 sub-module) — each iteration is a child workflow attempt under the parent run.
+- **`connectors:` map binding** is validated by the Workflow Service Binder at compile time (every alias must match an `spec.connectors[].name` on the activity manifest, with required capabilities satisfied by the bound connector type) and resolved by ARM at execution time. The Connector Service issues one lease per alias, subject to the per step-attempt concurrent-lease cap (default 16, see Connector Service design).
+- **`on_error` matching** uses the namespaced error-code scheme owned by ARM (`activity.*`, `input.*`, `output.*`, `system.*`, plus connector- and activity-defined namespaces). The Workflow Service Step Coordinator applies the handler before passing terminal state to the Dapr Workflow runtime.
 
 Equivalent template:
 
@@ -648,3 +688,4 @@ sequenceDiagram
 | 2026-05-17 | INCON-008 + INCON-016: Expanded `describe()` hook description to include `events.delivery` and `events.produced`; removed stale "opaque secret handles" from `bind()` description; clarified that delivery modes are declared statically in the plugin manifest at registration time | #33, #42 |
 | 2026-05-17 | INCON-009: Activity sandbox secret path corrected to `/custos/in/secrets/<connector-name>/<key>` (matches activity manifest `spec.connectors[].name` and ARM's normative two-level layout) | #34 |
 | 2026-05-17 | INCON-007: Added `API --> Conn` edge to Component Map so the diagram matches the documented Connector Service REST API surface; clarified that Deployment Model edges describe topology and not user-facing REST routing | #32 |
+| 2026-05-18 | INCON-027 + INCON-028: Extended Workflow and Template Schema with `let`, `forEach` (+ `where:`), `on_error`, and the multi-connector `connectors:` map form, plus a step-form reference table and cross-component implications paragraph | #89, #90 |
