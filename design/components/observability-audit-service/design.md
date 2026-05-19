@@ -1,8 +1,8 @@
 # Component Design: Observability and Audit Service
 
 Slug: `observability-audit-service`
-Last Updated: 2026-05-17
-Version: 1
+Last Updated: 2026-05-18
+Version: 2
 Status: Draft
 
 ## Responsibility
@@ -204,7 +204,6 @@ erDiagram
         jsonb subject
         jsonb context
         string correlationId
-        timestamp deliveredAt
     }
     AuditEvent {
         uuid eventId PK
@@ -222,7 +221,7 @@ erDiagram
     AuditOutboxRow ||--|| AuditEvent : "drained-to"
 ```
 
-`AuditOutboxRow` rows are deleted by the drainer after a successful write to `AuditEvent` plus a retention margin (24h); `AuditEvent` rows are append-only and live for the configured retention (default 90 days).
+`AuditOutboxRow` carries no `deliveredAt` and no per-row delivery flag — drain progress is per-pipeline, not per-row. Each registered drain pipeline (`audit-store`, `audit-alert`, ...) maintains its own high-water-mark in `AuditOutboxCursor`. A retention worker garbage-collects outbox rows once `id < min(cursor across all registered pipelines)` AND the row's age exceeds `CUSTOS_AUDIT_OUTBOX_RETENTION_MARGIN` (default 24h). A stuck pipeline therefore keeps outbox rows around indefinitely; operators observe this via `obs.outbox.lagging` and act on the slow pipeline rather than letting the table grow silently. `AuditEvent` rows are append-only and live for the configured retention (default 90 days).
 
 The Observability Service owns no schema of its own — pipeline cursors live in SPL (see "Public Interface — SPL additions").
 
@@ -335,3 +334,4 @@ _(none — all v1 design questions resolved this session.)_
 | Date | Change | GitHub Issue |
 |---|---|---|
 | 2026-05-17 | Initial component design: four pipelines (Logs/Metrics/Traces/Audit), audit outbox drainer with LISTEN/NOTIFY + polling fallback, retention worker (90-day default), Alerting Dispatcher (webhook + SMTP M1), External Exporter Loader over OTel Collector, Query API with SSE log tail, audit-event taxonomy locked to per-component declaration. Concern A (outbound telemetry export via OTel Collector) explicitly separated from Concern B (inbound query via new SPL `LogQueryProvider` and `MetricsQueryProvider`). Both query providers in M1 with `loki`/`opensearch`/`noop` and `prometheus`/`noop` adapters respectively. | #72 |
+| 2026-05-18 | INCON-028: Audit outbox drain state model is cursor-only. Removed `deliveredAt` field from `AuditOutboxRow` ER block. GC rule rewritten: rows are deleted by the retention worker once `id < min(cursor across all registered pipelines)` AND row age > `CUSTOS_AUDIT_OUTBOX_RETENTION_MARGIN` (default 24h); stuck pipelines keep outbox rows around indefinitely and are observable via `obs.outbox.lagging`. | #104 |
