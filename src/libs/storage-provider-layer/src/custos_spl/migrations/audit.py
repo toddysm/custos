@@ -12,8 +12,11 @@ audit partition via two redundant layers (per ADR-010):
      EXCEPTION` function fires on any mutation of `audit_events` or
      `audit_outbox`. The trigger short-circuits when `current_user` is
      the `audit_retention` role for `DELETE`, so retention cleanup can
-     still proceed. Grants alone would suffice, but the trigger catches
-     superuser bypass and misconfigured grants.
+     still proceed. Grants alone would suffice, but the trigger adds
+     defense in depth against misconfigured grants or accidental
+     privilege escalation for non-superuser roles; it does not protect
+     against true superusers or other roles that can disable/drop the
+     trigger machinery.
 
 The `audit_outbox_cursor` table lives in the same schema but is
 mutable — it tracks per-pipeline drain progress and is not audit data
