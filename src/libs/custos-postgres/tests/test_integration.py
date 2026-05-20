@@ -723,6 +723,19 @@ async def test_complete_idempotency_record(pg_pool: Pool) -> None:
     assert result2.response_snapshot is not None
 
 
+async def test_complete_idempotency_record_not_reserved(pg_pool: Pool) -> None:
+    """Completing a non-existent reservation raises NotReserved (per SPL contract)."""
+    from custos_spl.errors import NotReserved
+
+    adapter = PgMetadataAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    with pytest.raises(NotReserved):
+        await adapter.complete_idempotency_record(
+            "ws-1", "user-1", "/api/create", "key-nonexistent", {"status": 200}
+        )
+
+
 async def test_delete_expired_idempotency_records(pg_pool: Pool) -> None:
     adapter = PgMetadataAdapter(pool=pg_pool)
     await adapter.apply_pending()

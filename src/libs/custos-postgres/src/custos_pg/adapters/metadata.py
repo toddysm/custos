@@ -41,6 +41,7 @@ from custos_spl.errors import (
     InvalidTransactionHandle,
     LeaseBusy,
     LeaseExpired,
+    NotReserved,
 )
 from custos_spl.interfaces.metadata_store import (
     ArtifactUse,
@@ -1141,7 +1142,7 @@ class PgMetadataAdapter:
                 json.dumps(dict(response_snapshot)),
             )
         if row is None:
-            raise ValueError(
+            raise NotReserved(
                 f"no in-progress reservation for "
                 f"{workspace_id!r}/{principal_id!r}/{route!r}/{idempotency_key!r}"
             )
