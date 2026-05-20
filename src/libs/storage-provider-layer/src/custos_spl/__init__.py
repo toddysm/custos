@@ -111,7 +111,10 @@ from custos_spl.migrations import (
     DEFAULT_AUDIT_RETENTION_ROLE,
     DEFAULT_AUDIT_SCHEMA,
     DEFAULT_PLATFORM_ROLE,
+    MigrationCapable,
     audit_partition_ddl,
+    check_revisions,
+    required_revisions,
 )
 from custos_spl.pagination import Cursor, Page
 
@@ -171,6 +174,7 @@ __all__ = [
     "MetricSelector",
     "MetricSeries",
     "MetricsQueryProvider",
+    "MigrationCapable",
     "MigrationRequired",
     "NotReserved",
     "NotifyEvent",
@@ -225,5 +229,7 @@ __all__ = [
     "audit_partition_ddl",
     "bind_handle",
     "check_handle",
+    "check_revisions",
+    "required_revisions",
     "wrap_workspace_scoped",
 ]
