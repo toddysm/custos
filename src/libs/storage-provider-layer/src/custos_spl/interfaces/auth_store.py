@@ -25,8 +25,9 @@ Immutability:
 
 Audit:
   All mutating methods participate in the audit outbox via the same
-  transaction-handle contract as `MetadataStoreProvider`. `appendAudit`
-  is reachable from any provider's transaction.
+  transaction-handle contract as `MetadataStoreProvider`; audit rows are
+  appended via `MetadataStoreProvider.append_audit` using that shared
+  transaction handle.
 """
 
 from __future__ import annotations
