@@ -107,6 +107,12 @@ from custos_spl.interfaces import (
     WorkspaceScope,
 )
 from custos_spl.middleware import wrap_workspace_scoped
+from custos_spl.migrations import (
+    DEFAULT_AUDIT_RETENTION_ROLE,
+    DEFAULT_AUDIT_SCHEMA,
+    DEFAULT_PLATFORM_ROLE,
+    audit_partition_ddl,
+)
 from custos_spl.pagination import Cursor, Page
 
 try:
@@ -115,6 +121,9 @@ except PackageNotFoundError:
     __version__ = "0+unknown"
 
 __all__ = [
+    "DEFAULT_AUDIT_RETENTION_ROLE",
+    "DEFAULT_AUDIT_SCHEMA",
+    "DEFAULT_PLATFORM_ROLE",
     "ActivityTypeId",
     "ActivityTypeVersion",
     "ArtifactDescriptor",
@@ -213,5 +222,6 @@ __all__ = [
     "WorkspaceScope",
     "WorkspaceScopingViolation",
     "__version__",
+    "audit_partition_ddl",
     "wrap_workspace_scoped",
 ]
