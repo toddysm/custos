@@ -1,7 +1,7 @@
 """`python -m custos_spl.migrations` — admin CLI dispatcher.
 
 Forwards to `custos_spl.migrations.cli.main`. Operators can also use
-the `custos` console script (registered in `pyproject.toml`).
+the `custos-migrate` console script (registered in `pyproject.toml`).
 """
 
 from __future__ import annotations
