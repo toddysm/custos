@@ -31,6 +31,10 @@ ConnectorInstanceId = NewType("ConnectorInstanceId", str)
 ConnectorTypeId = NewType("ConnectorTypeId", str)
 ActivityTypeId = NewType("ActivityTypeId", str)
 
+RoleId = NewType("RoleId", str)
+RoleBindingId = NewType("RoleBindingId", str)
+ServiceTokenId = NewType("ServiceTokenId", str)
+
 
 __all__ = [
     "ActivityTypeId",
@@ -38,7 +42,10 @@ __all__ = [
     "ConnectorInstanceId",
     "ConnectorTypeId",
     "PrincipalId",
+    "RoleBindingId",
+    "RoleId",
     "RunId",
+    "ServiceTokenId",
     "StepId",
     "SubscriptionId",
     "TenantId",
