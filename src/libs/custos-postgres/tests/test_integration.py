@@ -352,6 +352,7 @@ async def test_metadata_fully_satisfied_after_rev4_apply(pg_pool: Pool) -> None:
     """
     adapter = PgMetadataAdapter(pool=pg_pool)
     await adapter.apply_pending()
+    check_revisions([adapter])
     assert adapter.declared_revisions["MetadataStoreProvider"] == frozenset({1, 2, 3, 4})
 
 
