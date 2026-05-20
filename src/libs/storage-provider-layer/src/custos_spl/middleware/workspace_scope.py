@@ -50,8 +50,12 @@ def _extract_workspace_id(
     """
     if _WORKSPACE_ID_PARAM in kwargs:
         return kwargs[_WORKSPACE_ID_PARAM]
-    if args:
-        return args[0]
+    try:
+        workspace_id_index = params.index(_WORKSPACE_ID_PARAM)
+    except ValueError:
+        return None
+    if workspace_id_index < len(args):
+        return args[workspace_id_index]
     return None
 
 
