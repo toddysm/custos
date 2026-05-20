@@ -52,7 +52,11 @@ from custos_spl.interfaces.metadata_store import (
     DedupKey,
     DedupReserved,
     DeviceCodeSession,
+    ExistingCompleted,
+    ExistingInFlight,
     IdempotencyRecord,
+    IdemReserved,
+    KeyReuse,
     LeaseHandle,
     NotifyEvent,
     PutDedupKeyResult,
@@ -70,7 +74,7 @@ from custos_spl.interfaces.metadata_store import (
 from custos_spl.middleware.transactions import bind_handle, check_handle
 from custos_spl.pagination import Cursor, Page
 
-from custos_pg.migrations.metadata import METADATA_REV1
+from custos_pg.migrations.metadata import METADATA_REV1, METADATA_REV2, METADATA_REV3
 from custos_pg.pool import LazyPool, read_dsn_from_env
 from custos_pg.revisions import ensure_ledger, read_declared, record_revision
 
@@ -294,6 +298,41 @@ def _row_to_artifact_use(row: Record) -> ArtifactUse:
     )
 
 
+def _row_to_idempotency_record(row: Record) -> IdempotencyRecord:
+    return IdempotencyRecord(
+        workspace_id=row["workspace_id"],
+        principal_id=row["principal_id"],
+        route=row["route"],
+        idempotency_key=row["idempotency_key"],
+        request_hash=row["request_hash"],
+        status=row["status"],
+        response_snapshot=(
+            MappingProxyType(dict(_json_payload(row["response_snapshot"])))
+            if row["response_snapshot"] is not None
+            else None
+        ),
+        reserved_at=row["reserved_at"],
+        expires_at=row["expires_at"],
+    )
+
+
+def _row_to_device_code_session(row: Record) -> DeviceCodeSession:
+    return DeviceCodeSession(
+        workspace_id=row["workspace_id"],
+        device_code=row["device_code"],
+        user_code=row["user_code"],
+        issuer_alias=row["issuer_alias"],
+        status=row["status"],
+        token_bundle=(
+            MappingProxyType(dict(_json_payload(row["token_bundle"])))
+            if row["token_bundle"] is not None
+            else None
+        ),
+        created_at=row["created_at"],
+        expires_at=row["expires_at"],
+    )
+
+
 class PgMetadataAdapter:
     """asyncpg implementation of `MetadataStoreProvider` — #127 slice.
 
@@ -339,12 +378,11 @@ class PgMetadataAdapter:
     async def apply_pending(self) -> list[str]:
         """Apply revisions in scope for this adapter slice.
 
-        Only rev 1 lives in this PR; revs 2-4 will be added by #128
-        and #129. `declared_revisions` therefore reports `{1}` after a
-        successful apply, which leaves a gap for the platform's
-        `SCHEMA_REVISION = 4` until the follow-on PRs land — this is
-        an intentional, transparent iteration step, not a silent
-        bypass.
+        Revisions 1-3 live in this PR and #128; revision 4 (audit
+        outbox) lands in #129. `declared_revisions` reports whatever was
+        applied (typically {1, 2, 3} after both PRs merge), leaving a gap
+        for the platform's `SCHEMA_REVISION = 4` until the audit PR lands
+        — this is an intentional, transparent iteration step.
         """
         summaries: list[str] = []
         pool = await self._pool_ref()
@@ -356,7 +394,7 @@ class PgMetadataAdapter:
                 INTERFACE_NAME,
             )
             already = {int(r["revision"]) for r in applied}
-            for rev in (METADATA_REV1,):
+            for rev in (METADATA_REV1, METADATA_REV2, METADATA_REV3):
                 if rev.number in already:
                     continue
                 for stmt in rev.statements:
@@ -1010,7 +1048,7 @@ class PgMetadataAdapter:
             next_cursor=next_cursor,
         )
 
-    # ----- Gateway short-lived state (#128 — stubs) -----
+    # ----- Gateway short-lived state (#128) -----
 
     async def reserve_idempotency_record(
         self,
@@ -1021,7 +1059,62 @@ class PgMetadataAdapter:
         request_hash: str,
         ttl_seconds: int,
     ) -> ReserveIdempotencyResult:
-        raise NotImplementedError("reserve_idempotency_record lands in SPL-014 (#128)")
+        """Atomic reserve-or-read: CAS to insert a fresh record or detect conflicts.
+
+        Returns one of:
+        - `IdemReserved` if the key was not present (caller should perform work).
+        - `ExistingCompleted` if an identical hash is already done (return snapshot).
+        - `ExistingInFlight` if an identical hash is still in progress (retry).
+        - `KeyReuse` if the key exists with a different hash (422 response).
+        """
+        expires_at = datetime.now(UTC) + timedelta(seconds=ttl_seconds)
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            # Try to insert a fresh record; if it exists, fetch the existing one.
+            row = await conn.fetchrow(
+                "INSERT INTO custos_state.idempotency_record "
+                "(workspace_id, principal_id, route, idempotency_key, "
+                " request_hash, status, reserved_at, expires_at) "
+                "VALUES ($1, $2, $3, $4, $5, 'in_progress', now(), $6) "
+                "ON CONFLICT (workspace_id, principal_id, route, idempotency_key) "
+                "DO NOTHING "
+                "RETURNING workspace_id, principal_id, route, idempotency_key, "
+                "request_hash, status, response_snapshot, reserved_at, expires_at",
+                workspace_id,
+                principal_id,
+                route,
+                idempotency_key,
+                request_hash,
+                expires_at,
+            )
+            if row is not None:
+                return IdemReserved(record=_row_to_idempotency_record(row))
+            # Key exists; fetch it to detect conflicts or in-flight status.
+            existing = await conn.fetchrow(
+                "SELECT workspace_id, principal_id, route, idempotency_key, "
+                "request_hash, status, response_snapshot, reserved_at, expires_at "
+                "FROM custos_state.idempotency_record "
+                "WHERE workspace_id = $1 AND principal_id = $2 "
+                "  AND route = $3 AND idempotency_key = $4",
+                workspace_id,
+                principal_id,
+                route,
+                idempotency_key,
+            )
+            assert existing is not None
+            rec = _row_to_idempotency_record(existing)
+            if existing["request_hash"] != request_hash:
+                return KeyReuse(record=rec)
+            if existing["status"] == "in_progress":
+                return ExistingInFlight(record=rec)
+            # status == "completed"
+            assert existing["response_snapshot"] is not None
+            return ExistingCompleted(
+                record=rec,
+                response_snapshot=MappingProxyType(
+                    dict(_json_payload(existing["response_snapshot"]))
+                ),
+            )
 
     async def complete_idempotency_record(
         self,
@@ -1031,31 +1124,96 @@ class PgMetadataAdapter:
         idempotency_key: str,
         response_snapshot: Mapping[str, Any],
     ) -> IdempotencyRecord:
-        raise NotImplementedError("complete_idempotency_record lands in SPL-014 (#128)")
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "UPDATE custos_state.idempotency_record "
+                "SET status = 'completed', response_snapshot = $5::jsonb "
+                "WHERE workspace_id = $1 AND principal_id = $2 "
+                "  AND route = $3 AND idempotency_key = $4 "
+                "  AND status = 'in_progress' "
+                "RETURNING workspace_id, principal_id, route, idempotency_key, "
+                "request_hash, status, response_snapshot, reserved_at, expires_at",
+                workspace_id,
+                principal_id,
+                route,
+                idempotency_key,
+                json.dumps(dict(response_snapshot)),
+            )
+        if row is None:
+            raise ValueError(
+                f"no in-progress reservation for "
+                f"{workspace_id!r}/{principal_id!r}/{route!r}/{idempotency_key!r}"
+            )
+        return _row_to_idempotency_record(row)
 
     async def delete_expired_idempotency_records(self, before: datetime) -> int:
-        raise NotImplementedError(
-            "delete_expired_idempotency_records lands in SPL-014 (#128)"
-        )
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM custos_state.idempotency_record "
+                "WHERE expires_at < $1",
+                before,
+            )
+        # result is a string like "DELETE 42"; extract count.
+        count = int(result.split()[-1]) if result else 0
+        return count
 
     async def put_device_code_session(
         self, workspace_id: str, session: DeviceCodeSession
     ) -> DeviceCodeSession:
-        raise NotImplementedError("put_device_code_session lands in SPL-014 (#128)")
+        pool = await self._pool_ref()
+        try:
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "INSERT INTO custos_state.device_code_session "
+                    "(workspace_id, device_code, user_code, issuer_alias, status, "
+                    " created_at, expires_at) "
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7) "
+                    "RETURNING workspace_id, device_code, user_code, issuer_alias, "
+                    "status, token_bundle, created_at, expires_at",
+                    workspace_id,
+                    session.device_code,
+                    session.user_code,
+                    session.issuer_alias,
+                    session.status,
+                    session.created_at,
+                    session.expires_at,
+                )
+        except Exception as exc:
+            raise self._classify(exc) from exc
+        assert row is not None
+        return _row_to_device_code_session(row)
 
     async def get_device_code_session_by_device_code(
         self, workspace_id: str, device_code: str
     ) -> DeviceCodeSession | None:
-        raise NotImplementedError(
-            "get_device_code_session_by_device_code lands in SPL-014 (#128)"
-        )
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT workspace_id, device_code, user_code, issuer_alias, status, "
+                "token_bundle, created_at, expires_at "
+                "FROM custos_state.device_code_session "
+                "WHERE workspace_id = $1 AND device_code = $2",
+                workspace_id,
+                device_code,
+            )
+        return _row_to_device_code_session(row) if row is not None else None
 
     async def get_device_code_session_by_user_code(
         self, workspace_id: str, user_code: str
     ) -> DeviceCodeSession | None:
-        raise NotImplementedError(
-            "get_device_code_session_by_user_code lands in SPL-014 (#128)"
-        )
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT workspace_id, device_code, user_code, issuer_alias, status, "
+                "token_bundle, created_at, expires_at "
+                "FROM custos_state.device_code_session "
+                "WHERE workspace_id = $1 AND user_code = $2",
+                workspace_id,
+                user_code,
+            )
+        return _row_to_device_code_session(row) if row is not None else None
 
     async def complete_device_code_session(
         self,
@@ -1063,14 +1221,34 @@ class PgMetadataAdapter:
         device_code: str,
         token_bundle: Mapping[str, Any],
     ) -> DeviceCodeSession:
-        raise NotImplementedError(
-            "complete_device_code_session lands in SPL-014 (#128)"
-        )
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "UPDATE custos_state.device_code_session "
+                "SET status = 'completed', token_bundle = $3::jsonb "
+                "WHERE workspace_id = $1 AND device_code = $2 "
+                "RETURNING workspace_id, device_code, user_code, issuer_alias, status, "
+                "token_bundle, created_at, expires_at",
+                workspace_id,
+                device_code,
+                json.dumps(dict(token_bundle)),
+            )
+        if row is None:
+            raise ValueError(
+                f"no device-code session for {workspace_id!r}/{device_code!r}"
+            )
+        return _row_to_device_code_session(row)
 
     async def delete_expired_device_code_sessions(self, before: datetime) -> int:
-        raise NotImplementedError(
-            "delete_expired_device_code_sessions lands in SPL-014 (#128)"
-        )
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM custos_state.device_code_session "
+                "WHERE expires_at < $1",
+                before,
+            )
+        count = int(result.split()[-1]) if result else 0
+        return count
 
     # ----- Audit writer + outbox drain (#129 — stubs) -----
 

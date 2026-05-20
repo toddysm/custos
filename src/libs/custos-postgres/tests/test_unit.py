@@ -39,7 +39,7 @@ from custos_pg.adapters.metadata import (
 from custos_pg.adapters.metadata import make_adapter as make_metadata_adapter
 from custos_pg.migrations.catalog import CATALOG_REV1
 from custos_pg.migrations.definition import DEFINITION_REV1
-from custos_pg.migrations.metadata import METADATA_REV1
+from custos_pg.migrations.metadata import METADATA_REV1, METADATA_REV2, METADATA_REV3
 from custos_pg.pool import DSN_ENV_VAR, LazyPool, read_dsn_from_env
 
 # ----- Protocol conformance -----
@@ -129,6 +129,12 @@ def test_revisions_are_numbered_one() -> None:
     assert METADATA_REV1.number == 1
 
 
+def test_metadata_revisions_are_numbered_one_through_three() -> None:
+    assert METADATA_REV1.number == 1
+    assert METADATA_REV2.number == 2
+    assert METADATA_REV3.number == 3
+
+
 def test_metadata_rev1_owns_expected_tables() -> None:
     joined = " ".join(METADATA_REV1.statements)
     assert "CREATE SCHEMA IF NOT EXISTS custos_state" in joined
@@ -144,6 +150,25 @@ def test_metadata_rev1_owns_expected_tables() -> None:
     assert "lease_holder" in joined
     assert "lease_expires_at" in joined
     assert "custos_state.artifact_use" in joined
+
+
+def test_metadata_rev2_owns_idempotency_records() -> None:
+    joined = " ".join(METADATA_REV2.statements)
+    assert "custos_state.idempotency_record" in joined
+    assert "workspace_id" in joined
+    assert "principal_id" in joined
+    assert "idempotency_key" in joined
+    assert "request_hash" in joined
+    assert "response_snapshot" in joined
+
+
+def test_metadata_rev3_owns_device_code_sessions() -> None:
+    joined = " ".join(METADATA_REV3.statements)
+    assert "custos_state.device_code_session" in joined
+    assert "device_code" in joined
+    assert "user_code" in joined
+    assert "issuer_alias" in joined
+    assert "token_bundle" in joined
 
 
 # ----- Factories -----

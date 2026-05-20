@@ -34,6 +34,10 @@ from custos_spl.interfaces.metadata_store import (
     ArtifactUse,
     DedupDuplicate,
     DedupReserved,
+    ExistingCompleted,
+    ExistingInFlight,
+    KeyReuse,
+    IdemReserved,
     ResumeSubscription,
     Run,
     Schedule,
@@ -41,6 +45,7 @@ from custos_spl.interfaces.metadata_store import (
     StepAttempt,
     Subscription,
     SubscriptionSelector,
+    DeviceCodeSession,
 )
 from custos_spl.migrations.runner import check_revisions
 
@@ -656,6 +661,232 @@ async def test_artifact_use_append_and_paginate(pg_pool: Pool) -> None:
     assert {u.run_id for u in page1.items}.isdisjoint(
         {u.run_id for u in page2.items}
     )
+
+
+# ----- Gateway short-lived state -----
+
+
+async def test_reserve_idempotency_fresh_record(pg_pool: Pool) -> None:
+    adapter = PgMetadataAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    result = await adapter.reserve_idempotency_record(
+        "ws-1", "user-1", "/api/create", "key-1", "hash-1", ttl_seconds=300
+    )
+    assert isinstance(result, IdemReserved)
+    assert result.record.status == "in_progress"
+    assert result.record.response_snapshot is None
+
+
+async def test_reserve_idempotency_handles_conflicts(pg_pool: Pool) -> None:
+    adapter = PgMetadataAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    # First reservation succeeds.
+    result1 = await adapter.reserve_idempotency_record(
+        "ws-1", "user-1", "/api/create", "key-1", "hash-1", ttl_seconds=300
+    )
+    assert isinstance(result1, IdemReserved)
+
+    # Same key, same hash, in-progress -> ExistingInFlight.
+    result2 = await adapter.reserve_idempotency_record(
+        "ws-1", "user-1", "/api/create", "key-1", "hash-1", ttl_seconds=300
+    )
+    assert isinstance(result2, ExistingInFlight)
+
+    # Same key, different hash -> KeyReuse.
+    result3 = await adapter.reserve_idempotency_record(
+        "ws-1", "user-1", "/api/create", "key-1", "hash-different", ttl_seconds=300
+    )
+    assert isinstance(result3, KeyReuse)
+
+
+async def test_complete_idempotency_record(pg_pool: Pool) -> None:
+    adapter = PgMetadataAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    await adapter.reserve_idempotency_record(
+        "ws-1", "user-1", "/api/create", "key-1", "hash-1", ttl_seconds=300
+    )
+    result = await adapter.complete_idempotency_record(
+        "ws-1", "user-1", "/api/create", "key-1", {"status": 200, "body": "ok"}
+    )
+    assert result.status == "completed"
+    assert result.response_snapshot is not None
+    assert result.response_snapshot["status"] == 200
+
+    # Second reservation, same hash, now sees ExistingCompleted.
+    result2 = await adapter.reserve_idempotency_record(
+        "ws-1", "user-1", "/api/create", "key-1", "hash-1", ttl_seconds=300
+    )
+    assert isinstance(result2, ExistingCompleted)
+    assert result2.response_snapshot is not None
+
+
+async def test_delete_expired_idempotency_records(pg_pool: Pool) -> None:
+    adapter = PgMetadataAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    now = datetime.now(UTC)
+    future = now + timedelta(seconds=10)
+    past = now - timedelta(seconds=1)
+
+    # Reserve one that expires in future (won't be deleted).
+    await adapter.reserve_idempotency_record(
+        "ws-1", "user-1", "/api/create", "key-1", "hash-1", ttl_seconds=10
+    )
+    # Reserve one that's already expired (will be deleted).
+    async with pg_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO custos_state.idempotency_record "
+            "(workspace_id, principal_id, route, idempotency_key, request_hash, "
+            " status, reserved_at, expires_at) "
+            "VALUES ($1, $2, $3, $4, $5, 'completed', now(), $6)",
+            "ws-1", "user-1", "/api/delete", "key-2", "hash-2", past,
+        )
+
+    count = await adapter.delete_expired_idempotency_records(now)
+    assert count == 1
+
+
+async def test_put_device_code_session(pg_pool: Pool) -> None:
+    adapter = PgMetadataAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    session = DeviceCodeSession(
+        workspace_id="ws-1",
+        device_code="D-ABC123",
+        user_code="U-XYZ789",
+        issuer_alias="google",
+        status="pending",
+        token_bundle=None,
+        created_at=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
+    )
+    result = await adapter.put_device_code_session("ws-1", session)
+    assert result.device_code == "D-ABC123"
+    assert result.status == "pending"
+
+
+async def test_get_device_code_session_by_device_code(pg_pool: Pool) -> None:
+    adapter = PgMetadataAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    session = DeviceCodeSession(
+        workspace_id="ws-1",
+        device_code="D-ABC123",
+        user_code="U-XYZ789",
+        issuer_alias="google",
+        status="pending",
+        token_bundle=None,
+        created_at=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
+    )
+    await adapter.put_device_code_session("ws-1", session)
+
+    retrieved = await adapter.get_device_code_session_by_device_code(
+        "ws-1", "D-ABC123"
+    )
+    assert retrieved is not None
+    assert retrieved.device_code == "D-ABC123"
+
+
+async def test_get_device_code_session_by_user_code(pg_pool: Pool) -> None:
+    adapter = PgMetadataAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    session = DeviceCodeSession(
+        workspace_id="ws-1",
+        device_code="D-ABC123",
+        user_code="U-XYZ789",
+        issuer_alias="google",
+        status="pending",
+        token_bundle=None,
+        created_at=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
+    )
+    await adapter.put_device_code_session("ws-1", session)
+
+    retrieved = await adapter.get_device_code_session_by_user_code(
+        "ws-1", "U-XYZ789"
+    )
+    assert retrieved is not None
+    assert retrieved.user_code == "U-XYZ789"
+
+
+async def test_complete_device_code_session(pg_pool: Pool) -> None:
+    adapter = PgMetadataAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    session = DeviceCodeSession(
+        workspace_id="ws-1",
+        device_code="D-ABC123",
+        user_code="U-XYZ789",
+        issuer_alias="google",
+        status="pending",
+        token_bundle=None,
+        created_at=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
+    )
+    await adapter.put_device_code_session("ws-1", session)
+
+    completed = await adapter.complete_device_code_session(
+        "ws-1", "D-ABC123", {"access_token": "tok123", "scope": "openid"}
+    )
+    assert completed.status == "completed"
+    assert completed.token_bundle is not None
+    assert completed.token_bundle["access_token"] == "tok123"
+
+
+async def test_delete_expired_device_code_sessions(pg_pool: Pool) -> None:
+    adapter = PgMetadataAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    now = datetime.now(UTC)
+    future = now + timedelta(minutes=10)
+    past = now - timedelta(seconds=1)
+
+    # Insert an expired session.
+    session_expired = DeviceCodeSession(
+        workspace_id="ws-1",
+        device_code="D-OLD",
+        user_code="U-OLD",
+        issuer_alias="google",
+        status="pending",
+        token_bundle=None,
+        created_at=past,
+        expires_at=past,
+    )
+    async with pg_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO custos_state.device_code_session "
+            "(workspace_id, device_code, user_code, issuer_alias, "
+            " status, created_at, expires_at) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            session_expired.workspace_id,
+            session_expired.device_code,
+            session_expired.user_code,
+            session_expired.issuer_alias,
+            session_expired.status,
+            session_expired.created_at,
+            session_expired.expires_at,
+        )
+
+    # Insert a fresh session (won't be deleted).
+    session_fresh = DeviceCodeSession(
+        workspace_id="ws-1",
+        device_code="D-NEW",
+        user_code="U-NEW",
+        issuer_alias="google",
+        status="pending",
+        token_bundle=None,
+        created_at=now,
+        expires_at=future,
+    )
+    await adapter.put_device_code_session("ws-1", session_fresh)
+
+    count = await adapter.delete_expired_device_code_sessions(now)
+    assert count == 1
 
 
 # ----- Transactions -----
