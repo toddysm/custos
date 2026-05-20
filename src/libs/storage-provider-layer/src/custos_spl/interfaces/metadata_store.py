@@ -380,9 +380,17 @@ class TransactionHandle:
     to the issuing provider; passing it to a different provider raises
     `InvalidTransactionHandle`. Callers MUST NOT inspect or persist
     these handles outside the scope of the callback.
+
+    Adapters enforce the issuing-provider binding via the helpers in
+    `custos_spl.middleware.transactions`: `bind_handle` records the
+    owning provider inside `with_transaction` before invoking the user
+    callback, and `check_handle` validates incoming handles on every
+    tx-aware method. The base class includes `__weakref__` in its
+    `__slots__` so the binding registry can hold weak references to
+    live handles.
     """
 
-    __slots__ = ()
+    __slots__ = ("__weakref__",)
 
 
 # ============================================================================

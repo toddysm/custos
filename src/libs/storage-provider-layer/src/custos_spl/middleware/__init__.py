@@ -6,8 +6,11 @@ Populated by:
 - SPL-010 — Transaction model (withTransaction, opaque handles)
 """
 
+from custos_spl.middleware.transactions import bind_handle, check_handle
 from custos_spl.middleware.workspace_scope import wrap_workspace_scoped
 
 __all__ = [
+    "bind_handle",
+    "check_handle",
     "wrap_workspace_scoped",
 ]

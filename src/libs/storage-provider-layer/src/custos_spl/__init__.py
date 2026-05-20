@@ -106,7 +106,7 @@ from custos_spl.interfaces import (
     WorkspaceFilter,
     WorkspaceScope,
 )
-from custos_spl.middleware import wrap_workspace_scoped
+from custos_spl.middleware import bind_handle, check_handle, wrap_workspace_scoped
 from custos_spl.migrations import (
     DEFAULT_AUDIT_RETENTION_ROLE,
     DEFAULT_AUDIT_SCHEMA,
@@ -223,5 +223,7 @@ __all__ = [
     "WorkspaceScopingViolation",
     "__version__",
     "audit_partition_ddl",
+    "bind_handle",
+    "check_handle",
     "wrap_workspace_scoped",
 ]
