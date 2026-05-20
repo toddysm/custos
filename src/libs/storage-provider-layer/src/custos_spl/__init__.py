@@ -18,6 +18,7 @@ from custos_spl.errors import (
     QueryUnsupported,
     SPLError,
     WorkspaceMismatch,
+    WorkspaceScopingViolation,
 )
 from custos_spl.ids import (
     ActivityTypeId,
@@ -105,6 +106,7 @@ from custos_spl.interfaces import (
     WorkspaceFilter,
     WorkspaceScope,
 )
+from custos_spl.middleware import wrap_workspace_scoped
 from custos_spl.pagination import Cursor, Page
 
 try:
@@ -209,5 +211,7 @@ __all__ = [
     "WorkspaceId",
     "WorkspaceMismatch",
     "WorkspaceScope",
+    "WorkspaceScopingViolation",
     "__version__",
+    "wrap_workspace_scoped",
 ]

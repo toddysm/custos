@@ -5,3 +5,9 @@ Populated by:
 - SPL-009 — Audit Partition Enforcer (custos_audit schema, append-only DDL)
 - SPL-010 — Transaction model (withTransaction, opaque handles)
 """
+
+from custos_spl.middleware.workspace_scope import wrap_workspace_scoped
+
+__all__ = [
+    "wrap_workspace_scoped",
+]
