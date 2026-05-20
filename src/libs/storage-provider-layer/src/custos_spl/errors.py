@@ -21,6 +21,7 @@ class SPLError(Exception):
       - `BackendUnavailable` (transient — retry with backoff)
       - `QueryUnsupported` (noop query-facade adapter)
       - `NotReserved` (idempotency-record state-machine misuse)
+      - `WorkspaceScopingViolation` (middleware bypass attempt)
     """
 
 
@@ -155,6 +156,18 @@ class ArtifactNotFound(SPLError):
     """
 
 
+class WorkspaceScopingViolation(SPLError):
+    """A workspace-scoped provider call was made without a valid `workspace_id`.
+
+    Raised by the workspace-scoping middleware (`wrap_workspace_scoped`)
+    when a wrapped method is invoked without a non-empty `WorkspaceId`
+    as the first non-self argument. This is a programming error: the
+    static type system already requires the parameter, so this
+    middleware catches the cases the type checker cannot — `None`,
+    empty strings, or callers using `**kwargs` to bypass the signature.
+    """
+
+
 __all__ = [
     "ArtifactNotFound",
     "BackendUnavailable",
@@ -168,4 +181,5 @@ __all__ = [
     "QueryUnsupported",
     "SPLError",
     "WorkspaceMismatch",
+    "WorkspaceScopingViolation",
 ]
