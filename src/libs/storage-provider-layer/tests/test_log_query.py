@@ -137,7 +137,10 @@ class _MinimalLogQuery:
 
     async def query_run_logs(self, *a: object, **kw: object) -> None: ...
 
-    def tail_run_logs(self, *a: object, **kw: object) -> AsyncIterator[LogRecord]:  # type: ignore[empty-body]
+    # type: ignore[empty-body]
+    def tail_run_logs(
+        self, *a: object, **kw: object
+    ) -> AsyncIterator[LogRecord]:
         ...
 
     async def query_step_logs(self, *a: object, **kw: object) -> None: ...
