@@ -263,7 +263,11 @@ METADATA_REV4 = Revision(
         """,
         """
         CREATE INDEX IF NOT EXISTS audit_event_by_occurred_at
-            ON custos_state.audit_event (workspace_id, occurred_at DESC)
+            ON custos_state.audit_event (
+                workspace_id,
+                occurred_at DESC,
+                event_id DESC
+            )
         """,
         # ----- Audit outbox (drain buffer) -----
         # Transient: each row read by a drain pipeline and marked as
