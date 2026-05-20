@@ -241,4 +241,67 @@ METADATA_REV3 = Revision(
 )
 
 
-__all__ = ["METADATA_REV1", "METADATA_REV2", "METADATA_REV3"]
+METADATA_REV4 = Revision(
+    number=4,
+    statements=(
+        # ----- Audit writer (event table) -----
+        # Append-only audit events written by `append_audit` (potentially
+        # within a caller's transaction). No direct update/delete; rows
+        # persist forever (observability archive). Primary key enforces
+        # write-once per (workspace, event_id) pair.
+        """
+        CREATE TABLE IF NOT EXISTS custos_state.audit_event (
+            workspace_id TEXT        NOT NULL,
+            event_id     TEXT        NOT NULL,
+            event_type   TEXT        NOT NULL,
+            actor        TEXT        NOT NULL,
+            subject      JSONB       NOT NULL,
+            payload      JSONB       NOT NULL,
+            occurred_at  TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (workspace_id, event_id)
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS audit_event_by_occurred_at
+            ON custos_state.audit_event (workspace_id, occurred_at DESC)
+        """,
+        # ----- Audit outbox (drain buffer) -----
+        # Transient: each row read by a drain pipeline and marked as
+        # drained via `commit_audit_outbox_cursor`. Auto-incrementing `id`
+        # provides total ordering for streaming + pagination. Observability
+        # Service (cross-workspace) reads these; no workspace_id scoping
+        # here (outbox is global). Expired rows are eventually cleaned up
+        # by the drain pipeline's retention policy.
+        """
+        CREATE TABLE IF NOT EXISTS custos_state.audit_outbox (
+            id           BIGSERIAL,
+            workspace_id TEXT        NOT NULL,
+            event_id     TEXT        NOT NULL,
+            event_type   TEXT        NOT NULL,
+            payload      JSONB       NOT NULL,
+            enqueued_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+            PRIMARY KEY (id)
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS audit_outbox_by_id
+            ON custos_state.audit_outbox (id)
+        """,
+        # ----- Audit outbox drain cursors -----
+        # Per-pipeline high-water mark: each pipeline (`audit-store`,
+        # `audit-alert`, …) tracks its own cursor so slow consumers don't
+        # block fast ones. Implicitly created on first `commit_audit_outbox_cursor`
+        # call; tracks the last `id` successfully persisted downstream.
+        """
+        CREATE TABLE IF NOT EXISTS custos_state.audit_outbox_cursor (
+            pipeline_id TEXT    NOT NULL,
+            cursor      BIGINT  NOT NULL,
+            updated_at  TIMESTAMPTZ DEFAULT now(),
+            PRIMARY KEY (pipeline_id)
+        )
+        """,
+    ),
+)
+
+
+__all__ = ["METADATA_REV1", "METADATA_REV2", "METADATA_REV3", "METADATA_REV4"]

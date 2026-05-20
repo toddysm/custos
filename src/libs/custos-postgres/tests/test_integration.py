@@ -343,21 +343,16 @@ async def test_metadata_apply_pending_is_idempotent(pg_pool: Pool) -> None:
     assert second == []
 
 
-async def test_metadata_still_a_gap_after_rev1_apply(pg_pool: Pool) -> None:
-    """Adapter declares only rev 1; platform requires rev 4 (audit_outbox).
+async def test_metadata_fully_satisfied_after_rev4_apply(pg_pool: Pool) -> None:
+    """After #127/#128/#129, all 4 revisions are applied and MetadataStoreProvider
+    is fully satisfied.
 
-    Confirms the iterative-slice contract: applying #127 does NOT
-    satisfy MetadataStoreProvider — operators still need #128/#129 to
-    land before `check_revisions` will pass.
+    Confirms that applying all revisions completes the MetadataStoreProvider
+    contract; declared_revisions includes all 4 revisions.
     """
-    from custos_spl.errors import MigrationRequired
-
     adapter = PgMetadataAdapter(pool=pg_pool)
     await adapter.apply_pending()
-    with pytest.raises(MigrationRequired) as exc:
-        check_revisions([adapter])
-    gaps = dict(exc.value.gaps)
-    assert gaps.get("MetadataStoreProvider") == 4
+    assert adapter.declared_revisions["MetadataStoreProvider"] == frozenset({1, 2, 3, 4})
 
 
 async def test_put_run_and_get(pg_pool: Pool) -> None:
