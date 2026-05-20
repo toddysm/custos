@@ -149,6 +149,28 @@ def test_handle_supports_weakref() -> None:
     assert ref() is handle
 
 
+def test_dead_provider_invalidates_handle() -> None:
+    """If the issuing provider is GC'd, the handle must not validate.
+
+    Storing `id(provider)` would be wrong here: CPython reuses
+    addresses, so a freshly-allocated object can land at the same
+    address as the dead one and silently pass the check. The registry
+    holds a weakref to the provider and compares with `is`, so a
+    collected provider cleanly produces `InvalidTransactionHandle`.
+    """
+    provider = _FakeProvider()
+    handle = _PgTx(conn=object())
+    bind_handle(handle, provider)
+
+    del provider
+    gc.collect()
+
+    with pytest.raises(
+        InvalidTransactionHandle, match="garbage collected"
+    ):
+        check_handle(handle, _FakeProvider())
+
+
 # ----- error classification -----
 
 

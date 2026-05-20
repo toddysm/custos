@@ -19,10 +19,13 @@ it from two places:
     that the incoming handle was issued by *this* provider instance.
 
 The binding registry is a module-level `weakref.WeakKeyDictionary`
-keyed by the handle — entries auto-evict once the handle goes out of
-scope at the end of `with_transaction`. The `__weakref__` slot on
-`TransactionHandle` makes this work for all adapter subclasses without
-forcing them to opt in.
+keyed by the handle, and the value is a `weakref.ref` to the
+provider. Two reasons for the value-side weakref: entries auto-evict
+once the handle goes out of scope at the end of `with_transaction`,
+and — crucially — the comparison uses object identity (`is`) on the
+live provider rather than `id()`, so a provider that has been
+garbage-collected cannot have its address recycled into a false
+positive match against a new object.
 
 The functions are intentionally narrow: they do not import any adapter,
 nor do they know about backends. Their only job is the contract check.
@@ -36,10 +39,12 @@ from typing import Final
 from custos_spl.errors import InvalidTransactionHandle
 from custos_spl.interfaces.metadata_store import TransactionHandle
 
-_owner: Final[weakref.WeakKeyDictionary[TransactionHandle, int]] = (
-    weakref.WeakKeyDictionary()
-)
-"""handle → id(provider). Weak keys so handles GC normally."""
+_owner: Final[
+    weakref.WeakKeyDictionary[TransactionHandle, weakref.ref[object]]
+] = weakref.WeakKeyDictionary()
+"""handle → weakref(provider). Weak keys so handles GC normally; weak
+values so a dead provider cannot have its identity recycled into a
+false match (id() values can be reused after GC)."""
 
 
 def bind_handle(handle: TransactionHandle, provider: object) -> None:
@@ -50,14 +55,22 @@ def bind_handle(handle: TransactionHandle, provider: object) -> None:
     before invoking the caller's body.
 
     Raises:
-        TypeError: if `handle` is not a `TransactionHandle` instance.
+        TypeError: if `handle` is not a `TransactionHandle` instance,
+            or if `provider` does not support weak references.
     """
     if not isinstance(handle, TransactionHandle):
         raise TypeError(
             f"bind_handle expected a TransactionHandle, "
             f"got {type(handle).__name__}"
         )
-    _owner[handle] = id(provider)
+    try:
+        _owner[handle] = weakref.ref(provider)
+    except TypeError as exc:  # pragma: no cover - depends on host class
+        raise TypeError(
+            f"provider {type(provider).__name__} does not support weak "
+            f"references; adapters must allow weakrefs so handle "
+            f"ownership cannot be spoofed by id() reuse"
+        ) from exc
 
 
 def check_handle(
@@ -69,7 +82,7 @@ def check_handle(
     """Validate that `handle` was issued by `provider`.
 
     Called at the top of every tx-aware adapter method. The check is
-    cheap (one dict lookup, one int compare) and never touches the
+    cheap (one dict lookup, one `is` compare) and never touches the
     backend.
 
     Args:
@@ -99,13 +112,22 @@ def check_handle(
         raise InvalidTransactionHandle(
             f"expected a TransactionHandle, got {type(handle).__name__}"
         )
-    owner_id = _owner.get(handle)
-    if owner_id is None:
+    owner_ref = _owner.get(handle)
+    if owner_ref is None:
         raise InvalidTransactionHandle(
             "transaction handle was never registered (or its "
             "with_transaction scope has already ended)"
         )
-    if owner_id != id(provider):
+    owner = owner_ref()
+    if owner is None:
+        # Provider was GC'd while the handle was still around. The
+        # binding is stale; treat the handle as unusable rather than
+        # risk an id() collision against any future object.
+        raise InvalidTransactionHandle(
+            "transaction handle's issuing provider has been garbage "
+            "collected — the handle is no longer usable"
+        )
+    if owner is not provider:
         raise InvalidTransactionHandle(
             "transaction handle was issued by a different provider "
             "than the one it is being used on — cross-provider "
