@@ -234,3 +234,11 @@ def test_transaction_handle_is_subclass_of_protocol_base() -> None:
     h = PgTransactionHandle(sentinel)
     assert h.conn is sentinel
     assert isinstance(h, TransactionHandle)
+
+
+def test_transaction_handle_starts_open_and_can_be_marked_closed() -> None:
+    sentinel = object()
+    h = PgTransactionHandle(sentinel)
+    assert h.closed is False
+    h._mark_closed()
+    assert h.closed is True

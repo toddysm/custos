@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 from custos_spl.errors import (
     BackendUnavailable,
     ImmutableViolation,
+    InvalidTransactionHandle,
     LeaseBusy,
     LeaseExpired,
 )
@@ -115,16 +116,32 @@ class PgTransactionHandle(TransactionHandle):
     The connection has an active `BEGIN`; tx-aware methods that
     receive this handle issue their statements on the pinned
     connection so they share atomicity with the rest of the callback.
+
+    The handle is one-shot: `with_transaction` marks it `closed` in a
+    `finally` block once the callback returns (success or failure).
+    A caller that retains a reference and passes it back later gets
+    `InvalidTransactionHandle` from tx-aware methods instead of
+    silently running on a connection that has been returned to the
+    pool — `check_handle` alone only verifies provider ownership, not
+    liveness of the underlying transaction.
     """
 
-    __slots__ = ("_conn",)
+    __slots__ = ("_closed", "_conn")
 
     def __init__(self, conn: Connection) -> None:
         self._conn = conn
+        self._closed = False
 
     @property
     def conn(self) -> Connection:
         return self._conn
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def _mark_closed(self) -> None:
+        self._closed = True
 
 
 # ----- Cursor helpers (keyset pagination) -----
@@ -1063,7 +1080,7 @@ class PgMetadataAdapter:
         event: AuditEvent,
         tx: TransactionHandle | None = None,
     ) -> None:
-        check_handle(tx, self)
+        self._check_tx_handle(tx)
         raise NotImplementedError("append_audit lands in SPL-015 (#129)")
 
     async def query_audit(
@@ -1103,7 +1120,29 @@ class PgMetadataAdapter:
         async with pool.acquire() as conn, conn.transaction():
             handle = PgTransactionHandle(conn)
             bind_handle(handle, self)
-            return await fn(handle)
+            try:
+                return await fn(handle)
+            finally:
+                # Mark the handle dead the moment control leaves the
+                # callback. The asyncpg `async with` block then ends
+                # the transaction and returns the connection to the
+                # pool, after which any retained reference must not be
+                # usable via `_check_tx_handle`.
+                handle._mark_closed()
+
+    def _check_tx_handle(self, tx: TransactionHandle | None) -> None:
+        """Validate a transaction handle for tx-aware methods.
+
+        Extends `custos_spl.middleware.transactions.check_handle`
+        (provider-ownership check) with a closed-state check, so
+        retained handles raise `InvalidTransactionHandle` instead of
+        running on a connection that has been released to the pool.
+        """
+        check_handle(tx, self)
+        if isinstance(tx, PgTransactionHandle) and tx.closed:
+            raise InvalidTransactionHandle(
+                "transaction handle was closed when `with_transaction` returned"
+            )
 
     # ----- Error classification -----
 

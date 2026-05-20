@@ -697,3 +697,56 @@ async def test_with_transaction_handle_rejected_by_other_provider(
             event=object(),
             tx=captured["tx"],
         )
+
+
+async def test_with_transaction_handle_rejected_after_callback_returns(
+    pg_pool: Pool,
+) -> None:
+    """A handle retained past `with_transaction`'s return must be dead.
+
+    `check_handle` alone only verifies provider ownership; without an
+    explicit closed-state check the issuing provider would accept a
+    stale handle even though the underlying asyncpg transaction has
+    ended and the connection has gone back to the pool.
+    """
+    adapter = PgMetadataAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    captured: dict[str, object] = {}
+
+    async def body(tx: object) -> None:
+        captured["tx"] = tx
+
+    await adapter.with_transaction(body)
+    with pytest.raises(InvalidTransactionHandle):
+        await adapter.append_audit(
+            "ws-1",
+            event=object(),
+            tx=captured["tx"],
+        )
+
+
+async def test_with_transaction_marks_handle_closed_on_error(
+    pg_pool: Pool,
+) -> None:
+    """Failure inside the callback must still close the handle."""
+    adapter = PgMetadataAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    captured: dict[str, object] = {}
+
+    class _Boom(RuntimeError):
+        pass
+
+    async def body(tx: object) -> None:
+        captured["tx"] = tx
+        raise _Boom("boom")
+
+    with pytest.raises(_Boom):
+        await adapter.with_transaction(body)
+    with pytest.raises(InvalidTransactionHandle):
+        await adapter.append_audit(
+            "ws-1",
+            event=object(),
+            tx=captured["tx"],
+        )
