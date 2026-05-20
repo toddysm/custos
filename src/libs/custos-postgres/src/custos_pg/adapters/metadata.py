@@ -1437,10 +1437,11 @@ class PgMetadataAdapter:
     def listen_audit_outbox(self) -> AsyncIterator[NotifyEvent]:
         """Optional notify stream for low-latency drain alerting.
 
-        Postgres lacks a built-in notify primitive in asyncpg for this adapter,
-        so raise QueryUnsupported to signal the drainer to fall back to polling.
+        This adapter does not implement notification-based audit outbox
+        listening, so raise QueryUnsupported to signal the drainer to
+        fall back to polling.
         """
-        raise QueryUnsupported("listen_audit_outbox not implemented (adapter lacks notify)")
+        raise QueryUnsupported("listen_audit_outbox not implemented by this adapter")
 
     # ----- Transactions -----
 
