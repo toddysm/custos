@@ -92,7 +92,9 @@ class MetricsQueryProvider(Protocol):
       - `WorkspaceMismatch` — run exists in a different workspace;
         caller maps to HTTP 404.
 
-    No `SCHEMA_REVISION` is declared by query facades.
+    Query facades pin `SCHEMA_REVISION` to `0` — they own no schema and
+    run no migration. The constant exists so call sites can uniformly
+    introspect `SCHEMA_REVISION` across all provider Protocols.
     """
 
     SCHEMA_REVISION: ClassVar[int] = 0
