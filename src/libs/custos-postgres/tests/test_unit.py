@@ -17,6 +17,10 @@ from datetime import UTC, datetime
 import pytest
 from custos_spl.interfaces.catalog_store import CatalogStoreProvider
 from custos_spl.interfaces.definition_store import DefinitionStoreProvider
+from custos_spl.interfaces.metadata_store import (
+    MetadataStoreProvider,
+    TransactionHandle,
+)
 from custos_spl.migrations.runner import MigrationCapable
 
 from custos_pg.adapters.catalog import (
@@ -27,8 +31,15 @@ from custos_pg.adapters.catalog import (
 from custos_pg.adapters.catalog import make_adapter as make_catalog_adapter
 from custos_pg.adapters.definition import PgDefinitionAdapter
 from custos_pg.adapters.definition import make_adapter as make_definition_adapter
+from custos_pg.adapters.metadata import (
+    PgLeaseHandle,
+    PgMetadataAdapter,
+    PgTransactionHandle,
+)
+from custos_pg.adapters.metadata import make_adapter as make_metadata_adapter
 from custos_pg.migrations.catalog import CATALOG_REV1
 from custos_pg.migrations.definition import DEFINITION_REV1
+from custos_pg.migrations.metadata import METADATA_REV1
 from custos_pg.pool import DSN_ENV_VAR, LazyPool, read_dsn_from_env
 
 # ----- Protocol conformance -----
@@ -44,6 +55,11 @@ def test_catalog_adapter_satisfies_catalog_protocol() -> None:
     assert isinstance(adapter, CatalogStoreProvider)
 
 
+def test_metadata_adapter_satisfies_metadata_protocol() -> None:
+    adapter = PgMetadataAdapter(lazy=LazyPool("postgresql://noop"))
+    assert isinstance(adapter, MetadataStoreProvider)
+
+
 def test_definition_adapter_satisfies_migration_capable() -> None:
     adapter = PgDefinitionAdapter(lazy=LazyPool("postgresql://noop"))
     assert isinstance(adapter, MigrationCapable)
@@ -54,11 +70,18 @@ def test_catalog_adapter_satisfies_migration_capable() -> None:
     assert isinstance(adapter, MigrationCapable)
 
 
+def test_metadata_adapter_satisfies_migration_capable() -> None:
+    adapter = PgMetadataAdapter(lazy=LazyPool("postgresql://noop"))
+    assert isinstance(adapter, MigrationCapable)
+
+
 def test_adapter_requires_pool_or_lazy() -> None:
     with pytest.raises(ValueError, match="requires either"):
         PgDefinitionAdapter()
     with pytest.raises(ValueError, match="requires either"):
         PgCatalogAdapter()
+    with pytest.raises(ValueError, match="requires either"):
+        PgMetadataAdapter()
 
 
 # ----- Declared-revisions cache before any migration -----
@@ -74,6 +97,8 @@ def test_declared_revisions_starts_empty() -> None:
     assert adapter.declared_revisions == {"DefinitionStoreProvider": frozenset()}
     cat = PgCatalogAdapter(lazy=LazyPool("postgresql://noop"))
     assert cat.declared_revisions == {"CatalogStoreProvider": frozenset()}
+    meta = PgMetadataAdapter(lazy=LazyPool("postgresql://noop"))
+    assert meta.declared_revisions == {"MetadataStoreProvider": frozenset()}
 
 
 # ----- DDL shape -----
@@ -101,6 +126,24 @@ def test_catalog_rev1_owns_expected_tables() -> None:
 def test_revisions_are_numbered_one() -> None:
     assert DEFINITION_REV1.number == 1
     assert CATALOG_REV1.number == 1
+    assert METADATA_REV1.number == 1
+
+
+def test_metadata_rev1_owns_expected_tables() -> None:
+    joined = " ".join(METADATA_REV1.statements)
+    assert "CREATE SCHEMA IF NOT EXISTS custos_state" in joined
+    assert "custos_state.run" in joined
+    assert "custos_state.step" in joined
+    assert "custos_state.step_attempt" in joined
+    assert "custos_state.subscription" in joined
+    assert "custos_state.subscription_selector" in joined
+    assert "custos_state.resume_subscription" in joined
+    assert "custos_state.dedup_key" in joined
+    assert "custos_state.schedule" in joined
+    assert "custos_state.connector_cursor" in joined
+    assert "lease_holder" in joined
+    assert "lease_expires_at" in joined
+    assert "custos_state.artifact_use" in joined
 
 
 # ----- Factories -----
@@ -139,6 +182,22 @@ def test_catalog_factory_returns_lazy_adapter(
     assert isinstance(adapter, PgCatalogAdapter)
 
 
+def test_metadata_factory_errors_when_dsn_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(DSN_ENV_VAR, raising=False)
+    with pytest.raises(RuntimeError, match=DSN_ENV_VAR):
+        make_metadata_adapter()
+
+
+def test_metadata_factory_returns_lazy_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(DSN_ENV_VAR, "postgresql://noop")
+    adapter = make_metadata_adapter()
+    assert isinstance(adapter, PgMetadataAdapter)
+
+
 def test_read_dsn_from_env_errors_when_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -156,3 +215,22 @@ def test_cursor_roundtrip() -> None:
     rt_ts, rt_ver = _decode_cursor(c)
     assert rt_ts == ts
     assert rt_ver == "1.2.3"
+
+
+# ----- Metadata handles -----
+
+
+def test_lease_handle_carries_identifiers() -> None:
+    h = PgLeaseHandle(workspace_id="ws", instance_id="inst", holder_id="holder-1")
+    assert h.workspace_id == "ws"
+    assert h.instance_id == "inst"
+    assert h.holder_id == "holder-1"
+
+
+def test_transaction_handle_is_subclass_of_protocol_base() -> None:
+    # __weakref__ comes from the base; PgTransactionHandle adds `_conn`.
+    # We construct with a sentinel and confirm the conn property works.
+    sentinel = object()
+    h = PgTransactionHandle(sentinel)
+    assert h.conn is sentinel
+    assert isinstance(h, TransactionHandle)
