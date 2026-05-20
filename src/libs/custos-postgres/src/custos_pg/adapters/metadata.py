@@ -1159,7 +1159,7 @@ class PgMetadataAdapter:
         async with pool.acquire() as conn:
             result = await conn.execute(
                 "DELETE FROM custos_state.idempotency_record "
-                "WHERE expires_at < $1",
+                "WHERE expires_at <= $1",
                 before,
             )
         # result is a string like "DELETE 42"; extract count.
@@ -1251,7 +1251,7 @@ class PgMetadataAdapter:
         async with pool.acquire() as conn:
             result = await conn.execute(
                 "DELETE FROM custos_state.device_code_session "
-                "WHERE expires_at < $1",
+                "WHERE expires_at <= $1",
                 before,
             )
         count = int(result.split()[-1]) if result else 0

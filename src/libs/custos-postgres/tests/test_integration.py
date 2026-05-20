@@ -748,7 +748,16 @@ async def test_delete_expired_idempotency_records(pg_pool: Pool) -> None:
     await adapter.reserve_idempotency_record(
         "ws-1", "user-1", "/api/create", "key-1", "hash-1", ttl_seconds=10
     )
-    # Reserve one that's already expired (will be deleted).
+    # Insert one with expires_at exactly at `now` (should be deleted with <=).
+    async with pg_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO custos_state.idempotency_record "
+            "(workspace_id, principal_id, route, idempotency_key, request_hash, "
+            " status, reserved_at, expires_at) "
+            "VALUES ($1, $2, $3, $4, $5, 'completed', now(), $6)",
+            "ws-1", "user-1", "/api/boundary", "key-boundary", "hash-boundary", now,
+        )
+    # Insert one with expires_at in the past (will be deleted).
     async with pg_pool.acquire() as conn:
         await conn.execute(
             "INSERT INTO custos_state.idempotency_record "
@@ -759,7 +768,8 @@ async def test_delete_expired_idempotency_records(pg_pool: Pool) -> None:
         )
 
     count = await adapter.delete_expired_idempotency_records(now)
-    assert count == 1
+    # Should delete both boundary and past (2 records).
+    assert count == 2
 
 
 async def test_put_device_code_session(pg_pool: Pool) -> None:
@@ -859,7 +869,7 @@ async def test_delete_expired_device_code_sessions(pg_pool: Pool) -> None:
     future = now + timedelta(minutes=10)
     past = now - timedelta(seconds=1)
 
-    # Insert an expired session.
+    # Insert an expired session (expires_at < now).
     session_expired = DeviceCodeSession(
         workspace_id="ws-1",
         device_code="D-OLD",
@@ -885,6 +895,16 @@ async def test_delete_expired_device_code_sessions(pg_pool: Pool) -> None:
             session_expired.expires_at,
         )
 
+    # Insert one with expires_at exactly at `now` (should be deleted with <=).
+    async with pg_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO custos_state.device_code_session "
+            "(workspace_id, device_code, user_code, issuer_alias, "
+            " status, created_at, expires_at) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "ws-1", "D-BOUNDARY", "U-BOUNDARY", "google", "pending", now, now,
+        )
+
     # Insert a fresh session (won't be deleted).
     session_fresh = DeviceCodeSession(
         workspace_id="ws-1",
@@ -899,7 +919,8 @@ async def test_delete_expired_device_code_sessions(pg_pool: Pool) -> None:
     await adapter.put_device_code_session("ws-1", session_fresh)
 
     count = await adapter.delete_expired_device_code_sessions(now)
-    assert count == 1
+    # Should delete both past and boundary (2 records).
+    assert count == 2
 
 
 # ----- Transactions -----
