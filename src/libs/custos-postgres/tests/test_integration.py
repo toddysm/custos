@@ -573,6 +573,35 @@ async def test_cursor_lease_busy_when_held_by_other(pg_pool: Pool) -> None:
         )
 
 
+async def test_first_touch_acquire_does_not_block_on_concurrent_insert(
+    pg_pool: Pool,
+) -> None:
+    """Two acquires racing on a brand-new cursor key must not hang.
+
+    Without the `pg_try_advisory_xact_lock` gate, the second acquire's
+    `INSERT … ON CONFLICT DO NOTHING` blocks waiting for the first
+    tx's unique-index check to commit, defeating the NOWAIT contract.
+    We simulate the race by holding the advisory lock from a separate
+    connection — the adapter call must surface `LeaseBusy` immediately
+    rather than wait on the row lock.
+    """
+    adapter = PgMetadataAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+    async with pg_pool.acquire() as holder, holder.transaction():
+        await holder.execute(
+            "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",
+            "ws-race",
+            "inst-race",
+        )
+        with pytest.raises(LeaseBusy):
+            await asyncio.wait_for(
+                adapter.acquire_cursor_lease(
+                    "ws-race", "inst-race", "holder-x", ttl_seconds=60
+                ),
+                timeout=5.0,
+            )
+
+
 async def test_commit_cursor_raises_lease_expired_after_other_steals(
     pg_pool: Pool,
 ) -> None:

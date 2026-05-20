@@ -735,17 +735,43 @@ class PgMetadataAdapter:
     ) -> tuple[ConnectorCursor, LeaseHandle]:
         """Acquire the single-writer lease.
 
-        Strategy: `SELECT ... FOR UPDATE NOWAIT` to take the row lock
-        (concurrent acquirers raise `55P03` which we classify into
-        `LeaseBusy`). If the row already has an un-expired lease held
-        by a different holder, raise `LeaseBusy` ourselves. Otherwise
-        write the lease and return a `PgLeaseHandle` carrying the
-        identifiers needed by `commit_cursor` / `release_cursor_lease`.
+        Strategy:
+
+        1. `pg_try_advisory_xact_lock(hashtext(ws), hashtext(inst))` —
+           a non-blocking serializer on the `(workspace_id,
+           instance_id)` key. Without this, two concurrent first-touch
+           acquires both hit `INSERT … ON CONFLICT DO NOTHING` and the
+           loser blocks waiting for the winner's unique-index check
+           to commit, which defeats the NOWAIT semantics we promise.
+           The advisory lock returns immediately and auto-releases at
+           COMMIT/ROLLBACK. Failure → `LeaseBusy`.
+        2. INSERT-if-missing (race-free now that we hold the advisory
+           lock).
+        3. `SELECT … FOR UPDATE NOWAIT` to take the row lock against
+           concurrent `commit_cursor` / `release_cursor_lease` on
+           other connections — `55P03` here also classifies into
+           `LeaseBusy`.
+        4. If the row already carries an un-expired lease held by a
+           different holder, raise `LeaseBusy` ourselves.
+        5. Write the lease and return a `PgLeaseHandle` carrying the
+           identifiers needed by `commit_cursor` /
+           `release_cursor_lease`.
         """
         new_expires = datetime.now(UTC) + timedelta(seconds=ttl_seconds)
         pool = await self._pool_ref()
         try:
             async with pool.acquire() as conn, conn.transaction():
+                locked = await conn.fetchval(
+                    "SELECT pg_try_advisory_xact_lock("
+                    "hashtext($1), hashtext($2))",
+                    workspace_id,
+                    instance_id,
+                )
+                if not locked:
+                    raise LeaseBusy(
+                        f"connector_cursor {workspace_id!r}/{instance_id!r} "
+                        f"is being acquired by another caller"
+                    )
                 # First-touch insert; subsequent acquires hit the SELECT.
                 await conn.execute(
                     "INSERT INTO custos_state.connector_cursor "
