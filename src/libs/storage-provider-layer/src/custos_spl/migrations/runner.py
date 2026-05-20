@@ -20,7 +20,8 @@ Contract (per `design/components/storage-provider-layer/design.md`
    implemented in v1 (would silently mask writes).
 4. The platform never auto-migrates. An operator runs the
    `custos migrate up` CLI (see `custos_spl.migrations.cli`) which
-   invokes `MigrationRunner.apply_pending()` on a configured adapter.
+   invokes `apply_pending()` on a configured adapter implementing
+   `MigrationCapable`.
 
 Adapters opt in by exposing two attributes:
 
