@@ -2,7 +2,7 @@
 
 Populated by:
 - SPL-009 — Audit Partition Enforcer DDL (this module: `audit`)
-- SPL-011 — Migration runner and `custos migrate up` CLI (this module:
+- SPL-011 — Migration runner and `custos-migrate` CLI (this module:
   `runner`, `cli`, `__main__`)
 - SPL-017 — Postgres migrations rev 1-4 (Metadata 1-4, Definition 1, Catalog 1, Auth 1)
 """
