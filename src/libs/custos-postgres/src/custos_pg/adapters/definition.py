@@ -63,7 +63,7 @@ def _decode_cursor(cursor: Cursor) -> tuple[datetime, str]:
 
 def _row_to_workflow_version(row: Record, parent_deprecated: bool) -> WorkflowVersion:
     doc = row["normalized_doc"]
-    if isinstance(doc, str | bytes | bytearray):
+    if isinstance(doc, (str, bytes, bytearray)):
         doc = json.loads(doc)
     return WorkflowVersion(
         workspace_id=row["workspace_id"],
@@ -78,7 +78,7 @@ def _row_to_workflow_version(row: Record, parent_deprecated: bool) -> WorkflowVe
 
 def _row_to_template_version(row: Record, parent_deprecated: bool) -> WorkflowTemplateVersion:
     doc = row["normalized_doc"]
-    if isinstance(doc, str | bytes | bytearray):
+    if isinstance(doc, (str, bytes, bytearray)):
         doc = json.loads(doc)
     return WorkflowTemplateVersion(
         workspace_id=row["workspace_id"],

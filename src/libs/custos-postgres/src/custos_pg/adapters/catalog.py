@@ -58,7 +58,7 @@ def _decode_cursor(cursor: Cursor) -> tuple[datetime, str]:
 
 def _row_to_activity(row: Record, parent_deprecated: bool) -> ActivityTypeVersion:
     manifest = row["normalized_manifest"]
-    if isinstance(manifest, str | bytes | bytearray):
+    if isinstance(manifest, (str, bytes, bytearray)):
         manifest = json.loads(manifest)
     return ActivityTypeVersion(
         namespace=row["namespace"],
@@ -73,7 +73,7 @@ def _row_to_activity(row: Record, parent_deprecated: bool) -> ActivityTypeVersio
 
 def _row_to_connector(row: Record, parent_deprecated: bool) -> ConnectorTypeVersion:
     manifest = row["normalized_manifest"]
-    if isinstance(manifest, str | bytes | bytearray):
+    if isinstance(manifest, (str, bytes, bytearray)):
         manifest = json.loads(manifest)
     return ConnectorTypeVersion(
         type=row["type"],
