@@ -582,11 +582,14 @@ class AuthStoreProvider(Protocol):
     ) -> T:
         """Run `body` inside a single adapter transaction.
 
-        The `TransactionHandle` is opaque and tied to this provider's
-        adapter — passing it to a different provider raises
-        `InvalidTransactionHandle`. `append_audit` on the matching
-        `MetadataStoreProvider` accepts this handle so audit rows
-        commit atomically with the mutation that produced them.
+        The `TransactionHandle` is opaque and scoped to the adapter
+        transaction opened by this method. It may be passed to other
+        SPL provider interfaces only when they are implemented by the
+        same adapter/transaction domain; in particular, `append_audit`
+        on the matching `MetadataStoreProvider` accepts this handle so
+        audit rows commit atomically with the mutation that produced
+        them. Passing the handle to a provider backed by a different
+        adapter transaction raises `InvalidTransactionHandle`.
         """
         ...
 
