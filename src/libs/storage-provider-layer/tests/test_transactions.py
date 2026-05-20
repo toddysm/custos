@@ -121,19 +121,23 @@ def test_handle_registry_uses_weak_keys() -> None:
     This is what keeps the module-level registry from growing unbounded
     across the process lifetime.
     """
+    import weakref
+
     from custos_spl.middleware.transactions import _owner
 
     provider = _FakeProvider()
+    before_len = len(_owner)
     handle = _PgTx(conn=object())
+    ref = weakref.ref(handle)
     bind_handle(handle, provider)
     assert handle in _owner
 
     del handle
     gc.collect()
-    # After GC, the registry must not retain the entry.
-    assert len(_owner) == 0 or all(
-        not isinstance(k, _PgTx) for k in _owner
-    )
+    # After GC, the specific handle must be collected and the registry
+    # must return to its pre-bind size.
+    assert ref() is None
+    assert len(_owner) == before_len
 
 
 def test_handle_supports_weakref() -> None:
