@@ -136,7 +136,7 @@ LANGUAGE plpgsql
 AS $$
 BEGIN
     -- Permit DELETEs only from the dedicated retention role.
-    IF TG_OP = 'DELETE' AND current_user = '{ret}' THEN
+    IF TG_OP = 'DELETE' AND lower(current_user) = lower('{ret}') THEN
         RETURN OLD;
     END IF;
     RAISE EXCEPTION
