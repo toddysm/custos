@@ -172,16 +172,35 @@ class PgCatalogAdapter:
                     namespace,
                     type,
                 )
-                existing = await conn.fetchrow(
-                    "SELECT namespace, type, version, digest, normalized_manifest, published_at "
-                    "FROM catalog.activity_type_version "
-                    "WHERE namespace = $1 AND type = $2 AND version = $3 "
-                    "FOR UPDATE",
+                # Race-safe upsert: ON CONFLICT DO NOTHING returns the
+                # new row only when we won the insert. If RETURNING is
+                # empty, a concurrent writer (or a prior put) owns the
+                # row — fetch it and compare digests to decide between
+                # idempotent re-put and ConflictDigest.
+                row = await conn.fetchrow(
+                    "INSERT INTO catalog.activity_type_version "
+                    "(namespace, type, version, digest, normalized_manifest) "
+                    "VALUES ($1, $2, $3, $4, $5::jsonb) "
+                    "ON CONFLICT (namespace, type, version) DO NOTHING "
+                    "RETURNING namespace, type, version, digest, normalized_manifest, "
+                    "published_at",
                     namespace,
                     type,
                     version,
+                    digest,
+                    json.dumps(dict(normalized_manifest)),
                 )
-                if existing is not None:
+                if row is None:
+                    existing = await conn.fetchrow(
+                        "SELECT namespace, type, version, digest, normalized_manifest, "
+                        "published_at "
+                        "FROM catalog.activity_type_version "
+                        "WHERE namespace = $1 AND type = $2 AND version = $3",
+                        namespace,
+                        type,
+                        version,
+                    )
+                    assert existing is not None
                     if existing["digest"] != digest:
                         raise ConflictDigest(
                             f"activity_type {namespace}/{type}@{version} already "
@@ -189,19 +208,6 @@ class PgCatalogAdapter:
                             f"refusing re-put with {digest!r}"
                         )
                     row = existing
-                else:
-                    row = await conn.fetchrow(
-                        "INSERT INTO catalog.activity_type_version "
-                        "(namespace, type, version, digest, normalized_manifest) "
-                        "VALUES ($1, $2, $3, $4, $5::jsonb) "
-                        "RETURNING namespace, type, version, digest, normalized_manifest, "
-                        "published_at",
-                        namespace,
-                        type,
-                        version,
-                        digest,
-                        json.dumps(dict(normalized_manifest)),
-                    )
                 parent_deprecated = await conn.fetchval(
                     "SELECT deprecated FROM catalog.activity_type "
                     "WHERE namespace = $1 AND type = $2",
@@ -311,14 +317,28 @@ class PgCatalogAdapter:
                     "ON CONFLICT DO NOTHING",
                     type,
                 )
-                existing = await conn.fetchrow(
-                    "SELECT type, version, digest, normalized_manifest, published_at "
-                    "FROM catalog.connector_type_version "
-                    "WHERE type = $1 AND version = $2 FOR UPDATE",
+                # Race-safe upsert: see put_activity_type_version for
+                # the rationale on ON CONFLICT DO NOTHING + RETURNING.
+                row = await conn.fetchrow(
+                    "INSERT INTO catalog.connector_type_version "
+                    "(type, version, digest, normalized_manifest) "
+                    "VALUES ($1, $2, $3, $4::jsonb) "
+                    "ON CONFLICT (type, version) DO NOTHING "
+                    "RETURNING type, version, digest, normalized_manifest, published_at",
                     type,
                     version,
+                    digest,
+                    json.dumps(dict(normalized_manifest)),
                 )
-                if existing is not None:
+                if row is None:
+                    existing = await conn.fetchrow(
+                        "SELECT type, version, digest, normalized_manifest, published_at "
+                        "FROM catalog.connector_type_version "
+                        "WHERE type = $1 AND version = $2",
+                        type,
+                        version,
+                    )
+                    assert existing is not None
                     if existing["digest"] != digest:
                         raise ConflictDigest(
                             f"connector_type {type}@{version} already published "
@@ -326,17 +346,6 @@ class PgCatalogAdapter:
                             f"re-put with {digest!r}"
                         )
                     row = existing
-                else:
-                    row = await conn.fetchrow(
-                        "INSERT INTO catalog.connector_type_version "
-                        "(type, version, digest, normalized_manifest) "
-                        "VALUES ($1, $2, $3, $4::jsonb) "
-                        "RETURNING type, version, digest, normalized_manifest, published_at",
-                        type,
-                        version,
-                        digest,
-                        json.dumps(dict(normalized_manifest)),
-                    )
                 parent_deprecated = await conn.fetchval(
                     "SELECT deprecated FROM catalog.connector_type WHERE type = $1",
                     type,

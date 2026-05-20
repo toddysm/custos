@@ -17,6 +17,7 @@ Covers the contract surface the design pins:
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 import pytest
@@ -177,6 +178,26 @@ async def test_put_activity_type_idempotent_on_same_digest(pg_pool: Pool) -> Non
         "ns", "echo", "1.0.0", "sha256:abc", {"k": 1}
     )
     assert a.digest == b.digest == "sha256:abc"
+
+
+async def test_put_activity_type_concurrent_same_digest_is_idempotent(
+    pg_pool: Pool,
+) -> None:
+    """Concurrent puts with the same (key, digest) must all succeed.
+
+    The legacy SELECT-then-INSERT pattern raced on the unique index;
+    ON CONFLICT DO NOTHING + RETURNING makes the loser fall through
+    to a digest comparison instead of leaking a 23505.
+    """
+    adapter = PgCatalogAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+    results = await asyncio.gather(
+        *(
+            adapter.put_activity_type_version("ns", "race", "1.0.0", "sha256:r", {"i": i})
+            for i in range(8)
+        )
+    )
+    assert {r.digest for r in results} == {"sha256:r"}
 
 
 async def test_put_activity_type_conflict_on_different_digest(pg_pool: Pool) -> None:
