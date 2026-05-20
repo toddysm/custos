@@ -42,12 +42,14 @@ from custos_spl.errors import (
     LeaseBusy,
     LeaseExpired,
     NotReserved,
+    QueryUnsupported,
 )
 from custos_spl.interfaces.metadata_store import (
     ArtifactUse,
     AuditEvent,
     AuditFilter,
     AuditOutboxBatch,
+    AuditOutboxRow,
     ConnectorCursor,
     DedupDuplicate,
     DedupKey,
@@ -75,7 +77,12 @@ from custos_spl.interfaces.metadata_store import (
 from custos_spl.middleware.transactions import bind_handle, check_handle
 from custos_spl.pagination import Cursor, Page
 
-from custos_pg.migrations.metadata import METADATA_REV1, METADATA_REV2, METADATA_REV3
+from custos_pg.migrations.metadata import (
+    METADATA_REV1,
+    METADATA_REV2,
+    METADATA_REV3,
+    METADATA_REV4,
+)
 from custos_pg.pool import LazyPool, read_dsn_from_env
 from custos_pg.revisions import ensure_ledger, read_declared, record_revision
 
@@ -334,6 +341,29 @@ def _row_to_device_code_session(row: Record) -> DeviceCodeSession:
     )
 
 
+def _row_to_audit_event(row: Record) -> AuditEvent:
+    return AuditEvent(
+        workspace_id=row["workspace_id"],
+        event_id=row["event_id"],
+        event_type=row["event_type"],
+        actor=row["actor"],
+        subject=MappingProxyType(dict(_json_payload(row["subject"]))),
+        payload=MappingProxyType(dict(_json_payload(row["payload"]))),
+        occurred_at=row["occurred_at"],
+    )
+
+
+def _row_to_audit_outbox_row(row: Record) -> AuditOutboxRow:
+    return AuditOutboxRow(
+        id=row["id"],
+        workspace_id=row["workspace_id"],
+        event_id=row["event_id"],
+        event_type=row["event_type"],
+        payload=MappingProxyType(dict(_json_payload(row["payload"]))),
+        enqueued_at=row["enqueued_at"],
+    )
+
+
 class PgMetadataAdapter:
     """asyncpg implementation of `MetadataStoreProvider` — #127 slice.
 
@@ -377,11 +407,9 @@ class PgMetadataAdapter:
     async def apply_pending(self) -> list[str]:
         """Apply revisions in scope for this adapter slice.
 
-        Revisions 1-3 live in this PR and #128; revision 4 (audit
-        outbox) lands in #129. `declared_revisions` reports whatever was
-        applied (typically {1, 2, 3} after both PRs merge), leaving a gap
-        for the platform's `SCHEMA_REVISION = 4` until the audit PR lands
-        — this is an intentional, transparent iteration step.
+        Revisions 1-4 complete the MetadataStore. After #129 merges,
+        `declared_revisions` will report {1, 2, 3, 4}, matching the
+        platform's `SCHEMA_REVISION = 4` with no gaps.
         """
         summaries: list[str] = []
         pool = await self._pool_ref()
@@ -392,7 +420,7 @@ class PgMetadataAdapter:
                 INTERFACE_NAME,
             )
             already = {int(r["revision"]) for r in applied}
-            for rev in (METADATA_REV1, METADATA_REV2, METADATA_REV3):
+            for rev in (METADATA_REV1, METADATA_REV2, METADATA_REV3, METADATA_REV4):
                 if rev.number in already:
                     continue
                 for stmt in rev.statements:
@@ -1229,7 +1257,7 @@ class PgMetadataAdapter:
         count = int(result.split()[-1]) if result else 0
         return count
 
-    # ----- Audit writer + outbox drain (#129 — stubs) -----
+    # ----- Audit writer + outbox drain -----
 
     async def append_audit(
         self,
@@ -1237,8 +1265,70 @@ class PgMetadataAdapter:
         event: AuditEvent,
         tx: TransactionHandle | None = None,
     ) -> None:
+        """Write an audit event and queue it for outbox drain.
+
+        If `tx` is provided, both writes participate in the caller's
+        transaction so rolled-back mutations don't leak audit rows.
+        Otherwise writes are standalone.
+        """
         self._check_tx_handle(tx)
-        raise NotImplementedError("append_audit lands in SPL-015 (#129)")
+        pool = await self._pool_ref()
+
+        if tx is not None:
+            # Use the provided transaction handle's connection.
+            conn = cast(PgTransactionHandle, tx).conn
+            try:
+                await conn.execute(
+                    "INSERT INTO custos_state.audit_event "
+                    "(workspace_id, event_id, event_type, actor, subject, payload, "
+                    "occurred_at) "
+                    "VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7)",
+                    workspace_id,
+                    event.event_id,
+                    event.event_type,
+                    event.actor,
+                    json.dumps(dict(event.subject)),
+                    json.dumps(dict(event.payload)),
+                    event.occurred_at,
+                )
+                await conn.execute(
+                    "INSERT INTO custos_state.audit_outbox "
+                    "(workspace_id, event_id, event_type, payload) "
+                    "VALUES ($1, $2, $3, $4::jsonb)",
+                    workspace_id,
+                    event.event_id,
+                    event.event_type,
+                    json.dumps(dict(event.payload)),
+                )
+            except Exception as exc:
+                raise self._classify(exc) from exc
+        else:
+            async with pool.acquire() as conn:
+                try:
+                    await conn.execute(
+                        "INSERT INTO custos_state.audit_event "
+                        "(workspace_id, event_id, event_type, actor, subject, "
+                        "payload, occurred_at) "
+                        "VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7)",
+                        workspace_id,
+                        event.event_id,
+                        event.event_type,
+                        event.actor,
+                        json.dumps(dict(event.subject)),
+                        json.dumps(dict(event.payload)),
+                        event.occurred_at,
+                    )
+                    await conn.execute(
+                        "INSERT INTO custos_state.audit_outbox "
+                        "(workspace_id, event_id, event_type, payload) "
+                        "VALUES ($1, $2, $3, $4::jsonb)",
+                        workspace_id,
+                        event.event_id,
+                        event.event_type,
+                        json.dumps(dict(event.payload)),
+                    )
+                except Exception as exc:
+                    raise self._classify(exc) from exc
 
     async def query_audit(
         self,
@@ -1247,20 +1337,111 @@ class PgMetadataAdapter:
         cursor: Cursor | None = None,
         limit: int | None = None,
     ) -> Page[AuditEvent]:
-        raise NotImplementedError("query_audit lands in SPL-015 (#129)")
+        """Query audit events with optional filtering and keyset pagination.
+
+        Ordered by (occurred_at DESC, event_id DESC) for consistent pagination.
+        """
+        eff_limit = _resolve_limit(limit)
+        params: list[Any] = [workspace_id]
+        where = ["workspace_id = $1"]
+
+        if filter is not None:
+            if filter.event_type is not None:
+                params.append(filter.event_type)
+                where.append(f"event_type = ${len(params)}")
+            if filter.actor is not None:
+                params.append(filter.actor)
+                where.append(f"actor = ${len(params)}")
+            if filter.occurred_after is not None:
+                params.append(filter.occurred_after)
+                where.append(f"occurred_at >= ${len(params)}")
+            if filter.occurred_before is not None:
+                params.append(filter.occurred_before)
+                where.append(f"occurred_at < ${len(params)}")
+
+        if cursor is not None:
+            ts_iso, eid = _decode_cursor(cursor)
+            params.extend([datetime.fromisoformat(ts_iso), eid])
+            where.append(f"(occurred_at, event_id) < (${len(params) - 1}, ${len(params)})")
+
+        params.append(eff_limit + 1)
+        sql = (
+            "SELECT workspace_id, event_id, event_type, actor, subject, payload, occurred_at "
+            "FROM custos_state.audit_event "
+            f"WHERE {' AND '.join(where)} "
+            "ORDER BY occurred_at DESC, event_id DESC "
+            f"LIMIT ${len(params)}"
+        )
+
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(sql, *params)
+
+        next_cursor: Cursor | None = None
+        if len(rows) > eff_limit:
+            last = rows[eff_limit - 1]
+            next_cursor = _encode_cursor(last["occurred_at"], last["event_id"])
+            rows = rows[:eff_limit]
+
+        return Page(
+            items=[_row_to_audit_event(r) for r in rows],
+            next_cursor=next_cursor,
+        )
 
     async def stream_audit_outbox(self, cursor: int, batch_size: int) -> AuditOutboxBatch:
-        raise NotImplementedError("stream_audit_outbox lands in SPL-015 (#129)")
+        """Stream audit outbox rows for drain.
+
+        Returns rows with id > cursor, up to batch_size, ordered by id ASC.
+        Idempotent and side-effect-free for reliable drain.
+        """
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, workspace_id, event_id, event_type, payload, "
+                "enqueued_at "
+                "FROM custos_state.audit_outbox "
+                "WHERE id > $1 "
+                "ORDER BY id ASC "
+                "LIMIT $2",
+                cursor,
+                batch_size,
+            )
+
+        if not rows:
+            return AuditOutboxBatch(rows=(), next_cursor=cursor)
+
+        next_cursor = rows[-1]["id"]
+        return AuditOutboxBatch(
+            rows=tuple(_row_to_audit_outbox_row(r) for r in rows),
+            next_cursor=next_cursor,
+        )
 
     async def commit_audit_outbox_cursor(self, pipeline_id: str, cursor: int) -> None:
-        raise NotImplementedError("commit_audit_outbox_cursor lands in SPL-015 (#129)")
+        """Record the high-water mark for a drain pipeline.
+
+        Each pipeline keeps its own cursor so slow consumers don't block fast ones.
+        Implicitly creates the row on first call.
+        """
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO custos_state.audit_outbox_cursor "
+                "(pipeline_id, cursor, updated_at) "
+                "VALUES ($1, $2, now()) "
+                "ON CONFLICT (pipeline_id) DO UPDATE "
+                "SET cursor = EXCLUDED.cursor, updated_at = now()",
+                pipeline_id,
+                cursor,
+            )
 
     def listen_audit_outbox(self) -> AsyncIterator[NotifyEvent]:
-        # Declared as a coroutine-free method on the Protocol; if a
-        # caller awaits this stub the NotImplementedError surfaces
-        # at iterator-call time rather than as a `coroutine was never
-        # awaited` warning.
-        raise NotImplementedError("listen_audit_outbox lands in SPL-015 (#129)")
+        """Optional notify stream for low-latency drain alerting.
+
+        This adapter does not implement notification-based audit outbox
+        listening, so raise QueryUnsupported to signal the drainer to
+        fall back to polling.
+        """
+        raise QueryUnsupported("listen_audit_outbox not implemented by this adapter")
 
     # ----- Transactions -----
 
