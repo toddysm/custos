@@ -741,7 +741,6 @@ async def test_delete_expired_idempotency_records(pg_pool: Pool) -> None:
     await adapter.apply_pending()
 
     now = datetime.now(UTC)
-    future = now + timedelta(seconds=10)
     past = now - timedelta(seconds=1)
 
     # Reserve one that expires in future (won't be deleted).
