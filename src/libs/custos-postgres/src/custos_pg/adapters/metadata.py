@@ -352,9 +352,7 @@ class PgMetadataAdapter:
         lazy: LazyPool | None = None,
     ) -> None:
         if pool is None and lazy is None:
-            raise ValueError(
-                "PgMetadataAdapter requires either `pool` or `lazy`."
-            )
+            raise ValueError("PgMetadataAdapter requires either `pool` or `lazy`.")
         self._pool: Pool | None = pool
         self._lazy = lazy
         self._applied_revisions: set[int] = set()
@@ -390,8 +388,7 @@ class PgMetadataAdapter:
         async with pool.acquire() as conn, conn.transaction():
             await ensure_ledger(conn)
             applied = await conn.fetch(
-                "SELECT revision FROM custos_meta.adapter_revisions "
-                "WHERE interface_name = $1",
+                "SELECT revision FROM custos_meta.adapter_revisions WHERE interface_name = $1",
                 INTERFACE_NAME,
             )
             already = {int(r["revision"]) for r in applied}
@@ -402,8 +399,7 @@ class PgMetadataAdapter:
                     await conn.execute(stmt)
                 await record_revision(conn, INTERFACE_NAME, rev.number)
                 summaries.append(
-                    f"applied {INTERFACE_NAME} rev{rev.number} "
-                    f"({len(rev.statements)} statements)"
+                    f"applied {INTERFACE_NAME} rev{rev.number} ({len(rev.statements)} statements)"
                 )
         await self.refresh_declared()
         return summaries
@@ -500,9 +496,7 @@ class PgMetadataAdapter:
         if cursor is not None:
             ts_iso, rid = _decode_cursor(cursor)
             params.extend([datetime.fromisoformat(ts_iso), rid])
-            where.append(
-                f"(started_at, run_id) < (${len(params) - 1}, ${len(params)})"
-            )
+            where.append(f"(started_at, run_id) < (${len(params) - 1}, ${len(params)})")
         params.append(eff_limit + 1)
         sql = (
             "SELECT workspace_id, run_id, workflow_id, workflow_version, "
@@ -593,9 +587,7 @@ class PgMetadataAdapter:
 
     # ----- Trigger Service state -----
 
-    async def put_subscription(
-        self, workspace_id: str, subscription: Subscription
-    ) -> Subscription:
+    async def put_subscription(self, workspace_id: str, subscription: Subscription) -> Subscription:
         pool = await self._pool_ref()
         try:
             async with pool.acquire() as conn:
@@ -637,9 +629,7 @@ class PgMetadataAdapter:
                 state,
             )
         if row is None:
-            raise ValueError(
-                f"unknown subscription: {workspace_id!r}/{subscription_id!r}"
-            )
+            raise ValueError(f"unknown subscription: {workspace_id!r}/{subscription_id!r}")
         return _row_to_subscription(row)
 
     async def append_subscription_selector(
@@ -690,9 +680,7 @@ class PgMetadataAdapter:
         assert row is not None
         return _row_to_resume(row)
 
-    async def delete_resume_subscription(
-        self, workspace_id: str, resume_id: str
-    ) -> None:
+    async def delete_resume_subscription(self, workspace_id: str, resume_id: str) -> None:
         pool = await self._pool_ref()
         async with pool.acquire() as conn:
             await conn.execute(
@@ -818,8 +806,7 @@ class PgMetadataAdapter:
         try:
             async with pool.acquire() as conn, conn.transaction():
                 locked = await conn.fetchval(
-                    "SELECT pg_try_advisory_xact_lock("
-                    "hashtext($1), hashtext($2))",
+                    "SELECT pg_try_advisory_xact_lock(hashtext($1), hashtext($2))",
                     workspace_id,
                     instance_id,
                 )
@@ -889,13 +876,10 @@ class PgMetadataAdapter:
     ) -> ConnectorCursor:
         if not isinstance(lease, PgLeaseHandle):
             raise LeaseExpired(
-                f"lease handle was not issued by PgMetadataAdapter "
-                f"(got {type(lease).__name__})"
+                f"lease handle was not issued by PgMetadataAdapter (got {type(lease).__name__})"
             )
         if lease.workspace_id != workspace_id:
-            raise LeaseExpired(
-                "lease handle workspace does not match commit_cursor argument"
-            )
+            raise LeaseExpired("lease handle workspace does not match commit_cursor argument")
         pool = await self._pool_ref()
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -921,9 +905,7 @@ class PgMetadataAdapter:
             )
         return _row_to_cursor(row)
 
-    async def release_cursor_lease(
-        self, workspace_id: str, lease: LeaseHandle
-    ) -> None:
+    async def release_cursor_lease(self, workspace_id: str, lease: LeaseHandle) -> None:
         if not isinstance(lease, PgLeaseHandle):
             return  # idempotent: foreign handles are no-ops here
         if lease.workspace_id != workspace_id:
@@ -940,9 +922,7 @@ class PgMetadataAdapter:
                 lease.holder_id,
             )
 
-    async def read_cursor(
-        self, workspace_id: str, instance_id: str
-    ) -> ConnectorCursor | None:
+    async def read_cursor(self, workspace_id: str, instance_id: str) -> ConnectorCursor | None:
         pool = await self._pool_ref()
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -983,16 +963,12 @@ class PgMetadataAdapter:
                 new_value,
             )
         if row is None:
-            raise ValueError(
-                f"unknown connector_cursor: {workspace_id!r}/{instance_id!r}"
-            )
+            raise ValueError(f"unknown connector_cursor: {workspace_id!r}/{instance_id!r}")
         return _row_to_cursor(row)
 
     # ----- Artifact backrefs -----
 
-    async def append_artifact_use(
-        self, workspace_id: str, use: ArtifactUse
-    ) -> ArtifactUse:
+    async def append_artifact_use(self, workspace_id: str, use: ArtifactUse) -> ArtifactUse:
         pool = await self._pool_ref()
         try:
             async with pool.acquire() as conn:
@@ -1158,8 +1134,7 @@ class PgMetadataAdapter:
         pool = await self._pool_ref()
         async with pool.acquire() as conn:
             result = await conn.execute(
-                "DELETE FROM custos_state.idempotency_record "
-                "WHERE expires_at <= $1",
+                "DELETE FROM custos_state.idempotency_record WHERE expires_at <= $1",
                 before,
             )
         # result is a string like "DELETE 42"; extract count.
@@ -1241,17 +1216,14 @@ class PgMetadataAdapter:
                 json.dumps(dict(token_bundle)),
             )
         if row is None:
-            raise ValueError(
-                f"no device-code session for {workspace_id!r}/{device_code!r}"
-            )
+            raise ValueError(f"no device-code session for {workspace_id!r}/{device_code!r}")
         return _row_to_device_code_session(row)
 
     async def delete_expired_device_code_sessions(self, before: datetime) -> int:
         pool = await self._pool_ref()
         async with pool.acquire() as conn:
             result = await conn.execute(
-                "DELETE FROM custos_state.device_code_session "
-                "WHERE expires_at <= $1",
+                "DELETE FROM custos_state.device_code_session WHERE expires_at <= $1",
                 before,
             )
         count = int(result.split()[-1]) if result else 0
@@ -1277,17 +1249,11 @@ class PgMetadataAdapter:
     ) -> Page[AuditEvent]:
         raise NotImplementedError("query_audit lands in SPL-015 (#129)")
 
-    async def stream_audit_outbox(
-        self, cursor: int, batch_size: int
-    ) -> AuditOutboxBatch:
+    async def stream_audit_outbox(self, cursor: int, batch_size: int) -> AuditOutboxBatch:
         raise NotImplementedError("stream_audit_outbox lands in SPL-015 (#129)")
 
-    async def commit_audit_outbox_cursor(
-        self, pipeline_id: str, cursor: int
-    ) -> None:
-        raise NotImplementedError(
-            "commit_audit_outbox_cursor lands in SPL-015 (#129)"
-        )
+    async def commit_audit_outbox_cursor(self, pipeline_id: str, cursor: int) -> None:
+        raise NotImplementedError("commit_audit_outbox_cursor lands in SPL-015 (#129)")
 
     def listen_audit_outbox(self) -> AsyncIterator[NotifyEvent]:
         # Declared as a coroutine-free method on the Protocol; if a
@@ -1298,9 +1264,7 @@ class PgMetadataAdapter:
 
     # ----- Transactions -----
 
-    async def with_transaction(
-        self, fn: Callable[[TransactionHandle], Awaitable[T]]
-    ) -> T:
+    async def with_transaction(self, fn: Callable[[TransactionHandle], Awaitable[T]]) -> T:
         pool = await self._pool_ref()
         async with pool.acquire() as conn, conn.transaction():
             handle = PgTransactionHandle(conn)
