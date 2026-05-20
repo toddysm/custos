@@ -30,7 +30,7 @@ from typing import NamedTuple
 
 # Adapter package root: <repo>/src/libs/storage-provider-layer/src/custos_spl/adapters
 _ADAPTERS_ROOT = (
-    Path(__file__).resolve().parents[2] / "src" / "custos_spl" / "adapters"
+    Path(__file__).resolve().parents[1] / "src" / "custos_spl" / "adapters"
 )
 
 # Subpaths exempt from workspace scoping.
