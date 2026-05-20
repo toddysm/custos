@@ -1,9 +1,9 @@
-"""`custos migrate up` CLI — operator command that gates platform startup.
+"""`custos-migrate up` CLI — operator command that gates platform startup.
 
 The platform never auto-migrates (see `design/components/storage-provider-layer/design.md`
 § Migration Runner). An operator runs:
 
-    custos migrate up [--adapter NAME] [--check]
+    custos-migrate up [--adapter NAME] [--check]
 
 The CLI discovers candidate adapters through the `custos_spl.adapters`
 entry-point group. Each entry point name is the human-friendly adapter
