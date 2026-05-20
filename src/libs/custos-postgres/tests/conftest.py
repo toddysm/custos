@@ -28,7 +28,7 @@ async def pg_pool() -> AsyncIterator[Pool]:
       1. `CUSTOS_PG_DSN` env var (preferred for CI with an external Postgres).
       2. `testcontainers[postgres]` container (local dev).
 
-    The fixture truncates known schemas before each test so adapter
+    The fixture drops known schemas before each test so adapter
     integration tests are isolated.
     """
     import asyncpg
