@@ -32,7 +32,7 @@ class _FakeStore:
 
     def tail(
         self, workspace_id: WorkspaceId
-    ) -> AsyncIterator[str]:  # type: ignore[empty-body]
+    ) -> AsyncIterator[str]:
         """Plain `def` returning an AsyncIterator — like tail_run_logs."""
         self.calls.append(("tail", (workspace_id,), {}))
 
