@@ -8,6 +8,10 @@ Populated by:
 - SPL-007 — LogQueryProvider + MetricsQueryProvider
 """
 
+from custos_spl.interfaces.artifact_store import (
+    ArtifactDescriptor,
+    ArtifactStoreProvider,
+)
 from custos_spl.interfaces.catalog_store import (
     ActivityTypeVersion,
     CatalogStoreProvider,
@@ -53,6 +57,8 @@ from custos_spl.interfaces.metadata_store import (
 
 __all__ = [
     "ActivityTypeVersion",
+    "ArtifactDescriptor",
+    "ArtifactStoreProvider",
     "ArtifactUse",
     "AuditEvent",
     "AuditFilter",
