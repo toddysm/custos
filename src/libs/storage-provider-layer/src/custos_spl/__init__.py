@@ -89,6 +89,7 @@ from custos_spl.interfaces import (
     Schedule,
     ServiceAccount,
     ServiceToken,
+    Severity,
     Step,
     StepAttempt,
     Subscription,
