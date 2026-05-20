@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 from datetime import datetime
@@ -33,7 +32,7 @@ from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
 from custos_pg.migrations.catalog import CATALOG_REV1
-from custos_pg.pool import DSN_ENV_VAR, LazyPool
+from custos_pg.pool import LazyPool, read_dsn_from_env
 from custos_pg.revisions import ensure_ledger, read_declared, record_revision
 
 if TYPE_CHECKING:
@@ -489,14 +488,7 @@ class PgCatalogAdapter:
 
 def make_adapter() -> PgCatalogAdapter:
     """Entry-point factory (synchronous). See definition.make_adapter."""
-    dsn = os.environ.get(DSN_ENV_VAR)
-    if not dsn:
-        raise RuntimeError(
-            f"{DSN_ENV_VAR} is not set; cannot construct Postgres pool. "
-            "Set it to a libpq DSN such as "
-            "'postgresql://user:pw@host:5432/custos'."
-        )
-    return PgCatalogAdapter(lazy=LazyPool(dsn))
+    return PgCatalogAdapter(lazy=LazyPool(read_dsn_from_env()))
 
 
 __all__ = ["INTERFACE_NAME", "PgCatalogAdapter", "make_adapter"]

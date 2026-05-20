@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 from datetime import datetime
@@ -38,7 +37,7 @@ from custos_spl.interfaces.definition_store import (
 from custos_spl.pagination import Cursor, Page
 
 from custos_pg.migrations.definition import DEFINITION_REV1
-from custos_pg.pool import DSN_ENV_VAR, LazyPool
+from custos_pg.pool import LazyPool, read_dsn_from_env
 from custos_pg.revisions import ensure_ledger, read_declared, record_revision
 
 if TYPE_CHECKING:
@@ -474,14 +473,7 @@ def make_adapter() -> PgDefinitionAdapter:
     pool is built lazily on first async use. The SPL CLI invokes this
     outside an event loop and then awaits adapter methods.
     """
-    dsn = os.environ.get(DSN_ENV_VAR)
-    if not dsn:
-        raise RuntimeError(
-            f"{DSN_ENV_VAR} is not set; cannot construct Postgres pool. "
-            "Set it to a libpq DSN such as "
-            "'postgresql://user:pw@host:5432/custos'."
-        )
-    return PgDefinitionAdapter(lazy=LazyPool(dsn))
+    return PgDefinitionAdapter(lazy=LazyPool(read_dsn_from_env()))
 
 
 __all__ = ["INTERFACE_NAME", "PgDefinitionAdapter", "make_adapter"]
