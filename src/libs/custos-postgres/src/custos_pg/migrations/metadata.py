@@ -283,10 +283,6 @@ METADATA_REV4 = Revision(
             PRIMARY KEY (id)
         )
         """,
-        """
-        CREATE INDEX IF NOT EXISTS audit_outbox_by_id
-            ON custos_state.audit_outbox (id)
-        """,
         # ----- Audit outbox drain cursors -----
         # Per-pipeline high-water mark: each pipeline (`audit-store`,
         # `audit-alert`, …) tracks its own cursor so slow consumers don't
