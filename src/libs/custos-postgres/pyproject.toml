@@ -81,11 +81,6 @@ mypy_path = "src:../storage-provider-layer/src"
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_defs = false
-# Tests pass plain string literals into dataclasses whose fields are
-# typed as SPL ID NewTypes (e.g. `WorkspaceId = NewType(..., str)`).
-# Wrapping every literal in its NewType constructor adds churn without
-# catching real bugs — the runtime values are interchangeable with str.
-disable_error_code = ["arg-type"]
 
 [[tool.mypy.overrides]]
 module = ["asyncpg.*", "testcontainers.*"]
