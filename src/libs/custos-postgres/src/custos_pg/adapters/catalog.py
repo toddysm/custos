@@ -439,8 +439,8 @@ class PgCatalogAdapter:
         # not a database round-trip.
         try:
             spec = SpecifierSet(semver_range)
-        except InvalidSpecifier:
-            return None
+        except InvalidSpecifier as exc:
+            raise ValueError(f"Invalid semver_range: {semver_range!r}") from exc
         pool = await self._pool_ref()
         async with pool.acquire() as conn:
             parent = await conn.fetchrow(
