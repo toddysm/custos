@@ -1277,28 +1277,31 @@ class PgMetadataAdapter:
         if tx is not None:
             # Use the provided transaction handle's connection.
             conn = cast(PgTransactionHandle, tx).conn
-            await conn.execute(
-                "INSERT INTO custos_state.audit_event "
-                "(workspace_id, event_id, event_type, actor, subject, payload, "
-                "occurred_at) "
-                "VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7)",
-                workspace_id,
-                event.event_id,
-                event.event_type,
-                event.actor,
-                json.dumps(dict(event.subject)),
-                json.dumps(dict(event.payload)),
-                event.occurred_at,
-            )
-            await conn.execute(
-                "INSERT INTO custos_state.audit_outbox "
-                "(workspace_id, event_id, event_type, payload) "
-                "VALUES ($1, $2, $3, $4::jsonb)",
-                workspace_id,
-                event.event_id,
-                event.event_type,
-                json.dumps(dict(event.payload)),
-            )
+            try:
+                await conn.execute(
+                    "INSERT INTO custos_state.audit_event "
+                    "(workspace_id, event_id, event_type, actor, subject, payload, "
+                    "occurred_at) "
+                    "VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7)",
+                    workspace_id,
+                    event.event_id,
+                    event.event_type,
+                    event.actor,
+                    json.dumps(dict(event.subject)),
+                    json.dumps(dict(event.payload)),
+                    event.occurred_at,
+                )
+                await conn.execute(
+                    "INSERT INTO custos_state.audit_outbox "
+                    "(workspace_id, event_id, event_type, payload) "
+                    "VALUES ($1, $2, $3, $4::jsonb)",
+                    workspace_id,
+                    event.event_id,
+                    event.event_type,
+                    json.dumps(dict(event.payload)),
+                )
+            except Exception as exc:
+                raise self._classify(exc) from exc
         else:
             async with pool.acquire() as conn:
                 try:
