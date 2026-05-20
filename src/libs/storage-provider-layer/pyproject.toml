@@ -37,6 +37,9 @@ Repository = "https://github.com/toddysm/custos"
 Issues = "https://github.com/toddysm/custos/issues"
 Design = "https://github.com/toddysm/custos/blob/main/design/components/storage-provider-layer/design.md"
 
+[project.scripts]
+custos-migrate = "custos_spl.migrations.cli:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/custos_spl"]
 
