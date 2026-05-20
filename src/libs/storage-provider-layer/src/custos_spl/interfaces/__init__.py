@@ -44,6 +44,13 @@ from custos_spl.interfaces.definition_store import (
     WorkflowTemplateVersion,
     WorkflowVersion,
 )
+from custos_spl.interfaces.log_query import (
+    LogFilter,
+    LogPage,
+    LogQueryProvider,
+    LogRecord,
+    Severity,
+)
 from custos_spl.interfaces.metadata_store import (
     ArtifactUse,
     AuditEvent,
@@ -75,6 +82,13 @@ from custos_spl.interfaces.metadata_store import (
     SubscriptionSelector,
     TransactionHandle,
 )
+from custos_spl.interfaces.metrics_query import (
+    MetricRange,
+    MetricSample,
+    MetricSelector,
+    MetricSeries,
+    MetricsQueryProvider,
+)
 
 __all__ = [
     "ActivityTypeVersion",
@@ -102,7 +116,16 @@ __all__ = [
     "IdempotencyRecord",
     "KeyReuse",
     "LeaseHandle",
+    "LogFilter",
+    "LogPage",
+    "LogQueryProvider",
+    "LogRecord",
     "MetadataStoreProvider",
+    "MetricRange",
+    "MetricSample",
+    "MetricSelector",
+    "MetricSeries",
+    "MetricsQueryProvider",
     "NotifyEvent",
     "OidcIdentity",
     "Permission",
@@ -120,6 +143,7 @@ __all__ = [
     "Schedule",
     "ServiceAccount",
     "ServiceToken",
+    "Severity",
     "Step",
     "StepAttempt",
     "Subscription",
