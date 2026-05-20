@@ -688,9 +688,9 @@ async def test_with_transaction_handle_rejected_by_other_provider(
         captured["tx"] = tx
 
     await adapter1.with_transaction(body)
-    # Once the with_transaction scope ends the handle is dead — even
-    # the issuing provider would reject it now. Use `append_audit`
-    # (a stubbed tx-aware method) on adapter2 to surface the check.
+    # The captured handle remains associated with adapter1; use
+    # `append_audit` (a stubbed tx-aware method) on adapter2 to verify
+    # that another provider rejects it.
     with pytest.raises(InvalidTransactionHandle):
         await adapter2.append_audit(
             "ws-1",
