@@ -46,6 +46,7 @@ Design = "https://github.com/toddysm/custos/blob/main/design/components/storage-
 [project.entry-points."custos_spl.adapters"]
 postgres-definition = "custos_pg.adapters.definition:make_adapter"
 postgres-catalog = "custos_pg.adapters.catalog:make_adapter"
+postgres-metadata = "custos_pg.adapters.metadata:make_adapter"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/custos_pg"]
