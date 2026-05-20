@@ -41,6 +41,7 @@ from custos_spl.errors import (
     InvalidTransactionHandle,
     LeaseBusy,
     LeaseExpired,
+    NotReserved,
 )
 from custos_spl.interfaces.metadata_store import (
     ArtifactUse,
@@ -52,7 +53,11 @@ from custos_spl.interfaces.metadata_store import (
     DedupKey,
     DedupReserved,
     DeviceCodeSession,
+    ExistingCompleted,
+    ExistingInFlight,
     IdempotencyRecord,
+    IdemReserved,
+    KeyReuse,
     LeaseHandle,
     NotifyEvent,
     PutDedupKeyResult,
@@ -70,7 +75,7 @@ from custos_spl.interfaces.metadata_store import (
 from custos_spl.middleware.transactions import bind_handle, check_handle
 from custos_spl.pagination import Cursor, Page
 
-from custos_pg.migrations.metadata import METADATA_REV1
+from custos_pg.migrations.metadata import METADATA_REV1, METADATA_REV2, METADATA_REV3
 from custos_pg.pool import LazyPool, read_dsn_from_env
 from custos_pg.revisions import ensure_ledger, read_declared, record_revision
 
@@ -294,6 +299,41 @@ def _row_to_artifact_use(row: Record) -> ArtifactUse:
     )
 
 
+def _row_to_idempotency_record(row: Record) -> IdempotencyRecord:
+    return IdempotencyRecord(
+        workspace_id=row["workspace_id"],
+        principal_id=row["principal_id"],
+        route=row["route"],
+        idempotency_key=row["idempotency_key"],
+        request_hash=row["request_hash"],
+        status=row["status"],
+        response_snapshot=(
+            MappingProxyType(dict(_json_payload(row["response_snapshot"])))
+            if row["response_snapshot"] is not None
+            else None
+        ),
+        reserved_at=row["reserved_at"],
+        expires_at=row["expires_at"],
+    )
+
+
+def _row_to_device_code_session(row: Record) -> DeviceCodeSession:
+    return DeviceCodeSession(
+        workspace_id=row["workspace_id"],
+        device_code=row["device_code"],
+        user_code=row["user_code"],
+        issuer_alias=row["issuer_alias"],
+        status=row["status"],
+        token_bundle=(
+            MappingProxyType(dict(_json_payload(row["token_bundle"])))
+            if row["token_bundle"] is not None
+            else None
+        ),
+        created_at=row["created_at"],
+        expires_at=row["expires_at"],
+    )
+
+
 class PgMetadataAdapter:
     """asyncpg implementation of `MetadataStoreProvider` — #127 slice.
 
@@ -312,9 +352,7 @@ class PgMetadataAdapter:
         lazy: LazyPool | None = None,
     ) -> None:
         if pool is None and lazy is None:
-            raise ValueError(
-                "PgMetadataAdapter requires either `pool` or `lazy`."
-            )
+            raise ValueError("PgMetadataAdapter requires either `pool` or `lazy`.")
         self._pool: Pool | None = pool
         self._lazy = lazy
         self._applied_revisions: set[int] = set()
@@ -339,32 +377,29 @@ class PgMetadataAdapter:
     async def apply_pending(self) -> list[str]:
         """Apply revisions in scope for this adapter slice.
 
-        Only rev 1 lives in this PR; revs 2-4 will be added by #128
-        and #129. `declared_revisions` therefore reports `{1}` after a
-        successful apply, which leaves a gap for the platform's
-        `SCHEMA_REVISION = 4` until the follow-on PRs land — this is
-        an intentional, transparent iteration step, not a silent
-        bypass.
+        Revisions 1-3 live in this PR and #128; revision 4 (audit
+        outbox) lands in #129. `declared_revisions` reports whatever was
+        applied (typically {1, 2, 3} after both PRs merge), leaving a gap
+        for the platform's `SCHEMA_REVISION = 4` until the audit PR lands
+        — this is an intentional, transparent iteration step.
         """
         summaries: list[str] = []
         pool = await self._pool_ref()
         async with pool.acquire() as conn, conn.transaction():
             await ensure_ledger(conn)
             applied = await conn.fetch(
-                "SELECT revision FROM custos_meta.adapter_revisions "
-                "WHERE interface_name = $1",
+                "SELECT revision FROM custos_meta.adapter_revisions WHERE interface_name = $1",
                 INTERFACE_NAME,
             )
             already = {int(r["revision"]) for r in applied}
-            for rev in (METADATA_REV1,):
+            for rev in (METADATA_REV1, METADATA_REV2, METADATA_REV3):
                 if rev.number in already:
                     continue
                 for stmt in rev.statements:
                     await conn.execute(stmt)
                 await record_revision(conn, INTERFACE_NAME, rev.number)
                 summaries.append(
-                    f"applied {INTERFACE_NAME} rev{rev.number} "
-                    f"({len(rev.statements)} statements)"
+                    f"applied {INTERFACE_NAME} rev{rev.number} ({len(rev.statements)} statements)"
                 )
         await self.refresh_declared()
         return summaries
@@ -461,9 +496,7 @@ class PgMetadataAdapter:
         if cursor is not None:
             ts_iso, rid = _decode_cursor(cursor)
             params.extend([datetime.fromisoformat(ts_iso), rid])
-            where.append(
-                f"(started_at, run_id) < (${len(params) - 1}, ${len(params)})"
-            )
+            where.append(f"(started_at, run_id) < (${len(params) - 1}, ${len(params)})")
         params.append(eff_limit + 1)
         sql = (
             "SELECT workspace_id, run_id, workflow_id, workflow_version, "
@@ -554,9 +587,7 @@ class PgMetadataAdapter:
 
     # ----- Trigger Service state -----
 
-    async def put_subscription(
-        self, workspace_id: str, subscription: Subscription
-    ) -> Subscription:
+    async def put_subscription(self, workspace_id: str, subscription: Subscription) -> Subscription:
         pool = await self._pool_ref()
         try:
             async with pool.acquire() as conn:
@@ -598,9 +629,7 @@ class PgMetadataAdapter:
                 state,
             )
         if row is None:
-            raise ValueError(
-                f"unknown subscription: {workspace_id!r}/{subscription_id!r}"
-            )
+            raise ValueError(f"unknown subscription: {workspace_id!r}/{subscription_id!r}")
         return _row_to_subscription(row)
 
     async def append_subscription_selector(
@@ -651,9 +680,7 @@ class PgMetadataAdapter:
         assert row is not None
         return _row_to_resume(row)
 
-    async def delete_resume_subscription(
-        self, workspace_id: str, resume_id: str
-    ) -> None:
+    async def delete_resume_subscription(self, workspace_id: str, resume_id: str) -> None:
         pool = await self._pool_ref()
         async with pool.acquire() as conn:
             await conn.execute(
@@ -779,8 +806,7 @@ class PgMetadataAdapter:
         try:
             async with pool.acquire() as conn, conn.transaction():
                 locked = await conn.fetchval(
-                    "SELECT pg_try_advisory_xact_lock("
-                    "hashtext($1), hashtext($2))",
+                    "SELECT pg_try_advisory_xact_lock(hashtext($1), hashtext($2))",
                     workspace_id,
                     instance_id,
                 )
@@ -850,13 +876,10 @@ class PgMetadataAdapter:
     ) -> ConnectorCursor:
         if not isinstance(lease, PgLeaseHandle):
             raise LeaseExpired(
-                f"lease handle was not issued by PgMetadataAdapter "
-                f"(got {type(lease).__name__})"
+                f"lease handle was not issued by PgMetadataAdapter (got {type(lease).__name__})"
             )
         if lease.workspace_id != workspace_id:
-            raise LeaseExpired(
-                "lease handle workspace does not match commit_cursor argument"
-            )
+            raise LeaseExpired("lease handle workspace does not match commit_cursor argument")
         pool = await self._pool_ref()
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -882,9 +905,7 @@ class PgMetadataAdapter:
             )
         return _row_to_cursor(row)
 
-    async def release_cursor_lease(
-        self, workspace_id: str, lease: LeaseHandle
-    ) -> None:
+    async def release_cursor_lease(self, workspace_id: str, lease: LeaseHandle) -> None:
         if not isinstance(lease, PgLeaseHandle):
             return  # idempotent: foreign handles are no-ops here
         if lease.workspace_id != workspace_id:
@@ -901,9 +922,7 @@ class PgMetadataAdapter:
                 lease.holder_id,
             )
 
-    async def read_cursor(
-        self, workspace_id: str, instance_id: str
-    ) -> ConnectorCursor | None:
+    async def read_cursor(self, workspace_id: str, instance_id: str) -> ConnectorCursor | None:
         pool = await self._pool_ref()
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -944,16 +963,12 @@ class PgMetadataAdapter:
                 new_value,
             )
         if row is None:
-            raise ValueError(
-                f"unknown connector_cursor: {workspace_id!r}/{instance_id!r}"
-            )
+            raise ValueError(f"unknown connector_cursor: {workspace_id!r}/{instance_id!r}")
         return _row_to_cursor(row)
 
     # ----- Artifact backrefs -----
 
-    async def append_artifact_use(
-        self, workspace_id: str, use: ArtifactUse
-    ) -> ArtifactUse:
+    async def append_artifact_use(self, workspace_id: str, use: ArtifactUse) -> ArtifactUse:
         pool = await self._pool_ref()
         try:
             async with pool.acquire() as conn:
@@ -1010,7 +1025,7 @@ class PgMetadataAdapter:
             next_cursor=next_cursor,
         )
 
-    # ----- Gateway short-lived state (#128 — stubs) -----
+    # ----- Gateway short-lived state (#128) -----
 
     async def reserve_idempotency_record(
         self,
@@ -1021,7 +1036,68 @@ class PgMetadataAdapter:
         request_hash: str,
         ttl_seconds: int,
     ) -> ReserveIdempotencyResult:
-        raise NotImplementedError("reserve_idempotency_record lands in SPL-014 (#128)")
+        """Atomic reserve-or-read: CAS to insert a fresh record or detect conflicts.
+
+        Returns one of:
+        - `IdemReserved` if the key was not present (caller should perform work).
+        - `ExistingCompleted` if an identical hash is already done (return snapshot).
+        - `ExistingInFlight` if an identical hash is still in progress (retry).
+        - `KeyReuse` if the key exists with a different hash (422 response).
+        """
+        expires_at = datetime.now(UTC) + timedelta(seconds=ttl_seconds)
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            # Try to insert a fresh record; if it exists, reclaim it only if expired.
+            row = await conn.fetchrow(
+                "INSERT INTO custos_state.idempotency_record "
+                "(workspace_id, principal_id, route, idempotency_key, "
+                " request_hash, status, reserved_at, expires_at) "
+                "VALUES ($1, $2, $3, $4, $5, 'in_progress', now(), $6) "
+                "ON CONFLICT (workspace_id, principal_id, route, idempotency_key) "
+                "DO UPDATE SET "
+                "request_hash = EXCLUDED.request_hash, "
+                "status = EXCLUDED.status, "
+                "response_snapshot = NULL, "
+                "reserved_at = EXCLUDED.reserved_at, "
+                "expires_at = EXCLUDED.expires_at "
+                "WHERE custos_state.idempotency_record.expires_at <= now() "
+                "RETURNING workspace_id, principal_id, route, idempotency_key, "
+                "request_hash, status, response_snapshot, reserved_at, expires_at",
+                workspace_id,
+                principal_id,
+                route,
+                idempotency_key,
+                request_hash,
+                expires_at,
+            )
+            if row is not None:
+                return IdemReserved(record=_row_to_idempotency_record(row))
+            # Key exists; fetch it to detect conflicts or in-flight status.
+            existing = await conn.fetchrow(
+                "SELECT workspace_id, principal_id, route, idempotency_key, "
+                "request_hash, status, response_snapshot, reserved_at, expires_at "
+                "FROM custos_state.idempotency_record "
+                "WHERE workspace_id = $1 AND principal_id = $2 "
+                "  AND route = $3 AND idempotency_key = $4",
+                workspace_id,
+                principal_id,
+                route,
+                idempotency_key,
+            )
+            assert existing is not None
+            rec = _row_to_idempotency_record(existing)
+            if existing["request_hash"] != request_hash:
+                return KeyReuse(record=rec)
+            if existing["status"] == "in_progress":
+                return ExistingInFlight(record=rec)
+            # status == "completed"
+            assert existing["response_snapshot"] is not None
+            return ExistingCompleted(
+                record=rec,
+                response_snapshot=MappingProxyType(
+                    dict(_json_payload(existing["response_snapshot"]))
+                ),
+            )
 
     async def complete_idempotency_record(
         self,
@@ -1031,31 +1107,95 @@ class PgMetadataAdapter:
         idempotency_key: str,
         response_snapshot: Mapping[str, Any],
     ) -> IdempotencyRecord:
-        raise NotImplementedError("complete_idempotency_record lands in SPL-014 (#128)")
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "UPDATE custos_state.idempotency_record "
+                "SET status = 'completed', response_snapshot = $5::jsonb "
+                "WHERE workspace_id = $1 AND principal_id = $2 "
+                "  AND route = $3 AND idempotency_key = $4 "
+                "  AND status = 'in_progress' "
+                "RETURNING workspace_id, principal_id, route, idempotency_key, "
+                "request_hash, status, response_snapshot, reserved_at, expires_at",
+                workspace_id,
+                principal_id,
+                route,
+                idempotency_key,
+                json.dumps(dict(response_snapshot)),
+            )
+        if row is None:
+            raise NotReserved(
+                f"no in-progress reservation for "
+                f"{workspace_id!r}/{principal_id!r}/{route!r}/{idempotency_key!r}"
+            )
+        return _row_to_idempotency_record(row)
 
     async def delete_expired_idempotency_records(self, before: datetime) -> int:
-        raise NotImplementedError(
-            "delete_expired_idempotency_records lands in SPL-014 (#128)"
-        )
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM custos_state.idempotency_record WHERE expires_at <= $1",
+                before,
+            )
+        # result is a string like "DELETE 42"; extract count.
+        count = int(result.split()[-1]) if result else 0
+        return count
 
     async def put_device_code_session(
         self, workspace_id: str, session: DeviceCodeSession
     ) -> DeviceCodeSession:
-        raise NotImplementedError("put_device_code_session lands in SPL-014 (#128)")
+        pool = await self._pool_ref()
+        try:
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "INSERT INTO custos_state.device_code_session "
+                    "(workspace_id, device_code, user_code, issuer_alias, status, "
+                    " created_at, expires_at) "
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7) "
+                    "RETURNING workspace_id, device_code, user_code, issuer_alias, "
+                    "status, token_bundle, created_at, expires_at",
+                    workspace_id,
+                    session.device_code,
+                    session.user_code,
+                    session.issuer_alias,
+                    session.status,
+                    session.created_at,
+                    session.expires_at,
+                )
+        except Exception as exc:
+            raise self._classify(exc) from exc
+        assert row is not None
+        return _row_to_device_code_session(row)
 
     async def get_device_code_session_by_device_code(
         self, workspace_id: str, device_code: str
     ) -> DeviceCodeSession | None:
-        raise NotImplementedError(
-            "get_device_code_session_by_device_code lands in SPL-014 (#128)"
-        )
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT workspace_id, device_code, user_code, issuer_alias, status, "
+                "token_bundle, created_at, expires_at "
+                "FROM custos_state.device_code_session "
+                "WHERE workspace_id = $1 AND device_code = $2",
+                workspace_id,
+                device_code,
+            )
+        return _row_to_device_code_session(row) if row is not None else None
 
     async def get_device_code_session_by_user_code(
         self, workspace_id: str, user_code: str
     ) -> DeviceCodeSession | None:
-        raise NotImplementedError(
-            "get_device_code_session_by_user_code lands in SPL-014 (#128)"
-        )
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT workspace_id, device_code, user_code, issuer_alias, status, "
+                "token_bundle, created_at, expires_at "
+                "FROM custos_state.device_code_session "
+                "WHERE workspace_id = $1 AND user_code = $2",
+                workspace_id,
+                user_code,
+            )
+        return _row_to_device_code_session(row) if row is not None else None
 
     async def complete_device_code_session(
         self,
@@ -1063,14 +1203,31 @@ class PgMetadataAdapter:
         device_code: str,
         token_bundle: Mapping[str, Any],
     ) -> DeviceCodeSession:
-        raise NotImplementedError(
-            "complete_device_code_session lands in SPL-014 (#128)"
-        )
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "UPDATE custos_state.device_code_session "
+                "SET status = 'completed', token_bundle = $3::jsonb "
+                "WHERE workspace_id = $1 AND device_code = $2 "
+                "RETURNING workspace_id, device_code, user_code, issuer_alias, status, "
+                "token_bundle, created_at, expires_at",
+                workspace_id,
+                device_code,
+                json.dumps(dict(token_bundle)),
+            )
+        if row is None:
+            raise ValueError(f"no device-code session for {workspace_id!r}/{device_code!r}")
+        return _row_to_device_code_session(row)
 
     async def delete_expired_device_code_sessions(self, before: datetime) -> int:
-        raise NotImplementedError(
-            "delete_expired_device_code_sessions lands in SPL-014 (#128)"
-        )
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM custos_state.device_code_session WHERE expires_at <= $1",
+                before,
+            )
+        count = int(result.split()[-1]) if result else 0
+        return count
 
     # ----- Audit writer + outbox drain (#129 — stubs) -----
 
@@ -1092,17 +1249,11 @@ class PgMetadataAdapter:
     ) -> Page[AuditEvent]:
         raise NotImplementedError("query_audit lands in SPL-015 (#129)")
 
-    async def stream_audit_outbox(
-        self, cursor: int, batch_size: int
-    ) -> AuditOutboxBatch:
+    async def stream_audit_outbox(self, cursor: int, batch_size: int) -> AuditOutboxBatch:
         raise NotImplementedError("stream_audit_outbox lands in SPL-015 (#129)")
 
-    async def commit_audit_outbox_cursor(
-        self, pipeline_id: str, cursor: int
-    ) -> None:
-        raise NotImplementedError(
-            "commit_audit_outbox_cursor lands in SPL-015 (#129)"
-        )
+    async def commit_audit_outbox_cursor(self, pipeline_id: str, cursor: int) -> None:
+        raise NotImplementedError("commit_audit_outbox_cursor lands in SPL-015 (#129)")
 
     def listen_audit_outbox(self) -> AsyncIterator[NotifyEvent]:
         # Declared as a coroutine-free method on the Protocol; if a
@@ -1113,9 +1264,7 @@ class PgMetadataAdapter:
 
     # ----- Transactions -----
 
-    async def with_transaction(
-        self, fn: Callable[[TransactionHandle], Awaitable[T]]
-    ) -> T:
+    async def with_transaction(self, fn: Callable[[TransactionHandle], Awaitable[T]]) -> T:
         pool = await self._pool_ref()
         async with pool.acquire() as conn, conn.transaction():
             handle = PgTransactionHandle(conn)

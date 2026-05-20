@@ -13,6 +13,12 @@ same key surfaces as `23505` and the adapter maps that to
 `SELECT … FOR UPDATE NOWAIT` per § Lease Primitive Abstraction in the
 design — the abstract contract is "CAS with fencing token", not "row
 lock", so future backends may implement it differently.
+
+REV2 adds idempotency records for API-gateway deduplication (in_progress
+→ completed; expired rows reaped by the gateway's maintenance task).
+
+REV3 adds device-code session storage for OIDC device-code flow (pending
+→ user_authorized → completed; expired rows reaped).
 """
 
 from __future__ import annotations
@@ -173,4 +179,66 @@ METADATA_REV1 = Revision(
 )
 
 
-__all__ = ["METADATA_REV1"]
+METADATA_REV2 = Revision(
+    number=2,
+    statements=(
+        # ----- Gateway short-lived state: idempotency records -----
+        # `status` tracks the state machine: in_progress → completed.
+        # Expired rows (expires_at <= now()) are reaped by the gateway's
+        # background cleanup job (`delete_expired_idempotency_records`).
+        """
+        CREATE TABLE IF NOT EXISTS custos_state.idempotency_record (
+            workspace_id    TEXT        NOT NULL,
+            principal_id    TEXT        NOT NULL,
+            route           TEXT        NOT NULL,
+            idempotency_key TEXT        NOT NULL,
+            request_hash    TEXT        NOT NULL,
+            status          TEXT        NOT NULL,
+            response_snapshot JSONB,
+            reserved_at     TIMESTAMPTZ NOT NULL,
+            expires_at      TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (workspace_id, principal_id, route, idempotency_key)
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idempotency_record_by_expires_at
+            ON custos_state.idempotency_record (expires_at)
+        """,
+    ),
+)
+
+
+METADATA_REV3 = Revision(
+    number=3,
+    statements=(
+        # ----- Gateway short-lived state: device-code sessions -----
+        # Device-code flow: client polls with user_code, backend polls
+        # with device_code. Status tracks: pending → user_authorized →
+        # completed (on token grant); also expires_at for cleanup.
+        # Unique index on (workspace_id, user_code) for polling by user.
+        """
+        CREATE TABLE IF NOT EXISTS custos_state.device_code_session (
+            workspace_id TEXT        NOT NULL,
+            device_code  TEXT        NOT NULL,
+            user_code    TEXT        NOT NULL,
+            issuer_alias TEXT        NOT NULL,
+            status       TEXT        NOT NULL,
+            token_bundle JSONB,
+            created_at   TIMESTAMPTZ NOT NULL,
+            expires_at   TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (workspace_id, device_code)
+        )
+        """,
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS device_code_session_by_user_code
+            ON custos_state.device_code_session (workspace_id, user_code)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS device_code_session_by_expires_at
+            ON custos_state.device_code_session (expires_at)
+        """,
+    ),
+)
+
+
+__all__ = ["METADATA_REV1", "METADATA_REV2", "METADATA_REV3"]
