@@ -1071,14 +1071,20 @@ class PgMetadataAdapter:
         expires_at = datetime.now(UTC) + timedelta(seconds=ttl_seconds)
         pool = await self._pool_ref()
         async with pool.acquire() as conn:
-            # Try to insert a fresh record; if it exists, fetch the existing one.
+            # Try to insert a fresh record; if it exists, reclaim it only if expired.
             row = await conn.fetchrow(
                 "INSERT INTO custos_state.idempotency_record "
                 "(workspace_id, principal_id, route, idempotency_key, "
                 " request_hash, status, reserved_at, expires_at) "
                 "VALUES ($1, $2, $3, $4, $5, 'in_progress', now(), $6) "
                 "ON CONFLICT (workspace_id, principal_id, route, idempotency_key) "
-                "DO NOTHING "
+                "DO UPDATE SET "
+                "request_hash = EXCLUDED.request_hash, "
+                "status = EXCLUDED.status, "
+                "response_snapshot = NULL, "
+                "reserved_at = EXCLUDED.reserved_at, "
+                "expires_at = EXCLUDED.expires_at "
+                "WHERE custos_state.idempotency_record.expires_at <= now() "
                 "RETURNING workspace_id, principal_id, route, idempotency_key, "
                 "request_hash, status, response_snapshot, reserved_at, expires_at",
                 workspace_id,
