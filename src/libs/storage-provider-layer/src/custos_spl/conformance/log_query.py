@@ -10,9 +10,13 @@ Tests that any LogQuery implementation must pass:
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 import pytest
 
-from custos_spl.errors import BackendUnavailable
+from custos_spl.errors import BackendUnavailable, WorkspaceMismatch
+from custos_spl.ids import RunId, WorkspaceId
+from custos_spl.interfaces.log_query import LogFilter, LogQueryProvider
 
 from .base import AdapterConformanceBase
 
@@ -20,105 +24,166 @@ from .base import AdapterConformanceBase
 class LogQueryConformanceTests(AdapterConformanceBase):
     """Base conformance tests for LogQueryProvider adapters.
 
-    Subclasses MUST provide:
-    - `adapter` fixture: LogQueryProvider instance
-    - `workspace_id` fixture: test workspace ID
-    - `run_id` fixture: test run ID
+    Subclasses MUST provide these pytest fixtures:
+    - `adapter` → LogQueryProvider instance, configured and ready
+    - `workspace_id` → WorkspaceId for testing
+    - `other_workspace_id` → different WorkspaceId for cross-workspace tests
+    - `run_id` → RunId with available logs for testing
+
+    Tests will skip if required fixtures are not provided.
 
     Example:
-        @pytest.fixture
-        def adapter(self) -> LogQueryProvider:
-            return MyLokiAdapter(base_url="http://loki:3100")
+        class TestMyLokiAdapter(LogQueryConformanceTests):
+            @pytest.fixture
+            def adapter(self):
+                return MyLokiAdapter(base_url="http://loki:3100")
+
+            @pytest.fixture
+            def workspace_id(self):
+                return WorkspaceId("ws-test")
     """
 
-    def test_workspace_scoping_query_run_logs(self) -> None:
-        """query_run_logs() enforces workspace scoping.
+    @pytest.fixture
+    def adapter(self) -> LogQueryProvider:
+        """Adapter fixture (must be overridden by subclass)."""
+        pytest.skip("adapter fixture not provided by subclass")
 
-        Cross-workspace queries must return empty page or raise WorkspaceMismatch.
+    @pytest.fixture
+    def workspace_id(self) -> WorkspaceId:
+        """Primary workspace ID fixture (must be overridden by subclass)."""
+        pytest.skip("workspace_id fixture not provided by subclass")
+
+    @pytest.fixture
+    def other_workspace_id(self) -> WorkspaceId:
+        """Secondary workspace ID for cross-workspace tests (must be overridden by subclass)."""
+        pytest.skip("other_workspace_id fixture not provided by subclass")
+
+    @pytest.fixture
+    def run_id(self) -> RunId:
+        """Run ID with logs (must be overridden by subclass)."""
+        pytest.skip("run_id fixture not provided by subclass")
+
+    @pytest.mark.asyncio
+    async def test_empty_query_result_returns_empty_page(
+        self,
+        adapter: LogQueryProvider,
+        workspace_id: WorkspaceId,
+        run_id: RunId,
+    ) -> None:
+        """Query with no matches returns empty LogPage.
+
+        No error raised; items tuple is empty, next_cursor is None.
         """
-        pytest.skip(
-            "Adapter must implement: test workspace scoping for query_run_logs"
-        )
+        # Query with filter that should match nothing
+        log_filter = LogFilter(message_contains="NONEXISTENT_STRING_XYZ_ABC")
+        page = await adapter.query_run_logs(workspace_id, run_id, log_filter)
 
-    def test_workspace_scoping_query_step_logs(self) -> None:
-        """query_step_logs() enforces workspace scoping.
+        assert len(page.items) == 0
+        assert page.next_cursor is None
 
-        Cross-workspace queries must return empty page or raise WorkspaceMismatch.
-        """
-        pytest.skip(
-            "Adapter must implement: test workspace scoping for query_step_logs"
-        )
-
-    def test_workspace_scoping_tail_run_logs(self) -> None:
-        """tail_run_logs() enforces workspace scoping.
-
-        Cross-workspace access must raise WorkspaceMismatch.
-        """
-        pytest.skip(
-            "Adapter must implement: test workspace scoping for tail_run_logs"
-        )
-
-    def test_cursor_pagination_is_idempotent(self) -> None:
+    @pytest.mark.asyncio
+    async def test_cursor_pagination_is_idempotent(
+        self,
+        adapter: LogQueryProvider,
+        workspace_id: WorkspaceId,
+        run_id: RunId,
+    ) -> None:
         """Cursor pagination is idempotent.
 
         Passing the same cursor twice returns the same page.
         Cursor is stateless and opaque.
         """
-        pytest.skip(
-            "Adapter must implement: test cursor pagination idempotency"
+        now = datetime.utcnow()
+        log_filter = LogFilter(
+            start=now - timedelta(hours=1),
+            end=now,
         )
 
-    def test_severity_filtering_includes_and_above(self) -> None:
-        """Severity filter returns matching level and above.
+        # Get first page
+        page1 = await adapter.query_run_logs(workspace_id, run_id, log_filter)
 
-        severity_at_least='warn' returns warn, error, fatal but NOT debug/info.
+        # If there's a next_cursor, fetch same page again
+        if page1.next_cursor:
+            page2 = await adapter.query_run_logs(
+                workspace_id, run_id, log_filter, page1.next_cursor
+            )
+            page3 = await adapter.query_run_logs(
+                workspace_id, run_id, log_filter, page1.next_cursor
+            )
+
+            # Same cursor should yield same results
+            assert len(page2.items) == len(page3.items)
+            if page2.items:
+                assert page2.items[0].timestamp == page3.items[0].timestamp
+
+    @pytest.mark.asyncio
+    async def test_workspace_scoping_blocks_cross_workspace_access(
+        self,
+        adapter: LogQueryProvider,
+        workspace_id: WorkspaceId,
+        other_workspace_id: WorkspaceId,
+        run_id: RunId,
+    ) -> None:
+        """Cross-workspace queries are blocked or return empty.
+
+        Adapter must prevent callers from accessing logs from workspace B
+        when querying as workspace A.
         """
-        pytest.skip(
-            "Adapter must implement: test severity filtering (warn and above)"
-        )
+        log_filter = LogFilter()
 
-    def test_time_range_filtering_respects_bounds(self) -> None:
-        """Time range filter respects start (inclusive) and end (exclusive).
+        # Query from workspace A should work (may be empty if no logs)
+        page_a = await adapter.query_run_logs(workspace_id, run_id, log_filter)
+        assert isinstance(page_a.items, tuple)
 
-        start <= timestamp < end for all returned logs.
-        """
-        pytest.skip(
-            "Adapter must implement: test time range filtering bounds"
-        )
+        # Query from workspace B for same run should return empty or raise
+        try:
+            page_b = await adapter.query_run_logs(
+                other_workspace_id, run_id, log_filter
+            )
+            # If it returns, should be empty
+            assert len(page_b.items) == 0
+        except WorkspaceMismatch:
+            # Also acceptable to raise WorkspaceMismatch
+            pass
 
-    def test_message_content_filtering_substring_match(self) -> None:
-        """Message filter matches substring in log message.
-
-        Case-sensitive substring match against log message.
-        """
-        pytest.skip(
-            "Adapter must implement: test message content filtering"
-        )
-
-    def test_tail_run_logs_returns_async_generator(self) -> None:
+    @pytest.mark.asyncio
+    async def test_tail_run_logs_returns_async_generator(
+        self,
+        adapter: LogQueryProvider,
+        workspace_id: WorkspaceId,
+        run_id: RunId,
+    ) -> None:
         """tail_run_logs() returns async generator (not coroutine).
 
         Caller iterates: async for record in tail_logs().
         """
-        pytest.skip(
-            "Adapter must implement: test tail_run_logs returns async generator"
-        )
+        result = adapter.tail_run_logs(workspace_id, run_id)
 
-    def test_empty_query_result_returns_empty_page(self) -> None:
-        """Query with no matches returns empty LogPage.
+        # Should be an async iterator, not a coroutine
+        assert hasattr(result, "__aiter__"), "tail_run_logs must return async generator"
+        assert hasattr(result, "__anext__"), "tail_run_logs must return async generator"
 
-        No error raised; items tuple is empty, next_cursor is None.
+    @pytest.mark.asyncio
+    async def test_time_range_filtering_respects_bounds(
+        self,
+        adapter: LogQueryProvider,
+        workspace_id: WorkspaceId,
+        run_id: RunId,
+    ) -> None:
+        """Time range filter respects start (inclusive) and end (exclusive).
+
+        start <= timestamp < end for all returned logs.
         """
-        pytest.skip(
-            "Adapter must implement: test empty result handling"
-        )
+        now = datetime.utcnow()
+        start = now - timedelta(hours=1)
+        end = now - timedelta(minutes=30)
 
-    def test_error_classification_transient_failures(self) -> None:
-        """Network/transient errors raise BackendUnavailable.
+        log_filter = LogFilter(start=start, end=end)
+        page = await adapter.query_run_logs(workspace_id, run_id, log_filter)
 
-        Connection refused, timeout, HTTP 503 → BackendUnavailable.
-        Caller retries with backoff.
-        """
-        pytest.skip(
-            "Adapter must implement: test transient errors raise BackendUnavailable"
-        )
+        # All returned logs should be within bounds
+        for record in page.items:
+            assert start <= record.timestamp < end, (
+                f"Log timestamp {record.timestamp} outside bounds "
+                f"[{start}, {end})"
+            )
