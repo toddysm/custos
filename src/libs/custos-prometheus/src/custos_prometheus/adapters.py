@@ -124,8 +124,6 @@ class PrometheusMetricsAdapter:
             return self._parse_range_response(selector.name, data, workspace_id)
 
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 404:
-                raise WorkspaceMismatch(f"run not found: {run_id}") from exc
             raise BackendUnavailable(f"Prometheus query failed: {exc}") from exc
         except (httpx.ConnectError, httpx.TimeoutError) as exc:
             raise BackendUnavailable(f"Prometheus unavailable: {exc}") from exc
