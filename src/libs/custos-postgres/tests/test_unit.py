@@ -274,6 +274,11 @@ def test_auth_rev1_is_numbered_one() -> None:
     assert AUTH_REV1.number == 1
 
 
+def test_auth_rev1_has_expected_statement_count() -> None:
+    # 1 schema + 8 tables + 9 indices = 18 statements
+    assert len(AUTH_REV1.statements) == 18
+
+
 def test_auth_rev1_owns_expected_tables() -> None:
     joined = " ".join(AUTH_REV1.statements)
     assert "CREATE SCHEMA IF NOT EXISTS auth" in joined
