@@ -1857,18 +1857,422 @@ async def test_list_oidc_identities_for_user_returns_empty_when_none_exist(pg_po
     assert len(identities) == 0
 
 
-async def test_unimplemented_service_token_methods_raise_not_implemented_error(
-
-    pg_pool: Pool,
-) -> None:
-    """Out-of-scope methods (SPL-130e and later) raise NotImplementedError."""
+async def test_put_and_get_service_token(pg_pool: Pool) -> None:
     adapter = PgAuthAdapter(pool=pg_pool)
     await adapter.apply_pending()
 
-    # OIDC methods (SPL-130d) are now implemented; service tokens and later raise errors
+    now = datetime.now(UTC)
+    tenant = Tenant(
+        tenant_id="t-1",
+        display_name="Tenant 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_tenant(tenant)
 
-    with pytest.raises(NotImplementedError, match="SPL-130e"):
-        await adapter.put_service_token(None)
+    workspace = Workspace(
+        workspace_id="ws-1",
+        tenant_id="t-1",
+        display_name="Workspace 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_workspace(workspace)
+
+    sa = ServiceAccount(
+        kind="serviceAccount",
+        principal_id="sa-1",
+        workspace_id="ws-1",
+        display_name="Bot",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(sa)
+
+    from custos_spl.ids import PrincipalId, ServiceTokenId
+    from custos_spl.interfaces.auth_store import ServiceToken
+
+    token = ServiceToken(
+        token_id=ServiceTokenId("token-1"),
+        service_account_id=PrincipalId("sa-1"),
+        hash="hash123",
+        issued_at=now,
+        expires_at=now + timedelta(days=30),
+        revoked_at=None,
+        revoked_by=None,
+        revoked_reason=None,
+    )
+    await adapter.put_service_token(token)
+
+    retrieved = await adapter.get_service_token_by_hash("hash123")
+    assert retrieved is not None
+    assert retrieved.token_id == ServiceTokenId("token-1")
+    assert retrieved.service_account_id == PrincipalId("sa-1")
+    assert retrieved.hash == "hash123"
+    assert retrieved.revoked_at is None
+
+
+async def test_get_service_token_by_hash_returns_none_when_absent(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    retrieved = await adapter.get_service_token_by_hash("nonexistent")
+    assert retrieved is None
+
+
+async def test_revoke_service_token(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    now = datetime.now(UTC)
+    tenant = Tenant(
+        tenant_id="t-1",
+        display_name="Tenant 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_tenant(tenant)
+
+    workspace = Workspace(
+        workspace_id="ws-1",
+        tenant_id="t-1",
+        display_name="Workspace 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_workspace(workspace)
+
+    sa = ServiceAccount(
+        kind="serviceAccount",
+        principal_id="sa-1",
+        workspace_id="ws-1",
+        display_name="Bot",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(sa)
+
+    from custos_spl.ids import PrincipalId, ServiceTokenId
+    from custos_spl.interfaces.auth_store import ServiceToken
+
+    token = ServiceToken(
+        token_id=ServiceTokenId("token-1"),
+        service_account_id=PrincipalId("sa-1"),
+        hash="hash123",
+        issued_at=now,
+        expires_at=now + timedelta(days=30),
+        revoked_at=None,
+        revoked_by=None,
+        revoked_reason=None,
+    )
+    await adapter.put_service_token(token)
+
+    # Revoke the token
+    await adapter.revoke_service_token(ServiceTokenId("token-1"), PrincipalId("admin"), "Compromised")
+
+    retrieved = await adapter.get_service_token_by_hash("hash123")
+    assert retrieved is not None
+    assert retrieved.revoked_at is not None
+    assert retrieved.revoked_by == PrincipalId("admin")
+    assert retrieved.revoked_reason == "Compromised"
+
+
+async def test_list_service_tokens_for_service_account(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    now = datetime.now(UTC)
+    tenant = Tenant(
+        tenant_id="t-1",
+        display_name="Tenant 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_tenant(tenant)
+
+    workspace = Workspace(
+        workspace_id="ws-1",
+        tenant_id="t-1",
+        display_name="Workspace 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_workspace(workspace)
+
+    sa = ServiceAccount(
+        kind="serviceAccount",
+        principal_id="sa-1",
+        workspace_id="ws-1",
+        display_name="Bot",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(sa)
+
+    from custos_spl.ids import PrincipalId, ServiceTokenId
+    from custos_spl.interfaces.auth_store import ServiceToken
+
+    # Add two tokens
+    token1 = ServiceToken(
+        token_id=ServiceTokenId("token-1"),
+        service_account_id=PrincipalId("sa-1"),
+        hash="hash1",
+        issued_at=now,
+        expires_at=now + timedelta(days=30),
+        revoked_at=None,
+        revoked_by=None,
+        revoked_reason=None,
+    )
+    await adapter.put_service_token(token1)
+
+    token2 = ServiceToken(
+        token_id=ServiceTokenId("token-2"),
+        service_account_id=PrincipalId("sa-1"),
+        hash="hash2",
+        issued_at=now + timedelta(hours=1),
+        expires_at=now + timedelta(days=30),
+        revoked_at=None,
+        revoked_by=None,
+        revoked_reason=None,
+    )
+    await adapter.put_service_token(token2)
+
+    tokens = await adapter.list_service_tokens_for_service_account(PrincipalId("sa-1"))
+    assert len(tokens) == 2
+    assert {t.token_id for t in tokens} == {ServiceTokenId("token-1"), ServiceTokenId("token-2")}
+
+
+async def test_service_token_hash_is_immutable(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    now = datetime.now(UTC)
+    tenant = Tenant(
+        tenant_id="t-1",
+        display_name="Tenant 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_tenant(tenant)
+
+    workspace = Workspace(
+        workspace_id="ws-1",
+        tenant_id="t-1",
+        display_name="Workspace 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_workspace(workspace)
+
+    sa = ServiceAccount(
+        kind="serviceAccount",
+        principal_id="sa-1",
+        workspace_id="ws-1",
+        display_name="Bot",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(sa)
+
+    from custos_spl.ids import PrincipalId, ServiceTokenId
+    from custos_spl.interfaces.auth_store import ServiceToken
+    from custos_spl.errors import ImmutableViolation
+
+    token = ServiceToken(
+        token_id=ServiceTokenId("token-1"),
+        service_account_id=PrincipalId("sa-1"),
+        hash="hash123",
+        issued_at=now,
+        expires_at=now + timedelta(days=30),
+        revoked_at=None,
+        revoked_by=None,
+        revoked_reason=None,
+    )
+    await adapter.put_service_token(token)
+
+    # Try to put same token_id with different hash — should raise ImmutableViolation
+    token_different_hash = ServiceToken(
+        token_id=ServiceTokenId("token-1"),
+        service_account_id=PrincipalId("sa-1"),
+        hash="different_hash",
+        issued_at=now,
+        expires_at=now + timedelta(days=30),
+        revoked_at=None,
+        revoked_by=None,
+        revoked_reason=None,
+    )
+
+    with pytest.raises(ImmutableViolation, match="hash.*immutable"):
+        await adapter.put_service_token(token_different_hash)
+
+
+async def test_service_token_upsert_with_same_hash(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    now = datetime.now(UTC)
+    tenant = Tenant(
+        tenant_id="t-1",
+        display_name="Tenant 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_tenant(tenant)
+
+    workspace = Workspace(
+        workspace_id="ws-1",
+        tenant_id="t-1",
+        display_name="Workspace 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_workspace(workspace)
+
+    sa = ServiceAccount(
+        kind="serviceAccount",
+        principal_id="sa-1",
+        workspace_id="ws-1",
+        display_name="Bot",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(sa)
+
+    admin = User(
+        kind="user",
+        principal_id="admin",
+        tenant_id="t-1",
+        display_name="Admin",
+        email="admin@example.com",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(admin)
+
+    from custos_spl.ids import PrincipalId, ServiceTokenId
+    from custos_spl.interfaces.auth_store import ServiceToken
+
+    token = ServiceToken(
+        token_id=ServiceTokenId("token-1"),
+        service_account_id=PrincipalId("sa-1"),
+        hash="hash123",
+        issued_at=now,
+        expires_at=now + timedelta(days=30),
+        revoked_at=None,
+        revoked_by=None,
+        revoked_reason=None,
+    )
+    await adapter.put_service_token(token)
+
+    # Put same token_id with same hash but revoke it (update mutable fields)
+    token_revoked = ServiceToken(
+        token_id=ServiceTokenId("token-1"),
+        service_account_id=PrincipalId("sa-1"),
+        hash="hash123",  # Same hash
+        issued_at=now,
+        expires_at=now + timedelta(days=30),
+        revoked_at=now + timedelta(hours=1),
+        revoked_by=PrincipalId("admin"),
+        revoked_reason="testing",
+    )
+    await adapter.put_service_token(token_revoked)
+
+    # Verify revoked state was updated
+    retrieved = await adapter.get_service_token_by_hash("hash123")
+    assert retrieved is not None
+    assert retrieved.revoked_at == now + timedelta(hours=1)
+    assert retrieved.revoked_by == PrincipalId("admin")
+    assert retrieved.revoked_reason == "testing"
+
+
+async def test_delete_expired_service_tokens(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    now = datetime.now(UTC)
+    tenant = Tenant(
+        tenant_id="t-1",
+        display_name="Tenant 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_tenant(tenant)
+
+    workspace = Workspace(
+        workspace_id="ws-1",
+        tenant_id="t-1",
+        display_name="Workspace 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_workspace(workspace)
+
+    sa = ServiceAccount(
+        kind="serviceAccount",
+        principal_id="sa-1",
+        workspace_id="ws-1",
+        display_name="Bot",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(sa)
+
+    from custos_spl.ids import PrincipalId, ServiceTokenId
+    from custos_spl.interfaces.auth_store import ServiceToken
+
+    # Add expired token
+    expired = ServiceToken(
+        token_id=ServiceTokenId("expired-1"),
+        service_account_id=PrincipalId("sa-1"),
+        hash="hash-expired",
+        issued_at=now - timedelta(days=60),
+        expires_at=now - timedelta(days=30),
+        revoked_at=None,
+        revoked_by=None,
+        revoked_reason=None,
+    )
+    await adapter.put_service_token(expired)
+
+    # Add valid token
+    valid = ServiceToken(
+        token_id=ServiceTokenId("valid-1"),
+        service_account_id=PrincipalId("sa-1"),
+        hash="hash-valid",
+        issued_at=now,
+        expires_at=now + timedelta(days=30),
+        revoked_at=None,
+        revoked_by=None,
+        revoked_reason=None,
+    )
+    await adapter.put_service_token(valid)
+
+    # Delete before now (should only delete expired)
+    deleted = await adapter.delete_expired_service_tokens(now)
+    assert deleted == 1
+
+    # Verify expired is gone, valid remains
+    expired_retrieved = await adapter.get_service_token_by_hash("hash-expired")
+    assert expired_retrieved is None
+
+    valid_retrieved = await adapter.get_service_token_by_hash("hash-valid")
+    assert valid_retrieved is not None
+
+
+async def test_unimplemented_permissions_methods_raise_not_implemented_error(
+    pg_pool: Pool,
+) -> None:
+    """Out-of-scope methods (SPL-130f and later) raise NotImplementedError."""
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    # Service tokens (SPL-130e) are now implemented; permissions/roles and later raise errors
 
     with pytest.raises(NotImplementedError, match="SPL-130f"):
         await adapter.upsert_permission(None)

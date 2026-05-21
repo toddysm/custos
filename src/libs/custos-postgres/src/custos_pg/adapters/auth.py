@@ -12,13 +12,14 @@ import asyncpg
 
 from custos_pg.pool import LazyPool
 from custos_spl.errors import ImmutableViolation
-from custos_spl.ids import PrincipalId, TenantId, WorkspaceId
+from custos_spl.ids import PrincipalId, ServiceTokenId, TenantId, WorkspaceId
 from custos_spl.interfaces.auth_store import (
     AuthStoreProvider,
     OidcIdentity,
     Principal,
     PrincipalFilter,
     ServiceAccount,
+    ServiceToken,
     Tenant,
     TenantFilter,
     User,
@@ -481,29 +482,169 @@ class PgAuthAdapter(MigrationCapable):
             )
 
 
-    async def put_service_token(self, token: object) -> None:
-        """Not yet implemented (SPL-130e)."""
-        raise NotImplementedError("Service tokens: SPL-130e")
+    # ----- Service tokens -----
 
-    async def get_service_token_by_hash(self, hash: object) -> object | None:
-        """Not yet implemented (SPL-130e)."""
-        raise NotImplementedError("Service tokens: SPL-130e")
+    async def put_service_token(self, token: ServiceToken) -> None:
+        """Insert or update a service token row.
+
+        Only hash is persisted; plaintext is never stored. token_id is the
+        identity; rotating is new row + revoke-old, not in-place hash update.
+        Hash is immutable: if a row with this token_id already exists with a
+        different hash, raises ImmutableViolation.
+        """
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            try:
+                await conn.execute(
+                    """
+                    INSERT INTO auth.service_token (
+                        token_id, service_account_id, hash,
+                        issued_at, expires_at, revoked_at, revoked_by, revoked_reason
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    """,
+                    token.token_id,
+                    token.service_account_id,
+                    token.hash,
+                    token.issued_at,
+                    token.expires_at,
+                    token.revoked_at,
+                    token.revoked_by,
+                    token.revoked_reason,
+                )
+            except asyncpg.UniqueViolationError:
+                existing = await conn.fetchrow(
+                    "SELECT hash FROM auth.service_token WHERE token_id = $1",
+                    token.token_id,
+                )
+                if existing and existing["hash"] != token.hash:
+                    raise ImmutableViolation(
+                        f"service_token hash for {token.token_id} is immutable"
+                    )
+                await conn.execute(
+                    """
+                    UPDATE auth.service_token
+                    SET service_account_id = $2,
+                        issued_at = $3,
+                        expires_at = $4,
+                        revoked_at = $5,
+                        revoked_by = $6,
+                        revoked_reason = $7
+                    WHERE token_id = $1
+                    """,
+                    token.token_id,
+                    token.service_account_id,
+                    token.issued_at,
+                    token.expires_at,
+                    token.revoked_at,
+                    token.revoked_by,
+                    token.revoked_reason,
+                )
+
+    async def get_service_token_by_hash(self, hash: str) -> ServiceToken | None:
+        """Resolve a hashed token to its row.
+
+        Verifier hot path, returns None if no match (treat as invalid).
+        Indexed on hash. Callers check revoked_at/expires_at; this method
+        returns all rows, revoked or expired.
+        """
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT token_id, service_account_id, hash,
+                       issued_at, expires_at, revoked_at, revoked_by, revoked_reason
+                FROM auth.service_token
+                WHERE hash = $1
+                """,
+                hash,
+            )
+            if row is None:
+                return None
+            return ServiceToken(
+                token_id=ServiceTokenId(row["token_id"]),
+                service_account_id=PrincipalId(row["service_account_id"]),
+                hash=row["hash"],
+                issued_at=row["issued_at"],
+                expires_at=row["expires_at"],
+                revoked_at=row["revoked_at"],
+                revoked_by=PrincipalId(row["revoked_by"]) if row["revoked_by"] else None,
+                revoked_reason=row["revoked_reason"],
+            )
 
     async def revoke_service_token(
-        self, token_id: object, actor: object, reason: object
+        self, token_id: ServiceTokenId, actor: PrincipalId, reason: str
     ) -> None:
-        """Not yet implemented (SPL-130e)."""
-        raise NotImplementedError("Service tokens: SPL-130e")
+        """Mark a token revoked.
+
+        Sets revoked_at, revoked_by, revoked_reason; never deletes row.
+        Sweeper handles physical removal separately.
+        """
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE auth.service_token
+                SET revoked_at = now(), revoked_by = $2, revoked_reason = $3
+                WHERE token_id = $1
+                """,
+                token_id,
+                actor,
+                reason,
+            )
 
     async def list_service_tokens_for_service_account(
-        self, service_account_id: object
-    ) -> list:
-        """Not yet implemented (SPL-130e)."""
-        raise NotImplementedError("Service tokens: SPL-130e")
+        self,
+        service_account_id: PrincipalId,
+    ) -> tuple[ServiceToken, ...]:
+        """List all tokens for a service account.
 
-    async def delete_expired_service_tokens(self, before: object) -> None:
-        """Not yet implemented (SPL-130e)."""
-        raise NotImplementedError("Service tokens: SPL-130e")
+        Bounded small; includes revoked rows so callers can render rotation history.
+        Returns the full set, not paginated.
+        """
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT token_id, service_account_id, hash,
+                       issued_at, expires_at, revoked_at, revoked_by, revoked_reason
+                FROM auth.service_token
+                WHERE service_account_id = $1
+                ORDER BY issued_at DESC
+                """,
+                service_account_id,
+            )
+            return tuple(
+                ServiceToken(
+                    token_id=ServiceTokenId(row["token_id"]),
+                    service_account_id=PrincipalId(row["service_account_id"]),
+                    hash=row["hash"],
+                    issued_at=row["issued_at"],
+                    expires_at=row["expires_at"],
+                    revoked_at=row["revoked_at"],
+                    revoked_by=PrincipalId(row["revoked_by"]) if row["revoked_by"] else None,
+                    revoked_reason=row["revoked_reason"],
+                )
+                for row in rows
+            )
+
+    async def delete_expired_service_tokens(self, before: datetime) -> int:
+        """Physical delete of expired tokens.
+
+        Sweeper-only operation. Removes rows where expires_at < before.
+        Returns the number of rows deleted.
+        """
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                DELETE FROM auth.service_token
+                WHERE expires_at < $1
+                """,
+                before,
+            )
+            # Extract count from result string like "DELETE N"
+            return int(result.split()[-1])
+
 
     async def upsert_permission(self, permission: object) -> None:
         """Not yet implemented (SPL-130f)."""
