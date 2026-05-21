@@ -1234,3 +1234,29 @@ async def test_list_workspaces_filters_by_tenant(pg_pool: Pool) -> None:
     )
     assert len(ws_t2) == 1
     assert ws_t2[0].workspace_id == "ws-t2-1"
+
+
+async def test_unimplemented_principal_methods_raise_not_implemented_error(
+    pg_pool: Pool,
+) -> None:
+    """Out-of-scope methods raise NotImplementedError with clear messages."""
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    with pytest.raises(NotImplementedError, match="SPL-130c"):
+        await adapter.put_principal(None)
+
+    with pytest.raises(NotImplementedError, match="SPL-130d"):
+        await adapter.put_oidc_identity("issuer", "subject", "user-id")
+
+    with pytest.raises(NotImplementedError, match="SPL-130e"):
+        await adapter.put_service_token(None)
+
+    with pytest.raises(NotImplementedError, match="SPL-130f"):
+        await adapter.upsert_permission(None)
+
+    with pytest.raises(NotImplementedError, match="SPL-130g"):
+        await adapter.put_role_binding(None)
+
+    with pytest.raises(NotImplementedError, match="SPL-130h"):
+        await adapter.with_transaction(None)

@@ -24,7 +24,7 @@ from custos_spl.migrations.runner import MigrationCapable
 from custos_pg.migrations.auth import AUTH_REV1
 
 
-class PgAuthAdapter(AuthStoreProvider, MigrationCapable):
+class PgAuthAdapter(MigrationCapable):
     """Postgres implementation of AuthStoreProvider."""
 
     SCHEMA_REVISION = 1
@@ -235,6 +235,112 @@ class PgAuthAdapter(AuthStoreProvider, MigrationCapable):
                 )
                 for row in rows
             ]
+
+    # ----- Unimplemented (SPL-130c and later) -----
+
+    async def put_principal(self, principal: object) -> None:
+        """Not yet implemented (SPL-130c)."""
+        raise NotImplementedError("Principals: SPL-130c")
+
+    async def get_principal(self, principal_id: object) -> None:
+        """Not yet implemented (SPL-130c)."""
+        raise NotImplementedError("Principals: SPL-130c")
+
+    async def list_principals(self, filter: object | None = None) -> list:
+        """Not yet implemented (SPL-130c)."""
+        raise NotImplementedError("Principals: SPL-130c")
+
+    async def disable_principal(
+        self, principal_id: object, actor: object, reason: object
+    ) -> None:
+        """Not yet implemented (SPL-130c)."""
+        raise NotImplementedError("Principals: SPL-130c")
+
+    async def put_oidc_identity(
+        self, issuer: object, subject: object, user_id: object
+    ) -> None:
+        """Not yet implemented (SPL-130d)."""
+        raise NotImplementedError("OIDC identities: SPL-130d")
+
+    async def get_oidc_identity(
+        self, issuer: object, subject: object
+    ) -> object | None:
+        """Not yet implemented (SPL-130d)."""
+        raise NotImplementedError("OIDC identities: SPL-130d")
+
+    async def list_oidc_identities_for_user(self, user_id: object) -> list:
+        """Not yet implemented (SPL-130d)."""
+        raise NotImplementedError("OIDC identities: SPL-130d")
+
+    async def put_service_token(self, token: object) -> None:
+        """Not yet implemented (SPL-130e)."""
+        raise NotImplementedError("Service tokens: SPL-130e")
+
+    async def get_service_token_by_hash(self, hash: object) -> object | None:
+        """Not yet implemented (SPL-130e)."""
+        raise NotImplementedError("Service tokens: SPL-130e")
+
+    async def revoke_service_token(
+        self, token_id: object, actor: object, reason: object
+    ) -> None:
+        """Not yet implemented (SPL-130e)."""
+        raise NotImplementedError("Service tokens: SPL-130e")
+
+    async def list_service_tokens_for_service_account(
+        self, service_account_id: object
+    ) -> list:
+        """Not yet implemented (SPL-130e)."""
+        raise NotImplementedError("Service tokens: SPL-130e")
+
+    async def delete_expired_service_tokens(self, before: object) -> None:
+        """Not yet implemented (SPL-130e)."""
+        raise NotImplementedError("Service tokens: SPL-130e")
+
+    async def upsert_permission(self, permission: object) -> None:
+        """Not yet implemented (SPL-130f)."""
+        raise NotImplementedError("Permissions: SPL-130f")
+
+    async def list_permissions(self) -> list:
+        """Not yet implemented (SPL-130f)."""
+        raise NotImplementedError("Permissions: SPL-130f")
+
+    async def put_role(self, role: object) -> None:
+        """Not yet implemented (SPL-130f)."""
+        raise NotImplementedError("Roles: SPL-130f")
+
+    async def get_role(self, role_id: object) -> object | None:
+        """Not yet implemented (SPL-130f)."""
+        raise NotImplementedError("Roles: SPL-130f")
+
+    async def list_roles(self) -> list:
+        """Not yet implemented (SPL-130f)."""
+        raise NotImplementedError("Roles: SPL-130f")
+
+    async def put_role_binding(self, binding: object) -> None:
+        """Not yet implemented (SPL-130g)."""
+        raise NotImplementedError("Role bindings: SPL-130g")
+
+    async def delete_role_binding(
+        self, binding_id: object, actor: object, reason: object
+    ) -> None:
+        """Not yet implemented (SPL-130g)."""
+        raise NotImplementedError("Role bindings: SPL-130g")
+
+    async def list_role_bindings_for_principal(
+        self, principal_id: object, scopes: object
+    ) -> list:
+        """Not yet implemented (SPL-130g)."""
+        raise NotImplementedError("Role bindings: SPL-130g")
+
+    async def list_role_bindings_for_scope(
+        self, scope: object, filter: object | None = None
+    ) -> list:
+        """Not yet implemented (SPL-130g)."""
+        raise NotImplementedError("Role bindings: SPL-130g")
+
+    async def with_transaction(self, callback: object) -> None:
+        """Not yet implemented (SPL-130h)."""
+        raise NotImplementedError("Transactions: SPL-130h")
 
 
 def make_adapter() -> PgAuthAdapter:

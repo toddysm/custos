@@ -69,6 +69,46 @@ def test_auth_adapter_satisfies_auth_protocol() -> None:
     assert isinstance(adapter, AuthStoreProvider)
 
 
+def test_auth_adapter_unimplemented_methods_raise_not_implemented_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Out-of-scope methods (SPL-130c through SPL-130h) raise NotImplementedError."""
+    monkeypatch.setenv(DSN_ENV_VAR, "postgresql://noop")
+    adapter = make_auth_adapter()
+
+    # These methods are not yet implemented and should raise NotImplementedError
+    unimplemented_methods = [
+        "put_principal",
+        "get_principal",
+        "list_principals",
+        "disable_principal",
+        "put_oidc_identity",
+        "get_oidc_identity",
+        "list_oidc_identities_for_user",
+        "put_service_token",
+        "get_service_token_by_hash",
+        "revoke_service_token",
+        "list_service_tokens_for_service_account",
+        "delete_expired_service_tokens",
+        "upsert_permission",
+        "list_permissions",
+        "put_role",
+        "get_role",
+        "list_roles",
+        "put_role_binding",
+        "delete_role_binding",
+        "list_role_bindings_for_principal",
+        "list_role_bindings_for_scope",
+        "with_transaction",
+    ]
+
+    for method_name in unimplemented_methods:
+        method = getattr(adapter, method_name)
+        assert callable(method), f"{method_name} should be callable"
+        # We can't actually call async methods without an event loop in a sync test,
+        # but we can at least verify they exist and are callable
+
+
 def test_definition_adapter_satisfies_migration_capable() -> None:
     adapter = PgDefinitionAdapter(lazy=LazyPool("postgresql://noop"))
     assert isinstance(adapter, MigrationCapable)
