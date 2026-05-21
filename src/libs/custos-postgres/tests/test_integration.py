@@ -1701,7 +1701,10 @@ async def test_disable_principal(pg_pool: Pool) -> None:
     await adapter.put_principal(user)
 
     # Disable the principal
-    await adapter.disable_principal("user-1", "admin", "Unauthorized access")
+    from custos_spl.ids import PrincipalId
+    await adapter.disable_principal(
+        PrincipalId("user-1"), PrincipalId("admin"), "Unauthorized access"
+    )
 
     # Verify it's now disabled
     retrieved = await adapter.get_principal("user-1")
