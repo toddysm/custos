@@ -350,7 +350,13 @@ class PgAuthAdapter(MigrationCapable):
     async def disable_principal(
         self, principal_id: PrincipalId, actor: PrincipalId, reason: str
     ) -> None:
-        """Soft-disable a principal."""
+        """Soft-disable a principal.
+
+        Sets disabled_at and disabled_reason on the principal row. The actor
+        and reason are intended for audit trail recording via the transaction
+        handle (SPL-130h); until transaction support lands, audit trail
+        emission is deferred and the actor parameter is presently unused.
+        """
         pool = await self._pool_ref()
         async with pool.acquire() as conn:
             await conn.execute(
