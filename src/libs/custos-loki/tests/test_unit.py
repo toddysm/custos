@@ -2,13 +2,12 @@
 
 import base64
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from custos_loki.adapters import (
-    SEVERITY_MAP,
     LokiLogQueryAdapter,
     make_adapter,
 )
