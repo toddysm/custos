@@ -6,9 +6,7 @@ test data factories.
 
 from __future__ import annotations
 
-import asyncio
-from contextlib import asynccontextmanager
-from typing import AsyncGenerator, Generator
+from typing import Generator
 
 import pytest
 from testcontainers.postgres import PostgresContainer
