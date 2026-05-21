@@ -2265,17 +2265,123 @@ async def test_delete_expired_service_tokens(pg_pool: Pool) -> None:
     assert valid_retrieved is not None
 
 
-async def test_unimplemented_permissions_methods_raise_not_implemented_error(
-    pg_pool: Pool,
-) -> None:
-    """Out-of-scope methods (SPL-130f and later) raise NotImplementedError."""
+
+
+async def test_upsert_and_list_permissions(pg_pool: Pool) -> None:
     adapter = PgAuthAdapter(pool=pg_pool)
     await adapter.apply_pending()
 
-    # Service tokens (SPL-130e) are now implemented; permissions/roles and later raise errors
+    # Clear any prior test data
+    async with pg_pool.acquire() as conn:
+        await conn.execute("TRUNCATE TABLE auth.permission")
 
-    with pytest.raises(NotImplementedError, match="SPL-130f"):
-        await adapter.upsert_permission(None)
+    from custos_spl.interfaces.auth_store import Permission
+
+    perm1 = Permission(name="read", description="Read access")
+    perm2 = Permission(name="write", description="Write access")
+
+    await adapter.upsert_permission(perm1)
+    await adapter.upsert_permission(perm2)
+
+    permissions = await adapter.list_permissions()
+    assert len(permissions) == 2
+    assert {p.name for p in permissions} == {"read", "write"}
+    assert {p.description for p in permissions} == {"Read access", "Write access"}
+
+
+async def test_upsert_permission_updates_description(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    # Clear any prior test data
+    async with pg_pool.acquire() as conn:
+        await conn.execute("TRUNCATE TABLE auth.permission")
+
+    from custos_spl.interfaces.auth_store import Permission
+
+    perm = Permission(name="read", description="Old description")
+    await adapter.upsert_permission(perm)
+
+    perm_updated = Permission(name="read", description="New description")
+    await adapter.upsert_permission(perm_updated)
+
+    permissions = await adapter.list_permissions()
+    assert len(permissions) == 1
+    assert permissions[0].description == "New description"
+
+
+async def test_put_and_get_role(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    from custos_spl.ids import RoleId
+    from custos_spl.interfaces.auth_store import Role
+
+    role = Role(
+        role_id=RoleId("admin"),
+        name="Administrator",
+        description="Full platform access",
+        permission_names=("read", "write", "delete"),
+    )
+    await adapter.put_role(role)
+
+    retrieved = await adapter.get_role(RoleId("admin"))
+    assert retrieved is not None
+    assert retrieved.role_id == RoleId("admin")
+    assert retrieved.name == "Administrator"
+    assert retrieved.permission_names == ("read", "write", "delete")
+
+
+async def test_get_role_returns_none_when_absent(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    from custos_spl.ids import RoleId
+
+    retrieved = await adapter.get_role(RoleId("nonexistent"))
+    assert retrieved is None
+
+
+async def test_list_roles(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    # Clear any prior test data
+    async with pg_pool.acquire() as conn:
+        await conn.execute("TRUNCATE TABLE auth.role")
+
+    from custos_spl.ids import RoleId
+    from custos_spl.interfaces.auth_store import Role
+
+    role1 = Role(
+        role_id=RoleId("admin"),
+        name="Administrator",
+        description="Full access",
+        permission_names=("read", "write"),
+    )
+    role2 = Role(
+        role_id=RoleId("viewer"),
+        name="Viewer",
+        description="Read-only access",
+        permission_names=("read",),
+    )
+
+    await adapter.put_role(role1)
+    await adapter.put_role(role2)
+
+    roles = await adapter.list_roles()
+    assert len(roles) == 2
+    assert {r.role_id for r in roles} == {RoleId("admin"), RoleId("viewer")}
+
+
+async def test_unimplemented_role_binding_methods_raise_not_implemented_error(
+    pg_pool: Pool,
+) -> None:
+    """Out-of-scope methods (SPL-130g and later) raise NotImplementedError."""
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    # Permissions/roles (SPL-130f) are now implemented; role bindings and later raise errors
 
     with pytest.raises(NotImplementedError, match="SPL-130g"):
         await adapter.put_role_binding(None)

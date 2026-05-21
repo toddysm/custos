@@ -12,12 +12,14 @@ import asyncpg
 
 from custos_pg.pool import LazyPool
 from custos_spl.errors import ImmutableViolation
-from custos_spl.ids import PrincipalId, ServiceTokenId, TenantId, WorkspaceId
+from custos_spl.ids import PrincipalId, RoleId, ServiceTokenId, TenantId, WorkspaceId
 from custos_spl.interfaces.auth_store import (
     AuthStoreProvider,
     OidcIdentity,
+    Permission,
     Principal,
     PrincipalFilter,
+    Role,
     ServiceAccount,
     ServiceToken,
     Tenant,
@@ -646,25 +648,107 @@ class PgAuthAdapter(MigrationCapable):
             return int(result.split()[-1])
 
 
-    async def upsert_permission(self, permission: object) -> None:
-        """Not yet implemented (SPL-130f)."""
-        raise NotImplementedError("Permissions: SPL-130f")
+    # ----- Permissions -----
 
-    async def list_permissions(self) -> list:
-        """Not yet implemented (SPL-130f)."""
-        raise NotImplementedError("Permissions: SPL-130f")
+    async def upsert_permission(self, permission: Permission) -> None:
+        """Insert or update a permission by name.
 
-    async def put_role(self, role: object) -> None:
-        """Not yet implemented (SPL-130f)."""
-        raise NotImplementedError("Roles: SPL-130f")
+        Called at platform startup for each declared permission. name is
+        the primary key; re-upserting updates description.
+        """
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO auth.permission (name, description)
+                VALUES ($1, $2)
+                ON CONFLICT (name) DO UPDATE SET description = EXCLUDED.description
+                """,
+                permission.name,
+                permission.description,
+            )
 
-    async def get_role(self, role_id: object) -> object | None:
-        """Not yet implemented (SPL-130f)."""
-        raise NotImplementedError("Roles: SPL-130f")
+    async def list_permissions(self) -> tuple[Permission, ...]:
+        """List all declared permissions.
 
-    async def list_roles(self) -> list:
-        """Not yet implemented (SPL-130f)."""
-        raise NotImplementedError("Roles: SPL-130f")
+        Bounded small; returns the full set without pagination.
+        """
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT name, description FROM auth.permission ORDER BY name"
+            )
+            return tuple(
+                Permission(name=row["name"], description=row["description"])
+                for row in rows
+            )
+
+    # ----- Roles -----
+
+    async def put_role(self, role: Role) -> None:
+        """Insert or update a role by role_id.
+
+        role_id is the primary key; upsert updates name, description, and
+        permission_names.
+        """
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO auth.role (role_id, name, description, permission_names)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (role_id) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    description = EXCLUDED.description,
+                    permission_names = EXCLUDED.permission_names
+                """,
+                role.role_id,
+                role.name,
+                role.description,
+                list(role.permission_names),
+            )
+
+    async def get_role(self, role_id: RoleId) -> Role | None:
+        """Read a role by ID. Returns None if absent."""
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT role_id, name, description, permission_names
+                FROM auth.role
+                WHERE role_id = $1
+                """,
+                role_id,
+            )
+            if row is None:
+                return None
+            return Role(
+                role_id=RoleId(row["role_id"]),
+                name=row["name"],
+                description=row["description"],
+                permission_names=tuple(row["permission_names"]),
+            )
+
+    async def list_roles(self) -> tuple[Role, ...]:
+        """List all roles. Bounded small."""
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT role_id, name, description, permission_names
+                FROM auth.role
+                ORDER BY role_id
+                """
+            )
+            return tuple(
+                Role(
+                    role_id=RoleId(row["role_id"]),
+                    name=row["name"],
+                    description=row["description"],
+                    permission_names=tuple(row["permission_names"]),
+                )
+                for row in rows
+            )
 
     async def put_role_binding(self, binding: object) -> None:
         """Not yet implemented (SPL-130g)."""

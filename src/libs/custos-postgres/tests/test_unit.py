@@ -72,26 +72,11 @@ def test_auth_adapter_satisfies_auth_protocol() -> None:
 async def test_auth_adapter_unimplemented_methods_raise_not_implemented_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Out-of-scope methods (SPL-130f through SPL-130h) raise NotImplementedError."""
+    """Out-of-scope methods (SPL-130g through SPL-130h) raise NotImplementedError."""
     monkeypatch.setenv(DSN_ENV_VAR, "postgresql://noop")
     adapter = make_auth_adapter()
 
-    # Service token methods (SPL-130e) are now implemented; verify remaining are unimplemented
-
-    with pytest.raises(NotImplementedError, match="SPL-130f"):
-        await adapter.upsert_permission(None)
-
-    with pytest.raises(NotImplementedError, match="SPL-130f"):
-        await adapter.list_permissions()
-
-    with pytest.raises(NotImplementedError, match="SPL-130f"):
-        await adapter.put_role(None)
-
-    with pytest.raises(NotImplementedError, match="SPL-130f"):
-        await adapter.get_role(None)
-
-    with pytest.raises(NotImplementedError, match="SPL-130f"):
-        await adapter.list_roles()
+    # Permission/role methods (SPL-130f) are now implemented; verify remaining are unimplemented
 
     with pytest.raises(NotImplementedError, match="SPL-130g"):
         await adapter.put_role_binding(None)
