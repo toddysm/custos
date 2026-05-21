@@ -20,8 +20,10 @@ from .base import AdapterConformanceBase
 class LogQueryConformanceTests(AdapterConformanceBase):
     """Base conformance tests for LogQueryProvider adapters.
 
-    Subclasses MUST provide an 'adapter' fixture that returns a configured
-    LogQueryProvider implementation ready for testing.
+    Subclasses MUST provide:
+    - `adapter` fixture: LogQueryProvider instance
+    - `workspace_id` fixture: test workspace ID
+    - `run_id` fixture: test run ID
 
     Example:
         @pytest.fixture
@@ -30,120 +32,93 @@ class LogQueryConformanceTests(AdapterConformanceBase):
     """
 
     def test_workspace_scoping_query_run_logs(self) -> None:
-        """query_run_logs() filters to workspace.
+        """query_run_logs() enforces workspace scoping.
 
-        Cross-workspace queries return empty page or WorkspaceMismatch.
-
-        Subclasses MUST implement:
-        1. Query logs from workspace A
-        2. Query same run from workspace B
-        3. Assert returns empty or raises WorkspaceMismatch
+        Cross-workspace queries must return empty page or raise WorkspaceMismatch.
         """
-        pytest.skip("Adapter must implement workspace scoping for query_run_logs test")
+        pytest.skip(
+            "Adapter must implement: test workspace scoping for query_run_logs"
+        )
 
     def test_workspace_scoping_query_step_logs(self) -> None:
-        """query_step_logs() filters to workspace.
+        """query_step_logs() enforces workspace scoping.
 
-        Cross-workspace queries return empty page or WorkspaceMismatch.
-
-        Subclasses MUST implement:
-        1. Query step logs from workspace A
-        2. Query same step from workspace B
-        3. Assert returns empty or raises WorkspaceMismatch
+        Cross-workspace queries must return empty page or raise WorkspaceMismatch.
         """
-        pytest.skip("Adapter must implement workspace scoping for query_step_logs test")
+        pytest.skip(
+            "Adapter must implement: test workspace scoping for query_step_logs"
+        )
 
     def test_workspace_scoping_tail_run_logs(self) -> None:
-        """tail_run_logs() streams only workspace logs.
+        """tail_run_logs() enforces workspace scoping.
 
-        Cross-workspace access raises WorkspaceMismatch.
-
-        Subclasses MUST implement:
-        1. Call tail_run_logs() on run in workspace B
-        2. Assert raises WorkspaceMismatch
+        Cross-workspace access must raise WorkspaceMismatch.
         """
-        pytest.skip("Adapter must implement workspace scoping for tail_run_logs test")
+        pytest.skip(
+            "Adapter must implement: test workspace scoping for tail_run_logs"
+        )
 
-    def test_cursor_pagination_idempotency(self) -> None:
-        """Passing same cursor twice yields same page.
+    def test_cursor_pagination_is_idempotent(self) -> None:
+        """Cursor pagination is idempotent.
 
-        Cursor is stateless and opaque; idempotent across calls.
-
-        Subclasses MUST implement:
-        1. Query and get first page with cursor A
-        2. Query again with same cursor A
-        3. Assert both calls return identical page
+        Passing the same cursor twice returns the same page.
+        Cursor is stateless and opaque.
         """
-        pytest.skip("Adapter must implement cursor pagination idempotency test")
+        pytest.skip(
+            "Adapter must implement: test cursor pagination idempotency"
+        )
 
-    def test_severity_filtering(self) -> None:
-        """Severity filter returns matching log level and above.
+    def test_severity_filtering_includes_and_above(self) -> None:
+        """Severity filter returns matching level and above.
 
-        severity_at_least='warn' returns warn, error, fatal but not debug/info.
-
-        Subclasses MUST implement:
-        1. Store logs at various severity levels
-        2. Query with severity_at_least='warn'
-        3. Assert returns only warn and above
+        severity_at_least='warn' returns warn, error, fatal but NOT debug/info.
         """
-        pytest.skip("Adapter must implement severity filtering test")
+        pytest.skip(
+            "Adapter must implement: test severity filtering (warn and above)"
+        )
 
-    def test_time_range_filtering(self) -> None:
-        """Time range filter respects start/end bounds.
+    def test_time_range_filtering_respects_bounds(self) -> None:
+        """Time range filter respects start (inclusive) and end (exclusive).
 
-        start is inclusive, end is exclusive (Prometheus-style).
-
-        Subclasses MUST implement:
-        1. Store logs at specific timestamps
-        2. Query with time range
-        3. Assert start <= timestamp < end for all results
+        start <= timestamp < end for all returned logs.
         """
-        pytest.skip("Adapter must implement time range filtering test")
+        pytest.skip(
+            "Adapter must implement: test time range filtering bounds"
+        )
 
-    def test_message_content_filtering(self) -> None:
+    def test_message_content_filtering_substring_match(self) -> None:
         """Message filter matches substring in log message.
 
-        Case-sensitive substring match against normalized message.
-
-        Subclasses MUST implement:
-        1. Store logs with specific messages
-        2. Query with message_contains filter
-        3. Assert all returned logs contain the filter string
+        Case-sensitive substring match against log message.
         """
-        pytest.skip("Adapter must implement message content filtering test")
+        pytest.skip(
+            "Adapter must implement: test message content filtering"
+        )
 
     def test_tail_run_logs_returns_async_generator(self) -> None:
         """tail_run_logs() returns async generator (not coroutine).
 
-        Caller can iterate logs as they arrive: async for record in tail_logs().
-
-        Subclasses MUST implement:
-        1. Call tail_run_logs()
-        2. Assert result is async iterable
-        3. Iterate and collect results
+        Caller iterates: async for record in tail_logs().
         """
-        pytest.skip("Adapter must implement async generator test for tail_run_logs")
+        pytest.skip(
+            "Adapter must implement: test tail_run_logs returns async generator"
+        )
 
-    def test_empty_query_result(self) -> None:
+    def test_empty_query_result_returns_empty_page(self) -> None:
         """Query with no matches returns empty LogPage.
 
-        No error raised; next_cursor is None.
-
-        Subclasses MUST implement:
-        1. Query with filter that matches no logs
-        2. Assert returns LogPage with empty items
-        3. Assert next_cursor is None
+        No error raised; items tuple is empty, next_cursor is None.
         """
-        pytest.skip("Adapter must implement empty result handling test")
+        pytest.skip(
+            "Adapter must implement: test empty result handling"
+        )
 
-    def test_error_classification(self) -> None:
-        """Backend connection errors classified as BackendUnavailable.
+    def test_error_classification_transient_failures(self) -> None:
+        """Network/transient errors raise BackendUnavailable.
 
-        Transient failures raise BackendUnavailable; caller retries.
-
-        Subclasses MUST implement:
-        1. Simulate backend unavailable
-        2. Call adapter query method
-        3. Assert raises BackendUnavailable (not other exception type)
+        Connection refused, timeout, HTTP 503 → BackendUnavailable.
+        Caller retries with backoff.
         """
-        pytest.skip("Adapter must implement error classification test")
+        pytest.skip(
+            "Adapter must implement: test transient errors raise BackendUnavailable"
+        )

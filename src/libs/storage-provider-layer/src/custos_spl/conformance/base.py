@@ -6,42 +6,36 @@ must satisfy regardless of provider type.
 
 from __future__ import annotations
 
-from custos_spl.errors import WorkspaceMismatch
+import pytest
+
+from custos_spl.errors import BackendUnavailable, WorkspaceMismatch
 
 
 class AdapterConformanceBase:
     """Base class for adapter conformance tests.
 
-    Subclasses should inherit from this and implement specific provider tests.
-    Provides common fixtures and assertions for workspace scoping, error handling,
-    and immutability contracts.
+    Subclasses MUST provide an 'adapter' pytest fixture that returns
+    a fully-configured adapter instance ready for testing.
+
+    All tests in this class validate the general contract that applies
+    to all adapters: error classification, workspace scoping, and
+    immutability rules.
     """
 
     def test_workspace_mismatch_error_exists(self) -> None:
-        """WorkspaceMismatch error is properly defined."""
+        """WorkspaceMismatch error is properly defined and subclasses Exception."""
         assert issubclass(WorkspaceMismatch, Exception)
+        assert WorkspaceMismatch.__module__ == "custos_spl.errors"
 
-    def test_workspace_scoping_contract(self) -> None:
-        """Document the workspace scoping contract for this adapter.
+    def test_backend_unavailable_error_exists(self) -> None:
+        """BackendUnavailable error is properly defined for transient failures."""
+        assert issubclass(BackendUnavailable, Exception)
+        assert BackendUnavailable.__module__ == "custos_spl.errors"
 
-        Every adapter MUST enforce workspace scoping per the SPL middleware.
-        Cross-workspace access MUST raise WorkspaceMismatch (mapped to 404).
+    def test_adapter_has_schema_revision(self) -> None:
+        """All adapters must declare SCHEMA_REVISION class constant.
+
+        This is required by SPL for compatibility tracking across adapter versions.
         """
-        # This is a documentation test — subclasses implement actual scoping tests
-        pass
-
-    def test_immutability_contract(self) -> None:
-        """Document immutability rules for this adapter.
-
-        Immutable fields MUST raise ImmutableViolation on update attempts.
-        This contract varies by provider — subclasses implement specifics.
-        """
-        pass
-
-    def test_error_classification_contract(self) -> None:
-        """Document error classification for this adapter.
-
-        Errors MUST be classified as transient (BackendUnavailable) or
-        permanent (domain error). Subclasses implement driver error mapping.
-        """
-        pass
+        # This test requires the adapter fixture — subclasses provide it
+        pytest.skip("Adapter fixture not provided — subclass must implement with adapter fixture")

@@ -10,9 +10,13 @@ Tests that any MetricsQuery implementation must pass:
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 import pytest
 
 from custos_spl.errors import BackendUnavailable, QueryUnsupported, WorkspaceMismatch
+from custos_spl.ids import RunId, WorkspaceId
+from custos_spl.interfaces.metrics_query import MetricRange, MetricSample, MetricSelector
 
 from .base import AdapterConformanceBase
 
@@ -20,8 +24,10 @@ from .base import AdapterConformanceBase
 class MetricsQueryConformanceTests(AdapterConformanceBase):
     """Base conformance tests for MetricsQueryProvider adapters.
 
-    Subclasses MUST provide an 'adapter' fixture that returns a configured
-    MetricsQueryProvider implementation ready for testing.
+    Subclasses MUST provide:
+    - `adapter` fixture: MetricsQueryProvider instance
+    - `workspace_id` fixture: test workspace ID
+    - `run_id` fixture: test run ID
 
     Example:
         @pytest.fixture
@@ -29,143 +35,95 @@ class MetricsQueryConformanceTests(AdapterConformanceBase):
             return MyPrometheusAdapter(base_url="http://prometheus:9090")
     """
 
-    def test_workspace_scoping_query_run_metrics(self) -> None:
-        """query_run_metrics() filters to workspace.
-
-        Returns metrics labeled with requested workspace_id only.
-
-        Subclasses MUST implement:
-        1. Query metrics from workspace A
-        2. Query same metric from workspace B
-        3. Assert workspace A gets no cross-workspace data
-        """
-        pytest.skip("Adapter must implement workspace scoping for query_run_metrics test")
-
-    def test_workspace_scoping_query_workspace_metrics(self) -> None:
-        """query_workspace_metrics() filters to workspace.
-
-        Returns metrics labeled with requested workspace_id only (no run filter).
-
-        Subclasses MUST implement:
-        1. Query metrics from workspace A
-        2. Query from workspace B
-        3. Assert workspace A gets no cross-workspace data
-        """
-        pytest.skip("Adapter must implement workspace scoping for query_workspace_metrics test")
-
-    def test_workspace_scoping_query_instant_metric(self) -> None:
-        """query_instant_metric() filters to workspace.
-
-        Returns metric labeled with requested workspace_id only.
-
-        Subclasses MUST implement:
-        1. Query instant metric from workspace A
-        2. Query from workspace B
-        3. Assert workspace A gets no cross-workspace data
-        """
-        pytest.skip("Adapter must implement workspace scoping for query_instant_metric test")
-
-    def test_metric_name_validation(self) -> None:
-        """Invalid metric names raise QueryUnsupported.
+    def test_metric_name_validation_rejects_invalid_names(self) -> None:
+        """Invalid metric names are rejected.
 
         Names must match [a-zA-Z_:][a-zA-Z0-9_:]* regex.
         Prevents PromQL injection (e.g., 'cpu{1==1}', 'up or up').
-
-        Subclasses MUST implement:
-        1. Try to query with invalid metric name (e.g., '123invalid')
-        2. Assert raises QueryUnsupported
         """
-        pytest.skip("Adapter must implement metric name validation test")
+        pytest.skip(
+            "Adapter must implement: test invalid metric names raise QueryUnsupported"
+        )
 
-    def test_label_name_validation(self) -> None:
-        """Invalid label names raise QueryUnsupported.
+    def test_label_name_validation_rejects_invalid_names(self) -> None:
+        """Invalid label names are rejected.
 
         Names must match [a-zA-Z_][a-zA-Z0-9_]* regex.
         Prevents injection via label matchers.
-
-        Subclasses MUST implement:
-        1. Try to query with invalid label name (e.g., 'job-name')
-        2. Assert raises QueryUnsupported
         """
-        pytest.skip("Adapter must implement label name validation test")
+        pytest.skip(
+            "Adapter must implement: test invalid label names raise QueryUnsupported"
+        )
 
-    def test_range_query_time_bucketing(self) -> None:
-        """Range query respects step_seconds bucket width.
+    def test_workspace_scoping_prevents_cross_workspace_access(self) -> None:
+        """Cross-workspace queries are blocked or return empty.
 
-        All samples aligned to multiples of step_seconds from range.start.
-
-        Subclasses MUST implement:
-        1. Query range with step_seconds=60
-        2. Assert all sample timestamps are aligned to 60s boundaries
+        Adapter must prevent callers from accessing metrics from
+        workspace B when querying as workspace A.
         """
-        pytest.skip("Adapter must implement range query time bucketing test")
+        pytest.skip(
+            "Adapter must implement: test cross-workspace access is blocked"
+        )
 
-    def test_range_query_time_bounds(self) -> None:
+    def test_workspace_validation_on_response_parsing(self) -> None:
+        """Workspace ownership is validated on response parsing.
+
+        If backend returns cross-workspace data (due to compromise or bug),
+        adapter must raise WorkspaceMismatch before returning it.
+        """
+        pytest.skip(
+            "Adapter must implement: test response parsing validates workspace_id label"
+        )
+
+    def test_empty_query_result_handling(self) -> None:
+        """Queries with no matches return empty MetricSeries.
+
+        No error raised; samples tuple is empty.
+        """
+        pytest.skip("Adapter must implement: test empty result handling")
+
+    def test_range_query_time_bounds_respected(self) -> None:
         """Range query respects start (inclusive) and end (exclusive).
 
-        start <= sample.timestamp < end for all returned samples.
-
-        Subclasses MUST implement:
-        1. Query range with specific start/end times
-        2. Assert all samples fall within bounds
+        All samples must satisfy: start <= timestamp < end.
         """
-        pytest.skip("Adapter must implement range query time bounds test")
+        pytest.skip(
+            "Adapter must implement: test range query time bounds enforcement"
+        )
 
-    def test_instant_query_staleness_window(self) -> None:
-        """Instant query uses backend staleness window for missing values.
+    def test_range_query_step_alignment(self) -> None:
+        """Range query samples are aligned to step_seconds boundaries.
 
-        If no value at exact timestamp, may return most recent within
-        backend-specific window (typically 5m for Prometheus).
-
-        Subclasses MUST implement:
-        1. Query instant with timestamp before any data
-        2. Verify either no data or most recent value returned
+        All sample timestamps must be multiples of step_seconds from range.start.
         """
-        pytest.skip("Adapter must implement instant query staleness window test")
+        pytest.skip(
+            "Adapter must implement: test range query step alignment"
+        )
 
-    def test_empty_query_result(self) -> None:
-        """Query with no matches returns empty MetricSeries.
+    def test_instant_query_returns_single_sample(self) -> None:
+        """Instant queries return exactly one sample.
 
-        samples tuple is empty; no error raised.
-
-        Subclasses MUST implement:
-        1. Query with filter that matches no data
-        2. Assert returns MetricSeries with empty samples tuple
+        Staleness window may apply (e.g., Prometheus 5m default).
         """
-        pytest.skip("Adapter must implement empty query result test")
+        pytest.skip(
+            "Adapter must implement: test instant query returns one sample"
+        )
 
-    def test_workspace_mismatch_detection(self) -> None:
-        """Backend returning cross-workspace data raises WorkspaceMismatch.
+    def test_error_classification_transient_failures(self) -> None:
+        """Network/transient errors raise BackendUnavailable.
 
-        Validates workspace_id label in response; prevents data leakage
-        if backend is compromised or query construction has injection bug.
-
-        Subclasses MUST implement:
-        1. Mock backend returning cross-workspace data
-        2. Call adapter query method
-        3. Assert raises WorkspaceMismatch (not returned silently)
+        Connection refused, timeout, HTTP 503 → BackendUnavailable.
+        Caller retries with backoff.
         """
-        pytest.skip("Adapter must implement workspace mismatch detection test")
+        pytest.skip(
+            "Adapter must implement: test transient errors raise BackendUnavailable"
+        )
 
-    def test_error_classification(self) -> None:
-        """Backend connection errors classified as BackendUnavailable.
-
-        Transient failures raise BackendUnavailable; caller retries.
-
-        Subclasses MUST implement:
-        1. Simulate backend unavailable
-        2. Call adapter query method
-        3. Assert raises BackendUnavailable (not other exception type)
-        """
-        pytest.skip("Adapter must implement error classification test")
-
-    def test_query_unsupported_noop_adapter(self) -> None:
+    def test_noop_adapter_raises_query_unsupported(self) -> None:
         """Noop adapter raises QueryUnsupported on all query methods.
 
-        UI navigates to CUSTOS_METRICS_EXTERNAL_URL instead.
-
-        Subclasses MUST implement (if testing noop adapter):
-        1. Call any query method
-        2. Assert raises QueryUnsupported
+        Used when metrics are disabled; UI falls back to external URL.
         """
-        pytest.skip("Adapter must implement QueryUnsupported test (if noop)")
+        pytest.skip(
+            "Adapter must implement: test QueryUnsupported for noop adapter"
+        )

@@ -14,7 +14,6 @@ from __future__ import annotations
 import pytest
 
 from custos_spl.errors import BackendUnavailable, WorkspaceMismatch
-from custos_spl.ids import ArtifactId, WorkspaceId
 
 from .base import AdapterConformanceBase
 
@@ -22,8 +21,10 @@ from .base import AdapterConformanceBase
 class ArtifactStoreConformanceTests(AdapterConformanceBase):
     """Base conformance tests for ArtifactStoreProvider adapters.
 
-    Subclasses MUST provide an 'adapter' fixture that returns a configured
-    ArtifactStoreProvider implementation ready for testing.
+    Subclasses MUST provide:
+    - `adapter` fixture: ArtifactStoreProvider instance
+    - `workspace_id` fixture: test workspace ID
+    - `sample_content` fixture: bytes for testing
 
     Example:
         @pytest.fixture
@@ -31,128 +32,99 @@ class ArtifactStoreConformanceTests(AdapterConformanceBase):
             return MyS3Adapter(bucket="test")
     """
 
-    def test_content_addressability(self) -> None:
+    def test_content_addressability_idempotency(self) -> None:
         """Identical content produces identical digest and artifact ID.
 
-        This ensures idempotency: writing the same content twice
-        produces the same artifact_id and digest.
-
-        Subclasses MUST implement:
-        1. Put same content twice
-        2. Assert both calls return same artifact_id and digest
+        Writing the same content twice must produce the same artifact_id
+        and digest (idempotency guarantee).
         """
-        pytest.skip("Adapter must implement content-addressability test")
+        pytest.skip(
+            "Adapter must implement: test identical content → same artifact_id"
+        )
 
-    def test_streaming_put_contract(self) -> None:
-        """put() accepts async iterator of bytes without buffering.
+    def test_streaming_put_memory_efficiency(self) -> None:
+        """put() streams without buffering entire content in memory.
 
-        The adapter MUST stream to temp file or backend without loading
-        entire content in memory (O(1) memory guarantee).
-
-        Subclasses MUST implement:
-        1. Provide large content via async iterator
-        2. Monitor memory during put()
-        3. Assert memory stays O(1) relative to content size
+        O(1) memory contract: memory usage independent of content size.
+        Content streamed to backend or temp file during upload.
         """
-        pytest.skip("Adapter must implement streaming put contract test")
+        pytest.skip(
+            "Adapter must implement: test put() streaming O(1) memory contract"
+        )
 
-    def test_streaming_get_contract(self) -> None:
+    def test_streaming_get_memory_efficiency(self) -> None:
         """get() returns async generator yielding chunks.
 
-        Caller can stream and process chunks without loading
-        entire artifact in memory.
-
-        Subclasses MUST implement:
-        1. Store artifact
-        2. Call get() and iterate chunks
-        3. Assert can process chunks without loading all in memory
+        Caller processes chunks without loading entire artifact
+        in memory (O(1) memory contract for caller).
         """
-        pytest.skip("Adapter must implement streaming get contract test")
+        pytest.skip(
+            "Adapter must implement: test get() returns streaming chunks"
+        )
 
-    def test_workspace_scoping_put(self) -> None:
+    def test_workspace_scoping_put_associates_workspace(self) -> None:
         """put() associates artifact with workspace.
 
-        Artifact digest includes workspace_id in key space,
-        preventing cross-workspace collisions.
-
-        Subclasses MUST implement:
-        1. Put artifact in workspace A
-        2. Verify artifact belongs to workspace A
+        Artifact digest/key includes workspace_id, preventing
+        cross-workspace collisions.
         """
-        pytest.skip("Adapter must implement workspace scoping for put test")
+        pytest.skip(
+            "Adapter must implement: test put() associates artifact with workspace"
+        )
 
-    def test_workspace_scoping_get(self) -> None:
+    def test_workspace_scoping_get_blocks_cross_workspace(self) -> None:
         """get() rejects cross-workspace access.
 
         Attempting to retrieve artifact from different workspace
         raises WorkspaceMismatch (caller maps to 404).
-
-        Subclasses MUST implement:
-        1. Put artifact in workspace A
-        2. Attempt get() from workspace B
-        3. Assert raises WorkspaceMismatch
         """
-        pytest.skip("Adapter must implement workspace scoping for get test")
+        pytest.skip(
+            "Adapter must implement: test get() blocks cross-workspace access"
+        )
 
-    def test_workspace_scoping_head(self) -> None:
+    def test_workspace_scoping_head_returns_none_for_cross_workspace(self) -> None:
         """head() returns None for cross-workspace artifacts.
 
-        Lightweight check that doesn't disclose cross-workspace existence.
-
-        Subclasses MUST implement:
-        1. Put artifact in workspace A
-        2. Call head() from workspace B
-        3. Assert returns None (not error)
+        Doesn't disclose cross-workspace existence (returns None, not error).
         """
-        pytest.skip("Adapter must implement workspace scoping for head test")
+        pytest.skip(
+            "Adapter must implement: test head() returns None for cross-workspace"
+        )
 
-    def test_sweeper_only_deletion(self) -> None:
+    def test_sweeper_only_deletion_requires_flag(self) -> None:
         """delete() requires is_sweeper=True flag.
 
         Prevents accidental deletion; only sweeper process can garbage-collect.
-
-        Subclasses MUST implement:
-        1. Put artifact
-        2. Call delete(is_sweeper=False)
-        3. Assert raises ValueError
-        4. Call delete(is_sweeper=True)
-        5. Assert succeeds
         """
-        pytest.skip("Adapter must implement sweeper-only deletion test")
+        pytest.skip(
+            "Adapter must implement: test delete() requires is_sweeper=True"
+        )
 
-    def test_deletion_idempotency(self) -> None:
+    def test_deletion_idempotency_no_error_if_missing(self) -> None:
         """delete() succeeds even if artifact already absent.
 
-        No error raised for missing artifact; safe for retry-able sweeper.
-
-        Subclasses MUST implement:
-        1. Call delete(is_sweeper=True) on missing artifact
-        2. Assert succeeds (no error raised)
+        No error raised for missing artifact (safe for retry-able sweeper).
         """
-        pytest.skip("Adapter must implement deletion idempotency test")
+        pytest.skip(
+            "Adapter must implement: test delete() idempotency (no error if missing)"
+        )
 
-    def test_media_type_consistency(self) -> None:
-        """put() stores effective media_type consistently.
+    def test_media_type_consistency_stored_vs_returned(self) -> None:
+        """put() stores and returns consistent media_type.
 
-        Returned ArtifactDescriptor.media_type must match what
-        was stored (not the argument, which may be None).
-
-        Subclasses MUST implement:
-        1. Put with media_type=None
-        2. Assert returned descriptor has effective type (e.g., application/octet-stream)
-        3. Call head() and verify media_type matches
+        Returned ArtifactDescriptor.media_type must match what was stored
+        (not just the input argument, which may be None).
         """
-        pytest.skip("Adapter must implement media type consistency test")
+        pytest.skip(
+            "Adapter must implement: test media_type consistency"
+        )
 
-    def test_error_classification(self) -> None:
-        """Network errors classified as BackendUnavailable.
+    def test_error_classification_transient_failures(self) -> None:
+        """Network/transient errors raise BackendUnavailable.
 
-        Transient failures (connection, timeout, HTTP 503) raise
-        BackendUnavailable; caller retries with backoff.
-
-        Subclasses MUST implement:
-        1. Simulate backend unavailable (mock connection error)
-        2. Call adapter method
-        3. Assert raises BackendUnavailable (not other exception type)
+        Connection refused, timeout, HTTP 503 → BackendUnavailable.
+        Caller retries with backoff.
         """
-        pytest.skip("Adapter must implement error classification test")
+        pytest.skip(
+            "Adapter must implement: test transient errors raise BackendUnavailable"
+        )
