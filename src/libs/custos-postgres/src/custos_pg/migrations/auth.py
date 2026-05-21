@@ -30,6 +30,7 @@ Role bindings:
     {type: "workspace", workspace_id: "..."},
     {type: "tenant", tenant_id: "..."},
     {type: "global"}
+    Adapter accepts both "type" and "kind" keys for backward compatibility.
 """
 
 from __future__ import annotations

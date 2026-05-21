@@ -2374,17 +2374,504 @@ async def test_list_roles(pg_pool: Pool) -> None:
     assert {r.role_id for r in roles} == {RoleId("admin"), RoleId("viewer")}
 
 
-async def test_unimplemented_role_binding_methods_raise_not_implemented_error(
-    pg_pool: Pool,
-) -> None:
-    """Out-of-scope methods (SPL-130g and later) raise NotImplementedError."""
+async def test_put_and_list_role_bindings_for_principal(pg_pool: Pool) -> None:
     adapter = PgAuthAdapter(pool=pg_pool)
     await adapter.apply_pending()
 
-    # Permissions/roles (SPL-130f) are now implemented; role bindings and later raise errors
+    # Clear any prior test data
+    async with pg_pool.acquire() as conn:
+        await conn.execute("TRUNCATE TABLE auth.role_binding CASCADE")
 
-    with pytest.raises(NotImplementedError, match="SPL-130g"):
-        await adapter.put_role_binding(None)
+    now = datetime.now(UTC)
+    tenant = Tenant(
+        tenant_id="t-1",
+        display_name="Tenant 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_tenant(tenant)
+
+    workspace = Workspace(
+        workspace_id="ws-1",
+        tenant_id="t-1",
+        display_name="Workspace 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_workspace(workspace)
+
+    user = User(
+        kind="user",
+        principal_id="user-1",
+        tenant_id="t-1",
+        display_name="Alice",
+        email="alice@example.com",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(user)
+
+    role = Role(
+        role_id=RoleId("admin"),
+        name="Administrator",
+        description="Full access",
+        permission_names=("read", "write"),
+    )
+    await adapter.put_role(role)
+
+    from custos_spl.ids import RoleBindingId
+    from custos_spl.interfaces.auth_store import RoleBinding, WorkspaceScope, TenantScope, GlobalScope
+
+    binding1 = RoleBinding(
+        binding_id=RoleBindingId("binding-1"),
+        principal_id=PrincipalId("user-1"),
+        role_id=RoleId("admin"),
+        scope=WorkspaceScope(workspace_id="ws-1"),
+        bound_at=now,
+        bound_by=PrincipalId("user-1"),
+    )
+    await adapter.put_role_binding(binding1)
+
+    binding2 = RoleBinding(
+        binding_id=RoleBindingId("binding-2"),
+        principal_id=PrincipalId("user-1"),
+        role_id=RoleId("admin"),
+        scope=TenantScope(tenant_id="t-1"),
+        bound_at=now + timedelta(hours=1),
+        bound_by=PrincipalId("user-1"),
+    )
+    await adapter.put_role_binding(binding2)
+
+    binding3 = RoleBinding(
+        binding_id=RoleBindingId("binding-3"),
+        principal_id=PrincipalId("user-1"),
+        role_id=RoleId("admin"),
+        scope=GlobalScope(),
+        bound_at=now + timedelta(hours=2),
+        bound_by=PrincipalId("user-1"),
+    )
+    await adapter.put_role_binding(binding3)
+
+    # Query workspace scope
+    bindings = await adapter.list_role_bindings_for_principal(
+        PrincipalId("user-1"),
+        (WorkspaceScope(workspace_id="ws-1"),),
+    )
+    assert len(bindings) == 1
+    assert bindings[0].binding_id == RoleBindingId("binding-1")
+
+    # Query multiple scopes at once (auth hot path): should return union
+    bindings = await adapter.list_role_bindings_for_principal(
+        PrincipalId("user-1"),
+        (
+            WorkspaceScope(workspace_id="ws-1"),
+            TenantScope(tenant_id="t-1"),
+        ),
+    )
+    assert len(bindings) == 2
+    assert {b.binding_id for b in bindings} == {
+        RoleBindingId("binding-1"),
+        RoleBindingId("binding-2"),
+    }
+
+    # Query all three scopes (workspace + tenant + global): full auth hot path
+    bindings = await adapter.list_role_bindings_for_principal(
+        PrincipalId("user-1"),
+        (
+            WorkspaceScope(workspace_id="ws-1"),
+            TenantScope(tenant_id="t-1"),
+            GlobalScope(),
+        ),
+    )
+    assert len(bindings) == 3
+    assert {b.binding_id for b in bindings} == {
+        RoleBindingId("binding-1"),
+        RoleBindingId("binding-2"),
+        RoleBindingId("binding-3"),
+    }
+
+
+async def test_delete_role_binding(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    # Clear any prior test data
+    async with pg_pool.acquire() as conn:
+        await conn.execute("TRUNCATE TABLE auth.role_binding CASCADE")
+
+    now = datetime.now(UTC)
+    tenant = Tenant(
+        tenant_id="t-1",
+        display_name="Tenant 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_tenant(tenant)
+
+    user = User(
+        kind="user",
+        principal_id="user-1",
+        tenant_id="t-1",
+        display_name="Alice",
+        email="alice@example.com",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(user)
+
+    role = Role(
+        role_id=RoleId("admin"),
+        name="Administrator",
+        description="Full access",
+        permission_names=("read", "write"),
+    )
+    await adapter.put_role(role)
+
+    from custos_spl.ids import RoleBindingId
+    from custos_spl.interfaces.auth_store import RoleBinding, GlobalScope
+
+    binding = RoleBinding(
+        binding_id=RoleBindingId("binding-1"),
+        principal_id=PrincipalId("user-1"),
+        role_id=RoleId("admin"),
+        scope=GlobalScope(),
+        bound_at=now,
+        bound_by=PrincipalId("user-1"),
+    )
+    await adapter.put_role_binding(binding)
+
+    # Verify binding exists
+    bindings = await adapter.list_role_bindings_for_principal(
+        PrincipalId("user-1"),
+        (GlobalScope(),),
+    )
+    assert len(bindings) == 1
+
+    # Delete the binding
+    await adapter.delete_role_binding(
+        RoleBindingId("binding-1"),
+        PrincipalId("user-1"),
+        "revoke",
+    )
+
+    # Verify binding is gone
+    bindings = await adapter.list_role_bindings_for_principal(
+        PrincipalId("user-1"),
+        (GlobalScope(),),
+    )
+    assert len(bindings) == 0
+
+
+async def test_put_role_binding_upserts_by_binding_id(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    # Clear any prior test data
+    async with pg_pool.acquire() as conn:
+        await conn.execute("TRUNCATE TABLE auth.role_binding CASCADE")
+
+    now = datetime.now(UTC)
+    tenant = Tenant(
+        tenant_id="t-1",
+        display_name="Tenant 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_tenant(tenant)
+
+    user1 = User(
+        kind="user",
+        principal_id="user-1",
+        tenant_id="t-1",
+        display_name="Alice",
+        email="alice@example.com",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(user1)
+
+    user2 = User(
+        kind="user",
+        principal_id="user-2",
+        tenant_id="t-1",
+        display_name="Bob",
+        email="bob@example.com",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(user2)
+
+    admin_role = Role(
+        role_id=RoleId("admin"),
+        name="Administrator",
+        description="Full access",
+        permission_names=("read", "write"),
+    )
+    await adapter.put_role(admin_role)
+
+    viewer_role = Role(
+        role_id=RoleId("viewer"),
+        name="Viewer",
+        description="Read-only",
+        permission_names=("read",),
+    )
+    await adapter.put_role(viewer_role)
+
+    from custos_spl.ids import RoleBindingId
+    from custos_spl.interfaces.auth_store import RoleBinding, GlobalScope
+
+    binding = RoleBinding(
+        binding_id=RoleBindingId("binding-1"),
+        principal_id=PrincipalId("user-1"),
+        role_id=RoleId("admin"),
+        scope=GlobalScope(),
+        bound_at=now,
+        bound_by=PrincipalId("user-1"),
+    )
+    await adapter.put_role_binding(binding)
+
+    # Verify initial binding
+    bindings = await adapter.list_role_bindings_for_principal(
+        PrincipalId("user-1"),
+        (GlobalScope(),),
+    )
+    assert len(bindings) == 1
+    assert bindings[0].role_id == RoleId("admin")
+
+    # Re-put same binding_id with different values (upsert)
+    binding_updated = RoleBinding(
+        binding_id=RoleBindingId("binding-1"),
+        principal_id=PrincipalId("user-2"),  # Changed principal
+        role_id=RoleId("viewer"),  # Changed role
+        scope=GlobalScope(),
+        bound_at=now + timedelta(hours=1),
+        bound_by=PrincipalId("user-1"),
+    )
+    await adapter.put_role_binding(binding_updated)
+
+    # Verify old principal no longer has binding
+    bindings_user1 = await adapter.list_role_bindings_for_principal(
+        PrincipalId("user-1"),
+        (GlobalScope(),),
+    )
+    assert len(bindings_user1) == 0
+
+    # Verify new principal has updated binding
+    bindings_user2 = await adapter.list_role_bindings_for_principal(
+        PrincipalId("user-2"),
+        (GlobalScope(),),
+    )
+    assert len(bindings_user2) == 1
+    assert bindings_user2[0].role_id == RoleId("viewer")
+    assert bindings_user2[0].bound_at == now + timedelta(hours=1)
+
+
+async def test_put_role_binding_retry_is_idempotent(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    # Clear any prior test data
+    async with pg_pool.acquire() as conn:
+        await conn.execute("TRUNCATE TABLE auth.role_binding CASCADE")
+
+    now = datetime.now(UTC)
+    tenant = Tenant(
+        tenant_id="t-1",
+        display_name="Tenant 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_tenant(tenant)
+
+    user = User(
+        kind="user",
+        principal_id="user-1",
+        tenant_id="t-1",
+        display_name="Alice",
+        email="alice@example.com",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(user)
+
+    admin_role = Role(
+        role_id=RoleId("admin"),
+        name="Administrator",
+        description="Full access",
+        permission_names=("read", "write"),
+    )
+    await adapter.put_role(admin_role)
+
+    viewer_role = Role(
+        role_id=RoleId("viewer"),
+        name="Viewer",
+        description="Read-only",
+        permission_names=("read",),
+    )
+    await adapter.put_role(viewer_role)
+
+    from custos_spl.ids import RoleBindingId
+    from custos_spl.interfaces.auth_store import RoleBinding, GlobalScope
+
+    binding = RoleBinding(
+        binding_id=RoleBindingId("binding-1"),
+        principal_id=PrincipalId("user-1"),
+        role_id=RoleId("admin"),
+        scope=GlobalScope(),
+        bound_at=now,
+        bound_by=PrincipalId("user-1"),
+    )
+    await adapter.put_role_binding(binding)
+
+    # Verify initial binding
+    bindings = await adapter.list_role_bindings_for_principal(
+        PrincipalId("user-1"),
+        (GlobalScope(),),
+    )
+    assert len(bindings) == 1
+    assert bindings[0].role_id == RoleId("admin")
+    assert bindings[0].bound_at == now
+
+    # Retry: re-call put_role_binding with same binding_id but updated role_id and bound_at
+    # This simulates a client retry after a network timeout
+    binding_retry = RoleBinding(
+        binding_id=RoleBindingId("binding-1"),
+        principal_id=PrincipalId("user-1"),
+        role_id=RoleId("viewer"),  # Changed role
+        scope=GlobalScope(),
+        bound_at=now + timedelta(minutes=5),  # Updated timestamp
+        bound_by=PrincipalId("user-1"),
+    )
+    # This should NOT raise a unique-key violation; upsert should succeed
+    await adapter.put_role_binding(binding_retry)
+
+    # Verify binding was updated (idempotent upsert)
+    bindings = await adapter.list_role_bindings_for_principal(
+        PrincipalId("user-1"),
+        (GlobalScope(),),
+    )
+    assert len(bindings) == 1
+    assert bindings[0].role_id == RoleId("viewer")
+    assert bindings[0].bound_at == now + timedelta(minutes=5)
+
+    # Second retry with same values should also succeed (fully idempotent)
+    await adapter.put_role_binding(binding_retry)
+    bindings = await adapter.list_role_bindings_for_principal(
+        PrincipalId("user-1"),
+        (GlobalScope(),),
+    )
+    assert len(bindings) == 1
+
+
+async def test_list_role_bindings_for_scope(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    # Clear any prior test data
+    async with pg_pool.acquire() as conn:
+        await conn.execute("TRUNCATE TABLE auth.role_binding CASCADE")
+
+    now = datetime.now(UTC)
+    tenant = Tenant(
+        tenant_id="t-1",
+        display_name="Tenant 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_tenant(tenant)
+
+    user1 = User(
+        kind="user",
+        principal_id="user-1",
+        tenant_id="t-1",
+        display_name="Alice",
+        email="alice@example.com",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(user1)
+
+    user2 = User(
+        kind="user",
+        principal_id="user-2",
+        tenant_id="t-1",
+        display_name="Bob",
+        email="bob@example.com",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(user2)
+
+    admin_role = Role(
+        role_id=RoleId("admin"),
+        name="Administrator",
+        description="Full access",
+        permission_names=("read", "write"),
+    )
+    await adapter.put_role(admin_role)
+
+    viewer_role = Role(
+        role_id=RoleId("viewer"),
+        name="Viewer",
+        description="Read-only",
+        permission_names=("read",),
+    )
+    await adapter.put_role(viewer_role)
+
+    from custos_spl.ids import RoleBindingId
+    from custos_spl.interfaces.auth_store import RoleBinding, TenantScope, RoleBindingFilter
+
+    binding1 = RoleBinding(
+        binding_id=RoleBindingId("binding-1"),
+        principal_id=PrincipalId("user-1"),
+        role_id=RoleId("admin"),
+        scope=TenantScope(tenant_id="t-1"),
+        bound_at=now,
+        bound_by=PrincipalId("user-1"),
+    )
+    await adapter.put_role_binding(binding1)
+
+    binding2 = RoleBinding(
+        binding_id=RoleBindingId("binding-2"),
+        principal_id=PrincipalId("user-2"),
+        role_id=RoleId("viewer"),
+        scope=TenantScope(tenant_id="t-1"),
+        bound_at=now + timedelta(hours=1),
+        bound_by=PrincipalId("user-1"),
+    )
+    await adapter.put_role_binding(binding2)
+
+    # List all bindings at tenant scope
+    bindings = await adapter.list_role_bindings_for_scope(
+        TenantScope(tenant_id="t-1"),
+        RoleBindingFilter(),
+    )
+    assert len(bindings) == 2
+
+    # Filter by role_id
+    bindings = await adapter.list_role_bindings_for_scope(
+        TenantScope(tenant_id="t-1"),
+        RoleBindingFilter(role_id=RoleId("admin")),
+    )
+    assert len(bindings) == 1
+    assert bindings[0].role_id == RoleId("admin")
+
+
+async def test_unimplemented_transaction_methods_raise_not_implemented_error(
+    pg_pool: Pool,
+) -> None:
+    """Out-of-scope methods (SPL-130h and later) raise NotImplementedError."""
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    # Role bindings (SPL-130g) are now implemented; transactions and later raise errors
 
     with pytest.raises(NotImplementedError, match="SPL-130h"):
         await adapter.with_transaction(None)
