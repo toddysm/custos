@@ -127,7 +127,7 @@ class S3ArtifactAdapter:
                     workspace_id=workspace_id,
                     artifact_id=artifact_id,
                     digest=digest,
-                    media_type=media_type,
+                    media_type=media_type or "application/octet-stream",
                     size=size,
                 )
             finally:
