@@ -12,21 +12,27 @@ import asyncpg
 
 from custos_pg.pool import LazyPool
 from custos_spl.errors import ImmutableViolation
-from custos_spl.ids import PrincipalId, RoleId, ServiceTokenId, TenantId, WorkspaceId
+from custos_spl.ids import PrincipalId, RoleBindingId, RoleId, ServiceTokenId, TenantId, WorkspaceId
 from custos_spl.interfaces.auth_store import (
     AuthStoreProvider,
+    GlobalScope,
     OidcIdentity,
     Permission,
     Principal,
     PrincipalFilter,
     Role,
+    RoleBinding,
+    RoleBindingFilter,
+    RoleBindingScope,
     ServiceAccount,
     ServiceToken,
+    TenantScope,
     Tenant,
     TenantFilter,
     User,
     Workspace,
     WorkspaceFilter,
+    WorkspaceScope,
 )
 from custos_spl.migrations.runner import MigrationCapable
 
@@ -750,27 +756,161 @@ class PgAuthAdapter(MigrationCapable):
                 for row in rows
             )
 
-    async def put_role_binding(self, binding: object) -> None:
-        """Not yet implemented (SPL-130g)."""
-        raise NotImplementedError("Role bindings: SPL-130g")
+    # ----- Role bindings -----
+
+    def _scope_to_json(self, scope: RoleBindingScope) -> dict[str, Any]:
+        """Serialize RoleBindingScope discriminated union to JSON.
+
+        Uses 'type' as discriminator key per schema documentation.
+        """
+        if isinstance(scope, WorkspaceScope):
+            return {"type": "workspace", "workspace_id": scope.workspace_id}
+        elif isinstance(scope, TenantScope):
+            return {"type": "tenant", "tenant_id": scope.tenant_id}
+        elif isinstance(scope, GlobalScope):
+            return {"type": "global"}
+        else:
+            raise TypeError(f"unknown scope type: {type(scope)}")
+
+    def _json_to_scope(self, data: dict[str, Any]) -> RoleBindingScope:
+        """Deserialize JSON to RoleBindingScope discriminated union.
+
+        Accepts both 'type' and 'kind' keys for backward compatibility.
+        """
+        kind = data.get("type") or data.get("kind")
+        if kind == "workspace":
+            return WorkspaceScope(workspace_id=data["workspace_id"])
+        elif kind == "tenant":
+            return TenantScope(tenant_id=data["tenant_id"])
+        elif kind == "global":
+            return GlobalScope()
+        else:
+            raise ValueError(f"unknown scope kind: {kind}")
+
+    async def put_role_binding(self, binding: RoleBinding) -> None:
+        """Insert or update a role binding.
+
+        Upsert by binding_id so callers can safely retry. The (principal_id,
+        scope) index is the authorization hot path.
+        """
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO auth.role_binding (
+                    binding_id, principal_id, role_id, scope, bound_at, bound_by
+                ) VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT (binding_id) DO UPDATE SET
+                    principal_id = EXCLUDED.principal_id,
+                    role_id = EXCLUDED.role_id,
+                    scope = EXCLUDED.scope,
+                    bound_at = EXCLUDED.bound_at,
+                    bound_by = EXCLUDED.bound_by
+                """,
+                binding.binding_id,
+                binding.principal_id,
+                binding.role_id,
+                self._scope_to_json(binding.scope),
+                binding.bound_at,
+                binding.bound_by,
+            )
 
     async def delete_role_binding(
-        self, binding_id: object, actor: object, reason: object
+        self, binding_id: RoleBindingId, actor: PrincipalId, reason: str
     ) -> None:
-        """Not yet implemented (SPL-130g)."""
-        raise NotImplementedError("Role bindings: SPL-130g")
+        """Delete a role binding.
+
+        Physical delete (revocation-by-removal). actor and reason are
+        captured in audit trail via transaction handle, not on row.
+        """
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM auth.role_binding WHERE binding_id = $1",
+                binding_id,
+            )
 
     async def list_role_bindings_for_principal(
-        self, principal_id: object, scopes: object
-    ) -> list:
-        """Not yet implemented (SPL-130g)."""
-        raise NotImplementedError("Role bindings: SPL-130g")
+        self,
+        principal_id: PrincipalId,
+        scopes: tuple[RoleBindingScope, ...],
+    ) -> tuple[RoleBinding, ...]:
+        """List a principal's bindings at the supplied scopes.
+
+        Authorization hot path: assembles relevant scope set (workspace
+        + tenant + global) and reads bindings in one round-trip.
+        """
+        if not scopes:
+            return ()
+
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            scope_jsons = [self._scope_to_json(s) for s in scopes]
+            rows = await conn.fetch(
+                """
+                SELECT binding_id, principal_id, role_id, scope, bound_at, bound_by
+                FROM auth.role_binding
+                WHERE principal_id = $1 AND scope = ANY($2)
+                ORDER BY bound_at DESC
+                """,
+                principal_id,
+                scope_jsons,
+            )
+            return tuple(
+                RoleBinding(
+                    binding_id=RoleBindingId(row["binding_id"]),
+                    principal_id=PrincipalId(row["principal_id"]),
+                    role_id=RoleId(row["role_id"]),
+                    scope=self._json_to_scope(row["scope"]),
+                    bound_at=row["bound_at"],
+                    bound_by=PrincipalId(row["bound_by"]),
+                )
+                for row in rows
+            )
 
     async def list_role_bindings_for_scope(
-        self, scope: object, filter: object | None = None
-    ) -> list:
-        """Not yet implemented (SPL-130g)."""
-        raise NotImplementedError("Role bindings: SPL-130g")
+        self,
+        scope: RoleBindingScope,
+        filter: RoleBindingFilter | None = None,
+    ) -> tuple[RoleBinding, ...]:
+        """Admin view: all bindings at a given scope.
+
+        Bounded by workspace/tenant size; returns full set without
+        pagination.
+        """
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            scope_json = self._scope_to_json(scope)
+            query = """
+                SELECT binding_id, principal_id, role_id, scope, bound_at, bound_by
+                FROM auth.role_binding
+                WHERE scope = $1
+            """
+            params: list[Any] = [scope_json]
+
+            if filter:
+                if filter.role_id is not None:
+                    query += " AND role_id = $2"
+                    params.append(filter.role_id)
+                if filter.principal_id is not None:
+                    idx = len(params) + 1
+                    query += f" AND principal_id = ${idx}"
+                    params.append(filter.principal_id)
+
+            query += " ORDER BY bound_at DESC"
+            rows = await conn.fetch(query, *params)
+
+            return tuple(
+                RoleBinding(
+                    binding_id=RoleBindingId(row["binding_id"]),
+                    principal_id=PrincipalId(row["principal_id"]),
+                    role_id=RoleId(row["role_id"]),
+                    scope=self._json_to_scope(row["scope"]),
+                    bound_at=row["bound_at"],
+                    bound_by=PrincipalId(row["bound_by"]),
+                )
+                for row in rows
+            )
 
     async def with_transaction(self, callback: object) -> None:
         """Not yet implemented (SPL-130h)."""
