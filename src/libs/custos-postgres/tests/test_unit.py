@@ -69,6 +69,67 @@ def test_auth_adapter_satisfies_auth_protocol() -> None:
     assert isinstance(adapter, AuthStoreProvider)
 
 
+@pytest.mark.asyncio
+async def test_auth_adapter_with_transaction_returns_body_value_and_closes_handle() -> None:
+    events: list[str] = []
+
+    class _FakeTransactionContext:
+        async def __aenter__(self) -> None:
+            events.append("transaction_enter")
+            return None
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            events.append("transaction_exit")
+            return None
+
+    class _FakeConnection:
+        def transaction(self) -> _FakeTransactionContext:
+            events.append("transaction_created")
+            return _FakeTransactionContext()
+
+    class _FakeConnectionContext:
+        async def __aenter__(self) -> _FakeConnection:
+            events.append("connection_enter")
+            return _FakeConnection()
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            events.append("connection_exit")
+            return None
+
+    class _FakePool:
+        def connection(self) -> _FakeConnectionContext:
+            events.append("connection_created")
+            return _FakeConnectionContext()
+
+    adapter = PgAuthAdapter(pool=_FakePool())
+    seen_handle: TransactionHandle | None = None
+
+    async def body(handle: TransactionHandle) -> str:
+        nonlocal seen_handle
+        seen_handle = handle
+        assert isinstance(handle, TransactionHandle)
+        assert isinstance(handle, PgTransactionHandle)
+        assert getattr(handle, "_closed", False) is False
+        events.append("body_called")
+        return "body-result"
+
+    result = await adapter.with_transaction(body)
+
+    assert result == "body-result"
+    assert seen_handle is not None
+    assert isinstance(seen_handle, PgTransactionHandle)
+    assert getattr(seen_handle, "_closed", False) is True
+    assert events == [
+        "connection_created",
+        "connection_enter",
+        "transaction_created",
+        "transaction_enter",
+        "body_called",
+        "transaction_exit",
+        "connection_exit",
+    ]
+
+
 def test_definition_adapter_satisfies_migration_capable() -> None:
     adapter = PgDefinitionAdapter(lazy=LazyPool("postgresql://noop"))
     assert isinstance(adapter, MigrationCapable)
