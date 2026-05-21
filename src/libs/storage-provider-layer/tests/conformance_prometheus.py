@@ -6,19 +6,15 @@ Run: pytest tests/conformance_prometheus.py -v
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import pytest
 
-from custos_prometheus.adapters import PrometheusMetricsAdapter, make_prometheus_adapter
+from custos_prometheus.adapters import PrometheusMetricsAdapter
 from custos_spl.conformance import MetricsQueryConformanceTests
 from custos_spl.errors import QueryUnsupported, WorkspaceMismatch
-from custos_spl.ids import RunId, WorkspaceId
-from custos_spl.interfaces.metrics_query import (
-    MetricRange,
-    MetricSample,
-    MetricSelector,
-)
+from custos_spl.ids import WorkspaceId
+from custos_spl.interfaces.metrics_query import MetricSelector
 
 
 class TestPrometheusMetricsConformance(MetricsQueryConformanceTests):
