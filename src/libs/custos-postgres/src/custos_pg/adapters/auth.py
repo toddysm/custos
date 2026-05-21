@@ -12,8 +12,8 @@ from typing import Any, TypeVar
 import asyncpg
 
 from custos_pg.pool import LazyPool
-from custos_spl.errors import ImmutableViolation
-from custos_spl.middleware.transactions import bind_handle
+from custos_spl.errors import ImmutableViolation, InvalidTransactionHandle
+from custos_spl.middleware.transactions import bind_handle, check_handle
 from custos_spl.ids import PrincipalId, RoleBindingId, RoleId, ServiceTokenId, TenantId, WorkspaceId
 from custos_spl.interfaces.auth_store import (
     AuthStoreProvider,
@@ -103,6 +103,19 @@ class PgAuthAdapter(MigrationCapable):
             return self._pool
         return await self._lazy()
 
+    async def _get_conn(self, tx: TransactionHandle | None) -> tuple[asyncpg.Connection, bool]:
+        """Get a connection for execution, either from tx or pool.
+
+        Returns (connection, should_release) where should_release indicates
+        if the caller must release the connection back to the pool.
+        """
+        if tx is not None:
+            self._check_tx_handle(tx)
+            return tx.conn, False
+        pool = await self._pool_ref()
+        conn = await pool.acquire()
+        return conn, True
+
     @property
     def declared_revisions(self) -> dict[str, frozenset[int]]:
         """Revisions applied by this adapter."""
@@ -143,10 +156,10 @@ class PgAuthAdapter(MigrationCapable):
 
     # ----- Tenants -----
 
-    async def put_tenant(self, tenant: Tenant) -> None:
+    async def put_tenant(self, tenant: Tenant, tx: TransactionHandle | None = None) -> None:
         """Insert or update a tenant."""
-        pool = await self._pool_ref()
-        async with pool.acquire() as conn:
+        conn, should_release = await self._get_conn(tx)
+        try:
             await conn.execute(
                 """
                 INSERT INTO auth.tenant (tenant_id, display_name, disabled_at, created_at)
@@ -160,6 +173,10 @@ class PgAuthAdapter(MigrationCapable):
                 tenant.disabled_at,
                 tenant.created_at,
             )
+        finally:
+            if should_release:
+                pool = await self._pool_ref()
+                await pool.release(conn)
 
     async def get_tenant(self, tenant_id: TenantId) -> Tenant | None:
         """Read a tenant by ID."""
@@ -207,10 +224,10 @@ class PgAuthAdapter(MigrationCapable):
 
     # ----- Workspaces -----
 
-    async def put_workspace(self, workspace: Workspace) -> None:
+    async def put_workspace(self, workspace: Workspace, tx: TransactionHandle | None = None) -> None:
         """Insert or update a workspace."""
-        pool = await self._pool_ref()
-        async with pool.acquire() as conn:
+        conn, should_release = await self._get_conn(tx)
+        try:
             await conn.execute(
                 """
                 INSERT INTO auth.workspace (workspace_id, tenant_id, display_name, disabled_at, created_at)
@@ -225,6 +242,10 @@ class PgAuthAdapter(MigrationCapable):
                 workspace.disabled_at,
                 workspace.created_at,
             )
+        finally:
+            if should_release:
+                pool = await self._pool_ref()
+                await pool.release(conn)
 
     async def get_workspace(self, workspace_id: WorkspaceId) -> Workspace | None:
         """Read a workspace by ID."""
@@ -285,10 +306,10 @@ class PgAuthAdapter(MigrationCapable):
 
     # ----- Principals -----
 
-    async def put_principal(self, principal: Principal) -> None:
+    async def put_principal(self, principal: Principal, tx: TransactionHandle | None = None) -> None:
         """Insert or update a principal (User or ServiceAccount)."""
-        pool = await self._pool_ref()
-        async with pool.acquire() as conn:
+        conn, should_release = await self._get_conn(tx)
+        try:
             if isinstance(principal, User):
                 await conn.execute(
                     """
@@ -345,6 +366,10 @@ class PgAuthAdapter(MigrationCapable):
                 raise TypeError(
                     f"principal must be User or ServiceAccount, got {type(principal).__name__}"
                 )
+        finally:
+            if should_release:
+                pool = await self._pool_ref()
+                await pool.release(conn)
 
     async def get_principal(self, principal_id: PrincipalId) -> Principal | None:
         """Read a principal by ID, returning the matching union variant."""
@@ -399,7 +424,7 @@ class PgAuthAdapter(MigrationCapable):
             return tuple(self._reconstruct_principal(row) for row in rows)
 
     async def disable_principal(
-        self, principal_id: PrincipalId, actor: PrincipalId, reason: str
+        self, principal_id: PrincipalId, actor: PrincipalId, reason: str, tx: TransactionHandle | None = None
     ) -> None:
         """Soft-disable a principal.
 
@@ -408,8 +433,8 @@ class PgAuthAdapter(MigrationCapable):
         handle (SPL-130h); until transaction support lands, audit trail
         emission is deferred and the actor parameter is presently unused.
         """
-        pool = await self._pool_ref()
-        async with pool.acquire() as conn:
+        conn, should_release = await self._get_conn(tx)
+        try:
             await conn.execute(
                 """
                 UPDATE auth.principal
@@ -419,6 +444,10 @@ class PgAuthAdapter(MigrationCapable):
                 principal_id,
                 reason,
             )
+        finally:
+            if should_release:
+                pool = await self._pool_ref()
+                await pool.release(conn)
 
     def _reconstruct_principal(self, row: dict) -> Principal:
         """Reconstruct Principal union from database row."""
@@ -456,14 +485,15 @@ class PgAuthAdapter(MigrationCapable):
         issuer: str,
         subject: str,
         user_id: PrincipalId,
+        tx: TransactionHandle | None = None,
     ) -> None:
         """Bind an OIDC (issuer, subject) to an internal user.
 
         Write-once on (issuer, subject). Raises ImmutableViolation if already
         bound (even to the same user_id).
         """
-        pool = await self._pool_ref()
-        async with pool.acquire() as conn:
+        conn, should_release = await self._get_conn(tx)
+        try:
             try:
                 await conn.execute(
                     """
@@ -478,6 +508,10 @@ class PgAuthAdapter(MigrationCapable):
                 raise ImmutableViolation(
                     f"OIDC identity ({issuer}, {subject}) already bound"
                 ) from exc
+        finally:
+            if should_release:
+                pool = await self._pool_ref()
+                await pool.release(conn)
 
     async def get_oidc_identity(
         self,
@@ -532,7 +566,7 @@ class PgAuthAdapter(MigrationCapable):
 
     # ----- Service tokens -----
 
-    async def put_service_token(self, token: ServiceToken) -> None:
+    async def put_service_token(self, token: ServiceToken, tx: TransactionHandle | None = None) -> None:
         """Insert or update a service token row.
 
         Only hash is persisted; plaintext is never stored. token_id is the
@@ -540,8 +574,8 @@ class PgAuthAdapter(MigrationCapable):
         Hash is immutable: if a row with this token_id already exists with a
         different hash, raises ImmutableViolation.
         """
-        pool = await self._pool_ref()
-        async with pool.acquire() as conn:
+        conn, should_release = await self._get_conn(tx)
+        try:
             try:
                 await conn.execute(
                     """
@@ -587,6 +621,10 @@ class PgAuthAdapter(MigrationCapable):
                     token.revoked_by,
                     token.revoked_reason,
                 )
+        finally:
+            if should_release:
+                pool = await self._pool_ref()
+                await pool.release(conn)
 
     async def get_service_token_by_hash(self, hash: str) -> ServiceToken | None:
         """Resolve a hashed token to its row.
@@ -620,15 +658,15 @@ class PgAuthAdapter(MigrationCapable):
             )
 
     async def revoke_service_token(
-        self, token_id: ServiceTokenId, actor: PrincipalId, reason: str
+        self, token_id: ServiceTokenId, actor: PrincipalId, reason: str, tx: TransactionHandle | None = None
     ) -> None:
         """Mark a token revoked.
 
         Sets revoked_at, revoked_by, revoked_reason; never deletes row.
         Sweeper handles physical removal separately.
         """
-        pool = await self._pool_ref()
-        async with pool.acquire() as conn:
+        conn, should_release = await self._get_conn(tx)
+        try:
             await conn.execute(
                 """
                 UPDATE auth.service_token
@@ -639,6 +677,10 @@ class PgAuthAdapter(MigrationCapable):
                 actor,
                 reason,
             )
+        finally:
+            if should_release:
+                pool = await self._pool_ref()
+                await pool.release(conn)
 
     async def list_service_tokens_for_service_account(
         self,
@@ -675,14 +717,14 @@ class PgAuthAdapter(MigrationCapable):
                 for row in rows
             )
 
-    async def delete_expired_service_tokens(self, before: datetime) -> int:
+    async def delete_expired_service_tokens(self, before: datetime, tx: TransactionHandle | None = None) -> int:
         """Physical delete of expired tokens.
 
         Sweeper-only operation. Removes rows where expires_at < before.
         Returns the number of rows deleted.
         """
-        pool = await self._pool_ref()
-        async with pool.acquire() as conn:
+        conn, should_release = await self._get_conn(tx)
+        try:
             result = await conn.execute(
                 """
                 DELETE FROM auth.service_token
@@ -692,18 +734,22 @@ class PgAuthAdapter(MigrationCapable):
             )
             # Extract count from result string like "DELETE N"
             return int(result.split()[-1])
+        finally:
+            if should_release:
+                pool = await self._pool_ref()
+                await pool.release(conn)
 
 
     # ----- Permissions -----
 
-    async def upsert_permission(self, permission: Permission) -> None:
+    async def upsert_permission(self, permission: Permission, tx: TransactionHandle | None = None) -> None:
         """Insert or update a permission by name.
 
         Called at platform startup for each declared permission. name is
         the primary key; re-upserting updates description.
         """
-        pool = await self._pool_ref()
-        async with pool.acquire() as conn:
+        conn, should_release = await self._get_conn(tx)
+        try:
             await conn.execute(
                 """
                 INSERT INTO auth.permission (name, description)
@@ -713,6 +759,10 @@ class PgAuthAdapter(MigrationCapable):
                 permission.name,
                 permission.description,
             )
+        finally:
+            if should_release:
+                pool = await self._pool_ref()
+                await pool.release(conn)
 
     async def list_permissions(self) -> tuple[Permission, ...]:
         """List all declared permissions.
@@ -731,14 +781,14 @@ class PgAuthAdapter(MigrationCapable):
 
     # ----- Roles -----
 
-    async def put_role(self, role: Role) -> None:
+    async def put_role(self, role: Role, tx: TransactionHandle | None = None) -> None:
         """Insert or update a role by role_id.
 
         role_id is the primary key; upsert updates name, description, and
         permission_names.
         """
-        pool = await self._pool_ref()
-        async with pool.acquire() as conn:
+        conn, should_release = await self._get_conn(tx)
+        try:
             await conn.execute(
                 """
                 INSERT INTO auth.role (role_id, name, description, permission_names)
@@ -753,6 +803,10 @@ class PgAuthAdapter(MigrationCapable):
                 role.description,
                 list(role.permission_names),
             )
+        finally:
+            if should_release:
+                pool = await self._pool_ref()
+                await pool.release(conn)
 
     async def get_role(self, role_id: RoleId) -> Role | None:
         """Read a role by ID. Returns None if absent."""
@@ -827,14 +881,14 @@ class PgAuthAdapter(MigrationCapable):
         else:
             raise ValueError(f"unknown scope kind: {kind}")
 
-    async def put_role_binding(self, binding: RoleBinding) -> None:
+    async def put_role_binding(self, binding: RoleBinding, tx: TransactionHandle | None = None) -> None:
         """Insert or update a role binding.
 
         Upsert by binding_id so callers can safely retry. The (principal_id,
         scope) index is the authorization hot path.
         """
-        pool = await self._pool_ref()
-        async with pool.acquire() as conn:
+        conn, should_release = await self._get_conn(tx)
+        try:
             await conn.execute(
                 """
                 INSERT INTO auth.role_binding (
@@ -854,21 +908,29 @@ class PgAuthAdapter(MigrationCapable):
                 binding.bound_at,
                 binding.bound_by,
             )
+        finally:
+            if should_release:
+                pool = await self._pool_ref()
+                await pool.release(conn)
 
     async def delete_role_binding(
-        self, binding_id: RoleBindingId, actor: PrincipalId, reason: str
+        self, binding_id: RoleBindingId, actor: PrincipalId, reason: str, tx: TransactionHandle | None = None
     ) -> None:
         """Delete a role binding.
 
         Physical delete (revocation-by-removal). actor and reason are
         captured in audit trail via transaction handle, not on row.
         """
-        pool = await self._pool_ref()
-        async with pool.acquire() as conn:
+        conn, should_release = await self._get_conn(tx)
+        try:
             await conn.execute(
                 "DELETE FROM auth.role_binding WHERE binding_id = $1",
                 binding_id,
             )
+        finally:
+            if should_release:
+                pool = await self._pool_ref()
+                await pool.release(conn)
 
     async def list_role_bindings_for_principal(
         self,
@@ -960,9 +1022,6 @@ class PgAuthAdapter(MigrationCapable):
         closed before the transaction ends. Callers can use the handle
         in tx-aware methods to share atomicity.
         """
-        if not callable(fn):
-            raise TypeError("fn must be callable")
-
         pool = await self._pool_ref()
         async with pool.acquire() as conn, conn.transaction():
             handle = PgAuthTransactionHandle(conn)
@@ -976,6 +1035,20 @@ class PgAuthAdapter(MigrationCapable):
                 # pool, after which any retained reference must not be
                 # usable via `_check_tx_handle`.
                 handle._mark_closed()
+
+    def _check_tx_handle(self, tx: TransactionHandle | None) -> None:
+        """Validate a transaction handle for tx-aware methods.
+
+        Extends `custos_spl.middleware.transactions.check_handle`
+        (provider-ownership check) with a closed-state check, so
+        retained handles raise `InvalidTransactionHandle` instead of
+        running on a connection that has been released to the pool.
+        """
+        check_handle(tx, self)
+        if isinstance(tx, PgAuthTransactionHandle) and tx.closed:
+            raise InvalidTransactionHandle(
+                "transaction handle was closed when `with_transaction` returned"
+            )
 
 
 def make_adapter() -> PgAuthAdapter:

@@ -97,7 +97,7 @@ async def test_auth_adapter_with_transaction_returns_body_value_and_closes_handl
             return None
 
     class _FakePool:
-        def connection(self) -> _FakeConnectionContext:
+        def acquire(self) -> _FakeConnectionContext:
             events.append("connection_created")
             return _FakeConnectionContext()
 
@@ -108,7 +108,8 @@ async def test_auth_adapter_with_transaction_returns_body_value_and_closes_handl
         nonlocal seen_handle
         seen_handle = handle
         assert isinstance(handle, TransactionHandle)
-        assert isinstance(handle, PgTransactionHandle)
+        from custos_pg.adapters.auth import PgAuthTransactionHandle
+        assert isinstance(handle, PgAuthTransactionHandle)
         assert getattr(handle, "_closed", False) is False
         events.append("body_called")
         return "body-result"
@@ -117,7 +118,8 @@ async def test_auth_adapter_with_transaction_returns_body_value_and_closes_handl
 
     assert result == "body-result"
     assert seen_handle is not None
-    assert isinstance(seen_handle, PgTransactionHandle)
+    from custos_pg.adapters.auth import PgAuthTransactionHandle
+    assert isinstance(seen_handle, PgAuthTransactionHandle)
     assert getattr(seen_handle, "_closed", False) is True
     assert events == [
         "connection_created",
