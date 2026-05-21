@@ -72,15 +72,12 @@ def test_auth_adapter_satisfies_auth_protocol() -> None:
 def test_auth_adapter_unimplemented_methods_raise_not_implemented_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Out-of-scope methods (SPL-130d through SPL-130h) raise NotImplementedError."""
+    """Out-of-scope methods (SPL-130e through SPL-130h) raise NotImplementedError."""
     monkeypatch.setenv(DSN_ENV_VAR, "postgresql://noop")
     adapter = make_auth_adapter()
 
-    # Principal methods (SPL-130c) are now implemented; these are out-of-scope
+    # OIDC methods (SPL-130d) are now implemented; these are out-of-scope
     unimplemented_methods = [
-        "put_oidc_identity",
-        "get_oidc_identity",
-        "list_oidc_identities_for_user",
         "put_service_token",
         "get_service_token_by_hash",
         "revoke_service_token",
