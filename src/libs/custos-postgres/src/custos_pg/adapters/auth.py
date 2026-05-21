@@ -419,12 +419,11 @@ class PgAuthAdapter(MigrationCapable):
                 await conn.execute(
                     """
                     INSERT INTO auth.oidc_identity (issuer, subject, user_id, bound_at)
-                    VALUES ($1, $2, $3, $4)
+                    VALUES ($1, $2, $3, now())
                     """,
                     issuer,
                     subject,
                     user_id,
-                    datetime.now(UTC),
                 )
             except asyncpg.UniqueViolationError as exc:
                 raise ImmutableViolation(
