@@ -38,44 +38,44 @@ class TestPostgresAdapterInstantiation:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def _check_postgres_available(self, postgres_container: object) -> None:
-        """Verify Postgres container is available (via conftest fixture)."""
-        # postgres_container fixture from conftest.py handles health check
+    def _check_postgres_available(self, pg_pool: object) -> None:
+        """Verify Postgres pool is available (via conftest fixture)."""
+        # pg_pool fixture from conftest.py handles database setup/connectivity
         # If we reach here, Postgres is available
-        pass
+        assert pg_pool is not None
 
     @pytest.mark.asyncio
     async def test_postgres_auth_adapter_instantiation(
-        self, testdb_url: str
+        self, pg_pool: object
     ) -> None:
-        """Auth adapter can be instantiated with Postgres URL."""
-        adapter = PgAuthAdapter(connection_string=testdb_url)
+        """Auth adapter can be instantiated with the shared Postgres pool."""
+        adapter = PgAuthAdapter(pool=pg_pool)
         assert adapter is not None
         # Full interface tests pending SPL conformance definition
 
     @pytest.mark.asyncio
     async def test_postgres_catalog_adapter_instantiation(
-        self, testdb_url: str
+        self, pg_pool: object
     ) -> None:
-        """Catalog adapter can be instantiated with Postgres URL."""
-        adapter = PgCatalogAdapter(connection_string=testdb_url)
+        """Catalog adapter can be instantiated with the shared Postgres pool."""
+        adapter = PgCatalogAdapter(pool=pg_pool)
         assert adapter is not None
         # Full interface tests pending SPL conformance definition
 
     @pytest.mark.asyncio
     async def test_postgres_definition_adapter_instantiation(
-        self, testdb_url: str
+        self, pg_pool: object
     ) -> None:
-        """Definition adapter can be instantiated with Postgres URL."""
-        adapter = PgDefinitionAdapter(connection_string=testdb_url)
+        """Definition adapter can be instantiated with the shared Postgres pool."""
+        adapter = PgDefinitionAdapter(pool=pg_pool)
         assert adapter is not None
         # Full interface tests pending SPL conformance definition
 
     @pytest.mark.asyncio
     async def test_postgres_metadata_adapter_instantiation(
-        self, testdb_url: str
+        self, pg_pool: object
     ) -> None:
-        """Metadata adapter can be instantiated with Postgres URL."""
-        adapter = PgMetadataAdapter(connection_string=testdb_url)
+        """Metadata adapter can be instantiated with the shared Postgres pool."""
+        adapter = PgMetadataAdapter(pool=pg_pool)
         assert adapter is not None
         # Full interface tests pending SPL conformance definition
