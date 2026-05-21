@@ -75,6 +75,13 @@ class LokiLogQueryAdapter:
         self.tenant_id = tenant_id
         self.tls_verify = tls_verify
 
+    def _escape_label_value(self, value: str) -> str:
+        """Escape a label value for safe inclusion in LogQL selectors.
+
+        Escapes backslashes and double-quotes per LogQL string rules.
+        """
+        return value.replace("\\", "\\\\").replace('"', '\\"')
+
     def _build_selector(
         self,
         workspace_id: WorkspaceId,
@@ -86,11 +93,14 @@ class LokiLogQueryAdapter:
         Returns a Loki label matcher string, e.g.:
         {workspace_id="ws-123", run_id="r-456"}
         """
-        labels = [f'workspace_id="{workspace_id}"']
+        escaped_workspace_id = self._escape_label_value(str(workspace_id))
+        labels = [f'workspace_id="{escaped_workspace_id}"']
         if run_id:
-            labels.append(f'run_id="{run_id}"')
+            escaped_run_id = self._escape_label_value(str(run_id))
+            labels.append(f'run_id="{escaped_run_id}"')
         if step_id:
-            labels.append(f'step_id="{step_id}"')
+            escaped_step_id = self._escape_label_value(str(step_id))
+            labels.append(f'step_id="{escaped_step_id}"')
         return "{" + ", ".join(labels) + "}"
 
     def _normalize_severity(self, severity_str: str) -> Severity:
