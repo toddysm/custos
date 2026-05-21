@@ -14,6 +14,7 @@ from pathlib import Path
 
 import aioboto3
 import aiofiles
+from botocore.exceptions import ClientError
 
 from custos_spl.errors import ArtifactNotFound, BackendUnavailable, WorkspaceMismatch
 from custos_spl.ids import ArtifactId, WorkspaceId
@@ -170,8 +171,11 @@ class S3ArtifactAdapter:
                     response = await s3.get_object(Bucket=self.bucket, Key=key)
                     async for chunk in response["Body"].iter_chunks(65536):  # 64KB chunks
                         yield chunk
-                except s3.exceptions.NoSuchKey as exc:
-                    raise ArtifactNotFound(f"artifact not found: {artifact_id}") from exc
+                except ClientError as exc:
+                    error_code = exc.response.get("Error", {}).get("Code")
+                    if error_code == "NoSuchKey" or exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 404:
+                        raise ArtifactNotFound(f"artifact not found: {artifact_id}") from exc
+                    raise BackendUnavailable(f"S3 read failed: {exc}") from exc
         except (ArtifactNotFound, WorkspaceMismatch):
             raise
         except Exception as exc:
@@ -204,8 +208,11 @@ class S3ArtifactAdapter:
                         media_type=response.get("ContentType"),
                         size=response.get("ContentLength", 0),
                     )
-                except s3.exceptions.NoSuchKey:
-                    return None
+                except ClientError as exc:
+                    error_code = exc.response.get("Error", {}).get("Code")
+                    if error_code == "NoSuchKey" or exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 404:
+                        return None
+                    raise BackendUnavailable(f"S3 head failed: {exc}") from exc
         except (WorkspaceMismatch, ArtifactNotFound):
             return None
         except Exception as exc:
