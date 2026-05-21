@@ -47,7 +47,14 @@ from custos_spl.interfaces.metadata_store import (
     SubscriptionSelector,
     DeviceCodeSession,
 )
-from custos_spl.interfaces.auth_store import Tenant, Workspace, WorkspaceFilter
+from custos_spl.interfaces.auth_store import (
+    PrincipalFilter,
+    ServiceAccount,
+    Tenant,
+    User,
+    Workspace,
+    WorkspaceFilter,
+)
 from custos_spl.migrations.runner import check_revisions
 
 from custos_pg.adapters.catalog import PgCatalogAdapter
@@ -1107,7 +1114,7 @@ async def test_list_tenants_returns_all(pg_pool: Pool) -> None:
         )
     )
 
-    tenants = await adapter.list_tenants()
+    tenants = await adapter.list_tenants(TenantFilter())
     assert len(tenants) == 2
     assert {t.tenant_id for t in tenants} == {"t-1", "t-2"}
 
@@ -1134,7 +1141,7 @@ async def test_list_tenants_excludes_disabled_by_default(pg_pool: Pool) -> None:
         )
     )
 
-    tenants = await adapter.list_tenants()
+    tenants = await adapter.list_tenants(TenantFilter())
     assert len(tenants) == 1
     assert tenants[0].tenant_id == "t-active"
 
@@ -1236,15 +1243,485 @@ async def test_list_workspaces_filters_by_tenant(pg_pool: Pool) -> None:
     assert ws_t2[0].workspace_id == "ws-t2-1"
 
 
-async def test_unimplemented_principal_methods_raise_not_implemented_error(
-    pg_pool: Pool,
-) -> None:
-    """Out-of-scope methods raise NotImplementedError with clear messages."""
+
+
+async def test_put_and_get_user_principal(pg_pool: Pool) -> None:
     adapter = PgAuthAdapter(pool=pg_pool)
     await adapter.apply_pending()
 
-    with pytest.raises(NotImplementedError, match="SPL-130c"):
-        await adapter.put_principal(None)
+    now = datetime.now(UTC)
+    tenant = Tenant(
+        tenant_id="t-1",
+        display_name="Tenant 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_tenant(tenant)
+
+    user = User(
+        kind="user",
+        principal_id="user-1",
+        tenant_id="t-1",
+        display_name="Alice",
+        email="alice@example.com",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(user)
+
+    retrieved = await adapter.get_principal("user-1")
+    assert retrieved is not None
+    assert isinstance(retrieved, User)
+    assert retrieved.principal_id == "user-1"
+    assert retrieved.tenant_id == "t-1"
+    assert retrieved.display_name == "Alice"
+    assert retrieved.email == "alice@example.com"
+
+
+async def test_put_and_get_service_account_principal(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    now = datetime.now(UTC)
+    tenant = Tenant(
+        tenant_id="t-1",
+        display_name="Tenant 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_tenant(tenant)
+
+    workspace = Workspace(
+        workspace_id="ws-1",
+        tenant_id="t-1",
+        display_name="Workspace 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_workspace(workspace)
+
+    sa = ServiceAccount(
+        kind="serviceAccount",
+        principal_id="sa-1",
+        workspace_id="ws-1",
+        display_name="Bot Account",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(sa)
+
+    retrieved = await adapter.get_principal("sa-1")
+    assert retrieved is not None
+    assert isinstance(retrieved, ServiceAccount)
+    assert retrieved.principal_id == "sa-1"
+    assert retrieved.workspace_id == "ws-1"
+    assert retrieved.display_name == "Bot Account"
+
+
+async def test_user_principal_upsert_updates_display_name(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    now = datetime.now(UTC)
+    tenant = Tenant(
+        tenant_id="t-1",
+        display_name="Tenant 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_tenant(tenant)
+
+    user1 = User(
+        kind="user",
+        principal_id="user-1",
+        tenant_id="t-1",
+        display_name="Alice",
+        email="alice@example.com",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(user1)
+
+    user2 = User(
+        kind="user",
+        principal_id="user-1",
+        tenant_id="t-1",
+        display_name="Alice Smith",
+        email="alice.smith@example.com",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(user2)
+
+    retrieved = await adapter.get_principal("user-1")
+    assert retrieved is not None
+    assert retrieved.display_name == "Alice Smith"
+
+
+async def test_get_principal_returns_none_when_absent(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    retrieved = await adapter.get_principal("nonexistent")
+    assert retrieved is None
+
+
+async def test_list_principals_returns_all(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    now = datetime.now(UTC)
+    tenant = Tenant(
+        tenant_id="t-1",
+        display_name="Tenant 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_tenant(tenant)
+
+    workspace = Workspace(
+        workspace_id="ws-1",
+        tenant_id="t-1",
+        display_name="Workspace 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_workspace(workspace)
+
+    # Add three principals
+    user1 = User(
+        kind="user",
+        principal_id="user-1",
+        tenant_id="t-1",
+        display_name="Alice",
+        email="alice@example.com",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(user1)
+
+    user2 = User(
+        kind="user",
+        principal_id="user-2",
+        tenant_id="t-1",
+        display_name="Bob",
+        email="bob@example.com",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(user2)
+
+    sa = ServiceAccount(
+        kind="serviceAccount",
+        principal_id="sa-1",
+        workspace_id="ws-1",
+        display_name="Bot",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(sa)
+
+    # List all principals
+    principals = await adapter.list_principals(PrincipalFilter())
+    assert len(principals) == 3
+    assert {p.principal_id for p in principals} == {"user-1", "user-2", "sa-1"}
+
+
+async def test_list_principals_filters_by_tenant(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    now = datetime.now(UTC)
+
+    # Create two tenants
+    await adapter.put_tenant(
+        Tenant(
+            tenant_id="t-1",
+            display_name="Tenant 1",
+            disabled_at=None,
+            created_at=now,
+        )
+    )
+    await adapter.put_tenant(
+        Tenant(
+            tenant_id="t-2",
+            display_name="Tenant 2",
+            disabled_at=None,
+            created_at=now,
+        )
+    )
+
+    # Add users to each tenant
+    user1 = User(
+        kind="user",
+        principal_id="user-1",
+        tenant_id="t-1",
+        display_name="Alice",
+        email="alice@example.com",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(user1)
+
+    user2 = User(
+        kind="user",
+        principal_id="user-2",
+        tenant_id="t-2",
+        display_name="Charlie",
+        email="charlie@example.com",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(user2)
+
+    # Filter by tenant 1
+    t1_principals = await adapter.list_principals(
+        PrincipalFilter(tenant_id="t-1", include_disabled=False)
+    )
+    assert len(t1_principals) == 1
+    assert t1_principals[0].principal_id == "user-1"
+
+    # Filter by tenant 2
+    t2_principals = await adapter.list_principals(
+        PrincipalFilter(tenant_id="t-2", include_disabled=False)
+    )
+    assert len(t2_principals) == 1
+    assert t2_principals[0].principal_id == "user-2"
+
+
+async def test_list_principals_filters_by_workspace(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    now = datetime.now(UTC)
+    tenant = Tenant(
+        tenant_id="t-1",
+        display_name="Tenant 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_tenant(tenant)
+
+    # Create two workspaces
+    await adapter.put_workspace(
+        Workspace(
+            workspace_id="ws-1",
+            tenant_id="t-1",
+            display_name="Workspace 1",
+            disabled_at=None,
+            created_at=now,
+        )
+    )
+    await adapter.put_workspace(
+        Workspace(
+            workspace_id="ws-2",
+            tenant_id="t-1",
+            display_name="Workspace 2",
+            disabled_at=None,
+            created_at=now,
+        )
+    )
+
+    # Add service accounts to each workspace
+    sa1 = ServiceAccount(
+        kind="serviceAccount",
+        principal_id="sa-1",
+        workspace_id="ws-1",
+        display_name="Bot 1",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(sa1)
+
+    sa2 = ServiceAccount(
+        kind="serviceAccount",
+        principal_id="sa-2",
+        workspace_id="ws-2",
+        display_name="Bot 2",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(sa2)
+
+    # Filter by workspace 1
+    ws1_principals = await adapter.list_principals(
+        PrincipalFilter(workspace_id="ws-1", include_disabled=False)
+    )
+    assert len(ws1_principals) == 1
+    assert ws1_principals[0].principal_id == "sa-1"
+
+
+async def test_list_principals_filters_by_kind(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    now = datetime.now(UTC)
+    tenant = Tenant(
+        tenant_id="t-1",
+        display_name="Tenant 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_tenant(tenant)
+
+    workspace = Workspace(
+        workspace_id="ws-1",
+        tenant_id="t-1",
+        display_name="Workspace 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_workspace(workspace)
+
+    # Add a user
+    user = User(
+        kind="user",
+        principal_id="user-1",
+        tenant_id="t-1",
+        display_name="Alice",
+        email="alice@example.com",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(user)
+
+    # Add a service account
+    sa = ServiceAccount(
+        kind="serviceAccount",
+        principal_id="sa-1",
+        workspace_id="ws-1",
+        display_name="Bot",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(sa)
+
+    # Filter by user kind
+    users = await adapter.list_principals(
+        PrincipalFilter(kind="user", include_disabled=False)
+    )
+    assert len(users) == 1
+    assert users[0].principal_id == "user-1"
+
+    # Filter by serviceAccount kind
+    sas = await adapter.list_principals(
+        PrincipalFilter(kind="serviceAccount", include_disabled=False)
+    )
+    assert len(sas) == 1
+    assert sas[0].principal_id == "sa-1"
+
+
+async def test_list_principals_excludes_disabled_by_default(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    now = datetime.now(UTC)
+    tenant = Tenant(
+        tenant_id="t-1",
+        display_name="Tenant 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_tenant(tenant)
+
+    # Add an active user
+    user1 = User(
+        kind="user",
+        principal_id="user-1",
+        tenant_id="t-1",
+        display_name="Alice",
+        email="alice@example.com",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(user1)
+
+    # Add a disabled user
+    user2 = User(
+        kind="user",
+        principal_id="user-2",
+        tenant_id="t-1",
+        display_name="Bob",
+        email="bob@example.com",
+        disabled_at=datetime.now(UTC),
+        disabled_reason="Inactive",
+        created_at=now,
+    )
+    await adapter.put_principal(user2)
+
+    # List without disabled (default)
+    active = await adapter.list_principals()
+    assert len(active) == 1
+    assert active[0].principal_id == "user-1"
+
+    # List with disabled
+    all_principals = await adapter.list_principals(
+        PrincipalFilter(include_disabled=True)
+    )
+    assert len(all_principals) == 2
+
+
+async def test_disable_principal(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    now = datetime.now(UTC)
+    tenant = Tenant(
+        tenant_id="t-1",
+        display_name="Tenant 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_tenant(tenant)
+
+    user = User(
+        kind="user",
+        principal_id="user-1",
+        tenant_id="t-1",
+        display_name="Alice",
+        email="alice@example.com",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(user)
+
+    # Disable the principal
+    from custos_spl.ids import PrincipalId
+    await adapter.disable_principal(
+        PrincipalId("user-1"), PrincipalId("admin"), "Unauthorized access"
+    )
+
+    # Verify it's now disabled
+    retrieved = await adapter.get_principal("user-1")
+    assert retrieved is not None
+    assert retrieved.disabled_at is not None
+    assert retrieved.disabled_reason == "Unauthorized access"
+
+
+async def test_unimplemented_oidc_methods_raise_not_implemented_error(
+
+    pg_pool: Pool,
+) -> None:
+    """Out-of-scope methods (SPL-130d and later) raise NotImplementedError."""
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    # Principal methods (SPL-130c) are now implemented; OIDC and later raise errors
 
     with pytest.raises(NotImplementedError, match="SPL-130d"):
         await adapter.put_oidc_identity("issuer", "subject", "user-id")
@@ -1260,3 +1737,4 @@ async def test_unimplemented_principal_methods_raise_not_implemented_error(
 
     with pytest.raises(NotImplementedError, match="SPL-130h"):
         await adapter.with_transaction(None)
+

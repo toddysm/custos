@@ -11,11 +11,15 @@ from typing import Any
 import asyncpg
 
 from custos_pg.pool import LazyPool
-from custos_spl.ids import TenantId, WorkspaceId
+from custos_spl.ids import PrincipalId, TenantId, WorkspaceId
 from custos_spl.interfaces.auth_store import (
     AuthStoreProvider,
+    Principal,
+    PrincipalFilter,
+    ServiceAccount,
     Tenant,
     TenantFilter,
+    User,
     Workspace,
     WorkspaceFilter,
 )
@@ -127,11 +131,8 @@ class PgAuthAdapter(MigrationCapable):
                 created_at=row["created_at"],
             )
 
-    async def list_tenants(self, filter: TenantFilter | None = None) -> list[Tenant]:
-        """List tenants with optional filters."""
-        if filter is None:
-            filter = TenantFilter()
-
+    async def list_tenants(self, filter: TenantFilter) -> tuple[Tenant, ...]:
+        """List tenants matching filter."""
         pool = await self._pool_ref()
         async with pool.acquire() as conn:
             query = "SELECT tenant_id, display_name, disabled_at, created_at FROM auth.tenant"
@@ -143,7 +144,7 @@ class PgAuthAdapter(MigrationCapable):
             query += " ORDER BY created_at DESC"
 
             rows = await conn.fetch(query, *params)
-            return [
+            return tuple(
                 Tenant(
                     tenant_id=row["tenant_id"],
                     display_name=row["display_name"],
@@ -151,7 +152,7 @@ class PgAuthAdapter(MigrationCapable):
                     created_at=row["created_at"],
                 )
                 for row in rows
-            ]
+            )
 
     # ----- Workspaces -----
 
@@ -196,13 +197,8 @@ class PgAuthAdapter(MigrationCapable):
                 created_at=row["created_at"],
             )
 
-    async def list_workspaces(
-        self, filter: WorkspaceFilter | None = None
-    ) -> list[Workspace]:
-        """List workspaces with optional filters."""
-        if filter is None:
-            filter = WorkspaceFilter()
-
+    async def list_workspaces(self, filter: WorkspaceFilter) -> tuple[Workspace, ...]:
+        """List workspaces matching filter."""
         pool = await self._pool_ref()
         async with pool.acquire() as conn:
             query = """
@@ -225,7 +221,7 @@ class PgAuthAdapter(MigrationCapable):
             query += " ORDER BY created_at DESC"
 
             rows = await conn.fetch(query, *params)
-            return [
+            return tuple(
                 Workspace(
                     workspace_id=row["workspace_id"],
                     tenant_id=row["tenant_id"],
@@ -234,27 +230,173 @@ class PgAuthAdapter(MigrationCapable):
                     created_at=row["created_at"],
                 )
                 for row in rows
-            ]
+            )
 
-    # ----- Unimplemented (SPL-130c and later) -----
+    # ----- Principals -----
 
-    async def put_principal(self, principal: object) -> None:
-        """Not yet implemented (SPL-130c)."""
-        raise NotImplementedError("Principals: SPL-130c")
+    async def put_principal(self, principal: Principal) -> None:
+        """Insert or update a principal (User or ServiceAccount)."""
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            if isinstance(principal, User):
+                await conn.execute(
+                    """
+                    INSERT INTO auth.principal (
+                        principal_id, kind, tenant_id, workspace_id,
+                        display_name, email, disabled_at, disabled_reason, created_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    ON CONFLICT (principal_id) DO UPDATE SET
+                        kind = $2,
+                        tenant_id = $3,
+                        workspace_id = $4,
+                        display_name = $5,
+                        email = $6,
+                        disabled_at = $7,
+                        disabled_reason = $8
+                    """,
+                    principal.principal_id,
+                    "user",
+                    principal.tenant_id,
+                    None,
+                    principal.display_name,
+                    principal.email,
+                    principal.disabled_at,
+                    principal.disabled_reason,
+                    principal.created_at,
+                )
+            elif isinstance(principal, ServiceAccount):
+                await conn.execute(
+                    """
+                    INSERT INTO auth.principal (
+                        principal_id, kind, tenant_id, workspace_id,
+                        display_name, email, disabled_at, disabled_reason, created_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    ON CONFLICT (principal_id) DO UPDATE SET
+                        kind = $2,
+                        tenant_id = $3,
+                        workspace_id = $4,
+                        display_name = $5,
+                        email = $6,
+                        disabled_at = $7,
+                        disabled_reason = $8
+                    """,
+                    principal.principal_id,
+                    "serviceAccount",
+                    None,
+                    principal.workspace_id,
+                    principal.display_name,
+                    None,
+                    principal.disabled_at,
+                    principal.disabled_reason,
+                    principal.created_at,
+                )
+            else:
+                raise TypeError(
+                    f"principal must be User or ServiceAccount, got {type(principal).__name__}"
+                )
 
-    async def get_principal(self, principal_id: object) -> None:
-        """Not yet implemented (SPL-130c)."""
-        raise NotImplementedError("Principals: SPL-130c")
+    async def get_principal(self, principal_id: PrincipalId) -> Principal | None:
+        """Read a principal by ID, returning the matching union variant."""
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT principal_id, kind, tenant_id, workspace_id,
+                       display_name, email, disabled_at, disabled_reason, created_at
+                FROM auth.principal
+                WHERE principal_id = $1
+                """,
+                principal_id,
+            )
+            if row is None:
+                return None
+            return self._reconstruct_principal(row)
 
-    async def list_principals(self, filter: object | None = None) -> list:
-        """Not yet implemented (SPL-130c)."""
-        raise NotImplementedError("Principals: SPL-130c")
+    async def list_principals(self, filter: PrincipalFilter) -> tuple[Principal, ...]:
+        """List principals matching filter."""
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            query = """
+                SELECT principal_id, kind, tenant_id, workspace_id,
+                       display_name, email, disabled_at, disabled_reason, created_at
+                FROM auth.principal
+            """
+            params: list[Any] = []
+            conditions = []
+
+            if filter.tenant_id is not None:
+                conditions.append(f"tenant_id = ${len(params) + 1}")
+                params.append(filter.tenant_id)
+
+            if filter.workspace_id is not None:
+                conditions.append(f"workspace_id = ${len(params) + 1}")
+                params.append(filter.workspace_id)
+
+            if filter.kind is not None:
+                conditions.append(f"kind = ${len(params) + 1}")
+                params.append(filter.kind)
+
+            if not filter.include_disabled:
+                conditions.append("disabled_at IS NULL")
+
+            if conditions:
+                query += " WHERE " + " AND ".join(conditions)
+
+            query += " ORDER BY created_at DESC"
+
+            rows = await conn.fetch(query, *params)
+            return tuple(self._reconstruct_principal(row) for row in rows)
 
     async def disable_principal(
-        self, principal_id: object, actor: object, reason: object
+        self, principal_id: PrincipalId, actor: PrincipalId, reason: str
     ) -> None:
-        """Not yet implemented (SPL-130c)."""
-        raise NotImplementedError("Principals: SPL-130c")
+        """Soft-disable a principal.
+
+        Sets disabled_at and disabled_reason on the principal row. The actor
+        and reason are intended for audit trail recording via the transaction
+        handle (SPL-130h); until transaction support lands, audit trail
+        emission is deferred and the actor parameter is presently unused.
+        """
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE auth.principal
+                SET disabled_at = now(), disabled_reason = $2
+                WHERE principal_id = $1
+                """,
+                principal_id,
+                reason,
+            )
+
+    def _reconstruct_principal(self, row: dict) -> Principal:
+        """Reconstruct Principal union from database row."""
+        if row["kind"] == "user":
+            return User(
+                kind="user",
+                principal_id=row["principal_id"],
+                tenant_id=row["tenant_id"],
+                display_name=row["display_name"],
+                email=row["email"],
+                disabled_at=row["disabled_at"],
+                disabled_reason=row["disabled_reason"],
+                created_at=row["created_at"],
+            )
+        elif row["kind"] == "serviceAccount":
+            return ServiceAccount(
+                kind="serviceAccount",
+                principal_id=row["principal_id"],
+                workspace_id=row["workspace_id"],
+                display_name=row["display_name"],
+                disabled_at=row["disabled_at"],
+                disabled_reason=row["disabled_reason"],
+                created_at=row["created_at"],
+            )
+        else:
+            raise ValueError(
+                f"Unknown principal kind: {row['kind']!r} (expected 'user' or 'serviceAccount')"
+            )
+
 
     async def put_oidc_identity(
         self, issuer: object, subject: object, user_id: object
