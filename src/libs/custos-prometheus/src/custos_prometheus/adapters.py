@@ -183,8 +183,8 @@ class PrometheusMetricsAdapter:
             data = response.json()
             return self._parse_range_response(selector.name, data, workspace_id)
 
-        except httpx.HTTPStatusError:
-            raise BackendUnavailable("Prometheus query failed") from None
+        except httpx.HTTPStatusError as exc:
+            raise BackendUnavailable(f"Prometheus query failed: {exc}") from exc
         except (httpx.ConnectError, httpx.TimeoutError) as exc:
             raise BackendUnavailable(f"Prometheus unavailable: {exc}") from exc
         except Exception as exc:
@@ -220,8 +220,8 @@ class PrometheusMetricsAdapter:
             data = response.json()
             return self._parse_instant_response(data, at, workspace_id)
 
-        except httpx.HTTPStatusError:
-            raise BackendUnavailable("Prometheus instant query failed") from None
+        except httpx.HTTPStatusError as exc:
+            raise BackendUnavailable(f"Prometheus instant query failed: {exc}") from exc
         except (httpx.ConnectError, httpx.TimeoutError) as exc:
             raise BackendUnavailable(f"Prometheus unavailable: {exc}") from exc
         except Exception as exc:
