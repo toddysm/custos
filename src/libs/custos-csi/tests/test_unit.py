@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from custos_csi.adapters import CsiArtifactAdapter
-from custos_spl.errors import ArtifactNotFound, BackendUnavailable, WorkspaceMismatch
+from custos_spl.errors import ArtifactNotFound, WorkspaceMismatch
 from custos_spl.ids import ArtifactId, WorkspaceId
 
 
