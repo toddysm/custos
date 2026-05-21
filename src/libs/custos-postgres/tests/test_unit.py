@@ -304,3 +304,13 @@ def test_auth_rev1_owns_expected_tables() -> None:
     assert "auth.role_binding" in joined
     assert "principal_id" in joined
     assert "scope" in joined
+    # Verify expected indices
+    assert "workspace_by_tenant" in joined
+    assert "principal_by_tenant_kind" in joined
+    assert "principal_by_workspace_kind" in joined
+    assert "oidc_identity_by_user" in joined
+    assert "service_token_by_hash" in joined
+    assert "service_token_by_service_account" in joined
+    assert "service_token_by_expires_at" in joined
+    assert "role_binding_by_principal_scope" in joined
+    assert "role_binding_by_role" in joined
