@@ -69,20 +69,6 @@ def test_auth_adapter_satisfies_auth_protocol() -> None:
     assert isinstance(adapter, AuthStoreProvider)
 
 
-async def test_auth_adapter_unimplemented_methods_raise_not_implemented_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Out-of-scope methods (SPL-130h and later) raise NotImplementedError."""
-    monkeypatch.setenv(DSN_ENV_VAR, "postgresql://noop")
-    adapter = make_auth_adapter()
-
-    # Permission/role methods (SPL-130f) are now implemented; verify remaining are unimplemented
-
-    with pytest.raises(NotImplementedError, match="SPL-130h"):
-        await adapter.with_transaction(None)
-
-
-
 def test_definition_adapter_satisfies_migration_capable() -> None:
     adapter = PgDefinitionAdapter(lazy=LazyPool("postgresql://noop"))
     assert isinstance(adapter, MigrationCapable)

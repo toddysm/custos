@@ -5,13 +5,15 @@ Implements identity, tenancy, and RBAC persistence.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, TypeVar
 
 import asyncpg
 
 from custos_pg.pool import LazyPool
 from custos_spl.errors import ImmutableViolation
+from custos_spl.middleware.transactions import bind_handle, check_handle
 from custos_spl.ids import PrincipalId, RoleBindingId, RoleId, ServiceTokenId, TenantId, WorkspaceId
 from custos_spl.interfaces.auth_store import (
     AuthStoreProvider,
@@ -29,6 +31,7 @@ from custos_spl.interfaces.auth_store import (
     TenantScope,
     Tenant,
     TenantFilter,
+    TransactionHandle,
     User,
     Workspace,
     WorkspaceFilter,
@@ -37,6 +40,43 @@ from custos_spl.interfaces.auth_store import (
 from custos_spl.migrations.runner import MigrationCapable
 
 from custos_pg.migrations.auth import AUTH_REV1
+
+
+T = TypeVar("T")
+
+
+class PgAuthTransactionHandle(TransactionHandle):
+    """Concrete handle pinning a single asyncpg connection inside `with_transaction`.
+
+    The connection has an active `BEGIN`; tx-aware methods that
+    receive this handle issue their statements on the pinned
+    connection so they share atomicity with the rest of the callback.
+
+    The handle is one-shot: `with_transaction` marks it `closed` in a
+    `finally` block once the callback returns (success or failure).
+    A caller that retains a reference and passes it back later gets
+    `InvalidTransactionHandle` from tx-aware methods instead of
+    silently running on a connection that has been returned to the
+    pool — `check_handle` alone only verifies provider ownership, not
+    liveness of the underlying transaction.
+    """
+
+    __slots__ = ("_closed", "_conn")
+
+    def __init__(self, conn: asyncpg.Connection) -> None:
+        self._conn = conn
+        self._closed = False
+
+    @property
+    def conn(self) -> asyncpg.Connection:
+        return self._conn
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def _mark_closed(self) -> None:
+        self._closed = True
 
 
 class PgAuthAdapter(MigrationCapable):
@@ -912,9 +952,27 @@ class PgAuthAdapter(MigrationCapable):
                 for row in rows
             )
 
-    async def with_transaction(self, callback: object) -> None:
-        """Not yet implemented (SPL-130h)."""
-        raise NotImplementedError("Transactions: SPL-130h")
+    async def with_transaction(self, fn: Callable[[TransactionHandle], Awaitable[T]]) -> T:
+        """Execute a callback within an atomic transaction.
+
+        Acquires a connection, opens a transaction, creates a transaction
+        handle, invokes the callback, and ensures the handle is marked
+        closed before the transaction ends. Callers can use the handle
+        in tx-aware methods to share atomicity.
+        """
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn, conn.transaction():
+            handle = PgAuthTransactionHandle(conn)
+            bind_handle(handle, self)
+            try:
+                return await fn(handle)
+            finally:
+                # Mark the handle dead the moment control leaves the
+                # callback. The asyncpg `async with` block then ends
+                # the transaction and returns the connection to the
+                # pool, after which any retained reference must not be
+                # usable via `_check_tx_handle`.
+                handle._mark_closed()
 
 
 def make_adapter() -> PgAuthAdapter:
