@@ -254,6 +254,9 @@ class PgAuthAdapter(MigrationCapable):
                         display_name, email, disabled_at, disabled_reason, created_at
                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                     ON CONFLICT (principal_id) DO UPDATE SET
+                        kind = $2,
+                        tenant_id = $3,
+                        workspace_id = $4,
                         display_name = $5,
                         email = $6,
                         disabled_at = $7,
@@ -277,7 +280,11 @@ class PgAuthAdapter(MigrationCapable):
                         display_name, email, disabled_at, disabled_reason, created_at
                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                     ON CONFLICT (principal_id) DO UPDATE SET
+                        kind = $2,
+                        tenant_id = $3,
+                        workspace_id = $4,
                         display_name = $5,
+                        email = $6,
                         disabled_at = $7,
                         disabled_reason = $8
                     """,
