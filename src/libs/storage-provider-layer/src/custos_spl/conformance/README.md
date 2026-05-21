@@ -77,6 +77,106 @@ class TestMyLokiAdapter(LogQueryConformanceTests):
         return RunId("run-123")
 ```
 
+## Implementing Conformance Tests
+
+Complete template for a new adapter's conformance test file (`src/libs/<your-adapter>/tests/test_conformance.py`):
+
+```python
+"""Conformance tests for <Your Adapter> <Interface>Provider.
+
+These tests verify that the adapter satisfies the conformance contract.
+Requires: custos-spl[conformance] installed, live backend (or moto for S3).
+
+Run with: pytest tests/test_conformance.py -v -m integration
+Skip without backend: pytest -v -m "not integration"
+"""
+
+from __future__ import annotations
+
+import pytest
+
+# STEP 1: Import the conformance test base class for your adapter type
+from custos_spl.conformance import (
+    ArtifactStoreConformanceTests,
+    LogQueryConformanceTests,
+    MetricsQueryConformanceTests,
+)
+from custos_spl.ids import RunId, WorkspaceId
+
+# STEP 2: Gracefully handle missing optional dependencies
+pytest.importorskip("your_adapter_module")
+
+from your_adapter_module.adapters import YourAdapter
+
+# STEP 3: Mark test class as integration and add backend availability check
+@pytest.mark.integration
+class TestYourAdapterConformance(MetricsQueryConformanceTests):
+    """Your adapter conformance tests."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    def _check_backend_available(self) -> None:
+        """Skip entire test class if backend is not available."""
+        try:
+            import httpx
+            response = httpx.get(
+                "http://your-backend:port/health",
+                timeout=2.0,
+            )
+            response.raise_for_status()
+        except Exception:
+            pytest.skip("Backend not available — skipping integration tests")
+
+    # STEP 4: Implement required fixtures
+    @pytest.fixture
+    def adapter(self) -> YourAdapter:
+        """Return a fully-configured adapter instance."""
+        return YourAdapter(base_url="http://your-backend:port")
+
+    @pytest.fixture
+    def workspace_id(self) -> WorkspaceId:
+        """Primary test workspace."""
+        return WorkspaceId("ws-conformance-test-primary")
+
+    @pytest.fixture
+    def other_workspace_id(self) -> WorkspaceId:
+        """Secondary workspace for cross-workspace tests."""
+        return WorkspaceId("ws-conformance-test-secondary")
+
+    @pytest.fixture
+    def run_id(self) -> RunId:
+        """Test run ID (for LogQuery and MetricsQuery adapters)."""
+        return RunId("run-conformance-test")
+
+    @pytest.fixture
+    async def sample_content(self) -> bytes:
+        """Sample content for ArtifactStore tests."""
+        return b"test content"
+
+    # STEP 5: (Optional) Override base tests if needed
+    # All base conformance tests are inherited automatically.
+    # Override only if you need special setup/teardown.
+```
+
+### Key Implementation Notes
+
+1. **Location**: Place conformance tests in `src/libs/<your-adapter>/tests/test_conformance.py`, NOT in storage-provider-layer/tests
+2. **Markers**: Use `@pytest.mark.integration` for all conformance test classes
+3. **Dependency handling**: Use `pytest.importorskip("your_adapter_module")` to gracefully skip if adapter package not installed
+4. **Backend checks**: Implement `_check_backend_available()` fixture with health check (HTTP GET, connection attempt, filesystem check, etc.)
+5. **Required fixtures**: Provide all fixtures required by your conformance base class:
+   - **ArtifactStore**: `adapter`, `workspace_id`, `other_workspace_id`, `sample_content`
+   - **LogQuery**: `adapter`, `workspace_id`, `other_workspace_id`, `run_id`
+   - **MetricsQuery**: `adapter`, `workspace_id`, `other_workspace_id`, `run_id`
+6. **Test execution**:
+   ```bash
+   # Run conformance tests only (requires services available)
+   pytest tests/test_conformance.py -v -m integration
+
+   # Skip conformance tests (services not needed)
+   pytest tests/ -v -m "not integration"
+   ```
+7. **CI/CD**: In CI pipelines, services have health checks; tests skip gracefully if services unavailable
+
 ## Test Organization
 
 ```
