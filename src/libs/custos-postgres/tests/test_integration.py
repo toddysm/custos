@@ -1713,18 +1713,159 @@ async def test_disable_principal(pg_pool: Pool) -> None:
     assert retrieved.disabled_reason == "Unauthorized access"
 
 
-async def test_unimplemented_oidc_methods_raise_not_implemented_error(
 
-    pg_pool: Pool,
-) -> None:
-    """Out-of-scope methods (SPL-130d and later) raise NotImplementedError."""
+
+async def test_put_and_get_oidc_identity(pg_pool: Pool) -> None:
     adapter = PgAuthAdapter(pool=pg_pool)
     await adapter.apply_pending()
 
-    # Principal methods (SPL-130c) are now implemented; OIDC and later raise errors
+    now = datetime.now(UTC)
+    tenant = Tenant(
+        tenant_id="t-1",
+        display_name="Tenant 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_tenant(tenant)
 
-    with pytest.raises(NotImplementedError, match="SPL-130d"):
-        await adapter.put_oidc_identity("issuer", "subject", "user-id")
+    user = User(
+        kind="user",
+        principal_id="user-1",
+        tenant_id="t-1",
+        display_name="Alice",
+        email="alice@example.com",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(user)
+
+    from custos_spl.ids import PrincipalId
+    await adapter.put_oidc_identity("https://example.com", "alice@example.com", PrincipalId("user-1"))
+
+    retrieved = await adapter.get_oidc_identity("https://example.com", "alice@example.com")
+    assert retrieved == PrincipalId("user-1")
+
+
+async def test_get_oidc_identity_returns_none_when_absent(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    retrieved = await adapter.get_oidc_identity("https://example.com", "unknown@example.com")
+    assert retrieved is None
+
+
+async def test_put_oidc_identity_write_once_raises_immutable_violation(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    now = datetime.now(UTC)
+    tenant = Tenant(
+        tenant_id="t-1",
+        display_name="Tenant 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_tenant(tenant)
+
+    user = User(
+        kind="user",
+        principal_id="user-1",
+        tenant_id="t-1",
+        display_name="Alice",
+        email="alice@example.com",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(user)
+
+    from custos_spl.ids import PrincipalId
+    await adapter.put_oidc_identity("https://example.com", "alice@example.com", PrincipalId("user-1"))
+
+    # Try to rebind the same (issuer, subject) — should raise ImmutableViolation
+    with pytest.raises(ImmutableViolation):
+        await adapter.put_oidc_identity("https://example.com", "alice@example.com", PrincipalId("user-1"))
+
+
+async def test_list_oidc_identities_for_user(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    now = datetime.now(UTC)
+    tenant = Tenant(
+        tenant_id="t-1",
+        display_name="Tenant 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_tenant(tenant)
+
+    user = User(
+        kind="user",
+        principal_id="user-1",
+        tenant_id="t-1",
+        display_name="Alice",
+        email="alice@example.com",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(user)
+
+    from custos_spl.ids import PrincipalId
+    # Add multiple OIDC identities for the same user
+    await adapter.put_oidc_identity("https://example.com", "alice@example.com", PrincipalId("user-1"))
+    await adapter.put_oidc_identity("https://github.com", "alice_github", PrincipalId("user-1"))
+
+    identities = await adapter.list_oidc_identities_for_user(PrincipalId("user-1"))
+    assert len(identities) == 2
+    assert {(i.issuer, i.subject) for i in identities} == {
+        ("https://example.com", "alice@example.com"),
+        ("https://github.com", "alice_github"),
+    }
+    assert all(i.user_id == PrincipalId("user-1") for i in identities)
+
+
+async def test_list_oidc_identities_for_user_returns_empty_when_none_exist(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    now = datetime.now(UTC)
+    tenant = Tenant(
+        tenant_id="t-1",
+        display_name="Tenant 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_tenant(tenant)
+
+    user = User(
+        kind="user",
+        principal_id="user-1",
+        tenant_id="t-1",
+        display_name="Alice",
+        email="alice@example.com",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(user)
+
+    from custos_spl.ids import PrincipalId
+    identities = await adapter.list_oidc_identities_for_user(PrincipalId("user-1"))
+    assert len(identities) == 0
+
+
+async def test_unimplemented_service_token_methods_raise_not_implemented_error(
+
+    pg_pool: Pool,
+) -> None:
+    """Out-of-scope methods (SPL-130e and later) raise NotImplementedError."""
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    # OIDC methods (SPL-130d) are now implemented; service tokens and later raise errors
 
     with pytest.raises(NotImplementedError, match="SPL-130e"):
         await adapter.put_service_token(None)

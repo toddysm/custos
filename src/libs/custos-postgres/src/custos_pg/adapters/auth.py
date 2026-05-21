@@ -5,15 +5,17 @@ Implements identity, tenancy, and RBAC persistence.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import asyncpg
 
 from custos_pg.pool import LazyPool
+from custos_spl.errors import ImmutableViolation
 from custos_spl.ids import PrincipalId, TenantId, WorkspaceId
 from custos_spl.interfaces.auth_store import (
     AuthStoreProvider,
+    OidcIdentity,
     Principal,
     PrincipalFilter,
     ServiceAccount,
@@ -398,21 +400,86 @@ class PgAuthAdapter(MigrationCapable):
             )
 
 
+    # ----- OIDC identities -----
+
     async def put_oidc_identity(
-        self, issuer: object, subject: object, user_id: object
+        self,
+        issuer: str,
+        subject: str,
+        user_id: PrincipalId,
     ) -> None:
-        """Not yet implemented (SPL-130d)."""
-        raise NotImplementedError("OIDC identities: SPL-130d")
+        """Bind an OIDC (issuer, subject) to an internal user.
+
+        Write-once on (issuer, subject). Raises ImmutableViolation if already
+        bound (even to the same user_id).
+        """
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            try:
+                await conn.execute(
+                    """
+                    INSERT INTO auth.oidc_identity (issuer, subject, user_id, bound_at)
+                    VALUES ($1, $2, $3, now())
+                    """,
+                    issuer,
+                    subject,
+                    user_id,
+                )
+            except asyncpg.UniqueViolationError as exc:
+                raise ImmutableViolation(
+                    f"OIDC identity ({issuer}, {subject}) already bound"
+                ) from exc
 
     async def get_oidc_identity(
-        self, issuer: object, subject: object
-    ) -> object | None:
-        """Not yet implemented (SPL-130d)."""
-        raise NotImplementedError("OIDC identities: SPL-130d")
+        self,
+        issuer: str,
+        subject: str,
+    ) -> PrincipalId | None:
+        """Resolve an OIDC (issuer, subject) to a user.
 
-    async def list_oidc_identities_for_user(self, user_id: object) -> list:
-        """Not yet implemented (SPL-130d)."""
-        raise NotImplementedError("OIDC identities: SPL-130d")
+        Verifier hot path; None means "unknown OIDC identity, treat as
+        unauthenticated". Indexed on (issuer, subject).
+        """
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT user_id FROM auth.oidc_identity
+                WHERE issuer = $1 AND subject = $2
+                """,
+                issuer,
+                subject,
+            )
+            if row is None:
+                return None
+            return PrincipalId(row["user_id"])
+
+    async def list_oidc_identities_for_user(
+        self,
+        user_id: PrincipalId,
+    ) -> tuple[OidcIdentity, ...]:
+        """List all OIDC identities bound to a user."""
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT issuer, subject, user_id, bound_at
+                FROM auth.oidc_identity
+                WHERE user_id = $1
+                ORDER BY bound_at DESC
+                """,
+                user_id,
+            )
+            return tuple(
+                OidcIdentity(
+                    issuer=row["issuer"],
+                    subject=row["subject"],
+                    user_id=PrincipalId(row["user_id"]),
+                    bound_at=row["bound_at"],
+                )
+                for row in rows
+            )
+
 
     async def put_service_token(self, token: object) -> None:
         """Not yet implemented (SPL-130e)."""

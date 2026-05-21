@@ -69,40 +69,59 @@ def test_auth_adapter_satisfies_auth_protocol() -> None:
     assert isinstance(adapter, AuthStoreProvider)
 
 
-def test_auth_adapter_unimplemented_methods_raise_not_implemented_error(
+async def test_auth_adapter_unimplemented_methods_raise_not_implemented_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Out-of-scope methods (SPL-130d through SPL-130h) raise NotImplementedError."""
+    """Out-of-scope methods (SPL-130e through SPL-130h) raise NotImplementedError."""
     monkeypatch.setenv(DSN_ENV_VAR, "postgresql://noop")
     adapter = make_auth_adapter()
 
-    # Principal methods (SPL-130c) are now implemented; these are out-of-scope
-    unimplemented_methods = [
-        "put_oidc_identity",
-        "get_oidc_identity",
-        "list_oidc_identities_for_user",
-        "put_service_token",
-        "get_service_token_by_hash",
-        "revoke_service_token",
-        "list_service_tokens_for_service_account",
-        "delete_expired_service_tokens",
-        "upsert_permission",
-        "list_permissions",
-        "put_role",
-        "get_role",
-        "list_roles",
-        "put_role_binding",
-        "delete_role_binding",
-        "list_role_bindings_for_principal",
-        "list_role_bindings_for_scope",
-        "with_transaction",
-    ]
+    # OIDC methods (SPL-130d) are now implemented; verify remaining are unimplemented
 
-    for method_name in unimplemented_methods:
-        method = getattr(adapter, method_name)
-        assert callable(method), f"{method_name} should be callable"
-        # We can't actually call async methods without an event loop in a sync test,
-        # but we can at least verify they exist and are callable
+    with pytest.raises(NotImplementedError, match="SPL-130e"):
+        await adapter.put_service_token(None)
+
+    with pytest.raises(NotImplementedError, match="SPL-130e"):
+        await adapter.get_service_token_by_hash("hash")
+
+    with pytest.raises(NotImplementedError, match="SPL-130e"):
+        await adapter.revoke_service_token(None, None, "reason")
+
+    with pytest.raises(NotImplementedError, match="SPL-130e"):
+        await adapter.list_service_tokens_for_service_account(None)
+
+    with pytest.raises(NotImplementedError, match="SPL-130e"):
+        await adapter.delete_expired_service_tokens(None)
+
+    with pytest.raises(NotImplementedError, match="SPL-130f"):
+        await adapter.upsert_permission(None)
+
+    with pytest.raises(NotImplementedError, match="SPL-130f"):
+        await adapter.list_permissions()
+
+    with pytest.raises(NotImplementedError, match="SPL-130f"):
+        await adapter.put_role(None)
+
+    with pytest.raises(NotImplementedError, match="SPL-130f"):
+        await adapter.get_role(None)
+
+    with pytest.raises(NotImplementedError, match="SPL-130f"):
+        await adapter.list_roles()
+
+    with pytest.raises(NotImplementedError, match="SPL-130g"):
+        await adapter.put_role_binding(None)
+
+    with pytest.raises(NotImplementedError, match="SPL-130g"):
+        await adapter.delete_role_binding(None, None, "reason")
+
+    with pytest.raises(NotImplementedError, match="SPL-130g"):
+        await adapter.list_role_bindings_for_principal(None, ())
+
+    with pytest.raises(NotImplementedError, match="SPL-130g"):
+        await adapter.list_role_bindings_for_scope(None)
+
+    with pytest.raises(NotImplementedError, match="SPL-130h"):
+        await adapter.with_transaction(None)
 
 
 
