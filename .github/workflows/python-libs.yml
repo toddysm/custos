@@ -46,3 +46,79 @@ jobs:
 
       - name: Pytest
         run: pytest -q
+
+  integration-tests:
+    name: Adapter Conformance Tests (integration)
+    runs-on: ubuntu-latest
+    needs: storage-provider-layer
+    if: |
+      always() &&
+      (needs.storage-provider-layer.result == 'success' || needs.storage-provider-layer.result == 'skipped')
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: custos_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      loki:
+        image: grafana/loki:latest
+        options: >-
+          --health-cmd "curl -f http://localhost:3100/-/ready || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 3100:3100
+
+      prometheus:
+        image: prom/prometheus:latest
+        options: >-
+          --health-cmd "curl -f http://localhost:9090/-/healthy || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 9090:9090
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install SPL and adapters
+        run: |
+          pip install -e src/libs/storage-provider-layer[dev]
+          pip install -e src/libs/custos-csi[dev]
+          pip install -e src/libs/custos-loki[dev]
+          pip install -e src/libs/custos-postgres[dev]
+          pip install -e src/libs/custos-prometheus[dev]
+          pip install -e src/libs/custos-s3[dev]
+
+      - name: Wait for services to be ready
+        run: sleep 10
+
+      - name: Run conformance tests
+        run: |
+          pytest \
+            src/libs/custos-csi/tests/test_conformance.py \
+            src/libs/custos-loki/tests/test_conformance.py \
+            src/libs/custos-postgres/tests/test_conformance.py \
+            src/libs/custos-prometheus/tests/test_conformance.py \
+            src/libs/custos-s3/tests/test_conformance.py \
+            -v -m integration --tb=short
+        env:
+          CUSTOS_POSTGRES_URL: postgresql://testuser:testpass@localhost:5432/custos_test
+          CUSTOS_LOKI_URL: http://localhost:3100
+          CUSTOS_PROMETHEUS_URL: http://localhost:9090
