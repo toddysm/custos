@@ -15,7 +15,7 @@ import aiofiles.os
 
 from custos_spl.errors import ArtifactNotFound, BackendUnavailable, WorkspaceMismatch
 from custos_spl.ids import ArtifactId, WorkspaceId
-from custos_spl.interfaces.artifact_store import ArtifactDescriptor, ArtifactStoreProvider
+from custos_spl.interfaces.artifact_store import ArtifactDescriptor
 
 
 class CsiArtifactAdapter:
