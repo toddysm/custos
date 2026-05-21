@@ -4,15 +4,30 @@ Defines the shared contract that all Storage Provider Layer adapters must satisf
 
 ## Purpose
 
-This conformance suite ensures consistent, safe behavior across all adapter implementations:
+This conformance suite ensures consistent, safe behavior across all adapter implementations.
 
-- **Workspace scoping enforcement** — cross-workspace access is blocked
-- **Immutability rules** — immutable fields cannot be updated
-- **Error classification** — transient vs permanent failures are correctly mapped
-- **Query validation** — metric/label names are validated to prevent injection
-- **Streaming semantics** — put/get preserve O(1) memory contract
-- **Pagination** — cursor-based pagination is idempotent
-- **Audit/outbox contracts** — correct write and drain semantics
+### Currently Enforced (gated by tests)
+
+- **Workspace scoping** — cross-workspace access is blocked with WorkspaceMismatch or returns empty
+- **Sweeper-only deletion** — delete() requires is_sweeper=True flag; calling without it raises ValueError
+- **Deletion idempotency** — delete() succeeds even if artifact/data already absent (safe for retries)
+- **Cursor pagination idempotency** — same cursor yields same results on retry
+- **Streaming for query results** — tail_run_logs() returns async generator (not coroutine)
+- **Time range validation** — query results respect start/end time bounds
+- **Error classification** — invalid metric/label names raise QueryUnsupported
+- **Media type consistency** — put() stores effective media_type; head() returns same value
+- **Content-addressability** — identical content produces identical digest and artifact_id
+
+### Future Work (planned, not yet gated)
+
+- **Immutability rules** — immutable fields raise ImmutableViolation on update attempts
+- **Streaming O(1) memory** — put/get don't buffer entire content in memory (currently documented, not measured)
+- **Lease primitive contract** — busy/expired/release state machine for cursor leases
+- **Audit outbox semantics** — write and drain protocols for audit stream
+- **Idempotency records** — state machine for dedup and device-code sessions
+- **Transaction handle misuse** — detection of cross-provider transaction errors
+- **Multi-tenant stress tests** — concurrent workspace queries under load
+- **Chaos engineering** — backend failure injection and recovery
 
 ## Usage
 
@@ -27,12 +42,19 @@ from my_adapter import MyS3Adapter
 class TestMyS3Adapter(ArtifactStoreConformanceTests):
     @pytest.fixture
     def adapter(self):
-        # Provide your adapter instance
-        return MyS3Adapter(bucket="test")
+        return MyS3Adapter(bucket="conformance-test")
 
-    def test_content_addressability(self):
-        # Implement actual test using fixture
-        ...
+    @pytest.fixture
+    def workspace_id(self):
+        return WorkspaceId("ws-test-primary")
+
+    @pytest.fixture
+    def other_workspace_id(self):
+        return WorkspaceId("ws-test-secondary")
+
+    @pytest.fixture
+    async def sample_content(self):
+        return b"test content for conformance"
 ```
 
 ### LogQuery Adapter Example
@@ -46,21 +68,94 @@ class TestMyLokiAdapter(LogQueryConformanceTests):
     def adapter(self):
         return MyLokiAdapter(base_url="http://loki:3100")
 
-    async def test_workspace_scoping_query_run_logs(self):
-        # Implement actual test
-        ...
+    @pytest.fixture
+    def workspace_id(self):
+        return WorkspaceId("ws-test")
+
+    @pytest.fixture
+    def run_id(self):
+        return RunId("run-123")
 ```
 
 ## Test Organization
 
 ```
 conformance/
-├── __init__.py           # Exports test classes and fixtures
-├── fixtures.py           # Shared pytest fixtures (Postgres container, URLs)
-├── base.py              # AdapterConformanceBase with common patterns
-├── artifact_store.py    # ArtifactStoreConformanceTests
-├── log_query.py         # LogQueryConformanceTests
-├── metrics_query.py     # MetricsQueryConformanceTests
+├── __init__.py              # Exports test classes and fixtures
+├── README.md               # This file
+├── fixtures.py             # Shared pytest fixtures (Postgres container, URLs)
+├── base.py                # AdapterConformanceBase with common patterns
+├── artifact_store.py       # ArtifactStoreConformanceTests (9 tests)
+├── log_query.py           # LogQueryConformanceTests (5 tests)
+├── metrics_query.py       # MetricsQueryConformanceTests (7 tests)
+```
+
+## Fixture Requirements
+
+Each conformance test class requires specific fixtures. If a subclass doesn't provide them, tests will skip with a clear message:
+
+### ArtifactStore
+- `adapter` — ArtifactStoreProvider instance, configured and ready
+- `workspace_id` — primary WorkspaceId for testing
+- `other_workspace_id` — secondary WorkspaceId for cross-workspace tests
+- `sample_content` — async iterator of bytes (or bytes) for put() testing
+
+### LogQuery
+- `adapter` — LogQueryProvider instance, configured and ready
+- `workspace_id` — primary WorkspaceId for testing
+- `other_workspace_id` — secondary WorkspaceId for cross-workspace tests
+- `run_id` — RunId with available logs for testing
+
+### MetricsQuery
+- `adapter` — MetricsQueryProvider instance, configured and ready
+- `workspace_id` — primary WorkspaceId for testing
+- `other_workspace_id` — secondary WorkspaceId for cross-workspace tests
+- `run_id` — RunId with available metrics for testing
+
+## What's Tested
+
+### Workspace Scoping (all adapters)
+- Cross-workspace reads raise WorkspaceMismatch or return empty
+- Workspace ownership is validated
+- No data leakage between workspaces
+
+### ArtifactStore (9 tests)
+- Sweeper-only deletion: delete() requires is_sweeper=True flag
+- Deletion safety: delete() succeeds on missing artifacts (idempotent)
+- Cross-workspace access blocked: get() raises WorkspaceMismatch
+- Cross-workspace visibility hidden: head() returns None (not error)
+- Content-addressability: identical content → identical digest
+- Media type consistency: put() and head() agree on media_type
+
+### LogQuery (5 tests)
+- Empty results: no-match queries return empty page
+- Cursor pagination: same cursor yields same results (idempotent)
+- Cross-workspace access blocked: queries blocked or return empty
+- Streaming interface: tail_run_logs() returns async generator
+- Time bounds: all results within [start, end) window
+
+### MetricsQuery (7 tests)
+- Metric name validation: invalid names raise QueryUnsupported
+- Label name validation: invalid names raise QueryUnsupported
+- Empty results: no-match queries return empty series
+- Time bounds: all samples within [start, end) window
+- Instant queries: return exactly one sample
+- Cross-workspace access blocked: queries blocked or return empty
+- Noop adapter: raises QueryUnsupported when metrics disabled
+
+## Test Invocation
+
+Run conformance tests for an adapter:
+
+```bash
+# All tests for Prometheus adapter
+pytest tests/conformance_prometheus.py -v
+
+# Specific test
+pytest tests/conformance_prometheus.py::TestPrometheusMetricsConformance::test_metric_name_validation_rejects_invalid_names -v
+
+# With markers
+pytest -m "not integration" tests/conformance_*.py -v
 ```
 
 ## Postgres Container Setup
@@ -75,50 +170,35 @@ def postgres_container() -> Generator[PostgresContainer, None, None]:
         yield container
 ```
 
-## What's Tested
+## Adding New Conformance Tests
 
-### Workspace Scoping (all adapters)
-- Cross-workspace reads raise `WorkspaceMismatch` → caller maps to 404
-- Workspace label is validated on response parsing
-- No data leakage even if backend is compromised
+To add a new test that applies to all adapters of a type:
 
-### ArtifactStore
-- Content-addressability: identical content → identical digest
-- Streaming: put/get never buffer entire artifact in memory
-- Sweeper-only deletion with `is_sweeper=True` flag
-- Media type consistency: stored type matches returned descriptor
+1. Add the test method to the appropriate conformance class (ArtifactStoreConformanceTests, etc.)
+2. Use existing fixtures (adapter, workspace_id, etc.) or add new required fixtures
+3. Implement the test logic with real assertions (not skip or pass)
+4. Update this README to document what is being tested
+5. Update the "Currently Enforced" section above
 
-### LogQuery
-- Cursor pagination is idempotent
-- Severity filtering (severity_at_least)
-- Time range filtering (start inclusive, end exclusive)
-- Message substring matching
-- Async generator semantics for `tail_run_logs()`
+## Roadmap
 
-### MetricsQuery
-- Metric name validation: prevents PromQL injection
-- Label name validation: prevents matcher injection
-- Time bucketing: samples aligned to multiples of step_seconds
-- Staleness window: instant queries return recent value if exact time unavailable
-- QueryUnsupported for noop adapter
+**Phase 1 (v1.0)** — Core contracts gated ✅
+- Workspace scoping
+- Sweeper-only deletion
+- Pagination idempotency
+- Streaming interfaces
+- Error classification
 
-## Error Classification
+**Phase 2 (v1.1)** — Storage provider contracts
+- Immutability rules
+- Lease primitives (busy/expired/release)
+- Transaction handle misuse detection
 
-All adapters must classify errors correctly:
+**Phase 3 (v1.2)** — Audit and observability
+- Audit outbox write/drain semantics
+- Idempotency record state machine
 
-- `BackendUnavailable` — transient; caller retries with backoff
-  - Connection refused, timeout, HTTP 503, etc.
-- `WorkspaceMismatch` — cross-workspace access; returns as 404
-- `QueryUnsupported` — feature not available (noop adapter)
-- `ImmutableViolation` — attempted update of immutable field (storage adapters)
-
-## Future Work
-
-This suite is the skeleton; future work includes:
-
-- [ ] Lease primitive tests (busy/expired/release states)
-- [ ] Audit outbox write and drain semantics
-- [ ] Idempotency record state machine
-- [ ] Transaction handle misuse detection
-- [ ] Multi-tenant stress tests
-- [ ] Chaos engineering (backend failure injection)
+**Phase 4 (v1.3+)** — Advanced testing
+- O(1) memory measurement
+- Multi-tenant stress testing
+- Chaos engineering (failure injection)
