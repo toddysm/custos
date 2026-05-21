@@ -15,7 +15,7 @@ Custos MetricsQueryProvider adapters for Prometheus and PromQL-speaking backends
 - **Instant queries** — single-point metric lookups at a specific instant
 - **Workspace isolation** — all queries scoped to workspace; cross-workspace access blocked
 - **Label matchers** — flexible metric selection with PromQL label matchers
-- **Staleness handling** — Prometheus staleness window for instant queries (5m default)
+- **Instant query execution** — performs a single instant query at the requested timestamp
 
 ## Installation
 
