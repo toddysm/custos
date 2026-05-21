@@ -37,6 +37,7 @@ from custos_pg.adapters.metadata import (
     PgTransactionHandle,
 )
 from custos_pg.adapters.metadata import make_adapter as make_metadata_adapter
+from custos_pg.migrations.auth import AUTH_REV1
 from custos_pg.migrations.catalog import CATALOG_REV1
 from custos_pg.migrations.definition import DEFINITION_REV1
 from custos_pg.migrations.metadata import METADATA_REV1, METADATA_REV2, METADATA_REV3
@@ -267,3 +268,34 @@ def test_transaction_handle_starts_open_and_can_be_marked_closed() -> None:
     assert h.closed is False
     h._mark_closed()
     assert h.closed is True
+
+
+def test_auth_rev1_is_numbered_one() -> None:
+    assert AUTH_REV1.number == 1
+
+
+def test_auth_rev1_owns_expected_tables() -> None:
+    joined = " ".join(AUTH_REV1.statements)
+    assert "CREATE SCHEMA IF NOT EXISTS auth" in joined
+    # Tenancy
+    assert "auth.tenant" in joined
+    assert "auth.workspace" in joined
+    # Principals
+    assert "auth.principal" in joined
+    assert "kind" in joined
+    # OIDC identities
+    assert "auth.oidc_identity" in joined
+    assert "issuer" in joined
+    assert "subject" in joined
+    # Service tokens
+    assert "auth.service_token" in joined
+    assert "hash" in joined
+    assert "service_account_id" in joined
+    # Permissions & roles
+    assert "auth.permission" in joined
+    assert "auth.role" in joined
+    assert "permission_names" in joined
+    # Role bindings
+    assert "auth.role_binding" in joined
+    assert "principal_id" in joined
+    assert "scope" in joined
