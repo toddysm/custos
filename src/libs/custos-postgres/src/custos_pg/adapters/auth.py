@@ -272,7 +272,7 @@ class PgAuthAdapter(MigrationCapable):
                     principal.disabled_reason,
                     principal.created_at,
                 )
-            else:
+            elif isinstance(principal, ServiceAccount):
                 await conn.execute(
                     """
                     INSERT INTO auth.principal (
@@ -297,6 +297,10 @@ class PgAuthAdapter(MigrationCapable):
                     principal.disabled_at,
                     principal.disabled_reason,
                     principal.created_at,
+                )
+            else:
+                raise TypeError(
+                    f"principal must be User or ServiceAccount, got {type(principal).__name__}"
                 )
 
     async def get_principal(self, principal_id: PrincipalId) -> Principal | None:
@@ -385,7 +389,7 @@ class PgAuthAdapter(MigrationCapable):
                 disabled_reason=row["disabled_reason"],
                 created_at=row["created_at"],
             )
-        else:
+        elif row["kind"] == "serviceAccount":
             return ServiceAccount(
                 kind="serviceAccount",
                 principal_id=row["principal_id"],
@@ -394,6 +398,10 @@ class PgAuthAdapter(MigrationCapable):
                 disabled_at=row["disabled_at"],
                 disabled_reason=row["disabled_reason"],
                 created_at=row["created_at"],
+            )
+        else:
+            raise ValueError(
+                f"Unknown principal kind: {row['kind']!r} (expected 'user' or 'serviceAccount')"
             )
 
 
