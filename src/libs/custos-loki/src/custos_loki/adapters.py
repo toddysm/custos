@@ -20,11 +20,10 @@ from custos_spl.ids import RunId, StepId, WorkspaceId
 from custos_spl.interfaces.log_query import (
     LogFilter,
     LogPage,
-    LogQueryProvider,
     LogRecord,
     Severity,
 )
-from custos_spl.pagination import Cursor, Page
+from custos_spl.pagination import Cursor
 
 LokiSeverity = Literal[
     "TRACE",
