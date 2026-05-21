@@ -1114,7 +1114,7 @@ async def test_list_tenants_returns_all(pg_pool: Pool) -> None:
         )
     )
 
-    tenants = await adapter.list_tenants()
+    tenants = await adapter.list_tenants(TenantFilter())
     assert len(tenants) == 2
     assert {t.tenant_id for t in tenants} == {"t-1", "t-2"}
 
@@ -1141,7 +1141,7 @@ async def test_list_tenants_excludes_disabled_by_default(pg_pool: Pool) -> None:
         )
     )
 
-    tenants = await adapter.list_tenants()
+    tenants = await adapter.list_tenants(TenantFilter())
     assert len(tenants) == 1
     assert tenants[0].tenant_id == "t-active"
 
@@ -1429,7 +1429,7 @@ async def test_list_principals_returns_all(pg_pool: Pool) -> None:
     await adapter.put_principal(sa)
 
     # List all principals
-    principals = await adapter.list_principals()
+    principals = await adapter.list_principals(PrincipalFilter())
     assert len(principals) == 3
     assert {p.principal_id for p in principals} == {"user-1", "user-2", "sa-1"}
 

@@ -131,11 +131,8 @@ class PgAuthAdapter(MigrationCapable):
                 created_at=row["created_at"],
             )
 
-    async def list_tenants(self, filter: TenantFilter | None = None) -> list[Tenant]:
-        """List tenants with optional filters."""
-        if filter is None:
-            filter = TenantFilter()
-
+    async def list_tenants(self, filter: TenantFilter) -> tuple[Tenant, ...]:
+        """List tenants matching filter."""
         pool = await self._pool_ref()
         async with pool.acquire() as conn:
             query = "SELECT tenant_id, display_name, disabled_at, created_at FROM auth.tenant"
@@ -147,7 +144,7 @@ class PgAuthAdapter(MigrationCapable):
             query += " ORDER BY created_at DESC"
 
             rows = await conn.fetch(query, *params)
-            return [
+            return tuple(
                 Tenant(
                     tenant_id=row["tenant_id"],
                     display_name=row["display_name"],
@@ -155,7 +152,7 @@ class PgAuthAdapter(MigrationCapable):
                     created_at=row["created_at"],
                 )
                 for row in rows
-            ]
+            )
 
     # ----- Workspaces -----
 
@@ -200,13 +197,8 @@ class PgAuthAdapter(MigrationCapable):
                 created_at=row["created_at"],
             )
 
-    async def list_workspaces(
-        self, filter: WorkspaceFilter | None = None
-    ) -> list[Workspace]:
-        """List workspaces with optional filters."""
-        if filter is None:
-            filter = WorkspaceFilter()
-
+    async def list_workspaces(self, filter: WorkspaceFilter) -> tuple[Workspace, ...]:
+        """List workspaces matching filter."""
         pool = await self._pool_ref()
         async with pool.acquire() as conn:
             query = """
@@ -229,7 +221,7 @@ class PgAuthAdapter(MigrationCapable):
             query += " ORDER BY created_at DESC"
 
             rows = await conn.fetch(query, *params)
-            return [
+            return tuple(
                 Workspace(
                     workspace_id=row["workspace_id"],
                     tenant_id=row["tenant_id"],
@@ -238,7 +230,7 @@ class PgAuthAdapter(MigrationCapable):
                     created_at=row["created_at"],
                 )
                 for row in rows
-            ]
+            )
 
     # ----- Principals -----
 
@@ -320,13 +312,8 @@ class PgAuthAdapter(MigrationCapable):
                 return None
             return self._reconstruct_principal(row)
 
-    async def list_principals(
-        self, filter: PrincipalFilter | None = None
-    ) -> list[Principal]:
-        """List principals with optional filters."""
-        if filter is None:
-            filter = PrincipalFilter()
-
+    async def list_principals(self, filter: PrincipalFilter) -> tuple[Principal, ...]:
+        """List principals matching filter."""
         pool = await self._pool_ref()
         async with pool.acquire() as conn:
             query = """
@@ -358,7 +345,7 @@ class PgAuthAdapter(MigrationCapable):
             query += " ORDER BY created_at DESC"
 
             rows = await conn.fetch(query, *params)
-            return [self._reconstruct_principal(row) for row in rows]
+            return tuple(self._reconstruct_principal(row) for row in rows)
 
     async def disable_principal(
         self, principal_id: PrincipalId, actor: PrincipalId, reason: str
