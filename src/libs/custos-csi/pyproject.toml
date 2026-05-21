@@ -41,7 +41,7 @@ Design = "https://github.com/toddysm/custos/blob/main/design/components/storage-
 
 # Adapter discovery by SPL startup gate
 [project.entry-points."custos_spl.adapters"]
-csi-artifact = "custos_csi.adapters:make_adapter"
+csi-pvc = "custos_csi.adapters:make_adapter"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/custos_csi"]
