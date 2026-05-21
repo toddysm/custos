@@ -119,6 +119,6 @@ jobs:
             src/libs/custos-s3/tests/test_conformance.py \
             -v -m integration --tb=short
         env:
-          CUSTOS_POSTGRES_URL: postgresql://testuser:testpass@localhost:5432/custos_test
+          CUSTOS_PG_DSN: postgresql://testuser:testpass@localhost:5432/custos_test
           CUSTOS_LOKI_URL: http://localhost:3100
           CUSTOS_PROMETHEUS_URL: http://localhost:9090
