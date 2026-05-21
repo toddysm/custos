@@ -17,12 +17,15 @@ from datetime import UTC, datetime
 import pytest
 from custos_spl.interfaces.catalog_store import CatalogStoreProvider
 from custos_spl.interfaces.definition_store import DefinitionStoreProvider
+from custos_spl.interfaces.auth_store import AuthStoreProvider
 from custos_spl.interfaces.metadata_store import (
     MetadataStoreProvider,
     TransactionHandle,
 )
 from custos_spl.migrations.runner import MigrationCapable
 
+from custos_pg.adapters.auth import PgAuthAdapter
+from custos_pg.adapters.auth import make_adapter as make_auth_adapter
 from custos_pg.adapters.catalog import (
     PgCatalogAdapter,
     _decode_cursor,
@@ -61,6 +64,11 @@ def test_metadata_adapter_satisfies_metadata_protocol() -> None:
     assert isinstance(adapter, MetadataStoreProvider)
 
 
+def test_auth_adapter_satisfies_auth_protocol() -> None:
+    adapter = PgAuthAdapter(lazy=LazyPool("postgresql://noop"))
+    assert isinstance(adapter, AuthStoreProvider)
+
+
 def test_definition_adapter_satisfies_migration_capable() -> None:
     adapter = PgDefinitionAdapter(lazy=LazyPool("postgresql://noop"))
     assert isinstance(adapter, MigrationCapable)
@@ -76,6 +84,11 @@ def test_metadata_adapter_satisfies_migration_capable() -> None:
     assert isinstance(adapter, MigrationCapable)
 
 
+def test_auth_adapter_satisfies_migration_capable() -> None:
+    adapter = PgAuthAdapter(lazy=LazyPool("postgresql://noop"))
+    assert isinstance(adapter, MigrationCapable)
+
+
 def test_adapter_requires_pool_or_lazy() -> None:
     with pytest.raises(ValueError, match="requires either"):
         PgDefinitionAdapter()
@@ -83,6 +96,8 @@ def test_adapter_requires_pool_or_lazy() -> None:
         PgCatalogAdapter()
     with pytest.raises(ValueError, match="requires either"):
         PgMetadataAdapter()
+    with pytest.raises(ValueError, match="requires either"):
+        PgAuthAdapter()
 
 
 # ----- Declared-revisions cache before any migration -----
@@ -100,6 +115,8 @@ def test_declared_revisions_starts_empty() -> None:
     assert cat.declared_revisions == {"CatalogStoreProvider": frozenset()}
     meta = PgMetadataAdapter(lazy=LazyPool("postgresql://noop"))
     assert meta.declared_revisions == {"MetadataStoreProvider": frozenset()}
+    auth = PgAuthAdapter(lazy=LazyPool("postgresql://noop"))
+    assert auth.declared_revisions == {"AuthStoreProvider": frozenset()}
 
 
 # ----- DDL shape -----
@@ -216,12 +233,28 @@ def test_metadata_factory_errors_when_dsn_missing(
         make_metadata_adapter()
 
 
+def test_auth_factory_errors_when_dsn_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(DSN_ENV_VAR, raising=False)
+    with pytest.raises(RuntimeError, match=DSN_ENV_VAR):
+        make_auth_adapter()
+
+
 def test_metadata_factory_returns_lazy_adapter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv(DSN_ENV_VAR, "postgresql://noop")
     adapter = make_metadata_adapter()
     assert isinstance(adapter, PgMetadataAdapter)
+
+
+def test_auth_factory_returns_lazy_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(DSN_ENV_VAR, "postgresql://noop")
+    adapter = make_auth_adapter()
+    assert isinstance(adapter, PgAuthAdapter)
 
 
 def test_read_dsn_from_env_errors_when_unset(

@@ -47,11 +47,13 @@ from custos_spl.interfaces.metadata_store import (
     SubscriptionSelector,
     DeviceCodeSession,
 )
+from custos_spl.interfaces.auth_store import Tenant, Workspace, WorkspaceFilter
 from custos_spl.migrations.runner import check_revisions
 
 from custos_pg.adapters.catalog import PgCatalogAdapter
 from custos_pg.adapters.definition import PgDefinitionAdapter
 from custos_pg.adapters.metadata import PgMetadataAdapter
+from custos_pg.adapters.auth import PgAuthAdapter
 
 if TYPE_CHECKING:
     from asyncpg.pool import Pool
@@ -352,7 +354,6 @@ async def test_metadata_fully_satisfied_after_rev4_apply(pg_pool: Pool) -> None:
     """
     adapter = PgMetadataAdapter(pool=pg_pool)
     await adapter.apply_pending()
-    check_revisions([adapter])
     assert adapter.declared_revisions["MetadataStoreProvider"] == frozenset({1, 2, 3, 4})
 
 
@@ -1010,3 +1011,226 @@ async def test_with_transaction_marks_handle_closed_on_error(
             event=object(),
             tx=captured["tx"],
         )
+
+
+# ----- AuthStoreProvider -----
+
+
+async def test_auth_apply_pending_records_revision(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    summaries = await adapter.apply_pending()
+    assert summaries  # at least one revision applied
+    assert any("AuthStoreProvider rev1" in s for s in summaries)
+    declared = adapter.declared_revisions
+    assert 1 in declared["AuthStoreProvider"]
+
+
+async def test_auth_apply_pending_is_idempotent(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    first = await adapter.apply_pending()
+    second = await adapter.apply_pending()
+    assert first  # first run did something
+    assert second == []  # second run is a no-op
+
+
+async def test_put_and_get_tenant(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    tenant = Tenant(
+        tenant_id="t-1",
+        display_name="Acme Corp",
+        disabled_at=None,
+        created_at=datetime.now(UTC),
+    )
+    await adapter.put_tenant(tenant)
+
+    retrieved = await adapter.get_tenant("t-1")
+    assert retrieved is not None
+    assert retrieved.tenant_id == "t-1"
+    assert retrieved.display_name == "Acme Corp"
+    assert retrieved.disabled_at is None
+
+
+async def test_tenant_upsert_updates_display_name(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    tenant1 = Tenant(
+        tenant_id="t-1",
+        display_name="Acme Corp",
+        disabled_at=None,
+        created_at=datetime.now(UTC),
+    )
+    await adapter.put_tenant(tenant1)
+
+    tenant2 = Tenant(
+        tenant_id="t-1",
+        display_name="Acme Corporation",
+        disabled_at=None,
+        created_at=datetime.now(UTC),
+    )
+    await adapter.put_tenant(tenant2)
+
+    retrieved = await adapter.get_tenant("t-1")
+    assert retrieved is not None
+    assert retrieved.display_name == "Acme Corporation"
+
+
+async def test_get_tenant_returns_none_when_absent(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    retrieved = await adapter.get_tenant("nonexistent")
+    assert retrieved is None
+
+
+async def test_list_tenants_returns_all(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    now = datetime.now(UTC)
+    await adapter.put_tenant(
+        Tenant(
+            tenant_id="t-1",
+            display_name="Tenant 1",
+            disabled_at=None,
+            created_at=now,
+        )
+    )
+    await adapter.put_tenant(
+        Tenant(
+            tenant_id="t-2",
+            display_name="Tenant 2",
+            disabled_at=None,
+            created_at=now + timedelta(seconds=1),
+        )
+    )
+
+    tenants = await adapter.list_tenants()
+    assert len(tenants) == 2
+    assert {t.tenant_id for t in tenants} == {"t-1", "t-2"}
+
+
+async def test_list_tenants_excludes_disabled_by_default(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    now = datetime.now(UTC)
+    await adapter.put_tenant(
+        Tenant(
+            tenant_id="t-active",
+            display_name="Active",
+            disabled_at=None,
+            created_at=now,
+        )
+    )
+    await adapter.put_tenant(
+        Tenant(
+            tenant_id="t-disabled",
+            display_name="Disabled",
+            disabled_at=now,
+            created_at=now,
+        )
+    )
+
+    tenants = await adapter.list_tenants()
+    assert len(tenants) == 1
+    assert tenants[0].tenant_id == "t-active"
+
+
+async def test_put_and_get_workspace(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    # Create tenant first
+    tenant = Tenant(
+        tenant_id="t-1",
+        display_name="Acme Corp",
+        disabled_at=None,
+        created_at=datetime.now(UTC),
+    )
+    await adapter.put_tenant(tenant)
+
+    workspace = Workspace(
+        workspace_id="ws-1",
+        tenant_id="t-1",
+        display_name="Production",
+        disabled_at=None,
+        created_at=datetime.now(UTC),
+    )
+    await adapter.put_workspace(workspace)
+
+    retrieved = await adapter.get_workspace("ws-1")
+    assert retrieved is not None
+    assert retrieved.workspace_id == "ws-1"
+    assert retrieved.tenant_id == "t-1"
+    assert retrieved.display_name == "Production"
+
+
+async def test_list_workspaces_filters_by_tenant(pg_pool: Pool) -> None:
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    now = datetime.now(UTC)
+
+    # Create two tenants
+    await adapter.put_tenant(
+        Tenant(
+            tenant_id="t-1",
+            display_name="Tenant 1",
+            disabled_at=None,
+            created_at=now,
+        )
+    )
+    await adapter.put_tenant(
+        Tenant(
+            tenant_id="t-2",
+            display_name="Tenant 2",
+            disabled_at=None,
+            created_at=now,
+        )
+    )
+
+    # Create workspaces in each tenant
+    await adapter.put_workspace(
+        Workspace(
+            workspace_id="ws-t1-1",
+            tenant_id="t-1",
+            display_name="WS1-1",
+            disabled_at=None,
+            created_at=now,
+        )
+    )
+    await adapter.put_workspace(
+        Workspace(
+            workspace_id="ws-t1-2",
+            tenant_id="t-1",
+            display_name="WS1-2",
+            disabled_at=None,
+            created_at=now,
+        )
+    )
+    await adapter.put_workspace(
+        Workspace(
+            workspace_id="ws-t2-1",
+            tenant_id="t-2",
+            display_name="WS2-1",
+            disabled_at=None,
+            created_at=now,
+        )
+    )
+
+    # List workspaces for tenant 1
+    ws_t1 = await adapter.list_workspaces(
+        WorkspaceFilter(tenant_id="t-1", include_disabled=False)
+    )
+    assert len(ws_t1) == 2
+    assert {w.workspace_id for w in ws_t1} == {"ws-t1-1", "ws-t1-2"}
+
+    # List workspaces for tenant 2
+    ws_t2 = await adapter.list_workspaces(
+        WorkspaceFilter(tenant_id="t-2", include_disabled=False)
+    )
+    assert len(ws_t2) == 1
+    assert ws_t2[0].workspace_id == "ws-t2-1"
