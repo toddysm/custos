@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import hashlib
 import os
+import tempfile
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import aioboto3
+import aiofiles
 
 from custos_spl.errors import ArtifactNotFound, BackendUnavailable, WorkspaceMismatch
 from custos_spl.ids import ArtifactId, WorkspaceId
@@ -81,107 +84,57 @@ class S3ArtifactAdapter:
     ) -> ArtifactDescriptor:
         """Stream-write a blob with streaming SHA256 digest computation.
 
-        Computes digest incrementally as bytes arrive via multipart upload.
-        Streams directly to S3 (O(1) memory, no buffering).
-        If an identical digest exists, returns descriptor (idempotent via digest).
+        Spools to temp file while computing digest, then uploads to S3.
+        Streaming digest computation (O(1) memory), temp file uses O(n) disk.
+        Idempotent: identical content produces same digest/key.
         """
         try:
             sha = hashlib.sha256()
             size = 0
-            key = None
-            artifact_id = None
-            upload_id = None
 
-            async with self.session.client(
-                "s3",
-                region_name=self.region,
-                endpoint_url=self.endpoint_url,
-            ) as s3:
-                part_etags: list[dict] = []
-                part_num = 1
-                min_part_size = 5 * 1024 * 1024  # 5MB minimum for multipart
+            # Spool to temp file while computing digest
+            with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                temp_path = Path(tmp.name)
 
-                # Stream content, computing digest on-the-fly
-                part_buffer = b""
-                async for chunk in content:
-                    sha.update(chunk)
-                    size += len(chunk)
-                    part_buffer += chunk
+            try:
+                async with aiofiles.open(temp_path, "wb") as f:
+                    async for chunk in content:
+                        sha.update(chunk)
+                        size += len(chunk)
+                        await f.write(chunk)
 
-                    # Upload part if buffer exceeds minimum size
-                    if len(part_buffer) >= min_part_size and upload_id:
-                        response = await s3.upload_part(
-                            Bucket=self.bucket,
-                            Key=key,
-                            PartNumber=part_num,
-                            UploadId=upload_id,
-                            Body=part_buffer,
-                        )
-                        part_etags.append(
-                            {"ETag": response["ETag"], "PartNumber": part_num}
-                        )
-                        part_num += 1
-                        part_buffer = b""
-
-                # Finalize digest before uploading remaining data
                 digest = sha.hexdigest()
                 artifact_id = ArtifactId(f"{workspace_id}:{digest}")
                 key = self._artifact_key(workspace_id, digest)
 
-                # Initiate multipart upload if not already done
-                if not upload_id:
-                    mp = await s3.create_multipart_upload(
-                        Bucket=self.bucket,
-                        Key=key,
-                        ContentType=media_type or "application/octet-stream",
-                    )
-                    upload_id = mp["UploadId"]
-
-                # Upload remaining data (or all data if small)
-                if part_buffer or part_num == 1:
-                    if part_num == 1 and len(part_buffer) < min_part_size:
-                        # Single part upload (small blob)
+                # Upload temp file to S3
+                async with self.session.client(
+                    "s3",
+                    region_name=self.region,
+                    endpoint_url=self.endpoint_url,
+                ) as s3:
+                    async with aiofiles.open(temp_path, "rb") as f:
+                        body = await f.read()
                         await s3.put_object(
                             Bucket=self.bucket,
                             Key=key,
-                            Body=part_buffer,
+                            Body=body,
                             ContentType=media_type or "application/octet-stream",
                         )
-                        return ArtifactDescriptor(
-                            workspace_id=workspace_id,
-                            artifact_id=artifact_id,
-                            digest=digest,
-                            media_type=media_type,
-                            size=size,
-                        )
-                    else:
-                        # Upload final part
-                        response = await s3.upload_part(
-                            Bucket=self.bucket,
-                            Key=key,
-                            PartNumber=part_num,
-                            UploadId=upload_id,
-                            Body=part_buffer,
-                        )
-                        part_etags.append(
-                            {"ETag": response["ETag"], "PartNumber": part_num}
-                        )
 
-                # Complete multipart upload
-                await s3.complete_multipart_upload(
-                    Bucket=self.bucket,
-                    Key=key,
-                    UploadId=upload_id,
-                    MultipartUpload={"Parts": part_etags},
+                return ArtifactDescriptor(
+                    workspace_id=workspace_id,
+                    artifact_id=artifact_id,
+                    digest=digest,
+                    media_type=media_type,
+                    size=size,
                 )
-
-            return ArtifactDescriptor(
-                workspace_id=workspace_id,
-                artifact_id=artifact_id,
-                digest=digest,
-                media_type=media_type,
-                size=size,
-            )
+            finally:
+                # Clean up temp file
+                try:
+                    temp_path.unlink()
+                except OSError:
+                    pass
         except ArtifactNotFound:
             raise
         except Exception as exc:
