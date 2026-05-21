@@ -960,6 +960,9 @@ class PgAuthAdapter(MigrationCapable):
         closed before the transaction ends. Callers can use the handle
         in tx-aware methods to share atomicity.
         """
+        if not callable(fn):
+            raise TypeError("fn must be callable")
+
         pool = await self._pool_ref()
         async with pool.acquire() as conn, conn.transaction():
             handle = PgAuthTransactionHandle(conn)
