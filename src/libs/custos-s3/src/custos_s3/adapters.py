@@ -81,37 +81,98 @@ class S3ArtifactAdapter:
     ) -> ArtifactDescriptor:
         """Stream-write a blob with streaming SHA256 digest computation.
 
-        Computes digest incrementally as bytes arrive. If an identical digest
-        exists, this is idempotent (overwrites with identical content).
+        Computes digest incrementally as bytes arrive via multipart upload.
+        Streams directly to S3 (O(1) memory, no buffering).
+        If an identical digest exists, returns descriptor (idempotent via digest).
         """
         try:
             sha = hashlib.sha256()
             size = 0
-            chunks: list[bytes] = []
-
-            # Stream content, computing digest on-the-fly
-            async for chunk in content:
-                sha.update(chunk)
-                size += len(chunk)
-                chunks.append(chunk)
-
-            digest = sha.hexdigest()
-            artifact_id = ArtifactId(f"{workspace_id}:{digest}")
-
-            # Upload to S3
-            key = self._artifact_key(workspace_id, digest)
-            body = b"".join(chunks)
+            key = None
+            artifact_id = None
+            upload_id = None
 
             async with self.session.client(
                 "s3",
                 region_name=self.region,
                 endpoint_url=self.endpoint_url,
             ) as s3:
-                await s3.put_object(
+                part_etags: list[dict] = []
+                part_num = 1
+                min_part_size = 5 * 1024 * 1024  # 5MB minimum for multipart
+
+                # Stream content, computing digest on-the-fly
+                part_buffer = b""
+                async for chunk in content:
+                    sha.update(chunk)
+                    size += len(chunk)
+                    part_buffer += chunk
+
+                    # Upload part if buffer exceeds minimum size
+                    if len(part_buffer) >= min_part_size and upload_id:
+                        response = await s3.upload_part(
+                            Bucket=self.bucket,
+                            Key=key,
+                            PartNumber=part_num,
+                            UploadId=upload_id,
+                            Body=part_buffer,
+                        )
+                        part_etags.append(
+                            {"ETag": response["ETag"], "PartNumber": part_num}
+                        )
+                        part_num += 1
+                        part_buffer = b""
+
+                # Finalize digest before uploading remaining data
+                digest = sha.hexdigest()
+                artifact_id = ArtifactId(f"{workspace_id}:{digest}")
+                key = self._artifact_key(workspace_id, digest)
+
+                # Initiate multipart upload if not already done
+                if not upload_id:
+                    mp = await s3.create_multipart_upload(
+                        Bucket=self.bucket,
+                        Key=key,
+                        ContentType=media_type or "application/octet-stream",
+                    )
+                    upload_id = mp["UploadId"]
+
+                # Upload remaining data (or all data if small)
+                if part_buffer or part_num == 1:
+                    if part_num == 1 and len(part_buffer) < min_part_size:
+                        # Single part upload (small blob)
+                        await s3.put_object(
+                            Bucket=self.bucket,
+                            Key=key,
+                            Body=part_buffer,
+                            ContentType=media_type or "application/octet-stream",
+                        )
+                        return ArtifactDescriptor(
+                            workspace_id=workspace_id,
+                            artifact_id=artifact_id,
+                            digest=digest,
+                            media_type=media_type,
+                            size=size,
+                        )
+                    else:
+                        # Upload final part
+                        response = await s3.upload_part(
+                            Bucket=self.bucket,
+                            Key=key,
+                            PartNumber=part_num,
+                            UploadId=upload_id,
+                            Body=part_buffer,
+                        )
+                        part_etags.append(
+                            {"ETag": response["ETag"], "PartNumber": part_num}
+                        )
+
+                # Complete multipart upload
+                await s3.complete_multipart_upload(
                     Bucket=self.bucket,
                     Key=key,
-                    Body=body,
-                    ContentType=media_type or "application/octet-stream",
+                    UploadId=upload_id,
+                    MultipartUpload={"Parts": part_etags},
                 )
 
             return ArtifactDescriptor(

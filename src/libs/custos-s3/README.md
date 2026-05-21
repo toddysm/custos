@@ -8,8 +8,9 @@ Custos ArtifactStore adapter for S3-compatible object storage.
 
 ## Features
 
-- **Content-addressed storage** — artifacts are stored by SHA256 digest, enabling deduplication and idempotent writes
-- **Streaming digest computation** — SHA256 is computed on-the-fly as bytes arrive (O(1) memory, no buffering)
+- **True streaming digest computation** — SHA256 computed on-the-fly as bytes arrive (O(1) memory)
+- **Multipart streaming upload** — chunks streamed directly to S3 (5MB parts), no intermediate buffering
+- **Content-addressed storage** — artifacts stored by SHA256 digest, enabling deduplication and idempotent writes
 - **Workspace isolation** — all operations enforce workspace scoping; cross-workspace access is blocked
 - **Sweeper-only deletion** — delete operations require explicit `is_sweeper=True` flag to prevent accidental data loss
 - **Async/await API** — all I/O operations are fully async for high concurrency
