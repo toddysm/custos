@@ -1,8 +1,8 @@
 """Conformance test suite framework for SPL adapters.
 
-Provides base test classes and fixtures that all adapter implementations
-must pass, covering workspace scoping, immutability, leases, audit outbox,
-idempotency records, and transaction semantics.
+Provides base test classes and fixtures for adapter conformance testing,
+including currently implemented suites for artifact storage, log queries,
+and metrics queries.
 """
 
 from .artifact_store import ArtifactStoreConformanceTests
