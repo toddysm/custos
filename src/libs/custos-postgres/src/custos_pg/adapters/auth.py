@@ -13,7 +13,7 @@ import asyncpg
 
 from custos_pg.pool import LazyPool
 from custos_spl.errors import ImmutableViolation
-from custos_spl.middleware.transactions import bind_handle, check_handle
+from custos_spl.middleware.transactions import bind_handle
 from custos_spl.ids import PrincipalId, RoleBindingId, RoleId, ServiceTokenId, TenantId, WorkspaceId
 from custos_spl.interfaces.auth_store import (
     AuthStoreProvider,
