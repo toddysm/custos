@@ -79,6 +79,71 @@ class TestPrometheusAdapter:
         assert 'pod="my-pod"' in query
         assert 'namespace="default"' in query
 
+    def test_validate_metric_name_valid(self, adapter: PrometheusMetricsAdapter) -> None:
+        """Valid metric names pass validation."""
+        adapter._validate_metric_name("cpu_usage")
+        adapter._validate_metric_name("http_requests_total")
+        adapter._validate_metric_name("_internal")
+        adapter._validate_metric_name("test:metric")
+        adapter._validate_metric_name("a")
+
+    def test_validate_metric_name_invalid(
+        self, adapter: PrometheusMetricsAdapter
+    ) -> None:
+        """Invalid metric names raise QueryUnsupported."""
+        with pytest.raises(QueryUnsupported, match="invalid metric name"):
+            adapter._validate_metric_name("123abc")  # starts with digit
+        with pytest.raises(QueryUnsupported, match="invalid metric name"):
+            adapter._validate_metric_name("cpu-usage")  # hyphen not allowed
+        with pytest.raises(QueryUnsupported, match="invalid metric name"):
+            adapter._validate_metric_name("cpu{}")  # contains braces
+        with pytest.raises(QueryUnsupported, match="invalid metric name"):
+            adapter._validate_metric_name("cpu usage")  # space not allowed
+
+    def test_validate_label_name_valid(self, adapter: PrometheusMetricsAdapter) -> None:
+        """Valid label names pass validation."""
+        adapter._validate_label_name("pod")
+        adapter._validate_label_name("namespace")
+        adapter._validate_label_name("_internal")
+        adapter._validate_label_name("job_name")
+        adapter._validate_label_name("a")
+
+    def test_validate_label_name_invalid(
+        self, adapter: PrometheusMetricsAdapter
+    ) -> None:
+        """Invalid label names raise QueryUnsupported."""
+        with pytest.raises(QueryUnsupported, match="invalid label name"):
+            adapter._validate_label_name("123abc")  # starts with digit
+        with pytest.raises(QueryUnsupported, match="invalid label name"):
+            adapter._validate_label_name("job-name")  # hyphen not allowed
+        with pytest.raises(QueryUnsupported, match="invalid label name"):
+            adapter._validate_label_name("job:name")  # colon not allowed in labels
+        with pytest.raises(QueryUnsupported, match="invalid label name"):
+            adapter._validate_label_name("job name")  # space not allowed
+
+    def test_build_query_with_invalid_metric_name(
+        self, adapter: PrometheusMetricsAdapter
+    ) -> None:
+        """Build query rejects invalid metric names."""
+        workspace_id = WorkspaceId("ws-123")
+        selector = MetricSelector(name="123invalid")
+
+        with pytest.raises(QueryUnsupported, match="invalid metric name"):
+            adapter._build_query(selector, workspace_id)
+
+    def test_build_query_with_invalid_label_name(
+        self, adapter: PrometheusMetricsAdapter
+    ) -> None:
+        """Build query rejects invalid label names."""
+        workspace_id = WorkspaceId("ws-123")
+        selector = MetricSelector(
+            name="cpu_usage",
+            label_matchers={"pod-name": "my-pod"},  # invalid: hyphen
+        )
+
+        with pytest.raises(QueryUnsupported, match="invalid label name"):
+            adapter._build_query(selector, workspace_id)
+
     @pytest.mark.asyncio
     async def test_query_run_metrics_success(
         self, adapter: PrometheusMetricsAdapter

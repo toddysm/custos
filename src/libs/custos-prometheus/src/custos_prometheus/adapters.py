@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime
 from typing import ClassVar
 
@@ -53,6 +54,24 @@ class PrometheusMetricsAdapter:
         """Escape a label value for safe inclusion in PromQL matchers."""
         return value.replace("\\", "\\\\").replace('"', '\\"')
 
+    def _validate_metric_name(self, name: str) -> None:
+        """Validate metric name against Prometheus regex.
+
+        Raises QueryUnsupported if name is invalid.
+        Prometheus metric names must match: [a-zA-Z_:][a-zA-Z0-9_:]*
+        """
+        if not re.match(r"^[a-zA-Z_:][a-zA-Z0-9_:]*$", name):
+            raise QueryUnsupported(f"invalid metric name: {name}")
+
+    def _validate_label_name(self, name: str) -> None:
+        """Validate label name against Prometheus regex.
+
+        Raises QueryUnsupported if name is invalid.
+        Prometheus label names must match: [a-zA-Z_][a-zA-Z0-9_]*
+        """
+        if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", name):
+            raise QueryUnsupported(f"invalid label name: {name}")
+
     def _build_matchers(
         self,
         workspace_id: WorkspaceId,
@@ -78,12 +97,14 @@ class PrometheusMetricsAdapter:
         run_id: RunId | None = None,
     ) -> str:
         """Build PromQL query from selector + workspace/run filters."""
+        self._validate_metric_name(selector.name)
         metric_name = selector.name
         workspace_matchers = self._build_matchers(workspace_id, run_id)
 
         # Build label matchers from selector
         selector_matchers = []
         for key, value in selector.label_matchers.items():
+            self._validate_label_name(key)
             escaped_value = self._escape_label_value(value)
             selector_matchers.append(f'{key}="{escaped_value}"')
 
