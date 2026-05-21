@@ -11,14 +11,11 @@ Skip without Prometheus: pytest tests/test_conformance.py -v -m "not integration
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
-
 import httpx
 import pytest
 
 from custos_spl.conformance import MetricsQueryConformanceTests
 from custos_spl.ids import RunId, WorkspaceId
-from custos_spl.interfaces.metrics_query import MetricRange, MetricSelector
 
 # Require custos-prometheus and conformance support
 pytest.importorskip("custos_prometheus")
