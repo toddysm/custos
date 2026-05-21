@@ -3,7 +3,7 @@
 These tests verify that the CSI adapter satisfies the ArtifactStoreProvider
 conformance contract. They require:
 - custos-spl[conformance] package installed
-- Kubernetes cluster or CSI volume accessible
+- Kubernetes cluster or CSI volume accessible via CUSTOS_CSI_PVC_MOUNT
 
 Run with: pytest tests/test_conformance.py -v -m integration
 Skip without CSI: pytest tests/test_conformance.py -v -m "not integration"
@@ -12,6 +12,7 @@ Skip without CSI: pytest tests/test_conformance.py -v -m "not integration"
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -33,17 +34,26 @@ class TestCsiArtifactConformance(ArtifactStoreConformanceTests):
     @pytest.fixture(scope="class", autouse=True)
     def _check_csi_available(self) -> None:
         """Skip entire test class if CSI volume is not accessible."""
-        csi_path = os.environ.get("CUSTOS_CSI_VOLUME_PATH", "/mnt/csi-test")
-        if not os.path.exists(csi_path) or not os.path.isdir(csi_path):
+        pvc_mount = os.environ.get("CUSTOS_CSI_PVC_MOUNT")
+        if not pvc_mount:
             pytest.skip(
-                f"CSI volume not available at {csi_path} — skipping integration tests"
+                "CUSTOS_CSI_PVC_MOUNT environment variable not set; skipping integration tests"
+            )
+        pvc_path = Path(pvc_mount)
+        if not pvc_path.exists() or not pvc_path.is_dir():
+            pytest.skip(
+                f"CSI volume not available at {pvc_mount} — skipping integration tests"
             )
 
     @pytest.fixture
     def adapter(self) -> CsiArtifactAdapter:
         """Provide configured CSI artifact adapter."""
-        csi_path = os.environ.get("CUSTOS_CSI_VOLUME_PATH", "/mnt/csi-test")
-        return CsiArtifactAdapter(volume_path=csi_path)
+        pvc_mount = os.environ.get("CUSTOS_CSI_PVC_MOUNT")
+        if not pvc_mount:
+            raise RuntimeError(
+                "CUSTOS_CSI_PVC_MOUNT environment variable not set; required for CSI adapter"
+            )
+        return CsiArtifactAdapter(pvc_mount=Path(pvc_mount))
 
     @pytest.fixture
     def workspace_id(self) -> WorkspaceId:
