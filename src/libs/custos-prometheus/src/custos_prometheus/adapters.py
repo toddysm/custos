@@ -233,7 +233,11 @@ class PrometheusMetricsAdapter:
         data: dict,
         workspace_id: WorkspaceId,
     ) -> MetricSeries:
-        """Parse Prometheus range query response into MetricSeries."""
+        """Parse Prometheus range query response into MetricSeries.
+
+        Validates that returned metrics belong to the requested workspace.
+        Raises WorkspaceMismatch if workspace_id label doesn't match.
+        """
         if data.get("status") != "success":
             raise BackendUnavailable(f"Prometheus error: {data.get('error', 'unknown')}")
 
@@ -244,6 +248,14 @@ class PrometheusMetricsAdapter:
         # For simplicity, use first series (most range queries return one)
         first_result = result[0]
         labels = dict(first_result.get("metric", {}))
+
+        # Validate workspace ownership
+        returned_workspace_id = labels.get("workspace_id")
+        if returned_workspace_id != str(workspace_id):
+            raise WorkspaceMismatch(
+                f"metric belongs to workspace {returned_workspace_id}, "
+                f"not {workspace_id}"
+            )
 
         samples = []
         for timestamp_str, value_str in first_result.get("values", []):
@@ -267,7 +279,11 @@ class PrometheusMetricsAdapter:
         at: datetime,
         workspace_id: WorkspaceId,
     ) -> MetricSample:
-        """Parse Prometheus instant query response into MetricSample."""
+        """Parse Prometheus instant query response into MetricSample.
+
+        Validates that returned metric belongs to the requested workspace.
+        Raises WorkspaceMismatch if workspace_id label doesn't match.
+        """
         if data.get("status") != "success":
             raise BackendUnavailable(f"Prometheus error: {data.get('error', 'unknown')}")
 
@@ -281,6 +297,14 @@ class PrometheusMetricsAdapter:
 
             first_value = values[0]
             labels = dict(first_value.get("metric", {}))
+
+            # Validate workspace ownership
+            returned_workspace_id = labels.get("workspace_id")
+            if returned_workspace_id != str(workspace_id):
+                raise WorkspaceMismatch(
+                    f"metric belongs to workspace {returned_workspace_id}, "
+                    f"not {workspace_id}"
+                )
 
             try:
                 value_tuple = first_value.get("value", [None, None])

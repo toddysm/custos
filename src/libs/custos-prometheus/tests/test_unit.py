@@ -291,8 +291,100 @@ class TestPrometheusAdapter:
             assert result.name == "requests_total"
             assert len(result.samples) == 1
 
+    def test_parse_range_response_validates_workspace(
+        self, adapter: PrometheusMetricsAdapter
+    ) -> None:
+        """Parse range response validates workspace ownership."""
+        workspace_id = WorkspaceId("ws-123")
+        data = {
+            "status": "success",
+            "data": {
+                "resultType": "matrix",
+                "result": [
+                    {
+                        "metric": {
+                            "__name__": "cpu_usage",
+                            "workspace_id": "ws-999",  # Different workspace
+                        },
+                        "values": [["1147483647", "1"]],
+                    }
+                ],
+            },
+        }
 
-class TestNoopAdapter:
+        with pytest.raises(WorkspaceMismatch, match="belongs to workspace ws-999"):
+            adapter._parse_range_response("cpu_usage", data, workspace_id)
+
+    def test_parse_range_response_missing_workspace_label(
+        self, adapter: PrometheusMetricsAdapter
+    ) -> None:
+        """Parse range response fails if workspace label is missing."""
+        from custos_spl.errors import WorkspaceMismatch
+
+        workspace_id = WorkspaceId("ws-123")
+        data = {
+            "status": "success",
+            "data": {
+                "resultType": "matrix",
+                "result": [
+                    {
+                        "metric": {"__name__": "cpu_usage"},  # No workspace_id label
+                        "values": [["1147483647", "1"]],
+                    }
+                ],
+            },
+        }
+
+        with pytest.raises(WorkspaceMismatch):
+            adapter._parse_range_response("cpu_usage", data, workspace_id)
+
+    def test_parse_instant_response_validates_workspace(
+        self, adapter: PrometheusMetricsAdapter
+    ) -> None:
+        """Parse instant response validates workspace ownership."""
+        workspace_id = WorkspaceId("ws-123")
+        at = datetime.utcnow()
+        data = {
+            "status": "success",
+            "data": {
+                "resultType": "vector",
+                "result": [
+                    {
+                        "metric": {
+                            "__name__": "up",
+                            "workspace_id": "ws-456",  # Different workspace
+                        },
+                        "value": ["1147483647", "1"],
+                    }
+                ],
+            },
+        }
+
+        with pytest.raises(WorkspaceMismatch, match="belongs to workspace ws-456"):
+            adapter._parse_instant_response(data, at, workspace_id)
+
+    def test_parse_instant_response_missing_workspace_label(
+        self, adapter: PrometheusMetricsAdapter
+    ) -> None:
+        """Parse instant response fails if workspace label is missing."""
+        workspace_id = WorkspaceId("ws-123")
+        at = datetime.utcnow()
+        data = {
+            "status": "success",
+            "data": {
+                "resultType": "vector",
+                "result": [
+                    {
+                        "metric": {"__name__": "up"},  # No workspace_id label
+                        "value": ["1147483647", "1"],
+                    }
+                ],
+            },
+        }
+
+        with pytest.raises(WorkspaceMismatch):
+            adapter._parse_instant_response(data, at, workspace_id)
+
     """Tests for NoopMetricsAdapter."""
 
     @pytest.fixture
