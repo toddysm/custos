@@ -36,9 +36,10 @@ __all__ = ["Clock", "DaprWorkflowClock", "FixedClock"]
 class Clock(Protocol):
     """The clock the evaluator calls for ``now()``.
 
-    Implementations must return a timezone-aware UTC :class:`datetime`.
-    The protocol is :func:`runtime_checkable` so callers can write
-    defensive ``isinstance(x, Clock)`` guards in scope construction.
+    Implementations must return a timezone-aware :class:`datetime`
+    (UTC by convention). The protocol is :func:`runtime_checkable` so
+    callers can write defensive ``isinstance(x, Clock)`` guards in
+    scope construction.
     """
 
     def now(self) -> datetime:  # pragma: no cover - protocol
