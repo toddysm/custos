@@ -327,7 +327,8 @@ class Literal(Node):
 
     def _payload_to_dict(self) -> dict[str, Any]:
         if self.kind is LiteralKind.BYTES:
-            assert isinstance(self.value, bytes)
+            if not isinstance(self.value, bytes):
+                raise TypeError("Literal._payload_to_dict: bytes literal value must be bytes")
             return {"kind": self.kind.value, "value": _bytes_to_str(self.value)}
         return {"kind": self.kind.value, "value": self.value}
 
