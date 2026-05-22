@@ -115,7 +115,7 @@ The runtime guarantees, as of WF-IMPL-006:
 
 - **No side effects** — expressions cannot perform I/O, mutate bindings, or
   observe wall-clock time except through the injected `Clock`. A static
-  audit (`tests/test_eval_branches.py::test_eval_module_does_not_import_dangerous_stdlib`)
+  audit (`tests/test_eval.py::test_eval_module_does_not_import_dangerous_stdlib`)
   asserts `custos_cel/eval.py` contains zero `os`/`sys`/`subprocess`/
   `socket`/`importlib`/`open`/`__import__`/`eval`/`exec`/`compile` imports
   or calls.
