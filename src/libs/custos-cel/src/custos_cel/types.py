@@ -901,6 +901,13 @@ def _infer_map_lit(node: MapLit, bindings: SchemaBindings) -> tuple[CelType, _Dr
     val_unified: CelType | None = None
     for k_node, v_node in node.entries:
         k_type, _kd, new_k = _infer(k_node, bindings)
+        if isinstance(k_type, NullType):
+            raise TypeCheckError(
+                "map literal keys cannot be null",
+                source_position=k_node.pos,
+                expected_type="non-null key",
+                actual_type=k_type,
+            )
         v_type, _vd, new_v = _infer(v_node, bindings)
         new_entries.append((new_k, new_v))
         if key_unified is None:
