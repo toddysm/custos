@@ -529,7 +529,30 @@ def _infer_index(node: Index, bindings: SchemaBindings) -> tuple[CelType, _Drill
                 actual_type=_index_type,
             )
         val = target_type.value
-        return val, None, Index(pos=node.pos, cel_type=val, target=new_target, index=new_index)
+        # When the map was reached via a JSON-Schema-backed
+        # ``additionalProperties`` declaration, the parent drill is a
+        # ``schema`` drill on the enclosing object. Derive the value
+        # drill from that ``additionalProperties`` sub-schema so
+        # follow-on access on the value (``inputs.records[k].field``,
+        # ``inputs.matrices[k][0]``) drills correctly. String-literal
+        # keys do not reach this branch — they are routed through
+        # ``_drill_by_name`` / ``_drill_schema`` above, which already
+        # handles the additionalProperties fallback.
+        val_drill: _Drill | None = None
+        if (
+            target_drill is not None
+            and target_drill.kind == "schema"
+            and target_drill.schema is not None
+        ):
+            additional = target_drill.schema.get("additionalProperties")
+            if isinstance(additional, Mapping):
+                val_label = f"{target_drill.label}[*]" if target_drill.label else "[*]"
+                val_drill = _drill_for_subschema(additional, val_label)
+        return (
+            val,
+            val_drill,
+            Index(pos=node.pos, cel_type=val, target=new_target, index=new_index),
+        )
     raise TypeCheckError(
         f"cannot index a value of type {_render_type(target_type)}",
         source_position=node.pos,

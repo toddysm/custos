@@ -703,6 +703,94 @@ def test_index_into_scalar_array_does_not_carry_dotting_drill() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Member / Index drilling through JSON-Schema maps (additionalProperties)
+# ---------------------------------------------------------------------------
+
+
+def _map_of_objects_bindings() -> SchemaBindings:
+    return _bindings(
+        inputs={
+            "type": "object",
+            "properties": {
+                "key": {"type": "string"},
+                "records": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "object",
+                        "properties": {
+                            "image": {"type": "string"},
+                            "meta": {
+                                "type": "object",
+                                "properties": {"score": {"type": "integer"}},
+                            },
+                        },
+                    },
+                },
+                "matrices": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                    },
+                },
+                "nestedMaps": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                    },
+                },
+                "scalars": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"},
+                },
+            },
+        }
+    )
+
+
+def test_member_after_runtime_key_index_drills_into_additional_properties() -> None:
+    n = _typed("inputs.records[inputs.key].image", _map_of_objects_bindings())
+    assert n.cel_type == StringType()
+
+
+def test_nested_member_after_runtime_key_index_drills_through_object_values() -> None:
+    n = _typed("inputs.records[inputs.key].meta.score", _map_of_objects_bindings())
+    assert n.cel_type == IntType()
+
+
+def test_index_then_index_through_map_of_arrays() -> None:
+    n = _typed("inputs.matrices[inputs.key][0]", _map_of_objects_bindings())
+    assert n.cel_type == IntType()
+
+
+def test_index_through_map_of_maps_with_runtime_keys() -> None:
+    n = _typed("inputs.nestedMaps[inputs.key][inputs.key]", _map_of_objects_bindings())
+    assert n.cel_type == StringType()
+
+
+def test_member_access_after_runtime_key_on_scalar_map_is_type_error() -> None:
+    with pytest.raises(TypeCheckError, match="cannot access member"):
+        _typed("inputs.scalars[inputs.key].length", _map_of_objects_bindings())
+
+
+def test_unknown_field_after_runtime_key_into_map_value_is_unbound() -> None:
+    from custos_cel import UnboundNameError
+
+    with pytest.raises(UnboundNameError):
+        _typed("inputs.records[inputs.key].nope", _map_of_objects_bindings())
+
+
+def test_string_literal_key_member_still_works_for_homogeneous_map() -> None:
+    # String-literal key is routed through _drill_schema's
+    # additionalProperties fallback (the pre-existing path) — this
+    # test guards against the new runtime-key drill regressing the
+    # literal-key behavior.
+    n = _typed('inputs.records["any"].image', _map_of_objects_bindings())
+    assert n.cel_type == StringType()
+
+
+# ---------------------------------------------------------------------------
 # Source position propagation
 # ---------------------------------------------------------------------------
 
