@@ -28,7 +28,7 @@ dependencies = [
 ]
 ```
 
-A scaffold-level smoke test ([`tests/test_parser_smoke.py`](../../../../src/libs/custos-cel/tests/test_parser_smoke.py)) exercises `celpy.Environment().compile(source)` against the canonical issue example and against an obviously malformed expression. It does **not** call `program()` or `evaluate()` — those reach in WF-IMPL-005 / WF-IMPL-006.
+A scaffold-level smoke test ([`tests/test_parser_smoke.py`](../../../../src/libs/custos-cel/tests/test_parser_smoke.py)) exercises `celpy.Environment().compile(source)` against the canonical issue example and against an obviously malformed expression. It does **not** call `program()` or `evaluate()` — those are implemented in WF-IMPL-005 / WF-IMPL-006.
 
 [`src/libs/custos-cel/README.md`](../../../../src/libs/custos-cel/README.md) is updated to name `celpy` as the parser/runtime, with a pointer back to this record.
 
