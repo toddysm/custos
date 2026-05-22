@@ -2,9 +2,9 @@
 and can parse the canonical example expression from the WF-IMPL-002 issue.
 
 This is a parser-only smoke. We never call ``program()`` or ``evaluate()``;
-those reach in WF-IMPL-005 / WF-IMPL-006 once the type checker and sandbox
-land. The parse-only contract is exactly the surface that Catalog Service
-needs at publish time per change record bundle-h (2026-05-18-003).
+those are implemented in WF-IMPL-005 / WF-IMPL-006 once the type checker and
+sandbox land. The parse-only contract is exactly the surface that Catalog
+Service needs at publish time per change record bundle-h (2026-05-18-003).
 
 These tests intentionally exercise celpy directly (not via the
 ``custos_cel`` public surface) because the public surface is the
