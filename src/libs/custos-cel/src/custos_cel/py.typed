@@ -1,0 +1,1 @@
+# Marker file so mypy treats `custos_cel` as an explicit typed package.
