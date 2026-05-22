@@ -273,12 +273,32 @@ class BindingScope:
             for invoking it when it encounters ``Call("now", [])``.
 
         Raises:
+            TypeError: If ``chain`` is a ``str`` (a common foot-gun:
+                ``str`` is itself a ``Sequence[str]``, so a stray
+                ``"inputs.image"`` would otherwise be silently split
+                into characters) or if any element of ``chain`` is not
+                a ``str``.
             UnboundNameError: If the chain is empty, the root is not
                 allowed, a step id is missing, or any item in the walk
                 is absent.
         """
+        # Reject str explicitly — every str is a Sequence[str] of single
+        # characters, so without this guard a caller mistakenly passing
+        # ``"inputs.image"`` would receive a confusing UnboundNameError
+        # with chain=("i",) rather than a clear type error.
+        if isinstance(chain, str):
+            raise TypeError(
+                "BindingScope.resolve: chain must be a sequence of identifiers, "
+                "not a single string; pass e.g. ['inputs', 'image'] instead of "
+                f"{chain!r}",
+            )
         if not chain:
             raise UnboundNameError(chain, pos=pos, reason="empty name chain")
+        for i, element in enumerate(chain):
+            if not isinstance(element, str):
+                raise TypeError(
+                    f"BindingScope.resolve: chain[{i}] must be a str, got {type(element).__name__}",
+                )
 
         head = chain[0]
         tail = list(chain[1:])

@@ -152,6 +152,25 @@ def test_resolve_rejects_empty_chain() -> None:
         s.resolve([])
 
 
+def test_resolve_rejects_str_chain() -> None:
+    # ``str`` is itself a ``Sequence[str]``; without an explicit guard,
+    # a stray dotted string would be silently split into characters and
+    # produce a confusing UnboundNameError. Catch the type error early.
+    s = _scope(inputs={"image": "alpine"})
+    with pytest.raises(TypeError, match="not a single string"):
+        s.resolve("inputs.image")
+    with pytest.raises(TypeError, match="not a single string"):
+        s.resolve("inputs")
+
+
+def test_resolve_rejects_non_str_chain_element() -> None:
+    s = _scope()
+    with pytest.raises(TypeError, match=r"chain\[1\] must be a str"):
+        s.resolve(["inputs", 0])  # type: ignore[list-item]
+    with pytest.raises(TypeError, match=r"chain\[0\] must be a str"):
+        s.resolve([None])  # type: ignore[list-item]
+
+
 def test_resolve_rejects_unknown_step_id() -> None:
     s = _scope(steps={"scan": StepBinding({"ok": True}, sealed=True)})
     with pytest.raises(UnboundNameError) as ei:
