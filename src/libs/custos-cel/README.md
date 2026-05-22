@@ -20,11 +20,20 @@ work is split across WF-IMPL-002 through WF-IMPL-012.
 
 ## Public surface
 
+Two distinct AST shapes are part of the contract:
+
+- **`AST`** — the untyped, purely structural tree returned by `parse()`. Carries source positions; no resolved types, no binding information.
+- **`TypedAST`** — the AST annotated with resolved types after `type_check()` resolves every identifier against a binding scope and its JSON Schemas. Required input to `evaluate()`.
+
+Both names are exported from `custos_cel` today (aliased to `Any` in the scaffold, re-pointed at concrete classes in their respective issues), so downstream consumers — Workflow Service Step Coordinator and Catalog Service publish-time validator — can write signatures against stable names now.
+
 | Symbol | Lands in | Purpose |
 |---|---|---|
-| `custos_cel.parse(source)` | WF-IMPL-002, WF-IMPL-003 | Parse expression source into a typed AST. |
-| `custos_cel.type_check(ast, bindings)` | WF-IMPL-005 | Type-check the AST against JSON Schema bindings. |
-| `custos_cel.evaluate(ast, bindings)` | WF-IMPL-006 | Evaluate a type-checked AST inside the sandbox. |
+| `custos_cel.AST` | WF-IMPL-003 | Untyped parse-tree node type alias. |
+| `custos_cel.TypedAST` | WF-IMPL-005 | Type-annotated parse-tree node type alias. |
+| `custos_cel.parse(source) -> AST` | WF-IMPL-002, WF-IMPL-003 | Parse expression source into an **untyped** `AST`. |
+| `custos_cel.type_check(ast: AST, bindings) -> TypedAST` | WF-IMPL-005 | Resolve identifiers against bindings + JSON Schemas; return a `TypedAST`. |
+| `custos_cel.evaluate(ast: TypedAST, bindings) -> Any` | WF-IMPL-006 | Evaluate a `TypedAST` inside the sandbox. Rejects an untyped `AST`. |
 
 The locked structured error taxonomy and the rest of the public API surface
 land in WF-IMPL-008.

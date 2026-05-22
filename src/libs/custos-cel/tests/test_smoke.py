@@ -22,8 +22,13 @@ def test_public_api_reexports_present() -> None:
         assert callable(getattr(custos_cel, name)), f"custos_cel.{name} not callable"
 
 
+def test_public_type_aliases_present() -> None:
+    for name in ("AST", "TypedAST"):
+        assert hasattr(custos_cel, name), f"custos_cel.{name} missing"
+
+
 def test_public_api_in_dunder_all() -> None:
-    for name in ("parse", "type_check", "evaluate"):
+    for name in ("AST", "TypedAST", "parse", "type_check", "evaluate"):
         assert name in custos_cel.__all__
 
 
