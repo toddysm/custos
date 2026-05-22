@@ -294,7 +294,18 @@ def _runtime_access(target: Any, key: Any, kind: str, pos: SourcePosition | None
     """
     # Mapping covers both dict and MappingProxyType.
     if isinstance(target, Mapping):
-        if key in target:
+        # ``key in target`` raises ``TypeError`` for unhashable keys
+        # (e.g. a list produced by an ill-typed hand-crafted AST). Trap
+        # it so we surface a structured ``EvalError`` rather than
+        # leaking the host exception.
+        try:
+            present = key in target
+        except TypeError as exc:
+            raise EvalError(
+                f"map key must be hashable, got {type(key).__name__}",
+                source_position=pos,
+            ) from exc
+        if present:
             return target[key]
         raise EvalError(
             f"missing key {key!r} in mapping",

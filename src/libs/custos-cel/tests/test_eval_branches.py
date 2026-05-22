@@ -190,6 +190,32 @@ def test_runtime_access_on_string_value_is_rejected() -> None:
         evaluate(ast, scope, _clock())
 
 
+def test_runtime_access_map_with_unhashable_key() -> None:
+    # Hand-crafted: ``inputs.labels[[1]]`` — the type checker would
+    # reject a list as a map key, but the evaluator must still
+    # surface a structured ``EvalError`` rather than leaking the
+    # host ``TypeError`` raised by ``[1] in some_dict``.
+    list_key = ListLit(
+        pos=_POS,
+        cel_type=ListType(element=IntType()),
+        elements=(_ilit(1),),
+    )
+    ast = Index(
+        pos=_POS,
+        cel_type=StringType(),
+        target=Member(
+            pos=_POS,
+            cel_type=MapType(key=StringType(), value=StringType()),
+            target=Ident(pos=_POS, cel_type=None, name="inputs"),
+            name="labels",
+        ),
+        index=list_key,
+    )
+    scope = _make_scope(inputs={"labels": {"a": "1"}})
+    with pytest.raises(EvalError, match="map key must be hashable"):
+        evaluate(ast, scope, _clock())
+
+
 # ---------------------------------------------------------------------------
 # Call dispatch: unknown function + wrong arg counts
 # ---------------------------------------------------------------------------
@@ -760,4 +786,48 @@ def test_in_with_non_collection_right_rejected() -> None:
         right=_ilit(2),
     )
     with pytest.raises(EvalError, match="'in' requires"):
+        evaluate(ast, _make_scope(), _clock())
+
+
+def test_in_with_unhashable_left_against_map_rejected() -> None:
+    # Hand-crafted: ``[1] in inputs.labels`` — the type checker rejects
+    # this, but the evaluator must surface a structured ``EvalError``
+    # rather than leaking the host ``TypeError``.
+    list_key = ListLit(
+        pos=_POS,
+        cel_type=ListType(element=IntType()),
+        elements=(_ilit(1),),
+    )
+    ast = Binary(
+        pos=_POS,
+        cel_type=BoolType(),
+        op=BinaryOp.IN,
+        left=list_key,
+        right=Member(
+            pos=_POS,
+            cel_type=MapType(key=StringType(), value=StringType()),
+            target=Ident(pos=_POS, cel_type=None, name="inputs"),
+            name="labels",
+        ),
+    )
+    scope = _make_scope(inputs={"labels": {"a": "1"}})
+    with pytest.raises(EvalError, match="'in' undefined for unhashable"):
+        evaluate(ast, scope, _clock())
+
+
+def test_map_literal_with_unhashable_key_rejected() -> None:
+    # Hand-crafted: ``{[1]: 2}`` — type checker rejects list keys, but
+    # if such an AST is ever evaluated the dict assignment raises
+    # ``TypeError``; the evaluator must wrap it in ``EvalError``.
+    list_key = ListLit(
+        pos=_POS,
+        cel_type=ListType(element=IntType()),
+        elements=(_ilit(1),),
+    )
+    ast = MapLit(
+        pos=_POS,
+        cel_type=MapType(key=StringType(), value=IntType()),
+        entries=((list_key, _ilit(2)),),
+    )
+    with pytest.raises(EvalError, match="unhashable type"):
         evaluate(ast, _make_scope(), _clock())
