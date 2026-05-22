@@ -413,11 +413,14 @@ class Member(Node):
     def _from_dict_payload(
         cls, data: Mapping[str, Any], pos: SourcePosition, cel_type: CelType | None
     ) -> Member:
+        name = data["name"]
+        if not isinstance(name, str):
+            raise ValueError("Member.from_dict: 'name' must be a string")
         return cls(
             pos=pos,
             cel_type=cel_type,
             target=node_from_dict(data["target"]),
-            name=data["name"],
+            name=name,
         )
 
 
