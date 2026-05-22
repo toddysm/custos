@@ -49,7 +49,7 @@ def test_type_check_rejects_non_schema_bindings() -> None:
         custos_cel.type_check(ast=_stub_ast(), bindings=None)  # type: ignore[arg-type]
 
 
-def test_evaluate_stub_raises_not_implemented() -> None:
+def test_evaluate_rejects_non_scope() -> None:
     # ``evaluate`` was a NotImplementedError stub up to WF-IMPL-005;
     # WF-IMPL-006 wires the real implementation. A non-``BindingScope``
     # argument is rejected up front, before any walk.
