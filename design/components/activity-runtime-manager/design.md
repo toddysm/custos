@@ -1,8 +1,8 @@
 # Component Design: Activity Runtime Manager
 
 Slug: `activity-runtime-manager`
-Last Updated: 2026-05-18
-Version: 4
+Last Updated: 2026-05-21
+Version: 5
 Status: Draft
 
 > This document captures the design decisions locked in so far. Sections marked **(pending)** will be filled out in subsequent design iterations.
@@ -321,7 +321,7 @@ The exit code is the **fallback** signal. The authoritative answer is `outputs.j
 | `class` | yes | One of `retryable`, `permanent`, `cancelled`. Drives orchestrator behavior. |
 | `message` | yes | Human-readable short summary. Shown in run inspection. |
 | `details` | no | Free-form structured context. MUST NOT contain secrets. Size cap: **4 KiB**. Larger context belongs in an artifact. |
-| `retryAfter` | no | ISO-8601 duration. **Lower-bound hint** to the retry scheduler; clamped by the workflow's backoff policy. Only meaningful when `class: retryable`. |
+| `retryAfter` | no | ISO-8601 duration. **Lower-bound hint** to the retry scheduler; clamped by the workflow's backoff policy (see Workflow Service design § Retry Policy for the precise interaction). Only meaningful when `class: retryable`. |
 | `cause` | no | Nested envelope for the underlying error. Preserves chains (e.g. transport → HTTP → API error) without flattening. Max depth: **3**. |
 
 ### Error code namespaces
@@ -367,7 +367,7 @@ Workflow authors match on `code` prefix or `class` in `on_error` blocks:
 - **Default class for uncategorized non-zero exit:** `retryable`.
 - **`details` size cap:** 4 KiB. Larger context belongs in an artifact referenced by `ArtifactRef`.
 - **`cause` max depth:** 3.
-- **`retryAfter` semantics:** lower-bound hint, clamped by workflow backoff policy.
+- **`retryAfter` semantics:** lower-bound hint, clamped by workflow backoff policy. The Workflow Service is the sole retry decision-maker; see Workflow Service design § Retry Policy for the full schema, precedence rules, and the `effectiveDelay = max(jitteredBackoff, retryAfter)` formula.
 
 ## Activity Manifest v1
 
@@ -683,5 +683,6 @@ Internal RPC surface (Workflow Service ⇄ ARM):
 | 2026-05-17 | INCON-013: TODO-009 scope expanded — activity lifecycle event taxonomy is unified with Trigger Service TODO-001 (#18) so connector event kinds and ARM-emitted audit event kinds share one dot-namespaced namespace | #38 |
 | 2026-05-17 | INCON-009: Sandbox filesystem layout `/custos/in/secrets/<name>` corrected to `/custos/in/secrets/<connector-name>/<key>`, matching the normative description in § No `spec.secrets[]` in v1 and the activity manifest `spec.connectors[].name` slot | #34 |
 | 2026-05-18 | INCON-023 + INCON-030 + INCON-031: added `/custos/in/sidecar-token` to the Activity Contract v1 filesystem layout (per connector-service change 007); pinned WASM (`runtime.kind: wasm`) to M4+ to match REQ-015; removed the reserved micro-VM runtime kind from the `runtime.kind` enum (no backing requirement) | #85, #92, #93 |
+| 2026-05-21 | REQ-010 / TODO-002 cross-link: clarified that ARM is the sole classifier and the Workflow Service is the sole retry decision-maker; added pointer to Workflow Service design § Retry Policy for the locked `retry:` schema (`maxAttempts`, `backoff` curves, `jitter` strategies, `respectRetryAfter`) and the `effectiveDelay = max(jitteredBackoff, retryAfter)` formula. No behavior change on the ARM side | #52 |
 | 2026-05-18 | INCON-018 + INCON-021: `ScheduleActivity` signature now takes pre-resolved named `connectorContexts` (produced by Workflow Service's `BindForStep`); ARM no longer calls Connector Service for the initial bind (only `RefreshLease` for long-running steps). ARM continues to mint the sidecar bootstrap token at sidecar start per the locked sidecar auth contract — it is not a `ScheduleActivity` parameter. Completion documented as native Dapr activity-task return path with cross-link to Workflow Service design | #98, #101 |
 | 2026-05-18 | INCON-023: Publishing flow updated to reflect that the Author CLI writes activity manifests directly to Catalog through the API Gateway (`POST /v1/workspaces/{ws}/activity-types`); the diagram is reproduced for context only — ARM is runtime-only and does not write to or proxy Catalog for activity-type registration | #105 |

@@ -5,7 +5,6 @@ Last Updated: 2026-05-21
 ## Open
 
 - [ ] TODO-001: Finalize canonical workflow event taxonomy (`workflow.*`, `run.*`, `step.*`) jointly with Trigger Service TS-TODO-001 (#18) and ARM TODO-009 (INCON-013 cross-link). Tracked under those existing issues; no separate WF issue. (added 2026-05-17)
-- [ ] TODO-002: Specify the retry-policy YAML schema for the `retry:` block on activity steps — max attempts, backoff curve (constant/linear/exponential), jitter strategy, per-error-class overrides (retryable vs. permanent). REQ-010. (added 2026-05-17, issue #52)
 
 ## Implementation
 
@@ -46,4 +45,5 @@ First sub-module under construction: **Expression Evaluator** (ADR-011), package
 
 ## Closed
 
+- [x] TODO-002: Specify the retry-policy YAML schema for the `retry:` block on activity steps — max attempts, backoff curve (constant/linear/exponential), jitter strategy, per-error-class overrides (retryable vs. permanent). REQ-010. Resolved by Workflow Service design § Retry Policy (2026-05-21): two-layer model (`on_error:` routes by matching `code`/`codePrefix`/`class`, `retry:` provides mechanics — `maxAttempts`, `backoff` curves {constant, linear, exponential}, `jitter` {none, full, equal, decorrelated}, `respectRetryAfter`), three locations (`step.retry`, `on_error[].retry`, `spec.defaults.retry`), per-match → step → workflow default → platform default precedence, implicit on_error policy, `effectiveDelay = max(jitteredBackoff, retryAfter)` clamp rule, Catalog publish-time validation rules, runtime decision tree, and `step.retry_scheduled` audit event. Closed 2026-05-21 via [changes/2026-05-21-004-retry-policy-schema.md](changes/2026-05-21-004-retry-policy-schema.md), closes issue #52.
 - [x] TODO-003: Specify the relationship between `workflow:` step kind and `WorkflowTemplateVersion` invocation. Resolved by Catalog Service design (2026-05-17): `workflow:` accepts only fully-qualified `WorkflowVersion` references; template-with-inline-values is a two-step authoring flow (materialize → reference). Closed 2026-05-17 via Catalog Service design PR, closes issue #53.
