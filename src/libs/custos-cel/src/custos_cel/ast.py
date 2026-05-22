@@ -647,8 +647,13 @@ def node_from_dict(data: Mapping[str, Any]) -> Node:
     if not isinstance(pos_raw, Mapping):
         raise ValueError("node_from_dict: 'pos' must be a mapping")
     pos = SourcePosition.from_dict(pos_raw)
-    cel_type_raw = data.get("cel_type")
-    cel_type = CelType.from_dict(cel_type_raw) if isinstance(cel_type_raw, Mapping) else None
+    if "cel_type" in data:
+        cel_type_raw = data["cel_type"]
+        if not isinstance(cel_type_raw, Mapping):
+            raise ValueError("node_from_dict: 'cel_type' must be a mapping")
+        cel_type = CelType.from_dict(cel_type_raw)
+    else:
+        cel_type = None
     return cls._from_dict_payload(data, pos, cel_type)
 
 
