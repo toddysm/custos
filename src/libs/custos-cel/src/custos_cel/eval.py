@@ -733,7 +733,13 @@ def _binary_in(left: Any, right: Any, pos: SourcePosition | None) -> bool:
     if isinstance(right, (list, tuple)) and not isinstance(right, (str, bytes)):
         return any(_binary_eq(left, item) for item in right)
     if isinstance(right, Mapping):
-        return left in right
+        try:
+            return left in right
+        except TypeError as exc:
+            raise EvalError(
+                f"'in' undefined for unhashable key type {type(left).__name__}",
+                source_position=pos,
+            ) from exc
     raise EvalError(
         f"'in' requires list or map on the right, got {type(right).__name__}",
         source_position=pos,
