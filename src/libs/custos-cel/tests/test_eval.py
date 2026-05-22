@@ -129,6 +129,21 @@ def test_evaluate_rejects_non_clock() -> None:
         evaluate(typed, _scope(), object())  # type: ignore[arg-type]
 
 
+def test_evaluate_rejects_non_node_ast() -> None:
+    with pytest.raises(TypeError, match="'typed_ast' must be a Node"):
+        evaluate("1 + 1", _scope(), _clock())  # type: ignore[arg-type]
+
+
+def test_evaluate_rejects_untyped_ast() -> None:
+    # ``parse()`` returns an AST whose nodes all have ``cel_type=None``.
+    # ``evaluate`` is documented to require a TypedAST; the wrapper
+    # enforces that invariant at the root level.
+    untyped = parse("1 + 1")
+    assert untyped.cel_type is None
+    with pytest.raises(TypeError, match="untyped"):
+        evaluate(untyped, _scope(), _clock())
+
+
 # ---------------------------------------------------------------------------
 # Literals
 # ---------------------------------------------------------------------------
@@ -525,9 +540,12 @@ def test_unknown_root_identifier_raises_unbound() -> None:
     # the type check (by hand-crafting an AST) is part of WF-IMPL-005;
     # here we just confirm that the eval-time call path goes through
     # ``scope.resolve`` which enforces the root allow-list.
-    from custos_cel import Ident, SourcePosition
+    from custos_cel import Ident, IntType, SourcePosition
 
-    ast = Ident(pos=SourcePosition(line=1, column=1), name="os")
+    # ``cel_type`` is a placeholder — the root-level guard requires it
+    # to be non-``None``; this test exercises ill-typed escape, not
+    # untyped escape.
+    ast = Ident(pos=SourcePosition(line=1, column=1), cel_type=IntType(), name="os")
     with pytest.raises(UnboundNameError):
         evaluate(ast, _scope(), _clock())
 

@@ -145,12 +145,26 @@ def evaluate(typed_ast: Node, scope: BindingScope, clock: Clock) -> Any:
         EvalError: For any value-level runtime failure (division by
             zero, missing key on a runtime mapping, out-of-range list
             index, unsupported runtime type for an operator).
+        TypeError: If ``scope`` is not a :class:`BindingScope`, if
+            ``clock`` does not satisfy the :class:`Clock` protocol, or
+            if ``typed_ast`` is not a :class:`Node` whose root carries
+            a populated ``cel_type`` (i.e. the caller forgot to run
+            :func:`custos_cel.type_check` first). The root-level check
+            catches the common mistake of passing the untyped
+            :data:`AST` produced by :func:`custos_cel.parse` directly.
     """
     if not isinstance(scope, BindingScope):
         raise TypeError("evaluate: 'scope' must be a BindingScope; got " + type(scope).__name__)
     if not isinstance(clock, Clock):
         raise TypeError(
             "evaluate: 'clock' must satisfy the Clock protocol; got " + type(clock).__name__
+        )
+    if not isinstance(typed_ast, Node):
+        raise TypeError("evaluate: 'typed_ast' must be a Node; got " + type(typed_ast).__name__)
+    if typed_ast.cel_type is None:
+        raise TypeError(
+            "evaluate: 'typed_ast' is untyped (cel_type is None on the root "
+            "node); call custos_cel.type_check() first"
         )
     return _eval(typed_ast, scope, clock)
 

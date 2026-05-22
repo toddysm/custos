@@ -212,8 +212,10 @@ def evaluate(ast: Node, scope: BindingScope, clock: Clock) -> Any:
 
     Args:
         ast: A :data:`TypedAST` produced by :func:`type_check`. Passing
-            an untyped :data:`AST` directly from :func:`parse` is a
-            programmer error.
+            an untyped :data:`AST` directly from :func:`parse` raises
+            :class:`TypeError` (the root-level ``cel_type`` is checked
+            up front; deeper untyped nodes that escape that check
+            surface as :class:`EvalError` during the walk).
         scope: A :class:`BindingScope` providing concrete values for
             ``inputs``, ``steps``, ``run``, ``workflow``, and ``let``.
         clock: A :class:`Clock` adapter — typically
@@ -226,6 +228,10 @@ def evaluate(ast: Node, scope: BindingScope, clock: Clock) -> Any:
         :class:`datetime.datetime`).
 
     Raises:
+        TypeError: If ``scope`` is not a :class:`BindingScope`, if
+            ``clock`` does not satisfy the :class:`Clock` protocol, or
+            if ``ast`` is not a :class:`Node` whose root carries a
+            populated ``cel_type``.
         UnboundNameError: For any unresolved identifier or non-allow-
             listed function name.
         EvalError: For value-level runtime failures (division by zero,

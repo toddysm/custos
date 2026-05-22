@@ -224,7 +224,9 @@ def test_runtime_access_map_with_unhashable_key() -> None:
 def test_call_unknown_function_raises_unbound() -> None:
     # The type checker rejects this at compile time, so the only
     # way to hit the evaluator's allow-list is a hand-crafted AST.
-    ast = Call(pos=_POS, cel_type=None, function="open", args=(_slit("/etc/passwd"),))
+    # ``cel_type`` is a placeholder — the root-level guard requires it
+    # to be non-``None``; this test exercises ill-typed escape.
+    ast = Call(pos=_POS, cel_type=StringType(), function="open", args=(_slit("/etc/passwd"),))
     with pytest.raises(UnboundNameError, match="allow-list"):
         evaluate(ast, _make_scope(), _clock())
 
