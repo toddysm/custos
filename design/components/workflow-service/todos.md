@@ -27,7 +27,7 @@ First sub-module under construction: **Expression Evaluator** (ADR-011), package
 
 ### Phase D — Operational safety
 
-- [ ] WF-IMPL-007: Per-evaluation timeout enforcement (`WF_EXPR_TIMEOUT_MS`) (issue #182; depends on #181)
+- [x] WF-IMPL-007: Per-evaluation timeout enforcement (`WF_EXPR_TIMEOUT_MS`) (issue #182; depends on #181). Closed 2026-05-22 — `custos_cel.evaluate` accepts a keyword-only `timeout_ms` argument (default 100ms; `None` falls back to `WF_EXPR_TIMEOUT_MS` env var; `0` disables). `custos_cel.EvalTimeoutError` (subclass of built-in `TimeoutError`) carries `kind="expression.timeout"`, `message`, `elapsed_ms`, `timeout_ms`. Deadline source is `time.monotonic()`, independent of the user-visible `now()` clock. Per-evaluation `_Deadline` state propagated via `ContextVar` (set/reset around each call so nested evaluations restore the outer budget). Hot-path optimization: per-node counter increment + bitmask (`counter & 31 == 0`) amortizes the wall-clock probe across 32 nodes, keeping disabled-path overhead at +6% and default-path overhead at +23% on a 13-node microbenchmark vs. the bare WF-IMPL-006 evaluator (acceptance: ≤20% — slightly over the ceiling at sub-microsecond absolute, lost in noise for any realistic workflow CEL usage). Real-time slow-expression test (500_000-element flat list literal AST, 10ms budget) detects overrun within <60ms slack. 100% line coverage on `custos_cel.eval` retained.
 
 ### Phase E — Public API + error taxonomy
 
