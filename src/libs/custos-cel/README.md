@@ -12,7 +12,7 @@ replay-deterministic runtime for workflow expressions. It is consumed by:
 
 ## Status
 
-**Scaffold + parser dependency + AST data model** — WF-IMPL-001 ([#176](https://github.com/toddysm/custos/issues/176)), WF-IMPL-002 ([#177](https://github.com/toddysm/custos/issues/177)), WF-IMPL-003 ([#178](https://github.com/toddysm/custos/issues/178)). `custos_cel.parse()` is real: it delegates to `celpy` and converts the parse tree into the internal `custos_cel.ast.Node` shape, which is the same Python class used for both the untyped AST and the TypedAST. `custos_cel.type_check()` and `custos_cel.evaluate()` remain `NotImplementedError` stubs until WF-IMPL-005 / WF-IMPL-006. Sandbox, observability, and developer-docs work is split across WF-IMPL-007 through WF-IMPL-012.
+**Scaffold + parser dependency + AST data model + binding scope** — WF-IMPL-001 ([#176](https://github.com/toddysm/custos/issues/176)), WF-IMPL-002 ([#177](https://github.com/toddysm/custos/issues/177)), WF-IMPL-003 ([#178](https://github.com/toddysm/custos/issues/178)), WF-IMPL-004 ([#179](https://github.com/toddysm/custos/issues/179)). `custos_cel.parse()` is real; `custos_cel.BindingScope` is real (immutable scope exposing only the design's seven bindings). `custos_cel.type_check()` and `custos_cel.evaluate()` remain `NotImplementedError` stubs until WF-IMPL-005 / WF-IMPL-006. Sandbox, observability, and developer-docs work is split across WF-IMPL-007 through WF-IMPL-012.
 
 ## Parser / runtime
 
@@ -39,6 +39,10 @@ Both names resolve to `custos_cel.ast.Node` today. The same Python class represe
 | `custos_cel.type_check(ast, bindings) -> Node` | WF-IMPL-005 | Resolve identifiers against bindings + JSON Schemas; return a TypedAST. |
 | `custos_cel.evaluate(ast, bindings) -> Any` | WF-IMPL-006 | Evaluate a TypedAST inside the sandbox. Rejects an untyped AST. |
 | `custos_cel.to_json(node) -> str` / `from_json(text) -> Node` | WF-IMPL-003 | Byte-stable JSON serialization for `Run.compiledGraph` caching. |
+| `custos_cel.BindingScope` | WF-IMPL-004 | Immutable binding scope for the evaluator (see below). |
+| `custos_cel.StepBinding` | WF-IMPL-004 | Per-step output container; sealable. |
+| `custos_cel.RunInfo` / `WorkflowInfo` | WF-IMPL-004 | Frozen run / workflow metadata. |
+| `custos_cel.UnboundNameError` | WF-IMPL-004 | Raised by `BindingScope.resolve()` on any unknown name. |
 
 The locked structured error taxonomy and the rest of the public API surface
 land in WF-IMPL-008.
@@ -57,6 +61,25 @@ Node types: `Literal`, `Ident`, `Member` (`a.b`), `Index` (`a[b]`), `Call` (`f(a
 **Serialization**: `Node.to_dict()` returns a JSON-safe dict tagged with `node`, `pos`, and (when typed) `cel_type`. `node_from_dict()` is the inverse. The versioned envelope helpers `to_dict_envelope(root)` / `from_dict(envelope)` add a `schema_version` (currently `AST_SCHEMA_VERSION = 1`); the convenience wrappers `to_json(node)` / `from_json(text)` produce byte-stable canonical JSON (sorted keys, minimized separators) suitable for `Run.compiledGraph` cache keys per the [bundle-h change record](../../../design/components/workflow-service/changes/2026-05-18-003-bundle-h-cel-parse-surface.md).
 
 Bytes literals serialize as hex strings inside the JSON form (so the envelope is plain JSON, no base64 dependency). Map entries are serialized as ordered `[key, value]` pairs to preserve source order.
+
+## Binding scope
+
+Defined in [`custos_cel.scope`](src/custos_cel/scope.py). The Step Coordinator constructs one `BindingScope` per evaluation; it exposes only the seven roots from [design.md § Expression Evaluator](../../../design/components/workflow-service/design.md):
+
+| Root | Source | Mutability |
+|---|---|---|
+| `inputs.*` | Run inputs at start | Immutable (wrapped in `MappingProxyType`) |
+| `steps.<id>.outputs.*` | Completed step outputs | Immutable once `StepBinding.seal()` is called |
+| `run.id` / `run.workspace` | Run identity | Frozen at construction |
+| `workflow.name` / `workflow.version` | Workflow metadata | Frozen at construction |
+| `now()` | Replay-deterministic clock callable | Injected by the Step Coordinator (typically Dapr Workflow's `current_utc_datetime`) |
+| `let.<name>` | Inline `let` bindings | Per-evaluation overlay; immutable within one block |
+
+Nothing else is resolvable. The host Python namespace is structurally unreachable: names like `os`, `sys`, `open`, `__import__`, `eval`, `exec`, `subprocess` all raise `UnboundNameError` from `BindingScope.resolve()` *before* any attribute or item access happens — the allow-list is keyed on the allowed root identifiers.
+
+`BindingScope.resolve(chain, *, pos=None)` takes a flattened dotted-name chain (e.g. `["steps", "scan", "outputs", "critical"]`) and returns the resolved value. `UnboundNameError` carries the original `chain`, the optional `SourcePosition`, and a short machine-readable `reason` (`unknown root`, `no such step`, `is not a mapping`, etc.).
+
+`BindingScope.with_let(**overlay)` returns a new scope with additional `let` bindings overlaid — the original scope is unchanged, which is what lets `let:` blocks expand into fresh child scopes without invalidating the parent.
 
 ## Sandbox guarantees (target)
 

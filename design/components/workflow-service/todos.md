@@ -1,6 +1,6 @@
 # TODOs: Workflow Service
 
-Last Updated: 2026-05-21
+Last Updated: 2026-05-22
 
 ## Open
 
@@ -21,7 +21,7 @@ First sub-module under construction: **Expression Evaluator** (ADR-011), package
 
 ### Phase C — Core evaluator
 
-- [ ] WF-IMPL-004: Immutable binding scope model (issue #179; depends on #178)
+- [x] WF-IMPL-004: Immutable binding scope model (issue #179; depends on #178). Closed 2026-05-22 — `custos_cel.scope` module with `BindingScope`, `StepBinding`, `RunInfo`, `WorkflowInfo`, `UnboundNameError`; allow-listed root identifiers, sealable step outputs, per-evaluation `let` overlay; host Python namespace structurally unreachable.
 - [ ] WF-IMPL-005: Type checker against JSON Schema bindings (issue #180; depends on #178; parallel with #179)
 - [ ] WF-IMPL-006: Sandboxed evaluator runtime + replay-deterministic `Clock` interface (issue #181; depends on #179)
 
