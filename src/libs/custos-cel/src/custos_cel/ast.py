@@ -647,7 +647,9 @@ def node_from_dict(data: Mapping[str, Any]) -> Node:
         cls = _NODE_REGISTRY[kind]
     except KeyError as exc:
         raise ValueError(f"node_from_dict: unknown node kind {kind!r}") from exc
-    pos_raw = data.get("pos", {})
+    if "pos" not in data:
+        raise ValueError(f"node_from_dict: missing 'pos' for node kind {kind!r}")
+    pos_raw = data["pos"]
     if not isinstance(pos_raw, Mapping):
         raise ValueError("node_from_dict: 'pos' must be a mapping")
     pos = SourcePosition.from_dict(pos_raw)

@@ -309,6 +309,18 @@ def test_node_from_dict_rejects_unknown_kind() -> None:
         node_from_dict({"node": "NotARealKind", "pos": _POS.to_dict()})
 
 
+def test_node_from_dict_rejects_missing_pos() -> None:
+    # A missing `pos` key must be a hard error so corrupted/partial cache
+    # payloads cannot silently deserialize as SourcePosition(None, None, None).
+    with pytest.raises(ValueError, match="missing 'pos'"):
+        node_from_dict({"node": "Ident", "name": "x"})
+
+
+def test_node_from_dict_rejects_non_mapping_pos() -> None:
+    with pytest.raises(ValueError, match="'pos' must be a mapping"):
+        node_from_dict({"node": "Ident", "name": "x", "pos": "not-a-mapping"})
+
+
 def test_from_json_handles_canonical_form() -> None:
     n = _ident("foo")
     s = to_json(n)
