@@ -180,7 +180,18 @@ def _eval(node: Node, scope: BindingScope, clock: Clock) -> Any:
     if isinstance(node, ListLit):
         return [_eval(e, scope, clock) for e in node.elements]
     if isinstance(node, MapLit):
-        return {_eval(k, scope, clock): _eval(v, scope, clock) for k, v in node.entries}
+        result: dict[Any, Any] = {}
+        for k, v in node.entries:
+            key = _eval(k, scope, clock)
+            value = _eval(v, scope, clock)
+            try:
+                result[key] = value
+            except TypeError as exc:
+                raise EvalError(
+                    f"map key evaluated to unhashable type {type(key).__name__}",
+                    source_position=getattr(k, "pos", getattr(node, "pos", None)),
+                ) from exc
+        return result
     raise EvalError(  # pragma: no cover - exhaustive
         f"internal: unhandled node type {type(node).__name__}",
         source_position=getattr(node, "pos", None),
