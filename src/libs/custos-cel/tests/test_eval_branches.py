@@ -658,6 +658,27 @@ def test_float_modulo_by_zero() -> None:
         evaluate(ast, _make_scope(), _clock())
 
 
+@pytest.mark.parametrize(
+    ("op", "left", "right", "message"),
+    [
+        (BinaryOp.DIV, _blit(True), _ilit(2), "'/' undefined"),
+        (BinaryOp.DIV, _ilit(7), _blit(True), "'/' undefined"),
+        (BinaryOp.MOD, _blit(True), _ilit(2), "'%' undefined"),
+        (BinaryOp.MOD, _ilit(7), _blit(True), "'%' undefined"),
+    ],
+)
+def test_divmod_rejects_bool_operands(
+    op: BinaryOp, left: Literal, right: Literal, message: str
+) -> None:
+    # Defence-in-depth: ``bool`` is a subclass of ``int`` in Python, so a
+    # hand-crafted ill-typed AST that escaped the type checker (e.g.
+    # ``7 / true``) must still raise ``EvalError`` rather than silently
+    # evaluating to ``7``.
+    ast = Binary(pos=_POS, cel_type=IntType(), op=op, left=left, right=right)
+    with pytest.raises(EvalError, match=message):
+        evaluate(ast, _make_scope(), _clock())
+
+
 # ---------------------------------------------------------------------------
 # Equality / comparison defensive paths
 # ---------------------------------------------------------------------------

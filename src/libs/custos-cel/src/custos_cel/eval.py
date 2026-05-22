@@ -667,11 +667,15 @@ def _binary_mul(left: Any, right: Any, pos: SourcePosition | None) -> Any:
 
 
 def _binary_div(left: Any, right: Any, pos: SourcePosition | None) -> Any:
-    if isinstance(left, int) and isinstance(right, int) and not isinstance(left, bool):
-        if right == 0:
-            raise EvalError("integer division by zero", source_position=pos)
-        return _trunc_div(left, right)
-    if isinstance(left, float) and isinstance(right, float):
+    # ``_is_numeric`` excludes ``bool`` on both sides (defence-in-depth:
+    # ``bool`` is a subclass of ``int`` in Python, so a hand-crafted
+    # ``7 / true`` AST that slipped past the type checker would
+    # otherwise evaluate to ``7`` instead of raising).
+    if _is_numeric(left) and _is_numeric(right) and type(left) is type(right):
+        if isinstance(left, int):
+            if right == 0:
+                raise EvalError("integer division by zero", source_position=pos)
+            return _trunc_div(left, right)
         if right == 0.0:
             raise EvalError("double division by zero", source_position=pos)
         return left / right
@@ -682,11 +686,11 @@ def _binary_div(left: Any, right: Any, pos: SourcePosition | None) -> Any:
 
 
 def _binary_mod(left: Any, right: Any, pos: SourcePosition | None) -> Any:
-    if isinstance(left, int) and isinstance(right, int) and not isinstance(left, bool):
-        if right == 0:
-            raise EvalError("integer modulo by zero", source_position=pos)
-        return left - _trunc_div(left, right) * right
-    if isinstance(left, float) and isinstance(right, float):
+    if _is_numeric(left) and _is_numeric(right) and type(left) is type(right):
+        if isinstance(left, int):
+            if right == 0:
+                raise EvalError("integer modulo by zero", source_position=pos)
+            return left - _trunc_div(left, right) * right
         if right == 0.0:
             raise EvalError("double modulo by zero", source_position=pos)
         return math.fmod(left, right)
