@@ -690,12 +690,94 @@ def _infer_call(node: Call, bindings: SchemaBindings) -> tuple[CelType, _Drill |
             None,
             Call(pos=node.pos, cel_type=bindings.now, function=node.function, args=()),
         )
-    # No other functions are part of the Custos CEL subset yet
-    # (additional stdlib functions land alongside the evaluator in
-    # later issues). Reject everything else as an unknown function.
+    if node.function == "size":
+        if len(node.args) != 1:
+            raise TypeCheckError(
+                f"'size' takes exactly one argument, got {len(node.args)}",
+                source_position=node.pos,
+            )
+        arg_type, _drill, new_arg = _infer(node.args[0], bindings)
+        if not isinstance(arg_type, (StringType, BytesType, ListType, MapType)):
+            raise TypeCheckError(
+                "'size' argument must be string, bytes, list, or map; got "
+                + _render_type(arg_type),
+                source_position=node.args[0].pos,
+                expected_type="string|bytes|list|map",
+                actual_type=arg_type,
+            )
+        return (
+            IntType(),
+            None,
+            Call(pos=node.pos, cel_type=IntType(), function=node.function, args=(new_arg,)),
+        )
+    if node.function == "type":
+        if len(node.args) != 1:
+            raise TypeCheckError(
+                f"'type' takes exactly one argument, got {len(node.args)}",
+                source_position=node.pos,
+            )
+        _arg_type, _drill, new_arg = _infer(node.args[0], bindings)
+        return (
+            StringType(),
+            None,
+            Call(pos=node.pos, cel_type=StringType(), function=node.function, args=(new_arg,)),
+        )
+    if node.function == "has":
+        # ``has(x.field)`` / ``has(x[k])`` — CEL macro semantics:
+        # the argument is a member or index access whose target is
+        # type-checked but whose final accessor is *not* required to
+        # exist. We still require the accessor to be statically known
+        # (string-literal index or dotted member), matching the CEL
+        # ``has()`` macro contract; runtime-resolved field probes are
+        # not part of the subset.
+        if len(node.args) != 1:
+            raise TypeCheckError(
+                f"'has' takes exactly one argument, got {len(node.args)}",
+                source_position=node.pos,
+            )
+        arg = node.args[0]
+        new_arg = _typecheck_has_argument(arg, bindings)
+        return (
+            BoolType(),
+            None,
+            Call(pos=node.pos, cel_type=BoolType(), function=node.function, args=(new_arg,)),
+        )
+    # No other functions are part of the Custos CEL subset.
     raise TypeCheckError(
         f"unknown function {node.function!r}",
         source_position=node.pos,
+    )
+
+
+def _typecheck_has_argument(arg: Node, bindings: SchemaBindings) -> Node:
+    """Type-check the single argument of ``has()``.
+
+    The argument must be a ``Member`` access or a string-literal
+    ``Index`` access whose target type-checks normally. The final
+    accessor itself is *not* required to be statically declared — that
+    is the whole point of ``has()``: probe for existence without
+    failing.
+    """
+    if isinstance(arg, Member):
+        _t, _d, new_target = _infer(arg.target, bindings)
+        return Member(pos=arg.pos, cel_type=BoolType(), target=new_target, name=arg.name)
+    if isinstance(arg, Index):
+        if not (
+            isinstance(arg.index, Literal)
+            and arg.index.kind is LiteralKind.STRING
+            and isinstance(arg.index.value, str)
+        ):
+            raise TypeCheckError(
+                "'has' argument must be a dotted member or a string-literal index",
+                source_position=arg.pos,
+            )
+        _t, _d, new_target = _infer(arg.target, bindings)
+        _it, _id, new_index = _infer(arg.index, bindings)
+        return Index(pos=arg.pos, cel_type=BoolType(), target=new_target, index=new_index)
+    raise TypeCheckError(
+        "'has' argument must be a dotted member or a string-literal index, "
+        f"got {type(arg).__name__}",
+        source_position=arg.pos,
     )
 
 

@@ -57,6 +57,9 @@ from custos_cel.ast import (
     node_from_dict,
     to_json,
 )
+from custos_cel.clock import Clock, DaprWorkflowClock, FixedClock
+from custos_cel.eval import EvalError
+from custos_cel.eval import evaluate as _evaluate_impl
 from custos_cel.scope import (
     BindingScope,
     BindingValue,
@@ -85,8 +88,12 @@ __all__ = [
     "Call",
     "CelConvertError",
     "CelType",
+    "Clock",
     "Conditional",
+    "DaprWorkflowClock",
     "DoubleType",
+    "EvalError",
+    "FixedClock",
     "Ident",
     "Index",
     "IntType",
@@ -194,21 +201,36 @@ def type_check(ast: Node, bindings: SchemaBindings) -> Node:
     return _type_check_impl(ast, bindings)
 
 
-def evaluate(ast: Node, bindings: Any) -> Any:
-    """Evaluate a :data:`TypedAST` against a binding scope.
+def evaluate(ast: Node, scope: BindingScope, clock: Clock) -> Any:
+    """Evaluate a :data:`TypedAST` against a binding scope and clock.
 
-    Requires a :data:`TypedAST` (the output of :func:`type_check`).
-    Passing an untyped :data:`AST` directly from :func:`parse` is a
-    usage error and will be rejected once WF-IMPL-006 lands.
+    Walks the type-checked tree, resolving every identifier through
+    ``scope`` (whose strict root allow-list keeps the host Python
+    namespace structurally unreachable) and routing every ``now()``
+    call through ``clock`` (whose :class:`Clock` protocol guarantees a
+    replay-deterministic wall-clock source).
 
     Args:
-        ast: A :data:`TypedAST` produced by :func:`type_check`.
-        bindings: The binding scope providing concrete values.
+        ast: A :data:`TypedAST` produced by :func:`type_check`. Passing
+            an untyped :data:`AST` directly from :func:`parse` is a
+            programmer error.
+        scope: A :class:`BindingScope` providing concrete values for
+            ``inputs``, ``steps``, ``run``, ``workflow``, and ``let``.
+        clock: A :class:`Clock` adapter — typically
+            :class:`DaprWorkflowClock` in production or
+            :class:`FixedClock` in tests.
 
     Returns:
-        The evaluated result. Concrete type defined in WF-IMPL-006.
+        The expression's value (``bool`` / ``int`` / ``float`` /
+        ``str`` / ``bytes`` / ``None`` / ``list`` / ``dict`` /
+        :class:`datetime.datetime`).
 
     Raises:
-        NotImplementedError: Always. Implementation lands in WF-IMPL-006.
+        UnboundNameError: For any unresolved identifier or non-allow-
+            listed function name.
+        EvalError: For value-level runtime failures (division by zero,
+            missing key on a runtime mapping, out-of-range list
+            index, type-shape mismatches that escaped the type
+            checker).
     """
-    raise NotImplementedError("custos_cel.evaluate is not yet implemented; see WF-IMPL-006.")
+    return _evaluate_impl(ast, scope, clock)
