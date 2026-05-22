@@ -12,11 +12,11 @@ First sub-module under construction: **Expression Evaluator** (ADR-011), package
 
 ### Phase A — Scaffolding
 
-- [ ] WF-IMPL-001: Bootstrap `custos-cel` shared library — project scaffold + CI gate (issue #176)
+- [x] WF-IMPL-001: Bootstrap `custos-cel` shared library — project scaffold + CI gate (issue #176). Closed 2026-05-21 — merged in PR #190.
 
 ### Phase B — Parser & AST foundation
 
-- [ ] WF-IMPL-002: Pick CEL parser implementation and write ADR-style decision record (issue #177; depends on #176)
+- [x] WF-IMPL-002: Pick CEL parser implementation and write ADR-style decision record (issue #177; depends on #176). Closed 2026-05-21 — `cel-python>=0.5.0,<0.6` chosen; see change record [`2026-05-21-005-cel-parser-choice.md`](changes/2026-05-21-005-cel-parser-choice.md).
 - [ ] WF-IMPL-003: AST + serializable typed-AST data model (issue #178; depends on #177)
 
 ### Phase C — Core evaluator

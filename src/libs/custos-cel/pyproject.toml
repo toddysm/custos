@@ -20,7 +20,15 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
     "Typing :: Typed",
 ]
-dependencies = []
+dependencies = [
+    # Chosen CEL parser/runtime (cloud-custodian/cel-python). Pinned tight
+    # because the project is pre-1.0 (latest release on PyPI is 0.5.0,
+    # 2026-01-31; 0.5.1 is on main but not yet published). We currently
+    # only consume the parser surface (Environment.compile); the runtime
+    # and macro/extension function injection points are reached in
+    # WF-IMPL-005/006. See change record 005 for the decision rationale.
+    "cel-python>=0.5.0,<0.6",
+]
 
 [project.optional-dependencies]
 dev = [
@@ -68,6 +76,11 @@ mypy_path = "src"
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+# celpy ships no PEP 561 marker as of 0.5.1; treat as untyped at our boundary.
+module = ["celpy", "celpy.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 minversion = "8.0"
