@@ -15,9 +15,9 @@ Sandbox guarantees (per design.md § Expression Evaluator, ADR-011):
   ``run``, ``workflow``, ``let``, ``now``) is enforced before any host
   attribute access occurs. The host Python namespace is structurally
   unreachable.
-* No ``os``, ``sys``, ``subprocess``, ``socket``, ``importlib``,
-  ``open``, ``__import__``, ``eval``, ``exec`` imports anywhere in
-  this module. A ``grep`` for those names returns zero hits.
+* This module's executable code contains no ``os``, ``sys``,
+  ``subprocess``, ``socket``, ``importlib``, ``open``, ``__import__``,
+  ``eval``, or ``exec`` imports, calls, or other references.
 * Function dispatch uses a fixed allow-list (``now``, ``size``, ``has``,
   ``type``); any other ``Call.function`` raises
   :class:`~custos_cel.UnboundNameError`.
