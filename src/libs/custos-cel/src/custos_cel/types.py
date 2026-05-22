@@ -273,6 +273,12 @@ class _Drill:
     * ``"steps_root"``: at the bare ``steps`` identifier — next
       member/index must be a step id.
     * ``"step"``: at ``steps.<id>`` — next member must be ``outputs``.
+    * ``"list_element"``: at a JSON-Schema-backed array binding —
+      ``schema`` carries the array's ``items`` sub-schema. An ``Index``
+      operation consumes this drill state to produce the element's
+      drill (which may itself be a ``schema`` or another
+      ``list_element``). Dotted member access on a list value is a
+      type error and is rejected by :func:`_drill_by_name`.
     """
 
     kind: str
@@ -464,9 +470,14 @@ def _infer_index(node: Index, bindings: SchemaBindings) -> tuple[CelType, _Drill
     # Bracket form on a binding subtree with a string literal index is
     # equivalent to dotted member access (this is the canonical way to
     # reference step ids that are not valid CEL identifiers, e.g.
-    # ``steps["scan-alt"]``).
+    # ``steps["scan-alt"]``). A ``list_element`` drill is *not* a
+    # record-like subtree — its ``schema`` holds the array's items
+    # sub-schema, not a ``properties`` mapping — so it must fall
+    # through to the static-type branch below, which raises the
+    # correct "list index must be int" error for string indices.
     if (
         target_drill is not None
+        and target_drill.kind != "list_element"
         and isinstance(node.index, Literal)
         and node.index.kind is LiteralKind.STRING
         and isinstance(node.index.value, str)
@@ -489,9 +500,23 @@ def _infer_index(node: Index, bindings: SchemaBindings) -> tuple[CelType, _Drill
                 actual_type=_index_type,
             )
         elem = target_type.element
+        # When the list was reached via a JSON-Schema-backed array
+        # binding (e.g. ``inputs.targets`` with ``type: array, items:
+        # {...}``), the parent drill carries the items sub-schema.
+        # Propagate a drill derived from that sub-schema so further
+        # member / index access on the element (``inputs.targets[0]
+        # .image``, ``inputs.matrix[0][1]``) drills correctly.
+        elem_drill: _Drill | None = None
+        if (
+            target_drill is not None
+            and target_drill.kind == "list_element"
+            and target_drill.schema is not None
+        ):
+            elem_label = f"{target_drill.label}[]" if target_drill.label else "[]"
+            elem_drill = _drill_for_subschema(target_drill.schema, elem_label)
         return (
             elem,
-            _drill_for_subschema_celtype(elem),
+            elem_drill,
             Index(pos=node.pos, cel_type=elem, target=new_target, index=new_index),
         )
     if isinstance(target_type, MapType):
@@ -548,6 +573,17 @@ def _drill_by_name(
             schema=schema,
             label=f"steps.{parent_drill.step_id}.outputs",
         )
+    if parent_drill.kind == "list_element":
+        # Dotted (or string-bracket) member access on a list value is
+        # not a CEL operation — the caller must index first. Producing
+        # the same error here that ``_infer_member`` raises for a
+        # drill-less list keeps the surface uniform.
+        label = parent_drill.label or "list"
+        raise TypeCheckError(
+            f"cannot access member {name!r} on list {label} (index first with [N])",
+            source_position=pos,
+            expected_type="record",
+        )
     raise TypeCheckError(  # pragma: no cover - exhaustive
         f"internal: unknown drill kind {parent_drill.kind!r}",
         source_position=pos,
@@ -581,19 +617,34 @@ def _drill_schema(
 
 
 def _drill_for_subschema(sub_schema: Mapping[str, Any], label: str) -> _Drill | None:
-    """Return a drill state for a sub-schema if further drilling is possible."""
+    """Return a drill state for a sub-schema if further drilling is possible.
+
+    Objects yield a ``"schema"`` drill so member access can resolve
+    ``properties``. Arrays with an ``items`` sub-schema yield a
+    ``"list_element"`` drill so ``Index`` can propagate the element's
+    drill state — this is what makes ``inputs.targets[0].image``
+    type-check when ``targets`` is declared as ``type: array, items:
+    {type: object, properties: {...}}``. Anything else returns
+    ``None``.
+    """
     jtype = sub_schema.get("type")
     if jtype == "object":
         return _Drill(kind="schema", schema=sub_schema, label=label)
+    if jtype == "array":
+        items = sub_schema.get("items")
+        if isinstance(items, Mapping):
+            return _Drill(kind="list_element", schema=items, label=label)
     return None
 
 
 def _drill_for_subschema_celtype(cel_type: CelType) -> _Drill | None:
     """Subschema drill derived from a CelType only.
 
-    Used when ``Index`` returns a list element with a static type and
-    we don't have a JSON Schema fragment to walk. Returns ``None`` — no
-    further dotted drilling is possible without schema context.
+    Retained for use sites where only a CelType is available (no JSON
+    Schema context). Currently always returns ``None`` because dotted
+    drilling requires schema information; ``Index`` on a JSON-Schema
+    array now propagates the items sub-schema via the parent drill
+    instead of through the element CelType.
     """
     del cel_type
     return None

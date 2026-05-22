@@ -617,6 +617,92 @@ def test_index_with_wrong_key_type_into_map() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Member / Index drilling through JSON-Schema arrays (items sub-schema)
+# ---------------------------------------------------------------------------
+
+
+def _array_of_objects_bindings() -> SchemaBindings:
+    return _bindings(
+        inputs={
+            "type": "object",
+            "properties": {
+                "targets": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "image": {"type": "string"},
+                            "tag": {"type": "string"},
+                            "meta": {
+                                "type": "object",
+                                "properties": {"score": {"type": "integer"}},
+                            },
+                        },
+                    },
+                },
+                "matrix": {
+                    "type": "array",
+                    "items": {"type": "array", "items": {"type": "integer"}},
+                },
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "records": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                    },
+                },
+            },
+        }
+    )
+
+
+def test_member_after_index_drills_into_items_object_schema() -> None:
+    n = _typed("inputs.targets[0].image", _array_of_objects_bindings())
+    assert n.cel_type == StringType()
+
+
+def test_nested_member_after_index_drills_through_object_items() -> None:
+    n = _typed("inputs.targets[0].meta.score", _array_of_objects_bindings())
+    assert n.cel_type == IntType()
+
+
+def test_double_index_into_array_of_arrays() -> None:
+    n = _typed("inputs.matrix[0][1]", _array_of_objects_bindings())
+    assert n.cel_type == IntType()
+
+
+def test_index_into_array_of_homogeneous_maps_returns_map() -> None:
+    n = _typed('inputs.records[0]["any-key"]', _array_of_objects_bindings())
+    assert n.cel_type == StringType()
+
+
+def test_member_access_on_array_value_without_index_is_type_error() -> None:
+    with pytest.raises(TypeCheckError, match="member"):
+        _typed("inputs.targets.image", _array_of_objects_bindings())
+
+
+def test_string_bracket_on_array_value_is_int_index_error() -> None:
+    with pytest.raises(TypeCheckError, match="list index must be int"):
+        _typed('inputs.targets["image"]', _array_of_objects_bindings())
+
+
+def test_unknown_field_on_indexed_array_element_is_unbound() -> None:
+    from custos_cel import UnboundNameError
+
+    with pytest.raises(UnboundNameError):
+        _typed("inputs.targets[0].nope", _array_of_objects_bindings())
+
+
+def test_index_into_scalar_array_does_not_carry_dotting_drill() -> None:
+    # `inputs.tags[0]` is a string; accessing `.length` is invalid CEL
+    # and must produce a "cannot access member" error rather than
+    # silently succeeding.
+    with pytest.raises(TypeCheckError, match="cannot access member"):
+        _typed("inputs.tags[0].length", _array_of_objects_bindings())
+
+
+# ---------------------------------------------------------------------------
 # Source position propagation
 # ---------------------------------------------------------------------------
 
