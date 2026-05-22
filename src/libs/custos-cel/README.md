@@ -75,7 +75,7 @@ Defined in [`custos_cel.scope`](src/custos_cel/scope.py). The Step Coordinator c
 | `now()` | Replay-deterministic clock callable | Injected by the Step Coordinator (typically Dapr Workflow's `current_utc_datetime`) |
 | `let.<name>` | Inline `let` bindings | Per-evaluation overlay; immutable within one block |
 
-Nothing else is resolvable. The host Python namespace is structurally unreachable: names like `os`, `sys`, `open`, `__import__`, `eval`, `exec`, `subprocess` all raise `UnboundNameError` from `BindingScope.resolve()` *before* any attribute or item access happens — the allow-list is keyed on the six root identifiers above plus `now`.
+Nothing else is resolvable. The host Python namespace is structurally unreachable: names like `os`, `sys`, `open`, `__import__`, `eval`, `exec`, `subprocess` all raise `UnboundNameError` from `BindingScope.resolve()` *before* any attribute or item access happens — the allow-list is keyed on the allowed root identifiers.
 
 `BindingScope.resolve(chain, *, pos=None)` takes a flattened dotted-name chain (e.g. `["steps", "scan", "outputs", "critical"]`) and returns the resolved value. `UnboundNameError` carries the original `chain`, the optional `SourcePosition`, and a short machine-readable `reason` (`unknown root`, `no such step`, `is not a mapping`, etc.).
 
