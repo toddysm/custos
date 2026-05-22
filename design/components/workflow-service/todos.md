@@ -22,7 +22,7 @@ First sub-module under construction: **Expression Evaluator** (ADR-011), package
 ### Phase C — Core evaluator
 
 - [x] WF-IMPL-004: Immutable binding scope model (issue #179; depends on #178). Closed 2026-05-22 — `custos_cel.scope` module with `BindingScope`, `StepBinding`, `RunInfo`, `WorkflowInfo`, `UnboundNameError`; allow-listed root identifiers, sealable step outputs, per-evaluation `let` overlay; host Python namespace structurally unreachable.
-- [ ] WF-IMPL-005: Type checker against JSON Schema bindings (issue #180; depends on #178; parallel with #179)
+- [x] WF-IMPL-005: Type checker against JSON Schema bindings (issue #180; depends on #178; parallel with #179). Closed 2026-05-22 — `custos_cel.types` module with `type_check(ast, bindings) -> TypedAST`, `SchemaBindings` (JSON Schema for `inputs`; ordered `(step_id, outputs_schema)` for prior steps; declared `let` types; defaults for `run`/`workflow`/`now`), structured `TypeCheckError(TypeError)` carrying `kind`/`source_position`/`expected_type`/`actual_type`, and `TimestampType` for `now()`. Operator typing follows CEL standard rules (arithmetic / comparison / equality / logical / `in` / unary / ternary), member access drills into JSON Schema fragments, only `now()` is whitelisted as a function for this phase. ≥96% coverage on `custos_cel.types`.
 - [ ] WF-IMPL-006: Sandboxed evaluator runtime + replay-deterministic `Clock` interface (issue #181; depends on #179)
 
 ### Phase D — Operational safety

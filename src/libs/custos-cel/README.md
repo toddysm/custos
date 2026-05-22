@@ -12,7 +12,7 @@ replay-deterministic runtime for workflow expressions. It is consumed by:
 
 ## Status
 
-**Scaffold + parser dependency + AST data model + binding scope** — WF-IMPL-001 ([#176](https://github.com/toddysm/custos/issues/176)), WF-IMPL-002 ([#177](https://github.com/toddysm/custos/issues/177)), WF-IMPL-003 ([#178](https://github.com/toddysm/custos/issues/178)), WF-IMPL-004 ([#179](https://github.com/toddysm/custos/issues/179)). `custos_cel.parse()` is real; `custos_cel.BindingScope` is real (immutable scope exposing only the design's seven bindings). `custos_cel.type_check()` and `custos_cel.evaluate()` remain `NotImplementedError` stubs until WF-IMPL-005 / WF-IMPL-006. Sandbox, observability, and developer-docs work is split across WF-IMPL-007 through WF-IMPL-012.
+**Scaffold + parser dependency + AST data model + binding scope + type checker** — WF-IMPL-001 ([#176](https://github.com/toddysm/custos/issues/176)), WF-IMPL-002 ([#177](https://github.com/toddysm/custos/issues/177)), WF-IMPL-003 ([#178](https://github.com/toddysm/custos/issues/178)), WF-IMPL-004 ([#179](https://github.com/toddysm/custos/issues/179)), WF-IMPL-005 ([#180](https://github.com/toddysm/custos/issues/180)). `custos_cel.parse()` is real; `custos_cel.BindingScope` is real (immutable scope exposing only the design's seven bindings); `custos_cel.type_check()` is real (JSON-Schema-backed StartRun-time gate). `custos_cel.evaluate()` remains a `NotImplementedError` stub until WF-IMPL-006. Sandbox, observability, and developer-docs work is split across WF-IMPL-007 through WF-IMPL-012.
 
 ## Parser / runtime
 
@@ -43,6 +43,9 @@ Both names resolve to `custos_cel.ast.Node` today. The same Python class represe
 | `custos_cel.StepBinding` | WF-IMPL-004 | Per-step output container; sealable. |
 | `custos_cel.RunInfo` / `WorkflowInfo` | WF-IMPL-004 | Frozen run / workflow metadata. |
 | `custos_cel.UnboundNameError` | WF-IMPL-004 | Raised by `BindingScope.resolve()` on any unknown name. |
+| `custos_cel.SchemaBindings` | WF-IMPL-005 | JSON-Schema-backed binding declarations for the type checker. |
+| `custos_cel.TypeCheckError` | WF-IMPL-005 | Structured `TypeError` subclass carrying `kind`/`source_position`/`expected_type`/`actual_type`. |
+| `custos_cel.TimestampType` | WF-IMPL-005 | New `CelType` for `google.protobuf.Timestamp` (used as the static return type of `now()`). |
 
 The locked structured error taxonomy and the rest of the public API surface
 land in WF-IMPL-008.
@@ -80,6 +83,27 @@ Nothing else is resolvable. The host Python namespace is structurally unreachabl
 `BindingScope.resolve(chain, *, pos=None)` takes a flattened dotted-name chain (e.g. `["steps", "scan", "outputs", "critical"]`) and returns the resolved value. `UnboundNameError` carries the original `chain`, the optional `SourcePosition`, and a short machine-readable `reason` (`unknown root`, `no such step`, `is not a mapping`, etc.).
 
 `BindingScope.with_let(**overlay)` returns a new scope with additional `let` bindings overlaid — the original scope is unchanged, which is what lets `let:` blocks expand into fresh child scopes without invalidating the parent.
+
+## Type checker
+
+Defined in [`custos_cel.types`](src/custos_cel/types.py). `custos_cel.type_check(ast, bindings)` walks an untyped AST and returns a `TypedAST` with `cel_type` populated on every node, or raises a structured `TypeCheckError` (subclass of Python's `TypeError`) with the source position of the offending node. Unknown identifiers, step ids, and schema fields raise the existing `UnboundNameError`.
+
+`SchemaBindings` carries the JSON-Schema declarations the checker resolves against:
+
+| Field | Shape | Meaning |
+|---|---|---|
+| `inputs` | JSON Schema (object) | The run's inputs schema. Object `properties` drill into per-key types; `additionalProperties` model homogeneous maps. |
+| `prior_steps` | Ordered `[(step_id, outputs_schema), ...]` | Each completed step's outputs JSON Schema. Lookup is by id; order is preserved for error messages. |
+| `let` | `name -> CelType` | Declared `let.<name>` types. The Catalog Service publish gate validates these structurally; the type checker trusts them at StartRun. |
+| `run` | `name -> CelType` (default: `{id: string, workspace: string}`) | Static types of `run.*` members. |
+| `workflow` | `name -> CelType` (default: `{name: string, version: string}`) | Static types of `workflow.*` members. |
+| `now` | `CelType` (default: `TimestampType`) | Static return type of `now()`. |
+
+JSON Schema → `CelType` translation: `integer→int`, `string→string`, `boolean→bool`, `number→double`, `array→list<T>` (requires an `items` sub-schema), `object→map<string, T>` (homogeneous via `additionalProperties`) or placeholder `map<string, null>` for heterogeneous records (member access drills into `properties` directly). Nullable scalars (`"type": ["string", "null"]`) are accepted and modeled as the non-null type.
+
+Operator typing matches CEL standard rules: arithmetic requires matching numeric operands (no implicit int↔double promotion), comparison requires matching comparable operands, equality allows null on either side, `in` checks element/key types against the right-hand `list`/`map`, ternary branches must unify (with null promotion). Only `now()` is whitelisted as a function for this phase; any other call site raises `TypeCheckError("unknown function")` until further stdlib functions land alongside the evaluator.
+
+Where it runs: the Workflow Service Definition Compiler at `StartRun` (per the bundle-h change record [`2026-05-18-003-bundle-h-cel-parse-surface.md`](../../../design/components/workflow-service/changes/2026-05-18-003-bundle-h-cel-parse-surface.md)). Catalog Service has already gated syntax at publish time; this is the only place a type-error path runs, and failure is permanent — the Validator rejects the `StartRun` request before a `runId` is issued.
 
 ## Sandbox guarantees (target)
 

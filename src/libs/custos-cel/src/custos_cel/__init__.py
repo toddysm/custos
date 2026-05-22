@@ -48,6 +48,7 @@ from custos_cel.ast import (
     NullType,
     SourcePosition,
     StringType,
+    TimestampType,
     UintType,
     Unary,
     UnaryOp,
@@ -63,6 +64,13 @@ from custos_cel.scope import (
     StepBinding,
     UnboundNameError,
     WorkflowInfo,
+)
+from custos_cel.types import (
+    SchemaBindings,
+    TypeCheckError,
+)
+from custos_cel.types import (
+    type_check as _type_check_impl,
 )
 
 __all__ = [
@@ -92,9 +100,12 @@ __all__ = [
     "Node",
     "NullType",
     "RunInfo",
+    "SchemaBindings",
     "SourcePosition",
     "StepBinding",
     "StringType",
+    "TimestampType",
+    "TypeCheckError",
     "TypedAST",
     "UintType",
     "Unary",
@@ -152,7 +163,7 @@ def parse(source: str) -> Node:
     return convert_celpy_tree(tree)
 
 
-def type_check(ast: Node, bindings: Any) -> Node:
+def type_check(ast: Node, bindings: SchemaBindings) -> Node:
     """Type-check an :data:`AST` against JSON Schema bindings.
 
     Resolves every identifier against ``bindings`` and annotates each
@@ -161,21 +172,26 @@ def type_check(ast: Node, bindings: Any) -> Node:
     :func:`evaluate`.
 
     Args:
-        ast: An :data:`AST` produced by :func:`parse`. Must be untyped —
-            i.e. ``ast.cel_type is None`` at the root. Re-checking a
-            typed tree is a usage error and will be rejected once
-            WF-IMPL-005 lands.
-        bindings: The binding scope describing available identifiers and
-            their JSON Schemas.
+        ast: An :data:`AST` produced by :func:`parse`.
+        bindings: A :class:`SchemaBindings` describing every binding
+            root visible to the expression (run inputs schema, ordered
+            prior-step output schemas, declared ``let`` types, and the
+            static types of ``run``, ``workflow``, and ``now()``).
 
     Returns:
-        A :data:`TypedAST` — a fresh tree with the same structure as the
-        input but with :attr:`Node.cel_type` populated on every node.
+        A :data:`TypedAST` — a fresh tree with the same structure as
+        the input but with :attr:`Node.cel_type` populated on every
+        node.
 
     Raises:
-        NotImplementedError: Always. Implementation lands in WF-IMPL-005.
+        TypeCheckError: For any type mismatch (operator-arity violation,
+            ternary branch divergence, schema/value-type mismatch,
+            unsupported language construct). Subclasses Python's
+            :class:`TypeError`.
+        UnboundNameError: For any identifier, step id, or schema field
+            not declared in ``bindings``.
     """
-    raise NotImplementedError("custos_cel.type_check is not yet implemented; see WF-IMPL-005.")
+    return _type_check_impl(ast, bindings)
 
 
 def evaluate(ast: Node, bindings: Any) -> Any:

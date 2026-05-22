@@ -43,9 +43,12 @@ def test_public_api_in_dunder_all() -> None:
         assert name in custos_cel.__all__
 
 
-def test_type_check_stub_raises_not_implemented() -> None:
-    with pytest.raises(NotImplementedError):
-        custos_cel.type_check(ast=_stub_ast(), bindings=None)
+def test_type_check_rejects_non_schema_bindings() -> None:
+    # ``type_check`` was a NotImplementedError stub up to WF-IMPL-004;
+    # WF-IMPL-005 wires the real implementation. A non-``SchemaBindings``
+    # argument is rejected up front, before any walk.
+    with pytest.raises(TypeError, match="SchemaBindings"):
+        custos_cel.type_check(ast=_stub_ast(), bindings=None)  # type: ignore[arg-type]
 
 
 def test_evaluate_stub_raises_not_implemented() -> None:
