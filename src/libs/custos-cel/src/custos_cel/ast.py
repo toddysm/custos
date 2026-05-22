@@ -81,7 +81,11 @@ AST_SCHEMA_VERSION: Final[int] = 1
 
 @dataclass(frozen=True, kw_only=True)
 class SourcePosition:
-    """1-indexed source position attached to every AST node.
+    """Source position attached to every AST node.
+
+    ``line`` and ``column`` are 1-indexed. ``offset`` is a 0-indexed
+    character offset from the start of the source string, matching the
+    underlying parser position data.
 
     All three fields are optional because the underlying parser
     (``cel-python``) does not always emit positions for every grammar
