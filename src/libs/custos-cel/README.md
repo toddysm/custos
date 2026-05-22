@@ -12,7 +12,7 @@ replay-deterministic runtime for workflow expressions. It is consumed by:
 
 ## Status
 
-**Scaffold + parser dependency + AST data model + binding scope + type checker** — WF-IMPL-001 ([#176](https://github.com/toddysm/custos/issues/176)), WF-IMPL-002 ([#177](https://github.com/toddysm/custos/issues/177)), WF-IMPL-003 ([#178](https://github.com/toddysm/custos/issues/178)), WF-IMPL-004 ([#179](https://github.com/toddysm/custos/issues/179)), WF-IMPL-005 ([#180](https://github.com/toddysm/custos/issues/180)). `custos_cel.parse()` is real; `custos_cel.BindingScope` is real (immutable scope exposing only the design's seven bindings); `custos_cel.type_check()` is real (JSON-Schema-backed StartRun-time gate). `custos_cel.evaluate()` remains a `NotImplementedError` stub until WF-IMPL-006. Sandbox, observability, and developer-docs work is split across WF-IMPL-007 through WF-IMPL-012.
+**Scaffold + parser dependency + AST data model + binding scope + type checker + sandboxed evaluator** — WF-IMPL-001 ([#176](https://github.com/toddysm/custos/issues/176)), WF-IMPL-002 ([#177](https://github.com/toddysm/custos/issues/177)), WF-IMPL-003 ([#178](https://github.com/toddysm/custos/issues/178)), WF-IMPL-004 ([#179](https://github.com/toddysm/custos/issues/179)), WF-IMPL-005 ([#180](https://github.com/toddysm/custos/issues/180)), WF-IMPL-006 ([#181](https://github.com/toddysm/custos/issues/181)). `custos_cel.parse()` is real; `custos_cel.BindingScope` is real (immutable scope exposing only the design's seven bindings); `custos_cel.type_check()` is real (JSON-Schema-backed StartRun-time gate); `custos_cel.evaluate()` is real (sandboxed walk over a TypedAST against a `BindingScope` and a `Clock`). Sandbox hardening, observability, and developer-docs work continues in WF-IMPL-007 through WF-IMPL-012.
 
 ## Parser / runtime
 
@@ -37,7 +37,11 @@ Both names resolve to `custos_cel.ast.Node` today. The same Python class represe
 | `custos_cel.TypedAST` | WF-IMPL-005 | Type-annotated parse-tree node type alias (= `Node`). |
 | `custos_cel.parse(source) -> Node` | WF-IMPL-002, WF-IMPL-003 | Parse expression source into an **untyped** AST via `celpy`. |
 | `custos_cel.type_check(ast, bindings) -> Node` | WF-IMPL-005 | Resolve identifiers against bindings + JSON Schemas; return a TypedAST. |
-| `custos_cel.evaluate(ast, bindings) -> Any` | WF-IMPL-006 | Evaluate a TypedAST inside the sandbox. Rejects an untyped AST. |
+| `custos_cel.evaluate(ast, scope, clock) -> Any` | WF-IMPL-006 | Evaluate a TypedAST inside the sandbox. Rejects an untyped AST. |
+| `custos_cel.Clock` | WF-IMPL-006 | Runtime protocol for replay-deterministic ``now()``. |
+| `custos_cel.DaprWorkflowClock` | WF-IMPL-006 | Adapter wrapping a Dapr Workflow context's `current_utc_datetime`. |
+| `custos_cel.FixedClock` | WF-IMPL-006 | Deterministic test clock returning a single timezone-aware datetime. |
+| `custos_cel.EvalError` | WF-IMPL-006 | Structured runtime-error type (`kind="expression.eval_error"`). |
 | `custos_cel.to_json(node) -> str` / `from_json(text) -> Node` | WF-IMPL-003 | Byte-stable JSON serialization for `Run.compiledGraph` caching. |
 | `custos_cel.BindingScope` | WF-IMPL-004 | Immutable binding scope for the evaluator (see below). |
 | `custos_cel.StepBinding` | WF-IMPL-004 | Per-step output container; sealable. |
@@ -105,17 +109,72 @@ Operator typing matches CEL standard rules: arithmetic requires matching numeric
 
 Where it runs: the Workflow Service Definition Compiler at `StartRun` (per the bundle-h change record [`2026-05-18-003-bundle-h-cel-parse-surface.md`](../../../design/components/workflow-service/changes/2026-05-18-003-bundle-h-cel-parse-surface.md)). Catalog Service has already gated syntax at publish time; this is the only place a type-error path runs, and failure is permanent — the Validator rejects the `StartRun` request before a `runId` is issued.
 
-## Sandbox guarantees (target)
+## Sandbox guarantees
 
-The runtime that lands in later issues will guarantee:
+The runtime guarantees, as of WF-IMPL-006:
 
 - **No side effects** — expressions cannot perform I/O, mutate bindings, or
-  observe wall-clock time except through the injected `Clock` interface.
-- **Replay determinism** — the same `(ast, bindings)` always produces the
-  same result on Dapr Workflow replay (property-based coverage in
-  WF-IMPL-010).
+  observe wall-clock time except through the injected `Clock`. A static
+  audit (`tests/test_eval.py::test_eval_module_does_not_import_dangerous_stdlib`)
+  asserts `custos_cel/eval.py` contains zero `os`/`sys`/`subprocess`/
+  `socket`/`importlib`/`open`/`__import__`/`eval`/`exec`/`compile` imports
+  or calls.
+- **Replay determinism** — the same `(ast, scope, clock)` always produces
+  the same result. `DaprWorkflowClock` reads `current_utc_datetime` on
+  every call so Dapr Workflow replays observe identical timestamps;
+  `FixedClock` returns a single byte-identical instant for tests.
+  Property-based coverage continues in WF-IMPL-010.
+- **Function allow-list** — the evaluator dispatches `now`, `size`, `has`,
+  and `type`. Every other `Call.function` raises `UnboundNameError(reason="function ... is not in the evaluator allow-list")`,
+  making `open()`, `__import__()`, `eval()`, `exec()` structurally
+  unreachable from inside an expression.
+- **Strict typing** — the evaluator does not implicitly coerce `int↔double`,
+  `bool↔int`, or `str↔bytes`. Each binary operator's defensive branch
+  surfaces a structured `EvalError` if the type checker ever admitted an
+  ill-typed tree.
 - **Bounded execution** — per-evaluation timeout via `WF_EXPR_TIMEOUT_MS`
   (enforced in WF-IMPL-007).
+
+## Evaluator
+
+Defined in [`custos_cel.eval`](src/custos_cel/eval.py). `custos_cel.evaluate(ast, scope, clock)` walks the type-checked tree:
+
+- Member / Index chains are *chain-collapsed*: a contiguous prefix of
+  compile-time-known accessors (a `Member.name` or a string-literal
+  `Index.index`) hands a single dotted chain to
+  `BindingScope.resolve()`. Any trailing dynamic accessors (runtime ints
+  for list indexing, runtime strings for map lookup) apply against the
+  resolved value via `_runtime_access`. This keeps the scope's strict
+  root allow-list in front of every host access while still supporting
+  the design's full expression shapes (`steps.scan.outputs.critical +
+  steps["scan-alt"].outputs.critical`).
+- Operator dispatch enforces CEL strict typing. Integer `/` and `%`
+  truncate toward zero (C semantics) rather than Python's floor;
+  `_trunc_div` makes the divergence explicit.
+- Builtins follow CEL macro semantics: `has(x.y)` is true when `x` is a
+  reachable mapping and `"y"` is a key in it, false otherwise (lists,
+  scalars, datetimes, and `RunInfo` / `WorkflowInfo` all report False),
+  but propagates `UnboundNameError` when the *target* is itself unbound
+  so typos surface loudly. `type(x)` prefers the static
+  `Node.cel_type` (CEL declared types) and falls back to a runtime
+  isinstance probe only when called against an untyped node.
+
+## Clock
+
+Defined in [`custos_cel.clock`](src/custos_cel/clock.py). The `Clock`
+protocol is a single-method, `@runtime_checkable` `Protocol` (`now() ->
+datetime`). Two adapters ship with the library:
+
+- **`DaprWorkflowClock(ctx)`** — wraps any object exposing
+  `current_utc_datetime`. Reads the attribute on every call so replays
+  observe Dapr's replay-stable timestamps. Naive datetimes are
+  defensively retagged `UTC` so downstream comparisons stay tz-aware.
+  Imports zero Dapr packages — production wiring injects the workflow
+  context duck-typed at call sites.
+- **`FixedClock(fixed)`** — a frozen dataclass returning a single
+  timezone-aware datetime byte-identically on every call. Rejects naive
+  datetimes at construction. Equal `FixedClock` instances compare equal,
+  which makes byte-determinism tests trivial.
 
 ## Design references
 

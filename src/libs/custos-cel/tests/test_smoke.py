@@ -1,11 +1,9 @@
 """Smoke tests for the custos_cel public surface.
 
-These tests assert that the public-API surface exists and that the
-remaining placeholder stubs (:func:`custos_cel.type_check` and
-:func:`custos_cel.evaluate`) raise :class:`NotImplementedError`. The
-parser stub became real in WF-IMPL-003 — see ``test_parse.py``. Full
-behavior tests for the type checker and evaluator land in WF-IMPL-009 /
-WF-IMPL-010.
+These tests assert that the public-API surface exists. The parser stub
+became real in WF-IMPL-003 (see ``test_parse.py``), the type checker in
+WF-IMPL-005 (see ``test_types.py``), and the evaluator in WF-IMPL-006
+(see ``test_eval.py``).
 """
 
 from __future__ import annotations
@@ -51,6 +49,9 @@ def test_type_check_rejects_non_schema_bindings() -> None:
         custos_cel.type_check(ast=_stub_ast(), bindings=None)  # type: ignore[arg-type]
 
 
-def test_evaluate_stub_raises_not_implemented() -> None:
-    with pytest.raises(NotImplementedError):
-        custos_cel.evaluate(ast=_stub_ast(), bindings=None)
+def test_evaluate_rejects_non_scope() -> None:
+    # ``evaluate`` was a NotImplementedError stub up to WF-IMPL-005;
+    # WF-IMPL-006 wires the real implementation. A non-``BindingScope``
+    # argument is rejected up front, before any walk.
+    with pytest.raises(TypeError, match="BindingScope"):
+        custos_cel.evaluate(ast=_stub_ast(), scope=None, clock=None)  # type: ignore[arg-type]
