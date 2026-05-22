@@ -12,7 +12,7 @@ replay-deterministic runtime for workflow expressions. It is consumed by:
 
 ## Status
 
-**Scaffold + parser dependency + AST data model + binding scope** — WF-IMPL-001 ([#176](https://github.com/toddysm/custos/issues/176)), WF-IMPL-002 ([#177](https://github.com/toddysm/custos/issues/177)), WF-IMPL-003 ([#178](https://github.com/toddysm/custos/issues/178)), WF-IMPL-004 ([#179](https://github.com/toddysm/custos/issues/179)). `custos_cel.parse()` is real; `custos_cel.BindingScope` is real (immutable scope exposing only the design's seven binding roots). `custos_cel.type_check()` and `custos_cel.evaluate()` remain `NotImplementedError` stubs until WF-IMPL-005 / WF-IMPL-006. Sandbox, observability, and developer-docs work is split across WF-IMPL-007 through WF-IMPL-012.
+**Scaffold + parser dependency + AST data model + binding scope** — WF-IMPL-001 ([#176](https://github.com/toddysm/custos/issues/176)), WF-IMPL-002 ([#177](https://github.com/toddysm/custos/issues/177)), WF-IMPL-003 ([#178](https://github.com/toddysm/custos/issues/178)), WF-IMPL-004 ([#179](https://github.com/toddysm/custos/issues/179)). `custos_cel.parse()` is real; `custos_cel.BindingScope` is real (immutable scope exposing only the design's seven bindings). `custos_cel.type_check()` and `custos_cel.evaluate()` remain `NotImplementedError` stubs until WF-IMPL-005 / WF-IMPL-006. Sandbox, observability, and developer-docs work is split across WF-IMPL-007 through WF-IMPL-012.
 
 ## Parser / runtime
 
