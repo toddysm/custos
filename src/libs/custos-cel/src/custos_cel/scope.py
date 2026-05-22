@@ -19,8 +19,8 @@ exposes only the names listed in the design's bindings table:
 Nothing else is resolvable. In particular, the host Python namespace is
 **not** exposed: names like ``os``, ``sys``, ``open``, ``__import__``,
 ``eval``, ``exec`` all raise :class:`UnboundNameError`. Resolution is a
-strict allow-list keyed on the six root identifiers above (plus ``now``);
-unknown roots are rejected before any attribute or item access happens.
+strict allow-list keyed on the allowed root identifiers above; unknown
+roots are rejected before any attribute or item access happens.
 
 See the issue: https://github.com/toddysm/custos/issues/179
 """
