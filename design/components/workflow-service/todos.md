@@ -9,7 +9,7 @@ Last Updated: 2026-05-21
 
 ## Implementation
 
-First sub-module under construction: **Expression Evaluator** (ADR-011), packaged as the shared library `src/libs/custos-cel/` (also consumed by Catalog Service for publish-time syntactic validation per [2026-05-18-003-bundle-h-cel-parse-surface.md](changes/2026-05-18-003-bundle-h-cel-parse-surface.md)). Planning branch: `design/impl-20260521-workflow-service-expression-evaluator`.
+First sub-module under construction: **Expression Evaluator** (ADR-011), packaged as the shared library `src/libs/custos-cel/` (also consumed by Catalog Service for publish-time syntactic validation per [2026-05-18-003-bundle-h-cel-parse-surface.md](changes/2026-05-18-003-bundle-h-cel-parse-surface.md)).
 
 ### Phase A — Scaffolding
 
