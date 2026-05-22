@@ -59,6 +59,7 @@ __all__ = [
     "NullType",
     "SourcePosition",
     "StringType",
+    "TimestampType",
     "UintType",
     "Unary",
     "UnaryOp",
@@ -186,6 +187,20 @@ class NullType(CelType):
 
 
 @dataclass(frozen=True)
+class TimestampType(CelType):
+    """CEL ``google.protobuf.Timestamp``.
+
+    Modeled as a distinct scalar so the type checker can give ``now()``
+    a meaningful static type rather than overloading :class:`StringType`
+    or :class:`IntType`. Arithmetic / comparison rules for timestamps
+    are reserved for the evaluator; the type checker only tracks the
+    type itself.
+    """
+
+    TYPE_KIND: ClassVar[str] = "timestamp"
+
+
+@dataclass(frozen=True)
 class ListType(CelType):
     TYPE_KIND: ClassVar[str] = "list"
     element: CelType
@@ -233,6 +248,7 @@ _CEL_TYPE_REGISTRY: dict[str, type[CelType]] = {
     StringType.TYPE_KIND: StringType,
     BytesType.TYPE_KIND: BytesType,
     NullType.TYPE_KIND: NullType,
+    TimestampType.TYPE_KIND: TimestampType,
     ListType.TYPE_KIND: ListType,
     MapType.TYPE_KIND: MapType,
 }
