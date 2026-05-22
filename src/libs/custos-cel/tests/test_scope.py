@@ -441,3 +441,29 @@ def test_with_let_preserves_other_bindings() -> None:
     assert s.resolve(["inputs", "image"]) == "alpine"
     assert s.resolve(["steps", "scan", "outputs", "ok"]) is True
     assert s.resolve(["run", "id"]) == "run-123"
+
+
+def test_with_let_shares_parent_mappings_by_reference() -> None:
+    # ``__post_init__`` keeps an already-wrapped ``MappingProxyType``
+    # as-is so ``with_let`` doesn't pay for a redundant dict copy of
+    # ``inputs`` / ``steps`` on every let-block expansion.
+    parent = _scope(
+        inputs={"image": "alpine"},
+        steps={"scan": StepBinding({"ok": True}, sealed=True)},
+    )
+    child = parent.with_let(x=1)
+    assert child.inputs is parent.inputs
+    assert child.steps is parent.steps
+    # ``let`` is a fresh mapping per overlay, so it must not be shared.
+    assert child.let is not parent.let
+
+
+def test_post_init_wraps_plain_dict_inputs() -> None:
+    # Sanity-check the other branch of the new isinstance guard: a plain
+    # dict still gets wrapped (and copied) on construction.
+    source: dict[str, Any] = {"image": "alpine"}
+    s = _scope(inputs=source)
+    assert isinstance(s.inputs, MappingProxyType)
+    # Mutating the original dict must not leak into the scope.
+    source["image"] = "ubuntu"
+    assert s.resolve(["inputs", "image"]) == "alpine"

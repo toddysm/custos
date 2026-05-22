@@ -218,9 +218,17 @@ class BindingScope:
         # Wrap mutable mappings as immutable views. Callers can pass plain
         # ``dict`` for ergonomic construction; the scope guarantees the
         # references it stores are read-only afterwards.
-        object.__setattr__(self, "inputs", MappingProxyType(dict(self.inputs)))
-        object.__setattr__(self, "steps", MappingProxyType(dict(self.steps)))
-        object.__setattr__(self, "let", MappingProxyType(dict(self.let)))
+        #
+        # A value that is already a ``MappingProxyType`` is kept as-is so
+        # that scope-derivation paths like :meth:`with_let` — which pass
+        # the parent's already-wrapped ``inputs`` / ``steps`` views
+        # straight through — don't pay for a redundant dict copy.
+        if not isinstance(self.inputs, MappingProxyType):
+            object.__setattr__(self, "inputs", MappingProxyType(dict(self.inputs)))
+        if not isinstance(self.steps, MappingProxyType):
+            object.__setattr__(self, "steps", MappingProxyType(dict(self.steps)))
+        if not isinstance(self.let, MappingProxyType):
+            object.__setattr__(self, "let", MappingProxyType(dict(self.let)))
 
     # ----- public API -------------------------------------------------------
 
@@ -234,8 +242,10 @@ class BindingScope:
         """
         merged: dict[str, Any] = dict(self.let)
         merged.update(overlay)
-        # ``replace`` would also re-trigger ``__post_init__`` and re-wrap
-        # every mapping unnecessarily. Build the new instance directly.
+        # Pass the parent's already-wrapped ``inputs`` / ``steps`` views
+        # straight through; ``__post_init__`` keeps existing
+        # ``MappingProxyType`` instances as-is, so the new scope shares
+        # the same underlying mapping objects rather than re-copying them.
         return BindingScope(
             run=self.run,
             workflow=self.workflow,
