@@ -708,7 +708,6 @@ _COMPARABLE_TYPES: Final = (
     DoubleType,
     StringType,
     BytesType,
-    BoolType,
     TimestampType,
 )
 
