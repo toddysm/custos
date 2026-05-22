@@ -1,8 +1,11 @@
-"""Smoke tests for the custos_cel scaffold.
+"""Smoke tests for the custos_cel public surface.
 
-These tests assert only that the public-API surface exists and that the
-placeholder stubs raise :class:`NotImplementedError`. Real behavior tests
-land in WF-IMPL-009 / WF-IMPL-010.
+These tests assert that the public-API surface exists and that the
+remaining placeholder stubs (:func:`custos_cel.type_check` and
+:func:`custos_cel.evaluate`) raise :class:`NotImplementedError`. The
+parser stub became real in WF-IMPL-003 — see ``test_parse.py``. Full
+behavior tests for the type checker and evaluator land in WF-IMPL-009 /
+WF-IMPL-010.
 """
 
 from __future__ import annotations
@@ -10,6 +13,11 @@ from __future__ import annotations
 import pytest
 
 import custos_cel
+from custos_cel import Ident, SourcePosition
+
+
+def _stub_ast() -> custos_cel.Node:
+    return Ident(pos=SourcePosition(line=1, column=1), name="x")
 
 
 def test_package_imports() -> None:
@@ -25,6 +33,9 @@ def test_public_api_reexports_present() -> None:
 def test_public_type_aliases_present() -> None:
     for name in ("AST", "TypedAST"):
         assert hasattr(custos_cel, name), f"custos_cel.{name} missing"
+    # Both aliases resolve to the Node class.
+    assert custos_cel.AST is custos_cel.Node
+    assert custos_cel.TypedAST is custos_cel.Node
 
 
 def test_public_api_in_dunder_all() -> None:
@@ -32,16 +43,11 @@ def test_public_api_in_dunder_all() -> None:
         assert name in custos_cel.__all__
 
 
-def test_parse_stub_raises_not_implemented() -> None:
-    with pytest.raises(NotImplementedError):
-        custos_cel.parse("1 + 1")
-
-
 def test_type_check_stub_raises_not_implemented() -> None:
     with pytest.raises(NotImplementedError):
-        custos_cel.type_check(ast=None, bindings=None)
+        custos_cel.type_check(ast=_stub_ast(), bindings=None)
 
 
 def test_evaluate_stub_raises_not_implemented() -> None:
     with pytest.raises(NotImplementedError):
-        custos_cel.evaluate(ast=None, bindings=None)
+        custos_cel.evaluate(ast=_stub_ast(), bindings=None)

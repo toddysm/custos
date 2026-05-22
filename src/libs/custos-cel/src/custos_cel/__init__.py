@@ -8,87 +8,155 @@ See the design at:
 https://github.com/toddysm/custos/blob/main/design/components/workflow-service/design.md
 (§ Expression Evaluator / ADR-011).
 
-This module currently exposes only the public-API skeleton; concrete
-implementations land in follow-up issues (WF-IMPL-002 through WF-IMPL-012).
+The chosen parser/runtime is `cel-python <https://github.com/cloud-custodian/cel-python>`_
+(import name ``celpy``). See change record
+``design/components/workflow-service/changes/2026-05-21-005-cel-parser-choice.md``.
+
+The AST data model lands in WF-IMPL-003 (this module re-exports the
+node classes from :mod:`custos_cel.ast`). The type checker and evaluator
+remain stubs until WF-IMPL-005 / WF-IMPL-006.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+import celpy
+
+from custos_cel._celpy_convert import CelConvertError, convert_celpy_tree
+from custos_cel.ast import (
+    AST_SCHEMA_VERSION,
+    Binary,
+    BinaryOp,
+    BoolType,
+    BytesType,
+    Call,
+    CelType,
+    Conditional,
+    DoubleType,
+    Ident,
+    Index,
+    IntType,
+    ListLit,
+    ListType,
+    Literal,
+    LiteralKind,
+    MapLit,
+    MapType,
+    Member,
+    Node,
+    NullType,
+    SourcePosition,
+    StringType,
+    UintType,
+    Unary,
+    UnaryOp,
+    from_dict,
+    from_json,
+    node_from_dict,
+    to_json,
+)
+
 __all__ = [
     "AST",
+    "AST_SCHEMA_VERSION",
+    "Binary",
+    "BinaryOp",
+    "BoolType",
+    "BytesType",
+    "Call",
+    "CelConvertError",
+    "CelType",
+    "Conditional",
+    "DoubleType",
+    "Ident",
+    "Index",
+    "IntType",
+    "ListLit",
+    "ListType",
+    "Literal",
+    "LiteralKind",
+    "MapLit",
+    "MapType",
+    "Member",
+    "Node",
+    "NullType",
+    "SourcePosition",
+    "StringType",
     "TypedAST",
+    "UintType",
+    "Unary",
+    "UnaryOp",
     "__version__",
     "evaluate",
+    "from_dict",
+    "from_json",
+    "node_from_dict",
     "parse",
+    "to_json",
     "type_check",
 ]
 
 __version__ = "0.1.0"
 
-# Public type aliases — terminology locked in WF-IMPL-001. The concrete node
-# classes land later but the names are part of the public contract now, so
-# downstream consumers (Workflow Service, Catalog Service) can write
-# signatures against stable names.
+# Public type aliases.
 #
-# - AST: the untyped, purely structural parse tree produced by :func:`parse`.
-#   Carries source positions but no resolved types or binding information.
-#   Concrete data model lands in WF-IMPL-003.
-# - TypedAST: the AST annotated with resolved types after binding-scope and
-#   JSON-Schema validation by :func:`type_check`. Required input to
-#   :func:`evaluate`. Concrete data model lands in WF-IMPL-005.
-#
-# Both are aliased to ``Any`` in the scaffold so the public surface compiles
-# under ``mypy --strict`` before the concrete classes exist. The aliases will
-# be re-pointed (not renamed) at their concrete classes in their respective
-# follow-up issues — callers writing ``custos_cel.AST`` / ``custos_cel.TypedAST``
-# today will keep working without source changes.
-AST = Any
-TypedAST = Any
+# Both names resolve to :class:`custos_cel.ast.Node` today — the same Python
+# class represents the structural (untyped) tree returned by :func:`parse`
+# and the type-annotated tree produced by :func:`type_check`. The
+# distinction is carried per-node in :attr:`Node.cel_type`: ``None`` for an
+# untyped AST, populated everywhere for a TypedAST. The runtime invariant
+# is asserted by the type checker and evaluator (WF-IMPL-005 / WF-IMPL-006).
+AST = Node
+TypedAST = Node
 
 
-def parse(source: str) -> AST:
-    """Parse a CEL-like expression source string into an untyped AST.
+def parse(source: str) -> Node:
+    """Parse a CEL expression into an untyped AST.
 
-    The returned node is purely structural — it carries source positions but
-    **no** resolved types and **no** binding information. Use
-    :func:`type_check` to lift the result to a :data:`TypedAST` before
-    handing it to :func:`evaluate`.
+    Delegates the lexer/parser to ``celpy`` and converts its parse tree
+    into the internal :class:`~custos_cel.ast.Node` shape. The returned
+    tree carries source positions but **no** resolved types and **no**
+    binding information — use :func:`type_check` to lift it to a
+    :data:`TypedAST` before handing it to :func:`evaluate`.
 
     Args:
-        source: The expression source text.
+        source: The CEL expression source text.
 
     Returns:
-        An :data:`AST` node. Concrete data model lands in WF-IMPL-003.
+        The root :class:`~custos_cel.ast.Node` of the parsed tree.
 
     Raises:
-        NotImplementedError: Always. Implementation lands in WF-IMPL-002 /
-            WF-IMPL-003.
+        celpy.celparser.CELParseError: If ``source`` is not syntactically
+            valid CEL.
+        CelConvertError: If the parse tree contains a CEL construct that
+            is outside the Custos subset (e.g. method-call syntax or
+            protobuf message construction).
     """
-    raise NotImplementedError(
-        "custos_cel.parse is not yet implemented; see WF-IMPL-002 / WF-IMPL-003."
-    )
+    env = celpy.Environment()
+    tree = env.compile(source)
+    return convert_celpy_tree(tree)
 
 
-def type_check(ast: AST, bindings: Any) -> TypedAST:
+def type_check(ast: Node, bindings: Any) -> Node:
     """Type-check an :data:`AST` against JSON Schema bindings.
 
-    Resolves every identifier against ``bindings`` and annotates each node
-    with its inferred type, producing a :data:`TypedAST`. The result is the
-    only input shape accepted by :func:`evaluate`.
+    Resolves every identifier against ``bindings`` and annotates each
+    node with its inferred :class:`~custos_cel.ast.CelType`, producing a
+    :data:`TypedAST`. The result is the only input shape accepted by
+    :func:`evaluate`.
 
     Args:
-        ast: An :data:`AST` produced by :func:`parse`. Must **not** be a
-            :data:`TypedAST` (the type checker is not idempotent at the
-            value level — re-checking a typed tree is a usage error and
-            will be rejected once WF-IMPL-005 lands).
+        ast: An :data:`AST` produced by :func:`parse`. Must be untyped —
+            i.e. ``ast.cel_type is None`` at the root. Re-checking a
+            typed tree is a usage error and will be rejected once
+            WF-IMPL-005 lands.
         bindings: The binding scope describing available identifiers and
             their JSON Schemas.
 
     Returns:
-        A :data:`TypedAST` — the input tree annotated with resolved types.
-        Concrete data model lands in WF-IMPL-005.
+        A :data:`TypedAST` — a fresh tree with the same structure as the
+        input but with :attr:`Node.cel_type` populated on every node.
 
     Raises:
         NotImplementedError: Always. Implementation lands in WF-IMPL-005.
@@ -96,12 +164,12 @@ def type_check(ast: AST, bindings: Any) -> TypedAST:
     raise NotImplementedError("custos_cel.type_check is not yet implemented; see WF-IMPL-005.")
 
 
-def evaluate(ast: TypedAST, bindings: Any) -> Any:
+def evaluate(ast: Node, bindings: Any) -> Any:
     """Evaluate a :data:`TypedAST` against a binding scope.
 
-    Requires a :data:`TypedAST` (the output of :func:`type_check`). Passing
-    an untyped :data:`AST` directly from :func:`parse` is a usage error and
-    will be rejected once WF-IMPL-006 lands.
+    Requires a :data:`TypedAST` (the output of :func:`type_check`).
+    Passing an untyped :data:`AST` directly from :func:`parse` is a
+    usage error and will be rejected once WF-IMPL-006 lands.
 
     Args:
         ast: A :data:`TypedAST` produced by :func:`type_check`.
