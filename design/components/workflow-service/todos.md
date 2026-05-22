@@ -17,7 +17,7 @@ First sub-module under construction: **Expression Evaluator** (ADR-011), package
 ### Phase B — Parser & AST foundation
 
 - [x] WF-IMPL-002: Pick CEL parser implementation and write ADR-style decision record (issue #177; depends on #176). Closed 2026-05-21 — `cel-python>=0.5.0,<0.6` chosen; see change record [`2026-05-21-005-cel-parser-choice.md`](changes/2026-05-21-005-cel-parser-choice.md).
-- [ ] WF-IMPL-003: AST + serializable typed-AST data model (issue #178; depends on #177)
+- [x] WF-IMPL-003: AST + serializable typed-AST data model (issue #178; depends on #177). Closed 2026-05-21 — `custos_cel.ast` module with all node types, `CelType` hierarchy, `celpy` parse-tree converter wired into `custos_cel.parse()`, and byte-stable JSON round-trip via `to_json` / `from_json`.
 
 ### Phase C — Core evaluator
 
