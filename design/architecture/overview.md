@@ -1,7 +1,7 @@
 # Architecture Overview: Custos
 
-Last Updated: 2026-05-18
-Version: 13
+Last Updated: 2026-05-21
+Version: 14
 Status: Draft
 
 ## Summary
@@ -248,11 +248,55 @@ spec:
 | `forEach:` (optional `where:`) | Fan-out primitive: expands the step over a list and schedules N parallel attempts. `where:` is sugar for an inline CEL pre-filter on the input list. | ARM design § `forEach` and `where:` clause |
 | `if:` | Skip predicate. Step is elided from the run if the expression evaluates to false. | — |
 | `on_error:` | Per-step (or workflow-scoped) error handler. Matches on `code`, `codePrefix`, or `class` against the ARM error envelope and selects `skip` / `retry` / `fail`. | ARM design § Error envelope and namespaces |
+| `retry:` | Mechanics of retry: total attempts, backoff curve, jitter, `retryAfter` handling. Consumed by `do: retry` arms. May appear at step level, inside an `on_error[]` arm, or under `spec.defaults.retry:`. | Workflow Service design § Retry Policy |
 
 Cross-component implications surfaced by these forms:
 - **`forEach` fan-out** is realized via the Workflow Service Sub-Orchestration Manager (COMP-003 sub-module) — each iteration is a child workflow attempt under the parent run.
 - **`connectors:` map binding** is validated by the Workflow Service Binder at compile time (every alias must match an `spec.connectors[].name` on the activity manifest, with required capabilities satisfied by the bound connector type) and resolved by ARM at execution time. The Connector Service issues one lease per alias, subject to the per step-attempt concurrent-lease cap (default 16, see Connector Service design).
 - **`on_error` matching** uses the namespaced error-code scheme owned by ARM (`activity.*`, `input.*`, `output.*`, `system.*`, plus connector- and activity-defined namespaces). The Workflow Service Step Coordinator applies the handler before passing terminal state to the Dapr Workflow runtime.
+- **Retry mechanics (`retry:`) and routing (`on_error:`) are orthogonal layers.** `on_error:` decides *which* errors retry (matching on `code` / `codePrefix` / `class`); `retry:` decides *how* (`maxAttempts`, `backoff.strategy` ∈ `{constant, linear, exponential}`, `jitter` ∈ `{none, full, equal, decorrelated}`, `respectRetryAfter`). When `on_error: … do: retry` is selected, the prevailing `retry:` policy is computed by overlaying per-match → step-level → `spec.defaults.retry:` → platform defaults, field by field. The inline `maxAttempts: N` shorthand on a `do: retry` arm is sugar for `retry: { maxAttempts: N }`. Full schema, precedence rules, formulas, and the `retryAfter` interaction live in the Workflow Service design § Retry Policy.
+
+### Retry policy
+
+Workflow authors compose two blocks: `on_error:` to route errors and `retry:` to configure how retries happen. Both are optional; the platform applies sensible defaults when omitted.
+
+```yaml
+spec:
+  defaults:
+    retry:
+      maxAttempts: 3
+      backoff: { strategy: exponential, initialDelay: PT1S, maxDelay: PT5M, multiplier: 2.0 }
+      jitter: full
+      respectRetryAfter: true
+  steps:
+    - id: scan
+      activity: custos.builtin/vuln-scan@2
+      connector: prod-registry
+      with: { image: ${{ inputs.image }} }
+      retry:
+        maxAttempts: 5                 # step-level override of spec.defaults.retry.maxAttempts
+      on_error:
+        - match: { codePrefix: "registry.rate_limited" }
+          do: retry
+          retry:                        # per-match override; only listed fields change
+            maxAttempts: 10
+            backoff: { strategy: exponential, initialDelay: PT5S, maxDelay: PT10M }
+        - match: { codePrefix: "registry." }
+          do: skip
+        - match: { class: "retryable" }
+          do: retry                     # uses the step-level retry policy unchanged
+          maxAttempts: 3                # shorthand for `retry: { maxAttempts: 3 }`
+```
+
+Implicit policy (when `on_error:` is omitted):
+
+| ARM envelope `class` | Action |
+|---|---|
+| `retryable` | `do: retry` using prevailing `retry:` |
+| `permanent` | `do: fail` |
+| `cancelled` | `do: fail` (never retried) |
+
+The full normative specification — precedence rules, backoff and jitter formulas, `retryAfter` interaction, where `retry:` may appear, and the publish-time validation rules Catalog enforces — lives in the Workflow Service design § Retry Policy.
 
 Equivalent template:
 
@@ -695,3 +739,4 @@ sequenceDiagram
 | 2026-05-18 | INCON-027 + INCON-028: Extended Workflow and Template Schema with `let`, `forEach` (+ `where:`), `on_error`, and the multi-connector `connectors:` map form, plus a step-form reference table and cross-component implications paragraph | #89, #90 |
 | 2026-05-18 | INCON-026: Aligned Domain Model on `Subscription` (was `Trigger`); the REST resource is still `/triggers` for ergonomic reasons. Added a naming-reconciliation note pointing at the Trigger Service data model as authoritative | #88 |
 | 2026-05-18 | INCON-018 + INCON-021: Step-execution sequence updated to "Workflow Service preflights, ARM consumes" pattern — WF calls `BindForStep(stepKey, slots[])` on Connector Service and passes the resulting named `ConnectorContexts` to ARM via `ScheduleActivity`; ARM no longer calls CS for the initial bind. ARM continues to mint the sidecar bootstrap token at sidecar start per the locked sidecar contract. Completion uses the native Dapr activity-task return path | #98, #101 |
+| 2026-05-21 | REQ-010 / TODO-002: Added Retry policy subsection to § Workflow and Template Schema (two-layer model: `on_error:` routes, `retry:` provides mechanics; `spec.defaults.retry:` for workflow-wide defaults; implicit policy table; pointer to Workflow Service design § Retry Policy as the normative spec). Added `retry:` row to the Step forms table and a retry-mechanics bullet to the cross-component implications list. Closes #52 | #52 |

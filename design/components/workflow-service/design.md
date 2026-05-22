@@ -2,8 +2,8 @@
 
 Slug: `workflow-service`
 Component ID: COMP-003
-Last Updated: 2026-05-18
-Version: 3
+Last Updated: 2026-05-21
+Version: 4
 Status: Draft
 
 ## Responsibility
@@ -141,7 +141,7 @@ sequenceDiagram
 
 Activity completion arrives via the **native Dapr activity-task return path** (ARM is invoked through Dapr Workflow's activity-task primitive; its return value is the result envelope). No `custos.activity.events` topic is used in v1. This is sufficient because the Workflow Service is the only consumer of activity completion. If a second consumer is ever required (e.g. an analytics pipeline reacting to activity completions), the design adds a parallel topic-based fan-out at that point; until then, the native return path is the source of truth.
 
-ARM does **not** retry on retryable failures — the ARM design § Retry Policy is authoritative. Workflow-level retry policy lives here, applied by the Step Coordinator using the per-step `retry` block from the workflow definition. Each retry attempt gets a fresh `(runId, stepId, attempt)` triple from the Idempotency Tracker; ARM uses this triple to deduplicate scheduling under Dapr replay.
+ARM does **not** retry on retryable failures — the ARM design § Retry Policy is authoritative on the ARM side. Workflow-level retry policy lives here: the full schema, precedence rules, and interaction with `on_error:` are specified in § Retry Policy below. Each retry attempt gets a fresh `(runId, stepId, attempt)` triple from the Idempotency Tracker; ARM uses this triple to deduplicate scheduling under Dapr replay.
 
 ### Operation: Step Resume on External Event (REQ-081)
 
@@ -410,6 +410,183 @@ Two layers:
    - Used as the Dapr activity task id, the ARM scheduling key, the Connector Service lease key, the audit-event correlation key, and the resume subscription dedup key.
    - Deterministic under Dapr replay: same `(runId, stepId, attempt)` re-derives on replay so all downstream services dedup correctly.
 
+## Retry Policy
+
+Workflow-level retry policy is owned by the Workflow Service Step Coordinator and is the **only** retry mechanism on Custos. ARM never retries internally (ARM design § Retry Policy). The schema below is the on-the-wire YAML contract; workflow authors write it, Catalog Service validates it at publish time, and the Step Coordinator applies it at runtime.
+
+### Two-layer model
+
+Retry policy splits into two orthogonal layers:
+
+| Layer | YAML surface | Responsibility |
+|---|---|---|
+| **Routing** | `on_error:` | Match the ARM error envelope (by `code` / `codePrefix` / `class`) and pick an action (`skip` / `retry` / `fail`). |
+| **Mechanics** | `retry:` | When the chosen action is `retry`, define **how**: total attempts, backoff curve, jitter, and `retryAfter` handling. |
+
+`on_error:` selects *which* errors retry. `retry:` defines *how* retries happen. A `do: retry` arm consumes the prevailing `retry:` policy.
+
+### Schema
+
+```yaml
+- id: scan
+  activity: custos.builtin/vuln-scan@2
+  connector: prod-registry
+  with: { image: ${{ item }} }
+
+  # Step-level retry policy. Applies to any do:retry that does not carry its own override.
+  retry:
+    maxAttempts: 5                 # total attempts including the first; integer >= 1
+    backoff:
+      strategy: exponential        # constant | linear | exponential
+      initialDelay: PT1S           # ISO-8601 duration; > 0
+      maxDelay: PT5M               # ISO-8601 duration; >= initialDelay
+      multiplier: 2.0              # exponential only; default 2.0; >= 1.0
+    jitter: full                   # none | full | equal | decorrelated; default full
+    respectRetryAfter: true        # honor envelope.retryAfter as a lower bound; default true
+
+  on_error:
+    - match: { codePrefix: "registry.rate_limited" }
+      do: retry
+      retry:                       # per-match override; only supplied fields are overridden
+        maxAttempts: 10
+        backoff: { strategy: exponential, initialDelay: PT5S, maxDelay: PT10M }
+    - match: { codePrefix: "registry." }
+      do: skip
+    - match: { class: "retryable" }
+      do: retry                    # uses the step-level retry policy unchanged
+      maxAttempts: 3               # shorthand: equivalent to `retry: { maxAttempts: 3 }`
+```
+
+Workflow-level defaults live under `spec.defaults.retry:` and apply to every activity step that does not declare its own:
+
+```yaml
+spec:
+  defaults:
+    retry:
+      maxAttempts: 4
+      backoff: { strategy: exponential, initialDelay: PT2S, maxDelay: PT2M }
+      jitter: equal
+  steps:
+    - id: scan
+      activity: custos.builtin/vuln-scan@2
+      # No step-level retry: defaults above apply when on_error selects do:retry.
+```
+
+### Precedence
+
+For any `do: retry` decision, the effective `retry:` policy is computed by overlaying (most-specific wins, field-by-field — partial overrides are supported):
+
+1. `on_error[i].retry` (per-match override) — wins on any field it specifies.
+2. `step.retry` — fills in fields not specified by (1).
+3. `spec.defaults.retry` — fills in fields not specified by (1) or (2).
+4. **Platform defaults** — fill in remaining fields:
+   - `maxAttempts: 3`
+   - `backoff: { strategy: exponential, initialDelay: PT1S, maxDelay: PT5M, multiplier: 2.0 }`
+   - `jitter: full`
+   - `respectRetryAfter: true`
+
+The inline `maxAttempts: N` shorthand on an `on_error[]` arm is treated as `retry: { maxAttempts: N }` at layer (1). If both are present on the same arm, `retry:` wins and the shorthand is reported as a redundant-field warning at publish time.
+
+### Implicit `on_error` policy
+
+When a step has **no** `on_error:` block, the Step Coordinator applies this implicit handler:
+
+- `class: retryable` → `do: retry` using the prevailing `retry:` policy.
+- `class: permanent` → `do: fail`.
+- `class: cancelled` → `do: fail` (never retried; cancellation is terminal by design).
+
+When a step **does** have an `on_error:` block, matches are evaluated in declaration order and the first match wins. A `class: cancelled` envelope is **never** matched by a `do: retry` arm even if the match clause would otherwise accept it — `cancelled` short-circuits to `fail` regardless. This rule prevents a misconfigured workflow from converting an operator-initiated cancellation into a retry loop.
+
+If no arm matches, the implicit policy above is the fallback.
+
+### Backoff formulas
+
+Let `n` = 1-indexed attempt number that just failed (so the delay precedes attempt `n + 1`). `D₀` = `initialDelay`. `Dmax` = `maxDelay`. `m` = `multiplier`. All values are in seconds before clamping.
+
+| `strategy` | Formula (pre-jitter, pre-clamp) |
+|---|---|
+| `constant` | `D = D₀` |
+| `linear` | `D = D₀ × n` |
+| `exponential` | `D = D₀ × m^(n − 1)` |
+
+Then clamp: `D = min(D, Dmax)`.
+
+### Jitter strategies
+
+Standard AWS Architecture Blog naming. `random(a, b)` is uniform on the half-open interval `[a, b)`.
+
+| `jitter` | Effective delay before next attempt |
+|---|---|
+| `none` | `D` |
+| `full` | `random(0, D)` |
+| `equal` | `D/2 + random(0, D/2)` |
+| `decorrelated` | `min(Dmax, random(D₀, prevDelay × 3))` where `prevDelay` is the previous attempt's effective delay (or `D₀` for the first retry) |
+
+### `retryAfter` interaction
+
+When the ARM error envelope carries a `retryAfter` field (ISO-8601 duration) and the prevailing `retry.respectRetryAfter` is `true` (default), the effective delay is:
+
+```
+effectiveDelay = max(jitteredBackoff, retryAfter)
+```
+
+Setting `respectRetryAfter: false` causes `retryAfter` to be logged but otherwise ignored. The envelope hint is **never** honored when `class: cancelled` or `class: permanent` (those classes don't retry).
+
+### Where `retry:` may appear
+
+| Location | Allowed | Notes |
+|---|---|---|
+| `activity:` step (top-level `retry:`) | ✅ | Default for any `do: retry` on this step. |
+| `on_error[].retry:` arm | ✅ | Per-match override. |
+| `spec.defaults.retry:` (workflow root) | ✅ | Workflow-wide default. |
+| `let:` step | ❌ | No I/O, never fails retryably. Catalog rejects with parse position. |
+| `if:`-only / guard step | ❌ | No execution to retry. Catalog rejects. |
+| `forEach:` step container | ❌ | The `retry:` belongs on the inner activity step; each iteration is its own attempt sequence. |
+| `wait:` / `waitFor:` / `approval:` | ❌ | Wait kinds have their own deadlines and timeout semantics (see § Approval-gate timeout); they do not participate in retry policy. |
+| `workflow:` (sub-workflow invocation) | ❌ | Retry the sub-workflow at the call site via the parent's `on_error:`, not via an inner `retry:` block — sub-workflows already own their own internal retry policies. |
+
+### Publish-time validation (enforced by Catalog Service)
+
+Catalog must reject the publish if any of the following hold; the error surfaces at workflow publish, never at `StartRun`:
+
+- `maxAttempts < 1` or non-integer.
+- `backoff.initialDelay <= 0` or not a valid ISO-8601 duration.
+- `backoff.maxDelay < backoff.initialDelay`.
+- `backoff.multiplier < 1.0` (when `strategy: exponential`).
+- `backoff.strategy` not in `{constant, linear, exponential}`.
+- `jitter` not in `{none, full, equal, decorrelated}`.
+- `retry:` on a disallowed step kind (table above).
+- `do: retry` on a `match: { class: "permanent" }` or `match: { class: "cancelled" }` arm.
+- An `on_error[]` arm carries both an inline `maxAttempts:` and an inner `retry: { maxAttempts: ... }` with conflicting values (the redundant-field warning above; conflict promotes to error).
+- An `on_error[]` arm with `do: skip` or `do: fail` carries a `retry:` block (mechanics without retry action is incoherent).
+
+### Runtime behavior
+
+The Step Coordinator's retry decision tree on receiving an ARM result envelope:
+
+```mermaid
+flowchart TD
+    A[Activity result envelope] --> B{class?}
+    B -->|cancelled| F[Step.status = cancelled — no retry]
+    B -->|permanent| G[Apply on_error match; default = fail]
+    B -->|retryable| C[Apply on_error match; default = do:retry]
+    C --> D{Match wins?}
+    D -->|do:skip| H[Step.status = skipped — output is null-equivalent]
+    D -->|do:fail| I[Step.status = failed]
+    D -->|do:retry| E{attempt < maxAttempts?}
+    E -->|yes| J[Schedule next attempt with effectiveDelay]
+    E -->|no| K[Step.status = failed — retries exhausted]
+```
+
+On every retry decision the Step Coordinator emits a `step.retry_scheduled` event into `custos.workflow.events` carrying `runId`, `stepId`, the previous attempt's envelope `code`/`class`, the chosen `do:` action, the effective delay, and the next attempt number. This makes retry behavior observable end-to-end without scraping logs.
+
+### Relationship to ARM (cross-component contract)
+
+- ARM **only** classifies the envelope (`class`) and surfaces `retryAfter` as a hint.
+- The Workflow Service **decides** whether to retry, when, and how many times.
+- The `(runId, stepId, attempt)` triple from the Idempotency Tracker is the shared scheduling key. ARM dedups on it; the Workflow Service increments `attempt` on every retry decision.
+- A `retryAfter` hint older than the prevailing maxDelay is clamped to `maxDelay` (the hint is a lower bound on the delay, not on the upper bound).
+
 ## Public Interface
 
 ### REST API (via API Gateway, COMP-001)
@@ -523,7 +700,7 @@ Delivery semantics: **at-least-once**. Producer-side dedup on `(runId, eventKind
 ## Open TODOs
 
 - [ ] TODO-001: Finalize canonical workflow event taxonomy (`workflow.*`, `run.*`, `step.*`) jointly with Trigger Service TS-TODO-001 (#18) and ARM TODO-009 (INCON-013 cross-link). Tracked under those existing issues; no separate WF issue. (added 2026-05-17)
-- [ ] TODO-002: Specify the retry-policy YAML schema for the `retry:` block on activity steps — max attempts, backoff curve (constant/linear/exponential), jitter strategy, per-error-class overrides (retryable vs. permanent). REQ-010. (added 2026-05-17, issue #52)
+- [x] TODO-002: Closed 2026-05-21 — `retry:` block schema specified in § Retry Policy below, with two-layer model (`on_error:` routes, `retry:` provides mechanics). Closes #52.
 - [x] TODO-003: Closed 2026-05-17 by Catalog Service design — `workflow:` accepts only fully-qualified `WorkflowVersion` references; template-with-inline-values is a two-step authoring flow (materialize → reference). Closes #53.
 
 ## Change History
@@ -533,3 +710,4 @@ Delivery semantics: **at-least-once**. Producer-side dedup on `(runId, eventKind
 | 2026-05-17 | Initial component design covering sub-modules, key operations (start/step/resume/sub-orchestration/cancel/replay), Dapr Workflow binding, expression evaluator scope, idempotency model, public interface (REST + internal RPC + Pub/Sub publications), data model, failure modes; resolves INCON-015 | #40 |
 | 2026-05-18 | INCON-018 + INCON-021: Step Coordinator is now the only caller of Connector Service `BindForStep(stepKey, slots[])`; renamed outbound RPC `Resolve` → `BindForStep`; `ScheduleActivity` signature changed from `connectorRefs` to pre-resolved named `connectorContexts` (the sidecar bootstrap token continues to be minted by ARM per the locked sidecar contract); clarified that activity completion uses the native Dapr activity-task return path (no `custos.activity.events` topic in v1) | #98, #101 |
 | 2026-05-18 | INCON-022: Clarified the CEL parse-error surface and AST storage location — Catalog is the sole syntactic gate at publish time; `WorkflowVersion.document` stores normalized CEL source strings (not a pre-built AST); WF's Definition Compiler at StartRun re-parses, type-checks, and caches the typed AST on `ExecutionGraph`; type errors fail StartRun, parse errors at this stage are a contract violation surfaced as compile errors | #100 |
+| 2026-05-21 | TODO-002 / REQ-010: Locked the retry-policy YAML schema — two-layer model where `on_error:` is the routing layer and `retry:` is the mechanics layer; defined per-step and per-match `retry:` blocks, workflow-level `spec.defaults.retry:`, platform defaults, precedence rules, backoff/jitter formulas, `retryAfter` interaction, and publish-time validation rules. Inline `maxAttempts: N` shorthand on `on_error[].do=retry` arms retained for ergonomics. Closes #52 | #52 |
