@@ -115,7 +115,7 @@ _LOGGER = logging.getLogger(__name__)
 DEFAULT_MAX_PUBLISH_RETRIES: Final[int] = 8
 
 
-PublishStage = Literal["parse", "schema", "normalize", "resolve", "cel"]
+PublishStage = Literal["parse", "schema", "placeholders", "normalize", "resolve", "cel"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,6 +303,7 @@ class DefinitionManager:
         workspace_id: str,
         principal_id: str,
         source: str | bytes,
+        derived_from_template_version_id: str | None = None,
     ) -> WorkflowVersionRef:
         """Publish a workflow document and return the new version ref.
 
@@ -322,6 +323,14 @@ class DefinitionManager:
         the same content) and otherwise retries with a freshly minted
         version up to ``max_publish_retries`` times.
 
+        Args:
+            workspace_id: Target workspace.
+            principal_id: Caller identity (audit only at v1).
+            source: Raw workflow body (JSON or YAML).
+            derived_from_template_version_id: Optional lineage link
+                set by :meth:`TemplateManager.materialize` (CS-IMPL-013).
+                Stored on the resulting :class:`WorkflowVersion`.
+
         Raises:
             PublishValidationError: If any pre-store stage fails. The
                 ``stage`` field tells which gate failed.
@@ -330,10 +339,12 @@ class DefinitionManager:
                 default and contention is steady-state-zero).
         """
         _LOGGER.info(
-            "publish_workflow start workspace=%s principal=%s source_bytes=%d",
+            "publish_workflow start workspace=%s principal=%s source_bytes=%d "
+            "derived_from_template_version_id=%s",
             workspace_id,
             principal_id,
             len(source) if isinstance(source, (bytes, str)) else -1,
+            derived_from_template_version_id or "<none>",
         )
 
         # 1. parse + 2. schema-validate
@@ -375,6 +386,7 @@ class DefinitionManager:
             workspace_id=workspace_id,
             workflow_name=workflow_name,
             resolved=resolved,
+            derived_from_template_version_id=derived_from_template_version_id,
         )
 
     # ------------------------------------------------------------------
@@ -682,6 +694,7 @@ class DefinitionManager:
         workspace_id: str,
         workflow_name: str,
         resolved: NormalizedWorkflow,
+        derived_from_template_version_id: str | None = None,
     ) -> WorkflowVersionRef:
         for attempt in range(self._max_publish_retries):
             version = await self._versioning.next_workflow_version(
@@ -694,6 +707,7 @@ class DefinitionManager:
                     WorkflowId(workflow_name),
                     str(version),
                     resolved.document,
+                    derived_from_template_version_id=derived_from_template_version_id,
                 )
             except ImmutableViolation:
                 # A concurrent publisher won the race. Two possibilities:
