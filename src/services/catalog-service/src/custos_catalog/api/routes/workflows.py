@@ -170,9 +170,7 @@ async def list_or_get_workflow(
             workflow_name=name,
             version=version,
         )
-        return _serialize_workflow_version(
-            row, workspace_id=ws, workflow_name=name
-        )
+        return _serialize_workflow_version(row, workspace_id=ws, workflow_name=name)
 
     from custos_spl.pagination import Cursor
 
@@ -184,9 +182,7 @@ async def list_or_get_workflow(
     )
     return WorkflowListResponse(
         items=[
-            _serialize_workflow_version(
-                row, workspace_id=ws, workflow_name=name_or_ref
-            )
+            _serialize_workflow_version(row, workspace_id=ws, workflow_name=name_or_ref)
             for row in page.items
         ],
         nextCursor=page.next_cursor.token if page.next_cursor else None,

@@ -40,9 +40,7 @@ def test_register_requires_write_permission(client: TestClient) -> None:
     resp = client.post(
         "/v1/catalog/connector-types",
         json={"manifest": minimal_connector_manifest()},
-        headers=callctx_header(
-            workspace_id="ws-1", permissions=["catalog:connector-types:read"]
-        ),
+        headers=callctx_header(workspace_id="ws-1", permissions=["catalog:connector-types:read"]),
     )
     assert resp.status_code == 403
 

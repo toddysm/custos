@@ -43,9 +43,7 @@ def test_publish_template_requires_write_permission(client: TestClient) -> None:
     resp = client.post(
         "/v1/workspaces/ws-1/templates",
         json={"definition": json.dumps(minimal_template())},
-        headers=callctx_header(
-            workspace_id="ws-1", permissions=["catalog:templates:read"]
-        ),
+        headers=callctx_header(workspace_id="ws-1", permissions=["catalog:templates:read"]),
     )
     assert resp.status_code == 403
 

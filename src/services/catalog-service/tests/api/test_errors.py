@@ -231,9 +231,7 @@ def test_workspace_mismatch_403_envelope(client: TestClient) -> None:
     resp = client.post(
         "/v1/workspaces/ws-1/workflows",
         json={"definition": json.dumps(minimal_workflow())},
-        headers=callctx_header(
-            workspace_id="ws-other", permissions=["catalog:workflows:write"]
-        ),
+        headers=callctx_header(workspace_id="ws-other", permissions=["catalog:workflows:write"]),
     )
     assert resp.status_code == 403
     _assert_envelope(resp.json(), "catalog.workspace_mismatch")

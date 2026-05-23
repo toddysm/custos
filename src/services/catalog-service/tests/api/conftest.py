@@ -161,9 +161,7 @@ class FakeDefinitionStore:
     ) -> None:
         self.workflow_deprecated[(str(workspace_id), str(workflow_id))] = deprecated
 
-    def _with_workflow_dep(
-        self, row: WorkflowVersion, key: tuple[str, str]
-    ) -> WorkflowVersion:
+    def _with_workflow_dep(self, row: WorkflowVersion, key: tuple[str, str]) -> WorkflowVersion:
         return WorkflowVersion(
             workspace_id=row.workspace_id,
             workflow_id=row.workflow_id,

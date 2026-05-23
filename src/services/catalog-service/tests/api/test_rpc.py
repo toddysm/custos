@@ -72,9 +72,7 @@ def test_rpc_get_workflow_version_requires_permission(
 def test_rpc_get_workflow_version_400_on_malformed_id(client: TestClient) -> None:
     resp = client.get(
         "/rpc/v1/workflow-versions/no-slash",
-        headers=callctx_header(
-            workspace_id="ws-1", permissions=["catalog:rpc:read"]
-        ),
+        headers=callctx_header(workspace_id="ws-1", permissions=["catalog:rpc:read"]),
     )
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "catalog.workflow_version_id_invalid"
@@ -83,9 +81,7 @@ def test_rpc_get_workflow_version_400_on_malformed_id(client: TestClient) -> Non
 def test_rpc_get_workflow_version_404_when_missing(client: TestClient) -> None:
     resp = client.get(
         "/rpc/v1/workflow-versions/ws-1/missing@1",
-        headers=callctx_header(
-            workspace_id="ws-1", permissions=["catalog:rpc:read"]
-        ),
+        headers=callctx_header(workspace_id="ws-1", permissions=["catalog:rpc:read"]),
     )
     assert resp.status_code == 404
 
@@ -122,9 +118,7 @@ def test_rpc_resolve_connector_type_returns_row(
 def test_rpc_resolve_connector_type_400_on_malformed(client: TestClient) -> None:
     resp = client.get(
         "/rpc/v1/connector-types/bogus",
-        headers=callctx_header(
-            workspace_id="ws-1", permissions=["catalog:rpc:read"]
-        ),
+        headers=callctx_header(workspace_id="ws-1", permissions=["catalog:rpc:read"]),
     )
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "catalog.connector_type_ref_invalid"
@@ -133,9 +127,7 @@ def test_rpc_resolve_connector_type_400_on_malformed(client: TestClient) -> None
 def test_rpc_resolve_connector_type_404_when_missing(client: TestClient) -> None:
     resp = client.get(
         "/rpc/v1/connector-types/missing@1.0.0",
-        headers=callctx_header(
-            workspace_id="ws-1", permissions=["catalog:rpc:read"]
-        ),
+        headers=callctx_header(workspace_id="ws-1", permissions=["catalog:rpc:read"]),
     )
     assert resp.status_code == 404
     assert resp.json()["error"]["code"] == "catalog.connector_type_not_found"
