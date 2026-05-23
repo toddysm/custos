@@ -320,7 +320,7 @@ Each public call opens exactly one span on the
 
 | Span name | Standard attributes | When the span status is ERROR |
 |---|---|---|
-| `custos_cel.parse` | `custos_cel.source_length` (input bytes); `custos_cel.node_count` (output AST size, on success). | A `ParseError` propagated out. |
+| `custos_cel.parse` | `custos_cel.source_length` (input characters); `custos_cel.node_count` (output AST size, on success). | A `ParseError` propagated out. |
 | `custos_cel.type_check` | `custos_cel.node_count` (input AST size). | A `TypeError` or `UnboundNameError` propagated out. |
 | `custos_cel.evaluate` | `custos_cel.node_count` (input AST size); `custos_cel.timeout_ms` (resolved budget — `timeout_ms` arg if supplied, else `WF_EXPR_TIMEOUT_MS`, else `DEFAULT_TIMEOUT_MS`). | A `TimeoutError`, `EvaluationError`, or `UnboundNameError` propagated out. |
 
