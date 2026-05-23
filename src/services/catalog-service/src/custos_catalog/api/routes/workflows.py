@@ -9,9 +9,8 @@ Per design § Public Interface, the workflow surface is six routes:
 * POST   ``/v1/workspaces/{ws}/workflows/{name}@{version}:deprecate``.
 * POST   ``/v1/workspaces/{ws}/workflows/{workflowVersionId}:extractTemplate``.
 
-The ``{name}@{version}`` and ``{workflowVersionId}`` shapes are passed
-through :func:`_parse_ref` which accepts either the dotted or the
-at-sign separator and validates the integer version.
+The ``{name}@{version}`` shape is passed through :func:`_parse_ref`,
+which accepts the at-sign separator and validates the integer version.
 """
 
 from __future__ import annotations
