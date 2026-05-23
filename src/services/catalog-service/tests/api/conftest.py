@@ -495,8 +495,8 @@ def providers(stores: tuple[FakeDefinitionStore, FakeCatalogStore]) -> Providers
     """Build a :class:`Providers` bundle from the in-memory stores."""
     definition_store, catalog_store = stores
     return Providers(
-        definition_store=definition_store,  # type: ignore[arg-type]
-        catalog_store=catalog_store,  # type: ignore[arg-type]
+        definition_store=definition_store,  # type: ignore[arg-type, unused-ignore]
+        catalog_store=catalog_store,  # type: ignore[arg-type, unused-ignore]
     )
 
 

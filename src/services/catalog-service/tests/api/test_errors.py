@@ -27,7 +27,7 @@ from tests.api.conftest import (
 def _assert_envelope(payload: dict[str, Any], code: str) -> dict[str, Any]:
     """Assert ``payload`` matches ``{"error": {"code", "detail", "issues"?}}``."""
     assert "error" in payload, payload
-    err = payload["error"]
+    err: dict[str, Any] = payload["error"]
     assert err["code"] == code, err
     assert isinstance(err["detail"], str)
     return err

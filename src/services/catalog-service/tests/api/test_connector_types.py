@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 from fastapi.testclient import TestClient
 
 from tests.api.conftest import (
@@ -21,7 +23,7 @@ def _register(client: TestClient, **overrides: str) -> dict[str, str]:
         headers=admin_header(),
     )
     assert resp.status_code == 201, resp.text
-    return resp.json()
+    return cast(dict[str, str], resp.json())
 
 
 # ---------------------------------------------------------------------------
