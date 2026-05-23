@@ -278,3 +278,52 @@ def test_parse_rejects_method_call_syntax() -> None:
     # has a typed signal to reject the expression.
     with pytest.raises(CelConvertError, match="method-call syntax"):
         custos_cel.parse('"abc".size()')
+
+
+# ---------------------------------------------------------------------------
+# Celpy parser-level smoke
+# ---------------------------------------------------------------------------
+#
+# These exercise the underlying ``celpy`` parser directly, without going
+# through the ``custos_cel`` converter. They're the proof-of-life smoke
+# from WF-IMPL-002 and continue to assert that the parser dependency
+# itself behaves as expected on the canonical inputs Catalog Service
+# uses at publish time (per change record bundle-h, 2026-05-18-003).
+
+
+def _celpy_compile(source: str) -> object:
+    import celpy
+
+    env = celpy.Environment()
+    return env.compile(source)
+
+
+def test_celpy_imports_and_parses_trivial_expression() -> None:
+    ast = _celpy_compile("1 + 1")
+    assert ast is not None
+
+
+def test_celpy_parses_indexed_step_outputs_expression() -> None:
+    # Bracket form is required when a step id contains a hyphen because
+    # CEL identifiers are ``[A-Za-z_][A-Za-z0-9_]*`` (a hyphen would
+    # otherwise be parsed as subtraction). This is the form the workflow
+    # compiler emits whenever a step id is not a bare identifier.
+    source = 'steps["scan"].outputs.critical + steps["scan-alt"].outputs.critical'
+    ast = _celpy_compile(source)
+    assert ast is not None
+
+
+def test_celpy_rejects_obviously_malformed_expression() -> None:
+    from celpy.celparser import CELParseError
+
+    with pytest.raises(CELParseError):
+        _celpy_compile("1 +")
+
+
+def test_celpy_parses_unbound_identifier_without_evaluation() -> None:
+    # Parse-only: unbound identifiers are a type-check / evaluation
+    # concern, not a parse concern. This is precisely the property
+    # Catalog relies on to do publish-time syntactic validation without
+    # a binding scope.
+    ast = _celpy_compile("does_not_exist + 1")
+    assert ast is not None

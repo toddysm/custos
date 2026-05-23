@@ -35,7 +35,7 @@ First sub-module under construction: **Expression Evaluator** (ADR-011), package
 
 ### Phase F — Verification
 
-- [ ] WF-IMPL-009: Unit test suite — bindings, failure modes, sandbox negatives (issue #184; depends on #183)
+- [x] WF-IMPL-009: Unit test suite — bindings, failure modes, sandbox negatives (issue #184; depends on #183). Closed 2026-05-22 — tests reorganised by area to match the issue's canonical layout (`test_parser.py`, `test_ast.py`, `test_scope.py`, `test_types.py`, `test_eval.py`, `test_timeout.py`, `test_errors.py`, `test_public_api.py`; plus `test_clock.py` and `test_eval_branches.py` for adjacent areas). Each of the eight host names in the sandbox-negative list (`os`, `sys`, `subprocess`, `socket`, `open`, `__import__`, `eval`, `exec`) is asserted explicitly at the `BindingScope.resolve()` layer (not just via the type checker). Each `kind` in the locked error taxonomy has at least one test in `test_errors.py`. Each binding kind (`inputs.*`, `steps.<id>.outputs.*`, `run.*`, `workflow.*`, `now()`, `let.*`) has at least one end-to-end test in `test_eval.py`. Determinism: two `evaluate()` calls under the same `FixedClock` produce byte-equal output. CI matrix runs on Python 3.11 and 3.12 under a `--cov=custos_cel --cov-fail-under=90` gate. Local coverage: 95% total, 100% on `__init__.py`, `errors.py`, `eval.py`, `clock.py`; 471 tests pass.
 - [ ] WF-IMPL-010: Property-based replay-determinism tests (Hypothesis) (issue #185; depends on #183; parallel with #184)
 
 ### Phase G — Observability & docs
