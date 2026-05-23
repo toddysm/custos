@@ -86,6 +86,75 @@ def test_rpc_get_workflow_version_404_when_missing(client: TestClient) -> None:
     assert resp.status_code == 404
 
 
+def test_rpc_get_workflow_version_rejects_cross_workspace_without_explicit_permission(
+    client: TestClient,
+    stores: tuple[FakeDefinitionStore, FakeCatalogStore],
+) -> None:
+    """``catalog:rpc:read`` alone does not allow crossing the tenant boundary.
+
+    A caller whose context lives in ``ws-2`` cannot resolve a workflow
+    that belongs to ``ws-1`` just by crafting the id; the gateway must
+    additionally grant ``catalog:rpc:cross-workspace-read``.
+    """
+    _, catalog_store = stores
+    seed_builtin_echo(catalog_store)
+    client.post(
+        "/v1/workspaces/ws-1/workflows",
+        json={"definition": json.dumps(minimal_workflow())},
+        headers=admin_header(),
+    )
+
+    resp = client.get(
+        "/rpc/v1/workflow-versions/ws-1/orders@1",
+        headers=callctx_header(
+            workspace_id="ws-2",
+            principal_id="rogue-rpc-caller",
+            permissions=["catalog:rpc:read"],
+        ),
+    )
+    assert resp.status_code == 403
+    body = resp.json()
+    assert body["error"]["code"] == "catalog.workspace_mismatch"
+    assert "catalog:rpc:cross-workspace-read" in body["error"]["detail"]
+
+
+def test_rpc_get_workflow_version_allows_cross_workspace_with_explicit_permission(
+    client: TestClient,
+    stores: tuple[FakeDefinitionStore, FakeCatalogStore],
+) -> None:
+    """Internal services with the cross-workspace grant can still fan out.
+
+    The workflow runtime and activity dispatcher both operate under a
+    system workspace while reading tenant workflows; the gateway
+    issues them ``catalog:rpc:cross-workspace-read`` to authorise this
+    explicitly.
+    """
+    _, catalog_store = stores
+    seed_builtin_echo(catalog_store)
+    client.post(
+        "/v1/workspaces/ws-1/workflows",
+        json={"definition": json.dumps(minimal_workflow())},
+        headers=admin_header(),
+    )
+
+    resp = client.get(
+        "/rpc/v1/workflow-versions/ws-1/orders@1",
+        headers=callctx_header(
+            workspace_id="ws-system",
+            principal_id="workflow-runtime",
+            permissions=[
+                "catalog:rpc:read",
+                "catalog:rpc:cross-workspace-read",
+            ],
+        ),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["workspaceId"] == "ws-1"
+    assert body["workflowName"] == "orders"
+    assert body["version"] == 1
+
+
 # ---------------------------------------------------------------------------
 # GET /rpc/v1/connector-types/{ref}
 # ---------------------------------------------------------------------------

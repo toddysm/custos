@@ -12,9 +12,25 @@ Routes:
 * ``GET /rpc/v1/workflow-versions/{workflowVersionId}`` — full row.
 * ``GET /rpc/v1/connector-types/{type}@{version}`` — resolve a ref.
 
-Auth: same call-context middleware as the REST routes. The internal
-gateway issues a context carrying ``catalog:rpc:read`` (and the
-component's identity) which authorises both endpoints.
+Auth model:
+
+  The internal gateway issues a context carrying ``catalog:rpc:read``
+  (and the component's identity). That permission alone authorises
+  **same-workspace** internal reads — i.e. the call-context's
+  ``workspace_id`` must match the ``<workspaceId>`` embedded in the
+  workflow-version id. Cross-workspace internal reads (the workflow
+  runtime resolving a tenant workflow while running under a system
+  workspace, the activity dispatcher fanning out across tenants)
+  additionally require ``catalog:rpc:cross-workspace-read``. The
+  permission catalog distinguishes these two grants so the gateway
+  can issue least-privilege RPC contexts: a workflow runtime that
+  only needs to resolve workflows inside its own workspace never
+  receives the cross-workspace grant, and a principal that somehow
+  acquires ``catalog:rpc:read`` cannot use the id-shaped path to
+  escape its workspace.
+
+  Connector-type refs are global (not workspace-scoped), so
+  ``rpc_resolve_connector_type`` only requires ``catalog:rpc:read``.
 """
 
 from __future__ import annotations
@@ -34,12 +50,19 @@ from custos_catalog.api.models import (
 )
 from custos_catalog.managers.connector_registry import ConnectorTypeRegistry
 from custos_catalog.managers.definition import DefinitionManager
-from custos_catalog.middleware.callctx import CallContext
+from custos_catalog.middleware.callctx import CallContext, CallContextError
 
 router = APIRouter()
 
 _WORKFLOW_ID_RE = re.compile(r"^(?P<ws>[^/]+)/(?P<name>[^@/]+)@(?P<version>[0-9]+)$")
 _CT_REF_RE = re.compile(r"^(?P<type>[^@/]+)@(?P<version>[^@/]+)$")
+
+#: Permission required to read a workflow version belonging to a
+#: workspace other than the call-context's own. Granted by the gateway
+#: to internal services that legitimately fan out across tenants
+#: (workflow runtime, activity dispatcher) and withheld from everyone
+#: else — ``catalog:rpc:read`` alone is not enough.
+CROSS_WORKSPACE_RPC_READ = "catalog:rpc:cross-workspace-read"
 
 
 @router.get(
@@ -56,13 +79,22 @@ async def rpc_get_workflow_version(
             "``<workspaceId>/<workflowName>@<version>``."
         ),
     ),
-    _ctx: CallContext = Depends(require_permission_only("catalog:rpc:read")),
+    ctx: CallContext = Depends(require_permission_only("catalog:rpc:read")),
     manager: DefinitionManager = Depends(get_definition_manager),
 ) -> WorkflowVersionBody:
     """Resolve a ``WorkflowVersionId`` to its full row.
 
     Implements design ``GetWorkflowVersion`` (component sequence
     diagrams "Run Workflow" and "Activity Inputs Resolution").
+
+    Tenant boundary: ``catalog:rpc:read`` alone authorises
+    **same-workspace** reads. If the workspace embedded in the id
+    differs from ``ctx.workspace_id`` the caller must additionally
+    carry :data:`CROSS_WORKSPACE_RPC_READ`; otherwise the handler
+    rejects with the standard 403 ``catalog.workspace_mismatch``
+    envelope. The cross-workspace grant is the gateway's explicit
+    signal that a system principal (workflow runtime, activity
+    dispatcher) is fanning out across tenants by design.
     """
     match = _WORKFLOW_ID_RE.match(workflow_version_id)
     if match is None:
@@ -81,6 +113,24 @@ async def rpc_get_workflow_version(
     workspace_id = match.group("ws")
     name = match.group("name")
     version = int(match.group("version"))
+    # Tenant boundary enforcement: ``require_permission_only`` only
+    # asserts ``catalog:rpc:read``; it does not constrain *which*
+    # workspace the caller may read. Without this check, any internal
+    # principal with rpc:read could craft an id pointing at another
+    # workspace and cross the tenant boundary. Cross-workspace reads
+    # require a separate explicit grant.
+    if ctx.workspace_id != workspace_id and not ctx.has_permission(
+        CROSS_WORKSPACE_RPC_READ,
+    ):
+        raise CallContextError(
+            403,
+            "catalog.workspace_mismatch",
+            (
+                f"call context workspace {ctx.workspace_id!r} does not match "
+                f"workflow version id workspace {workspace_id!r}; "
+                f"cross-workspace reads require {CROSS_WORKSPACE_RPC_READ!r}"
+            ),
+        )
     row = await manager.get_workflow_version_by_ref(
         workspace_id=workspace_id,
         workflow_name=name,
@@ -138,4 +188,4 @@ async def rpc_resolve_connector_type(
     )
 
 
-__all__ = ["router"]
+__all__ = ["CROSS_WORKSPACE_RPC_READ", "router"]
