@@ -53,9 +53,10 @@ follow-up because the SPL does not yet expose them:
   REST endpoint depending on it for v1.
 * ``get_workflow_version_by_id(workflow_version_id)`` — UUID-keyed
   fetch. The SPL's :class:`WorkflowVersion` has no UUID field, so the
-  ``GET /v1/workflows/{workflowVersionId}`` endpoint has no backing
-  storage operation at v1. The REST endpoint is documented but its
-  implementation is deferred until SPL surfaces a UUID lookup.
+  workspaceless ``GET /v1/workflows/{workspaceId}/{workflowName}@{version}``
+  REST route uses the triple wire form (delegates to
+  ``get_workflow_version_by_ref`` under the hood). The bare
+  UUID PK is reserved for a future SPL evolution.
 
 Both deferrals are documented in the PR body that lands this change.
 """

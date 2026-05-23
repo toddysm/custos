@@ -50,15 +50,22 @@ from typing import Any, Final
 #: inside and around the ``${{ ... }}``). The captured group is the
 #: placeholder name. We deliberately do not anchor with ``\A`` /
 #: ``\Z`` since :meth:`re.Pattern.fullmatch` already enforces that.
+#:
+#: All ``*`` quantifiers are **possessive** (``*+``, Python 3.11+) so
+#: the matcher cannot backtrack on whitespace runs even though each
+#: ``\s*`` is already bounded by a non-whitespace literal in this
+#: grammar. This sidesteps polynomial-regex DoS detectors and keeps
+#: the matcher provably linear in input length.
 _WHOLE_STRING_TOKEN: Final[re.Pattern[str]] = re.compile(
-    r"\s*\$\{\{\s*placeholders\.([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}\s*",
+    r"\s*+\$\{\{\s*+placeholders\.([a-zA-Z][a-zA-Z0-9_]*+)\s*+\}\}\s*+",
 )
 
 #: Embedded token: matches any ``${{ placeholders.<name> }}`` reference
 #: anywhere in a string. Used only to detect (and reject) compound
 #: expressions; the materializer never substitutes embedded tokens.
+#: Same possessive-quantifier rationale as :data:`_WHOLE_STRING_TOKEN`.
 _EMBEDDED_TOKEN: Final[re.Pattern[str]] = re.compile(
-    r"\$\{\{\s*placeholders\.([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}",
+    r"\$\{\{\s*+placeholders\.([a-zA-Z][a-zA-Z0-9_]*+)\s*+\}\}",
 )
 
 

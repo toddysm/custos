@@ -21,6 +21,11 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
+from custos_catalog.api import (
+    all_routers,
+    register_exception_handlers,
+    rpc_router,
+)
 from custos_catalog.health import router as health_router
 from custos_catalog.middleware import (
     CallContextError,
@@ -112,4 +117,8 @@ def create_app(
     app.add_exception_handler(CallContextError, call_context_error_handler)
 
     app.include_router(health_router)
+    for r in all_routers:
+        app.include_router(r)
+    app.include_router(rpc_router)
+    register_exception_handlers(app)
     return app
