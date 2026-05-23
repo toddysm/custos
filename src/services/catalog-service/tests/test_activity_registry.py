@@ -500,6 +500,41 @@ async def test_register_rejects_bad_type_token() -> None:
     assert "/metadata/type" in paths
 
 
+async def test_register_rejects_non_string_metadata_namespace() -> None:
+    """A present-but-non-string ``metadata.namespace`` must be flagged so it
+    never reaches the store or namespace-tier classifier as a non-str."""
+    store = FakeCatalogStore()
+    registry = _make_registry(store)
+    bad = _manifest(namespace=WS)
+    bad["metadata"]["namespace"] = 42
+    with pytest.raises(ActivityManifestError) as exc:
+        await registry.register(workspace_id=WS, principal_id=USER, manifest=bad)
+    issues = {(issue.path, issue.code) for issue in exc.value.issues}
+    assert ("/metadata/namespace", "type") in issues
+
+
+async def test_register_rejects_non_string_metadata_type() -> None:
+    store = FakeCatalogStore()
+    registry = _make_registry(store)
+    bad = _manifest(namespace=WS)
+    bad["metadata"]["type"] = True
+    with pytest.raises(ActivityManifestError) as exc:
+        await registry.register(workspace_id=WS, principal_id=USER, manifest=bad)
+    issues = {(issue.path, issue.code) for issue in exc.value.issues}
+    assert ("/metadata/type", "type") in issues
+
+
+async def test_register_rejects_non_string_metadata_version() -> None:
+    store = FakeCatalogStore()
+    registry = _make_registry(store)
+    bad = _manifest(namespace=WS)
+    bad["metadata"]["version"] = 1
+    with pytest.raises(ActivityManifestError) as exc:
+        await registry.register(workspace_id=WS, principal_id=USER, manifest=bad)
+    issues = {(issue.path, issue.code) for issue in exc.value.issues}
+    assert ("/metadata/version", "type") in issues
+
+
 # ---------------------------------------------------------------------------
 # Digest conflict
 # ---------------------------------------------------------------------------

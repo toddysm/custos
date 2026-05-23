@@ -665,38 +665,67 @@ def _validate_envelope(manifest: Mapping[str, Any]) -> list[ActivityManifestIssu
                 ),
             )
 
-    namespace = metadata.get("namespace")
-    if isinstance(namespace, str) and not _TOKEN_RE.match(namespace):
-        issues.append(
-            ActivityManifestIssue(
-                path="/metadata/namespace",
-                code="format",
-                message=f"namespace {namespace!r} does not match token grammar",
-            ),
-        )
-
-    type_ = metadata.get("type")
-    if isinstance(type_, str) and not _TOKEN_RE.match(type_):
-        issues.append(
-            ActivityManifestIssue(
-                path="/metadata/type",
-                code="format",
-                message=f"type {type_!r} does not match token grammar",
-            ),
-        )
-
-    version = metadata.get("version")
-    if isinstance(version, str) and not _EXACT_VERSION_RE.match(version):
-        issues.append(
-            ActivityManifestIssue(
-                path="/metadata/version",
-                code="format",
-                message=(
-                    f"version {version!r} is not MAJOR.MINOR.PATCH "
-                    "(short forms forbidden at publish)"
+    if "namespace" in metadata:
+        namespace = metadata["namespace"]
+        if not isinstance(namespace, str):
+            issues.append(
+                ActivityManifestIssue(
+                    path="/metadata/namespace",
+                    code="type",
+                    message=(
+                        f"metadata.namespace must be a string, got {type(namespace).__name__}"
+                    ),
                 ),
-            ),
-        )
+            )
+        elif not _TOKEN_RE.match(namespace):
+            issues.append(
+                ActivityManifestIssue(
+                    path="/metadata/namespace",
+                    code="format",
+                    message=f"namespace {namespace!r} does not match token grammar",
+                ),
+            )
+
+    if "type" in metadata:
+        type_ = metadata["type"]
+        if not isinstance(type_, str):
+            issues.append(
+                ActivityManifestIssue(
+                    path="/metadata/type",
+                    code="type",
+                    message=(f"metadata.type must be a string, got {type(type_).__name__}"),
+                ),
+            )
+        elif not _TOKEN_RE.match(type_):
+            issues.append(
+                ActivityManifestIssue(
+                    path="/metadata/type",
+                    code="format",
+                    message=f"type {type_!r} does not match token grammar",
+                ),
+            )
+
+    if "version" in metadata:
+        version = metadata["version"]
+        if not isinstance(version, str):
+            issues.append(
+                ActivityManifestIssue(
+                    path="/metadata/version",
+                    code="type",
+                    message=(f"metadata.version must be a string, got {type(version).__name__}"),
+                ),
+            )
+        elif not _EXACT_VERSION_RE.match(version):
+            issues.append(
+                ActivityManifestIssue(
+                    path="/metadata/version",
+                    code="format",
+                    message=(
+                        f"version {version!r} is not MAJOR.MINOR.PATCH "
+                        "(short forms forbidden at publish)"
+                    ),
+                ),
+            )
 
     return issues
 

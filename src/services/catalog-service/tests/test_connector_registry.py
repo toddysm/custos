@@ -315,6 +315,30 @@ async def test_register_rejects_bad_type_token() -> None:
     assert "/metadata/type" in paths
 
 
+async def test_register_rejects_non_string_metadata_type() -> None:
+    """A present-but-non-string ``metadata.type`` must be flagged so it never
+    reaches the store as a non-str value (or sneaks into error messages)."""
+    store = FakeCatalogStore()
+    registry = _make_registry(store)
+    bad = _manifest()
+    bad["metadata"]["type"] = 123
+    with pytest.raises(ConnectorManifestError) as exc:
+        await registry.register(principal_id=PRINCIPAL, manifest=bad)
+    issues = {(issue.path, issue.code) for issue in exc.value.issues}
+    assert ("/metadata/type", "type") in issues
+
+
+async def test_register_rejects_non_string_metadata_version() -> None:
+    store = FakeCatalogStore()
+    registry = _make_registry(store)
+    bad = _manifest()
+    bad["metadata"]["version"] = 2
+    with pytest.raises(ConnectorManifestError) as exc:
+        await registry.register(principal_id=PRINCIPAL, manifest=bad)
+    issues = {(issue.path, issue.code) for issue in exc.value.issues}
+    assert ("/metadata/version", "type") in issues
+
+
 async def test_register_rejects_event_token_in_capabilities() -> None:
     """Per design § Capabilities and Events, event.* tokens must live in
     events.* not in capabilities."""

@@ -417,28 +417,46 @@ def _validate_envelope(manifest: Mapping[str, Any]) -> list[ConnectorManifestIss
                 ),
             )
 
-    type_ = metadata.get("type")
-    if isinstance(type_, str) and not _TOKEN_RE.match(type_):
-        issues.append(
-            ConnectorManifestIssue(
-                path="/metadata/type",
-                code="format",
-                message=f"type {type_!r} does not match token grammar",
-            ),
-        )
-
-    version = metadata.get("version")
-    if isinstance(version, str) and not _EXACT_VERSION_RE.match(version):
-        issues.append(
-            ConnectorManifestIssue(
-                path="/metadata/version",
-                code="format",
-                message=(
-                    f"version {version!r} is not MAJOR.MINOR.PATCH "
-                    "(short forms forbidden at publish)"
+    if "type" in metadata:
+        type_ = metadata["type"]
+        if not isinstance(type_, str):
+            issues.append(
+                ConnectorManifestIssue(
+                    path="/metadata/type",
+                    code="type",
+                    message=(f"metadata.type must be a string, got {type(type_).__name__}"),
                 ),
-            ),
-        )
+            )
+        elif not _TOKEN_RE.match(type_):
+            issues.append(
+                ConnectorManifestIssue(
+                    path="/metadata/type",
+                    code="format",
+                    message=f"type {type_!r} does not match token grammar",
+                ),
+            )
+
+    if "version" in metadata:
+        version = metadata["version"]
+        if not isinstance(version, str):
+            issues.append(
+                ConnectorManifestIssue(
+                    path="/metadata/version",
+                    code="type",
+                    message=(f"metadata.version must be a string, got {type(version).__name__}"),
+                ),
+            )
+        elif not _EXACT_VERSION_RE.match(version):
+            issues.append(
+                ConnectorManifestIssue(
+                    path="/metadata/version",
+                    code="format",
+                    message=(
+                        f"version {version!r} is not MAJOR.MINOR.PATCH "
+                        "(short forms forbidden at publish)"
+                    ),
+                ),
+            )
 
     # ---- spec-level lightweight checks ----------------------------------
     if "spec" not in manifest:
