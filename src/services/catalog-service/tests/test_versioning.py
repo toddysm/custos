@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from custos_spl.errors import ImmutableViolation
@@ -36,6 +36,8 @@ class FakeDefinitionStore:
     of ``WorkflowVersion`` / ``WorkflowTemplateVersion`` rows, sorted
     newest first like the real adapter.
     """
+
+    SCHEMA_REVISION: ClassVar[int] = 1
 
     workflows: dict[tuple[WorkspaceId, WorkflowId], list[WorkflowVersion]] = field(
         default_factory=dict,
