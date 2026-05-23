@@ -45,11 +45,13 @@ from custos_spl.errors import ImmutableViolation, SPLError
 from custos_spl.ids import WorkflowId, WorkflowTemplateId, WorkspaceId
 from custos_spl.interfaces.definition_store import DefinitionStoreProvider
 
-# A version string is the decimal representation of a positive integer.
+# A version string is the canonical decimal representation of a
+# positive integer.
 # We tolerate (but ignore) any rows whose ``version`` does not match —
-# real adapters only mint integer strings, and a hypothetical legacy
-# row with a non-integer version should not block the next mint.
-_VERSION_RE = re.compile(r"^[0-9]+$")
+# real adapters only mint canonical integer strings, and a hypothetical
+# legacy row with a non-canonical or non-integer version should not
+# block the next mint.
+_VERSION_RE = re.compile(r"^[1-9][0-9]*$")
 
 # When listing existing versions to discover the max, paginate in
 # 100-row chunks. Most workflows have a handful of versions; the
