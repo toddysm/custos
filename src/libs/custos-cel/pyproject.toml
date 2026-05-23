@@ -36,6 +36,11 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.4",
     "mypy>=1.10",
+    # Property-based tests live in ``tests/test_determinism_property.py``
+    # (WF-IMPL-010, #185). The suite uses Hypothesis to generate
+    # well-typed CEL expressions and assert replay-determinism
+    # properties across at least 1000 examples.
+    "hypothesis>=6.100",
 ]
 
 [project.urls]
