@@ -5,7 +5,7 @@ Per design § Public Interface, the workflow surface is six routes:
 * POST   ``/v1/workspaces/{ws}/workflows`` — publish.
 * GET    ``/v1/workspaces/{ws}/workflows/{name}`` — list versions.
 * GET    ``/v1/workspaces/{ws}/workflows/{name}@{version}`` — get-by-ref.
-* GET    ``/v1/workflows/{workflowVersionId}`` — get-by-id (workspace-less).
+* GET    ``/v1/workflows/{workspaceId}/{workflowName}@{version}`` — get-by-id (workspace-less).
 * POST   ``/v1/workspaces/{ws}/workflows/{name}@{version}:deprecate``.
 * POST   ``/v1/workspaces/{ws}/workflows/{name}@{version}:extractTemplate``.
 

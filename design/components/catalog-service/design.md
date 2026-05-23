@@ -240,7 +240,7 @@ A `workflow:` step kind references **a fully-qualified `workflowVersionId`** —
 
 **Rules locked in this design**:
 
-1. The `workflow:` step kind invokes a specific `WorkflowVersion`. The reference form is the immutable `workflowVersionId` produced at publish time (or, equivalently, a `<workspace>/<name>@<version>` triple that resolves uniquely to one `workflowVersionId`).
+1. The `workflow:` step kind invokes a specific `WorkflowVersion`. The reference form on the wire (the v1 contract) is the colon-free triple `<workspaceId>/<workflowName>@<version>`, which resolves uniquely to one immutable `WorkflowVersion` row. The persistent model still has a `workflowVersionId` UUID PK (see ER diagram), but it is not exposed on the wire at v1 — a future evolution may surface it directly, at which point both forms could be accepted equivalently.
 2. A user wanting to invoke "a template with these placeholder values" performs that as **two steps at the authoring layer**: (a) materialize the template into a concrete `WorkflowVersion` (one-time, persistent, REQ-025); (b) reference the resulting `workflowVersionId` from the calling workflow's `workflow:` step.
 3. Catalog validates at workflow publish time that the referenced `workflowVersionId` exists, is not deprecated, and is reachable in the same workspace (or in an explicitly cross-workspace-allowed namespace; cross-workspace policy itself is deferred to M3 RBAC).
 4. There is no inline-placeholder invocation path. This keeps the runtime model simple: a sub-workflow is just another workflow run with its own immutable definition, identical to a top-level run except for the parent linkage.
@@ -364,9 +364,9 @@ Both providers are abstractions per REQ-048; the OCI registry adapter for `Defin
 | POST | `/v1/workspaces/{ws}/workflows` | `{ definition }` (YAML or JSON) | `WorkflowVersionRef` (201) | Publish a new workflow version. |
 | GET | `/v1/workspaces/{ws}/workflows/{name}` | — | `Workflow + [WorkflowVersionRef]` | List versions of a workflow. |
 | GET | `/v1/workspaces/{ws}/workflows/{name}@{version}` | — | `WorkflowVersion` | Fetch a specific version. |
-| GET | `/v1/workflows/{workflowVersionId}` | — | `WorkflowVersion` | Fetch by immutable ID. |
+| GET | `/v1/workflows/{workspaceId}/{workflowName}@{version}` | — | `WorkflowVersion` | Fetch a workflow version by its workspaceless wire id. **v1 wire form**: the colon-free triple `<workspaceId>/<workflowName>@<version>`. The triple resolves uniquely to one immutable `WorkflowVersion` row (see ER diagram § PK column); the bare UUID PK is reserved for a future evolution when SPL exposes it directly. Tenant principals are workspace-scoped at this route via `catalog:workflows:read`; internal cross-workspace reads use `GET /rpc/v1/workflow-versions/{workspaceId}/{workflowName}@{version}` (gated on `catalog:rpc:read`). |
 | POST | `/v1/workspaces/{ws}/workflows/{name}@{version}:deprecate` | `{ reason }` | 200 | Deprecate a workflow version. |
-| POST | `/v1/workspaces/{ws}/workflows/{name}@{version}:extractTemplate` | `{ selectors, templateName }` | `WorkflowTemplateVersionRef` (201) | Extract a template from a workflow version. The workspace prefix is implicit in the URL; cross-workspace reads use the workspaceless `GET /v1/workflows/{workflowVersionId}` route. |
+| POST | `/v1/workspaces/{ws}/workflows/{name}@{version}:extractTemplate` | `{ selectors, templateName }` | `WorkflowTemplateVersionRef` (201) | Extract a template from a workflow version. The workspace prefix is implicit in the URL; cross-workspace reads use the workspaceless `GET /v1/workflows/{workspaceId}/{workflowName}@{version}` route. |
 | POST | `/v1/workspaces/{ws}/templates` | `{ definition }` | `WorkflowTemplateVersionRef` (201) | Publish a template version directly. |
 | GET | `/v1/workspaces/{ws}/templates/{name}@{version}` | — | `WorkflowTemplateVersion` | Fetch a template version. |
 | POST | `/v1/workspaces/{ws}/templates/{name}@{version}:materialize` | `{ bindings, targetName }` | `WorkflowVersionRef` (201) | Materialize a template into a workflow version. The workspace prefix is implicit in the URL. |
@@ -382,7 +382,7 @@ Both providers are abstractions per REQ-048; the OCI registry adapter for `Defin
 
 | RPC | Caller | Purpose |
 |---|---|---|
-| `GetWorkflowVersion(workflowVersionId)` | Workflow Service (Validator → Definition Compiler) | Read-only fetch at `StartRun`. |
+| `GetWorkflowVersion(workflowVersionRef)` | Workflow Service (Validator → Definition Compiler) | Read-only fetch at `StartRun`. `workflowVersionRef` is the v1 wire triple `<workspaceId>/<workflowName>@<version>` (see REST GET route); the bare UUID PK is reserved for a future SPL evolution. |
 | `ResolveActivityRef(ref)` | Workflow Service (publish-time validation, if WF acts as a publish proxy) | Resolve `<ns>/<type>@<major>` to a digest-pinned version. (M1: this path goes through the publish API; this RPC reserved for future direct call.) |
 | `ResolveConnectorTypeRef(ref)` | Workflow Service, Trigger Service | Resolve a connector type version for `events.produced` lookups. |
 
