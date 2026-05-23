@@ -132,7 +132,7 @@ class ActivityManifestIssue:
         path: JSON Pointer-style path of the offending field
             (``"/metadata/version"``, ``""`` for envelope-level issues).
         code: Stable machine-readable code (e.g. ``"required"``,
-            ``"version_format"``, ``"reserved_kind"``).
+            ``"value"``, ``"format"``).
         message: Human-readable message suitable for API response.
     """
 
