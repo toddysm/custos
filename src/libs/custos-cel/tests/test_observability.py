@@ -57,15 +57,12 @@ from custos_cel import (
 # OTel SDK wiring
 # ---------------------------------------------------------------------------
 #
-# Provider installation must happen before ``custos_cel._telemetry``
-# resolves its module-level tracer / meter. We rely on pytest
-# collecting this file (which imports ``custos_cel`` above) AFTER the
-# session fixture runs, but ``opentelemetry-api`` snapshots its
-# global providers on first ``get_tracer`` / ``get_meter`` call —
-# which happens at ``custos_cel`` import time, *before* this module
-# finishes loading. To work around that, we install the providers at
-# module level (before any test runs) and rely on the SDK's
-# documented behaviour that providers can be replaced once.
+# ``custos_cel`` is imported above so this module also exercises the
+# "import without an installed SDK provider" path. After import, these
+# tests install in-memory SDK providers at module scope and then
+# rebind ``custos_cel._telemetry`` so subsequent public API calls use
+# the test tracer / meter instead of the no-op instances resolved at
+# import time.
 
 _span_exporter = InMemorySpanExporter()
 _tracer_provider = TracerProvider()
