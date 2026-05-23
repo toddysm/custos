@@ -201,11 +201,11 @@ runs under a wall-clock budget enforced cooperatively by the walker.
 
 **Special values**:
 
-- `timeout_ms=0` disables the gate. No ContextVar is armed, no counter
-  is incremented, and `time.monotonic()` is not consulted; the hot
-  path is byte-identical to the bare WF-IMPL-006 evaluator. Intended
-  for tests and for callers that wrap the evaluator in their own
-  deadline machinery.
+- `timeout_ms=0` disables the gate. No ContextVar deadline is armed,
+  no deadline-sampling counter is active, and `time.monotonic()` is
+  not consulted; evaluation proceeds without deadline enforcement.
+  Intended for tests and for callers that wrap the evaluator in their
+  own deadline machinery.
 - `timeout_ms < 0` raises `ValueError`. `bool` is rejected (it
   subclasses `int` in Python but is a programming bug as a budget).
 
