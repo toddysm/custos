@@ -117,8 +117,14 @@ class SchemaBindings:
     inputs: Mapping[str, Any] = field(default_factory=dict)
     prior_steps: Sequence[tuple[str, Mapping[str, Any]]] = field(default_factory=tuple)
     let: Mapping[str, CelType] = field(default_factory=dict)
-    run: Mapping[str, CelType] = field(default=_DEFAULT_RUN_TYPES)
-    workflow: Mapping[str, CelType] = field(default=_DEFAULT_WORKFLOW_TYPES)
+    # NOTE: Python 3.11's @dataclass rejects ``MappingProxyType`` as a
+    # plain ``default=`` value (treated as a mutable default), even
+    # though it is read-only in practice. Use ``default_factory`` to
+    # hand the same shared read-only proxy to every instance.
+    run: Mapping[str, CelType] = field(default_factory=lambda: _DEFAULT_RUN_TYPES)
+    workflow: Mapping[str, CelType] = field(
+        default_factory=lambda: _DEFAULT_WORKFLOW_TYPES
+    )
     now: CelType = field(default_factory=TimestampType)
 
     def __post_init__(self) -> None:
