@@ -116,6 +116,7 @@ class PlaceholderDeclaration:
     type: PlaceholderType
     required: bool = True
     default: Any = None
+    default_provided: bool = False
     description: str | None = None
     connector_type: str | None = None
     activity_type: str | None = None
@@ -124,13 +125,10 @@ class PlaceholderDeclaration:
     def has_default(self) -> bool:
         """Return ``True`` if the declaration carries an explicit default.
 
-        ``None`` is not a valid placeholder default (every JSON type
-        we support has its own non-``None`` zero value, and the schema
-        gates ``default`` to non-null), so we can use it as the
-        "absent" sentinel.
+        Note: the JSON Schema permits ``default: null`` (via ``_expression_or_value``),
+        so we must track presence separately from the value.
         """
-        return self.default is not None
-
+        return self.default_provided
 
 class PlaceholderError(ValueError):
     """Base class for placeholder declaration / binding failures.
