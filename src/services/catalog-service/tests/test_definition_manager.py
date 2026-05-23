@@ -6,7 +6,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, ClassVar
-from uuid import UUID
 
 import pytest
 from custos_spl.errors import ImmutableViolation
@@ -760,7 +759,3 @@ def _doc_yaml(doc: dict[str, Any]) -> str:
     import yaml
 
     return yaml.safe_dump(doc)
-
-
-# UUID import kept so type-check passes if mypy looks for unused imports.
-_ = UUID
