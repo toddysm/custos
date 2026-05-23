@@ -422,3 +422,41 @@ def test_instrument_helper_is_transparent_to_callers() -> None:
         custos_cel.parse("inputs.x +")
     # ``ParseError.KIND`` matches the locked taxonomy and the counter label.
     assert exc_info.value.KIND == "expression.parse_error"
+
+
+def test_instrument_does_not_record_process_control_exceptions() -> None:
+    """``KeyboardInterrupt`` / ``SystemExit`` must bypass the recorder.
+
+    Process-control exceptions are not application errors; treating
+    them as such would skew the duration histograms (an
+    ``outcome=internal_error`` sample on a Ctrl-C) and the
+    ``custos_cel_errors_total`` counter (which only counts the locked
+    taxonomy). The wrapper catches ``Exception``, not
+    ``BaseException``, so these unwind straight through.
+    """
+    from custos_cel._telemetry import instrument
+
+    histogram = _telemetry.EVALUATE_DURATION_MS
+
+    # Drain any state left over from the previous test.
+    _collect_points()
+    _span_exporter.clear()
+
+    for exc_cls in (KeyboardInterrupt, SystemExit, GeneratorExit):
+        with (
+            pytest.raises(exc_cls),
+            instrument("custos_cel.test", histogram, {}),
+        ):
+            raise exc_cls("bypass instrumentation")
+
+    points = _collect_points()
+    # No duration samples should have been emitted under the test span.
+    assert _by_name(points, "custos_cel_evaluate_duration_ms") == []
+    # And no error-counter ticks either.
+    assert _by_name(points, "custos_cel_errors_total") == []
+    # Spans still close (the OTel context manager's ``__exit__`` runs
+    # on every unwind), but our instrumentation contributed neither
+    # ``set_status(ERROR)`` nor ``record_exception``.
+    for span in _span_exporter.get_finished_spans():
+        assert span.status.status_code is not StatusCode.ERROR
+        assert not span.events

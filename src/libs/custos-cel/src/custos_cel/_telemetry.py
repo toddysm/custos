@@ -188,7 +188,14 @@ def instrument(
     with _tracer.start_as_current_span(span_name) as span:
         try:
             yield span
-        except BaseException as exc:
+        except Exception as exc:
+            # Deliberately catch ``Exception`` (not ``BaseException``)
+            # so process-control unwinds — ``KeyboardInterrupt``,
+            # ``SystemExit``, ``GeneratorExit`` — propagate through
+            # the wrapper untouched and are never recorded into the
+            # duration histograms or the ``custos_cel_errors_total``
+            # counter. Those events are not application errors and
+            # mis-labelling them as such would skew SLO dashboards.
             elapsed_ms = (time.perf_counter() - start) * 1000.0
             outcome = _outcome_for(exc, outcomes)
             histogram.record(elapsed_ms, {"outcome": outcome})
