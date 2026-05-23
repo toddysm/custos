@@ -13,10 +13,10 @@ For each example we:
    ``FixedClock``.
 4. Assert the value matches what the doc text describes.
 
-Additionally, the test asserts that the exact CEL source strings
-appearing in the doc are byte-identical to the ones in this file —
-so doc drift (rename a binding, change an operator) trips this test
-loudly.
+Additionally, the test asserts that the CEL source strings appearing
+in the doc match the ones in this file after normalizing surrounding
+whitespace — so doc drift (rename a binding, change an operator)
+trips this test loudly.
 """
 
 from __future__ import annotations
