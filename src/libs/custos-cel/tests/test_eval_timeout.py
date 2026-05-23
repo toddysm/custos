@@ -418,7 +418,7 @@ def test_eval_module_does_not_import_os(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 # ---------------------------------------------------------------------------
-# Smoke: env value of empty string falls back to default
+# Smoke: env value of empty string is invalid
 # ---------------------------------------------------------------------------
 
 
