@@ -3,8 +3,10 @@
 from custos_catalog.middleware.callctx import (
     CALLCTX_HEADER,
     CallContext,
+    CallContextError,
     CallContextMiddleware,
     DevShimDisabledInProductionError,
+    call_context_error_handler,
     get_call_context,
     require_permission,
 )
@@ -12,8 +14,10 @@ from custos_catalog.middleware.callctx import (
 __all__ = [
     "CALLCTX_HEADER",
     "CallContext",
+    "CallContextError",
     "CallContextMiddleware",
     "DevShimDisabledInProductionError",
+    "call_context_error_handler",
     "get_call_context",
     "require_permission",
 ]

@@ -59,6 +59,29 @@ class DevShimDisabledInProductionError(RuntimeError):
     """
 
 
+class CallContextError(Exception):
+    """Authorization failure rendered through the shared error envelope.
+
+    Both the middleware (which returns a :class:`JSONResponse` directly
+    because Starlette would otherwise convert middleware-raised
+    exceptions to a generic 500) and the FastAPI dependencies
+    (:func:`get_call_context` and :func:`require_permission`) channel
+    every 4xx auth failure through this type so HTTP clients see one
+    shape for a given logical failure mode regardless of where it was
+    detected.
+
+    Pair this with :func:`call_context_error_handler` on the FastAPI
+    application; :func:`custos_catalog.create_app` registers it
+    automatically.
+    """
+
+    def __init__(self, status_code: int, code: str, detail: str) -> None:
+        super().__init__(detail)
+        self.status_code = status_code
+        self.code = code
+        self.detail = detail
+
+
 class CallContext(BaseModel):
     """Per-request authorization context attached to ``request.state``."""
 
@@ -75,11 +98,36 @@ class CallContext(BaseModel):
         return name in self.permissions
 
 
-def _error(status_code: int, code: str, detail: str) -> JSONResponse:
+def _render_envelope(status_code: int, code: str, detail: str) -> JSONResponse:
+    """Single source of truth for the call-context error envelope."""
     return JSONResponse(
         status_code=status_code,
         content={"error": {"code": code, "detail": detail}},
     )
+
+
+def _error(status_code: int, code: str, detail: str) -> JSONResponse:
+    return _render_envelope(status_code, code, detail)
+
+
+async def call_context_error_handler(
+    _request: Request,
+    exc: Exception,
+) -> JSONResponse:
+    """FastAPI exception handler that renders :class:`CallContextError`.
+
+    Registered by :func:`custos_catalog.create_app`; consumers mounting
+    :class:`CallContextMiddleware` directly (e.g. tests) must also
+    register this handler against :class:`CallContextError` so the
+    dependency-side 4xx responses match the middleware envelope.
+
+    The signature accepts ``Exception`` so it matches
+    :meth:`FastAPI.add_exception_handler` without an explicit ``# type:
+    ignore``; the implementation narrows back to
+    :class:`CallContextError` for the attribute access.
+    """
+    assert isinstance(exc, CallContextError)
+    return _render_envelope(exc.status_code, exc.code, exc.detail)
 
 
 class CallContextMiddleware(BaseHTTPMiddleware):
@@ -191,14 +239,19 @@ def _summarize_validation_error(exc: ValidationError) -> str:
 async def get_call_context(request: Request) -> CallContext:
     """FastAPI dependency that returns the parsed call context.
 
-    Raises an HTTP 401 if the middleware was not run (e.g. mis-mounted)
-    so handlers always observe a populated context on a 2xx path.
+    Raises :class:`CallContextError` (rendered through
+    :func:`call_context_error_handler`) when the middleware was not run
+    — e.g. on a route mounted outside the middleware stack — so
+    handlers always observe a populated context on a 2xx path AND so
+    the wire response shape matches the middleware-emitted envelope.
     """
-    from fastapi import HTTPException
-
     ctx = getattr(request.state, "call_context", None)
     if ctx is None:
-        raise HTTPException(status_code=401, detail="call context not available")
+        raise CallContextError(
+            401,
+            "callctx_missing",
+            f"{CALLCTX_HEADER} header is required",
+        )
     assert isinstance(ctx, CallContext)
     return ctx
 
@@ -207,14 +260,14 @@ def require_permission(
     name: str,
 ) -> Callable[[Request], Awaitable[CallContext]]:
     """Build a FastAPI dependency that requires ``name`` on the call context."""
-    from fastapi import HTTPException
 
     async def _dep(request: Request) -> CallContext:
         ctx = await get_call_context(request)
         if not ctx.has_permission(name):
-            raise HTTPException(
-                status_code=403,
-                detail=f"missing required permission: {name}",
+            raise CallContextError(
+                403,
+                "permission_denied",
+                f"missing required permission: {name}",
             )
         return ctx
 
@@ -224,8 +277,10 @@ def require_permission(
 __all__ = [
     "CALLCTX_HEADER",
     "CallContext",
+    "CallContextError",
     "CallContextMiddleware",
     "DevShimDisabledInProductionError",
+    "call_context_error_handler",
     "get_call_context",
     "require_permission",
 ]

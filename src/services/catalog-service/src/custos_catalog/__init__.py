@@ -22,7 +22,11 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 from custos_catalog.health import router as health_router
-from custos_catalog.middleware import CallContextMiddleware
+from custos_catalog.middleware import (
+    CallContextError,
+    CallContextMiddleware,
+    call_context_error_handler,
+)
 from custos_catalog.providers import (
     MigrationRequired,
     Providers,
@@ -102,6 +106,10 @@ def create_app(
         authz_endpoint=effective_settings.authz_endpoint,
         environment=effective_settings.environment,
     )
+    # Pair the middleware with its exception handler so the dependency-side
+    # 4xx responses (get_call_context / require_permission) emit the same
+    # `{"error": {"code", "detail"}}` envelope as the middleware itself.
+    app.add_exception_handler(CallContextError, call_context_error_handler)
 
     app.include_router(health_router)
     return app

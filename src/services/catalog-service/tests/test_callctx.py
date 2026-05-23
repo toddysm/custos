@@ -12,8 +12,10 @@ from fastapi.testclient import TestClient
 from custos_catalog.middleware import (
     CALLCTX_HEADER,
     CallContext,
+    CallContextError,
     CallContextMiddleware,
     DevShimDisabledInProductionError,
+    call_context_error_handler,
     get_call_context,
     require_permission,
 )
@@ -34,6 +36,10 @@ def _build_app(*, authz_endpoint: str = "", environment: str = "development") ->
         authz_endpoint=authz_endpoint,
         environment=environment,
     )
+    # Mirror what `custos_catalog.create_app` does: pair the middleware
+    # with its exception handler so the dependency-side 4xx responses
+    # share the middleware's `{"error": {"code", "detail"}}` envelope.
+    app.add_exception_handler(CallContextError, call_context_error_handler)
 
     @app.get("/healthz")
     async def _healthz() -> dict[str, str]:
@@ -147,7 +153,34 @@ def test_require_permission_denies_when_missing() -> None:
     resp = client.get("/publish", headers={CALLCTX_HEADER: ctx})
     assert resp.status_code == 403
     body = resp.json()
-    assert "catalog:publish" in body["detail"]
+    assert body["error"]["code"] == "permission_denied"
+    assert "catalog:publish" in body["error"]["detail"]
+
+
+def test_dependency_unmounted_middleware_returns_shared_envelope() -> None:
+    """Asserts get_call_context renders the same envelope as the middleware.
+
+    Builds an app with the dependency-using route but WITHOUT the
+    middleware mounted (mirroring a misconfigured deployment), then
+    confirms the 401 response matches the `callctx_missing` envelope the
+    middleware itself emits when the header is absent.
+    """
+    app = FastAPI()
+    app.add_exception_handler(CallContextError, call_context_error_handler)
+
+    @app.get("/whoami")
+    async def _whoami(ctx: CallContext = Depends(get_call_context)) -> dict[str, str]:
+        return {"workspace_id": ctx.workspace_id}
+
+    client = TestClient(app)
+    resp = client.get("/whoami")
+    assert resp.status_code == 401
+    assert resp.json() == {
+        "error": {
+            "code": "callctx_missing",
+            "detail": f"{CALLCTX_HEADER} header is required",
+        },
+    }
 
 
 def test_production_path_with_authz_endpoint_raises_not_implemented() -> None:
