@@ -115,7 +115,7 @@ _LOGGER = logging.getLogger(__name__)
 DEFAULT_MAX_PUBLISH_RETRIES: Final[int] = 8
 
 
-PublishStage = Literal["parse", "schema", "normalize", "resolve", "cel"]
+PublishStage = Literal["parse", "schema", "placeholders", "normalize", "resolve", "cel"]
 
 
 @dataclass(frozen=True, slots=True)
