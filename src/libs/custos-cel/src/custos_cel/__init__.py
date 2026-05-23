@@ -27,6 +27,18 @@ from celpy.celparser import CELParseError
 
 from custos_cel import errors
 from custos_cel._celpy_convert import CelConvertError, convert_celpy_tree
+from custos_cel._telemetry import (
+    count_nodes as _count_nodes,
+)
+from custos_cel._telemetry import (
+    observe_evaluate as _observe_evaluate,
+)
+from custos_cel._telemetry import (
+    observe_parse as _observe_parse,
+)
+from custos_cel._telemetry import (
+    observe_type_check as _observe_type_check,
+)
 from custos_cel.ast import (
     AST_SCHEMA_VERSION,
     Binary,
@@ -189,16 +201,28 @@ def parse(source: str) -> Node:
             is preserved for callers that key off the narrower type.
     """
     env = celpy.Environment()
-    try:
-        tree = env.compile(source)
-    except CELParseError as exc:
-        # celpy raises its own ``CELParseError`` for lexer/parser
-        # failures. Re-raise as our taxonomy ``ParseError`` so the
-        # public surface only ever raises one error type at the parse
-        # boundary; ``__cause__`` retains the celpy traceback for
-        # debugging.
-        raise ParseError(str(exc)) from exc
-    return convert_celpy_tree(tree)
+    with _observe_parse() as _span:
+        # Gate descriptive span attributes behind ``is_recording()`` so
+        # the no-SDK hot path (proxy / no-op spans) pays nothing for
+        # attribute computation. This is the recommended OTel idiom
+        # for instrumentation libraries whose attribute values aren't
+        # free to derive (here, ``_count_nodes`` is an O(N) walk).
+        recording = _span.is_recording()
+        if recording:
+            _span.set_attribute("custos_cel.source_length", len(source))
+        try:
+            tree = env.compile(source)
+        except CELParseError as exc:
+            # celpy raises its own ``CELParseError`` for lexer/parser
+            # failures. Re-raise as our taxonomy ``ParseError`` so the
+            # public surface only ever raises one error type at the parse
+            # boundary; ``__cause__`` retains the celpy traceback for
+            # debugging.
+            raise ParseError(str(exc)) from exc
+        node = convert_celpy_tree(tree)
+        if recording:
+            _span.set_attribute("custos_cel.node_count", _count_nodes(node))
+    return node
 
 
 def type_check(ast: Node, bindings: SchemaBindings) -> Node:
@@ -229,7 +253,11 @@ def type_check(ast: Node, bindings: SchemaBindings) -> Node:
         UnboundNameError: For any identifier, step id, or schema field
             not declared in ``bindings``.
     """
-    return _type_check_impl(ast, bindings)
+    with _observe_type_check() as _span:
+        # See ``parse`` above for why ``_count_nodes`` is gated.
+        if _span.is_recording():
+            _span.set_attribute("custos_cel.node_count", _count_nodes(ast))
+        return _type_check_impl(ast, bindings)
 
 
 def evaluate(
@@ -292,7 +320,21 @@ def evaluate(
     """
     if timeout_ms is None:
         timeout_ms = _resolve_timeout_from_env()
-    return _evaluate_impl(ast, scope, clock, timeout_ms=timeout_ms)
+    with _observe_evaluate() as _span:
+        # Gate attribute computation on ``is_recording()`` — no-op
+        # spans see no attributes and pay no ``_count_nodes`` cost,
+        # which dominates the per-call overhead on small ASTs.
+        if _span.is_recording():
+            if isinstance(ast, Node):
+                # ``count_nodes`` walks the (already-validated) typed
+                # AST, so it never raises on the values the public
+                # API accepts; an untyped node here would surface
+                # from ``_evaluate_impl`` as its usual ``TypeError``
+                # and still be timed under the ``internal_error``
+                # outcome bucket.
+                _span.set_attribute("custos_cel.node_count", _count_nodes(ast))
+            _span.set_attribute("custos_cel.timeout_ms", timeout_ms)
+        return _evaluate_impl(ast, scope, clock, timeout_ms=timeout_ms)
 
 
 def _resolve_timeout_from_env() -> int:
