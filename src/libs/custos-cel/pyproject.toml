@@ -31,8 +31,9 @@ dependencies = [
     # OpenTelemetry API only — no SDK requirement (WF-IMPL-011, #186).
     # Consumers without an OTel SDK installed get no-op spans and
     # metrics via the API's default no-op providers, so importing
-    # ``custos_cel`` works unconditionally and ``parse`` /
-    # ``type_check`` / ``evaluate`` add no measurable overhead.
+    # ``custos_cel`` works unconditionally. ``parse`` /
+    # ``type_check`` / ``evaluate`` still dispatch through the API's
+    # default no-op providers when no SDK is installed.
     "opentelemetry-api>=1.20,<2",
 ]
 
