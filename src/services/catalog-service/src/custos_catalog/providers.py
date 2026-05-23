@@ -35,18 +35,16 @@ the required catalog-service schema revisions have been applied.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import Protocol, cast
 
 from custos_spl import MigrationRequired
 from custos_spl.interfaces.catalog_store import CatalogStoreProvider
 from custos_spl.interfaces.definition_store import DefinitionStoreProvider
 
 from custos_catalog.settings import Settings
-
-if TYPE_CHECKING:
-    pass
-
 
 # The interfaces catalog-service actually owns. ``custos_spl.check_revisions``
 # checks the global SPL set (Definition, Catalog, Auth, Artifact, Metadata)
@@ -61,7 +59,18 @@ _REQUIRED_INTERFACES: tuple[type, ...] = (
 
 
 class _RefreshableAdapter(Protocol):
-    """Minimal capability the startup gate needs from each adapter."""
+    """Structural type the schema-revision startup gate needs from each
+    adapter: a read-side view of the migration ledger plus an async hook
+    that pulls the latest ledger state from the store before the gate
+    compares declared vs. required.
+
+    ``declared_revisions`` comes from SPL's ``MigrationCapable`` Protocol;
+    ``refresh_declared`` is the custos-postgres ledger-refresh convention
+    that every catalog-service adapter (real or fake) implements.
+    """
+
+    @property
+    def declared_revisions(self) -> Mapping[str, AbstractSet[int]]: ...
 
     async def refresh_declared(self) -> None: ...
 
@@ -124,11 +133,12 @@ async def verify_schema_revisions(providers: Providers) -> None:
             the per-interface gaps so the operator can run
             ``custos migrate up`` against the specific interfaces listed.
     """
-    adapters: list[object] = [providers.definition_store, providers.catalog_store]
+    adapters: list[_RefreshableAdapter] = [
+        cast(_RefreshableAdapter, providers.definition_store),
+        cast(_RefreshableAdapter, providers.catalog_store),
+    ]
     for adapter in adapters:
-        refresh = getattr(adapter, "refresh_declared", None)
-        if refresh is not None:
-            await refresh()
+        await adapter.refresh_declared()
 
     required = {
         iface.__name__: int(getattr(iface, "SCHEMA_REVISION"))  # noqa: B009
@@ -136,10 +146,7 @@ async def verify_schema_revisions(providers: Providers) -> None:
     }
     declared: dict[str, set[int]] = {name: set() for name in required}
     for adapter in adapters:
-        adapter_revs = getattr(adapter, "declared_revisions", None)
-        if adapter_revs is None:
-            continue
-        for iface_name, revs in adapter_revs.items():
+        for iface_name, revs in adapter.declared_revisions.items():
             declared.setdefault(iface_name, set()).update(revs)
 
     gaps = sorted(
