@@ -130,6 +130,7 @@ class PlaceholderDeclaration:
         """
         return self.default_provided
 
+
 class PlaceholderError(ValueError):
     """Base class for placeholder declaration / binding failures.
 
