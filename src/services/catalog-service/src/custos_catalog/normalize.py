@@ -107,15 +107,37 @@ class NormalizedTemplate:
 # ---------------------------------------------------------------------------
 
 
+def _sort_key(key: Any) -> tuple[str, str]:
+    """Return a total-ordering sort key for a dict key of any type.
+
+    Plain ``sorted(dict.keys())`` raises :class:`TypeError` when a
+    mapping mixes key types (the canonical case being YAML documents
+    with both string and integer keys, e.g. ``{1: "x", "a": "y"}``).
+    Mixed-key documents cannot pass the JSON Schema gate, but per the
+    publish-time pipeline contract the normalizer must stay total —
+    its output is fed to the CEL validator and resolver, which surface
+    structured errors. Allowing :func:`sorted` to explode here would
+    short-circuit those gates with an opaque ``TypeError``.
+
+    Sorting by ``(type_name, str(key))`` gives a deterministic total
+    order across heterogeneous key types while preserving the natural
+    str-against-str ordering used by every well-formed document.
+    """
+    return (type(key).__name__, str(key))
+
+
 def _canonicalize(node: Any) -> Any:
     """Recursively sort dict keys at every level.
 
     Lists keep their order (the workflow step order is semantically
     significant; arbitrary sorting would change execution behaviour).
-    Scalars pass through unchanged.
+    Scalars pass through unchanged. Mixed-type dict keys are tolerated
+    via :func:`_sort_key` so the normalizer remains total even on
+    malformed input (the schema gate is the canonical place to reject
+    such documents).
     """
     if isinstance(node, dict):
-        return {key: _canonicalize(node[key]) for key in sorted(node.keys())}
+        return {key: _canonicalize(node[key]) for key in sorted(node, key=_sort_key)}
     if isinstance(node, list):
         return [_canonicalize(item) for item in node]
     return node
@@ -127,10 +149,15 @@ def canonical_json(doc: dict[str, Any]) -> str:
     The output is the byte-stable representation hashed by
     :func:`canonical_hash` and stored on ``WorkflowVersion.document``
     after the resolver step substitutes resolved reference strings.
+
+    Pre-canonicalizes via :func:`_canonicalize` rather than relying on
+    ``json.dumps(sort_keys=True)`` so heterogeneous-keyed documents
+    (rejected by the schema gate but still occasionally handed to this
+    function in error paths) produce a deterministic byte string
+    instead of raising :class:`TypeError`.
     """
     return json.dumps(
-        doc,
-        sort_keys=True,
+        _canonicalize(doc),
         separators=(",", ":"),
         ensure_ascii=False,
     )

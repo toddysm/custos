@@ -102,6 +102,26 @@ def test_canonical_hash_changes_on_value_change() -> None:
     assert a != b
 
 
+def test_normalize_workflow_tolerates_mixed_type_keys() -> None:
+    # YAML happily parses ``1: x`` as an integer key. Such documents
+    # cannot pass the JSON Schema gate, but the normalizer must stay
+    # total — emitting them as a ``TypeError`` would short-circuit the
+    # downstream CEL/resolver gates instead of letting them surface
+    # structured errors. See review comment on CS-IMPL-006.
+    doc = {
+        "apiVersion": "custos.dev/v1",
+        "kind": "Workflow",
+        "metadata": {"name": "wf"},
+        "spec": {"weird": {1: "int-key", "a": "str-key"}, "steps": []},
+    }
+    nw = normalize_workflow(doc)  # must not raise
+    # Hashing must also stay total even with mixed-type keys.
+    digest = canonical_hash(nw.document)
+    assert len(digest) == 64
+    # And it must be byte-stable across calls.
+    assert digest == canonical_hash(nw.document)
+
+
 # ---------------------------------------------------------------------------
 # Slot discovery
 # ---------------------------------------------------------------------------

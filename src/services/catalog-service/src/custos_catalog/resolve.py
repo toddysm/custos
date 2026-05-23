@@ -490,7 +490,7 @@ async def resolve_subworkflow_ref(
         wf_id = str(_get_attr(result, "workflow_id"))
         version = str(_get_attr(result, "version"))
         return ResolvedSubworkflowRef(
-            canonical_ref=str(wf_version_id),
+            canonical_ref=f"{result_workspace}/{wf_id}@{version}",
             workspace_id=result_workspace,
             workflow_id=wf_id,
             version=version,
