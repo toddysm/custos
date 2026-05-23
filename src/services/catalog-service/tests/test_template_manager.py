@@ -860,3 +860,156 @@ async def test_materialize_applies_default_for_optional_placeholder() -> None:
         principal_id="alice",
     )
     assert ref.version == 1
+
+
+# ---------------------------------------------------------------------------
+# Extract (CS-IMPL-014)
+# ---------------------------------------------------------------------------
+
+
+def _minimal_workflow_doc(name: str = "src-wf") -> dict[str, Any]:
+    return {
+        "apiVersion": "custos.dev/v1",
+        "kind": "Workflow",
+        "metadata": {"name": name, "workspace": "ws-1"},
+        "spec": {
+            "inputs": {"image": {"type": "string"}},
+            "steps": [
+                {
+                    "id": "scan",
+                    "activity": "custos.builtin/vuln-scan@2.0.0",
+                },
+            ],
+        },
+    }
+
+
+async def test_extract_from_workflow_publishes_template_and_records_lineage() -> None:
+    from custos_catalog.extract import Selector
+
+    store = FakeDefinitionStore()
+    manager = _make_manager(store)
+    # First publish a source workflow.
+    await manager._definition_manager.publish_workflow(  # type: ignore[union-attr]
+        workspace_id=WS,
+        principal_id="alice",
+        source=_doc_json(_minimal_workflow_doc()),
+    )
+    ref = await manager.extract_from_workflow(
+        workspace_id=WS,
+        principal_id="alice",
+        source_workflow_name="src-wf",
+        source_workflow_version=1,
+        selectors=[
+            Selector(
+                path="spec.steps[0].activity",
+                placeholder_name="scanActivity",
+                placeholder_type="activityRef",
+                activity_type="vuln-scan",
+            ),
+        ],
+        template_name="extracted-tmpl",
+    )
+    assert ref.template_name == "extracted-tmpl"
+    row = store.templates[(WS, WorkflowTemplateId("extracted-tmpl"))][0]
+    assert row.derived_from_workflow_version_id == "src-wf@1"
+    # Template body has the placeholder substitution.
+    rendered_step = row.normalized_doc["spec"]["workflow"]["steps"][0]
+    assert rendered_step["activity"].startswith("${{")
+
+
+async def test_extract_unknown_workflow_raises_workflow_not_found() -> None:
+    from custos_catalog.extract import Selector
+    from custos_catalog.managers.definition import WorkflowNotFound
+
+    store = FakeDefinitionStore()
+    manager = _make_manager(store)
+    with pytest.raises(WorkflowNotFound):
+        await manager.extract_from_workflow(
+            workspace_id=WS,
+            principal_id="alice",
+            source_workflow_name="ghost",
+            source_workflow_version=1,
+            selectors=[
+                Selector(path="spec.x", placeholder_name="x", placeholder_type="string"),
+            ],
+            template_name="t",
+        )
+
+
+async def test_extract_bad_selector_raises_extraction_error() -> None:
+    from custos_catalog.extract import ExtractError, Selector
+    from custos_catalog.managers.template import ExtractionError
+
+    store = FakeDefinitionStore()
+    manager = _make_manager(store)
+    await manager._definition_manager.publish_workflow(  # type: ignore[union-attr]
+        workspace_id=WS,
+        principal_id="alice",
+        source=_doc_json(_minimal_workflow_doc()),
+    )
+    with pytest.raises(ExtractionError) as exc:
+        await manager.extract_from_workflow(
+            workspace_id=WS,
+            principal_id="alice",
+            source_workflow_name="src-wf",
+            source_workflow_version=1,
+            selectors=[
+                Selector(
+                    path="spec.does.not.exist",
+                    placeholder_name="ghost",
+                    placeholder_type="string",
+                ),
+            ],
+            template_name="t",
+        )
+    assert isinstance(exc.value.cause, ExtractError)
+    assert exc.value.source_workflow_name == "src-wf"
+    assert exc.value.template_name == "t"
+
+
+async def test_extract_then_materialize_yields_byte_equal_workflow() -> None:
+    from custos_catalog.extract import Selector
+
+    store = FakeDefinitionStore()
+    manager = _make_manager(store)
+    # 1. Publish source workflow.
+    await manager._definition_manager.publish_workflow(  # type: ignore[union-attr]
+        workspace_id=WS,
+        principal_id="alice",
+        source=_doc_json(_minimal_workflow_doc()),
+    )
+    source_row = store.workflows[(WS, WorkflowId("src-wf"))][0]
+    source_doc = dict(source_row.normalized_doc)
+
+    # 2. Extract a template that parameterizes the activity.
+    await manager.extract_from_workflow(
+        workspace_id=WS,
+        principal_id="alice",
+        source_workflow_name="src-wf",
+        source_workflow_version=1,
+        selectors=[
+            Selector(
+                path="spec.steps[0].activity",
+                placeholder_name="scanActivity",
+                placeholder_type="activityRef",
+                activity_type="vuln-scan",
+            ),
+        ],
+        template_name="round-trip-tmpl",
+    )
+
+    # 3. Materialize that template with the original binding into a
+    # different workflow name. The resulting workflow spec must match
+    # the source workflow's spec byte-for-byte after canonicalization.
+    await manager.materialize(
+        workspace_id=WS,
+        template_name="round-trip-tmpl",
+        template_version=1,
+        target_workflow_name="rebuilt-wf",
+        bindings={"scanActivity": "custos.builtin/vuln-scan@2.0.0"},
+        principal_id="alice",
+    )
+    rebuilt_row = store.workflows[(WS, WorkflowId("rebuilt-wf"))][0]
+    # Compare spec bodies (metadata.name differs).
+    assert rebuilt_row.normalized_doc["spec"] == source_doc["spec"]

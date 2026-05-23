@@ -61,6 +61,13 @@ from custos_catalog.cel_validate import (
     CelValidationError,
     validate_template_expressions,
 )
+from custos_catalog.extract import (
+    ExtractError,
+    RoundtripViolation,
+    Selector,
+    extract,
+    self_check_roundtrip,
+)
 from custos_catalog.managers.definition import (
     DefinitionManager,
     PublishValidationError,
@@ -152,6 +159,55 @@ class TemplateNotFound(Exception):
         self.workspace_id = workspace_id
         self.template_name = template_name
         self.version = version
+
+
+class ExtractionError(Exception):
+    """Raised when ``TemplateManager.extract_from_workflow`` cannot extract.
+
+    Carries both endpoints of the extraction — the source workflow
+    ref and the target template name, plus the underlying cause —
+    so the API layer can surface a structured ``problem+json`` body
+    that includes both refs.
+
+    Attributes:
+        workspace_id: The target workspace.
+        source_workflow_name: Source workflow name.
+        source_workflow_version: Source workflow version.
+        template_name: The template name the caller asked the
+            extracted template to be written under.
+        cause: The underlying error. One of:
+
+            * :class:`custos_catalog.extract.ExtractError` — one or
+              more selectors could not be applied.
+            * :class:`custos_catalog.extract.RoundtripViolation` —
+              re-materializing the extracted template did not
+              reproduce the source workflow byte-for-byte after
+              canonicalization (ADR-009).
+            * :class:`PublishValidationError` — the resulting
+              template failed the template publish pipeline.
+    """
+
+    code: str = "catalog.template_extract_failed"
+
+    def __init__(
+        self,
+        *,
+        workspace_id: str,
+        source_workflow_name: str,
+        source_workflow_version: int,
+        template_name: str,
+        cause: Exception,
+    ) -> None:
+        super().__init__(
+            f"extraction from workflow {source_workflow_name!r}@"
+            f"{source_workflow_version} -> template {template_name!r} "
+            f"failed: {cause}",
+        )
+        self.workspace_id = workspace_id
+        self.source_workflow_name = source_workflow_name
+        self.source_workflow_version = source_workflow_version
+        self.template_name = template_name
+        self.cause = cause
 
 
 class MaterializationError(Exception):
@@ -744,6 +800,152 @@ class TemplateManager:
         return ref
 
     # ------------------------------------------------------------------
+    # Extract (CS-IMPL-014)
+    # ------------------------------------------------------------------
+
+    async def extract_from_workflow(
+        self,
+        *,
+        workspace_id: str,
+        principal_id: str,
+        source_workflow_name: str,
+        source_workflow_version: int,
+        selectors: list[Selector],
+        template_name: str,
+    ) -> WorkflowTemplateVersionRef:
+        """Extract a WorkflowTemplate from a published workflow version.
+
+        The operation is the design's ``POST
+        /v1/workspaces/{ws}/workflows/{workflowVersionId}:extractTemplate``
+        (design/components/catalog-service § Operation: Extract
+        Template from Workflow). The pipeline:
+
+        1. Fetch the source workflow version
+           (:meth:`DefinitionManager.get_workflow_version_by_ref`).
+        2. Run :func:`custos_catalog.extract.extract` over the
+           workflow document with the supplied selectors. The result
+           is a candidate template plus a ``captured_bindings`` map
+           that records the original value of every rewritten slot.
+        3. Run :func:`custos_catalog.extract.self_check_roundtrip`:
+           re-materialize the candidate template with
+           ``captured_bindings`` and assert canonical-hash equality
+           with the source workflow. ADR-009 § Round-Trip Property
+           requires byte-equality after canonicalization.
+        4. Publish via :meth:`publish_template` with
+           ``derived_from_workflow_version_id`` set to
+           ``"<source_workflow_name>@<source_workflow_version>"``.
+
+        SPL has no UUID lookup at v1, so the lineage handle is the
+        triple-encoded reference (same shape as Phase D + CS-IMPL-013
+        deferrals).
+
+        Args:
+            workspace_id: Workspace owning both the source workflow
+                and the resulting template.
+            principal_id: Caller identity (audit only at v1).
+            source_workflow_name: Source workflow name.
+            source_workflow_version: Source workflow version (must
+                already exist).
+            selectors: Ordered list of extraction directives. Every
+                placeholder name must be unique; every selector path
+                must resolve to a scalar (or, for ``[*]`` selectors,
+                a list of equal scalars).
+            template_name: ``metadata.name`` for the resulting
+                template.
+
+        Raises:
+            RuntimeError: When the manager was constructed without a
+                ``definition_manager`` (programmer error).
+            WorkflowNotFound: When the source workflow version does
+                not exist (propagated from the workflow manager).
+            ExtractionError: When extraction, round-trip, or the
+                chained template publish fails. The ``cause``
+                attribute carries the underlying exception.
+        """
+        if self._definition_manager is None:  # pragma: no cover - construction guard
+            raise RuntimeError(
+                "TemplateManager.extract_from_workflow requires "
+                "definition_manager= to be supplied at construction",
+            )
+        _LOGGER.info(
+            "extract_from_workflow start workspace=%s source=%s@%d "
+            "template=%s principal=%s selectors=%d",
+            workspace_id,
+            source_workflow_name,
+            source_workflow_version,
+            template_name,
+            principal_id,
+            len(selectors),
+        )
+
+        # 1. Fetch the source workflow version. WorkflowNotFound
+        # propagates as-is; the API layer maps it to 404.
+        source_row = await self._definition_manager.get_workflow_version_by_ref(
+            workspace_id=workspace_id,
+            workflow_name=source_workflow_name,
+            version=source_workflow_version,
+        )
+        source_doc = dict(source_row.normalized_doc)
+
+        # 2. Apply the selectors.
+        try:
+            template_doc, captured_bindings = extract(
+                source_doc,
+                selectors,
+                template_name=template_name,
+            )
+        except ExtractError as exc:
+            raise ExtractionError(
+                workspace_id=workspace_id,
+                source_workflow_name=source_workflow_name,
+                source_workflow_version=source_workflow_version,
+                template_name=template_name,
+                cause=exc,
+            ) from exc
+
+        # 3. Round-trip self-check. ADR-009 makes this non-optional.
+        try:
+            self_check_roundtrip(template_doc, source_doc, captured_bindings)
+        except RoundtripViolation as exc:
+            raise ExtractionError(
+                workspace_id=workspace_id,
+                source_workflow_name=source_workflow_name,
+                source_workflow_version=source_workflow_version,
+                template_name=template_name,
+                cause=exc,
+            ) from exc
+
+        # 4. Publish the template via the existing pipeline. Errors
+        # from the template publish path are wrapped too so callers
+        # see a single structured error type.
+        derived_id = f"{source_workflow_name}@{source_workflow_version}"
+        try:
+            ref = await self.publish_template(
+                workspace_id=workspace_id,
+                principal_id=principal_id,
+                source=json.dumps(template_doc),
+                derived_from_workflow_version_id=derived_id,
+            )
+        except PublishValidationError as exc:
+            raise ExtractionError(
+                workspace_id=workspace_id,
+                source_workflow_name=source_workflow_name,
+                source_workflow_version=source_workflow_version,
+                template_name=template_name,
+                cause=exc,
+            ) from exc
+
+        _LOGGER.info(
+            "extract_from_workflow success workspace=%s source=%s@%d -> template=%s@%d",
+            workspace_id,
+            source_workflow_name,
+            source_workflow_version,
+            ref.template_name,
+            ref.version,
+        )
+        return ref
+
+    # ------------------------------------------------------------------
     # Read / lifecycle surface
     # ------------------------------------------------------------------
 
@@ -841,6 +1043,7 @@ class TemplateManager:
 
 __all__ = [
     "DEFAULT_MAX_PUBLISH_RETRIES",
+    "ExtractionError",
     "MaterializationError",
     "TemplateManager",
     "TemplateNotFound",
