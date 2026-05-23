@@ -1,0 +1,49 @@
+name: python-services
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    paths:
+      - "src/services/**"
+      - ".github/workflows/python-services.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/services/**"
+      - ".github/workflows/python-services.yml"
+
+jobs:
+  catalog-service:
+    name: catalog-service (lint + types + tests)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    defaults:
+      run:
+        working-directory: src/services/catalog-service
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install package and dev dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Ruff lint
+        run: ruff check .
+
+      - name: Ruff format check
+        run: ruff format --check .
+
+      - name: Mypy (strict)
+        run: mypy src tests
+
+      - name: Pytest
+        run: pytest -q
