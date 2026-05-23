@@ -422,6 +422,44 @@ async def test_publish_workflow_schema_error_surfaces_as_schema_stage() -> None:
     assert any(i.code == "required" for i in excinfo.value.issues)
 
 
+async def test_publish_workflow_metadata_workspace_mismatch_is_schema_error() -> None:
+    store = FakeDefinitionStore()
+    manager = _make_manager(store)
+    doc = _minimal_workflow()
+    # embedded workspace disagrees with the URL workspace WS = "ws-1"
+    doc["metadata"]["workspace"] = "other-ws"
+    with pytest.raises(PublishValidationError) as excinfo:
+        await manager.publish_workflow(
+            workspace_id=WS,
+            principal_id="alice",
+            source=_doc_json(doc),
+        )
+    assert excinfo.value.stage == "schema"
+    assert len(excinfo.value.issues) == 1
+    issue = excinfo.value.issues[0]
+    assert issue.code == "workspace_mismatch"
+    assert issue.path == "metadata/workspace"
+    assert "other-ws" in issue.message
+    assert "ws-1" in issue.message
+    # And no row was written.
+    assert (WS, WorkflowId("my-wf")) not in store.workflows
+
+
+async def test_publish_workflow_metadata_workspace_omitted_is_accepted() -> None:
+    store = FakeDefinitionStore()
+    manager = _make_manager(store)
+    doc = _minimal_workflow()
+    # metadata.workspace is optional per the schema; URL workspace is authoritative.
+    del doc["metadata"]["workspace"]
+    ref = await manager.publish_workflow(
+        workspace_id=WS,
+        principal_id="alice",
+        source=_doc_json(doc),
+    )
+    assert ref.workspace_id == WS
+    assert ref.version == 1
+
+
 async def test_publish_workflow_resolve_error_surfaces_as_resolve_stage() -> None:
     store = FakeDefinitionStore()
     manager = DefinitionManager(

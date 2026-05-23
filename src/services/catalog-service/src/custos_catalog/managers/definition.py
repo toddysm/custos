@@ -338,6 +338,13 @@ class DefinitionManager:
 
         # 1. parse + 2. schema-validate
         doc = self._parse_and_validate_schema(source)
+        # 2a. enforce metadata.workspace (when present) matches the
+        # target workspace. The schema marks metadata.workspace
+        # optional and explicitly defers this check to the manager
+        # (see workflow.WORKFLOW_SCHEMA comment); without it a caller
+        # could publish a document whose embedded workspace disagrees
+        # with the URL workspace.
+        self._enforce_workspace_match(doc, workspace_id=workspace_id)
         # 3. normalize
         normalized = normalize_workflow(doc)
         # 4. resolve references
@@ -511,6 +518,59 @@ class DefinitionManager:
                 issues=[_schema_issue(i) for i in exc.issues],
             ) from exc
         return doc
+
+    @staticmethod
+    def _enforce_workspace_match(
+        doc: Mapping[str, Any],
+        *,
+        workspace_id: str,
+    ) -> None:
+        """Reject a document whose ``metadata.workspace`` disagrees with the target.
+
+        The Workflow schema marks ``metadata.workspace`` as optional
+        and explicitly defers the cross-check to this layer (see the
+        comment on ``WORKFLOW_SCHEMA.properties.metadata`` in
+        :mod:`custos_catalog.schema.workflow`). When the field is
+        absent we accept the document as-is; the URL workspace is the
+        authority. When present it must match exactly, otherwise the
+        stored document would carry an embedded workspace that
+        disagrees with the row's ``workspace_id`` column — a recipe
+        for confusing downstream behaviour.
+
+        Schema validation has already run, so ``metadata`` is an
+        object and ``metadata.workspace`` (when present) is a string
+        matching the name pattern. The ``isinstance`` checks are
+        retained as defence in depth.
+
+        Raises:
+            PublishValidationError: When the embedded workspace
+                disagrees with ``workspace_id``. Reported under the
+                ``schema`` stage with code ``"workspace_mismatch"``.
+        """
+        metadata = doc.get("metadata", {})
+        if not isinstance(metadata, Mapping):  # pragma: no cover - schema gate
+            return
+        doc_workspace = metadata.get("workspace")
+        if doc_workspace is None:
+            return
+        if not isinstance(doc_workspace, str):  # pragma: no cover - schema gate
+            return
+        if doc_workspace == workspace_id:
+            return
+        raise PublishValidationError(
+            stage="schema",
+            issues=[
+                PublishValidationIssue(
+                    stage="schema",
+                    path="metadata/workspace",
+                    code="workspace_mismatch",
+                    message=(
+                        f"metadata.workspace {doc_workspace!r} does not match "
+                        f"target workspace {workspace_id!r}"
+                    ),
+                ),
+            ],
+        )
 
     async def _resolve_refs(
         self,
