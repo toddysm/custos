@@ -196,9 +196,16 @@ class WorkflowTemplateVersionBody(_Wire):
 
 
 class WorkflowListResponse(_Wire):
-    """List response for ``GET /v1/workspaces/{ws}/workflows/{name}``."""
+    """List response for ``GET /v1/workspaces/{ws}/workflows/{name}``.
 
-    items: list[WorkflowVersionBody]
+    Per design § Public Interface the response is ``[WorkflowVersionRef]``
+    (refs only); callers fetch the full normalized ``document`` via the
+    workspaced get-by-ref endpoint. Keeping the list payload small
+    matters because workflow documents are kilobytes-scale normalized
+    JSON, and authoring UIs commonly list-across many workflows.
+    """
+
+    items: list[WorkflowVersionRefBody]
     next_cursor: str | None = Field(default=None, alias="nextCursor")
 
 

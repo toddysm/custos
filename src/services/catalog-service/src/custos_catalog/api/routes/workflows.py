@@ -192,7 +192,11 @@ async def list_or_get_workflow(
     )
     return WorkflowListResponse(
         items=[
-            _serialize_workflow_version(row, workspace_id=ws, workflow_name=name_or_ref)
+            WorkflowVersionRefBody(
+                workspaceId=ws,
+                workflowName=name_or_ref,
+                version=int(getattr(row, "version")),  # noqa: B009
+            )
             for row in page.items
         ],
         nextCursor=page.next_cursor.token if page.next_cursor else None,

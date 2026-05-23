@@ -131,11 +131,13 @@ def test_list_versions_returns_published_rows(
     assert body["nextCursor"] is None
     assert len(body["items"]) == 1
     item = body["items"][0]
+    # Design contract: list returns refs only — no document leak.
+    # Callers fetch the full normalized document via the workspaced
+    # get-by-ref endpoint.
+    assert set(item.keys()) == {"workspaceId", "workflowName", "version"}
     assert item["workspaceId"] == "ws-1"
     assert item["workflowName"] == "orders"
     assert item["version"] == 1
-    assert item["document"]["kind"] == "Workflow"
-    assert item["parentDeprecated"] is False
 
 
 def test_list_versions_returns_empty_for_unknown_workflow(client: TestClient) -> None:
