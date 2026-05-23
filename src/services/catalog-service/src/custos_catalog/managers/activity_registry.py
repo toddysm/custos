@@ -505,11 +505,14 @@ class ActivityTypeRegistry:
         namespace = metadata["namespace"]
         type_ = metadata["type"]
         version = metadata["version"]
+        spec = manifest.get("spec", {})
+        if spec is None:
+            spec = {}
         raw: dict[str, Any] = {
             "apiVersion": manifest["apiVersion"],
             "kind": manifest["kind"],
             "metadata": dict(metadata),
-            "spec": dict(manifest.get("spec", {})),
+            "spec": dict(spec),
         }
         # Persist the canonical (sorted-keys) form so the digest is a true
         # content address of what we store. ``json.loads(canonical_json(...))``
