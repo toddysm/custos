@@ -38,7 +38,7 @@ from custos_catalog.api.models import (
 from custos_catalog.extract import Selector
 from custos_catalog.managers.definition import DefinitionManager
 from custos_catalog.managers.template import TemplateManager
-from custos_catalog.middleware.callctx import CallContext
+from custos_catalog.middleware.callctx import CallContext, CallContextError
 
 router = APIRouter()
 
@@ -207,7 +207,7 @@ async def get_workflow_version_by_id(
             "``<workspaceId>/<workflowName>@<version>``."
         ),
     ),
-    _ctx: CallContext = Depends(require_permission_only("catalog:workflows:read")),
+    ctx: CallContext = Depends(require_permission_only("catalog:workflows:read")),
     manager: DefinitionManager = Depends(get_definition_manager),
 ) -> WorkflowVersionBody:
     """Fetch by the triple-encoded id, the design's canonical handle.
@@ -216,6 +216,14 @@ async def get_workflow_version_by_id(
     ``<workspaceId>/<workflowName>@<version>``. The path is decoded
     with the same regex used for ``<name>@<version>`` after splitting
     on the first slash.
+
+    Tenant principals carrying ``catalog:workflows:read`` are scoped
+    to their own workspace: this handler rejects requests whose
+    parsed ``<workspaceId>`` differs from ``ctx.workspace_id`` with
+    the standard 403 ``catalog.workspace_mismatch`` envelope. Internal
+    callers that legitimately need cross-workspace reads (the workflow
+    runtime, activity dispatcher) must use the ``catalog:rpc:read``-gated
+    ``GET /rpc/v1/workflow-versions/{id}`` route instead.
     """
     try:
         workspace_id, name_at_version = workflow_version_id.split("/", 1)
@@ -233,10 +241,20 @@ async def get_workflow_version_by_id(
             },
         ) from exc
     name, version = _parse_ref(name_at_version)
-    # Workspace authorisation is enforced via the call-context permission
-    # check; cross-workspace reads are restricted to principals carrying
-    # the global `catalog:workflows:read` permission, which the gateway
-    # only grants to workflow-service callers in practice.
+    # Tenant boundary enforcement: ``require_permission_only`` only
+    # asserts that the caller carries ``catalog:workflows:read``; it
+    # does not constrain *which* workspace they may read. Without this
+    # check, a principal with read access in workspace A could fetch
+    # any other workspace's workflows simply by crafting the id.
+    if ctx.workspace_id != workspace_id:
+        raise CallContextError(
+            403,
+            "catalog.workspace_mismatch",
+            (
+                f"call context workspace {ctx.workspace_id!r} does not match "
+                f"workflow version id workspace {workspace_id!r}"
+            ),
+        )
     row = await manager.get_workflow_version_by_ref(
         workspace_id=workspace_id,
         workflow_name=name,

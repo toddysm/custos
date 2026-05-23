@@ -236,6 +236,40 @@ def test_get_by_id_400_on_malformed_id(client: TestClient) -> None:
     assert resp.status_code == 400
 
 
+def test_get_by_id_rejects_cross_workspace_read(
+    client: TestClient,
+    stores: tuple[FakeDefinitionStore, FakeCatalogStore],
+) -> None:
+    """A tenant principal cannot read other workspaces' workflows by id.
+
+    The workspaceless route only carries a permission gate
+    (``catalog:workflows:read``); without an explicit workspace check
+    against the call context, a principal holding that permission in
+    workspace ``ws-1`` could craft an id pointing at ``ws-2`` and read
+    across the tenant boundary. Internal callers that legitimately
+    need cross-workspace reads must use the ``/rpc/v1/`` surface
+    gated on ``catalog:rpc:read``.
+    """
+    _, catalog_store = stores
+    seed_builtin_echo(catalog_store)
+    # Publish a workflow in ws-2 as ws-2's admin.
+    resp = client.post(
+        "/v1/workspaces/ws-2/workflows",
+        json={"definition": json.dumps(minimal_workflow(ws="ws-2"))},
+        headers=admin_header(ws="ws-2"),
+    )
+    assert resp.status_code == 201, resp.text
+
+    # Caller belongs to ws-1, has read permission in ws-1, tries to
+    # read ws-2's workflow.
+    resp = client.get(
+        "/v1/workflows/ws-2/orders@1",
+        headers=admin_header(ws="ws-1"),
+    )
+    assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "catalog.workspace_mismatch"
+
+
 def test_get_by_id_400_when_name_contains_slash(client: TestClient) -> None:
     """Workflow names cannot contain ``/`` — three-slash IDs are rejected.
 
