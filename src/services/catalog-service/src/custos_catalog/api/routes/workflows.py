@@ -42,7 +42,7 @@ from custos_catalog.middleware.callctx import CallContext
 
 router = APIRouter()
 
-_REF_RE = re.compile(r"^(?P<name>[^@]+)@(?P<version>[0-9]+)$")
+_REF_RE = re.compile(r"^(?P<name>[^@/]+)@(?P<version>[0-9]+)$")
 
 
 def _parse_ref(ref: str) -> tuple[str, int]:

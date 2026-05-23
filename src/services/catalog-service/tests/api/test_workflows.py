@@ -236,6 +236,22 @@ def test_get_by_id_400_on_malformed_id(client: TestClient) -> None:
     assert resp.status_code == 400
 
 
+def test_get_by_id_400_when_name_contains_slash(client: TestClient) -> None:
+    """Workflow names cannot contain ``/`` — three-slash IDs are rejected.
+
+    The documented id shape is ``<workspaceId>/<workflowName>@<version>``;
+    accepting ``ws-1/a/b@1`` would silently route a malformed id to the
+    manager with ``name="a/b"``. ``_REF_RE`` now excludes ``/`` from
+    the name group so the parse fails with a 400.
+    """
+    resp = client.get(
+        "/v1/workflows/ws-1/a/b@1",
+        headers=admin_header(),
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "catalog.workflow_ref_invalid"
+
+
 # ---------------------------------------------------------------------------
 # Deprecate
 # ---------------------------------------------------------------------------
