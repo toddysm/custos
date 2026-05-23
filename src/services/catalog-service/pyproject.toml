@@ -95,6 +95,13 @@ ignore = []
 # documented FastAPI idiom; B008 fires on every such call. B011 covers
 # `assert ... is None` patterns used in fixture wiring.
 "tests/**" = ["B008", "B011"]
+# The API surface uses the documented FastAPI `Depends(...)` / `Body(...)` /
+# `Path(...)` / `Query(...)` idiom in argument defaults; B008 fires on every
+# such call. There is no clean way to express these without the call in the
+# default value (Annotated[..., Depends(...)] avoids B008 but mypy strict
+# rejects the pattern with our protocols), so we narrow the ignore to the
+# api package.
+"src/custos_catalog/api/**" = ["B008"]
 
 [tool.mypy]
 python_version = "3.11"
