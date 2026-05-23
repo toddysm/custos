@@ -42,3 +42,10 @@ oidc:
 
 gateway:
   hostname: custos.internal
+
+# Airgapped HA still wires CAT_DEFINITION_STORE / CAT_CATALOG_STORE through
+# ExternalSecret; the secret-store backend swaps to Sealed Secrets via the
+# umbrella `secrets:` block.
+catalog-service:
+  externalSecret:
+    enabled: true

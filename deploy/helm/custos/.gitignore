@@ -1,0 +1,4 @@
+# Transient outputs of `helm dependency update` against the umbrella chart.
+# Reconstructed from `dependencies` in Chart.yaml on every fresh checkout.
+Chart.lock
+charts/

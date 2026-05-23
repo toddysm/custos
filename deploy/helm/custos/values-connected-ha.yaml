@@ -39,3 +39,11 @@ oidc:
 
 gateway:
   hostname: custos.example.com
+
+# In HA, catalog-service reads CAT_DEFINITION_STORE / CAT_CATALOG_STORE from a
+# Secret materialized by ExternalSecret against the cluster secret store.
+# Eval profiles leave this off and operators populate the DSNs by hand or
+# via a pre-install Job.
+catalog-service:
+  externalSecret:
+    enabled: true

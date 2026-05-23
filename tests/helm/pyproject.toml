@@ -1,0 +1,19 @@
+[project]
+name = "custos-helm-tests"
+version = "0.0.0"
+description = "Helm-render integration tests for the Custos umbrella + subcharts."
+requires-python = ">=3.11"
+dependencies = [
+    "pytest>=8.0",
+    "pyyaml>=6.0",
+    "types-PyYAML>=6.0",
+]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["."]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+]
