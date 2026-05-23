@@ -147,6 +147,17 @@ def test_list_versions_returns_empty_for_unknown_workflow(client: TestClient) ->
     assert resp.json() == {"items": [], "nextCursor": None}
 
 
+def test_list_versions_rejects_out_of_range_limit(client: TestClient) -> None:
+    # ``limit`` must satisfy ``1 <= limit <= 1000``; FastAPI rejects everything
+    # else at the API boundary with a 422 before the handler runs.
+    for bad in (0, -1, 1001, 99999):
+        resp = client.get(
+            f"/v1/workspaces/ws-1/workflows/orders?limit={bad}",
+            headers=admin_header(),
+        )
+        assert resp.status_code == 422, (bad, resp.text)
+
+
 # ---------------------------------------------------------------------------
 # Get-by-ref
 # ---------------------------------------------------------------------------

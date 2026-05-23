@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Path
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 
 from custos_catalog.api.dependencies import (
     get_definition_manager,
@@ -150,8 +150,19 @@ def _dump_yaml_or_json(payload: dict[str, object]) -> str:
 async def list_or_get_workflow(
     ws: str = Path(...),
     name_or_ref: str = Path(..., min_length=1),
-    cursor: str | None = None,
-    limit: int | None = None,
+    cursor: str | None = Query(
+        default=None,
+        description="Opaque pagination token returned as ``nextCursor`` by a prior call.",
+    ),
+    limit: int | None = Query(
+        default=None,
+        ge=1,
+        le=1000,
+        description=(
+            "Maximum number of versions to return (1-1000). Defaults to the"
+            " SPL provider's page size when omitted."
+        ),
+    ),
     _ctx: CallContext = Depends(require_workspace_access("catalog:workflows:read")),
     manager: DefinitionManager = Depends(get_definition_manager),
 ) -> WorkflowListResponse | WorkflowVersionBody:
