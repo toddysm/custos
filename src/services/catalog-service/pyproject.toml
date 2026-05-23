@@ -31,12 +31,14 @@ classifiers = [
 # `custos-spl` provides the `DefinitionStoreProvider` /
 # `CatalogStoreProvider` Protocols + `MigrationRequired`; `custos-postgres`
 # provides the v1 Postgres adapter classes. CS-IMPL-005 pulls in
-# `jsonschema` for the publish-time workflow/template schema gate, and
-# CS-IMPL-007 will add `custos-cel`; CS-IMPL-017 will exercise the
-# FastAPI/uvicorn surface end-to-end through real routes.
+# `jsonschema` for the publish-time workflow/template schema gate;
+# CS-IMPL-007 pulls in `custos-cel` for the CEL syntactic +
+# name-binding gate. CS-IMPL-017 will exercise the FastAPI/uvicorn
+# surface end-to-end through real routes.
 dependencies = [
     "custos-spl",
     "custos-postgres",
+    "custos-cel",
     "fastapi>=0.110,<1",
     "uvicorn[standard]>=0.27,<1",
     "pydantic>=2.6,<3",
@@ -106,7 +108,7 @@ no_implicit_optional = true
 check_untyped_defs = true
 namespace_packages = true
 explicit_package_bases = true
-mypy_path = "src:../../libs/storage-provider-layer/src:../../libs/custos-postgres/src"
+mypy_path = "src:../../libs/storage-provider-layer/src:../../libs/custos-postgres/src:../../libs/custos-cel/src"
 
 [[tool.mypy.overrides]]
 module = "tests.*"
