@@ -42,8 +42,8 @@ failure modes):
   shrinks the budget.
 * ``timeout_ms == 0`` disables the gate (intended for tests and for
   callers that wrap the evaluator in their own deadline machinery);
-  no ContextVar is armed in that case, so the disabled path is
-  byte-identical to the bare WF-IMPL-006 evaluator on the hot path.
+  no deadline ContextVar state is armed in that case, and
+  :func:`time.monotonic` is never consulted.
 
 See the issues:
 * https://github.com/toddysm/custos/issues/181 (evaluator core)
