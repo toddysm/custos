@@ -441,18 +441,20 @@ def _validate_envelope(manifest: Mapping[str, Any]) -> list[ConnectorManifestIss
         )
 
     # ---- spec-level lightweight checks ----------------------------------
+    if "spec" not in manifest:
+        # Missing spec is allowed at the envelope level — Connector Service
+        # validates spec contents at register time.
+        return issues
+
     spec = manifest.get("spec")
     if not isinstance(spec, Mapping):
-        # Missing spec is allowed at the envelope level — Connector Service
-        # validates spec contents at register time; we only flag a non-dict.
-        if spec is not None:
-            issues.append(
-                ConnectorManifestIssue(
-                    path="/spec",
-                    code="type",
-                    message="spec must be an object when present",
-                ),
-            )
+        issues.append(
+            ConnectorManifestIssue(
+                path="/spec",
+                code="type",
+                message="spec must be an object when present",
+            ),
+        )
         return issues
 
     capabilities = spec.get("capabilities")
