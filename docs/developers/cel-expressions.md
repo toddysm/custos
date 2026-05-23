@@ -33,7 +33,7 @@ type-checked + evaluated by the Workflow Service at **run time**.
 - id: summarize
   let:
     totalCritical: ${{ steps.scan.outputs.critical + steps["scan-alt"].outputs.critical }}
-    label: ${{ totalCritical > 0 ? "block" : "allow" }}
+    label: ${{ let.totalCritical > 0 ? "block" : "allow" }}
 ```
 
 The expressions inside the two `${{ ... }}` placeholders are pure CEL.
