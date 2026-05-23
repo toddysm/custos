@@ -1,10 +1,10 @@
 """Per-evaluation timeout enforcement (WF-IMPL-007, issue #182).
 
-The deadline is wall-clock based (``time.monotonic``), checked at the
-entry of every recursive walker call, and disabled when
-``timeout_ms == 0``. The error type carries the structured
-``kind`` / ``elapsed_ms`` / ``timeout_ms`` fields the WF-IMPL-008
-error taxonomy expects.
+The deadline is wall-clock based (``time.monotonic``), sampled
+periodically during evaluation (currently every 32 visited nodes),
+and disabled when ``timeout_ms == 0``. The error type carries the
+structured ``kind`` / ``elapsed_ms`` / ``timeout_ms`` fields the
+WF-IMPL-008 error taxonomy expects.
 
 Tests fall into three groups:
 
