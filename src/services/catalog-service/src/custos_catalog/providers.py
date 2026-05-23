@@ -24,12 +24,13 @@ Startup gate
 ------------
 
 :func:`verify_schema_revisions` calls each adapter's
-``refresh_declared()`` to read the migration ledger, then defers to
-:func:`custos_spl.check_revisions` which raises
-:class:`custos_spl.MigrationRequired` when the running build's required
-revision is not present. The app factory wires this onto a startup hook
-that flips ``app.state.ready`` to ``False`` and surfaces a 503 on
-``/readyz`` until the operator runs ``custos migrate up``.
+``refresh_declared()`` to read the migration ledger, then compares the
+declared revisions for the interfaces owned by catalog-service against
+the corresponding required ``SCHEMA_REVISION`` values. It raises
+:class:`custos_spl.MigrationRequired` when a required revision is not
+present. The app factory wires this onto a startup hook that flips
+``app.state.ready`` to ``False`` and surfaces a 503 on ``/readyz`` until
+the required catalog-service schema revisions have been applied.
 """
 
 from __future__ import annotations
