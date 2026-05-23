@@ -111,7 +111,13 @@ def load_document(source: str | bytes) -> dict[str, Any]:
             scalar at the document root is rejected here so downstream
             validators always see a ``dict``).
     """
-    text = source.decode("utf-8") if isinstance(source, bytes) else source
+    if isinstance(source, bytes):
+        try:
+            text = source.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise DocumentParseError(f"document is not valid UTF-8: {exc}") from exc
+    else:
+        text = source
     try:
         parsed: Any = json.loads(text)
     except json.JSONDecodeError:
