@@ -30,9 +30,10 @@ classifiers = [
 #
 # `custos-spl` provides the `DefinitionStoreProvider` /
 # `CatalogStoreProvider` Protocols + `MigrationRequired`; `custos-postgres`
-# provides the v1 Postgres adapter classes. CS-IMPL-007 will add
-# `custos-cel`; CS-IMPL-017 will exercise the FastAPI/uvicorn surface
-# end-to-end through real routes.
+# provides the v1 Postgres adapter classes. CS-IMPL-005 pulls in
+# `jsonschema` for the publish-time workflow/template schema gate, and
+# CS-IMPL-007 will add `custos-cel`; CS-IMPL-017 will exercise the
+# FastAPI/uvicorn surface end-to-end through real routes.
 dependencies = [
     "custos-spl",
     "custos-postgres",
@@ -40,6 +41,7 @@ dependencies = [
     "uvicorn[standard]>=0.27,<1",
     "pydantic>=2.6,<3",
     "pyyaml>=6.0,<7",
+    "jsonschema>=4.21,<5",
     "opentelemetry-api>=1.20,<2",
 ]
 
@@ -52,6 +54,7 @@ dev = [
     "ruff>=0.4",
     "mypy>=1.10",
     "types-PyYAML>=6.0",
+    "types-jsonschema>=4.21",
     # OTel SDK is dev-only so tests can install in-memory exporters when
     # CS-IMPL-019 lands. The library itself only depends on the API.
     "opentelemetry-sdk>=1.20,<2",
