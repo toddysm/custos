@@ -184,9 +184,8 @@ def _summarize_validation_error(exc: ValidationError) -> str:
     if not errors:
         return "invalid call context"
     first: dict[str, Any] = dict(errors[0])
-    loc = ".".join(str(p) for p in first.get("loc", ()))
     msg = first.get("msg", "invalid call context")
-    return f"{loc}: {msg}" if loc else str(msg)
+    return str(msg)
 
 
 async def get_call_context(request: Request) -> CallContext:
