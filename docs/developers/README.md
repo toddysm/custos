@@ -19,6 +19,7 @@ Custos is a pluggable workflow orchestrator. Developers extend the platform by w
 | Section | Description |
 |---|---|
 | [Connections API](connections-api.md) | Connector manifest schema, field reference, and examples |
+| [CEL Expressions](cel-expressions.md) | Reference for workflow expressions: bindings, operators, sandbox guarantees, failure modes, worked examples |
 | [Examples](examples/) | Reference connector manifests for the supported target and authentication combinations |
 
 ## Quick Start for Connection Developers
