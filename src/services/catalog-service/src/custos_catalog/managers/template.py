@@ -40,6 +40,7 @@ commits on the same module.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -61,8 +62,10 @@ from custos_catalog.cel_validate import (
     validate_template_expressions,
 )
 from custos_catalog.managers.definition import (
+    DefinitionManager,
     PublishValidationError,
     PublishValidationIssue,
+    WorkflowVersionRef,
     _cel_issue,
     _schema_issue,
     _SubworkflowResolverAdapter,
@@ -73,9 +76,12 @@ from custos_catalog.normalize import (
     normalize_template,
 )
 from custos_catalog.placeholders import (
+    PlaceholderBindingError,
     PlaceholderDeclaration,
     PlaceholderDeclarationError,
+    effective_bindings,
     parse_declarations,
+    validate_placeholder_bindings,
     validate_placeholder_declarations,
 )
 from custos_catalog.resolve import (
@@ -89,6 +95,10 @@ from custos_catalog.schema.validate import (
     TemplateSchemaError,
     load_document,
     validate_template,
+)
+from custos_catalog.template_engine import (
+    TemplateRenderError,
+    render,
 )
 from custos_catalog.versioning import (
     TemplateImmutabilityError,
@@ -144,6 +154,53 @@ class TemplateNotFound(Exception):
         self.version = version
 
 
+class MaterializationError(Exception):
+    """Raised when ``TemplateManager.materialize`` cannot produce a workflow.
+
+    Carries both endpoints of the materialization — the template
+    triple the caller asked for and the chained underlying error —
+    so the API layer can surface a structured ``problem+json`` body
+    that includes both refs.
+
+    Attributes:
+        workspace_id: The target workspace.
+        template_name: Source template name.
+        template_version: Source template version.
+        target_workflow_name: The workflow name the caller asked the
+            materialized workflow to be written under.
+        cause: The underlying error. One of:
+
+            * :class:`custos_catalog.placeholders.PlaceholderBindingError`
+              — bindings did not satisfy the template's declarations.
+            * :class:`TemplateRenderError` — the engine could not
+              render the template body (unbound or embedded
+              placeholders).
+            * :class:`PublishValidationError` — the rendered document
+              failed the workflow publish pipeline.
+    """
+
+    code: str = "catalog.template_materialization_failed"
+
+    def __init__(
+        self,
+        *,
+        workspace_id: str,
+        template_name: str,
+        template_version: int,
+        target_workflow_name: str,
+        cause: Exception,
+    ) -> None:
+        super().__init__(
+            f"materialization of template {template_name!r}@{template_version} "
+            f"-> workflow {target_workflow_name!r} failed: {cause}",
+        )
+        self.workspace_id = workspace_id
+        self.template_name = template_name
+        self.template_version = template_version
+        self.target_workflow_name = target_workflow_name
+        self.cause = cause
+
+
 class TemplateManager:
     """Orchestrates Template publish + materialize + extract pipelines.
 
@@ -158,6 +215,7 @@ class TemplateManager:
         activity_registry: ActivityTypeRegistry,
         connector_client: ConnectorClient,
         versioning: VersioningManager,
+        definition_manager: DefinitionManager | None = None,
         max_publish_retries: int = DEFAULT_MAX_PUBLISH_RETRIES,
     ) -> None:
         self._store = definition_store
@@ -168,6 +226,10 @@ class TemplateManager:
             raise ValueError("max_publish_retries must be >= 1")
         self._max_publish_retries = max_publish_retries
         self._subworkflow_adapter = _SubworkflowResolverAdapter(definition_store)
+        #: Required only by :meth:`materialize`; the publish + read
+        #: paths do not call into it. Late binding keeps the publish
+        #: path testable without spinning up a workflow manager.
+        self._definition_manager = definition_manager
 
     # ------------------------------------------------------------------
     # Publish pipeline (CS-IMPL-012)
@@ -531,6 +593,157 @@ class TemplateManager:
         )
 
     # ------------------------------------------------------------------
+    # Materialize (CS-IMPL-013)
+    # ------------------------------------------------------------------
+
+    async def materialize(
+        self,
+        *,
+        workspace_id: str,
+        template_name: str,
+        template_version: int,
+        target_workflow_name: str,
+        bindings: Mapping[str, Any],
+        principal_id: str,
+    ) -> WorkflowVersionRef:
+        """Materialize a template version into a Workflow version.
+
+        The operation is the design's ``POST
+        /v1/workspaces/{ws}/templates/{id}:materialize`` (see
+        design/components/catalog-service § Operation: Materialize
+        Workflow from Template). The pipeline:
+
+        1. Fetch ``(workspace_id, template_name, template_version)``.
+        2. Re-parse ``spec.placeholders`` from the stored doc.
+        3. Validate ``bindings`` against declarations
+           (:func:`validate_placeholder_bindings`); apply declared
+           defaults (:func:`effective_bindings`).
+        4. Render the template body with the engine
+           (:func:`custos_catalog.template_engine.render`).
+        5. Publish the rendered document via
+           :meth:`DefinitionManager.publish_workflow` with
+           ``derived_from_template_version_id`` set to
+           ``"<template_name>@<template_version>"``. SPL has no UUID
+           lookup at v1, so the triple-encoded reference is the
+           canonical lineage handle.
+
+        Idempotency / immutability: piggy-backs on the workflow
+        publish path. Re-running the same materialization with the
+        same bindings produces byte-identical output and resolves to
+        the same :class:`WorkflowVersionRef`.
+
+        Args:
+            workspace_id: Target workspace (must equal the template's
+                workspace).
+            template_name: Source template name.
+            template_version: Source template version (must already
+                exist; this method does not auto-resolve "latest").
+            target_workflow_name: ``metadata.name`` for the
+                materialized workflow. Callers pick this; the
+                template's own ``metadata.name`` is not used.
+            bindings: Concrete placeholder values. Defaults from the
+                declarations fill any unbound optional placeholders.
+            principal_id: Caller identity (audit only at v1).
+
+        Raises:
+            RuntimeError: When the manager was constructed without a
+                ``definition_manager`` (programmer error).
+            TemplateNotFound: When the requested template version
+                does not exist.
+            MaterializationError: When binding validation, rendering,
+                or the chained workflow publish fails. The ``cause``
+                attribute carries the underlying exception so callers
+                can surface structured issue lists.
+        """
+        if self._definition_manager is None:  # pragma: no cover - construction guard
+            raise RuntimeError(
+                "TemplateManager.materialize requires definition_manager= "
+                "to be supplied at construction",
+            )
+        _LOGGER.info(
+            "materialize start workspace=%s template=%s@%d target=%s principal=%s",
+            workspace_id,
+            template_name,
+            template_version,
+            target_workflow_name,
+            principal_id,
+        )
+
+        # 1. Fetch the template version (raises TemplateNotFound).
+        template_row = await self.get_template_version_by_ref(
+            workspace_id=workspace_id,
+            template_name=template_name,
+            version=template_version,
+        )
+        template_doc = dict(template_row.normalized_doc)
+
+        # 2. Re-parse declarations from the stored body.
+        spec = template_doc.get("spec", {})
+        raw_placeholders: list[Any] = []
+        if isinstance(spec, Mapping):
+            raw = spec.get("placeholders", []) or []
+            if isinstance(raw, list):
+                raw_placeholders = raw
+        declarations = parse_declarations(raw_placeholders)
+
+        # 3. Validate the supplied bindings + apply defaults.
+        try:
+            validate_placeholder_bindings(declarations, bindings)
+        except PlaceholderBindingError as exc:
+            raise MaterializationError(
+                workspace_id=workspace_id,
+                template_name=template_name,
+                template_version=template_version,
+                target_workflow_name=target_workflow_name,
+                cause=exc,
+            ) from exc
+        full_bindings = effective_bindings(declarations, bindings)
+
+        # 4. Render the template body.
+        try:
+            rendered = render(
+                template_doc,
+                full_bindings,
+                target_workflow_name=target_workflow_name,
+            )
+        except TemplateRenderError as exc:
+            raise MaterializationError(
+                workspace_id=workspace_id,
+                template_name=template_name,
+                template_version=template_version,
+                target_workflow_name=target_workflow_name,
+                cause=exc,
+            ) from exc
+
+        # 5. Publish via the workflow pipeline.
+        derived_id = f"{template_name}@{template_version}"
+        try:
+            ref = await self._definition_manager.publish_workflow(
+                workspace_id=workspace_id,
+                principal_id=principal_id,
+                source=json.dumps(rendered),
+                derived_from_template_version_id=derived_id,
+            )
+        except PublishValidationError as exc:
+            raise MaterializationError(
+                workspace_id=workspace_id,
+                template_name=template_name,
+                template_version=template_version,
+                target_workflow_name=target_workflow_name,
+                cause=exc,
+            ) from exc
+
+        _LOGGER.info(
+            "materialize success workspace=%s template=%s@%d -> workflow=%s@%d",
+            workspace_id,
+            template_name,
+            template_version,
+            ref.workflow_name,
+            ref.version,
+        )
+        return ref
+
+    # ------------------------------------------------------------------
     # Read / lifecycle surface
     # ------------------------------------------------------------------
 
@@ -628,6 +841,7 @@ class TemplateManager:
 
 __all__ = [
     "DEFAULT_MAX_PUBLISH_RETRIES",
+    "MaterializationError",
     "TemplateManager",
     "TemplateNotFound",
     "WorkflowTemplateVersionRef",

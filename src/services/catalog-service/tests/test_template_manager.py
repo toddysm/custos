@@ -1,6 +1,6 @@
 """Tests for :class:`custos_catalog.managers.template.TemplateManager` publish path.
 
-Covers CS-IMPL-012.
+Covers CS-IMPL-012 and CS-IMPL-013 (materialize).
 """
 
 from __future__ import annotations
@@ -21,8 +21,12 @@ from custos_spl.interfaces.definition_store import (
 )
 from custos_spl.pagination import Cursor, Page
 
-from custos_catalog.managers.definition import PublishValidationError
+from custos_catalog.managers.definition import (
+    DefinitionManager,
+    PublishValidationError,
+)
 from custos_catalog.managers.template import (
+    MaterializationError,
     TemplateManager,
     TemplateNotFound,
     WorkflowTemplateVersionRef,
@@ -319,11 +323,21 @@ def _doc_yaml(doc: dict[str, Any]) -> str:
 
 
 def _make_manager(store: FakeDefinitionStore) -> TemplateManager:
+    versioning = VersioningManager(store=store)
+    registry = FakeActivityRegistry()
+    connector = StubConnectorClient()
+    definition_manager = DefinitionManager(
+        definition_store=store,
+        activity_registry=registry,
+        connector_client=connector,
+        versioning=versioning,
+    )
     return TemplateManager(
         definition_store=store,
-        activity_registry=FakeActivityRegistry(),
-        connector_client=StubConnectorClient(),
-        versioning=VersioningManager(store=store),
+        activity_registry=registry,
+        connector_client=connector,
+        versioning=versioning,
+        definition_manager=definition_manager,
     )
 
 
@@ -680,3 +694,169 @@ async def test_deprecate_template_unknown_raises() -> None:
             template_name="ghost",
             principal_id="alice",
         )
+
+
+# ---------------------------------------------------------------------------
+# Materialize (CS-IMPL-013)
+# ---------------------------------------------------------------------------
+
+
+async def test_materialize_publishes_workflow_with_substituted_activity() -> None:
+    store = FakeDefinitionStore()
+    manager = _make_manager(store)
+    await manager.publish_template(
+        workspace_id=WS,
+        principal_id="alice",
+        source=_doc_json(_minimal_template()),
+    )
+    ref = await manager.materialize(
+        workspace_id=WS,
+        template_name="my-tmpl",
+        template_version=1,
+        target_workflow_name="scan-wf",
+        bindings={"scanActivity": "custos.builtin/vuln-scan@2.0.0"},
+        principal_id="alice",
+    )
+    assert ref.workflow_name == "scan-wf"
+    assert ref.version == 1
+    rows = store.workflows[(WS, WorkflowId("scan-wf"))]
+    assert len(rows) == 1
+    step = rows[0].normalized_doc["spec"]["steps"][0]
+    # The placeholder has been substituted with the concrete activity ref.
+    assert step["activity"].startswith("custos.builtin/vuln-scan")
+
+
+async def test_materialize_records_derived_from_template_version_id() -> None:
+    store = FakeDefinitionStore()
+    manager = _make_manager(store)
+    await manager.publish_template(
+        workspace_id=WS,
+        principal_id="alice",
+        source=_doc_json(_minimal_template()),
+    )
+    await manager.materialize(
+        workspace_id=WS,
+        template_name="my-tmpl",
+        template_version=1,
+        target_workflow_name="scan-wf",
+        bindings={"scanActivity": "custos.builtin/vuln-scan@2.0.0"},
+        principal_id="alice",
+    )
+    row = store.workflows[(WS, WorkflowId("scan-wf"))][0]
+    assert row.derived_from_template_version_id == "my-tmpl@1"
+
+
+async def test_materialize_is_idempotent_for_same_bindings() -> None:
+    store = FakeDefinitionStore()
+    manager = _make_manager(store)
+    await manager.publish_template(
+        workspace_id=WS,
+        principal_id="alice",
+        source=_doc_json(_minimal_template()),
+    )
+    bindings = {"scanActivity": "custos.builtin/vuln-scan@2.0.0"}
+    ref1 = await manager.materialize(
+        workspace_id=WS,
+        template_name="my-tmpl",
+        template_version=1,
+        target_workflow_name="scan-wf",
+        bindings=bindings,
+        principal_id="alice",
+    )
+    ref2 = await manager.materialize(
+        workspace_id=WS,
+        template_name="my-tmpl",
+        template_version=1,
+        target_workflow_name="scan-wf",
+        bindings=bindings,
+        principal_id="alice",
+    )
+    assert ref1 == ref2
+    assert len(store.workflows[(WS, WorkflowId("scan-wf"))]) == 1
+
+
+async def test_materialize_unknown_template_raises_template_not_found() -> None:
+    store = FakeDefinitionStore()
+    manager = _make_manager(store)
+    with pytest.raises(TemplateNotFound):
+        await manager.materialize(
+            workspace_id=WS,
+            template_name="ghost",
+            template_version=1,
+            target_workflow_name="scan-wf",
+            bindings={"scanActivity": "custos.builtin/vuln-scan@2.0.0"},
+            principal_id="alice",
+        )
+
+
+async def test_materialize_missing_required_binding_raises_materialization_error() -> None:
+    store = FakeDefinitionStore()
+    manager = _make_manager(store)
+    await manager.publish_template(
+        workspace_id=WS,
+        principal_id="alice",
+        source=_doc_json(_minimal_template()),
+    )
+    with pytest.raises(MaterializationError) as exc:
+        await manager.materialize(
+            workspace_id=WS,
+            template_name="my-tmpl",
+            template_version=1,
+            target_workflow_name="scan-wf",
+            bindings={},  # scanActivity is required
+            principal_id="alice",
+        )
+    assert exc.value.template_name == "my-tmpl"
+    assert exc.value.template_version == 1
+    assert exc.value.target_workflow_name == "scan-wf"
+    # cause should be a PlaceholderBindingError
+    from custos_catalog.placeholders import PlaceholderBindingError
+
+    assert isinstance(exc.value.cause, PlaceholderBindingError)
+
+
+async def test_materialize_chained_publish_failure_surfaces_through_cause() -> None:
+    # Build a template that's valid as a template but produces an
+    # invalid workflow: the activity placeholder resolves to a value
+    # that doesn't match the workflow activity-ref pattern.
+    store = FakeDefinitionStore()
+    manager = _make_manager(store)
+    await manager.publish_template(
+        workspace_id=WS,
+        principal_id="alice",
+        source=_doc_json(_minimal_template()),
+    )
+    with pytest.raises(MaterializationError) as exc:
+        await manager.materialize(
+            workspace_id=WS,
+            template_name="my-tmpl",
+            template_version=1,
+            target_workflow_name="scan-wf",
+            bindings={"scanActivity": "NOT A VALID ACTIVITY REF"},
+            principal_id="alice",
+        )
+    assert isinstance(exc.value.cause, PublishValidationError)
+
+
+async def test_materialize_applies_default_for_optional_placeholder() -> None:
+    # The template has `topic` with a default of "default-topic"; we
+    # only supply scanActivity. Ensure the materialized doc still
+    # publishes successfully (the default would be substituted into
+    # any topic reference in the workflow body — for this test we
+    # just verify the materialize path doesn't reject the input).
+    store = FakeDefinitionStore()
+    manager = _make_manager(store)
+    await manager.publish_template(
+        workspace_id=WS,
+        principal_id="alice",
+        source=_doc_json(_minimal_template()),
+    )
+    ref = await manager.materialize(
+        workspace_id=WS,
+        template_name="my-tmpl",
+        template_version=1,
+        target_workflow_name="scan-wf",
+        bindings={"scanActivity": "custos.builtin/vuln-scan@2.0.0"},
+        principal_id="alice",
+    )
+    assert ref.version == 1
