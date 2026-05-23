@@ -77,8 +77,8 @@ jobs:
       - name: Mypy (strict)
         run: mypy src tests
 
-      - name: Pytest
-        run: pytest -q
+      - name: Pytest (with 90% coverage gate)
+        run: pytest -q --cov=custos_cel --cov-report=term-missing --cov-fail-under=90
 
   integration-tests:
     name: Adapter Conformance Tests (integration)

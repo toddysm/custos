@@ -12,7 +12,7 @@ replay-deterministic runtime for workflow expressions. It is consumed by:
 
 ## Status
 
-**Scaffold + parser dependency + AST data model + binding scope + type checker + sandboxed evaluator + per-evaluation timeout + locked error taxonomy** — WF-IMPL-001 ([#176](https://github.com/toddysm/custos/issues/176)), WF-IMPL-002 ([#177](https://github.com/toddysm/custos/issues/177)), WF-IMPL-003 ([#178](https://github.com/toddysm/custos/issues/178)), WF-IMPL-004 ([#179](https://github.com/toddysm/custos/issues/179)), WF-IMPL-005 ([#180](https://github.com/toddysm/custos/issues/180)), WF-IMPL-006 ([#181](https://github.com/toddysm/custos/issues/181)), WF-IMPL-007 ([#182](https://github.com/toddysm/custos/issues/182)), WF-IMPL-008 ([#183](https://github.com/toddysm/custos/issues/183)). `custos_cel.parse()` is real; `custos_cel.BindingScope` is real (immutable scope exposing only the design's seven bindings); `custos_cel.type_check()` is real (JSON-Schema-backed StartRun-time gate); `custos_cel.evaluate()` is real (sandboxed walk over a TypedAST against a `BindingScope` and a `Clock`, gated by a per-evaluation wall-clock budget configurable via `WF_EXPR_TIMEOUT_MS`); `custos_cel.errors` is the locked structured-error taxonomy (`CelError` base + `ParseError` / `TypeError` / `UnboundNameError` / `TimeoutError` / `EvaluationError` / `DivergenceError`, each with a stable `kind` string and a JSON-safe `to_dict()`). Sandbox hardening, observability, and developer-docs work continues in WF-IMPL-009 through WF-IMPL-012.
+**Scaffold + parser dependency + AST data model + binding scope + type checker + sandboxed evaluator + per-evaluation timeout + locked error taxonomy + comprehensive unit-test suite** — WF-IMPL-001 ([#176](https://github.com/toddysm/custos/issues/176)), WF-IMPL-002 ([#177](https://github.com/toddysm/custos/issues/177)), WF-IMPL-003 ([#178](https://github.com/toddysm/custos/issues/178)), WF-IMPL-004 ([#179](https://github.com/toddysm/custos/issues/179)), WF-IMPL-005 ([#180](https://github.com/toddysm/custos/issues/180)), WF-IMPL-006 ([#181](https://github.com/toddysm/custos/issues/181)), WF-IMPL-007 ([#182](https://github.com/toddysm/custos/issues/182)), WF-IMPL-008 ([#183](https://github.com/toddysm/custos/issues/183)), WF-IMPL-009 ([#184](https://github.com/toddysm/custos/issues/184)). `custos_cel.parse()` is real; `custos_cel.BindingScope` is real (immutable scope exposing only the design's seven bindings); `custos_cel.type_check()` is real (JSON-Schema-backed StartRun-time gate); `custos_cel.evaluate()` is real (sandboxed walk over a TypedAST against a `BindingScope` and a `Clock`, gated by a per-evaluation wall-clock budget configurable via `WF_EXPR_TIMEOUT_MS`); `custos_cel.errors` is the locked structured-error taxonomy (`CelError` base + `ParseError` / `TypeError` / `UnboundNameError` / `TimeoutError` / `EvaluationError` / `DivergenceError`, each with a stable `kind` string and a JSON-safe `to_dict()`); CI runs the full test suite on Python 3.11 and 3.12 under a `--cov-fail-under=90` coverage gate. Sandbox hardening, observability, and developer-docs work continues in WF-IMPL-010 through WF-IMPL-012.
 
 ## Parser / runtime
 
@@ -319,11 +319,32 @@ ruff check .
 ruff format --check .
 mypy src tests
 pytest -q
+# With the WF-IMPL-009 coverage gate (matches CI):
+pytest -q --cov=custos_cel --cov-report=term-missing --cov-fail-under=90
 ```
 
 CI for this library lives in
 [`.github/workflows/python-libs.yml`](../../../.github/workflows/python-libs.yml)
-(job: `custos-cel`).
+(job: `custos-cel`). It runs the full test suite on Python 3.11 and
+3.12 under the same `--cov-fail-under=90` gate.
+
+### Test layout
+
+Tests live in [`tests/`](tests/) and are organised by area, matching
+the WF-IMPL-009 scope:
+
+| File | Area |
+|---|---|
+| [`test_parser.py`](tests/test_parser.py) | `parse()` end-to-end + celpy parser smoke. |
+| [`test_ast.py`](tests/test_ast.py) | AST data model, JSON round-trip, `from_dict` / `to_json`. |
+| [`test_scope.py`](tests/test_scope.py) | `BindingScope` allow-list, `with_let`, sandbox negatives at the scope layer (one explicit case per host name in the WF-IMPL-009 list: `os`, `sys`, `subprocess`, `socket`, `open`, `__import__`, `eval`, `exec`). |
+| [`test_types.py`](tests/test_types.py) | `type_check()` against `SchemaBindings`; one case per binding kind and operator family. |
+| [`test_clock.py`](tests/test_clock.py) | `Clock` protocol, `FixedClock` determinism, `DaprWorkflowClock`. |
+| [`test_eval.py`](tests/test_eval.py) | `evaluate()` end-to-end; one case per binding kind (`inputs.*`, `steps.<id>.outputs.*`, `run.*`, `workflow.*`, `now()`, `let.*`); determinism (two evaluations under the same `FixedClock` are byte-equal); static sandbox audit of `eval.py`. |
+| [`test_eval_branches.py`](tests/test_eval_branches.py) | Per-operator and short-circuit branch coverage for the evaluator. |
+| [`test_timeout.py`](tests/test_timeout.py) | Per-evaluation wall-clock budget, `WF_EXPR_TIMEOUT_MS`, nested-evaluation deadline restore. |
+| [`test_errors.py`](tests/test_errors.py) | Locked error taxonomy: one case per `kind`; `to_dict` / `__repr__` / hashability; full lifecycle (`parse` → `type_check` → `evaluate`). |
+| [`test_public_api.py`](tests/test_public_api.py) | `custos_cel` package-level re-export surface and `__all__`. |
 
 ## License
 

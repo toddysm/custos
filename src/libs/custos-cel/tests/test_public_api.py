@@ -1,9 +1,11 @@
-"""Smoke tests for the custos_cel public surface.
+"""Public-API surface tests for ``custos_cel``.
 
-These tests assert that the public-API surface exists. The parser stub
-became real in WF-IMPL-003 (see ``test_parse.py``), the type checker in
-WF-IMPL-005 (see ``test_types.py``), and the evaluator in WF-IMPL-006
-(see ``test_eval.py``).
+These exercise the package-level re-export surface — that every name
+the design.md / WF-IMPL-008 acceptance criteria commit to importing
+from ``custos_cel`` actually exists, is callable where expected, and
+appears in ``__all__``. End-to-end semantics for each entry point
+live in their per-area files (``test_parser.py``, ``test_types.py``,
+``test_eval.py``, ``test_timeout.py``, ``test_errors.py``).
 """
 
 from __future__ import annotations

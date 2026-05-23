@@ -124,17 +124,26 @@ def test_resolve_steps_with_hyphenated_id() -> None:
 @pytest.mark.parametrize(
     "host_name",
     [
+        # The eight names enumerated explicitly in the WF-IMPL-009
+        # acceptance criteria (issue #184). Each must raise
+        # ``UnboundNameError`` at the *scope* layer, not implicitly via
+        # the type checker — the sandbox is structurally enforced by
+        # ``BindingScope.resolve``'s root allow-list before any
+        # attribute / item access happens.
         "os",
         "sys",
+        "subprocess",
+        "socket",
         "open",
         "__import__",
         "eval",
         "exec",
+        # Adjacent built-ins / typo-prone names — included so the
+        # sandbox surface stays auditable.
         "globals",
         "locals",
         "input",
         "__builtins__",
-        "subprocess",
         "compile",
     ],
 )
