@@ -41,13 +41,14 @@ Everything outside the placeholder braces is workflow YAML, not CEL.
 
 ## Bindings
 
-Expressions can only read from the seven binding roots below. Anything
+Expressions can only read from the six binding roots below. Anything
 else — secrets, connector contexts, environment variables, host modules,
 arbitrary functions — is structurally unreachable and resolves to an
 `expression.unbound_name` error. The table mirrors
 [design.md § Expression Evaluator](../../design/components/workflow-service/design.md#expression-evaluator-adr-011);
 see [README § Binding scope](../../src/libs/custos-cel/README.md#binding-scope)
-for the Python API behind the same model.
+for the Python API behind the same model. Some rows below show members of
+the `run` and `workflow` roots rather than additional top-level roots.
 
 | Binding | Source | Mutability | Example |
 |---|---|---|---|
