@@ -319,10 +319,7 @@ def _check_roots(
             if "-" in second and isinstance(parent, Member):
                 # `steps.foo-bar` parses as subtraction; tell the
                 # author to use bracket form.
-                hint = (
-                    f"; hyphenated step ids must use bracket form, "
-                    f'e.g. `steps["{second}"]`'
-                )
+                hint = f'; hyphenated step ids must use bracket form, e.g. `steps["{second}"]`'
             issues.append(
                 CelValidationIssue(
                     path=slot_path,
@@ -360,7 +357,9 @@ def _check_roots(
     return issues
 
 
-def _validate_expression(slot: CelSlot) -> tuple[
+def _validate_expression(
+    slot: CelSlot,
+) -> tuple[
     list[CelValidationIssue],
     list[CelValidationIssue],
 ]:
