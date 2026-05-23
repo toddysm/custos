@@ -78,7 +78,7 @@ jobs:
         run: mypy src tests
 
       - name: Pytest (with 90% coverage gate)
-        run: pytest -q --cov=custos_cel --cov-report=term-missing --cov-fail-under=90
+        run: pytest -q --cov=custos_cel --cov-report=term-missing --cov-fail-under=90 --hypothesis-seed=0
 
   integration-tests:
     name: Adapter Conformance Tests (integration)

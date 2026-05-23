@@ -495,6 +495,54 @@ def test_has_string_literal_index_form() -> None:
     assert _eval('has(inputs.labels["missing"])', scope=scope) is False
 
 
+def test_has_steps_dotted_outputs_field() -> None:
+    # ``has(steps.<id>.outputs.<key>)`` — the dotted form. Regression
+    # guard for the WF-IMPL-010 evaluator fix: the type checker
+    # accepts the chain but ``BindingScope.resolve`` rejects
+    # ``steps.<id>.outputs`` as "not a value", so ``_eval_has`` must
+    # special-case the chain to probe the outputs mapping directly.
+    scope = _scope(
+        steps={
+            "scan": StepBinding(outputs={"critical": 7}, sealed=True),
+        }
+    )
+    assert _eval("has(steps.scan.outputs.critical)", scope=scope) is True
+    assert _eval("has(steps.scan.outputs.absent)", scope=scope) is False
+
+
+def test_has_steps_bracket_outputs_field() -> None:
+    # ``has(steps["<id>"].outputs.<key>)`` — the bracket form,
+    # required for step ids that aren't valid CEL identifiers (e.g.
+    # ``scan-alt`` contains a ``-``). The evaluator must recognize
+    # the ``Index(Ident("steps"), Literal("..."))`` target shape the
+    # same way it recognizes the dotted ``Member`` chain.
+    scope = _scope(
+        steps={
+            "scan-alt": StepBinding(outputs={"critical": 5}, sealed=True),
+        }
+    )
+    assert _eval('has(steps["scan-alt"].outputs.critical)', scope=scope) is True
+    assert _eval('has(steps["scan-alt"].outputs.absent)', scope=scope) is False
+
+
+def test_has_steps_unknown_step_id_raises() -> None:
+    # An unknown step id reaching ``has`` is a typo, not a missing
+    # field — both the dotted and bracket forms must raise
+    # ``UnboundNameError`` rather than silently returning False.
+    bindings = SchemaBindings(
+        inputs=_INPUTS_SCHEMA,
+        prior_steps=(
+            (
+                "scan-alt",
+                {"type": "object", "properties": {"critical": {"type": "integer"}}},
+            ),
+        ),
+    )
+    scope = _scope(steps={})  # type-checker sees scan-alt; runtime doesn't have it
+    with pytest.raises(UnboundNameError):
+        _eval('has(steps["scan-alt"].outputs.critical)', scope=scope, bindings=bindings)
+
+
 def test_has_unbound_target_still_raises() -> None:
     # ``bogus`` is not a binding root, so the *target* itself is
     # unbound — that's a typo, not a missing field, and ``has`` is

@@ -1,0 +1,47 @@
+name: custos-cel-nightly
+
+# Nightly property-test exploration with a random Hypothesis seed.
+# WF-IMPL-010 / #185 requires only that the PR/push job runs with
+# ``--hypothesis-seed=0`` for reproducibility; this scheduled job is
+# the *optional* broader exploration counterpart that the issue
+# acceptance criterion calls out. A regression that the locked-seed
+# CI run misses but a random seed catches will fail this job, leaving
+# a counter-example in the Hypothesis database for follow-up triage.
+
+permissions:
+  contents: read
+
+on:
+  schedule:
+    # 07:00 UTC every day. Off-hours for the maintainer's timezone so
+    # a failure is visible by morning.
+    - cron: "0 7 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  property-tests-random-seed:
+    name: custos-cel property tests (random seed)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    defaults:
+      run:
+        working-directory: src/libs/custos-cel
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install package and dev dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Pytest (property tests, random seed)
+        # No ``--hypothesis-seed`` — Hypothesis picks a fresh seed
+        # per invocation, and any falsifying example is recorded
+        # into the Hypothesis database for replay.
+        run: pytest -q tests/test_determinism_property.py
