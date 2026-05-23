@@ -6,3 +6,11 @@ metadata:
     {{- include "svc.labels" . | nindent 4 }}
 data:
   CUSTOS_SERVICE_NAME: {{ .Chart.Name | quote }}
+  # Non-secret CAT_* env vars per design.md § Configuration.
+  CAT_PUBLISH_MAX_BODY_MB: {{ .Values.config.publishMaxBodyMb | quote }}
+  CAT_CEL_PARSE_TIMEOUT_MS: {{ .Values.config.celParseTimeoutMs | quote }}
+  {{- with .Values.config.defaultNamespaceTierVendor }}
+  CAT_DEFAULT_NAMESPACE_TIER_VENDOR: {{ . | quote }}
+  {{- end }}
+  CAT_CONNECTOR_ENDPOINT: {{ .Values.connector.endpoint | quote }}
+  CAT_AUTHZ_ENDPOINT: {{ .Values.auth.endpoint | quote }}

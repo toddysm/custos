@@ -12,13 +12,14 @@ SHELL    := /bin/bash
 
 TEMPLATE_TARGETS := $(addprefix template-,$(PROFILES))
 
-.PHONY: lint template $(TEMPLATE_TARGETS) deps clean bundle help
+.PHONY: lint template $(TEMPLATE_TARGETS) deps clean bundle help helm-test
 
 help:
 	@echo "Targets:"
 	@echo "  lint              - helm lint umbrella chart against all 4 profiles"
 	@echo "  template          - render manifests to $(BUILD_DIR)/ for all 4 profiles"
 	@echo "  template-<profile>- render a single profile (connected-eval | connected-ha | airgapped-eval | airgapped-ha)"
+	@echo "  helm-test         - pytest-based render assertions in tests/helm (requires helm + python)"
 	@echo "  bundle            - build air-gapped offline tarball (delegates to deploy/offline)"
 	@echo "  clean             - remove build artifacts"
 
@@ -41,6 +42,9 @@ $(TEMPLATE_TARGETS): template-%: deps
 
 bundle:
 	$(MAKE) -C deploy/offline bundle
+
+helm-test: deps
+	cd tests/helm && pip install -e . >/dev/null && pytest -q
 
 clean:
 	rm -rf $(BUILD_DIR)

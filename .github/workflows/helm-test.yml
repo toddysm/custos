@@ -5,6 +5,7 @@ on:
   pull_request:
     paths:
       - 'deploy/helm/**'
+      - 'tests/helm/**'
       - '.github/workflows/helm-test.yml'
 
 jobs:
@@ -20,3 +21,22 @@ jobs:
       - name: snapshot diff (TODO)
         run: |
           echo "TODO: compare rendered manifests against committed snapshots."
+
+  render-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: install render-test dependencies
+        run: pip install -e tests/helm
+      - name: helm dependency update
+        run: helm dependency update deploy/helm/custos
+      - name: pytest (helm render assertions)
+        run: pytest -q tests/helm
+

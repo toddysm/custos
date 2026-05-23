@@ -1,13 +1,22 @@
 # catalog-service — leave image.repository/tag/pullPolicy and replicaCount/resources
 # empty to inherit umbrella global.* values. Set them here only to override
 # the umbrella for this one subchart.
+#
+# Configuration variables come from
+# design/components/catalog-service/design.md § Configuration. Non-secret
+# vars are projected through the ConfigMap (`config:` block below); secret
+# vars (the two DSNs) are projected through the ExternalSecret
+# (`externalSecret:` block below) and become container env via envFrom.
 
 enabled: true
 
 replicaCount: ""
 
 image:
-  repository: ""
+  # Default repository is built from <global.imageRegistry>/<chart name>
+  # by templates/_helpers.tpl `svc.image`. Setting `image.repository` here
+  # explicitly to make the binding obvious to operators reading values.yaml.
+  repository: ghcr.io/toddysm/custos/catalog-service
   tag: ""
   pullPolicy: ""
 
@@ -17,6 +26,8 @@ service:
 
 resources: {}
 
+# Per-pod env overrides. Most config flows through envFrom (ConfigMap +
+# ExternalSecret); this list is for ad-hoc overrides only.
 env: []
 
 dapr:
@@ -28,10 +39,47 @@ dapr:
 serviceMonitor:
   enabled: false
 
+# Non-secret CAT_* env vars projected into the ConfigMap.
+#
+# CAT_DEFINITION_STORE / CAT_CATALOG_STORE intentionally NOT listed here —
+# they carry Postgres DSNs and flow through `externalSecret` below.
+config:
+  # design.md § Configuration defaults
+  publishMaxBodyMb: 4
+  celParseTimeoutMs: 500
+  # Default vendor namespace tier (unused in M1; short-form is rejected).
+  defaultNamespaceTierVendor: ""
+
+# Connector Service and AuthN/Z endpoints. Sane in-cluster defaults match
+# the k8s Service names emitted by the connector-service / auth-service
+# subcharts. Override per-profile when those services are reached through a
+# different address (e.g. via a sidecar / out-of-cluster proxy).
+connector:
+  endpoint: http://connector-service:8080
+auth:
+  endpoint: http://auth-service:8080
+
+# ExternalSecret carrying the two Postgres DSNs the service reads at
+# startup (CAT_DEFINITION_STORE, CAT_CATALOG_STORE). Disabled by default
+# (eval profiles can synthesise the DSNs from the CNPG app secret); HA /
+# connected profiles enable this and project the keys from the configured
+# secret store path.
 externalSecret:
   enabled: false
   refreshInterval: 1h
   secretStoreRef:
     name: custos-secret-store
     kind: ClusterSecretStore
-  data: []
+  # Each entry maps a CAT_* env var (secretKey) to a key in the upstream
+  # secret store. Defaults expect the SPL-conventional path
+  # `custos/storage-provider-layer/<tier>` populated by ops; override per
+  # deployment as needed.
+  data:
+    - secretKey: CAT_DEFINITION_STORE
+      remoteRef:
+        key: custos/storage-provider-layer/definition-store
+        property: dsn
+    - secretKey: CAT_CATALOG_STORE
+      remoteRef:
+        key: custos/storage-provider-layer/catalog-store
+        property: dsn
