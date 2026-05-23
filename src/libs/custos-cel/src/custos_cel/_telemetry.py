@@ -8,12 +8,13 @@ counter — all keyed to the locked error taxonomy from WF-IMPL-008
 Design notes
 ------------
 The module imports ``opentelemetry-api`` only. The API ships default
-no-op providers, so consumers without an SDK installed get zero-cost
-instrumentation: importing ``custos_cel`` never raises, and
-``parse`` / ``type_check`` / ``evaluate`` add no measurable overhead
-(within the issue's 5% budget). Production deployments configure
-their own SDK; the in-memory SDK is dev-only and exists exclusively
-to drive the assertions in ``tests/test_observability.py``.
+no-op providers, so consumers without an SDK installed can import
+``custos_cel`` safely without configuring telemetry first. The issue's
+performance budget applies to import-time behavior; this module does not
+make a zero-overhead guarantee for per-call ``parse`` / ``type_check`` /
+``evaluate`` latency. Production deployments configure their own SDK; the
+in-memory SDK is dev-only and exists exclusively to drive the assertions
+in ``tests/test_observability.py``.
 
 The instrumentation is intentionally narrow: only the three public
 top-level functions (``parse``, ``type_check``, ``evaluate``) emit
