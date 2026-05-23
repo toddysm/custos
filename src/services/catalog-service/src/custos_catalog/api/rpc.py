@@ -38,7 +38,7 @@ from custos_catalog.middleware.callctx import CallContext
 
 router = APIRouter()
 
-_WORKFLOW_ID_RE = re.compile(r"^(?P<ws>[^/]+)/(?P<name>[^@]+)@(?P<version>[0-9]+)$")
+_WORKFLOW_ID_RE = re.compile(r"^(?P<ws>[^/]+)/(?P<name>[^@/]+)@(?P<version>[0-9]+)$")
 _CT_REF_RE = re.compile(r"^(?P<type>[^@/]+)@(?P<version>[^@/]+)$")
 
 
