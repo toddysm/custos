@@ -73,11 +73,11 @@ _INSTRUMENTATION_VERSION: Final[str] = "0.1.0"
 # operation returns normally.
 _SUCCESS: Final[str] = "success"
 
-# Outcome label used as a defence-in-depth fallback for an unexpected
-# (non-``CelError``) exception. The library's public API doesn't
-# raise these in practice, but the catch-all keeps the histogram
-# total consistent with the call count even when something goes
-# wrong outside the taxonomy.
+# Outcome label used for any exception outside the ``CelError``
+# taxonomy. Public APIs may still raise built-in exceptions (for
+# example invalid input or configuration errors), and this catch-all
+# labels them ``internal_error`` so histogram totals remain
+# consistent with the call count.
 _INTERNAL_ERROR: Final[str] = "internal_error"
 
 
