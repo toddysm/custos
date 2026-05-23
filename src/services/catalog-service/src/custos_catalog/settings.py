@@ -28,7 +28,10 @@ ENV_CATALOG_STORE: Final[str] = "CAT_CATALOG_STORE"
 #: Required. URL of the in-cluster Connector Service.
 ENV_CONNECTOR_ENDPOINT: Final[str] = "CAT_CONNECTOR_ENDPOINT"
 
-#: Required in production; empty enables the dev-shim call-context middleware.
+#: Required in production. Empty switches the service to the dev-shim
+#: call-context middleware (CS-IMPL-004), which refuses to start when
+#: ``ENVIRONMENT=production``. See
+#: ``design/components/catalog-service/design.md`` § Configuration.
 ENV_AUTHZ_ENDPOINT: Final[str] = "CAT_AUTHZ_ENDPOINT"
 
 #: Optional. Documented default 4 MiB; reached by CS-IMPL-017 publish path.
@@ -98,9 +101,10 @@ def _opt_int(name: str, env: dict[str, str], default: int) -> int:
 def load_settings(env: dict[str, str] | None = None) -> Settings:
     """Parse a :class:`Settings` from the supplied env mapping (default ``os.environ``).
 
-    ``CAT_AUTHZ_ENDPOINT`` is intentionally NOT required — leaving it empty
-    enables the dev-shim middleware. The shim itself refuses to start in
-    production via :meth:`Settings.is_production`; see CS-IMPL-004.
+    ``CAT_AUTHZ_ENDPOINT`` is required in production but accepted as empty
+    here so local development and tests can opt into the dev-shim
+    call-context middleware. The shim itself refuses to start when
+    :meth:`Settings.is_production` is true; see CS-IMPL-004.
     """
     src: dict[str, str] = dict(os.environ if env is None else env)
     namespace_tier = src.get(ENV_DEFAULT_NAMESPACE_TIER_VENDOR, "").strip()

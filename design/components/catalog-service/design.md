@@ -421,10 +421,24 @@ Catalog's publish-time validator owns syntactic and **name-binding** checks: it 
 | `CAT_DEFINITION_STORE` | Yes | — | `DefinitionStoreProvider` binding (Postgres DSN in v1). |
 | `CAT_CATALOG_STORE` | Yes | — | `CatalogStoreProvider` binding (Postgres DSN in v1). |
 | `CAT_CONNECTOR_ENDPOINT` | Yes | — | Connector Service endpoint for `ExistsConnectorInstance`. |
-| `CAT_AUTHZ_ENDPOINT` | Yes | — | AuthN/AuthZ Service endpoint. |
+| `CAT_AUTHZ_ENDPOINT` | Yes (prod) | — | AuthN/AuthZ Service endpoint. See dev-shim note below. |
 | `CAT_PUBLISH_MAX_BODY_MB` | No | `4` | Maximum workflow/template document size at publish. |
 | `CAT_CEL_PARSE_TIMEOUT_MS` | No | `500` | Per-expression parse timeout at publish (separate from runtime evaluation timeout in WF). |
 | `CAT_DEFAULT_NAMESPACE_TIER_VENDOR` | No | — | Optional default vendor namespace for short-form publishes (unused in M1 since short-form is rejected). |
+| `ENVIRONMENT` | No | `development` | Operational env tag. The call-context dev-shim refuses to start when this is `production` (case-insensitive). |
+
+> **`CAT_AUTHZ_ENDPOINT` dev-shim exception.** Production deployments must set
+> `CAT_AUTHZ_ENDPOINT` to a non-empty Auth Service URL — the umbrella chart's
+> `auth.endpoint` default (`http://auth-service:8080`) satisfies this for the
+> standard in-cluster topology. In development and tests the variable may be
+> left empty, which switches the service to a dev-shim call-context
+> middleware that trusts the inbound `x-custos-callctx` header verbatim,
+> logs a WARNING and emits an `auth.callctx.shim_used` audit event per
+> request. The shim raises `DevShimDisabledInProductionError` at startup
+> when `ENVIRONMENT=production` (case-insensitive) so a forgotten endpoint
+> takes the service out of rotation instead of silently trusting unsigned
+> headers. The live Auth Service integration that removes this exception is
+> tracked by CS-IMPL-024 (#225).
 
 ## Dependencies
 
