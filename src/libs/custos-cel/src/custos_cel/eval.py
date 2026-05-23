@@ -608,14 +608,16 @@ def _resolve_has_target(node: Node, scope: BindingScope, clock: Clock) -> Any:
         # ``has(now)`` — ``now`` is a callable, not a record. Fall
         # through to the normal evaluator so the scope's error shape
         # (rejecting bare ``now``) is what surfaces.
-    # Special-case ``steps.<id>.outputs`` so
-    # ``has(steps.<id>.outputs.<key>)`` can probe the outputs mapping.
-    # ``BindingScope.resolve`` rejects ``steps.<id>.outputs`` as "not a
-    # value" — correct for value contexts, but the ``has`` macro
-    # genuinely needs the outputs mapping to probe a key. Without
-    # this, the type checker accepts the expression but evaluation
-    # raises ``UnboundNameError`` (found by WF-IMPL-010 property
-    # tests, #185).
+    # Special-case ``steps.<id>.outputs`` and ``steps["<id>"].outputs``
+    # so ``has(steps.<id>.outputs.<key>)`` / ``has(steps["<id>"].outputs.<key>)``
+    # can probe the outputs mapping. ``BindingScope.resolve`` rejects
+    # ``steps.<id>.outputs`` as "not a value" — correct for value
+    # contexts, but the ``has`` macro genuinely needs the outputs
+    # mapping to probe a key. Without this, the type checker accepts
+    # the expression but evaluation raises ``UnboundNameError`` (found
+    # by WF-IMPL-010 property tests, #185). The bracket form is the
+    # canonical access for step ids that aren't valid CEL identifiers
+    # (e.g. ``steps["scan-alt"]``).
     if (
         isinstance(node, Member)
         and node.name == "outputs"
@@ -623,7 +625,21 @@ def _resolve_has_target(node: Node, scope: BindingScope, clock: Clock) -> Any:
         and isinstance(node.target.target, Ident)
         and node.target.target.name == "steps"
     ):
-        step_id = node.target.name
+        step_id: str | None = node.target.name
+    elif (
+        isinstance(node, Member)
+        and node.name == "outputs"
+        and isinstance(node.target, Index)
+        and isinstance(node.target.target, Ident)
+        and node.target.target.name == "steps"
+        and isinstance(node.target.index, Literal)
+        and node.target.index.kind is LiteralKind.STRING
+        and isinstance(node.target.index.value, str)
+    ):
+        step_id = node.target.index.value
+    else:
+        step_id = None
+    if step_id is not None:
         if step_id in scope.steps:
             return scope.steps[step_id].outputs
         raise UnboundNameError(
