@@ -196,6 +196,7 @@ def parse_declarations(raw: Sequence[Mapping[str, Any]]) -> list[PlaceholderDecl
                 type=item["type"],
                 required=bool(item.get("required", True)),
                 default=item.get("default"),
+                default_provided=("default" in item),
                 description=item.get("description"),
                 connector_type=item.get("connectorType"),
                 activity_type=item.get("activityType"),
