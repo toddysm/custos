@@ -83,11 +83,9 @@ class TemplateRenderIssue:
     """One render-time issue.
 
     Attributes:
-        path: Slash-joined location within the template document
-            (e.g. ``"spec/workflow/steps/0/connector"``).
         code: Stable machine-readable code (one of
-            ``"unbound_placeholder"`` or ``"embedded_placeholder"``).
-        message: Human-readable explanation.
+            ``"unbound_placeholder"``, ``"embedded_placeholder"``, or
+            ``"invalid_template"``).
     """
 
     path: str
