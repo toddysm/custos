@@ -21,6 +21,7 @@ from custos_spl.pagination import Cursor, Page
 from custos_catalog.managers.definition import (
     DefinitionManager,
     PublishValidationError,
+    WorkflowNotFound,
     WorkflowVersionRef,
 )
 from custos_catalog.resolve import StubConnectorClient
@@ -556,6 +557,155 @@ async def test_publish_workflow_exhausted_retries_raises_immutability_error() ->
         )
     assert excinfo.value.workflow_name == "my-wf"
     assert excinfo.value.is_idempotent_match is False
+
+
+# ---------------------------------------------------------------------------
+# Read surface (CS-IMPL-011)
+# ---------------------------------------------------------------------------
+
+
+async def test_list_workflow_versions_returns_page() -> None:
+    store = FakeDefinitionStore()
+    manager = _make_manager(store)
+    # Publish two distinct versions.
+    await manager.publish_workflow(
+        workspace_id=WS,
+        principal_id="alice",
+        source=_doc_json(_minimal_workflow()),
+    )
+    await manager.publish_workflow(
+        workspace_id=WS,
+        principal_id="alice",
+        source=_doc_json(_minimal_workflow(extra_step=True)),
+    )
+    page = await manager.list_workflow_versions(
+        workspace_id=WS,
+        workflow_name="my-wf",
+    )
+    versions = sorted(int(row.version) for row in page.items)
+    assert versions == [1, 2]
+
+
+async def test_list_workflow_versions_empty_when_workflow_absent() -> None:
+    store = FakeDefinitionStore()
+    manager = _make_manager(store)
+    page = await manager.list_workflow_versions(
+        workspace_id=WS,
+        workflow_name="nope",
+    )
+    assert page.items == ()
+    assert page.next_cursor is None
+
+
+async def test_get_workflow_version_by_ref_returns_row() -> None:
+    store = FakeDefinitionStore()
+    manager = _make_manager(store)
+    await manager.publish_workflow(
+        workspace_id=WS,
+        principal_id="alice",
+        source=_doc_json(_minimal_workflow()),
+    )
+    row = await manager.get_workflow_version_by_ref(
+        workspace_id=WS,
+        workflow_name="my-wf",
+        version=1,
+    )
+    assert row.version == "1"
+
+
+async def test_get_workflow_version_by_ref_raises_not_found() -> None:
+    store = FakeDefinitionStore()
+    manager = _make_manager(store)
+    with pytest.raises(WorkflowNotFound) as excinfo:
+        await manager.get_workflow_version_by_ref(
+            workspace_id=WS,
+            workflow_name="my-wf",
+            version=42,
+        )
+    assert excinfo.value.workflow_name == "my-wf"
+    assert excinfo.value.version == 42
+
+
+# ---------------------------------------------------------------------------
+# Deprecation
+# ---------------------------------------------------------------------------
+
+
+async def test_deprecate_workflow_flips_parent_flag() -> None:
+    store = FakeDefinitionStore()
+    manager = _make_manager(store)
+    await manager.publish_workflow(
+        workspace_id=WS,
+        principal_id="alice",
+        source=_doc_json(_minimal_workflow()),
+    )
+    await manager.deprecate_workflow(
+        workspace_id=WS,
+        workflow_name="my-wf",
+        principal_id="alice",
+        reason="rot",
+    )
+    row = await manager.get_workflow_version_by_ref(
+        workspace_id=WS,
+        workflow_name="my-wf",
+        version=1,
+    )
+    assert row.parent_deprecated is True
+    # Version row's normalized_doc must not be mutated by the deprecate.
+    assert "spec" in row.normalized_doc
+
+
+async def test_deprecate_workflow_does_not_touch_version_rows() -> None:
+    store = FakeDefinitionStore()
+    manager = _make_manager(store)
+    await manager.publish_workflow(
+        workspace_id=WS,
+        principal_id="alice",
+        source=_doc_json(_minimal_workflow()),
+    )
+    pre_rows = list(store.workflows[(WS, WorkflowId("my-wf"))])
+    pre_docs = [dict(row.normalized_doc) for row in pre_rows]
+    await manager.deprecate_workflow(
+        workspace_id=WS,
+        workflow_name="my-wf",
+        principal_id="alice",
+    )
+    post_rows = store.workflows[(WS, WorkflowId("my-wf"))]
+    assert [dict(row.normalized_doc) for row in post_rows] == pre_docs
+
+
+async def test_deprecate_workflow_is_idempotent() -> None:
+    store = FakeDefinitionStore()
+    manager = _make_manager(store)
+    await manager.publish_workflow(
+        workspace_id=WS,
+        principal_id="alice",
+        source=_doc_json(_minimal_workflow()),
+    )
+    await manager.deprecate_workflow(
+        workspace_id=WS,
+        workflow_name="my-wf",
+        principal_id="alice",
+    )
+    await manager.deprecate_workflow(
+        workspace_id=WS,
+        workflow_name="my-wf",
+        principal_id="alice",
+    )
+    # Both calls reached the store; the store's view of the flag is True after both.
+    assert store.parent_deprecated[(WS, WorkflowId("my-wf"))] is True
+    assert len(store.deprecate_calls) == 2
+
+
+async def test_deprecate_workflow_unknown_raises_not_found() -> None:
+    store = FakeDefinitionStore()
+    manager = _make_manager(store)
+    with pytest.raises(WorkflowNotFound):
+        await manager.deprecate_workflow(
+            workspace_id=WS,
+            workflow_name="ghost",
+            principal_id="alice",
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -1,9 +1,8 @@
-"""Workflow Definition Manager — publish pipeline (CS-IMPL-010).
+"""Workflow Definition Manager (CS-IMPL-010 + CS-IMPL-011).
 
-Orchestrates the **publish pipeline** for Workflow documents on top of
+Orchestrates the **publish pipeline** for Workflow documents and the
+**read / lifecycle** surface on top of
 :class:`custos_spl.interfaces.definition_store.DefinitionStoreProvider`.
-The read / lifecycle surface (list / get / deprecate) is extended onto
-this class by CS-IMPL-011 in a follow-up commit.
 
 Publish pipeline stages
 -----------------------
@@ -31,6 +30,34 @@ Every stage that fails surfaces as :class:`PublishValidationError`
 with the failing :attr:`PublishValidationError.stage` and the list of
 :class:`PublishValidationIssue` objects. Callers (the FastAPI router
 in CS-IMPL-017) map these to HTTP 400 with a stable envelope.
+
+Read / lifecycle surface (CS-IMPL-011)
+--------------------------------------
+
+* :meth:`list_workflow_versions` — paginated list of versions for a
+  given ``(workspace, name)``.
+* :meth:`get_workflow_version_by_ref` — single-version fetch by
+  ``(workspace, name, version)`` triple.
+* :meth:`deprecate_workflow` — toggles the workflow's deprecation
+  flag. **Parent-row toggle only** per the design contract; the
+  version rows themselves are never mutated, with the denormalized
+  ``parent_deprecated`` flag surfacing on subsequent fetches.
+
+Two surface items called out in issue #212 are **deferred** to a
+follow-up because the SPL does not yet expose them:
+
+* ``list_workflows(workspace_id)`` — workspace-wide workflow
+  enumeration. The SPL has no list-workflows method (only
+  list-workflow-versions for a known name). Adding this requires
+  either an SPL extension or a Catalog-side index; design has no
+  REST endpoint depending on it for v1.
+* ``get_workflow_version_by_id(workflow_version_id)`` — UUID-keyed
+  fetch. The SPL's :class:`WorkflowVersion` has no UUID field, so the
+  ``GET /v1/workflows/{workflowVersionId}`` endpoint has no backing
+  storage operation at v1. The REST endpoint is documented but its
+  implementation is deferred until SPL surfaces a UUID lookup.
+
+Both deferrals are documented in the PR body that lands this change.
 """
 
 from __future__ import annotations
@@ -44,10 +71,11 @@ from uuid import UUID
 from custos_spl.errors import ImmutableViolation
 from custos_spl.ids import WorkflowId, WorkspaceId
 from custos_spl.interfaces.definition_store import (
+    DefinitionListFilter,
     DefinitionStoreProvider,
     WorkflowVersion,
 )
-from custos_spl.pagination import Cursor
+from custos_spl.pagination import Cursor, Page
 
 from custos_catalog.cel_validate import (
     CelNameBindingError,
@@ -162,6 +190,31 @@ class PublishValidationError(Exception):
         super().__init__(
             f"publish failed at stage {stage!r}: {len(issues)} issue(s): {rendered}",
         )
+
+
+class WorkflowNotFound(Exception):
+    """Raised when a workflow / workflow version cannot be located."""
+
+    code: str = "catalog.workflow_not_found"
+
+    def __init__(
+        self,
+        *,
+        workspace_id: str,
+        workflow_name: str,
+        version: int | None = None,
+    ) -> None:
+        if version is not None:
+            msg = (
+                f"workflow {workflow_name!r} version {version} not found "
+                f"in workspace {workspace_id!r}"
+            )
+        else:
+            msg = f"workflow {workflow_name!r} not found in workspace {workspace_id!r}"
+        super().__init__(msg)
+        self.workspace_id = workspace_id
+        self.workflow_name = workflow_name
+        self.version = version
 
 
 class _SubworkflowResolverAdapter:
@@ -313,6 +366,120 @@ class DefinitionManager:
             workspace_id=workspace_id,
             workflow_name=workflow_name,
             resolved=resolved,
+        )
+
+    # ------------------------------------------------------------------
+    # Read / lifecycle surface (CS-IMPL-011)
+    # ------------------------------------------------------------------
+
+    async def list_workflow_versions(
+        self,
+        *,
+        workspace_id: str,
+        workflow_name: str,
+        cursor: Cursor | None = None,
+        limit: int | None = None,
+        filter: DefinitionListFilter | None = None,
+    ) -> Page[WorkflowVersion]:
+        """Page through versions of ``workflow_name`` in ``workspace_id``.
+
+        Thin pass-through to
+        :meth:`DefinitionStoreProvider.list_workflow_versions`. Order
+        is newest-published-first per the SPL contract. The empty
+        page (``items=()``, ``next_cursor=None``) is returned when the
+        workflow has no versions; callers may treat this either as
+        "workflow does not exist" or "exists but is empty" — at v1
+        these are indistinguishable since the parent row is only
+        materialized at first put.
+        """
+        return await self._store.list_workflow_versions(
+            WorkspaceId(workspace_id),
+            WorkflowId(workflow_name),
+            filter=filter,
+            cursor=cursor,
+            limit=limit,
+        )
+
+    async def get_workflow_version_by_ref(
+        self,
+        *,
+        workspace_id: str,
+        workflow_name: str,
+        version: int,
+    ) -> WorkflowVersion:
+        """Fetch a single workflow version by its triple.
+
+        Raises:
+            WorkflowNotFound: When no version row matches the triple.
+        """
+        row = await self._store.get_workflow_version(
+            WorkspaceId(workspace_id),
+            WorkflowId(workflow_name),
+            str(version),
+        )
+        if row is None:
+            raise WorkflowNotFound(
+                workspace_id=workspace_id,
+                workflow_name=workflow_name,
+                version=version,
+            )
+        return row
+
+    async def deprecate_workflow(
+        self,
+        *,
+        workspace_id: str,
+        workflow_name: str,
+        principal_id: str,
+        reason: str | None = None,
+    ) -> None:
+        """Flip the workflow's parent-row deprecation flag to ``True``.
+
+        Per the design contract:
+
+        * Deprecation is a **parent-row toggle**; version rows are
+          never mutated. The denormalized ``parent_deprecated`` flag
+          surfaces on subsequent fetches via the SPL adapter.
+        * Deprecating a workflow that has no versions still
+          materialises the parent row (the SPL adapter handles this).
+        * Repeated deprecate calls are idempotent — flipping a
+          deprecated workflow to deprecated is a no-op.
+
+        ``reason`` and ``principal_id`` are captured in the audit log
+        only; the SPL surface carries no per-action audit fields, so
+        the audit trail lives in the structured log and (later) in
+        the audit store.
+
+        Raises:
+            WorkflowNotFound: When the workflow has no versions at
+                all in ``workspace_id``. We treat "no versions" as
+                "no workflow to deprecate" because the SPL has no
+                way to distinguish a never-published parent row from
+                an absent one.
+        """
+        # Probe for existence: a workflow with at least one version is
+        # the only state the SPL can attest to. An empty list_workflow_versions
+        # response means "no workflow to deprecate".
+        latest = await self._store.get_latest_workflow_version(
+            WorkspaceId(workspace_id),
+            WorkflowId(workflow_name),
+        )
+        if latest is None:
+            raise WorkflowNotFound(
+                workspace_id=workspace_id,
+                workflow_name=workflow_name,
+            )
+        await self._store.set_workflow_deprecated(
+            WorkspaceId(workspace_id),
+            WorkflowId(workflow_name),
+            True,
+        )
+        _LOGGER.info(
+            "deprecate_workflow workspace=%s name=%s principal=%s reason=%s",
+            workspace_id,
+            workflow_name,
+            principal_id,
+            reason or "<none>",
         )
 
     # ------------------------------------------------------------------
@@ -548,5 +715,6 @@ __all__ = [
     "PublishStage",
     "PublishValidationError",
     "PublishValidationIssue",
+    "WorkflowNotFound",
     "WorkflowVersionRef",
 ]
