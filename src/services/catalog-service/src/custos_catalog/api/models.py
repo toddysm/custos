@@ -361,9 +361,15 @@ class ActivityTypeVersionBody(_Wire):
 
 
 class ActivityTypeListResponse(_Wire):
-    """List response for activity types."""
+    """List response for activity types.
 
-    items: list[ActivityTypeVersionBody]
+    Per design § Public Interface, the list endpoint returns refs only;
+    callers fetch the full ``normalizedManifest`` via the get-by-ref
+    endpoint. Keeping the list payload small matters because authoring
+    UIs commonly call list across many ``(namespace, type)`` pairs.
+    """
+
+    items: list[ActivityTypeRefBody]
     next_cursor: str | None = Field(default=None, alias="nextCursor")
 
 
@@ -419,9 +425,14 @@ class ConnectorTypeVersionBody(_Wire):
 
 
 class ConnectorTypeListResponse(_Wire):
-    """List response for connector types."""
+    """List response for connector types.
 
-    items: list[ConnectorTypeVersionBody]
+    Per design § Public Interface, the list endpoint returns refs only;
+    callers fetch the full ``normalizedManifest`` via the get-by-ref
+    endpoint.
+    """
+
+    items: list[ConnectorTypeRefBody]
     next_cursor: str | None = Field(default=None, alias="nextCursor")
 
 

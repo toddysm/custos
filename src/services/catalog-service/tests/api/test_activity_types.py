@@ -94,6 +94,11 @@ def test_list_returns_versions(client: TestClient) -> None:
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert len(body["items"]) == 2
+    # Design contract: list returns refs only — no normalizedManifest /
+    # parentDeprecated / publishedAt leak. Keeps payload small for
+    # authoring UIs that fan out across many (namespace, type) pairs.
+    for item in body["items"]:
+        assert set(item.keys()) == {"namespace", "type", "version", "digest"}
 
 
 def test_list_requires_namespace_and_type(client: TestClient) -> None:

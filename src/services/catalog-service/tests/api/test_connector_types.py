@@ -76,6 +76,9 @@ def test_list_returns_versions(client: TestClient) -> None:
     assert resp.status_code == 200
     body = resp.json()
     assert len(body["items"]) == 2
+    # Design contract: list returns refs only.
+    for item in body["items"]:
+        assert set(item.keys()) == {"type", "version", "digest"}
 
 
 def test_list_requires_type_query_param(client: TestClient) -> None:

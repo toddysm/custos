@@ -72,6 +72,21 @@ def _serialize(row: object) -> ActivityTypeVersionBody:
     )
 
 
+def _serialize_ref(row: object) -> ActivityTypeRefBody:
+    """Project an SPL row down to its ref tuple for list responses.
+
+    The list endpoint contract is ``[ActivityTypeRef]`` (refs only) per
+    design § Public Interface; callers fetch the full normalized
+    manifest via the get-by-ref endpoint.
+    """
+    return ActivityTypeRefBody(
+        namespace=getattr(row, "namespace"),  # noqa: B009
+        type=getattr(row, "type"),  # noqa: B009
+        version=getattr(row, "version"),  # noqa: B009
+        digest=getattr(row, "digest"),  # noqa: B009
+    )
+
+
 # ---------------------------------------------------------------------------
 # Register
 # ---------------------------------------------------------------------------
@@ -137,7 +152,7 @@ async def list_activity_type_versions(
         limit=limit,
     )
     return ActivityTypeListResponse(
-        items=[_serialize(row) for row in page.items],
+        items=[_serialize_ref(row) for row in page.items],
         nextCursor=page.next_cursor.token if page.next_cursor else None,
     )
 
