@@ -145,10 +145,10 @@ def _outcome_for(
 ) -> str:
     """Resolve the duration-histogram ``outcome`` label for ``exc``.
 
-    Walks the mapping in declaration order so a more specific subtype
-    (e.g. ``EvalTimeoutError``, which subclasses both ``TimeoutError``
-    and ``EvaluationError`` via ``CelError``) hits its preferred
-    label first.
+    Walks the mapping in declaration order so more specific exception
+    types can be matched before broader base classes. For example, in
+    the evaluate mapping ``_TimeoutError`` should resolve to
+    ``"timeout"`` before any broader ``EvaluationError`` match.
     """
     for exc_type, label in mapping.items():
         if isinstance(exc, exc_type):
