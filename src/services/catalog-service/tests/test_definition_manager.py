@@ -480,12 +480,11 @@ async def test_publish_workflow_cel_name_binding_error_surfaces_as_cel_stage() -
 async def test_publish_workflow_retries_on_immutable_violation() -> None:
     store = FakeDefinitionStore()
     manager = _make_manager(store)
-    # Pre-load one ImmutableViolation so the first put fails; the
-    # retry loop must mint version=2 (since after the violation, no
-    # version row exists and the next-version mint returns 1 again,
-    # but the retry incrementing path runs through next_workflow_version
-    # again which is still 1; the second put succeeds at version 1
-    # because put_failures is now empty).
+    # Pre-load one ImmutableViolation so the first put fails. This
+    # models an injected write failure only: no concurrent publisher
+    # wins and persists version 1 while this call is retrying, so the
+    # retried publish can still mint and store version 1 once
+    # ``put_failures`` has been exhausted.
     store.put_failures = [ImmutableViolation("simulated race")]
     ref = await manager.publish_workflow(
         workspace_id=WS,
