@@ -33,6 +33,12 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
+      - name: Install SPL + Postgres adapter from path
+        working-directory: ${{ github.workspace }}
+        run: |
+          pip install -e src/libs/storage-provider-layer[dev]
+          pip install -e src/libs/custos-postgres[dev]
+
       - name: Install package and dev dependencies
         run: pip install -e ".[dev]"
 
