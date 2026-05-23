@@ -19,6 +19,7 @@ remain stubs until WF-IMPL-005 / WF-IMPL-006.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import celpy
@@ -58,7 +59,7 @@ from custos_cel.ast import (
     to_json,
 )
 from custos_cel.clock import Clock, DaprWorkflowClock, FixedClock
-from custos_cel.eval import EvalError
+from custos_cel.eval import DEFAULT_TIMEOUT_MS, EvalError, EvalTimeoutError
 from custos_cel.eval import evaluate as _evaluate_impl
 from custos_cel.scope import (
     BindingScope,
@@ -76,9 +77,15 @@ from custos_cel.types import (
     type_check as _type_check_impl,
 )
 
+#: Environment variable consulted by :func:`evaluate` when the caller
+#: passes ``timeout_ms=None``. Matches design.md § Configuration.
+TIMEOUT_ENV_VAR = "WF_EXPR_TIMEOUT_MS"
+
 __all__ = [
     "AST",
     "AST_SCHEMA_VERSION",
+    "DEFAULT_TIMEOUT_MS",
+    "TIMEOUT_ENV_VAR",
     "Binary",
     "BinaryOp",
     "BindingScope",
@@ -93,6 +100,7 @@ __all__ = [
     "DaprWorkflowClock",
     "DoubleType",
     "EvalError",
+    "EvalTimeoutError",
     "FixedClock",
     "Ident",
     "Index",
@@ -201,7 +209,13 @@ def type_check(ast: Node, bindings: SchemaBindings) -> Node:
     return _type_check_impl(ast, bindings)
 
 
-def evaluate(ast: Node, scope: BindingScope, clock: Clock) -> Any:
+def evaluate(
+    ast: Node,
+    scope: BindingScope,
+    clock: Clock,
+    *,
+    timeout_ms: int | None = None,
+) -> Any:
     """Evaluate a :data:`TypedAST` against a binding scope and clock.
 
     Walks the type-checked tree, resolving every identifier through
@@ -209,6 +223,11 @@ def evaluate(ast: Node, scope: BindingScope, clock: Clock) -> Any:
     namespace structurally unreachable) and routing every ``now()``
     call through ``clock`` (whose :class:`Clock` protocol guarantees a
     replay-deterministic wall-clock source).
+
+    A per-evaluation wall-clock deadline bounds the walk; the budget
+    is sourced from (in order) ``timeout_ms`` if supplied, the
+    ``WF_EXPR_TIMEOUT_MS`` environment variable, or
+    :data:`DEFAULT_TIMEOUT_MS` (100 ms).
 
     Args:
         ast: A :data:`TypedAST` produced by :func:`type_check`. Passing
@@ -221,6 +240,9 @@ def evaluate(ast: Node, scope: BindingScope, clock: Clock) -> Any:
         clock: A :class:`Clock` adapter — typically
             :class:`DaprWorkflowClock` in production or
             :class:`FixedClock` in tests.
+        timeout_ms: Per-evaluation wall-clock budget in milliseconds.
+            ``None`` (the default) consults ``WF_EXPR_TIMEOUT_MS``;
+            ``0`` disables the gate; negative values are rejected.
 
     Returns:
         The expression's value (``bool`` / ``int`` / ``float`` /
@@ -229,14 +251,39 @@ def evaluate(ast: Node, scope: BindingScope, clock: Clock) -> Any:
 
     Raises:
         TypeError: If ``scope`` is not a :class:`BindingScope`, if
-            ``clock`` does not satisfy the :class:`Clock` protocol, or
-            if ``ast`` is not a :class:`Node` whose root carries a
-            populated ``cel_type``.
+            ``clock`` does not satisfy the :class:`Clock` protocol, if
+            ``ast`` is not a :class:`Node` whose root carries a
+            populated ``cel_type``, or if the resolved ``timeout_ms``
+            is not an :class:`int`.
+        ValueError: If ``timeout_ms`` (after env-var resolution) is
+            negative, or if ``WF_EXPR_TIMEOUT_MS`` is set to a value
+            that cannot be parsed as an integer.
         UnboundNameError: For any unresolved identifier or non-allow-
             listed function name.
         EvalError: For value-level runtime failures (division by zero,
             missing key on a runtime mapping, out-of-range list
             index, type-shape mismatches that escaped the type
             checker).
+        EvalTimeoutError: If the walk's wall-clock elapsed time
+            exceeds the resolved budget.
     """
-    return _evaluate_impl(ast, scope, clock)
+    if timeout_ms is None:
+        timeout_ms = _resolve_timeout_from_env()
+    return _evaluate_impl(ast, scope, clock, timeout_ms=timeout_ms)
+
+
+def _resolve_timeout_from_env() -> int:
+    """Resolve the default per-evaluation timeout from the environment.
+
+    Returns ``WF_EXPR_TIMEOUT_MS`` as an :class:`int` if set; otherwise
+    :data:`DEFAULT_TIMEOUT_MS`. A non-integer setting raises
+    :class:`ValueError` so misconfiguration fails loudly at the first
+    evaluation rather than silently falling back to the default.
+    """
+    raw = os.environ.get(TIMEOUT_ENV_VAR)
+    if raw is None:
+        return DEFAULT_TIMEOUT_MS
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{TIMEOUT_ENV_VAR}={raw!r} is not a valid integer") from exc

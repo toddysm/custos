@@ -26,13 +26,37 @@ Sandbox guarantees (per design.md § Expression Evaluator, ADR-011):
   ``current_utc_datetime``) is replay-deterministic and the test
   wiring (:class:`~custos_cel.clock.FixedClock`) is byte-deterministic.
 
-See the issue: https://github.com/toddysm/custos/issues/181
+Per-evaluation timeout (WF-IMPL-007, design.md § Expression Evaluator
+failure modes):
+
+* Cooperative cancellation. Every :func:`_eval` entry increments a
+  per-evaluation counter and, every 32 nodes, consults
+  :func:`time.monotonic` against a precomputed deadline. The
+  amortized wall-clock probe keeps fast-path overhead well below the
+  20% ceiling the acceptance criterion imposes vs. the bare
+  WF-IMPL-006 evaluator, while still surfacing an
+  :class:`EvalTimeoutError` within the ``timeout_ms + 50ms`` slack
+  the acceptance criterion permits on slow expressions.
+* The deadline source is :func:`time.monotonic` — independent of the
+  user-visible ``now()`` clock so a wall-clock jump never expands or
+  shrinks the budget.
+* ``timeout_ms == 0`` disables the gate (intended for tests and for
+  callers that wrap the evaluator in their own deadline machinery);
+  no deadline ContextVar state is armed in that case, and
+  :func:`time.monotonic` is never consulted.
+
+See the issues:
+* https://github.com/toddysm/custos/issues/181 (evaluator core)
+* https://github.com/toddysm/custos/issues/182 (timeout enforcement)
 """
 
 from __future__ import annotations
 
 import math
+import time
 from collections.abc import Mapping
+from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final
 
@@ -66,7 +90,15 @@ from custos_cel.ast import (
 from custos_cel.clock import Clock
 from custos_cel.scope import BindingScope, UnboundNameError
 
-__all__ = ["EvalError", "evaluate"]
+__all__ = ["DEFAULT_TIMEOUT_MS", "EvalError", "EvalTimeoutError", "evaluate"]
+
+
+#: Default per-evaluation timeout in milliseconds.
+#:
+#: Matches design.md § Configuration (``WF_EXPR_TIMEOUT_MS`` default). The
+#: public :func:`custos_cel.evaluate` wrapper substitutes this value when the
+#: caller passes ``timeout_ms=None`` and ``WF_EXPR_TIMEOUT_MS`` is unset.
+DEFAULT_TIMEOUT_MS: Final[int] = 100
 
 
 # Root identifiers resolvable via :meth:`BindingScope.resolve`. Kept in
@@ -111,12 +143,87 @@ class EvalError(RuntimeError):
         self.source_position: SourcePosition | None = source_position
 
 
+class EvalTimeoutError(TimeoutError):
+    """Per-evaluation timeout exceeded.
+
+    Raised by :func:`evaluate` when the walk overruns ``timeout_ms``.
+    Subclasses the built-in :class:`TimeoutError` so callers that catch
+    the standard timeout shape see this as a timeout; carries the
+    structured ``kind`` / ``elapsed_ms`` / ``timeout_ms`` fields the
+    WF-IMPL-008 error taxonomy expects.
+
+    Attributes:
+        kind: Always ``"expression.timeout"``.
+        message: Human-readable summary.
+        elapsed_ms: Wall-clock milliseconds elapsed before the
+            deadline check fired (always >= ``timeout_ms``).
+        timeout_ms: The budget that was exceeded — the value the
+            caller passed to :func:`evaluate`.
+    """
+
+    KIND: Final[str] = "expression.timeout"
+
+    def __init__(self, message: str, *, elapsed_ms: int, timeout_ms: int) -> None:
+        super().__init__(message)
+        self.kind: str = self.KIND
+        self.message: str = message
+        self.elapsed_ms: int = elapsed_ms
+        self.timeout_ms: int = timeout_ms
+
+
+# ---------------------------------------------------------------------------
+# Deadline state (per-evaluation, propagated via ContextVar so nested
+# evaluations save/restore cleanly without threading an explicit
+# parameter through every helper).
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class _Deadline:
+    """Per-evaluation timing state.
+
+    ``start`` and ``deadline`` are :func:`time.monotonic` readings. The
+    monotonic clock is the only time source the evaluator uses for
+    deadline arithmetic — independent of the user-visible
+    :class:`Clock`, so a wall-clock jump cannot grow or shrink the
+    evaluation budget.
+
+    ``counter`` is incremented by :func:`_eval` on every node entry
+    and is used to amortize the :func:`time.monotonic` syscall via a
+    bitmask sample rate (see :data:`_DEADLINE_CHECK_MASK`). The
+    counter is intentionally mutable; this class is *not* frozen.
+    """
+
+    start: float
+    deadline: float
+    timeout_ms: int
+    counter: int = 0
+
+
+_DEADLINE_CTX: ContextVar[_Deadline | None] = ContextVar("_custos_cel_deadline", default=None)
+
+# Sample-rate mask for the wall-clock check. The evaluator increments
+# ``state.counter`` on every node entry but only reads
+# :func:`time.monotonic` when ``counter & _DEADLINE_CHECK_MASK == 0``
+# (i.e. once every 32 nodes). This caps per-node overhead at a
+# ctxvar lookup + attribute write + bitmask, while keeping detection
+# latency well under the 50ms slack the acceptance criterion permits.
+# A power-of-two minus 1 lets the bitmask compile to a single AND.
+_DEADLINE_CHECK_MASK: Final[int] = 31
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
 
-def evaluate(typed_ast: Node, scope: BindingScope, clock: Clock) -> Any:
+def evaluate(
+    typed_ast: Node,
+    scope: BindingScope,
+    clock: Clock,
+    *,
+    timeout_ms: int = DEFAULT_TIMEOUT_MS,
+) -> Any:
     """Evaluate a TypedAST against a binding scope.
 
     Args:
@@ -130,6 +237,12 @@ def evaluate(typed_ast: Node, scope: BindingScope, clock: Clock) -> Any:
             satisfy the :class:`Clock` protocol; production uses
             :class:`~custos_cel.clock.DaprWorkflowClock`, tests use
             :class:`~custos_cel.clock.FixedClock`.
+        timeout_ms: Per-evaluation wall-clock budget in milliseconds.
+            Defaults to :data:`DEFAULT_TIMEOUT_MS` (100 ms — matches
+            ``WF_EXPR_TIMEOUT_MS``). ``0`` disables the gate entirely;
+            this is intended for tests and for callers that wrap the
+            evaluator in their own deadline machinery. Negative values
+            are rejected.
 
     Returns:
         The expression's value. Booleans, integers (positive and
@@ -145,13 +258,15 @@ def evaluate(typed_ast: Node, scope: BindingScope, clock: Clock) -> Any:
         EvalError: For any value-level runtime failure (division by
             zero, missing key on a runtime mapping, out-of-range list
             index, unsupported runtime type for an operator).
+        EvalTimeoutError: If the walk's wall-clock elapsed time
+            exceeds ``timeout_ms``. Carries structured
+            ``kind`` / ``elapsed_ms`` / ``timeout_ms`` fields.
         TypeError: If ``scope`` is not a :class:`BindingScope`, if
-            ``clock`` does not satisfy the :class:`Clock` protocol, or
-            if ``typed_ast`` is not a :class:`Node` whose root carries
-            a populated ``cel_type`` (i.e. the caller forgot to run
-            :func:`custos_cel.type_check` first). The root-level check
-            catches the common mistake of passing the untyped
-            :data:`AST` produced by :func:`custos_cel.parse` directly.
+            ``clock`` does not satisfy the :class:`Clock` protocol, if
+            ``typed_ast`` is not a :class:`Node` whose root carries a
+            populated ``cel_type``, or if ``timeout_ms`` is not an
+            :class:`int`.
+        ValueError: If ``timeout_ms`` is negative.
     """
     if not isinstance(scope, BindingScope):
         raise TypeError("evaluate: 'scope' must be a BindingScope; got " + type(scope).__name__)
@@ -166,7 +281,44 @@ def evaluate(typed_ast: Node, scope: BindingScope, clock: Clock) -> Any:
             "evaluate: 'typed_ast' is untyped (cel_type is None on the root "
             "node); call custos_cel.type_check() first"
         )
-    return _eval(typed_ast, scope, clock)
+    # ``bool`` is excluded explicitly even though it subclasses ``int`` —
+    # passing ``True`` / ``False`` as a budget is a programming bug.
+    if not isinstance(timeout_ms, int) or isinstance(timeout_ms, bool):
+        raise TypeError("evaluate: 'timeout_ms' must be an int; got " + type(timeout_ms).__name__)
+    if timeout_ms < 0:
+        raise ValueError(
+            "evaluate: 'timeout_ms' must be non-negative (got " + str(timeout_ms) + ")"
+        )
+
+    if timeout_ms == 0:
+        return _eval(typed_ast, scope, clock)
+    start = time.monotonic()
+    deadline = _Deadline(
+        start=start,
+        deadline=start + timeout_ms / 1000.0,
+        timeout_ms=timeout_ms,
+    )
+    token = _DEADLINE_CTX.set(deadline)
+    try:
+        return _eval(typed_ast, scope, clock)
+    finally:
+        _DEADLINE_CTX.reset(token)
+
+
+def _raise_deadline(state: _Deadline) -> None:
+    """Raise :class:`EvalTimeoutError` once a deadline overrun is detected.
+
+    Called only from the slow path of the inline deadline check in
+    :func:`_eval` (i.e. exactly once, just before unwinding). Keeping
+    this out of the hot path lets the typical no-overrun case avoid
+    any function-call overhead beyond the inline check.
+    """
+    elapsed_ms = int((time.monotonic() - state.start) * 1000.0)
+    raise EvalTimeoutError(
+        f"expression evaluation exceeded {state.timeout_ms}ms budget ({elapsed_ms}ms elapsed)",
+        elapsed_ms=elapsed_ms,
+        timeout_ms=state.timeout_ms,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +327,18 @@ def evaluate(typed_ast: Node, scope: BindingScope, clock: Clock) -> Any:
 
 
 def _eval(node: Node, scope: BindingScope, clock: Clock) -> Any:
+    # Inline the deadline check on the hot path. The typical case
+    # (no deadline armed) is a single ContextVar.get + ``is None``
+    # branch. When armed, we increment a per-evaluation counter and
+    # only consult :func:`time.monotonic` every 32 nodes — keeping
+    # per-node overhead to a ctxvar lookup + attribute write +
+    # bitmask, well under the 20% ceiling the acceptance criterion
+    # imposes vs. the bare WF-IMPL-006 evaluator.
+    state = _DEADLINE_CTX.get()
+    if state is not None:
+        state.counter += 1
+        if not state.counter & _DEADLINE_CHECK_MASK and time.monotonic() >= state.deadline:
+            _raise_deadline(state)
     if isinstance(node, Literal):
         return _eval_literal(node)
     if isinstance(node, Ident):
