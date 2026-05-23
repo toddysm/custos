@@ -324,11 +324,11 @@ class ConnectorTypeRegistry:
         normalized: dict[str, Any] = json.loads(canonical_text)
         digest = "sha256:" + canonical_hash(raw)
         _LOGGER.debug(
-            "connector manifest projected: type=%s version=%s digest=%s json=%s",
+            "connector manifest projected: type=%s version=%s digest=%s bytes=%d",
             type_,
             version,
             digest,
-            canonical_text,
+            len(canonical_text),
         )
         return _ManifestProjection(
             type=type_,

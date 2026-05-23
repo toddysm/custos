@@ -522,12 +522,12 @@ class ActivityTypeRegistry:
         normalized: dict[str, Any] = json.loads(canonical_text)
         digest = "sha256:" + canonical_hash(raw)
         _LOGGER.debug(
-            "activity manifest projected: namespace=%s type=%s version=%s digest=%s json=%s",
+            "activity manifest projected: namespace=%s type=%s version=%s digest=%s bytes=%d",
             namespace,
             type_,
             version,
             digest,
-            canonical_text,
+            len(canonical_text),
         )
         return _ManifestProjection(
             namespace=namespace,
