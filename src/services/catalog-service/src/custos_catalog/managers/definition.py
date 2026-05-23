@@ -288,6 +288,8 @@ class DefinitionManager:
         self._activity_registry = activity_registry
         self._connector_client = connector_client
         self._versioning = versioning
+        if max_publish_retries < 1:
+            raise ValueError("max_publish_retries must be >= 1")
         self._max_publish_retries = max_publish_retries
         self._subworkflow_adapter = _SubworkflowResolverAdapter(definition_store)
 
