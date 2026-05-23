@@ -24,10 +24,11 @@ Per [`design/components/catalog-service/design.md`](../../../design/components/c
 | `CAT_DEFINITION_STORE` | Yes | — | `DefinitionStoreProvider` binding (Postgres DSN in v1). |
 | `CAT_CATALOG_STORE` | Yes | — | `CatalogStoreProvider` binding (Postgres DSN in v1). |
 | `CAT_CONNECTOR_ENDPOINT` | Yes | — | Connector Service endpoint for `ExistsConnectorInstance`. |
-| `CAT_AUTHZ_ENDPOINT` | Yes | — | AuthN/AuthZ Service endpoint. |
+| `CAT_AUTHZ_ENDPOINT` | Yes (prod) | — | AuthN/AuthZ Service endpoint. Leaving this empty switches the call-context middleware to a dev-shim that trusts `x-custos-callctx` verbatim, logs a WARNING per request, and refuses to start when `ENVIRONMENT=production`. See [`design/components/catalog-service/design.md`](../../../design/components/catalog-service/design.md) § Configuration. |
 | `CAT_PUBLISH_MAX_BODY_MB` | No | `4` | Maximum workflow/template document size at publish. |
 | `CAT_CEL_PARSE_TIMEOUT_MS` | No | `500` | Per-expression parse timeout at publish (separate from runtime evaluation timeout in WF). |
 | `CAT_DEFAULT_NAMESPACE_TIER_VENDOR` | No | — | Optional default vendor namespace for short-form publishes (unused in M1). |
+| `ENVIRONMENT` | No | `development` | Operational env tag. The dev-shim refuses to start when this is `production` (case-insensitive). |
 
 Process bind:
 

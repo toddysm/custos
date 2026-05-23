@@ -30,3 +30,18 @@ will touch:
 - `externalSecret.data[]` — override the upstream secret-store key paths
   when the operator-chosen layout differs from
   `custos/storage-provider-layer/<tier>`.
+
+### `auth.endpoint` / `CAT_AUTHZ_ENDPOINT` semantics
+
+`auth.endpoint` projects directly into `CAT_AUTHZ_ENDPOINT`. The default
+(`http://auth-service:8080`) is the right value for any standard in-cluster
+topology and must be non-empty in production. Setting it to the empty
+string (e.g. `--set auth.endpoint=""` for local development) switches the
+service to a dev-shim call-context middleware that trusts the inbound
+`x-custos-callctx` header verbatim and emits an `auth.callctx.shim_used`
+audit event per request. The shim raises
+`DevShimDisabledInProductionError` at startup when the container's
+`ENVIRONMENT` env var is `production` (case-insensitive), so a misconfigured
+production deployment takes the service out of rotation instead of silently
+trusting unsigned headers. The live Auth Service integration that removes
+this exception is tracked by CS-IMPL-024 (#225).

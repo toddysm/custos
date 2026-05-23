@@ -1,13 +1,15 @@
-"""Smoke tests for the catalog-service scaffold (CS-IMPL-001).
+"""Smoke tests for the catalog-service package (CS-IMPL-001 scaffold + CS-IMPL-003/004 wiring).
 
-These tests assert only that the package imports cleanly and that the
-scaffold's documented placeholder contract holds. Real behaviour lands in
-CS-IMPL-003 onwards.
+These tests assert the package imports cleanly and that the
+:func:`create_app` factory returns a FastAPI instance with the
+Phase B middleware + probes wired. Per-component behaviour is
+covered in dedicated test modules (``test_providers.py``,
+``test_callctx.py``, ``test_app.py``).
 """
 
 from __future__ import annotations
 
-import pytest
+import importlib
 
 
 def test_package_imports() -> None:
@@ -18,17 +20,31 @@ def test_package_imports() -> None:
     assert custos_catalog.__version__ == "0.1.0"
 
 
-def test_create_app_is_scaffold_stub() -> None:
-    """``create_app`` is documented to raise until CS-IMPL-017 lands."""
-    import custos_catalog
+def test_create_app_builds_a_fastapi_instance() -> None:
+    """``create_app`` is now a working factory (CS-IMPL-003 / CS-IMPL-004)."""
+    from fastapi import FastAPI
 
-    with pytest.raises(NotImplementedError, match="CS-IMPL-017"):
-        custos_catalog.create_app()
+    import custos_catalog
+    from custos_catalog.providers import Providers
+    from custos_catalog.settings import load_settings
+    from tests._fakes import FakeCatalogAdapter, FakeDefinitionAdapter
+
+    settings = load_settings(
+        {
+            "CAT_DEFINITION_STORE": "postgresql://u:p@h:5432/def",
+            "CAT_CATALOG_STORE": "postgresql://u:p@h:5432/cat",
+            "CAT_CONNECTOR_ENDPOINT": "http://connector-service:8080",
+        },
+    )
+    providers = Providers(
+        definition_store=FakeDefinitionAdapter(),  # type: ignore[arg-type]
+        catalog_store=FakeCatalogAdapter(),  # type: ignore[arg-type]
+    )
+    app = custos_catalog.create_app(settings=settings, providers=providers)
+    assert isinstance(app, FastAPI)
 
 
 def test_main_module_is_importable() -> None:
-    """``python -m custos_catalog`` must be wired even pre-CS-IMPL-017."""
-    import importlib
-
+    """``python -m custos_catalog`` must be wired."""
     mod = importlib.import_module("custos_catalog.__main__")
     assert callable(mod.main)

@@ -20,15 +20,22 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
     "Typing :: Typed",
 ]
-# All non-stdlib dependencies are reached in later CS-IMPL-* issues. The
-# scaffold itself only imports stdlib; CI installs `[dev]` to exercise the
-# lint/type/test toolchain. The runtime extras here pin the surfaces every
-# downstream issue will pull in (custos-spl + custos-postgres for CS-IMPL-003,
-# custos-cel for CS-IMPL-007, FastAPI/uvicorn for CS-IMPL-017, pydantic for
-# typed request/response models throughout). Path-installed locally via the
-# `[tool.hatch.metadata]` allow-direct-references switch below; CI mirrors
-# the same install order in `python-services.yml`.
+# Runtime surfaces are pulled in incrementally across the CS-IMPL-* phases.
+# Path-installed locally and in CI from `src/libs/` via the same install
+# order in `.github/workflows/python-services.yml`:
+#
+#   pip install -e src/libs/storage-provider-layer[dev]
+#   pip install -e src/libs/custos-postgres[dev]
+#   pip install -e src/services/catalog-service[dev]
+#
+# `custos-spl` provides the `DefinitionStoreProvider` /
+# `CatalogStoreProvider` Protocols + `MigrationRequired`; `custos-postgres`
+# provides the v1 Postgres adapter classes. CS-IMPL-007 will add
+# `custos-cel`; CS-IMPL-017 will exercise the FastAPI/uvicorn surface
+# end-to-end through real routes.
 dependencies = [
+    "custos-spl",
+    "custos-postgres",
     "fastapi>=0.110,<1",
     "uvicorn[standard]>=0.27,<1",
     "pydantic>=2.6,<3",
@@ -79,7 +86,10 @@ select = [
 ignore = []
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["B011"]
+# Tests legitimately use `Depends(...)` in default arguments, which is the
+# documented FastAPI idiom; B008 fires on every such call. B011 covers
+# `assert ... is None` patterns used in fixture wiring.
+"tests/**" = ["B008", "B011"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -93,11 +103,16 @@ no_implicit_optional = true
 check_untyped_defs = true
 namespace_packages = true
 explicit_package_bases = true
-mypy_path = "src"
+mypy_path = "src:../../libs/storage-provider-layer/src:../../libs/custos-postgres/src"
 
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+# asyncpg ships no PEP 561 marker; treat as untyped at the boundary.
+module = ["asyncpg", "asyncpg.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 minversion = "8.0"
@@ -107,3 +122,4 @@ addopts = [
     "--strict-markers",
     "--strict-config",
 ]
+asyncio_mode = "auto"
