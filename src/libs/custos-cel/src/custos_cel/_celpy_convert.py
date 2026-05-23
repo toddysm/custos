@@ -36,6 +36,7 @@ from custos_cel.ast import (
     Unary,
     UnaryOp,
 )
+from custos_cel.errors import ParseError
 
 # Mapping from celpy wrapper-rule names to our BinaryOp.
 _BINARY_OP_BY_WRAPPER: dict[str, BinaryOp] = {
@@ -59,8 +60,17 @@ _UNARY_OP_BY_WRAPPER: dict[str, UnaryOp] = {
 }
 
 
-class CelConvertError(ValueError):
-    """Raised when the celpy parse tree contains a shape we do not handle."""
+class CelConvertError(ParseError):
+    """Raised when the celpy parse tree contains a shape we do not handle.
+
+    Sits inside the WF-IMPL-008 error taxonomy: subclasses
+    :class:`custos_cel.errors.ParseError` (which in turn subclasses
+    :class:`ValueError` and :class:`custos_cel.errors.CelError`) so
+    every parse failure surfaces with ``kind="expression.parse_error"``
+    regardless of whether ``celpy`` rejected the source at the lexer
+    stage or this converter rejected a construct outside the Custos
+    CEL subset.
+    """
 
 
 def convert_celpy_tree(tree: Any) -> Node:

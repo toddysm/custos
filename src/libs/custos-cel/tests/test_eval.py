@@ -625,7 +625,7 @@ def test_eval_error_carries_source_position() -> None:
     with pytest.raises(EvalError) as excinfo:
         _eval("1 / 0")
     assert excinfo.value.source_position is not None
-    assert excinfo.value.kind == "expression.eval_error"
+    assert excinfo.value.kind == "expression.evaluation_error"
 
 
 # ---------------------------------------------------------------------------

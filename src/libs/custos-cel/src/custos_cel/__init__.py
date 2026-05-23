@@ -23,7 +23,9 @@ import os
 from typing import Any
 
 import celpy
+from celpy.celparser import CELParseError
 
+from custos_cel import errors
 from custos_cel._celpy_convert import CelConvertError, convert_celpy_tree
 from custos_cel.ast import (
     AST_SCHEMA_VERSION,
@@ -59,6 +61,12 @@ from custos_cel.ast import (
     to_json,
 )
 from custos_cel.clock import Clock, DaprWorkflowClock, FixedClock
+from custos_cel.errors import (
+    CelError,
+    DivergenceError,
+    EvaluationError,
+    ParseError,
+)
 from custos_cel.eval import DEFAULT_TIMEOUT_MS, EvalError, EvalTimeoutError
 from custos_cel.eval import evaluate as _evaluate_impl
 from custos_cel.scope import (
@@ -94,13 +102,16 @@ __all__ = [
     "BytesType",
     "Call",
     "CelConvertError",
+    "CelError",
     "CelType",
     "Clock",
     "Conditional",
     "DaprWorkflowClock",
+    "DivergenceError",
     "DoubleType",
     "EvalError",
     "EvalTimeoutError",
+    "EvaluationError",
     "FixedClock",
     "Ident",
     "Index",
@@ -114,6 +125,7 @@ __all__ = [
     "Member",
     "Node",
     "NullType",
+    "ParseError",
     "RunInfo",
     "SchemaBindings",
     "SourcePosition",
@@ -128,6 +140,7 @@ __all__ = [
     "UnboundNameError",
     "WorkflowInfo",
     "__version__",
+    "errors",
     "evaluate",
     "from_dict",
     "from_json",
@@ -167,14 +180,24 @@ def parse(source: str) -> Node:
         The root :class:`~custos_cel.ast.Node` of the parsed tree.
 
     Raises:
-        celpy.celparser.CELParseError: If ``source`` is not syntactically
-            valid CEL.
-        CelConvertError: If the parse tree contains a CEL construct that
-            is outside the Custos subset (e.g. method-call syntax or
-            protobuf message construction).
+        ParseError: If ``source`` is not syntactically valid CEL or
+            if the parse tree contains a construct outside the Custos
+            subset (e.g. method-call syntax or protobuf message
+            construction). The error always carries
+            ``kind="expression.parse_error"`` per the WF-IMPL-008
+            locked taxonomy; the ``CelConvertError`` subclass surface
+            is preserved for callers that key off the narrower type.
     """
     env = celpy.Environment()
-    tree = env.compile(source)
+    try:
+        tree = env.compile(source)
+    except CELParseError as exc:
+        # celpy raises its own ``CELParseError`` for lexer/parser
+        # failures. Re-raise as our taxonomy ``ParseError`` so the
+        # public surface only ever raises one error type at the parse
+        # boundary; ``__cause__`` retains the celpy traceback for
+        # debugging.
+        raise ParseError(str(exc)) from exc
     return convert_celpy_tree(tree)
 
 

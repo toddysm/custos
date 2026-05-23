@@ -34,6 +34,7 @@ from types import MappingProxyType
 from typing import Any, Final
 
 from custos_cel.ast import SourcePosition
+from custos_cel.errors import UnboundNameError
 
 # A CEL-evaluable value. Concrete shape is constrained by the type checker
 # (WF-IMPL-005); the scope itself is value-shape-agnostic, so this is a
@@ -41,36 +42,10 @@ from custos_cel.ast import SourcePosition
 BindingValue = Any
 
 
-# ---------------------------------------------------------------------------
-# Errors
-# ---------------------------------------------------------------------------
-
-
-class UnboundNameError(LookupError):
-    """Raised when a dotted name chain cannot be resolved in a scope.
-
-    Carries the original ``chain`` and, when available, the
-    :class:`~custos_cel.ast.SourcePosition` of the expression that
-    triggered the lookup so the evaluator can produce a structured error
-    per the WF-IMPL-008 error taxonomy. A short, machine-readable
-    ``reason`` distinguishes the failure mode (unknown root, missing
-    step id, scalar treated as a mapping, etc.) without leaking host
-    state.
-    """
-
-    def __init__(
-        self,
-        chain: Sequence[str],
-        *,
-        pos: SourcePosition | None = None,
-        reason: str | None = None,
-    ) -> None:
-        self.chain: tuple[str, ...] = tuple(chain)
-        self.pos: SourcePosition | None = pos
-        self.reason: str | None = reason
-        rendered = ".".join(self.chain) if self.chain else "<empty>"
-        suffix = f" ({reason})" if reason else ""
-        super().__init__(f"unbound name: {rendered}{suffix}")
+# :class:`UnboundNameError` is re-exported from :mod:`custos_cel.errors`
+# (WF-IMPL-008) so the locked taxonomy has a single home. The constructor
+# is back-compat with WF-IMPL-004 callers that pass the chain
+# positionally as ``chain=`` (the new field is ``name_chain``).
 
 
 # ---------------------------------------------------------------------------
