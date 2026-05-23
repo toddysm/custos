@@ -12,7 +12,7 @@ replay-deterministic runtime for workflow expressions. It is consumed by:
 
 ## Status
 
-**Scaffold + parser dependency + AST data model + binding scope + type checker + sandboxed evaluator + per-evaluation timeout** — WF-IMPL-001 ([#176](https://github.com/toddysm/custos/issues/176)), WF-IMPL-002 ([#177](https://github.com/toddysm/custos/issues/177)), WF-IMPL-003 ([#178](https://github.com/toddysm/custos/issues/178)), WF-IMPL-004 ([#179](https://github.com/toddysm/custos/issues/179)), WF-IMPL-005 ([#180](https://github.com/toddysm/custos/issues/180)), WF-IMPL-006 ([#181](https://github.com/toddysm/custos/issues/181)), WF-IMPL-007 ([#182](https://github.com/toddysm/custos/issues/182)). `custos_cel.parse()` is real; `custos_cel.BindingScope` is real (immutable scope exposing only the design's seven bindings); `custos_cel.type_check()` is real (JSON-Schema-backed StartRun-time gate); `custos_cel.evaluate()` is real (sandboxed walk over a TypedAST against a `BindingScope` and a `Clock`, gated by a per-evaluation wall-clock budget configurable via `WF_EXPR_TIMEOUT_MS`). Sandbox hardening, observability, and developer-docs work continues in WF-IMPL-008 through WF-IMPL-012.
+**Scaffold + parser dependency + AST data model + binding scope + type checker + sandboxed evaluator + per-evaluation timeout + locked error taxonomy** — WF-IMPL-001 ([#176](https://github.com/toddysm/custos/issues/176)), WF-IMPL-002 ([#177](https://github.com/toddysm/custos/issues/177)), WF-IMPL-003 ([#178](https://github.com/toddysm/custos/issues/178)), WF-IMPL-004 ([#179](https://github.com/toddysm/custos/issues/179)), WF-IMPL-005 ([#180](https://github.com/toddysm/custos/issues/180)), WF-IMPL-006 ([#181](https://github.com/toddysm/custos/issues/181)), WF-IMPL-007 ([#182](https://github.com/toddysm/custos/issues/182)), WF-IMPL-008 ([#183](https://github.com/toddysm/custos/issues/183)). `custos_cel.parse()` is real; `custos_cel.BindingScope` is real (immutable scope exposing only the design's seven bindings); `custos_cel.type_check()` is real (JSON-Schema-backed StartRun-time gate); `custos_cel.evaluate()` is real (sandboxed walk over a TypedAST against a `BindingScope` and a `Clock`, gated by a per-evaluation wall-clock budget configurable via `WF_EXPR_TIMEOUT_MS`); `custos_cel.errors` is the locked structured-error taxonomy (`CelError` base + `ParseError` / `TypeError` / `UnboundNameError` / `TimeoutError` / `EvaluationError` / `DivergenceError`, each with a stable `kind` string and a JSON-safe `to_dict()`). Sandbox hardening, observability, and developer-docs work continues in WF-IMPL-009 through WF-IMPL-012.
 
 ## Parser / runtime
 
@@ -41,21 +41,26 @@ Both names resolve to `custos_cel.ast.Node` today. The same Python class represe
 | `custos_cel.Clock` | WF-IMPL-006 | Runtime protocol for replay-deterministic ``now()``. |
 | `custos_cel.DaprWorkflowClock` | WF-IMPL-006 | Adapter wrapping a Dapr Workflow context's `current_utc_datetime`. |
 | `custos_cel.FixedClock` | WF-IMPL-006 | Deterministic test clock returning a single timezone-aware datetime. |
-| `custos_cel.EvalError` | WF-IMPL-006 | Structured runtime-error type (`kind="expression.eval_error"`). |
-| `custos_cel.EvalTimeoutError` | WF-IMPL-007 | Structured timeout type (`kind="expression.timeout"`), carrying `elapsed_ms` / `timeout_ms`. Subclass of built-in `TimeoutError`. |
+| `custos_cel.EvalError` | WF-IMPL-006, WF-IMPL-008 | Backwards-compat alias for `custos_cel.errors.EvaluationError` (`kind="expression.evaluation_error"`). |
+| `custos_cel.EvalTimeoutError` | WF-IMPL-007, WF-IMPL-008 | Backwards-compat alias for `custos_cel.errors.TimeoutError` (`kind="expression.timeout"`); subclass of built-in `TimeoutError`, carries `elapsed_ms` / `timeout_ms`. |
 | `custos_cel.DEFAULT_TIMEOUT_MS` | WF-IMPL-007 | Default per-evaluation budget (`100`), used when neither `timeout_ms` nor `WF_EXPR_TIMEOUT_MS` is set. |
 | `custos_cel.TIMEOUT_ENV_VAR` | WF-IMPL-007 | Name of the env var (`"WF_EXPR_TIMEOUT_MS"`) the wrapper consults. |
 | `custos_cel.to_json(node) -> str` / `from_json(text) -> Node` | WF-IMPL-003 | Byte-stable JSON serialization for `Run.compiledGraph` caching. |
 | `custos_cel.BindingScope` | WF-IMPL-004 | Immutable binding scope for the evaluator (see below). |
 | `custos_cel.StepBinding` | WF-IMPL-004 | Per-step output container; sealable. |
 | `custos_cel.RunInfo` / `WorkflowInfo` | WF-IMPL-004 | Frozen run / workflow metadata. |
-| `custos_cel.UnboundNameError` | WF-IMPL-004 | Raised by `BindingScope.resolve()` on any unknown name. |
+| `custos_cel.UnboundNameError` | WF-IMPL-004, WF-IMPL-008 | Raised by `BindingScope.resolve()` on any unknown name (`kind="expression.unbound_name"`); carries `name_chain` and `reason`. |
 | `custos_cel.SchemaBindings` | WF-IMPL-005 | JSON-Schema-backed binding declarations for the type checker. |
-| `custos_cel.TypeCheckError` | WF-IMPL-005 | Structured `TypeError` subclass carrying `kind`/`source_position`/`expected_type`/`actual_type`. |
+| `custos_cel.TypeCheckError` | WF-IMPL-005, WF-IMPL-008 | Backwards-compat alias for `custos_cel.errors.TypeError` (`kind="expression.type_error"`); carries `expected_type` / `actual_type`. |
 | `custos_cel.TimestampType` | WF-IMPL-005 | New `CelType` for `google.protobuf.Timestamp` (used as the static return type of `now()`). |
+| `custos_cel.errors` submodule | WF-IMPL-008 | Locked structured-error taxonomy: `CelError` (base), `ParseError`, `TypeError`, `UnboundNameError`, `TimeoutError`, `EvaluationError`, `DivergenceError`. Each class carries `kind` / `message` / `source_position` and a JSON-safe `to_dict()`. |
+| `custos_cel.CelError` | WF-IMPL-008 | Re-export of `custos_cel.errors.CelError` for convenience. |
+| `custos_cel.ParseError` | WF-IMPL-008 | Re-export of `custos_cel.errors.ParseError` (`kind="expression.parse_error"`). Raised by `parse()` for both `celpy` lexer/parser failures and converter-level rejections (e.g. method-call syntax). |
+| `custos_cel.EvaluationError` | WF-IMPL-008 | Re-export of `custos_cel.errors.EvaluationError`. Canonical name for the WF-IMPL-006 runtime catch-all (e.g. division by zero). |
+| `custos_cel.DivergenceError` | WF-IMPL-008 | Re-export of `custos_cel.errors.DivergenceError` (`kind="expression.divergence"`); raised by the Workflow Service Step Coordinator on replay non-determinism. |
 
-The locked structured error taxonomy and the rest of the public API surface
-land in WF-IMPL-008.
+The locked structured error taxonomy is part of the WF-IMPL-008 surface and
+is described in detail below.
 
 ## AST data model
 
@@ -114,7 +119,7 @@ Where it runs: the Workflow Service Definition Compiler at `StartRun` (per the b
 
 ## Sandbox guarantees
 
-The runtime guarantees, as of WF-IMPL-006:
+The runtime guarantees, as of WF-IMPL-008:
 
 - **No side effects** — expressions cannot perform I/O, mutate bindings, or
   observe wall-clock time except through the injected `Clock`. A static
@@ -237,6 +242,65 @@ each `evaluate()` call, so a nested `evaluate()` (e.g. a future
 activity-level wrapper that re-enters the evaluator) does not
 contaminate the outer call's budget. After every `evaluate()` returns
 or unwinds, the ContextVar is restored to its prior value.
+
+## Error taxonomy
+
+Defined in [`custos_cel.errors`](src/custos_cel/errors.py). Every
+public entry point raises exactly one of these classes. The taxonomy
+is locked: the `kind` strings are part of the audit-event contract
+with the Observability Service and the Step Coordinator's emission
+path, so changing one is a downstream contract break.
+
+| Class | Kind | Python parent (besides `CelError`) | Extra fields | Raised by |
+|---|---|---|---|---|
+| `CelError` | (abstract) | `Exception` | — | (base; never raised directly) |
+| `ParseError` | `expression.parse_error` | `ValueError` | — | `parse()` (wraps `celpy.celparser.CELParseError` and the internal `CelConvertError`) |
+| `TypeError` | `expression.type_error` | builtin `TypeError` | `expected_type`, `actual_type` | `type_check()` |
+| `UnboundNameError` | `expression.unbound_name` | `LookupError` | `name_chain`, `reason` | `BindingScope.resolve()`; surfaces from `type_check()` and `evaluate()` for unknown roots / step ids / schema fields / non-allow-listed functions |
+| `TimeoutError` | `expression.timeout` | builtin `TimeoutError` | `elapsed_ms`, `timeout_ms` | `evaluate()` when the wall-clock budget is exceeded |
+| `EvaluationError` | `expression.evaluation_error` | `RuntimeError` | — | `evaluate()` for value-level runtime failures (division by zero, out-of-range index, runtime type-shape mismatch that escaped the type checker) |
+| `DivergenceError` | `expression.divergence` | `RuntimeError` | — | Not raised by `custos_cel` itself; constructed and emitted by the Workflow Service Step Coordinator on Dapr Workflow replay non-determinism. Lives in this taxonomy so downstream audit consumers key off a single `kind` regardless of which component fired |
+
+**Shared shape**. Every class — including `CelError` — exposes:
+
+- `kind: str` — the locked string above (also available as `cls.KIND`).
+- `message: str` — human-readable summary; `str(err)` returns the same.
+- `source_position: SourcePosition | None` — 1-indexed `line` / `column` / 0-indexed `offset` of the offending node when available.
+- `to_dict() -> dict[str, Any]` — JSON-safe dict for audit emission. Key order is stable: `kind`, `message`, `source_position` first, then any subclass extras in declaration order. The subclass extras hook is `_extra_fields()`; downstream code never needs to introspect class structure.
+- Structured `__repr__` echoing the same fields.
+
+**Backwards-compatible names** (preserved for existing call sites and
+the `custos_cel` public re-export):
+
+- `custos_cel.EvalError` → `custos_cel.errors.EvaluationError` (same class object).
+- `custos_cel.EvalTimeoutError` → `custos_cel.errors.TimeoutError`.
+- `custos_cel.TypeCheckError` → `custos_cel.errors.TypeError`.
+- `UnboundNameError.chain` and `.pos` are kept alongside the canonical `.name_chain` and `.source_position`.
+
+The `TypeError` and `TimeoutError` names live on `custos_cel.errors`
+only (and not on the top-level `custos_cel` package) so
+`from custos_cel import *` cannot accidentally shadow the Python
+builtins of the same name. Import them explicitly when needed:
+
+```python
+from custos_cel.errors import TypeError as CelTypeError, TimeoutError as CelTimeoutError
+```
+
+**Catching contracts**. Every taxonomy class is hashable (via
+`Exception`'s identity hash) and `json.dumps(err.to_dict())` round-trips
+without a custom encoder. Generic-builtin catches still work:
+
+```python
+try:
+    typed = custos_cel.type_check(custos_cel.parse(src), bindings)
+    result = custos_cel.evaluate(typed, scope, clock)
+except custos_cel.errors.CelError as err:
+    audit.emit(err.to_dict())  # locked kind + structured fields
+    raise
+except ValueError:
+    # Still fires for ParseError, since ParseError(CelError, ValueError).
+    ...
+```
 
 ## Design references
 

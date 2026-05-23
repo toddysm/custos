@@ -51,6 +51,7 @@ from custos_cel.ast import (
     Unary,
     UnaryOp,
 )
+from custos_cel.errors import TypeError as _CelTypeError
 from custos_cel.scope import UnboundNameError
 
 __all__ = ["SchemaBindings", "TypeCheckError", "type_check"]
@@ -61,44 +62,14 @@ __all__ = ["SchemaBindings", "TypeCheckError", "type_check"]
 # ---------------------------------------------------------------------------
 
 
-class TypeCheckError(TypeError):
-    """Structured type-check failure.
-
-    Subclasses Python's :class:`TypeError` so callers that catch the
-    builtin (e.g. generic validation wrappers) still see this error.
-    The additional attributes give the WF Definition Compiler enough
-    structure to emit the ``expression.type_error`` audit event per the
-    WF-IMPL-008 error taxonomy.
-
-    Attributes:
-        kind: Always ``"expression.type_error"``; matches the audit
-            event ``kind`` field.
-        message: Human-readable reason the type check failed.
-        source_position: Position in the original CEL source string
-            where the offending node was parsed, when available.
-        expected_type: The type the checker expected at that position.
-            Either a :class:`CelType` or a short human-readable label
-            (e.g. ``"numeric"`` for the arithmetic operator family).
-        actual_type: The type actually inferred. Same shape as
-            ``expected_type``.
-    """
-
-    KIND: Final[str] = "expression.type_error"
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        source_position: SourcePosition | None = None,
-        expected_type: CelType | str | None = None,
-        actual_type: CelType | str | None = None,
-    ) -> None:
-        self.kind: str = self.KIND
-        self.message: str = message
-        self.source_position: SourcePosition | None = source_position
-        self.expected_type: CelType | str | None = expected_type
-        self.actual_type: CelType | str | None = actual_type
-        super().__init__(message)
+# WF-IMPL-008 (issue #183) lifted the canonical type-check error into
+# :mod:`custos_cel.errors` as :class:`custos_cel.errors.TypeError`. The
+# WF-IMPL-005 name ``TypeCheckError`` remains the public surface for
+# this module and is kept as an alias so existing call sites and the
+# ``custos_cel`` public re-export keep working. The class identity is
+# the same — ``isinstance(err, TypeCheckError)`` and
+# ``isinstance(err, custos_cel.errors.TypeError)`` are interchangeable.
+TypeCheckError = _CelTypeError
 
 
 # ---------------------------------------------------------------------------

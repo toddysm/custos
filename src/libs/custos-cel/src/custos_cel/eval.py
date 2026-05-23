@@ -88,6 +88,8 @@ from custos_cel.ast import (
     UnaryOp,
 )
 from custos_cel.clock import Clock
+from custos_cel.errors import EvaluationError as _EvaluationError
+from custos_cel.errors import TimeoutError as _TimeoutError
 from custos_cel.scope import BindingScope, UnboundNameError
 
 __all__ = ["DEFAULT_TIMEOUT_MS", "EvalError", "EvalTimeoutError", "evaluate"]
@@ -114,61 +116,14 @@ _BINDING_ROOTS: Final[frozenset[str]] = frozenset(
 # ---------------------------------------------------------------------------
 
 
-class EvalError(RuntimeError):
-    """Runtime evaluation error in a CEL expression.
-
-    Raised for division-by-zero, modulo-by-zero, out-of-range index,
-    missing map key on a runtime value, and similar value-level
-    failures. Type-shape mismatches that should have been caught by the
-    type checker are also surfaced as :class:`EvalError` if they reach
-    the evaluator (which would indicate a bug in either the type
-    checker or the caller's bindings).
-
-    Carries the source position of the offending node so the Step
-    Coordinator can emit a structured ``expression.eval_error`` audit
-    event per the WF-IMPL-008 error taxonomy.
-    """
-
-    KIND: Final[str] = "expression.eval_error"
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        source_position: SourcePosition | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.kind: str = self.KIND
-        self.message: str = message
-        self.source_position: SourcePosition | None = source_position
-
-
-class EvalTimeoutError(TimeoutError):
-    """Per-evaluation timeout exceeded.
-
-    Raised by :func:`evaluate` when the walk overruns ``timeout_ms``.
-    Subclasses the built-in :class:`TimeoutError` so callers that catch
-    the standard timeout shape see this as a timeout; carries the
-    structured ``kind`` / ``elapsed_ms`` / ``timeout_ms`` fields the
-    WF-IMPL-008 error taxonomy expects.
-
-    Attributes:
-        kind: Always ``"expression.timeout"``.
-        message: Human-readable summary.
-        elapsed_ms: Wall-clock milliseconds elapsed before the
-            deadline check fired (always >= ``timeout_ms``).
-        timeout_ms: The budget that was exceeded — the value the
-            caller passed to :func:`evaluate`.
-    """
-
-    KIND: Final[str] = "expression.timeout"
-
-    def __init__(self, message: str, *, elapsed_ms: int, timeout_ms: int) -> None:
-        super().__init__(message)
-        self.kind: str = self.KIND
-        self.message: str = message
-        self.elapsed_ms: int = elapsed_ms
-        self.timeout_ms: int = timeout_ms
+# WF-IMPL-008 (issue #183) lifted the runtime-error and timeout classes
+# into :mod:`custos_cel.errors` so the locked taxonomy has a single
+# home. The WF-IMPL-006 / WF-IMPL-007 names ``EvalError`` and
+# ``EvalTimeoutError`` remain the public surface for this module and
+# are kept as aliases so existing call sites and the ``custos_cel``
+# public re-export keep working. Class identity is the same.
+EvalError = _EvaluationError
+EvalTimeoutError = _TimeoutError
 
 
 # ---------------------------------------------------------------------------
