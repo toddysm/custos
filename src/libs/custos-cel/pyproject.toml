@@ -28,6 +28,13 @@ dependencies = [
     # and macro/extension function injection points are reached in
     # WF-IMPL-005/006. See change record 005 for the decision rationale.
     "cel-python>=0.5.0,<0.6",
+    # OpenTelemetry API only — no SDK requirement (WF-IMPL-011, #186).
+    # Consumers without an OTel SDK installed get no-op spans and
+    # metrics via the API's default no-op providers, so importing
+    # ``custos_cel`` works unconditionally. ``parse`` /
+    # ``type_check`` / ``evaluate`` still dispatch through the API's
+    # default no-op providers when no SDK is installed.
+    "opentelemetry-api>=1.20,<2",
 ]
 
 [project.optional-dependencies]
@@ -41,6 +48,11 @@ dev = [
     # well-typed CEL expressions and assert replay-determinism
     # properties across at least 1000 examples.
     "hypothesis>=6.100",
+    # OTel SDK is dev-only: tests in ``tests/test_observability.py``
+    # (WF-IMPL-011, #186) install in-memory exporters to assert span
+    # shape and metric emission. Production deployments wire their
+    # own SDK; the library itself only depends on the API.
+    "opentelemetry-sdk>=1.20,<2",
 ]
 
 [project.urls]
