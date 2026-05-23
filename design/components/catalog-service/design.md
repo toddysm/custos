@@ -366,10 +366,10 @@ Both providers are abstractions per REQ-048; the OCI registry adapter for `Defin
 | GET | `/v1/workspaces/{ws}/workflows/{name}@{version}` | — | `WorkflowVersion` | Fetch a specific version. |
 | GET | `/v1/workflows/{workflowVersionId}` | — | `WorkflowVersion` | Fetch by immutable ID. |
 | POST | `/v1/workspaces/{ws}/workflows/{name}@{version}:deprecate` | `{ reason }` | 200 | Deprecate a workflow version. |
-| POST | `/v1/workspaces/{ws}/workflows/{workflowVersionId}:extractTemplate` | `{ selectors, templateName }` | `WorkflowTemplateVersionRef` (201) | Extract a template from a workflow version. |
+| POST | `/v1/workspaces/{ws}/workflows/{name}@{version}:extractTemplate` | `{ selectors, templateName }` | `WorkflowTemplateVersionRef` (201) | Extract a template from a workflow version. The workspace prefix is implicit in the URL; cross-workspace reads use the workspaceless `GET /v1/workflows/{workflowVersionId}` route. |
 | POST | `/v1/workspaces/{ws}/templates` | `{ definition }` | `WorkflowTemplateVersionRef` (201) | Publish a template version directly. |
 | GET | `/v1/workspaces/{ws}/templates/{name}@{version}` | — | `WorkflowTemplateVersion` | Fetch a template version. |
-| POST | `/v1/workspaces/{ws}/templates/{templateVersionId}:materialize` | `{ bindings, targetName }` | `WorkflowVersionRef` (201) | Materialize a template into a workflow version. |
+| POST | `/v1/workspaces/{ws}/templates/{name}@{version}:materialize` | `{ bindings, targetName }` | `WorkflowVersionRef` (201) | Materialize a template into a workflow version. The workspace prefix is implicit in the URL. |
 | POST | `/v1/workspaces/{ws}/activity-types` | `{ manifest, referrerRef? }` | `ActivityTypeRef` (201) | Register an activity type version. (Writer: Author CLI via API Gateway) |
 | GET | `/v1/workspaces/{ws}/activity-types` | filters | `[ActivityTypeRef]` | List activity types. |
 | GET | `/v1/workspaces/{ws}/activity-types/{namespace}/{type}@{version}` | — | `ActivityTypeVersion` | Fetch an activity type version's normalized manifest. |

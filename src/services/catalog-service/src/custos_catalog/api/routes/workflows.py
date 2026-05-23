@@ -7,7 +7,7 @@ Per design § Public Interface, the workflow surface is six routes:
 * GET    ``/v1/workspaces/{ws}/workflows/{name}@{version}`` — get-by-ref.
 * GET    ``/v1/workflows/{workflowVersionId}`` — get-by-id (workspace-less).
 * POST   ``/v1/workspaces/{ws}/workflows/{name}@{version}:deprecate``.
-* POST   ``/v1/workspaces/{ws}/workflows/{workflowVersionId}:extractTemplate``.
+* POST   ``/v1/workspaces/{ws}/workflows/{name}@{version}:extractTemplate``.
 
 The ``{name}@{version}`` shape is passed through :func:`_parse_ref`,
 which accepts the at-sign separator and validates the integer version.
@@ -320,7 +320,15 @@ async def deprecate_workflow(
 )
 async def extract_template_from_workflow(
     ws: str = Path(...),
-    ref: str = Path(..., description="Source workflow ref of the form <name>@<version>."),
+    ref: str = Path(
+        ...,
+        description=(
+            "Source workflow version, expressed as ``<name>@<version>`` within"
+            " the path's ``{ws}``. The workspace prefix is implicit; cross-workspace"
+            " callers must look up the workflow via the workspaceless"
+            " ``GET /v1/workflows/{workflow_version_id}`` route instead."
+        ),
+    ),
     body: ExtractTemplateRequest = Body(...),
     ctx: CallContext = Depends(require_workspace_access("catalog:workflows:write")),
     template_manager: TemplateManager = Depends(get_template_manager),

@@ -4,7 +4,7 @@ Per design § Public Interface:
 
 * POST   ``/v1/workspaces/{ws}/templates`` — publish a template.
 * GET    ``/v1/workspaces/{ws}/templates/{name}@{version}`` — get-by-ref.
-* POST   ``/v1/workspaces/{ws}/templates/{templateVersionId}:materialize``.
+* POST   ``/v1/workspaces/{ws}/templates/{name}@{version}:materialize``.
 
 There is no template-level deprecate route in the design's table; the
 template manager exposes a deprecate method but the gateway does not
@@ -120,7 +120,14 @@ async def get_template_version_by_ref(
 )
 async def materialize_template(
     ws: str = Path(...),
-    ref: str = Path(..., description="Source template ref of the form <name>@<version>."),
+    ref: str = Path(
+        ...,
+        description=(
+            "Source template version, expressed as ``<name>@<version>`` within"
+            " the path's ``{ws}``. The workspace prefix is implicit; templates"
+            " cannot be materialized across workspaces."
+        ),
+    ),
     body: MaterializeRequest = Body(...),
     ctx: CallContext = Depends(require_workspace_access("catalog:templates:write")),
     manager: TemplateManager = Depends(get_template_manager),
