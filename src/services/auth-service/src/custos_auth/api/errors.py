@@ -12,12 +12,11 @@ Phase C surfaces three logical failure modes:
   existence; see ``design/components/auth-service/design.md`` §
   Authorization).
 * :class:`Conflict` (409) — duplicate tenant / workspace / principal
-  identifiers, write-once OIDC binding collisions.
+  identifiers, write-once OIDC binding collisions, and other
+  immutability/write-once conflicts surfaced by the service layer.
 * :class:`ValidationFailure` (400) — invalid request body or
   business-rule violation that FastAPI's Pydantic validator could not
   catch (e.g. workspace creation under a disabled tenant).
-
-The SPL ``ImmutableViolation`` is bubbled up via :func:`Conflict.from_spl`.
 """
 
 from __future__ import annotations
