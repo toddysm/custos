@@ -12,12 +12,14 @@ from custos_auth.audit import (
     EVENT_PRINCIPAL_CREATED,
     EVENT_PRINCIPAL_DISABLED,
     EVENT_TENANT_CREATED,
+    EVENT_TOKEN_ISSUED,
     EVENT_WORKSPACE_CREATED,
     PLATFORM_WORKSPACE_ID,
     audit_oidc_identity_linked,
     audit_principal_created,
     audit_principal_disabled,
     audit_tenant_created,
+    audit_token_issued,
     audit_workspace_created,
 )
 from tests._fakes import FakeMetadataAdapter
@@ -113,6 +115,38 @@ async def test_audit_oidc_identity_linked_payload_empty_subject_carries_keys() -
         "oidc_subject": "sub-42",
     }
     assert event.payload == {}
+
+
+@pytest.mark.asyncio
+async def test_audit_token_issued_keys_under_sa_workspace_and_omits_secrets() -> None:
+    import datetime as _dt
+
+    meta = FakeMetadataAdapter()
+    issued = _dt.datetime(2026, 5, 24, 12, 0, 0, tzinfo=_dt.UTC)
+    expires = issued + _dt.timedelta(days=90)
+    await audit_token_issued(
+        meta,  # type: ignore[arg-type]
+        actor="op-1",
+        workspace_id="ws-1",
+        token_id="tok-1",
+        service_account_id="sa-1",
+        issued_at=issued,
+        expires_at=expires,
+    )
+    ws_id, event = meta.append_audit_calls[0]
+    assert ws_id == "ws-1"
+    assert event.event_type == EVENT_TOKEN_ISSUED
+    assert event.actor == "op-1"
+    assert event.subject == {"token_id": "tok-1", "service_account_id": "sa-1"}
+    # The audit payload must carry timestamps as ISO 8601 strings
+    # (not naive epoch ints) and must never carry the plaintext or
+    # the storage hash.
+    assert event.payload == {
+        "issued_at": issued.isoformat(),
+        "expires_at": expires.isoformat(),
+    }
+    for k, v in event.payload.items():
+        assert isinstance(v, str), f"payload[{k}] must be ISO-format string"
 
 
 # ---------------------------------------------------------------------------

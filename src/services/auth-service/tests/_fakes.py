@@ -9,7 +9,7 @@ from types import MappingProxyType
 from typing import Any, TypeVar
 
 from custos_spl.errors import ImmutableViolation
-from custos_spl.ids import PrincipalId, RoleBindingId, RoleId, TenantId, WorkspaceId
+from custos_spl.ids import PrincipalId, RoleBindingId, RoleId, ServiceTokenId, TenantId, WorkspaceId
 from custos_spl.interfaces.auth_store import (
     GlobalScope,
     Permission,
@@ -20,6 +20,7 @@ from custos_spl.interfaces.auth_store import (
     RoleBindingFilter,
     RoleBindingScope,
     ServiceAccount,
+    ServiceToken,
     Tenant,
     TenantFilter,
     TenantScope,
@@ -65,9 +66,11 @@ class FakeAuthAdapter:
         self.permissions: dict[str, Permission] = {}
         self.roles: dict[str, Role] = {}
         self.role_bindings: dict[str, RoleBinding] = {}
+        self.service_tokens: dict[str, ServiceToken] = {}
         # Call recorders for tests that want to assert on argument shape
         self.disable_principal_calls: list[tuple[str, str, str]] = []
         self.delete_role_binding_calls: list[tuple[str, str, str]] = []
+        self.revoke_service_token_calls: list[tuple[str, str, str]] = []
 
     @property
     def declared_revisions(self) -> Mapping[str, AbstractSet[int]]:
@@ -274,6 +277,55 @@ class FakeAuthAdapter:
         if filter.principal_id is not None:
             rows = [b for b in rows if b.principal_id == filter.principal_id]
         return tuple(rows)
+
+    # ------------------------------------------------------------------
+    # Service tokens (Phase F / AS-IMPL-013)
+    # ------------------------------------------------------------------
+
+    async def put_service_token(self, token: ServiceToken) -> None:
+        self.service_tokens[str(token.token_id)] = token
+
+    async def get_service_token_by_hash(self, hash: str) -> ServiceToken | None:
+        for token in self.service_tokens.values():
+            if token.hash == hash:
+                return token
+        return None
+
+    async def revoke_service_token(
+        self,
+        token_id: ServiceTokenId,
+        actor: PrincipalId,
+        reason: str,
+    ) -> None:
+        self.revoke_service_token_calls.append((str(token_id), str(actor), reason))
+        existing = self.service_tokens.get(str(token_id))
+        if existing is None:
+            return
+        now = datetime.now(UTC)
+        self.service_tokens[str(token_id)] = ServiceToken(
+            token_id=existing.token_id,
+            service_account_id=existing.service_account_id,
+            hash=existing.hash,
+            issued_at=existing.issued_at,
+            expires_at=existing.expires_at,
+            revoked_at=now,
+            revoked_by=actor,
+            revoked_reason=reason,
+        )
+
+    async def list_service_tokens_for_service_account(
+        self,
+        service_account_id: PrincipalId,
+    ) -> tuple[ServiceToken, ...]:
+        return tuple(
+            t for t in self.service_tokens.values() if t.service_account_id == service_account_id
+        )
+
+    async def delete_expired_service_tokens(self, before: datetime) -> int:
+        victims = [tid for tid, t in self.service_tokens.items() if t.expires_at < before]
+        for tid in victims:
+            del self.service_tokens[tid]
+        return len(victims)
 
     # ------------------------------------------------------------------
     # Transactions

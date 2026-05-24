@@ -100,6 +100,7 @@ EVENT_OIDC_IDENTITY_LINKED: Final[str] = "oidc.identity-linked"
 EVENT_ROLE_BINDING_GRANTED: Final[str] = "role-binding.granted"
 EVENT_ROLE_BINDING_REVOKED: Final[str] = "role-binding.revoked"
 EVENT_AUTHZ_DECISION: Final[str] = "authz.decision"
+EVENT_TOKEN_ISSUED: Final[str] = "token.issued"
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +356,50 @@ async def audit_role_binding_revoked(
 
 
 # ---------------------------------------------------------------------------
+# Service-token lifecycle events (Phase F / AS-IMPL-013+)
+# ---------------------------------------------------------------------------
+
+
+async def audit_token_issued(
+    metadata_store: MetadataStoreProvider,
+    *,
+    actor: str,
+    workspace_id: str,
+    token_id: str,
+    service_account_id: str,
+    issued_at: datetime,
+    expires_at: datetime,
+) -> None:
+    """Emit ``token.issued`` keyed to the service-account's workspace.
+
+    ``actor`` is the call-context principal that performed the mint
+    (the operator holding ``admin:service-account``);
+    ``service_account_id`` is the SA the token was issued to. The
+    payload deliberately omits the token plaintext **and** the
+    storage hash — the plaintext leaks the credential, and the hash
+    is a deterministic function of the plaintext so it would let
+    anyone with audit-read access correlate the row back to the same
+    hash an attacker might intercept on the wire. ``token_id`` is
+    sufficient for forensic correlation against the
+    :class:`~custos_spl.interfaces.auth_store.ServiceToken` row.
+    """
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_TOKEN_ISSUED,
+        actor=actor,
+        subject={
+            "token_id": token_id,
+            "service_account_id": service_account_id,
+        },
+        payload={
+            "issued_at": issued_at.isoformat(),
+            "expires_at": expires_at.isoformat(),
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
 # Authorization decision events (Phase E / AS-IMPL-011)
 # ---------------------------------------------------------------------------
 #
@@ -414,6 +459,7 @@ __all__ = [
     "EVENT_ROLE_BINDING_GRANTED",
     "EVENT_ROLE_BINDING_REVOKED",
     "EVENT_TENANT_CREATED",
+    "EVENT_TOKEN_ISSUED",
     "EVENT_WORKSPACE_CREATED",
     "PLATFORM_WORKSPACE_ID",
     "audit_authz_decision",
@@ -423,5 +469,6 @@ __all__ = [
     "audit_role_binding_granted",
     "audit_role_binding_revoked",
     "audit_tenant_created",
+    "audit_token_issued",
     "audit_workspace_created",
 ]

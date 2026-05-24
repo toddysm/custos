@@ -29,6 +29,7 @@ from custos_auth.middleware.callctx import (
     require_permission as _require_permission_inner,
 )
 from custos_auth.providers import Providers
+from custos_auth.settings import Settings
 
 
 def get_providers(request: Request) -> Providers:
@@ -43,6 +44,20 @@ def get_providers(request: Request) -> Providers:
         raise RuntimeError("Providers bundle is not attached to app.state. Did the lifespan run?")
     assert isinstance(providers, Providers)
     return providers
+
+
+def get_settings(request: Request) -> Settings:
+    """Return the parsed :class:`Settings` attached by the lifespan.
+
+    Used by route handlers that need to read configuration knobs
+    (service-token default TTL, cache TTLs, …) without re-parsing
+    the environment.
+    """
+    settings = getattr(request.app.state, "settings", None)
+    if settings is None:  # pragma: no cover - defensive
+        raise RuntimeError("Settings is not attached to app.state. Did the lifespan run?")
+    assert isinstance(settings, Settings)
+    return settings
 
 
 def get_auth_store(
@@ -85,5 +100,6 @@ __all__ = [
     "get_call_context",
     "get_metadata_store",
     "get_providers",
+    "get_settings",
     "require_permission",
 ]

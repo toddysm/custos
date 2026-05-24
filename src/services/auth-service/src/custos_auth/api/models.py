@@ -30,6 +30,7 @@ from typing import Annotated, Literal
 from custos_spl.interfaces.auth_store import (
     Principal,
     ServiceAccount,
+    ServiceToken,
     Tenant,
     User,
     Workspace,
@@ -212,6 +213,89 @@ class PrincipalDisableRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Service tokens (Phase F / AS-IMPL-013)
+# ---------------------------------------------------------------------------
+
+
+class ServiceTokenMintRequest(BaseModel):
+    """Body of ``POST /v1/service-accounts/{principal_id}/tokens``.
+
+    ``ttl_seconds`` is optional. Omitting it falls back to the
+    platform default
+    (:data:`custos_auth.settings.DEFAULT_SERVICE_TOKEN_TTL_SECONDS`,
+    overridable via ``CUSTOS_AUTH_SERVICE_TOKEN_TTL_DEFAULT``). The
+    body deliberately does not let the client choose ``token_id`` —
+    the server allocates a UUID-shaped id so two parallel mints
+    cannot collide.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    ttl_seconds: Annotated[int | None, Field(default=None, ge=1, le=10 * 365 * 24 * 60 * 60)]
+
+
+class ServiceTokenMintResponse(BaseModel):
+    """Response body for a successful token mint.
+
+    ``token`` is the **plaintext** bearer the client must capture
+    immediately — the server stores only a one-way hash, so this is
+    the single moment the plaintext is observable. Subsequent
+    ``GET`` / ``DELETE`` operations key on ``token_id``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    token_id: str
+    service_account_id: str
+    token: str
+    issued_at: datetime
+    expires_at: datetime
+
+
+class ServiceTokenResponse(BaseModel):
+    """One row in the ``GET /v1/service-accounts/{id}/tokens`` response.
+
+    Carries no plaintext and no hash — the hash is a deterministic
+    function of the plaintext and exposing it would let any caller
+    with token-read access pre-compute hashes for a token harvesting
+    attack on the SPL row.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    token_id: str
+    service_account_id: str
+    issued_at: datetime
+    expires_at: datetime
+    revoked_at: datetime | None
+    revoked_by: str | None
+    revoked_reason: str | None
+
+
+class ServiceTokenListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tokens: list[ServiceTokenResponse]
+
+
+def service_token_to_response(token: ServiceToken) -> ServiceTokenResponse:
+    """Project a SPL :class:`ServiceToken` to its wire envelope.
+
+    Omits the ``hash`` column on purpose — see the
+    :class:`ServiceTokenResponse` docstring.
+    """
+    return ServiceTokenResponse(
+        token_id=str(token.token_id),
+        service_account_id=str(token.service_account_id),
+        issued_at=token.issued_at,
+        expires_at=token.expires_at,
+        revoked_at=token.revoked_at,
+        revoked_by=None if token.revoked_by is None else str(token.revoked_by),
+        revoked_reason=token.revoked_reason,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Permission registry (Phase D / AS-IMPL-009)
 # ---------------------------------------------------------------------------
 
@@ -323,6 +407,10 @@ __all__ = [
     "RoleResponse",
     "ServiceAccountCreateRequest",
     "ServiceAccountResponse",
+    "ServiceTokenListResponse",
+    "ServiceTokenMintRequest",
+    "ServiceTokenMintResponse",
+    "ServiceTokenResponse",
     "TenantCreateRequest",
     "TenantListResponse",
     "TenantResponse",
@@ -331,6 +419,7 @@ __all__ = [
     "WorkspaceListResponse",
     "WorkspaceResponse",
     "principal_to_response",
+    "service_token_to_response",
     "tenant_to_response",
     "workspace_to_response",
 ]

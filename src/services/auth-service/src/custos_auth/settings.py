@@ -82,6 +82,21 @@ ENV_PERMISSIONS_PATHS: Final[str] = "CUSTOS_AUTH_PERMISSIONS_PATHS"
 #: rejected with :class:`SettingsError`.
 ENV_AUTHZ_CACHE_TTL: Final[str] = "CUSTOS_AUTH_AUTHZ_CACHE_TTL"
 
+#: Optional. Default lifetime (seconds) for newly minted service
+#: tokens (AS-IMPL-013, REQ-035). Matches the design doc §
+#: Configuration default ``90d`` (= 7_776_000 seconds). Operators
+#: override per platform via this env var; clients additionally
+#: override per mint by passing ``ttl_seconds`` on the request body.
+#: Must be a positive integer — a service token with zero or
+#: negative TTL is meaningless (and the audit trail would record an
+#: already-expired token), so :class:`SettingsError` is raised on
+#: anything non-positive.
+ENV_SERVICE_TOKEN_TTL_DEFAULT: Final[str] = "CUSTOS_AUTH_SERVICE_TOKEN_TTL_DEFAULT"
+
+#: Default lifetime for service tokens when no env override is set.
+#: 90 days in seconds.
+DEFAULT_SERVICE_TOKEN_TTL_SECONDS: Final[int] = 90 * 24 * 60 * 60
+
 
 class SettingsError(RuntimeError):
     """Raised when the environment is missing a required setting or carries a malformed value."""
@@ -97,6 +112,7 @@ class Settings:
     callctx_verifier_url: str
     permissions_paths: tuple[str, ...]
     authz_cache_ttl_seconds: int
+    service_token_ttl_default_seconds: int
 
     @property
     def is_production(self) -> bool:
@@ -153,6 +169,31 @@ def _parse_authz_cache_ttl(raw: str) -> int:
     return value
 
 
+def _parse_service_token_ttl_default(raw: str) -> int:
+    """Parse the ``CUSTOS_AUTH_SERVICE_TOKEN_TTL_DEFAULT`` env value.
+
+    Empty string falls back to
+    :data:`DEFAULT_SERVICE_TOKEN_TTL_SECONDS` (90 days). Values
+    ≤ 0 are rejected because a service token with zero or negative
+    TTL would be born expired. Non-integer values are also
+    rejected.
+    """
+    if raw == "":
+        return DEFAULT_SERVICE_TOKEN_TTL_SECONDS
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise SettingsError(
+            f"{ENV_SERVICE_TOKEN_TTL_DEFAULT} must be a positive integer (got {raw!r})"
+        ) from exc
+    if value <= 0:
+        raise SettingsError(
+            f"{ENV_SERVICE_TOKEN_TTL_DEFAULT} must be a positive integer (got {value}); "
+            "a service token's default TTL must be strictly positive."
+        )
+    return value
+
+
 def load_settings(env: dict[str, str] | None = None) -> Settings:
     """Parse a :class:`Settings` from the supplied env mapping (default ``os.environ``)."""
     src: dict[str, str] = dict(os.environ if env is None else env)
@@ -165,16 +206,21 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         authz_cache_ttl_seconds=_parse_authz_cache_ttl(
             src.get(ENV_AUTHZ_CACHE_TTL, "").strip(),
         ),
+        service_token_ttl_default_seconds=_parse_service_token_ttl_default(
+            src.get(ENV_SERVICE_TOKEN_TTL_DEFAULT, "").strip(),
+        ),
     )
 
 
 __all__ = [
+    "DEFAULT_SERVICE_TOKEN_TTL_SECONDS",
     "ENV_AUTHZ_CACHE_TTL",
     "ENV_AUTH_STORE_DSN",
     "ENV_CALLCTX_VERIFIER_URL",
     "ENV_ENVIRONMENT",
     "ENV_METADATA_STORE_DSN",
     "ENV_PERMISSIONS_PATHS",
+    "ENV_SERVICE_TOKEN_TTL_DEFAULT",
     "Settings",
     "SettingsError",
     "load_settings",
