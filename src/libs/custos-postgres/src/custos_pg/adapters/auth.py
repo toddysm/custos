@@ -31,12 +31,12 @@ from custos_spl.interfaces.auth_store import (
     TenantScope,
     Tenant,
     TenantFilter,
-    TransactionHandle,
     User,
     Workspace,
     WorkspaceFilter,
     WorkspaceScope,
 )
+from custos_spl.interfaces.metadata_store import TransactionHandle
 from custos_spl.migrations.runner import MigrationCapable
 
 from custos_pg.migrations.auth import AUTH_REV1
@@ -101,7 +101,8 @@ class PgAuthAdapter(MigrationCapable):
         """Acquire the connection pool (lazy or eager)."""
         if self._pool is not None:
             return self._pool
-        return await self._lazy()
+        assert self._lazy is not None  # invariant established in __init__
+        return await self._lazy.get()
 
     async def _get_conn(self, tx: TransactionHandle | None) -> tuple[asyncpg.Connection, bool]:
         """Get a connection for execution, either from tx or pool.
@@ -111,6 +112,10 @@ class PgAuthAdapter(MigrationCapable):
         """
         if tx is not None:
             self._check_tx_handle(tx)
+            # `_check_tx_handle` guarantees ownership; tx-aware callers always
+            # hand back the concrete `PgAuthTransactionHandle` the adapter
+            # produced in `with_transaction`, which carries the pinned conn.
+            assert isinstance(tx, PgAuthTransactionHandle)
             return tx.conn, False
         pool = await self._pool_ref()
         conn = await pool.acquire()
@@ -123,7 +128,7 @@ class PgAuthAdapter(MigrationCapable):
 
     async def refresh_declared(self) -> None:
         """Refresh declared revisions from the migration ledger."""
-        from custos_pg.adapters.metadata import read_declared
+        from custos_pg.revisions import read_declared
 
         pool = await self._pool_ref()
         declared = await read_declared(pool, (self.INTERFACE_NAME,))
@@ -131,7 +136,7 @@ class PgAuthAdapter(MigrationCapable):
 
     async def apply_pending(self) -> list[str]:
         """Apply pending migrations."""
-        from custos_pg.adapters.metadata import ensure_ledger, record_revision
+        from custos_pg.revisions import ensure_ledger, record_revision
 
         summaries: list[str] = []
         pool = await self._pool_ref()
@@ -449,7 +454,7 @@ class PgAuthAdapter(MigrationCapable):
                 pool = await self._pool_ref()
                 await pool.release(conn)
 
-    def _reconstruct_principal(self, row: dict) -> Principal:
+    def _reconstruct_principal(self, row: dict[str, Any]) -> Principal:
         """Reconstruct Principal union from database row."""
         if row["kind"] == "user":
             return User(

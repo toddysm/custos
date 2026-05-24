@@ -1,17 +1,24 @@
-"""Health endpoints for the Auth Service scaffold (AS-IMPL-001).
+"""Health endpoints (AS-IMPL-004 ``/readyz`` lifespan-gated behavior).
 
 The ``/healthz`` probe is a flat liveness signal; the FastAPI app being able
 to respond at all means the process is up and the middleware chain is sane.
 
-The ``/readyz`` probe currently returns 200 unconditionally. AS-IMPL-004 will
-introduce the SPL schema-revision startup gate and ``/readyz`` will then
-surface a 503 with operator-actionable text while migrations are behind.
-AS-IMPL-018 will additionally report JWKS-rotation health.
+The ``/readyz`` probe reports the lifespan readiness flag set by
+:func:`custos_auth.create_app`. When the SPL schema-revision gate fails,
+:func:`custos_auth.providers.verify_schema_revisions` raises
+:class:`custos_spl.MigrationRequired` from inside the lifespan, which
+aborts startup with a non-zero exit before this router ever serves a
+request (Kubernetes then crash-loops the pod). The 503 branch below is
+therefore reached only during the brief window when lifespan startup is
+still in progress — before ``app.state.ready`` flips to ``True``.
+AS-IMPL-018 will additionally factor in JWKS-rotation health.
 """
 
 from __future__ import annotations
 
 from fastapi import APIRouter
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 router = APIRouter()
 
@@ -23,13 +30,14 @@ async def healthz() -> dict[str, str]:
 
 
 @router.get("/readyz", include_in_schema=False)
-async def readyz() -> dict[str, str]:
-    """Readiness probe — 200 OK in the AS-IMPL-001 scaffold.
-
-    AS-IMPL-004 will gate this on the SPL schema-revision check. AS-IMPL-018
-    will additionally include JWKS-rotation health.
-    """
-    return {"status": "ready"}
+async def readyz(request: Request) -> JSONResponse:
+    """Readiness probe — 503 until lifespan startup completes successfully."""
+    if getattr(request.app.state, "ready", False):
+        return JSONResponse({"status": "ready"})
+    return JSONResponse(
+        status_code=503,
+        content={"status": "not_ready", "detail": "auth-service has not finished startup"},
+    )
 
 
 __all__ = ["router"]

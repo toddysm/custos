@@ -21,22 +21,20 @@ classifiers = [
     "Typing :: Typed",
 ]
 # Runtime surfaces are pulled in incrementally across the AS-IMPL-* phases.
-# Phase A (AS-IMPL-001) ships with **zero** in-repo `custos-*` runtime
-# dependencies, so the CI install order in
-# `.github/workflows/python-services.yml` is just a single
-# `pip install -e ".[dev]"` step (no extra "install libs from path" step,
-# unlike the catalog-service job which already needs SPL + Postgres +
-# CEL). AS-IMPL-003 will add `custos-spl` + `custos-postgres` to the
-# `dependencies` list below for `AuthStoreProvider` + the schema-revision
-# startup gate **and** wire the matching path-install steps into the
-# workflow (mirroring catalog-service). AS-IMPL-017 will add a JWT
-# library (proposed `python-jose[cryptography]` or `authlib`) for the
-# EdDSA call-context signer; AS-IMPL-020 will add OIDC verification deps.
+# Phase B (AS-IMPL-003 + AS-IMPL-004) added `custos-spl` + `custos-postgres`
+# for the `AuthStoreProvider` + `MetadataStoreProvider` adapters and the
+# schema-revision startup gate. The matching path-install steps live in
+# `.github/workflows/python-services.yml` (mirroring catalog-service).
+# AS-IMPL-017 will add a JWT library (proposed `python-jose[cryptography]`
+# or `authlib`) for the EdDSA call-context signer; AS-IMPL-020 will add
+# OIDC verification deps.
 dependencies = [
     "fastapi>=0.110,<1",
     "uvicorn[standard]>=0.27,<1",
     "pydantic>=2.6,<3",
     "opentelemetry-api>=1.20,<2",
+    "custos-spl",
+    "custos-postgres",
 ]
 
 [project.optional-dependencies]
@@ -103,11 +101,19 @@ no_implicit_optional = true
 check_untyped_defs = true
 namespace_packages = true
 explicit_package_bases = true
-mypy_path = "src"
+mypy_path = "src:../../libs/storage-provider-layer/src:../../libs/custos-postgres/src"
 
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+# asyncpg ships no PEP 561 marker; treat as untyped at the boundary.
+# Auth-service transitively imports `custos_pg.adapters.auth` via
+# `custos_pg.PgAuthAdapter`, so the asyncpg surface needs the same
+# `ignore_missing_imports` carve-out catalog-service uses.
+module = ["asyncpg", "asyncpg.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 minversion = "8.0"

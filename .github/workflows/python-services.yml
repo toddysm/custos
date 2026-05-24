@@ -123,11 +123,12 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      # NOTE: AS-IMPL-001 (Phase A) ships zero in-repo `custos-*` runtime
-      # deps, so there is no "install libs from path" step yet. AS-IMPL-003
-      # (Phase B) will add `custos-spl` + `custos-postgres` to the
-      # auth-service pyproject and prepend the matching path-install step
-      # here, mirroring the catalog-service job above.
+      - name: Install SPL + Postgres adapter from path
+        working-directory: ${{ github.workspace }}
+        run: |
+          pip install -e src/libs/storage-provider-layer[dev]
+          pip install -e src/libs/custos-postgres[dev]
+
       - name: Install package and dev dependencies
         run: pip install -e ".[dev]"
 
@@ -140,5 +141,5 @@ jobs:
       - name: Mypy (strict)
         run: mypy src tests
 
-      - name: Pytest (coverage gate raised in AS-IMPL-027)
-        run: pytest -q --cov=custos_auth --cov-report=term-missing --cov-fail-under=0
+      - name: Pytest (with 90% coverage gate)
+        run: pytest -q --cov=custos_auth --cov-report=term-missing --cov-fail-under=90
