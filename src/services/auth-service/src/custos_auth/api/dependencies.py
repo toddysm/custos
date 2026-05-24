@@ -7,12 +7,9 @@
   per-route signatures shorter.
 * :func:`require_permission` re-exports the middleware dependency so
   routers only import from one module.
-* :func:`require_workspace_membership` adds the workspace scope check
-  on top of a permission requirement (the natural shape of any
-  ``/v1/workspaces/{id}/...`` route).
 
-The pattern mirrors catalog-service's ``api/dependencies.py``; the
-shape is identical so any future shared package can hoist both.
+The pattern mirrors the shared dependency modules used by sibling
+services so any future common package can hoist these helpers.
 """
 
 from __future__ import annotations
