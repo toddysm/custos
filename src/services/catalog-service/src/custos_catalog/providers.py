@@ -43,6 +43,7 @@ from typing import Protocol, cast
 from custos_spl import MigrationRequired
 from custos_spl.interfaces.catalog_store import CatalogStoreProvider
 from custos_spl.interfaces.definition_store import DefinitionStoreProvider
+from custos_spl.interfaces.metadata_store import MetadataStoreProvider
 
 from custos_catalog.settings import Settings
 
@@ -50,11 +51,14 @@ from custos_catalog.settings import Settings
 # checks the global SPL set (Definition, Catalog, Auth, Artifact, Metadata)
 # which is the right thing for the platform-wide ``custos migrate up`` CLI
 # but the wrong thing for a per-service startup gate — catalog-service does
-# not deploy Auth/Artifact/Metadata adapters and would otherwise refuse to
-# start because of revisions owned by sibling services.
+# not deploy Auth/Artifact adapters and would otherwise refuse to start
+# because of revisions owned by sibling services. Metadata is included
+# from CS-IMPL-019 onwards because catalog-service writes audit events
+# into the SPL outbox.
 _REQUIRED_INTERFACES: tuple[type, ...] = (
     DefinitionStoreProvider,
     CatalogStoreProvider,
+    MetadataStoreProvider,
 )
 
 
@@ -80,11 +84,13 @@ class Providers:
     """Bundle of the SPL providers Catalog Service consumes.
 
     Held on ``app.state.providers`` and exposed to FastAPI handlers via
-    :func:`get_definition_store` / :func:`get_catalog_store`.
+    :func:`get_definition_store` / :func:`get_catalog_store` /
+    :func:`get_metadata_store`.
     """
 
     definition_store: DefinitionStoreProvider
     catalog_store: CatalogStoreProvider
+    metadata_store: MetadataStoreProvider
 
 
 def load_providers(settings: Settings) -> Providers:
@@ -99,6 +105,7 @@ def load_providers(settings: Settings) -> Providers:
     from custos_pg import (
         PgCatalogAdapter,
         PgDefinitionAdapter,
+        PgMetadataAdapter,
     )
     from custos_pg.pool import LazyPool
 
@@ -108,6 +115,9 @@ def load_providers(settings: Settings) -> Providers:
     catalog_store = PgCatalogAdapter(
         lazy=LazyPool(settings.catalog_store_dsn),
     )
+    metadata_store = PgMetadataAdapter(
+        lazy=LazyPool(settings.metadata_store_dsn),
+    )
     # The adapters declare SCHEMA_REVISION as a bare class attr rather
     # than a `ClassVar[int]`, so mypy can't see them as Protocol-conforming
     # at the consumer boundary. `custos-postgres` has its own strict mypy
@@ -116,6 +126,7 @@ def load_providers(settings: Settings) -> Providers:
     return Providers(
         definition_store=cast(DefinitionStoreProvider, definition_store),
         catalog_store=cast(CatalogStoreProvider, catalog_store),
+        metadata_store=cast(MetadataStoreProvider, metadata_store),
     )
 
 
@@ -136,6 +147,7 @@ async def verify_schema_revisions(providers: Providers) -> None:
     adapters: list[_RefreshableAdapter] = [
         cast(_RefreshableAdapter, providers.definition_store),
         cast(_RefreshableAdapter, providers.catalog_store),
+        cast(_RefreshableAdapter, providers.metadata_store),
     ]
     for adapter in adapters:
         await adapter.refresh_declared()
@@ -169,7 +181,8 @@ def schema_gate_explainer(error: MigrationRequired) -> str:
         "running build's required schema revisions. "
         f"Missing: {gaps}. "
         "Resolve by running `custos migrate up` against the configured "
-        "DSNs (see CAT_DEFINITION_STORE / CAT_CATALOG_STORE)."
+        "DSNs (see CAT_DEFINITION_STORE / CAT_CATALOG_STORE / "
+        "CAT_METADATA_STORE)."
     )
 
 

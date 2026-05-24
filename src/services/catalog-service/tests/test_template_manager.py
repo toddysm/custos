@@ -33,6 +33,7 @@ from custos_catalog.managers.template import (
 )
 from custos_catalog.resolve import StubConnectorClient
 from custos_catalog.versioning import TemplateImmutabilityError, VersioningManager
+from tests._fakes import FakeMetadataStore
 
 WS = WorkspaceId("ws-1")
 
@@ -326,14 +327,17 @@ def _make_manager(store: FakeDefinitionStore) -> TemplateManager:
     versioning = VersioningManager(store=store)
     registry = FakeActivityRegistry()
     connector = StubConnectorClient()
+    metadata_store = FakeMetadataStore()
     definition_manager = DefinitionManager(
         definition_store=store,
+        metadata_store=metadata_store,  # type: ignore[arg-type]
         activity_registry=registry,
         connector_client=connector,
         versioning=versioning,
     )
     return TemplateManager(
         definition_store=store,
+        metadata_store=metadata_store,  # type: ignore[arg-type]
         activity_registry=registry,
         connector_client=connector,
         versioning=versioning,
@@ -567,6 +571,7 @@ async def test_publish_template_exhausted_retries_raise_template_immutability() 
     store = FakeDefinitionStore()
     manager = TemplateManager(
         definition_store=store,
+        metadata_store=FakeMetadataStore(),  # type: ignore[arg-type]
         activity_registry=FakeActivityRegistry(),
         connector_client=StubConnectorClient(),
         versioning=VersioningManager(store=store),

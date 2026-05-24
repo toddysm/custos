@@ -32,6 +32,7 @@ from custos_spl.interfaces.definition_store import (
     WorkflowTemplateVersion,
     WorkflowVersion,
 )
+from custos_spl.interfaces.metadata_store import AuditEvent
 from custos_spl.pagination import Cursor, Page
 from fastapi.testclient import TestClient
 
@@ -46,6 +47,7 @@ from custos_catalog.settings import load_settings
 _ENV: dict[str, str] = {
     "CAT_DEFINITION_STORE": "postgresql://u:p@h:5432/def",
     "CAT_CATALOG_STORE": "postgresql://u:p@h:5432/cat",
+    "CAT_METADATA_STORE": "postgresql://u:p@h:5432/meta",
     "CAT_CONNECTOR_ENDPOINT": "http://connector-service:8080",
     # CAT_AUTHZ_ENDPOINT intentionally unset — exercises the dev shim.
 }
@@ -436,6 +438,60 @@ class FakeCatalogStore:
 
 
 # ---------------------------------------------------------------------------
+# Fake MetadataStoreProvider (audit-only slice for CS-IMPL-019)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class FakeMetadataStore:
+    """In-memory ``MetadataStoreProvider`` slice for the catalog tests.
+
+    Implements only the audit-emission surface plus the migration
+    surface the schema-revision startup gate requires. Catalog-service
+    never calls the run / step / cursor / idempotency / dedupe / lease
+    methods so they are not stubbed.
+
+    Attributes:
+        audit: Every event appended via :meth:`append_audit`, in
+            chronological order.
+        raise_on_append: If set, every :meth:`append_audit` call
+            raises this exception. Used to exercise the audit
+            best-effort path in the catalog managers.
+    """
+
+    SCHEMA_REVISION: ClassVar[int] = 4
+    applied: set[int] = field(default_factory=lambda: {1, 2, 3, 4})
+    audit: list[AuditEvent] = field(default_factory=list)
+    raise_on_append: BaseException | None = None
+
+    # ---- Migration surface ----
+
+    @property
+    def declared_revisions(self) -> Mapping[str, frozenset[int]]:
+        from types import MappingProxyType
+
+        return MappingProxyType({"MetadataStoreProvider": frozenset(self.applied)})
+
+    async def apply_pending(self) -> list[str]:  # pragma: no cover
+        return []
+
+    async def refresh_declared(self) -> None:
+        return None
+
+    # ---- Audit surface ----
+
+    async def append_audit(
+        self,
+        workspace_id: WorkspaceId,
+        event: AuditEvent,
+        tx: Any | None = None,
+    ) -> None:
+        if self.raise_on_append is not None:
+            raise self.raise_on_append
+        self.audit.append(event)
+
+
+# ---------------------------------------------------------------------------
 # CallContext header helper
 # ---------------------------------------------------------------------------
 
@@ -485,18 +541,21 @@ def admin_header(ws: str = "ws-1") -> dict[str, str]:
 
 
 @pytest.fixture
-def stores() -> tuple[FakeDefinitionStore, FakeCatalogStore]:
+def stores() -> tuple[FakeDefinitionStore, FakeCatalogStore, FakeMetadataStore]:
     """Fresh empty in-memory stores per test."""
-    return FakeDefinitionStore(), FakeCatalogStore()
+    return FakeDefinitionStore(), FakeCatalogStore(), FakeMetadataStore()
 
 
 @pytest.fixture
-def providers(stores: tuple[FakeDefinitionStore, FakeCatalogStore]) -> Providers:
+def providers(
+    stores: tuple[FakeDefinitionStore, FakeCatalogStore, FakeMetadataStore],
+) -> Providers:
     """Build a :class:`Providers` bundle from the in-memory stores."""
-    definition_store, catalog_store = stores
+    definition_store, catalog_store, metadata_store = stores
     return Providers(
         definition_store=definition_store,  # type: ignore[arg-type, unused-ignore]
         catalog_store=catalog_store,  # type: ignore[arg-type, unused-ignore]
+        metadata_store=metadata_store,  # type: ignore[arg-type, unused-ignore]
     )
 
 

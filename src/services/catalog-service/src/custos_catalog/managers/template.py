@@ -53,8 +53,14 @@ from custos_spl.interfaces.definition_store import (
     DefinitionStoreProvider,
     WorkflowTemplateVersion,
 )
+from custos_spl.interfaces.metadata_store import MetadataStoreProvider
 from custos_spl.pagination import Cursor, Page
 
+from custos_catalog import _telemetry as telemetry
+from custos_catalog.audit import (
+    audit_template_extracted,
+    audit_template_materialized,
+)
 from custos_catalog.cel_validate import (
     CelNameBindingError,
     CelSyntaxError,
@@ -268,6 +274,7 @@ class TemplateManager:
         self,
         *,
         definition_store: DefinitionStoreProvider,
+        metadata_store: MetadataStoreProvider,
         activity_registry: ActivityTypeRegistry,
         connector_client: ConnectorClient,
         versioning: VersioningManager,
@@ -275,6 +282,7 @@ class TemplateManager:
         max_publish_retries: int = DEFAULT_MAX_PUBLISH_RETRIES,
     ) -> None:
         self._store = definition_store
+        self._metadata_store = metadata_store
         self._activity_registry = activity_registry
         self._connector_client = connector_client
         self._versioning = versioning
@@ -338,45 +346,74 @@ class TemplateManager:
             derived_from_workflow_version_id or "<none>",
         )
 
-        # 1. parse + 2. schema-validate
-        doc = self._parse_and_validate_schema(source)
-        # 2a. enforce metadata.workspace (when present) matches the target
-        self._enforce_workspace_match(doc, workspace_id=workspace_id)
-        # 2b. placeholder-declaration well-formedness
-        declarations = self._validate_declarations(doc)
-        # 3. normalize
-        normalized = normalize_template(doc)
-        # 4. resolve concrete references (template typically has few/none)
-        resolved = await self._resolve_refs(normalized, workspace_id=workspace_id)
-        # 5. CEL validation
-        self._validate_cel(resolved)
-        # 6. idempotency: scan existing versions for matching canonical hash
-        template_name = self._extract_template_name(resolved.document)
-        idempotent = await self._find_idempotent_match(
-            workspace_id=workspace_id,
-            template_name=template_name,
-            resolved=resolved,
-        )
-        if idempotent is not None:
-            _LOGGER.info(
-                "publish_template idempotent re-publish workspace=%s name=%s version=%s",
-                workspace_id,
-                template_name,
-                idempotent.version,
-            )
-            return WorkflowTemplateVersionRef(
-                workspace_id=workspace_id,
-                template_name=template_name,
-                version=int(idempotent.version),
-            )
-        # 7. mint + put with race-recovery loop
-        _ = declarations  # declarations are informational at publish time
-        return await self._mint_and_put(
-            workspace_id=workspace_id,
-            template_name=template_name,
-            resolved=resolved,
-            derived_from_workflow_version_id=derived_from_workflow_version_id,
-        )
+        with telemetry.observe_operation(
+            telemetry.OP_TEMPLATE_PUBLISH,
+            outcomes={
+                PublishValidationError: "validation_error",
+                TemplateImmutabilityError: "immutability",
+            },
+        ):
+            # 1. parse + 2. schema-validate
+            with telemetry.observe_stage(
+                telemetry.STAGE_PARSE,
+                outcomes={PublishValidationError: "validation_error"},
+            ):
+                doc = self._parse_and_validate_schema(source)
+            # 2a. enforce metadata.workspace (when present) matches the target
+            self._enforce_workspace_match(doc, workspace_id=workspace_id)
+            # 2b. placeholder-declaration well-formedness
+            with telemetry.observe_stage(
+                telemetry.STAGE_SCHEMA,
+                outcomes={PublishValidationError: "validation_error"},
+            ):
+                declarations = self._validate_declarations(doc)
+            # 3. normalize
+            with telemetry.observe_stage(telemetry.STAGE_NORMALIZE):
+                normalized = normalize_template(doc)
+            # 4. resolve concrete references (template typically has few/none)
+            with telemetry.observe_stage(
+                telemetry.STAGE_RESOLVE,
+                outcomes={PublishValidationError: "validation_error"},
+            ):
+                resolved = await self._resolve_refs(normalized, workspace_id=workspace_id)
+            # 5. CEL validation
+            with telemetry.observe_stage(
+                telemetry.STAGE_CEL,
+                outcomes={PublishValidationError: "validation_error"},
+            ):
+                self._validate_cel(resolved)
+            # 6. idempotency: scan existing versions for matching canonical hash
+            template_name = self._extract_template_name(resolved.document)
+            with telemetry.observe_stage(telemetry.STAGE_IDEMPOTENCY):
+                idempotent = await self._find_idempotent_match(
+                    workspace_id=workspace_id,
+                    template_name=template_name,
+                    resolved=resolved,
+                )
+            if idempotent is not None:
+                _LOGGER.info(
+                    "publish_template idempotent re-publish workspace=%s name=%s version=%s",
+                    workspace_id,
+                    template_name,
+                    idempotent.version,
+                )
+                return WorkflowTemplateVersionRef(
+                    workspace_id=workspace_id,
+                    template_name=template_name,
+                    version=int(idempotent.version),
+                )
+            # 7. mint + put with race-recovery loop
+            _ = declarations  # declarations are informational at publish time
+            with telemetry.observe_stage(
+                telemetry.STAGE_MINT_PUT,
+                outcomes={TemplateImmutabilityError: "immutability"},
+            ):
+                return await self._mint_and_put(
+                    workspace_id=workspace_id,
+                    template_name=template_name,
+                    resolved=resolved,
+                    derived_from_workflow_version_id=derived_from_workflow_version_id,
+                )
 
     # ------------------------------------------------------------------
     # Publish pipeline — internal helpers
@@ -725,69 +762,76 @@ class TemplateManager:
             principal_id,
         )
 
-        # 1. Fetch the template version (raises TemplateNotFound).
-        template_row = await self.get_template_version_by_ref(
-            workspace_id=workspace_id,
-            template_name=template_name,
-            version=template_version,
-        )
-        template_doc = dict(template_row.normalized_doc)
-
-        # 2. Re-parse declarations from the stored body.
-        spec = template_doc.get("spec", {})
-        raw_placeholders: list[Any] = []
-        if isinstance(spec, Mapping):
-            raw = spec.get("placeholders", []) or []
-            if isinstance(raw, list):
-                raw_placeholders = raw
-        declarations = parse_declarations(raw_placeholders)
-
-        # 3. Validate the supplied bindings + apply defaults.
-        try:
-            validate_placeholder_bindings(declarations, bindings)
-        except PlaceholderBindingError as exc:
-            raise MaterializationError(
+        with telemetry.observe_operation(
+            telemetry.OP_TEMPLATE_MATERIALIZE,
+            outcomes={
+                TemplateNotFound: "not_found",
+                MaterializationError: "validation_error",
+            },
+        ):
+            # 1. Fetch the template version (raises TemplateNotFound).
+            template_row = await self.get_template_version_by_ref(
                 workspace_id=workspace_id,
                 template_name=template_name,
-                template_version=template_version,
-                target_workflow_name=target_workflow_name,
-                cause=exc,
-            ) from exc
-        full_bindings = effective_bindings(declarations, bindings)
-
-        # 4. Render the template body.
-        try:
-            rendered = render(
-                template_doc,
-                full_bindings,
-                target_workflow_name=target_workflow_name,
+                version=template_version,
             )
-        except TemplateRenderError as exc:
-            raise MaterializationError(
-                workspace_id=workspace_id,
-                template_name=template_name,
-                template_version=template_version,
-                target_workflow_name=target_workflow_name,
-                cause=exc,
-            ) from exc
+            template_doc = dict(template_row.normalized_doc)
 
-        # 5. Publish via the workflow pipeline.
-        derived_id = f"{template_name}@{template_version}"
-        try:
-            ref = await self._definition_manager.publish_workflow(
-                workspace_id=workspace_id,
-                principal_id=principal_id,
-                source=json.dumps(rendered),
-                derived_from_template_version_id=derived_id,
-            )
-        except PublishValidationError as exc:
-            raise MaterializationError(
-                workspace_id=workspace_id,
-                template_name=template_name,
-                template_version=template_version,
-                target_workflow_name=target_workflow_name,
-                cause=exc,
-            ) from exc
+            # 2. Re-parse declarations from the stored body.
+            spec = template_doc.get("spec", {})
+            raw_placeholders: list[Any] = []
+            if isinstance(spec, Mapping):
+                raw = spec.get("placeholders", []) or []
+                if isinstance(raw, list):
+                    raw_placeholders = raw
+            declarations = parse_declarations(raw_placeholders)
+
+            # 3. Validate the supplied bindings + apply defaults.
+            try:
+                validate_placeholder_bindings(declarations, bindings)
+            except PlaceholderBindingError as exc:
+                raise MaterializationError(
+                    workspace_id=workspace_id,
+                    template_name=template_name,
+                    template_version=template_version,
+                    target_workflow_name=target_workflow_name,
+                    cause=exc,
+                ) from exc
+            full_bindings = effective_bindings(declarations, bindings)
+
+            # 4. Render the template body.
+            try:
+                rendered = render(
+                    template_doc,
+                    full_bindings,
+                    target_workflow_name=target_workflow_name,
+                )
+            except TemplateRenderError as exc:
+                raise MaterializationError(
+                    workspace_id=workspace_id,
+                    template_name=template_name,
+                    template_version=template_version,
+                    target_workflow_name=target_workflow_name,
+                    cause=exc,
+                ) from exc
+
+            # 5. Publish via the workflow pipeline.
+            derived_id = f"{template_name}@{template_version}"
+            try:
+                ref = await self._definition_manager.publish_workflow(
+                    workspace_id=workspace_id,
+                    principal_id=principal_id,
+                    source=json.dumps(rendered),
+                    derived_from_template_version_id=derived_id,
+                )
+            except PublishValidationError as exc:
+                raise MaterializationError(
+                    workspace_id=workspace_id,
+                    template_name=template_name,
+                    template_version=template_version,
+                    target_workflow_name=target_workflow_name,
+                    cause=exc,
+                ) from exc
 
         _LOGGER.info(
             "materialize success workspace=%s template=%s@%d -> workflow=%s@%d",
@@ -796,6 +840,15 @@ class TemplateManager:
             template_version,
             ref.workflow_name,
             ref.version,
+        )
+        await audit_template_materialized(
+            self._metadata_store,
+            workspace_id=workspace_id,
+            actor=principal_id,
+            template_name=template_name,
+            template_version=template_version,
+            workflow_name=ref.workflow_name,
+            workflow_version=ref.version,
         )
         return ref
 
@@ -878,62 +931,68 @@ class TemplateManager:
             len(selectors),
         )
 
-        # 1. Fetch the source workflow version. WorkflowNotFound
-        # propagates as-is; the API layer maps it to 404.
-        source_row = await self._definition_manager.get_workflow_version_by_ref(
-            workspace_id=workspace_id,
-            workflow_name=source_workflow_name,
-            version=source_workflow_version,
-        )
-        source_doc = dict(source_row.normalized_doc)
-
-        # 2. Apply the selectors.
-        try:
-            template_doc, captured_bindings = extract(
-                source_doc,
-                selectors,
-                template_name=template_name,
+        with telemetry.observe_operation(
+            telemetry.OP_TEMPLATE_EXTRACT,
+            outcomes={
+                ExtractionError: "validation_error",
+            },
+        ):
+            # 1. Fetch the source workflow version. WorkflowNotFound
+            # propagates as-is; the API layer maps it to 404.
+            source_row = await self._definition_manager.get_workflow_version_by_ref(
+                workspace_id=workspace_id,
+                workflow_name=source_workflow_name,
+                version=source_workflow_version,
             )
-        except ExtractError as exc:
-            raise ExtractionError(
-                workspace_id=workspace_id,
-                source_workflow_name=source_workflow_name,
-                source_workflow_version=source_workflow_version,
-                template_name=template_name,
-                cause=exc,
-            ) from exc
+            source_doc = dict(source_row.normalized_doc)
 
-        # 3. Round-trip self-check. ADR-009 makes this non-optional.
-        try:
-            self_check_roundtrip(template_doc, source_doc, captured_bindings)
-        except RoundtripViolation as exc:
-            raise ExtractionError(
-                workspace_id=workspace_id,
-                source_workflow_name=source_workflow_name,
-                source_workflow_version=source_workflow_version,
-                template_name=template_name,
-                cause=exc,
-            ) from exc
+            # 2. Apply the selectors.
+            try:
+                template_doc, captured_bindings = extract(
+                    source_doc,
+                    selectors,
+                    template_name=template_name,
+                )
+            except ExtractError as exc:
+                raise ExtractionError(
+                    workspace_id=workspace_id,
+                    source_workflow_name=source_workflow_name,
+                    source_workflow_version=source_workflow_version,
+                    template_name=template_name,
+                    cause=exc,
+                ) from exc
 
-        # 4. Publish the template via the existing pipeline. Errors
-        # from the template publish path are wrapped too so callers
-        # see a single structured error type.
-        derived_id = f"{source_workflow_name}@{source_workflow_version}"
-        try:
-            ref = await self.publish_template(
-                workspace_id=workspace_id,
-                principal_id=principal_id,
-                source=json.dumps(template_doc),
-                derived_from_workflow_version_id=derived_id,
-            )
-        except PublishValidationError as exc:
-            raise ExtractionError(
-                workspace_id=workspace_id,
-                source_workflow_name=source_workflow_name,
-                source_workflow_version=source_workflow_version,
-                template_name=template_name,
-                cause=exc,
-            ) from exc
+            # 3. Round-trip self-check. ADR-009 makes this non-optional.
+            try:
+                self_check_roundtrip(template_doc, source_doc, captured_bindings)
+            except RoundtripViolation as exc:
+                raise ExtractionError(
+                    workspace_id=workspace_id,
+                    source_workflow_name=source_workflow_name,
+                    source_workflow_version=source_workflow_version,
+                    template_name=template_name,
+                    cause=exc,
+                ) from exc
+
+            # 4. Publish the template via the existing pipeline. Errors
+            # from the template publish path are wrapped too so callers
+            # see a single structured error type.
+            derived_id = f"{source_workflow_name}@{source_workflow_version}"
+            try:
+                ref = await self.publish_template(
+                    workspace_id=workspace_id,
+                    principal_id=principal_id,
+                    source=json.dumps(template_doc),
+                    derived_from_workflow_version_id=derived_id,
+                )
+            except PublishValidationError as exc:
+                raise ExtractionError(
+                    workspace_id=workspace_id,
+                    source_workflow_name=source_workflow_name,
+                    source_workflow_version=source_workflow_version,
+                    template_name=template_name,
+                    cause=exc,
+                ) from exc
 
         _LOGGER.info(
             "extract_from_workflow success workspace=%s source=%s@%d -> template=%s@%d",
@@ -942,6 +1001,15 @@ class TemplateManager:
             source_workflow_version,
             ref.template_name,
             ref.version,
+        )
+        await audit_template_extracted(
+            self._metadata_store,
+            workspace_id=workspace_id,
+            actor=principal_id,
+            source_workflow_name=source_workflow_name,
+            source_workflow_version=source_workflow_version,
+            template_name=ref.template_name,
+            template_version=ref.version,
         )
         return ref
 
@@ -1017,21 +1085,25 @@ class TemplateManager:
         # Probe for existence by listing the first page; an empty
         # listing means "no template to deprecate" since the parent
         # row is only materialised at first put.
-        page = await self._store.list_workflow_template_versions(
-            WorkspaceId(workspace_id),
-            WorkflowTemplateId(template_name),
-            limit=1,
-        )
-        if not page.items:
-            raise TemplateNotFound(
-                workspace_id=workspace_id,
-                template_name=template_name,
+        with telemetry.observe_operation(
+            telemetry.OP_TEMPLATE_DEPRECATE,
+            outcomes={TemplateNotFound: "not_found"},
+        ):
+            page = await self._store.list_workflow_template_versions(
+                WorkspaceId(workspace_id),
+                WorkflowTemplateId(template_name),
+                limit=1,
             )
-        await self._store.set_workflow_template_deprecated(
-            WorkspaceId(workspace_id),
-            WorkflowTemplateId(template_name),
-            True,
-        )
+            if not page.items:
+                raise TemplateNotFound(
+                    workspace_id=workspace_id,
+                    template_name=template_name,
+                )
+            await self._store.set_workflow_template_deprecated(
+                WorkspaceId(workspace_id),
+                WorkflowTemplateId(template_name),
+                True,
+            )
         _LOGGER.info(
             "deprecate_template workspace=%s name=%s principal=%s reason=%s",
             workspace_id,

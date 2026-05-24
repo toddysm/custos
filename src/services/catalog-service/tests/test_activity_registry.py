@@ -20,6 +20,7 @@ from custos_catalog.managers.activity_registry import (
     ActivityTypeRef,
     ActivityTypeRegistry,
 )
+from tests._fakes import FakeMetadataStore
 
 WS = "ws-1"
 ADMIN = "alice"
@@ -234,6 +235,7 @@ def _make_registry(
 ) -> ActivityTypeRegistry:
     return ActivityTypeRegistry(
         catalog_store=store,
+        metadata_store=FakeMetadataStore(),  # type: ignore[arg-type]
         platform_admins=platform_admins,
         vendor_grants=vendor_grants,
     )

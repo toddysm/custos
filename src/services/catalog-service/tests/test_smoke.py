@@ -27,18 +27,20 @@ def test_create_app_builds_a_fastapi_instance() -> None:
     import custos_catalog
     from custos_catalog.providers import Providers
     from custos_catalog.settings import load_settings
-    from tests._fakes import FakeCatalogAdapter, FakeDefinitionAdapter
+    from tests._fakes import FakeCatalogAdapter, FakeDefinitionAdapter, FakeMetadataAdapter
 
     settings = load_settings(
         {
             "CAT_DEFINITION_STORE": "postgresql://u:p@h:5432/def",
             "CAT_CATALOG_STORE": "postgresql://u:p@h:5432/cat",
+            "CAT_METADATA_STORE": "postgresql://u:p@h:5432/meta",
             "CAT_CONNECTOR_ENDPOINT": "http://connector-service:8080",
         },
     )
     providers = Providers(
         definition_store=FakeDefinitionAdapter(),  # type: ignore[arg-type]
         catalog_store=FakeCatalogAdapter(),  # type: ignore[arg-type]
+        metadata_store=FakeMetadataAdapter(),  # type: ignore[arg-type]
     )
     app = custos_catalog.create_app(settings=settings, providers=providers)
     assert isinstance(app, FastAPI)

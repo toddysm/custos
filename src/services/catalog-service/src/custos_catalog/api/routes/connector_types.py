@@ -96,6 +96,7 @@ async def register_connector_type(
     registry: ConnectorTypeRegistry = Depends(get_connector_registry),
 ) -> ConnectorTypeRefBody:
     ref = await registry.register(
+        workspace_id=ctx.workspace_id,
         principal_id=ctx.principal_id,
         manifest=body.manifest,
     )
@@ -181,6 +182,7 @@ async def deprecate_connector_type(
     # segment is parsed-and-discarded so the URL grammar matches the
     # design.
     await registry.deprecate(
+        workspace_id=ctx.workspace_id,
         principal_id=ctx.principal_id,
         type=type_,
         reason=body.reason,

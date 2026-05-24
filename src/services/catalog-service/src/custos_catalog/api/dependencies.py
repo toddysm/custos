@@ -76,6 +76,7 @@ def get_activity_registry(
     state = request.app.state
     return ActivityTypeRegistry(
         catalog_store=providers.catalog_store,
+        metadata_store=providers.metadata_store,
         platform_admins=getattr(state, "platform_admins", None),
         vendor_grants=getattr(state, "vendor_grants", None),
     )
@@ -85,7 +86,10 @@ def get_connector_registry(
     providers: Providers = Depends(get_providers),
 ) -> ConnectorTypeRegistry:
     """Build a per-request :class:`ConnectorTypeRegistry`."""
-    return ConnectorTypeRegistry(catalog_store=providers.catalog_store)
+    return ConnectorTypeRegistry(
+        catalog_store=providers.catalog_store,
+        metadata_store=providers.metadata_store,
+    )
 
 
 def get_versioning_manager(
@@ -103,6 +107,7 @@ def get_definition_manager(
     """Build a per-request :class:`DefinitionManager`."""
     return DefinitionManager(
         definition_store=providers.definition_store,
+        metadata_store=providers.metadata_store,
         activity_registry=activity_registry,
         connector_client=connector_client,
         versioning=versioning,
@@ -119,6 +124,7 @@ def get_template_manager(
     """Build a per-request :class:`TemplateManager`."""
     return TemplateManager(
         definition_store=providers.definition_store,
+        metadata_store=providers.metadata_store,
         activity_registry=activity_registry,
         connector_client=connector_client,
         versioning=versioning,
