@@ -104,8 +104,8 @@ def _require(name: str, env: dict[str, str]) -> str:
 
 
 def _parse_paths(raw: str) -> tuple[str, ...]:
-    """Split a colon-separated path list and drop empty entries."""
-    return tuple(part for part in raw.split(":") if part)
+    """Split a colon-separated path list, trim entries, and drop empties."""
+    return tuple(part.strip() for part in raw.split(":") if part.strip())
 
 
 def load_settings(env: dict[str, str] | None = None) -> Settings:
