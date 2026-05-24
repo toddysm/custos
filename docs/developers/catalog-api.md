@@ -144,16 +144,32 @@ Every non-`2xx` response uses a uniform envelope:
 {
   "error": {
     "code": "catalog.publish.resolve",
-    "detail": "activity-type ws-1/missing@1 is not registered",
-    "fields": { "path": "spec.steps[0].activity" }
+    "detail": "workflow failed publish-time resolve validation",
+    "issues": [
+      {
+        "path": "spec.steps[0].activity",
+        "ref": "ws-1/missing@1",
+        "message": "activity-type is not registered"
+      }
+    ]
   }
 }
 ```
 
-`code` is always present. `detail` is human-readable. `fields` is an
-optional bag of structured context (paths, refs, version
-combinations, etc.). The full set of codes emitted by the catalog
-service is:
+`code` is always present. `detail` is a human-readable summary.
+`issues` is an **optional** array of structured records carrying
+per-violation context. Its shape depends on the producing class:
+
+| Code | `issues[]` shape |
+|---|---|
+| `catalog.publish.*`, `catalog.activity_manifest_invalid`, `catalog.connector_manifest_invalid` | Validation issue records (typically `path`, `message`, plus optional `code` / `ref` / `expected` / `got` fields). |
+| `catalog.template_extract_failed.PublishValidationError`, `catalog.template_materialization_failed.PublishValidationError` | Same records as above, propagated from the underlying publish failure. |
+| `catalog.activity_type_digest_conflict` | One record: `{namespace, type, version, suppliedDigest, storedDigest}`. |
+| `catalog.connector_type_digest_conflict` | One record: `{type, version, suppliedDigest, storedDigest}`. |
+| `catalog.request_invalid` | Pydantic-style records: `{loc, code, message}` for every offending body / query field. |
+| Other codes (`*_not_found`, `*_immutability_violation`, `activity_namespace_forbidden`, `catalog.http_<status>`, the two `*_internal_error` codes) | `issues` is omitted. |
+
+The full set of codes emitted by the catalog service is:
 
 | Code prefix / code | HTTP | Emitted by |
 |---|---|---|
@@ -165,8 +181,8 @@ service is:
 | `catalog.template_not_found` | 404 | GET / materialize / deprecate on missing template |
 | `catalog.workflow_immutability_violation` | 409 | Attempt to mutate a published version |
 | `catalog.template_immutability_violation` | 409 | Attempt to mutate a published template version |
-| `catalog.template_extract_failed.<cause>` | 400 / 409 | Bad selectors / forbidden paths during `:extractTemplate` |
-| `catalog.template_materialization_failed.<cause>` | 400 / 409 | Missing required binding, type mismatch, etc. |
+| `catalog.template_extract_failed.<cause>` | 400 | Bad selectors / forbidden paths during `:extractTemplate` |
+| `catalog.template_materialization_failed.<cause>` | 400 | Missing required binding, type mismatch, etc. |
 | `catalog.activity_manifest_invalid` | 400 | Activity manifest schema or rule failure |
 | `catalog.activity_namespace_forbidden` | 403 | Non-platform-admin tries to register in `custos.builtin` |
 | `catalog.activity_type_digest_conflict` | 409 | Re-register same (namespace, type, version) with a different digest |
@@ -176,7 +192,7 @@ service is:
 | `catalog.connector_type_not_found` | 404 | Resolve a connector-type ref that does not exist |
 | `catalog.activity_registry_internal_error` | 500 | Unexpected error in activity registry |
 | `catalog.connector_registry_internal_error` | 500 | Unexpected error in connector registry |
-| `catalog.request_invalid` | 400 | Generic Pydantic request validation failure |
+| `catalog.request_invalid` | 422 | Generic Pydantic request validation failure |
 | `catalog.http_<status>` | as `<status>` | Pass-through wrapper for raw HTTP exceptions |
 
 ---
@@ -685,6 +701,8 @@ The catalog will:
 5. Publish the result as `ws-1/release-pipeline-prod@1`.
 
 Failures in any of these steps surface as
-`catalog.template_materialization_failed.<cause>` envelopes with
-`fields.placeholder` and `fields.path` indicating exactly where the
-problem was.
+`catalog.template_materialization_failed.<cause>` envelopes. When the
+cause is a `PublishValidationError`, the `issues[]` array carries
+structured per-violation records (typically `path` plus a
+`message`) so clients can map the failure back to the offending
+placeholder or step.
