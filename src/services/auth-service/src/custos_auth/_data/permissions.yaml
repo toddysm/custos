@@ -21,10 +21,11 @@
 #                     the registry can attribute every name to the
 #                     component(s) that own it.
 #
-# The four ``admin:*`` entries auth-service owns end-to-end stay first
-# so a reviewer can read the auth-service-side surface in one block;
-# the rest are the cross-component perms the v1 built-in roles
-# (``workspace.viewer`` → ``platform.admin``) reference. As each
+# The three ``admin:*`` entries auth-service owns end-to-end
+# (``admin:service-account``, ``admin:role-binding``, ``admin:workspace``)
+# stay first so a reviewer can read the auth-service-side surface in
+# one block; the rest are the cross-component perms the v1 built-in
+# roles (``workspace.viewer`` → ``platform.admin``) reference. As each
 # component lands its own service, it will ship its own
 # ``permissions.yaml`` and ``CUSTOS_AUTH_PERMISSIONS_PATHS`` will be
 # pointed at that file instead of relying on the platform-M1 fallback
