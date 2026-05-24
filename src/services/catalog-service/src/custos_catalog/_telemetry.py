@@ -17,12 +17,14 @@ the in-memory SDK is dev-only and exists exclusively to drive the
 assertions in ``tests/test_telemetry.py``.
 
 The instrumentation is intentionally narrow: spans + samples are
-emitted at the **manager entry points** (one per user-visible
-operation) and at the **publish-pipeline stages** that have a known
-cost profile. Internal recursion stays uninstrumented so a single
-user-visible call maps one-to-one to a single span and one duration
-sample on the operation histogram. Matches the convention established
-by ``custos-cel`` WF-IMPL-011 (#186, PR #200).
+emitted at the **manager entry points** and at the
+**publish-pipeline stages** that have a known cost profile.
+Internal recursion stays uninstrumented, but public manager methods
+remain instrumented even when one user-visible operation delegates to
+another. As a result, a top-level call normally emits telemetry for
+its own entry point and may also produce nested operation spans and
+duration samples for delegated public operations. Matches the
+convention established by ``custos-cel`` WF-IMPL-011 (#186, PR #200).
 
 Metric / span names
 -------------------
