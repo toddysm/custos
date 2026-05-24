@@ -87,11 +87,12 @@ async def _load_service_account(
     if str(principal.workspace_id) != caller_workspace_id:
         raise NotFound(f"service account '{principal_id}' not found")
     if principal.disabled_at is not None:
-        # A disabled SA cannot mint or list — collapsing both to
-        # ``ValidationFailure`` (400) is right because the resource
-        # *does* exist in the workspace; the action is disallowed
-        # rather than the resource hidden. List can read history
-        # but mint must refuse; the caller handles the distinction.
+        # A disabled SA cannot be acted on for mutating operations
+        # such as minting. ``ValidationFailure`` (400) is right
+        # because the resource *does* exist in the workspace; the
+        # action is disallowed rather than the resource hidden.
+        # List requests may still read token history if the caller
+        # handles this distinction.
         raise ValidationFailure(
             f"service account '{principal_id}' is disabled and cannot be acted on"
         )
