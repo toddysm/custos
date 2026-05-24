@@ -454,11 +454,13 @@ def test_validate_rejects_unknown_root_inside_call_argument() -> None:
 
 
 def test_validate_steps_with_non_string_index_is_accepted_silently() -> None:
-    """``steps[1+2]`` parses as Index with a non-Literal-str index.
+    """``steps[a.b]`` parses as Index with a non-Literal-str index.
 
     The validator can't statically resolve the step id; it must not
-    crash and must not emit a spurious binding error against that
-    Index node (the inner ``1+2`` carries no Ident root).
+    crash on the Index node itself. The inner ``a.b`` *does* carry an
+    Ident root (``a``), which is not a legal binding root, so we
+    expect a binding error pointing at ``a`` — but the error must
+    come from the inner expression, not from the Index node.
     """
     doc = _wf(
         [
