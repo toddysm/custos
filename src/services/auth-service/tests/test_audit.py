@@ -15,6 +15,7 @@ from custos_auth.audit import (
     EVENT_PRINCIPAL_DISABLED,
     EVENT_TENANT_CREATED,
     EVENT_TOKEN_ISSUED,
+    EVENT_TOKEN_REVOKED,
     EVENT_TOKEN_USED,
     EVENT_WORKSPACE_CREATED,
     PLATFORM_WORKSPACE_ID,
@@ -25,6 +26,7 @@ from custos_auth.audit import (
     audit_principal_disabled,
     audit_tenant_created,
     audit_token_issued,
+    audit_token_revoked,
     audit_token_used,
     audit_workspace_created,
 )
@@ -254,3 +256,31 @@ async def test_audit_authn_failure_unknown_token_falls_back_to_platform() -> Non
     # Empty subject — we don't leak the input hash on the row.
     assert event.subject == {}
     assert event.payload == {"reason": "unknown-token"}
+
+
+# ---------------------------------------------------------------------------
+# AS-IMPL-015: token.revoked helper.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_audit_token_revoked_keys_under_sa_workspace() -> None:
+    # The revoke row lands in the SA's owning workspace so an
+    # operator filtering the audit pipeline by their workspace can
+    # see every revoke they caused. The reason string is part of
+    # the payload — subject carries only the structural ids.
+    meta = FakeMetadataAdapter()
+    await audit_token_revoked(
+        meta,  # type: ignore[arg-type]
+        actor="op-1",
+        workspace_id="ws-1",
+        token_id="tok-1",
+        service_account_id="sa-1",
+        reason="compromised",
+    )
+    ws_id, event = meta.append_audit_calls[0]
+    assert ws_id == "ws-1"
+    assert event.event_type == EVENT_TOKEN_REVOKED
+    assert event.actor == "op-1"
+    assert event.subject == {"token_id": "tok-1", "service_account_id": "sa-1"}
+    assert event.payload == {"reason": "compromised"}

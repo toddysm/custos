@@ -452,6 +452,18 @@ class AuthStoreProvider(Protocol):
         """
         ...
 
+    async def get_service_token(self, token_id: ServiceTokenId) -> ServiceToken | None:
+        """Look up a service token by its operator-facing identifier.
+
+        Used by the revoke path to (a) check that the caller's
+        workspace owns the SA that holds the token, (b) detect the
+        already-revoked idempotency case, and (c) extract the hash
+        to publish on the ``custos.auth.token-revoked`` event. The
+        primary key is `token_id`; returns `None` if no row matches.
+        Includes revoked rows.
+        """
+        ...
+
     async def revoke_service_token(
         self,
         token_id: ServiceTokenId,

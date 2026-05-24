@@ -1,4 +1,4 @@
-"""Service-token endpoints (AS-IMPL-013, GH-#248).
+"""Service-token endpoints (AS-IMPL-013, GH-#248; AS-IMPL-015, GH-#250).
 
 * ``POST /v1/service-accounts/{principal_id}/tokens`` mints a bearer
   for the targeted service account. The plaintext is returned in the
@@ -9,13 +9,19 @@
 * ``GET /v1/service-accounts/{principal_id}/tokens`` lists every
   token row for the SA — revoked rows included, plaintext excluded
   — so operators can render rotation history.
+* ``DELETE /v1/tokens/{token_id}`` revokes a single token. Idempotent
+  — a second revoke against an already-revoked row is a silent 204.
+* ``DELETE /v1/service-accounts/{principal_id}/tokens`` bulk-revokes
+  every live token owned by the SA. Emits one ``token.revoked`` row
+  and one ``custos.auth.token-revoked`` event per token actually
+  flipped from live → revoked; already-revoked rows are ignored.
 
-Both endpoints require ``admin:service-account`` and are scoped to
-the caller's current workspace. Cross-workspace token enumeration is
-explicitly disallowed: a token list query against a SA that lives in
-another workspace collapses to ``404`` so the existence of the SA is
-not leaked across the workspace boundary (mirrors the existence-
-hiding gate documented in
+All endpoints require ``admin:service-account`` and are scoped to
+the caller's current workspace. Cross-workspace token access is
+explicitly disallowed: any lookup against a SA (or a token whose
+owning SA lives in another workspace) collapses to ``404`` so the
+existence of the SA/token is not leaked across the workspace
+boundary (mirrors the existence-hiding gate documented in
 :func:`custos_auth.authorize.authorize`).
 """
 
@@ -28,24 +34,31 @@ from uuid import uuid4
 from custos_spl import AuthStoreProvider, MetadataStoreProvider
 from custos_spl.ids import PrincipalId, ServiceTokenId
 from custos_spl.interfaces.auth_store import ServiceAccount, ServiceToken
-from fastapi import APIRouter, Depends, Path, status
+from fastapi import APIRouter, Depends, Path, Response, status
 
 from custos_auth.api.dependencies import (
     get_auth_store,
     get_metadata_store,
     get_settings,
+    get_token_revoked_publisher,
     require_permission,
 )
 from custos_auth.api.errors import NotFound, ValidationFailure
 from custos_auth.api.models import (
+    ServiceTokenBulkRevokeResponse,
     ServiceTokenListResponse,
     ServiceTokenMintRequest,
     ServiceTokenMintResponse,
+    ServiceTokenRevokeRequest,
     service_token_to_response,
 )
-from custos_auth.audit import audit_token_issued
+from custos_auth.audit import audit_token_issued, audit_token_revoked
 from custos_auth.middleware.callctx import CallContext
 from custos_auth.settings import Settings
+from custos_auth.token_revoked_events import (
+    TokenRevokedEvent,
+    TokenRevokedPublisher,
+)
 from custos_auth.tokens import mint_token
 
 router = APIRouter(prefix="/v1", tags=["service-tokens"])
@@ -179,6 +192,144 @@ async def list_service_tokens(
     return ServiceTokenListResponse(
         tokens=[service_token_to_response(t) for t in tokens],
     )
+
+
+@router.delete(
+    "/tokens/{token_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+async def revoke_service_token(
+    body: ServiceTokenRevokeRequest,
+    token_id: Annotated[str, Path(min_length=1, max_length=120)],
+    ctx: Annotated[
+        CallContext,
+        Depends(require_permission("admin:service-account")),
+    ],
+    auth_store: Annotated[AuthStoreProvider, Depends(get_auth_store)],
+    metadata_store: Annotated[MetadataStoreProvider, Depends(get_metadata_store)],
+    publisher: Annotated[TokenRevokedPublisher, Depends(get_token_revoked_publisher)],
+) -> Response:
+    """Revoke a single service token.
+
+    Cross-workspace lookups collapse to 404 (existence-hiding).
+    Idempotent: a second revoke against the same id is a silent 204
+    with no audit row and no eviction event — the SPL row is
+    already in the terminal state and we don't want to spam either
+    the audit pipeline or the cache-eviction bus.
+    """
+    if ctx.workspace_id is None:
+        # No workspace context → caller cannot prove ownership of
+        # any token. Collapse to 404 to keep the workspace-boundary
+        # contract uniform across the surface.
+        raise NotFound(f"service token '{token_id}' not found")
+    token = await auth_store.get_service_token(ServiceTokenId(token_id))
+    if token is None:
+        raise NotFound(f"service token '{token_id}' not found")
+    sa = await auth_store.get_principal(token.service_account_id)
+    if not isinstance(sa, ServiceAccount) or str(sa.workspace_id) != ctx.workspace_id:
+        # Either the owning SA was hard-deleted (defensive, design
+        # forbids it) or the token belongs to a different
+        # workspace. Same 404 either way so the response cannot be
+        # used as a cross-workspace probe.
+        raise NotFound(f"service token '{token_id}' not found")
+    if token.revoked_at is not None:
+        # Idempotency: silent 204, no audit row, no event publish.
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    await auth_store.revoke_service_token(
+        ServiceTokenId(token_id),
+        PrincipalId(ctx.principal_id),
+        body.reason,
+    )
+    await audit_token_revoked(
+        metadata_store,
+        actor=ctx.principal_id,
+        workspace_id=str(sa.workspace_id),
+        token_id=token_id,
+        service_account_id=str(sa.principal_id),
+        reason=body.reason,
+    )
+    # Publish the eviction event AFTER the SPL commit and the audit
+    # write so subscribers that re-read the SPL row always see the
+    # ``revoked_at`` non-null. The local-bus subscriber in
+    # :func:`custos_auth.create_app` invalidates the per-pod authn
+    # cache; the cross-replica subscriber (no-op by default in M1)
+    # would do the same on every other replica.
+    await publisher.publish(
+        TokenRevokedEvent(
+            token_id=token_id,
+            token_hash=token.hash,
+            service_account_id=str(sa.principal_id),
+        ),
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.delete(
+    "/service-accounts/{principal_id}/tokens",
+    response_model=ServiceTokenBulkRevokeResponse,
+)
+async def revoke_all_service_tokens(
+    body: ServiceTokenRevokeRequest,
+    principal_id: Annotated[str, Path(min_length=1, max_length=120)],
+    ctx: Annotated[
+        CallContext,
+        Depends(require_permission("admin:service-account")),
+    ],
+    auth_store: Annotated[AuthStoreProvider, Depends(get_auth_store)],
+    metadata_store: Annotated[MetadataStoreProvider, Depends(get_metadata_store)],
+    publisher: Annotated[TokenRevokedPublisher, Depends(get_token_revoked_publisher)],
+) -> ServiceTokenBulkRevokeResponse:
+    """Revoke every live token owned by the SA.
+
+    Already-revoked rows are skipped silently — only rows that
+    transitioned live → revoked count toward the response's
+    ``revoked_count`` and only those rows emit an audit/eviction
+    pair. A disabled SA can still be the target of a bulk revoke
+    (the design's "kill switch" flow chains disable → bulk revoke
+    so leftover tokens are guaranteed dead even if a verifier
+    races the disable step).
+    """
+    # Bypass the disabled-SA guard in :func:`_load_service_account`
+    # because the bulk-revoke flow is exactly the path operators
+    # take after disabling a SA to mop up its outstanding tokens.
+    if ctx.workspace_id is None:
+        raise NotFound(f"service account '{principal_id}' not found")
+    sa_or_none = await auth_store.get_principal(PrincipalId(principal_id))
+    if not isinstance(sa_or_none, ServiceAccount):
+        raise NotFound(f"service account '{principal_id}' not found")
+    if str(sa_or_none.workspace_id) != ctx.workspace_id:
+        raise NotFound(f"service account '{principal_id}' not found")
+    sa = sa_or_none
+
+    tokens = await auth_store.list_service_tokens_for_service_account(sa.principal_id)
+    revoked_count = 0
+    for token in tokens:
+        if token.revoked_at is not None:
+            continue
+        await auth_store.revoke_service_token(
+            token.token_id,
+            PrincipalId(ctx.principal_id),
+            body.reason,
+        )
+        await audit_token_revoked(
+            metadata_store,
+            actor=ctx.principal_id,
+            workspace_id=str(sa.workspace_id),
+            token_id=str(token.token_id),
+            service_account_id=str(sa.principal_id),
+            reason=body.reason,
+        )
+        await publisher.publish(
+            TokenRevokedEvent(
+                token_id=str(token.token_id),
+                token_hash=token.hash,
+                service_account_id=str(sa.principal_id),
+            ),
+        )
+        revoked_count += 1
+    return ServiceTokenBulkRevokeResponse(revoked_count=revoked_count)
 
 
 __all__ = ["router"]

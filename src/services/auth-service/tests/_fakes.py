@@ -291,6 +291,9 @@ class FakeAuthAdapter:
                 return token
         return None
 
+    async def get_service_token(self, token_id: ServiceTokenId) -> ServiceToken | None:
+        return self.service_tokens.get(str(token_id))
+
     async def revoke_service_token(
         self,
         token_id: ServiceTokenId,

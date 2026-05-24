@@ -278,6 +278,33 @@ class ServiceTokenListResponse(BaseModel):
     tokens: list[ServiceTokenResponse]
 
 
+class ServiceTokenRevokeRequest(BaseModel):
+    """Body of ``DELETE /v1/tokens/{token_id}`` and the bulk variant.
+
+    ``reason`` is required so the audit row carries a human-readable
+    explanation. The bulk endpoint shares the model so a single
+    ``reason`` covers every token revoked in the request.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: Annotated[str, Field(min_length=1, max_length=512)]
+
+
+class ServiceTokenBulkRevokeResponse(BaseModel):
+    """Response body for ``DELETE /v1/service-accounts/{id}/tokens``.
+
+    Carries the count of tokens whose state changed in this request
+    so the operator can verify the action without re-listing. Tokens
+    that were already revoked are not counted (the request is
+    idempotent and a no-op on already-revoked rows).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    revoked_count: int
+
+
 def service_token_to_response(token: ServiceToken) -> ServiceTokenResponse:
     """Project a SPL :class:`ServiceToken` to its wire envelope.
 
@@ -407,10 +434,12 @@ __all__ = [
     "RoleResponse",
     "ServiceAccountCreateRequest",
     "ServiceAccountResponse",
+    "ServiceTokenBulkRevokeResponse",
     "ServiceTokenListResponse",
     "ServiceTokenMintRequest",
     "ServiceTokenMintResponse",
     "ServiceTokenResponse",
+    "ServiceTokenRevokeRequest",
     "TenantCreateRequest",
     "TenantListResponse",
     "TenantResponse",

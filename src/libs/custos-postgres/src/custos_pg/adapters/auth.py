@@ -662,6 +662,37 @@ class PgAuthAdapter(MigrationCapable):
                 revoked_reason=row["revoked_reason"],
             )
 
+    async def get_service_token(self, token_id: ServiceTokenId) -> ServiceToken | None:
+        """Resolve a token by its primary key.
+
+        Used by the revoke path. Returns None if no row matches.
+        Includes revoked rows (so the idempotency check has
+        something to look at).
+        """
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT token_id, service_account_id, hash,
+                       issued_at, expires_at, revoked_at, revoked_by, revoked_reason
+                FROM auth.service_token
+                WHERE token_id = $1
+                """,
+                token_id,
+            )
+            if row is None:
+                return None
+            return ServiceToken(
+                token_id=ServiceTokenId(row["token_id"]),
+                service_account_id=PrincipalId(row["service_account_id"]),
+                hash=row["hash"],
+                issued_at=row["issued_at"],
+                expires_at=row["expires_at"],
+                revoked_at=row["revoked_at"],
+                revoked_by=PrincipalId(row["revoked_by"]) if row["revoked_by"] else None,
+                revoked_reason=row["revoked_reason"],
+            )
+
     async def revoke_service_token(
         self, token_id: ServiceTokenId, actor: PrincipalId, reason: str, tx: TransactionHandle | None = None
     ) -> None:

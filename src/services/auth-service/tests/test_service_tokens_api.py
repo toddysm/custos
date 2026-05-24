@@ -443,3 +443,391 @@ def test_list_tokens_requires_permission(
         headers=callctx_header(workspace_id="ws-1", permissions=["random.perm"]),
     )
     assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# AS-IMPL-015 (#250) — DELETE /v1/tokens/{token_id}
+# ---------------------------------------------------------------------------
+
+
+def test_revoke_token_204_marks_spl_row_revoked_and_audits(
+    client: TestClient,
+    fake_auth_store: FakeAuthAdapter,
+    fake_metadata_store: FakeMetadataAdapter,
+) -> None:
+    _seed_service_account(fake_auth_store, "sa-1", "ws-1")
+    _seed_token(fake_auth_store, token_id="tok-1", service_account_id="sa-1", hash="h1")
+
+    resp = client.request(
+        "DELETE",
+        "/v1/tokens/tok-1",
+        json={"reason": "compromised"},
+        headers=callctx_header(workspace_id="ws-1", permissions=["admin:service-account"]),
+    )
+    assert resp.status_code == 204
+    assert resp.content == b""
+
+    # SPL row flipped.
+    row = fake_auth_store.service_tokens["tok-1"]
+    assert row.revoked_at is not None
+    assert row.revoked_by == PrincipalId("user-1")
+    assert row.revoked_reason == "compromised"
+    # Audit row emitted with the operator-supplied reason.
+    revoked_audits = [
+        e for _ws, e in fake_metadata_store.append_audit_calls if e.event_type == "token.revoked"
+    ]
+    assert len(revoked_audits) == 1
+    event = revoked_audits[0]
+    assert event.actor == "user-1"
+    assert event.subject == {"token_id": "tok-1", "service_account_id": "sa-1"}
+    assert event.payload == {"reason": "compromised"}
+
+
+def test_revoke_token_publishes_token_revoked_event(
+    client: TestClient, fake_auth_store: FakeAuthAdapter, providers: object
+) -> None:
+    # The publish must carry the token_id, the (now-old) hash, and
+    # the owning SA id so cross-replica subscribers can evict their
+    # per-pod authn cache without re-hitting the SPL.
+    from custos_auth.providers import Providers
+    from custos_auth.token_revoked_events import (
+        LocalTokenRevokedBus,
+        RecordingTokenRevokedSubscriber,
+        TokenRevokedEvent,
+    )
+
+    assert isinstance(providers, Providers)
+    bus = providers.token_revoked_publisher
+    assert isinstance(bus, LocalTokenRevokedBus)
+
+    seen: list[TokenRevokedEvent] = []
+
+    async def witness(event: TokenRevokedEvent) -> None:
+        seen.append(event)
+
+    bus.subscribe(witness)
+
+    _seed_service_account(fake_auth_store, "sa-1", "ws-1")
+    _seed_token(fake_auth_store, token_id="tok-1", service_account_id="sa-1", hash="h1")
+
+    resp = client.request(
+        "DELETE",
+        "/v1/tokens/tok-1",
+        json={"reason": "rotate"},
+        headers=callctx_header(workspace_id="ws-1", permissions=["admin:service-account"]),
+    )
+    assert resp.status_code == 204
+    assert seen == [TokenRevokedEvent(token_id="tok-1", token_hash="h1", service_account_id="sa-1")]
+    # Also assert the no-op RecordingTokenRevokedSubscriber type
+    # really is in scope (regression: catches accidental import
+    # breakage of the events module).
+    assert RecordingTokenRevokedSubscriber  # type: ignore[truthy-function]
+
+
+def test_revoke_token_204_no_op_when_already_revoked(
+    client: TestClient,
+    fake_auth_store: FakeAuthAdapter,
+    fake_metadata_store: FakeMetadataAdapter,
+    providers: object,
+) -> None:
+    from custos_auth.providers import Providers
+    from custos_auth.token_revoked_events import (
+        LocalTokenRevokedBus,
+        TokenRevokedEvent,
+    )
+
+    assert isinstance(providers, Providers)
+    bus = providers.token_revoked_publisher
+    assert isinstance(bus, LocalTokenRevokedBus)
+    seen: list[TokenRevokedEvent] = []
+
+    async def witness(event: TokenRevokedEvent) -> None:
+        seen.append(event)
+
+    bus.subscribe(witness)
+
+    _seed_service_account(fake_auth_store, "sa-1", "ws-1")
+    _seed_token(
+        fake_auth_store,
+        token_id="tok-1",
+        service_account_id="sa-1",
+        hash="h1",
+        revoked=True,
+    )
+    fake_metadata_store.append_audit_calls.clear()
+
+    resp = client.request(
+        "DELETE",
+        "/v1/tokens/tok-1",
+        json={"reason": "compromised"},
+        headers=callctx_header(workspace_id="ws-1", permissions=["admin:service-account"]),
+    )
+    # Idempotent: second revoke must succeed (204) but emit
+    # nothing — no audit row and no eviction event. Operators
+    # rerunning the same script should not flood the audit
+    # pipeline with redundant rows.
+    assert resp.status_code == 204
+    assert fake_metadata_store.append_audit_calls == []
+    assert seen == []
+
+
+def test_revoke_token_404_when_token_missing(
+    client: TestClient, fake_auth_store: FakeAuthAdapter
+) -> None:
+    _seed_service_account(fake_auth_store, "sa-1", "ws-1")
+    resp = client.request(
+        "DELETE",
+        "/v1/tokens/tok-ghost",
+        json={"reason": "compromised"},
+        headers=callctx_header(workspace_id="ws-1", permissions=["admin:service-account"]),
+    )
+    assert resp.status_code == 404
+
+
+def test_revoke_token_404_when_token_belongs_to_other_workspace(
+    client: TestClient, fake_auth_store: FakeAuthAdapter
+) -> None:
+    # Cross-workspace probe collapses to 404 so the existence of the
+    # token is not observable from a sibling workspace.
+    _seed_service_account(fake_auth_store, "sa-1", "ws-other")
+    _seed_token(fake_auth_store, token_id="tok-1", service_account_id="sa-1", hash="h1")
+    resp = client.request(
+        "DELETE",
+        "/v1/tokens/tok-1",
+        json={"reason": "compromised"},
+        headers=callctx_header(workspace_id="ws-mine", permissions=["admin:service-account"]),
+    )
+    assert resp.status_code == 404
+
+
+def test_revoke_token_404_when_owning_sa_was_hard_deleted(
+    client: TestClient, fake_auth_store: FakeAuthAdapter
+) -> None:
+    # Defensive: SPL contract forbids SA hard-delete, but the
+    # revoke path still collapses to 404 if the row vanishes so
+    # there is no way to mutate an orphan token row.
+    _seed_token(fake_auth_store, token_id="tok-orphan", service_account_id="sa-gone", hash="h1")
+    resp = client.request(
+        "DELETE",
+        "/v1/tokens/tok-orphan",
+        json={"reason": "compromised"},
+        headers=callctx_header(workspace_id="ws-1", permissions=["admin:service-account"]),
+    )
+    assert resp.status_code == 404
+
+
+def test_revoke_token_requires_admin_service_account_permission(
+    client: TestClient, fake_auth_store: FakeAuthAdapter
+) -> None:
+    _seed_service_account(fake_auth_store, "sa-1", "ws-1")
+    _seed_token(fake_auth_store, token_id="tok-1", service_account_id="sa-1", hash="h1")
+    resp = client.request(
+        "DELETE",
+        "/v1/tokens/tok-1",
+        json={"reason": "rotate"},
+        headers=callctx_header(workspace_id="ws-1", permissions=["random.perm"]),
+    )
+    assert resp.status_code == 403
+
+
+def test_revoke_token_rejects_empty_reason(
+    client: TestClient, fake_auth_store: FakeAuthAdapter
+) -> None:
+    _seed_service_account(fake_auth_store, "sa-1", "ws-1")
+    _seed_token(fake_auth_store, token_id="tok-1", service_account_id="sa-1", hash="h1")
+    resp = client.request(
+        "DELETE",
+        "/v1/tokens/tok-1",
+        json={"reason": ""},
+        headers=callctx_header(workspace_id="ws-1", permissions=["admin:service-account"]),
+    )
+    assert resp.status_code == 422
+
+
+def test_revoke_token_rejects_extra_fields(
+    client: TestClient, fake_auth_store: FakeAuthAdapter
+) -> None:
+    _seed_service_account(fake_auth_store, "sa-1", "ws-1")
+    _seed_token(fake_auth_store, token_id="tok-1", service_account_id="sa-1", hash="h1")
+    resp = client.request(
+        "DELETE",
+        "/v1/tokens/tok-1",
+        json={"reason": "rotate", "extra": "x"},
+        headers=callctx_header(workspace_id="ws-1", permissions=["admin:service-account"]),
+    )
+    assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# AS-IMPL-015 (#250) — DELETE /v1/service-accounts/{id}/tokens
+# ---------------------------------------------------------------------------
+
+
+def test_revoke_all_tokens_revokes_every_live_row(
+    client: TestClient,
+    fake_auth_store: FakeAuthAdapter,
+    fake_metadata_store: FakeMetadataAdapter,
+) -> None:
+    _seed_service_account(fake_auth_store, "sa-1", "ws-1")
+    _seed_token(fake_auth_store, token_id="tok-1", service_account_id="sa-1", hash="h1")
+    _seed_token(fake_auth_store, token_id="tok-2", service_account_id="sa-1", hash="h2")
+    _seed_token(
+        fake_auth_store,
+        token_id="tok-3",
+        service_account_id="sa-1",
+        hash="h3",
+        revoked=True,
+    )
+    resp = client.request(
+        "DELETE",
+        "/v1/service-accounts/sa-1/tokens",
+        json={"reason": "sa-disabled"},
+        headers=callctx_header(workspace_id="ws-1", permissions=["admin:service-account"]),
+    )
+    assert resp.status_code == 200
+    # Only the two live rows were flipped — the already-revoked
+    # row is a silent no-op.
+    assert resp.json() == {"revoked_count": 2}
+    assert fake_auth_store.service_tokens["tok-1"].revoked_at is not None
+    assert fake_auth_store.service_tokens["tok-2"].revoked_at is not None
+    # And exactly two ``token.revoked`` audits were emitted.
+    revoked_events = [
+        e for _ws, e in fake_metadata_store.append_audit_calls if e.event_type == "token.revoked"
+    ]
+    assert len(revoked_events) == 2
+    assert {e.subject["token_id"] for e in revoked_events} == {"tok-1", "tok-2"}
+
+
+def test_revoke_all_tokens_publishes_one_event_per_flipped_token(
+    client: TestClient, fake_auth_store: FakeAuthAdapter, providers: object
+) -> None:
+    from custos_auth.providers import Providers
+    from custos_auth.token_revoked_events import (
+        LocalTokenRevokedBus,
+        TokenRevokedEvent,
+    )
+
+    assert isinstance(providers, Providers)
+    bus = providers.token_revoked_publisher
+    assert isinstance(bus, LocalTokenRevokedBus)
+    seen: list[TokenRevokedEvent] = []
+
+    async def witness(event: TokenRevokedEvent) -> None:
+        seen.append(event)
+
+    bus.subscribe(witness)
+
+    _seed_service_account(fake_auth_store, "sa-1", "ws-1")
+    _seed_token(fake_auth_store, token_id="tok-1", service_account_id="sa-1", hash="h1")
+    _seed_token(fake_auth_store, token_id="tok-2", service_account_id="sa-1", hash="h2")
+
+    resp = client.request(
+        "DELETE",
+        "/v1/service-accounts/sa-1/tokens",
+        json={"reason": "rotate"},
+        headers=callctx_header(workspace_id="ws-1", permissions=["admin:service-account"]),
+    )
+    assert resp.status_code == 200
+    assert {e.token_id for e in seen} == {"tok-1", "tok-2"}
+    # Each event carries the matching hash so subscribers don't
+    # have to re-fetch the SPL row to compute it.
+    assert {(e.token_id, e.token_hash) for e in seen} == {
+        ("tok-1", "h1"),
+        ("tok-2", "h2"),
+    }
+
+
+def test_revoke_all_tokens_returns_zero_when_nothing_was_live(
+    client: TestClient,
+    fake_auth_store: FakeAuthAdapter,
+    fake_metadata_store: FakeMetadataAdapter,
+) -> None:
+    _seed_service_account(fake_auth_store, "sa-1", "ws-1")
+    _seed_token(
+        fake_auth_store,
+        token_id="tok-1",
+        service_account_id="sa-1",
+        hash="h1",
+        revoked=True,
+    )
+    fake_metadata_store.append_audit_calls.clear()
+    resp = client.request(
+        "DELETE",
+        "/v1/service-accounts/sa-1/tokens",
+        json={"reason": "rotate"},
+        headers=callctx_header(workspace_id="ws-1", permissions=["admin:service-account"]),
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"revoked_count": 0}
+    assert fake_metadata_store.append_audit_calls == []
+
+
+def test_revoke_all_tokens_works_against_disabled_sa(
+    client: TestClient, fake_auth_store: FakeAuthAdapter
+) -> None:
+    # The "kill switch" flow: operator disables the SA, then bulk-
+    # revokes its outstanding tokens. The bulk-revoke endpoint
+    # therefore deliberately bypasses the disabled-SA guard that
+    # would otherwise refuse a mutation on a disabled principal.
+    _seed_service_account(fake_auth_store, "sa-1", "ws-1", disabled=True)
+    _seed_token(fake_auth_store, token_id="tok-1", service_account_id="sa-1", hash="h1")
+    resp = client.request(
+        "DELETE",
+        "/v1/service-accounts/sa-1/tokens",
+        json={"reason": "kill-switch"},
+        headers=callctx_header(workspace_id="ws-1", permissions=["admin:service-account"]),
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"revoked_count": 1}
+
+
+def test_revoke_all_tokens_404_when_sa_missing(
+    client: TestClient, fake_auth_store: FakeAuthAdapter
+) -> None:
+    resp = client.request(
+        "DELETE",
+        "/v1/service-accounts/sa-ghost/tokens",
+        json={"reason": "rotate"},
+        headers=callctx_header(workspace_id="ws-1", permissions=["admin:service-account"]),
+    )
+    assert resp.status_code == 404
+
+
+def test_revoke_all_tokens_404_when_sa_in_other_workspace(
+    client: TestClient, fake_auth_store: FakeAuthAdapter
+) -> None:
+    _seed_service_account(fake_auth_store, "sa-1", "ws-other")
+    resp = client.request(
+        "DELETE",
+        "/v1/service-accounts/sa-1/tokens",
+        json={"reason": "rotate"},
+        headers=callctx_header(workspace_id="ws-mine", permissions=["admin:service-account"]),
+    )
+    assert resp.status_code == 404
+
+
+def test_revoke_all_tokens_404_when_principal_is_a_user(
+    client: TestClient, fake_auth_store: FakeAuthAdapter
+) -> None:
+    _seed_user(fake_auth_store, "user-1", "t-1")
+    resp = client.request(
+        "DELETE",
+        "/v1/service-accounts/user-1/tokens",
+        json={"reason": "rotate"},
+        headers=callctx_header(workspace_id="ws-1", permissions=["admin:service-account"]),
+    )
+    assert resp.status_code == 404
+
+
+def test_revoke_all_tokens_requires_admin_service_account_permission(
+    client: TestClient, fake_auth_store: FakeAuthAdapter
+) -> None:
+    _seed_service_account(fake_auth_store, "sa-1", "ws-1")
+    _seed_token(fake_auth_store, token_id="tok-1", service_account_id="sa-1", hash="h1")
+    resp = client.request(
+        "DELETE",
+        "/v1/service-accounts/sa-1/tokens",
+        json={"reason": "rotate"},
+        headers=callctx_header(workspace_id="ws-1", permissions=["random.perm"]),
+    )
+    assert resp.status_code == 403

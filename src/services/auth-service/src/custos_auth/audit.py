@@ -102,6 +102,7 @@ EVENT_ROLE_BINDING_REVOKED: Final[str] = "role-binding.revoked"
 EVENT_AUTHZ_DECISION: Final[str] = "authz.decision"
 EVENT_TOKEN_ISSUED: Final[str] = "token.issued"
 EVENT_TOKEN_USED: Final[str] = "token.used"
+EVENT_TOKEN_REVOKED: Final[str] = "token.revoked"
 EVENT_AUTHN_SUCCESS: Final[str] = "authn.success"
 EVENT_AUTHN_FAILURE: Final[str] = "authn.failure"
 
@@ -521,6 +522,48 @@ async def audit_authn_failure(
 
 
 # ---------------------------------------------------------------------------
+# Service-token lifecycle events (Phase F / AS-IMPL-015)
+# ---------------------------------------------------------------------------
+
+
+async def audit_token_revoked(
+    metadata_store: MetadataStoreProvider,
+    *,
+    actor: str,
+    workspace_id: str,
+    token_id: str,
+    service_account_id: str,
+    reason: str,
+) -> None:
+    """Emit ``token.revoked`` keyed to the SA's workspace.
+
+    The single-revoke endpoint emits one row per revoked token; the
+    bulk-revoke endpoint emits one row per revoked-now token (rows
+    that were already revoked are no-ops and emit nothing because
+    the AS-IMPL-015 idempotency contract is "second revoke is a
+    silent 204"). The reason carried on the row is the human-
+    readable reason the operator supplied on the request body, not
+    the SPL ``revoked_reason`` column which carries the same string
+    — that's just an internal-vs-external naming thing.
+
+    The payload deliberately does **not** carry the hash; ``token_id``
+    is the operator-facing identifier and is what the audit pipeline
+    keys on.
+    """
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_TOKEN_REVOKED,
+        actor=actor,
+        subject={
+            "token_id": token_id,
+            "service_account_id": service_account_id,
+        },
+        payload={"reason": reason},
+    )
+
+
+# ---------------------------------------------------------------------------
 # Authorization decision events (Phase E / AS-IMPL-011)
 # ---------------------------------------------------------------------------
 #
@@ -583,6 +626,7 @@ __all__ = [
     "EVENT_ROLE_BINDING_REVOKED",
     "EVENT_TENANT_CREATED",
     "EVENT_TOKEN_ISSUED",
+    "EVENT_TOKEN_REVOKED",
     "EVENT_TOKEN_USED",
     "EVENT_WORKSPACE_CREATED",
     "PLATFORM_WORKSPACE_ID",
@@ -596,6 +640,7 @@ __all__ = [
     "audit_role_binding_revoked",
     "audit_tenant_created",
     "audit_token_issued",
+    "audit_token_revoked",
     "audit_token_used",
     "audit_workspace_created",
 ]
