@@ -171,9 +171,10 @@ class Settings:
         """True when the token sweeper is configured to run.
 
         ``CUSTOS_AUTH_TOKEN_SWEEPER_INTERVAL_SECONDS=0`` disables
-        the loop entirely; the lifespan handler skips the
-        ``asyncio.create_task`` step in that case so a misconfigured
-        replica cannot quietly accumulate expired rows.
+        sweep work entirely. The current lifespan flow may still
+        create the background task, but the sweeper loop returns
+        immediately when disabled instead of performing any periodic
+        cleanup.
         """
         return self.token_sweeper_interval_seconds > 0
 
