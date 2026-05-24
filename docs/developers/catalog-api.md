@@ -47,13 +47,14 @@ authz envelopes:
 
 | Permission | Used by |
 |---|---|
-| `catalog:workflow:publish` | publish workflow, publish template, extract template, materialize template |
-| `catalog:workflow:read` | get workflow, list workflows, get template, list templates |
-| `catalog:workflow:deprecate` | deprecate workflow, deprecate template |
-| `catalog:activity:write` | register / deprecate activity-type |
-| `catalog:activity:read` | get / list activity-types |
-| `catalog:connector:write` | register / deprecate connector-type |
-| `catalog:connector:read` | get / list connector-types |
+| `catalog:workflows:write` | publish workflow, deprecate workflow |
+| `catalog:workflows:read` | get workflow, list workflows |
+| `catalog:templates:write` | publish template, extract template, materialize template, deprecate template |
+| `catalog:templates:read` | get template, list templates |
+| `catalog:activity-types:write` | register / deprecate activity-type |
+| `catalog:activity-types:read` | get / list activity-types |
+| `catalog:connector-types:write` | register / deprecate connector-type |
+| `catalog:connector-types:read` | get / list connector-types |
 | `catalog:rpc:read` | internal RPC sub-tree |
 
 ---
