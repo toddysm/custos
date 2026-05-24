@@ -4,7 +4,7 @@ The signing key minted by :class:`custos_auth.callctx_signer.CallContextSigner`
 must rotate on a fixed schedule so the blast radius of an exfiltrated key
 is bounded to the rotation period. The receivers — every other Custos
 component — verify against the JWKS endpoint shipped by
-:func:`custos_auth.api.routes.jwks.jwks_router`; that endpoint publishes
+:data:`custos_auth.api.routes.jwks.router`; that endpoint publishes
 the **current** key plus any **retired** keys still within the
 :math:`2\\times` overlap window, so a JWT minted just before rotation
 still verifies for up to its 5-minute ``exp`` even after the JWKS rolls
