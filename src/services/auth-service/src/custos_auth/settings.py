@@ -25,6 +25,8 @@ import os
 from dataclasses import dataclass
 from typing import Final
 
+from custos_auth.authz_cache import DEFAULT_AUTHZ_CACHE_TTL_SECONDS
+
 #: Required. DSN that resolves the ``AuthStoreProvider`` adapter.
 #: V1 only supports Postgres adapters from ``custos-postgres``; the value
 #: is therefore a libpq DSN such as
@@ -129,14 +131,15 @@ def _parse_paths(raw: str) -> tuple[str, ...]:
 def _parse_authz_cache_ttl(raw: str) -> int:
     """Parse the ``CUSTOS_AUTH_AUTHZ_CACHE_TTL`` env value.
 
-    Empty string falls back to the 60-second default. A literal ``0``
-    is preserved (and enables the bypass-mode acceptance criterion).
-    Negative values raise :class:`SettingsError` because a negative
-    TTL is not a meaningful configuration. Non-integer values raise
-    :class:`SettingsError`.
+    Empty string falls back to
+    :data:`custos_auth.authz_cache.DEFAULT_AUTHZ_CACHE_TTL_SECONDS`.
+    A literal ``0`` is preserved (and enables the bypass-mode
+    acceptance criterion). Negative values raise
+    :class:`SettingsError` because a negative TTL is not a meaningful
+    configuration. Non-integer values raise :class:`SettingsError`.
     """
     if raw == "":
-        return 60
+        return DEFAULT_AUTHZ_CACHE_TTL_SECONDS
     try:
         value = int(raw)
     except ValueError as exc:

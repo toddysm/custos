@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from custos_spl import MigrationRequired
 
+from custos_auth.authz_cache import DEFAULT_AUTHZ_CACHE_TTL_SECONDS
 from custos_auth.providers import (
     Providers,
     schema_gate_explainer,
@@ -96,7 +97,7 @@ def test_default_authz_cache_uses_60_second_ttl() -> None:
         auth_store=FakeAuthAdapter(),  # type: ignore[arg-type]
         metadata_store=FakeMetadataAdapter(),  # type: ignore[arg-type]
     )
-    assert bundle.authz_cache.ttl_seconds == 60
+    assert bundle.authz_cache.ttl_seconds == DEFAULT_AUTHZ_CACHE_TTL_SECONDS
     assert bundle.authz_cache.enabled is True
 
 

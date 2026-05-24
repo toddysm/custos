@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from custos_auth.authz_cache import DEFAULT_AUTHZ_CACHE_TTL_SECONDS
 from custos_auth.settings import (
     ENV_AUTH_STORE_DSN,
     ENV_AUTHZ_CACHE_TTL,
@@ -85,9 +86,10 @@ def test_settings_is_frozen() -> None:
 
 
 def test_authz_cache_ttl_defaults_to_60_seconds() -> None:
-    # Default tracks the design's "Authz (decision) … 60s" entry.
+    # Default tracks the design's "Authz (decision) … 60s" entry and is
+    # single-sourced from ``custos_auth.authz_cache``.
     settings = load_settings(_required_env())
-    assert settings.authz_cache_ttl_seconds == 60
+    assert settings.authz_cache_ttl_seconds == DEFAULT_AUTHZ_CACHE_TTL_SECONDS
     assert settings.authz_cache_enabled is True
 
 

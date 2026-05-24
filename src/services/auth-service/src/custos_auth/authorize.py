@@ -15,10 +15,18 @@ correlate denials with the audit row. The shape mirrors the design's
 Resolution
 ----------
 
-1. Resolve the workspace (returns 404 ``workspace-not-found`` with
-   existence-hiding semantics when the workspace is absent or in a
-   different tenant from the call-context's tenant). Platform-admin
-   callers bypass the tenant check.
+1. Resolve the workspace. Missing-or-cross-tenant collapses to
+   :data:`REASON_DENY_WORKSPACE_NOT_FOUND` with existence-hiding
+   semantics — the audit row records ``workspace_id=None`` so
+   per-workspace audit feeds for the targeted workspace do **not**
+   leak the cross-tenant probe. The tenant check requires the caller
+   to supply ``caller_tenant_id`` (the tenant component of the
+   :class:`CallContext`); when the caller is a platform admin the
+   tenant gate is skipped via ``caller_is_platform_admin=True``.
+   Callers that pass neither (``caller_tenant_id=None`` and
+   ``caller_is_platform_admin=False``) are treated as tenant-less and
+   collapse to ``workspace-not-found`` — the design's "never disclose
+   existence cross-tenant" rule is the strict default.
 2. Look up the principal's bindings at workspace, tenant, and
    platform-global scopes in a single :meth:`list_role_bindings_for_principal`
    round-trip.
@@ -187,6 +195,8 @@ async def authorize(
     permission: str,
     workspace_id: str,
     caller_component: str,
+    caller_tenant_id: str | None = None,
+    caller_is_platform_admin: bool = False,
     actor: str | None = None,
     declared_permissions: frozenset[str] | None = None,
 ) -> Decision:
@@ -206,6 +216,22 @@ async def authorize(
         caller_component: Component name that initiated the check
             (``"api-gateway"``, ``"workflow-service"``, …). Recorded
             on the audit row's ``caller_component`` payload field.
+        caller_tenant_id: Tenant component of the call-context. When
+            the workspace exists but belongs to a different tenant
+            (or ``caller_tenant_id`` is ``None``), :func:`authorize`
+            collapses the result to
+            :data:`REASON_DENY_WORKSPACE_NOT_FOUND` and audits with
+            ``workspace_id=None`` so the cross-tenant probe is not
+            disclosed by the per-workspace audit feed of the targeted
+            workspace. Pass the tenant id resolved by the call-context
+            verifier.
+        caller_is_platform_admin: When ``True`` skips the tenant gate
+            — a platform admin may target any tenant's workspaces.
+            The verifier/middleware derives this flag from the
+            call-context's platform-admin claim. The binding-side
+            ``role:platform.admin`` short-circuit (Resolution step 4)
+            remains in effect for principals whose admin status is
+            not yet projected onto the call-context.
         actor: Optional override for the audit row's ``actor`` field.
             Defaults to ``principal_id``; internal components that
             re-check on behalf of a user can pass their own component
@@ -236,7 +262,15 @@ async def authorize(
     audit_actor = actor if actor is not None else principal_id
 
     workspace = await auth_store.get_workspace(WorkspaceId(workspace_id))
-    if workspace is None:
+    # Existence-hiding: a missing workspace and a workspace that exists
+    # in a *different* tenant from the caller must be indistinguishable
+    # on the wire. Both paths collapse to ``deny-workspace-not-found``
+    # and audit with ``workspace_id=None`` so the per-workspace audit
+    # feed of the targeted workspace does not leak the probe.
+    if workspace is None or (
+        not caller_is_platform_admin
+        and (caller_tenant_id is None or caller_tenant_id != str(workspace.tenant_id))
+    ):
         event_id = await audit_authz_decision(
             metadata_store,
             actor=audit_actor,

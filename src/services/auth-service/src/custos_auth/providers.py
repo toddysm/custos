@@ -52,7 +52,10 @@ from custos_spl import MigrationRequired
 from custos_spl.interfaces.auth_store import AuthStoreProvider
 from custos_spl.interfaces.metadata_store import MetadataStoreProvider
 
-from custos_auth.authz_cache import AuthzDecisionCache
+from custos_auth.authz_cache import (
+    DEFAULT_AUTHZ_CACHE_TTL_SECONDS,
+    AuthzDecisionCache,
+)
 from custos_auth.binding_events import (
     BindingChangedPublisher,
     BindingChangedSubscriber,
@@ -118,7 +121,9 @@ class Providers:
         default_factory=NoOpBindingChangedSubscriber,
     )
     authz_cache: AuthzDecisionCache = dc_field(
-        default_factory=lambda: AuthzDecisionCache(ttl_seconds=60),
+        default_factory=lambda: AuthzDecisionCache(
+            ttl_seconds=DEFAULT_AUTHZ_CACHE_TTL_SECONDS,
+        ),
     )
 
 

@@ -71,7 +71,13 @@ async def _call(
     The in-memory fakes implement the SPL Protocol surface structurally
     but mypy --strict cannot infer Protocol conformance for them, so
     cast at the call boundary and keep the test bodies clean.
+
+    Defaults ``caller_tenant_id`` to :data:`TENANT` so every test that
+    does not explicitly exercise the cross-tenant existence-hiding
+    path looks like a same-tenant call from the caller's perspective.
+    Pass ``caller_tenant_id=...`` (or ``None``) to override.
     """
+    kwargs.setdefault("caller_tenant_id", TENANT)
     return await authorize(
         cast(AuthStoreProvider, auth_store),
         cast(MetadataStoreProvider, metadata_store),
@@ -413,3 +419,124 @@ async def test_workspace_scope_audit_recorded_under_target_workspace(
 
     workspace_id, _ = metadata_store.append_audit_calls[0]
     assert workspace_id == WORKSPACE
+
+
+# ---------------------------------------------------------------------------
+# Cross-tenant existence-hiding (the design's
+# "never disclose existence cross-tenant" rule)
+# ---------------------------------------------------------------------------
+
+
+async def test_cross_tenant_workspace_collapses_to_workspace_not_found(
+    auth_store: FakeAuthAdapter,
+    metadata_store: FakeMetadataAdapter,
+) -> None:
+    # Workspace exists but belongs to ``tenant-2``; caller is in
+    # ``tenant-1``. The result must be indistinguishable from a
+    # genuine missing-workspace probe: deny-workspace-not-found with
+    # workspace_id=None on the audit row.
+    other_tenant = "tenant-2"
+    other_ws = "ws-in-other-tenant"
+    auth_store.workspaces[other_ws] = Workspace(
+        workspace_id=WorkspaceId(other_ws),
+        tenant_id=TenantId(other_tenant),
+        display_name=other_ws,
+        disabled_at=None,
+        created_at=datetime.now(UTC),
+    )
+    # Even a workspace-scope binding on the *other* tenant's workspace
+    # must not leak — the engine returns workspace-not-found before it
+    # ever looks at the bindings.
+    _grant(
+        auth_store,
+        role_id=ROLE_WORKSPACE_VIEWER,
+        scope=WorkspaceScope(workspace_id=WorkspaceId(other_ws)),
+    )
+
+    decision = await _call(
+        auth_store,
+        metadata_store,
+        principal_id=PRINCIPAL,
+        permission="workflow:read",
+        workspace_id=other_ws,
+        caller_component="api-gateway",
+        caller_tenant_id=TENANT,
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == REASON_DENY_WORKSPACE_NOT_FOUND
+    _assert_one_audit(
+        metadata_store,
+        decision="deny",
+        reason=REASON_DENY_WORKSPACE_NOT_FOUND,
+        workspace_id=None,
+    )
+
+
+async def test_missing_caller_tenant_collapses_to_workspace_not_found(
+    auth_store: FakeAuthAdapter,
+    metadata_store: FakeMetadataAdapter,
+) -> None:
+    # A caller with no resolved tenant context (``caller_tenant_id=None``)
+    # cannot prove same-tenant standing for any workspace, so the
+    # engine collapses every probe to workspace-not-found per the
+    # design's strict default.
+    decision = await _call(
+        auth_store,
+        metadata_store,
+        principal_id=PRINCIPAL,
+        permission="workflow:read",
+        workspace_id=WORKSPACE,
+        caller_component="api-gateway",
+        caller_tenant_id=None,
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == REASON_DENY_WORKSPACE_NOT_FOUND
+    _assert_one_audit(
+        metadata_store,
+        decision="deny",
+        reason=REASON_DENY_WORKSPACE_NOT_FOUND,
+        workspace_id=None,
+    )
+
+
+async def test_platform_admin_caller_bypasses_tenant_gate(
+    auth_store: FakeAuthAdapter,
+    metadata_store: FakeMetadataAdapter,
+) -> None:
+    # A platform-admin caller may target any tenant's workspaces. The
+    # decision still depends on bindings — here no binding exists for
+    # the other tenant's workspace, so the result is
+    # ``deny-no-binding`` (NOT ``workspace-not-found``). The audit row
+    # is filed under the targeted workspace because the platform-admin
+    # claim made the existence visible.
+    other_tenant = "tenant-2"
+    other_ws = "ws-in-other-tenant"
+    auth_store.workspaces[other_ws] = Workspace(
+        workspace_id=WorkspaceId(other_ws),
+        tenant_id=TenantId(other_tenant),
+        display_name=other_ws,
+        disabled_at=None,
+        created_at=datetime.now(UTC),
+    )
+
+    decision = await _call(
+        auth_store,
+        metadata_store,
+        principal_id=PRINCIPAL,
+        permission="workflow:read",
+        workspace_id=other_ws,
+        caller_component="api-gateway",
+        caller_tenant_id=TENANT,
+        caller_is_platform_admin=True,
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == REASON_DENY_NO_BINDING
+    _assert_one_audit(
+        metadata_store,
+        decision="deny",
+        reason=REASON_DENY_NO_BINDING,
+        workspace_id=other_ws,
+    )
