@@ -41,9 +41,10 @@ Including the hash on the bus is acceptable because the hash is
 **not** a credential — it is the persisted storage representation
 and possessing it does not let an attacker authenticate; only the
 plaintext bearer does, and the plaintext is never logged or
-persisted past the mint response. The audit trail records hash
-disclosures via ``token.issued`` /
-``token.revoked`` rows under workspace authn audit scope.
+persisted past the mint response. The workspace authn audit trail
+still records the token lifecycle action (for example, identifiers
+such as ``token_id`` and ``service_account_id``), but intentionally
+omits both the plaintext bearer and the token hash.
 """
 
 from __future__ import annotations
