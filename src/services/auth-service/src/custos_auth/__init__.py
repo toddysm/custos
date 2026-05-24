@@ -169,6 +169,21 @@ def create_app(
         app.state.providers = local_providers
         app.state.ready = False
         app.state.schema_gate_error = None
+        # AS-IMPL-024: per-subsystem readiness map surfaced through
+        # /readyz so operators can tell *which* dependency is keeping
+        # the pod from ready. Mirrors the design's "Healthz/readyz
+        # expose dependency state (Postgres, JWKS rotation status,
+        # Pub/Sub)" acceptance criterion. Values are intentionally
+        # closed-set strings so the JSON shape is stable. A missing
+        # key means the corresponding subsystem has not yet been
+        # touched by the lifespan (we are mid-startup); the flat
+        # ``ready`` flag remains the source of truth for "all
+        # dependencies wired and healthy".
+        app.state.dependency_status = {
+            "postgres": "unknown",
+            "jwks_rotation": "unknown",
+            "pubsub": "unknown",
+        }
         try:
             await verify_schema_revisions(local_providers)
         except MigrationRequired as exc:
@@ -181,8 +196,10 @@ def create_app(
             # `custos migrate up` against the configured DSNs and the
             # pod restart picks up the new ledger state.
             app.state.schema_gate_error = exc
+            app.state.dependency_status["postgres"] = "schema_gap"
             logger.error("%s", schema_gate_explainer(exc))
             raise
+        app.state.dependency_status["postgres"] = "ok"
         # Phase D (AS-IMPL-008 / AS-IMPL-009): load + validate the
         # permission registry, then seed the built-in role table.
         # Both calls are idempotent across restarts and re-raise so a
@@ -249,6 +266,15 @@ def create_app(
             local_providers.authn_cache.invalidate_by_token_id(event.token_id)
 
         await local_providers.token_revoked_subscriber.start(_on_token_revoked_remote)
+        # Both invalidation buses are now wired. Subscribers cover
+        # the cross-replica delivery path; the in-process publishers
+        # cover local-replica delivery. /readyz surfaces ``ok`` for
+        # the operator; the no-op default subscribers still report
+        # ``ok`` because the lifespan completed the wiring step
+        # (production deployments swap in real Redis / Dapr pub/sub
+        # subscribers, which then enforce their own health on the
+        # transport).
+        app.state.dependency_status["pubsub"] = "ok"
         # Phase G (AS-IMPL-017 / AS-IMPL-018): build the call-context
         # signing-key ring, signer, and (in dev mode) the in-process
         # rotation loop.
@@ -344,6 +370,17 @@ def create_app(
                 name="custos-auth.callctx-rotation",
             )
         app.state.call_context_rotation_task = rotation_task
+        # JWKS rotation status (AS-IMPL-024): "ok" when production
+        # Dapr resolver is wired (rotation managed externally) or when
+        # in-process dev rotation is running. "static" when running
+        # in dev with the in-process loop disabled
+        # (CUSTOS_AUTH_CALL_CONTEXT_KEY_ROTATION=0) — the active key
+        # never changes and operators should know the JWKS feed is
+        # effectively a single-entry set.
+        if is_dapr_mode or rotation_task is not None:
+            app.state.dependency_status["jwks_rotation"] = "ok"
+        else:
+            app.state.dependency_status["jwks_rotation"] = "static"
         # Phase F (AS-IMPL-016): launch the token-expiry sweeper.
         # The loop coroutine handles the ``interval=0`` (disabled)
         # case itself by returning immediately — we still spawn the
