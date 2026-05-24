@@ -200,6 +200,55 @@ async def test_verify_token_returns_none_for_unknown_token() -> None:
 
 
 @pytest.mark.asyncio
+async def test_verify_token_rejects_row_with_mismatched_hash() -> None:
+    # Defence in depth: the SPL contract does not forbid a future
+    # adapter from returning a near-miss row from a hash-table
+    # bucket. The verifier MUST re-check the row's stored hash
+    # against the computed lookup hash in constant time and reject
+    # the row on mismatch. The wire-level outcome is
+    # indistinguishable from a genuine miss (``unknown-token``) so
+    # an attacker cannot probe for adapter collisions.
+    auth = FakeAuthAdapter()
+    meta = FakeMetadataAdapter()
+    cache = AuthnCache(ttl_seconds=30)
+    _seed_service_account(auth, "sa-1", "ws-1")
+    plaintext, _ = mint_token()
+    # Insert a row whose hash deliberately does NOT match the
+    # plaintext, then force the lookup to return that row.
+    now = datetime.now(UTC)
+    bad_row = ServiceToken(
+        token_id=ServiceTokenId("tok-bad"),
+        service_account_id=PrincipalId("sa-1"),
+        hash="0" * 64,
+        issued_at=now,
+        expires_at=now + timedelta(days=30),
+        revoked_at=None,
+        revoked_by=None,
+        revoked_reason=None,
+    )
+    auth.service_tokens["tok-bad"] = bad_row
+
+    async def _stub_lookup(_h: str) -> ServiceToken | None:
+        return bad_row
+
+    auth.get_service_token_by_hash = _stub_lookup  # type: ignore[method-assign,assignment]
+
+    principal = await verify_token(
+        plaintext,
+        auth_store=auth,  # type: ignore[arg-type]
+        metadata_store=meta,  # type: ignore[arg-type]
+        authn_cache=cache,
+    )
+    assert principal is None
+    _ws, event = meta.append_audit_calls[0]
+    assert event.event_type == EVENT_AUTHN_FAILURE
+    assert event.payload == {"reason": REASON_UNKNOWN}
+    # And the cache must not have been populated with the
+    # mismatched principal.
+    assert cache.get(hash_token(plaintext)) is None
+
+
+@pytest.mark.asyncio
 async def test_verify_token_returns_none_for_revoked_token() -> None:
     auth = FakeAuthAdapter()
     meta = FakeMetadataAdapter()

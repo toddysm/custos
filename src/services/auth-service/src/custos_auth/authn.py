@@ -44,11 +44,14 @@ Constant-time
 -------------
 
 The lookup is by deterministic hash, so the SPL adapter's
-indexed lookup does the heavy lifting. The final hash comparison in
-:func:`custos_auth.tokens.verify_hash` is constant-time
-(``hmac.compare_digest``) so a malicious peer cannot probe the hash
-funnel for collisions — even though the SHA-256 keyspace makes
-practical collisions impossible at 2**256 candidates.
+indexed lookup does the heavy lifting. After the SPL returns a
+candidate row, the verifier re-compares the computed
+``token_hash`` against the row's stored ``hash`` with
+:func:`hmac.compare_digest` so a hash-table collision (impossible
+at the SHA-256 level, but the SPL adapter is free to use any
+storage scheme) cannot let a different token through. The
+mismatch path is indistinguishable from a genuine miss on the
+wire — both surface the ``unknown-token`` audit reason.
 
 Best-effort audit
 -----------------
@@ -65,6 +68,7 @@ against an audit-emitter bug.
 
 from __future__ import annotations
 
+import hmac
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -143,6 +147,19 @@ async def verify_token(
         # carry the hash on the failure row — the audit pipeline
         # treats ``unknown-token`` as the catch-all for both
         # genuine misses and chosen-plaintext probes.
+        await _safe_audit(audit_authn_failure(metadata_store, reason=REASON_UNKNOWN))
+        return None
+
+    # Defence in depth: the SPL adapter indexes on ``hash`` so the
+    # lookup is already O(1) on the digest, but the contract does
+    # not forbid a future adapter from using a hash-table scheme
+    # that could in principle return a near-miss row. Re-compare
+    # the lookup hash against the row's stored hash in constant
+    # time (``hmac.compare_digest``) so a hash-table collision
+    # cannot let a different token through. A mismatch maps to the
+    # ``unknown-token`` reason — the indistinguishability from a
+    # genuine miss is intentional anti-probing behaviour.
+    if not hmac.compare_digest(token_hash, row.hash):
         await _safe_audit(audit_authn_failure(metadata_store, reason=REASON_UNKNOWN))
         return None
 
