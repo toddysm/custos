@@ -51,8 +51,11 @@ def _postgres_dsn() -> Iterator[str]:
     except ImportError:  # pragma: no cover - dev-dep gate
         pytest.skip("CUSTOS_PG_DSN not set and testcontainers not installed")
 
+    # Pinned to match the service container used by the
+    # ``catalog-service-integration`` GitHub Actions job so version-specific
+    # behaviour cannot slip through the local pre-merge gate.
     try:
-        container = PostgresContainer("postgres:16-alpine")
+        container = PostgresContainer("postgres:15-alpine")
         container.start()
     except Exception as exc:  # pragma: no cover - docker not available
         pytest.skip(f"could not start postgres testcontainer: {exc}")
