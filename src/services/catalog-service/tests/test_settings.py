@@ -19,7 +19,7 @@ _REQUIRED = {
 }
 
 
-def test_load_settings_requires_all_three_required_vars() -> None:
+def test_load_settings_populates_all_required_dsns_and_endpoint() -> None:
     cfg = load_settings(_REQUIRED)
     assert cfg.definition_store_dsn == _REQUIRED["CAT_DEFINITION_STORE"]
     assert cfg.catalog_store_dsn == _REQUIRED["CAT_CATALOG_STORE"]
