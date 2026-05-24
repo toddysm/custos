@@ -58,6 +58,7 @@ a caller restart.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import time
 import uuid
@@ -333,15 +334,39 @@ class DaprSecretsSigningKeyResolver:
     _cached_key: SigningKey | None = field(default=None, init=False)
     _cached_at: float = field(default=0.0, init=False)
     _clock: Callable[[], float] = field(default=time.monotonic, init=False)
+    #: Serialises refreshes so a burst of cache-miss callers triggers
+    #: exactly one Dapr round-trip. Created lazily on first refresh so
+    #: the dataclass can still be constructed off the event loop
+    #: (``asyncio.Lock()`` instantiated at import time used to bind to
+    #: a non-existent loop on older Pythons; ``None``-then-lazy keeps
+    #: us compatible with every supported runtime).
+    _refresh_lock: asyncio.Lock | None = field(default=None, init=False, repr=False)
 
     async def active_signing_key(self) -> SigningKey:
-        now = self._clock()
-        if self._cached_key is not None and now - self._cached_at < self.cache_ttl_seconds:
+        if self._is_cache_fresh():
+            assert self._cached_key is not None  # narrowed by _is_cache_fresh
             return self._cached_key
-        key = await self._fetch()
-        self._cached_key = key
-        self._cached_at = now
-        return key
+        lock = self._refresh_lock
+        if lock is None:
+            lock = asyncio.Lock()
+            self._refresh_lock = lock
+        async with lock:
+            # Double-checked locking: a sibling coroutine may have
+            # already refreshed the cache while we were waiting on
+            # the lock. Re-read ``self._cached_key`` / ``_cached_at``
+            # under the lock before issuing another Dapr call.
+            if self._is_cache_fresh():
+                assert self._cached_key is not None
+                return self._cached_key
+            key = await self._fetch()
+            self._cached_key = key
+            self._cached_at = self._clock()
+            return key
+
+    def _is_cache_fresh(self) -> bool:
+        if self._cached_key is None:
+            return False
+        return (self._clock() - self._cached_at) < self.cache_ttl_seconds
 
     async def _fetch(self) -> SigningKey:
         url = (

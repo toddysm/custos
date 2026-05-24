@@ -473,6 +473,50 @@ async def test_dapr_resolver_raises_when_payload_has_no_string_values() -> None:
         await resolver.active_signing_key()
 
 
+async def test_dapr_resolver_coalesces_concurrent_refreshes() -> None:
+    """A burst of concurrent cache-miss callers must issue exactly one Dapr GET.
+
+    Regression for a thundering-herd window where every coroutine that found the
+    cache empty/expired raced into ``_fetch()`` because the refresh path had no
+    lock. The current implementation re-checks the cache under
+    ``self._refresh_lock`` so only the first coroutine talks to Dapr; the rest
+    observe the freshly cached key.
+    """
+    import asyncio as _asyncio
+
+    pem = SigningKey.generate().private_pem().decode("ascii")
+    gate = _asyncio.Event()
+
+    class _BlockingFetcher:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def __call__(self, url: str) -> dict[str, Any]:
+            self.calls += 1
+            # Hold the first fetch open so the sibling tasks all queue up on
+            # the refresh lock instead of racing into their own _fetch().
+            await gate.wait()
+            return {"key": pem}
+
+    fetcher = _BlockingFetcher()
+    resolver = DaprSecretsSigningKeyResolver(
+        secret_store="store",
+        secret_name="cc",
+        fetch_json=fetcher,
+    )
+
+    tasks = [_asyncio.create_task(resolver.active_signing_key()) for _ in range(10)]
+    # Yield once so every task reaches `await self._refresh_lock` / `await fetcher`.
+    await _asyncio.sleep(0)
+    gate.set()
+    keys = await _asyncio.gather(*tasks)
+
+    assert fetcher.calls == 1, f"expected exactly one Dapr round-trip, observed {fetcher.calls}"
+    # All callers must observe the same cached object.
+    first = keys[0]
+    assert all(k is first for k in keys)
+
+
 # ---------------------------------------------------------------------------
 # Diagnostic helpers
 # ---------------------------------------------------------------------------
