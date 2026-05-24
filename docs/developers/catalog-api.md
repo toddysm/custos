@@ -300,10 +300,11 @@ placeholder reference. The returned document is a new
 `WorkflowTemplate` ready to be published via the template
 endpoints below.
 
-Selectors targeting non-leaf, non-existent, or forbidden paths raise
-`catalog.template_extract_failed.<cause>` where `<cause>` is one of
-`forbidden_path`, `unknown_path`, `not_a_leaf`,
-`duplicate_placeholder_name`.
+Selectors targeting non-leaf, non-existent, forbidden, or otherwise
+invalid paths raise `catalog.template_extract_failed.<cause>` where
+`<cause>` is the underlying cause class name emitted by the service
+(for example `PublishValidationError`), yielding error codes such as
+`catalog.template_extract_failed.PublishValidationError`.
 
 ---
 
