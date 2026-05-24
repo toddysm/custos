@@ -42,8 +42,8 @@ if TYPE_CHECKING:
 class OidcIdentityAlreadyBound(RuntimeError):
     """Raised when ``(issuer, subject)`` is already linked to a user.
 
-    Mirrors the SPL ``ImmutableViolation`` but carries the original
-    user_id (when the adapter can supply it) so callers can render an
+    Mirrors the SPL ``ImmutableViolation`` for the conflicting
+    ``(issuer, subject)`` binding so callers can render an
     operator-actionable message. Callers that want a 4xx HTTP response
     should map this to :class:`custos_auth.api.errors.Conflict`.
     """
