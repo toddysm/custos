@@ -2,10 +2,11 @@
 
 This package ships the helper every Custos component (catalog, workflow,
 trigger, …) uses to verify the EdDSA-signed call-context JWT carried in the
-``X-Call-Context`` header. The verifier fetches and caches the Auth
-Service's JWKS, validates the signature plus ``iss``/``aud``/``exp``/``iat``,
-and returns a typed :class:`CallContext` object the caller can use for
-authorization.
+default ``x-custos-callctx`` header (see ``CALLCTX_HEADER``). Callers that
+need a different header name can override it via the verifier's ``header=``
+parameter. The verifier fetches and caches the Auth Service's JWKS,
+validates the signature plus ``iss``/``aud``/``exp``/``iat``, and returns a
+typed :class:`CallContext` object the caller can use for authorization.
 
 Design reference:
 ``design/components/auth-service/design.md`` § Internal vs External Auth —
