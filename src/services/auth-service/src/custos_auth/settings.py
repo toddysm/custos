@@ -128,6 +128,51 @@ ENV_TOKEN_SWEEPER_INTERVAL: Final[str] = "CUSTOS_AUTH_TOKEN_SWEEPER_INTERVAL_SEC
 #: override the env var.
 DEFAULT_TOKEN_SWEEPER_INTERVAL_SECONDS: Final[int] = 300
 
+#: Required-at-startup once Phase G AS-IMPL-018 wires the signer/JWKS
+#: into the app lifespan. Dapr Secrets reference (logical name) under
+#: which the EdDSA call-context signing key PEM is stored. AS-IMPL-017
+#: ships the signer module + resolver protocol; lifespan integration —
+#: including the "missing key ref crash-loops production" guard — lands
+#: with AS-IMPL-018 once the rotation scheduler is in place. Until then
+#: this setting is parsed but unused at runtime.
+ENV_CALL_CONTEXT_KEY_REF: Final[str] = "CUSTOS_AUTH_CALL_CONTEXT_KEY_REF"
+
+#: Optional. Name of the Dapr secret-store component the resolver
+#: consults to fetch :data:`ENV_CALL_CONTEXT_KEY_REF`. Empty falls
+#: back to :data:`DEFAULT_CALL_CONTEXT_SECRET_STORE`, which matches
+#: the default component name shipped by the Helm umbrella chart.
+ENV_CALL_CONTEXT_SECRET_STORE: Final[str] = "CUSTOS_AUTH_CALL_CONTEXT_SECRET_STORE"
+
+#: Default Dapr secret-store component name.
+DEFAULT_CALL_CONTEXT_SECRET_STORE: Final[str] = "custos-secrets"
+
+#: Optional. JWT ``aud`` claim stamped into every call-context token
+#: minted by :class:`custos_auth.callctx_signer.CallContextSigner`.
+#: Receivers must be configured with the same value. Empty falls
+#: back to
+#: :data:`custos_auth.callctx_signer.DEFAULT_AUDIENCE`
+#: (``custos.internal``).
+ENV_CALL_CONTEXT_AUDIENCE: Final[str] = "CUSTOS_AUTH_CALL_CONTEXT_AUDIENCE"
+
+#: Optional. Default lifetime (seconds) applied to minted call-context
+#: tokens when the caller does not pass an explicit override. Default
+#: :data:`DEFAULT_CALL_CONTEXT_TTL_SECONDS` (5 min) matches the
+#: design's "Internal vs External Auth — Trust Model" section. Must be
+#: a strictly positive integer; non-integer or non-positive values
+#: raise :class:`SettingsError`.
+ENV_CALL_CONTEXT_TTL_SECONDS: Final[str] = "CUSTOS_AUTH_CALL_CONTEXT_TTL_SECONDS"
+
+#: Default call-context JWT lifetime (5 min). Mirrors
+#: :data:`custos_auth.callctx_signer.DEFAULT_TTL_SECONDS`; carried
+#: in settings so the runtime knob lives next to its peers.
+DEFAULT_CALL_CONTEXT_TTL_SECONDS: Final[int] = 300
+
+#: Default JWT ``aud`` claim. Mirrors
+#: :data:`custos_auth.callctx_signer.DEFAULT_AUDIENCE`; duplicated
+#: here so the settings module remains stdlib-only and does not
+#: have to import the signer just to know the default.
+DEFAULT_CALL_CONTEXT_AUDIENCE: Final[str] = "custos.internal"
+
 
 class SettingsError(RuntimeError):
     """Raised when the environment is missing a required setting or carries a malformed value."""
@@ -146,6 +191,10 @@ class Settings:
     service_token_ttl_default_seconds: int
     authn_cache_ttl_seconds: int
     token_sweeper_interval_seconds: int
+    call_context_key_ref: str
+    call_context_secret_store: str
+    call_context_audience: str
+    call_context_ttl_seconds: int
 
     @property
     def is_production(self) -> bool:
@@ -291,6 +340,32 @@ def _parse_service_token_ttl_default(raw: str) -> int:
     return value
 
 
+def _parse_call_context_ttl(raw: str) -> int:
+    """Parse the ``CUSTOS_AUTH_CALL_CONTEXT_TTL_SECONDS`` env value.
+
+    Empty string falls back to
+    :data:`DEFAULT_CALL_CONTEXT_TTL_SECONDS` (5 minutes). Zero or
+    negative TTLs would mint already-expired tokens, so the parser
+    rejects anything non-positive. Non-integer values are rejected
+    too.
+    """
+    if raw == "":
+        return DEFAULT_CALL_CONTEXT_TTL_SECONDS
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise SettingsError(
+            f"{ENV_CALL_CONTEXT_TTL_SECONDS} must be a positive integer (got {raw!r})"
+        ) from exc
+    if value <= 0:
+        raise SettingsError(
+            f"{ENV_CALL_CONTEXT_TTL_SECONDS} must be a positive integer (got {value}); "
+            "minting a call-context token with a zero or negative TTL "
+            "would be born expired."
+        )
+    return value
+
+
 def load_settings(env: dict[str, str] | None = None) -> Settings:
     """Parse a :class:`Settings` from the supplied env mapping (default ``os.environ``)."""
     src: dict[str, str] = dict(os.environ if env is None else env)
@@ -312,17 +387,34 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         token_sweeper_interval_seconds=_parse_token_sweeper_interval(
             src.get(ENV_TOKEN_SWEEPER_INTERVAL, "").strip(),
         ),
+        call_context_key_ref=src.get(ENV_CALL_CONTEXT_KEY_REF, "").strip(),
+        call_context_secret_store=(
+            src.get(ENV_CALL_CONTEXT_SECRET_STORE, "").strip() or DEFAULT_CALL_CONTEXT_SECRET_STORE
+        ),
+        call_context_audience=(
+            src.get(ENV_CALL_CONTEXT_AUDIENCE, "").strip() or DEFAULT_CALL_CONTEXT_AUDIENCE
+        ),
+        call_context_ttl_seconds=_parse_call_context_ttl(
+            src.get(ENV_CALL_CONTEXT_TTL_SECONDS, "").strip(),
+        ),
     )
 
 
 __all__ = [
     "DEFAULT_AUTHN_CACHE_TTL_SECONDS",
+    "DEFAULT_CALL_CONTEXT_AUDIENCE",
+    "DEFAULT_CALL_CONTEXT_SECRET_STORE",
+    "DEFAULT_CALL_CONTEXT_TTL_SECONDS",
     "DEFAULT_SERVICE_TOKEN_TTL_SECONDS",
     "DEFAULT_TOKEN_SWEEPER_INTERVAL_SECONDS",
     "ENV_AUTHN_CACHE_TTL",
     "ENV_AUTHZ_CACHE_TTL",
     "ENV_AUTH_STORE_DSN",
     "ENV_CALLCTX_VERIFIER_URL",
+    "ENV_CALL_CONTEXT_AUDIENCE",
+    "ENV_CALL_CONTEXT_KEY_REF",
+    "ENV_CALL_CONTEXT_SECRET_STORE",
+    "ENV_CALL_CONTEXT_TTL_SECONDS",
     "ENV_ENVIRONMENT",
     "ENV_METADATA_STORE_DSN",
     "ENV_PERMISSIONS_PATHS",
