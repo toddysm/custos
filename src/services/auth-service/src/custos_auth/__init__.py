@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING
 from custos_auth.api import all_routers, register_exception_handlers
 from custos_auth.health import router as health_router
 from custos_auth.middleware.callctx import CallContextMiddleware
+from custos_auth.permission_registry import seed_permissions_and_validate_roles
 from custos_auth.providers import (
     MigrationRequired,
     Providers,
@@ -98,6 +99,16 @@ def create_app(
             app.state.schema_gate_error = exc
             logger.error("%s", schema_gate_explainer(exc))
             raise
+        # Phase D (AS-IMPL-008): load + validate the permission
+        # registry. Re-raises on misconfiguration so the pod crash-
+        # loops with an actionable diagnostic. The built-in role
+        # table is seeded by a subsequent AS-IMPL-* phase.
+        declared = await seed_permissions_and_validate_roles(
+            local_providers.auth_store,
+            paths=effective_settings.permissions_paths,
+            roles=(),
+        )
+        app.state.declared_permissions = declared
         app.state.ready = True
         logger.info("schema-revision gate passed; auth-service is ready")
         yield

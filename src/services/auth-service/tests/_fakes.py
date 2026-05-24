@@ -11,6 +11,7 @@ from typing import Any
 from custos_spl.errors import ImmutableViolation
 from custos_spl.ids import PrincipalId, TenantId, WorkspaceId
 from custos_spl.interfaces.auth_store import (
+    Permission,
     Principal,
     PrincipalFilter,
     ServiceAccount,
@@ -46,6 +47,7 @@ class FakeAuthAdapter:
         self.workspaces: dict[str, Workspace] = {}
         self.principals: dict[str, Principal] = {}
         self.oidc_identities: dict[tuple[str, str], str] = {}
+        self.permissions: dict[str, Permission] = {}
         # Call recorders for tests that want to assert on argument shape
         self.disable_principal_calls: list[tuple[str, str, str]] = []
 
@@ -183,6 +185,16 @@ class FakeAuthAdapter:
         if raw is None:
             return None
         return PrincipalId(raw)
+
+    # ------------------------------------------------------------------
+    # Permissions (Phase D / AS-IMPL-008)
+    # ------------------------------------------------------------------
+
+    async def upsert_permission(self, permission: Permission) -> None:
+        self.permissions[permission.name] = permission
+
+    async def list_permissions(self) -> tuple[Permission, ...]:
+        return tuple(self.permissions.values())
 
 
 class FakeMetadataAdapter:

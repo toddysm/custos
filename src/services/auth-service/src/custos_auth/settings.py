@@ -56,6 +56,18 @@ ENV_ENVIRONMENT: Final[str] = "ENVIRONMENT"
 #: dev shim until the verifier is in place.
 ENV_CALLCTX_VERIFIER_URL: Final[str] = "CUSTOS_AUTH_CALLCTX_VERIFIER_URL"
 
+#: Optional. Colon-separated list of filesystem paths to
+#: ``permissions.yaml`` files that the Phase D registry loader ingests
+#: at startup (AS-IMPL-008). Empty falls back to the bundled
+#: platform-M1 registry shipped with the package
+#: (``custos_auth._data.permissions``), which declares every permission
+#: referenced by the six built-in roles. Each path independently
+#: contributes ``(name, description, declared_by)`` rows; multi-
+#: declarer names are merged with a ``|`` separator on
+#: ``declared_by``. The loader refuses to start the service when any
+#: built-in role references a name that no path declared.
+ENV_PERMISSIONS_PATHS: Final[str] = "CUSTOS_AUTH_PERMISSIONS_PATHS"
+
 
 class SettingsError(RuntimeError):
     """Raised when the environment is missing a required setting or carries a malformed value."""
@@ -69,6 +81,7 @@ class Settings:
     metadata_store_dsn: str
     environment: str
     callctx_verifier_url: str
+    permissions_paths: tuple[str, ...]
 
     @property
     def is_production(self) -> bool:
@@ -90,6 +103,11 @@ def _require(name: str, env: dict[str, str]) -> str:
     return value
 
 
+def _parse_paths(raw: str) -> tuple[str, ...]:
+    """Split a colon-separated path list and drop empty entries."""
+    return tuple(part for part in raw.split(":") if part)
+
+
 def load_settings(env: dict[str, str] | None = None) -> Settings:
     """Parse a :class:`Settings` from the supplied env mapping (default ``os.environ``)."""
     src: dict[str, str] = dict(os.environ if env is None else env)
@@ -98,6 +116,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         metadata_store_dsn=_require(ENV_METADATA_STORE_DSN, src),
         environment=src.get(ENV_ENVIRONMENT, "development").strip() or "development",
         callctx_verifier_url=src.get(ENV_CALLCTX_VERIFIER_URL, "").strip(),
+        permissions_paths=_parse_paths(src.get(ENV_PERMISSIONS_PATHS, "").strip()),
     )
 
 
@@ -106,6 +125,7 @@ __all__ = [
     "ENV_CALLCTX_VERIFIER_URL",
     "ENV_ENVIRONMENT",
     "ENV_METADATA_STORE_DSN",
+    "ENV_PERMISSIONS_PATHS",
     "Settings",
     "SettingsError",
     "load_settings",

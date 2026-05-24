@@ -33,6 +33,7 @@ dependencies = [
     "uvicorn[standard]>=0.27,<1",
     "pydantic>=2.6,<3",
     "opentelemetry-api>=1.20,<2",
+    "pyyaml>=6.0,<7",
     "custos-spl",
     "custos-postgres",
 ]
@@ -46,6 +47,7 @@ dev = [
     "ruff>=0.4",
     "mypy>=1.10",
     "opentelemetry-sdk>=1.20,<2",
+    "types-PyYAML>=6.0",
 ]
 
 [project.urls]
@@ -58,6 +60,9 @@ custos-auth-service = "custos_auth.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/custos_auth"]
+include = [
+    "src/custos_auth/**/*.yaml",
+]
 
 [tool.ruff]
 line-length = 100
