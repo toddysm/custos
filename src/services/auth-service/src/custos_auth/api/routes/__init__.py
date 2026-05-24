@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from custos_auth.api.routes import (
     principals,
+    role_bindings,
     roles,
     service_accounts,
     tenants,
@@ -19,6 +20,7 @@ all_routers = [
     principals.router,
     service_accounts.router,
     roles.router,
+    role_bindings.router,
 ]
 
 

@@ -45,12 +45,17 @@ from __future__ import annotations
 from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
+from dataclasses import field as dc_field
 from typing import Protocol, cast
 
 from custos_spl import MigrationRequired
 from custos_spl.interfaces.auth_store import AuthStoreProvider
 from custos_spl.interfaces.metadata_store import MetadataStoreProvider
 
+from custos_auth.binding_events import (
+    BindingChangedPublisher,
+    NoOpBindingChangedPublisher,
+)
 from custos_auth.settings import Settings
 
 # The interfaces auth-service actually owns. ``custos_spl.check_revisions``
@@ -88,10 +93,18 @@ class Providers:
 
     Held on ``app.state.providers`` and exposed to FastAPI handlers via
     dependency helpers introduced in subsequent AS-IMPL-* phases.
+
+    ``binding_changed_publisher`` defaults to the in-process no-op
+    transport — see :mod:`custos_auth.binding_events`. The Phase E
+    deployment override replaces it with the Redis pub/sub or SPL-
+    outbox-backed transport.
     """
 
     auth_store: AuthStoreProvider
     metadata_store: MetadataStoreProvider
+    binding_changed_publisher: BindingChangedPublisher = dc_field(
+        default_factory=NoOpBindingChangedPublisher,
+    )
 
 
 def load_providers(settings: Settings) -> Providers:

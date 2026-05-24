@@ -265,11 +265,60 @@ class RoleListResponse(BaseModel):
     roles: list[RoleResponse]
 
 
+# ---------------------------------------------------------------------------
+# Role bindings (Phase D / AS-IMPL-010)
+# ---------------------------------------------------------------------------
+
+
+class RoleBindingCreateRequest(BaseModel):
+    """Body of ``POST /v1/workspaces/{workspace_id}/role-bindings``.
+
+    The binding scope is implicit in the path (a workspace endpoint
+    binds at :class:`WorkspaceScope` only); ``binding_id`` is server-
+    generated so the body carries just the assignment.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    principal_id: Annotated[str, Field(min_length=1, max_length=120)]
+    role_id: Annotated[str, Field(min_length=1, max_length=120)]
+
+
+class RoleBindingResponse(BaseModel):
+    """Wire envelope for a single :class:`RoleBinding` row.
+
+    ``scope_kind`` is the canonical
+    ``"workspace" | "tenant" | "platform"`` tag; ``scope_id`` carries
+    the workspace or tenant identifier (or ``None`` for platform-
+    scope bindings) so clients can disambiguate without parsing the
+    discriminated union.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    binding_id: str
+    principal_id: str
+    role_id: str
+    scope_kind: Literal["workspace", "tenant", "platform"]
+    scope_id: str | None
+    bound_at: datetime
+    bound_by: str
+
+
+class RoleBindingListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    bindings: list[RoleBindingResponse]
+
+
 __all__ = [
     "PermissionListResponse",
     "PermissionResponse",
     "PrincipalDisableRequest",
     "PrincipalResponse",
+    "RoleBindingCreateRequest",
+    "RoleBindingListResponse",
+    "RoleBindingResponse",
     "RoleListResponse",
     "RoleResponse",
     "ServiceAccountCreateRequest",

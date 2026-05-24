@@ -2,26 +2,40 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from collections.abc import Set as AbstractSet
 from datetime import UTC, datetime
 from types import MappingProxyType
-from typing import Any
+from typing import Any, TypeVar
 
 from custos_spl.errors import ImmutableViolation
-from custos_spl.ids import PrincipalId, RoleId, TenantId, WorkspaceId
+from custos_spl.ids import PrincipalId, RoleBindingId, RoleId, TenantId, WorkspaceId
 from custos_spl.interfaces.auth_store import (
+    GlobalScope,
     Permission,
     Principal,
     PrincipalFilter,
     Role,
+    RoleBinding,
+    RoleBindingFilter,
+    RoleBindingScope,
     ServiceAccount,
     Tenant,
     TenantFilter,
+    TenantScope,
     User,
     Workspace,
     WorkspaceFilter,
+    WorkspaceScope,
 )
+from custos_spl.interfaces.metadata_store import TransactionHandle
+from custos_spl.middleware.transactions import bind_handle
+
+T = TypeVar("T")
+
+
+class _FakeAuthTransactionHandle(TransactionHandle):
+    """Adapter-side handle subclass for the in-memory ``with_transaction``."""
 
 
 class FakeAuthAdapter:
@@ -50,8 +64,10 @@ class FakeAuthAdapter:
         self.oidc_identities: dict[tuple[str, str], str] = {}
         self.permissions: dict[str, Permission] = {}
         self.roles: dict[str, Role] = {}
+        self.role_bindings: dict[str, RoleBinding] = {}
         # Call recorders for tests that want to assert on argument shape
         self.disable_principal_calls: list[tuple[str, str, str]] = []
+        self.delete_role_binding_calls: list[tuple[str, str, str]] = []
 
     @property
     def declared_revisions(self) -> Mapping[str, AbstractSet[int]]:
@@ -210,6 +226,75 @@ class FakeAuthAdapter:
 
     async def list_roles(self) -> tuple[Role, ...]:
         return tuple(self.roles.values())
+
+    # ------------------------------------------------------------------
+    # Role bindings (Phase D / AS-IMPL-010)
+    # ------------------------------------------------------------------
+
+    async def put_role_binding(self, binding: RoleBinding) -> None:
+        self.role_bindings[str(binding.binding_id)] = binding
+
+    async def delete_role_binding(
+        self,
+        binding_id: RoleBindingId,
+        actor: PrincipalId,
+        reason: str,
+    ) -> None:
+        self.delete_role_binding_calls.append((str(binding_id), str(actor), reason))
+        # Match the SPL Postgres adapter: silently no-op on missing
+        # — the calling handler is responsible for the 404 check.
+        self.role_bindings.pop(str(binding_id), None)
+
+    async def list_role_bindings_for_principal(
+        self,
+        principal_id: PrincipalId,
+        scopes: tuple[RoleBindingScope, ...],
+    ) -> tuple[RoleBinding, ...]:
+        return tuple(
+            b
+            for b in self.role_bindings.values()
+            if b.principal_id == principal_id and b.scope in scopes
+        )
+
+    async def list_role_bindings_for_scope(
+        self,
+        scope: RoleBindingScope,
+        filter: RoleBindingFilter,
+    ) -> tuple[RoleBinding, ...]:
+        def _scope_eq(left: RoleBindingScope, right: RoleBindingScope) -> bool:
+            if isinstance(left, WorkspaceScope) and isinstance(right, WorkspaceScope):
+                return left.workspace_id == right.workspace_id
+            if isinstance(left, TenantScope) and isinstance(right, TenantScope):
+                return left.tenant_id == right.tenant_id
+            return isinstance(left, GlobalScope) and isinstance(right, GlobalScope)
+
+        rows = [b for b in self.role_bindings.values() if _scope_eq(b.scope, scope)]
+        if filter.role_id is not None:
+            rows = [b for b in rows if b.role_id == filter.role_id]
+        if filter.principal_id is not None:
+            rows = [b for b in rows if b.principal_id == filter.principal_id]
+        return tuple(rows)
+
+    # ------------------------------------------------------------------
+    # Transactions
+    # ------------------------------------------------------------------
+
+    async def with_transaction(
+        self,
+        body: Callable[[TransactionHandle], Awaitable[T]],
+    ) -> T:
+        """In-memory ``with_transaction`` that auto-commits.
+
+        The fake has no real backing store, so no rollback semantics
+        are simulated — Phase D handlers commit binding + audit
+        sequentially anyway (the SPL ``with_transaction`` is intra-
+        provider only). The handle is registered through the standard
+        SPL machinery so any future tests that mis-use cross-provider
+        handles will surface the canonical :class:`InvalidTransactionHandle`.
+        """
+        handle = _FakeAuthTransactionHandle()
+        bind_handle(handle, self)
+        return await body(handle)
 
 
 class FakeMetadataAdapter:

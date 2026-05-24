@@ -91,6 +91,21 @@ class ValidationFailure(AuthApiError):
     code = "invalid_request"
 
 
+class InvalidRoleScope(AuthApiError):
+    """400 — role cannot be bound at the requested scope.
+
+    Raised by ``POST /v1/workspaces/{workspace_id}/role-bindings`` when
+    the role's allowed-scope tag (see :mod:`custos_auth.roles`) does
+    not include workspace, and by the tenant / platform binding
+    endpoints when the analogous mismatch occurs. The machine-readable
+    code is intentionally distinct from the generic
+    ``invalid_request`` so clients can branch on it.
+    """
+
+    status_code = 400
+    code = "invalid_role_scope"
+
+
 # ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
@@ -157,6 +172,7 @@ def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(NotFound, handle_auth_api_error)
     app.add_exception_handler(Conflict, handle_auth_api_error)
     app.add_exception_handler(ValidationFailure, handle_auth_api_error)
+    app.add_exception_handler(InvalidRoleScope, handle_auth_api_error)
     app.add_exception_handler(RequestValidationError, handle_validation_error)
     app.add_exception_handler(StarletteHTTPException, handle_http_exception)
 
@@ -164,6 +180,7 @@ def register_exception_handlers(app: FastAPI) -> None:
 __all__ = [
     "AuthApiError",
     "Conflict",
+    "InvalidRoleScope",
     "NotFound",
     "ValidationFailure",
     "register_exception_handlers",
