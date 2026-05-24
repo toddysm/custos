@@ -1921,6 +1921,70 @@ async def test_get_service_token_by_hash_returns_none_when_absent(pg_pool: Pool)
     assert retrieved is None
 
 
+async def test_get_service_token_by_id(pg_pool: Pool) -> None:
+    """Round-trip the primary-key lookup used by the revoke endpoint."""
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    now = datetime.now(UTC)
+    tenant = Tenant(
+        tenant_id="t-1",
+        display_name="Tenant 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_tenant(tenant)
+    workspace = Workspace(
+        workspace_id="ws-1",
+        tenant_id="t-1",
+        display_name="Workspace 1",
+        disabled_at=None,
+        created_at=now,
+    )
+    await adapter.put_workspace(workspace)
+    sa = ServiceAccount(
+        kind="serviceAccount",
+        principal_id="sa-1",
+        workspace_id="ws-1",
+        display_name="Bot",
+        disabled_at=None,
+        disabled_reason=None,
+        created_at=now,
+    )
+    await adapter.put_principal(sa)
+
+    from custos_spl.ids import PrincipalId, ServiceTokenId
+    from custos_spl.interfaces.auth_store import ServiceToken
+
+    token = ServiceToken(
+        token_id=ServiceTokenId("token-by-id-1"),
+        service_account_id=PrincipalId("sa-1"),
+        hash="hash-by-id-1",
+        issued_at=now,
+        expires_at=now + timedelta(days=30),
+        revoked_at=None,
+        revoked_by=None,
+        revoked_reason=None,
+    )
+    await adapter.put_service_token(token)
+
+    retrieved = await adapter.get_service_token(ServiceTokenId("token-by-id-1"))
+    assert retrieved is not None
+    assert retrieved.token_id == ServiceTokenId("token-by-id-1")
+    assert retrieved.hash == "hash-by-id-1"
+
+
+async def test_get_service_token_returns_none_when_absent(pg_pool: Pool) -> None:
+    """Unknown token id collapses to None."""
+    adapter = PgAuthAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    from custos_spl.ids import ServiceTokenId
+
+    retrieved = await adapter.get_service_token(ServiceTokenId("nonexistent"))
+    assert retrieved is None
+
+
 async def test_revoke_service_token(pg_pool: Pool) -> None:
     adapter = PgAuthAdapter(pool=pg_pool)
     await adapter.apply_pending()
@@ -2253,6 +2317,10 @@ async def test_delete_expired_service_tokens(pg_pool: Pool) -> None:
     )
     await adapter.put_service_token(valid)
 
+    # list_expired_service_tokens returns only the expired row.
+    expired_rows = await adapter.list_expired_service_tokens(now)
+    assert {str(t.token_id) for t in expired_rows} == {"expired-1"}
+
     # Delete before now (should only delete expired)
     deleted = await adapter.delete_expired_service_tokens(now)
     assert deleted == 1
@@ -2264,7 +2332,8 @@ async def test_delete_expired_service_tokens(pg_pool: Pool) -> None:
     valid_retrieved = await adapter.get_service_token_by_hash("hash-valid")
     assert valid_retrieved is not None
 
-
+    # And after the delete the listing must be empty.
+    assert await adapter.list_expired_service_tokens(now) == ()
 
 
 async def test_upsert_and_list_permissions(pg_pool: Pool) -> None:

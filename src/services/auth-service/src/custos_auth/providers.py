@@ -52,6 +52,7 @@ from custos_spl import MigrationRequired
 from custos_spl.interfaces.auth_store import AuthStoreProvider
 from custos_spl.interfaces.metadata_store import MetadataStoreProvider
 
+from custos_auth.authn_cache import AuthnCache
 from custos_auth.authz_cache import (
     DEFAULT_AUTHZ_CACHE_TTL_SECONDS,
     AuthzDecisionCache,
@@ -62,7 +63,16 @@ from custos_auth.binding_events import (
     LocalBindingChangedBus,
     NoOpBindingChangedSubscriber,
 )
-from custos_auth.settings import Settings
+from custos_auth.settings import (
+    DEFAULT_AUTHN_CACHE_TTL_SECONDS,
+    Settings,
+)
+from custos_auth.token_revoked_events import (
+    LocalTokenRevokedBus,
+    NoOpTokenRevokedSubscriber,
+    TokenRevokedPublisher,
+    TokenRevokedSubscriber,
+)
 
 # The interfaces auth-service actually owns. ``custos_spl.check_revisions``
 # checks the global SPL set (Definition, Catalog, Auth, Artifact, Metadata)
@@ -125,6 +135,17 @@ class Providers:
             ttl_seconds=DEFAULT_AUTHZ_CACHE_TTL_SECONDS,
         ),
     )
+    token_revoked_publisher: TokenRevokedPublisher = dc_field(
+        default_factory=LocalTokenRevokedBus,
+    )
+    token_revoked_subscriber: TokenRevokedSubscriber = dc_field(
+        default_factory=NoOpTokenRevokedSubscriber,
+    )
+    authn_cache: AuthnCache = dc_field(
+        default_factory=lambda: AuthnCache(
+            ttl_seconds=DEFAULT_AUTHN_CACHE_TTL_SECONDS,
+        ),
+    )
 
 
 def load_providers(settings: Settings) -> Providers:
@@ -158,6 +179,9 @@ def load_providers(settings: Settings) -> Providers:
         metadata_store=cast(MetadataStoreProvider, metadata_store),
         authz_cache=AuthzDecisionCache(
             ttl_seconds=settings.authz_cache_ttl_seconds,
+        ),
+        authn_cache=AuthnCache(
+            ttl_seconds=settings.authn_cache_ttl_seconds,
         ),
     )
 

@@ -6,9 +6,15 @@ import pytest
 
 from custos_auth.authz_cache import DEFAULT_AUTHZ_CACHE_TTL_SECONDS
 from custos_auth.settings import (
+    DEFAULT_AUTHN_CACHE_TTL_SECONDS,
+    DEFAULT_SERVICE_TOKEN_TTL_SECONDS,
+    DEFAULT_TOKEN_SWEEPER_INTERVAL_SECONDS,
     ENV_AUTH_STORE_DSN,
+    ENV_AUTHN_CACHE_TTL,
     ENV_AUTHZ_CACHE_TTL,
     ENV_METADATA_STORE_DSN,
+    ENV_SERVICE_TOKEN_TTL_DEFAULT,
+    ENV_TOKEN_SWEEPER_INTERVAL,
     Settings,
     SettingsError,
     load_settings,
@@ -113,3 +119,128 @@ def test_authz_cache_ttl_rejects_negative_value() -> None:
 def test_authz_cache_ttl_rejects_non_integer_value() -> None:
     with pytest.raises(SettingsError, match=ENV_AUTHZ_CACHE_TTL):
         load_settings(_required_env(**{ENV_AUTHZ_CACHE_TTL: "not-a-number"}))
+
+
+# ---------------------------------------------------------------------------
+# CUSTOS_AUTH_SERVICE_TOKEN_TTL_DEFAULT (AS-IMPL-013)
+# ---------------------------------------------------------------------------
+
+
+def test_service_token_ttl_default_is_90_days_when_unset() -> None:
+    settings = load_settings(_required_env())
+    # 90 days == 90 * 24 * 60 * 60 = 7_776_000 seconds. Asserting
+    # against the constant keeps the test resilient to a future
+    # default-tuning change while still pinning the named contract.
+    assert settings.service_token_ttl_default_seconds == DEFAULT_SERVICE_TOKEN_TTL_SECONDS
+    assert DEFAULT_SERVICE_TOKEN_TTL_SECONDS == 90 * 24 * 60 * 60
+
+
+def test_service_token_ttl_default_positive_override_is_respected() -> None:
+    settings = load_settings(_required_env(**{ENV_SERVICE_TOKEN_TTL_DEFAULT: "3600"}))
+    assert settings.service_token_ttl_default_seconds == 3600
+
+
+def test_service_token_ttl_default_empty_string_falls_back_to_default() -> None:
+    settings = load_settings(_required_env(**{ENV_SERVICE_TOKEN_TTL_DEFAULT: ""}))
+    assert settings.service_token_ttl_default_seconds == DEFAULT_SERVICE_TOKEN_TTL_SECONDS
+
+
+def test_service_token_ttl_default_rejects_zero() -> None:
+    # A zero default would mint tokens that are already expired the
+    # instant they leave the API; that's never a legitimate config,
+    # so reject at boot rather than silently breaking minting.
+    with pytest.raises(SettingsError, match=ENV_SERVICE_TOKEN_TTL_DEFAULT):
+        load_settings(_required_env(**{ENV_SERVICE_TOKEN_TTL_DEFAULT: "0"}))
+
+
+def test_service_token_ttl_default_rejects_negative() -> None:
+    with pytest.raises(SettingsError, match=ENV_SERVICE_TOKEN_TTL_DEFAULT):
+        load_settings(_required_env(**{ENV_SERVICE_TOKEN_TTL_DEFAULT: "-1"}))
+
+
+def test_service_token_ttl_default_rejects_non_integer_value() -> None:
+    with pytest.raises(SettingsError, match=ENV_SERVICE_TOKEN_TTL_DEFAULT):
+        load_settings(_required_env(**{ENV_SERVICE_TOKEN_TTL_DEFAULT: "not-a-number"}))
+
+
+# ---------------------------------------------------------------------------
+# CUSTOS_AUTH_AUTHN_CACHE_TTL (AS-IMPL-014)
+# ---------------------------------------------------------------------------
+
+
+def test_authn_cache_ttl_defaults_to_30_seconds() -> None:
+    # Default tracks the design's "Authn (token) … 30s" entry.
+    settings = load_settings(_required_env())
+    assert settings.authn_cache_ttl_seconds == DEFAULT_AUTHN_CACHE_TTL_SECONDS
+    assert DEFAULT_AUTHN_CACHE_TTL_SECONDS == 30
+    assert settings.authn_cache_enabled is True
+
+
+def test_authn_cache_ttl_zero_puts_cache_in_bypass_mode() -> None:
+    # AS-IMPL-014 acceptance criterion: 0 disables the cache so
+    # operators can run a forced-bypass smoke test in production
+    # without redeploying.
+    settings = load_settings(_required_env(**{ENV_AUTHN_CACHE_TTL: "0"}))
+    assert settings.authn_cache_ttl_seconds == 0
+    assert settings.authn_cache_enabled is False
+
+
+def test_authn_cache_ttl_positive_override_is_respected() -> None:
+    settings = load_settings(_required_env(**{ENV_AUTHN_CACHE_TTL: "5"}))
+    assert settings.authn_cache_ttl_seconds == 5
+
+
+def test_authn_cache_ttl_empty_string_falls_back_to_default() -> None:
+    settings = load_settings(_required_env(**{ENV_AUTHN_CACHE_TTL: ""}))
+    assert settings.authn_cache_ttl_seconds == DEFAULT_AUTHN_CACHE_TTL_SECONDS
+
+
+def test_authn_cache_ttl_rejects_negative_value() -> None:
+    with pytest.raises(SettingsError, match="non-negative"):
+        load_settings(_required_env(**{ENV_AUTHN_CACHE_TTL: "-1"}))
+
+
+def test_authn_cache_ttl_rejects_non_integer_value() -> None:
+    with pytest.raises(SettingsError, match=ENV_AUTHN_CACHE_TTL):
+        load_settings(_required_env(**{ENV_AUTHN_CACHE_TTL: "not-a-number"}))
+
+
+# ---------------------------------------------------------------------------
+# CUSTOS_AUTH_TOKEN_SWEEPER_INTERVAL_SECONDS (AS-IMPL-016)
+# ---------------------------------------------------------------------------
+
+
+def test_token_sweeper_interval_defaults_to_300_seconds() -> None:
+    # Design's "sweeper sweeps every ~5 min" recommendation.
+    settings = load_settings(_required_env())
+    assert settings.token_sweeper_interval_seconds == DEFAULT_TOKEN_SWEEPER_INTERVAL_SECONDS
+    assert DEFAULT_TOKEN_SWEEPER_INTERVAL_SECONDS == 300
+    assert settings.token_sweeper_enabled is True
+
+
+def test_token_sweeper_interval_zero_disables_the_sweeper() -> None:
+    # Operators can disable the sweeper for tests, a degraded
+    # cluster, or an external janitor without redeploying.
+    settings = load_settings(_required_env(**{ENV_TOKEN_SWEEPER_INTERVAL: "0"}))
+    assert settings.token_sweeper_interval_seconds == 0
+    assert settings.token_sweeper_enabled is False
+
+
+def test_token_sweeper_interval_positive_override_is_respected() -> None:
+    settings = load_settings(_required_env(**{ENV_TOKEN_SWEEPER_INTERVAL: "60"}))
+    assert settings.token_sweeper_interval_seconds == 60
+
+
+def test_token_sweeper_interval_empty_string_falls_back_to_default() -> None:
+    settings = load_settings(_required_env(**{ENV_TOKEN_SWEEPER_INTERVAL: ""}))
+    assert settings.token_sweeper_interval_seconds == DEFAULT_TOKEN_SWEEPER_INTERVAL_SECONDS
+
+
+def test_token_sweeper_interval_rejects_negative_value() -> None:
+    with pytest.raises(SettingsError, match="non-negative"):
+        load_settings(_required_env(**{ENV_TOKEN_SWEEPER_INTERVAL: "-1"}))
+
+
+def test_token_sweeper_interval_rejects_non_integer_value() -> None:
+    with pytest.raises(SettingsError, match=ENV_TOKEN_SWEEPER_INTERVAL):
+        load_settings(_required_env(**{ENV_TOKEN_SWEEPER_INTERVAL: "not-a-number"}))

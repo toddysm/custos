@@ -452,6 +452,18 @@ class AuthStoreProvider(Protocol):
         """
         ...
 
+    async def get_service_token(self, token_id: ServiceTokenId) -> ServiceToken | None:
+        """Look up a service token by its operator-facing identifier.
+
+        Used by the revoke path to (a) check that the caller's
+        workspace owns the SA that holds the token, (b) detect the
+        already-revoked idempotency case, and (c) extract the hash
+        to publish on the ``custos.auth.token-revoked`` event. The
+        primary key is `token_id`; returns `None` if no row matches.
+        Includes revoked rows.
+        """
+        ...
+
     async def revoke_service_token(
         self,
         token_id: ServiceTokenId,
@@ -475,6 +487,24 @@ class AuthStoreProvider(Protocol):
         Bounded small (a SA holds at most a handful of live tokens);
         returns the full set including revoked rows so callers can
         render rotation history.
+        """
+        ...
+
+    async def list_expired_service_tokens(
+        self,
+        before: datetime,
+    ) -> tuple[ServiceToken, ...]:
+        """List token rows whose `expires_at < before`.
+
+        Sweeper-only read. Returns every row that the matching
+        :meth:`delete_expired_service_tokens` call would remove,
+        including rows already marked revoked, so the sweeper can
+        emit a `token.expired` audit row and publish a cache-
+        eviction event **before** the row is physically deleted.
+        Auth Service callers must invoke this with the same
+        `before` value they then pass to
+        :meth:`delete_expired_service_tokens`; otherwise the audit
+        row set and the deleted row set will drift.
         """
         ...
 

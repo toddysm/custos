@@ -82,6 +82,52 @@ ENV_PERMISSIONS_PATHS: Final[str] = "CUSTOS_AUTH_PERMISSIONS_PATHS"
 #: rejected with :class:`SettingsError`.
 ENV_AUTHZ_CACHE_TTL: Final[str] = "CUSTOS_AUTH_AUTHZ_CACHE_TTL"
 
+#: Optional. Default lifetime (seconds) for newly minted service
+#: tokens (AS-IMPL-013, REQ-035). Matches the design doc §
+#: Configuration default ``90d`` (= 7_776_000 seconds). Operators
+#: override per platform via this env var; clients additionally
+#: override per mint by passing ``ttl_seconds`` on the request body.
+#: Must be a positive integer — a service token with zero or
+#: negative TTL is meaningless (and the audit trail would record an
+#: already-expired token), so :class:`SettingsError` is raised on
+#: anything non-positive.
+ENV_SERVICE_TOKEN_TTL_DEFAULT: Final[str] = "CUSTOS_AUTH_SERVICE_TOKEN_TTL_DEFAULT"
+
+#: Default lifetime for service tokens when no env override is set.
+#: 90 days in seconds.
+DEFAULT_SERVICE_TOKEN_TTL_SECONDS: Final[int] = 90 * 24 * 60 * 60
+
+#: Optional. Time-to-live (seconds) for entries in the per-replica
+#: authn cache that backs :func:`custos_auth.authn.verify_token`
+#: (AS-IMPL-014). Default 30 seconds matches the design's § Cache
+#: Invalidation Bus table. Setting the value to ``0`` puts the cache
+#: in **bypass mode** — every verify call performs a full SPL
+#: lookup. Negative or non-integer values raise
+#: :class:`SettingsError`.
+ENV_AUTHN_CACHE_TTL: Final[str] = "CUSTOS_AUTH_AUTHN_CACHE_TTL"
+
+#: Default lifetime for authn cache entries when the env override is
+#: unset. The design fixes this at 30 s so a revoke is observable
+#: across replicas within one TTL window even if the eviction event
+#: gets lost in the pub/sub transport.
+DEFAULT_AUTHN_CACHE_TTL_SECONDS: Final[int] = 30
+
+#: Optional. Interval (seconds) at which the background sweeper
+#: scans for service tokens whose ``expires_at`` has elapsed,
+#: emits ``token.expired``, publishes a cache-eviction event, and
+#: physically deletes the row (AS-IMPL-016). Setting the value to
+#: ``0`` disables the sweeper entirely (useful for tests and for
+#: single-purpose replicas that should never run the housekeeping
+#: loop). Negative or non-integer values raise
+#: :class:`SettingsError`.
+ENV_TOKEN_SWEEPER_INTERVAL: Final[str] = "CUSTOS_AUTH_TOKEN_SWEEPER_INTERVAL_SECONDS"
+
+#: Default interval for the token sweeper when the env override is
+#: unset. Five minutes balances audit-row latency against SPL load;
+#: an operator who needs the sweep to land within a minute can
+#: override the env var.
+DEFAULT_TOKEN_SWEEPER_INTERVAL_SECONDS: Final[int] = 300
+
 
 class SettingsError(RuntimeError):
     """Raised when the environment is missing a required setting or carries a malformed value."""
@@ -97,6 +143,9 @@ class Settings:
     callctx_verifier_url: str
     permissions_paths: tuple[str, ...]
     authz_cache_ttl_seconds: int
+    service_token_ttl_default_seconds: int
+    authn_cache_ttl_seconds: int
+    token_sweeper_interval_seconds: int
 
     @property
     def is_production(self) -> bool:
@@ -111,6 +160,23 @@ class Settings:
     def authz_cache_enabled(self) -> bool:
         """True when the authz decision cache is configured to store entries."""
         return self.authz_cache_ttl_seconds > 0
+
+    @property
+    def authn_cache_enabled(self) -> bool:
+        """True when the authn cache is configured to store entries."""
+        return self.authn_cache_ttl_seconds > 0
+
+    @property
+    def token_sweeper_enabled(self) -> bool:
+        """True when the token sweeper is configured to run.
+
+        ``CUSTOS_AUTH_TOKEN_SWEEPER_INTERVAL_SECONDS=0`` disables
+        sweep work entirely. The current lifespan flow may still
+        create the background task, but the sweeper loop returns
+        immediately when disabled instead of performing any periodic
+        cleanup.
+        """
+        return self.token_sweeper_interval_seconds > 0
 
 
 def _require(name: str, env: dict[str, str]) -> str:
@@ -153,6 +219,78 @@ def _parse_authz_cache_ttl(raw: str) -> int:
     return value
 
 
+def _parse_authn_cache_ttl(raw: str) -> int:
+    """Parse the ``CUSTOS_AUTH_AUTHN_CACHE_TTL`` env value.
+
+    Empty string falls back to
+    :data:`DEFAULT_AUTHN_CACHE_TTL_SECONDS`. ``0`` enables the
+    bypass-mode acceptance criterion (every verify hits the store).
+    Negative or non-integer values raise :class:`SettingsError`.
+    """
+    if raw == "":
+        return DEFAULT_AUTHN_CACHE_TTL_SECONDS
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise SettingsError(
+            f"{ENV_AUTHN_CACHE_TTL} must be a non-negative integer (got {raw!r})"
+        ) from exc
+    if value < 0:
+        raise SettingsError(
+            f"{ENV_AUTHN_CACHE_TTL} must be non-negative (got {value}); use 0 to disable the cache."
+        )
+    return value
+
+
+def _parse_token_sweeper_interval(raw: str) -> int:
+    """Parse the ``CUSTOS_AUTH_TOKEN_SWEEPER_INTERVAL_SECONDS`` env value.
+
+    Empty string falls back to
+    :data:`DEFAULT_TOKEN_SWEEPER_INTERVAL_SECONDS`. ``0`` disables
+    the sweeper. Negative or non-integer values raise
+    :class:`SettingsError`.
+    """
+    if raw == "":
+        return DEFAULT_TOKEN_SWEEPER_INTERVAL_SECONDS
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise SettingsError(
+            f"{ENV_TOKEN_SWEEPER_INTERVAL} must be a non-negative integer (got {raw!r})"
+        ) from exc
+    if value < 0:
+        raise SettingsError(
+            f"{ENV_TOKEN_SWEEPER_INTERVAL} must be non-negative (got {value}); "
+            "use 0 to disable the sweeper."
+        )
+    return value
+
+
+def _parse_service_token_ttl_default(raw: str) -> int:
+    """Parse the ``CUSTOS_AUTH_SERVICE_TOKEN_TTL_DEFAULT`` env value.
+
+    Empty string falls back to
+    :data:`DEFAULT_SERVICE_TOKEN_TTL_SECONDS` (90 days). Values
+    ≤ 0 are rejected because a service token with zero or negative
+    TTL would be born expired. Non-integer values are also
+    rejected.
+    """
+    if raw == "":
+        return DEFAULT_SERVICE_TOKEN_TTL_SECONDS
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise SettingsError(
+            f"{ENV_SERVICE_TOKEN_TTL_DEFAULT} must be a positive integer (got {raw!r})"
+        ) from exc
+    if value <= 0:
+        raise SettingsError(
+            f"{ENV_SERVICE_TOKEN_TTL_DEFAULT} must be a positive integer (got {value}); "
+            "a service token's default TTL must be strictly positive."
+        )
+    return value
+
+
 def load_settings(env: dict[str, str] | None = None) -> Settings:
     """Parse a :class:`Settings` from the supplied env mapping (default ``os.environ``)."""
     src: dict[str, str] = dict(os.environ if env is None else env)
@@ -165,16 +303,31 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         authz_cache_ttl_seconds=_parse_authz_cache_ttl(
             src.get(ENV_AUTHZ_CACHE_TTL, "").strip(),
         ),
+        service_token_ttl_default_seconds=_parse_service_token_ttl_default(
+            src.get(ENV_SERVICE_TOKEN_TTL_DEFAULT, "").strip(),
+        ),
+        authn_cache_ttl_seconds=_parse_authn_cache_ttl(
+            src.get(ENV_AUTHN_CACHE_TTL, "").strip(),
+        ),
+        token_sweeper_interval_seconds=_parse_token_sweeper_interval(
+            src.get(ENV_TOKEN_SWEEPER_INTERVAL, "").strip(),
+        ),
     )
 
 
 __all__ = [
+    "DEFAULT_AUTHN_CACHE_TTL_SECONDS",
+    "DEFAULT_SERVICE_TOKEN_TTL_SECONDS",
+    "DEFAULT_TOKEN_SWEEPER_INTERVAL_SECONDS",
+    "ENV_AUTHN_CACHE_TTL",
     "ENV_AUTHZ_CACHE_TTL",
     "ENV_AUTH_STORE_DSN",
     "ENV_CALLCTX_VERIFIER_URL",
     "ENV_ENVIRONMENT",
     "ENV_METADATA_STORE_DSN",
     "ENV_PERMISSIONS_PATHS",
+    "ENV_SERVICE_TOKEN_TTL_DEFAULT",
+    "ENV_TOKEN_SWEEPER_INTERVAL",
     "Settings",
     "SettingsError",
     "load_settings",

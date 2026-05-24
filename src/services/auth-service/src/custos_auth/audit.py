@@ -100,6 +100,12 @@ EVENT_OIDC_IDENTITY_LINKED: Final[str] = "oidc.identity-linked"
 EVENT_ROLE_BINDING_GRANTED: Final[str] = "role-binding.granted"
 EVENT_ROLE_BINDING_REVOKED: Final[str] = "role-binding.revoked"
 EVENT_AUTHZ_DECISION: Final[str] = "authz.decision"
+EVENT_TOKEN_ISSUED: Final[str] = "token.issued"
+EVENT_TOKEN_USED: Final[str] = "token.used"
+EVENT_TOKEN_REVOKED: Final[str] = "token.revoked"
+EVENT_TOKEN_EXPIRED: Final[str] = "token.expired"
+EVENT_AUTHN_SUCCESS: Final[str] = "authn.success"
+EVENT_AUTHN_FAILURE: Final[str] = "authn.failure"
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +361,247 @@ async def audit_role_binding_revoked(
 
 
 # ---------------------------------------------------------------------------
+# Service-token lifecycle events (Phase F / AS-IMPL-013+)
+# ---------------------------------------------------------------------------
+
+
+async def audit_token_issued(
+    metadata_store: MetadataStoreProvider,
+    *,
+    actor: str,
+    workspace_id: str,
+    token_id: str,
+    service_account_id: str,
+    issued_at: datetime,
+    expires_at: datetime,
+) -> None:
+    """Emit ``token.issued`` keyed to the service-account's workspace.
+
+    ``actor`` is the call-context principal that performed the mint
+    (the operator holding ``admin:service-account``);
+    ``service_account_id`` is the SA the token was issued to. The
+    payload deliberately omits the token plaintext **and** the
+    storage hash — the plaintext leaks the credential, and the hash
+    is a deterministic function of the plaintext so it would let
+    anyone with audit-read access correlate the row back to the same
+    hash an attacker might intercept on the wire. ``token_id`` is
+    sufficient for forensic correlation against the
+    :class:`~custos_spl.interfaces.auth_store.ServiceToken` row.
+    """
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_TOKEN_ISSUED,
+        actor=actor,
+        subject={
+            "token_id": token_id,
+            "service_account_id": service_account_id,
+        },
+        payload={
+            "issued_at": issued_at.isoformat(),
+            "expires_at": expires_at.isoformat(),
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Service-token lifecycle events (Phase F / AS-IMPL-014)
+# ---------------------------------------------------------------------------
+
+
+async def audit_token_used(
+    metadata_store: MetadataStoreProvider,
+    *,
+    workspace_id: str,
+    token_id: str,
+    service_account_id: str,
+) -> None:
+    """Emit ``token.used`` keyed to the SA's workspace.
+
+    AS-IMPL-014 spec: "``token.used`` audit event on first use after
+    rotation (not on every request)." First-use detection is the
+    verify-path responsibility: a cache miss on the authn cache
+    triggers the emission, a cache hit does not. The 30 s cache TTL
+    naturally rate-limits the row to at most ~one per 30 s per
+    token, which is the design's intent — operators see the token
+    leaving the gate after a rotation without drowning the audit
+    pipeline with a row per HTTP request.
+
+    ``actor`` is fixed to the bearer (the SA itself) because the
+    verify path runs before the call-context middleware has
+    established a calling identity.
+    """
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_TOKEN_USED,
+        actor=service_account_id,
+        subject={
+            "token_id": token_id,
+            "service_account_id": service_account_id,
+        },
+        payload={},
+    )
+
+
+async def audit_authn_success(
+    metadata_store: MetadataStoreProvider,
+    *,
+    workspace_id: str,
+    token_id: str,
+    service_account_id: str,
+    cache_hit: bool,
+) -> None:
+    """Emit ``authn.success`` keyed to the SA's workspace.
+
+    Per AS-IMPL-014: emitted at the gateway entry path on every
+    successful verify call. The ``cache_hit`` payload field lets
+    operators differentiate cache-served verifies from store
+    lookups; cache pressure correlates with low verify latency and
+    is useful diagnostic context.
+    """
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_AUTHN_SUCCESS,
+        actor=service_account_id,
+        subject={
+            "token_id": token_id,
+            "service_account_id": service_account_id,
+        },
+        payload={"cache_hit": cache_hit},
+    )
+
+
+async def audit_authn_failure(
+    metadata_store: MetadataStoreProvider,
+    *,
+    reason: str,
+    workspace_id: str = PLATFORM_WORKSPACE_ID,
+    token_id: str | None = None,
+    service_account_id: str | None = None,
+) -> None:
+    """Emit ``authn.failure`` for a verify call that did not return a Principal.
+
+    Failure rows are written under the SA's workspace when a row
+    was located (so workspace operators can see authentication
+    failures against their SAs) and under the platform sentinel
+    when no row was located (so an unknown-token probe surfaces in
+    the platform audit bucket, not arbitrarily in some workspace).
+    The ``reason`` carries one of:
+
+    * ``"unknown-token"`` — no SPL row matched the input hash.
+    * ``"malformed-token"`` — the input did not look like a custos
+      bearer (failed :func:`looks_like_custos_token`).
+    * ``"revoked"`` — the row was found but its ``revoked_at`` was
+      non-null.
+    * ``"expired"`` — the row was found but its ``expires_at`` was
+      in the past.
+    * ``"sa-disabled"`` — the row was found but the owning SA's
+      ``disabled_at`` was non-null.
+    * ``"sa-missing"`` — the row was found but the owning SA had
+      been hard-deleted (defensive; the design forbids hard-delete
+      of SAs but the failure mode is worth distinguishing).
+
+    The payload never carries the plaintext or the hash; the
+    ``token_id`` is the operator-facing identifier and is safe to
+    log.
+    """
+    subject: dict[str, Any] = {}
+    if token_id is not None:
+        subject["token_id"] = token_id
+    if service_account_id is not None:
+        subject["service_account_id"] = service_account_id
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_AUTHN_FAILURE,
+        actor=service_account_id or "anonymous",
+        subject=subject,
+        payload={"reason": reason},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Service-token lifecycle events (Phase F / AS-IMPL-015)
+# ---------------------------------------------------------------------------
+
+
+async def audit_token_revoked(
+    metadata_store: MetadataStoreProvider,
+    *,
+    actor: str,
+    workspace_id: str,
+    token_id: str,
+    service_account_id: str,
+    reason: str,
+) -> None:
+    """Emit ``token.revoked`` keyed to the SA's workspace.
+
+    The single-revoke endpoint emits one row per revoked token; the
+    bulk-revoke endpoint emits one row per revoked-now token (rows
+    that were already revoked are no-ops and emit nothing because
+    the AS-IMPL-015 idempotency contract is "second revoke is a
+    silent 204"). The reason carried on the row is the human-
+    readable reason the operator supplied on the request body, not
+    the SPL ``revoked_reason`` column which carries the same string
+    — that's just an internal-vs-external naming thing.
+
+    The payload deliberately does **not** carry the hash; ``token_id``
+    is the operator-facing identifier and is what the audit pipeline
+    keys on.
+    """
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_TOKEN_REVOKED,
+        actor=actor,
+        subject={
+            "token_id": token_id,
+            "service_account_id": service_account_id,
+        },
+        payload={"reason": reason},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Service-token expiry events (Phase F / AS-IMPL-016)
+# ---------------------------------------------------------------------------
+
+
+async def audit_token_expired(
+    metadata_store: MetadataStoreProvider,
+    *,
+    workspace_id: str,
+    token_id: str,
+    service_account_id: str,
+    expires_at: datetime,
+) -> None:
+    """Emit ``token.expired`` keyed to the SA's workspace.
+
+    The sweeper emits one row per token it is about to physically
+    delete. The actor is the SA itself — the sweep is an internal
+    platform process, not an operator action, so attributing the
+    row to the SA keeps the workspace-scoped audit feed coherent
+    (every row in the feed has an actor that lives in the same
+    workspace). The payload carries the original ``expires_at`` so
+    operators can reconstruct the rotation cadence from the audit
+    feed without joining against the (now-deleted) SPL row.
+    """
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_TOKEN_EXPIRED,
+        actor=service_account_id,
+        subject={
+            "token_id": token_id,
+            "service_account_id": service_account_id,
+        },
+        payload={"expires_at": expires_at.isoformat()},
+    )
+
+
+# ---------------------------------------------------------------------------
 # Authorization decision events (Phase E / AS-IMPL-011)
 # ---------------------------------------------------------------------------
 #
@@ -407,6 +654,8 @@ async def audit_authz_decision(
 
 __all__ = [
     "EMIT_FAILURES_TOTAL",
+    "EVENT_AUTHN_FAILURE",
+    "EVENT_AUTHN_SUCCESS",
     "EVENT_AUTHZ_DECISION",
     "EVENT_OIDC_IDENTITY_LINKED",
     "EVENT_PRINCIPAL_CREATED",
@@ -414,8 +663,14 @@ __all__ = [
     "EVENT_ROLE_BINDING_GRANTED",
     "EVENT_ROLE_BINDING_REVOKED",
     "EVENT_TENANT_CREATED",
+    "EVENT_TOKEN_EXPIRED",
+    "EVENT_TOKEN_ISSUED",
+    "EVENT_TOKEN_REVOKED",
+    "EVENT_TOKEN_USED",
     "EVENT_WORKSPACE_CREATED",
     "PLATFORM_WORKSPACE_ID",
+    "audit_authn_failure",
+    "audit_authn_success",
     "audit_authz_decision",
     "audit_oidc_identity_linked",
     "audit_principal_created",
@@ -423,5 +678,9 @@ __all__ = [
     "audit_role_binding_granted",
     "audit_role_binding_revoked",
     "audit_tenant_created",
+    "audit_token_expired",
+    "audit_token_issued",
+    "audit_token_revoked",
+    "audit_token_used",
     "audit_workspace_created",
 ]
