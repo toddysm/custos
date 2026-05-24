@@ -225,7 +225,7 @@ def test_lifespan_builds_call_context_signer_in_dev_mode() -> None:
     env = dict(_ENV, CUSTOS_AUTH_CALL_CONTEXT_KEY_ROTATION="0")
     app = create_app(settings=load_settings(env), providers=_providers())
     with TestClient(app):
-        from custos_auth.callctx_keyring import KeyRing
+        from custos_auth.callctx_keyring import KeyRing, KeyRingObservingResolver
         from custos_auth.callctx_signer import (
             CallContextSigner,
             StaticSigningKeyResolver,
@@ -233,6 +233,16 @@ def test_lifespan_builds_call_context_signer_in_dev_mode() -> None:
 
         assert isinstance(app.state.call_context_key_ring, KeyRing)
         assert isinstance(app.state.call_context_signing_key_resolver, StaticSigningKeyResolver)
+        # Even in dev mode the signer consults the observer wrapper
+        # so the lifespan wiring is uniform across both modes.
+        assert isinstance(
+            app.state.call_context_signing_key_observer,
+            KeyRingObservingResolver,
+        )
+        assert (
+            app.state.call_context_signing_key_observer.inner
+            is app.state.call_context_signing_key_resolver
+        )
         assert isinstance(app.state.call_context_signer, CallContextSigner)
         # Rotation disabled => no rotation task spawned.
         assert app.state.call_context_rotation_task is None
@@ -312,7 +322,77 @@ def test_lifespan_loads_signing_key_from_dapr_secret_reference(
     )
     app = create_app(settings=load_settings(env), providers=_providers())
     with TestClient(app):
-        from custos_auth.callctx_signer import SigningKey as _SigningKey
+        from custos_auth.callctx_keyring import KeyRingObservingResolver
+        from custos_auth.callctx_signer import (
+            DaprSecretsSigningKeyResolver,
+        )
+        from custos_auth.callctx_signer import (
+            SigningKey as _SigningKey,
+        )
 
         active = app.state.call_context_key_ring.active
         assert isinstance(active, _SigningKey)
+        # The live resolver is kept across the lifespan — it is the
+        # Dapr-backed one, NOT a Static wrapper around a one-shot
+        # fetch. This is what lets externally-driven Dapr secret
+        # rotations propagate without a pod restart.
+        assert isinstance(
+            app.state.call_context_signing_key_resolver,
+            DaprSecretsSigningKeyResolver,
+        )
+        # The signer consults the observer wrapper so the key ring
+        # stays in lockstep with the live Dapr resolver.
+        assert isinstance(
+            app.state.call_context_signing_key_observer,
+            KeyRingObservingResolver,
+        )
+
+
+def test_lifespan_in_dapr_mode_disables_in_process_rotation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # When CUSTOS_AUTH_CALL_CONTEXT_KEY_REF is set, the in-process
+    # rotation loop is disabled even if
+    # CUSTOS_AUTH_CALL_CONTEXT_KEY_ROTATION > 0, because rotated key
+    # material would only live in memory and would be lost on pod
+    # restart — rolling the active key backwards. Rotation in this
+    # mode is operator-driven (Vault rotator / KMS / CronJob updates
+    # the Dapr secret) and propagates via the live DaprSecretsSigning
+    # KeyResolver.
+    from custos_auth.callctx_signer import SigningKey
+
+    pem = SigningKey.generate().private_pem().decode("utf-8")
+
+    class _FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, str]:
+            return {"call-context-key": pem}
+
+    class _FakeAsyncClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> _FakeAsyncClient:
+            return self
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            return None
+
+        async def get(self, _url: str) -> _FakeResponse:
+            return _FakeResponse()
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeAsyncClient)
+
+    env = dict(
+        _ENV,
+        CUSTOS_AUTH_CALL_CONTEXT_KEY_REF="call-context-key",
+        CUSTOS_AUTH_CALL_CONTEXT_KEY_ROTATION="600",
+    )
+    app = create_app(settings=load_settings(env), providers=_providers())
+    with TestClient(app):
+        # Rotation explicitly suppressed in Dapr mode.
+        assert app.state.call_context_rotation_task is None

@@ -15,6 +15,7 @@ from custos_auth.callctx_keyring import (
     OVERLAP_FACTOR,
     JwksEntry,
     KeyRing,
+    KeyRingObservingResolver,
     install_key_age_metric,
     run_rotation_loop,
 )
@@ -288,6 +289,103 @@ def test_jwks_cache_fraction_default_is_half() -> None:
 
 def test_default_rotation_period_is_seven_days() -> None:
     assert DEFAULT_ROTATION_PERIOD_SECONDS == 7 * 24 * 60 * 60
+
+
+# ---------------------------------------------------------------------------
+# KeyRingObservingResolver
+#
+# Production wiring: wraps the live DaprSecretsSigningKeyResolver so the
+# in-memory key ring tracks whatever the resolver returns. The wrapper
+# is the bridge that turns externally-driven secret rotations (Vault,
+# KMS, operator) into JWKS updates without an explicit signal.
+# ---------------------------------------------------------------------------
+
+
+class _StubResolver:
+    """Minimal SigningKeyResolver returning a mutable current key."""
+
+    def __init__(self, key: SigningKey) -> None:
+        self.current = key
+        self.calls = 0
+
+    async def active_signing_key(self) -> SigningKey:
+        self.calls += 1
+        return self.current
+
+
+def test_observing_resolver_passes_through_when_kid_unchanged() -> None:
+    initial = _fixed_key()
+    ring = KeyRing(initial, rotation_period_seconds=60)
+    inner = _StubResolver(initial)
+    wrapper = KeyRingObservingResolver(inner, ring)
+
+    returned = asyncio.run(wrapper.active_signing_key())
+
+    assert returned is initial
+    assert inner.calls == 1
+    # Ring untouched — no retirement.
+    assert ring.retired_entries() == []
+
+
+def test_observing_resolver_promotes_new_kid_into_ring() -> None:
+    initial = _fixed_key()
+    rotated = _fixed_key()
+    assert initial.kid != rotated.kid  # paranoia: SigningKey.generate gives unique kids
+    ring = KeyRing(initial, rotation_period_seconds=60)
+    inner = _StubResolver(initial)
+    wrapper = KeyRingObservingResolver(inner, ring)
+
+    # Externally driven rotation: the secret store now returns the
+    # new key, the wrapper observes it on next sign and rotates the
+    # ring so JWKS picks up the new kid + retains the previous as a
+    # retired entry inside the overlap window.
+    inner.current = rotated
+    returned = asyncio.run(wrapper.active_signing_key())
+
+    assert returned is rotated
+    assert ring.active.kid == rotated.kid
+    retired_kids = [e.kid for e in ring.retired_entries()]
+    assert retired_kids == [initial.kid]
+
+
+def test_observing_resolver_coalesces_concurrent_observers_of_same_rotation() -> None:
+    # Two concurrent callers seeing the same externally-rotated kid
+    # must result in exactly one ring.rotate() call. The second
+    # caller's check-under-lock catches the kid match and skips.
+    initial = _fixed_key()
+    rotated = _fixed_key()
+    ring = KeyRing(initial, rotation_period_seconds=60)
+
+    gate = asyncio.Event()
+
+    class _BlockingResolver:
+        def __init__(self) -> None:
+            self.current = initial
+
+        async def active_signing_key(self) -> SigningKey:
+            await gate.wait()
+            return self.current
+
+    inner = _BlockingResolver()
+    wrapper = KeyRingObservingResolver(inner, ring)
+
+    async def _run() -> list[SigningKey]:
+        # Stage the rotation BEFORE releasing the gate so every
+        # task sees the new kid simultaneously.
+        inner.current = rotated
+        tasks = [asyncio.create_task(wrapper.active_signing_key()) for _ in range(10)]
+        await asyncio.sleep(0)
+        gate.set()
+        return await asyncio.gather(*tasks)
+
+    results = asyncio.run(_run())
+
+    assert all(k is rotated for k in results)
+    assert ring.active.kid == rotated.kid
+    # Exactly one retired entry — the previous active. If rotate()
+    # had been called twice by two racing observers it would have
+    # raised ValueError, failing the gather.
+    assert [e.kid for e in ring.retired_entries()] == [initial.kid]
 
 
 # Awaitable typing sanity check — keeps unused import happy if any IDE

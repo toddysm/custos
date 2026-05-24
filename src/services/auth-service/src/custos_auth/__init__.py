@@ -32,6 +32,7 @@ from custos_auth.api import all_routers, register_exception_handlers
 from custos_auth.binding_events import LocalBindingChangedBus
 from custos_auth.callctx_keyring import (
     KeyRing,
+    KeyRingObservingResolver,
     install_key_age_metric,
     run_rotation_loop,
 )
@@ -39,6 +40,7 @@ from custos_auth.callctx_signer import (
     CallContextSigner,
     DaprSecretsSigningKeyResolver,
     SigningKey,
+    SigningKeyResolver,
     StaticSigningKeyResolver,
 )
 from custos_auth.health import router as health_router
@@ -66,26 +68,38 @@ __version__ = "0.1.0"
 logger = logging.getLogger("custos_auth")
 
 
-async def _load_initial_signing_key(settings: Settings) -> SigningKey:
-    """Build the initial :class:`SigningKey` for the lifespan.
+async def _build_signing_state(
+    settings: Settings,
+) -> tuple[SigningKeyResolver, SigningKey]:
+    """Build the live :class:`SigningKeyResolver` and initial active key.
 
-    Production / non-development deployments must set
-    :data:`custos_auth.settings.ENV_CALL_CONTEXT_KEY_REF` so the key
-    is pulled from the Dapr Secrets sidecar — that is the M1 secrets
-    contract for the call-context signer
-    (``design/components/auth-service/design.md`` § Internal vs
-    External Auth — Trust Model).
+    Production (``CUSTOS_AUTH_CALL_CONTEXT_KEY_REF`` is set) returns a
+    *live* :class:`DaprSecretsSigningKeyResolver` so the signer keeps
+    consulting Dapr on every mint — externally driven rotations (the
+    operator updates the Dapr secret, Vault dynamic rotation, KMS
+    rotate-on-cadence) propagate within the resolver's cache TTL. The
+    initial active key is the resolver's first ``active_signing_key()``
+    result, used to seed the :class:`KeyRing`.
 
-    Development convenience: when the env var is empty and
-    ``CUSTOS_AUTH_ENVIRONMENT`` is set to ``"development"`` (or left
-    at its default), the helper generates an ephemeral keypair so
-    operators get a working signer without standing up Dapr. The
-    generated key does not survive a pod restart, which is desirable
-    for dev and explicitly disallowed in production.
+    Development (no key ref, ``CUSTOS_AUTH_ENVIRONMENT`` defaults to
+    ``"development"``) returns a :class:`StaticSigningKeyResolver`
+    wrapping a freshly generated ephemeral keypair so operators get a
+    working signer without standing up Dapr. The static resolver is
+    the one the in-process rotation loop mutates on each rotation.
 
     Production deployments without ``CUSTOS_AUTH_CALL_CONTEXT_KEY_REF``
     crash-loop with an operator-actionable diagnostic — the same
     pattern used by the call-context middleware verifier-url guard.
+
+    Returns:
+        ``(resolver, initial_key)`` where ``resolver`` is the live
+        resolver the signer should consult, and ``initial_key`` is the
+        currently active :class:`SigningKey` used to seed the
+        :class:`KeyRing`.
+
+    Raises:
+        RuntimeError: When run outside development without a
+            ``CUSTOS_AUTH_CALL_CONTEXT_KEY_REF`` set.
     """
     key_ref = settings.call_context_key_ref.strip()
     if key_ref:
@@ -97,12 +111,13 @@ async def _load_initial_signing_key(settings: Settings) -> SigningKey:
                 response.raise_for_status()
                 return response.json()  # type: ignore[no-any-return]
 
-        resolver = DaprSecretsSigningKeyResolver(
+        dapr_resolver = DaprSecretsSigningKeyResolver(
             secret_store=settings.call_context_secret_store,
             secret_name=key_ref,
             fetch_json=_fetch,
         )
-        return await resolver.active_signing_key()
+        initial_key = await dapr_resolver.active_signing_key()
+        return dapr_resolver, initial_key
     if settings.environment != "development":
         raise RuntimeError(
             "CUSTOS_AUTH_CALL_CONTEXT_KEY_REF must be set outside development; "
@@ -115,7 +130,8 @@ async def _load_initial_signing_key(settings: Settings) -> SigningKey:
         "Ed25519 call-context signing key for development. Tokens minted "
         "by this replica will not survive a pod restart."
     )
-    return SigningKey.generate()
+    ephemeral_key = SigningKey.generate()
+    return StaticSigningKeyResolver(key=ephemeral_key), ephemeral_key
 
 
 def create_app(
@@ -234,23 +250,44 @@ def create_app(
 
         await local_providers.token_revoked_subscriber.start(_on_token_revoked_remote)
         # Phase G (AS-IMPL-017 / AS-IMPL-018): build the call-context
-        # signing-key ring, signer, and rotation loop. The lifespan
-        # owns the long-lived KeyRing + signer so the JWKS route and
-        # any future internal mint paths share a single source of
-        # truth. The resolver is a :class:`StaticSigningKeyResolver`
-        # initialised either from a Dapr Secrets reference (production
-        # / non-development) or from a freshly generated keypair
-        # (development convenience — operators get a working signer
-        # without a Dapr sidecar).
-        initial_signing_key = await _load_initial_signing_key(effective_settings)
-        signing_key_resolver = StaticSigningKeyResolver(key=initial_signing_key)
+        # signing-key ring, signer, and (in dev mode) the in-process
+        # rotation loop.
+        #
+        # Two distinct deployment modes, picked by whether
+        # ``CUSTOS_AUTH_CALL_CONTEXT_KEY_REF`` is set:
+        #
+        # * **Production (Dapr secret reference set).** The live
+        #   :class:`DaprSecretsSigningKeyResolver` is kept and wrapped
+        #   in :class:`KeyRingObservingResolver`, then passed straight
+        #   to the signer. Every mint consults Dapr (cached for
+        #   ``cache_ttl_seconds``); when the operator rotates the
+        #   secret externally (Vault rotator, KMS rotate-on-cadence,
+        #   CronJob writing into the Dapr secret store) the resolver
+        #   sees the new ``kid`` after the cache TTL and the wrapper
+        #   promotes it on the :class:`KeyRing` so JWKS advertises
+        #   the new active key + the previous one as a retired
+        #   entry inside the overlap window. The in-process rotation
+        #   loop is *disabled* in this mode: rotated key material
+        #   must be persisted (which Dapr secret stores are typically
+        #   read-only for) so a pod restart does not roll the active
+        #   key backwards. Persistence is the operator's
+        #   responsibility via the secret store.
+        # * **Development (no key ref).** A
+        #   :class:`StaticSigningKeyResolver` wraps a freshly
+        #   generated ephemeral key. The in-process rotation loop
+        #   continues to mint fresh ephemeral keys on cadence and
+        #   pushes them into both the static resolver and the ring.
+        #   Pod restarts lose every rotated key — desired for dev,
+        #   explicitly disallowed in production.
+        live_resolver, initial_signing_key = await _build_signing_state(
+            effective_settings,
+        )
         # When rotation is disabled (operator manages rotation
-        # externally via ``CUSTOS_AUTH_CALL_CONTEXT_KEY_ROTATION=0``)
-        # the ring still needs a positive rotation_period_seconds so
-        # the JWKS ``Cache-Control: max-age`` makes sense. Fall back
-        # to the design default (7 days) — that is the longest
-        # plausible interval and matches the JWKS overlap window the
-        # operator should target.
+        # externally) the ring still needs a positive
+        # rotation_period_seconds so the JWKS ``Cache-Control:
+        # max-age`` makes sense. Fall back to the design default
+        # (7 days) — that is the longest plausible interval and
+        # matches the JWKS overlap window the operator should target.
         from custos_auth.callctx_keyring import DEFAULT_ROTATION_PERIOD_SECONDS
 
         rotation_for_ring = (
@@ -262,21 +299,46 @@ def create_app(
             initial_signing_key,
             rotation_period_seconds=rotation_for_ring,
         )
+        # Wrap the live resolver so the ring stays in lockstep with
+        # whatever the resolver returns. In production this is what
+        # makes externally driven rotations show up in JWKS without
+        # any explicit signal. In dev mode this is a defensive no-op
+        # — the rotation loop already updates the ring directly.
+        observing_resolver = KeyRingObservingResolver(live_resolver, key_ring)
         call_context_signer = CallContextSigner(
-            signing_key_resolver,
+            observing_resolver,
             audience=effective_settings.call_context_audience,
             default_ttl_seconds=effective_settings.call_context_ttl_seconds,
         )
         app.state.call_context_key_ring = key_ring
-        app.state.call_context_signing_key_resolver = signing_key_resolver
+        app.state.call_context_signing_key_resolver = live_resolver
+        app.state.call_context_signing_key_observer = observing_resolver
         app.state.call_context_signer = call_context_signer
         install_key_age_metric(key_ring)
         rotation_task: asyncio.Task[None] | None = None
-        if effective_settings.call_context_key_rotation_seconds > 0:
+        is_dapr_mode = isinstance(live_resolver, DaprSecretsSigningKeyResolver)
+        if is_dapr_mode:
+            if effective_settings.call_context_key_rotation_seconds > 0:
+                logger.info(
+                    "CUSTOS_AUTH_CALL_CONTEXT_KEY_REF is set; the in-process "
+                    "call-context key rotation loop is disabled to keep the "
+                    "signing key persistent across pod restarts. Rotate the "
+                    "Dapr secret externally (operator / Vault / KMS); the "
+                    "resolver picks up the new key within its cache TTL and "
+                    "the JWKS advertises it via KeyRingObservingResolver. "
+                    "Set CUSTOS_AUTH_CALL_CONTEXT_KEY_ROTATION=0 to silence "
+                    "this notice."
+                )
+        elif effective_settings.call_context_key_rotation_seconds > 0:
+            # Dev-mode in-process rotation: the loop expects a
+            # StaticSigningKeyResolver so it can push fresh keys into
+            # it. _build_signing_state guarantees this when key_ref
+            # is empty.
+            assert isinstance(live_resolver, StaticSigningKeyResolver)
             rotation_task = asyncio.create_task(
                 run_rotation_loop(
                     key_ring=key_ring,
-                    resolver=signing_key_resolver,
+                    resolver=live_resolver,
                     rotation_period_seconds=(effective_settings.call_context_key_rotation_seconds),
                 ),
                 name="custos-auth.callctx-rotation",

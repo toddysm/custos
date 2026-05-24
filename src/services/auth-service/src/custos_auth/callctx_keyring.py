@@ -61,7 +61,11 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from opentelemetry import metrics
 from opentelemetry.metrics import CallbackOptions, Observation
 
-from custos_auth.callctx_signer import SigningKey, StaticSigningKeyResolver
+from custos_auth.callctx_signer import (
+    SigningKey,
+    SigningKeyResolver,
+    StaticSigningKeyResolver,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -308,6 +312,60 @@ def install_key_age_metric(ring: KeyRing) -> None:
     )
 
 
+class KeyRingObservingResolver:
+    """Resolver wrapper that keeps a :class:`KeyRing` in lockstep with
+    the inner resolver.
+
+    The lifespan wires this around the *live* signing-key resolver — in
+    production a :class:`DaprSecretsSigningKeyResolver` — so externally
+    driven rotations (operator updates the Dapr secret, Vault dynamic
+    rotation, KMS rotate-on-cadence) propagate into the in-memory
+    :class:`KeyRing` the moment the resolver returns a fresh ``kid``.
+    The JWKS route, which reads from the ring, then advertises the new
+    active key and the previously active key as a retired entry inside
+    the overlap window — without any explicit signal from the rotator.
+
+    The wrapper is read-mostly: cache-hit calls (matching ``kid``) are
+    a single attribute compare. Only the first observation of a
+    rotated ``kid`` takes the lock and calls :meth:`KeyRing.rotate`;
+    concurrent callers double-check under the lock so exactly one
+    ``rotate`` runs per externally-driven rotation event.
+
+    The wrapper is intentionally a no-op when the inner resolver is a
+    :class:`StaticSigningKeyResolver` whose key has already been
+    promoted in the ring (e.g. the dev-mode in-process rotation loop
+    updates the ring and the resolver in lockstep). In that case the
+    ``kid`` matches the ring's active ``kid`` and no rotation runs.
+    """
+
+    def __init__(self, inner: SigningKeyResolver, key_ring: KeyRing) -> None:
+        self._inner = inner
+        self._key_ring = key_ring
+        # Lazily allocated so the wrapper stays constructible off the
+        # event loop. Same pattern as DaprSecretsSigningKeyResolver's
+        # refresh lock.
+        self._lock: asyncio.Lock | None = None
+
+    @property
+    def inner(self) -> SigningKeyResolver:
+        """The underlying resolver (Dapr or Static)."""
+        return self._inner
+
+    async def active_signing_key(self) -> SigningKey:
+        key = await self._inner.active_signing_key()
+        if key.kid == self._key_ring.active.kid:
+            return key
+        lock = self._lock or asyncio.Lock()
+        self._lock = lock
+        async with lock:
+            # Double-check under the lock so two concurrent observers
+            # of the same rotation event do not both call rotate(),
+            # which would raise ValueError on the second caller.
+            if key.kid != self._key_ring.active.kid:
+                self._key_ring.rotate(key)
+        return key
+
+
 async def run_rotation_loop(
     *,
     key_ring: KeyRing,
@@ -395,6 +453,7 @@ __all__ = [
     "OVERLAP_FACTOR",
     "JwksEntry",
     "KeyRing",
+    "KeyRingObservingResolver",
     "TimeFunc",
     "install_key_age_metric",
     "run_rotation_loop",
