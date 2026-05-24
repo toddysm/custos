@@ -208,7 +208,7 @@ def test_revoke_then_recheck_evicts_cache_in_one_round_trip() -> None:
             action="revoked",
             binding_id="rb-1",
         )
-        asyncio.new_event_loop().run_until_complete(bus.publish(event))
+        asyncio.run(bus.publish(event))
         # Cache row evicted — recheck path will go to the auth store
         # and observe the new decision.
         assert cache.get("user-1", "ws-1", "workflow:read") is None
