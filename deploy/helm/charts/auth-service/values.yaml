@@ -8,8 +8,9 @@
 # call-context signing key itself is resolved by the service at runtime
 # via the Dapr Secrets API using the *reference* in
 # `CUSTOS_AUTH_CALL_CONTEXT_KEY_REF` — it is NOT a Kubernetes Secret.
-# AS-IMPL-004 (Phase B) will introduce the AS-side Postgres DSN env
-# var(s) and wire them through the ExternalSecret block.
+# The two SPL Postgres DSNs (`CUSTOS_AUTH_STORE_DSN`,
+# `CUSTOS_AUTH_METADATA_STORE_DSN`) introduced by AS-IMPL-004 flow
+# through `externalSecret:` below.
 
 enabled: true
 
@@ -64,15 +65,27 @@ config:
   callContextKeyRef: ""
   platformAdminBootstrap: ""
 
-# ExternalSecret skeleton — empty by default. AS-IMPL-004 (Phase B) will
-# populate this with the SPL Postgres DSN env var(s) once
-# `AuthStoreProvider` lands. Eval profiles (single-node) can leave this
-# off and rely on an operator-supplied Secret; HA / connected profiles
-# enable it and project keys from the configured secret store.
+# ExternalSecret carrying the two Postgres DSNs the service reads at
+# startup (CUSTOS_AUTH_STORE_DSN, CUSTOS_AUTH_METADATA_STORE_DSN).
+# Disabled by default (eval profiles can synthesise the DSNs from the
+# CNPG app secret); HA / connected profiles enable this and project the
+# keys from the configured secret store path.
 externalSecret:
   enabled: false
   refreshInterval: 1h
   secretStoreRef:
     name: custos-secret-store
     kind: ClusterSecretStore
-  data: []
+  # Each entry maps a CUSTOS_AUTH_* env var (secretKey) to a key in the
+  # upstream secret store. Defaults expect the SPL-conventional path
+  # `custos/storage-provider-layer/<tier>` populated by ops; override
+  # per deployment as needed.
+  data:
+    - secretKey: CUSTOS_AUTH_STORE_DSN
+      remoteRef:
+        key: custos/storage-provider-layer/auth-store
+        property: dsn
+    - secretKey: CUSTOS_AUTH_METADATA_STORE_DSN
+      remoteRef:
+        key: custos/storage-provider-layer/metadata-store
+        property: dsn
