@@ -51,6 +51,28 @@ transaction domains). The generated event id is returned on the
 bump :data:`custos_auth.audit.EMIT_FAILURES_TOTAL` and page
 Observability.
 
+Caching
+-------
+
+:func:`authorize` accepts an optional
+:class:`~custos_auth.authz_cache.AuthzDecisionCache`. The cache sits
+*after* the tenant existence-hiding gate and *before* the binding
+resolution — a cache hit short-cuts only the
+:meth:`list_role_bindings_for_principal` round trip, never the
+tenant check and never the audit row. The cache is keyed by
+``(principal_id, workspace_id, permission)`` so it is callera-state
+independent; only post-tenant-gate decisions are stored. Cross-tenant
+probes and missing-workspace probes are *not* cached because the
+existence-hiding outcome depends on the caller's tenant id, not on
+``(principal, workspace, permission)`` alone.
+
+Every cache hit still emits a fresh :data:`~custos_auth.audit.EVENT_AUTHZ_DECISION`
+audit row with a new ``audit_event_id`` so the audit ledger remains
+the source of truth even when the cache serves the answer. When the
+cache is disabled (``CUSTOS_AUTH_AUTHZ_CACHE_TTL=0``) the
+``cache.get`` / ``cache.put`` calls short-circuit and the resolution
+always runs.
+
 Unknown permissions
 -------------------
 
@@ -83,6 +105,8 @@ from custos_auth.roles import BUILTIN_ROLES_BY_ID, ROLE_PLATFORM_ADMIN
 
 if TYPE_CHECKING:
     from custos_spl import AuthStoreProvider, MetadataStoreProvider
+
+    from custos_auth.authz_cache import AuthzDecisionCache
 
 _LOGGER = logging.getLogger("custos_auth.authorize")
 
@@ -199,6 +223,7 @@ async def authorize(
     caller_is_platform_admin: bool = False,
     actor: str | None = None,
     declared_permissions: frozenset[str] | None = None,
+    cache: AuthzDecisionCache | None = None,
 ) -> Decision:
     """Decide whether ``principal_id`` may perform ``permission`` in
     ``workspace_id``.
@@ -243,6 +268,18 @@ async def authorize(
             silently denying. The HTTP/RPC surface passes the snapshot
             from ``app.state.declared_permissions``; pure-library
             callers may omit it.
+        cache: Optional per-replica
+            :class:`~custos_auth.authz_cache.AuthzDecisionCache`
+            consulted *after* the tenant existence-hiding gate and
+            *before* the binding resolution. The HTTP/RPC surface
+            passes ``providers.authz_cache``. A hit short-cuts the
+            :meth:`list_role_bindings_for_principal` round trip;
+            audit emission still runs (a new ``audit_event_id`` is
+            generated for every call). Cross-tenant and missing-
+            workspace probes are never cached. When ``None`` the
+            cache machinery is bypassed entirely — useful for
+            diagnostic call-sites that must always hit the auth
+            store.
 
     Returns:
         A :class:`Decision`. The ``audit_event_id`` is set whether or
@@ -266,26 +303,43 @@ async def authorize(
     # in a *different* tenant from the caller must be indistinguishable
     # on the wire. Both paths collapse to ``deny-workspace-not-found``
     # and audit with ``workspace_id=None`` so the per-workspace audit
-    # feed of the targeted workspace does not leak the probe.
+    # feed of the targeted workspace does not leak the probe. These
+    # caller-state-dependent denials are *not* cached — a later same-
+    # tenant caller targeting the same key must reach the normal
+    # binding-resolution path.
     if workspace is None or (
         not caller_is_platform_admin
         and (caller_tenant_id is None or caller_tenant_id != str(workspace.tenant_id))
     ):
-        event_id = await audit_authz_decision(
+        return await _emit_decision(
             metadata_store,
-            actor=audit_actor,
+            audit_actor=audit_actor,
             workspace_id=None,
             principal_id=principal_id,
             permission=permission,
-            decision=_DECISION_DENY,
+            allowed=False,
             reason=REASON_DENY_WORKSPACE_NOT_FOUND,
             caller_component=caller_component,
         )
-        return Decision(
-            allowed=False,
-            reason=REASON_DENY_WORKSPACE_NOT_FOUND,
-            audit_event_id=event_id,
-        )
+
+    # Cache lookup happens *after* the tenant gate so cross-tenant
+    # probes can never read a poisoned entry. The cache key is
+    # ``(principal_id, workspace_id, permission)`` — caller-state
+    # independent — so it is safe to share across callers within the
+    # tenant.
+    if cache is not None:
+        hit = cache.get(principal_id, workspace_id, permission)
+        if hit is not None:
+            return await _emit_decision(
+                metadata_store,
+                audit_actor=audit_actor,
+                workspace_id=workspace_id,
+                principal_id=principal_id,
+                permission=permission,
+                allowed=hit.allowed,
+                reason=hit.reason,
+                caller_component=caller_component,
+            )
 
     scopes = _build_scope_set(workspace_id, str(workspace.tenant_id))
     bindings = await auth_store.list_role_bindings_for_principal(
@@ -293,77 +347,77 @@ async def authorize(
         scopes,
     )
 
-    # platform.admin short-circuits — the role's permission tuple is
-    # intentionally empty (the engine treats the role marker itself as
-    # "allow everything" so we don't have to enumerate every permission
-    # the platform ever declares).
+    # Resolve the binding set to a single (allowed, reason) tuple. The
+    # platform.admin role's permission tuple is intentionally empty —
+    # the engine treats the role marker itself as "allow everything"
+    # so we don't have to enumerate every permission the platform
+    # ever declares.
     if _is_platform_admin(bindings):
-        event_id = await audit_authz_decision(
-            metadata_store,
-            actor=audit_actor,
-            workspace_id=workspace_id,
-            principal_id=principal_id,
-            permission=permission,
-            decision=_DECISION_ALLOW,
-            reason=REASON_ALLOW_PLATFORM_ADMIN,
-            caller_component=caller_component,
-        )
-        return Decision(
-            allowed=True,
-            reason=REASON_ALLOW_PLATFORM_ADMIN,
-            audit_event_id=event_id,
+        allowed, reason = True, REASON_ALLOW_PLATFORM_ADMIN
+    elif not bindings:
+        allowed, reason = False, REASON_DENY_NO_BINDING
+    else:
+        granted = _resolve_permission_set(bindings)
+        if permission in granted:
+            allowed, reason = True, REASON_ALLOW_BOUND
+        else:
+            allowed, reason = False, REASON_DENY_PERMISSION_NOT_GRANTED
+
+    # Populate the cache *before* emitting the audit row so a write
+    # failure on the outbox does not prevent the next call from hitting
+    # the cached answer (audit drops are accounted out-of-band via
+    # EMIT_FAILURES_TOTAL).
+    if cache is not None:
+        cache.put(
+            principal_id,
+            workspace_id,
+            permission,
+            allowed=allowed,
+            reason=reason,
         )
 
-    if not bindings:
-        event_id = await audit_authz_decision(
-            metadata_store,
-            actor=audit_actor,
-            workspace_id=workspace_id,
-            principal_id=principal_id,
-            permission=permission,
-            decision=_DECISION_DENY,
-            reason=REASON_DENY_NO_BINDING,
-            caller_component=caller_component,
-        )
-        return Decision(
-            allowed=False,
-            reason=REASON_DENY_NO_BINDING,
-            audit_event_id=event_id,
-        )
+    return await _emit_decision(
+        metadata_store,
+        audit_actor=audit_actor,
+        workspace_id=workspace_id,
+        principal_id=principal_id,
+        permission=permission,
+        allowed=allowed,
+        reason=reason,
+        caller_component=caller_component,
+    )
 
-    granted = _resolve_permission_set(bindings)
-    if permission in granted:
-        event_id = await audit_authz_decision(
-            metadata_store,
-            actor=audit_actor,
-            workspace_id=workspace_id,
-            principal_id=principal_id,
-            permission=permission,
-            decision=_DECISION_ALLOW,
-            reason=REASON_ALLOW_BOUND,
-            caller_component=caller_component,
-        )
-        return Decision(
-            allowed=True,
-            reason=REASON_ALLOW_BOUND,
-            audit_event_id=event_id,
-        )
 
+async def _emit_decision(
+    metadata_store: MetadataStoreProvider,
+    *,
+    audit_actor: str,
+    workspace_id: str | None,
+    principal_id: str,
+    permission: str,
+    allowed: bool,
+    reason: str,
+    caller_component: str,
+) -> Decision:
+    """Emit the ``authz.decision`` audit row and shape the
+    :class:`Decision` return value.
+
+    Factored out so each return site — existence-hiding deny, cache
+    hit, and the resolved tail — shares a single emission
+    implementation. Keeping the audit emission funnel narrow makes
+    the "exactly one row per call" invariant trivially auditable.
+    """
     event_id = await audit_authz_decision(
         metadata_store,
         actor=audit_actor,
         workspace_id=workspace_id,
         principal_id=principal_id,
         permission=permission,
-        decision=_DECISION_DENY,
-        reason=REASON_DENY_PERMISSION_NOT_GRANTED,
+        decision=_DECISION_ALLOW if allowed else _DECISION_DENY,
+        reason=reason,
         caller_component=caller_component,
     )
-    return Decision(
-        allowed=False,
-        reason=REASON_DENY_PERMISSION_NOT_GRANTED,
-        audit_event_id=event_id,
-    )
+    return Decision(allowed=allowed, reason=reason, audit_event_id=event_id)
 
 
 __all__ = [

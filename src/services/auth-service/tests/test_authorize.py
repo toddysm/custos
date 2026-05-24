@@ -48,6 +48,7 @@ from custos_auth.authorize import (
     UnknownPermissionError,
     authorize,
 )
+from custos_auth.authz_cache import AuthzDecisionCache
 from custos_auth.roles import (
     ROLE_PLATFORM_ADMIN,
     ROLE_TENANT_ADMIN,
@@ -540,3 +541,224 @@ async def test_platform_admin_caller_bypasses_tenant_gate(
         reason=REASON_DENY_NO_BINDING,
         workspace_id=other_ws,
     )
+
+
+# ---------------------------------------------------------------------------
+# Decision-cache integration (AS-IMPL-012)
+# ---------------------------------------------------------------------------
+
+
+async def test_cache_hit_short_circuits_binding_resolution(
+    auth_store: FakeAuthAdapter,
+    metadata_store: FakeMetadataAdapter,
+) -> None:
+    # Prime the cache with an "allow-bound" entry. The auth store has
+    # no bindings for the principal, so the only way ``authorize`` can
+    # return allow is if it consulted the cache and skipped the binding
+    # resolution.
+    cache = AuthzDecisionCache(ttl_seconds=60)
+    cache.put(
+        PRINCIPAL,
+        WORKSPACE,
+        "workflow:read",
+        allowed=True,
+        reason=REASON_ALLOW_BOUND,
+    )
+
+    decision = await _call(
+        auth_store,
+        metadata_store,
+        principal_id=PRINCIPAL,
+        permission="workflow:read",
+        workspace_id=WORKSPACE,
+        caller_component="api-gateway",
+        cache=cache,
+    )
+
+    assert decision.allowed is True
+    assert decision.reason == REASON_ALLOW_BOUND
+    # Cache-hit counter bumped; miss counter untouched.
+    assert cache.hits == 1
+    assert cache.misses == 0
+    # Audit row still emitted (the cache short-cuts resolution, never
+    # the audit trail).
+    audit_id = _assert_one_audit(
+        metadata_store,
+        decision="allow",
+        reason=REASON_ALLOW_BOUND,
+        workspace_id=WORKSPACE,
+    )
+    # Each call generates its own audit event id.
+    assert decision.audit_event_id == audit_id
+
+
+async def test_cache_miss_populates_the_cache(
+    auth_store: FakeAuthAdapter,
+    metadata_store: FakeMetadataAdapter,
+) -> None:
+    _grant(
+        auth_store,
+        role_id=ROLE_WORKSPACE_VIEWER,
+        scope=WorkspaceScope(workspace_id=WorkspaceId(WORKSPACE)),
+    )
+    cache = AuthzDecisionCache(ttl_seconds=60)
+
+    decision = await _call(
+        auth_store,
+        metadata_store,
+        principal_id=PRINCIPAL,
+        permission="workflow:read",
+        workspace_id=WORKSPACE,
+        caller_component="api-gateway",
+        cache=cache,
+    )
+
+    assert decision.allowed is True
+    assert decision.reason == REASON_ALLOW_BOUND
+    # First call missed and populated the cache.
+    assert cache.misses == 1
+    cached = cache.get(PRINCIPAL, WORKSPACE, "workflow:read")
+    assert cached is not None
+    assert cached.allowed is True
+    assert cached.reason == REASON_ALLOW_BOUND
+
+
+async def test_cache_disabled_does_not_store_decisions(
+    auth_store: FakeAuthAdapter,
+    metadata_store: FakeMetadataAdapter,
+) -> None:
+    # CUSTOS_AUTH_AUTHZ_CACHE_TTL=0 bypass mode: every call resolves
+    # from the auth store; nothing is ever written to or read from
+    # the cache.
+    _grant(
+        auth_store,
+        role_id=ROLE_WORKSPACE_VIEWER,
+        scope=WorkspaceScope(workspace_id=WorkspaceId(WORKSPACE)),
+    )
+    cache = AuthzDecisionCache(ttl_seconds=0)
+
+    await _call(
+        auth_store,
+        metadata_store,
+        principal_id=PRINCIPAL,
+        permission="workflow:read",
+        workspace_id=WORKSPACE,
+        caller_component="api-gateway",
+        cache=cache,
+    )
+
+    assert cache.hits == 0
+    assert cache.misses == 0  # disabled get() short-circuits before counters
+    assert cache.get(PRINCIPAL, WORKSPACE, "workflow:read") is None
+
+
+async def test_cross_tenant_deny_is_not_cached(
+    auth_store: FakeAuthAdapter,
+    metadata_store: FakeMetadataAdapter,
+) -> None:
+    # Existence-hiding denials depend on caller_tenant_id, not on the
+    # cache-key triple alone. Caching them would let a same-tenant
+    # follow-up call read a poisoned entry. The engine must therefore
+    # never write a cross-tenant deny to the cache.
+    other_tenant = "tenant-2"
+    other_ws = "ws-in-other-tenant"
+    auth_store.workspaces[other_ws] = Workspace(
+        workspace_id=WorkspaceId(other_ws),
+        tenant_id=TenantId(other_tenant),
+        display_name=other_ws,
+        disabled_at=None,
+        created_at=datetime.now(UTC),
+    )
+    cache = AuthzDecisionCache(ttl_seconds=60)
+
+    decision = await _call(
+        auth_store,
+        metadata_store,
+        principal_id=PRINCIPAL,
+        permission="workflow:read",
+        workspace_id=other_ws,
+        caller_component="api-gateway",
+        caller_tenant_id=TENANT,
+        cache=cache,
+    )
+
+    assert decision.reason == REASON_DENY_WORKSPACE_NOT_FOUND
+    # Cache was never consulted on the existence-hiding path — the
+    # gate runs before the lookup. Check counters *before* probing
+    # the cache because ``get`` itself bumps the miss counter.
+    assert cache.hits == 0
+    assert cache.misses == 0
+    assert cache.get(PRINCIPAL, other_ws, "workflow:read") is None
+
+
+async def test_missing_workspace_deny_is_not_cached(
+    auth_store: FakeAuthAdapter,
+    metadata_store: FakeMetadataAdapter,
+) -> None:
+    cache = AuthzDecisionCache(ttl_seconds=60)
+
+    decision = await _call(
+        auth_store,
+        metadata_store,
+        principal_id=PRINCIPAL,
+        permission="workflow:read",
+        workspace_id="does-not-exist",
+        caller_component="api-gateway",
+        cache=cache,
+    )
+
+    assert decision.reason == REASON_DENY_WORKSPACE_NOT_FOUND
+    # ``get`` bumps the miss counter, so check counters first.
+    assert cache.hits == 0
+    assert cache.misses == 0
+    assert cache.get(PRINCIPAL, "does-not-exist", "workflow:read") is None
+
+
+async def test_cache_miss_then_hit_skips_auth_store_on_second_call(
+    auth_store: FakeAuthAdapter,
+    metadata_store: FakeMetadataAdapter,
+) -> None:
+    _grant(
+        auth_store,
+        role_id=ROLE_WORKSPACE_VIEWER,
+        scope=WorkspaceScope(workspace_id=WorkspaceId(WORKSPACE)),
+    )
+    cache = AuthzDecisionCache(ttl_seconds=60)
+
+    # First call \u2014 cache miss, populates from the auth store.
+    first = await _call(
+        auth_store,
+        metadata_store,
+        principal_id=PRINCIPAL,
+        permission="workflow:read",
+        workspace_id=WORKSPACE,
+        caller_component="api-gateway",
+        cache=cache,
+    )
+    assert first.allowed is True
+    assert cache.misses == 1
+    assert cache.hits == 0
+
+    # Drop the binding to prove the second call did NOT consult the
+    # auth store \u2014 if it did, the result would flip to deny-no-binding.
+    auth_store.role_bindings.clear()
+
+    second = await _call(
+        auth_store,
+        metadata_store,
+        principal_id=PRINCIPAL,
+        permission="workflow:read",
+        workspace_id=WORKSPACE,
+        caller_component="api-gateway",
+        cache=cache,
+    )
+    assert second.allowed is True
+    assert second.reason == REASON_ALLOW_BOUND
+    assert cache.hits == 1
+    # Each call emitted its own audit row \u2014 two total now.
+    rows = [
+        event
+        for _, event in metadata_store.append_audit_calls
+        if event.event_type == EVENT_AUTHZ_DECISION
+    ]
+    assert len(rows) == 2
