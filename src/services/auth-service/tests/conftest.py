@@ -77,8 +77,9 @@ def callctx_header(
 ) -> dict[str, str]:
     """Build a dev-shim call-context header for tests.
 
-    Defaults match a "platform-admin in tenant-1 / workspace-1" caller
-    so individual tests only override the fields they care about.
+    By default the payload only includes ``principal_id="user-1"``.
+    ``tenant_id``, ``workspace_id``, and ``permissions`` are added only
+    when explicitly provided by an individual test.
     """
     payload: dict[str, Any] = {"principal_id": principal_id}
     if tenant_id is not None:
