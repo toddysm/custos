@@ -32,6 +32,14 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "svc.fullname" . }}
+            {{- if .Values.externalSecret.enabled }}
+            # ExternalSecret materializes a Secret under the same name
+            # carrying the AS-side DSN env var(s) wired by AS-IMPL-004.
+            # ConfigMap first so common env vars are set; Secret last so
+            # secret-store-backed values win on overlap.
+            - secretRef:
+                name: {{ include "svc.fullname" . }}
+            {{- end }}
           {{- with .Values.env }}
           env:
             {{- toYaml . | nindent 12 }}

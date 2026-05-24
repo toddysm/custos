@@ -6,3 +6,22 @@ metadata:
     {{- include "svc.labels" . | nindent 4 }}
 data:
   CUSTOS_SERVICE_NAME: {{ .Chart.Name | quote }}
+  # Non-secret CUSTOS_AUTH_* env vars per design.md § Configuration.
+  CUSTOS_AUTH_SERVICE_TOKEN_TTL_DEFAULT: {{ .Values.config.serviceTokenTtlDefault | quote }}
+  CUSTOS_AUTH_CALL_CONTEXT_KEY_ROTATION: {{ .Values.config.callContextKeyRotation | quote }}
+  CUSTOS_AUTH_INTERNAL_IDENTITY_MODE: {{ .Values.config.internalIdentityMode | quote }}
+  CUSTOS_AUTH_AUTHZ_CACHE_TTL: {{ .Values.config.authzCacheTtl | quote }}
+  CUSTOS_AUTH_AUTHN_CACHE_TTL: {{ .Values.config.authnCacheTtl | quote }}
+  # CUSTOS_AUTH_CALL_CONTEXT_KEY_REF is a Dapr secret-store *reference*
+  # (the name of the entry the service looks up at runtime via the Dapr
+  # Secrets API), not the signing key itself. It is safe to project
+  # through the ConfigMap.
+  {{- with .Values.config.callContextKeyRef }}
+  CUSTOS_AUTH_CALL_CONTEXT_KEY_REF: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.config.oidcIssuers }}
+  CUSTOS_AUTH_OIDC_ISSUERS: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.config.platformAdminBootstrap }}
+  CUSTOS_AUTH_PLATFORM_ADMIN_BOOTSTRAP: {{ . | quote }}
+  {{- end }}
