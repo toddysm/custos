@@ -81,10 +81,11 @@ def test_jwks_endpoint_emits_cache_control_header() -> None:
 
 
 def test_jwks_endpoint_is_listed_as_callctx_bypass_path() -> None:
-    # Routes behind the call-context middleware require an X-Call-Context
-    # header outside development. The JWKS route must be reachable
-    # without one (verifiers fetch it *before* they hold a context),
-    # so it has to live in the middleware's bypass set.
+    # Routes behind the call-context middleware require an
+    # X-Custos-Callctx header outside development. The JWKS route
+    # must be reachable without one (verifiers fetch it *before*
+    # they hold a context), so it has to live in the middleware's
+    # bypass set.
     from custos_auth.middleware.callctx import _BYPASS_PATHS
 
     assert "/.well-known/jwks.json" in _BYPASS_PATHS
