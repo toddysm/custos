@@ -82,6 +82,7 @@ _BYPASS_PATHS: frozenset[str] = frozenset(
         "/readyz",
         "/v1/auth/verify",
         "/v1/authz/verify-and-authorize",
+        "/.well-known/jwks.json",
     }
 )
 

@@ -7,11 +7,20 @@ import pytest
 from custos_auth.authz_cache import DEFAULT_AUTHZ_CACHE_TTL_SECONDS
 from custos_auth.settings import (
     DEFAULT_AUTHN_CACHE_TTL_SECONDS,
+    DEFAULT_CALL_CONTEXT_AUDIENCE,
+    DEFAULT_CALL_CONTEXT_KEY_ROTATION_SECONDS,
+    DEFAULT_CALL_CONTEXT_SECRET_STORE,
+    DEFAULT_CALL_CONTEXT_TTL_SECONDS,
     DEFAULT_SERVICE_TOKEN_TTL_SECONDS,
     DEFAULT_TOKEN_SWEEPER_INTERVAL_SECONDS,
     ENV_AUTH_STORE_DSN,
     ENV_AUTHN_CACHE_TTL,
     ENV_AUTHZ_CACHE_TTL,
+    ENV_CALL_CONTEXT_AUDIENCE,
+    ENV_CALL_CONTEXT_KEY_REF,
+    ENV_CALL_CONTEXT_KEY_ROTATION,
+    ENV_CALL_CONTEXT_SECRET_STORE,
+    ENV_CALL_CONTEXT_TTL_SECONDS,
     ENV_METADATA_STORE_DSN,
     ENV_SERVICE_TOKEN_TTL_DEFAULT,
     ENV_TOKEN_SWEEPER_INTERVAL,
@@ -244,3 +253,84 @@ def test_token_sweeper_interval_rejects_negative_value() -> None:
 def test_token_sweeper_interval_rejects_non_integer_value() -> None:
     with pytest.raises(SettingsError, match=ENV_TOKEN_SWEEPER_INTERVAL):
         load_settings(_required_env(**{ENV_TOKEN_SWEEPER_INTERVAL: "not-a-number"}))
+
+
+# ---------------------------------------------------------------------------
+# Phase G — call-context signer settings (AS-IMPL-017)
+# ---------------------------------------------------------------------------
+
+
+def test_call_context_settings_default_when_env_unset() -> None:
+    settings = load_settings(_required_env())
+    assert settings.call_context_key_ref == ""
+    assert settings.call_context_secret_store == DEFAULT_CALL_CONTEXT_SECRET_STORE
+    assert settings.call_context_audience == DEFAULT_CALL_CONTEXT_AUDIENCE
+    assert settings.call_context_ttl_seconds == DEFAULT_CALL_CONTEXT_TTL_SECONDS
+    assert settings.call_context_key_rotation_seconds == DEFAULT_CALL_CONTEXT_KEY_ROTATION_SECONDS
+
+
+def test_call_context_key_ref_is_carried_when_provided() -> None:
+    settings = load_settings(
+        _required_env(**{ENV_CALL_CONTEXT_KEY_REF: "call-context-key"}),
+    )
+    assert settings.call_context_key_ref == "call-context-key"
+
+
+def test_call_context_secret_store_override() -> None:
+    settings = load_settings(
+        _required_env(**{ENV_CALL_CONTEXT_SECRET_STORE: "vault"}),
+    )
+    assert settings.call_context_secret_store == "vault"
+
+
+def test_call_context_audience_override() -> None:
+    settings = load_settings(
+        _required_env(**{ENV_CALL_CONTEXT_AUDIENCE: "custos.test"}),
+    )
+    assert settings.call_context_audience == "custos.test"
+
+
+def test_call_context_ttl_override() -> None:
+    settings = load_settings(
+        _required_env(**{ENV_CALL_CONTEXT_TTL_SECONDS: "60"}),
+    )
+    assert settings.call_context_ttl_seconds == 60
+
+
+def test_call_context_ttl_rejects_zero() -> None:
+    with pytest.raises(SettingsError, match="positive integer"):
+        load_settings(_required_env(**{ENV_CALL_CONTEXT_TTL_SECONDS: "0"}))
+
+
+def test_call_context_ttl_rejects_negative() -> None:
+    with pytest.raises(SettingsError, match="positive integer"):
+        load_settings(_required_env(**{ENV_CALL_CONTEXT_TTL_SECONDS: "-1"}))
+
+
+def test_call_context_ttl_rejects_non_integer() -> None:
+    with pytest.raises(SettingsError, match=ENV_CALL_CONTEXT_TTL_SECONDS):
+        load_settings(_required_env(**{ENV_CALL_CONTEXT_TTL_SECONDS: "not-a-number"}))
+
+
+def test_call_context_key_rotation_override() -> None:
+    settings = load_settings(
+        _required_env(**{ENV_CALL_CONTEXT_KEY_ROTATION: "3600"}),
+    )
+    assert settings.call_context_key_rotation_seconds == 3600
+
+
+def test_call_context_key_rotation_accepts_zero_to_disable() -> None:
+    settings = load_settings(
+        _required_env(**{ENV_CALL_CONTEXT_KEY_ROTATION: "0"}),
+    )
+    assert settings.call_context_key_rotation_seconds == 0
+
+
+def test_call_context_key_rotation_rejects_negative() -> None:
+    with pytest.raises(SettingsError, match="non-negative"):
+        load_settings(_required_env(**{ENV_CALL_CONTEXT_KEY_ROTATION: "-1"}))
+
+
+def test_call_context_key_rotation_rejects_non_integer() -> None:
+    with pytest.raises(SettingsError, match=ENV_CALL_CONTEXT_KEY_ROTATION):
+        load_settings(_required_env(**{ENV_CALL_CONTEXT_KEY_ROTATION: "not-a-number"}))
