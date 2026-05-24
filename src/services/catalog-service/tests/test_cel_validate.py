@@ -545,7 +545,7 @@ def test_validate_for_each_evaluates_in_outer_item_less_scope() -> None:
                 "with": {"v": "${{ item.value }}"},
             },
         ],
-        inputs={"items": {"type": "list"}},
+        inputs={"items": {"type": "array"}},
     )
     validate_expressions(normalize_workflow(doc))
 
