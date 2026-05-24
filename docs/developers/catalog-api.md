@@ -61,31 +61,28 @@ authz envelopes:
 
 ## Reference grammar
 
-The catalog uses a single, opinionated **reference (ref) grammar** to
-identify versioned objects:
+The catalog uses an opinionated **reference (ref) grammar** whose
+exact form depends on object kind:
 
-| Form | Example | Meaning |
-|---|---|---|
-| `workspace/name@MAJOR.MINOR.PATCH` | `ws-1/orders@1.2.0` | Exact pin to a specific version |
-| `workspace/name@MAJOR` | `ws-1/orders@1` | Latest non-deprecated version inside major `MAJOR` |
-| `name@MAJOR.MINOR.PATCH` | `oci-registry@1.0.0` | Connector-type pin (no workspace) |
-| `name@MAJOR` | `oci-registry@1` | Connector-type major pin |
+| Kind | Form | Example | Meaning |
+|---|---|---|---|
+| Workflow / Template | `workspace/name@VERSION` | `ws-1/orders@42` | Exact pin to a specific published integer version |
+| Activity-type | `workspace/name@MAJOR.MINOR.PATCH` | `ws-1/vuln-scan@2.1.0` | Exact semver pin |
+| Activity-type | `workspace/name@MAJOR` | `ws-1/vuln-scan@2` | Major-version semver ref |
+| Connector-type | `name@MAJOR.MINOR.PATCH` | `oci-registry@1.0.0` | Exact semver pin (no workspace) |
+| Connector-type | `name@MAJOR` | `oci-registry@1` | Major-version semver ref |
 
 Notes:
 
-1. The two-segment form (`workspace/name@...`) is used by workflows,
-   templates, and activity-types.
-2. Connector-types are platform-scoped and use the one-segment form.
-3. The `@MAJOR` form resolves to the highest non-deprecated version
-   under that major at the moment of resolution.
-4. Bare names (`vuln-scan@2`), `latest`-style tags, and partial
-   versions (`@1.2`) are explicitly rejected with
-   `catalog.workflow_not_found` or stage-level validation errors.
-
-Internally, `@MAJOR` is translated to the PEP 440 specifier
-`>=MAJOR,<MAJOR+1` before being passed to the storage layer, so any
-adapter implementing the SPL `CatalogStoreProvider.resolve` contract
-sees a valid `SpecifierSet`.
+1. Workflows and templates use monotonic integer versions and are
+   referenced as `workspace/name@<int>`.
+2. Activity-types use the two-segment workspace-scoped form and semver
+   versioning.
+3. Connector-types are platform-scoped, use the one-segment form, and
+   use semver versioning.
+4. Bare names, `latest`-style tags, and unsupported partial versions
+   are rejected. In particular, workflows/templates do not use semver
+   shorthand such as `@MAJOR` or `@MAJOR.MINOR`.
 
 ---
 
