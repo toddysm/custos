@@ -83,6 +83,11 @@ CALLCTX_HEADER: str = "x-custos-callctx"
 #: * JWKS endpoint — every component fetches the public key set
 #:   anonymously to verify call-contexts locally; requiring a
 #:   call-context here would be a chicken-and-egg deadlock.
+#: * OpenAPI / docs endpoints — the spec is a public artefact used by
+#:   client codegen, gateways, and external operators; gating it
+#:   behind a call-context would mean nothing could discover the
+#:   service surface without already speaking the call-context
+#:   protocol.
 _BYPASS_PATHS: frozenset[str] = frozenset(
     {
         "/healthz",
@@ -91,6 +96,10 @@ _BYPASS_PATHS: frozenset[str] = frozenset(
         "/v1/auth/login/oidc/callback",
         "/v1/authz/verify-and-authorize",
         "/.well-known/jwks.json",
+        "/openapi.json",
+        "/docs",
+        "/docs/oauth2-redirect",
+        "/redoc",
     }
 )
 
