@@ -21,12 +21,17 @@ classifiers = [
     "Typing :: Typed",
 ]
 # Runtime surfaces are pulled in incrementally across the AS-IMPL-* phases.
-# Path-installed locally and in CI from `src/libs/` via the same install
-# order in `.github/workflows/python-services.yml`. AS-IMPL-003 will add
-# `custos-spl` + `custos-postgres` for `AuthStoreProvider` and the
-# schema-revision startup gate; AS-IMPL-017 will add a JWT library
-# (proposed `python-jose[cryptography]` or `authlib`) for the EdDSA
-# call-context signer; AS-IMPL-020 will add OIDC verification deps.
+# Phase A (AS-IMPL-001) ships with **zero** in-repo `custos-*` runtime
+# dependencies, so the CI install order in
+# `.github/workflows/python-services.yml` is just a single
+# `pip install -e ".[dev]"` step (no extra "install libs from path" step,
+# unlike the catalog-service job which already needs SPL + Postgres +
+# CEL). AS-IMPL-003 will add `custos-spl` + `custos-postgres` to the
+# `dependencies` list below for `AuthStoreProvider` + the schema-revision
+# startup gate **and** wire the matching path-install steps into the
+# workflow (mirroring catalog-service). AS-IMPL-017 will add a JWT
+# library (proposed `python-jose[cryptography]` or `authlib`) for the
+# EdDSA call-context signer; AS-IMPL-020 will add OIDC verification deps.
 dependencies = [
     "fastapi>=0.110,<1",
     "uvicorn[standard]>=0.27,<1",

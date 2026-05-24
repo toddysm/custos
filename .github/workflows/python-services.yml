@@ -123,6 +123,11 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
+      # NOTE: AS-IMPL-001 (Phase A) ships zero in-repo `custos-*` runtime
+      # deps, so there is no "install libs from path" step yet. AS-IMPL-003
+      # (Phase B) will add `custos-spl` + `custos-postgres` to the
+      # auth-service pyproject and prepend the matching path-install step
+      # here, mirroring the catalog-service job above.
       - name: Install package and dev dependencies
         run: pip install -e ".[dev]"
 
