@@ -1,12 +1,26 @@
 # auth-service — leave image.repository/tag/pullPolicy and replicaCount/resources
 # empty to inherit umbrella global.* values. Set them here only to override
 # the umbrella for this one subchart.
+#
+# Configuration variables come from
+# design/components/auth-service/design.md § Configuration. Non-secret
+# vars are projected through the ConfigMap (`config:` block below). The
+# call-context signing key itself is resolved by the service at runtime
+# via the Dapr Secrets API using the *reference* in
+# `CUSTOS_AUTH_CALL_CONTEXT_KEY_REF` — it is NOT a Kubernetes Secret.
+# AS-IMPL-004 (Phase B) will introduce the AS-side Postgres DSN env
+# var(s) and wire them through the ExternalSecret block.
 
 enabled: true
 
 replicaCount: ""
 
 image:
+  # Default repository is built from <global.imageRegistry>/<chart name>
+  # by templates/_helpers.tpl `svc.image`. Leave `image.repository` empty
+  # here so airgapped/override profiles can switch registries via
+  # `global.imageRegistry`; document the binding in comments rather than
+  # hardcoding the repository.
   repository: ""
   tag: ""
   pullPolicy: ""
@@ -17,6 +31,8 @@ service:
 
 resources: {}
 
+# Per-pod env overrides. Most config flows through envFrom (ConfigMap +
+# ExternalSecret); this list is for ad-hoc overrides only.
 env: []
 
 dapr:
@@ -28,6 +44,31 @@ dapr:
 serviceMonitor:
   enabled: false
 
+# Non-secret CUSTOS_AUTH_* env vars projected into the ConfigMap.
+#
+# Required-at-install values (`oidcIssuers`, `callContextKeyRef`,
+# `platformAdminBootstrap`) are left empty by default so `helm template`
+# stays green on the scaffold; the umbrella per-profile values files OR
+# a pre-install operator workflow MUST set them before the service can
+# pass AS-IMPL-018 (JWKS rotation) and AS-IMPL-020 (OIDC verifier)
+# bring-up.
+config:
+  # design.md § Configuration defaults
+  serviceTokenTtlDefault: "90d"
+  callContextKeyRotation: "7d"
+  internalIdentityMode: "jwt"
+  authzCacheTtl: "60s"
+  authnCacheTtl: "30s"
+  # Required at install / first boot. Override per-profile.
+  oidcIssuers: ""
+  callContextKeyRef: ""
+  platformAdminBootstrap: ""
+
+# ExternalSecret skeleton — empty by default. AS-IMPL-004 (Phase B) will
+# populate this with the SPL Postgres DSN env var(s) once
+# `AuthStoreProvider` lands. Eval profiles (single-node) can leave this
+# off and rely on an operator-supplied Secret; HA / connected profiles
+# enable it and project keys from the configured secret store.
 externalSecret:
   enabled: false
   refreshInterval: 1h
