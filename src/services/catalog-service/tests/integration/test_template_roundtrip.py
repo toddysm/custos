@@ -56,7 +56,7 @@ def test_template_round_trip_preserves_canonical_hash(
     )
     assert get_a.status_code == 200
     a_doc = get_a.json()["document"]
-    a_hash = canonical_hash(a_doc)
+    a_hash = canonical_hash(a_doc["spec"])
 
     # Step 2 — Extract template T pointing at the message field.
     extract_resp = client.post(
