@@ -91,6 +91,8 @@ EVENT_WORKSPACE_CREATED: Final[str] = "workspace.created"
 EVENT_PRINCIPAL_CREATED: Final[str] = "principal.created"
 EVENT_PRINCIPAL_DISABLED: Final[str] = "principal.disabled"
 EVENT_OIDC_IDENTITY_LINKED: Final[str] = "oidc.identity-linked"
+EVENT_ROLE_BINDING_GRANTED: Final[str] = "role-binding.granted"
+EVENT_ROLE_BINDING_REVOKED: Final[str] = "role-binding.revoked"
 
 
 # ---------------------------------------------------------------------------
@@ -256,17 +258,98 @@ async def audit_oidc_identity_linked(
     )
 
 
+# ---------------------------------------------------------------------------
+# Role-binding events (Phase D / AS-IMPL-010)
+# ---------------------------------------------------------------------------
+#
+# The SPL ``with_transaction`` primitive is intra-provider — a handle
+# issued by :class:`AuthStoreProvider` cannot be replayed against
+# :class:`MetadataStoreProvider.append_audit`. Role-binding handlers
+# therefore commit the binding write first and follow up with a
+# best-effort audit emission; any drop bumps
+# :data:`EMIT_FAILURES_TOTAL` and pages Observability. See
+# :mod:`custos_auth.api.routes.role_bindings` for the full rationale.
+
+
+def _audit_workspace_for_scope(scope_kind: str, scope_id: str | None) -> str:
+    """Pick the audit-bucket workspace id for a role-binding event.
+
+    Workspace-scope bindings record under the affected workspace; all
+    other scopes record under the platform sentinel so the
+    Observability pipeline can still index them by bucket.
+    """
+    if scope_kind == "workspace" and scope_id is not None:
+        return scope_id
+    return PLATFORM_WORKSPACE_ID
+
+
+async def audit_role_binding_granted(
+    metadata_store: MetadataStoreProvider,
+    *,
+    actor: str,
+    binding_id: str,
+    principal_id: str,
+    role_id: str,
+    scope_kind: str,
+    scope_id: str | None,
+) -> None:
+    """Emit ``role-binding.granted`` (best-effort, post-commit)."""
+    await _emit(
+        metadata_store,
+        workspace_id=_audit_workspace_for_scope(scope_kind, scope_id),
+        event_type=EVENT_ROLE_BINDING_GRANTED,
+        actor=actor,
+        subject={"binding_id": binding_id, "principal_id": principal_id},
+        payload={
+            "role_id": role_id,
+            "scope_kind": scope_kind,
+            "scope_id": scope_id,
+        },
+    )
+
+
+async def audit_role_binding_revoked(
+    metadata_store: MetadataStoreProvider,
+    *,
+    actor: str,
+    binding_id: str,
+    principal_id: str,
+    role_id: str,
+    scope_kind: str,
+    scope_id: str | None,
+    reason: str,
+) -> None:
+    """Emit ``role-binding.revoked`` (best-effort, post-commit)."""
+    await _emit(
+        metadata_store,
+        workspace_id=_audit_workspace_for_scope(scope_kind, scope_id),
+        event_type=EVENT_ROLE_BINDING_REVOKED,
+        actor=actor,
+        subject={"binding_id": binding_id, "principal_id": principal_id},
+        payload={
+            "role_id": role_id,
+            "scope_kind": scope_kind,
+            "scope_id": scope_id,
+            "reason": reason,
+        },
+    )
+
+
 __all__ = [
     "EMIT_FAILURES_TOTAL",
     "EVENT_OIDC_IDENTITY_LINKED",
     "EVENT_PRINCIPAL_CREATED",
     "EVENT_PRINCIPAL_DISABLED",
+    "EVENT_ROLE_BINDING_GRANTED",
+    "EVENT_ROLE_BINDING_REVOKED",
     "EVENT_TENANT_CREATED",
     "EVENT_WORKSPACE_CREATED",
     "PLATFORM_WORKSPACE_ID",
     "audit_oidc_identity_linked",
     "audit_principal_created",
     "audit_principal_disabled",
+    "audit_role_binding_granted",
+    "audit_role_binding_revoked",
     "audit_tenant_created",
     "audit_workspace_created",
 ]

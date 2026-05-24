@@ -20,6 +20,7 @@ from typing import Annotated
 from custos_spl import AuthStoreProvider, MetadataStoreProvider
 from fastapi import Depends, Request
 
+from custos_auth.binding_events import BindingChangedPublisher
 from custos_auth.middleware.callctx import (
     CallContext,
     get_call_context,
@@ -56,6 +57,17 @@ def get_metadata_store(
     return providers.metadata_store
 
 
+def get_binding_changed_publisher(
+    providers: Annotated[Providers, Depends(get_providers)],
+) -> BindingChangedPublisher:
+    """Return the binding-changed event publisher from the provider bundle.
+
+    Defaults to :class:`NoOpBindingChangedPublisher` for single-replica
+    deployments; the Phase E deployment swaps in the real transport.
+    """
+    return providers.binding_changed_publisher
+
+
 def require_permission(
     *names: str,
 ) -> Callable[[Request], Awaitable[CallContext]]:
@@ -69,6 +81,7 @@ def require_permission(
 
 __all__ = [
     "get_auth_store",
+    "get_binding_changed_publisher",
     "get_call_context",
     "get_metadata_store",
     "get_providers",

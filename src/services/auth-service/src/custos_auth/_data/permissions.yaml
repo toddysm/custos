@@ -1,0 +1,114 @@
+# Platform-M1 permissions registry shipped with auth-service.
+#
+# Phase D / AS-IMPL-008. The registry loader in
+# ``custos_auth.permission_registry`` reads this file (and any extra files
+# pointed at by ``CUSTOS_AUTH_PERMISSIONS_PATHS``) at service startup,
+# upserts each row into the SPL ``Permission`` table, and refuses to
+# start the service if any built-in role references a name no path
+# declared.
+#
+# Each entry carries:
+# * ``name``        — canonical permission identifier the call-context
+#                     and authorize engine consume.
+# * ``description`` — operator-facing human description; surfaced via
+#                     ``GET /v1/permissions`` and rendered in the
+#                     audit-trail diagnostic when a role references an
+#                     unknown name.
+# * ``declaredBy``  — pipe-delimited list of components that ship this
+#                     permission. Multi-declarer entries (e.g.
+#                     ``audit:read`` shipped by both auth-service and
+#                     observability-audit-service) merge with ``|`` so
+#                     the registry can attribute every name to the
+#                     component(s) that own it.
+#
+# The three ``admin:*`` entries auth-service owns end-to-end
+# (``admin:service-account``, ``admin:role-binding``, ``admin:workspace``)
+# stay first so a reviewer can read the auth-service-side surface in
+# one block; the rest are the cross-component perms the v1 built-in
+# roles (``workspace.viewer`` → ``platform.admin``) reference. As each
+# component lands its own service, it will ship its own
+# ``permissions.yaml`` and ``CUSTOS_AUTH_PERMISSIONS_PATHS`` will be
+# pointed at that file instead of relying on the platform-M1 fallback
+# embedded here.
+
+permissions:
+  # ----- auth-service-owned admin permissions ------------------------
+  - name: admin:service-account
+    description: |
+      Create, disable, and list service accounts within a workspace.
+      Required to provision automation principals and rotate their
+      credentials.
+    declaredBy: auth-service
+  - name: admin:role-binding
+    description: |
+      Grant or revoke role bindings for principals within a scope
+      (workspace, tenant, or platform). Required for every call to
+      POST/DELETE /v1/.../role-bindings.
+    declaredBy: auth-service
+  - name: admin:workspace
+    description: |
+      Manage workspace lifecycle (create, disable) within a tenant.
+      Held by tenant.admin and platform.admin.
+    declaredBy: auth-service
+
+  # ----- workflow-service-owned permissions --------------------------
+  - name: workflow:read
+    description: List workflows and read workflow definitions in a workspace.
+    declaredBy: workflow-service
+  - name: workflow:create
+    description: Create, update, and publish workflows in a workspace.
+    declaredBy: workflow-service
+  - name: workflow:execute
+    description: |
+      Trigger workflow runs (manual or via signed trigger receivers).
+      Required for every POST /runs call.
+    declaredBy: workflow-service
+  - name: run:read
+    description: Read workflow run history, step outputs, and run-level audit rows.
+    declaredBy: workflow-service
+  - name: run:cancel
+    description: Cancel an in-flight run owned by the calling workspace.
+    declaredBy: workflow-service
+
+  # ----- catalog-service-owned permissions ---------------------------
+  - name: template:read
+    description: List and read workflow templates in the workspace catalog.
+    declaredBy: catalog-service
+  - name: template:create
+    description: Publish new templates and update existing template versions.
+    declaredBy: catalog-service
+
+  # ----- connector-service-owned permissions -------------------------
+  - name: connector:read
+    description: List connectors and read connector metadata for a workspace.
+    declaredBy: connector-service
+  - name: admin:connector
+    description: |
+      Register, update, and remove connectors in a workspace
+      (including connection secret bindings).
+    declaredBy: connector-service
+
+  # ----- trigger-service-owned permissions ---------------------------
+  - name: admin:trigger
+    description: |
+      Create, update, and disable trigger receivers (webhooks, cron,
+      and external-event subscriptions) in a workspace.
+    declaredBy: trigger-service
+
+  # ----- observability-audit-service-owned permissions ---------------
+  # `audit:read` is multi-declarer: auth-service owns the
+  # role-binding/principal audit projection, observability-audit
+  # owns the consolidated audit log.
+  - name: audit:read
+    description: Read audit-trail events for a workspace, tenant, or platform scope.
+    declaredBy: auth-service|observability-audit-service
+  - name: logs:read
+    description: |
+      Read run logs and connector logs streamed to the workspace
+      observability bucket.
+    declaredBy: observability-audit-service
+  - name: metrics:read
+    description: |
+      Read workspace-scoped metric series (run latency, run failure
+      rates, queue depth).
+    declaredBy: observability-audit-service
