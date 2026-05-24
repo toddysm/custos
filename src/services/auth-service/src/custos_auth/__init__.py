@@ -26,10 +26,21 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from custos_auth.api import all_routers, register_exception_handlers
 from custos_auth.binding_events import LocalBindingChangedBus
+from custos_auth.callctx_keyring import (
+    KeyRing,
+    install_key_age_metric,
+    run_rotation_loop,
+)
+from custos_auth.callctx_signer import (
+    CallContextSigner,
+    DaprSecretsSigningKeyResolver,
+    SigningKey,
+    StaticSigningKeyResolver,
+)
 from custos_auth.health import router as health_router
 from custos_auth.middleware.callctx import CallContextMiddleware
 from custos_auth.permission_registry import seed_permissions_and_validate_roles
@@ -53,6 +64,58 @@ __all__ = ["__version__", "create_app"]
 __version__ = "0.1.0"
 
 logger = logging.getLogger("custos_auth")
+
+
+async def _load_initial_signing_key(settings: Settings) -> SigningKey:
+    """Build the initial :class:`SigningKey` for the lifespan.
+
+    Production / non-development deployments must set
+    :data:`custos_auth.settings.ENV_CALL_CONTEXT_KEY_REF` so the key
+    is pulled from the Dapr Secrets sidecar — that is the M1 secrets
+    contract for the call-context signer
+    (``design/components/auth-service/design.md`` § Internal vs
+    External Auth — Trust Model).
+
+    Development convenience: when the env var is empty and
+    ``CUSTOS_AUTH_ENVIRONMENT`` is set to ``"development"`` (or left
+    at its default), the helper generates an ephemeral keypair so
+    operators get a working signer without standing up Dapr. The
+    generated key does not survive a pod restart, which is desirable
+    for dev and explicitly disallowed in production.
+
+    Production deployments without ``CUSTOS_AUTH_CALL_CONTEXT_KEY_REF``
+    crash-loop with an operator-actionable diagnostic — the same
+    pattern used by the call-context middleware verifier-url guard.
+    """
+    key_ref = settings.call_context_key_ref.strip()
+    if key_ref:
+        import httpx
+
+        async def _fetch(url: str) -> dict[str, Any]:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                return response.json()  # type: ignore[no-any-return]
+
+        resolver = DaprSecretsSigningKeyResolver(
+            secret_store=settings.call_context_secret_store,
+            secret_name=key_ref,
+            fetch_json=_fetch,
+        )
+        return await resolver.active_signing_key()
+    if settings.environment != "development":
+        raise RuntimeError(
+            "CUSTOS_AUTH_CALL_CONTEXT_KEY_REF must be set outside development; "
+            "the call-context signer cannot mint tokens without a stable key. "
+            "Configure the Dapr secret reference in the Helm values "
+            "(deploy/helm/charts/auth-service/values.yaml) and re-deploy."
+        )
+    logger.warning(
+        "CUSTOS_AUTH_CALL_CONTEXT_KEY_REF not set; generating an ephemeral "
+        "Ed25519 call-context signing key for development. Tokens minted "
+        "by this replica will not survive a pod restart."
+    )
+    return SigningKey.generate()
 
 
 def create_app(
@@ -170,6 +233,55 @@ def create_app(
             local_providers.authn_cache.invalidate_by_token_id(event.token_id)
 
         await local_providers.token_revoked_subscriber.start(_on_token_revoked_remote)
+        # Phase G (AS-IMPL-017 / AS-IMPL-018): build the call-context
+        # signing-key ring, signer, and rotation loop. The lifespan
+        # owns the long-lived KeyRing + signer so the JWKS route and
+        # any future internal mint paths share a single source of
+        # truth. The resolver is a :class:`StaticSigningKeyResolver`
+        # initialised either from a Dapr Secrets reference (production
+        # / non-development) or from a freshly generated keypair
+        # (development convenience — operators get a working signer
+        # without a Dapr sidecar).
+        initial_signing_key = await _load_initial_signing_key(effective_settings)
+        signing_key_resolver = StaticSigningKeyResolver(key=initial_signing_key)
+        # When rotation is disabled (operator manages rotation
+        # externally via ``CUSTOS_AUTH_CALL_CONTEXT_KEY_ROTATION=0``)
+        # the ring still needs a positive rotation_period_seconds so
+        # the JWKS ``Cache-Control: max-age`` makes sense. Fall back
+        # to the design default (7 days) — that is the longest
+        # plausible interval and matches the JWKS overlap window the
+        # operator should target.
+        from custos_auth.callctx_keyring import DEFAULT_ROTATION_PERIOD_SECONDS
+
+        rotation_for_ring = (
+            effective_settings.call_context_key_rotation_seconds
+            if effective_settings.call_context_key_rotation_seconds > 0
+            else DEFAULT_ROTATION_PERIOD_SECONDS
+        )
+        key_ring = KeyRing(
+            initial_signing_key,
+            rotation_period_seconds=rotation_for_ring,
+        )
+        call_context_signer = CallContextSigner(
+            signing_key_resolver,
+            audience=effective_settings.call_context_audience,
+            default_ttl_seconds=effective_settings.call_context_ttl_seconds,
+        )
+        app.state.call_context_key_ring = key_ring
+        app.state.call_context_signing_key_resolver = signing_key_resolver
+        app.state.call_context_signer = call_context_signer
+        install_key_age_metric(key_ring)
+        rotation_task: asyncio.Task[None] | None = None
+        if effective_settings.call_context_key_rotation_seconds > 0:
+            rotation_task = asyncio.create_task(
+                run_rotation_loop(
+                    key_ring=key_ring,
+                    resolver=signing_key_resolver,
+                    rotation_period_seconds=(effective_settings.call_context_key_rotation_seconds),
+                ),
+                name="custos-auth.callctx-rotation",
+            )
+        app.state.call_context_rotation_task = rotation_task
         # Phase F (AS-IMPL-016): launch the token-expiry sweeper.
         # The loop coroutine handles the ``interval=0`` (disabled)
         # case itself by returning immediately — we still spawn the
@@ -201,6 +313,17 @@ def create_app(
                 pass
             except Exception:  # guard lifespan shutdown
                 logger.warning("token sweeper failed to stop cleanly", exc_info=True)
+            if rotation_task is not None:
+                rotation_task.cancel()
+                try:
+                    await rotation_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:  # guard lifespan shutdown
+                    logger.warning(
+                        "call-context rotation loop failed to stop cleanly",
+                        exc_info=True,
+                    )
             try:
                 await local_providers.binding_changed_subscriber.stop()
             except Exception:  # guard lifespan shutdown

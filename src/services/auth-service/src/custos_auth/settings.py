@@ -173,6 +173,21 @@ DEFAULT_CALL_CONTEXT_TTL_SECONDS: Final[int] = 300
 #: have to import the signer just to know the default.
 DEFAULT_CALL_CONTEXT_AUDIENCE: Final[str] = "custos.internal"
 
+#: Optional. Interval (seconds) between call-context signing-key
+#: rotations (AS-IMPL-018). Default
+#: :data:`DEFAULT_CALL_CONTEXT_KEY_ROTATION_SECONDS` (7 days) mirrors
+#: the design's ``CUSTOS_AUTH_CALL_CONTEXT_KEY_ROTATION`` default.
+#: Setting the value to ``0`` disables the in-process rotation
+#: loop entirely — operators must then manage rotation externally
+#: (e.g. via a Kubernetes CronJob that swaps the Dapr secret).
+#: Negative or non-integer values raise :class:`SettingsError`.
+ENV_CALL_CONTEXT_KEY_ROTATION: Final[str] = "CUSTOS_AUTH_CALL_CONTEXT_KEY_ROTATION"
+
+#: Default rotation interval (7 days, in seconds). Mirrors
+#: :data:`custos_auth.callctx_keyring.DEFAULT_ROTATION_PERIOD_SECONDS`;
+#: carried in settings so the runtime knob lives next to its peers.
+DEFAULT_CALL_CONTEXT_KEY_ROTATION_SECONDS: Final[int] = 7 * 24 * 60 * 60
+
 
 class SettingsError(RuntimeError):
     """Raised when the environment is missing a required setting or carries a malformed value."""
@@ -195,6 +210,7 @@ class Settings:
     call_context_secret_store: str
     call_context_audience: str
     call_context_ttl_seconds: int
+    call_context_key_rotation_seconds: int
 
     @property
     def is_production(self) -> bool:
@@ -366,6 +382,31 @@ def _parse_call_context_ttl(raw: str) -> int:
     return value
 
 
+def _parse_call_context_key_rotation(raw: str) -> int:
+    """Parse the ``CUSTOS_AUTH_CALL_CONTEXT_KEY_ROTATION`` env value.
+
+    Empty string falls back to
+    :data:`DEFAULT_CALL_CONTEXT_KEY_ROTATION_SECONDS` (7 days). ``0``
+    disables the in-process rotation loop (operator manages rotation
+    externally). Negative or non-integer values raise
+    :class:`SettingsError`.
+    """
+    if raw == "":
+        return DEFAULT_CALL_CONTEXT_KEY_ROTATION_SECONDS
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise SettingsError(
+            f"{ENV_CALL_CONTEXT_KEY_ROTATION} must be a non-negative integer (got {raw!r})"
+        ) from exc
+    if value < 0:
+        raise SettingsError(
+            f"{ENV_CALL_CONTEXT_KEY_ROTATION} must be non-negative (got {value}); "
+            "use 0 to disable in-process rotation."
+        )
+    return value
+
+
 def load_settings(env: dict[str, str] | None = None) -> Settings:
     """Parse a :class:`Settings` from the supplied env mapping (default ``os.environ``)."""
     src: dict[str, str] = dict(os.environ if env is None else env)
@@ -397,12 +438,16 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         call_context_ttl_seconds=_parse_call_context_ttl(
             src.get(ENV_CALL_CONTEXT_TTL_SECONDS, "").strip(),
         ),
+        call_context_key_rotation_seconds=_parse_call_context_key_rotation(
+            src.get(ENV_CALL_CONTEXT_KEY_ROTATION, "").strip(),
+        ),
     )
 
 
 __all__ = [
     "DEFAULT_AUTHN_CACHE_TTL_SECONDS",
     "DEFAULT_CALL_CONTEXT_AUDIENCE",
+    "DEFAULT_CALL_CONTEXT_KEY_ROTATION_SECONDS",
     "DEFAULT_CALL_CONTEXT_SECRET_STORE",
     "DEFAULT_CALL_CONTEXT_TTL_SECONDS",
     "DEFAULT_SERVICE_TOKEN_TTL_SECONDS",
@@ -413,6 +458,7 @@ __all__ = [
     "ENV_CALLCTX_VERIFIER_URL",
     "ENV_CALL_CONTEXT_AUDIENCE",
     "ENV_CALL_CONTEXT_KEY_REF",
+    "ENV_CALL_CONTEXT_KEY_ROTATION",
     "ENV_CALL_CONTEXT_SECRET_STORE",
     "ENV_CALL_CONTEXT_TTL_SECONDS",
     "ENV_ENVIRONMENT",

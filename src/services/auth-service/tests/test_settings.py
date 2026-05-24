@@ -8,6 +8,7 @@ from custos_auth.authz_cache import DEFAULT_AUTHZ_CACHE_TTL_SECONDS
 from custos_auth.settings import (
     DEFAULT_AUTHN_CACHE_TTL_SECONDS,
     DEFAULT_CALL_CONTEXT_AUDIENCE,
+    DEFAULT_CALL_CONTEXT_KEY_ROTATION_SECONDS,
     DEFAULT_CALL_CONTEXT_SECRET_STORE,
     DEFAULT_CALL_CONTEXT_TTL_SECONDS,
     DEFAULT_SERVICE_TOKEN_TTL_SECONDS,
@@ -17,6 +18,7 @@ from custos_auth.settings import (
     ENV_AUTHZ_CACHE_TTL,
     ENV_CALL_CONTEXT_AUDIENCE,
     ENV_CALL_CONTEXT_KEY_REF,
+    ENV_CALL_CONTEXT_KEY_ROTATION,
     ENV_CALL_CONTEXT_SECRET_STORE,
     ENV_CALL_CONTEXT_TTL_SECONDS,
     ENV_METADATA_STORE_DSN,
@@ -264,6 +266,7 @@ def test_call_context_settings_default_when_env_unset() -> None:
     assert settings.call_context_secret_store == DEFAULT_CALL_CONTEXT_SECRET_STORE
     assert settings.call_context_audience == DEFAULT_CALL_CONTEXT_AUDIENCE
     assert settings.call_context_ttl_seconds == DEFAULT_CALL_CONTEXT_TTL_SECONDS
+    assert settings.call_context_key_rotation_seconds == DEFAULT_CALL_CONTEXT_KEY_ROTATION_SECONDS
 
 
 def test_call_context_key_ref_is_carried_when_provided() -> None:
@@ -307,3 +310,27 @@ def test_call_context_ttl_rejects_negative() -> None:
 def test_call_context_ttl_rejects_non_integer() -> None:
     with pytest.raises(SettingsError, match=ENV_CALL_CONTEXT_TTL_SECONDS):
         load_settings(_required_env(**{ENV_CALL_CONTEXT_TTL_SECONDS: "not-a-number"}))
+
+
+def test_call_context_key_rotation_override() -> None:
+    settings = load_settings(
+        _required_env(**{ENV_CALL_CONTEXT_KEY_ROTATION: "3600"}),
+    )
+    assert settings.call_context_key_rotation_seconds == 3600
+
+
+def test_call_context_key_rotation_accepts_zero_to_disable() -> None:
+    settings = load_settings(
+        _required_env(**{ENV_CALL_CONTEXT_KEY_ROTATION: "0"}),
+    )
+    assert settings.call_context_key_rotation_seconds == 0
+
+
+def test_call_context_key_rotation_rejects_negative() -> None:
+    with pytest.raises(SettingsError, match="non-negative"):
+        load_settings(_required_env(**{ENV_CALL_CONTEXT_KEY_ROTATION: "-1"}))
+
+
+def test_call_context_key_rotation_rejects_non_integer() -> None:
+    with pytest.raises(SettingsError, match=ENV_CALL_CONTEXT_KEY_ROTATION):
+        load_settings(_required_env(**{ENV_CALL_CONTEXT_KEY_ROTATION: "not-a-number"}))

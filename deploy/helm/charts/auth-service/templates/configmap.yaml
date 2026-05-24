@@ -9,6 +9,9 @@ data:
   # Non-secret CUSTOS_AUTH_* env vars per design.md § Configuration.
   CUSTOS_AUTH_SERVICE_TOKEN_TTL_DEFAULT: {{ .Values.config.serviceTokenTtlDefault | quote }}
   CUSTOS_AUTH_CALL_CONTEXT_KEY_ROTATION: {{ .Values.config.callContextKeyRotation | quote }}
+  CUSTOS_AUTH_CALL_CONTEXT_TTL_SECONDS: {{ .Values.config.callContextTtlSeconds | quote }}
+  CUSTOS_AUTH_CALL_CONTEXT_SECRET_STORE: {{ .Values.config.callContextSecretStore | quote }}
+  CUSTOS_AUTH_CALL_CONTEXT_AUDIENCE: {{ .Values.config.callContextAudience | quote }}
   CUSTOS_AUTH_INTERNAL_IDENTITY_MODE: {{ .Values.config.internalIdentityMode | quote }}
   CUSTOS_AUTH_AUTHZ_CACHE_TTL: {{ .Values.config.authzCacheTtl | quote }}
   CUSTOS_AUTH_AUTHN_CACHE_TTL: {{ .Values.config.authnCacheTtl | quote }}

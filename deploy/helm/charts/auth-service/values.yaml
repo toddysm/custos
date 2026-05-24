@@ -56,7 +56,21 @@ serviceMonitor:
 config:
   # design.md § Configuration defaults
   serviceTokenTtlDefault: "90d"
-  callContextKeyRotation: "7d"
+  # Integer seconds. ``0`` disables the in-process rotation loop
+  # (operator manages rotation externally). The default matches the
+  # design's 7-day rotation cadence (AS-IMPL-018).
+  callContextKeyRotation: "604800"
+  # Integer seconds. Lifetime of every minted internal call-context
+  # JWT. 300 (5 minutes) matches the design (AS-IMPL-017).
+  callContextTtlSeconds: "300"
+  # Dapr secret-store *component name* the service queries when
+  # ``callContextKeyRef`` is set. Match the component installed via
+  # the Dapr subchart.
+  callContextSecretStore: "custos-secrets"
+  # JWT ``aud`` claim stamped on every call-context token. Verifiers
+  # in other Custos components must be configured with the same
+  # value (AS-IMPL-019).
+  callContextAudience: "custos.internal"
   internalIdentityMode: "jwt"
   authzCacheTtl: "60s"
   authnCacheTtl: "30s"

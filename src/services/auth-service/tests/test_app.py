@@ -212,3 +212,107 @@ def test_revoke_then_recheck_evicts_cache_in_one_round_trip() -> None:
         # Cache row evicted — recheck path will go to the auth store
         # and observe the new decision.
         assert cache.get("user-1", "ws-1", "workflow:read") is None
+
+
+# ---------------------------------------------------------------------------
+# Phase G (AS-IMPL-017 / AS-IMPL-018) lifespan wiring
+# ---------------------------------------------------------------------------
+
+
+def test_lifespan_builds_call_context_signer_in_dev_mode() -> None:
+    # No CUSTOS_AUTH_CALL_CONTEXT_KEY_REF set + environment defaults
+    # to "development" — the lifespan generates an ephemeral key.
+    env = dict(_ENV, CUSTOS_AUTH_CALL_CONTEXT_KEY_ROTATION="0")
+    app = create_app(settings=load_settings(env), providers=_providers())
+    with TestClient(app):
+        from custos_auth.callctx_keyring import KeyRing
+        from custos_auth.callctx_signer import (
+            CallContextSigner,
+            StaticSigningKeyResolver,
+        )
+
+        assert isinstance(app.state.call_context_key_ring, KeyRing)
+        assert isinstance(app.state.call_context_signing_key_resolver, StaticSigningKeyResolver)
+        assert isinstance(app.state.call_context_signer, CallContextSigner)
+        # Rotation disabled => no rotation task spawned.
+        assert app.state.call_context_rotation_task is None
+
+
+def test_lifespan_spawns_and_cancels_rotation_task() -> None:
+    # When rotation > 0, the lifespan creates an asyncio task and
+    # cancels it cleanly on shutdown.
+    env = dict(_ENV, CUSTOS_AUTH_CALL_CONTEXT_KEY_ROTATION="600")
+    app = create_app(settings=load_settings(env), providers=_providers())
+    with TestClient(app):
+        task = app.state.call_context_rotation_task
+        assert task is not None
+        assert not task.done()
+    # After the TestClient exit, the lifespan shutdown should have
+    # cancelled the task.
+    task = app.state.call_context_rotation_task
+    assert task is not None
+    assert task.done()
+    assert task.cancelled() or task.exception() is None
+
+
+def test_lifespan_refuses_to_start_in_production_without_key_ref() -> None:
+    # Outside development the lifespan demands an explicit Dapr key
+    # reference; without it the helper raises a RuntimeError that
+    # crash-loops the pod with an operator-actionable message.
+    env = dict(
+        _ENV,
+        ENVIRONMENT="staging",
+        # Provide a non-empty verifier URL so the call-context
+        # middleware accepts the non-dev environment.
+        CUSTOS_AUTH_CALLCTX_VERIFIER_URL="http://auth-service/.well-known/jwks.json",
+    )
+    app = create_app(settings=load_settings(env), providers=_providers())
+    with pytest.raises(RuntimeError, match="CUSTOS_AUTH_CALL_CONTEXT_KEY_REF"), TestClient(app):
+        pass
+
+
+def test_lifespan_loads_signing_key_from_dapr_secret_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # When CUSTOS_AUTH_CALL_CONTEXT_KEY_REF is set, the lifespan
+    # builds a DaprSecretsSigningKeyResolver and fetches the PEM via
+    # the injected HTTP client. We swap httpx.AsyncClient for an
+    # in-memory fake so the test is hermetic.
+    from custos_auth.callctx_signer import SigningKey
+
+    pem = SigningKey.generate().private_pem().decode("utf-8")
+
+    class _FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, str]:
+            return {"call-context-key": pem}
+
+    class _FakeAsyncClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> _FakeAsyncClient:
+            return self
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            return None
+
+        async def get(self, _url: str) -> _FakeResponse:
+            return _FakeResponse()
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeAsyncClient)
+
+    env = dict(
+        _ENV,
+        CUSTOS_AUTH_CALL_CONTEXT_KEY_REF="call-context-key",
+    )
+    app = create_app(settings=load_settings(env), providers=_providers())
+    with TestClient(app):
+        from custos_auth.callctx_signer import SigningKey as _SigningKey
+
+        active = app.state.call_context_key_ring.active
+        assert isinstance(active, _SigningKey)
