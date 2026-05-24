@@ -103,6 +103,7 @@ EVENT_AUTHZ_DECISION: Final[str] = "authz.decision"
 EVENT_TOKEN_ISSUED: Final[str] = "token.issued"
 EVENT_TOKEN_USED: Final[str] = "token.used"
 EVENT_TOKEN_REVOKED: Final[str] = "token.revoked"
+EVENT_TOKEN_EXPIRED: Final[str] = "token.expired"
 EVENT_AUTHN_SUCCESS: Final[str] = "authn.success"
 EVENT_AUTHN_FAILURE: Final[str] = "authn.failure"
 
@@ -564,6 +565,43 @@ async def audit_token_revoked(
 
 
 # ---------------------------------------------------------------------------
+# Service-token expiry events (Phase F / AS-IMPL-016)
+# ---------------------------------------------------------------------------
+
+
+async def audit_token_expired(
+    metadata_store: MetadataStoreProvider,
+    *,
+    workspace_id: str,
+    token_id: str,
+    service_account_id: str,
+    expires_at: datetime,
+) -> None:
+    """Emit ``token.expired`` keyed to the SA's workspace.
+
+    The sweeper emits one row per token it is about to physically
+    delete. The actor is the SA itself — the sweep is an internal
+    platform process, not an operator action, so attributing the
+    row to the SA keeps the workspace-scoped audit feed coherent
+    (every row in the feed has an actor that lives in the same
+    workspace). The payload carries the original ``expires_at`` so
+    operators can reconstruct the rotation cadence from the audit
+    feed without joining against the (now-deleted) SPL row.
+    """
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_TOKEN_EXPIRED,
+        actor=service_account_id,
+        subject={
+            "token_id": token_id,
+            "service_account_id": service_account_id,
+        },
+        payload={"expires_at": expires_at.isoformat()},
+    )
+
+
+# ---------------------------------------------------------------------------
 # Authorization decision events (Phase E / AS-IMPL-011)
 # ---------------------------------------------------------------------------
 #
@@ -625,6 +663,7 @@ __all__ = [
     "EVENT_ROLE_BINDING_GRANTED",
     "EVENT_ROLE_BINDING_REVOKED",
     "EVENT_TENANT_CREATED",
+    "EVENT_TOKEN_EXPIRED",
     "EVENT_TOKEN_ISSUED",
     "EVENT_TOKEN_REVOKED",
     "EVENT_TOKEN_USED",
@@ -639,6 +678,7 @@ __all__ = [
     "audit_role_binding_granted",
     "audit_role_binding_revoked",
     "audit_tenant_created",
+    "audit_token_expired",
     "audit_token_issued",
     "audit_token_revoked",
     "audit_token_used",

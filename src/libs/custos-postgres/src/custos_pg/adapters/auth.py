@@ -753,6 +753,45 @@ class PgAuthAdapter(MigrationCapable):
                 for row in rows
             )
 
+    async def list_expired_service_tokens(
+        self, before: datetime, tx: TransactionHandle | None = None
+    ) -> tuple[ServiceToken, ...]:
+        """Return every token row with `expires_at < before`.
+
+        Sweeper-only read. Matches the row set that the matching
+        :meth:`delete_expired_service_tokens` call would remove —
+        callers must use the same `before` value for both.
+        """
+        conn, should_release = await self._get_conn(tx)
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT token_id, service_account_id, hash,
+                       issued_at, expires_at, revoked_at, revoked_by, revoked_reason
+                FROM auth.service_token
+                WHERE expires_at < $1
+                ORDER BY expires_at
+                """,
+                before,
+            )
+            return tuple(
+                ServiceToken(
+                    token_id=ServiceTokenId(row["token_id"]),
+                    service_account_id=PrincipalId(row["service_account_id"]),
+                    hash=row["hash"],
+                    issued_at=row["issued_at"],
+                    expires_at=row["expires_at"],
+                    revoked_at=row["revoked_at"],
+                    revoked_by=PrincipalId(row["revoked_by"]) if row["revoked_by"] else None,
+                    revoked_reason=row["revoked_reason"],
+                )
+                for row in rows
+            )
+        finally:
+            if should_release:
+                pool = await self._pool_ref()
+                await pool.release(conn)
+
     async def delete_expired_service_tokens(self, before: datetime, tx: TransactionHandle | None = None) -> int:
         """Physical delete of expired tokens.
 

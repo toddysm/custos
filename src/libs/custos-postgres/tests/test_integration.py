@@ -2317,6 +2317,10 @@ async def test_delete_expired_service_tokens(pg_pool: Pool) -> None:
     )
     await adapter.put_service_token(valid)
 
+    # list_expired_service_tokens returns only the expired row.
+    expired_rows = await adapter.list_expired_service_tokens(now)
+    assert {str(t.token_id) for t in expired_rows} == {"expired-1"}
+
     # Delete before now (should only delete expired)
     deleted = await adapter.delete_expired_service_tokens(now)
     assert deleted == 1
@@ -2328,7 +2332,8 @@ async def test_delete_expired_service_tokens(pg_pool: Pool) -> None:
     valid_retrieved = await adapter.get_service_token_by_hash("hash-valid")
     assert valid_retrieved is not None
 
-
+    # And after the delete the listing must be empty.
+    assert await adapter.list_expired_service_tokens(now) == ()
 
 
 async def test_upsert_and_list_permissions(pg_pool: Pool) -> None:

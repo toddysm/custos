@@ -490,6 +490,24 @@ class AuthStoreProvider(Protocol):
         """
         ...
 
+    async def list_expired_service_tokens(
+        self,
+        before: datetime,
+    ) -> tuple[ServiceToken, ...]:
+        """List token rows whose `expires_at < before`.
+
+        Sweeper-only read. Returns every row that the matching
+        :meth:`delete_expired_service_tokens` call would remove,
+        including rows already marked revoked, so the sweeper can
+        emit a `token.expired` audit row and publish a cache-
+        eviction event **before** the row is physically deleted.
+        Auth Service callers must invoke this with the same
+        `before` value they then pass to
+        :meth:`delete_expired_service_tokens`; otherwise the audit
+        row set and the deleted row set will drift.
+        """
+        ...
+
     async def delete_expired_service_tokens(self, before: datetime) -> int:
         """Sweeper-only physical delete.
 

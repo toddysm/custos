@@ -8,11 +8,13 @@ from custos_auth.authz_cache import DEFAULT_AUTHZ_CACHE_TTL_SECONDS
 from custos_auth.settings import (
     DEFAULT_AUTHN_CACHE_TTL_SECONDS,
     DEFAULT_SERVICE_TOKEN_TTL_SECONDS,
+    DEFAULT_TOKEN_SWEEPER_INTERVAL_SECONDS,
     ENV_AUTH_STORE_DSN,
     ENV_AUTHN_CACHE_TTL,
     ENV_AUTHZ_CACHE_TTL,
     ENV_METADATA_STORE_DSN,
     ENV_SERVICE_TOKEN_TTL_DEFAULT,
+    ENV_TOKEN_SWEEPER_INTERVAL,
     Settings,
     SettingsError,
     load_settings,
@@ -201,3 +203,44 @@ def test_authn_cache_ttl_rejects_negative_value() -> None:
 def test_authn_cache_ttl_rejects_non_integer_value() -> None:
     with pytest.raises(SettingsError, match=ENV_AUTHN_CACHE_TTL):
         load_settings(_required_env(**{ENV_AUTHN_CACHE_TTL: "not-a-number"}))
+
+
+# ---------------------------------------------------------------------------
+# CUSTOS_AUTH_TOKEN_SWEEPER_INTERVAL_SECONDS (AS-IMPL-016)
+# ---------------------------------------------------------------------------
+
+
+def test_token_sweeper_interval_defaults_to_300_seconds() -> None:
+    # Design's "sweeper sweeps every ~5 min" recommendation.
+    settings = load_settings(_required_env())
+    assert settings.token_sweeper_interval_seconds == DEFAULT_TOKEN_SWEEPER_INTERVAL_SECONDS
+    assert DEFAULT_TOKEN_SWEEPER_INTERVAL_SECONDS == 300
+    assert settings.token_sweeper_enabled is True
+
+
+def test_token_sweeper_interval_zero_disables_the_sweeper() -> None:
+    # Operators can disable the sweeper for tests, a degraded
+    # cluster, or an external janitor without redeploying.
+    settings = load_settings(_required_env(**{ENV_TOKEN_SWEEPER_INTERVAL: "0"}))
+    assert settings.token_sweeper_interval_seconds == 0
+    assert settings.token_sweeper_enabled is False
+
+
+def test_token_sweeper_interval_positive_override_is_respected() -> None:
+    settings = load_settings(_required_env(**{ENV_TOKEN_SWEEPER_INTERVAL: "60"}))
+    assert settings.token_sweeper_interval_seconds == 60
+
+
+def test_token_sweeper_interval_empty_string_falls_back_to_default() -> None:
+    settings = load_settings(_required_env(**{ENV_TOKEN_SWEEPER_INTERVAL: ""}))
+    assert settings.token_sweeper_interval_seconds == DEFAULT_TOKEN_SWEEPER_INTERVAL_SECONDS
+
+
+def test_token_sweeper_interval_rejects_negative_value() -> None:
+    with pytest.raises(SettingsError, match="non-negative"):
+        load_settings(_required_env(**{ENV_TOKEN_SWEEPER_INTERVAL: "-1"}))
+
+
+def test_token_sweeper_interval_rejects_non_integer_value() -> None:
+    with pytest.raises(SettingsError, match=ENV_TOKEN_SWEEPER_INTERVAL):
+        load_settings(_required_env(**{ENV_TOKEN_SWEEPER_INTERVAL: "not-a-number"}))

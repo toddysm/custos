@@ -324,6 +324,9 @@ class FakeAuthAdapter:
             t for t in self.service_tokens.values() if t.service_account_id == service_account_id
         )
 
+    async def list_expired_service_tokens(self, before: datetime) -> tuple[ServiceToken, ...]:
+        return tuple(t for t in self.service_tokens.values() if t.expires_at < before)
+
     async def delete_expired_service_tokens(self, before: datetime) -> int:
         victims = [tid for tid, t in self.service_tokens.items() if t.expires_at < before]
         for tid in victims:

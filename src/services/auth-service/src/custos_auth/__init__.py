@@ -22,6 +22,7 @@ AS-IMPL-* phases.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -41,6 +42,7 @@ from custos_auth.providers import (
 )
 from custos_auth.roles import BUILTIN_ROLES, seed_builtin_roles
 from custos_auth.settings import Settings, load_settings
+from custos_auth.sweeper import run_sweeper_loop
 from custos_auth.token_revoked_events import LocalTokenRevokedBus
 
 if TYPE_CHECKING:
@@ -168,6 +170,21 @@ def create_app(
             local_providers.authn_cache.invalidate_by_token_id(event.token_id)
 
         await local_providers.token_revoked_subscriber.start(_on_token_revoked_remote)
+        # Phase F (AS-IMPL-016): launch the token-expiry sweeper.
+        # The loop coroutine handles the ``interval=0`` (disabled)
+        # case itself by returning immediately — we still spawn the
+        # task so the lifespan teardown has a uniform cancel/await
+        # shape regardless of configuration.
+        sweeper_task = asyncio.create_task(
+            run_sweeper_loop(
+                auth_store=local_providers.auth_store,
+                metadata_store=local_providers.metadata_store,
+                publisher=local_providers.token_revoked_publisher,
+                interval_seconds=effective_settings.token_sweeper_interval_seconds,
+            ),
+            name="custos-auth.token-sweeper",
+        )
+        app.state.token_sweeper_task = sweeper_task
         app.state.ready = True
         logger.info("schema-revision gate passed; auth-service is ready")
         try:
@@ -177,6 +194,13 @@ def create_app(
             # logged but does not propagate; the pod is going away
             # anyway and we do not want a noisy shutdown to mask the
             # real exit reason.
+            sweeper_task.cancel()
+            try:
+                await sweeper_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # guard lifespan shutdown
+                logger.warning("token sweeper failed to stop cleanly", exc_info=True)
             try:
                 await local_providers.binding_changed_subscriber.stop()
             except Exception:  # guard lifespan shutdown

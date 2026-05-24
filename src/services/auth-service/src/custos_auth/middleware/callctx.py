@@ -73,7 +73,17 @@ CALLCTX_HEADER: str = "x-custos-callctx"
 #: * Token verification (``/v1/auth/verify``) — the verify endpoint
 #:   is *the source* of call-context for downstream services, so by
 #:   construction the caller does not yet have one.
-_BYPASS_PATHS: frozenset[str] = frozenset({"/healthz", "/readyz", "/v1/auth/verify"})
+#: * Gateway hot-path (``/v1/authz/verify-and-authorize``) — same
+#:   reasoning: the gateway calls this *before* it has a
+#:   call-context, on every external request.
+_BYPASS_PATHS: frozenset[str] = frozenset(
+    {
+        "/healthz",
+        "/readyz",
+        "/v1/auth/verify",
+        "/v1/authz/verify-and-authorize",
+    }
+)
 
 logger = logging.getLogger(__name__)
 

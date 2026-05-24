@@ -305,6 +305,42 @@ class ServiceTokenBulkRevokeResponse(BaseModel):
     revoked_count: int
 
 
+class VerifyAndAuthorizeRequest(BaseModel):
+    """POST body for ``/v1/authz/verify-and-authorize``.
+
+    Composes the two distinct checks the API Gateway performs on
+    every external request: authenticate the bearer token and then
+    decide whether the resulting principal may perform
+    ``permission`` against ``workspace_id``. Folding the pair into
+    one RPC saves the gateway two round trips on the hot path.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    token: Annotated[str, Field(min_length=1, max_length=4096)]
+    permission: Annotated[str, Field(min_length=1, max_length=255)]
+    workspace_id: Annotated[str, Field(min_length=1, max_length=120)]
+
+
+class VerifyAndAuthorizeResponse(BaseModel):
+    """Combined response from ``/v1/authz/verify-and-authorize``.
+
+    Returned with HTTP 200 whenever the bearer authenticated, even
+    when the authorization decision is ``deny`` — the body's
+    ``allowed`` flag carries the decision, so the gateway can map a
+    deny to its own 403 without re-interpreting the auth-service
+    response code. A failed verify still returns 401 with the
+    standard call-context envelope and no body of this shape.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    principal_id: str
+    allowed: bool
+    reason: str
+    audit_event_id: str
+
+
 def service_token_to_response(token: ServiceToken) -> ServiceTokenResponse:
     """Project a SPL :class:`ServiceToken` to its wire envelope.
 
@@ -444,6 +480,8 @@ __all__ = [
     "TenantListResponse",
     "TenantResponse",
     "UserResponse",
+    "VerifyAndAuthorizeRequest",
+    "VerifyAndAuthorizeResponse",
     "WorkspaceCreateRequest",
     "WorkspaceListResponse",
     "WorkspaceResponse",

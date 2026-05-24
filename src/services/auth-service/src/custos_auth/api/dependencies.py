@@ -21,6 +21,7 @@ from custos_spl import AuthStoreProvider, MetadataStoreProvider
 from fastapi import Depends, Request
 
 from custos_auth.authn_cache import AuthnCache
+from custos_auth.authz_cache import AuthzDecisionCache
 from custos_auth.binding_events import BindingChangedPublisher
 from custos_auth.middleware.callctx import (
     CallContext,
@@ -104,6 +105,13 @@ def get_authn_cache(
     return providers.authn_cache
 
 
+def get_authz_cache(
+    providers: Annotated[Providers, Depends(get_providers)],
+) -> AuthzDecisionCache:
+    """Return the per-replica authz decision cache from the provider bundle."""
+    return providers.authz_cache
+
+
 def require_permission(
     *names: str,
 ) -> Callable[[Request], Awaitable[CallContext]]:
@@ -118,6 +126,7 @@ def require_permission(
 __all__ = [
     "get_auth_store",
     "get_authn_cache",
+    "get_authz_cache",
     "get_binding_changed_publisher",
     "get_call_context",
     "get_metadata_store",

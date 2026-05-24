@@ -14,6 +14,7 @@ from custos_auth.audit import (
     EVENT_PRINCIPAL_CREATED,
     EVENT_PRINCIPAL_DISABLED,
     EVENT_TENANT_CREATED,
+    EVENT_TOKEN_EXPIRED,
     EVENT_TOKEN_ISSUED,
     EVENT_TOKEN_REVOKED,
     EVENT_TOKEN_USED,
@@ -25,6 +26,7 @@ from custos_auth.audit import (
     audit_principal_created,
     audit_principal_disabled,
     audit_tenant_created,
+    audit_token_expired,
     audit_token_issued,
     audit_token_revoked,
     audit_token_used,
@@ -284,3 +286,34 @@ async def test_audit_token_revoked_keys_under_sa_workspace() -> None:
     assert event.actor == "op-1"
     assert event.subject == {"token_id": "tok-1", "service_account_id": "sa-1"}
     assert event.payload == {"reason": "compromised"}
+
+
+# ---------------------------------------------------------------------------
+# AS-IMPL-016: token.expired helper.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_audit_token_expired_keys_under_sa_workspace() -> None:
+    # Sweeper-driven expiry rows land in the SA's owning workspace
+    # so the audit-query path is identical to ``token.revoked``.
+    # ``actor`` is the SA itself (the system is the deleter; the
+    # SA is the only meaningful actor since no human triggered the
+    # row).
+    from datetime import UTC, datetime
+
+    meta = FakeMetadataAdapter()
+    expires_at = datetime(2030, 1, 1, tzinfo=UTC)
+    await audit_token_expired(
+        meta,  # type: ignore[arg-type]
+        workspace_id="ws-1",
+        token_id="tok-1",
+        service_account_id="sa-1",
+        expires_at=expires_at,
+    )
+    ws_id, event = meta.append_audit_calls[0]
+    assert ws_id == "ws-1"
+    assert event.event_type == EVENT_TOKEN_EXPIRED
+    assert event.actor == "sa-1"
+    assert event.subject == {"token_id": "tok-1", "service_account_id": "sa-1"}
+    assert event.payload == {"expires_at": expires_at.isoformat()}

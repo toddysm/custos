@@ -112,6 +112,22 @@ ENV_AUTHN_CACHE_TTL: Final[str] = "CUSTOS_AUTH_AUTHN_CACHE_TTL"
 #: gets lost in the pub/sub transport.
 DEFAULT_AUTHN_CACHE_TTL_SECONDS: Final[int] = 30
 
+#: Optional. Interval (seconds) at which the background sweeper
+#: scans for service tokens whose ``expires_at`` has elapsed,
+#: emits ``token.expired``, publishes a cache-eviction event, and
+#: physically deletes the row (AS-IMPL-016). Setting the value to
+#: ``0`` disables the sweeper entirely (useful for tests and for
+#: single-purpose replicas that should never run the housekeeping
+#: loop). Negative or non-integer values raise
+#: :class:`SettingsError`.
+ENV_TOKEN_SWEEPER_INTERVAL: Final[str] = "CUSTOS_AUTH_TOKEN_SWEEPER_INTERVAL_SECONDS"
+
+#: Default interval for the token sweeper when the env override is
+#: unset. Five minutes balances audit-row latency against SPL load;
+#: an operator who needs the sweep to land within a minute can
+#: override the env var.
+DEFAULT_TOKEN_SWEEPER_INTERVAL_SECONDS: Final[int] = 300
+
 
 class SettingsError(RuntimeError):
     """Raised when the environment is missing a required setting or carries a malformed value."""
@@ -129,6 +145,7 @@ class Settings:
     authz_cache_ttl_seconds: int
     service_token_ttl_default_seconds: int
     authn_cache_ttl_seconds: int
+    token_sweeper_interval_seconds: int
 
     @property
     def is_production(self) -> bool:
@@ -148,6 +165,17 @@ class Settings:
     def authn_cache_enabled(self) -> bool:
         """True when the authn cache is configured to store entries."""
         return self.authn_cache_ttl_seconds > 0
+
+    @property
+    def token_sweeper_enabled(self) -> bool:
+        """True when the token sweeper is configured to run.
+
+        ``CUSTOS_AUTH_TOKEN_SWEEPER_INTERVAL_SECONDS=0`` disables
+        the loop entirely; the lifespan handler skips the
+        ``asyncio.create_task`` step in that case so a misconfigured
+        replica cannot quietly accumulate expired rows.
+        """
+        return self.token_sweeper_interval_seconds > 0
 
 
 def _require(name: str, env: dict[str, str]) -> str:
@@ -213,6 +241,30 @@ def _parse_authn_cache_ttl(raw: str) -> int:
     return value
 
 
+def _parse_token_sweeper_interval(raw: str) -> int:
+    """Parse the ``CUSTOS_AUTH_TOKEN_SWEEPER_INTERVAL_SECONDS`` env value.
+
+    Empty string falls back to
+    :data:`DEFAULT_TOKEN_SWEEPER_INTERVAL_SECONDS`. ``0`` disables
+    the sweeper. Negative or non-integer values raise
+    :class:`SettingsError`.
+    """
+    if raw == "":
+        return DEFAULT_TOKEN_SWEEPER_INTERVAL_SECONDS
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise SettingsError(
+            f"{ENV_TOKEN_SWEEPER_INTERVAL} must be a non-negative integer (got {raw!r})"
+        ) from exc
+    if value < 0:
+        raise SettingsError(
+            f"{ENV_TOKEN_SWEEPER_INTERVAL} must be non-negative (got {value}); "
+            "use 0 to disable the sweeper."
+        )
+    return value
+
+
 def _parse_service_token_ttl_default(raw: str) -> int:
     """Parse the ``CUSTOS_AUTH_SERVICE_TOKEN_TTL_DEFAULT`` env value.
 
@@ -256,12 +308,16 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         authn_cache_ttl_seconds=_parse_authn_cache_ttl(
             src.get(ENV_AUTHN_CACHE_TTL, "").strip(),
         ),
+        token_sweeper_interval_seconds=_parse_token_sweeper_interval(
+            src.get(ENV_TOKEN_SWEEPER_INTERVAL, "").strip(),
+        ),
     )
 
 
 __all__ = [
     "DEFAULT_AUTHN_CACHE_TTL_SECONDS",
     "DEFAULT_SERVICE_TOKEN_TTL_SECONDS",
+    "DEFAULT_TOKEN_SWEEPER_INTERVAL_SECONDS",
     "ENV_AUTHN_CACHE_TTL",
     "ENV_AUTHZ_CACHE_TTL",
     "ENV_AUTH_STORE_DSN",
@@ -270,6 +326,7 @@ __all__ = [
     "ENV_METADATA_STORE_DSN",
     "ENV_PERMISSIONS_PATHS",
     "ENV_SERVICE_TOKEN_TTL_DEFAULT",
+    "ENV_TOKEN_SWEEPER_INTERVAL",
     "Settings",
     "SettingsError",
     "load_settings",
