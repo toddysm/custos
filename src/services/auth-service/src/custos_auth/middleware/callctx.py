@@ -31,9 +31,10 @@ The dev-shim header is a JSON object with these fields::
 ``principal_id`` is the only required field. ``tenant_id`` /
 ``workspace_id`` are optional because auth-service has both
 platform-global endpoints (e.g. ``POST /v1/tenants``) and
-workspace-scoped endpoints (e.g. ``GET /v1/workspaces/{id}``). Endpoints
-that require a workspace scope check it through
-:func:`require_workspace_membership` rather than via the model.
+workspace-scoped endpoints (e.g. ``GET /v1/workspaces/{id}``). Routes read
+the tenant/workspace scope from :func:`get_call_context` and enforce any
+required authorization with :func:`require_permission` where applicable,
+rather than via the model alone.
 
 Audit hook
 ----------
