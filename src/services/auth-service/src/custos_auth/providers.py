@@ -99,9 +99,9 @@ class Providers:
 
     ``binding_changed_publisher`` defaults to the in-process
     :class:`LocalBindingChangedBus` introduced by AS-IMPL-012. The
-    lifespan subscribes the local authz cache to that bus so a single
-    -replica deployment delivers invalidations synchronously — the
-    multi-replica deployment additionally wires
+    lifespan subscribes the local authz cache to that bus so a
+    single-replica deployment delivers invalidations synchronously —
+    the multi-replica deployment additionally wires
     :attr:`binding_changed_subscriber` against a real transport so
     every replica's cache sees the same events.
 
