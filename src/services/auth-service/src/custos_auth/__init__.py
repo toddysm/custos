@@ -28,6 +28,7 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 from custos_auth.api import all_routers, register_exception_handlers
+from custos_auth.binding_events import LocalBindingChangedBus
 from custos_auth.health import router as health_router
 from custos_auth.middleware.callctx import CallContextMiddleware
 from custos_auth.permission_registry import seed_permissions_and_validate_roles
@@ -113,9 +114,49 @@ def create_app(
         )
         app.state.declared_permissions = declared
         await seed_builtin_roles(local_providers.auth_store)
+        # Phase E (AS-IMPL-012): wire the authz decision cache to the
+        # binding-changed bus on both sides.
+        #
+        # * The in-process publisher (``LocalBindingChangedBus``)
+        #   delivers events on the same replica that performed the
+        #   binding mutation. Subscribing the cache satisfies the
+        #   single-replica "revoke-then-recheck within one round
+        #   trip" acceptance criterion without standing up a real
+        #   transport.
+        # * The cross-replica subscriber (defaults to no-op) is
+        #   started here so production deployments that swap in a
+        #   Redis pub/sub or SPL-outbox-backed transport deliver
+        #   every event to the local cache. ``stop()`` runs on
+        #   shutdown so background tasks do not leak.
+        #
+        # Both paths invoke
+        # :meth:`AuthzDecisionCache.on_binding_changed`, which is
+        # idempotent — double-delivery from publisher and subscriber
+        # against the same replica is harmless (the second call is a
+        # no-op against an already-empty bucket).
+        if isinstance(local_providers.binding_changed_publisher, LocalBindingChangedBus):
+            local_providers.binding_changed_publisher.subscribe(
+                local_providers.authz_cache.on_binding_changed,
+            )
+        await local_providers.binding_changed_subscriber.start(
+            local_providers.authz_cache.on_binding_changed,
+        )
         app.state.ready = True
         logger.info("schema-revision gate passed; auth-service is ready")
-        yield
+        try:
+            yield
+        finally:
+            # Best-effort subscriber shutdown. A failure here is
+            # logged but does not propagate; the pod is going away
+            # anyway and we do not want a noisy shutdown to mask the
+            # real exit reason.
+            try:
+                await local_providers.binding_changed_subscriber.stop()
+            except Exception:  # guard lifespan shutdown
+                logger.warning(
+                    "binding-changed subscriber failed to stop cleanly",
+                    exc_info=True,
+                )
 
     app = FastAPI(
         title="Custos Auth Service",

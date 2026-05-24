@@ -14,9 +14,15 @@ Canonical events emitted from Phase C
 * :func:`audit_principal_disabled`     → ``principal.disabled``
 * :func:`audit_oidc_identity_linked`   → ``oidc.identity-linked``
 
-Additional canonical events (``authz.decision``, ``token.*``,
-``role-binding.*``) are emitted by subsequent AS-IMPL-* phases and will
-reuse the same :func:`_emit` core.
+Canonical events emitted from Phase D / E
+-----------------------------------------
+
+* :func:`audit_role_binding_granted`   → ``role-binding.granted``
+* :func:`audit_role_binding_revoked`   → ``role-binding.revoked``
+* :func:`audit_authz_decision`         → ``authz.decision``
+
+Additional canonical events (``token.*``) are emitted by subsequent
+AS-IMPL-* phases and will reuse the same :func:`_emit` core.
 
 Platform-scope events
 ---------------------
@@ -93,6 +99,7 @@ EVENT_PRINCIPAL_DISABLED: Final[str] = "principal.disabled"
 EVENT_OIDC_IDENTITY_LINKED: Final[str] = "oidc.identity-linked"
 EVENT_ROLE_BINDING_GRANTED: Final[str] = "role-binding.granted"
 EVENT_ROLE_BINDING_REVOKED: Final[str] = "role-binding.revoked"
+EVENT_AUTHZ_DECISION: Final[str] = "authz.decision"
 
 
 # ---------------------------------------------------------------------------
@@ -108,17 +115,26 @@ async def _emit(
     actor: str,
     subject: Mapping[str, Any],
     payload: Mapping[str, Any],
-) -> None:
+) -> str:
     """Append an auth-service audit event to the SPL outbox.
+
+    Returns the generated ``event_id`` so the caller can correlate the
+    audit row with its own observability or response envelope (the
+    authorization engine in particular surfaces the id on its
+    :class:`Decision` return value).
 
     Best-effort: any failure here is logged at WARNING and bumps
     :data:`EMIT_FAILURES_TOTAL` but is otherwise swallowed so the state
-    mutation that triggered the emission stays committed.
+    mutation that triggered the emission stays committed. The
+    generated ``event_id`` is still returned (and logged on the
+    failure path) so observability can search both sides of the gap
+    when a drop occurs.
     """
     ws_id = WorkspaceId(workspace_id)
+    event_id = str(uuid4())
     event = AuditEvent(
         workspace_id=ws_id,
-        event_id=str(uuid4()),
+        event_id=event_id,
         event_type=event_type,
         actor=actor,
         subject=dict(subject),
@@ -134,21 +150,24 @@ async def _emit(
     except Exception:
         EMIT_FAILURES_TOTAL.add(1, {"event_type": event_type})
         _LOGGER.warning(
-            "audit emission failed event_type=%s workspace=%s actor=%s subject=%s",
+            "audit emission failed event_type=%s event_id=%s workspace=%s actor=%s subject=%s",
             event_type,
+            event_id,
             workspace_id,
             actor,
             json.dumps(dict(subject), default=str, sort_keys=True),
             exc_info=True,
         )
-        return
+        return event_id
     _AUDIT_LOGGER.info(
-        "audit_event event_type=%s workspace=%s actor=%s subject=%s",
+        "audit_event event_type=%s event_id=%s workspace=%s actor=%s subject=%s",
         event_type,
+        event_id,
         workspace_id,
         actor,
         json.dumps(dict(subject), default=str, sort_keys=True),
     )
+    return event_id
 
 
 # ---------------------------------------------------------------------------
@@ -335,8 +354,60 @@ async def audit_role_binding_revoked(
     )
 
 
+# ---------------------------------------------------------------------------
+# Authorization decision events (Phase E / AS-IMPL-011)
+# ---------------------------------------------------------------------------
+#
+# Every ``authorize`` call — allow *and* deny — emits exactly one
+# ``authz.decision`` row so the audit pipeline records the full
+# decision history. The id is returned to the caller so the HTTP/RPC
+# response envelope can surface ``auditEventId`` per design §
+# "Authorization decision".
+
+
+async def audit_authz_decision(
+    metadata_store: MetadataStoreProvider,
+    *,
+    actor: str,
+    workspace_id: str | None,
+    principal_id: str,
+    permission: str,
+    decision: str,
+    reason: str,
+    caller_component: str,
+) -> str:
+    """Emit ``authz.decision`` and return the generated ``event_id``.
+
+    ``workspace_id`` is the authorize-call target workspace. When the
+    workspace is unknown (the ``workspace-not-found`` deny path) or
+    the caller targeted platform scope, the row is filed under the
+    platform sentinel bucket so observability still gets the trail.
+    ``actor`` is the call-context actor — typically the same string as
+    ``principal_id`` for user-initiated requests, but distinct when an
+    internal component re-checks on behalf of a user.
+    """
+    bucket = workspace_id if workspace_id else PLATFORM_WORKSPACE_ID
+    return await _emit(
+        metadata_store,
+        workspace_id=bucket,
+        event_type=EVENT_AUTHZ_DECISION,
+        actor=actor,
+        subject={
+            "principal_id": principal_id,
+            "permission": permission,
+            "workspace_id": workspace_id,
+        },
+        payload={
+            "decision": decision,
+            "reason": reason,
+            "caller_component": caller_component,
+        },
+    )
+
+
 __all__ = [
     "EMIT_FAILURES_TOTAL",
+    "EVENT_AUTHZ_DECISION",
     "EVENT_OIDC_IDENTITY_LINKED",
     "EVENT_PRINCIPAL_CREATED",
     "EVENT_PRINCIPAL_DISABLED",
@@ -345,6 +416,7 @@ __all__ = [
     "EVENT_TENANT_CREATED",
     "EVENT_WORKSPACE_CREATED",
     "PLATFORM_WORKSPACE_ID",
+    "audit_authz_decision",
     "audit_oidc_identity_linked",
     "audit_principal_created",
     "audit_principal_disabled",

@@ -52,9 +52,15 @@ from custos_spl import MigrationRequired
 from custos_spl.interfaces.auth_store import AuthStoreProvider
 from custos_spl.interfaces.metadata_store import MetadataStoreProvider
 
+from custos_auth.authz_cache import (
+    DEFAULT_AUTHZ_CACHE_TTL_SECONDS,
+    AuthzDecisionCache,
+)
 from custos_auth.binding_events import (
     BindingChangedPublisher,
-    NoOpBindingChangedPublisher,
+    BindingChangedSubscriber,
+    LocalBindingChangedBus,
+    NoOpBindingChangedSubscriber,
 )
 from custos_auth.settings import Settings
 
@@ -94,16 +100,30 @@ class Providers:
     Held on ``app.state.providers`` and exposed to FastAPI handlers via
     dependency helpers introduced in subsequent AS-IMPL-* phases.
 
-    ``binding_changed_publisher`` defaults to the in-process no-op
-    transport — see :mod:`custos_auth.binding_events`. The Phase E
-    deployment override replaces it with the Redis pub/sub or SPL-
-    outbox-backed transport.
+    ``binding_changed_publisher`` defaults to the in-process
+    :class:`LocalBindingChangedBus` introduced by AS-IMPL-012. The
+    lifespan subscribes the local authz cache to that bus so a
+    single-replica deployment delivers invalidations synchronously —
+    the multi-replica deployment additionally wires
+    :attr:`binding_changed_subscriber` against a real transport so
+    every replica's cache sees the same events.
+
+    ``authz_cache`` is the per-replica TTL cache that backstops the
+    authorize hot path; see :class:`custos_auth.authz_cache.AuthzDecisionCache`.
     """
 
     auth_store: AuthStoreProvider
     metadata_store: MetadataStoreProvider
     binding_changed_publisher: BindingChangedPublisher = dc_field(
-        default_factory=NoOpBindingChangedPublisher,
+        default_factory=LocalBindingChangedBus,
+    )
+    binding_changed_subscriber: BindingChangedSubscriber = dc_field(
+        default_factory=NoOpBindingChangedSubscriber,
+    )
+    authz_cache: AuthzDecisionCache = dc_field(
+        default_factory=lambda: AuthzDecisionCache(
+            ttl_seconds=DEFAULT_AUTHZ_CACHE_TTL_SECONDS,
+        ),
     )
 
 
@@ -130,9 +150,15 @@ def load_providers(settings: Settings) -> Providers:
     # at the consumer boundary. `custos-postgres` has its own strict mypy
     # job that verifies the conformance at the implementation site; the
     # cast keeps the consumer view typed.
+    # The authz cache TTL is read from settings so the production knob
+    # ``CUSTOS_AUTH_AUTHZ_CACHE_TTL`` flows through to the per-replica
+    # cache without test or factory overrides.
     return Providers(
         auth_store=cast(AuthStoreProvider, auth_store),
         metadata_store=cast(MetadataStoreProvider, metadata_store),
+        authz_cache=AuthzDecisionCache(
+            ttl_seconds=settings.authz_cache_ttl_seconds,
+        ),
     )
 
 
