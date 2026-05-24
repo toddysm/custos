@@ -374,6 +374,15 @@ class DaprSecretsSigningKeyResolver:
         )
         try:
             payload = await self.fetch_json(url)
+        except asyncio.CancelledError:
+            # Preserve task-cancellation semantics. asyncio.CancelledError
+            # derives from BaseException on Python 3.8+, so the broader
+            # ``except Exception`` below already misses it — but an
+            # injected ``fetch_json`` could (incorrectly) raise a custom
+            # Exception-derived cancellation marker, and being explicit
+            # makes the intent obvious to readers and to future
+            # maintainers swapping the fetcher.
+            raise
         except Exception as exc:  # network/transport failures
             raise DaprSecretsResolutionError(
                 f"Dapr Secrets API call to {url!r} failed: {exc}"

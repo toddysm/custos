@@ -462,6 +462,26 @@ async def test_dapr_resolver_wraps_transport_exceptions() -> None:
         await resolver.active_signing_key()
 
 
+async def test_dapr_resolver_propagates_cancellation_without_wrapping() -> None:
+    # asyncio.CancelledError raised by the injected fetcher must
+    # propagate out of _fetch() untouched so task cancellation
+    # (e.g. lifespan shutdown, request timeout) is observed by the
+    # caller. Wrapping it in DaprSecretsResolutionError would mask
+    # the cancellation signal and prevent clean teardown.
+    import asyncio as _asyncio
+
+    async def cancelled_fetch(url: str) -> dict[str, Any]:
+        raise _asyncio.CancelledError
+
+    resolver = DaprSecretsSigningKeyResolver(
+        secret_store="store",
+        secret_name="cc",
+        fetch_json=cancelled_fetch,
+    )
+    with pytest.raises(_asyncio.CancelledError):
+        await resolver.active_signing_key()
+
+
 async def test_dapr_resolver_raises_when_payload_has_no_string_values() -> None:
     fetcher = _FakeFetcher([{"x": 1, "y": [], "z": None}])
     resolver = DaprSecretsSigningKeyResolver(
