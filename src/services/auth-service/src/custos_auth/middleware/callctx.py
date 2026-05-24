@@ -76,11 +76,19 @@ CALLCTX_HEADER: str = "x-custos-callctx"
 #: * Gateway hot-path (``/v1/authz/verify-and-authorize``) — same
 #:   reasoning: the gateway calls this *before* it has a
 #:   call-context, on every external request.
+#: * OIDC callback (``/v1/auth/login/oidc/callback``) — external
+#:   OIDC redirect from the IdP, bootstrapping a session; no
+#:   internal call-context exists yet (AS-IMPL-024, Phase H lands
+#:   the actual handler).
+#: * JWKS endpoint — every component fetches the public key set
+#:   anonymously to verify call-contexts locally; requiring a
+#:   call-context here would be a chicken-and-egg deadlock.
 _BYPASS_PATHS: frozenset[str] = frozenset(
     {
         "/healthz",
         "/readyz",
         "/v1/auth/verify",
+        "/v1/auth/login/oidc/callback",
         "/v1/authz/verify-and-authorize",
         "/.well-known/jwks.json",
     }
