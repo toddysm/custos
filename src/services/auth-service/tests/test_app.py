@@ -35,9 +35,18 @@ def test_create_app_returns_a_fastapi_instance() -> None:
     assert isinstance(app, FastAPI)
 
 
-def test_healthz_returns_200_before_any_startup_work() -> None:
-    app = create_app(settings=load_settings(_ENV), providers=_providers())
-    with TestClient(app) as client:
+def test_healthz_returns_200_independent_of_lifespan_state() -> None:
+    # /healthz is a flat liveness probe: it must not depend on
+    # app.state.ready, app.state.providers, or anything else the
+    # lifespan sets. Exercise that by mounting the health router on a
+    # bare FastAPI app without ever entering the create_app lifespan.
+    from fastapi import FastAPI
+
+    from custos_auth.health import router as health_router
+
+    bare = FastAPI()
+    bare.include_router(health_router)
+    with TestClient(bare) as client:
         resp = client.get("/healthz")
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok"}
