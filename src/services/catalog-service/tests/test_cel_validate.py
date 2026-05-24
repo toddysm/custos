@@ -429,7 +429,7 @@ def test_validate_walks_call_binary_unary_conditional_list_map_branches() -> Non
                 "activity": "ns/t@1",
             },
         ],
-        inputs={"foo": {"type": "int"}},
+        inputs={"foo": {"type": "integer"}},
     )
     # No name-binding violations — the expression is well-formed and
     # all roots are legal. The interesting assertion is that this
