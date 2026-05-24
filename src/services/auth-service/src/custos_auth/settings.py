@@ -128,13 +128,14 @@ ENV_TOKEN_SWEEPER_INTERVAL: Final[str] = "CUSTOS_AUTH_TOKEN_SWEEPER_INTERVAL_SEC
 #: override the env var.
 DEFAULT_TOKEN_SWEEPER_INTERVAL_SECONDS: Final[int] = 300
 
-#: Required-at-startup once Phase G AS-IMPL-018 wires the signer/JWKS
-#: into the app lifespan. Dapr Secrets reference (logical name) under
-#: which the EdDSA call-context signing key PEM is stored. AS-IMPL-017
-#: ships the signer module + resolver protocol; lifespan integration —
-#: including the "missing key ref crash-loops production" guard — lands
-#: with AS-IMPL-018 once the rotation scheduler is in place. Until then
-#: this setting is parsed but unused at runtime.
+#: Dapr Secrets reference (logical name) under which the EdDSA
+#: call-context signing key PEM is stored. During app lifespan startup,
+#: auth-service consults this setting to decide whether to fetch the
+#: initial signing key from Dapr Secrets or fall back to generating an
+#: ephemeral key when no reference is configured. Phase G AS-IMPL-018
+#: wires the signer/JWKS into the app lifespan, including the
+#: "missing key ref crash-loops production" guard and rotation
+#: scheduler integration.
 ENV_CALL_CONTEXT_KEY_REF: Final[str] = "CUSTOS_AUTH_CALL_CONTEXT_KEY_REF"
 
 #: Optional. Name of the Dapr secret-store component the resolver
