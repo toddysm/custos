@@ -211,9 +211,67 @@ class PrincipalDisableRequest(BaseModel):
     reason: Annotated[str, Field(min_length=1, max_length=500)]
 
 
+# ---------------------------------------------------------------------------
+# Permission registry (Phase D / AS-IMPL-009)
+# ---------------------------------------------------------------------------
+
+
+class PermissionResponse(BaseModel):
+    """One row in the ``GET /v1/permissions`` response.
+
+    ``declared_by`` carries the loader-side multi-declarer attribution
+    (pipe-delimited list of owning components — see
+    :mod:`custos_auth.permission_registry`).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    description: str
+    declared_by: str
+
+
+class PermissionListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    permissions: list[PermissionResponse]
+
+
+# ---------------------------------------------------------------------------
+# Roles (Phase D / AS-IMPL-009)
+# ---------------------------------------------------------------------------
+
+
+class RoleResponse(BaseModel):
+    """One row in the ``GET /v1/roles`` response.
+
+    Mirrors the SPL :class:`Role` dataclass plus the built-in scope-rule
+    metadata so clients can render the role catalogue without a
+    second round-trip.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    role_id: str
+    name: str
+    description: str
+    permission_names: list[str]
+    allowed_scopes: list[Literal["workspace", "tenant", "platform"]]
+
+
+class RoleListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    roles: list[RoleResponse]
+
+
 __all__ = [
+    "PermissionListResponse",
+    "PermissionResponse",
     "PrincipalDisableRequest",
     "PrincipalResponse",
+    "RoleListResponse",
+    "RoleResponse",
     "ServiceAccountCreateRequest",
     "ServiceAccountResponse",
     "TenantCreateRequest",

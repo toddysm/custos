@@ -9,11 +9,12 @@ from types import MappingProxyType
 from typing import Any
 
 from custos_spl.errors import ImmutableViolation
-from custos_spl.ids import PrincipalId, TenantId, WorkspaceId
+from custos_spl.ids import PrincipalId, RoleId, TenantId, WorkspaceId
 from custos_spl.interfaces.auth_store import (
     Permission,
     Principal,
     PrincipalFilter,
+    Role,
     ServiceAccount,
     Tenant,
     TenantFilter,
@@ -48,6 +49,7 @@ class FakeAuthAdapter:
         self.principals: dict[str, Principal] = {}
         self.oidc_identities: dict[tuple[str, str], str] = {}
         self.permissions: dict[str, Permission] = {}
+        self.roles: dict[str, Role] = {}
         # Call recorders for tests that want to assert on argument shape
         self.disable_principal_calls: list[tuple[str, str, str]] = []
 
@@ -195,6 +197,19 @@ class FakeAuthAdapter:
 
     async def list_permissions(self) -> tuple[Permission, ...]:
         return tuple(self.permissions.values())
+
+    # ------------------------------------------------------------------
+    # Roles (Phase D / AS-IMPL-009)
+    # ------------------------------------------------------------------
+
+    async def put_role(self, role: Role) -> None:
+        self.roles[str(role.role_id)] = role
+
+    async def get_role(self, role_id: RoleId) -> Role | None:
+        return self.roles.get(str(role_id))
+
+    async def list_roles(self) -> tuple[Role, ...]:
+        return tuple(self.roles.values())
 
 
 class FakeMetadataAdapter:
