@@ -391,7 +391,16 @@ async def resolve_activity_ref(
         )
 
     if _MAJOR_PIN_RE.match(ver):
-        result = await registry.resolve(namespace, type_, ver)
+        # SPL stores (and the v1 Postgres adapter) accept a PEP 440
+        # ``SpecifierSet`` for the resolver's ``semver_range`` argument.
+        # The catalog ref grammar's ``@MAJOR`` form is sugar for "the
+        # latest non-deprecated version inside that major" — translate
+        # to the equivalent specifier so the SPL contract receives a
+        # valid input. The in-memory fakes used by manager-level unit
+        # tests still accept the bare major pin, so the registry's
+        # public contract is unchanged.
+        spec = f">={ver},<{int(ver) + 1}"
+        result = await registry.resolve(namespace, type_, spec)
         if result is None:
             raise ActivityTypeNotFound(
                 f"no non-deprecated activity-type version satisfies {ref!r}",

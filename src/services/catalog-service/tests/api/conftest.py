@@ -355,16 +355,20 @@ class FakeCatalogStore:
         type: str,
         semver_range: str,
     ) -> ActivityTypeVersion | None:
+        from packaging.specifiers import SpecifierSet
+        from packaging.version import Version
+
         if self.activity_deprecated.get((namespace, type), False):
             return None
+        spec = SpecifierSet(semver_range)
         matching = [
             row
             for (ns, tp, _), row in self.activity_versions.items()
-            if ns == namespace and tp == type and row.version.split(".")[0] == semver_range
+            if ns == namespace and tp == type and Version(row.version) in spec
         ]
         if not matching:
             return None
-        matching.sort(key=lambda r: tuple(int(p) for p in r.version.split(".")))
+        matching.sort(key=lambda r: Version(r.version))
         return self._with_activity_dep(matching[-1])
 
     def _with_activity_dep(self, row: ActivityTypeVersion) -> ActivityTypeVersion:

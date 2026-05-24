@@ -60,6 +60,10 @@ dev = [
     # OTel SDK is dev-only so tests can install in-memory exporters when
     # CS-IMPL-019 lands. The library itself only depends on the API.
     "opentelemetry-sdk>=1.20,<2",
+    # Integration tests (CS-IMPL-021) need testcontainers to spin up
+    # Postgres locally when ``CUSTOS_PG_DSN`` is not provided.
+    "testcontainers[postgres]>=4.0",
+    "asyncpg>=0.29",
 ]
 
 [project.urls]
@@ -123,7 +127,7 @@ disallow_untyped_defs = false
 
 [[tool.mypy.overrides]]
 # asyncpg ships no PEP 561 marker; treat as untyped at the boundary.
-module = ["asyncpg", "asyncpg.*"]
+module = ["asyncpg", "asyncpg.*", "testcontainers", "testcontainers.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -133,5 +137,31 @@ addopts = [
     "-ra",
     "--strict-markers",
     "--strict-config",
+    "-m",
+    "not integration",
 ]
 asyncio_mode = "auto"
+markers = [
+    "integration: requires a live Postgres backend (testcontainers / CI service)",
+]
+
+[tool.coverage.run]
+branch = false
+source = ["custos_catalog"]
+omit = [
+    "src/custos_catalog/__main__.py",
+]
+
+[tool.coverage.report]
+precision = 1
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "if typing.TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "\\.\\.\\.",
+    "if __name__ == .__main__.:",
+    "@overload",
+]

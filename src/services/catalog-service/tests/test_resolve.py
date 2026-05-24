@@ -57,26 +57,26 @@ class FakeActivityRegistry:
         self.rows = rows
 
     async def resolve(self, namespace: str, type: str, semver_range: str) -> _ActivityRow | None:
-        """Return the highest matching row whose major == semver_range."""
-        matches = [
-            r
-            for r in self.rows
-            if r.namespace == namespace
-            and r.type == type
-            and r.version.split(".")[0] == semver_range
-            and not r.parent_deprecated
-        ]
+        """Return the highest row whose version satisfies the PEP 440 spec.
+
+        ``resolve_activity_ref`` translates the catalog ref grammar's
+        ``@MAJOR`` form into a ``">=N,<N+1"`` specifier before
+        forwarding to a registry, so the fake must speak PEP 440.
+        """
+        from packaging.specifiers import SpecifierSet
+        from packaging.version import Version
+
+        spec = SpecifierSet(semver_range)
+
+        def _ok(row: _ActivityRow) -> bool:
+            return row.namespace == namespace and row.type == type and Version(row.version) in spec
+
+        matches = [r for r in self.rows if _ok(r) and not r.parent_deprecated]
         if not matches:
             # The store would still return a deprecated match if it's
             # the only one — we return it so the resolver can surface
             # ActivityTypeDeprecated.
-            deprecated = [
-                r
-                for r in self.rows
-                if r.namespace == namespace
-                and r.type == type
-                and r.version.split(".")[0] == semver_range
-            ]
+            deprecated = [r for r in self.rows if _ok(r)]
             if not deprecated:
                 return None
             return sorted(deprecated, key=lambda r: _semver_key(r.version))[-1]
