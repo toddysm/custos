@@ -10,6 +10,7 @@ from custos_auth.api.routes import (
     principals,
     role_bindings,
     roles,
+    rpc,
     service_accounts,
     service_tokens,
     tenants,
@@ -31,6 +32,7 @@ all_routers = [
     roles.router,
     role_bindings.router,
     jwks.router,
+    rpc.router,
 ]
 
 

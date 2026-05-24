@@ -46,6 +46,14 @@ def test_openapi_spec_advertises_documented_routes(client: TestClient) -> None:
         "/v1/auth/login/oidc/callback",
         "/v1/authz/verify-and-authorize",
         "/.well-known/jwks.json",
+        # AS-IMPL-025 internal RPC surface — the five method names
+        # from the design's "Internal RPC" table, exposed under the
+        # ``/rpc/`` prefix.
+        "/rpc/authn.verifyToken",
+        "/rpc/authz.authorize",
+        "/rpc/authz.verifyAndAuthorize",
+        "/rpc/callctx.sign",
+        "/rpc/callctx.verify",
     }
     missing = expected - paths.keys()
     assert not missing, f"missing routes in OpenAPI spec: {sorted(missing)}"

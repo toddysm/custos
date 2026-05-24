@@ -88,6 +88,13 @@ CALLCTX_HEADER: str = "x-custos-callctx"
 #:   behind a call-context would mean nothing could discover the
 #:   service surface without already speaking the call-context
 #:   protocol.
+#: * Bootstrap Internal RPCs (AS-IMPL-025) — ``authn.verifyToken``,
+#:   ``authz.verifyAndAuthorize``, and ``callctx.sign`` are how
+#:   components bootstrap their call-context from a raw bearer.
+#:   Requiring a call-context here would be a chicken-and-egg
+#:   deadlock. ``authz.authorize`` and ``callctx.verify`` are NOT
+#:   bypassed — by the time a component calls them it already holds
+#:   a verified call-context.
 _BYPASS_PATHS: frozenset[str] = frozenset(
     {
         "/healthz",
@@ -100,6 +107,9 @@ _BYPASS_PATHS: frozenset[str] = frozenset(
         "/docs",
         "/docs/oauth2-redirect",
         "/redoc",
+        "/rpc/authn.verifyToken",
+        "/rpc/authz.verifyAndAuthorize",
+        "/rpc/callctx.sign",
     }
 )
 
