@@ -106,6 +106,21 @@ class InvalidRoleScope(AuthApiError):
     code = "invalid_role_scope"
 
 
+class Unauthenticated(AuthApiError):
+    """401 — bearer / call-context could not be authenticated.
+
+    Used by the verify endpoint (AS-IMPL-014) on any negative
+    outcome (unknown / malformed / revoked / expired / sa-disabled).
+    The wire envelope deliberately carries a single generic
+    ``detail`` so the endpoint cannot be used as an oracle —
+    operators read the disambiguating ``reason`` from the
+    ``authn.failure`` audit row.
+    """
+
+    status_code = 401
+    code = "unauthenticated"
+
+
 # ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
@@ -173,6 +188,7 @@ def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(Conflict, handle_auth_api_error)
     app.add_exception_handler(ValidationFailure, handle_auth_api_error)
     app.add_exception_handler(InvalidRoleScope, handle_auth_api_error)
+    app.add_exception_handler(Unauthenticated, handle_auth_api_error)
     app.add_exception_handler(RequestValidationError, handle_validation_error)
     app.add_exception_handler(StarletteHTTPException, handle_http_exception)
 
@@ -182,6 +198,7 @@ __all__ = [
     "Conflict",
     "InvalidRoleScope",
     "NotFound",
+    "Unauthenticated",
     "ValidationFailure",
     "register_exception_handlers",
 ]

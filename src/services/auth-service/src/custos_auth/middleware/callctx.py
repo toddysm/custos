@@ -67,7 +67,13 @@ if TYPE_CHECKING:
 CALLCTX_HEADER: str = "x-custos-callctx"
 
 #: Paths the middleware deliberately bypasses (no auth on probes).
-_BYPASS_PATHS: frozenset[str] = frozenset({"/healthz", "/readyz"})
+#:
+#: * Health probes (``/healthz`` / ``/readyz``) — Kubernetes makes
+#:   them without a call-context.
+#: * Token verification (``/v1/auth/verify``) — the verify endpoint
+#:   is *the source* of call-context for downstream services, so by
+#:   construction the caller does not yet have one.
+_BYPASS_PATHS: frozenset[str] = frozenset({"/healthz", "/readyz", "/v1/auth/verify"})
 
 logger = logging.getLogger(__name__)
 

@@ -6,8 +6,10 @@ import pytest
 
 from custos_auth.authz_cache import DEFAULT_AUTHZ_CACHE_TTL_SECONDS
 from custos_auth.settings import (
+    DEFAULT_AUTHN_CACHE_TTL_SECONDS,
     DEFAULT_SERVICE_TOKEN_TTL_SECONDS,
     ENV_AUTH_STORE_DSN,
+    ENV_AUTHN_CACHE_TTL,
     ENV_AUTHZ_CACHE_TTL,
     ENV_METADATA_STORE_DSN,
     ENV_SERVICE_TOKEN_TTL_DEFAULT,
@@ -157,3 +159,45 @@ def test_service_token_ttl_default_rejects_negative() -> None:
 def test_service_token_ttl_default_rejects_non_integer_value() -> None:
     with pytest.raises(SettingsError, match=ENV_SERVICE_TOKEN_TTL_DEFAULT):
         load_settings(_required_env(**{ENV_SERVICE_TOKEN_TTL_DEFAULT: "not-a-number"}))
+
+
+# ---------------------------------------------------------------------------
+# CUSTOS_AUTH_AUTHN_CACHE_TTL (AS-IMPL-014)
+# ---------------------------------------------------------------------------
+
+
+def test_authn_cache_ttl_defaults_to_30_seconds() -> None:
+    # Default tracks the design's "Authn (token) … 30s" entry.
+    settings = load_settings(_required_env())
+    assert settings.authn_cache_ttl_seconds == DEFAULT_AUTHN_CACHE_TTL_SECONDS
+    assert DEFAULT_AUTHN_CACHE_TTL_SECONDS == 30
+    assert settings.authn_cache_enabled is True
+
+
+def test_authn_cache_ttl_zero_puts_cache_in_bypass_mode() -> None:
+    # AS-IMPL-014 acceptance criterion: 0 disables the cache so
+    # operators can run a forced-bypass smoke test in production
+    # without redeploying.
+    settings = load_settings(_required_env(**{ENV_AUTHN_CACHE_TTL: "0"}))
+    assert settings.authn_cache_ttl_seconds == 0
+    assert settings.authn_cache_enabled is False
+
+
+def test_authn_cache_ttl_positive_override_is_respected() -> None:
+    settings = load_settings(_required_env(**{ENV_AUTHN_CACHE_TTL: "5"}))
+    assert settings.authn_cache_ttl_seconds == 5
+
+
+def test_authn_cache_ttl_empty_string_falls_back_to_default() -> None:
+    settings = load_settings(_required_env(**{ENV_AUTHN_CACHE_TTL: ""}))
+    assert settings.authn_cache_ttl_seconds == DEFAULT_AUTHN_CACHE_TTL_SECONDS
+
+
+def test_authn_cache_ttl_rejects_negative_value() -> None:
+    with pytest.raises(SettingsError, match="non-negative"):
+        load_settings(_required_env(**{ENV_AUTHN_CACHE_TTL: "-1"}))
+
+
+def test_authn_cache_ttl_rejects_non_integer_value() -> None:
+    with pytest.raises(SettingsError, match=ENV_AUTHN_CACHE_TTL):
+        load_settings(_required_env(**{ENV_AUTHN_CACHE_TTL: "not-a-number"}))

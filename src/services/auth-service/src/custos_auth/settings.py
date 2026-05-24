@@ -97,6 +97,21 @@ ENV_SERVICE_TOKEN_TTL_DEFAULT: Final[str] = "CUSTOS_AUTH_SERVICE_TOKEN_TTL_DEFAU
 #: 90 days in seconds.
 DEFAULT_SERVICE_TOKEN_TTL_SECONDS: Final[int] = 90 * 24 * 60 * 60
 
+#: Optional. Time-to-live (seconds) for entries in the per-replica
+#: authn cache that backs :func:`custos_auth.authn.verify_token`
+#: (AS-IMPL-014). Default 30 seconds matches the design's § Cache
+#: Invalidation Bus table. Setting the value to ``0`` puts the cache
+#: in **bypass mode** — every verify call performs a full SPL
+#: lookup. Negative or non-integer values raise
+#: :class:`SettingsError`.
+ENV_AUTHN_CACHE_TTL: Final[str] = "CUSTOS_AUTH_AUTHN_CACHE_TTL"
+
+#: Default lifetime for authn cache entries when the env override is
+#: unset. The design fixes this at 30 s so a revoke is observable
+#: across replicas within one TTL window even if the eviction event
+#: gets lost in the pub/sub transport.
+DEFAULT_AUTHN_CACHE_TTL_SECONDS: Final[int] = 30
+
 
 class SettingsError(RuntimeError):
     """Raised when the environment is missing a required setting or carries a malformed value."""
@@ -113,6 +128,7 @@ class Settings:
     permissions_paths: tuple[str, ...]
     authz_cache_ttl_seconds: int
     service_token_ttl_default_seconds: int
+    authn_cache_ttl_seconds: int
 
     @property
     def is_production(self) -> bool:
@@ -127,6 +143,11 @@ class Settings:
     def authz_cache_enabled(self) -> bool:
         """True when the authz decision cache is configured to store entries."""
         return self.authz_cache_ttl_seconds > 0
+
+    @property
+    def authn_cache_enabled(self) -> bool:
+        """True when the authn cache is configured to store entries."""
+        return self.authn_cache_ttl_seconds > 0
 
 
 def _require(name: str, env: dict[str, str]) -> str:
@@ -165,6 +186,29 @@ def _parse_authz_cache_ttl(raw: str) -> int:
     if value < 0:
         raise SettingsError(
             f"{ENV_AUTHZ_CACHE_TTL} must be non-negative (got {value}); use 0 to disable the cache."
+        )
+    return value
+
+
+def _parse_authn_cache_ttl(raw: str) -> int:
+    """Parse the ``CUSTOS_AUTH_AUTHN_CACHE_TTL`` env value.
+
+    Empty string falls back to
+    :data:`DEFAULT_AUTHN_CACHE_TTL_SECONDS`. ``0`` enables the
+    bypass-mode acceptance criterion (every verify hits the store).
+    Negative or non-integer values raise :class:`SettingsError`.
+    """
+    if raw == "":
+        return DEFAULT_AUTHN_CACHE_TTL_SECONDS
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise SettingsError(
+            f"{ENV_AUTHN_CACHE_TTL} must be a non-negative integer (got {raw!r})"
+        ) from exc
+    if value < 0:
+        raise SettingsError(
+            f"{ENV_AUTHN_CACHE_TTL} must be non-negative (got {value}); use 0 to disable the cache."
         )
     return value
 
@@ -209,11 +253,16 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         service_token_ttl_default_seconds=_parse_service_token_ttl_default(
             src.get(ENV_SERVICE_TOKEN_TTL_DEFAULT, "").strip(),
         ),
+        authn_cache_ttl_seconds=_parse_authn_cache_ttl(
+            src.get(ENV_AUTHN_CACHE_TTL, "").strip(),
+        ),
     )
 
 
 __all__ = [
+    "DEFAULT_AUTHN_CACHE_TTL_SECONDS",
     "DEFAULT_SERVICE_TOKEN_TTL_SECONDS",
+    "ENV_AUTHN_CACHE_TTL",
     "ENV_AUTHZ_CACHE_TTL",
     "ENV_AUTH_STORE_DSN",
     "ENV_CALLCTX_VERIFIER_URL",

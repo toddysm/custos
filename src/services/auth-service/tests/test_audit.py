@@ -8,18 +8,24 @@ import pytest
 from custos_spl import AuditEvent
 
 from custos_auth.audit import (
+    EVENT_AUTHN_FAILURE,
+    EVENT_AUTHN_SUCCESS,
     EVENT_OIDC_IDENTITY_LINKED,
     EVENT_PRINCIPAL_CREATED,
     EVENT_PRINCIPAL_DISABLED,
     EVENT_TENANT_CREATED,
     EVENT_TOKEN_ISSUED,
+    EVENT_TOKEN_USED,
     EVENT_WORKSPACE_CREATED,
     PLATFORM_WORKSPACE_ID,
+    audit_authn_failure,
+    audit_authn_success,
     audit_oidc_identity_linked,
     audit_principal_created,
     audit_principal_disabled,
     audit_tenant_created,
     audit_token_issued,
+    audit_token_used,
     audit_workspace_created,
 )
 from tests._fakes import FakeMetadataAdapter
@@ -168,3 +174,83 @@ async def test_audit_emission_failure_is_swallowed(
         )
     assert meta.append_audit_calls == []
     assert any("audit emission failed" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# AS-IMPL-014: token.used / authn.success / authn.failure helpers.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_audit_token_used_keys_to_sa_workspace_with_sa_as_actor() -> None:
+    meta = FakeMetadataAdapter()
+    await audit_token_used(
+        meta,  # type: ignore[arg-type]
+        workspace_id="ws-1",
+        token_id="tok-1",
+        service_account_id="sa-1",
+    )
+    ws_id, event = meta.append_audit_calls[0]
+    assert ws_id == "ws-1"
+    assert event.event_type == EVENT_TOKEN_USED
+    # The verify path runs before call-context middleware so the
+    # bearer (the SA itself) is the only available actor.
+    assert event.actor == "sa-1"
+    assert event.subject == {"token_id": "tok-1", "service_account_id": "sa-1"}
+    # ``token.used`` carries no payload — the row is a presence
+    # signal, not a data point. The 30 s authn-cache rate-limits
+    # it to ~one per token per window after a rotation.
+    assert event.payload == {}
+
+
+@pytest.mark.asyncio
+async def test_audit_authn_success_payload_carries_cache_hit_flag() -> None:
+    meta = FakeMetadataAdapter()
+    await audit_authn_success(
+        meta,  # type: ignore[arg-type]
+        workspace_id="ws-1",
+        token_id="tok-1",
+        service_account_id="sa-1",
+        cache_hit=True,
+    )
+    _ws, event = meta.append_audit_calls[0]
+    assert event.event_type == EVENT_AUTHN_SUCCESS
+    assert event.actor == "sa-1"
+    assert event.payload == {"cache_hit": True}
+
+
+@pytest.mark.asyncio
+async def test_audit_authn_failure_with_full_subject_keys_to_sa_workspace() -> None:
+    meta = FakeMetadataAdapter()
+    await audit_authn_failure(
+        meta,  # type: ignore[arg-type]
+        reason="revoked",
+        workspace_id="ws-1",
+        token_id="tok-1",
+        service_account_id="sa-1",
+    )
+    ws_id, event = meta.append_audit_calls[0]
+    assert ws_id == "ws-1"
+    assert event.event_type == EVENT_AUTHN_FAILURE
+    assert event.actor == "sa-1"
+    assert event.subject == {"token_id": "tok-1", "service_account_id": "sa-1"}
+    assert event.payload == {"reason": "revoked"}
+
+
+@pytest.mark.asyncio
+async def test_audit_authn_failure_unknown_token_falls_back_to_platform() -> None:
+    # When no SPL row matched the input hash we have neither a
+    # token_id nor a SA id; the failure row therefore lands in the
+    # platform sentinel bucket so an unknown-token probe does not
+    # appear (arbitrarily) under some workspace's audit pipeline.
+    meta = FakeMetadataAdapter()
+    await audit_authn_failure(
+        meta,  # type: ignore[arg-type]
+        reason="unknown-token",
+    )
+    ws_id, event = meta.append_audit_calls[0]
+    assert ws_id == PLATFORM_WORKSPACE_ID
+    assert event.actor == "anonymous"
+    # Empty subject — we don't leak the input hash on the row.
+    assert event.subject == {}
+    assert event.payload == {"reason": "unknown-token"}

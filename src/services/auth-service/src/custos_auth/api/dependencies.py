@@ -20,6 +20,7 @@ from typing import Annotated
 from custos_spl import AuthStoreProvider, MetadataStoreProvider
 from fastapi import Depends, Request
 
+from custos_auth.authn_cache import AuthnCache
 from custos_auth.binding_events import BindingChangedPublisher
 from custos_auth.middleware.callctx import (
     CallContext,
@@ -30,6 +31,7 @@ from custos_auth.middleware.callctx import (
 )
 from custos_auth.providers import Providers
 from custos_auth.settings import Settings
+from custos_auth.token_revoked_events import TokenRevokedPublisher
 
 
 def get_providers(request: Request) -> Providers:
@@ -83,6 +85,25 @@ def get_binding_changed_publisher(
     return providers.binding_changed_publisher
 
 
+def get_token_revoked_publisher(
+    providers: Annotated[Providers, Depends(get_providers)],
+) -> TokenRevokedPublisher:
+    """Return the token-revoked event publisher from the provider bundle.
+
+    Defaults to :class:`LocalTokenRevokedBus` for single-replica
+    deployments; multi-replica deployments swap in the real
+    Dapr Pub/Sub or SPL-outbox-backed transport.
+    """
+    return providers.token_revoked_publisher
+
+
+def get_authn_cache(
+    providers: Annotated[Providers, Depends(get_providers)],
+) -> AuthnCache:
+    """Return the per-replica authn cache from the provider bundle."""
+    return providers.authn_cache
+
+
 def require_permission(
     *names: str,
 ) -> Callable[[Request], Awaitable[CallContext]]:
@@ -96,10 +117,12 @@ def require_permission(
 
 __all__ = [
     "get_auth_store",
+    "get_authn_cache",
     "get_binding_changed_publisher",
     "get_call_context",
     "get_metadata_store",
     "get_providers",
     "get_settings",
+    "get_token_revoked_publisher",
     "require_permission",
 ]
