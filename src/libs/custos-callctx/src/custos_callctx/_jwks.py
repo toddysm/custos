@@ -214,6 +214,15 @@ class JwksCache:
                 return
             try:
                 headers, body = await self._fetcher(self._jwks_url)
+            except asyncio.CancelledError:
+                # Preserve task-cancellation semantics. asyncio.CancelledError
+                # derives from BaseException on Python 3.8+, so the broader
+                # ``except Exception`` below already misses it — but an
+                # injected ``HttpJsonFetcher`` could (incorrectly) raise a
+                # custom Exception-derived cancellation marker, and being
+                # explicit makes the intent obvious to readers and to future
+                # maintainers swapping the fetcher.
+                raise
             except InvalidCallContextError:
                 raise
             except Exception as exc:

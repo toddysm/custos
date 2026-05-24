@@ -204,6 +204,26 @@ async def test_jwks_cache_wraps_transport_failures() -> None:
     assert exc.value.reason is InvalidReason.JWKS_UNAVAILABLE
 
 
+async def test_jwks_cache_propagates_cancellation_without_wrapping() -> None:
+    # asyncio.CancelledError raised by the injected fetcher must
+    # propagate out of _refresh() untouched so task cancellation
+    # (request cancellation, lifespan shutdown) is observed by the
+    # caller. Wrapping it in InvalidCallContextError would mask the
+    # cancellation signal and prevent clean teardown.
+    import asyncio as _asyncio
+
+    class _CancelledFetcher:
+        async def __call__(self, url: str) -> tuple[dict[str, str], dict[str, Any]]:
+            raise _asyncio.CancelledError
+
+    cache = JwksCache(
+        jwks_url="https://auth/.well-known/jwks.json",
+        fetcher=_CancelledFetcher(),
+    )
+    with pytest.raises(_asyncio.CancelledError):
+        await cache.get_key("anything")
+
+
 async def test_jwks_cache_rejects_non_okp_keys(signing_key: SigningKeyFixture) -> None:
     bad_body: dict[str, Any] = {
         "keys": [
