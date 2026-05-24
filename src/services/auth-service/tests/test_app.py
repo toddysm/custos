@@ -130,3 +130,85 @@ def test_probes_do_not_require_authentication(path: str) -> None:
     with TestClient(app) as client:
         resp = client.get(path)
     assert resp.status_code in (200, 503)
+
+
+def test_lifespan_subscribes_authz_cache_to_local_bus() -> None:
+    # AS-IMPL-012: when the publisher is LocalBindingChangedBus
+    # (default), the lifespan subscribes the authz cache's
+    # on_binding_changed handler so binding-changed events on the
+    # local replica invalidate the cache synchronously.
+    from custos_auth.binding_events import LocalBindingChangedBus
+
+    providers = _providers()
+    assert isinstance(providers.binding_changed_publisher, LocalBindingChangedBus)
+    app = create_app(settings=load_settings(_ENV), providers=providers)
+    with TestClient(app):
+        bus = providers.binding_changed_publisher
+        assert isinstance(bus, LocalBindingChangedBus)
+        # The handler list contains the cache invalidator. Bound
+        # methods compare by ``__self__`` + ``__func__`` so equality
+        # is the right check, not identity.
+        assert any(
+            getattr(h, "__self__", None) is providers.authz_cache
+            and getattr(h, "__func__", None) is type(providers.authz_cache).on_binding_changed
+            for h in bus.handlers
+        )
+
+
+def test_lifespan_starts_and_stops_binding_changed_subscriber() -> None:
+    # The subscriber Protocol is started with the cache's handler
+    # and stopped cleanly on shutdown so background tasks (in a real
+    # Redis subscriber) do not leak.
+    from custos_auth.binding_events import NoOpBindingChangedSubscriber
+
+    providers = _providers()
+    sub = providers.binding_changed_subscriber
+    assert isinstance(sub, NoOpBindingChangedSubscriber)
+    app = create_app(settings=load_settings(_ENV), providers=providers)
+    with TestClient(app):
+        assert sub.started is True
+        # Bound methods compare by ``__self__`` + ``__func__``.
+        assert sub.handler is not None
+        assert getattr(sub.handler, "__self__", None) is providers.authz_cache
+        assert (
+            getattr(sub.handler, "__func__", None) is type(providers.authz_cache).on_binding_changed
+        )
+    # Shutdown ran the subscriber's stop().
+    assert sub.stopped is True
+
+
+def test_revoke_then_recheck_evicts_cache_in_one_round_trip() -> None:
+    # AS-IMPL-012 acceptance criterion: a revoke (publish on the
+    # local bus) followed by a recheck must see the new decision —
+    # the cache row must be gone after the publish.
+    import asyncio
+
+    from custos_spl.interfaces.auth_store import WorkspaceScope
+
+    from custos_auth.binding_events import (
+        BindingChangedEvent,
+        LocalBindingChangedBus,
+    )
+
+    providers = _providers()
+    app = create_app(settings=load_settings(_ENV), providers=providers)
+    with TestClient(app):
+        cache = providers.authz_cache
+        bus = providers.binding_changed_publisher
+        assert isinstance(bus, LocalBindingChangedBus)
+        # Prime the cache with a stale "allow" decision.
+        cache.put("user-1", "ws-1", "workflow:read", allowed=True, reason="allow-bound")
+        assert cache.get("user-1", "ws-1", "workflow:read") is not None
+        # Publish a revoke; the in-process bus invokes the cache
+        # invalidator synchronously.
+        event = BindingChangedEvent(
+            principal_id="user-1",
+            role_id="role:workspace.viewer",
+            scope=WorkspaceScope(workspace_id="ws-1"),  # type: ignore[arg-type]
+            action="revoked",
+            binding_id="rb-1",
+        )
+        asyncio.new_event_loop().run_until_complete(bus.publish(event))
+        # Cache row evicted — recheck path will go to the auth store
+        # and observe the new decision.
+        assert cache.get("user-1", "ws-1", "workflow:read") is None

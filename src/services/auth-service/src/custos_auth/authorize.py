@@ -150,9 +150,7 @@ def _resolve_permission_set(bindings: tuple[object, ...]) -> set[str]:
 
 def _is_platform_admin(bindings: tuple[object, ...]) -> bool:
     """``True`` if any binding grants the platform-admin role."""
-    return any(
-        getattr(b, "role_id", None) == ROLE_PLATFORM_ADMIN for b in bindings
-    )
+    return any(getattr(b, "role_id", None) == ROLE_PLATFORM_ADMIN for b in bindings)
 
 
 def _build_scope_set(

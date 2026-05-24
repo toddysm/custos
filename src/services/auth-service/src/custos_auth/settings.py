@@ -68,6 +68,18 @@ ENV_CALLCTX_VERIFIER_URL: Final[str] = "CUSTOS_AUTH_CALLCTX_VERIFIER_URL"
 #: built-in role references a name that no path declared.
 ENV_PERMISSIONS_PATHS: Final[str] = "CUSTOS_AUTH_PERMISSIONS_PATHS"
 
+#: Optional. Time-to-live (seconds) for entries in the per-replica
+#: authz decision cache (AS-IMPL-012). Default 60 seconds matches the
+#: ``design/components/auth-service/design.md`` § "Cache Invalidation
+#: Bus" table. Setting the value to ``0`` puts the cache in **bypass
+#: mode** — every authorize call performs a full binding resolution
+#: against the auth store and the cache neither reads nor writes —
+#: which is the AS-IMPL-012 acceptance-criterion knob for diagnostic
+#: and side-by-side comparison scenarios. Negative values are
+#: rejected with :class:`SettingsError`. Non-integer values are
+#: rejected with :class:`SettingsError`.
+ENV_AUTHZ_CACHE_TTL: Final[str] = "CUSTOS_AUTH_AUTHZ_CACHE_TTL"
+
 
 class SettingsError(RuntimeError):
     """Raised when the environment is missing a required setting or carries a malformed value."""
@@ -82,6 +94,7 @@ class Settings:
     environment: str
     callctx_verifier_url: str
     permissions_paths: tuple[str, ...]
+    authz_cache_ttl_seconds: int
 
     @property
     def is_production(self) -> bool:
@@ -91,6 +104,11 @@ class Settings:
     def callctx_dev_shim_active(self) -> bool:
         """True when no verifier URL is configured (dev mode)."""
         return self.callctx_verifier_url == ""
+
+    @property
+    def authz_cache_enabled(self) -> bool:
+        """True when the authz decision cache is configured to store entries."""
+        return self.authz_cache_ttl_seconds > 0
 
 
 def _require(name: str, env: dict[str, str]) -> str:
@@ -108,6 +126,30 @@ def _parse_paths(raw: str) -> tuple[str, ...]:
     return tuple(part.strip() for part in raw.split(":") if part.strip())
 
 
+def _parse_authz_cache_ttl(raw: str) -> int:
+    """Parse the ``CUSTOS_AUTH_AUTHZ_CACHE_TTL`` env value.
+
+    Empty string falls back to the 60-second default. A literal ``0``
+    is preserved (and enables the bypass-mode acceptance criterion).
+    Negative values raise :class:`SettingsError` because a negative
+    TTL is not a meaningful configuration. Non-integer values raise
+    :class:`SettingsError`.
+    """
+    if raw == "":
+        return 60
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise SettingsError(
+            f"{ENV_AUTHZ_CACHE_TTL} must be a non-negative integer (got {raw!r})"
+        ) from exc
+    if value < 0:
+        raise SettingsError(
+            f"{ENV_AUTHZ_CACHE_TTL} must be non-negative (got {value}); use 0 to disable the cache."
+        )
+    return value
+
+
 def load_settings(env: dict[str, str] | None = None) -> Settings:
     """Parse a :class:`Settings` from the supplied env mapping (default ``os.environ``)."""
     src: dict[str, str] = dict(os.environ if env is None else env)
@@ -117,10 +159,14 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         environment=src.get(ENV_ENVIRONMENT, "development").strip() or "development",
         callctx_verifier_url=src.get(ENV_CALLCTX_VERIFIER_URL, "").strip(),
         permissions_paths=_parse_paths(src.get(ENV_PERMISSIONS_PATHS, "").strip()),
+        authz_cache_ttl_seconds=_parse_authz_cache_ttl(
+            src.get(ENV_AUTHZ_CACHE_TTL, "").strip(),
+        ),
     )
 
 
 __all__ = [
+    "ENV_AUTHZ_CACHE_TTL",
     "ENV_AUTH_STORE_DSN",
     "ENV_CALLCTX_VERIFIER_URL",
     "ENV_ENVIRONMENT",
