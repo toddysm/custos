@@ -4,19 +4,36 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
+from datetime import UTC, datetime
 from types import MappingProxyType
+from typing import Any
+
+from custos_spl.errors import ImmutableViolation
+from custos_spl.ids import PrincipalId, TenantId, WorkspaceId
+from custos_spl.interfaces.auth_store import (
+    Principal,
+    PrincipalFilter,
+    ServiceAccount,
+    Tenant,
+    TenantFilter,
+    User,
+    Workspace,
+    WorkspaceFilter,
+)
 
 
 class FakeAuthAdapter:
-    """A minimal in-memory ``AuthStoreProvider`` for wiring tests.
+    """A minimal in-memory ``AuthStoreProvider`` for auth-service tests.
 
-    Implements only the ``MigrationCapable`` surface plus enough
-    metadata for :func:`custos_spl.check_revisions` to read the
-    ledger. The real adapter surface (``put_principal`` etc.) is
-    exercised by the SPL contract suite in
+    Implements the ``MigrationCapable`` surface (used by the schema-
+    revision startup gate tests) plus the CRUD surface that the Phase
+    C HTTP routes exercise. The real Postgres adapter surface is
+    covered by the SPL conformance suite in
     ``src/libs/storage-provider-layer/tests/test_auth_store.py`` and
-    by the integration suite in
-    ``src/libs/custos-postgres/tests/test_integration.py``.
+    by ``src/libs/custos-postgres/tests/test_integration.py``; this
+    fake intentionally keeps the storage model deliberately simple
+    (plain dicts, no concurrency, no real transactions) so tests stay
+    focused on the route + audit logic.
     """
 
     SCHEMA_REVISION = 1
@@ -24,6 +41,13 @@ class FakeAuthAdapter:
     def __init__(self, *, applied_revisions: AbstractSet[int] | None = None) -> None:
         self._applied: set[int] = set({1} if applied_revisions is None else applied_revisions)
         self.refresh_calls = 0
+        # In-memory entity stores
+        self.tenants: dict[str, Tenant] = {}
+        self.workspaces: dict[str, Workspace] = {}
+        self.principals: dict[str, Principal] = {}
+        self.oidc_identities: dict[tuple[str, str], str] = {}
+        # Call recorders for tests that want to assert on argument shape
+        self.disable_principal_calls: list[tuple[str, str, str]] = []
 
     @property
     def declared_revisions(self) -> Mapping[str, AbstractSet[int]]:
@@ -40,6 +64,126 @@ class FakeAuthAdapter:
     def set_applied(self, revisions: AbstractSet[int]) -> None:
         self._applied = set(revisions)
 
+    # ------------------------------------------------------------------
+    # Tenants
+    # ------------------------------------------------------------------
+
+    async def put_tenant(self, tenant: Tenant) -> None:
+        self.tenants[str(tenant.tenant_id)] = tenant
+
+    async def get_tenant(self, tenant_id: TenantId) -> Tenant | None:
+        return self.tenants.get(str(tenant_id))
+
+    async def list_tenants(self, filter: TenantFilter) -> tuple[Tenant, ...]:
+        rows = list(self.tenants.values())
+        if not filter.include_disabled:
+            rows = [t for t in rows if t.disabled_at is None]
+        return tuple(rows)
+
+    # ------------------------------------------------------------------
+    # Workspaces
+    # ------------------------------------------------------------------
+
+    async def put_workspace(self, workspace: Workspace) -> None:
+        self.workspaces[str(workspace.workspace_id)] = workspace
+
+    async def get_workspace(self, workspace_id: WorkspaceId) -> Workspace | None:
+        return self.workspaces.get(str(workspace_id))
+
+    async def list_workspaces(self, filter: WorkspaceFilter) -> tuple[Workspace, ...]:
+        rows = list(self.workspaces.values())
+        if filter.tenant_id is not None:
+            rows = [w for w in rows if w.tenant_id == filter.tenant_id]
+        if not filter.include_disabled:
+            rows = [w for w in rows if w.disabled_at is None]
+        return tuple(rows)
+
+    # ------------------------------------------------------------------
+    # Principals
+    # ------------------------------------------------------------------
+
+    async def put_principal(self, principal: Principal) -> None:
+        self.principals[str(principal.principal_id)] = principal
+
+    async def get_principal(self, principal_id: PrincipalId) -> Principal | None:
+        return self.principals.get(str(principal_id))
+
+    async def list_principals(self, filter: PrincipalFilter) -> tuple[Principal, ...]:
+        rows = list(self.principals.values())
+        if filter.kind is not None:
+            rows = [p for p in rows if p.kind == filter.kind]
+        if filter.tenant_id is not None:
+            rows = [p for p in rows if isinstance(p, User) and p.tenant_id == filter.tenant_id]
+        if filter.workspace_id is not None:
+            rows = [
+                p
+                for p in rows
+                if isinstance(p, ServiceAccount) and p.workspace_id == filter.workspace_id
+            ]
+        if not filter.include_disabled:
+            rows = [p for p in rows if p.disabled_at is None]
+        return tuple(rows)
+
+    async def disable_principal(
+        self,
+        principal_id: PrincipalId,
+        actor: PrincipalId,
+        reason: str,
+    ) -> None:
+        self.disable_principal_calls.append((str(principal_id), str(actor), reason))
+        existing = self.principals.get(str(principal_id))
+        if existing is None:
+            return
+        now = datetime.now(UTC)
+        # Rebuild the frozen dataclass with the disabled fields populated.
+        if isinstance(existing, User):
+            self.principals[str(principal_id)] = User(
+                kind="user",
+                principal_id=existing.principal_id,
+                tenant_id=existing.tenant_id,
+                display_name=existing.display_name,
+                email=existing.email,
+                disabled_at=now,
+                disabled_reason=reason,
+                created_at=existing.created_at,
+            )
+        else:
+            assert isinstance(existing, ServiceAccount)
+            self.principals[str(principal_id)] = ServiceAccount(
+                kind="serviceAccount",
+                principal_id=existing.principal_id,
+                workspace_id=existing.workspace_id,
+                display_name=existing.display_name,
+                disabled_at=now,
+                disabled_reason=reason,
+                created_at=existing.created_at,
+            )
+
+    # ------------------------------------------------------------------
+    # OIDC identities (write-once on (issuer, subject))
+    # ------------------------------------------------------------------
+
+    async def put_oidc_identity(
+        self,
+        issuer: str,
+        subject: str,
+        user_id: PrincipalId,
+    ) -> None:
+        key = (issuer, subject)
+        if key in self.oidc_identities:
+            raise ImmutableViolation(f"OIDC identity ({issuer!r}, {subject!r}) is already bound")
+        self.oidc_identities[key] = str(user_id)
+
+    async def get_oidc_identity(
+        self,
+        issuer: str,
+        subject: str,
+    ) -> PrincipalId | None:
+        raw = self.oidc_identities.get((issuer, subject))
+        if raw is None:
+            return None
+        return PrincipalId(raw)
+
 
 class FakeMetadataAdapter:
     """In-memory ``MetadataStoreProvider`` mirror used by auth-service wiring tests.
@@ -53,12 +197,18 @@ class FakeMetadataAdapter:
 
     SCHEMA_REVISION = 4
 
-    def __init__(self, *, applied_revisions: AbstractSet[int] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        applied_revisions: AbstractSet[int] | None = None,
+        append_audit_should_fail: bool = False,
+    ) -> None:
         self._applied: set[int] = set(
             {1, 2, 3, 4} if applied_revisions is None else applied_revisions,
         )
         self.refresh_calls = 0
-        self.append_audit_calls: list[tuple[str, object]] = []
+        self.append_audit_calls: list[tuple[str, Any]] = []
+        self.append_audit_should_fail = append_audit_should_fail
 
     @property
     def declared_revisions(self) -> Mapping[str, AbstractSet[int]]:
@@ -75,7 +225,14 @@ class FakeMetadataAdapter:
     def set_applied(self, revisions: AbstractSet[int]) -> None:
         self._applied = set(revisions)
 
-    async def append_audit(self, workspace_id: object, event: object, tx: object = None) -> None:
+    async def append_audit(
+        self,
+        workspace_id: object,
+        event: object,
+        tx: object = None,
+    ) -> None:
+        if self.append_audit_should_fail:
+            raise RuntimeError("simulated audit-outbox failure")
         self.append_audit_calls.append((str(workspace_id), event))
 
 

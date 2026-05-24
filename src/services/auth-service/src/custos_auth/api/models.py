@@ -1,0 +1,228 @@
+"""Pydantic request/response schemas for the Phase C HTTP surface.
+
+These are pure wire-format models — they describe what bytes go on the
+network and nothing else. SPL dataclasses (:class:`custos_spl.Tenant`,
+:class:`custos_spl.Workspace`, the :data:`Principal` union, …) stay the
+single source of truth for the persisted shape; this module ships the
+projection functions (:func:`tenant_to_response`, etc.) that map them
+to the wire envelope.
+
+Field-name conventions:
+
+* All API timestamps are ISO-8601 UTC strings rendered via
+  :class:`datetime.datetime` → Pydantic's default serializer.
+* ``tenant_id`` / ``workspace_id`` / ``principal_id`` are the canonical
+  opaque-string identifiers issued by auth-service. They are *not*
+  client-supplied on create.
+* ``display_name`` is the human-readable label; it is freely mutable
+  through future PATCH endpoints (out of scope for Phase C).
+* ``kind`` discriminates the :class:`PrincipalResponse` union exactly
+  the way :class:`custos_spl.User` / :class:`custos_spl.ServiceAccount`
+  discriminate the persisted union.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Annotated, Literal
+
+from custos_spl.interfaces.auth_store import (
+    Principal,
+    ServiceAccount,
+    Tenant,
+    User,
+    Workspace,
+)
+from pydantic import BaseModel, ConfigDict, Field
+
+# ---------------------------------------------------------------------------
+# Tenant
+# ---------------------------------------------------------------------------
+
+
+class TenantCreateRequest(BaseModel):
+    """Body of ``POST /v1/tenants``.
+
+    ``tenant_id`` is operator-supplied (it must be a stable opaque
+    string the operator picks for the customer; auth-service does not
+    generate it). ``display_name`` is the human-readable label.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tenant_id: Annotated[str, Field(min_length=1, max_length=120)]
+    display_name: Annotated[str, Field(min_length=1, max_length=200)]
+
+
+class TenantResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tenant_id: str
+    display_name: str
+    disabled_at: datetime | None
+    created_at: datetime
+
+
+class TenantListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tenants: list[TenantResponse]
+
+
+def tenant_to_response(tenant: Tenant) -> TenantResponse:
+    return TenantResponse(
+        tenant_id=str(tenant.tenant_id),
+        display_name=tenant.display_name,
+        disabled_at=tenant.disabled_at,
+        created_at=tenant.created_at,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Workspace
+# ---------------------------------------------------------------------------
+
+
+class WorkspaceCreateRequest(BaseModel):
+    """Body of ``POST /v1/tenants/{tenant_id}/workspaces``.
+
+    ``workspace_id`` is operator-supplied for parity with tenant
+    creation. ``tenant_id`` comes from the path, not the body.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: Annotated[str, Field(min_length=1, max_length=120)]
+    display_name: Annotated[str, Field(min_length=1, max_length=200)]
+
+
+class WorkspaceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: str
+    tenant_id: str
+    display_name: str
+    disabled_at: datetime | None
+    created_at: datetime
+
+
+class WorkspaceListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workspaces: list[WorkspaceResponse]
+
+
+def workspace_to_response(workspace: Workspace) -> WorkspaceResponse:
+    return WorkspaceResponse(
+        workspace_id=str(workspace.workspace_id),
+        tenant_id=str(workspace.tenant_id),
+        display_name=workspace.display_name,
+        disabled_at=workspace.disabled_at,
+        created_at=workspace.created_at,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Principal (User + ServiceAccount)
+# ---------------------------------------------------------------------------
+
+
+class UserResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["user"] = "user"
+    principal_id: str
+    tenant_id: str
+    display_name: str
+    email: str | None
+    disabled_at: datetime | None
+    disabled_reason: str | None
+    created_at: datetime
+
+
+class ServiceAccountResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["serviceAccount"] = "serviceAccount"
+    principal_id: str
+    workspace_id: str
+    display_name: str
+    disabled_at: datetime | None
+    disabled_reason: str | None
+    created_at: datetime
+
+
+PrincipalResponse = UserResponse | ServiceAccountResponse
+
+
+def principal_to_response(principal: Principal) -> PrincipalResponse:
+    """Project a SPL :data:`Principal` to its wire-format envelope.
+
+    The discriminator is the persisted ``kind`` literal; the projection
+    is a straight field-for-field copy with opaque IDs widened to
+    plain strings for JSON serialisation.
+    """
+    if isinstance(principal, User):
+        return UserResponse(
+            principal_id=str(principal.principal_id),
+            tenant_id=str(principal.tenant_id),
+            display_name=principal.display_name,
+            email=principal.email,
+            disabled_at=principal.disabled_at,
+            disabled_reason=principal.disabled_reason,
+            created_at=principal.created_at,
+        )
+    assert isinstance(principal, ServiceAccount)
+    return ServiceAccountResponse(
+        principal_id=str(principal.principal_id),
+        workspace_id=str(principal.workspace_id),
+        display_name=principal.display_name,
+        disabled_at=principal.disabled_at,
+        disabled_reason=principal.disabled_reason,
+        created_at=principal.created_at,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Service-account create
+# ---------------------------------------------------------------------------
+
+
+class ServiceAccountCreateRequest(BaseModel):
+    """Body of ``POST /v1/service-accounts``.
+
+    The service account is created in the caller's *current workspace*
+    — pulled from the call-context — so the body does not carry a
+    workspace id. ``principal_id`` is operator-supplied.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    principal_id: Annotated[str, Field(min_length=1, max_length=120)]
+    display_name: Annotated[str, Field(min_length=1, max_length=200)]
+
+
+class PrincipalDisableRequest(BaseModel):
+    """Body of ``POST /v1/principals/{principal_id}/disable``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: Annotated[str, Field(min_length=1, max_length=500)]
+
+
+__all__ = [
+    "PrincipalDisableRequest",
+    "PrincipalResponse",
+    "ServiceAccountCreateRequest",
+    "ServiceAccountResponse",
+    "TenantCreateRequest",
+    "TenantListResponse",
+    "TenantResponse",
+    "UserResponse",
+    "WorkspaceCreateRequest",
+    "WorkspaceListResponse",
+    "WorkspaceResponse",
+    "principal_to_response",
+    "tenant_to_response",
+    "workspace_to_response",
+]

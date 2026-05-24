@@ -11,9 +11,13 @@ Phase A (AS-IMPL-001 / AS-IMPL-002) shipped the FastAPI scaffold + Helm
 subchart. Phase B (AS-IMPL-003 / AS-IMPL-004) wires the SPL provider
 bundle (``AuthStoreProvider`` + ``MetadataStoreProvider``) into the app
 factory via a FastAPI lifespan hook and runs the schema-revision startup
-gate before serving traffic. Tenancy + principal model, permission/role
-registry, authorization engine, service tokens, call-context signing,
-and the OIDC verifier all land in subsequent AS-IMPL-* phases.
+gate before serving traffic. Phase C (AS-IMPL-005/006/007) mounts the
+:class:`CallContextMiddleware`, registers the M1 admin endpoints
+(tenants / workspaces / principals / service-accounts), and ships the
+``OidcIdentity`` storage helpers used by the Phase H verifier.
+Permission/role registry, authorization engine, service tokens,
+call-context signing, and the OIDC verifier all land in subsequent
+AS-IMPL-* phases.
 """
 
 from __future__ import annotations
@@ -23,7 +27,9 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
+from custos_auth.api import all_routers, register_exception_handlers
 from custos_auth.health import router as health_router
+from custos_auth.middleware.callctx import CallContextMiddleware
 from custos_auth.providers import (
     MigrationRequired,
     Providers,
@@ -105,5 +111,16 @@ def create_app(
         ),
         lifespan=lifespan,
     )
+    # Health probes are mounted before the call-context middleware so
+    # liveness/readiness checks never carry a call-context header.
     app.include_router(health_router)
+
+    app.add_middleware(
+        CallContextMiddleware,
+        verifier_url=effective_settings.callctx_verifier_url,
+        environment=effective_settings.environment,
+    )
+    register_exception_handlers(app)
+    for router in all_routers:
+        app.include_router(router)
     return app
