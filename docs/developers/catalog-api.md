@@ -231,11 +231,8 @@ Response `201 Created`:
 ```json
 {
   "workspaceId": "ws-1",
-  "name": "orders",
-  "version": 1,
-  "workflowVersionId": "ws-1/orders/1",
-  "canonicalRef": "ws-1/orders@1.0.0",
-  "canonicalHash": "sha256:..."
+  "workflowName": "orders",
+  "version": 1
 }
 ```
 
