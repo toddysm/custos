@@ -171,9 +171,17 @@ def test_workflow_deprecate_not_found_envelope(client: TestClient) -> None:
     )
     # Catalog policy: deprecate of an unknown workflow returns 404
     # with the workflow_not_found envelope.
-    assert resp.status_code in (400, 404), resp.text
+    assert resp.status_code == 404, resp.text
     body = resp.json()
-    assert body["error"]["code"] in {
-        "catalog.workflow_not_found",
-        "catalog.workflow_ref_invalid",
-    }
+    assert body["error"]["code"] == "catalog.workflow_not_found"
+
+
+def test_workflow_deprecate_invalid_ref_envelope(client: TestClient) -> None:
+    resp = client.post(
+        "/v1/workspaces/ws-1/workflows/does-not-exist:deprecate",
+        json={},
+        headers=admin_header(),
+    )
+    assert resp.status_code == 400, resp.text
+    body = resp.json()
+    assert body["error"]["code"] == "catalog.workflow_ref_invalid"
