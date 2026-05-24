@@ -74,6 +74,12 @@ config:
   internalIdentityMode: "jwt"
   authzCacheTtl: "60s"
   authnCacheTtl: "30s"
+  # OIDC end-user login (POST /v1/auth/login/oidc/callback). M3
+  # feature: must remain ``false`` until AS-IMPL-020..023 (the OIDC
+  # verifier + provisioning policy) lands. With this flag off the
+  # callback returns 503 ``oidc_not_enabled``; with it on it returns
+  # 503 ``oidc_not_implemented`` until the handler is wired.
+  oidcEnabled: "false"
   # Required at install / first boot. Override per-profile.
   oidcIssuers: ""
   callContextKeyRef: ""
