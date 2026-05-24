@@ -17,9 +17,11 @@ replicaCount: ""
 
 image:
   # Default repository is built from <global.imageRegistry>/<chart name>
-  # by templates/_helpers.tpl `svc.image`. Setting `image.repository` here
-  # explicitly to make the binding obvious to operators reading values.yaml.
-  repository: ghcr.io/toddysm/custos/auth-service
+  # by templates/_helpers.tpl `svc.image`. Leave `image.repository` empty
+  # here so airgapped/override profiles can switch registries via
+  # `global.imageRegistry`; document the binding in comments rather than
+  # hardcoding the repository.
+  repository: ""
   tag: ""
   pullPolicy: ""
 
