@@ -46,6 +46,7 @@ signal.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import Mapping
@@ -131,6 +132,11 @@ async def _emit(
     )
     try:
         await metadata_store.append_audit(ws_id, event)
+    except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
+        # Cancellation / process-control signals must propagate so the
+        # caller's task or process can unwind. They are not operational
+        # emission failures and must not be counted as such.
+        raise
     except Exception:
         EMIT_FAILURES_TOTAL.add(1, {"event_type": event_type})
         _LOGGER.warning(

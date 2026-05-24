@@ -9,6 +9,8 @@ into ``custos_audit_emit_failures_total``.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from custos_catalog import audit
@@ -190,3 +192,42 @@ async def test_append_audit_failure_is_swallowed(caplog: pytest.LogCaptureFixtur
     # Emission failed → no event captured, WARNING log line emitted.
     assert store.audit == []
     assert any("audit emission failed" in rec.message for rec in caplog.records)
+
+
+async def test_cancelled_error_propagates_and_is_not_counted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Cancellation must propagate; it is not an operational failure."""
+    store = FakeMetadataStore()
+    store.raise_on_append = asyncio.CancelledError()
+    with (
+        caplog.at_level("WARNING", logger="custos_catalog.audit"),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await audit.audit_workflow_published(
+            store,  # type: ignore[arg-type]
+            workspace_id="ws-1",
+            actor="alice",
+            workflow_name="wf",
+            version=1,
+        )
+    # Cancellation must not be logged as an emission failure.
+    assert not any("audit emission failed" in rec.message for rec in caplog.records)
+
+
+async def test_system_exit_propagates(caplog: pytest.LogCaptureFixture) -> None:
+    """SystemExit/KeyboardInterrupt must propagate through ``_emit``."""
+    store = FakeMetadataStore()
+    store.raise_on_append = SystemExit(1)
+    with (
+        caplog.at_level("WARNING", logger="custos_catalog.audit"),
+        pytest.raises(SystemExit),
+    ):
+        await audit.audit_workflow_published(
+            store,  # type: ignore[arg-type]
+            workspace_id="ws-1",
+            actor="alice",
+            workflow_name="wf",
+            version=1,
+        )
+    assert not any("audit emission failed" in rec.message for rec in caplog.records)
