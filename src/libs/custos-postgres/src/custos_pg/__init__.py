@@ -20,10 +20,14 @@ from custos_pg.adapters.definition import (
 from custos_pg.adapters.definition import (
     make_adapter as make_definition_adapter,
 )
+from custos_pg.adapters.metadata import PgMetadataAdapter
+from custos_pg.adapters.metadata import make_adapter as make_metadata_adapter
 
 __all__ = [
     "PgCatalogAdapter",
     "PgDefinitionAdapter",
+    "PgMetadataAdapter",
     "make_catalog_adapter",
     "make_definition_adapter",
+    "make_metadata_adapter",
 ]

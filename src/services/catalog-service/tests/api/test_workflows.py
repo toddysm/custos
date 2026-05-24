@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from tests.api.conftest import (
     FakeCatalogStore,
     FakeDefinitionStore,
+    FakeMetadataStore,
     admin_header,
     callctx_header,
     minimal_workflow,
@@ -22,9 +23,9 @@ from tests.api.conftest import (
 
 def test_publish_returns_201_and_version_ref(
     client: TestClient,
-    stores: tuple[FakeDefinitionStore, FakeCatalogStore],
+    stores: tuple[FakeDefinitionStore, FakeCatalogStore, FakeMetadataStore],
 ) -> None:
-    _, catalog_store = stores
+    _, catalog_store, _ = stores
     seed_builtin_echo(catalog_store)
 
     resp = client.post(
@@ -40,9 +41,9 @@ def test_publish_returns_201_and_version_ref(
 
 def test_publish_accepts_pre_parsed_object_body(
     client: TestClient,
-    stores: tuple[FakeDefinitionStore, FakeCatalogStore],
+    stores: tuple[FakeDefinitionStore, FakeCatalogStore, FakeMetadataStore],
 ) -> None:
-    _, catalog_store = stores
+    _, catalog_store, _ = stores
     seed_builtin_echo(catalog_store)
 
     resp = client.post(
@@ -84,9 +85,9 @@ def test_publish_rejects_workspace_mismatch(client: TestClient) -> None:
 
 def test_publish_emits_envelope_on_schema_failure(
     client: TestClient,
-    stores: tuple[FakeDefinitionStore, FakeCatalogStore],
+    stores: tuple[FakeDefinitionStore, FakeCatalogStore, FakeMetadataStore],
 ) -> None:
-    _, catalog_store = stores
+    _, catalog_store, _ = stores
     seed_builtin_echo(catalog_store)
 
     # Drop the required apiVersion.
@@ -111,9 +112,9 @@ def test_publish_emits_envelope_on_schema_failure(
 
 def test_list_versions_returns_published_rows(
     client: TestClient,
-    stores: tuple[FakeDefinitionStore, FakeCatalogStore],
+    stores: tuple[FakeDefinitionStore, FakeCatalogStore, FakeMetadataStore],
 ) -> None:
-    _, catalog_store = stores
+    _, catalog_store, _ = stores
     seed_builtin_echo(catalog_store)
     client.post(
         "/v1/workspaces/ws-1/workflows",
@@ -167,9 +168,9 @@ def test_list_versions_rejects_out_of_range_limit(client: TestClient) -> None:
 
 def test_get_by_ref_returns_version_body(
     client: TestClient,
-    stores: tuple[FakeDefinitionStore, FakeCatalogStore],
+    stores: tuple[FakeDefinitionStore, FakeCatalogStore, FakeMetadataStore],
 ) -> None:
-    _, catalog_store = stores
+    _, catalog_store, _ = stores
     seed_builtin_echo(catalog_store)
     client.post(
         "/v1/workspaces/ws-1/workflows",
@@ -219,9 +220,9 @@ def test_segment_without_at_sign_is_treated_as_list_by_name(client: TestClient) 
 
 def test_get_by_id_returns_version_body(
     client: TestClient,
-    stores: tuple[FakeDefinitionStore, FakeCatalogStore],
+    stores: tuple[FakeDefinitionStore, FakeCatalogStore, FakeMetadataStore],
 ) -> None:
-    _, catalog_store = stores
+    _, catalog_store, _ = stores
     seed_builtin_echo(catalog_store)
     client.post(
         "/v1/workspaces/ws-1/workflows",
@@ -251,7 +252,7 @@ def test_get_by_id_400_on_malformed_id(client: TestClient) -> None:
 
 def test_get_by_id_rejects_cross_workspace_read(
     client: TestClient,
-    stores: tuple[FakeDefinitionStore, FakeCatalogStore],
+    stores: tuple[FakeDefinitionStore, FakeCatalogStore, FakeMetadataStore],
 ) -> None:
     """A tenant principal cannot read other workspaces' workflows by id.
 
@@ -263,7 +264,7 @@ def test_get_by_id_rejects_cross_workspace_read(
     need cross-workspace reads must use the ``/rpc/v1/`` surface
     gated on ``catalog:rpc:read``.
     """
-    _, catalog_store = stores
+    _, catalog_store, _ = stores
     seed_builtin_echo(catalog_store)
     # Publish a workflow in ws-2 as ws-2's admin.
     resp = client.post(
@@ -306,9 +307,9 @@ def test_get_by_id_400_when_name_contains_slash(client: TestClient) -> None:
 
 def test_deprecate_returns_status_ok(
     client: TestClient,
-    stores: tuple[FakeDefinitionStore, FakeCatalogStore],
+    stores: tuple[FakeDefinitionStore, FakeCatalogStore, FakeMetadataStore],
 ) -> None:
-    definition_store, catalog_store = stores
+    definition_store, catalog_store, _ = stores
     seed_builtin_echo(catalog_store)
     client.post(
         "/v1/workspaces/ws-1/workflows",
@@ -329,9 +330,9 @@ def test_deprecate_returns_status_ok(
 
 def test_deprecate_empty_body_is_accepted(
     client: TestClient,
-    stores: tuple[FakeDefinitionStore, FakeCatalogStore],
+    stores: tuple[FakeDefinitionStore, FakeCatalogStore, FakeMetadataStore],
 ) -> None:
-    _, catalog_store = stores
+    _, catalog_store, _ = stores
     seed_builtin_echo(catalog_store)
     client.post(
         "/v1/workspaces/ws-1/workflows",

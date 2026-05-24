@@ -9,20 +9,27 @@ from fastapi.testclient import TestClient
 from custos_catalog import create_app
 from custos_catalog.providers import Providers
 from custos_catalog.settings import load_settings
-from tests._fakes import FakeCatalogAdapter, FakeDefinitionAdapter
+from tests._fakes import FakeCatalogAdapter, FakeDefinitionAdapter, FakeMetadataAdapter
 
 _ENV = {
     "CAT_DEFINITION_STORE": "postgresql://u:p@h:5432/def",
     "CAT_CATALOG_STORE": "postgresql://u:p@h:5432/cat",
+    "CAT_METADATA_STORE": "postgresql://u:p@h:5432/meta",
     "CAT_CONNECTOR_ENDPOINT": "http://connector-service:8080",
     # CAT_AUTHZ_ENDPOINT intentionally unset — exercises the dev shim.
 }
 
 
-def _providers(*, def_revs: set[int] | None = None, cat_revs: set[int] | None = None) -> Providers:
+def _providers(
+    *,
+    def_revs: set[int] | None = None,
+    cat_revs: set[int] | None = None,
+    meta_revs: set[int] | None = None,
+) -> Providers:
     return Providers(
         definition_store=FakeDefinitionAdapter(applied_revisions=def_revs),  # type: ignore[arg-type]
         catalog_store=FakeCatalogAdapter(applied_revisions=cat_revs),  # type: ignore[arg-type]
+        metadata_store=FakeMetadataAdapter(applied_revisions=meta_revs),  # type: ignore[arg-type]
     )
 
 

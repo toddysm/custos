@@ -50,9 +50,14 @@ from typing import Any, Final
 
 from custos_spl.errors import ConflictDigest
 from custos_spl.interfaces.catalog_store import ActivityTypeVersion, CatalogStoreProvider
+from custos_spl.interfaces.metadata_store import MetadataStoreProvider
 from custos_spl.pagination import Cursor, Page
 
-from custos_catalog.audit import emit_event
+from custos_catalog import _telemetry as telemetry
+from custos_catalog.audit import (
+    audit_activity_deprecated,
+    audit_activity_registered,
+)
 from custos_catalog.normalize import canonical_hash, canonical_json
 
 _LOGGER = logging.getLogger(__name__)
@@ -273,10 +278,12 @@ class ActivityTypeRegistry:
         self,
         *,
         catalog_store: CatalogStoreProvider,
+        metadata_store: MetadataStoreProvider,
         platform_admins: frozenset[str] | set[str] | None = None,
         vendor_grants: Mapping[str, frozenset[str] | set[str]] | None = None,
     ) -> None:
         self._store = catalog_store
+        self._metadata_store = metadata_store
         self._platform_admins: frozenset[str] = frozenset(platform_admins or ())
         self._vendor_grants: dict[str, frozenset[str]] = {
             workspace: frozenset(grants) for workspace, grants in (vendor_grants or {}).items()
@@ -316,52 +323,62 @@ class ActivityTypeRegistry:
         Returns:
             The :class:`ActivityTypeRef` for the registered version.
         """
-        projection = self._project_manifest(manifest, referrer_ref=referrer_ref)
-        self._authorise_namespace(
-            namespace=projection.namespace,
-            workspace_id=workspace_id,
-            principal_id=principal_id,
-        )
-
-        try:
-            stored = await self._store.put_activity_type_version(
-                namespace=projection.namespace,
-                type=projection.type,
-                version=projection.version,
-                digest=projection.digest,
-                normalized_manifest=projection.normalized,
-            )
-        except ConflictDigest as exc:
-            stored_digest = await self._lookup_stored_digest(
-                namespace=projection.namespace,
-                type=projection.type,
-                version=projection.version,
-            )
-            raise ActivityRegistryConflict(
-                namespace=projection.namespace,
-                type=projection.type,
-                version=projection.version,
-                supplied_digest=projection.digest,
-                stored_digest=stored_digest,
-            ) from exc
-
-        ref = ActivityTypeRef(
-            namespace=stored.namespace,
-            type=stored.type,
-            version=stored.version,
-            digest=stored.digest,
-        )
-        emit_event(
-            "activity_type.registered",
-            {
-                "workspace_id": workspace_id,
-                "principal_id": principal_id,
-                "namespace": ref.namespace,
-                "type": ref.type,
-                "version": ref.version,
-                "digest": ref.digest,
-                "referrer_ref": referrer_ref,
+        with telemetry.observe_operation(
+            telemetry.OP_ACTIVITY_REGISTER,
+            outcomes={
+                ActivityManifestError: "manifest_invalid",
+                ActivityNamespaceError: "namespace_forbidden",
+                ActivityRegistryConflict: "digest_conflict",
             },
+        ):
+            projection = self._project_manifest(manifest, referrer_ref=referrer_ref)
+            self._authorise_namespace(
+                namespace=projection.namespace,
+                workspace_id=workspace_id,
+                principal_id=principal_id,
+            )
+
+            try:
+                stored = await self._store.put_activity_type_version(
+                    namespace=projection.namespace,
+                    type=projection.type,
+                    version=projection.version,
+                    digest=projection.digest,
+                    normalized_manifest=projection.normalized,
+                )
+            except ConflictDigest as exc:
+                stored_digest = await self._lookup_stored_digest(
+                    namespace=projection.namespace,
+                    type=projection.type,
+                    version=projection.version,
+                )
+                raise ActivityRegistryConflict(
+                    namespace=projection.namespace,
+                    type=projection.type,
+                    version=projection.version,
+                    supplied_digest=projection.digest,
+                    stored_digest=stored_digest,
+                ) from exc
+
+            ref = ActivityTypeRef(
+                namespace=stored.namespace,
+                type=stored.type,
+                version=stored.version,
+                digest=stored.digest,
+            )
+        # Audit emission runs outside the instrumentation span so the
+        # outcome label reflects the catalog mutation, not the outbox
+        # write. Failures are swallowed by the helper and observed via
+        # ``custos_audit_emit_failures_total``.
+        await audit_activity_registered(
+            self._metadata_store,
+            workspace_id=workspace_id,
+            actor=principal_id,
+            namespace=ref.namespace,
+            type_name=ref.type,
+            version=ref.version,
+            digest=ref.digest,
+            referrer_ref=referrer_ref,
         )
         return ref
 
@@ -438,26 +455,31 @@ class ActivityTypeRegistry:
         :meth:`register` — only a principal authorised to publish into
         the namespace may deprecate it.
         """
-        self._authorise_namespace(
-            namespace=namespace,
-            workspace_id=workspace_id,
-            principal_id=principal_id,
-        )
-        # Existence probe — SPL's list surface is the only available
-        # cheap check (the store does not expose a get-parent method).
-        probe = await self._store.list_activity_type_versions(namespace, type, limit=1)
-        if not probe.items:
-            raise ActivityTypeNotFound(namespace=namespace, type=type)
-        await self._store.set_activity_type_deprecated(namespace, type, True)
-        emit_event(
-            "activity_type.deprecated",
-            {
-                "workspace_id": workspace_id,
-                "principal_id": principal_id,
-                "namespace": namespace,
-                "type": type,
-                "reason": reason,
+        with telemetry.observe_operation(
+            telemetry.OP_ACTIVITY_DEPRECATE,
+            outcomes={
+                ActivityNamespaceError: "namespace_forbidden",
+                ActivityTypeNotFound: "not_found",
             },
+        ):
+            self._authorise_namespace(
+                namespace=namespace,
+                workspace_id=workspace_id,
+                principal_id=principal_id,
+            )
+            # Existence probe — SPL's list surface is the only available
+            # cheap check (the store does not expose a get-parent method).
+            probe = await self._store.list_activity_type_versions(namespace, type, limit=1)
+            if not probe.items:
+                raise ActivityTypeNotFound(namespace=namespace, type=type)
+            await self._store.set_activity_type_deprecated(namespace, type, True)
+        await audit_activity_deprecated(
+            self._metadata_store,
+            workspace_id=workspace_id,
+            actor=principal_id,
+            namespace=namespace,
+            type_name=type,
+            reason=reason,
         )
 
     # ------------------------------------------------------------------

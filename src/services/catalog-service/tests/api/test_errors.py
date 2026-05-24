@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from tests.api.conftest import (
     FakeCatalogStore,
     FakeDefinitionStore,
+    FakeMetadataStore,
     admin_header,
     callctx_header,
     minimal_activity_manifest,
@@ -254,9 +255,9 @@ def test_permission_denied_403_envelope(client: TestClient) -> None:
 
 def test_extract_with_bad_selector_emits_envelope(
     client: TestClient,
-    stores: tuple[FakeDefinitionStore, FakeCatalogStore],
+    stores: tuple[FakeDefinitionStore, FakeCatalogStore, FakeMetadataStore],
 ) -> None:
-    _, catalog_store = stores
+    _, catalog_store, _ = stores
     seed_builtin_echo(catalog_store)
     client.post(
         "/v1/workspaces/ws-1/workflows",

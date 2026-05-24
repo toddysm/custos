@@ -25,6 +25,11 @@ ENV_DEFINITION_STORE: Final[str] = "CAT_DEFINITION_STORE"
 #: Required. DSN that resolves the ``CatalogStoreProvider`` adapter.
 ENV_CATALOG_STORE: Final[str] = "CAT_CATALOG_STORE"
 
+#: Required. DSN that resolves the ``MetadataStoreProvider`` adapter.
+#: catalog-service writes audit-trail events to the SPL outbox via this
+#: adapter (CS-IMPL-019).
+ENV_METADATA_STORE: Final[str] = "CAT_METADATA_STORE"
+
 #: Required. URL of the in-cluster Connector Service.
 ENV_CONNECTOR_ENDPOINT: Final[str] = "CAT_CONNECTOR_ENDPOINT"
 
@@ -61,6 +66,7 @@ class Settings:
 
     definition_store_dsn: str
     catalog_store_dsn: str
+    metadata_store_dsn: str
     connector_endpoint: str
     authz_endpoint: str  # empty string means "dev shim active"
     publish_max_body_mb: int
@@ -111,6 +117,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
     return Settings(
         definition_store_dsn=_require(ENV_DEFINITION_STORE, src),
         catalog_store_dsn=_require(ENV_CATALOG_STORE, src),
+        metadata_store_dsn=_require(ENV_METADATA_STORE, src),
         connector_endpoint=_require(ENV_CONNECTOR_ENDPOINT, src),
         authz_endpoint=src.get(ENV_AUTHZ_ENDPOINT, "").strip(),
         publish_max_body_mb=_opt_int(ENV_PUBLISH_MAX_BODY_MB, src, DEFAULT_PUBLISH_MAX_BODY_MB),
@@ -130,6 +137,7 @@ __all__ = [
     "ENV_DEFAULT_NAMESPACE_TIER_VENDOR",
     "ENV_DEFINITION_STORE",
     "ENV_ENVIRONMENT",
+    "ENV_METADATA_STORE",
     "ENV_PUBLISH_MAX_BODY_MB",
     "Settings",
     "SettingsError",

@@ -76,8 +76,14 @@ from custos_spl.interfaces.definition_store import (
     DefinitionStoreProvider,
     WorkflowVersion,
 )
+from custos_spl.interfaces.metadata_store import MetadataStoreProvider
 from custos_spl.pagination import Cursor, Page
 
+from custos_catalog import _telemetry as telemetry
+from custos_catalog.audit import (
+    audit_workflow_deprecated,
+    audit_workflow_published,
+)
 from custos_catalog.cel_validate import (
     CelNameBindingError,
     CelSyntaxError,
@@ -280,12 +286,14 @@ class DefinitionManager:
         self,
         *,
         definition_store: DefinitionStoreProvider,
+        metadata_store: MetadataStoreProvider,
         activity_registry: ActivityTypeRegistry,
         connector_client: ConnectorClient,
         versioning: VersioningManager,
         max_publish_retries: int = DEFAULT_MAX_PUBLISH_RETRIES,
     ) -> None:
         self._store = definition_store
+        self._metadata_store = metadata_store
         self._activity_registry = activity_registry
         self._connector_client = connector_client
         self._versioning = versioning
@@ -348,47 +356,85 @@ class DefinitionManager:
             derived_from_template_version_id or "<none>",
         )
 
-        # 1. parse + 2. schema-validate
-        doc = self._parse_and_validate_schema(source)
-        # 2a. enforce metadata.workspace (when present) matches the
-        # target workspace. The schema marks metadata.workspace
-        # optional and explicitly defers this check to the manager
-        # (see workflow.WORKFLOW_SCHEMA comment); without it a caller
-        # could publish a document whose embedded workspace disagrees
-        # with the URL workspace.
-        self._enforce_workspace_match(doc, workspace_id=workspace_id)
-        # 3. normalize
-        normalized = normalize_workflow(doc)
-        # 4. resolve references
-        resolved = await self._resolve_refs(normalized, workspace_id=workspace_id)
-        # 5. CEL validation
-        self._validate_cel(resolved)
-        # 6. idempotency: scan existing versions for matching canonical hash
-        workflow_name = self._extract_workflow_name(resolved.document)
-        idempotent = await self._find_idempotent_match(
-            workspace_id=workspace_id,
-            workflow_name=workflow_name,
-            resolved=resolved,
-        )
-        if idempotent is not None:
-            _LOGGER.info(
-                "publish_workflow idempotent re-publish workspace=%s name=%s version=%s",
-                workspace_id,
-                workflow_name,
-                idempotent.version,
-            )
-            return WorkflowVersionRef(
+        with telemetry.observe_operation(
+            telemetry.OP_WORKFLOW_PUBLISH,
+            outcomes={
+                PublishValidationError: "validation_error",
+                WorkflowImmutabilityError: "immutability",
+            },
+        ):
+            # 1. parse + 2. schema-validate
+            with telemetry.observe_stage(
+                telemetry.STAGE_PARSE,
+                outcomes={PublishValidationError: "validation_error"},
+            ):
+                doc = self._parse_and_validate_schema(source)
+            # 2a. enforce metadata.workspace (when present) matches the
+            # target workspace. The schema marks metadata.workspace
+            # optional and explicitly defers this check to the manager
+            # (see workflow.WORKFLOW_SCHEMA comment); without it a caller
+            # could publish a document whose embedded workspace disagrees
+            # with the URL workspace.
+            self._enforce_workspace_match(doc, workspace_id=workspace_id)
+            # 3. normalize
+            with telemetry.observe_stage(telemetry.STAGE_NORMALIZE):
+                normalized = normalize_workflow(doc)
+            # 4. resolve references
+            with telemetry.observe_stage(
+                telemetry.STAGE_RESOLVE,
+                outcomes={PublishValidationError: "validation_error"},
+            ):
+                resolved = await self._resolve_refs(normalized, workspace_id=workspace_id)
+            # 5. CEL validation
+            with telemetry.observe_stage(
+                telemetry.STAGE_CEL,
+                outcomes={PublishValidationError: "validation_error"},
+            ):
+                self._validate_cel(resolved)
+            # 6. idempotency: scan existing versions for matching canonical hash
+            workflow_name = self._extract_workflow_name(resolved.document)
+            with telemetry.observe_stage(telemetry.STAGE_IDEMPOTENCY):
+                idempotent = await self._find_idempotent_match(
+                    workspace_id=workspace_id,
+                    workflow_name=workflow_name,
+                    resolved=resolved,
+                )
+            if idempotent is not None:
+                _LOGGER.info(
+                    "publish_workflow idempotent re-publish workspace=%s name=%s version=%s",
+                    workspace_id,
+                    workflow_name,
+                    idempotent.version,
+                )
+                return WorkflowVersionRef(
+                    workspace_id=workspace_id,
+                    workflow_name=workflow_name,
+                    version=int(idempotent.version),
+                )
+            # 7. mint + put with race-recovery loop
+            with telemetry.observe_stage(
+                telemetry.STAGE_MINT_PUT,
+                outcomes={WorkflowImmutabilityError: "immutability"},
+            ):
+                ref, newly_published = await self._mint_and_put(
+                    workspace_id=workspace_id,
+                    workflow_name=workflow_name,
+                    resolved=resolved,
+                    derived_from_template_version_id=derived_from_template_version_id,
+                )
+        # Audit emission runs outside the instrumentation context so
+        # outbox failures (best-effort, swallowed by the helper) don't
+        # appear as failed publish operations on the dashboards.
+        if newly_published:
+            await audit_workflow_published(
+                self._metadata_store,
                 workspace_id=workspace_id,
-                workflow_name=workflow_name,
-                version=int(idempotent.version),
+                actor=principal_id,
+                workflow_name=ref.workflow_name,
+                version=ref.version,
+                derived_from_template_version_id=derived_from_template_version_id,
             )
-        # 7. mint + put with race-recovery loop
-        return await self._mint_and_put(
-            workspace_id=workspace_id,
-            workflow_name=workflow_name,
-            resolved=resolved,
-            derived_from_template_version_id=derived_from_template_version_id,
-        )
+        return ref
 
     # ------------------------------------------------------------------
     # Read / lifecycle surface (CS-IMPL-011)
@@ -482,26 +528,37 @@ class DefinitionManager:
         # Probe for existence: a workflow with at least one version is
         # the only state the SPL can attest to. An empty list_workflow_versions
         # response means "no workflow to deprecate".
-        latest = await self._store.get_latest_workflow_version(
-            WorkspaceId(workspace_id),
-            WorkflowId(workflow_name),
-        )
-        if latest is None:
-            raise WorkflowNotFound(
-                workspace_id=workspace_id,
-                workflow_name=workflow_name,
+        with telemetry.observe_operation(
+            telemetry.OP_WORKFLOW_DEPRECATE,
+            outcomes={WorkflowNotFound: "not_found"},
+        ):
+            latest = await self._store.get_latest_workflow_version(
+                WorkspaceId(workspace_id),
+                WorkflowId(workflow_name),
             )
-        await self._store.set_workflow_deprecated(
-            WorkspaceId(workspace_id),
-            WorkflowId(workflow_name),
-            True,
-        )
+            if latest is None:
+                raise WorkflowNotFound(
+                    workspace_id=workspace_id,
+                    workflow_name=workflow_name,
+                )
+            await self._store.set_workflow_deprecated(
+                WorkspaceId(workspace_id),
+                WorkflowId(workflow_name),
+                True,
+            )
         _LOGGER.info(
             "deprecate_workflow workspace=%s name=%s principal=%s reason=%s",
             workspace_id,
             workflow_name,
             principal_id,
             reason or "<none>",
+        )
+        await audit_workflow_deprecated(
+            self._metadata_store,
+            workspace_id=workspace_id,
+            actor=principal_id,
+            workflow_name=workflow_name,
+            reason=reason,
         )
 
     # ------------------------------------------------------------------
@@ -696,7 +753,14 @@ class DefinitionManager:
         workflow_name: str,
         resolved: NormalizedWorkflow,
         derived_from_template_version_id: str | None = None,
-    ) -> WorkflowVersionRef:
+    ) -> tuple[WorkflowVersionRef, bool]:
+        """Mint a fresh version and put it; retry on race.
+
+        Returns the resulting ref plus a ``newly_published`` flag that
+        is ``False`` when the race-recovery loop discovered an
+        idempotent match (no new row was written) and ``True`` when
+        the put succeeded.
+        """
         for attempt in range(self._max_publish_retries):
             version = await self._versioning.next_workflow_version(
                 WorkspaceId(workspace_id),
@@ -730,10 +794,13 @@ class DefinitionManager:
                     resolved=resolved,
                 )
                 if rematch is not None:
-                    return WorkflowVersionRef(
-                        workspace_id=workspace_id,
-                        workflow_name=workflow_name,
-                        version=int(rematch.version),
+                    return (
+                        WorkflowVersionRef(
+                            workspace_id=workspace_id,
+                            workflow_name=workflow_name,
+                            version=int(rematch.version),
+                        ),
+                        False,
                     )
                 continue
             _LOGGER.info(
@@ -742,10 +809,13 @@ class DefinitionManager:
                 workflow_name,
                 version,
             )
-            return WorkflowVersionRef(
-                workspace_id=workspace_id,
-                workflow_name=workflow_name,
-                version=version,
+            return (
+                WorkflowVersionRef(
+                    workspace_id=workspace_id,
+                    workflow_name=workflow_name,
+                    version=version,
+                ),
+                True,
             )
 
         # All retries exhausted; surface a structured immutability error

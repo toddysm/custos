@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from tests.api.conftest import (
     FakeCatalogStore,
     FakeDefinitionStore,
+    FakeMetadataStore,
     admin_header,
     callctx_header,
     minimal_activity_manifest,
@@ -155,9 +156,9 @@ def test_get_400_on_malformed_ref(client: TestClient) -> None:
 
 def test_deprecate_returns_status_ok(
     client: TestClient,
-    stores: tuple[FakeDefinitionStore, FakeCatalogStore],
+    stores: tuple[FakeDefinitionStore, FakeCatalogStore, FakeMetadataStore],
 ) -> None:
-    _, catalog_store = stores
+    _, catalog_store, _ = stores
     _register(client)
 
     resp = client.post(

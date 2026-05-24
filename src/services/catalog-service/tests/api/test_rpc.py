@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from tests.api.conftest import (
     FakeCatalogStore,
     FakeDefinitionStore,
+    FakeMetadataStore,
     admin_header,
     callctx_header,
     minimal_connector_manifest,
@@ -23,9 +24,9 @@ from tests.api.conftest import (
 
 def test_rpc_get_workflow_version_returns_row(
     client: TestClient,
-    stores: tuple[FakeDefinitionStore, FakeCatalogStore],
+    stores: tuple[FakeDefinitionStore, FakeCatalogStore, FakeMetadataStore],
 ) -> None:
-    _, catalog_store = stores
+    _, catalog_store, _ = stores
     seed_builtin_echo(catalog_store)
     client.post(
         "/v1/workspaces/ws-1/workflows",
@@ -52,9 +53,9 @@ def test_rpc_get_workflow_version_returns_row(
 
 def test_rpc_get_workflow_version_requires_permission(
     client: TestClient,
-    stores: tuple[FakeDefinitionStore, FakeCatalogStore],
+    stores: tuple[FakeDefinitionStore, FakeCatalogStore, FakeMetadataStore],
 ) -> None:
-    _, catalog_store = stores
+    _, catalog_store, _ = stores
     seed_builtin_echo(catalog_store)
     client.post(
         "/v1/workspaces/ws-1/workflows",
@@ -88,7 +89,7 @@ def test_rpc_get_workflow_version_404_when_missing(client: TestClient) -> None:
 
 def test_rpc_get_workflow_version_rejects_cross_workspace_without_explicit_permission(
     client: TestClient,
-    stores: tuple[FakeDefinitionStore, FakeCatalogStore],
+    stores: tuple[FakeDefinitionStore, FakeCatalogStore, FakeMetadataStore],
 ) -> None:
     """``catalog:rpc:read`` alone does not allow crossing the tenant boundary.
 
@@ -96,7 +97,7 @@ def test_rpc_get_workflow_version_rejects_cross_workspace_without_explicit_permi
     that belongs to ``ws-1`` just by crafting the id; the gateway must
     additionally grant ``catalog:rpc:cross-workspace-read``.
     """
-    _, catalog_store = stores
+    _, catalog_store, _ = stores
     seed_builtin_echo(catalog_store)
     client.post(
         "/v1/workspaces/ws-1/workflows",
@@ -120,7 +121,7 @@ def test_rpc_get_workflow_version_rejects_cross_workspace_without_explicit_permi
 
 def test_rpc_get_workflow_version_allows_cross_workspace_with_explicit_permission(
     client: TestClient,
-    stores: tuple[FakeDefinitionStore, FakeCatalogStore],
+    stores: tuple[FakeDefinitionStore, FakeCatalogStore, FakeMetadataStore],
 ) -> None:
     """Internal services with the cross-workspace grant can still fan out.
 
@@ -129,7 +130,7 @@ def test_rpc_get_workflow_version_allows_cross_workspace_with_explicit_permissio
     issues them ``catalog:rpc:cross-workspace-read`` to authorise this
     explicitly.
     """
-    _, catalog_store = stores
+    _, catalog_store, _ = stores
     seed_builtin_echo(catalog_store)
     client.post(
         "/v1/workspaces/ws-1/workflows",

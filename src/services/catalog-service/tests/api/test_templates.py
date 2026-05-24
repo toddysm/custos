@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from tests.api.conftest import (
     FakeCatalogStore,
     FakeDefinitionStore,
+    FakeMetadataStore,
     admin_header,
     callctx_header,
     minimal_template,
@@ -23,9 +24,9 @@ from tests.api.conftest import (
 
 def test_publish_template_returns_201_and_ref(
     client: TestClient,
-    stores: tuple[FakeDefinitionStore, FakeCatalogStore],
+    stores: tuple[FakeDefinitionStore, FakeCatalogStore, FakeMetadataStore],
 ) -> None:
-    _, catalog_store = stores
+    _, catalog_store, _ = stores
     seed_builtin_echo(catalog_store)
 
     resp = client.post(
@@ -55,9 +56,9 @@ def test_publish_template_requires_write_permission(client: TestClient) -> None:
 
 def test_get_template_by_ref_returns_body(
     client: TestClient,
-    stores: tuple[FakeDefinitionStore, FakeCatalogStore],
+    stores: tuple[FakeDefinitionStore, FakeCatalogStore, FakeMetadataStore],
 ) -> None:
-    _, catalog_store = stores
+    _, catalog_store, _ = stores
     seed_builtin_echo(catalog_store)
     client.post(
         "/v1/workspaces/ws-1/templates",
@@ -101,9 +102,9 @@ def test_get_template_by_ref_400_on_malformed(client: TestClient) -> None:
 
 def test_materialize_publishes_a_workflow(
     client: TestClient,
-    stores: tuple[FakeDefinitionStore, FakeCatalogStore],
+    stores: tuple[FakeDefinitionStore, FakeCatalogStore, FakeMetadataStore],
 ) -> None:
-    _, catalog_store = stores
+    _, catalog_store, _ = stores
     seed_builtin_echo(catalog_store)
     # Publish the source template.
     client.post(
@@ -126,9 +127,9 @@ def test_materialize_publishes_a_workflow(
 
 def test_materialize_uses_default_bindings_when_omitted(
     client: TestClient,
-    stores: tuple[FakeDefinitionStore, FakeCatalogStore],
+    stores: tuple[FakeDefinitionStore, FakeCatalogStore, FakeMetadataStore],
 ) -> None:
-    _, catalog_store = stores
+    _, catalog_store, _ = stores
     seed_builtin_echo(catalog_store)
     client.post(
         "/v1/workspaces/ws-1/templates",
@@ -162,9 +163,9 @@ def test_materialize_404_on_missing_source(client: TestClient) -> None:
 
 def test_extract_publishes_a_template(
     client: TestClient,
-    stores: tuple[FakeDefinitionStore, FakeCatalogStore],
+    stores: tuple[FakeDefinitionStore, FakeCatalogStore, FakeMetadataStore],
 ) -> None:
-    _, catalog_store = stores
+    _, catalog_store, _ = stores
     seed_builtin_echo(catalog_store)
     # Publish the source workflow.
     client.post(

@@ -14,6 +14,7 @@ from custos_catalog.settings import (
 _REQUIRED = {
     "CAT_DEFINITION_STORE": "postgresql://u:p@h:5432/def",
     "CAT_CATALOG_STORE": "postgresql://u:p@h:5432/cat",
+    "CAT_METADATA_STORE": "postgresql://u:p@h:5432/meta",
     "CAT_CONNECTOR_ENDPOINT": "http://connector-service:8080",
 }
 
@@ -22,6 +23,7 @@ def test_load_settings_requires_all_three_required_vars() -> None:
     cfg = load_settings(_REQUIRED)
     assert cfg.definition_store_dsn == _REQUIRED["CAT_DEFINITION_STORE"]
     assert cfg.catalog_store_dsn == _REQUIRED["CAT_CATALOG_STORE"]
+    assert cfg.metadata_store_dsn == _REQUIRED["CAT_METADATA_STORE"]
     assert cfg.connector_endpoint == _REQUIRED["CAT_CONNECTOR_ENDPOINT"]
 
 

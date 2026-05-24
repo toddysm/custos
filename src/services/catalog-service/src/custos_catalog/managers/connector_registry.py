@@ -37,9 +37,14 @@ from typing import Any, Final
 
 from custos_spl.errors import ConflictDigest
 from custos_spl.interfaces.catalog_store import CatalogStoreProvider, ConnectorTypeVersion
+from custos_spl.interfaces.metadata_store import MetadataStoreProvider
 from custos_spl.pagination import Cursor, Page
 
-from custos_catalog.audit import emit_event
+from custos_catalog import _telemetry as telemetry
+from custos_catalog.audit import (
+    audit_connector_deprecated,
+    audit_connector_registered,
+)
 from custos_catalog.normalize import canonical_hash, canonical_json
 
 _LOGGER = logging.getLogger(__name__)
@@ -164,10 +169,19 @@ class ConnectorTypeRegistry:
 
     Args:
         catalog_store: SPL :class:`CatalogStoreProvider` instance.
+        metadata_store: SPL :class:`MetadataStoreProvider` instance,
+            used to append connector lifecycle events to the audit
+            outbox (CS-IMPL-019).
     """
 
-    def __init__(self, *, catalog_store: CatalogStoreProvider) -> None:
+    def __init__(
+        self,
+        *,
+        catalog_store: CatalogStoreProvider,
+        metadata_store: MetadataStoreProvider,
+    ) -> None:
         self._store = catalog_store
+        self._metadata_store = metadata_store
 
     # ------------------------------------------------------------------
     # Register
@@ -176,6 +190,7 @@ class ConnectorTypeRegistry:
     async def register(
         self,
         *,
+        workspace_id: str,
         principal_id: str,
         manifest: Mapping[str, Any],
     ) -> ConnectorTypeRef:
@@ -189,45 +204,56 @@ class ConnectorTypeRegistry:
         client can diff its local manifest against the stored one.
 
         Args:
+            workspace_id: Workspace id of the call-context that
+                triggered the registration. Connector types are
+                globally addressable in the catalog row model but the
+                audit event still carries a workspace partition key
+                per the SPL contract.
             principal_id: Caller identity, recorded in the audit
                 event. Authorisation is enforced upstream by the
                 gateway.
             manifest: Raw connector manifest mapping. Must carry the
                 ``custos.dev/connector-manifest/v1`` envelope.
         """
-        projection = self._project_manifest(manifest)
-        try:
-            stored = await self._store.put_connector_type_version(
-                type=projection.type,
-                version=projection.version,
-                digest=projection.digest,
-                normalized_manifest=projection.normalized,
-            )
-        except ConflictDigest as exc:
-            stored_digest = await self._lookup_stored_digest(
-                type=projection.type,
-                version=projection.version,
-            )
-            raise ConnectorRegistryConflict(
-                type=projection.type,
-                version=projection.version,
-                supplied_digest=projection.digest,
-                stored_digest=stored_digest,
-            ) from exc
-
-        ref = ConnectorTypeRef(
-            type=stored.type,
-            version=stored.version,
-            digest=stored.digest,
-        )
-        emit_event(
-            "connector_type.registered",
-            {
-                "principal_id": principal_id,
-                "type": ref.type,
-                "version": ref.version,
-                "digest": ref.digest,
+        with telemetry.observe_operation(
+            telemetry.OP_CONNECTOR_REGISTER,
+            outcomes={
+                ConnectorManifestError: "manifest_invalid",
+                ConnectorRegistryConflict: "digest_conflict",
             },
+        ):
+            projection = self._project_manifest(manifest)
+            try:
+                stored = await self._store.put_connector_type_version(
+                    type=projection.type,
+                    version=projection.version,
+                    digest=projection.digest,
+                    normalized_manifest=projection.normalized,
+                )
+            except ConflictDigest as exc:
+                stored_digest = await self._lookup_stored_digest(
+                    type=projection.type,
+                    version=projection.version,
+                )
+                raise ConnectorRegistryConflict(
+                    type=projection.type,
+                    version=projection.version,
+                    supplied_digest=projection.digest,
+                    stored_digest=stored_digest,
+                ) from exc
+
+            ref = ConnectorTypeRef(
+                type=stored.type,
+                version=stored.version,
+                digest=stored.digest,
+            )
+        await audit_connector_registered(
+            self._metadata_store,
+            workspace_id=workspace_id,
+            actor=principal_id,
+            type_name=ref.type,
+            version=ref.version,
+            digest=ref.digest,
         )
         return ref
 
@@ -279,6 +305,7 @@ class ConnectorTypeRegistry:
     async def deprecate(
         self,
         *,
+        workspace_id: str,
         principal_id: str,
         type: str,
         reason: str | None = None,
@@ -289,17 +316,20 @@ class ConnectorTypeRegistry:
         the version row itself never changes, so existing connector
         instances and bound workflow versions continue to operate.
         """
-        probe = await self._store.list_connector_type_versions(type, limit=1)
-        if not probe.items:
-            raise ConnectorTypeNotFound(type=type)
-        await self._store.set_connector_type_deprecated(type, True)
-        emit_event(
-            "connector_type.deprecated",
-            {
-                "principal_id": principal_id,
-                "type": type,
-                "reason": reason,
-            },
+        with telemetry.observe_operation(
+            telemetry.OP_CONNECTOR_DEPRECATE,
+            outcomes={ConnectorTypeNotFound: "not_found"},
+        ):
+            probe = await self._store.list_connector_type_versions(type, limit=1)
+            if not probe.items:
+                raise ConnectorTypeNotFound(type=type)
+            await self._store.set_connector_type_deprecated(type, True)
+        await audit_connector_deprecated(
+            self._metadata_store,
+            workspace_id=workspace_id,
+            actor=principal_id,
+            type_name=type,
+            reason=reason,
         )
 
     # ------------------------------------------------------------------

@@ -25,6 +25,7 @@ from custos_catalog.managers.definition import (
 )
 from custos_catalog.resolve import StubConnectorClient
 from custos_catalog.versioning import VersioningManager, WorkflowImmutabilityError
+from tests._fakes import FakeMetadataStore
 
 WS = WorkspaceId("ws-1")
 
@@ -294,6 +295,7 @@ def _minimal_workflow(name: str = "my-wf", extra_step: bool = False) -> dict[str
 def _make_manager(store: FakeDefinitionStore) -> DefinitionManager:
     return DefinitionManager(
         definition_store=store,
+        metadata_store=FakeMetadataStore(),  # type: ignore[arg-type]
         activity_registry=FakeActivityRegistry(),
         connector_client=StubConnectorClient(),
         versioning=VersioningManager(store=store),
@@ -463,6 +465,7 @@ async def test_publish_workflow_resolve_error_surfaces_as_resolve_stage() -> Non
     store = FakeDefinitionStore()
     manager = DefinitionManager(
         definition_store=store,
+        metadata_store=FakeMetadataStore(),  # type: ignore[arg-type]
         activity_registry=FakeActivityRegistry(allow_all=False),
         connector_client=StubConnectorClient(),
         versioning=VersioningManager(store=store),
@@ -578,6 +581,7 @@ async def test_publish_workflow_exhausted_retries_raises_immutability_error() ->
     store = FakeDefinitionStore()
     manager = DefinitionManager(
         definition_store=store,
+        metadata_store=FakeMetadataStore(),  # type: ignore[arg-type]
         activity_registry=FakeActivityRegistry(),
         connector_client=StubConnectorClient(),
         versioning=VersioningManager(store=store),
