@@ -1,15 +1,17 @@
-"""Health endpoints (AS-IMPL-004 ``/readyz`` schema-gate behavior).
+"""Health endpoints (AS-IMPL-004 ``/readyz`` lifespan-gated behavior).
 
 The ``/healthz`` probe is a flat liveness signal; the FastAPI app being able
 to respond at all means the process is up and the middleware chain is sane.
 
-The ``/readyz`` probe additionally reports the schema-revision startup gate:
-when :func:`custos_auth.providers.verify_schema_revisions` raises
-:class:`custos_spl.MigrationRequired` during lifespan startup, the app holds
-the exception on ``app.state.schema_gate_error`` and surfaces a 503 with
-the same operator-actionable text the startup log carried (see
-:func:`custos_auth.providers.schema_gate_explainer`). AS-IMPL-018 will
-additionally factor in JWKS-rotation health.
+The ``/readyz`` probe reports the lifespan readiness flag set by
+:func:`custos_auth.create_app`. When the SPL schema-revision gate fails,
+:func:`custos_auth.providers.verify_schema_revisions` raises
+:class:`custos_spl.MigrationRequired` from inside the lifespan, which
+aborts startup with a non-zero exit before this router ever serves a
+request (Kubernetes then crash-loops the pod). The 503 branch below is
+therefore reached only during the brief window when lifespan startup is
+still in progress — before ``app.state.ready`` flips to ``True``.
+AS-IMPL-018 will additionally factor in JWKS-rotation health.
 """
 
 from __future__ import annotations
@@ -17,8 +19,6 @@ from __future__ import annotations
 from fastapi import APIRouter
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-
-from custos_auth.providers import MigrationRequired, schema_gate_explainer
 
 router = APIRouter()
 
@@ -31,17 +31,12 @@ async def healthz() -> dict[str, str]:
 
 @router.get("/readyz", include_in_schema=False)
 async def readyz(request: Request) -> JSONResponse:
-    """Readiness probe — 503 while the schema gate is failing."""
+    """Readiness probe — 503 until lifespan startup completes successfully."""
     if getattr(request.app.state, "ready", False):
         return JSONResponse({"status": "ready"})
-    error = getattr(request.app.state, "schema_gate_error", None)
-    if isinstance(error, MigrationRequired):
-        detail = schema_gate_explainer(error)
-    else:
-        detail = "auth-service has not finished startup"
     return JSONResponse(
         status_code=503,
-        content={"status": "not_ready", "detail": detail},
+        content={"status": "not_ready", "detail": "auth-service has not finished startup"},
     )
 
 

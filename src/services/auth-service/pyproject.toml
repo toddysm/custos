@@ -107,6 +107,14 @@ mypy_path = "src:../../libs/storage-provider-layer/src:../../libs/custos-postgre
 module = "tests.*"
 disallow_untyped_defs = false
 
+[[tool.mypy.overrides]]
+# asyncpg ships no PEP 561 marker; treat as untyped at the boundary.
+# Auth-service transitively imports `custos_pg.adapters.auth` via
+# `custos_pg.PgAuthAdapter`, so the asyncpg surface needs the same
+# `ignore_missing_imports` carve-out catalog-service uses.
+module = ["asyncpg", "asyncpg.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]

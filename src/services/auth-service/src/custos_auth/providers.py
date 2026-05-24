@@ -28,12 +28,16 @@ Startup gate
 declared revisions for the interfaces owned by auth-service against the
 corresponding required ``SCHEMA_REVISION`` values. It raises
 :class:`custos_spl.MigrationRequired` when a required revision is not
-present. The app factory wires this onto a startup hook that flips
-``app.state.ready`` to ``False`` and surfaces a 503 on ``/readyz`` until
-the required auth-service schema revisions have been applied. This is
-the readiness-probe equivalent of the AS-IMPL-004 acceptance criterion
-"refuses to start on schema mismatch" — Kubernetes withholds traffic
-and crash-loops the pod until the operator runs ``custos migrate up``.
+present. The app factory wires this onto a FastAPI lifespan hook that
+sets ``app.state.schema_gate_error``, emits an operator-actionable
+ERROR log line (:func:`schema_gate_explainer`), and re-raises the
+exception so the lifespan startup fails. uvicorn surfaces this as a
+non-zero exit code, which Kubernetes turns into a CrashLoopBackOff
+under the default ``restartPolicy: Always`` — matching the AS-IMPL-004
+acceptance criterion "service refuses to start (clear error message +
+non-zero exit) when run against a Postgres ahead-of or behind-of the
+bundled migrations". Resolve by running ``custos migrate up`` against
+the configured DSNs and letting Kubernetes restart the pod.
 """
 
 from __future__ import annotations

@@ -80,11 +80,20 @@ def create_app(
         app.state.schema_gate_error = None
         try:
             await verify_schema_revisions(local_providers)
-            app.state.ready = True
-            logger.info("schema-revision gate passed; auth-service is ready")
         except MigrationRequired as exc:
+            # Stash on app.state for forensic inspection in tests, log the
+            # operator-actionable diagnostic, then re-raise so uvicorn
+            # surfaces a non-zero exit. Kubernetes turns that into a
+            # CrashLoopBackOff under the default `restartPolicy: Always`,
+            # which is the AS-IMPL-004 acceptance-criterion equivalent
+            # of "service refuses to start". Recovery: operator runs
+            # `custos migrate up` against the configured DSNs and the
+            # pod restart picks up the new ledger state.
             app.state.schema_gate_error = exc
             logger.error("%s", schema_gate_explainer(exc))
+            raise
+        app.state.ready = True
+        logger.info("schema-revision gate passed; auth-service is ready")
         yield
 
     app = FastAPI(
