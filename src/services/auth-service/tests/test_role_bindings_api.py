@@ -11,6 +11,8 @@ Covers:
 * POST 404 when the workspace does not exist.
 * POST 404 when the workspace is in a different tenant
   (existence-hiding semantics).
+* POST 404 when the caller has ``admin:role-binding`` but no
+  ``tenant_id`` on the call-context (deny-by-default).
 * DELETE happy path (204 + audit + binding-changed event).
 * DELETE 404 when the binding does not exist at this workspace.
 * DELETE 404 when the binding exists at a different workspace
@@ -267,6 +269,34 @@ def test_post_returns_404_on_cross_tenant_workspace(
     assert response.status_code == 404
     # Existence-hiding: collapse to "not_found" rather than 403.
     assert response.json()["error"]["code"] == "not_found"
+    assert publisher.published == []
+
+
+def test_post_returns_404_when_caller_has_no_tenant(
+    bindings_client: TestClient,
+    auth_store: FakeAuthAdapter,
+    publisher: RecordingBindingChangedPublisher,
+) -> None:
+    """A tenant-less ``admin:role-binding`` caller must not be able to
+    target any workspace. Without an explicit tenant on the
+    call-context we have no way to authorise the cross-tenant check,
+    so the resolver denies by default (404 existence-hiding) unless
+    the caller is ``platform.admin``.
+    """
+    # No tenant_id on the callctx — only the bare admin:role-binding
+    # permission. This is the case the original guard was bypassing.
+    headers = callctx_header(
+        principal_id="rogue-admin",
+        permissions=["admin:role-binding"],
+    )
+    response = bindings_client.post(
+        f"/v1/workspaces/{WORKSPACE}/role-bindings",
+        headers=headers,
+        json={"principal_id": "user-1", "role_id": "role:workspace.viewer"},
+    )
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "not_found"
+    assert auth_store.role_bindings == {}
     assert publisher.published == []
 
 

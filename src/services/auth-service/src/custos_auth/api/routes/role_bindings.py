@@ -121,13 +121,13 @@ async def _resolve_workspace(
     if workspace is None:
         raise NotFound(f"workspace '{workspace_id}' not found")
     # Tenant scoping: a workspace-scoped admin who is not platform.admin
-    # may only target workspaces in their own tenant. Cross-tenant
-    # attempts collapse to 404 to avoid leaking existence.
-    if (
-        not ctx.has_permission("platform.admin")
-        and ctx.tenant_id is not None
-        and str(workspace.tenant_id) != ctx.tenant_id
-    ):
+    # may only target workspaces in their own tenant. A missing
+    # ``ctx.tenant_id`` is treated as a mismatch — we deny by default
+    # rather than skipping the check, otherwise a tenant-less
+    # ``admin:role-binding`` caller would silently target every
+    # workspace. Cross-tenant attempts (and the tenant-less case)
+    # collapse to 404 to avoid leaking existence.
+    if not ctx.has_permission("platform.admin") and ctx.tenant_id != str(workspace.tenant_id):
         raise NotFound(f"workspace '{workspace_id}' not found")
     return typed
 
