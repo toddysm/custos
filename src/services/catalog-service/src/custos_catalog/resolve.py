@@ -391,7 +391,14 @@ async def resolve_activity_ref(
         )
 
     if _MAJOR_PIN_RE.match(ver):
-        result = await registry.resolve(namespace, type_, ver)
+        # ``ActivityTypeRegistry.resolve(..., semver_range)`` is called
+        # with a PEP 440-compatible specifier string. The catalog ref
+        # grammar's ``@MAJOR`` form is sugar for "the latest
+        # non-deprecated version inside that major", so translate it to
+        # the equivalent specifier range before delegating to the
+        # registry.
+        spec = f">={ver},<{int(ver) + 1}"
+        result = await registry.resolve(namespace, type_, spec)
         if result is None:
             raise ActivityTypeNotFound(
                 f"no non-deprecated activity-type version satisfies {ref!r}",

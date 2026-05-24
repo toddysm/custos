@@ -407,3 +407,271 @@ def test_discover_template_slots_includes_inner_workflow_paths() -> None:
     }
     slots = discover_template_slots(normalize_template(doc))
     assert [s.path for s in slots] == ["spec.workflow.steps[0].with.v"]
+
+
+# ---------------------------------------------------------------------------
+# Coverage backfill (CS-IMPL-020): AST visitor branches + slot variants
+# ---------------------------------------------------------------------------
+
+
+def test_validate_walks_call_binary_unary_conditional_list_map_branches() -> None:
+    """Exercise every AST visitor branch in ``_iter_ast``.
+
+    A single deeply-nested expression touches Call, Binary, Unary,
+    Conditional, ListLit, and MapLit visitors so the recursion paths
+    used to collect identifiers are all exercised.
+    """
+    doc = _wf(
+        [
+            {
+                "id": "s",
+                "if": ('${{ size([1, 2, !true ? 3 : 4, {"k": inputs.foo + 1}]) > 0 }}'),
+                "activity": "ns/t@1",
+            },
+        ],
+        inputs={"foo": {"type": "integer"}},
+    )
+    # No name-binding violations — the expression is well-formed and
+    # all roots are legal. The interesting assertion is that this
+    # expression validates without raising despite the deep AST.
+    validate_expressions(normalize_workflow(doc))
+
+
+def test_validate_rejects_unknown_root_inside_call_argument() -> None:
+    """A bad root nested inside a Call argument is reported."""
+    doc = _wf(
+        [
+            {
+                "id": "s",
+                "if": "${{ size([nope.x]) > 0 }}",
+                "activity": "ns/t@1",
+            },
+        ],
+    )
+    with pytest.raises(CelNameBindingError) as exc:
+        validate_expressions(normalize_workflow(doc))
+    assert any("nope" in i.message for i in exc.value.issues)
+
+
+def test_validate_steps_with_non_string_index_is_accepted_silently() -> None:
+    """``steps[a.b]`` parses as Index with a non-Literal-str index.
+
+    The validator can't statically resolve the step id; it must not
+    crash on the Index node itself. The inner ``a.b`` *does* carry an
+    Ident root (``a``), which is not a legal binding root, so we
+    expect a binding error pointing at ``a`` — but the error must
+    come from the inner expression, not from the Index node.
+    """
+    doc = _wf(
+        [
+            {"id": "a", "activity": "ns/t@1"},
+            {
+                "id": "b",
+                "if": "${{ steps[a.b].outputs.x }}",
+                "activity": "ns/t@1",
+            },
+        ],
+    )
+    # `a.b` is a bad root (the leftmost Ident isn't a legal root), so
+    # we expect *some* binding error pointing at `a`, but not a crash.
+    with pytest.raises(CelNameBindingError):
+        validate_expressions(normalize_workflow(doc))
+
+
+def test_validate_trigger_connector_slot_is_discovered_and_validated() -> None:
+    """A trigger's connector expression is in the discovered slot list."""
+    doc = _wf(
+        [{"id": "s", "activity": "ns/t@1"}],
+        triggers=[{"name": "t1", "connector": "${{ inputs.cn }}"}],
+        inputs={"cn": {"type": "connectorRef"}},
+    )
+    slots = discover_workflow_slots(normalize_workflow(doc))
+    assert any(s.path == "spec.triggers[0].connector" for s in slots)
+    validate_expressions(normalize_workflow(doc))
+
+
+def test_validate_step_connector_and_connectors_block_are_discovered() -> None:
+    """``step.connector`` and ``step.connectors.<alias>`` both surface as slots."""
+    doc = _wf(
+        [
+            {
+                "id": "s",
+                "activity": "ns/t@1",
+                "connector": "${{ inputs.primary }}",
+                "connectors": {
+                    "alpha": "${{ inputs.cn_alpha }}",
+                    "beta": "${{ inputs.cn_beta }}",
+                },
+            },
+        ],
+        inputs={
+            "primary": {"type": "connectorRef"},
+            "cn_alpha": {"type": "connectorRef"},
+            "cn_beta": {"type": "connectorRef"},
+        },
+    )
+    paths = {s.path for s in discover_workflow_slots(normalize_workflow(doc))}
+    assert "spec.steps[0].connector" in paths
+    assert "spec.steps[0].connectors.alpha" in paths
+    assert "spec.steps[0].connectors.beta" in paths
+
+
+def test_validate_let_block_binds_progressively() -> None:
+    """``let.x`` is visible to a *subsequent* ``let`` entry, not its own."""
+    doc = _wf(
+        [
+            {
+                "id": "s",
+                "activity": "ns/t@1",
+                "let": {
+                    "a": "${{ inputs.foo }}",
+                    "b": "${{ let.a + 1 }}",
+                },
+            },
+        ],
+        inputs={"foo": {"type": "int"}},
+    )
+    # `let.b` may reference `let.a` because we walk in sorted order
+    # and `a < b`.
+    validate_expressions(normalize_workflow(doc))
+
+
+def test_validate_for_each_evaluates_in_outer_item_less_scope() -> None:
+    """A ``forEach`` expression cannot reference ``item``; following slots can."""
+    doc = _wf(
+        [
+            {
+                "id": "s",
+                "activity": "ns/t@1",
+                "forEach": "${{ inputs.items }}",
+                "with": {"v": "${{ item.value }}"},
+            },
+        ],
+        inputs={"items": {"type": "array"}},
+    )
+    validate_expressions(normalize_workflow(doc))
+
+
+def test_validate_for_each_referencing_item_is_rejected() -> None:
+    doc = _wf(
+        [
+            {
+                "id": "s",
+                "activity": "ns/t@1",
+                "forEach": "${{ item.values }}",
+            },
+        ],
+    )
+    with pytest.raises(CelNameBindingError) as exc:
+        validate_expressions(normalize_workflow(doc))
+    assert any("item" in i.message for i in exc.value.issues)
+
+
+def test_validate_template_expressions_raises_binding_error_for_unknown_placeholder() -> None:
+    """Surface the binding-error path through ``validate_template_expressions``."""
+    doc = {
+        "apiVersion": "custos.dev/v1",
+        "kind": "WorkflowTemplate",
+        "metadata": {"name": "t"},
+        "spec": {
+            "placeholders": [{"name": "x", "type": "string"}],
+            "workflow": {
+                "steps": [
+                    {
+                        "id": "s",
+                        "activity": "ns/t@1",
+                        "with": {"v": "${{ placeholders.does_not_exist }}"},
+                    },
+                ],
+            },
+        },
+    }
+    with pytest.raises(CelNameBindingError) as exc:
+        validate_template_expressions(normalize_template(doc))
+    assert any("does_not_exist" in i.message for i in exc.value.issues)
+
+
+# ---------------------------------------------------------------------------
+# Defensive guards: malformed documents pass through cleanly
+# ---------------------------------------------------------------------------
+
+
+def test_discover_workflow_slots_returns_empty_for_non_dict_spec() -> None:
+    """A normalized workflow with a non-dict ``spec`` yields no slots."""
+    norm = normalize_workflow(
+        {
+            "apiVersion": "custos.dev/v1",
+            "kind": "Workflow",
+            "metadata": {"name": "wf"},
+            "spec": {"steps": []},
+        },
+    )
+    # Mutate the document post-normalize so the defensive guard is hit
+    # (schema gate would normally reject this upstream).
+    object.__setattr__(norm, "document", {"apiVersion": "x", "spec": "not-a-dict"})
+    assert discover_workflow_slots(norm) == []
+
+
+def test_discover_template_slots_returns_empty_for_non_dict_inner_workflow() -> None:
+    norm = normalize_template(
+        {
+            "apiVersion": "custos.dev/v1",
+            "kind": "WorkflowTemplate",
+            "metadata": {"name": "t"},
+            "spec": {
+                "placeholders": [{"name": "x", "type": "string"}],
+                "workflow": {"steps": []},
+            },
+        },
+    )
+    object.__setattr__(
+        norm,
+        "document",
+        {
+            "apiVersion": "x",
+            "spec": {
+                "placeholders": [{"name": "x", "type": "string"}, "not-a-dict"],
+                "workflow": "not-a-dict",
+            },
+        },
+    )
+    assert discover_template_slots(norm) == []
+
+
+def test_discover_template_slots_returns_empty_for_non_dict_spec() -> None:
+    norm = normalize_template(
+        {
+            "apiVersion": "custos.dev/v1",
+            "kind": "WorkflowTemplate",
+            "metadata": {"name": "t"},
+            "spec": {
+                "placeholders": [{"name": "x", "type": "string"}],
+                "workflow": {"steps": []},
+            },
+        },
+    )
+    object.__setattr__(norm, "document", {"apiVersion": "x", "spec": "not-a-dict"})
+    assert discover_template_slots(norm) == []
+
+
+def test_validate_template_expressions_raises_syntax_error_for_unparseable_cel() -> None:
+    """The syntax-error path through ``validate_template_expressions``."""
+    doc = {
+        "apiVersion": "custos.dev/v1",
+        "kind": "WorkflowTemplate",
+        "metadata": {"name": "t"},
+        "spec": {
+            "placeholders": [],
+            "workflow": {
+                "steps": [
+                    {
+                        "id": "s",
+                        "activity": "ns/t@1",
+                        "if": "${{ )) bad syntax }}",
+                    },
+                ],
+            },
+        },
+    }
+    with pytest.raises(CelSyntaxError):
+        validate_template_expressions(normalize_template(doc))
