@@ -159,8 +159,8 @@ service is:
 |---|---|---|
 | `catalog.publish.parse` | 400 | YAML / JSON syntax errors |
 | `catalog.publish.schema` | 400 | JSON-Schema violations |
-| `catalog.publish.resolve` | 422 | Unresolvable refs |
-| `catalog.publish.cel` | 422 | CEL compile / sandbox / unknown-binding errors |
+| `catalog.publish.resolve` | 400 | Unresolvable refs |
+| `catalog.publish.cel` | 400 | CEL compile / sandbox / unknown-binding errors |
 | `catalog.workflow_not_found` | 404 | GET / deprecate on missing workflow ref |
 | `catalog.template_not_found` | 404 | GET / materialize / deprecate on missing template |
 | `catalog.workflow_immutability_violation` | 409 | Attempt to mutate a published version |
