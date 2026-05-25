@@ -206,8 +206,8 @@ async def test_handle_http_exception_coerces_non_string_detail() -> None:
     """
     # ``StarletteHTTPException.detail`` is typed as ``str | None`` but the
     # runtime accepts arbitrary values (FastAPI documents the dict shape).
-    # The handler's ``isinstance(exc.detail, str)`` branch is the path
-    # under test, so we coerce past the typed signature.
+    # The handler's non-string ``detail`` path (the ``else str(exc.detail)``
+    # branch) is under test, so we coerce past the typed signature.
     exc = StarletteHTTPException(status_code=418, detail="placeholder")
     exc.detail = {"reason": "teapot"}  # type: ignore[assignment]
     response = await handle_http_exception(_make_request(), exc)
