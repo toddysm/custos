@@ -49,3 +49,10 @@ gateway:
 catalog-service:
   externalSecret:
     enabled: true
+
+# Airgapped HA still wires CONN_CATALOG_STORE / CONN_METADATA_STORE through
+# ExternalSecret; the secret-store backend swaps to Sealed Secrets via the
+# umbrella `secrets:` block.
+connector-service:
+  externalSecret:
+    enabled: true
