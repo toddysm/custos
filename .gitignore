@@ -24,7 +24,9 @@ share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-MANIFEST
+# Python sdist MANIFEST file (root-level only; do not match package directories
+# called ``manifest`` elsewhere in the tree, e.g. ``custos_connector/manifest``).
+/MANIFEST
 
 # PyInstaller
 #   Usually these files are written by a python script from a template
