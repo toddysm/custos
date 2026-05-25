@@ -54,6 +54,14 @@ dev = [
     "openapi-spec-validator>=0.7",
     "opentelemetry-sdk>=1.20,<2",
     "types-PyYAML>=6.0",
+    # AS-IMPL-028: local-dev Postgres for the `tests/integration` suite.
+    # CI uses a `postgres:15-alpine` service container instead (see
+    # `.github/workflows/python-services.yml` job
+    # `auth-service-integration`), so this dep only fires when Docker is
+    # available on the developer workstation. The version pin matches
+    # catalog-service to keep the test-time Postgres surface consistent
+    # across services.
+    "testcontainers[postgres]>=4.0",
 ]
 
 [project.urls]
