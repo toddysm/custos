@@ -9,7 +9,7 @@ Status: closed
 
 ## Summary
 
-Phase K (M3) of the auth-service implementation plan (AS-IMPL-029)
+Phase K (M1) of the auth-service implementation plan (AS-IMPL-029)
 landed. The auth-service now ships a developer-facing reference
 guide at [`docs/developers/auth-api.md`](../../../../docs/developers/auth-api.md),
 modelled on the existing
