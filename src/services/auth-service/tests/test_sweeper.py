@@ -270,3 +270,86 @@ async def test_run_sweeper_loop_continues_after_unexpected_error(
             interval_seconds=1,
         )
     assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_sweep_once_emits_per_row_even_when_publish_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Publisher exceptions must not abort the sweep.
+
+    Symmetric with the audit-fail test: the SPL physical delete
+    must still complete so a flaky pub/sub backend cannot quietly
+    disable housekeeping. The exception is logged at WARNING; the
+    audit row is still written.
+    """
+
+    class FailingPublisher:
+        async def publish(self, _event: TokenRevokedEvent) -> None:
+            raise RuntimeError("simulated pub/sub outage")
+
+    auth = FakeAuthAdapter()
+    meta = FakeMetadataAdapter()
+    _seed_sa(auth, "sa-1", "ws-1")
+    _seed_token(
+        auth, token_id="tok-old", service_account_id="sa-1", hash="h1", ttl=timedelta(days=-1)
+    )
+
+    with caplog.at_level("WARNING", logger="custos_auth.sweeper"):
+        deleted = await sweep_once(
+            auth_store=auth,  # type: ignore[arg-type]
+            metadata_store=meta,  # type: ignore[arg-type]
+            publisher=FailingPublisher(),
+        )
+
+    assert deleted == 1
+    assert "tok-old" not in auth.service_tokens
+
+    # The audit row still landed despite the publisher exception.
+    assert sum(1 for _ws, e in meta.append_audit_calls if e.event_type == EVENT_TOKEN_EXPIRED) == 1
+
+    # And the failure surfaced at WARNING so operators can see the drop.
+    assert any("publish failed" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_run_sweeper_loop_logs_count_after_nonzero_deletion(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When a cycle deletes ≥1 row the loop emits an INFO summary.
+
+    Pins the operator-facing visibility contract: dashboards and
+    log-search alerts that key on the ``deleted N expired
+    token(s)`` line keep working across refactors.
+    """
+    import custos_auth.sweeper as sweeper
+
+    auth = FakeAuthAdapter()
+    meta = FakeMetadataAdapter()
+    bus = LocalTokenRevokedBus()
+
+    calls = {"n": 0}
+
+    async def stub_sweep(**_kw: object) -> int:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return 3  # non-zero deletion → triggers the INFO log
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(sweeper, "sweep_once", stub_sweep)
+    monkeypatch.setattr(sweeper, "_jittered_interval", lambda _s: 0.0)
+
+    with (
+        caplog.at_level("INFO", logger="custos_auth.sweeper"),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await sweeper.run_sweeper_loop(
+            auth_store=auth,  # type: ignore[arg-type]
+            metadata_store=meta,  # type: ignore[arg-type]
+            publisher=bus,
+            interval_seconds=1,
+        )
+
+    assert calls["n"] == 2
+    assert any("deleted 3 expired token(s)" in record.getMessage() for record in caplog.records)
