@@ -1,12 +1,26 @@
 # connector-service — leave image.repository/tag/pullPolicy and replicaCount/resources
 # empty to inherit umbrella global.* values. Set them here only to override
 # the umbrella for this one subchart.
+#
+# Configuration variables come from
+# design/components/connector-service/design.md. Non-secret vars are
+# projected through the ConfigMap (`config:` + `catalog:` + `auth:` blocks
+# below); secret vars (the two store DSNs) are projected through the
+# ExternalSecret (`externalSecret:` block below) and become container env
+# via envFrom.
 
 enabled: true
 
 replicaCount: ""
 
 image:
+  # Leave empty so templates/_helpers.tpl `svc.image` composes
+  # <global.imageRegistry>/<chart name>. Hardcoding a registry here would
+  # shadow `global.imageRegistry` and break airgapped profiles, which set
+  # `global.imageRegistry: registry.internal/custos` in
+  # values-airgapped-{eval,ha}.yaml. Set this only as a per-profile
+  # override when one subchart genuinely needs a different registry from
+  # the rest of the platform.
   repository: ""
   tag: ""
   pullPolicy: ""
@@ -17,6 +31,8 @@ service:
 
 resources: {}
 
+# Per-pod env overrides. Most config flows through envFrom (ConfigMap +
+# ExternalSecret); this list is for ad-hoc overrides only.
 env: []
 
 dapr:
@@ -28,10 +44,63 @@ dapr:
 serviceMonitor:
   enabled: false
 
+# Non-secret CONN_* env vars projected into the ConfigMap.
+#
+# CONN_CATALOG_STORE / CONN_METADATA_STORE intentionally NOT listed here —
+# they carry Postgres DSNs and flow through `externalSecret` below.
+config:
+  # OCI Referrers API per-request timeout (CONN-IMPL-007).
+  ociReferrersTimeoutMs: 5000
+  # Maximum ConnectorManifest size at registry write (CONN-IMPL-005/006/008).
+  publishMaxBodyMb: 4
+  # Default per-lease TTL (10 min) when callers don't request one
+  # (CONN-IMPL-017).
+  sidecarDefaultTtlSeconds: 600
+  # Per-step concurrent-lease cap per design § Lease Manager
+  # (CONN-IMPL-017).
+  leaseMaxConcurrent: 16
+  # Minimum interval between pull-loop ticks per design § Pull Cursor Model
+  # (CONN-IMPL-023).
+  pullLoopMinIntervalSec: 10
+
+# Catalog Service endpoint for `ResolveConnectorTypeRef` calls (CONN-IMPL-027
+# inbound + Catalog Service publish-time validation flow). Default matches
+# the k8s Service name emitted by the catalog-service subchart.
+catalog:
+  endpoint: http://catalog-service:8080
+
+# AuthN/Z Service endpoint. Sane in-cluster default matches the k8s Service
+# name emitted by the auth-service subchart. Override per-profile when Auth
+# Service is reached through a different address.
+auth:
+  endpoint: http://auth-service:8080
+
+# Sidecar control-channel mTLS issuer name (CONN-IMPL-020). In v1 this is an
+# in-cluster CA; SPIFFE is deferred to M3 per REQ-059.
+sidecar:
+  mtlsIssuer: custos-internal-ca
+
+# ExternalSecret carrying the two Postgres DSNs the service reads at
+# startup (CONN_CATALOG_STORE, CONN_METADATA_STORE). Disabled by default
+# (eval profiles can synthesise the DSNs from the CNPG app secret); HA /
+# connected profiles enable this and project the keys from the configured
+# secret store path.
 externalSecret:
   enabled: false
   refreshInterval: 1h
   secretStoreRef:
     name: custos-secret-store
     kind: ClusterSecretStore
-  data: []
+  # Each entry maps a CONN_* env var (secretKey) to a key in the upstream
+  # secret store. Defaults expect the SPL-conventional path
+  # `custos/storage-provider-layer/<tier>` populated by ops; override per
+  # deployment as needed.
+  data:
+    - secretKey: CONN_CATALOG_STORE
+      remoteRef:
+        key: custos/storage-provider-layer/catalog-store
+        property: dsn
+    - secretKey: CONN_METADATA_STORE
+      remoteRef:
+        key: custos/storage-provider-layer/metadata-store
+        property: dsn

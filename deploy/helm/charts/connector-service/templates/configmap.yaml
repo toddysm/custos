@@ -6,3 +6,12 @@ metadata:
     {{- include "svc.labels" . | nindent 4 }}
 data:
   CUSTOS_SERVICE_NAME: {{ .Chart.Name | quote }}
+  # Non-secret CONN_* env vars per design.md.
+  CONN_OCI_REFERRERS_TIMEOUT_MS: {{ .Values.config.ociReferrersTimeoutMs | quote }}
+  CONN_PUBLISH_MAX_BODY_MB: {{ .Values.config.publishMaxBodyMb | quote }}
+  CONN_SIDECAR_DEFAULT_TTL: {{ .Values.config.sidecarDefaultTtlSeconds | quote }}
+  CONN_LEASE_MAX_CONCURRENT: {{ .Values.config.leaseMaxConcurrent | quote }}
+  CONN_PULL_LOOP_MIN_INTERVAL_SEC: {{ .Values.config.pullLoopMinIntervalSec | quote }}
+  CONN_CATALOG_ENDPOINT: {{ .Values.catalog.endpoint | quote }}
+  CONN_AUTHZ_ENDPOINT: {{ .Values.auth.endpoint | quote }}
+  CONN_SIDECAR_MTLS_ISSUER: {{ .Values.sidecar.mtlsIssuer | quote }}

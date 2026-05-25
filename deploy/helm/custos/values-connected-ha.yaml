@@ -47,3 +47,11 @@ gateway:
 catalog-service:
   externalSecret:
     enabled: true
+
+# In HA, connector-service reads CONN_CATALOG_STORE / CONN_METADATA_STORE
+# from a Secret materialized by ExternalSecret against the cluster secret
+# store. Eval profiles leave this off and operators populate the DSNs by
+# hand or via a pre-install Job.
+connector-service:
+  externalSecret:
+    enabled: true
