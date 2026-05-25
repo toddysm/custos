@@ -60,7 +60,7 @@ Per-issuer fields (full schema in `src/custos_auth/oidc/config.py`):
 | `client_secret_env` | required for `/callback` | — | **Name** of the env var carrying the secret (never the secret itself). |
 | `group_claim` | optional | entra | Claim whose string-list value is intersected with `group_bindings`. |
 | `group_bindings` | optional | — | `{claim_value → [role_binding_ref...]}` matched at authn-success time. |
-| `provisioning_policy` | optional | — | `create_user_with_zero_bindings` (default, only v1 value). |
+| `provisioning_policy` | optional | — | `zero-binding` (default, only v1 value). |
 
 Strict parser: unknown fields, unknown preset names, unsupported provisioning policies, duplicate ids, and empty audiences fail-fast at startup.
 
