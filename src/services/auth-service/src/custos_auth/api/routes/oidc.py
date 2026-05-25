@@ -52,7 +52,6 @@ from custos_auth.oidc import IssuersConfig, OidcVerifier, parse_issuers_config
 from custos_auth.oidc.provisioning import OidcProvisioner, ProvisionResult
 from custos_auth.oidc.verifier import (
     REASON_EXCHANGE_FAILED,
-    REASON_MALFORMED,
     REASON_MISSING_CLAIM,
     OidcVerificationError,
 )
@@ -187,14 +186,21 @@ async def _exchange_code_for_id_token(
     try:
         body = response.json()
     except Exception as exc:
+        # All exchange-step failures (transport, non-200, unparseable
+        # JSON body, missing ``id_token`` field) collapse to the
+        # same closed-set reason so the audit row consistently
+        # identifies the failure category as the 502
+        # ``oidc_exchange_failed`` path. Using ``REASON_MALFORMED``
+        # here would imply the *ID token* was malformed, which is a
+        # different verification step.
         raise OidcVerificationError(
-            REASON_MALFORMED,
+            REASON_EXCHANGE_FAILED,
             f"OIDC token exchange response is not valid JSON: {exc}",
         ) from exc
     id_token = body.get("id_token") if isinstance(body, dict) else None
     if not isinstance(id_token, str) or not id_token:
         raise OidcVerificationError(
-            REASON_MALFORMED,
+            REASON_EXCHANGE_FAILED,
             "OIDC token exchange response is missing the 'id_token' field",
         )
     return id_token

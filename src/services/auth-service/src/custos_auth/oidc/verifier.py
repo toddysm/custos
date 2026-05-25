@@ -64,11 +64,24 @@ REASON_WRONG_ISSUER: Final[str] = "wrong_issuer"
 REASON_WRONG_ALGORITHM: Final[str] = "wrong_algorithm"
 REASON_MISSING_CLAIM: Final[str] = "missing_claim"
 REASON_JWKS_FETCH_FAILED: Final[str] = "jwks_fetch_failed"
-#: Token-endpoint outage / non-200 / malformed body during the OAuth
-#: ``authorization_code`` exchange step. Distinct from
+#: Anything that goes wrong during the OAuth ``authorization_code``
+#: exchange step against the provider's token endpoint:
+#:
+#: * transport / DNS / TLS failure;
+#: * non-200 HTTP status (provider rejected the code or our client
+#:   credentials);
+#: * response body is not valid JSON;
+#: * response body is JSON but missing the ``id_token`` field.
+#:
+#: All four collapse to a single audit reason because the operator
+#: response is the same (check provider availability, then check
+#: client-id / client-secret). Distinct from
 #: :data:`REASON_JWKS_FETCH_FAILED` so an exchange outage doesn't
 #: pollute the JWKS-failure SLO dashboards (the two endpoints are
-#: hosted separately by most providers and fail independently).
+#: hosted separately by most providers and fail independently), and
+#: distinct from :data:`REASON_MALFORMED` so an unparseable
+#: *exchange response* isn't conflated with an unparseable *ID
+#: token* in the verification step.
 REASON_EXCHANGE_FAILED: Final[str] = "exchange_failed"
 
 #: Set of all valid reason codes, exposed so other modules
