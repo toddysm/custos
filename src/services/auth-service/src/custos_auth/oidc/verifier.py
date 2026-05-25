@@ -181,25 +181,17 @@ class OidcVerifier:
         try:
             jwk = await self._jwks_cache.get_key(entry.jwks_uri, kid)
         except Exception as exc:
-            # Prefer structured cache error metadata over exception
-            # message parsing when deciding which closed-set audit
-            # reason to emit. Unknown / unstructured cache failures
-            # still map conservatively to jwks_fetch_failed.
+            # Map the structured ``reason`` attribute on
+            # :class:`JwksCacheError` to the closed-set audit code.
+            # We do NOT parse the exception message — the cache owns
+            # the failure-mode taxonomy and exposes it as a typed
+            # attribute. Anything that isn't a JwksCacheError (or is
+            # a JwksCacheError with an unrecognised reason) maps
+            # conservatively to ``jwks_fetch_failed``.
             from custos_auth.oidc.jwks_cache import JwksCacheError
 
-            if isinstance(exc, JwksCacheError):
-                cache_error_code = (
-                    getattr(exc, "reason", None)
-                    or getattr(exc, "code", None)
-                    or getattr(exc, "error_code", None)
-                )
-                if isinstance(cache_error_code, str) and cache_error_code.lower() in {
-                    "unknown_kid",
-                    "kid_missing",
-                    "missing_kid",
-                }:
-                    raise OidcVerificationError(REASON_UNKNOWN_KID, str(exc)) from exc
-                raise OidcVerificationError(REASON_JWKS_FETCH_FAILED, str(exc)) from exc
+            if isinstance(exc, JwksCacheError) and exc.reason == "unknown_kid":
+                raise OidcVerificationError(REASON_UNKNOWN_KID, str(exc)) from exc
             raise OidcVerificationError(REASON_JWKS_FETCH_FAILED, str(exc)) from exc
 
         # Step 3 — verify signature + standard claims via PyJWT. We

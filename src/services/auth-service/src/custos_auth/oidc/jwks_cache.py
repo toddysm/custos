@@ -56,7 +56,23 @@ _MAX_AGE_RE = re.compile(r"max-age\s*=\s*(\d+)", re.IGNORECASE)
 
 
 class JwksCacheError(RuntimeError):
-    """Raised when a JWKS fetch fails (network, HTTP error, malformed body)."""
+    """Raised when a JWKS fetch fails (network, HTTP error, malformed body).
+
+    Carries a structured ``reason`` so callers can map cache failures to
+    the right closed-set audit reason without parsing the exception
+    message. Two values today:
+
+    * ``"unknown_kid"`` — the JWKS document was fetched and parsed fine
+      but does not contain the requested ``kid`` (post-refresh).
+    * ``"jwks_fetch_failed"`` — anything else: transport error, non-200
+      HTTP, oversize body, invalid JSON, malformed JWKS shape.
+    """
+
+    __slots__ = ("reason",)
+
+    def __init__(self, message: str, *, reason: str = "jwks_fetch_failed") -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 @dataclass(slots=True)
@@ -145,7 +161,10 @@ class JwksCache:
 
         jwk = entry.keys_by_kid.get(kid)
         if jwk is None:
-            raise JwksCacheError(f"JWKS at {jwks_uri!r} has no key with kid={kid!r} after refresh")
+            raise JwksCacheError(
+                f"JWKS at {jwks_uri!r} has no key with kid={kid!r} after refresh",
+                reason="unknown_kid",
+            )
         return jwk
 
     async def _refresh(self, jwks_uri: str) -> _Entry:
