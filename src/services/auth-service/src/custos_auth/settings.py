@@ -214,6 +214,38 @@ DEFAULT_OIDC_ENABLED: Final[bool] = False
 #: :class:`SettingsError` during :func:`load_settings`.
 ENV_OIDC_ISSUERS: Final[str] = "CUSTOS_AUTH_OIDC_ISSUERS"
 
+#: Optional. Selects the internal call-context identity mode (AS-IMPL-031,
+#: REQ-059). Two modes are recognised:
+#:
+#: * ``jwt`` — the M1 default. API gateway mints, downstream
+#:   components verify, signed-JWT call contexts against the
+#:   auth-service JWKS. This is the only fully wired path today.
+#: * ``spiffe`` — the M3 target. Components present SPIFFE SVIDs
+#:   attested by a SPIRE agent; ``callctx.verify`` validates the
+#:   SVID against the trust bundle. Selecting this mode currently
+#:   refuses to boot because the verifier is not implemented yet
+#:   (see :doc:`spiffe-cutover-plan` in the design tree).
+#:
+#: Defaults to :data:`DEFAULT_INTERNAL_IDENTITY_MODE` (``jwt``).
+#: Any other value raises :class:`SettingsError`.
+ENV_INTERNAL_IDENTITY_MODE: Final[str] = "CUSTOS_AUTH_INTERNAL_IDENTITY_MODE"
+
+#: M1 default. The fully wired signed-JWT verifier path.
+INTERNAL_IDENTITY_MODE_JWT: Final[str] = "jwt"
+
+#: M3 target. SPIFFE/SPIRE-attested workload identity. Not
+#: implemented yet; selecting this mode raises :class:`SettingsError`.
+INTERNAL_IDENTITY_MODE_SPIFFE: Final[str] = "spiffe"
+
+#: Default internal-identity mode. Matches the M1 deployment shape.
+DEFAULT_INTERNAL_IDENTITY_MODE: Final[str] = INTERNAL_IDENTITY_MODE_JWT
+
+#: Closed set of recognised modes. Used by the parser to surface a
+#: helpful error listing the legal values.
+_INTERNAL_IDENTITY_MODES: Final[frozenset[str]] = frozenset(
+    {INTERNAL_IDENTITY_MODE_JWT, INTERNAL_IDENTITY_MODE_SPIFFE}
+)
+
 
 class SettingsError(RuntimeError):
     """Raised when the environment is missing a required setting or carries a malformed value."""
@@ -239,6 +271,7 @@ class Settings:
     call_context_key_rotation_seconds: int
     oidc_enabled: bool
     oidc_issuers_raw: str
+    internal_identity_mode: str
 
     @property
     def is_production(self) -> bool:
@@ -461,6 +494,40 @@ def _parse_oidc_enabled(raw: str) -> bool:
     )
 
 
+def _parse_internal_identity_mode(raw: str) -> str:
+    """Parse the ``CUSTOS_AUTH_INTERNAL_IDENTITY_MODE`` env value.
+
+    Empty string falls back to :data:`DEFAULT_INTERNAL_IDENTITY_MODE`
+    (``jwt``). The value is matched case-insensitively against the
+    closed set ``{jwt, spiffe}``. Selecting ``spiffe`` currently
+    raises :class:`SettingsError` so the auth-service refuses to
+    boot in a half-wired state — the SPIFFE/SPIRE verifier is
+    tracked under AS-IMPL-031 and the design lives in
+    :doc:`spiffe-cutover-plan`. Any value outside the closed set
+    also raises :class:`SettingsError` with the legal alternatives.
+    """
+    if raw == "":
+        return DEFAULT_INTERNAL_IDENTITY_MODE
+    folded = raw.lower()
+    if folded not in _INTERNAL_IDENTITY_MODES:
+        raise SettingsError(
+            f"{ENV_INTERNAL_IDENTITY_MODE} must be one of "
+            f"{{{', '.join(sorted(_INTERNAL_IDENTITY_MODES))}}}; "
+            f"got {raw!r}"
+        )
+    if folded == INTERNAL_IDENTITY_MODE_SPIFFE:
+        raise SettingsError(
+            f"{ENV_INTERNAL_IDENTITY_MODE}={folded!r} is not implemented yet. "
+            "SPIFFE/SPIRE workload identity is the M3 target tracked by "
+            "AS-IMPL-031 (#266); the cutover plan lives at "
+            "design/components/auth-service/spiffe-cutover-plan.md. "
+            "Unset the variable or set it to "
+            f"{INTERNAL_IDENTITY_MODE_JWT!r} to boot with the M1 "
+            "signed-JWT verifier."
+        )
+    return folded
+
+
 def load_settings(env: dict[str, str] | None = None) -> Settings:
     """Parse a :class:`Settings` from the supplied env mapping (default ``os.environ``)."""
     src: dict[str, str] = dict(os.environ if env is None else env)
@@ -499,6 +566,9 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
             src.get(ENV_OIDC_ENABLED, "").strip(),
         ),
         oidc_issuers_raw=src.get(ENV_OIDC_ISSUERS, ""),
+        internal_identity_mode=_parse_internal_identity_mode(
+            src.get(ENV_INTERNAL_IDENTITY_MODE, "").strip(),
+        ),
     )
 
 
@@ -508,6 +578,7 @@ __all__ = [
     "DEFAULT_CALL_CONTEXT_KEY_ROTATION_SECONDS",
     "DEFAULT_CALL_CONTEXT_SECRET_STORE",
     "DEFAULT_CALL_CONTEXT_TTL_SECONDS",
+    "DEFAULT_INTERNAL_IDENTITY_MODE",
     "DEFAULT_OIDC_ENABLED",
     "DEFAULT_SERVICE_TOKEN_TTL_SECONDS",
     "DEFAULT_TOKEN_SWEEPER_INTERVAL_SECONDS",
@@ -521,12 +592,15 @@ __all__ = [
     "ENV_CALL_CONTEXT_SECRET_STORE",
     "ENV_CALL_CONTEXT_TTL_SECONDS",
     "ENV_ENVIRONMENT",
+    "ENV_INTERNAL_IDENTITY_MODE",
     "ENV_METADATA_STORE_DSN",
     "ENV_OIDC_ENABLED",
     "ENV_OIDC_ISSUERS",
     "ENV_PERMISSIONS_PATHS",
     "ENV_SERVICE_TOKEN_TTL_DEFAULT",
     "ENV_TOKEN_SWEEPER_INTERVAL",
+    "INTERNAL_IDENTITY_MODE_JWT",
+    "INTERNAL_IDENTITY_MODE_SPIFFE",
     "Settings",
     "SettingsError",
     "load_settings",

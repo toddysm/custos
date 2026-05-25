@@ -21,10 +21,13 @@ from custos_auth.settings import (
     ENV_CALL_CONTEXT_KEY_ROTATION,
     ENV_CALL_CONTEXT_SECRET_STORE,
     ENV_CALL_CONTEXT_TTL_SECONDS,
+    ENV_INTERNAL_IDENTITY_MODE,
     ENV_METADATA_STORE_DSN,
     ENV_OIDC_ENABLED,
     ENV_SERVICE_TOKEN_TTL_DEFAULT,
     ENV_TOKEN_SWEEPER_INTERVAL,
+    INTERNAL_IDENTITY_MODE_JWT,
+    INTERNAL_IDENTITY_MODE_SPIFFE,
     Settings,
     SettingsError,
     load_settings,
@@ -360,3 +363,61 @@ def test_oidc_enabled_accepts_falsy_strings(raw: str) -> None:
 def test_oidc_enabled_rejects_unknown_value() -> None:
     with pytest.raises(SettingsError, match=ENV_OIDC_ENABLED):
         load_settings(_required_env(**{ENV_OIDC_ENABLED: "maybe"}))
+
+
+# ---------------------------------------------------------------------------
+# AS-IMPL-031: CUSTOS_AUTH_INTERNAL_IDENTITY_MODE
+# ---------------------------------------------------------------------------
+
+
+def test_internal_identity_mode_defaults_to_jwt() -> None:
+    """M1 deployments ship without the env var set; the parser must
+    default to the signed-JWT path (the only fully wired verifier)."""
+    settings = load_settings(_required_env())
+    assert settings.internal_identity_mode == INTERNAL_IDENTITY_MODE_JWT
+
+
+@pytest.mark.parametrize("raw", ["jwt", "JWT", "Jwt"])
+def test_internal_identity_mode_accepts_jwt_case_insensitively(raw: str) -> None:
+    settings = load_settings(_required_env(**{ENV_INTERNAL_IDENTITY_MODE: raw}))
+    assert settings.internal_identity_mode == INTERNAL_IDENTITY_MODE_JWT
+
+
+def test_internal_identity_mode_empty_string_falls_back_to_jwt() -> None:
+    settings = load_settings(_required_env(**{ENV_INTERNAL_IDENTITY_MODE: ""}))
+    assert settings.internal_identity_mode == INTERNAL_IDENTITY_MODE_JWT
+
+
+def test_internal_identity_mode_spiffe_refuses_to_boot() -> None:
+    """AS-IMPL-031: the SPIFFE/SPIRE verifier is the M3 target and is
+    not implemented yet. Selecting ``spiffe`` must fail fast at
+    settings parse so the operator sees a clear pointer to the
+    cutover plan, rather than booting in a half-wired state."""
+    with pytest.raises(SettingsError) as excinfo:
+        load_settings(
+            _required_env(**{ENV_INTERNAL_IDENTITY_MODE: INTERNAL_IDENTITY_MODE_SPIFFE}),
+        )
+    msg = str(excinfo.value)
+    assert ENV_INTERNAL_IDENTITY_MODE in msg
+    assert INTERNAL_IDENTITY_MODE_SPIFFE in msg
+    assert "AS-IMPL-031" in msg
+    assert "spiffe-cutover-plan" in msg
+
+
+def test_internal_identity_mode_spiffe_case_insensitive_still_refuses() -> None:
+    """The case-fold happens before the not-implemented check, so
+    upper-case ``SPIFFE`` produces the same not-implemented error
+    (not the unknown-value error)."""
+    with pytest.raises(SettingsError, match="AS-IMPL-031"):
+        load_settings(_required_env(**{ENV_INTERNAL_IDENTITY_MODE: "SPIFFE"}))
+
+
+def test_internal_identity_mode_rejects_unknown_value() -> None:
+    with pytest.raises(SettingsError) as excinfo:
+        load_settings(_required_env(**{ENV_INTERNAL_IDENTITY_MODE: "mtls"}))
+    msg = str(excinfo.value)
+    assert ENV_INTERNAL_IDENTITY_MODE in msg
+    # The error must enumerate the legal values so the operator can
+    # self-correct without reading the source.
+    assert INTERNAL_IDENTITY_MODE_JWT in msg
+    assert INTERNAL_IDENTITY_MODE_SPIFFE in msg

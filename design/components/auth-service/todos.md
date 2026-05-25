@@ -1,6 +1,6 @@
 # Auth Service TODOs
 
-Last Updated: 2026-05-27
+Last Updated: 2026-05-28
 
 ## Open
 
@@ -10,7 +10,7 @@ Last Updated: 2026-05-27
 - [ ] Specify the **Azure Entra ID OIDC preset** (default authority URL, tenant-vs-multitenant audience handling, group-claim → role-binding mapping rules — **M1, P0**). _**Resolved** 2026-05-25 via Phase H (AS-IMPL-022 #257)._
 - [ ] Cross-region replication strategy for Auth Service state (multi-region M2+).
 - [ ] Custom role authoring API (M2+).
-- [ ] SPIFFE/SPIRE cutover plan (M2/M3).
+- [ ] SPIFFE/SPIRE cutover plan (M2/M3). _**Resolved** 2026-05-28 via AS-IMPL-031 (#266). Planning doc landed at `spiffe-cutover-plan.md`; auth-service ships the fail-fast settings stub for `CUSTOS_AUTH_INTERNAL_IDENTITY_MODE`. The SPIRE verifier swap itself is M3._
 
 ## Closed
 

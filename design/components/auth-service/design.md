@@ -196,6 +196,7 @@ authorize(principalId, permission, workspaceId) → Allow | Deny + reason
 
 - The call-context interface stays the same: `verifyCallContext(metadata) → CallContext`. Implementations swap from "verify signed JWT against published JWKS" to "verify SPIFFE SVID against trust bundle". Component code does not change.
 - A feature flag `CUSTOS_AUTH_INTERNAL_IDENTITY_MODE = jwt | spiffe` lets us bridge the transition. Both modes co-exist during cutover; `spiffe` becomes the only mode once all components are SPIRE-attested.
+- Full cutover plan (rollout sequencing, SPIRE deployment prerequisites, trust-bundle distribution, required changes in `custos-callctx`, decommission of the JWT signer) is in [`spiffe-cutover-plan.md`](spiffe-cutover-plan.md). AS-IMPL-031 (#266) lands the env var as a fail-fast stub in auth-service only; `spiffe` mode currently refuses to boot until M3 wires the SPIRE Workload-API verifier.
 
 ## Service-Token Lifecycle (M1)
 
@@ -285,7 +286,7 @@ Auth Service persists exclusively through the new `AuthStoreProvider` interface 
 | `CUSTOS_AUTH_SERVICE_TOKEN_TTL_DEFAULT` | No | `90d` | Default lifetime for new service tokens. |
 | `CUSTOS_AUTH_CALL_CONTEXT_KEY_REF` | Yes | — | Dapr secret reference for the call-context signing key. |
 | `CUSTOS_AUTH_CALL_CONTEXT_KEY_ROTATION` | No | `7d` | Rotation interval for the call-context signing key. |
-| `CUSTOS_AUTH_INTERNAL_IDENTITY_MODE` | No | `jwt` | `jwt` (v1) or `spiffe` (M2/M3 cutover). |
+| `CUSTOS_AUTH_INTERNAL_IDENTITY_MODE` | No | `jwt` | `jwt` (M1) or `spiffe` (M3 cutover, not implemented yet — see [`spiffe-cutover-plan.md`](spiffe-cutover-plan.md)). Setting to `spiffe` currently raises `SettingsError` at boot. |
 | `CUSTOS_AUTH_AUTHZ_CACHE_TTL` | No | `60s` | Authz decision cache TTL. |
 | `CUSTOS_AUTH_AUTHN_CACHE_TTL` | No | `30s` | Token-verification cache TTL. |
 | `CUSTOS_AUTH_PLATFORM_ADMIN_BOOTSTRAP` | Yes-at-install | — | First-boot platform admin principal id; ignored after first successful binding. |
@@ -338,7 +339,7 @@ All events flow through the SPL audit outbox in the same transaction as the stat
 - [x] Specify the **Azure Entra ID OIDC preset** (default authority URL, tenant-vs-multitenant audience handling, group-claim → role-binding mapping rules — **M1, P0**). _Shipped 2026-05-25 (Phase H, AS-IMPL-022)._
 - [ ] Cross-region replication strategy for Auth Service state (multi-region M2+).
 - [ ] Custom role authoring API (M2+).
-- [ ] SPIFFE/SPIRE cutover plan (M2/M3).
+- [x] SPIFFE/SPIRE cutover plan (M2/M3). _Shipped 2026-05-28 (AS-IMPL-031 #266) as the planning doc [`spiffe-cutover-plan.md`](spiffe-cutover-plan.md); auth-service ships the fail-fast settings stub. M3 wires the SPIRE verifier per the plan._
 
 ## Open Questions
 
@@ -351,3 +352,4 @@ _(none — all v1 design questions resolved this session.)_
 | 2026-05-17 | Initial component design: built-in v1 roles (workspace.viewer/author/operator/admin + tenant.admin + platform.admin), permission registry ingested from per-component `permissions.yaml`, OIDC provisioning policy "create with zero bindings", **GitHub and Azure Entra ID OIDC presets prioritized as P0 in M1** (both human login and workload tokens; generic OIDC and service tokens follow), signed-JWT call context (with SPIFFE migration path via `CUSTOS_AUTH_INTERNAL_IDENTITY_MODE`), every-call `authz.decision` audit, workspace/tenant/platform scope hierarchy, new `AuthStoreProvider` interface in SPL, immediate cache eviction via `custos.auth.token-revoked` and `custos.auth.binding-changed` pub/sub events | #67 |
 | 2026-05-18 | INCON-026: Added `logs:read` and `metrics:read` to `workspace.viewer` built-in role so role bindings cover the log/metric read permissions in the Observability Service registry. Kept the permissions distinct (not folded into `run:read`) so service accounts can be granted tighter scopes later | #102 |
 | 2026-05-25 | Phase H landed: generic OIDC verifier (AS-IMPL-020 #255), GitHub OIDC preset (AS-IMPL-021 #256), Azure Entra ID OIDC preset (AS-IMPL-022 #257), zero-binding provisioning policy + `oidc.identity-linked` audit (AS-IMPL-023 #258). `POST /v1/auth/login/oidc/callback` now performs full server-side code exchange + id-token verification + provisioning; the M1 stub is retired. See `changes/2026-05-25-002-impl-phase-h-oidc.md` for the full operator-facing `CUSTOS_AUTH_OIDC_ISSUERS` schema | #255 #256 #257 #258 |
+| 2026-05-28 | AS-IMPL-031 landed the SPIFFE/SPIRE cutover plan ([`spiffe-cutover-plan.md`](spiffe-cutover-plan.md)) and a fail-fast settings stub for `CUSTOS_AUTH_INTERNAL_IDENTITY_MODE`. `jwt` (default) is unchanged; `spiffe` refuses to boot until M3 wires the SPIRE Workload-API verifier. No `custos-callctx` changes in this issue. See `changes/2026-05-28-008-impl-spiffe-cutover-plan.md` | #266 |
