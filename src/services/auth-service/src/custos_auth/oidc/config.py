@@ -61,8 +61,9 @@ from typing import Final, Literal
 
 #: Default JWT signing algorithms accepted by the verifier when an
 #: issuer entry does not specify ``algorithms``. ``RS256`` is the de-
-#: facto OIDC default (Google, Microsoft, GitHub all use it); ``ES256``
-#: covers presets that publish EC keys.
+#: facto OIDC default (Google, Microsoft, GitHub all use it), so the
+#: baseline default remains ``RS256`` unless an issuer explicitly
+#: configures a broader allow-list.
 DEFAULT_ALGORITHMS: Final[tuple[str, ...]] = ("RS256",)
 
 #: Default subject claim — the standard OIDC ``sub`` claim. Presets
