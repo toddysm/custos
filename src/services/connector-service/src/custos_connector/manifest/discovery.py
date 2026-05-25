@@ -20,20 +20,27 @@ Two paths resolve a manifest for a given ``(repository, image_digest)``:
    ``sha256`` algorithm only in v1. Length budget ≤ 128 chars (OCI
    distribution spec tag length cap).
 
-Both paths may resolve. *Referrers wins* — if both produce a descriptor
-they MUST agree (same digest, same size); otherwise the discovery
-rejects with :class:`DiscoveryErrorCode.AMBIGUOUS_MANIFEST`. Zero
-resolutions across both paths is also a hard failure
-(:class:`DiscoveryErrorCode.NO_MANIFEST_FOUND`).
+Both paths may resolve, but **the Referrers API is authoritative**.
+When Referrers returns a usable descriptor we return it immediately
+without consulting the fallback tag: the Referrers index is the
+registry's own view of the subject's referents, and a HEAD on the
+fallback tag would only add latency without strengthening the
+guarantee. The fallback tag is therefore consulted *only* when the
+Referrers path is empty (404, network error, or zero matching
+descriptors). If Referrers returns more than one descriptor for the
+v1 artifact type, discovery rejects with
+:class:`DiscoveryErrorCode.AMBIGUOUS_MANIFEST` — multiple manifests
+referencing the same subject is a publishing bug, not something the
+fallback tag can disambiguate. Zero resolutions across both paths is
+also a hard failure (:class:`DiscoveryErrorCode.NO_MANIFEST_FOUND`).
 
 Every discovery emits exactly one audit event:
 
 * ``connector.manifest.fallback-used`` — Referrers empty, fallback tag
   found.
 * ``connector.manifest.fallback-ignored`` — Referrers returned the
-  authoritative answer; fallback tag was not consulted (or was
-  consulted and matched, which is the same observable from the
-  operator's standpoint).
+  authoritative answer; the fallback tag was deliberately not
+  consulted.
 * ``connector.manifest.fallback-rejected`` — Discovery rejected on the
   fallback path or during final resolution after considering fallback,
   including ``unsupported-digest-algorithm``,
@@ -108,12 +115,14 @@ def fallback_tag_for_digest(digest: str) -> str:
 
     * Algorithm MUST be ``sha256`` — anything else raises
       :class:`DiscoveryErrorCode.UNSUPPORTED_DIGEST_ALGORITHM`.
-    * Digest MUST be ``sha256:<64 lowercase hex>`` — any other shape
+    * Digest hex MUST be 64 hex chars. Uppercase input is accepted
+      and normalised to lowercase before validation; anything else
       raises :class:`DiscoveryErrorCode.INVALID_DIGEST_FORMAT`.
-    * Result is ``custos-connector-manifest-v1_sha256-<hex>``. The
-      length is ``29 + 7 + 64 = 100`` chars; well under the OCI tag
-      cap of 128, but we still range-check defensively so a future
-      template change can't silently overflow.
+    * Result is ``custos-connector-manifest-v1_sha256-<hex>`` with the
+      hex portion in canonical lowercase form. The length is
+      ``29 + 7 + 64 = 100`` chars; well under the OCI tag cap of 128,
+      but we still range-check defensively so a future template
+      change can't silently overflow.
     """
     if not isinstance(digest, str) or ":" not in digest:
         raise ManifestDiscoveryError(
@@ -129,16 +138,17 @@ def fallback_tag_for_digest(digest: str) -> str:
             detail=f"v1 supports only sha256 digests; got algorithm {alg!r}",
             digest=digest,
         )
-    if len(hex_part) != _SHA256_HEX_LEN or not _HEX_RE.fullmatch(hex_part):
+    hex_lower = hex_part.lower()
+    if len(hex_lower) != _SHA256_HEX_LEN or not _HEX_RE.fullmatch(hex_lower):
         raise ManifestDiscoveryError(
             code=DiscoveryErrorCode.INVALID_DIGEST_FORMAT,
             detail=(
-                f"sha256 digest must be exactly {_SHA256_HEX_LEN} lowercase hex "
-                f"chars; got {hex_part!r}"
+                f"sha256 digest must be exactly {_SHA256_HEX_LEN} hex chars "
+                f"(case-insensitive); got {hex_part!r}"
             ),
             digest=digest,
         )
-    tag = f"{_FALLBACK_TAG_PREFIX}sha256-{hex_part}"
+    tag = f"{_FALLBACK_TAG_PREFIX}sha256-{hex_lower}"
     if len(tag) > MAX_OCI_TAG_LENGTH:  # pragma: no cover - mathematically unreachable for sha256
         raise ManifestDiscoveryError(
             code=DiscoveryErrorCode.FALLBACK_TAG_TOO_LONG,

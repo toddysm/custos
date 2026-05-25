@@ -119,10 +119,16 @@ def test_fallback_tag_rejects_short_hex() -> None:
     assert exc_info.value.code == DiscoveryErrorCode.INVALID_DIGEST_FORMAT
 
 
-def test_fallback_tag_rejects_uppercase_hex() -> None:
-    with pytest.raises(ManifestDiscoveryError) as exc_info:
-        fallback_tag_for_digest("sha256:" + "A" * 64)
-    assert exc_info.value.code == DiscoveryErrorCode.INVALID_DIGEST_FORMAT
+def test_fallback_tag_normalizes_uppercase_hex() -> None:
+    """Uppercase hex MUST be accepted and lowered into the canonical tag form."""
+    upper_digest = "sha256:" + "A" * 64
+    tag = fallback_tag_for_digest(upper_digest)
+    assert tag == "custos-connector-manifest-v1_sha256-" + "a" * 64
+    # Mixed case behaves the same as the all-lower input.
+    mixed = "sha256:" + ("Ab" * 32)
+    assert fallback_tag_for_digest(mixed) == fallback_tag_for_digest(
+        "sha256:" + ("ab" * 32)
+    )
 
 
 def test_fallback_tag_rejects_non_hex_chars() -> None:
