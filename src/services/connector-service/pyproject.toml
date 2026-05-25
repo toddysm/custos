@@ -66,6 +66,14 @@ dev = [
     # Postgres locally when ``CUSTOS_PG_DSN`` is not provided.
     "testcontainers[postgres]>=4.0",
     "asyncpg>=0.29",
+    # Property-based tests for the canonical normalizer (CONN-IMPL-006)
+    # exercise the permutation-invariance + mutation-sensitivity
+    # guarantees that ``compute_digest`` must satisfy.
+    "hypothesis>=6.99",
+    # OCI Referrers integration tests (CONN-IMPL-007) spin up a local
+    # registry container when ``CUSTOS_OCI_REGISTRY_URL`` is not provided.
+    # We don't pull a registry-specific testcontainers extra because the
+    # base ``DockerContainer`` is sufficient; the dep stays implicit.
 ]
 
 [project.urls]
@@ -78,6 +86,15 @@ custos-connector-service = "custos_connector.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/custos_connector"]
+# The packaged ConnectorManifest v1 JSON Schema at
+# ``src/custos_connector/manifest/_schemas/connector-manifest.v1.schema.json``
+# ships with the wheel automatically (hatchling includes non-Python files
+# in ``packages`` subtrees by default). ``importlib.resources`` resolves
+# the file under ``custos_connector.manifest._schemas`` for both editable
+# and wheel installs. The schema source-of-truth lives at
+# ``design/components/connector-service/schemas/`` and is pinned
+# bytes-equal to the packaged copy via
+# ``tests/test_manifest_schema_drift.py``.
 
 [tool.ruff]
 line-length = 100
@@ -145,6 +162,7 @@ addopts = [
 asyncio_mode = "auto"
 markers = [
     "integration: requires a live Postgres backend (testcontainers / CI service)",
+    "oci_integration: requires a live OCI registry (testcontainers / CI service; CONN-IMPL-007)",
 ]
 
 [tool.coverage.run]
