@@ -157,14 +157,38 @@ def load_providers(settings: Settings) -> Providers:
     """
     # Imported here so that test suites injecting fakes can avoid the
     # asyncpg dependency entirely.
+    import json
+
     from custos_pg import PgAuthAdapter, PgMetadataAdapter
     from custos_pg.pool import LazyPool
 
+    async def _register_jsonb_codec(conn: object) -> None:
+        """Register a dict <-> JSONB codec on every pooled connection.
+
+        ``PgAuthAdapter.put_role_binding`` (and several methods on
+        ``PgMetadataAdapter``) pass Python dicts directly to JSONB
+        columns; asyncpg has no built-in handler so without this
+        registration writes blow up with
+        ``DataError: invalid input for query argument $N``. Symmetric
+        decode keeps reads producing dicts so adapter ``_json_to_*``
+        helpers stay unchanged.
+        """
+        # ``conn`` is ``asyncpg.Connection``; ``set_type_codec`` is
+        # not on a Protocol so the cast is informal — annotated as
+        # ``object`` here only so ``LazyPool``'s typing surface stays
+        # free of the asyncpg import. Local runtime check confirms it.
+        await conn.set_type_codec(  # type: ignore[attr-defined]
+            "jsonb",
+            encoder=json.dumps,
+            decoder=json.loads,
+            schema="pg_catalog",
+        )
+
     auth_store = PgAuthAdapter(
-        lazy=LazyPool(settings.auth_store_dsn),
+        lazy=LazyPool(settings.auth_store_dsn, init=_register_jsonb_codec),
     )
     metadata_store = PgMetadataAdapter(
-        lazy=LazyPool(settings.metadata_store_dsn),
+        lazy=LazyPool(settings.metadata_store_dsn, init=_register_jsonb_codec),
     )
     # The adapters declare SCHEMA_REVISION as a bare class attr rather
     # than a `ClassVar[int]`, so mypy can't see them as Protocol-conforming
