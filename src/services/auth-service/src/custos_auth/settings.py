@@ -207,10 +207,11 @@ DEFAULT_OIDC_ENABLED: Final[bool] = False
 #: Optional. JSON document carrying the OIDC issuer config consumed
 #: by Phase H (AS-IMPL-020). Empty falls back to an empty issuer
 #: list — the M1 default deployment shape. See
-#: :mod:`custos_auth.oidc.config` for the schema. Malformed JSON or
-#: schema violations raise :class:`SettingsError` at startup; the
-#: auth-service refuses to come up so operators see the problem at
-#: deploy time rather than at first user login.
+#: :mod:`custos_auth.oidc.config` for the schema. The settings loader
+#: stores this value as the raw JSON string; malformed JSON or schema
+#: violations are surfaced later when the OIDC config parser consumes
+#: it during startup/lifespan initialization rather than as a
+#: :class:`SettingsError` during :func:`load_settings`.
 ENV_OIDC_ISSUERS: Final[str] = "CUSTOS_AUTH_OIDC_ISSUERS"
 
 
