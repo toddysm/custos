@@ -522,6 +522,80 @@ async def audit_authn_failure(
     )
 
 
+async def audit_authn_success_oidc(
+    metadata_store: MetadataStoreProvider,
+    *,
+    user_id: str,
+    issuer: str,
+    subject: str,
+    issuer_id: str,
+    workspace_id: str = PLATFORM_WORKSPACE_ID,
+    extra_payload: dict[str, str] | None = None,
+) -> None:
+    """Emit ``authn.success`` for a verified OIDC login (AS-IMPL-020).
+
+    Distinct from :func:`audit_authn_success` (the service-token path)
+    in two ways: the payload always carries ``authentication_type=oidc``
+    plus the verifier-supplied ``issuer`` / ``oidc_subject`` so audit
+    consumers can group by identity source; and the actor is the
+    internal user id resolved by the provisioner, not a service-account
+    id. Workspace defaults to :data:`PLATFORM_WORKSPACE_ID` because
+    OIDC verifies happen pre-workspace-binding by definition.
+    """
+    payload: dict[str, Any] = {
+        "authentication_type": "oidc",
+        "issuer": issuer,
+        "issuer_id": issuer_id,
+    }
+    if extra_payload:
+        payload.update(extra_payload)
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_AUTHN_SUCCESS,
+        actor=user_id,
+        subject={
+            "user_id": user_id,
+            "issuer": issuer,
+            "oidc_subject": subject,
+        },
+        payload=payload,
+    )
+
+
+async def audit_authn_failure_oidc(
+    metadata_store: MetadataStoreProvider,
+    *,
+    reason: str,
+    issuer_id: str,
+    issuer: str | None = None,
+    workspace_id: str = PLATFORM_WORKSPACE_ID,
+) -> None:
+    """Emit ``authn.failure`` for a rejected OIDC verification (AS-IMPL-020).
+
+    ``reason`` is one of the closed-set codes defined in
+    :data:`custos_auth.oidc.verifier.FAILURE_REASONS` —
+    ``malformed`` / ``unknown_kid`` / ``bad_signature`` / ``expired`` /
+    ``wrong_audience`` / ``wrong_issuer`` / ``wrong_algorithm`` /
+    ``missing_claim`` / ``jwks_fetch_failed`` / ``immature``. ``issuer``
+    is the configured ``issuer_url`` (may be ``None`` when the failure
+    happened before issuer resolution); ``issuer_id`` is the operator-
+    visible config id. Subject is intentionally absent — for a failed
+    verification we cannot trust any claim in the token.
+    """
+    subject: dict[str, str] = {"issuer_id": issuer_id}
+    if issuer is not None:
+        subject["issuer"] = issuer
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_AUTHN_FAILURE,
+        actor="anonymous",
+        subject=subject,
+        payload={"reason": reason, "authentication_type": "oidc"},
+    )
+
+
 # ---------------------------------------------------------------------------
 # Service-token lifecycle events (Phase F / AS-IMPL-015)
 # ---------------------------------------------------------------------------
@@ -670,7 +744,9 @@ __all__ = [
     "EVENT_WORKSPACE_CREATED",
     "PLATFORM_WORKSPACE_ID",
     "audit_authn_failure",
+    "audit_authn_failure_oidc",
     "audit_authn_success",
+    "audit_authn_success_oidc",
     "audit_authz_decision",
     "audit_oidc_identity_linked",
     "audit_principal_created",

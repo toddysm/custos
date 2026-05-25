@@ -28,8 +28,9 @@ classifiers = [
 # Phase G (AS-IMPL-017) added `PyJWT[crypto]` for the EdDSA call-context
 # signer + verifier (the `[crypto]` extra pulls in `cryptography`, which
 # also backs the Ed25519 keypair generation and PEM (de)serialization
-# used by the signer's key resolvers). AS-IMPL-020 will add OIDC
-# verification deps.
+# used by the signer's key resolvers). Phase H (AS-IMPL-020) added
+# `httpx` for OIDC JWKS fetching and the authorization-code token
+# exchange against external OIDC providers.
 dependencies = [
     "fastapi>=0.110,<1",
     "uvicorn[standard]>=0.27,<1",
@@ -37,6 +38,7 @@ dependencies = [
     "opentelemetry-api>=1.20,<2",
     "pyyaml>=6.0,<7",
     "pyjwt[crypto]>=2.8,<3",
+    "httpx>=0.27,<1",
     "custos-spl",
     "custos-postgres",
 ]

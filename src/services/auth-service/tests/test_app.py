@@ -69,6 +69,8 @@ def test_readyz_returns_200_when_schema_gate_passes() -> None:
         # loop (no key ref), which flips jwks_rotation to "ok".
         "jwks_rotation": "ok",
         "pubsub": "ok",
+        # Phase H (AS-IMPL-020): default deployment ships with OIDC off.
+        "oidc": "disabled",
     }
 
 
@@ -113,6 +115,7 @@ def test_readyz_returns_503_during_lifespan_startup_before_ready() -> None:
         "postgres": "unknown",
         "jwks_rotation": "unknown",
         "pubsub": "unknown",
+        "oidc": "unknown",
     }
 
 
