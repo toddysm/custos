@@ -179,9 +179,15 @@ def verify(metadata: Mapping[str, str]) -> CallContext: ...
 
 What changes inside the library:
 
-1. **A new `SpiffeVerifier` class** alongside the existing
-   `JwtVerifier`. The factory `get_verifier(settings)` returns one
-   or the other based on `CUSTOS_AUTH_INTERNAL_IDENTITY_MODE`.
+1. **Verifier implementation split/refactor.** Today the public
+   implementation is `CallContextVerifier`. In M3 we will either
+   extend that class to support both modes, or refactor its internals
+   into mode-specific implementations such as `JwtVerifier` and
+   `SpiffeVerifier` behind the same public interface/factory. The
+   selection remains driven by
+   `CUSTOS_AUTH_INTERNAL_IDENTITY_MODE`; this document does **not**
+   assume that a `JwtVerifier` class already exists in the current
+   codebase.
 2. **Wire envelope.** In `spiffe` mode the call-context still
    travels in Dapr service-invocation metadata, but the bearer is
    the SVID (X.509 SVID in the TLS handshake, OR JWT-SVID in a
