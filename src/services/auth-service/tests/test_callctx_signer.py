@@ -244,6 +244,18 @@ def test_signer_init_rejects_non_positive_default_ttl() -> None:
         )
 
 
+def test_signer_init_rejects_empty_audience() -> None:
+    """Catching an empty configured audience at construction time means
+    every later ``sign(...)`` call gets a clear "audience must be a
+    non-empty string" error sourced at the misconfiguration, rather
+    than a misleading "audience override" error per mint."""
+    with pytest.raises(ValueError, match="audience must be a non-empty string"):
+        CallContextSigner(
+            StaticSigningKeyResolver(key=SigningKey.generate()),
+            audience="",
+        )
+
+
 async def test_each_signed_context_has_unique_jti_by_default() -> None:
     signer = CallContextSigner(StaticSigningKeyResolver(key=SigningKey.generate()))
     a = await signer.sign(

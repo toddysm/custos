@@ -463,6 +463,8 @@ class CallContextSigner:
             raise ValueError(
                 f"default_ttl_seconds must be a positive integer; got {default_ttl_seconds!r}"
             )
+        if not audience:
+            raise ValueError("audience must be a non-empty string")
         self._resolver = resolver
         self._audience = audience
         self._issuer = issuer
@@ -530,7 +532,7 @@ class CallContextSigner:
             raise ValueError(f"ttl_seconds must be a positive integer; got {effective_ttl!r}")
         effective_audience = self._audience if audience is None else audience
         if not effective_audience:
-            raise ValueError("audience override must be a non-empty string")
+            raise ValueError("audience must be a non-empty string")
         normalised_permissions = self._normalise_permissions(permissions)
         iat = int(self._clock())
         exp = iat + effective_ttl
