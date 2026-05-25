@@ -169,12 +169,13 @@ class OidcProvisioner:
         SPL ``put_principal`` and ``put_oidc_identity`` calls are
         separate writes, and a crash between them leaves a dangling
         User with no OIDC binding. Operators reconcile via the
-        ``oidc.identity-linked`` audit feed; subsequent OIDC verifies
-        for the same ``(issuer, subject)`` retry the link until it
-        succeeds (the SPL ``ImmutableViolation`` raised by a duplicate
-        put becomes :class:`OidcIdentityAlreadyBound` which the
-        verifier surfaces as ``unknown_kid``-equivalent so the
-        operator can resolve manually).
+        ``oidc.identity-linked`` audit feed. A concurrent provisioner
+        can also win the identity-link race after our initial
+        ``get_oidc_identity`` check; in that case the duplicate link
+        attempt raises :class:`OidcIdentityAlreadyBound` out of
+        :meth:`provision`, and callers must catch it and reconcile the
+        orphaned freshly-created User row via the accepted manual/audit
+        reconciliation flow.
         """
         config = identity.issuer_config
         existing_user_id = await self._auth_store.get_oidc_identity(
