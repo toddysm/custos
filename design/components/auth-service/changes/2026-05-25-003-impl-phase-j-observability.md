@@ -9,7 +9,7 @@ Status: closed
 
 ## Summary
 
-Phase J of the M3 auth-service implementation plan (AS-IMPL-026) landed. The `custos_auth` public surface is now fully instrumented for OpenTelemetry tracing and metrics, and the call-context verifier emits the security-relevant `call-context.invalid` audit event on every failed verification. Refs #267 (M3 auth-service track).
+Phase J of the M1 auth-service implementation plan (AS-IMPL-026) landed. The `custos_auth` public surface is now fully instrumented for OpenTelemetry tracing and metrics, and the call-context verifier emits the security-relevant `call-context.invalid` audit event on every failed verification. Refs #267 (M3 auth-service track).
 
 ## Before
 
