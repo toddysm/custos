@@ -174,15 +174,25 @@ class OidcVerifier:
         try:
             jwk = await self._jwks_cache.get_key(entry.jwks_uri, kid)
         except Exception as exc:
-            # JwksCacheError covers both "kid never published" and
-            # "JWKS fetch failed". The latter is the wider failure
-            # surface (DNS, TLS, 5xx) so we attribute the audit row
-            # to jwks_fetch_failed; the verbose detail captures the
-            # actual cause in the operator-visible diagnostic.
+            # Prefer structured cache error metadata over exception
+            # message parsing when deciding which closed-set audit
+            # reason to emit. Unknown / unstructured cache failures
+            # still map conservatively to jwks_fetch_failed.
             from custos_auth.oidc.jwks_cache import JwksCacheError
 
-            if isinstance(exc, JwksCacheError) and "has no key with kid=" in str(exc):
-                raise OidcVerificationError(REASON_UNKNOWN_KID, str(exc)) from exc
+            if isinstance(exc, JwksCacheError):
+                cache_error_code = (
+                    getattr(exc, "reason", None)
+                    or getattr(exc, "code", None)
+                    or getattr(exc, "error_code", None)
+                )
+                if isinstance(cache_error_code, str) and cache_error_code.lower() in {
+                    "unknown_kid",
+                    "kid_missing",
+                    "missing_kid",
+                }:
+                    raise OidcVerificationError(REASON_UNKNOWN_KID, str(exc)) from exc
+                raise OidcVerificationError(REASON_JWKS_FETCH_FAILED, str(exc)) from exc
             raise OidcVerificationError(REASON_JWKS_FETCH_FAILED, str(exc)) from exc
 
         # Step 3 — verify signature + standard claims via PyJWT. We
