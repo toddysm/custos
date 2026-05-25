@@ -787,7 +787,7 @@ principal_id: sa-ci-publisher
 workspace_id: ws-payments   # optional; null → platform-global ctx
 caller_component: api-gateway
 ttl_seconds: 300            # optional; default 300, max 86400
-permissions: []             # optional; embedded grants (max 256 entries, each 1..128 chars)
+permissions: [artifacts.publish, artifacts.read]  # optional; embedded grants (max 256 entries, each 1..128 chars)
 audience: null              # optional; overrides aud; default "custos.internal"
 
 # Response
