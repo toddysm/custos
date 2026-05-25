@@ -1,6 +1,6 @@
 # Developer Guide: Custos — Plugins, Connections & Activities
 
-Last Updated: 2026-05-16
+Last Updated: 2026-05-27
 
 ## Overview
 
@@ -20,6 +20,7 @@ Custos is a pluggable workflow orchestrator. Developers extend the platform by w
 |---|---|
 | [Connections API](connections-api.md) | Connector manifest schema, field reference, and examples |
 | [Catalog API](catalog-api.md) | REST surface for workflows, templates, activity- and connector-types; validation taxonomy, immutability and deprecation contracts, placeholder reference |
+| [Auth API](auth-api.md) | REST and RPC surface for tenants, workspaces, service accounts, tokens, role bindings, and call-context signing; error taxonomy, permission registry, built-in roles |
 | [CEL Expressions](cel-expressions.md) | Reference for workflow expressions: bindings, operators, sandbox guarantees, failure modes, worked examples |
 | [Examples](examples/) | Reference connector manifests for the supported target and authentication combinations |
 
