@@ -70,11 +70,14 @@ def _collect_metrics() -> list[dict[str, Any]]:
             for metric in scope_metric.metrics:
                 points = metric.data.data_points
                 for point in points:
+                    value = getattr(point, "count", None)
+                    if value is None:
+                        value = getattr(point, "value", None)
                     out.append(
                         {
                             "name": metric.name,
                             "labels": dict(point.attributes or {}),
-                            "value": getattr(point, "count", None) or getattr(point, "value", None),
+                            "value": value,
                         },
                     )
     return out
