@@ -13,7 +13,7 @@
 
 ## Closed-set OIDC failure reasons (verifier)
 
-`malformed`, `unknown_kid`, `bad_signature`, `expired`, `immature`, `wrong_audience`, `wrong_issuer`, `wrong_algorithm`, `missing_claim`, `jwks_fetch_failed`. Exposed as `custos_auth.oidc.verifier.FAILURE_REASONS: frozenset[str]`.
+`malformed`, `unknown_kid`, `bad_signature`, `expired`, `immature`, `wrong_audience`, `wrong_issuer`, `wrong_algorithm`, `missing_claim`, `jwks_fetch_failed`, `exchange_failed` (token-endpoint outage / non-200 / malformed body during the OAuth `authorization_code` exchange — kept distinct from `jwks_fetch_failed` so an exchange outage doesn't pollute JWKS SLO dashboards). Exposed as `custos_auth.oidc.verifier.FAILURE_REASONS: frozenset[str]`.
 
 ## Configuration
 

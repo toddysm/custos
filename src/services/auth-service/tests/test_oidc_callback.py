@@ -348,7 +348,8 @@ def test_oidc_callback_502_on_exchange_failure(
             "CUSTOS_AUTH_OIDC_ISSUERS": _issuers_env(),
         }
     )
-    with _app_with_settings(settings) as client:
+    providers = _providers()
+    with _app_with_settings(settings, providers=providers) as client:
         _patch_oidc_client(
             client,
             _make_mock_transport(jwk=jwk, id_token=id_token, exchange_status=503),
@@ -357,6 +358,14 @@ def test_oidc_callback_502_on_exchange_failure(
 
     assert resp.status_code == 502
     assert resp.json()["error"]["code"] == "oidc_exchange_failed"
+
+    # Audit row distinguishes token-endpoint outages from JWKS outages —
+    # the audit reason MUST be ``exchange_failed`` (not the legacy
+    # ``jwks_fetch_failed`` that pollutes the JWKS SLO dashboards).
+    events = [event for _, event in providers.metadata_store.append_audit_calls]  # type: ignore[attr-defined]
+    failure_rows = [e for e in events if e.event_type == "authn.failure"]
+    assert len(failure_rows) == 1
+    assert failure_rows[0].payload["reason"] == "exchange_failed"
 
 
 def test_oidc_callback_503_when_token_endpoint_missing() -> None:

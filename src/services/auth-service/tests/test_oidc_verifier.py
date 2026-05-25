@@ -310,8 +310,9 @@ async def test_verify_missing_subject_claim_raises_missing_claim() -> None:
 
 
 async def test_failure_reasons_set_size_matches_design_contract() -> None:
-    # Closed-set guarantee: 10 reason codes. Adding one is an audit-schema change.
-    assert len(FAILURE_REASONS) == 10
+    # Closed-set guarantee: 11 reason codes (10 verifier-side + 1
+    # token-exchange). Adding one is an audit-schema change.
+    assert len(FAILURE_REASONS) == 11
 
 
 async def test_issuer_for_lookup() -> None:

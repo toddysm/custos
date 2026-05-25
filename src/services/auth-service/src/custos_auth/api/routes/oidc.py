@@ -51,7 +51,7 @@ from custos_auth.audit import audit_authn_failure_oidc, audit_authn_success_oidc
 from custos_auth.oidc import IssuersConfig, OidcVerifier, parse_issuers_config
 from custos_auth.oidc.provisioning import OidcProvisioner, ProvisionResult
 from custos_auth.oidc.verifier import (
-    REASON_JWKS_FETCH_FAILED,
+    REASON_EXCHANGE_FAILED,
     REASON_MALFORMED,
     REASON_MISSING_CLAIM,
     OidcVerificationError,
@@ -173,12 +173,12 @@ async def _exchange_code_for_id_token(
         )
     except Exception as exc:
         raise OidcVerificationError(
-            REASON_JWKS_FETCH_FAILED,
+            REASON_EXCHANGE_FAILED,
             f"OIDC token exchange transport failed: {exc}",
         ) from exc
     if response.status_code != 200:
         raise OidcVerificationError(
-            REASON_JWKS_FETCH_FAILED,
+            REASON_EXCHANGE_FAILED,
             (
                 f"OIDC token exchange returned HTTP {response.status_code}; "
                 "provider rejected the code or our client credentials"

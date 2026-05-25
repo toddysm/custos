@@ -64,6 +64,12 @@ REASON_WRONG_ISSUER: Final[str] = "wrong_issuer"
 REASON_WRONG_ALGORITHM: Final[str] = "wrong_algorithm"
 REASON_MISSING_CLAIM: Final[str] = "missing_claim"
 REASON_JWKS_FETCH_FAILED: Final[str] = "jwks_fetch_failed"
+#: Token-endpoint outage / non-200 / malformed body during the OAuth
+#: ``authorization_code`` exchange step. Distinct from
+#: :data:`REASON_JWKS_FETCH_FAILED` so an exchange outage doesn't
+#: pollute the JWKS-failure SLO dashboards (the two endpoints are
+#: hosted separately by most providers and fail independently).
+REASON_EXCHANGE_FAILED: Final[str] = "exchange_failed"
 
 #: Set of all valid reason codes, exposed so other modules
 #: (audit emission, tests) can validate against the closed set.
@@ -79,6 +85,7 @@ FAILURE_REASONS: Final[frozenset[str]] = frozenset(
         REASON_WRONG_ALGORITHM,
         REASON_MISSING_CLAIM,
         REASON_JWKS_FETCH_FAILED,
+        REASON_EXCHANGE_FAILED,
     }
 )
 
