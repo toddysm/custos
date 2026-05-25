@@ -21,6 +21,7 @@ from custos_spl.ids import PrincipalId, WorkspaceId
 from custos_spl.interfaces.auth_store import ServiceAccount
 from fastapi import APIRouter, Depends, status
 
+from custos_auth import _telemetry as telemetry
 from custos_auth.api.dependencies import (
     get_auth_store,
     get_metadata_store,
@@ -56,37 +57,46 @@ async def create_service_account(
 
     Emits ``principal.created`` keyed to the workspace.
     """
-    if ctx.workspace_id is None:
-        raise ValidationFailure("service-account creation requires a workspace-scoped call context")
+    with telemetry.observe_operation(
+        telemetry.OP_SERVICE_ACCOUNT_CREATE,
+        outcomes={
+            ValidationFailure: "validation_failed",
+            Conflict: "conflict",
+        },
+    ):
+        if ctx.workspace_id is None:
+            raise ValidationFailure(
+                "service-account creation requires a workspace-scoped call context"
+            )
 
-    workspace_id = WorkspaceId(ctx.workspace_id)
-    principal_id = PrincipalId(body.principal_id)
-    existing = await auth_store.get_principal(principal_id)
-    if existing is not None:
-        raise Conflict(f"principal '{body.principal_id}' already exists")
+        workspace_id = WorkspaceId(ctx.workspace_id)
+        principal_id = PrincipalId(body.principal_id)
+        existing = await auth_store.get_principal(principal_id)
+        if existing is not None:
+            raise Conflict(f"principal '{body.principal_id}' already exists")
 
-    sa = ServiceAccount(
-        kind="serviceAccount",
-        principal_id=principal_id,
-        workspace_id=workspace_id,
-        display_name=body.display_name,
-        disabled_at=None,
-        disabled_reason=None,
-        created_at=datetime.now(UTC),
-    )
-    await auth_store.put_principal(sa)
-    await audit_principal_created(
-        metadata_store,
-        actor=ctx.principal_id,
-        workspace_id=ctx.workspace_id,
-        principal_id=body.principal_id,
-        kind="serviceAccount",
-        display_name=body.display_name,
-    )
-    response = principal_to_response(sa)
-    # Narrow to the right union arm for the type annotation.
-    assert isinstance(response, ServiceAccountResponse)
-    return response
+        sa = ServiceAccount(
+            kind="serviceAccount",
+            principal_id=principal_id,
+            workspace_id=workspace_id,
+            display_name=body.display_name,
+            disabled_at=None,
+            disabled_reason=None,
+            created_at=datetime.now(UTC),
+        )
+        await auth_store.put_principal(sa)
+        await audit_principal_created(
+            metadata_store,
+            actor=ctx.principal_id,
+            workspace_id=ctx.workspace_id,
+            principal_id=body.principal_id,
+            kind="serviceAccount",
+            display_name=body.display_name,
+        )
+        response = principal_to_response(sa)
+        # Narrow to the right union arm for the type annotation.
+        assert isinstance(response, ServiceAccountResponse)
+        return response
 
 
 __all__ = ["router"]

@@ -36,6 +36,7 @@ from custos_spl.ids import PrincipalId, ServiceTokenId
 from custos_spl.interfaces.auth_store import ServiceAccount, ServiceToken
 from fastapi import APIRouter, Depends, Path, Response, status
 
+from custos_auth import _telemetry as telemetry
 from custos_auth.api.dependencies import (
     get_auth_store,
     get_metadata_store,
@@ -120,43 +121,50 @@ async def mint_service_token(
     Plaintext is returned in the response body and never persisted.
     Emits ``token.issued`` keyed to the SA's workspace.
     """
-    sa = await _load_service_account(
-        auth_store,
-        principal_id=principal_id,
-        caller_workspace_id=ctx.workspace_id,
-    )
-    ttl = body.ttl_seconds or settings.service_token_ttl_default_seconds
-    plaintext, token_hash = mint_token()
-    issued_at = datetime.now(UTC)
-    expires_at = issued_at + timedelta(seconds=ttl)
-    token_id = ServiceTokenId(str(uuid4()))
-    token = ServiceToken(
-        token_id=token_id,
-        service_account_id=sa.principal_id,
-        hash=token_hash,
-        issued_at=issued_at,
-        expires_at=expires_at,
-        revoked_at=None,
-        revoked_by=None,
-        revoked_reason=None,
-    )
-    await auth_store.put_service_token(token)
-    await audit_token_issued(
-        metadata_store,
-        actor=ctx.principal_id,
-        workspace_id=str(sa.workspace_id),
-        token_id=str(token_id),
-        service_account_id=str(sa.principal_id),
-        issued_at=issued_at,
-        expires_at=expires_at,
-    )
-    return ServiceTokenMintResponse(
-        token_id=str(token_id),
-        service_account_id=str(sa.principal_id),
-        token=plaintext,
-        issued_at=issued_at,
-        expires_at=expires_at,
-    )
+    with telemetry.observe_operation(
+        telemetry.OP_SERVICE_TOKEN_ISSUE,
+        outcomes={
+            NotFound: "not_found",
+            ValidationFailure: "validation_failed",
+        },
+    ):
+        sa = await _load_service_account(
+            auth_store,
+            principal_id=principal_id,
+            caller_workspace_id=ctx.workspace_id,
+        )
+        ttl = body.ttl_seconds or settings.service_token_ttl_default_seconds
+        plaintext, token_hash = mint_token()
+        issued_at = datetime.now(UTC)
+        expires_at = issued_at + timedelta(seconds=ttl)
+        token_id = ServiceTokenId(str(uuid4()))
+        token = ServiceToken(
+            token_id=token_id,
+            service_account_id=sa.principal_id,
+            hash=token_hash,
+            issued_at=issued_at,
+            expires_at=expires_at,
+            revoked_at=None,
+            revoked_by=None,
+            revoked_reason=None,
+        )
+        await auth_store.put_service_token(token)
+        await audit_token_issued(
+            metadata_store,
+            actor=ctx.principal_id,
+            workspace_id=str(sa.workspace_id),
+            token_id=str(token_id),
+            service_account_id=str(sa.principal_id),
+            issued_at=issued_at,
+            expires_at=expires_at,
+        )
+        return ServiceTokenMintResponse(
+            token_id=str(token_id),
+            service_account_id=str(sa.principal_id),
+            token=plaintext,
+            issued_at=issued_at,
+            expires_at=expires_at,
+        )
 
 
 @router.get(
@@ -172,27 +180,31 @@ async def list_service_tokens(
     auth_store: Annotated[AuthStoreProvider, Depends(get_auth_store)],
 ) -> ServiceTokenListResponse:
     """List every token row owned by the SA (revoked rows included)."""
-    # Existence-hiding gate; same lookup helper as mint. List is
-    # permitted against a disabled SA so operators can audit the
-    # history that led to disabling; the helper's
-    # ``ValidationFailure`` is therefore caught and downgraded to
-    # the regular lookup path for the read endpoint.
-    try:
-        sa = await _load_service_account(
-            auth_store,
-            principal_id=principal_id,
-            caller_workspace_id=ctx.workspace_id,
+    with telemetry.observe_operation(
+        telemetry.OP_SERVICE_TOKEN_LIST,
+        outcomes={NotFound: "not_found"},
+    ):
+        # Existence-hiding gate; same lookup helper as mint. List is
+        # permitted against a disabled SA so operators can audit the
+        # history that led to disabling; the helper's
+        # ``ValidationFailure`` is therefore caught and downgraded to
+        # the regular lookup path for the read endpoint.
+        try:
+            sa = await _load_service_account(
+                auth_store,
+                principal_id=principal_id,
+                caller_workspace_id=ctx.workspace_id,
+            )
+        except ValidationFailure:
+            # The SA exists and lives in this workspace but is disabled;
+            # we still allow read.
+            sa_or_none = await auth_store.get_principal(PrincipalId(principal_id))
+            assert isinstance(sa_or_none, ServiceAccount)  # invariant of the disabled branch
+            sa = sa_or_none
+        tokens = await auth_store.list_service_tokens_for_service_account(sa.principal_id)
+        return ServiceTokenListResponse(
+            tokens=[service_token_to_response(t) for t in tokens],
         )
-    except ValidationFailure:
-        # The SA exists and lives in this workspace but is disabled;
-        # we still allow read.
-        sa_or_none = await auth_store.get_principal(PrincipalId(principal_id))
-        assert isinstance(sa_or_none, ServiceAccount)  # invariant of the disabled branch
-        sa = sa_or_none
-    tokens = await auth_store.list_service_tokens_for_service_account(sa.principal_id)
-    return ServiceTokenListResponse(
-        tokens=[service_token_to_response(t) for t in tokens],
-    )
 
 
 @router.delete(
@@ -219,52 +231,56 @@ async def revoke_service_token(
     already in the terminal state and we don't want to spam either
     the audit pipeline or the cache-eviction bus.
     """
-    if ctx.workspace_id is None:
-        # No workspace context → caller cannot prove ownership of
-        # any token. Collapse to 404 to keep the workspace-boundary
-        # contract uniform across the surface.
-        raise NotFound(f"service token '{token_id}' not found")
-    token = await auth_store.get_service_token(ServiceTokenId(token_id))
-    if token is None:
-        raise NotFound(f"service token '{token_id}' not found")
-    sa = await auth_store.get_principal(token.service_account_id)
-    if not isinstance(sa, ServiceAccount) or str(sa.workspace_id) != ctx.workspace_id:
-        # Either the owning SA was hard-deleted (defensive, design
-        # forbids it) or the token belongs to a different
-        # workspace. Same 404 either way so the response cannot be
-        # used as a cross-workspace probe.
-        raise NotFound(f"service token '{token_id}' not found")
-    if token.revoked_at is not None:
-        # Idempotency: silent 204, no audit row, no event publish.
-        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    with telemetry.observe_operation(
+        telemetry.OP_SERVICE_TOKEN_REVOKE,
+        outcomes={NotFound: "not_found"},
+    ):
+        if ctx.workspace_id is None:
+            # No workspace context → caller cannot prove ownership of
+            # any token. Collapse to 404 to keep the workspace-boundary
+            # contract uniform across the surface.
+            raise NotFound(f"service token '{token_id}' not found")
+        token = await auth_store.get_service_token(ServiceTokenId(token_id))
+        if token is None:
+            raise NotFound(f"service token '{token_id}' not found")
+        sa = await auth_store.get_principal(token.service_account_id)
+        if not isinstance(sa, ServiceAccount) or str(sa.workspace_id) != ctx.workspace_id:
+            # Either the owning SA was hard-deleted (defensive, design
+            # forbids it) or the token belongs to a different
+            # workspace. Same 404 either way so the response cannot be
+            # used as a cross-workspace probe.
+            raise NotFound(f"service token '{token_id}' not found")
+        if token.revoked_at is not None:
+            # Idempotency: silent 204, no audit row, no event publish.
+            return Response(status_code=status.HTTP_204_NO_CONTENT)
 
-    await auth_store.revoke_service_token(
-        ServiceTokenId(token_id),
-        PrincipalId(ctx.principal_id),
-        body.reason,
-    )
-    await audit_token_revoked(
-        metadata_store,
-        actor=ctx.principal_id,
-        workspace_id=str(sa.workspace_id),
-        token_id=token_id,
-        service_account_id=str(sa.principal_id),
-        reason=body.reason,
-    )
-    # Publish the eviction event AFTER the SPL commit and the audit
-    # write so subscribers that re-read the SPL row always see the
-    # ``revoked_at`` non-null. The local-bus subscriber in
-    # :func:`custos_auth.create_app` invalidates the per-pod authn
-    # cache; the cross-replica subscriber (no-op by default in M1)
-    # would do the same on every other replica.
-    await publisher.publish(
-        TokenRevokedEvent(
+        await auth_store.revoke_service_token(
+            ServiceTokenId(token_id),
+            PrincipalId(ctx.principal_id),
+            body.reason,
+        )
+        await audit_token_revoked(
+            metadata_store,
+            actor=ctx.principal_id,
+            workspace_id=str(sa.workspace_id),
             token_id=token_id,
-            token_hash=token.hash,
             service_account_id=str(sa.principal_id),
-        ),
-    )
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+            reason=body.reason,
+        )
+        # Publish the eviction event AFTER the SPL commit and the audit
+        # write so subscribers that re-read the SPL row always see the
+        # ``revoked_at`` non-null. The local-bus subscriber in
+        # :func:`custos_auth.create_app` invalidates the per-pod authn
+        # cache; the cross-replica subscriber (no-op by default in M1)
+        # would do the same on every other replica.
+        await publisher.publish(
+            TokenRevokedEvent(
+                token_id=token_id,
+                token_hash=token.hash,
+                service_account_id=str(sa.principal_id),
+            ),
+        )
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.delete(
@@ -292,45 +308,49 @@ async def revoke_all_service_tokens(
     so leftover tokens are guaranteed dead even if a verifier
     races the disable step).
     """
-    # Bypass the disabled-SA guard in :func:`_load_service_account`
-    # because the bulk-revoke flow is exactly the path operators
-    # take after disabling a SA to mop up its outstanding tokens.
-    if ctx.workspace_id is None:
-        raise NotFound(f"service account '{principal_id}' not found")
-    sa_or_none = await auth_store.get_principal(PrincipalId(principal_id))
-    if not isinstance(sa_or_none, ServiceAccount):
-        raise NotFound(f"service account '{principal_id}' not found")
-    if str(sa_or_none.workspace_id) != ctx.workspace_id:
-        raise NotFound(f"service account '{principal_id}' not found")
-    sa = sa_or_none
+    with telemetry.observe_operation(
+        telemetry.OP_SERVICE_TOKEN_REVOKE_ALL,
+        outcomes={NotFound: "not_found"},
+    ):
+        # Bypass the disabled-SA guard in :func:`_load_service_account`
+        # because the bulk-revoke flow is exactly the path operators
+        # take after disabling a SA to mop up its outstanding tokens.
+        if ctx.workspace_id is None:
+            raise NotFound(f"service account '{principal_id}' not found")
+        sa_or_none = await auth_store.get_principal(PrincipalId(principal_id))
+        if not isinstance(sa_or_none, ServiceAccount):
+            raise NotFound(f"service account '{principal_id}' not found")
+        if str(sa_or_none.workspace_id) != ctx.workspace_id:
+            raise NotFound(f"service account '{principal_id}' not found")
+        sa = sa_or_none
 
-    tokens = await auth_store.list_service_tokens_for_service_account(sa.principal_id)
-    revoked_count = 0
-    for token in tokens:
-        if token.revoked_at is not None:
-            continue
-        await auth_store.revoke_service_token(
-            token.token_id,
-            PrincipalId(ctx.principal_id),
-            body.reason,
-        )
-        await audit_token_revoked(
-            metadata_store,
-            actor=ctx.principal_id,
-            workspace_id=str(sa.workspace_id),
-            token_id=str(token.token_id),
-            service_account_id=str(sa.principal_id),
-            reason=body.reason,
-        )
-        await publisher.publish(
-            TokenRevokedEvent(
+        tokens = await auth_store.list_service_tokens_for_service_account(sa.principal_id)
+        revoked_count = 0
+        for token in tokens:
+            if token.revoked_at is not None:
+                continue
+            await auth_store.revoke_service_token(
+                token.token_id,
+                PrincipalId(ctx.principal_id),
+                body.reason,
+            )
+            await audit_token_revoked(
+                metadata_store,
+                actor=ctx.principal_id,
+                workspace_id=str(sa.workspace_id),
                 token_id=str(token.token_id),
-                token_hash=token.hash,
                 service_account_id=str(sa.principal_id),
-            ),
-        )
-        revoked_count += 1
-    return ServiceTokenBulkRevokeResponse(revoked_count=revoked_count)
+                reason=body.reason,
+            )
+            await publisher.publish(
+                TokenRevokedEvent(
+                    token_id=str(token.token_id),
+                    token_hash=token.hash,
+                    service_account_id=str(sa.principal_id),
+                ),
+            )
+            revoked_count += 1
+        return ServiceTokenBulkRevokeResponse(revoked_count=revoked_count)
 
 
 __all__ = ["router"]

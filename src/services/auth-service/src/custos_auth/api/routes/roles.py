@@ -26,6 +26,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request, status
 
+from custos_auth import _telemetry as telemetry
 from custos_auth.api.dependencies import get_call_context
 from custos_auth.api.errors import AuthApiError
 from custos_auth.api.models import (
@@ -67,18 +68,19 @@ async def list_roles(
     _ctx: Annotated[CallContext, Depends(get_call_context)],
 ) -> RoleListResponse:
     """List every role known to this build of auth-service."""
-    return RoleListResponse(
-        roles=[
-            RoleResponse(
-                role_id=str(role.role_id),
-                name=role.name,
-                description=role.description,
-                permission_names=list(role.permission_names),
-                allowed_scopes=sorted(role.allowed_scopes),
-            )
-            for role in BUILTIN_ROLES
-        ],
-    )
+    with telemetry.observe_operation(telemetry.OP_ROLE_LIST):
+        return RoleListResponse(
+            roles=[
+                RoleResponse(
+                    role_id=str(role.role_id),
+                    name=role.name,
+                    description=role.description,
+                    permission_names=list(role.permission_names),
+                    allowed_scopes=sorted(role.allowed_scopes),
+                )
+                for role in BUILTIN_ROLES
+            ],
+        )
 
 
 class _NotImplementedError(AuthApiError):
@@ -121,16 +123,17 @@ async def list_permissions(
     the SPL ``Permission`` row does not carry the ``declared_by``
     attribution.
     """
-    return PermissionListResponse(
-        permissions=[
-            PermissionResponse(
-                name=perm.name,
-                description=perm.description,
-                declared_by=perm.declared_by,
-            )
-            for perm in sorted(declared.values(), key=lambda p: p.name)
-        ],
-    )
+    with telemetry.observe_operation(telemetry.OP_PERMISSION_LIST):
+        return PermissionListResponse(
+            permissions=[
+                PermissionResponse(
+                    name=perm.name,
+                    description=perm.description,
+                    declared_by=perm.declared_by,
+                )
+                for perm in sorted(declared.values(), key=lambda p: p.name)
+            ],
+        )
 
 
 __all__ = ["get_declared_permissions", "router"]

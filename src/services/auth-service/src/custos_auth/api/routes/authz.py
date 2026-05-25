@@ -22,6 +22,7 @@ from custos_spl import AuthStoreProvider, MetadataStoreProvider
 from custos_spl.interfaces.auth_store import ServiceAccount
 from fastapi import APIRouter, Depends, status
 
+from custos_auth import _telemetry as telemetry
 from custos_auth.api.dependencies import (
     get_auth_store,
     get_authn_cache,
@@ -58,45 +59,49 @@ async def verify_and_authorize(
     Wire shape and audit pipeline behaviour are documented at the
     module level.
     """
-    principal = await verify_token(
-        body.token,
-        auth_store=auth_store,
-        metadata_store=metadata_store,
-        authn_cache=authn_cache,
-    )
-    if principal is None:
-        # Verify failures are existence-hiding: the body never
-        # disambiguates ``unknown-token`` / ``revoked`` / ``expired``
-        # — the audit pipeline carries the disambiguating reason.
-        raise Unauthenticated("Token verification failed.")
-    # M1 only supports service-account tokens. The verifier already
-    # narrows the row to a SA, but the explicit type-check keeps the
-    # mypy --strict surface honest and guards against a future
-    # principal kind landing in this method by accident.
-    assert isinstance(principal, ServiceAccount)
-    # Derive the caller's tenant from the SA's owning workspace so
-    # ``authorize`` can apply its cross-tenant existence-hiding gate.
-    # A missing home workspace collapses to ``deny-workspace-not-found``
-    # via the tenant-mismatch branch — that is the correct
-    # information-hiding outcome.
-    home_ws = await auth_store.get_workspace(principal.workspace_id)
-    caller_tenant_id = None if home_ws is None else str(home_ws.tenant_id)
-    decision = await authorize(
-        auth_store,
-        metadata_store,
-        principal_id=str(principal.principal_id),
-        permission=body.permission,
-        workspace_id=body.workspace_id,
-        caller_component="api-gateway",
-        caller_tenant_id=caller_tenant_id,
-        cache=authz_cache,
-    )
-    return VerifyAndAuthorizeResponse(
-        principal_id=str(principal.principal_id),
-        allowed=decision.allowed,
-        reason=decision.reason,
-        audit_event_id=decision.audit_event_id,
-    )
+    with telemetry.observe_operation(
+        telemetry.OP_AUTHZ_VERIFY_AND_AUTHORIZE,
+        outcomes={Unauthenticated: "unauthenticated"},
+    ):
+        principal = await verify_token(
+            body.token,
+            auth_store=auth_store,
+            metadata_store=metadata_store,
+            authn_cache=authn_cache,
+        )
+        if principal is None:
+            # Verify failures are existence-hiding: the body never
+            # disambiguates ``unknown-token`` / ``revoked`` / ``expired``
+            # — the audit pipeline carries the disambiguating reason.
+            raise Unauthenticated("Token verification failed.")
+        # M1 only supports service-account tokens. The verifier already
+        # narrows the row to a SA, but the explicit type-check keeps the
+        # mypy --strict surface honest and guards against a future
+        # principal kind landing in this method by accident.
+        assert isinstance(principal, ServiceAccount)
+        # Derive the caller's tenant from the SA's owning workspace so
+        # ``authorize`` can apply its cross-tenant existence-hiding gate.
+        # A missing home workspace collapses to ``deny-workspace-not-found``
+        # via the tenant-mismatch branch — that is the correct
+        # information-hiding outcome.
+        home_ws = await auth_store.get_workspace(principal.workspace_id)
+        caller_tenant_id = None if home_ws is None else str(home_ws.tenant_id)
+        decision = await authorize(
+            auth_store,
+            metadata_store,
+            principal_id=str(principal.principal_id),
+            permission=body.permission,
+            workspace_id=body.workspace_id,
+            caller_component="api-gateway",
+            caller_tenant_id=caller_tenant_id,
+            cache=authz_cache,
+        )
+        return VerifyAndAuthorizeResponse(
+            principal_id=str(principal.principal_id),
+            allowed=decision.allowed,
+            reason=decision.reason,
+            audit_event_id=decision.audit_event_id,
+        )
 
 
 __all__ = ["router"]

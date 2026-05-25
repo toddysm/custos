@@ -10,6 +10,7 @@ from custos_spl import AuditEvent
 from custos_auth.audit import (
     EVENT_AUTHN_FAILURE,
     EVENT_AUTHN_SUCCESS,
+    EVENT_CALL_CONTEXT_INVALID,
     EVENT_OIDC_IDENTITY_LINKED,
     EVENT_PRINCIPAL_CREATED,
     EVENT_PRINCIPAL_DISABLED,
@@ -22,6 +23,7 @@ from custos_auth.audit import (
     PLATFORM_WORKSPACE_ID,
     audit_authn_failure,
     audit_authn_success,
+    audit_call_context_invalid,
     audit_oidc_identity_linked,
     audit_principal_created,
     audit_principal_disabled,
@@ -317,3 +319,64 @@ async def test_audit_token_expired_keys_under_sa_workspace() -> None:
     assert event.actor == "sa-1"
     assert event.subject == {"token_id": "tok-1", "service_account_id": "sa-1"}
     assert event.payload == {"expires_at": expires_at.isoformat()}
+
+
+# ---------------------------------------------------------------------------
+# AS-IMPL-026: call-context.invalid helper.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_audit_call_context_invalid_keys_under_platform_sentinel() -> None:
+    meta = FakeMetadataAdapter()
+    await audit_call_context_invalid(
+        meta,  # type: ignore[arg-type]
+        reason="bad_signature",
+    )
+    ws_id, event = meta.append_audit_calls[0]
+    assert ws_id == PLATFORM_WORKSPACE_ID
+    assert event.event_type == EVENT_CALL_CONTEXT_INVALID
+    # Default actor is the system because failed call-contexts have
+    # no trusted principal binding.
+    assert event.actor == "system"
+    assert event.subject == {"reason": "bad_signature"}
+    assert event.payload == {"reason": "bad_signature"}
+
+
+@pytest.mark.asyncio
+async def test_audit_call_context_invalid_includes_kid_when_present() -> None:
+    meta = FakeMetadataAdapter()
+    await audit_call_context_invalid(
+        meta,  # type: ignore[arg-type]
+        reason="unknown_kid",
+        actor="dapr-app:catalog",
+        kid="kid-1",
+    )
+    _, event = meta.append_audit_calls[0]
+    assert event.actor == "dapr-app:catalog"
+    assert event.payload == {"reason": "unknown_kid", "kid": "kid-1"}
+
+
+@pytest.mark.asyncio
+async def test_audit_call_context_invalid_never_carries_raw_token() -> None:
+    """Security: the failing JWT must never enter the audit payload.
+
+    The helper takes only the reason + optional ``kid``; there is no
+    keyword that could smuggle the raw signed string. This guards
+    against future refactors that might try to attach the offending
+    token "for debugging".
+    """
+    meta = FakeMetadataAdapter()
+    await audit_call_context_invalid(
+        meta,  # type: ignore[arg-type]
+        reason="expired",
+        kid="kid-9",
+    )
+    _, event = meta.append_audit_calls[0]
+    # No keyword on the helper accepts a raw token; the only data
+    # that may travel is the reason code + the optional public kid.
+    # Assert the payload keyset is exactly the contractually-allowed
+    # set so a future refactor that smuggles a JWT under any new
+    # key trips the gate.
+    assert set(event.payload.keys()) <= {"reason", "kid"}
+    assert set(event.subject.keys()) <= {"reason"}

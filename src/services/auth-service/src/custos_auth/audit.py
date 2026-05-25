@@ -106,6 +106,7 @@ EVENT_TOKEN_REVOKED: Final[str] = "token.revoked"
 EVENT_TOKEN_EXPIRED: Final[str] = "token.expired"
 EVENT_AUTHN_SUCCESS: Final[str] = "authn.success"
 EVENT_AUTHN_FAILURE: Final[str] = "authn.failure"
+EVENT_CALL_CONTEXT_INVALID: Final[str] = "call-context.invalid"
 
 
 # ---------------------------------------------------------------------------
@@ -726,11 +727,66 @@ async def audit_authz_decision(
     )
 
 
+# ---------------------------------------------------------------------------
+# call-context.invalid
+# ---------------------------------------------------------------------------
+#
+# Emitted by ``rpc/callctx.verify`` (and any future call-context
+# verification entry point) when a signed call-context fails the
+# closed-set validity checks. Carries the failure reason code but
+# never the raw token or any signature material — auditing the
+# reason is what makes the event security-relevant, while echoing
+# the JWT itself would defeat the security posture the call-context
+# scheme establishes.
+
+
+async def audit_call_context_invalid(
+    metadata_store: MetadataStoreProvider,
+    *,
+    reason: str,
+    actor: str = "system",
+    kid: str | None = None,
+) -> None:
+    """Emit ``call-context.invalid`` against the platform sentinel workspace.
+
+    Args:
+        metadata_store: SPL provider whose ``append_audit`` runs the
+          outbox write.
+        reason: One of the closed-set reason codes defined in
+          ``custos_auth.api.routes.rpc`` (``malformed``,
+          ``unknown_kid``, ``bad_signature``, ``expired``,
+          ``wrong_audience``, ``wrong_issuer``). Mirroring the design
+          constraint, this is the *only* failure descriptor that
+          enters the payload — never the raw token.
+        actor: Best-effort caller identity. Defaults to ``"system"``
+          because failed call-contexts by definition have no trusted
+          actor binding; if the verifier can recover a non-spoofable
+          identity (e.g. the calling component's Dapr app-id) it
+          should pass that string instead.
+        kid: Optional ``kid`` header parsed off the failing token.
+          Useful for incident response (which signing key was the
+          caller pointing at) and safe to log because the key id is
+          public via the JWKS endpoint.
+    """
+    payload: dict[str, Any] = {"reason": reason}
+    if kid is not None:
+        payload["kid"] = kid
+    await _emit(
+        metadata_store,
+        workspace_id=PLATFORM_WORKSPACE_ID,
+        event_type=EVENT_CALL_CONTEXT_INVALID,
+        actor=actor,
+        subject={"reason": reason},
+        payload=payload,
+    )
+
+
 __all__ = [
     "EMIT_FAILURES_TOTAL",
     "EVENT_AUTHN_FAILURE",
     "EVENT_AUTHN_SUCCESS",
     "EVENT_AUTHZ_DECISION",
+    "EVENT_CALL_CONTEXT_INVALID",
     "EVENT_OIDC_IDENTITY_LINKED",
     "EVENT_PRINCIPAL_CREATED",
     "EVENT_PRINCIPAL_DISABLED",
@@ -748,6 +804,7 @@ __all__ = [
     "audit_authn_success",
     "audit_authn_success_oidc",
     "audit_authz_decision",
+    "audit_call_context_invalid",
     "audit_oidc_identity_linked",
     "audit_principal_created",
     "audit_principal_disabled",

@@ -20,6 +20,7 @@ from custos_spl import AuthStoreProvider, MetadataStoreProvider
 from custos_spl.ids import PrincipalId
 from fastapi import APIRouter, Depends, status
 
+from custos_auth import _telemetry as telemetry
 from custos_auth.api.dependencies import (
     get_auth_store,
     get_call_context,
@@ -57,10 +58,14 @@ async def get_me(
     token mint and this call". We surface it as 404 to keep the
     contract consistent with the other endpoints.
     """
-    principal = await auth_store.get_principal(PrincipalId(ctx.principal_id))
-    if principal is None:
-        raise NotFound(f"principal '{ctx.principal_id}' not found")
-    return principal_to_response(principal)
+    with telemetry.observe_operation(
+        telemetry.OP_PRINCIPAL_GET_ME,
+        outcomes={NotFound: "not_found"},
+    ):
+        principal = await auth_store.get_principal(PrincipalId(ctx.principal_id))
+        if principal is None:
+            raise NotFound(f"principal '{ctx.principal_id}' not found")
+        return principal_to_response(principal)
 
 
 @router.post(
@@ -88,39 +93,43 @@ async def disable_principal(
     users — they live at tenant scope, which is not a valid SPL
     audit-row key).
     """
-    target = await auth_store.get_principal(PrincipalId(principal_id))
-    if target is None:
-        raise NotFound(f"principal '{principal_id}' not found")
+    with telemetry.observe_operation(
+        telemetry.OP_PRINCIPAL_DISABLE,
+        outcomes={NotFound: "not_found"},
+    ):
+        target = await auth_store.get_principal(PrincipalId(principal_id))
+        if target is None:
+            raise NotFound(f"principal '{principal_id}' not found")
 
-    # Scope check
-    if not ctx.has_permission("platform.admin"):
-        # tenant.admin path
-        if target.kind == "user":
-            if ctx.tenant_id != str(target.tenant_id):
-                raise NotFound(f"principal '{principal_id}' not found")
-        else:  # serviceAccount
-            # Service accounts are workspace-scoped; tenant-admin needs
-            # the SA's workspace tenant to match ctx.tenant_id. Phase C
-            # MVP: require the call-context's workspace_id to match.
-            if ctx.workspace_id != str(target.workspace_id):
-                raise NotFound(f"principal '{principal_id}' not found")
+        # Scope check
+        if not ctx.has_permission("platform.admin"):
+            # tenant.admin path
+            if target.kind == "user":
+                if ctx.tenant_id != str(target.tenant_id):
+                    raise NotFound(f"principal '{principal_id}' not found")
+            else:  # serviceAccount
+                # Service accounts are workspace-scoped; tenant-admin needs
+                # the SA's workspace tenant to match ctx.tenant_id. Phase C
+                # MVP: require the call-context's workspace_id to match.
+                if ctx.workspace_id != str(target.workspace_id):
+                    raise NotFound(f"principal '{principal_id}' not found")
 
-    await auth_store.disable_principal(
-        PrincipalId(principal_id),
-        PrincipalId(ctx.principal_id),
-        body.reason,
-    )
+        await auth_store.disable_principal(
+            PrincipalId(principal_id),
+            PrincipalId(ctx.principal_id),
+            body.reason,
+        )
 
-    audit_workspace_id = (
-        str(target.workspace_id) if target.kind == "serviceAccount" else PLATFORM_WORKSPACE_ID
-    )
-    await audit_principal_disabled(
-        metadata_store,
-        actor=ctx.principal_id,
-        workspace_id=audit_workspace_id,
-        principal_id=principal_id,
-        reason=body.reason,
-    )
+        audit_workspace_id = (
+            str(target.workspace_id) if target.kind == "serviceAccount" else PLATFORM_WORKSPACE_ID
+        )
+        await audit_principal_disabled(
+            metadata_store,
+            actor=ctx.principal_id,
+            workspace_id=audit_workspace_id,
+            principal_id=principal_id,
+            reason=body.reason,
+        )
 
 
 __all__ = ["router"]

@@ -45,6 +45,7 @@ from fastapi import APIRouter, Depends, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.responses import JSONResponse
 
+from custos_auth import _telemetry as telemetry
 from custos_auth.api.dependencies import get_metadata_store, get_settings
 from custos_auth.api.models import PrincipalResponse, principal_to_response
 from custos_auth.audit import audit_authn_failure_oidc, audit_authn_success_oidc
@@ -237,6 +238,37 @@ async def oidc_callback(
           ``oidc_not_configured`` when the flag is on but no issuers
           match the request, or ``oidc_not_implemented`` when the
           app state is missing the verifier (bare-app test).
+
+    The route is wrapped in
+    :func:`telemetry.observe_operation` under
+    :data:`telemetry.OP_OIDC_CALLBACK` so latency lands on the shared
+    operation histogram. Every error envelope this handler returns is
+    rendered as a :class:`JSONResponse` (not raised), so the
+    histogram outcome is always ``success`` from a wrapper viewpoint;
+    the failure-reason breakdown lives on the ``authn.failure_oidc``
+    audit row instead.
+    """
+    with telemetry.observe_operation(telemetry.OP_OIDC_CALLBACK):
+        return await _oidc_callback_impl(
+            body=body,
+            request=request,
+            settings=settings,
+            metadata_store=metadata_store,
+        )
+
+
+async def _oidc_callback_impl(
+    *,
+    body: OidcCallbackRequest,
+    request: Request,
+    settings: Settings,
+    metadata_store: MetadataStoreProvider,
+) -> JSONResponse:
+    """Body of :func:`oidc_callback` extracted so the route wrapper can
+    stay single-line under :func:`telemetry.observe_operation`.
+
+    Lives module-private; tests reach this through ``oidc_callback``
+    via the FastAPI surface.
     """
     if not settings.oidc_enabled:
         return _error_response(
