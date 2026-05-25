@@ -5,20 +5,15 @@ configured claim constraints:
 
 * ``iss`` matches the configured ``issuer_url`` exactly.
 * ``aud`` (string or array) intersects the configured ``audiences``.
-* ``alg`` is in the configured allow-list (and matches the JWK's
-  algorithm advertisement).
+* ``alg`` is in the configured allow-list.
 * ``exp`` is in the future, ``nbf`` (when present) is in the past,
   ``iat`` (when present) is not too far in the future. ``leeway``
   absorbs small clock skew.
 
-The verifier emits ``authn.success`` on a successful verify and
-``authn.failure`` with a closed-set reason on every failure mode.
-Audit emission is best-effort and is **post**-verification — the
-verifier returns the verdict to the caller and emits in the
-background-equivalent path so an audit-store outage does not block
-the auth flow. (Strict at-least-once audit semantics with outbox
-guarantees come through AS-IMPL-014's pattern; OIDC verifies do not
-mutate state so the post-commit model applies cleanly.)
+The verifier returns a ``VerifiedOidcIdentity`` on success and raises
+an appropriate verification error on failure. Audit emission for OIDC
+authentication outcomes is handled by the caller/auth route rather
+than by this module.
 """
 
 from __future__ import annotations
