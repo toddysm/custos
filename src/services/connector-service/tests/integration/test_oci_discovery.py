@@ -160,8 +160,13 @@ async def _push_blob(client: httpx.AsyncClient, repo: str, data: bytes) -> str:
     upload_loc = start.headers["location"]
     # Some registries return absolute URLs, others relative.
     if upload_loc.startswith("http"):
-        # Strip the scheme+host so httpx joins it onto the base URL cleanly.
-        upload_path = httpx.URL(upload_loc).copy_with(scheme="", host="", port=None).path
+        # Strip the scheme+host so httpx joins it onto the base URL cleanly,
+        # while preserving any upload-session query parameters (for example
+        # registry-managed state tokens).
+        upload_url = httpx.URL(upload_loc)
+        upload_path = upload_url.path
+        if upload_url.query:
+            upload_path = f"{upload_path}?{upload_url.query.decode('ascii')}"
     else:
         upload_path = upload_loc
 
