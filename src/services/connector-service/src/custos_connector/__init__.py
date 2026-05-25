@@ -9,42 +9,104 @@ Trigger Service.
 See the design at:
 https://github.com/toddysm/custos/blob/main/design/components/connector-service/design.md
 
-CONN-IMPL-001 (Phase A) ships the package skeleton, the ``create_app()``
-factory exposing ``/healthz`` and ``/readyz`` (so the IMPL-002 Helm chart
-can pass its liveness / readiness gates), and the
-``python -m custos_connector`` entry point. Phase B (CONN-IMPL-003 +
-CONN-IMPL-004) will wire the SPL provider bundle (``CatalogStoreProvider``
-+ ``MetadataStoreProvider``), the schema-revision startup gate, and the
-call-context middleware (via ``custos-callctx``). REST routes land in
-CONN-IMPL-026; the secret-bridge sidecar lands in Phase H
-(CONN-IMPL-019..021).
+Phase A (CONN-IMPL-001, #284) shipped the package skeleton plus the
+``/healthz`` + ``/readyz`` probes so the Phase A Helm chart could deploy.
+Phase B (CONN-IMPL-003 + CONN-IMPL-004) ships the SPL provider wiring,
+the schema-revision startup gate, and the call-context middleware (with
+dev shim). REST routes land in CONN-IMPL-026; the secret-bridge sidecar
+lands in Phase H (CONN-IMPL-019..021).
 """
 
 from __future__ import annotations
 
-from fastapi import FastAPI
+import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING
+
+from custos_connector.health import router as health_router
+from custos_connector.middleware import (
+    CallContextError,
+    CallContextMiddleware,
+    call_context_error_handler,
+)
+from custos_connector.providers import (
+    MigrationRequired,
+    Providers,
+    load_providers,
+    schema_gate_explainer,
+    verify_schema_revisions,
+)
+from custos_connector.settings import Settings, load_settings
+
+if TYPE_CHECKING:
+    from fastapi import FastAPI
 
 __all__ = ["__version__", "create_app"]
 
 __version__ = "0.1.0"
 
+logger = logging.getLogger("custos_connector")
 
-def create_app() -> FastAPI:
-    """Construct the Connector Service ASGI application.
 
-    Phase A ships a minimal FastAPI application that only exposes the
-    ``/healthz`` and ``/readyz`` probes so the Helm chart can deploy.
-    Phase B (CONN-IMPL-003 + CONN-IMPL-004) wires providers and middleware;
-    Phase J (CONN-IMPL-026) adds the REST surface.
+def create_app(
+    *,
+    settings: Settings | None = None,
+    providers: Providers | None = None,
+) -> FastAPI:
+    """Build and return the Connector Service FastAPI application.
+
+    Args:
+        settings: Pre-parsed :class:`Settings`. Defaults to
+            :func:`custos_connector.settings.load_settings` reading from
+            the process environment.
+        providers: Pre-built :class:`Providers` (used by tests to inject
+            in-memory fakes). When ``None``, the lifespan hook constructs
+            the real Postgres adapters from the settings DSNs.
+
+    The factory is import-safe: no DSN lookups, no socket connections.
+    All side-effecting work happens inside the FastAPI lifespan context.
     """
-    app = FastAPI(title="Custos Connector Service", version=__version__)
+    from fastapi import FastAPI
 
-    @app.get("/healthz")
-    def healthz() -> dict[str, str]:
-        return {"status": "ok"}
+    effective_settings = settings if settings is not None else load_settings()
 
-    @app.get("/readyz")
-    def readyz() -> dict[str, str]:
-        return {"status": "ok"}
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        app.state.settings = effective_settings
+        local_providers = providers if providers is not None else load_providers(effective_settings)
+        app.state.providers = local_providers
+        app.state.ready = False
+        app.state.schema_gate_error = None
+        try:
+            await verify_schema_revisions(local_providers)
+            app.state.ready = True
+            logger.info("schema-revision gate passed; connector-service is ready")
+        except MigrationRequired as exc:
+            app.state.schema_gate_error = exc
+            logger.error("%s", schema_gate_explainer(exc))
+        yield
 
+    app = FastAPI(
+        title="Custos Connector Service",
+        version=__version__,
+        lifespan=lifespan,
+    )
+
+    # CallContextMiddleware is instantiated lazily on the first request,
+    # so a DevShimDisabledInProductionError surfaces during startup
+    # (visible to the operator the same way any startup exception is)
+    # rather than at create_app() time. This keeps the factory side-effect
+    # free and trivially testable.
+    app.add_middleware(
+        CallContextMiddleware,
+        authz_endpoint=effective_settings.authz_endpoint,
+        environment=effective_settings.environment,
+    )
+    # Pair the middleware with its exception handler so the dependency-side
+    # 4xx responses (get_call_context / require_permission) emit the same
+    # ``{"error": {"code", "detail"}}`` envelope as the middleware itself.
+    app.add_exception_handler(CallContextError, call_context_error_handler)
+
+    app.include_router(health_router)
     return app
