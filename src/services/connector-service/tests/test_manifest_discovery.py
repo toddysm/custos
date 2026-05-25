@@ -126,9 +126,7 @@ def test_fallback_tag_normalizes_uppercase_hex() -> None:
     assert tag == "custos-connector-manifest-v1_sha256-" + "a" * 64
     # Mixed case behaves the same as the all-lower input.
     mixed = "sha256:" + ("Ab" * 32)
-    assert fallback_tag_for_digest(mixed) == fallback_tag_for_digest(
-        "sha256:" + ("ab" * 32)
-    )
+    assert fallback_tag_for_digest(mixed) == fallback_tag_for_digest("sha256:" + ("ab" * 32))
 
 
 def test_fallback_tag_rejects_non_hex_chars() -> None:
