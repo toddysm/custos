@@ -325,13 +325,20 @@ jobs:
       - name: Wait for registries to be ready
         run: |
           for url in http://localhost:5000/v2/ http://localhost:5001/v2/; do
+            ready=false
             for _ in $(seq 1 30); do
               if curl -fsS "$url" >/dev/null 2>&1; then
                 echo "$url is ready"
+                ready=true
                 break
               fi
               sleep 2
             done
+
+            if [ "$ready" != true ]; then
+              echo "Registry did not become ready after retries: $url" >&2
+              exit 1
+            fi
           done
 
       - name: Pytest (OCI integration)
