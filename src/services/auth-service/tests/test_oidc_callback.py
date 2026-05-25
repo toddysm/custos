@@ -404,3 +404,315 @@ def test_oidc_callback_503_when_client_secret_env_unset() -> None:
         resp = client.post("/v1/auth/login/oidc/callback", json=_valid_body())
     assert resp.status_code == 503
     assert resp.json()["error"]["code"] == "oidc_not_configured"
+
+
+# ---------------------------------------------------------------------------
+# Supplemental branch coverage (Phase K / AS-IMPL-027)
+# ---------------------------------------------------------------------------
+
+
+def test_oidc_callback_bare_app_returns_503_oidc_not_implemented() -> None:
+    """A bare ``FastAPI`` (no lifespan) is missing ``app.state.oidc_*``.
+
+    The route falls back to parsing ``settings.oidc_issuers_raw``
+    inline so it still type-checks, then short-circuits with
+    ``oidc_not_implemented``. Used to pin the fixture-friendly
+    contract — bare-app tests must never crash on a missing
+    ``app.state`` attribute.
+    """
+    from fastapi import FastAPI
+
+    from custos_auth.api.routes.oidc import router as oidc_router
+
+    settings = load_settings(
+        {
+            **_ENV_BASE,
+            "CUSTOS_AUTH_OIDC_ENABLED": "true",
+            "CUSTOS_AUTH_OIDC_ISSUERS": _issuers_env(),
+        }
+    )
+
+    app = FastAPI()
+    # Mount the route at its real prefix and override both
+    # ``get_settings`` and ``get_metadata_store``. Even though the
+    # ``oidc_not_implemented`` branch does not use the metadata store,
+    # FastAPI still resolves ``get_metadata_store`` as a dependency,
+    # and the default provider would raise on a bare app with no
+    # ``app.state.providers``.
+    from custos_auth.api.dependencies import get_metadata_store, get_settings
+
+    # ``oidc_router`` already declares its ``/v1`` prefix on the
+    # ``APIRouter`` constructor — including it without an extra prefix
+    # is what the production app does in ``create_app()``.
+    app.include_router(oidc_router)
+    app.dependency_overrides[get_settings] = lambda: settings
+    app.dependency_overrides[get_metadata_store] = lambda: FakeMetadataAdapter()
+
+    with TestClient(app) as client:
+        resp = client.post("/v1/auth/login/oidc/callback", json=_valid_body())
+
+    assert resp.status_code == 503
+    assert resp.json()["error"]["code"] == "oidc_not_implemented"
+
+
+def test_oidc_callback_503_when_issuer_missing_client_id() -> None:
+    """Issuer entry has a ``token_endpoint`` but no ``client_id`` →
+    ``oidc_not_configured``. The exchange step requires both.
+
+    The parser permits ``client_id`` to be omitted (workload-token
+    issuers don't need it); the route is the one that demands the
+    pair when a code-flow exchange is requested.
+    """
+    raw_config = json.dumps(
+        {
+            "issuers": [
+                {
+                    "id": "primary",
+                    "issuer_url": _ISSUER_URL,
+                    "jwks_uri": _JWKS_URI,
+                    "audiences": [_AUDIENCE],
+                    "token_endpoint": _TOKEN_ENDPOINT,
+                    # client_id + client_secret_env intentionally absent.
+                }
+            ]
+        }
+    )
+    settings = load_settings(
+        {
+            **_ENV_BASE,
+            "CUSTOS_AUTH_OIDC_ENABLED": "true",
+            "CUSTOS_AUTH_OIDC_ISSUERS": raw_config,
+        }
+    )
+    with _app_with_settings(settings) as client:
+        resp = client.post("/v1/auth/login/oidc/callback", json=_valid_body())
+    assert resp.status_code == 503
+    assert resp.json()["error"]["code"] == "oidc_not_configured"
+    assert "client_id" in resp.json()["error"]["detail"]
+
+
+def test_oidc_callback_502_on_exchange_transport_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Transport-level failure during the OAuth code exchange.
+
+    The route catches the ``httpx`` exception and re-raises it as
+    :class:`OidcVerificationError` with ``reason=exchange_failed``,
+    which the handler maps to a 502 + ``authn.failure_oidc`` audit
+    row. Distinct branch from the non-200 path (covered by the
+    existing 503-status test).
+    """
+    monkeypatch.setenv("TEST_OIDC_CLIENT_SECRET", "shhh")
+
+    def _raising(_request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("simulated DNS failure")
+
+    transport = httpx.MockTransport(_raising)
+
+    settings = load_settings(
+        {
+            **_ENV_BASE,
+            "CUSTOS_AUTH_OIDC_ENABLED": "true",
+            "CUSTOS_AUTH_OIDC_ISSUERS": _issuers_env(),
+        }
+    )
+    providers = _providers()
+    with _app_with_settings(settings, providers=providers) as client:
+        _patch_oidc_client(client, transport)
+        resp = client.post("/v1/auth/login/oidc/callback", json=_valid_body())
+
+    assert resp.status_code == 502
+    assert resp.json()["error"]["code"] == "oidc_exchange_failed"
+
+    events = [event for _, event in providers.metadata_store.append_audit_calls]  # type: ignore[attr-defined]
+    failure_rows = [e for e in events if e.event_type == "authn.failure"]
+    assert len(failure_rows) == 1
+    assert failure_rows[0].payload["reason"] == "exchange_failed"
+
+
+def test_oidc_callback_502_on_exchange_response_not_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Token endpoint returns 200 but the body is not JSON.
+
+    Provider misconfiguration (HTML error page, gateway-rewritten
+    body) collapses to the same closed-set ``exchange_failed``
+    reason so dashboards keep one bucket for code-exchange health.
+    """
+    monkeypatch.setenv("TEST_OIDC_CLIENT_SECRET", "shhh")
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == _TOKEN_ENDPOINT:
+            return httpx.Response(
+                200,
+                content=b"<html>maintenance mode</html>",
+                headers={"content-type": "text/html"},
+            )
+        return httpx.Response(404)
+
+    settings = load_settings(
+        {
+            **_ENV_BASE,
+            "CUSTOS_AUTH_OIDC_ENABLED": "true",
+            "CUSTOS_AUTH_OIDC_ISSUERS": _issuers_env(),
+        }
+    )
+    providers = _providers()
+    with _app_with_settings(settings, providers=providers) as client:
+        _patch_oidc_client(client, httpx.MockTransport(_handler))
+        resp = client.post("/v1/auth/login/oidc/callback", json=_valid_body())
+
+    assert resp.status_code == 502
+    assert resp.json()["error"]["code"] == "oidc_exchange_failed"
+
+
+def test_oidc_callback_502_on_exchange_missing_id_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Token endpoint returns 200 JSON but no ``id_token`` field.
+
+    Some providers return ``{"access_token": "..."}`` without an
+    ``id_token`` when the ``openid`` scope is missing — same closed-
+    set reason so the audit feed stays consistent.
+    """
+    monkeypatch.setenv("TEST_OIDC_CLIENT_SECRET", "shhh")
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == _TOKEN_ENDPOINT:
+            return httpx.Response(200, json={"access_token": "abc"})
+        return httpx.Response(404)
+
+    settings = load_settings(
+        {
+            **_ENV_BASE,
+            "CUSTOS_AUTH_OIDC_ENABLED": "true",
+            "CUSTOS_AUTH_OIDC_ISSUERS": _issuers_env(),
+        }
+    )
+    providers = _providers()
+    with _app_with_settings(settings, providers=providers) as client:
+        _patch_oidc_client(client, httpx.MockTransport(_handler))
+        resp = client.post("/v1/auth/login/oidc/callback", json=_valid_body())
+
+    assert resp.status_code == 502
+    assert resp.json()["error"]["code"] == "oidc_exchange_failed"
+
+
+def test_oidc_callback_forwards_redirect_uri_to_exchange(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the caller passes ``redirect_uri`` the exchange POST must
+    forward it.
+
+    Some providers (notably GitHub OAuth) refuse the code exchange
+    when ``redirect_uri`` was sent on the ``/authorize`` call but is
+    omitted on the token exchange.
+    """
+    monkeypatch.setenv("TEST_OIDC_CLIENT_SECRET", "shhh")
+
+    priv, pub = _generate_rsa_keypair()
+    jwk = _jwk_from_public_key(pub, kid="kid-1")
+    id_token = _mint_id_token(priv, sub="user-42")
+
+    captured: dict[str, str] = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == _TOKEN_ENDPOINT:
+            # ``request.content`` is the form-encoded payload.
+            body = request.content.decode("utf-8")
+            for piece in body.split("&"):
+                if "=" in piece:
+                    k, v = piece.split("=", 1)
+                    captured[k] = v
+            return httpx.Response(200, json={"id_token": id_token})
+        if str(request.url) == _JWKS_URI:
+            return httpx.Response(200, json={"keys": [jwk]})
+        return httpx.Response(404)
+
+    settings = load_settings(
+        {
+            **_ENV_BASE,
+            "CUSTOS_AUTH_OIDC_ENABLED": "true",
+            "CUSTOS_AUTH_OIDC_ISSUERS": _issuers_env(),
+        }
+    )
+    body = {**_valid_body(), "redirect_uri": "https://app.example.com/cb"}
+    with _app_with_settings(settings) as client:
+        _patch_oidc_client(client, httpx.MockTransport(_handler))
+        resp = client.post("/v1/auth/login/oidc/callback", json=body)
+
+    assert resp.status_code == 200, resp.text
+    # ``urllib.parse.quote_plus``-style encoding by httpx: ``:`` → ``%3A`` etc.
+    from urllib.parse import unquote_plus
+
+    assert "redirect_uri" in captured
+    assert unquote_plus(captured["redirect_uri"]) == "https://app.example.com/cb"
+
+
+def test_oidc_callback_github_preset_attaches_extras_to_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the issuer carries ``preset: github`` the audit success
+    row must include the GitHub preset's extra claims.
+
+    Pins the wire shape for downstream audit-feed consumers: a
+    GitHub workload-token login surfaces ``repository`` /
+    ``workflow`` / ``ref`` on the audit row so operators can pivot
+    on origin pipeline.
+    """
+    monkeypatch.setenv("TEST_OIDC_CLIENT_SECRET", "shhh")
+
+    priv, pub = _generate_rsa_keypair()
+    jwk = _jwk_from_public_key(pub, kid="kid-1")
+    id_token = _mint_id_token(
+        priv,
+        sub="repo:acme/sandbox:ref:refs/heads/main",
+        extra={
+            "repository": "acme/sandbox",
+            "repository_id": 12345,
+            "workflow": "ci",
+            "ref": "refs/heads/main",
+        },
+    )
+
+    raw_config = json.dumps(
+        {
+            "issuers": [
+                {
+                    "id": "primary",
+                    "preset": "github",
+                    "issuer_url": _ISSUER_URL,
+                    "jwks_uri": _JWKS_URI,
+                    "audiences": [_AUDIENCE],
+                    "token_endpoint": _TOKEN_ENDPOINT,
+                    "client_id": "test-client",
+                    "client_secret_env": "TEST_OIDC_CLIENT_SECRET",
+                }
+            ]
+        }
+    )
+    settings = load_settings(
+        {
+            **_ENV_BASE,
+            "CUSTOS_AUTH_OIDC_ENABLED": "true",
+            "CUSTOS_AUTH_OIDC_ISSUERS": raw_config,
+        }
+    )
+    providers = _providers()
+    with _app_with_settings(settings, providers=providers) as client:
+        _patch_oidc_client(
+            client,
+            _make_mock_transport(jwk=jwk, id_token=id_token),
+        )
+        resp = client.post("/v1/auth/login/oidc/callback", json=_valid_body())
+
+    assert resp.status_code == 200, resp.text
+
+    events = [event for _, event in providers.metadata_store.append_audit_calls]  # type: ignore[attr-defined]
+    success_rows = [e for e in events if e.event_type == "authn.success"]
+    assert len(success_rows) == 1
+    payload = success_rows[0].payload
+    assert payload["repository"] == "acme/sandbox"
+    assert payload["repository_id"] == "12345"  # int → str in preset
+    assert payload["workflow"] == "ci"
+    assert payload["ref"] == "refs/heads/main"
