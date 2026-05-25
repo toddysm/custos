@@ -244,6 +244,33 @@ async def test_verify_jwks_fetch_failed_raises() -> None:
     assert exc_info.value.reason == REASON_JWKS_FETCH_FAILED
 
 
+async def test_verify_unconsumable_jwk_raises_jwks_fetch_failed() -> None:
+    """JWKS document is well-formed JSON but PyJWK can't build a key.
+
+    Reachable when a provider mis-publishes a JWK (e.g., RSA entry
+    with a malformed modulus, or an unsupported ``kty``). Without
+    the dedicated ``except PyJWTError`` guard around ``_PyJWK(jwk)``
+    the PyJWKError would bubble out as a 500 instead of an audited
+    ``OidcVerificationError`` — ``PyJWKError`` is a ``PyJWTError``
+    but NOT an ``InvalidTokenError``, so the decode-block chain
+    does not cover it.
+    """
+    priv, pub = _generate_rsa_keypair()
+    token = _mint_token(priv, kid="kid-1")
+    # Build a valid-shaped JWK then corrupt the RSA modulus so
+    # PyJWK's base64url decode succeeds but the key construction
+    # in cryptography fails.
+    broken_jwk = _jwk_from_public_key(pub, kid="kid-1")
+    broken_jwk["n"] = "!!!not-base64url!!!"
+
+    entry = _make_issuer_entry()
+    async with _make_client(broken_jwk) as client:
+        verifier = OidcVerifier((entry,), JwksCache(client))
+        with pytest.raises(OidcVerificationError) as exc_info:
+            await verifier.verify("primary", token)
+    assert exc_info.value.reason == REASON_JWKS_FETCH_FAILED
+
+
 async def test_verify_expired_token_raises_expired() -> None:
     priv, pub = _generate_rsa_keypair()
     jwk = _jwk_from_public_key(pub, kid="kid-1")

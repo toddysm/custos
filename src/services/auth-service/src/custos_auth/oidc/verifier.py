@@ -212,8 +212,33 @@ class OidcVerifier:
         # there is exactly one implementation of the OIDC claim
         # contract; the closed-set reason mapping below distills
         # PyJWT's exception hierarchy into the audit codes.
+        #
+        # ``_PyJWK(jwk)`` is split out from the decode block because
+        # its failure mode is "the *JWKS entry* is unconsumable"
+        # (missing ``kty``, unsupported curve, malformed RSA
+        # modulus, etc.) — a provider-side JWKS-document problem.
+        # That sits in the same operator-triage bucket as a fetch
+        # failure ("the provider's JWKS endpoint is broken / served
+        # us garbage") so it maps to ``REASON_JWKS_FETCH_FAILED``,
+        # not the ID-token-malformed bucket.
+        #
+        # The catch is intentionally ``Exception``: PyJWK validates
+        # in layers (PyJWKError / InvalidKeyError from PyJWT itself,
+        # ValueError / binascii.Error from the base64url decode,
+        # TypeError from the cryptography backend if a field has the
+        # wrong type) and enumerating that surface across upstream
+        # versions is brittle. The scope is one deterministic
+        # constructor call; anything other than success means the
+        # JWKS entry is unusable. Without this guard those errors
+        # would bubble out as a 500.
         try:
             pyjwk = _PyJWK(jwk)
+        except Exception as exc:
+            raise OidcVerificationError(
+                REASON_JWKS_FETCH_FAILED,
+                f"JWKS entry for kid={kid!r} is not consumable: {exc}",
+            ) from exc
+        try:
             claims = jwt.decode(
                 token,
                 key=pyjwk.key,
