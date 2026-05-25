@@ -52,9 +52,12 @@ custos-auth-service
 uvicorn custos_auth:create_app --factory --reload
 ```
 
-The app currently has no environment variables (the configuration table in
-the design lands incrementally across AS-IMPL-002, AS-IMPL-004, AS-IMPL-017,
-AS-IMPL-018, AS-IMPL-020).
+The app is configured via environment variables. For the current, authoritative
+set of supported settings, see `custos_auth/settings.py` and the configuration
+table in
+[`design/components/auth-service/design.md`](../../../design/components/auth-service/design.md).
+This includes settings such as `CUSTOS_AUTH_STORE_DSN`,
+`CUSTOS_AUTH_METADATA_STORE_DSN`, and `CUSTOS_AUTH_OIDC_ENABLED`.
 
 ## Internal RPC surface (AS-IMPL-025)
 
