@@ -38,7 +38,12 @@ def _dependency_snapshot(request: Request) -> dict[str, str]:
     """
     raw = getattr(request.app.state, "dependency_status", None)
     if not isinstance(raw, dict):
-        return {"postgres": "unknown", "jwks_rotation": "unknown", "pubsub": "unknown"}
+        return {
+            "postgres": "unknown",
+            "jwks_rotation": "unknown",
+            "pubsub": "unknown",
+            "oidc": "unknown",
+        }
     snapshot: dict[str, str] = {}
     for key, value in raw.items():
         if isinstance(key, str) and isinstance(value, str):

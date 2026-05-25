@@ -45,6 +45,12 @@ from custos_auth.callctx_signer import (
 )
 from custos_auth.health import router as health_router
 from custos_auth.middleware.callctx import CallContextMiddleware
+from custos_auth.oidc import (
+    JwksCache,
+    OidcProvisioner,
+    OidcVerifier,
+    parse_issuers_config,
+)
 from custos_auth.permission_registry import seed_permissions_and_validate_roles
 from custos_auth.providers import (
     MigrationRequired,
@@ -183,6 +189,7 @@ def create_app(
             "postgres": "unknown",
             "jwks_rotation": "unknown",
             "pubsub": "unknown",
+            "oidc": "unknown",
         }
         try:
             await verify_schema_revisions(local_providers)
@@ -396,6 +403,45 @@ def create_app(
             name="custos-auth.token-sweeper",
         )
         app.state.token_sweeper_task = sweeper_task
+        # Phase H (AS-IMPL-020..023): wire the OIDC verifier + JWKS
+        # cache + provisioner so the public callback can do
+        # code-exchange + verify + provisioning when the operator
+        # flips ``CUSTOS_AUTH_OIDC_ENABLED=true``. The HTTP client
+        # is constructed unconditionally (it costs nothing when
+        # idle) so unit tests can exercise the verifier even with
+        # the flag off. Bad OIDC config crash-loops the pod —
+        # ``parse_issuers_config`` raises :class:`OidcConfigError`
+        # which propagates out of the lifespan and uvicorn surfaces
+        # a non-zero exit. Operators see the misconfiguration at
+        # deploy time, not at first user login.
+        import httpx  # local import keeps the top-level import surface stable
+
+        issuers_config = parse_issuers_config(effective_settings.oidc_issuers_raw)
+        oidc_http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(5.0, connect=3.0),
+            headers={"User-Agent": "custos-auth/0.1"},
+        )
+        jwks_cache = JwksCache(oidc_http_client)
+        oidc_verifier = OidcVerifier(issuers_config.issuers, jwks_cache)
+        oidc_provisioner = OidcProvisioner(
+            local_providers.auth_store,
+            local_providers.metadata_store,
+        )
+        app.state.oidc_issuers = issuers_config
+        app.state.oidc_http_client = oidc_http_client
+        app.state.oidc_jwks_cache = jwks_cache
+        app.state.oidc_verifier = oidc_verifier
+        app.state.oidc_provisioner = oidc_provisioner
+        # Closed-set readiness signal: "disabled" (flag off — M1
+        # default), "no_issuers" (flag on but config has no
+        # entries — operator forgot to wire issuers), "ok" (flag
+        # on and at least one issuer configured).
+        if not effective_settings.oidc_enabled:
+            app.state.dependency_status["oidc"] = "disabled"
+        elif not issuers_config.issuers:
+            app.state.dependency_status["oidc"] = "no_issuers"
+        else:
+            app.state.dependency_status["oidc"] = "ok"
         app.state.ready = True
         logger.info("schema-revision gate passed; auth-service is ready")
         try:
@@ -435,6 +481,13 @@ def create_app(
             except Exception:  # guard lifespan shutdown
                 logger.warning(
                     "token-revoked subscriber failed to stop cleanly",
+                    exc_info=True,
+                )
+            try:
+                await oidc_http_client.aclose()
+            except Exception:  # guard lifespan shutdown
+                logger.warning(
+                    "OIDC httpx client failed to close cleanly",
                     exc_info=True,
                 )
 

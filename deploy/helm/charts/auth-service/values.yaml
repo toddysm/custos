@@ -74,13 +74,35 @@ config:
   internalIdentityMode: "jwt"
   authzCacheTtl: "60s"
   authnCacheTtl: "30s"
-  # OIDC end-user login (POST /v1/auth/login/oidc/callback). M3
-  # feature: must remain ``false`` until AS-IMPL-020..023 (the OIDC
-  # verifier + provisioning policy) lands. With this flag off the
-  # callback returns 503 ``oidc_not_enabled``; with it on it returns
-  # 503 ``oidc_not_implemented`` until the handler is wired.
+  # OIDC end-user login (POST /v1/auth/login/oidc/callback). AS-IMPL-024
+  # feature flag gating the handler shipped in AS-IMPL-020..023. With
+  # this flag off the callback returns 503 ``oidc_not_enabled``; with
+  # it on AND ``oidcIssuers`` carrying at least one entry, the route
+  # verifies provider id-tokens against the configured JWKS, applies
+  # the GitHub / Entra preset defaults, and zero-binding-provisions
+  # the principal on first contact.
   oidcEnabled: "false"
-  # Required at install / first boot. Override per-profile.
+  # JSON document (single-line, projected through the ConfigMap) of the
+  # form ``{"issuers": [...]}`` with one block per configured issuer.
+  # Each block requires ``id``, ``issuer_url``, ``jwks_uri``,
+  # ``audiences``; presets ``github`` / ``entra`` supply remaining
+  # defaults. Use ``client_secret_env`` (NOT ``client_secret``) so the
+  # secret is injected via the externalSecret / Dapr secret store and
+  # never written to this values file. Example (uncomment + adapt):
+  #
+  #   oidcIssuers: |
+  #     {"issuers":[
+  #       {"id":"github","preset":"github","audiences":["api://custos"],
+  #        "token_endpoint":"https://github.com/login/oauth/access_token",
+  #        "client_id":"Iv1.example","client_secret_env":"CUSTOS_AUTH_OIDC_GITHUB_SECRET"},
+  #       {"id":"entra","preset":"entra",
+  #        "issuer_url":"https://login.microsoftonline.com/{tenant}/v2.0",
+  #        "jwks_uri":"https://login.microsoftonline.com/{tenant}/discovery/v2.0/keys",
+  #        "audiences":["api://custos"],
+  #        "token_endpoint":"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
+  #        "client_id":"00000000-0000-0000-0000-000000000000",
+  #        "client_secret_env":"CUSTOS_AUTH_OIDC_ENTRA_SECRET"}
+  #     ]}
   oidcIssuers: ""
   callContextKeyRef: ""
   platformAdminBootstrap: ""

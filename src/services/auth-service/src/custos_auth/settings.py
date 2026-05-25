@@ -204,6 +204,16 @@ ENV_OIDC_ENABLED: Final[str] = "CUSTOS_AUTH_OIDC_ENABLED"
 #: route in stub mode until Phase H ships.
 DEFAULT_OIDC_ENABLED: Final[bool] = False
 
+#: Optional. JSON document carrying the OIDC issuer config consumed
+#: by Phase H (AS-IMPL-020). Empty falls back to an empty issuer
+#: list — the M1 default deployment shape. See
+#: :mod:`custos_auth.oidc.config` for the schema. The settings loader
+#: stores this value as the raw JSON string; malformed JSON or schema
+#: violations are surfaced later when the OIDC config parser consumes
+#: it during startup/lifespan initialization rather than as a
+#: :class:`SettingsError` during :func:`load_settings`.
+ENV_OIDC_ISSUERS: Final[str] = "CUSTOS_AUTH_OIDC_ISSUERS"
+
 
 class SettingsError(RuntimeError):
     """Raised when the environment is missing a required setting or carries a malformed value."""
@@ -228,6 +238,7 @@ class Settings:
     call_context_ttl_seconds: int
     call_context_key_rotation_seconds: int
     oidc_enabled: bool
+    oidc_issuers_raw: str
 
     @property
     def is_production(self) -> bool:
@@ -487,6 +498,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         oidc_enabled=_parse_oidc_enabled(
             src.get(ENV_OIDC_ENABLED, "").strip(),
         ),
+        oidc_issuers_raw=src.get(ENV_OIDC_ISSUERS, ""),
     )
 
 
@@ -511,6 +523,7 @@ __all__ = [
     "ENV_ENVIRONMENT",
     "ENV_METADATA_STORE_DSN",
     "ENV_OIDC_ENABLED",
+    "ENV_OIDC_ISSUERS",
     "ENV_PERMISSIONS_PATHS",
     "ENV_SERVICE_TOKEN_TTL_DEFAULT",
     "ENV_TOKEN_SWEEPER_INTERVAL",

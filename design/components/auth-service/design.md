@@ -333,9 +333,9 @@ All events flow through the SPL audit outbox in the same transaction as the stat
 ## Open TODOs
 
 - [ ] Define the exact JWT claim shape for signed call contexts (claim names, audience, signing algorithm — proposed EdDSA).
-- [ ] Specify the OIDC issuer config schema for `CUSTOS_AUTH_OIDC_ISSUERS` (per-issuer provisioning policy options).
-- [ ] Specify the **GitHub OIDC preset** (default issuer URL, JWKS endpoint, audience claim shape, GitHub Actions `aud`/`sub`/`repository` claim handling for workload tokens, human-login vs workload-token distinction — **M1, P0**).
-- [ ] Specify the **Azure Entra ID OIDC preset** (default authority URL, tenant-vs-multitenant audience handling, group-claim → role-binding mapping rules — **M1, P0**).
+- [x] Specify the OIDC issuer config schema for `CUSTOS_AUTH_OIDC_ISSUERS` (per-issuer provisioning policy options). _Shipped 2026-05-25 (Phase H, AS-IMPL-020; see `changes/2026-05-25-002-impl-phase-h-oidc.md`)._
+- [x] Specify the **GitHub OIDC preset** (default issuer URL, JWKS endpoint, audience claim shape, GitHub Actions `aud`/`sub`/`repository` claim handling for workload tokens, human-login vs workload-token distinction — **M1, P0**). _Shipped 2026-05-25 (Phase H, AS-IMPL-021)._
+- [x] Specify the **Azure Entra ID OIDC preset** (default authority URL, tenant-vs-multitenant audience handling, group-claim → role-binding mapping rules — **M1, P0**). _Shipped 2026-05-25 (Phase H, AS-IMPL-022)._
 - [ ] Cross-region replication strategy for Auth Service state (multi-region M2+).
 - [ ] Custom role authoring API (M2+).
 - [ ] SPIFFE/SPIRE cutover plan (M2/M3).
@@ -350,3 +350,4 @@ _(none — all v1 design questions resolved this session.)_
 |---|---|---|
 | 2026-05-17 | Initial component design: built-in v1 roles (workspace.viewer/author/operator/admin + tenant.admin + platform.admin), permission registry ingested from per-component `permissions.yaml`, OIDC provisioning policy "create with zero bindings", **GitHub and Azure Entra ID OIDC presets prioritized as P0 in M1** (both human login and workload tokens; generic OIDC and service tokens follow), signed-JWT call context (with SPIFFE migration path via `CUSTOS_AUTH_INTERNAL_IDENTITY_MODE`), every-call `authz.decision` audit, workspace/tenant/platform scope hierarchy, new `AuthStoreProvider` interface in SPL, immediate cache eviction via `custos.auth.token-revoked` and `custos.auth.binding-changed` pub/sub events | #67 |
 | 2026-05-18 | INCON-026: Added `logs:read` and `metrics:read` to `workspace.viewer` built-in role so role bindings cover the log/metric read permissions in the Observability Service registry. Kept the permissions distinct (not folded into `run:read`) so service accounts can be granted tighter scopes later | #102 |
+| 2026-05-25 | Phase H landed: generic OIDC verifier (AS-IMPL-020 #255), GitHub OIDC preset (AS-IMPL-021 #256), Azure Entra ID OIDC preset (AS-IMPL-022 #257), zero-binding provisioning policy + `oidc.identity-linked` audit (AS-IMPL-023 #258). `POST /v1/auth/login/oidc/callback` now performs full server-side code exchange + id-token verification + provisioning; the M1 stub is retired. See `changes/2026-05-25-002-impl-phase-h-oidc.md` for the full operator-facing `CUSTOS_AUTH_OIDC_ISSUERS` schema | #255 #256 #257 #258 |
