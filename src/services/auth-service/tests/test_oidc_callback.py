@@ -145,24 +145,30 @@ def _make_mock_transport(
 
 
 def _patch_oidc_client(client: TestClient, transport: httpx.MockTransport) -> None:
-    """Swap the lifespan-built httpx client for a mock-transport client.
+    """Point the lifespan-built httpx client at a mock transport.
 
-    The lifespan installs a real ``httpx.AsyncClient`` pointing at the
-    public Internet. Tests need the transport replaced; we also rebuild
-    the :class:`JwksCache` + :class:`OidcVerifier` since they each
-    captured the original client by reference at lifespan time.
+    The lifespan in ``create_app()`` builds the real
+    :class:`httpx.AsyncClient` and registers ``await client.aclose()``
+    against the *local reference captured by closure*. If we
+    replaced ``app.state.oidc_http_client`` with a brand-new client
+    here, the lifespan teardown would still close the original
+    (now-detached) instance and our replacement would leak — leaving
+    an unclosed asyncio resource and producing flaky
+    ``ResourceWarning`` noise across the suite.
+
+    Instead we mutate the existing client's transport in place. The
+    :class:`JwksCache` and :class:`OidcVerifier` already hold the
+    client by reference (they were built around it at lifespan time)
+    so no downstream rebuild is needed — they automatically pick up
+    the new transport on the next request.
     """
-    new_client = httpx.AsyncClient(transport=transport)
     from fastapi import FastAPI
 
     app = cast(FastAPI, client.app)
-    app.state.oidc_http_client = new_client
-    from custos_auth.oidc import JwksCache, OidcVerifier
-
-    cache = JwksCache(new_client)
-    app.state.oidc_jwks_cache = cache
-    issuers = app.state.oidc_issuers
-    app.state.oidc_verifier = OidcVerifier(issuers.issuers, cache)
+    http_client: httpx.AsyncClient = app.state.oidc_http_client
+    # ``_transport`` is the documented httpx test-injection point and
+    # has been stable across the 0.27.x line (our pinned range).
+    http_client._transport = transport
 
 
 # ---------------------------------------------------------------------------
