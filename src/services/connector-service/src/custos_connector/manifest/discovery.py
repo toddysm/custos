@@ -34,9 +34,12 @@ Every discovery emits exactly one audit event:
   authoritative answer; fallback tag was not consulted (or was
   consulted and matched, which is the same observable from the
   operator's standpoint).
-* ``connector.manifest.fallback-rejected`` — Fallback path was the
-  source of the rejection (``unsupported-digest-algorithm``,
-  ``invalid-digest-format``, ``fallback-tag-too-long``).
+* ``connector.manifest.fallback-rejected`` — Discovery rejected on the
+  fallback path or during final resolution after considering fallback,
+  including ``unsupported-digest-algorithm``,
+  ``invalid-digest-format``, ``fallback-tag-too-long``,
+  :class:`DiscoveryErrorCode.AMBIGUOUS_MANIFEST`, and
+  :class:`DiscoveryErrorCode.NO_MANIFEST_FOUND`.
 """
 
 from __future__ import annotations
