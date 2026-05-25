@@ -158,9 +158,12 @@ under M3-A/B nails down the registration-entry shape.
    server, and air-gap is already an in-cluster topology.
 5. **Workload API socket mount.** Every component pod mounts the
    Workload API UDS (`/run/spire/sockets/agent.sock`) read-only.
-   The `deploy/helm/charts/<component>/` charts pick this up from
-   a shared library template under
-   `deploy/helm/charts/custos-common/templates/_spire.tpl`.
+   This is an M3 chart deliverable: the
+   `deploy/helm/charts/<component>/` charts will either add the
+   mount directly or consume a new shared library template (planned
+   location:
+   `deploy/helm/charts/custos-common/templates/_spire.tpl`) once
+   that chart artifact is introduced.
 6. **Health and readiness.** `custos-callctx` exposes a `ready`
    probe that turns red if the Workload API is unreachable for more
    than the SVID half-life. The probe is wired into the existing
