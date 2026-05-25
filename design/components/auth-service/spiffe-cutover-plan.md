@@ -130,9 +130,9 @@ under M3-A/B nails down the registration-entry shape.
 ## 4. Operational Prerequisites (M3-A / M3-B)
 
 1. **SPIRE Server deployment.** One per cluster; backed by Postgres
-   for HA registration-entry storage. Bundled as a Helm subchart
-   under `deploy/helm/charts/spire-server/`. Trust domain configured
-   per environment (`custos.example.com` for connected,
+   for HA registration-entry storage. Planned for M3-A as a Helm
+   subchart at `deploy/helm/charts/spire-server/`. Trust domain
+   configured per environment (`custos.example.com` for connected,
    `custos.internal` for air-gapped — both already documented in
    `design/architecture/reference-deployment.md`).
 2. **SPIRE Agent DaemonSet.** One per node; uses the Kubernetes PSAT
