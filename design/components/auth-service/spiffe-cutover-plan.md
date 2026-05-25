@@ -141,10 +141,10 @@ under M3-A/B nails down the registration-entry shape.
    service-account, container image, and (where available)
    container image hash.
 3. **Workload registration entries.** One per component
-   `ServiceAccount`. Created by a one-shot bootstrap job
-   (`src/jobs/bootstrap/spire-register/`) that reads the
-   reference-deployment manifest and emits `spire-server entry create`
-   commands. Selectors required:
+   `ServiceAccount`. Planned future work: a one-shot bootstrap job
+   under the proposed path `src/jobs/bootstrap/spire-register/`
+   would read the reference-deployment manifest and emit
+   `spire-server entry create` commands. Selectors required:
    - `k8s:ns:custos`
    - `k8s:sa:<component>` (e.g. `k8s:sa:catalog-service`)
    - `k8s:container-image:<expected-digest>` (defence in depth)
