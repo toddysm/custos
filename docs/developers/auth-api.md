@@ -1,6 +1,6 @@
 # Developer Guide: Auth API
 
-Last Updated: 2026-05-27
+Last Updated: 2026-05-28
 
 The **Auth Service** is Custos's authoritative provider of identity,
 authorization, and call-context signing. This page documents the
@@ -787,6 +787,8 @@ principal_id: sa-ci-publisher
 workspace_id: ws-payments   # optional; null → platform-global ctx
 caller_component: api-gateway
 ttl_seconds: 300            # optional; default 300, max 86400
+permissions: []             # optional; embedded grants (max 256 entries, each 1..128 chars)
+audience: null              # optional; overrides aud; default "custos.internal"
 
 # Response
 token: eyJhbGciOiJFZERTQSIsImtpZCI6ImExYjJjMyJ9.eyJqdGkiOiJjLTAxIn0.sig
@@ -807,7 +809,27 @@ exp: 1717003900
 jti: c-01HZX...
 aud: custos.internal
 iss: custos-auth
+# permissions is OMITTED entirely when the mint request supplied
+# none. When supplied, it is preserved verbatim (order + duplicates)
+# on the wire; the verifier collapses to a set on receipt.
+permissions:
+  - catalog:workflows:read
+  - catalog:workflows:write
 ```
+
+`permissions` is the AS-IMPL-030 "fat call-context" enabler: the API
+gateway pre-computes the effective grants for the principal +
+workspace at mint time and embeds them in the JWT so downstream
+components can authorize a request locally without re-calling
+`authz.authorize`. Empty lists are treated identically to omitting
+the field — the claim is dropped from the JWT.
+
+`audience` is the per-mint audience override. When the API gateway
+fans a request out to a specific component (e.g. catalog-service),
+it sets `audience: custos.catalog` so the resulting JWT is rejected
+by every other component. Omitting `audience` (or passing `null`)
+falls back to the signer's configured default
+(`custos.internal`). Empty strings are rejected with `422`.
 
 M1 trust model: only the API gateway is permitted to invoke
 `callctx.sign`. M2 will pin the dependency to a `callctx:sign`
@@ -828,6 +850,7 @@ verify locally.
 ```yaml
 # Request
 token: eyJhbGciOiJFZERTQSIsImtpZCI6ImExYjJjMyJ9.eyJqdGkiOiJjLTAxIn0.sig
+audience: null              # optional; defaults to "custos.internal"
 
 # Response (success)
 valid: true
@@ -839,7 +862,21 @@ iat: 1717003600
 exp: 1717003900
 kid: a1b2c3d4e5f60718
 jti: c-01HZX...
+permissions:
+  - catalog:workflows:read
+  - catalog:workflows:write
 ```
+
+`audience` lets the caller verify a token that was minted for a
+specific component (e.g. `custos.catalog`). When omitted, the
+default `custos.internal` audience is enforced. Empty strings are
+rejected.
+
+`permissions` echoes the embedded grants from the JWT. The field is
+always present in success responses: it is an empty list when the
+mint request did not embed any. A malformed `permissions` claim on
+the wire (non-list, or any entry that is not a non-empty string)
+fails verification with `reason: "malformed"`.
 
 Closed-set reason codes on failure: `malformed`, `unknown_kid`,
 `bad_signature`, `expired`, `wrong_audience`, `wrong_issuer`.

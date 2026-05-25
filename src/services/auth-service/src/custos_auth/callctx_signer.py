@@ -477,6 +477,8 @@ class CallContextSigner:
         caller_component: str,
         ttl_seconds: int | None = None,
         jti: str | None = None,
+        permissions: list[str] | None = None,
+        audience: str | None = None,
     ) -> SignedContext:
         """Mint a signed call-context JWT.
 
@@ -494,14 +496,30 @@ class CallContextSigner:
             jti: Override for the unique-token-id claim (tests use
                 this to make the produced JWT byte-stable). ``None``
                 generates a fresh UUID4.
+            permissions: Optional list of permission strings to embed
+                under the ``permissions`` claim. The API Gateway
+                populates this from the principal's RBAC grant so
+                downstream services can enforce ``require_permission``
+                without an extra Auth Service round-trip. ``None``
+                (the default) and ``[]`` both skip the claim
+                entirely; the verifier treats either as "no embedded
+                grant". Duplicate entries are not deduplicated at
+                mint time (the verifier collapses them on decode).
+            audience: Optional per-mint override of the ``aud`` claim.
+                Defaults to the signer's configured audience
+                (:data:`DEFAULT_AUDIENCE`). The API Gateway uses this
+                to target component-specific audiences such as
+                ``"custos.catalog"``; an empty string is rejected.
 
         Returns:
             A :class:`SignedContext` holding the compact JWT and its
             decoded metadata.
 
         Raises:
-            ValueError: When required arguments are missing/empty
-                or ``ttl_seconds`` is non-positive.
+            ValueError: When required arguments are missing/empty,
+                ``ttl_seconds`` is non-positive, ``audience`` is the
+                empty string, or any ``permissions`` entry is not a
+                non-empty string.
         """
         if not principal_id:
             raise ValueError("principal_id is required and must be non-empty")
@@ -510,12 +528,16 @@ class CallContextSigner:
         effective_ttl = ttl_seconds if ttl_seconds is not None else self._default_ttl_seconds
         if effective_ttl <= 0:
             raise ValueError(f"ttl_seconds must be a positive integer; got {effective_ttl!r}")
+        effective_audience = self._audience if audience is None else audience
+        if not effective_audience:
+            raise ValueError("audience override must be a non-empty string")
+        normalised_permissions = self._normalise_permissions(permissions)
         iat = int(self._clock())
         exp = iat + effective_ttl
         token_id = jti if jti is not None else str(uuid.uuid4())
         payload: dict[str, Any] = {
             "iss": self._issuer,
-            "aud": self._audience,
+            "aud": effective_audience,
             "iat": iat,
             "exp": exp,
             "jti": token_id,
@@ -523,6 +545,8 @@ class CallContextSigner:
             "workspaceId": workspace_id,
             "callerComponent": caller_component,
         }
+        if normalised_permissions is not None:
+            payload["permissions"] = normalised_permissions
         key = await self._resolver.active_signing_key()
         token = jwt.encode(
             payload,
@@ -531,6 +555,26 @@ class CallContextSigner:
             headers={"kid": key.kid, "typ": "JWT"},
         )
         return SignedContext(token=token, kid=key.kid, jti=token_id, iat=iat, exp=exp)
+
+    @staticmethod
+    def _normalise_permissions(permissions: list[str] | None) -> list[str] | None:
+        """Validate + canonicalise the optional ``permissions`` parameter.
+
+        Returns ``None`` when the claim should be omitted from the
+        payload (caller passed ``None`` or an empty list). Otherwise
+        returns the list verbatim after asserting every entry is a
+        non-empty string. The verifier collapses duplicates on decode;
+        we don't dedupe here so the on-wire shape can stay byte-stable
+        when callers pre-sort their grant.
+        """
+        if permissions is None or len(permissions) == 0:
+            return None
+        for entry in permissions:
+            if not isinstance(entry, str) or not entry:
+                raise ValueError(
+                    f"permissions entries must be non-empty strings; got {entry!r}",
+                )
+        return permissions
 
 
 def decode_claims_unverified(token: str) -> dict[str, Any]:

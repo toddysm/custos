@@ -85,6 +85,7 @@ class SigningKeyFixture:
         issuer: str = "custos-auth",
         ttl_seconds: int = 300,
         now: float | None = None,
+        permissions: list[str] | None = None,
         extra_claims: Mapping[str, Any] | None = None,
         override_headers: Mapping[str, Any] | None = None,
         override_claims: Mapping[str, Any] | None = None,
@@ -101,6 +102,8 @@ class SigningKeyFixture:
             "workspaceId": workspace_id,
             "callerComponent": caller_component,
         }
+        if permissions is not None:
+            claims["permissions"] = permissions
         if extra_claims:
             claims.update(extra_claims)
         if override_claims:

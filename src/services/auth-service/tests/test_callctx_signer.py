@@ -260,6 +260,165 @@ async def test_each_signed_context_has_unique_jti_by_default() -> None:
 
 
 # ---------------------------------------------------------------------------
+# AS-IMPL-030 Option D: embedded permissions + per-mint audience
+# ---------------------------------------------------------------------------
+
+
+async def test_signer_omits_permissions_claim_by_default() -> None:
+    """Back-compat: existing callers that do not pass ``permissions`` get a
+    JWT shaped exactly like the AS-IMPL-017 wire format (no extra claim)."""
+    key = SigningKey.generate()
+    signer = CallContextSigner(StaticSigningKeyResolver(key=key))
+    signed = await signer.sign(
+        principal_id="user-1",
+        workspace_id="ws-1",
+        caller_component="api-gateway",
+    )
+    claims = jwt.decode(
+        signed.token,
+        key.public_key,
+        algorithms=[ALGORITHM],
+        audience=DEFAULT_AUDIENCE,
+    )
+    assert "permissions" not in claims
+
+
+async def test_signer_omits_permissions_claim_when_explicitly_empty() -> None:
+    """An empty list is treated identically to ``None`` — claim absent."""
+    key = SigningKey.generate()
+    signer = CallContextSigner(StaticSigningKeyResolver(key=key))
+    signed = await signer.sign(
+        principal_id="user-1",
+        workspace_id="ws-1",
+        caller_component="api-gateway",
+        permissions=[],
+    )
+    claims = jwt.decode(
+        signed.token,
+        key.public_key,
+        algorithms=[ALGORITHM],
+        audience=DEFAULT_AUDIENCE,
+    )
+    assert "permissions" not in claims
+
+
+async def test_signer_embeds_permissions_claim_in_jwt() -> None:
+    key = SigningKey.generate()
+    signer = CallContextSigner(StaticSigningKeyResolver(key=key))
+    signed = await signer.sign(
+        principal_id="user-1",
+        workspace_id="ws-1",
+        caller_component="api-gateway",
+        permissions=["catalog:workflows:read", "catalog:workflows:write"],
+    )
+    claims = jwt.decode(
+        signed.token,
+        key.public_key,
+        algorithms=[ALGORITHM],
+        audience=DEFAULT_AUDIENCE,
+    )
+    assert claims["permissions"] == [
+        "catalog:workflows:read",
+        "catalog:workflows:write",
+    ]
+
+
+async def test_signer_preserves_permissions_order_as_supplied() -> None:
+    """Duplicates and order are kept verbatim; the verifier collapses them."""
+    key = SigningKey.generate()
+    signer = CallContextSigner(StaticSigningKeyResolver(key=key))
+    signed = await signer.sign(
+        principal_id="user-1",
+        workspace_id="ws-1",
+        caller_component="api-gateway",
+        permissions=["b", "a", "b"],
+    )
+    claims = jwt.decode(
+        signed.token,
+        key.public_key,
+        algorithms=[ALGORITHM],
+        audience=DEFAULT_AUDIENCE,
+    )
+    assert claims["permissions"] == ["b", "a", "b"]
+
+
+async def test_signer_rejects_empty_string_permission_entry() -> None:
+    signer = CallContextSigner(StaticSigningKeyResolver(key=SigningKey.generate()))
+    with pytest.raises(ValueError, match="permissions"):
+        await signer.sign(
+            principal_id="user-1",
+            workspace_id="ws-1",
+            caller_component="api-gateway",
+            permissions=["catalog:read", ""],
+        )
+
+
+async def test_signer_rejects_non_string_permission_entry() -> None:
+    signer = CallContextSigner(StaticSigningKeyResolver(key=SigningKey.generate()))
+    with pytest.raises(ValueError, match="permissions"):
+        await signer.sign(
+            principal_id="user-1",
+            workspace_id="ws-1",
+            caller_component="api-gateway",
+            permissions=["catalog:read", 42],  # type: ignore[list-item]
+        )
+
+
+async def test_signer_audience_override_replaces_default_aud() -> None:
+    """API Gateway path: per-mint override targets a component audience."""
+    key = SigningKey.generate()
+    signer = CallContextSigner(StaticSigningKeyResolver(key=key))
+    signed = await signer.sign(
+        principal_id="user-1",
+        workspace_id="ws-1",
+        caller_component="api-gateway",
+        audience="custos.catalog",
+    )
+    claims = jwt.decode(
+        signed.token,
+        key.public_key,
+        algorithms=[ALGORITHM],
+        audience="custos.catalog",
+        issuer=ISSUER,
+    )
+    assert claims["aud"] == "custos.catalog"
+    # Issuer is untouched by the audience override.
+    assert claims["iss"] == ISSUER
+
+
+async def test_signer_audience_override_none_falls_back_to_configured() -> None:
+    key = SigningKey.generate()
+    signer = CallContextSigner(
+        StaticSigningKeyResolver(key=key),
+        audience="custos.workflow",
+    )
+    signed = await signer.sign(
+        principal_id="user-1",
+        workspace_id="ws-1",
+        caller_component="api-gateway",
+        audience=None,
+    )
+    claims = jwt.decode(
+        signed.token,
+        key.public_key,
+        algorithms=[ALGORITHM],
+        audience="custos.workflow",
+    )
+    assert claims["aud"] == "custos.workflow"
+
+
+async def test_signer_rejects_empty_audience_override() -> None:
+    signer = CallContextSigner(StaticSigningKeyResolver(key=SigningKey.generate()))
+    with pytest.raises(ValueError, match="audience"):
+        await signer.sign(
+            principal_id="user-1",
+            workspace_id="ws-1",
+            caller_component="api-gateway",
+            audience="",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Rotation acceptance criterion — swap-in resolver
 # ---------------------------------------------------------------------------
 
