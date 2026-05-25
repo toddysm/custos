@@ -339,6 +339,19 @@ class CallctxSignRpcRequest(BaseModel):
     (``callctx:sign``). For M1 we accept any successfully bootstrapped
     caller — the bypass list means the caller authenticated via the
     bearer in the request, not via the call-context header.
+
+    ``permissions`` carries the principal's RBAC grant as an embedded
+    claim so downstream components can enforce ``require_permission``
+    without an additional Auth Service round-trip. Each entry is a
+    component-defined permission string (e.g.
+    ``"catalog:workflows:read"``). The list MUST contain only
+    non-empty strings; duplicates are collapsed by the verifier.
+
+    ``audience`` overrides the signer's default ``aud`` claim
+    (``custos.internal``). The API Gateway sets it to a per-component
+    audience (``"custos.catalog"``, ``"custos.workflow"``, …) so a
+    token minted for one downstream cannot be replayed against
+    another.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -347,6 +360,11 @@ class CallctxSignRpcRequest(BaseModel):
     workspace_id: Annotated[str | None, Field(default=None, max_length=120)] = None
     caller_component: Annotated[str, Field(min_length=1, max_length=64)]
     ttl_seconds: Annotated[int | None, Field(default=None, ge=1, le=86_400)] = None
+    permissions: Annotated[
+        list[Annotated[str, Field(min_length=1, max_length=128)]],
+        Field(default_factory=list, max_length=256),
+    ]
+    audience: Annotated[str | None, Field(default=None, min_length=1, max_length=120)] = None
 
 
 class CallctxSignRpcResponse(BaseModel):
@@ -389,6 +407,8 @@ async def callctx_sign(
             workspace_id=body.workspace_id,
             caller_component=body.caller_component,
             ttl_seconds=body.ttl_seconds,
+            permissions=body.permissions if body.permissions else None,
+            audience=body.audience,
         )
         return CallctxSignRpcResponse(
             token=signed.token,
@@ -405,11 +425,19 @@ async def callctx_sign(
 
 
 class CallctxVerifyRpcRequest(BaseModel):
-    """Inbound body for ``rpc/callctx.verify``."""
+    """Inbound body for ``rpc/callctx.verify``.
+
+    ``audience`` lets the caller diagnose tokens minted with the
+    per-component audience override (e.g. ``"custos.catalog"``).
+    Defaults to the signer's :data:`DEFAULT_AUDIENCE` so existing
+    callers (and the byte-stable internal callctx flow) keep working
+    unchanged.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     token: Annotated[str, Field(min_length=1, max_length=8192)]
+    audience: Annotated[str | None, Field(default=None, min_length=1, max_length=120)] = None
 
 
 class CallctxVerifyRpcResponse(BaseModel):
@@ -420,6 +448,12 @@ class CallctxVerifyRpcResponse(BaseModel):
     claims are populated and ``reason`` is empty; when ``valid`` is
     ``False`` the claim fields are ``None`` and ``reason`` carries
     one of the closed-set verification failure codes.
+
+    ``permissions`` is the optional embedded RBAC grant (Option D
+    fat call-context). On successful verification it is the (possibly
+    empty) list of strings copied verbatim from the JWT payload; on
+    failure it is ``None``. Missing-from-claim and explicit empty list
+    both surface as ``[]``.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -433,6 +467,7 @@ class CallctxVerifyRpcResponse(BaseModel):
     exp: int | None = None
     kid: str | None = None
     jti: str | None = None
+    permissions: list[str] | None = None
 
 
 #: Closed-set reason codes for ``callctx.verify`` failures. External
@@ -515,7 +550,7 @@ async def callctx_verify(
                 body.token,
                 public_key,
                 algorithms=[ALGORITHM],
-                audience=DEFAULT_AUDIENCE,
+                audience=body.audience if body.audience is not None else DEFAULT_AUDIENCE,
                 issuer=ISSUER,
             )
         except jwt.ExpiredSignatureError:
@@ -561,6 +596,16 @@ async def callctx_verify(
         ):
             return await _invalid(REASON_MALFORMED, kid=kid)
 
+        permissions_claim = claims.get("permissions")
+        permissions_out: list[str] = []
+        if permissions_claim is not None:
+            if not isinstance(permissions_claim, list):
+                return await _invalid(REASON_MALFORMED, kid=kid)
+            for entry in permissions_claim:
+                if not isinstance(entry, str) or not entry:
+                    return await _invalid(REASON_MALFORMED, kid=kid)
+                permissions_out.append(entry)
+
         return CallctxVerifyRpcResponse(
             valid=True,
             reason="",
@@ -571,6 +616,7 @@ async def callctx_verify(
             exp=exp,
             kid=kid,
             jti=jti,
+            permissions=permissions_out,
         )
 
 

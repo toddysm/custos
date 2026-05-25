@@ -395,6 +395,138 @@ async def test_verify_normalises_aud_list_claim(
     assert ctx.audience == "custos.internal"
 
 
+# ---------------------------------------------------------------------------
+# permissions claim (Option D fat call-context)
+# ---------------------------------------------------------------------------
+
+
+async def test_verify_extracts_permissions_claim(
+    signing_key: SigningKeyFixture,
+    verifier: CallContextVerifier,
+) -> None:
+    token = signing_key.mint(
+        permissions=["catalog:workflows:read", "catalog:workflows:write"],
+    )
+    ctx = await verifier.verify(metadata={CALLCTX_HEADER: token})
+    assert ctx.permissions == frozenset(
+        {"catalog:workflows:read", "catalog:workflows:write"},
+    )
+    assert ctx.has_permission("catalog:workflows:read") is True
+    assert ctx.has_permission("catalog:workflows:delete") is False
+
+
+async def test_verify_deduplicates_permissions_claim(
+    signing_key: SigningKeyFixture,
+    verifier: CallContextVerifier,
+) -> None:
+    """Duplicates in the JSON array collapse to a single set entry."""
+    token = signing_key.mint(
+        permissions=["catalog:read", "catalog:read", "catalog:write"],
+    )
+    ctx = await verifier.verify(metadata={CALLCTX_HEADER: token})
+    assert ctx.permissions == frozenset({"catalog:read", "catalog:write"})
+
+
+async def test_verify_treats_missing_permissions_claim_as_empty(
+    signing_key: SigningKeyFixture,
+    verifier: CallContextVerifier,
+) -> None:
+    """Back-compat with AS-IMPL-017 tokens that predate the claim."""
+    token = signing_key.mint()  # no permissions kwarg
+    ctx = await verifier.verify(metadata={CALLCTX_HEADER: token})
+    assert ctx.permissions == frozenset()
+    assert ctx.has_permission("catalog:read") is False
+
+
+async def test_verify_treats_null_permissions_claim_as_empty(
+    signing_key: SigningKeyFixture,
+    verifier: CallContextVerifier,
+) -> None:
+    """Explicit ``null`` is a documented signer-side way to say 'no grant'."""
+    token = signing_key.mint(extra_claims={"permissions": None})
+    ctx = await verifier.verify(metadata={CALLCTX_HEADER: token})
+    assert ctx.permissions == frozenset()
+
+
+async def test_verify_accepts_empty_permissions_list(
+    signing_key: SigningKeyFixture,
+    verifier: CallContextVerifier,
+) -> None:
+    token = signing_key.mint(permissions=[])
+    ctx = await verifier.verify(metadata={CALLCTX_HEADER: token})
+    assert ctx.permissions == frozenset()
+
+
+async def test_verify_rejects_non_list_permissions_claim(
+    signing_key: SigningKeyFixture,
+    verifier: CallContextVerifier,
+) -> None:
+    """A scalar permissions claim is a forgery signal — refuse the token."""
+    token = signing_key.mint(extra_claims={"permissions": "catalog:read"})
+    with pytest.raises(InvalidCallContextError) as exc:
+        await verifier.verify(metadata={CALLCTX_HEADER: token})
+    assert exc.value.reason is InvalidReason.MALFORMED_TOKEN
+
+
+async def test_verify_rejects_permissions_claim_with_non_string_entry(
+    signing_key: SigningKeyFixture,
+    verifier: CallContextVerifier,
+) -> None:
+    token = signing_key.mint(extra_claims={"permissions": ["catalog:read", 42]})
+    with pytest.raises(InvalidCallContextError) as exc:
+        await verifier.verify(metadata={CALLCTX_HEADER: token})
+    assert exc.value.reason is InvalidReason.MALFORMED_TOKEN
+
+
+async def test_verify_rejects_permissions_claim_with_empty_string_entry(
+    signing_key: SigningKeyFixture,
+    verifier: CallContextVerifier,
+) -> None:
+    token = signing_key.mint(extra_claims={"permissions": ["catalog:read", ""]})
+    with pytest.raises(InvalidCallContextError) as exc:
+        await verifier.verify(metadata={CALLCTX_HEADER: token})
+    assert exc.value.reason is InvalidReason.MALFORMED_TOKEN
+
+
+def test_call_context_has_permission_is_exact_match() -> None:
+    from custos_callctx import CallContext
+
+    ctx = CallContext(
+        acting_principal_id="p",
+        workspace_id="w",
+        caller_component="c",
+        jti="j",
+        issued_at=0,
+        expires_at=0,
+        issuer="i",
+        audience="a",
+        kid="k",
+        permissions=frozenset({"catalog:workflows:read"}),
+    )
+    # Wildcard expansion is not the library's job.
+    assert ctx.has_permission("catalog:workflows:read") is True
+    assert ctx.has_permission("catalog:*") is False
+    assert ctx.has_permission("catalog:workflows:*") is False
+
+
+def test_call_context_defaults_permissions_to_empty_frozenset() -> None:
+    from custos_callctx import CallContext
+
+    ctx = CallContext(
+        acting_principal_id="p",
+        workspace_id=None,
+        caller_component="c",
+        jti="j",
+        issued_at=0,
+        expires_at=0,
+        issuer="i",
+        audience="a",
+        kid="k",
+    )
+    assert ctx.permissions == frozenset()
+    assert ctx.has_permission("anything") is False
+
+
 def test_module_exports_canonical_constants() -> None:
     from custos_callctx import DEFAULT_AUDIENCE, DEFAULT_ISSUER
 

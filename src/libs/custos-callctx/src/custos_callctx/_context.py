@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +21,10 @@ class CallContext:
     * ``expires_at``           <- ``exp`` claim
     * ``issuer``               <- ``iss`` claim
     * ``audience``             <- ``aud`` claim
+    * ``permissions``          <- ``permissions`` claim (empty when the
+                                  token was minted without RBAC grants
+                                  embedded; consumer-owned permission
+                                  strings, e.g. ``catalog:workflows:read``)
     * ``kid``                  <- JWT header ``kid``
 
     Frozen so the context can be shared between coroutines / handlers
@@ -36,6 +40,16 @@ class CallContext:
     issuer: str
     audience: str
     kid: str
+    permissions: frozenset[str] = field(default_factory=frozenset)
+
+    def has_permission(self, name: str) -> bool:
+        """Return ``True`` when ``name`` is present in :attr:`permissions`.
+
+        Matching is exact. Wildcard expansion (``"catalog:*"``) is **not**
+        applied here; callers wanting glob semantics should resolve the
+        membership in their own RBAC layer before checking.
+        """
+        return name in self.permissions
 
 
 __all__ = ["CallContext"]

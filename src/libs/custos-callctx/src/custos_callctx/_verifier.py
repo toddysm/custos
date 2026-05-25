@@ -264,6 +264,7 @@ class CallContextVerifier:
         # CallContext shape.
         if isinstance(aud, list):
             aud = self._audience
+        permissions = self._extract_permissions(claims, kid=kid)
         return CallContext(
             acting_principal_id=principal,
             workspace_id=workspace,
@@ -274,7 +275,55 @@ class CallContextVerifier:
             issuer=str(iss),
             audience=str(aud),
             kid=kid,
+            permissions=permissions,
         )
+
+    @staticmethod
+    def _extract_permissions(
+        claims: dict[str, Any],
+        *,
+        kid: str,
+    ) -> frozenset[str]:
+        """Parse the optional ``permissions`` claim.
+
+        The claim is an enabler for Option D of AS-IMPL-030 (fat call
+        context): the API Gateway embeds the principal's RBAC grant
+        into the signed token so downstream services do not need a
+        per-request Auth Service round-trip to enforce
+        ``require_permission``. Tokens minted without the claim
+        (e.g. internal callctx for platform-global RPCs) yield an
+        empty :class:`frozenset`.
+
+        Validation rules:
+
+        * Missing claim → empty set (back-compat with AS-IMPL-017 tokens).
+        * ``null`` → empty set (signer is allowed to emit ``None`` to
+          signal "no embedded grant").
+        * List of strings → de-duplicated frozenset.
+        * Anything else (non-list, non-null) is rejected as
+          :data:`InvalidReason.MALFORMED_TOKEN` so a downstream that
+          relies on ``has_permission`` cannot be fooled by an
+          attacker-controlled claim type.
+        """
+        raw = claims.get("permissions")
+        if raw is None:
+            return frozenset()
+        if not isinstance(raw, list):
+            raise InvalidCallContextError(
+                InvalidReason.MALFORMED_TOKEN,
+                "permissions claim must be a JSON array of strings",
+                kid=kid,
+            )
+        out: set[str] = set()
+        for item in raw:
+            if not isinstance(item, str) or not item:
+                raise InvalidCallContextError(
+                    InvalidReason.MALFORMED_TOKEN,
+                    "permissions claim entries must be non-empty strings",
+                    kid=kid,
+                )
+            out.add(item)
+        return frozenset(out)
 
 
 __all__ = [

@@ -317,6 +317,124 @@ def test_rpc_callctx_sign_in_bypass_list() -> None:
     assert "/rpc/callctx.sign" in _BYPASS_PATHS
 
 
+# AS-IMPL-030 Option D enablers — permissions claim + per-mint audience.
+
+
+def test_rpc_callctx_sign_embeds_permissions_claim(client: TestClient) -> None:
+    resp = client.post(
+        "/rpc/callctx.sign",
+        json={
+            "principal_id": "user-1",
+            "workspace_id": WORKSPACE,
+            "caller_component": "api-gateway",
+            "permissions": ["catalog:workflows:read", "catalog:workflows:write"],
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    # The on-wire token must verify back with the embedded permissions
+    # claim populated. We round-trip through callctx.verify (rather
+    # than re-decoding here) so we exercise the verify path too.
+    verify = client.post(
+        "/rpc/callctx.verify",
+        json={"token": body["token"]},
+        headers=_callctx_header(),
+    )
+    assert verify.status_code == 200
+    vbody = verify.json()
+    assert vbody["valid"] is True
+    assert vbody["permissions"] == [
+        "catalog:workflows:read",
+        "catalog:workflows:write",
+    ]
+
+
+def test_rpc_callctx_sign_default_omits_permissions_claim(
+    client: TestClient,
+) -> None:
+    """A mint without ``permissions`` produces a token with no claim — and
+    ``callctx.verify`` surfaces that as an empty list (the wire shape
+    distinguishes "no embedded grant" from "decode failure" via
+    ``valid``, not via a missing field)."""
+    signed = client.post(
+        "/rpc/callctx.sign",
+        json={
+            "principal_id": "user-1",
+            "workspace_id": WORKSPACE,
+            "caller_component": "api-gateway",
+        },
+    ).json()
+    verify = client.post(
+        "/rpc/callctx.verify",
+        json={"token": signed["token"]},
+        headers=_callctx_header(),
+    )
+    assert verify.json()["permissions"] == []
+
+
+def test_rpc_callctx_sign_rejects_empty_permission_string(
+    client: TestClient,
+) -> None:
+    resp = client.post(
+        "/rpc/callctx.sign",
+        json={
+            "principal_id": "user-1",
+            "workspace_id": WORKSPACE,
+            "caller_component": "api-gateway",
+            "permissions": ["catalog:read", ""],
+        },
+    )
+    assert resp.status_code == 422
+
+
+def test_rpc_callctx_sign_accepts_audience_override(client: TestClient) -> None:
+    """Per-mint audience override targets a downstream component."""
+    signed = client.post(
+        "/rpc/callctx.sign",
+        json={
+            "principal_id": "user-1",
+            "workspace_id": WORKSPACE,
+            "caller_component": "api-gateway",
+            "audience": "custos.catalog",
+        },
+    ).json()
+    # The default verify path expects ``custos.internal`` and should
+    # therefore refuse this token; passing the explicit override
+    # makes it round-trip.
+    rejected = client.post(
+        "/rpc/callctx.verify",
+        json={"token": signed["token"]},
+        headers=_callctx_header(),
+    )
+    rbody = rejected.json()
+    assert rbody["valid"] is False
+    assert rbody["reason"] == "wrong_audience"
+
+    accepted = client.post(
+        "/rpc/callctx.verify",
+        json={"token": signed["token"], "audience": "custos.catalog"},
+        headers=_callctx_header(),
+    )
+    abody = accepted.json()
+    assert abody["valid"] is True
+    assert abody["acting_principal_id"] == "user-1"
+
+
+def test_rpc_callctx_sign_rejects_empty_audience_override(
+    client: TestClient,
+) -> None:
+    resp = client.post(
+        "/rpc/callctx.sign",
+        json={
+            "principal_id": "user-1",
+            "workspace_id": WORKSPACE,
+            "caller_component": "api-gateway",
+            "audience": "",
+        },
+    )
+    assert resp.status_code == 422
+
+
 # ---------------------------------------------------------------------------
 # rpc/callctx.verify
 # ---------------------------------------------------------------------------

@@ -276,6 +276,56 @@ def test_callctx_sign_then_verify_round_trip(client: TestClient) -> None:
     assert verdict["exp"] == minted["exp"]
 
 
+def test_callctx_sign_with_permissions_and_audience_round_trip(
+    client: TestClient,
+) -> None:
+    """AS-IMPL-030 fat call-context: a mint that embeds permissions
+    and overrides the audience must round-trip every new field
+    through ``rpc/callctx.verify``, including the per-component
+    audience-override-only-on-explicit-request behaviour.
+    """
+    sign_resp = client.post(
+        "/rpc/callctx.sign",
+        json={
+            "principal_id": "user-42",
+            "workspace_id": "ws-int",
+            "caller_component": "api-gateway",
+            "permissions": [
+                "catalog:workflows:read",
+                "catalog:workflows:write",
+            ],
+            "audience": "custos.catalog",
+        },
+    )
+    assert sign_resp.status_code == 200, sign_resp.text
+    minted = sign_resp.json()
+
+    # The default-audience verify rejects this token: the gateway-
+    # minted JWT is targeted at custos.catalog, not custos.internal.
+    rejected = client.post(
+        "/rpc/callctx.verify",
+        json={"token": minted["token"]},
+        headers=callctx_header(workspace_id="ws-int"),
+    ).json()
+    assert rejected["valid"] is False
+    assert rejected["reason"] == "wrong_audience"
+
+    # Passing the per-component audience override makes it round-trip.
+    verify_resp = client.post(
+        "/rpc/callctx.verify",
+        json={"token": minted["token"], "audience": "custos.catalog"},
+        headers=callctx_header(workspace_id="ws-int"),
+    )
+    assert verify_resp.status_code == 200, verify_resp.text
+    verdict = verify_resp.json()
+    assert verdict["valid"] is True
+    assert verdict["acting_principal_id"] == "user-42"
+    assert verdict["permissions"] == [
+        "catalog:workflows:read",
+        "catalog:workflows:write",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # 4. JWKS rotation overlap
 # ---------------------------------------------------------------------------
