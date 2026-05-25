@@ -9,12 +9,12 @@ Status: closed
 
 ## Summary
 
-Phase K of the M3 auth-service implementation plan (AS-IMPL-027) landed.
-Direct unit tests for the FastAPI error handlers were authored, the
-remaining sub-90% per-module gaps in `custos_auth.api.routes.oidc` and
-`custos_auth.sweeper` were closed, and the ≥90% TOTAL coverage gate is
-confirmed enforced on both Python 3.11 and 3.12 CI lanes. Refs #267 (M3
-auth-service track).
+Phase K (M1) of the auth-service implementation plan (AS-IMPL-027)
+landed. Direct unit tests for the FastAPI error handlers were authored,
+the remaining sub-90% per-module gaps in `custos_auth.api.routes.oidc`
+and `custos_auth.sweeper` were closed, and the ≥90% TOTAL coverage gate
+is confirmed enforced on both Python 3.11 and 3.12 CI lanes. Refs #267
+(auth-service implementation tracker).
 
 ## Before
 
