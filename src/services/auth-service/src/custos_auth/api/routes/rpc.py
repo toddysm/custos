@@ -494,19 +494,49 @@ async def callctx_verify(
         return CallctxVerifyRpcResponse(valid=False, reason=REASON_BAD_SIGNATURE)
     except jwt.InvalidTokenError:
         return CallctxVerifyRpcResponse(valid=False, reason=REASON_MALFORMED)
-    acting = claims.get("actingPrincipalId")
+
+    def _required_str_claim(name: str) -> str | None:
+        value = claims.get(name)
+        if not isinstance(value, str) or not value:
+            return None
+        return value
+
+    def _required_int_claim(name: str) -> int | None:
+        value = claims.get(name)
+        if isinstance(value, bool) or value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    acting = _required_str_claim("actingPrincipalId")
+    caller_component = _required_str_claim("callerComponent")
+    jti = _required_str_claim("jti")
+    iat = _required_int_claim("iat")
+    exp = _required_int_claim("exp")
     workspace = claims.get("workspaceId")
-    caller_component = claims.get("callerComponent")
+
+    if (
+        acting is None
+        or caller_component is None
+        or jti is None
+        or iat is None
+        or exp is None
+        or ("workspaceId" in claims and not isinstance(workspace, str))
+    ):
+        return CallctxVerifyRpcResponse(valid=False, reason=REASON_MALFORMED)
+
     return CallctxVerifyRpcResponse(
         valid=True,
         reason="",
-        acting_principal_id=acting if isinstance(acting, str) else None,
+        acting_principal_id=acting,
         workspace_id=workspace if isinstance(workspace, str) else None,
-        caller_component=(caller_component if isinstance(caller_component, str) else None),
-        iat=int(claims["iat"]) if "iat" in claims else None,
-        exp=int(claims["exp"]) if "exp" in claims else None,
+        caller_component=caller_component,
+        iat=iat,
+        exp=exp,
         kid=kid,
-        jti=claims.get("jti") if isinstance(claims.get("jti"), str) else None,
+        jti=jti,
     )
 
 
