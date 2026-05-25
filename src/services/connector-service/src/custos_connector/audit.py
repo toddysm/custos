@@ -37,9 +37,10 @@ def emit_event(name: str, payload: Mapping[str, Any]) -> None:
     Args:
         name: Canonical event name (e.g. ``auth.callctx.shim_used``,
             ``authz.decision``).
-        payload: Per-event attributes. Must be JSON-serialisable; values
-            that aren't are coerced via ``repr`` so the audit log line is
-            never lost.
+        payload: Per-event attributes. Values that aren't directly
+            JSON-serialisable are coerced via ``str`` during JSON encoding
+            so the audit log line is never lost; if JSON serialisation still
+            fails, the whole payload falls back to ``repr(dict(payload))``.
     """
     try:
         body = json.dumps(dict(payload), default=str, sort_keys=True)
