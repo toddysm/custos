@@ -52,6 +52,37 @@ custos-auth-service
 uvicorn custos_auth:create_app --factory --reload
 ```
 
-The app currently has no environment variables (the configuration table in
-the design lands incrementally across AS-IMPL-002, AS-IMPL-004, AS-IMPL-017,
-AS-IMPL-018, AS-IMPL-020).
+The app is configured via environment variables. For the current, authoritative
+set of supported settings, see `custos_auth/settings.py` and the configuration
+table in
+[`design/components/auth-service/design.md`](../../../design/components/auth-service/design.md).
+This includes settings such as `CUSTOS_AUTH_STORE_DSN`,
+`CUSTOS_AUTH_METADATA_STORE_DSN`, and `CUSTOS_AUTH_OIDC_ENABLED`.
+
+## Internal RPC surface (AS-IMPL-025)
+
+Every other Custos component invokes auth-service through Dapr
+service-invocation using the **app-id `custos-auth`**. Dapr forwards
+`POST /v1.0/invoke/custos-auth/method/{name}` to the app as `POST /{name}`;
+we project the dotted RPC method names from the design's "Internal RPC"
+table onto an `/rpc/` prefix so the internal surface stays visibly
+separate from the public REST surface (`/v1/...`).
+
+| Dapr method name              | App path                          | Purpose                                                                |
+| ----------------------------- | --------------------------------- | ---------------------------------------------------------------------- |
+| `rpc/authn.verifyToken`       | `POST /rpc/authn.verifyToken`     | Verify a bearer token; returns `{principal: PrincipalResponse | null}` |
+| `rpc/authz.authorize`         | `POST /rpc/authz.authorize`       | Decide a permission against a workspace; returns `Decision`            |
+| `rpc/authz.verifyAndAuthorize`| `POST /rpc/authz.verifyAndAuthorize` | Composed verify + authorize (also exposed at `/v1/authz/...`)       |
+| `rpc/callctx.sign`            | `POST /rpc/callctx.sign`          | Mint a signed call-context JWT (EdDSA / Ed25519)                       |
+| `rpc/callctx.verify`          | `POST /rpc/callctx.verify`        | Verify a call-context locally; returns `CallContext | InvalidContext`  |
+
+Bootstrap RPCs (`authn.verifyToken`, `authz.verifyAndAuthorize`,
+`callctx.sign`) are bypassed by the call-context middleware — by
+definition the caller has no call-context to send yet. The other two RPCs
+require a valid call-context header.
+
+External components do not need to call `callctx.verify` on the hot path —
+they fetch the JWKS at `/.well-known/jwks.json` once per rotation period
+and verify locally via the `custos_callctx` helper library (AS-IMPL-019).
+The RPC exists so audit / admin tooling can ask auth-service to render a
+verification verdict for an arbitrary token.

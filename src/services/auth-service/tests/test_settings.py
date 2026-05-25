@@ -22,6 +22,7 @@ from custos_auth.settings import (
     ENV_CALL_CONTEXT_SECRET_STORE,
     ENV_CALL_CONTEXT_TTL_SECONDS,
     ENV_METADATA_STORE_DSN,
+    ENV_OIDC_ENABLED,
     ENV_SERVICE_TOKEN_TTL_DEFAULT,
     ENV_TOKEN_SWEEPER_INTERVAL,
     Settings,
@@ -334,3 +335,28 @@ def test_call_context_key_rotation_rejects_negative() -> None:
 def test_call_context_key_rotation_rejects_non_integer() -> None:
     with pytest.raises(SettingsError, match=ENV_CALL_CONTEXT_KEY_ROTATION):
         load_settings(_required_env(**{ENV_CALL_CONTEXT_KEY_ROTATION: "not-a-number"}))
+
+
+def test_oidc_enabled_defaults_to_false() -> None:
+    # Phase I (AS-IMPL-024) lands the OIDC callback as a stub; the
+    # feature flag stays False so M1 deployments ship with the
+    # endpoint mounted but disabled until Phase H wires the verifier.
+    settings = load_settings(_required_env())
+    assert settings.oidc_enabled is False
+
+
+@pytest.mark.parametrize("raw", ["true", "True", "TRUE", "1", "yes", "on"])
+def test_oidc_enabled_accepts_truthy_strings(raw: str) -> None:
+    settings = load_settings(_required_env(**{ENV_OIDC_ENABLED: raw}))
+    assert settings.oidc_enabled is True
+
+
+@pytest.mark.parametrize("raw", ["false", "False", "FALSE", "0", "no", "off"])
+def test_oidc_enabled_accepts_falsy_strings(raw: str) -> None:
+    settings = load_settings(_required_env(**{ENV_OIDC_ENABLED: raw}))
+    assert settings.oidc_enabled is False
+
+
+def test_oidc_enabled_rejects_unknown_value() -> None:
+    with pytest.raises(SettingsError, match=ENV_OIDC_ENABLED):
+        load_settings(_required_env(**{ENV_OIDC_ENABLED: "maybe"}))

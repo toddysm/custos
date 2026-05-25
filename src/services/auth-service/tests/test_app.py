@@ -57,7 +57,19 @@ def test_readyz_returns_200_when_schema_gate_passes() -> None:
     with TestClient(app) as client:
         resp = client.get("/readyz")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ready"}
+    body = resp.json()
+    # AS-IMPL-024: readyz now carries a per-subsystem dependency map
+    # so operators can tell which dependency is the laggard. The flat
+    # ``status`` field stays so existing health-probe wiring still
+    # works; the new ``dependencies`` field is additive.
+    assert body["status"] == "ready"
+    assert body["dependencies"] == {
+        "postgres": "ok",
+        # FakeAuthAdapter-backed lifespan runs the in-process rotation
+        # loop (no key ref), which flips jwks_rotation to "ok".
+        "jwks_rotation": "ok",
+        "pubsub": "ok",
+    }
 
 
 def test_readyz_returns_503_when_schema_gate_fails() -> None:
@@ -94,6 +106,14 @@ def test_readyz_returns_503_during_lifespan_startup_before_ready() -> None:
     body = resp.json()
     assert body["status"] == "not_ready"
     assert body["detail"] == "auth-service has not finished startup"
+    # AS-IMPL-024: dependency map is present even during the startup
+    # window. The bare app has no lifespan-populated state so every
+    # subsystem reports ``unknown``.
+    assert body["dependencies"] == {
+        "postgres": "unknown",
+        "jwks_rotation": "unknown",
+        "pubsub": "unknown",
+    }
 
 
 def test_app_state_carries_schema_gate_error_on_failure() -> None:
@@ -108,6 +128,14 @@ def test_app_state_carries_schema_gate_error_on_failure() -> None:
     # crash-looped pod, etc.) can confirm the diagnostic.
     assert isinstance(app.state.schema_gate_error, MigrationRequired)
     assert app.state.ready is False
+    # AS-IMPL-024: the dependency map marks postgres as ``schema_gap``
+    # so an operator inspecting the crashed pod's last-readyz body
+    # (or app.state) can pinpoint which subsystem failed startup.
+    assert app.state.dependency_status["postgres"] == "schema_gap"
+    # The remaining subsystems never got a chance to wire because the
+    # schema gate aborted startup, so they stay at the initial value.
+    assert app.state.dependency_status["jwks_rotation"] == "unknown"
+    assert app.state.dependency_status["pubsub"] == "unknown"
 
 
 def test_app_state_carries_providers_after_startup() -> None:
@@ -246,6 +274,10 @@ def test_lifespan_builds_call_context_signer_in_dev_mode() -> None:
         assert isinstance(app.state.call_context_signer, CallContextSigner)
         # Rotation disabled => no rotation task spawned.
         assert app.state.call_context_rotation_task is None
+        # AS-IMPL-024: rotation disabled in dev mode flips the JWKS
+        # dependency status to "static" so operators know the JWKS
+        # feed is a single-entry set.
+        assert app.state.dependency_status["jwks_rotation"] == "static"
 
 
 def test_lifespan_spawns_and_cancels_rotation_task() -> None:
@@ -396,3 +428,8 @@ def test_lifespan_in_dapr_mode_disables_in_process_rotation(
     with TestClient(app):
         # Rotation explicitly suppressed in Dapr mode.
         assert app.state.call_context_rotation_task is None
+        # AS-IMPL-024: Dapr-mode rotation is operator-driven, so the
+        # dependency status reports "ok" — the resolver consults the
+        # secret store on its cache cycle and the JWKS picks up new
+        # keys via KeyRingObservingResolver.
+        assert app.state.dependency_status["jwks_rotation"] == "ok"

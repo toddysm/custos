@@ -76,13 +76,40 @@ CALLCTX_HEADER: str = "x-custos-callctx"
 #: * Gateway hot-path (``/v1/authz/verify-and-authorize``) — same
 #:   reasoning: the gateway calls this *before* it has a
 #:   call-context, on every external request.
+#: * OIDC callback (``/v1/auth/login/oidc/callback``) — external
+#:   OIDC redirect from the IdP, bootstrapping a session; no
+#:   internal call-context exists yet (AS-IMPL-024, Phase H lands
+#:   the actual handler).
+#: * JWKS endpoint — every component fetches the public key set
+#:   anonymously to verify call-contexts locally; requiring a
+#:   call-context here would be a chicken-and-egg deadlock.
+#: * OpenAPI / docs endpoints — the spec is a public artefact used by
+#:   client codegen, gateways, and external operators; gating it
+#:   behind a call-context would mean nothing could discover the
+#:   service surface without already speaking the call-context
+#:   protocol.
+#: * Bootstrap Internal RPCs (AS-IMPL-025) — ``authn.verifyToken``,
+#:   ``authz.verifyAndAuthorize``, and ``callctx.sign`` are how
+#:   components bootstrap their call-context from a raw bearer.
+#:   Requiring a call-context here would be a chicken-and-egg
+#:   deadlock. ``authz.authorize`` and ``callctx.verify`` are NOT
+#:   bypassed — by the time a component calls them it already holds
+#:   a verified call-context.
 _BYPASS_PATHS: frozenset[str] = frozenset(
     {
         "/healthz",
         "/readyz",
         "/v1/auth/verify",
+        "/v1/auth/login/oidc/callback",
         "/v1/authz/verify-and-authorize",
         "/.well-known/jwks.json",
+        "/openapi.json",
+        "/docs",
+        "/docs/oauth2-redirect",
+        "/redoc",
+        "/rpc/authn.verifyToken",
+        "/rpc/authz.verifyAndAuthorize",
+        "/rpc/callctx.sign",
     }
 )
 

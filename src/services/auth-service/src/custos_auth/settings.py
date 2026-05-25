@@ -189,6 +189,21 @@ ENV_CALL_CONTEXT_KEY_ROTATION: Final[str] = "CUSTOS_AUTH_CALL_CONTEXT_KEY_ROTATI
 #: carried in settings so the runtime knob lives next to its peers.
 DEFAULT_CALL_CONTEXT_KEY_ROTATION_SECONDS: Final[int] = 7 * 24 * 60 * 60
 
+#: Optional boolean. Gates the OIDC verifier code paths shipped in
+#: Phase H (AS-IMPL-020 — AS-IMPL-023). M1 deployments ship with the
+#: OIDC routes mounted but disabled: ``POST /v1/auth/login/oidc/callback``
+#: returns ``503 oidc_not_enabled`` until the operator flips this flag
+#: *and* Phase H lands. Phase I (AS-IMPL-024) only stubs the route
+#: behind this flag — the actual verifier wiring follows in Phase H.
+#: Accepts the conventional truthy/falsy strings (``true`` / ``false``
+#: / ``1`` / ``0`` / ``yes`` / ``no``, case-insensitive). Empty falls
+#: back to ``False``. Other values raise :class:`SettingsError`.
+ENV_OIDC_ENABLED: Final[str] = "CUSTOS_AUTH_OIDC_ENABLED"
+
+#: Default OIDC feature-flag state. ``False`` keeps the OIDC callback
+#: route in stub mode until Phase H ships.
+DEFAULT_OIDC_ENABLED: Final[bool] = False
+
 
 class SettingsError(RuntimeError):
     """Raised when the environment is missing a required setting or carries a malformed value."""
@@ -212,6 +227,7 @@ class Settings:
     call_context_audience: str
     call_context_ttl_seconds: int
     call_context_key_rotation_seconds: int
+    oidc_enabled: bool
 
     @property
     def is_production(self) -> bool:
@@ -408,6 +424,32 @@ def _parse_call_context_key_rotation(raw: str) -> int:
     return value
 
 
+_BOOL_TRUE_VALUES: Final[frozenset[str]] = frozenset({"true", "1", "yes", "on"})
+_BOOL_FALSE_VALUES: Final[frozenset[str]] = frozenset({"false", "0", "no", "off"})
+
+
+def _parse_oidc_enabled(raw: str) -> bool:
+    """Parse the ``CUSTOS_AUTH_OIDC_ENABLED`` env value.
+
+    Empty string falls back to :data:`DEFAULT_OIDC_ENABLED` (``False``).
+    Accepted truthy values: ``true``, ``1``, ``yes``, ``on``
+    (case-insensitive). Accepted falsy values: ``false``, ``0``,
+    ``no``, ``off``. Any other value raises :class:`SettingsError`.
+    """
+    if raw == "":
+        return DEFAULT_OIDC_ENABLED
+    folded = raw.lower()
+    if folded in _BOOL_TRUE_VALUES:
+        return True
+    if folded in _BOOL_FALSE_VALUES:
+        return False
+    raise SettingsError(
+        f"{ENV_OIDC_ENABLED} must be a boolean "
+        f"(one of {{{', '.join(sorted(_BOOL_TRUE_VALUES | _BOOL_FALSE_VALUES))}}}); "
+        f"got {raw!r}"
+    )
+
+
 def load_settings(env: dict[str, str] | None = None) -> Settings:
     """Parse a :class:`Settings` from the supplied env mapping (default ``os.environ``)."""
     src: dict[str, str] = dict(os.environ if env is None else env)
@@ -442,6 +484,9 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         call_context_key_rotation_seconds=_parse_call_context_key_rotation(
             src.get(ENV_CALL_CONTEXT_KEY_ROTATION, "").strip(),
         ),
+        oidc_enabled=_parse_oidc_enabled(
+            src.get(ENV_OIDC_ENABLED, "").strip(),
+        ),
     )
 
 
@@ -451,6 +496,7 @@ __all__ = [
     "DEFAULT_CALL_CONTEXT_KEY_ROTATION_SECONDS",
     "DEFAULT_CALL_CONTEXT_SECRET_STORE",
     "DEFAULT_CALL_CONTEXT_TTL_SECONDS",
+    "DEFAULT_OIDC_ENABLED",
     "DEFAULT_SERVICE_TOKEN_TTL_SECONDS",
     "DEFAULT_TOKEN_SWEEPER_INTERVAL_SECONDS",
     "ENV_AUTHN_CACHE_TTL",
@@ -464,6 +510,7 @@ __all__ = [
     "ENV_CALL_CONTEXT_TTL_SECONDS",
     "ENV_ENVIRONMENT",
     "ENV_METADATA_STORE_DSN",
+    "ENV_OIDC_ENABLED",
     "ENV_PERMISSIONS_PATHS",
     "ENV_SERVICE_TOKEN_TTL_DEFAULT",
     "ENV_TOKEN_SWEEPER_INTERVAL",
