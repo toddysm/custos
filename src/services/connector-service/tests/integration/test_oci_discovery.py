@@ -64,10 +64,11 @@ class _RegistrySpec:
     image: str
     container_port: int
     env_var: str
-    #: ``True`` if the implementation supports the OCI Referrers API
-    #: natively. Both supported implementations do today; kept as a
-    #: knob so a "Referrers-absent" registry can be added later without
-    #: changing assertion logic.
+    #: ``True`` if the implementation exposes the OCI Referrers API at
+    #: ``GET /v2/<name>/referrers/<digest>``. ``zot`` does;
+    #: ``distribution/distribution`` does not in its released default
+    #: configuration (verified against v2.8.x, v3.0.0 and v3.1.1) and is
+    #: gated out of the Referrers-only test.
     supports_referrers: bool = True
 
 
@@ -77,6 +78,16 @@ REGISTRY_SPECS: tuple[_RegistrySpec, ...] = (
         image="registry:2.8.3",
         container_port=5000,
         env_var="CUSTOS_OCI_REGISTRY_DISTRIBUTION_URL",
+        # distribution/distribution does NOT expose the OCI Referrers
+        # API at /v2/<name>/referrers/<digest> in any released default
+        # configuration we have validated against (v2.8.x, v3.0.0,
+        # v3.1.1). The endpoint simply isn't routed: requests return
+        # the Go default "404 page not found" text/plain response with
+        # no v2 JSON error envelope, and no OCI fallback index tag
+        # ("<algo>-<digest>") is created either. distribution is
+        # therefore exercised only against the connector-specific
+        # fallback tag path.
+        supports_referrers=False,
     ),
     _RegistrySpec(
         name="zot",
@@ -88,13 +99,22 @@ REGISTRY_SPECS: tuple[_RegistrySpec, ...] = (
 
 
 @pytest.fixture(scope="session", params=REGISTRY_SPECS, ids=lambda s: s.name)
-def registry_url(request: pytest.FixtureRequest) -> Iterator[str]:
+def registry_spec(request: pytest.FixtureRequest) -> _RegistrySpec:
+    """Expose the active ``_RegistrySpec`` so tests can gate on
+    capability flags such as ``supports_referrers`` without having to
+    re-parameterise themselves.
+    """
+    return request.param  # type: ignore[no-any-return]
+
+
+@pytest.fixture(scope="session")
+def registry_url(registry_spec: _RegistrySpec) -> Iterator[str]:
     """Per-implementation registry base URL.
 
     Yields the base URL of a usable OCI registry. Skips when neither
     the env var nor testcontainers can produce one.
     """
-    spec: _RegistrySpec = request.param
+    spec = registry_spec
 
     # CI / externally-managed registry: pick it up via env var.
     env_url = os.environ.get(spec.env_var)
@@ -134,7 +154,25 @@ def registry_url(request: pytest.FixtureRequest) -> Iterator[str]:
 # ---------------------------------------------------------------------------
 
 
-SUBJECT_REPO = "custos-integration/oci-subject"
+@pytest.fixture
+def subject_repo(request: pytest.FixtureRequest) -> str:
+    """Per-test repository name so tests don't cross-pollinate.
+
+    The session-scoped ``registry_url`` fixture keeps the same
+    container alive across all tests, so two tests that pushed to
+    the same repo + subject digest would see each other's manifests
+    — e.g. ``test_discover_via_fallback_tag`` would resolve via the
+    leftover Referrers entry that ``test_discover_via_referrers``
+    just pushed against the same constant subject body. Giving each
+    test its own repo isolates registry-side state without paying for
+    a fresh container.
+    """
+    # request.node.name looks like 'test_discover_via_referrers[zot]'.
+    # Strip the ``[param]`` suffix and lowercase to keep the repo name
+    # within the OCI distribution-spec regex.
+    base = request.node.name.split("[")[0].lower().replace("_", "-")
+    return f"custos-integration/{base}"
+
 
 #: A trivial OCI image config object so the registry accepts the
 #: manifest. Content is arbitrary; only its sha256 matters.
@@ -181,8 +219,16 @@ async def _push_blob(client: httpx.AsyncClient, repo: str, data: bytes) -> str:
     return digest
 
 
-async def _push_subject_image(client: httpx.AsyncClient, repo: str) -> str:
-    """Push a minimal OCI image manifest and return its digest."""
+async def _push_subject_image(client: httpx.AsyncClient, repo: str) -> tuple[str, int]:
+    """Push a minimal OCI image manifest; return ``(digest, size)``.
+
+    The returned ``digest`` is the one the registry stored under
+    (``Docker-Content-Digest`` from the PUT response when available,
+    falling back to the locally-computed sha for compliant registries
+    that return no such header). The size is the byte length of the
+    JSON body we PUT, so callers building a Referrers ``subject``
+    descriptor don't need to round-trip the registry to learn it.
+    """
     config_digest = await _push_blob(client, repo, _CONFIG_BODY)
     layer_digest = await _push_blob(client, repo, _LAYER_BODY)
     manifest: dict[str, Any] = {
@@ -202,20 +248,22 @@ async def _push_subject_image(client: httpx.AsyncClient, repo: str) -> str:
         ],
     }
     body = json.dumps(manifest).encode("utf-8")
-    digest = _sha256(body)
+    local_digest = _sha256(body)
     put = await client.put(
-        f"/v2/{repo}/manifests/{digest}",
+        f"/v2/{repo}/manifests/{local_digest}",
         content=body,
         headers={"content-type": "application/vnd.oci.image.manifest.v1+json"},
     )
     assert put.status_code in (200, 201), (put.status_code, put.text)
-    return digest
+    server_digest = put.headers.get("docker-content-digest", local_digest)
+    return server_digest, len(body)
 
 
 async def _push_connector_manifest(
     client: httpx.AsyncClient,
     repo: str,
     subject_digest: str,
+    subject_size: int,
     *,
     use_referrers: bool,
     use_fallback_tag: bool,
@@ -248,11 +296,6 @@ async def _push_connector_manifest(
         ],
     }
     if use_referrers:
-        # The subject also needs a size; we'll fetch it from the
-        # registry to keep this generic across image sizes.
-        head = await client.head(f"/v2/{repo}/manifests/{subject_digest}")
-        assert head.status_code == 200, (head.status_code, head.text)
-        subject_size = int(head.headers.get("content-length", "0"))
         manifest["subject"] = {
             "mediaType": "application/vnd.oci.image.manifest.v1+json",
             "digest": subject_digest,
@@ -286,19 +329,24 @@ async def _push_connector_manifest(
 @pytest.mark.asyncio
 async def test_discover_via_referrers(
     registry_url: str,
+    registry_spec: _RegistrySpec,
+    subject_repo: str,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Push a manifest with a ``subject`` reference; discover_manifest
     MUST find it via the Referrers API and emit ``fallback-ignored``.
     """
+    if not registry_spec.supports_referrers:
+        pytest.skip(f"{registry_spec.name} does not implement the OCI Referrers API")
     import logging
 
     async with httpx.AsyncClient(base_url=registry_url, timeout=30.0) as client:
-        subject_digest = await _push_subject_image(client, SUBJECT_REPO)
+        subject_digest, subject_size = await _push_subject_image(client, subject_repo)
         manifest_digest = await _push_connector_manifest(
             client,
-            SUBJECT_REPO,
+            subject_repo,
             subject_digest,
+            subject_size,
             use_referrers=True,
             use_fallback_tag=False,
         )
@@ -306,7 +354,7 @@ async def test_discover_via_referrers(
         with caplog.at_level(logging.INFO, logger="custos_connector.audit"):
             descriptor = await discover_manifest(
                 client,
-                repository=SUBJECT_REPO,
+                repository=subject_repo,
                 subject_digest=subject_digest,
             )
     assert descriptor.digest == manifest_digest
@@ -316,6 +364,7 @@ async def test_discover_via_referrers(
 @pytest.mark.asyncio
 async def test_discover_via_fallback_tag(
     registry_url: str,
+    subject_repo: str,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Push a manifest tagged with the fallback tag but WITHOUT a
@@ -325,11 +374,12 @@ async def test_discover_via_fallback_tag(
     import logging
 
     async with httpx.AsyncClient(base_url=registry_url, timeout=30.0) as client:
-        subject_digest = await _push_subject_image(client, SUBJECT_REPO)
+        subject_digest, subject_size = await _push_subject_image(client, subject_repo)
         await _push_connector_manifest(
             client,
-            SUBJECT_REPO,
+            subject_repo,
             subject_digest,
+            subject_size,
             use_referrers=False,
             use_fallback_tag=True,
         )
@@ -337,7 +387,7 @@ async def test_discover_via_fallback_tag(
         with caplog.at_level(logging.INFO, logger="custos_connector.audit"):
             descriptor = await discover_manifest(
                 client,
-                repository=SUBJECT_REPO,
+                repository=subject_repo,
                 subject_digest=subject_digest,
             )
     # Tagged-only path -> the descriptor digest comes from the HEAD
@@ -350,6 +400,7 @@ async def test_discover_via_fallback_tag(
 @pytest.mark.asyncio
 async def test_discover_no_manifest_for_unknown_subject(
     registry_url: str,
+    subject_repo: str,
 ) -> None:
     """A subject with no associated connector manifest in either path
     MUST raise NO_MANIFEST_FOUND."""
@@ -358,7 +409,7 @@ async def test_discover_no_manifest_for_unknown_subject(
         with pytest.raises(ManifestDiscoveryError) as exc_info:
             await discover_manifest(
                 client,
-                repository=SUBJECT_REPO,
+                repository=subject_repo,
                 subject_digest=unknown_digest,
             )
     assert exc_info.value.code == DiscoveryErrorCode.NO_MANIFEST_FOUND

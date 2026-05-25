@@ -70,6 +70,23 @@ from custos_connector.manifest.errors import (
 #: descriptor and queried via the Referrers API filter parameter.
 CONNECTOR_MANIFEST_MEDIA_TYPE: Final[str] = "application/vnd.custos.connector.manifest.v1+json"
 
+#: Accept header for manifest HEAD/GET calls. Some registries
+#: (notably distribution/distribution 2.x) return 404 on
+#: ``/v2/<repo>/manifests/<ref>`` when the request omits an ``Accept``
+#: header listing the manifest media types — even when the tag exists.
+#: We list both OCI (v1 + v1.1) and legacy Docker manifest/index types
+#: so the fallback tag resolves uniformly across the registry
+#: ecosystem; the descriptor's ``mediaType`` comes from the
+#: ``Content-Type`` response header, not the request Accept list.
+_MANIFEST_ACCEPT: Final[str] = ", ".join(
+    (
+        "application/vnd.oci.image.manifest.v1+json",
+        "application/vnd.oci.image.index.v1+json",
+        "application/vnd.docker.distribution.manifest.v2+json",
+        "application/vnd.docker.distribution.manifest.list.v2+json",
+    )
+)
+
 #: Maximum tag length per OCI distribution spec §4.1.
 #: Reference: https://github.com/opencontainers/distribution-spec/blob/main/spec.md
 MAX_OCI_TAG_LENGTH: Final[int] = 128
@@ -260,14 +277,16 @@ async def resolve_fallback_tag(
     tag = fallback_tag_for_digest(subject_digest)
     path = f"/v2/{repository}/manifests/{tag}"
     # Use HEAD so we don't pull the full body just to confirm existence
-    # and read the descriptor headers. Do not send the connector
-    # artifact type in Accept here: the manifests endpoint negotiates
-    # on manifest/index media types, and a custom artifactType Accept
-    # can trigger 406 responses on some registries. Registries that
-    # don't support HEAD on manifests will surface a 405 which we read
-    # as "no".
+    # and read the descriptor headers. Send a manifest/index Accept
+    # header — distribution/distribution 2.x answers 404 when the
+    # client omits Accept, even for tags that resolve fine with one.
+    # Do NOT add the connector ``artifactType`` here: the manifests
+    # endpoint negotiates on manifest/index media types, and a custom
+    # artifactType in Accept can trigger 406 on some registries.
+    # Registries that don't support HEAD on manifests will surface a
+    # 405 which we read as "no".
     try:
-        response = await client.head(path)
+        response = await client.head(path, headers={"Accept": _MANIFEST_ACCEPT})
     except httpx.HTTPError:
         return None
     if response.status_code == 404 or response.status_code >= 400:

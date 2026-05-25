@@ -295,7 +295,12 @@ jobs:
         working-directory: src/services/connector-service
     services:
       distribution:
-        # CNCF distribution reference (registry:2). Referrers API since v2.8.2.
+        # CNCF distribution reference (registry:2). The released default
+        # configuration does NOT expose the OCI Referrers API at
+        # /v2/<name>/referrers/<digest> (verified through v2.8.x and
+        # v3.1.1), so the integration suite exercises distribution only
+        # against the connector-specific fallback-tag path. The
+        # Referrers code path is covered against zot below.
         image: registry:2.8.3
         ports:
           - 5000:5000

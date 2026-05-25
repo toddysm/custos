@@ -275,6 +275,14 @@ async def test_resolve_fallback_tag_returns_descriptor_when_head_succeeds() -> N
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "HEAD"
         assert request.url.path == f"/v2/{SUBJECT_REPO}/manifests/{expected_tag}"
+        # The fallback tag HEAD must advertise manifest/index media
+        # types in Accept — distribution/distribution 2.x answers 404
+        # otherwise. The connector ``artifactType`` is deliberately
+        # absent (it would trigger 406 on some registries).
+        accept = request.headers.get("accept", "")
+        assert "application/vnd.oci.image.manifest.v1+json" in accept
+        assert "application/vnd.oci.image.index.v1+json" in accept
+        assert CONNECTOR_MANIFEST_MEDIA_TYPE not in accept
         return httpx.Response(
             200,
             headers={
