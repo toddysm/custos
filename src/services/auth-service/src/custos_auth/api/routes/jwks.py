@@ -26,6 +26,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
+from custos_auth import _telemetry as telemetry
 from custos_auth.callctx_keyring import JWKS_CACHE_FRACTION, KeyRing
 
 router = APIRouter(tags=["jwks"])
@@ -83,12 +84,13 @@ async def jwks(
     age out — that is the AS-IMPL-018 acceptance criterion "JWKS
     cacheable via standard HTTP caching headers".
     """
-    keys = [entry.to_jwk() for entry in ring.all_public_entries()]
-    max_age = max(1, int(ring.rotation_period_seconds * JWKS_CACHE_FRACTION))
-    return JSONResponse(
-        content={"keys": keys},
-        headers={"Cache-Control": f"public, max-age={max_age}"},
-    )
+    with telemetry.observe_operation(telemetry.OP_JWKS_GET):
+        keys = [entry.to_jwk() for entry in ring.all_public_entries()]
+        max_age = max(1, int(ring.rotation_period_seconds * JWKS_CACHE_FRACTION))
+        return JSONResponse(
+            content={"keys": keys},
+            headers={"Cache-Control": f"public, max-age={max_age}"},
+        )
 
 
 __all__ = ["get_key_ring", "router"]

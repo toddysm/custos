@@ -49,6 +49,7 @@ from custos_spl.interfaces.auth_store import ServiceAccount
 from fastapi import APIRouter, Depends, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
+from custos_auth import _telemetry as telemetry
 from custos_auth.api.dependencies import (
     get_auth_store,
     get_authn_cache,
@@ -61,6 +62,7 @@ from custos_auth.api.models import (
     VerifyAndAuthorizeResponse,
     principal_to_response,
 )
+from custos_auth.audit import audit_call_context_invalid
 from custos_auth.authn import verify_token
 from custos_auth.authn_cache import AuthnCache
 from custos_auth.authorize import authorize
@@ -165,15 +167,16 @@ async def authn_verify_token(
     single response shape. Callers (workflow-service, ARM, …) treat
     ``principal is None`` as "deny".
     """
-    principal = await verify_token(
-        body.token,
-        auth_store=auth_store,
-        metadata_store=metadata_store,
-        authn_cache=authn_cache,
-    )
-    if principal is None:
-        return VerifyTokenRpcResponse(principal=None)
-    return VerifyTokenRpcResponse(principal=principal_to_response(principal))
+    with telemetry.observe_operation(telemetry.OP_RPC_AUTHN_VERIFY_TOKEN):
+        principal = await verify_token(
+            body.token,
+            auth_store=auth_store,
+            metadata_store=metadata_store,
+            authn_cache=authn_cache,
+        )
+        if principal is None:
+            return VerifyTokenRpcResponse(principal=None)
+        return VerifyTokenRpcResponse(principal=principal_to_response(principal))
 
 
 # ---------------------------------------------------------------------------
@@ -230,23 +233,24 @@ async def authz_authorize(
     prior ``rpc/authn.verifyToken`` or via the call-context header)
     and is asking auth-service to render the binding-based decision.
     """
-    home_ws = await auth_store.get_workspace(WorkspaceId(body.workspace_id))
-    caller_tenant_id = None if home_ws is None else str(home_ws.tenant_id)
-    decision = await authorize(
-        auth_store,
-        metadata_store,
-        principal_id=body.principal_id,
-        permission=body.permission,
-        workspace_id=body.workspace_id,
-        caller_component=body.caller_component,
-        caller_tenant_id=caller_tenant_id,
-        cache=authz_cache,
-    )
-    return AuthorizeRpcResponse(
-        allowed=decision.allowed,
-        reason=decision.reason,
-        audit_event_id=decision.audit_event_id,
-    )
+    with telemetry.observe_operation(telemetry.OP_RPC_AUTHZ_AUTHORIZE):
+        home_ws = await auth_store.get_workspace(WorkspaceId(body.workspace_id))
+        caller_tenant_id = None if home_ws is None else str(home_ws.tenant_id)
+        decision = await authorize(
+            auth_store,
+            metadata_store,
+            principal_id=body.principal_id,
+            permission=body.permission,
+            workspace_id=body.workspace_id,
+            caller_component=body.caller_component,
+            caller_tenant_id=caller_tenant_id,
+            cache=authz_cache,
+        )
+        return AuthorizeRpcResponse(
+            allowed=decision.allowed,
+            reason=decision.reason,
+            audit_event_id=decision.audit_event_id,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -288,34 +292,38 @@ async def authz_verify_and_authorize(
     check via Dapr service-invocation without going through the
     gateway.
     """
-    principal = await verify_token(
-        body.token,
-        auth_store=auth_store,
-        metadata_store=metadata_store,
-        authn_cache=authn_cache,
-    )
-    if principal is None:
-        raise Unauthenticated("Token verification failed.")
-    # M1 only supports service-account tokens.
-    assert isinstance(principal, ServiceAccount)
-    home_ws = await auth_store.get_workspace(principal.workspace_id)
-    caller_tenant_id = None if home_ws is None else str(home_ws.tenant_id)
-    decision = await authorize(
-        auth_store,
-        metadata_store,
-        principal_id=str(principal.principal_id),
-        permission=body.permission,
-        workspace_id=body.workspace_id,
-        caller_component="rpc-client",
-        caller_tenant_id=caller_tenant_id,
-        cache=authz_cache,
-    )
-    return VerifyAndAuthorizeResponse(
-        principal_id=str(principal.principal_id),
-        allowed=decision.allowed,
-        reason=decision.reason,
-        audit_event_id=decision.audit_event_id,
-    )
+    with telemetry.observe_operation(
+        telemetry.OP_RPC_AUTHZ_VERIFY_AND_AUTHORIZE,
+        outcomes={Unauthenticated: "unauthenticated"},
+    ):
+        principal = await verify_token(
+            body.token,
+            auth_store=auth_store,
+            metadata_store=metadata_store,
+            authn_cache=authn_cache,
+        )
+        if principal is None:
+            raise Unauthenticated("Token verification failed.")
+        # M1 only supports service-account tokens.
+        assert isinstance(principal, ServiceAccount)
+        home_ws = await auth_store.get_workspace(principal.workspace_id)
+        caller_tenant_id = None if home_ws is None else str(home_ws.tenant_id)
+        decision = await authorize(
+            auth_store,
+            metadata_store,
+            principal_id=str(principal.principal_id),
+            permission=body.permission,
+            workspace_id=body.workspace_id,
+            caller_component="rpc-client",
+            caller_tenant_id=caller_tenant_id,
+            cache=authz_cache,
+        )
+        return VerifyAndAuthorizeResponse(
+            principal_id=str(principal.principal_id),
+            allowed=decision.allowed,
+            reason=decision.reason,
+            audit_event_id=decision.audit_event_id,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -375,19 +383,20 @@ async def callctx_sign(
     M1 trust assumption that only the API Gateway is wired into the
     cluster as a caller of this RPC).
     """
-    signed = await signer.sign(
-        principal_id=body.principal_id,
-        workspace_id=body.workspace_id,
-        caller_component=body.caller_component,
-        ttl_seconds=body.ttl_seconds,
-    )
-    return CallctxSignRpcResponse(
-        token=signed.token,
-        kid=signed.kid,
-        jti=signed.jti,
-        iat=signed.iat,
-        exp=signed.exp,
-    )
+    with telemetry.observe_operation(telemetry.OP_RPC_CALLCTX_SIGN):
+        signed = await signer.sign(
+            principal_id=body.principal_id,
+            workspace_id=body.workspace_id,
+            caller_component=body.caller_component,
+            ttl_seconds=body.ttl_seconds,
+        )
+        return CallctxSignRpcResponse(
+            token=signed.token,
+            kid=signed.kid,
+            jti=signed.jti,
+            iat=signed.iat,
+            exp=signed.exp,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -444,6 +453,7 @@ REASON_WRONG_ISSUER = "wrong_issuer"
 async def callctx_verify(
     body: CallctxVerifyRpcRequest,
     ring: Annotated[KeyRing, Depends(get_call_context_key_ring)],
+    metadata_store: Annotated[MetadataStoreProvider, Depends(get_metadata_store)],
 ) -> CallctxVerifyRpcResponse:
     """Internal RPC: verify a signed call-context JWT locally.
 
@@ -454,6 +464,13 @@ async def callctx_verify(
     audience, issuer, or expiry checks return ``valid=False`` with
     a closed-set ``reason``.
 
+    Every ``valid=False`` return additionally emits a
+    ``call-context.invalid`` audit row (carrying only the closed-set
+    reason code and, when parseable, the ``kid`` header — never the
+    raw token) and bumps :data:`telemetry.ERRORS_TOTAL` under the
+    ``callctx.<reason>`` ``kind`` label so SLO dashboards can track
+    verification-failure rates independently from RPC HTTP status.
+
     External components do not need to call this RPC on the hot
     path — they fetch the JWKS at ``/.well-known/jwks.json`` once
     per rotation period and verify locally via the
@@ -462,82 +479,99 @@ async def callctx_verify(
     a verification verdict for an arbitrary token (e.g. inspecting
     a token surfaced by a downstream 401).
     """
-    try:
-        header = jwt.get_unverified_header(body.token)
-    except jwt.InvalidTokenError:
-        return CallctxVerifyRpcResponse(valid=False, reason=REASON_MALFORMED)
-    kid = header.get("kid")
-    if not isinstance(kid, str) or not kid:
-        return CallctxVerifyRpcResponse(valid=False, reason=REASON_MALFORMED)
-    public_key = None
-    for entry in ring.all_public_entries():
-        if entry.kid == kid:
-            public_key = entry.public_key
-            break
-    if public_key is None:
-        return CallctxVerifyRpcResponse(valid=False, reason=REASON_UNKNOWN_KID)
-    try:
-        claims: dict[str, Any] = jwt.decode(
-            body.token,
-            public_key,
-            algorithms=[ALGORITHM],
-            audience=DEFAULT_AUDIENCE,
-            issuer=ISSUER,
-        )
-    except jwt.ExpiredSignatureError:
-        return CallctxVerifyRpcResponse(valid=False, reason=REASON_EXPIRED)
-    except jwt.InvalidAudienceError:
-        return CallctxVerifyRpcResponse(valid=False, reason=REASON_WRONG_AUDIENCE)
-    except jwt.InvalidIssuerError:
-        return CallctxVerifyRpcResponse(valid=False, reason=REASON_WRONG_ISSUER)
-    except jwt.InvalidSignatureError:
-        return CallctxVerifyRpcResponse(valid=False, reason=REASON_BAD_SIGNATURE)
-    except jwt.InvalidTokenError:
-        return CallctxVerifyRpcResponse(valid=False, reason=REASON_MALFORMED)
+    with telemetry.observe_operation(telemetry.OP_RPC_CALLCTX_VERIFY):
 
-    def _required_str_claim(name: str) -> str | None:
-        value = claims.get(name)
-        if not isinstance(value, str) or not value:
-            return None
-        return value
+        async def _invalid(reason: str, *, kid: str | None = None) -> CallctxVerifyRpcResponse:
+            """Record + audit a verification failure and shape the response.
 
-    def _required_int_claim(name: str) -> int | None:
-        value = claims.get(name)
-        if isinstance(value, bool) or value is None:
-            return None
+            Centralises the three side effects every invalid branch
+            performs so each return site stays a single line and we
+            cannot accidentally drop the audit row on a new failure
+            path. ``kid`` is forwarded only when the unverified
+            header parsed cleanly; pre-header parse failures pass
+            ``None`` because we never trust a token's claimed key id
+            before the header has been syntactically validated.
+            """
+            await audit_call_context_invalid(metadata_store, reason=reason, kid=kid)
+            telemetry.record_error_kind(f"callctx.{reason}")
+            return CallctxVerifyRpcResponse(valid=False, reason=reason)
+
         try:
-            return int(value)
-        except (TypeError, ValueError):
-            return None
+            header = jwt.get_unverified_header(body.token)
+        except jwt.InvalidTokenError:
+            return await _invalid(REASON_MALFORMED)
+        kid = header.get("kid")
+        if not isinstance(kid, str) or not kid:
+            return await _invalid(REASON_MALFORMED)
+        public_key = None
+        for entry in ring.all_public_entries():
+            if entry.kid == kid:
+                public_key = entry.public_key
+                break
+        if public_key is None:
+            return await _invalid(REASON_UNKNOWN_KID, kid=kid)
+        try:
+            claims: dict[str, Any] = jwt.decode(
+                body.token,
+                public_key,
+                algorithms=[ALGORITHM],
+                audience=DEFAULT_AUDIENCE,
+                issuer=ISSUER,
+            )
+        except jwt.ExpiredSignatureError:
+            return await _invalid(REASON_EXPIRED, kid=kid)
+        except jwt.InvalidAudienceError:
+            return await _invalid(REASON_WRONG_AUDIENCE, kid=kid)
+        except jwt.InvalidIssuerError:
+            return await _invalid(REASON_WRONG_ISSUER, kid=kid)
+        except jwt.InvalidSignatureError:
+            return await _invalid(REASON_BAD_SIGNATURE, kid=kid)
+        except jwt.InvalidTokenError:
+            return await _invalid(REASON_MALFORMED, kid=kid)
 
-    acting = _required_str_claim("actingPrincipalId")
-    caller_component = _required_str_claim("callerComponent")
-    jti = _required_str_claim("jti")
-    iat = _required_int_claim("iat")
-    exp = _required_int_claim("exp")
-    workspace = claims.get("workspaceId")
+        def _required_str_claim(name: str) -> str | None:
+            value = claims.get(name)
+            if not isinstance(value, str) or not value:
+                return None
+            return value
 
-    if (
-        acting is None
-        or caller_component is None
-        or jti is None
-        or iat is None
-        or exp is None
-        or ("workspaceId" in claims and not isinstance(workspace, str))
-    ):
-        return CallctxVerifyRpcResponse(valid=False, reason=REASON_MALFORMED)
+        def _required_int_claim(name: str) -> int | None:
+            value = claims.get(name)
+            if isinstance(value, bool) or value is None:
+                return None
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
 
-    return CallctxVerifyRpcResponse(
-        valid=True,
-        reason="",
-        acting_principal_id=acting,
-        workspace_id=workspace if isinstance(workspace, str) else None,
-        caller_component=caller_component,
-        iat=iat,
-        exp=exp,
-        kid=kid,
-        jti=jti,
-    )
+        acting = _required_str_claim("actingPrincipalId")
+        caller_component = _required_str_claim("callerComponent")
+        jti = _required_str_claim("jti")
+        iat = _required_int_claim("iat")
+        exp = _required_int_claim("exp")
+        workspace = claims.get("workspaceId")
+
+        if (
+            acting is None
+            or caller_component is None
+            or jti is None
+            or iat is None
+            or exp is None
+            or ("workspaceId" in claims and not isinstance(workspace, str))
+        ):
+            return await _invalid(REASON_MALFORMED, kid=kid)
+
+        return CallctxVerifyRpcResponse(
+            valid=True,
+            reason="",
+            acting_principal_id=acting,
+            workspace_id=workspace if isinstance(workspace, str) else None,
+            caller_component=caller_component,
+            iat=iat,
+            exp=exp,
+            kid=kid,
+            jti=jti,
+        )
 
 
 __all__ = ["router"]

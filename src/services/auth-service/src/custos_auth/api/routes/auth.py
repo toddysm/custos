@@ -21,6 +21,7 @@ from custos_spl import AuthStoreProvider, MetadataStoreProvider
 from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, ConfigDict, Field
 
+from custos_auth import _telemetry as telemetry
 from custos_auth.api.dependencies import (
     get_auth_store,
     get_authn_cache,
@@ -70,15 +71,19 @@ async def verify(
     carries the disambiguating ``reason``; see
     :mod:`custos_auth.authn` for the closed reason set.
     """
-    principal = await verify_token(
-        body.token,
-        auth_store=auth_store,
-        metadata_store=metadata_store,
-        authn_cache=authn_cache,
-    )
-    if principal is None:
-        raise Unauthenticated("Token verification failed.")
-    return principal_to_response(principal)
+    with telemetry.observe_operation(
+        telemetry.OP_AUTH_VERIFY,
+        outcomes={Unauthenticated: "unauthenticated"},
+    ):
+        principal = await verify_token(
+            body.token,
+            auth_store=auth_store,
+            metadata_store=metadata_store,
+            authn_cache=authn_cache,
+        )
+        if principal is None:
+            raise Unauthenticated("Token verification failed.")
+        return principal_to_response(principal)
 
 
 __all__ = ["router"]

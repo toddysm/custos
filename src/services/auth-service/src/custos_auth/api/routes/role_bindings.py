@@ -52,6 +52,7 @@ from custos_spl.interfaces.auth_store import (
 )
 from fastapi import APIRouter, Depends, status
 
+from custos_auth import _telemetry as telemetry
 from custos_auth.api.dependencies import (
     get_auth_store,
     get_binding_changed_publisher,
@@ -164,56 +165,65 @@ async def create_workspace_role_binding(
     4. Best-effort emit ``role-binding.granted``.
     5. Best-effort publish the binding-changed event.
     """
-    workspace_typed = await _resolve_workspace(
-        auth_store,
-        ctx=ctx,
-        workspace_id=workspace_id,
-    )
-
-    role_id_typed = RoleId(body.role_id)
-    role = await auth_store.get_role(role_id_typed)
-    if role is None:
-        # Unknown role ⇒ scope rule cannot be evaluated; reject
-        # with the same machine-readable code so client UX is one path.
-        raise InvalidRoleScope(f"role '{body.role_id}' is not defined; declare it before binding")
-    scope = WorkspaceScope(workspace_id=workspace_typed)
-    if not is_scope_allowed(role_id_typed, scope):
-        raise InvalidRoleScope(
-            f"role '{body.role_id}' may not be bound at workspace scope; "
-            f"check GET /v1/roles for the allowed_scopes registry"
+    with telemetry.observe_operation(
+        telemetry.OP_ROLE_BINDING_GRANT,
+        outcomes={
+            NotFound: "not_found",
+            InvalidRoleScope: "invalid_role_scope",
+        },
+    ):
+        workspace_typed = await _resolve_workspace(
+            auth_store,
+            ctx=ctx,
+            workspace_id=workspace_id,
         )
 
-    binding = RoleBinding(
-        binding_id=RoleBindingId(str(uuid4())),
-        principal_id=PrincipalId(body.principal_id),
-        role_id=role_id_typed,
-        scope=scope,
-        bound_at=datetime.now(UTC),
-        bound_by=PrincipalId(ctx.principal_id),
-    )
-    await auth_store.put_role_binding(binding)
+        role_id_typed = RoleId(body.role_id)
+        role = await auth_store.get_role(role_id_typed)
+        if role is None:
+            # Unknown role ⇒ scope rule cannot be evaluated; reject
+            # with the same machine-readable code so client UX is one path.
+            raise InvalidRoleScope(
+                f"role '{body.role_id}' is not defined; declare it before binding"
+            )
+        scope = WorkspaceScope(workspace_id=workspace_typed)
+        if not is_scope_allowed(role_id_typed, scope):
+            raise InvalidRoleScope(
+                f"role '{body.role_id}' may not be bound at workspace scope; "
+                f"check GET /v1/roles for the allowed_scopes registry"
+            )
 
-    # Best-effort audit emission — see module docstring "Atomicity".
-    await audit_role_binding_granted(
-        metadata_store,
-        actor=ctx.principal_id,
-        binding_id=str(binding.binding_id),
-        principal_id=str(binding.principal_id),
-        role_id=str(binding.role_id),
-        scope_kind="workspace",
-        scope_id=workspace_id,
-    )
-    # Best-effort cache-invalidation publish.
-    await publisher.publish(
-        BindingChangedEvent(
+        binding = RoleBinding(
+            binding_id=RoleBindingId(str(uuid4())),
+            principal_id=PrincipalId(body.principal_id),
+            role_id=role_id_typed,
+            scope=scope,
+            bound_at=datetime.now(UTC),
+            bound_by=PrincipalId(ctx.principal_id),
+        )
+        await auth_store.put_role_binding(binding)
+
+        # Best-effort audit emission — see module docstring "Atomicity".
+        await audit_role_binding_granted(
+            metadata_store,
+            actor=ctx.principal_id,
+            binding_id=str(binding.binding_id),
             principal_id=str(binding.principal_id),
             role_id=str(binding.role_id),
-            scope=scope,
-            action="granted",
-            binding_id=str(binding.binding_id),
-        ),
-    )
-    return _binding_to_response(binding)
+            scope_kind="workspace",
+            scope_id=workspace_id,
+        )
+        # Best-effort cache-invalidation publish.
+        await publisher.publish(
+            BindingChangedEvent(
+                principal_id=str(binding.principal_id),
+                role_id=str(binding.role_id),
+                scope=scope,
+                action="granted",
+                binding_id=str(binding.binding_id),
+            ),
+        )
+        return _binding_to_response(binding)
 
 
 @router.delete(
@@ -250,50 +260,54 @@ async def delete_workspace_role_binding(
     Idempotency: a repeat DELETE on an already-revoked binding returns
     404, matching the rest of auth-service.
     """
-    workspace_typed = await _resolve_workspace(
-        auth_store,
-        ctx=ctx,
-        workspace_id=workspace_id,
-    )
-    scope = WorkspaceScope(workspace_id=workspace_typed)
-    bindings = await auth_store.list_role_bindings_for_scope(
-        scope,
-        RoleBindingFilter(),
-    )
-    target: RoleBinding | None = None
-    for b in bindings:
-        if str(b.binding_id) == binding_id:
-            target = b
-            break
-    if target is None:
-        raise NotFound(f"role binding '{binding_id}' not found in workspace '{workspace_id}'")
+    with telemetry.observe_operation(
+        telemetry.OP_ROLE_BINDING_REVOKE,
+        outcomes={NotFound: "not_found"},
+    ):
+        workspace_typed = await _resolve_workspace(
+            auth_store,
+            ctx=ctx,
+            workspace_id=workspace_id,
+        )
+        scope = WorkspaceScope(workspace_id=workspace_typed)
+        bindings = await auth_store.list_role_bindings_for_scope(
+            scope,
+            RoleBindingFilter(),
+        )
+        target: RoleBinding | None = None
+        for b in bindings:
+            if str(b.binding_id) == binding_id:
+                target = b
+                break
+        if target is None:
+            raise NotFound(f"role binding '{binding_id}' not found in workspace '{workspace_id}'")
 
-    await auth_store.delete_role_binding(
-        target.binding_id,
-        actor=PrincipalId(ctx.principal_id),
-        reason=_REVOKE_REASON,
-    )
+        await auth_store.delete_role_binding(
+            target.binding_id,
+            actor=PrincipalId(ctx.principal_id),
+            reason=_REVOKE_REASON,
+        )
 
-    await audit_role_binding_revoked(
-        metadata_store,
-        actor=ctx.principal_id,
-        binding_id=str(target.binding_id),
-        principal_id=str(target.principal_id),
-        role_id=str(target.role_id),
-        scope_kind="workspace",
-        scope_id=workspace_id,
-        reason=_REVOKE_REASON,
-    )
-    await publisher.publish(
-        BindingChangedEvent(
+        await audit_role_binding_revoked(
+            metadata_store,
+            actor=ctx.principal_id,
+            binding_id=str(target.binding_id),
             principal_id=str(target.principal_id),
             role_id=str(target.role_id),
-            scope=target.scope,
-            action="revoked",
-            binding_id=str(target.binding_id),
-        ),
-    )
-    return None
+            scope_kind="workspace",
+            scope_id=workspace_id,
+            reason=_REVOKE_REASON,
+        )
+        await publisher.publish(
+            BindingChangedEvent(
+                principal_id=str(target.principal_id),
+                role_id=str(target.role_id),
+                scope=target.scope,
+                action="revoked",
+                binding_id=str(target.binding_id),
+            ),
+        )
+        return None
 
 
 __all__ = ["router"]

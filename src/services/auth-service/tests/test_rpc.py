@@ -26,7 +26,7 @@ from fastapi.testclient import TestClient
 from custos_auth.callctx_signer import ALGORITHM, DEFAULT_AUDIENCE, ISSUER
 from custos_auth.roles import ROLE_WORKSPACE_VIEWER
 from custos_auth.tokens import mint_token
-from tests._fakes import FakeAuthAdapter
+from tests._fakes import FakeAuthAdapter, FakeMetadataAdapter
 
 WORKSPACE = "ws-1"
 TENANT = "t-1"
@@ -525,3 +525,138 @@ def _callctx_header() -> dict[str, str]:
             }
         ),
     }
+
+
+# ---------------------------------------------------------------------------
+# AS-IMPL-026: every callctx.verify failure path emits ``call-context.invalid``
+# ---------------------------------------------------------------------------
+
+
+def test_rpc_callctx_verify_malformed_emits_audit(
+    client: TestClient,
+    fake_metadata_store: FakeMetadataAdapter,
+) -> None:
+    client.post(
+        "/rpc/callctx.verify",
+        json={"token": "not-a-jwt"},
+        headers=_callctx_header(),
+    )
+    rows = [
+        (ws, ev)
+        for ws, ev in fake_metadata_store.append_audit_calls
+        if ev.event_type == "call-context.invalid"
+    ]
+    assert len(rows) == 1
+    ws_id, event = rows[0]
+    # Filed under the platform sentinel — call-contexts are platform-scoped.
+    from custos_auth.audit import PLATFORM_WORKSPACE_ID
+
+    assert ws_id == PLATFORM_WORKSPACE_ID
+    assert event.subject == {"reason": "malformed"}
+    # No raw token should appear anywhere in the audit row.
+    assert "not-a-jwt" not in repr(event.payload)
+    assert "not-a-jwt" not in repr(event.subject)
+
+
+def test_rpc_callctx_verify_unknown_kid_emits_audit_with_kid(
+    client: TestClient,
+    fake_metadata_store: FakeMetadataAdapter,
+) -> None:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    private = Ed25519PrivateKey.generate()
+    payload = {
+        "iss": ISSUER,
+        "aud": DEFAULT_AUDIENCE,
+        "iat": int(time.time()),
+        "exp": int(time.time()) + 300,
+        "actingPrincipalId": "user-1",
+        "workspaceId": WORKSPACE,
+        "callerComponent": "api-gateway",
+    }
+    token = jwt.encode(
+        payload,
+        private,
+        algorithm=ALGORITHM,
+        headers={"kid": "deadbeefdeadbeef", "typ": "JWT"},
+    )
+    client.post(
+        "/rpc/callctx.verify",
+        json={"token": token},
+        headers=_callctx_header(),
+    )
+    rows = [
+        (ws, ev)
+        for ws, ev in fake_metadata_store.append_audit_calls
+        if ev.event_type == "call-context.invalid"
+    ]
+    assert len(rows) == 1
+    _, event = rows[0]
+    assert event.subject == {"reason": "unknown_kid"}
+    # ``kid`` is public via JWKS and safe to attach for incident response.
+    assert event.payload == {"reason": "unknown_kid", "kid": "deadbeefdeadbeef"}
+    # The raw token must not be in the payload anywhere.
+    assert token not in repr(event.payload)
+
+
+def test_rpc_callctx_verify_bad_signature_emits_audit(
+    client: TestClient,
+    fake_metadata_store: FakeMetadataAdapter,
+) -> None:
+    signed = client.post(
+        "/rpc/callctx.sign",
+        json={
+            "principal_id": "user-1",
+            "workspace_id": WORKSPACE,
+            "caller_component": "api-gateway",
+        },
+    ).json()
+    parts = signed["token"].split(".")
+    bad_sig = parts[2]
+    bad_sig = ("B" if bad_sig[0] == "A" else "A") + bad_sig[1:]
+    tampered = ".".join([parts[0], parts[1], bad_sig])
+    # Clear audit rows from the sign step so we only see the verify-side row.
+    fake_metadata_store.append_audit_calls.clear()
+    client.post(
+        "/rpc/callctx.verify",
+        json={"token": tampered},
+        headers=_callctx_header(),
+    )
+    rows = [
+        (ws, ev)
+        for ws, ev in fake_metadata_store.append_audit_calls
+        if ev.event_type == "call-context.invalid"
+    ]
+    assert len(rows) == 1
+    _, event = rows[0]
+    assert event.subject == {"reason": "bad_signature"}
+    # The tampered JWT must never enter the payload.
+    assert tampered not in repr(event.payload)
+    assert tampered not in repr(event.subject)
+
+
+def test_rpc_callctx_verify_valid_token_does_not_emit_audit(
+    client: TestClient,
+    fake_metadata_store: FakeMetadataAdapter,
+) -> None:
+    signed = client.post(
+        "/rpc/callctx.sign",
+        json={
+            "principal_id": "user-1",
+            "workspace_id": WORKSPACE,
+            "caller_component": "api-gateway",
+        },
+    ).json()
+    fake_metadata_store.append_audit_calls.clear()
+    resp = client.post(
+        "/rpc/callctx.verify",
+        json={"token": signed["token"]},
+        headers=_callctx_header(),
+    )
+    assert resp.json()["valid"] is True
+    rows = [
+        ev
+        for _, ev in fake_metadata_store.append_audit_calls
+        if ev.event_type == "call-context.invalid"
+    ]
+    assert rows == []
