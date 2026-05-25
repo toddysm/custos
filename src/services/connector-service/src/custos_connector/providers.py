@@ -80,8 +80,8 @@ class _RefreshableAdapter(Protocol):
 class Providers:
     """Bundle of the SPL providers Connector Service consumes.
 
-    Held on ``app.state.providers`` and exposed to FastAPI handlers via
-    :func:`get_catalog_store` / :func:`get_metadata_store`.
+    Held on ``app.state.providers`` and used by the application's request-
+    handling layer to access the catalog and metadata stores.
     """
 
     catalog_store: CatalogStoreProvider
