@@ -71,7 +71,8 @@ dev = [
     # guarantees that ``compute_digest`` must satisfy.
     "hypothesis>=6.99",
     # OCI Referrers integration tests (CONN-IMPL-007) spin up a local
-    # registry container when ``CUSTOS_OCI_REGISTRY_URL`` is not provided.
+    # registry container when ``CUSTOS_OCI_REGISTRY_DISTRIBUTION_URL`` and
+    # ``CUSTOS_OCI_REGISTRY_ZOT_URL`` are not provided.
     # We don't pull a registry-specific testcontainers extra because the
     # base ``DockerContainer`` is sufficient; the dep stays implicit.
 ]
