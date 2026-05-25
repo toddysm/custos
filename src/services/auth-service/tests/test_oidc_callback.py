@@ -433,10 +433,12 @@ def test_oidc_callback_bare_app_returns_503_oidc_not_implemented() -> None:
     )
 
     app = FastAPI()
-    # Mount the route at its real prefix and wire only the
-    # ``get_settings`` dependency the route needs. No
-    # ``MetadataStoreProvider`` because the route exits before any
-    # audit-store call on the not-implemented branch.
+    # Mount the route at its real prefix and override both
+    # ``get_settings`` and ``get_metadata_store``. Even though the
+    # ``oidc_not_implemented`` branch does not use the metadata store,
+    # FastAPI still resolves ``get_metadata_store`` as a dependency,
+    # and the default provider would raise on a bare app with no
+    # ``app.state.providers``.
     from custos_auth.api.dependencies import get_metadata_store, get_settings
 
     # ``oidc_router`` already declares its ``/v1`` prefix on the
