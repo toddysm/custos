@@ -1,8 +1,9 @@
 """Runtime configuration parsed from environment variables (CONN-IMPL-003).
 
-Connector Service is configured exclusively through the ``CONN_*`` env vars
-documented in ``design/components/connector-service/design.md`` and projected
-by the Helm subchart at ``deploy/helm/charts/connector-service/templates/``.
+Connector Service is configured through the ``CONN_*`` env vars documented
+in ``design/components/connector-service/design.md`` and projected by the
+Helm subchart at ``deploy/helm/charts/connector-service/templates/``. This
+module also reads ``ENVIRONMENT`` to enforce the production dev-shim guard.
 
 This module is deliberately stdlib-only so it can be imported by both the
 ASGI app factory and lightweight test fixtures without dragging in FastAPI
