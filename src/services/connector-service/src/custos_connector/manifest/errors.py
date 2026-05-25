@@ -107,15 +107,16 @@ class ManifestValidationError(Exception):
             fragments).
         path: JSON-Pointer-style ``"/"``-joined path to the offending
             element (empty string for root-level errors).
+        issues: Optional supplementary validation issues accompanying the
+            primary error. Empty by default.
     """
 
     code: ValidationErrorCode
     detail: str
     path: str = ""
-    # Optional secondary errors collected from the same jsonschema pass.
-    # Kept empty by default to preserve the "first hard error wins"
-    # caller contract; populated only when callers explicitly opt into
-    # the multi-error mode by calling ``validate_manifest(..., collect=True)``.
+    # Optional supplementary validation issues accompanying the primary
+    # error. Empty by default to preserve the existing "first hard error
+    # wins" caller contract.
     issues: tuple[ManifestValidationIssue, ...] = field(default_factory=tuple)
 
     def __str__(self) -> str:  # pragma: no cover - trivial
