@@ -247,13 +247,14 @@ async def resolve_fallback_tag(
     tag = fallback_tag_for_digest(subject_digest)
     path = f"/v2/{repository}/manifests/{tag}"
     # Use HEAD so we don't pull the full body just to confirm existence
-    # and read the descriptor headers. Registries that don't support
-    # HEAD on manifests will surface a 405 which we read as "no".
+    # and read the descriptor headers. Do not send the connector
+    # artifact type in Accept here: the manifests endpoint negotiates
+    # on manifest/index media types, and a custom artifactType Accept
+    # can trigger 406 responses on some registries. Registries that
+    # don't support HEAD on manifests will surface a 405 which we read
+    # as "no".
     try:
-        response = await client.head(
-            path,
-            headers={"Accept": CONNECTOR_MANIFEST_MEDIA_TYPE},
-        )
+        response = await client.head(path)
     except httpx.HTTPError:
         return None
     if response.status_code == 404 or response.status_code >= 400:
