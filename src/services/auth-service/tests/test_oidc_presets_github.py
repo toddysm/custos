@@ -14,7 +14,8 @@ def test_name_constant() -> None:
 def test_defaults_shape() -> None:
     defaults = github.defaults()
     assert defaults["issuer_url"] == "https://token.actions.githubusercontent.com"
-    assert defaults["jwks_uri"].endswith("/.well-known/jwks")
+    jwks_uri = defaults["jwks_uri"]
+    assert isinstance(jwks_uri, str) and jwks_uri.endswith("/.well-known/jwks")
     assert defaults["audiences"] == ("custos",)
     assert defaults["algorithms"] == ("RS256",)
     assert defaults["subject_claim"] == "sub"

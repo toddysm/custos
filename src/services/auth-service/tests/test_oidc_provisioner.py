@@ -197,7 +197,7 @@ async def test_provision_propagates_race_condition() -> None:
             return None
         return await original_get(issuer, subject)
 
-    auth.get_oidc_identity = racing_get  # type: ignore[assignment]
+    auth.get_oidc_identity = racing_get  # type: ignore[method-assign]
     # Pre-write the peer's binding so put_oidc_identity raises.
     auth.oidc_identities[(entry.issuer_url, "user-42")] = str(peer_user_id)
 

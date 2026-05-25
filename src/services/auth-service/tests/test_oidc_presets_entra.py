@@ -16,7 +16,8 @@ def test_defaults_omit_issuer_url() -> None:
     # implicit ``common`` issuer would silently accept any tenant.
     defaults = entra.defaults()
     assert "issuer_url" not in defaults
-    assert defaults["jwks_uri"].endswith("/discovery/v2.0/keys")
+    jwks_uri = defaults["jwks_uri"]
+    assert isinstance(jwks_uri, str) and jwks_uri.endswith("/discovery/v2.0/keys")
     assert defaults["algorithms"] == ("RS256",)
     assert defaults["subject_claim"] == "oid"
     assert defaults["group_claim"] == "groups"

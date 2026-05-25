@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import jwt
@@ -100,7 +100,7 @@ def _jwk_from_public_key(public_key: Any, kid: str) -> dict[str, Any]:
         format=serialization.PublicFormat.SubjectPublicKeyInfo,
     )
     jwk_str = RSAAlgorithm.to_jwk(RSAAlgorithm(RSAAlgorithm.SHA256).prepare_key(pem))
-    jwk = json.loads(jwk_str)
+    jwk: dict[str, Any] = json.loads(jwk_str)
     jwk["kid"] = kid
     jwk["alg"] = "RS256"
     jwk["use"] = "sig"
@@ -153,13 +153,16 @@ def _patch_oidc_client(client: TestClient, transport: httpx.MockTransport) -> No
     captured the original client by reference at lifespan time.
     """
     new_client = httpx.AsyncClient(transport=transport)
-    client.app.state.oidc_http_client = new_client
+    from fastapi import FastAPI
+
+    app = cast(FastAPI, client.app)
+    app.state.oidc_http_client = new_client
     from custos_auth.oidc import JwksCache, OidcVerifier
 
     cache = JwksCache(new_client)
-    client.app.state.oidc_jwks_cache = cache
-    issuers = client.app.state.oidc_issuers
-    client.app.state.oidc_verifier = OidcVerifier(issuers.issuers, cache)
+    app.state.oidc_jwks_cache = cache
+    issuers = app.state.oidc_issuers
+    app.state.oidc_verifier = OidcVerifier(issuers.issuers, cache)
 
 
 # ---------------------------------------------------------------------------

@@ -77,7 +77,7 @@ def _jwk_from_public_key(public_key: Any, kid: str) -> dict[str, Any]:
     jwk_str = RSAAlgorithm.to_jwk(RSAAlgorithm(RSAAlgorithm.SHA256).prepare_key(pem))
     import json
 
-    jwk = json.loads(jwk_str)
+    jwk: dict[str, Any] = json.loads(jwk_str)
     jwk["kid"] = kid
     jwk["alg"] = "RS256"
     jwk["use"] = "sig"
