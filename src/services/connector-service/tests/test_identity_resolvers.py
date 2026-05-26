@@ -14,6 +14,7 @@ import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlparse
 
 import pytest
 
@@ -263,7 +264,9 @@ class TestAmazonKmsResolver:
         assert outbound.headers["X-Amz-Target"] == "secretsmanager.GetSecretValue"
         assert outbound.headers["Authorization"].startswith("AWS4-HMAC-SHA256")
         assert outbound.json_body == {"SecretId": "arn:aws:secretsmanager:us-east-1:1:secret:foo"}
-        assert outbound.url.endswith(".amazonaws.com/")
+        parsed = urlparse(outbound.url)
+        assert parsed.hostname is not None
+        assert parsed.hostname == "amazonaws.com" or parsed.hostname.endswith(".amazonaws.com")
         assert signer_calls
 
     @pytest.mark.asyncio
