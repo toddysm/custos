@@ -85,8 +85,10 @@ def _row_to_instance(row: Record) -> ConnectorInstance:
         enabled=bool(row["enabled"]),
         status=row["status"],
         health_status=row["health_status"],
-        target_config=_json_payload(row["target_config"]) or {},
-        credentials_authentication=_json_payload(row["credentials_authentication"]) or {},
+        target_config=_frozen_mapping(_json_payload(row["target_config"])),
+        credentials_authentication=_frozen_mapping(
+            _json_payload(row["credentials_authentication"])
+        ),
         used_capabilities=_decode_capabilities(_json_payload(row["used_capabilities"])),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -102,6 +104,20 @@ def _json_payload(value: Any) -> Any:
     if isinstance(value, (str, bytes, bytearray)):
         return json.loads(value)
     return value
+
+
+def _frozen_mapping(value: Any) -> Mapping[str, Any]:
+    """Return an immutable view over a JSON-derived mapping.
+
+    Matches the repo-wide convention of wrapping JSONB-decoded blobs in
+    ``MappingProxyType(dict(...))`` (see ``catalog.py``, ``definition.py``,
+    ``metadata.py``) so callers cannot accidentally mutate the cached
+    decode through the frozen :class:`ConnectorInstance` dataclass.
+    """
+
+    if not isinstance(value, Mapping):
+        return MappingProxyType({})
+    return MappingProxyType(dict(value))
 
 
 def _decode_capabilities(value: Any) -> tuple[str, ...] | None:
