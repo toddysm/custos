@@ -16,6 +16,7 @@ from custos_spl import (
     AuthStoreProvider,
     CatalogStoreProvider,
     DefinitionStoreProvider,
+    LeaseStoreProvider,
     MetadataStoreProvider,
     MigrationCapable,
     MigrationRequired,
@@ -34,6 +35,7 @@ def test_required_revisions_pinned_to_protocol_class_vars() -> None:
     assert req["CatalogStoreProvider"] == CatalogStoreProvider.SCHEMA_REVISION
     assert req["AuthStoreProvider"] == AuthStoreProvider.SCHEMA_REVISION
     assert req["ArtifactStoreProvider"] == ArtifactStoreProvider.SCHEMA_REVISION
+    assert req["LeaseStoreProvider"] == LeaseStoreProvider.SCHEMA_REVISION
 
 
 def test_required_revisions_excludes_query_facades() -> None:
@@ -102,22 +104,19 @@ def test_check_revisions_passes_when_all_revisions_present() -> None:
 def test_check_revisions_unions_across_multiple_adapters() -> None:
     """Two adapters can collectively cover what one cannot."""
     req = required_revisions()
-    # Adapter A covers Metadata + Definition; B covers Catalog + Auth + Artifact.
+    # Adapter A covers Metadata + Definition; B covers Catalog + Auth + Artifact + Lease.
     a = _FakeAdapter(
         {
             "MetadataStoreProvider": set(range(1, req["MetadataStoreProvider"] + 1)),
-            "DefinitionStoreProvider": set(
-                range(1, req["DefinitionStoreProvider"] + 1)
-            ),
+            "DefinitionStoreProvider": set(range(1, req["DefinitionStoreProvider"] + 1)),
         }
     )
     b = _FakeAdapter(
         {
             "CatalogStoreProvider": set(range(1, req["CatalogStoreProvider"] + 1)),
             "AuthStoreProvider": set(range(1, req["AuthStoreProvider"] + 1)),
-            "ArtifactStoreProvider": set(
-                range(1, req["ArtifactStoreProvider"] + 1)
-            ),
+            "ArtifactStoreProvider": set(range(1, req["ArtifactStoreProvider"] + 1)),
+            "LeaseStoreProvider": set(range(1, req["LeaseStoreProvider"] + 1)),
         }
     )
     check_revisions([a, b])
@@ -126,9 +125,7 @@ def test_check_revisions_unions_across_multiple_adapters() -> None:
 def test_check_revisions_skips_non_capable_objects() -> None:
     """Stateless objects (e.g. query-facade adapters) pass through silently."""
     req = required_revisions()
-    capable = _FakeAdapter(
-        {iface: set(range(1, rev + 1)) for iface, rev in req.items()}
-    )
+    capable = _FakeAdapter({iface: set(range(1, rev + 1)) for iface, rev in req.items()})
 
     class _StatelessFacade:
         # No declared_revisions, no apply_pending — must be skipped.
@@ -144,9 +141,7 @@ def test_check_revisions_raises_when_required_revision_missing() -> None:
     """Adapter at lower revision must surface a gap for the platform's required level."""
     req = required_revisions()
     # Cover everything EXCEPT the topmost MetadataStoreProvider revision.
-    declared = {
-        iface: set(range(1, rev + 1)) for iface, rev in req.items()
-    }
+    declared = {iface: set(range(1, rev + 1)) for iface, rev in req.items()}
     declared["MetadataStoreProvider"].discard(req["MetadataStoreProvider"])
     adapter = _FakeAdapter(declared)
 
@@ -166,6 +161,7 @@ def test_check_revisions_raises_with_no_adapters() -> None:
     assert "CatalogStoreProvider" in gap_ifaces
     assert "AuthStoreProvider" in gap_ifaces
     assert "ArtifactStoreProvider" in gap_ifaces
+    assert "LeaseStoreProvider" in gap_ifaces
 
 
 def test_check_revisions_reports_sorted_gaps() -> None:

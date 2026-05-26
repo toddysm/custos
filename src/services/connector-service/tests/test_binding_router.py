@@ -35,9 +35,11 @@ from custos_connector.settings import Settings
 from tests._fakes import (
     FakeCatalogAdapter,
     FakeConnectorInstanceAdapter,
+    FakeLeaseAdapter,
     FakeMetadataAdapter,
     StubPluginBinder,
     build_bind_for_step_service,
+    build_lease_manager,
 )
 
 _BASE_SETTINGS = Settings(
@@ -155,6 +157,7 @@ def _build_providers(
     catalog = catalog or FakeCatalogAdapter(applied_revisions={1, 2})
     instances = instances or FakeConnectorInstanceAdapter(applied_revisions={1})
     metadata = metadata or FakeMetadataAdapter(applied_revisions={1, 2, 3, 4})
+    leases = FakeLeaseAdapter(applied_revisions={1})
     registry = IdentityResolverRegistry(resolvers=[_StubResolver()])
     binder = plugin_binder or StubPluginBinder()
     service = build_bind_for_step_service(
@@ -167,9 +170,11 @@ def _build_providers(
     return Providers(
         catalog_store=catalog,  # type: ignore[arg-type]
         instance_store=instances,  # type: ignore[arg-type]
+        lease_store=leases,  # type: ignore[arg-type]
         metadata_store=metadata,  # type: ignore[arg-type]
         identity_registry=registry,
         bind_for_step_service=service,
+        lease_manager=build_lease_manager(lease_store=leases, metadata_store=metadata),
     )
 
 

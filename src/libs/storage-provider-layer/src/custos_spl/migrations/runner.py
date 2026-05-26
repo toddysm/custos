@@ -46,6 +46,7 @@ from custos_spl.interfaces.artifact_store import ArtifactStoreProvider
 from custos_spl.interfaces.auth_store import AuthStoreProvider
 from custos_spl.interfaces.catalog_store import CatalogStoreProvider
 from custos_spl.interfaces.definition_store import DefinitionStoreProvider
+from custos_spl.interfaces.lease_store import LeaseStoreProvider
 from custos_spl.interfaces.metadata_store import MetadataStoreProvider
 
 # Stateless query facades pin SCHEMA_REVISION to 0 and own no schema —
@@ -58,6 +59,7 @@ _STATEFUL_INTERFACES: tuple[type, ...] = (
     CatalogStoreProvider,
     AuthStoreProvider,
     ArtifactStoreProvider,
+    LeaseStoreProvider,
 )
 
 
@@ -134,9 +136,7 @@ def check_revisions(adapters: Iterable[object]) -> None:
             declared.setdefault(iface_name, set()).update(revs)
 
     gaps: list[tuple[str, int]] = sorted(
-        (iface, rev)
-        for iface, rev in required.items()
-        if rev not in declared[iface]
+        (iface, rev) for iface, rev in required.items() if rev not in declared[iface]
     )
     if gaps:
         raise MigrationRequired(gaps)
