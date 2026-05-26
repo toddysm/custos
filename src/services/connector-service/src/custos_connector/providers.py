@@ -157,9 +157,9 @@ def load_identity_registry(
 
     Wires the four built-in resolvers (CONN-IMPL-015) through a shared
     :class:`HttpxAsyncHttpClient` so we have a single HTTP client to
-    close on shutdown. The httpx client itself is created lazily on
-    first import inside :class:`HttpxAsyncHttpClient.request` — the
-    factory here does not open a socket.
+    close on shutdown. Constructing an ``httpx.AsyncClient`` is side-effect
+    free (no sockets are opened until the first request), so this factory
+    remains safe to call during startup.
 
     Operators that need vendor (``x-<vendor>``) resolvers register them
     via :meth:`IdentityResolverRegistry.register_vendor_resolver` after
