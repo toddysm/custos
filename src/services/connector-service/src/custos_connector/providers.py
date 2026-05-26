@@ -105,14 +105,16 @@ def load_providers(settings: Settings) -> Providers:
     from custos_pg import PgCatalogAdapter, PgConnectorInstanceAdapter, PgMetadataAdapter
     from custos_pg.pool import LazyPool
 
+    metadata_lazy_pool = LazyPool(settings.metadata_store_dsn)
+
     catalog_store = PgCatalogAdapter(
         lazy=LazyPool(settings.catalog_store_dsn),
     )
     instance_store = PgConnectorInstanceAdapter(
-        lazy=LazyPool(settings.metadata_store_dsn),
+        lazy=metadata_lazy_pool,
     )
     metadata_store = PgMetadataAdapter(
-        lazy=LazyPool(settings.metadata_store_dsn),
+        lazy=metadata_lazy_pool,
     )
     # The adapters declare SCHEMA_REVISION as a bare class attr rather
     # than a ``ClassVar[int]``, so mypy can't see them as Protocol-conforming
