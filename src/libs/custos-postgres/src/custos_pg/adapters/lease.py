@@ -256,9 +256,15 @@ class PgLeaseAdapter:
                 # adapter contract tight: refresh-after-release returns
                 # None just like refresh of an unknown id, so the Lease
                 # Manager does not need to fetch+check.
+                #
+                # ``updated_at`` is the wall clock of the mutation, not
+                # ``new_expires_at`` (which is in the future) — the SPL
+                # contract documents ``updated_at`` as "last modified at",
+                # so we use SQL ``now()`` and let Postgres timestamp it
+                # consistently with ``created_at`` (same DEFAULT).
                 row = await conn.fetchrow(
                     "UPDATE lease.lease "
-                    "SET expires_at = $3, updated_at = $4 "
+                    "SET expires_at = $3, updated_at = now() "
                     "WHERE workspace_id = $1 "
                     "  AND lease_id = $2 "
                     "  AND released_at IS NULL "
@@ -268,7 +274,6 @@ class PgLeaseAdapter:
                     "revoke_reason, created_at, updated_at",
                     str(workspace_id),
                     lease_id,
-                    new_expires_at,
                     new_expires_at,
                 )
         except Exception as exc:
@@ -349,7 +354,14 @@ class PgLeaseAdapter:
         limit: int | None = None,
     ) -> Page[Lease]:
         eff_limit = _resolve_limit(limit)
-        where: list[str] = ["workspace_id = $1", "released_at IS NULL"]
+        # "Active" per the SPL contract means "not released AND not yet
+        # expired at SQL evaluation time" — filtering both keeps expired
+        # rows from poisoning startup rehydration in the Lease Manager.
+        where: list[str] = [
+            "workspace_id = $1",
+            "released_at IS NULL",
+            "expires_at > now()",
+        ]
         params: list[Any] = [str(workspace_id)]
         if filter is not None:
             if filter.run_id is not None:

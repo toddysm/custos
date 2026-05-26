@@ -21,6 +21,8 @@ and the Phase B integration test that drives the real ``PgCatalogAdapter`` /
 
 from __future__ import annotations
 
+import base64
+import json
 from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 from datetime import UTC, datetime
@@ -366,6 +368,24 @@ class FakeConnectorInstanceAdapter:
         return Page(items=ws_rows[start:end], next_cursor=next_cursor)
 
 
+def _encode_lease_cursor(issued_at: datetime, lease_id: str) -> Cursor:
+    """Mirrors :func:`custos_pg.adapters.lease._encode_cursor`.
+
+    Base64-encoded JSON of ``[issued_at_iso, lease_id]`` so the fake's
+    cursor shape is wire-compatible with :class:`PgLeaseAdapter` — a
+    pagination-test that round-trips a cursor through the fake exercises
+    the same encoding that production parses.
+    """
+    raw = json.dumps([issued_at.isoformat(), lease_id]).encode("utf-8")
+    return Cursor(token=base64.urlsafe_b64encode(raw).decode("ascii"))
+
+
+def _decode_lease_cursor(cursor: Cursor) -> tuple[datetime, str]:
+    raw = base64.urlsafe_b64decode(cursor.token.encode("ascii"))
+    issued_at_iso, lease_id = json.loads(raw)
+    return datetime.fromisoformat(issued_at_iso), str(lease_id)
+
+
 class FakeLeaseAdapter:
     """In-memory ``LeaseStoreProvider`` for Lease Manager unit tests.
 
@@ -443,6 +463,10 @@ class FakeLeaseAdapter:
         current = self._rows.get(key)
         if current is None or current.released_at is not None:
             return None
+        # ``updated_at`` is the wall clock of the mutation, not
+        # ``new_expires_at`` (which is in the future) — mirrors the
+        # SPL contract documented on ``LeaseStoreProvider.refresh_lease``
+        # and the SQL ``now()`` used by :class:`PgLeaseAdapter`.
         updated = Lease(
             workspace_id=current.workspace_id,
             lease_id=current.lease_id,
@@ -459,7 +483,7 @@ class FakeLeaseAdapter:
             revoked_at=current.revoked_at,
             revoke_reason=current.revoke_reason,
             created_at=current.created_at,
-            updated_at=new_expires_at,
+            updated_at=datetime.now(UTC),
         )
         self._rows[key] = updated
         return updated
@@ -530,10 +554,15 @@ class FakeLeaseAdapter:
         limit: int | None = None,
     ) -> Page[Lease]:
         ws = str(workspace_id)
+        # "Active" per the SPL contract excludes both released rows and
+        # already-expired rows — mirrors the ``expires_at > now()`` filter
+        # in :class:`PgLeaseAdapter.list_active_leases` so cap-rehydration
+        # tests cannot pass against the fake and fail in production.
+        now = datetime.now(UTC)
         rows = [
             row
             for (row_ws, _), row in self._rows.items()
-            if row_ws == ws and row.released_at is None
+            if row_ws == ws and row.released_at is None and row.expires_at > now
         ]
         if filter is not None:
             if filter.run_id is not None:
@@ -549,14 +578,26 @@ class FakeLeaseAdapter:
                     if str(r.connector_instance_id) == str(filter.connector_instance_id)
                 ]
         rows.sort(key=lambda r: (-r.issued_at.timestamp(), str(r.lease_id)))
+        # Mirror PgLeaseAdapter's keyset cursor (base64-encoded JSON of
+        # ``[issued_at_iso, lease_id]``) so pagination shape matches
+        # production and a malformed token is rejected the same way.
         start = 0
         if cursor is not None:
-            try:
-                start = int(cursor.token)
-            except ValueError:  # pragma: no cover - defensive
-                start = 0
+            ts, lid = _decode_lease_cursor(cursor)
+            for i, r in enumerate(rows):
+                # Same boundary as PgLeaseAdapter: rows ordered by
+                # ``(issued_at DESC, lease_id ASC)`` so the next page
+                # starts at the first row strictly past ``(ts, lid)``.
+                if r.issued_at < ts or (r.issued_at == ts and str(r.lease_id) > lid):
+                    start = i
+                    break
+            else:
+                start = len(rows)
         end = len(rows) if limit is None else min(start + limit, len(rows))
-        next_cursor = Cursor(token=str(end)) if end < len(rows) else None
+        next_cursor: Cursor | None = None
+        if end < len(rows):
+            last = rows[end - 1]
+            next_cursor = _encode_lease_cursor(last.issued_at, last.lease_id)
         return Page(items=rows[start:end], next_cursor=next_cursor)
 
 
