@@ -47,6 +47,7 @@ workspace" so cross-workspace existence cannot be probed.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 from uuid import uuid4
@@ -58,10 +59,23 @@ from custos_spl.interfaces.connector_instance_store import (
     ConnectorInstanceStoreProvider,
 )
 
-from custos_connector.audit import audit_instance_created, audit_instance_updated
+from custos_connector.audit import (
+    audit_health_check_completed,
+    audit_health_check_invoked,
+    audit_instance_created,
+    audit_instance_disabled,
+    audit_instance_enabled,
+    audit_instance_updated,
+)
 from custos_connector.instances.validator import (
     InstanceConfigValidationError,
     validate_instance_config,
+)
+from custos_connector.runtime import (
+    DockerCliHookRunner,
+    HealthResult,
+    PluginInvoker,
+    PluginRuntimeError,
 )
 
 if TYPE_CHECKING:
@@ -76,6 +90,8 @@ if TYPE_CHECKING:
 #: enforce on top of this. Until then this is the platform-wide
 #: ceiling.
 _MAX_LEASE_TTL_SECONDS: Final[int] = 30 * 24 * 60 * 60  # 30 days
+_DEFAULT_HEALTH_CACHE_TTL_SECONDS: Final[int] = 60
+_SYSTEM_ACTOR: Final[str] = "system:connector-service"
 
 #: Fields the PATCH surface accepts.
 _PATCHABLE_FIELDS: Final[frozenset[str]] = frozenset({"name", "lease_ttl_seconds", "enabled"})
@@ -155,6 +171,31 @@ class InvalidInstancePayload(InstanceServiceError):
     code: str = "connector.instance_invalid_payload"
 
 
+class ActivationProbeFailed(InstanceServiceError):
+    """Raised when enable() cannot promote due to an unhealthy probe."""
+
+    code: str = "connector.instance_activation_probe_failed"
+
+    def __init__(self, *, instance_id: str, detail: str) -> None:
+        self.instance_id = instance_id
+        self.detail = detail
+        super().__init__(
+            f"connector instance {instance_id!r} cannot be enabled; health probe failed: {detail}"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class InstanceHealthSnapshot:
+    """Cached + returned health probe snapshot for one connector instance."""
+
+    workspace_id: str
+    instance_id: str
+    healthy: bool
+    detail: str | None
+    checked_at: datetime
+    source: str
+
+
 # ---------------------------------------------------------------------------
 # Service
 # ---------------------------------------------------------------------------
@@ -176,10 +217,17 @@ class InstanceService:
         instance_store: ConnectorInstanceStoreProvider,
         catalog_store: CatalogStoreProvider,
         metadata_store: MetadataStoreProvider,
+        plugin_invoker: PluginInvoker | None = None,
+        health_cache_ttl_seconds: int = _DEFAULT_HEALTH_CACHE_TTL_SECONDS,
     ) -> None:
         self._instances = instance_store
         self._catalog = catalog_store
         self._metadata = metadata_store
+        self._runtime = (
+            plugin_invoker if plugin_invoker is not None else PluginInvoker(DockerCliHookRunner())
+        )
+        self._health_cache_ttl_seconds = max(0, health_cache_ttl_seconds)
+        self._health_cache: dict[tuple[str, str], InstanceHealthSnapshot] = {}
 
     # ------------------------------------------------------------------
     # Create
@@ -255,7 +303,7 @@ class InstanceService:
             name=name,
             lease_ttl_seconds=lease_ttl_seconds,
             enabled=enabled,
-            status="active",
+            status="active" if enabled else "disabled",
             health_status=None,
             target_config=effective_target_config,
             credentials_authentication=effective_credentials_auth,
@@ -384,6 +432,189 @@ class InstanceService:
         return after
 
     # ------------------------------------------------------------------
+    # Activation + health (CONN-IMPL-013)
+    # ------------------------------------------------------------------
+
+    async def disable(
+        self,
+        workspace_id: str,
+        instance_id: str,
+        *,
+        actor: str,
+    ) -> ConnectorInstance:
+        """Disable an instance and emit ``connector.instance.disabled``."""
+        before = await self.get(workspace_id, instance_id)
+        if (not before.enabled) and before.status == "disabled":
+            return before
+
+        after = await self._instances.patch_connector_instance(
+            WorkspaceId(workspace_id),
+            ConnectorInstanceId(instance_id),
+            {"enabled": False, "status": "disabled"},
+        )
+        if after is None:
+            raise ConnectorInstanceNotFound(workspace_id=workspace_id, instance_id=instance_id)
+
+        await audit_instance_disabled(
+            self._metadata,
+            workspace_id=workspace_id,
+            actor=actor,
+            instance_id=instance_id,
+        )
+        return after
+
+    async def enable(
+        self,
+        workspace_id: str,
+        instance_id: str,
+        *,
+        actor: str,
+    ) -> ConnectorInstance:
+        """Enable an instance; requires a successful synchronous probe."""
+        current = await self.get(workspace_id, instance_id)
+        if current.enabled and current.status == "active":
+            return current
+
+        snapshot = await self._probe_and_refresh(
+            workspace_id=workspace_id,
+            instance=current,
+            emit_invoked=False,
+            invoked_actor=actor,
+        )
+        if not snapshot.healthy:
+            raise ActivationProbeFailed(
+                instance_id=instance_id,
+                detail=snapshot.detail or "plugin reported unhealthy",
+            )
+
+        after = await self._instances.patch_connector_instance(
+            WorkspaceId(workspace_id),
+            ConnectorInstanceId(instance_id),
+            {
+                "enabled": True,
+                "status": "active",
+                "health_status": "healthy",
+            },
+        )
+        if after is None:
+            raise ConnectorInstanceNotFound(workspace_id=workspace_id, instance_id=instance_id)
+
+        await audit_instance_enabled(
+            self._metadata,
+            workspace_id=workspace_id,
+            actor=actor,
+            instance_id=instance_id,
+            health_status=after.health_status,
+        )
+        return after
+
+    async def get_health(
+        self,
+        workspace_id: str,
+        instance_id: str,
+    ) -> InstanceHealthSnapshot:
+        """Return cached health snapshot when fresh, else probe and refresh."""
+        instance = await self.get(workspace_id, instance_id)
+        cached = self._health_cache.get((workspace_id, instance_id))
+        if cached is not None and self._is_cache_fresh(cached):
+            return InstanceHealthSnapshot(
+                workspace_id=cached.workspace_id,
+                instance_id=cached.instance_id,
+                healthy=cached.healthy,
+                detail=cached.detail,
+                checked_at=cached.checked_at,
+                source="cache",
+            )
+        return await self._probe_and_refresh(
+            workspace_id=workspace_id,
+            instance=instance,
+            emit_invoked=False,
+            invoked_actor=None,
+        )
+
+    async def force_health_check(
+        self,
+        workspace_id: str,
+        instance_id: str,
+        *,
+        actor: str,
+    ) -> InstanceHealthSnapshot:
+        """Bypass cache and synchronously probe plugin health."""
+        instance = await self.get(workspace_id, instance_id)
+        return await self._probe_and_refresh(
+            workspace_id=workspace_id,
+            instance=instance,
+            emit_invoked=True,
+            invoked_actor=actor,
+        )
+
+    async def _probe_and_refresh(
+        self,
+        *,
+        workspace_id: str,
+        instance: ConnectorInstance,
+        emit_invoked: bool,
+        invoked_actor: str | None,
+    ) -> InstanceHealthSnapshot:
+        row = await self._catalog.get_connector_type_version(instance.type, instance.version)
+        if row is None:
+            raise ConnectorTypeNotRegistered(type=instance.type, version=instance.version)
+
+        healthy = False
+        detail: str | None = None
+        checked_at = datetime.now(UTC)
+        try:
+            result: HealthResult = await self._runtime.health(connector=row, instance=instance)
+            healthy = result.healthy
+            detail = result.detail
+            checked_at = result.checked_at
+        except PluginRuntimeError as exc:
+            healthy = False
+            detail = exc.detail
+
+        health_status = "healthy" if healthy else "unhealthy"
+        await self._instances.patch_connector_instance(
+            WorkspaceId(workspace_id),
+            ConnectorInstanceId(str(instance.instance_id)),
+            {"health_status": health_status},
+        )
+
+        snapshot = InstanceHealthSnapshot(
+            workspace_id=workspace_id,
+            instance_id=str(instance.instance_id),
+            healthy=healthy,
+            detail=detail,
+            checked_at=checked_at,
+            source="probe",
+        )
+        self._health_cache[(workspace_id, str(instance.instance_id))] = snapshot
+
+        if emit_invoked and invoked_actor is not None:
+            await audit_health_check_invoked(
+                self._metadata,
+                workspace_id=workspace_id,
+                actor=invoked_actor,
+                instance_id=str(instance.instance_id),
+                healthy=healthy,
+                detail=detail,
+            )
+        await audit_health_check_completed(
+            self._metadata,
+            workspace_id=workspace_id,
+            actor=_SYSTEM_ACTOR,
+            instance_id=str(instance.instance_id),
+            healthy=healthy,
+            detail=detail,
+        )
+        return snapshot
+
+    def _is_cache_fresh(self, snapshot: InstanceHealthSnapshot) -> bool:
+        if self._health_cache_ttl_seconds <= 0:
+            return False
+        age = datetime.now(UTC) - snapshot.checked_at
+        return age.total_seconds() <= self._health_cache_ttl_seconds
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
@@ -394,10 +625,12 @@ class InstanceService:
 
 
 __all__ = [
+    "ActivationProbeFailed",
     "ConnectorInstanceNotFound",
     "ConnectorTypeNotRegistered",
     "ImmutableFieldUpdate",
     "InstanceConfigValidationError",
+    "InstanceHealthSnapshot",
     "InstanceService",
     "InstanceServiceError",
     "InvalidInstancePayload",

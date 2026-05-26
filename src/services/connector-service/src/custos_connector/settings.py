@@ -54,6 +54,10 @@ ENV_LEASE_MAX_CONCURRENT: Final[str] = "CONN_LEASE_MAX_CONCURRENT"
 #: design pins ``>= 10`` so we refuse to honour smaller values).
 ENV_PULL_LOOP_MIN_INTERVAL_SEC: Final[str] = "CONN_PULL_LOOP_MIN_INTERVAL_SEC"
 
+#: Optional. Connector-instance health snapshot cache TTL in seconds
+#: (CONN-IMPL-013 default = 60).
+ENV_HEALTH_CACHE_TTL_S: Final[str] = "CONN_HEALTH_CACHE_TTL_S"
+
 #: Optional. PKI issuer for the secret-bridge sidecar mTLS material
 #: (CONN-IMPL-020).
 ENV_SIDECAR_MTLS_ISSUER: Final[str] = "CONN_SIDECAR_MTLS_ISSUER"
@@ -67,6 +71,7 @@ DEFAULT_PUBLISH_MAX_BODY_MB: Final[int] = 4
 DEFAULT_SIDECAR_DEFAULT_TTL: Final[int] = 600
 DEFAULT_LEASE_MAX_CONCURRENT: Final[int] = 16
 DEFAULT_PULL_LOOP_MIN_INTERVAL_SEC: Final[int] = 10
+DEFAULT_HEALTH_CACHE_TTL_S: Final[int] = 60
 
 #: Minimum pull-loop interval the design allows (CONN-IMPL-023). Set
 #: ``CONN_PULL_LOOP_MIN_INTERVAL_SEC`` above this; smaller values are rejected.
@@ -90,6 +95,7 @@ class Settings:
     sidecar_default_ttl_sec: int
     lease_max_concurrent: int
     pull_loop_min_interval_sec: int
+    health_cache_ttl_s: int
     sidecar_mtls_issuer: str | None
     environment: str
 
@@ -155,12 +161,14 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
             DEFAULT_PULL_LOOP_MIN_INTERVAL_SEC,
             minimum=PULL_LOOP_HARD_FLOOR_SEC,
         ),
+        health_cache_ttl_s=_opt_int(ENV_HEALTH_CACHE_TTL_S, src, DEFAULT_HEALTH_CACHE_TTL_S),
         sidecar_mtls_issuer=mtls_issuer,
         environment=src.get(ENV_ENVIRONMENT, "development").strip() or "development",
     )
 
 
 __all__ = [
+    "DEFAULT_HEALTH_CACHE_TTL_S",
     "DEFAULT_LEASE_MAX_CONCURRENT",
     "DEFAULT_OCI_REFERRERS_TIMEOUT_MS",
     "DEFAULT_PUBLISH_MAX_BODY_MB",
@@ -170,6 +178,7 @@ __all__ = [
     "ENV_CATALOG_ENDPOINT",
     "ENV_CATALOG_STORE",
     "ENV_ENVIRONMENT",
+    "ENV_HEALTH_CACHE_TTL_S",
     "ENV_LEASE_MAX_CONCURRENT",
     "ENV_METADATA_STORE",
     "ENV_OCI_REFERRERS_TIMEOUT_MS",

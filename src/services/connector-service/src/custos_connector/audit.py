@@ -70,6 +70,10 @@ EMIT_FAILURES_TOTAL = _meter.create_counter(
 
 EVENT_INSTANCE_CREATED: Final[str] = "connector.instance.created"
 EVENT_INSTANCE_UPDATED: Final[str] = "connector.instance.updated"
+EVENT_INSTANCE_ENABLED: Final[str] = "connector.instance.enabled"
+EVENT_INSTANCE_DISABLED: Final[str] = "connector.instance.disabled"
+EVENT_HEALTH_CHECK_INVOKED: Final[str] = "connector.health-check.invoked"
+EVENT_HEALTH_CHECK_COMPLETED: Final[str] = "connector.health-check.completed"
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +188,83 @@ async def audit_instance_updated(
     )
 
 
+async def audit_instance_enabled(
+    metadata_store: MetadataStoreProvider,
+    *,
+    workspace_id: str,
+    actor: str,
+    instance_id: str,
+    health_status: str | None,
+) -> None:
+    """Emit ``connector.instance.enabled`` after enable transition succeeds."""
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_INSTANCE_ENABLED,
+        actor=actor,
+        subject={"instance_id": instance_id},
+        payload={"health_status": health_status},
+    )
+
+
+async def audit_instance_disabled(
+    metadata_store: MetadataStoreProvider,
+    *,
+    workspace_id: str,
+    actor: str,
+    instance_id: str,
+) -> None:
+    """Emit ``connector.instance.disabled`` after disable transition succeeds."""
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_INSTANCE_DISABLED,
+        actor=actor,
+        subject={"instance_id": instance_id},
+        payload={},
+    )
+
+
+async def audit_health_check_invoked(
+    metadata_store: MetadataStoreProvider,
+    *,
+    workspace_id: str,
+    actor: str,
+    instance_id: str,
+    healthy: bool,
+    detail: str | None,
+) -> None:
+    """Emit ``connector.health-check.invoked`` for operator force-check calls."""
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_HEALTH_CHECK_INVOKED,
+        actor=actor,
+        subject={"instance_id": instance_id},
+        payload={"healthy": healthy, "detail": detail},
+    )
+
+
+async def audit_health_check_completed(
+    metadata_store: MetadataStoreProvider,
+    *,
+    workspace_id: str,
+    actor: str,
+    instance_id: str,
+    healthy: bool,
+    detail: str | None,
+) -> None:
+    """Emit ``connector.health-check.completed`` for every probe completion."""
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_HEALTH_CHECK_COMPLETED,
+        actor=actor,
+        subject={"instance_id": instance_id},
+        payload={"healthy": healthy, "detail": detail},
+    )
+
+
 # ---------------------------------------------------------------------------
 # Legacy log-only shim (call-context + authz decision events)
 # ---------------------------------------------------------------------------
@@ -218,9 +299,17 @@ def emit_event(name: str, payload: Mapping[str, Any]) -> None:
 
 __all__ = [
     "EMIT_FAILURES_TOTAL",
+    "EVENT_HEALTH_CHECK_COMPLETED",
+    "EVENT_HEALTH_CHECK_INVOKED",
     "EVENT_INSTANCE_CREATED",
+    "EVENT_INSTANCE_DISABLED",
+    "EVENT_INSTANCE_ENABLED",
     "EVENT_INSTANCE_UPDATED",
+    "audit_health_check_completed",
+    "audit_health_check_invoked",
     "audit_instance_created",
+    "audit_instance_disabled",
+    "audit_instance_enabled",
     "audit_instance_updated",
     "emit_event",
     "logger",
