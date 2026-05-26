@@ -82,6 +82,23 @@ class _CacheEntry:
     expires_at: datetime
 
 
+@dataclass(slots=True)
+class _KeyLock:
+    """Per-cache-key serialization primitive.
+
+    The registry holds at most one :class:`asyncio.Lock` per *active*
+    cache key so concurrent callers for the same key collapse onto a
+    single upstream call while callers for *different* keys run in
+    parallel. ``waiters`` is a refcount used to evict the entry from
+    :attr:`IdentityResolverRegistry._key_locks` once nobody is using it
+    — without that, the dict would grow unbounded over the process'
+    lifetime.
+    """
+
+    lock: asyncio.Lock
+    waiters: int = 0
+
+
 class IdentityResolverRegistry:
     """Compose the per-auth-type resolvers and cache their results.
 
@@ -136,7 +153,12 @@ class IdentityResolverRegistry:
         self._resolved_rate_limit = timedelta(seconds=resolved_event_rate_limit_seconds)
         self._last_resolved_emission: dict[tuple[str, str], datetime] = {}
         self._cache: dict[tuple[str, str, str, str], _CacheEntry] = {}
-        self._lock = asyncio.Lock()
+        # Per-cache-key locks let unrelated cache misses proceed in
+        # parallel. ``_key_locks_mutex`` only guards the *dict* — the
+        # actual resolve happens under the per-key lock, so the mutex
+        # is held for microseconds, not the upstream RTT.
+        self._key_locks: dict[tuple[str, str, str, str], _KeyLock] = {}
+        self._key_locks_mutex = asyncio.Lock()
         self._http_transport = http_transport
 
         for resolver in resolvers:
@@ -311,77 +333,119 @@ class IdentityResolverRegistry:
         if cached is not None and cached.expires_at > now:
             return cached.value
 
-        async with self._lock:
-            # Re-check inside the lock so concurrent callers for the
-            # same key collapse onto a single upstream call.
-            now = self._clock()
-            cached = self._cache.get(cache_key)
-            if cached is not None and cached.expires_at > now:
-                return cached.value
+        key_lock = await self._acquire_key_lock(cache_key)
+        try:
+            async with key_lock.lock:
+                # Re-check inside the per-key lock so concurrent callers
+                # for the *same* key collapse onto a single upstream
+                # call. Callers for different keys never block here.
+                now = self._clock()
+                cached = self._cache.get(cache_key)
+                if cached is not None and cached.expires_at > now:
+                    return cached.value
 
-            context = IdentityResolverContext(
-                workspace_id=workspace_id,
-                instance_id=instance_id,
-                lease_ttl_seconds=lease_ttl_seconds,
-                now=self._clock,
-            )
-            try:
-                resolved = await resolver.resolve(
-                    credentials_authentication=credentials_authentication,
-                    context=context,
+                context = IdentityResolverContext(
+                    workspace_id=workspace_id,
+                    instance_id=instance_id,
+                    lease_ttl_seconds=lease_ttl_seconds,
+                    now=self._clock,
                 )
-            except IdentityResolverError as exc:
-                await self._emit_failure(
+                try:
+                    resolved = await resolver.resolve(
+                        credentials_authentication=credentials_authentication,
+                        context=context,
+                    )
+                except IdentityResolverError as exc:
+                    await self._emit_failure(
+                        workspace_id=workspace_id,
+                        actor=actor,
+                        instance_id=instance_id,
+                        authentication_type=authentication_type,
+                        category=category,
+                        error=exc,
+                    )
+                    raise
+
+                if resolved.category is not category:
+                    # A resolver returning a category that disagrees with
+                    # the Loader-derived category is a programming error;
+                    # surface it the same way as a mismatched registration.
+                    category_mismatch = IdentityResolverError(
+                        detail=(
+                            f"resolver for {authentication_type!r} returned "
+                            f"category {resolved.category.value!r} but the "
+                            f"registry expects {category.value!r}"
+                        ),
+                        code=IdentityResolverErrorCode.CATEGORY_MISMATCH,
+                    )
+                    await self._emit_failure(
+                        workspace_id=workspace_id,
+                        actor=actor,
+                        instance_id=instance_id,
+                        authentication_type=authentication_type,
+                        category=category,
+                        error=category_mismatch,
+                    )
+                    raise category_mismatch
+
+                cache_expiry = self._cache_expiry(
+                    resolved=resolved,
+                    lease_ttl_seconds=lease_ttl_seconds,
+                    now=now,
+                )
+                self._cache[cache_key] = _CacheEntry(value=resolved, expires_at=cache_expiry)
+
+                await self._emit_resolved_rate_limited(
                     workspace_id=workspace_id,
                     actor=actor,
                     instance_id=instance_id,
-                    authentication_type=authentication_type,
-                    category=category,
-                    error=exc,
+                    resolved=resolved,
+                    now=now,
                 )
-                raise
-
-            if resolved.category is not category:
-                # A resolver returning a category that disagrees with
-                # the Loader-derived category is a programming error;
-                # surface it the same way as a mismatched registration.
-                category_mismatch = IdentityResolverError(
-                    detail=(
-                        f"resolver for {authentication_type!r} returned "
-                        f"category {resolved.category.value!r} but the "
-                        f"registry expects {category.value!r}"
-                    ),
-                    code=IdentityResolverErrorCode.CATEGORY_MISMATCH,
-                )
-                await self._emit_failure(
-                    workspace_id=workspace_id,
-                    actor=actor,
-                    instance_id=instance_id,
-                    authentication_type=authentication_type,
-                    category=category,
-                    error=category_mismatch,
-                )
-                raise category_mismatch
-
-            cache_expiry = self._cache_expiry(
-                resolved=resolved,
-                lease_ttl_seconds=lease_ttl_seconds,
-                now=now,
-            )
-            self._cache[cache_key] = _CacheEntry(value=resolved, expires_at=cache_expiry)
-
-            await self._emit_resolved_rate_limited(
-                workspace_id=workspace_id,
-                actor=actor,
-                instance_id=instance_id,
-                resolved=resolved,
-                now=now,
-            )
-            return resolved
+                return resolved
+        finally:
+            await self._release_key_lock(cache_key)
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    async def _acquire_key_lock(
+        self,
+        cache_key: tuple[str, str, str, str],
+    ) -> _KeyLock:
+        """Return the per-key lock, incrementing its waiter refcount.
+
+        The mutex around ``_key_locks`` is held only long enough to
+        install/lookup the :class:`_KeyLock` entry; the actual
+        resolve happens under the per-key lock, so unrelated
+        ``cache_key`` callers never serialise behind a slow upstream.
+        """
+        async with self._key_locks_mutex:
+            key_lock = self._key_locks.get(cache_key)
+            if key_lock is None:
+                key_lock = _KeyLock(lock=asyncio.Lock())
+                self._key_locks[cache_key] = key_lock
+            key_lock.waiters += 1
+            return key_lock
+
+    async def _release_key_lock(
+        self,
+        cache_key: tuple[str, str, str, str],
+    ) -> None:
+        """Drop the waiter refcount; evict the entry when it hits zero.
+
+        Without eviction, ``_key_locks`` would grow unbounded over the
+        process' lifetime as bind sites cycle through workspace /
+        instance pairs.
+        """
+        async with self._key_locks_mutex:
+            key_lock = self._key_locks.get(cache_key)
+            if key_lock is None:  # defensive: paired with acquire
+                return
+            key_lock.waiters -= 1
+            if key_lock.waiters <= 0:
+                del self._key_locks[cache_key]
 
     def _lookup(self, authentication_type: str) -> IdentityResolver:
         if authentication_type in self._builtin:

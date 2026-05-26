@@ -8,6 +8,7 @@ and audit behaviour without standing up the real HTTP-backed resolvers.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar
@@ -298,6 +299,163 @@ class TestCache:
         )
         # Lease TTL won the clamp: second call should re-resolve.
         assert len(resolver.calls) == 2
+
+
+class _GatedResolver:
+    """Resolver that blocks each call on an :class:`asyncio.Event`.
+
+    Used to deterministically prove that concurrent resolves for
+    *different* cache keys run in parallel (no global serialization)
+    while concurrent resolves for the *same* cache key collapse onto a
+    single upstream call.
+    """
+
+    authentication_type: ClassVar[str] = "azure-key-vault"
+    category: ClassVar[IdentityCategory] = IdentityCategory.KMS
+
+    def __init__(self) -> None:
+        self.gate = asyncio.Event()
+        self.calls_started = 0
+        self.calls_completed = 0
+        # ``concurrent_peak`` records the maximum number of in-flight
+        # upstream calls observed at any point; > 1 proves unrelated
+        # keys do not serialise behind a slow resolver.
+        self._in_flight = 0
+        self.concurrent_peak = 0
+
+    async def resolve(
+        self,
+        *,
+        credentials_authentication: Mapping[str, Any],
+        context: IdentityResolverContext,
+    ) -> ResolvedIdentity:
+        self.calls_started += 1
+        self._in_flight += 1
+        self.concurrent_peak = max(self.concurrent_peak, self._in_flight)
+        try:
+            await self.gate.wait()
+            return ResolvedIdentity.build(
+                authentication_type=self.authentication_type,
+                category=self.category,
+                material={"secret": "s"},
+                descriptor=(
+                    f"azure-key-vault:{credentials_authentication.get('vaultUri', '?')}"
+                    f"/secrets/{credentials_authentication.get('secretName', '?')}"
+                ),
+                issued_at=context.now(),
+                expires_at=None,
+            )
+        finally:
+            self._in_flight -= 1
+            self.calls_completed += 1
+
+
+class TestConcurrency:
+    @pytest.mark.asyncio
+    async def test_unrelated_cache_misses_run_in_parallel(self) -> None:
+        # Two concurrent resolves for *different* cache keys must not
+        # serialise. With a single global lock the second call would
+        # only start after the first completes, so ``concurrent_peak``
+        # would be 1; with per-key locks both are in flight together
+        # and ``concurrent_peak`` is 2.
+        resolver = _GatedResolver()
+        registry = IdentityResolverRegistry(resolvers=[resolver])
+
+        async def _resolve(secret: str) -> ResolvedIdentity:
+            return await registry.resolve(
+                workspace_id="ws-1",
+                actor="connector-service",
+                instance_id="inst-A",
+                authentication_type="azure-key-vault",
+                credentials_authentication={
+                    "vaultUri": "https://v.example",
+                    "secretName": secret,
+                },
+                lease_ttl_seconds=600,
+            )
+
+        task_a = asyncio.create_task(_resolve("foo"))
+        task_b = asyncio.create_task(_resolve("bar"))
+
+        # Yield control until both tasks are parked inside the
+        # resolver. Without per-key locks, only the first ever enters
+        # ``resolver.resolve``.
+        for _ in range(50):
+            if resolver.calls_started >= 2:
+                break
+            await asyncio.sleep(0)
+        assert resolver.calls_started == 2, "second cache miss serialised behind the first"
+
+        resolver.gate.set()
+        results = await asyncio.gather(task_a, task_b)
+        assert {r.descriptor for r in results} == {
+            "azure-key-vault:https://v.example/secrets/foo",
+            "azure-key-vault:https://v.example/secrets/bar",
+        }
+        assert resolver.concurrent_peak == 2
+
+    @pytest.mark.asyncio
+    async def test_same_key_concurrent_callers_collapse_onto_one_resolve(self) -> None:
+        # Two concurrent resolves for the *same* cache key must run
+        # the upstream resolver exactly once; the second caller blocks
+        # on the per-key lock, re-checks the cache on entry, and
+        # returns the cached value.
+        resolver = _GatedResolver()
+        registry = IdentityResolverRegistry(resolvers=[resolver])
+
+        async def _resolve() -> ResolvedIdentity:
+            return await registry.resolve(
+                workspace_id="ws-1",
+                actor="connector-service",
+                instance_id="inst-A",
+                authentication_type="azure-key-vault",
+                credentials_authentication={
+                    "vaultUri": "https://v.example",
+                    "secretName": "shared",
+                },
+                lease_ttl_seconds=600,
+            )
+
+        task_a = asyncio.create_task(_resolve())
+        task_b = asyncio.create_task(_resolve())
+
+        # Park both tasks. ``calls_started`` must stay at 1 because
+        # task_b is blocked on the per-key lock, not the gate.
+        for _ in range(50):
+            if resolver.calls_started >= 1:
+                break
+            await asyncio.sleep(0)
+        # Give task_b a chance to also reach (and block on) the
+        # per-key lock without entering the resolver.
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert resolver.calls_started == 1
+
+        resolver.gate.set()
+        results = await asyncio.gather(task_a, task_b)
+        assert results[0] is results[1]
+        assert resolver.calls_completed == 1
+
+    @pytest.mark.asyncio
+    async def test_per_key_lock_dict_is_cleaned_up(self) -> None:
+        # The per-key lock map must not grow unbounded. After all
+        # waiters release, the entry is evicted.
+        resolver = _StubResolver()
+        registry = IdentityResolverRegistry(resolvers=[resolver])
+        await registry.resolve(
+            workspace_id="ws-1",
+            actor="connector-service",
+            instance_id="inst-A",
+            authentication_type="azure-key-vault",
+            credentials_authentication={
+                "vaultUri": "https://v.example",
+                "secretName": "foo",
+            },
+            lease_ttl_seconds=600,
+        )
+        # Private attribute access is justified here: the eviction
+        # invariant is part of the per-key locking contract.
+        assert registry._key_locks == {}
 
 
 class TestAuditEmission:
