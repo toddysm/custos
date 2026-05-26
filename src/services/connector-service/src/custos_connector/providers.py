@@ -48,6 +48,7 @@ from custos_spl.interfaces.connector_instance_store import (
 )
 from custos_spl.interfaces.metadata_store import MetadataStoreProvider
 
+from custos_connector.binding import BindForStepService
 from custos_connector.identity import (
     AmazonKmsResolver,
     AzureKeyVaultResolver,
@@ -56,6 +57,7 @@ from custos_connector.identity import (
     IdentityResolverRegistry,
     OidcFederatedResolver,
 )
+from custos_connector.runtime import DockerCliHookRunner, PluginInvoker
 from custos_connector.settings import Settings
 
 # The interfaces connector-service actually owns. ``custos_spl.check_revisions``
@@ -103,12 +105,19 @@ class Providers:
     identities. The registry is constructed lazily by
     :func:`load_identity_registry` with the four built-in resolvers
     plumbed through a shared :class:`HttpxAsyncHttpClient`.
+
+    The :class:`BindForStepService` shipped in CONN-IMPL-016 (Phase G)
+    is the only piece of state the FastAPI app holds for the BindForStep
+    RPC — it carries the in-memory idempotency cache that collapses
+    concurrent re-binds for the same ``(workspace_id, run_id, step_id,
+    attempt)`` onto a single resolve.
     """
 
     catalog_store: CatalogStoreProvider
     instance_store: ConnectorInstanceStoreProvider
     metadata_store: MetadataStoreProvider
     identity_registry: IdentityResolverRegistry
+    bind_for_step_service: BindForStepService
 
 
 def load_providers(settings: Settings) -> Providers:
@@ -139,12 +148,20 @@ def load_providers(settings: Settings) -> Providers:
     # at the consumer boundary. ``custos-postgres`` has its own strict mypy
     # job that verifies the conformance at the implementation site; the
     # cast keeps the consumer view typed.
+    typed_catalog = cast(CatalogStoreProvider, catalog_store)
+    typed_instances = cast(ConnectorInstanceStoreProvider, instance_store)
+    typed_metadata = cast(MetadataStoreProvider, metadata_store)
+    identity_registry = load_identity_registry(metadata_store=typed_metadata)
     return Providers(
-        catalog_store=cast(CatalogStoreProvider, catalog_store),
-        instance_store=cast(ConnectorInstanceStoreProvider, instance_store),
-        metadata_store=cast(MetadataStoreProvider, metadata_store),
-        identity_registry=load_identity_registry(
-            metadata_store=cast(MetadataStoreProvider, metadata_store),
+        catalog_store=typed_catalog,
+        instance_store=typed_instances,
+        metadata_store=typed_metadata,
+        identity_registry=identity_registry,
+        bind_for_step_service=load_bind_for_step_service(
+            catalog_store=typed_catalog,
+            instance_store=typed_instances,
+            metadata_store=typed_metadata,
+            identity_registry=identity_registry,
         ),
     )
 
@@ -186,6 +203,35 @@ def load_identity_registry(
         ],
         metadata_store=metadata_store,
         http_transport=transport,
+    )
+
+
+def load_bind_for_step_service(
+    *,
+    catalog_store: CatalogStoreProvider,
+    instance_store: ConnectorInstanceStoreProvider,
+    metadata_store: MetadataStoreProvider,
+    identity_registry: IdentityResolverRegistry,
+    plugin_binder: PluginInvoker | None = None,
+) -> BindForStepService:
+    """Build the default :class:`BindForStepService` (CONN-IMPL-016).
+
+    Wires the SPL providers + identity registry + the production
+    :class:`PluginInvoker` (backed by :class:`DockerCliHookRunner`) into
+    a single :class:`BindForStepService` instance. The service is the
+    only place that owns the in-memory idempotency cache, so a single
+    instance per FastAPI app is correct.
+
+    Tests inject a stub via ``plugin_binder`` to avoid the Docker
+    runtime; production wiring constructs the default invoker.
+    """
+    binder = plugin_binder if plugin_binder is not None else PluginInvoker(DockerCliHookRunner())
+    return BindForStepService(
+        catalog_store=catalog_store,
+        instance_store=instance_store,
+        metadata_store=metadata_store,
+        identity_registry=identity_registry,
+        plugin_binder=binder,
     )
 
 
@@ -249,6 +295,7 @@ def schema_gate_explainer(error: MigrationRequired) -> str:
 __all__ = [
     "MigrationRequired",
     "Providers",
+    "load_bind_for_step_service",
     "load_identity_registry",
     "load_providers",
     "schema_gate_explainer",

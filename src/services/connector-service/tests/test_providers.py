@@ -15,6 +15,7 @@ from tests._fakes import (
     FakeCatalogAdapter,
     FakeConnectorInstanceAdapter,
     FakeMetadataAdapter,
+    build_bind_for_step_service,
 )
 
 
@@ -25,6 +26,7 @@ def providers() -> Providers:
         instance_store=FakeConnectorInstanceAdapter(),  # type: ignore[arg-type]
         metadata_store=FakeMetadataAdapter(),  # type: ignore[arg-type]
         identity_registry=IdentityResolverRegistry(),
+        bind_for_step_service=build_bind_for_step_service(),
     )
 
 
@@ -46,6 +48,7 @@ async def test_verify_schema_revisions_raises_when_catalog_store_is_behind() -> 
         instance_store=FakeConnectorInstanceAdapter(),  # type: ignore[arg-type]
         metadata_store=FakeMetadataAdapter(),  # type: ignore[arg-type]
         identity_registry=IdentityResolverRegistry(),
+        bind_for_step_service=build_bind_for_step_service(),
     )
     with pytest.raises(MigrationRequired) as exc_info:
         await verify_schema_revisions(providers)
@@ -58,6 +61,7 @@ async def test_verify_schema_revisions_raises_when_metadata_store_is_behind() ->
         instance_store=FakeConnectorInstanceAdapter(),  # type: ignore[arg-type]
         metadata_store=FakeMetadataAdapter(applied_revisions=set()),  # type: ignore[arg-type]
         identity_registry=IdentityResolverRegistry(),
+        bind_for_step_service=build_bind_for_step_service(),
     )
     with pytest.raises(MigrationRequired) as exc_info:
         await verify_schema_revisions(providers)
@@ -72,6 +76,7 @@ async def test_verify_schema_revisions_raises_when_instance_store_is_behind() ->
         ),
         metadata_store=FakeMetadataAdapter(),  # type: ignore[arg-type]
         identity_registry=IdentityResolverRegistry(),
+        bind_for_step_service=build_bind_for_step_service(),
     )
     with pytest.raises(MigrationRequired) as exc_info:
         await verify_schema_revisions(providers)
@@ -84,6 +89,7 @@ async def test_verify_schema_revisions_collects_gaps_from_both_stores() -> None:
         instance_store=FakeConnectorInstanceAdapter(),  # type: ignore[arg-type]
         metadata_store=FakeMetadataAdapter(applied_revisions=set()),  # type: ignore[arg-type]
         identity_registry=IdentityResolverRegistry(),
+        bind_for_step_service=build_bind_for_step_service(),
     )
     with pytest.raises(MigrationRequired) as exc_info:
         await verify_schema_revisions(providers)

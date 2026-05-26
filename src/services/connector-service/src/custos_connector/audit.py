@@ -83,6 +83,21 @@ EVENT_IDENTITY_RESOLVED: Final[str] = "connector.identity.resolved"
 #: :class:`IdentityResolverRegistry` on any resolver failure. Not
 #: rate-limited; every failure is operationally significant.
 EVENT_IDENTITY_FAILED: Final[str] = "connector.identity.failed"
+#: CONN-IMPL-016 (Phase G). Emitted by
+#: :class:`custos_connector.binding.BindForStepService` on a successful
+#: ``BindForStep`` round-trip. Subject carries the run/step coordinates;
+#: payload carries the resolved slot → instance map (no secret material).
+EVENT_BINDING_CREATED: Final[str] = "connector.binding.created"
+#: CONN-IMPL-016 (Phase G). Emitted by the binder when a ``BindForStep``
+#: call is rejected (workspace mismatch, instance disabled or unhealthy,
+#: capability shortfall, upstream identity failure). Carries the reason
+#: code and the offending slot so operators can diagnose the failure.
+EVENT_BINDING_REJECTED: Final[str] = "connector.binding.rejected"
+#: CONN-IMPL-016 (Phase G). Emitted once per deprecated capability
+#: consumed by a successful ``BindForStep`` call. The connector type
+#: version still satisfies the request, but operators see one event
+#: per deprecated capability so they can plan migration.
+EVENT_CAPABILITY_DEPRECATED: Final[str] = "connector.capability.deprecated"
 
 
 # ---------------------------------------------------------------------------
@@ -364,6 +379,123 @@ async def audit_identity_failed(
     )
 
 
+async def audit_binding_created(
+    metadata_store: MetadataStoreProvider,
+    *,
+    workspace_id: str,
+    actor: str,
+    run_id: str,
+    step_id: str,
+    attempt: int,
+    step_key: str,
+    slots: Mapping[str, str],
+) -> None:
+    """Emit ``connector.binding.created`` for a successful ``BindForStep``.
+
+    ``slots`` is the resolved slot-name → ``instance_id`` map. The
+    payload deliberately carries only opaque identifiers; the actual
+    :class:`ConnectorContext` payload (endpoint, handle, extras) flows
+    over the RPC and never lands in the audit outbox.
+    """
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_BINDING_CREATED,
+        actor=actor,
+        subject={
+            "run_id": run_id,
+            "step_id": step_id,
+            "attempt": attempt,
+            "step_key": step_key,
+        },
+        payload={
+            "slots": dict(slots),
+        },
+    )
+
+
+async def audit_binding_rejected(
+    metadata_store: MetadataStoreProvider,
+    *,
+    workspace_id: str,
+    actor: str,
+    run_id: str,
+    step_id: str,
+    attempt: int,
+    step_key: str,
+    slot: str | None,
+    instance_id: str | None,
+    reason_code: str,
+    reason_detail: str,
+) -> None:
+    """Emit ``connector.binding.rejected`` for a failed ``BindForStep``.
+
+    ``slot`` and ``instance_id`` are the first slot whose validation
+    failed; both can be ``None`` for request-level rejections (e.g.
+    empty slots array, malformed request) where no specific slot is
+    implicated. ``reason_code`` is the stable taxonomy string from
+    :class:`custos_connector.binding.errors.BindErrorCode`.
+    """
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_BINDING_REJECTED,
+        actor=actor,
+        subject={
+            "run_id": run_id,
+            "step_id": step_id,
+            "attempt": attempt,
+            "step_key": step_key,
+        },
+        payload={
+            "slot": slot,
+            "instance_id": instance_id,
+            "reason_code": reason_code,
+            "reason_detail": reason_detail,
+        },
+    )
+
+
+async def audit_capability_deprecated(
+    metadata_store: MetadataStoreProvider,
+    *,
+    workspace_id: str,
+    actor: str,
+    instance_id: str,
+    type_name: str,
+    version: str,
+    capability: str,
+    run_id: str,
+    step_id: str,
+    attempt: int,
+) -> None:
+    """Emit ``connector.capability.deprecated`` for a deprecated bind.
+
+    Fired once per deprecated capability consumed by a successful
+    ``BindForStep``. The connector type version *can* still satisfy
+    the request — deprecation is an advisory signal, not a hard
+    failure — so this event accompanies (not replaces)
+    ``connector.binding.created``.
+    """
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_CAPABILITY_DEPRECATED,
+        actor=actor,
+        subject={
+            "instance_id": instance_id,
+            "type": type_name,
+            "version": version,
+            "capability": capability,
+        },
+        payload={
+            "run_id": run_id,
+            "step_id": step_id,
+            "attempt": attempt,
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # Legacy log-only shim (call-context + authz decision events)
 # ---------------------------------------------------------------------------
@@ -398,6 +530,9 @@ def emit_event(name: str, payload: Mapping[str, Any]) -> None:
 
 __all__ = [
     "EMIT_FAILURES_TOTAL",
+    "EVENT_BINDING_CREATED",
+    "EVENT_BINDING_REJECTED",
+    "EVENT_CAPABILITY_DEPRECATED",
     "EVENT_HEALTH_CHECK_COMPLETED",
     "EVENT_HEALTH_CHECK_INVOKED",
     "EVENT_IDENTITY_FAILED",
@@ -406,6 +541,9 @@ __all__ = [
     "EVENT_INSTANCE_DISABLED",
     "EVENT_INSTANCE_ENABLED",
     "EVENT_INSTANCE_UPDATED",
+    "audit_binding_created",
+    "audit_binding_rejected",
+    "audit_capability_deprecated",
     "audit_health_check_completed",
     "audit_health_check_invoked",
     "audit_identity_failed",

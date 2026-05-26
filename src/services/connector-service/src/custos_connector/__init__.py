@@ -24,6 +24,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
+from custos_connector.binding import binding_router
 from custos_connector.health import router as health_router
 from custos_connector.middleware import (
     CallContextError,
@@ -119,4 +120,5 @@ def create_app(
     app.add_exception_handler(CallContextError, call_context_error_handler)
 
     app.include_router(health_router)
+    app.include_router(binding_router)
     return app
