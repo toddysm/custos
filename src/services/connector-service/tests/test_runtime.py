@@ -351,3 +351,69 @@ async def test_listen_parses_success_result() -> None:
     assert result.events[0]["eventId"] == "evt-1"
     assert result.next_cursor is not None
     assert result.next_cursor.value == "cursor-2"
+
+
+def _listen_runner_with_cursor(advanced_at_raw: object) -> _FakeRunner:
+    return _FakeRunner(
+        result=HookRunResult(
+            exit_code=0,
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "result": {
+                        "events": [],
+                        "nextCursor": {
+                            "encoding": "stub-cursor-v1",
+                            "value": "cursor-2",
+                            "advancedAt": advanced_at_raw,
+                        },
+                        "receiverEndpoint": None,
+                    },
+                }
+            ).encode(),
+            stderr=b"",
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_listen_normalizes_naive_cursor_advanced_at_to_utc() -> None:
+    invoker = PluginInvoker(_listen_runner_with_cursor("2026-01-01T00:00:00"))
+
+    result = await invoker.listen(
+        connector=_connector(),
+        instance=_instance(),
+        mode=ListenMode.PULL,
+        cursor=CursorEnvelope(encoding="stub-cursor-v1", value="cursor-1"),
+    )
+
+    assert result.next_cursor is not None
+    assert result.next_cursor.advanced_at is not None
+    assert result.next_cursor.advanced_at.tzinfo is UTC
+    assert result.next_cursor.advanced_at == datetime(2026, 1, 1, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_listen_rejects_invalid_cursor_advanced_at() -> None:
+    invoker = PluginInvoker(_listen_runner_with_cursor("not-a-date"))
+
+    with pytest.raises(PluginProtocolError):
+        await invoker.listen(
+            connector=_connector(),
+            instance=_instance(),
+            mode=ListenMode.PULL,
+            cursor=CursorEnvelope(encoding="stub-cursor-v1", value="cursor-1"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_listen_rejects_non_string_cursor_advanced_at() -> None:
+    invoker = PluginInvoker(_listen_runner_with_cursor(12345))
+
+    with pytest.raises(PluginProtocolError):
+        await invoker.listen(
+            connector=_connector(),
+            instance=_instance(),
+            mode=ListenMode.PULL,
+            cursor=CursorEnvelope(encoding="stub-cursor-v1", value="cursor-1"),
+        )

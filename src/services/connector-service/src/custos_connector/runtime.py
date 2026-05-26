@@ -508,7 +508,14 @@ def _parse_cursor(payload: Mapping[str, Any]) -> CursorEnvelope:
     if advanced_at_raw is not None:
         if not isinstance(advanced_at_raw, str):
             raise PluginProtocolError("cursor advancedAt must be an RFC3339 string when present")
-        advanced_at = datetime.fromisoformat(advanced_at_raw.replace("Z", "+00:00"))
+        try:
+            advanced_at = datetime.fromisoformat(advanced_at_raw.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise PluginProtocolError(
+                "cursor advancedAt must be an RFC3339 string when present"
+            ) from exc
+        if advanced_at.tzinfo is None:
+            advanced_at = advanced_at.replace(tzinfo=UTC)
     return CursorEnvelope(
         encoding=encoding,
         value=payload.get("value"),
