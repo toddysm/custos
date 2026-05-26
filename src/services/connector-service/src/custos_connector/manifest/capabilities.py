@@ -78,7 +78,20 @@ def _load_registry() -> _RegistryData:
 
 _REGISTRY: Final[_RegistryData] = _load_registry()
 
-#: Reserved core prefixes — the first dot-segment of every Tier 1 token.
+#: Reserved core prefixes — first dot-segments whose namespace is
+#: reserved by the curated registry. When a token's first segment is in
+#: this set but the full token is not in :data:`TIER1_TOKENS`, the
+#: classifier raises ``UNKNOWN_CORE_CAPABILITY`` (instead of falling
+#: through to ``INVALID_CAPABILITY_SYNTAX``) so operators get a precise,
+#: actionable error pointing at the curated registry.
+#:
+#: Not every Tier 1 token's first segment appears here. Individually
+#: curated tokens such as ``slack.post`` / ``teams.post`` /
+#: ``email.send`` are accepted via :data:`TIER1_TOKENS` membership; their
+#: prefixes are NOT namespace-reserved (an unknown ``slack.*`` token
+#: therefore falls through to ``INVALID_CAPABILITY_SYNTAX`` rather than
+#: ``UNKNOWN_CORE_CAPABILITY``).
+#:
 #: ``event`` is reserved as well, but is special-cased into
 #: :data:`FORBIDDEN_IN_CAPABILITIES` because ``event.*`` MUST NOT appear
 #: in the ``capabilities`` array (event-stream verbs live in
