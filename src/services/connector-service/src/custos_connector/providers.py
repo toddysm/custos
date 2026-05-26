@@ -48,6 +48,14 @@ from custos_spl.interfaces.connector_instance_store import (
 )
 from custos_spl.interfaces.metadata_store import MetadataStoreProvider
 
+from custos_connector.identity import (
+    AmazonKmsResolver,
+    AzureKeyVaultResolver,
+    AzureManagedIdentityResolver,
+    HttpxAsyncHttpClient,
+    IdentityResolverRegistry,
+    OidcFederatedResolver,
+)
 from custos_connector.settings import Settings
 
 # The interfaces connector-service actually owns. ``custos_spl.check_revisions``
@@ -88,11 +96,19 @@ class Providers:
     handling layer to access the catalog store (connector type registry),
     the connector-instance store (workspace-scoped instance rows), and the
     metadata store (audit log and supporting metadata).
+
+    The :class:`IdentityResolverRegistry` shipped in CONN-IMPL-015 (Phase
+    F) is wired alongside the SPL providers so the BindForStep call site
+    (CONN-IMPL-016, Phase G) has a single place to fetch resolved
+    identities. The registry is constructed lazily by
+    :func:`load_identity_registry` with the four built-in resolvers
+    plumbed through a shared :class:`HttpxAsyncHttpClient`.
     """
 
     catalog_store: CatalogStoreProvider
     instance_store: ConnectorInstanceStoreProvider
     metadata_store: MetadataStoreProvider
+    identity_registry: IdentityResolverRegistry
 
 
 def load_providers(settings: Settings) -> Providers:
@@ -127,6 +143,49 @@ def load_providers(settings: Settings) -> Providers:
         catalog_store=cast(CatalogStoreProvider, catalog_store),
         instance_store=cast(ConnectorInstanceStoreProvider, instance_store),
         metadata_store=cast(MetadataStoreProvider, metadata_store),
+        identity_registry=load_identity_registry(
+            metadata_store=cast(MetadataStoreProvider, metadata_store),
+        ),
+    )
+
+
+def load_identity_registry(
+    *,
+    metadata_store: MetadataStoreProvider,
+) -> IdentityResolverRegistry:
+    """Build the default :class:`IdentityResolverRegistry`.
+
+    Wires the four built-in resolvers (CONN-IMPL-015) through a shared
+    :class:`HttpxAsyncHttpClient` so we have a single HTTP client to
+    close on shutdown. Constructing an ``httpx.AsyncClient`` is side-effect
+    free (no sockets are opened until the first request), so this factory
+    remains safe to call during startup.
+
+    Operators that need vendor (``x-<vendor>``) resolvers register them
+    via :meth:`IdentityResolverRegistry.register_vendor_resolver` after
+    the lifespan hook has bound the registry to ``app.state``.
+
+    The default per-resolver token providers raise an
+    :class:`IdentityResolverError` so a misconfigured environment
+    surfaces at first bind, not at startup. CONN-IMPL-016 (Phase G)
+    will swap in the workload-identity wiring during the bind flow.
+    """
+    # Lazy import keeps providers.py importable in unit tests that
+    # never touch the identity path.
+    import httpx
+
+    http_client = httpx.AsyncClient()
+    transport = HttpxAsyncHttpClient(http_client, owns_client=True)
+
+    return IdentityResolverRegistry(
+        resolvers=[
+            AzureKeyVaultResolver(http=transport),
+            AmazonKmsResolver(http=transport),
+            AzureManagedIdentityResolver(http=transport),
+            OidcFederatedResolver(http=transport),
+        ],
+        metadata_store=metadata_store,
+        http_transport=transport,
     )
 
 
@@ -190,6 +249,7 @@ def schema_gate_explainer(error: MigrationRequired) -> str:
 __all__ = [
     "MigrationRequired",
     "Providers",
+    "load_identity_registry",
     "load_providers",
     "schema_gate_explainer",
     "verify_schema_revisions",

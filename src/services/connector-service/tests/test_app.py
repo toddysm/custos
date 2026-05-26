@@ -10,6 +10,7 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from custos_connector import create_app
+from custos_connector.identity import IdentityResolverRegistry
 from custos_connector.providers import Providers
 from custos_connector.settings import Settings
 from tests._fakes import (
@@ -42,6 +43,7 @@ def _providers(*, behind: bool = False) -> Providers:
         catalog_store=catalog,  # type: ignore[arg-type]
         instance_store=instances,  # type: ignore[arg-type]
         metadata_store=metadata,  # type: ignore[arg-type]
+        identity_registry=IdentityResolverRegistry(),
     )
 
 

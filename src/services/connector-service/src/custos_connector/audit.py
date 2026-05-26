@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 from uuid import uuid4
@@ -74,6 +74,15 @@ EVENT_INSTANCE_ENABLED: Final[str] = "connector.instance.enabled"
 EVENT_INSTANCE_DISABLED: Final[str] = "connector.instance.disabled"
 EVENT_HEALTH_CHECK_INVOKED: Final[str] = "connector.health-check.invoked"
 EVENT_HEALTH_CHECK_COMPLETED: Final[str] = "connector.health-check.completed"
+#: CONN-IMPL-015 (Phase F). Emitted by
+#: :class:`IdentityResolverRegistry` whenever a resolver mints fresh
+#: credential material. Rate-limited per (workspace, instance) so a
+#: noisy bind loop does not flood the audit outbox.
+EVENT_IDENTITY_RESOLVED: Final[str] = "connector.identity.resolved"
+#: CONN-IMPL-015 (Phase F). Emitted by
+#: :class:`IdentityResolverRegistry` on any resolver failure. Not
+#: rate-limited; every failure is operationally significant.
+EVENT_IDENTITY_FAILED: Final[str] = "connector.identity.failed"
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +274,96 @@ async def audit_health_check_completed(
     )
 
 
+async def audit_identity_resolved(
+    metadata_store: MetadataStoreProvider,
+    *,
+    workspace_id: str,
+    actor: str,
+    instance_id: str,
+    authentication_type: str,
+    category: str,
+    descriptor: str,
+    material_keys: Sequence[str],
+    expires_at: datetime | None,
+    issued_at: datetime,
+) -> None:
+    """Emit ``connector.identity.resolved`` for a fresh resolution.
+
+    The :class:`IdentityResolverRegistry` rate-limits this emission
+    per ``(workspace_id, instance_id)``: the helper itself is not
+    rate-limited so direct callers (tests, integration probes) see
+    every emission.
+
+    ``descriptor`` is the *non-secret* source identifier the resolver
+    returned (e.g. ``"azure-key-vault:https://vault/secrets/foo"``);
+    ``material_keys`` is the set of envelope keys that flow into the
+    plugin. Neither field leaks the secret material itself.
+    """
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_IDENTITY_RESOLVED,
+        actor=actor,
+        subject={
+            "instance_id": instance_id,
+            "authentication_type": authentication_type,
+            "category": category,
+        },
+        payload={
+            "descriptor": descriptor,
+            "material_keys": list(material_keys),
+            "issued_at": issued_at.isoformat(),
+            "expires_at": expires_at.isoformat() if expires_at else None,
+        },
+    )
+
+
+async def audit_identity_failed(
+    metadata_store: MetadataStoreProvider,
+    *,
+    workspace_id: str,
+    actor: str,
+    instance_id: str,
+    authentication_type: str,
+    category: str,
+    error_code: str,
+    error_detail: str,
+    error_data: Mapping[str, Any],
+) -> None:
+    """Emit ``connector.identity.failed`` for any resolver-side failure.
+
+    The taxonomy carried on ``error_code`` is the stable
+    :class:`~custos_connector.identity.IdentityResolverErrorCode` set;
+    the audit consumer treats it as an opaque string.
+
+    ``category`` is the resolved
+    :class:`~custos_connector.loader.identity.IdentityCategory` value
+    (e.g. ``"kms"``, ``"workload"``, ``"federated"``, ``"vendor"``) when
+    the registry got far enough to derive it. For failures raised
+    *before* category derivation — currently only
+    :class:`~custos_connector.identity.IdentityResolverErrorCode.UNKNOWN_AUTHENTICATION_TYPE`,
+    where there is no resolver and therefore no category — the registry
+    passes the sentinel string ``"unknown"`` so the audit subject shape
+    remains stable.
+    """
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_IDENTITY_FAILED,
+        actor=actor,
+        subject={
+            "instance_id": instance_id,
+            "authentication_type": authentication_type,
+            "category": category,
+        },
+        payload={
+            "error_code": error_code,
+            "error_detail": error_detail,
+            "error_data": dict(error_data),
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # Legacy log-only shim (call-context + authz decision events)
 # ---------------------------------------------------------------------------
@@ -301,12 +400,16 @@ __all__ = [
     "EMIT_FAILURES_TOTAL",
     "EVENT_HEALTH_CHECK_COMPLETED",
     "EVENT_HEALTH_CHECK_INVOKED",
+    "EVENT_IDENTITY_FAILED",
+    "EVENT_IDENTITY_RESOLVED",
     "EVENT_INSTANCE_CREATED",
     "EVENT_INSTANCE_DISABLED",
     "EVENT_INSTANCE_ENABLED",
     "EVENT_INSTANCE_UPDATED",
     "audit_health_check_completed",
     "audit_health_check_invoked",
+    "audit_identity_failed",
+    "audit_identity_resolved",
     "audit_instance_created",
     "audit_instance_disabled",
     "audit_instance_enabled",
