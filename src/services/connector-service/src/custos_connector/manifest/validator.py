@@ -367,8 +367,9 @@ def _check_event_namespace(evt: str, idx: int) -> None:
     redundant ``event.`` wrapper.
 
     Raises :class:`ManifestValidationError` with
-    :attr:`UNKNOWN_EVENT_NAMESPACE` on rejection. The path points at
-    the offending entry so operators can diff against the manifest.
+    :attr:`ValidationErrorCode.UNKNOWN_EVENT_NAMESPACE` on rejection.
+    The path points at the offending entry so operators can diff
+    against the manifest.
     """
     first_segment = evt.split(".", 1)[0]
     path = f"/spec/events/produced/{idx}"
