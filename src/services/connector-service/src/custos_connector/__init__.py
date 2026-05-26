@@ -85,7 +85,17 @@ def create_app(
         except MigrationRequired as exc:
             app.state.schema_gate_error = exc
             logger.error("%s", schema_gate_explainer(exc))
-        yield
+        try:
+            yield
+        finally:
+            # Release any HTTP transport the IdentityResolverRegistry owns
+            # (CONN-IMPL-015). The registry's aclose() is a no-op when no
+            # transport was injected (the unit-test path), so this is safe
+            # to call unconditionally.
+            try:
+                await local_providers.identity_registry.aclose()
+            except Exception:
+                logger.exception("identity registry aclose failed during shutdown")
 
     app = FastAPI(
         title="Custos Connector Service",

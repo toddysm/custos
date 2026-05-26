@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from custos_spl import MigrationRequired
 
+from custos_connector.identity import IdentityResolverRegistry
 from custos_connector.providers import (
     Providers,
     schema_gate_explainer,
@@ -23,6 +24,7 @@ def providers() -> Providers:
         catalog_store=FakeCatalogAdapter(),  # type: ignore[arg-type]
         instance_store=FakeConnectorInstanceAdapter(),  # type: ignore[arg-type]
         metadata_store=FakeMetadataAdapter(),  # type: ignore[arg-type]
+        identity_registry=IdentityResolverRegistry(),
     )
 
 
@@ -43,6 +45,7 @@ async def test_verify_schema_revisions_raises_when_catalog_store_is_behind() -> 
         catalog_store=FakeCatalogAdapter(applied_revisions=set()),  # type: ignore[arg-type]
         instance_store=FakeConnectorInstanceAdapter(),  # type: ignore[arg-type]
         metadata_store=FakeMetadataAdapter(),  # type: ignore[arg-type]
+        identity_registry=IdentityResolverRegistry(),
     )
     with pytest.raises(MigrationRequired) as exc_info:
         await verify_schema_revisions(providers)
@@ -54,6 +57,7 @@ async def test_verify_schema_revisions_raises_when_metadata_store_is_behind() ->
         catalog_store=FakeCatalogAdapter(),  # type: ignore[arg-type]
         instance_store=FakeConnectorInstanceAdapter(),  # type: ignore[arg-type]
         metadata_store=FakeMetadataAdapter(applied_revisions=set()),  # type: ignore[arg-type]
+        identity_registry=IdentityResolverRegistry(),
     )
     with pytest.raises(MigrationRequired) as exc_info:
         await verify_schema_revisions(providers)
@@ -67,6 +71,7 @@ async def test_verify_schema_revisions_raises_when_instance_store_is_behind() ->
             applied_revisions=set()
         ),
         metadata_store=FakeMetadataAdapter(),  # type: ignore[arg-type]
+        identity_registry=IdentityResolverRegistry(),
     )
     with pytest.raises(MigrationRequired) as exc_info:
         await verify_schema_revisions(providers)
@@ -78,6 +83,7 @@ async def test_verify_schema_revisions_collects_gaps_from_both_stores() -> None:
         catalog_store=FakeCatalogAdapter(applied_revisions=set()),  # type: ignore[arg-type]
         instance_store=FakeConnectorInstanceAdapter(),  # type: ignore[arg-type]
         metadata_store=FakeMetadataAdapter(applied_revisions=set()),  # type: ignore[arg-type]
+        identity_registry=IdentityResolverRegistry(),
     )
     with pytest.raises(MigrationRequired) as exc_info:
         await verify_schema_revisions(providers)
