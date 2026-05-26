@@ -20,6 +20,7 @@ from custos_connector.runtime import (
     ListenMode,
     ListenResult,
     PluginHookTimeout,
+    PluginInvocationFailed,
     PluginInvoker,
     PluginProtocolError,
     UpstreamUnreachable,
@@ -245,6 +246,49 @@ async def test_invalid_json_raises_protocol_error() -> None:
 
     with pytest.raises(PluginProtocolError):
         await invoker.health(connector=_connector(), instance=_instance())
+
+
+@pytest.mark.asyncio
+async def test_non_zero_exit_with_empty_stdout_raises_invocation_failed() -> None:
+    invoker = PluginInvoker(
+        _FakeRunner(
+            result=HookRunResult(
+                exit_code=125,
+                stdout=b"",
+                stderr=b"Unable to find image 'example.test/stub' locally\n",
+            )
+        )
+    )
+
+    with pytest.raises(PluginInvocationFailed) as excinfo:
+        await invoker.health(connector=_connector(), instance=_instance())
+
+    data = excinfo.value.data or {}
+    assert data.get("exit_code") == 125
+    assert "Unable to find image" in (data.get("stderr") or "")
+    assert data.get("stdout") == ""
+    assert data.get("hook") == "health"
+
+
+@pytest.mark.asyncio
+async def test_non_zero_exit_with_invalid_stdout_raises_invocation_failed() -> None:
+    invoker = PluginInvoker(
+        _FakeRunner(
+            result=HookRunResult(
+                exit_code=1,
+                stdout=b"panic: runtime error\n",
+                stderr=b"goroutine 1 [running]:\n",
+            )
+        )
+    )
+
+    with pytest.raises(PluginInvocationFailed) as excinfo:
+        await invoker.health(connector=_connector(), instance=_instance())
+
+    data = excinfo.value.data or {}
+    assert data.get("exit_code") == 1
+    assert "panic" in (data.get("stdout") or "")
+    assert "goroutine" in (data.get("stderr") or "")
 
 
 @pytest.mark.asyncio
