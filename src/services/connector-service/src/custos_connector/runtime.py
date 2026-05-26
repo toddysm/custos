@@ -312,7 +312,14 @@ class PluginInvoker:
         if checked_at_raw is None:
             checked_at = datetime.now(UTC)
         elif isinstance(checked_at_raw, str):
-            checked_at = datetime.fromisoformat(checked_at_raw.replace("Z", "+00:00"))
+            try:
+                checked_at = datetime.fromisoformat(checked_at_raw.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise PluginProtocolError(
+                    "health result checkedAt must be an RFC3339 string"
+                ) from exc
+            if checked_at.tzinfo is None:
+                checked_at = checked_at.replace(tzinfo=UTC)
         else:
             raise PluginProtocolError("health result checkedAt must be an RFC3339 string")
         extras = result.get("extras")
