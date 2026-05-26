@@ -335,11 +335,12 @@ def _optional_str(payload: Mapping[str, Any], field: str, default: str) -> str:
         return default
     if not isinstance(value, str):
         raise IdentityResolverError(
-            detail=(f"credentials.authentication.{field} must be a string when present"),
+            detail=f"credentials.authentication.{field} must be a string when present",
             code=IdentityResolverErrorCode.INVALID_CREDENTIAL_FIELD,
             data={"field": field},
         )
-    return value
+    value = value.strip()
+    return value or default
 
 
 __all__ = [
