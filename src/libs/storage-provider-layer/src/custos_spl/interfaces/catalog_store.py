@@ -52,14 +52,18 @@ class ConnectorTypeVersion:
     """A single connector-type version row.
 
     Primary key is `(type, version)`. Same digest semantics as
-    `ActivityTypeVersion`. `parent_deprecated` denormalizes the parent
-    `ConnectorType` row's `deprecated` flag — see `ActivityTypeVersion`
-    for the rationale.
+    `ActivityTypeVersion`. ``image_ref`` is the authoritative OCI image
+    reference the runtime invokes for this connector version. The
+    manifest artifact describes the plugin metadata, but the executable
+    image reference itself must be persisted separately. `parent_deprecated`
+    denormalizes the parent `ConnectorType` row's `deprecated` flag —
+    see `ActivityTypeVersion` for the rationale.
     """
 
     type: str
     version: str
     digest: str
+    image_ref: str
     normalized_manifest: Mapping[str, Any]
     parent_deprecated: bool
     published_at: datetime
@@ -78,7 +82,7 @@ class CatalogStoreProvider(Protocol):
     The schema revision required by this build is `SCHEMA_REVISION`.
     """
 
-    SCHEMA_REVISION: ClassVar[int] = 1
+    SCHEMA_REVISION: ClassVar[int] = 2
 
     # ----- Activity types -----
 
@@ -136,6 +140,7 @@ class CatalogStoreProvider(Protocol):
         type: str,
         version: str,
         digest: str,
+        image_ref: str,
         normalized_manifest: Mapping[str, Any],
     ) -> ConnectorTypeVersion: ...
 

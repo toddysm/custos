@@ -619,6 +619,7 @@ async def test_list_versions_walks_pagination_to_completion() -> None:
             type=payload["metadata"]["type"],
             version=v,
             digest=digest,
+            image_ref=f"example.test/{payload['metadata']['type']}@{digest}",
             normalized_manifest=payload,
         )
     loader = Loader(
@@ -642,6 +643,7 @@ async def test_list_versions_with_zero_limit_returns_empty_without_hitting_catal
         type=payload["metadata"]["type"],
         version=payload["metadata"]["version"],
         digest=digest,
+        image_ref=f"example.test/{payload['metadata']['type']}@{digest}",
         normalized_manifest=payload,
     )
     loader = Loader(

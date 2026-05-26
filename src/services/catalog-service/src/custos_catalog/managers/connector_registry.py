@@ -228,6 +228,7 @@ class ConnectorTypeRegistry:
                     type=projection.type,
                     version=projection.version,
                     digest=projection.digest,
+                    image_ref=f"catalog://connector/{projection.type}@{projection.version}",
                     normalized_manifest=projection.normalized,
                 )
             except ConflictDigest as exc:

@@ -34,7 +34,7 @@ _BASE_SETTINGS = Settings(
 
 
 def _providers(*, behind: bool = False) -> Providers:
-    catalog = FakeCatalogAdapter(applied_revisions=set() if behind else {1})
+    catalog = FakeCatalogAdapter(applied_revisions=set() if behind else {1, 2})
     instances = FakeConnectorInstanceAdapter(applied_revisions=set() if behind else {1})
     metadata = FakeMetadataAdapter(applied_revisions=set() if behind else {1, 2, 3, 4})
     return Providers(
@@ -67,7 +67,7 @@ def test_readyz_returns_503_with_explainer_when_schema_gate_fails() -> None:
     assert resp.status_code == 503
     body = resp.json()
     assert body["status"] == "not_ready"
-    assert "CatalogStoreProvider@rev1" in body["detail"]
+    assert "CatalogStoreProvider@rev2" in body["detail"]
     assert "MetadataStoreProvider@rev4" in body["detail"]
     assert "CONN_CATALOG_STORE" in body["detail"]
 

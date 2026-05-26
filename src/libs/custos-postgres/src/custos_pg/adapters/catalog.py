@@ -31,7 +31,7 @@ from custos_spl.pagination import Cursor, Page
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
-from custos_pg.migrations.catalog import CATALOG_REV1
+from custos_pg.migrations.catalog import CATALOG_REV1, CATALOG_REV2
 from custos_pg.pool import LazyPool, read_dsn_from_env
 from custos_pg.revisions import ensure_ledger, read_declared, record_revision
 
@@ -78,6 +78,7 @@ def _row_to_connector(row: Record, parent_deprecated: bool) -> ConnectorTypeVers
         type=row["type"],
         version=row["version"],
         digest=row["digest"],
+        image_ref=row["image_ref"],
         normalized_manifest=MappingProxyType(dict(manifest)),
         parent_deprecated=parent_deprecated,
         published_at=row["published_at"],
@@ -95,7 +96,7 @@ def _resolve_limit(limit: int | None) -> int:
 class PgCatalogAdapter:
     """asyncpg implementation of `CatalogStoreProvider`."""
 
-    SCHEMA_REVISION = 1
+    SCHEMA_REVISION = 2
 
     def __init__(
         self,
@@ -139,7 +140,7 @@ class PgCatalogAdapter:
                 INTERFACE_NAME,
             )
             already = {int(r["revision"]) for r in applied}
-            for rev in (CATALOG_REV1,):
+            for rev in (CATALOG_REV1, CATALOG_REV2):
                 if rev.number in already:
                     continue
                 for stmt in rev.statements:
@@ -306,6 +307,7 @@ class PgCatalogAdapter:
         type: str,
         version: str,
         digest: str,
+        image_ref: str,
         normalized_manifest: Mapping[str, Any],
     ) -> ConnectorTypeVersion:
         pool = await self._pool_ref()
@@ -320,18 +322,19 @@ class PgCatalogAdapter:
                 # the rationale on ON CONFLICT DO NOTHING + RETURNING.
                 row = await conn.fetchrow(
                     "INSERT INTO catalog.connector_type_version "
-                    "(type, version, digest, normalized_manifest) "
-                    "VALUES ($1, $2, $3, $4::jsonb) "
+                    "(type, version, digest, image_ref, normalized_manifest) "
+                    "VALUES ($1, $2, $3, $4, $5::jsonb) "
                     "ON CONFLICT (type, version) DO NOTHING "
-                    "RETURNING type, version, digest, normalized_manifest, published_at",
+                    "RETURNING type, version, digest, image_ref, normalized_manifest, published_at",
                     type,
                     version,
                     digest,
+                    image_ref,
                     json.dumps(dict(normalized_manifest)),
                 )
                 if row is None:
                     existing = await conn.fetchrow(
-                        "SELECT type, version, digest, normalized_manifest, published_at "
+                        "SELECT type, version, digest, image_ref, normalized_manifest, published_at "
                         "FROM catalog.connector_type_version "
                         "WHERE type = $1 AND version = $2",
                         type,
@@ -364,7 +367,7 @@ class PgCatalogAdapter:
         pool = await self._pool_ref()
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT v.type, v.version, v.digest, v.normalized_manifest, "
+                "SELECT v.type, v.version, v.digest, v.image_ref, v.normalized_manifest, "
                 "v.published_at, c.deprecated "
                 "FROM catalog.connector_type_version v "
                 "JOIN catalog.connector_type c ON c.type = v.type "
@@ -393,7 +396,7 @@ class PgCatalogAdapter:
             )
         params.append(eff_limit + 1)
         sql = (
-            "SELECT v.type, v.version, v.digest, v.normalized_manifest, "
+            "SELECT v.type, v.version, v.digest, v.image_ref, v.normalized_manifest, "
             "v.published_at, c.deprecated "
             "FROM catalog.connector_type_version v "
             "JOIN catalog.connector_type c ON c.type = v.type "

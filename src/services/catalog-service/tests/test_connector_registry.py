@@ -49,6 +49,7 @@ class FakeCatalogStore:
         type: str,
         version: str,
         digest: str,
+        image_ref: str,
         normalized_manifest: Mapping[str, Any],
     ) -> ConnectorTypeVersion:
         key = (type, version)
@@ -62,6 +63,7 @@ class FakeCatalogStore:
             type=type,
             version=version,
             digest=digest,
+            image_ref=image_ref,
             normalized_manifest=dict(normalized_manifest),
             parent_deprecated=self.parent_deprecated.get(type, False),
             published_at=datetime.now(tz=UTC),
@@ -146,6 +148,7 @@ class FakeCatalogStore:
             type=row.type,
             version=row.version,
             digest=row.digest,
+            image_ref=row.image_ref,
             normalized_manifest=row.normalized_manifest,
             parent_deprecated=flag,
             published_at=row.published_at,

@@ -165,7 +165,12 @@ class FakeCatalogStore:
     # ---- connector surface (unused here — present to satisfy the Protocol shape) ----
 
     async def put_connector_type_version(
-        self, type: str, version: str, digest: str, normalized_manifest: Mapping[str, Any]
+        self,
+        type: str,
+        version: str,
+        digest: str,
+        image_ref: str,
+        normalized_manifest: Mapping[str, Any],
     ) -> Any:
         raise NotImplementedError
 

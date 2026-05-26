@@ -46,10 +46,10 @@ class FakeDefinitionAdapter:
 class FakeCatalogAdapter:
     """In-memory ``CatalogStoreProvider`` mirror of :class:`FakeDefinitionAdapter`."""
 
-    SCHEMA_REVISION = 1
+    SCHEMA_REVISION = 2
 
     def __init__(self, *, applied_revisions: AbstractSet[int] | None = None) -> None:
-        self._applied: set[int] = set({1} if applied_revisions is None else applied_revisions)
+        self._applied: set[int] = set({1, 2} if applied_revisions is None else applied_revisions)
         self.refresh_calls = 0
 
     @property

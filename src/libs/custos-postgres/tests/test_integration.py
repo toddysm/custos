@@ -252,17 +252,42 @@ async def test_put_activity_type_conflict_on_different_digest(pg_pool: Pool) -> 
 async def test_put_connector_type_idempotent_on_same_digest(pg_pool: Pool) -> None:
     adapter = PgCatalogAdapter(pool=pg_pool)
     await adapter.apply_pending()
-    a = await adapter.put_connector_type_version("http", "1.0.0", "sha256:x", {"k": 1})
-    b = await adapter.put_connector_type_version("http", "1.0.0", "sha256:x", {"k": 1})
+    a = await adapter.put_connector_type_version(
+        "http",
+        "1.0.0",
+        "sha256:x",
+        "example.test/http@sha256:x",
+        {"k": 1},
+    )
+    b = await adapter.put_connector_type_version(
+        "http",
+        "1.0.0",
+        "sha256:x",
+        "example.test/http@sha256:x",
+        {"k": 1},
+    )
     assert a.digest == b.digest == "sha256:x"
+    assert a.image_ref == b.image_ref == "example.test/http@sha256:x"
 
 
 async def test_put_connector_type_conflict_on_different_digest(pg_pool: Pool) -> None:
     adapter = PgCatalogAdapter(pool=pg_pool)
     await adapter.apply_pending()
-    await adapter.put_connector_type_version("http", "1.0.0", "sha256:1", {})
+    await adapter.put_connector_type_version(
+        "http",
+        "1.0.0",
+        "sha256:1",
+        "example.test/http@sha256:1",
+        {},
+    )
     with pytest.raises(ConflictDigest):
-        await adapter.put_connector_type_version("http", "1.0.0", "sha256:2", {})
+        await adapter.put_connector_type_version(
+            "http",
+            "1.0.0",
+            "sha256:2",
+            "example.test/http@sha256:2",
+            {},
+        )
 
 
 async def test_resolve_picks_latest_in_range(pg_pool: Pool) -> None:

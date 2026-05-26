@@ -25,7 +25,7 @@ End-to-end registration flow for a single connector manifest:
     derive_identity_category()              # authenticationType → category
        │
        ▼
-    catalog_store.put_connector_type_version(type, version, digest, normalized)
+    catalog_store.put_connector_type_version(type, version, digest, image_ref, normalized)
 
 Idempotency: SPL's ``put_connector_type_version`` succeeds on identical
 ``(type, version, digest)`` re-puts and raises
@@ -371,6 +371,7 @@ class Loader:
                 type=connector_type,
                 version=connector_version,
                 digest=payload_digest,
+                image_ref=image_ref,
                 normalized_manifest=normalized,
             )
         except ConflictDigest as exc:

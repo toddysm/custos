@@ -47,10 +47,10 @@ class FakeCatalogAdapter:
     registry slice the Plugin Loader (CONN-IMPL-008) drives.
     """
 
-    SCHEMA_REVISION = 1
+    SCHEMA_REVISION = 2
 
     def __init__(self, *, applied_revisions: AbstractSet[int] | None = None) -> None:
-        self._applied: set[int] = set({1} if applied_revisions is None else applied_revisions)
+        self._applied: set[int] = set({1, 2} if applied_revisions is None else applied_revisions)
         self.refresh_calls = 0
         # Per-(type, version) row store + parent-type deprecation flag.
         # The parent_deprecated flag is denormalised onto every returned
@@ -82,6 +82,7 @@ class FakeCatalogAdapter:
         type: str,
         version: str,
         digest: str,
+        image_ref: str,
         normalized_manifest: Mapping[str, Any],
     ) -> ConnectorTypeVersion:
         """Idempotent on identical ``(type, version, digest)``; raises
@@ -99,6 +100,7 @@ class FakeCatalogAdapter:
                 type=existing.type,
                 version=existing.version,
                 digest=existing.digest,
+                image_ref=existing.image_ref,
                 normalized_manifest=existing.normalized_manifest,
                 parent_deprecated=type in self._deprecated_types,
                 published_at=existing.published_at,
@@ -109,6 +111,7 @@ class FakeCatalogAdapter:
             type=type,
             version=version,
             digest=digest,
+            image_ref=image_ref,
             normalized_manifest=dict(normalized_manifest),
             parent_deprecated=type in self._deprecated_types,
             published_at=datetime.now(UTC),
@@ -131,6 +134,7 @@ class FakeCatalogAdapter:
             type=row.type,
             version=row.version,
             digest=row.digest,
+            image_ref=row.image_ref,
             normalized_manifest=row.normalized_manifest,
             parent_deprecated=type in self._deprecated_types,
             published_at=row.published_at,
@@ -149,6 +153,7 @@ class FakeCatalogAdapter:
                 type=row.type,
                 version=row.version,
                 digest=row.digest,
+                image_ref=row.image_ref,
                 normalized_manifest=row.normalized_manifest,
                 parent_deprecated=type in self._deprecated_types,
                 published_at=row.published_at,
