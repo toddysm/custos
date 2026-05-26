@@ -278,6 +278,31 @@ class BindForStepService:
                     instance_id=slot.instance_id,
                 )
 
+            seen_capabilities: set[str] = set()
+            for capability in slot.required_capabilities:
+                if not capability.strip():
+                    raise BindError(
+                        BindErrorCode.INVALID_REQUEST,
+                        f"slot {slot.name!r} required_capabilities must not contain empty entries",
+                        slot=slot.name,
+                        instance_id=slot.instance_id,
+                    )
+                if capability != capability.strip():
+                    raise BindError(
+                        BindErrorCode.INVALID_REQUEST,
+                        f"slot {slot.name!r} capability {capability!r} must not contain surrounding whitespace",
+                        slot=slot.name,
+                        instance_id=slot.instance_id,
+                    )
+                if capability in seen_capabilities:
+                    raise BindError(
+                        BindErrorCode.INVALID_REQUEST,
+                        f"slot {slot.name!r} has duplicate required capability {capability!r}",
+                        slot=slot.name,
+                        instance_id=slot.instance_id,
+                    )
+                seen_capabilities.add(capability)
+
     # ------------------------------------------------------------------
     # Internals: orchestration
     # ------------------------------------------------------------------
