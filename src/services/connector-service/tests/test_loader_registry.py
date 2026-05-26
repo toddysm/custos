@@ -631,6 +631,37 @@ async def test_list_versions_walks_pagination_to_completion() -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_versions_with_zero_limit_returns_empty_without_hitting_catalog() -> None:
+    cat = FakeCatalogAdapter()
+    # Seed a single row so a buggy implementation that ignores
+    # limit=0 would observably return it.
+    payload = _baseline_payload()
+    _, digest = compute_digest(payload)
+    await cat.put_connector_type_version(
+        type=payload["metadata"]["type"],
+        version=payload["metadata"]["version"],
+        digest=digest,
+        normalized_manifest=payload,
+    )
+    loader = Loader(
+        catalog_store=cast(CatalogStoreProvider, cat),
+        registry_client=_build_client(lambda _r: httpx.Response(404)),
+    )
+    assert await loader.list_versions("oci-registry", limit=0) == []
+
+
+@pytest.mark.asyncio
+async def test_list_versions_with_negative_limit_raises_value_error() -> None:
+    cat = FakeCatalogAdapter()
+    loader = Loader(
+        catalog_store=cast(CatalogStoreProvider, cat),
+        registry_client=_build_client(lambda _r: httpx.Response(404)),
+    )
+    with pytest.raises(ValueError, match="limit must be non-negative"):
+        await loader.list_versions("oci-registry", limit=-1)
+
+
+@pytest.mark.asyncio
 async def test_deprecate_toggles_flag_and_emits_audit(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

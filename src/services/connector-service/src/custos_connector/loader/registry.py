@@ -325,14 +325,32 @@ class Loader:
         the cap is hit) — a hard cap is enforced when the caller passes
         one because SPL accepts ``None`` as "implementation default" and
         we want the loader's contract to be explicit.
+
+        Args:
+            connector_type: The parent connector type to list.
+            limit: Optional cap on the number of rows returned. Must be
+                a non-negative integer when provided. ``limit=0``
+                returns the empty list without contacting SPL;
+                ``limit=None`` (the default) walks the whole cursor
+                chain.
+
+        Raises:
+            ValueError: When ``limit`` is negative. We refuse rather
+                than silently mapping negative limits to ``out[:limit]``
+                (which would drop trailing rows the caller never asked
+                to drop).
         """
+        if limit is not None and limit < 0:
+            raise ValueError(f"limit must be non-negative, got {limit!r}")
+        if limit == 0:
+            return []
         out: list[ConnectorTypeVersion] = []
         cursor = None
         while True:
             page = await self._catalog.list_connector_type_versions(
                 connector_type,
                 cursor=cursor,
-                limit=limit if limit is not None and limit > 0 else None,
+                limit=limit,
             )
             out.extend(page.items)
             if limit is not None and len(out) >= limit:
