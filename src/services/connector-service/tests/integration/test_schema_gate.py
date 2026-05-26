@@ -2,10 +2,11 @@
 the SPL adapter wiring (CONN-IMPL-003).
 
 These tests drive ``custos_connector.create_app`` mounted on real
-``PgCatalogAdapter`` / ``PgMetadataAdapter`` instances pointed at a live
-Postgres database. The intent is to catch regressions in the wiring
-between :func:`custos_connector.providers.load_providers`, the FastAPI
-lifespan in :func:`custos_connector.create_app`, and the SPL ledger that
+``PgCatalogAdapter`` / ``PgConnectorInstanceAdapter`` /
+``PgMetadataAdapter`` instances pointed at a live Postgres database. The
+intent is to catch regressions in the wiring between
+:func:`custos_connector.providers.load_providers`, the FastAPI lifespan
+in :func:`custos_connector.create_app`, and the SPL ledger that
 ``refresh_declared`` reads.
 """
 
@@ -40,7 +41,8 @@ def test_readyz_returns_503_when_ledger_is_empty(stale_client: TestClient) -> No
     assert resp.status_code == 503
     body = resp.json()
     assert body["status"] == "not_ready"
-    # Both interfaces should be flagged.
+    # All three interfaces should be flagged.
     assert "CatalogStoreProvider@rev1" in body["detail"]
+    assert "ConnectorInstanceStoreProvider@rev1" in body["detail"]
     assert "MetadataStoreProvider@rev4" in body["detail"]
     assert "custos migrate up" in body["detail"]

@@ -38,6 +38,11 @@ from custos_spl.interfaces.catalog_store import (
     CatalogStoreProvider,
     ConnectorTypeVersion,
 )
+from custos_spl.interfaces.connector_instance_store import (
+    ConnectorInstance,
+    ConnectorInstanceFilter,
+    ConnectorInstanceStoreProvider,
+)
 from custos_spl.interfaces.definition_store import (
     DefinitionListFilter,
     DefinitionStoreProvider,
@@ -102,6 +107,9 @@ __all__ = [
     "AuthStoreProvider",
     "CatalogStoreProvider",
     "ConnectorCursor",
+    "ConnectorInstance",
+    "ConnectorInstanceFilter",
+    "ConnectorInstanceStoreProvider",
     "ConnectorTypeVersion",
     "DedupDuplicate",
     "DedupKey",

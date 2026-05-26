@@ -43,6 +43,9 @@ from typing import Protocol, cast
 
 from custos_spl import MigrationRequired
 from custos_spl.interfaces.catalog_store import CatalogStoreProvider
+from custos_spl.interfaces.connector_instance_store import (
+    ConnectorInstanceStoreProvider,
+)
 from custos_spl.interfaces.metadata_store import MetadataStoreProvider
 
 from custos_connector.settings import Settings
@@ -55,6 +58,7 @@ from custos_connector.settings import Settings
 # services.
 _REQUIRED_INTERFACES: tuple[type, ...] = (
     CatalogStoreProvider,
+    ConnectorInstanceStoreProvider,
     MetadataStoreProvider,
 )
 
@@ -81,10 +85,13 @@ class Providers:
     """Bundle of the SPL providers Connector Service consumes.
 
     Held on ``app.state.providers`` and used by the application's request-
-    handling layer to access the catalog and metadata stores.
+    handling layer to access the catalog store (connector type registry),
+    the connector-instance store (workspace-scoped instance rows), and the
+    metadata store (audit log and supporting metadata).
     """
 
     catalog_store: CatalogStoreProvider
+    instance_store: ConnectorInstanceStoreProvider
     metadata_store: MetadataStoreProvider
 
 
@@ -97,14 +104,19 @@ def load_providers(settings: Settings) -> Providers:
     """
     # Imported here so that test suites injecting fakes can avoid the
     # asyncpg dependency entirely.
-    from custos_pg import PgCatalogAdapter, PgMetadataAdapter
+    from custos_pg import PgCatalogAdapter, PgConnectorInstanceAdapter, PgMetadataAdapter
     from custos_pg.pool import LazyPool
+
+    metadata_lazy_pool = LazyPool(settings.metadata_store_dsn)
 
     catalog_store = PgCatalogAdapter(
         lazy=LazyPool(settings.catalog_store_dsn),
     )
+    instance_store = PgConnectorInstanceAdapter(
+        lazy=metadata_lazy_pool,
+    )
     metadata_store = PgMetadataAdapter(
-        lazy=LazyPool(settings.metadata_store_dsn),
+        lazy=metadata_lazy_pool,
     )
     # The adapters declare SCHEMA_REVISION as a bare class attr rather
     # than a ``ClassVar[int]``, so mypy can't see them as Protocol-conforming
@@ -113,6 +125,7 @@ def load_providers(settings: Settings) -> Providers:
     # cast keeps the consumer view typed.
     return Providers(
         catalog_store=cast(CatalogStoreProvider, catalog_store),
+        instance_store=cast(ConnectorInstanceStoreProvider, instance_store),
         metadata_store=cast(MetadataStoreProvider, metadata_store),
     )
 
@@ -120,10 +133,11 @@ def load_providers(settings: Settings) -> Providers:
 async def verify_schema_revisions(providers: Providers) -> None:
     """Refresh the per-adapter declared revisions and run the schema gate.
 
-    The gate is scoped to the two interfaces connector-service owns
-    (``CatalogStoreProvider`` for the connector-type registry, and
-    ``MetadataStoreProvider`` for connector instances + cursors + the
-    audit outbox); revisions owned by sibling services are deliberately
+    The gate is scoped to the three interfaces connector-service owns:
+    ``CatalogStoreProvider`` for the connector-type registry,
+    ``ConnectorInstanceStoreProvider`` for workspace-scoped connector
+    instance rows, and ``MetadataStoreProvider`` for cursors and the
+    audit outbox. Revisions owned by sibling services are deliberately
     out of scope so this service can start independently.
 
     Raises:
@@ -134,6 +148,7 @@ async def verify_schema_revisions(providers: Providers) -> None:
     """
     adapters: list[_RefreshableAdapter] = [
         cast(_RefreshableAdapter, providers.catalog_store),
+        cast(_RefreshableAdapter, providers.instance_store),
         cast(_RefreshableAdapter, providers.metadata_store),
     ]
     for adapter in adapters:

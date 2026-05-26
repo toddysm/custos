@@ -12,7 +12,11 @@ from fastapi.testclient import TestClient
 from custos_connector import create_app
 from custos_connector.providers import Providers
 from custos_connector.settings import Settings
-from tests._fakes import FakeCatalogAdapter, FakeMetadataAdapter
+from tests._fakes import (
+    FakeCatalogAdapter,
+    FakeConnectorInstanceAdapter,
+    FakeMetadataAdapter,
+)
 
 _BASE_SETTINGS = Settings(
     catalog_store_dsn="postgresql://u:p@h:5432/cat",
@@ -31,9 +35,11 @@ _BASE_SETTINGS = Settings(
 
 def _providers(*, behind: bool = False) -> Providers:
     catalog = FakeCatalogAdapter(applied_revisions=set() if behind else {1})
+    instances = FakeConnectorInstanceAdapter(applied_revisions=set() if behind else {1})
     metadata = FakeMetadataAdapter(applied_revisions=set() if behind else {1, 2, 3, 4})
     return Providers(
         catalog_store=catalog,  # type: ignore[arg-type]
+        instance_store=instances,  # type: ignore[arg-type]
         metadata_store=metadata,  # type: ignore[arg-type]
     )
 

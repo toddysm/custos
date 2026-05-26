@@ -55,9 +55,15 @@ from custos_spl.interfaces.auth_store import (
     Workspace,
     WorkspaceFilter,
 )
+from custos_spl.ids import ConnectorInstanceId, WorkspaceId
+from custos_spl.interfaces.connector_instance_store import (
+    ConnectorInstance,
+    ConnectorInstanceFilter,
+)
 from custos_spl.migrations.runner import check_revisions
 
 from custos_pg.adapters.catalog import PgCatalogAdapter
+from custos_pg.adapters.connector_instance import PgConnectorInstanceAdapter
 from custos_pg.adapters.definition import PgDefinitionAdapter
 from custos_pg.adapters.metadata import PgMetadataAdapter
 from custos_pg.adapters.auth import PgAuthAdapter
@@ -2945,3 +2951,284 @@ async def test_unimplemented_transaction_methods_raise_not_implemented_error(
     with pytest.raises(NotImplementedError, match="SPL-130h"):
         await adapter.with_transaction(None)
 
+
+
+# ----- ConnectorInstanceStoreProvider -----
+
+
+async def test_connector_instance_apply_pending_records_revision(
+    pg_pool: Pool,
+) -> None:
+
+    adapter = PgConnectorInstanceAdapter(pool=pg_pool)
+    summaries = await adapter.apply_pending()
+    assert summaries
+    assert any("ConnectorInstanceStoreProvider rev1" in s for s in summaries)
+    assert 1 in adapter.declared_revisions["ConnectorInstanceStoreProvider"]
+    # Apply is idempotent.
+    second = await adapter.apply_pending()
+    assert second == []
+
+
+def _make_instance(
+    *,
+    workspace_id: str = "ws-1",
+    instance_id: str = "inst-1",
+    type: str = "http",
+    version: str = "1.0.0",
+    name: str | None = None,
+    lease_ttl_seconds: int | None = None,
+    enabled: bool = True,
+) -> ConnectorInstance:
+
+    now = datetime.now(UTC)
+    return ConnectorInstance(
+        workspace_id=WorkspaceId(workspace_id),
+        instance_id=ConnectorInstanceId(instance_id),
+        type=type,
+        version=version,
+        name=name,
+        lease_ttl_seconds=lease_ttl_seconds,
+        enabled=enabled,
+        status="active",
+        health_status=None,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+async def test_put_connector_instance_creates_row(pg_pool: Pool) -> None:
+
+    adapter = PgConnectorInstanceAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    put = await adapter.put_connector_instance(
+        WorkspaceId("ws-1"),
+        _make_instance(name="prod-http", lease_ttl_seconds=3600),
+    )
+    assert put.workspace_id == "ws-1"
+    assert put.instance_id == "inst-1"
+    assert put.name == "prod-http"
+    assert put.lease_ttl_seconds == 3600
+    assert put.enabled is True
+    assert put.status == "active"
+    assert put.health_status is None
+
+    got = await adapter.get_connector_instance(
+        WorkspaceId("ws-1"), ConnectorInstanceId("inst-1")
+    )
+    assert got is not None
+    assert got.name == "prod-http"
+
+
+async def test_put_connector_instance_is_create_only(pg_pool: Pool) -> None:
+
+    adapter = PgConnectorInstanceAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+    await adapter.put_connector_instance(WorkspaceId("ws-1"), _make_instance())
+    # Re-put on identical contents still rejects — adapters do not
+    # silently merge; idempotence is the service layer's job.
+    with pytest.raises(ImmutableViolation):
+        await adapter.put_connector_instance(
+            WorkspaceId("ws-1"), _make_instance()
+        )
+
+
+async def test_put_connector_instance_rejects_workspace_mismatch(
+    pg_pool: Pool,
+) -> None:
+
+    adapter = PgConnectorInstanceAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+    bad = _make_instance(workspace_id="ws-other")
+    with pytest.raises(ValueError, match="workspace_id"):
+        await adapter.put_connector_instance(WorkspaceId("ws-1"), bad)
+
+
+async def test_get_connector_instance_returns_none_when_absent(
+    pg_pool: Pool,
+) -> None:
+
+    adapter = PgConnectorInstanceAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+    got = await adapter.get_connector_instance(
+        WorkspaceId("ws-1"), ConnectorInstanceId("nope")
+    )
+    assert got is None
+
+
+async def test_get_connector_instance_workspace_isolation(pg_pool: Pool) -> None:
+    """A row in ws-A must be invisible to a get from ws-B."""
+
+    adapter = PgConnectorInstanceAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+    await adapter.put_connector_instance(
+        WorkspaceId("ws-A"), _make_instance(workspace_id="ws-A")
+    )
+    got = await adapter.get_connector_instance(
+        WorkspaceId("ws-B"), ConnectorInstanceId("inst-1")
+    )
+    assert got is None  # cross-workspace existence MUST NOT leak
+
+
+async def test_patch_connector_instance_mutates_allowed_fields(
+    pg_pool: Pool,
+) -> None:
+
+    adapter = PgConnectorInstanceAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+    initial = await adapter.put_connector_instance(
+        WorkspaceId("ws-1"), _make_instance(name="orig", enabled=True)
+    )
+
+    patched = await adapter.patch_connector_instance(
+        WorkspaceId("ws-1"),
+        ConnectorInstanceId("inst-1"),
+        {"name": "renamed", "enabled": False, "lease_ttl_seconds": 7200},
+    )
+    assert patched is not None
+    assert patched.name == "renamed"
+    assert patched.enabled is False
+    assert patched.lease_ttl_seconds == 7200
+    # Immutable fields stay put.
+    assert patched.type == initial.type
+    assert patched.version == initial.version
+    assert patched.created_at == initial.created_at
+    # updated_at bumped.
+    assert patched.updated_at >= initial.updated_at
+
+
+async def test_patch_connector_instance_rejects_unknown_fields(
+    pg_pool: Pool,
+) -> None:
+
+    adapter = PgConnectorInstanceAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+    await adapter.put_connector_instance(WorkspaceId("ws-1"), _make_instance())
+    with pytest.raises(ValueError, match="unknown patch fields"):
+        await adapter.patch_connector_instance(
+            WorkspaceId("ws-1"),
+            ConnectorInstanceId("inst-1"),
+            {"type": "smtp"},  # immutable; rejected at the adapter
+        )
+
+
+async def test_patch_connector_instance_returns_none_when_absent(
+    pg_pool: Pool,
+) -> None:
+
+    adapter = PgConnectorInstanceAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+    res = await adapter.patch_connector_instance(
+        WorkspaceId("ws-1"),
+        ConnectorInstanceId("ghost"),
+        {"enabled": False},
+    )
+    assert res is None
+
+
+async def test_patch_connector_instance_workspace_isolation(pg_pool: Pool) -> None:
+    """Patching from the wrong workspace MUST NOT mutate the row."""
+
+    adapter = PgConnectorInstanceAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+    await adapter.put_connector_instance(
+        WorkspaceId("ws-A"),
+        _make_instance(workspace_id="ws-A", name="A-original"),
+    )
+    res = await adapter.patch_connector_instance(
+        WorkspaceId("ws-B"),
+        ConnectorInstanceId("inst-1"),
+        {"name": "B-hijack"},
+    )
+    assert res is None  # cross-workspace patch returns None
+    # Verify the ws-A row is untouched.
+    got = await adapter.get_connector_instance(
+        WorkspaceId("ws-A"), ConnectorInstanceId("inst-1")
+    )
+    assert got is not None
+    assert got.name == "A-original"
+
+
+async def test_list_connector_instances_returns_workspace_only(
+    pg_pool: Pool,
+) -> None:
+
+    adapter = PgConnectorInstanceAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+    await adapter.put_connector_instance(
+        WorkspaceId("ws-A"),
+        _make_instance(workspace_id="ws-A", instance_id="a-1"),
+    )
+    await adapter.put_connector_instance(
+        WorkspaceId("ws-A"),
+        _make_instance(workspace_id="ws-A", instance_id="a-2"),
+    )
+    await adapter.put_connector_instance(
+        WorkspaceId("ws-B"),
+        _make_instance(workspace_id="ws-B", instance_id="b-1"),
+    )
+
+    page = await adapter.list_connector_instances(WorkspaceId("ws-A"))
+    ids = {i.instance_id for i in page.items}
+    assert ids == {"a-1", "a-2"}
+    assert page.next_cursor is None
+
+
+async def test_list_connector_instances_filters_by_type_and_enabled(
+    pg_pool: Pool,
+) -> None:
+
+    adapter = PgConnectorInstanceAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+    await adapter.put_connector_instance(
+        WorkspaceId("ws-1"),
+        _make_instance(instance_id="i-http-on", type="http", enabled=True),
+    )
+    await adapter.put_connector_instance(
+        WorkspaceId("ws-1"),
+        _make_instance(instance_id="i-http-off", type="http", enabled=False),
+    )
+    await adapter.put_connector_instance(
+        WorkspaceId("ws-1"),
+        _make_instance(instance_id="i-smtp-on", type="smtp", enabled=True),
+    )
+
+    only_http = await adapter.list_connector_instances(
+        WorkspaceId("ws-1"),
+        filter=ConnectorInstanceFilter(type="http"),
+    )
+    assert {i.instance_id for i in only_http.items} == {"i-http-on", "i-http-off"}
+
+    only_enabled_http = await adapter.list_connector_instances(
+        WorkspaceId("ws-1"),
+        filter=ConnectorInstanceFilter(type="http", enabled=True),
+    )
+    assert {i.instance_id for i in only_enabled_http.items} == {"i-http-on"}
+
+
+async def test_list_connector_instances_keyset_pagination(pg_pool: Pool) -> None:
+
+    adapter = PgConnectorInstanceAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+    # Insert 5 rows; rely on monotonic now() in DB but pace them so
+    # created_at order is deterministic.
+    for n in range(5):
+        await adapter.put_connector_instance(
+            WorkspaceId("ws-1"),
+            _make_instance(instance_id=f"i-{n}", type="http"),
+        )
+        await asyncio.sleep(0.01)
+
+    first = await adapter.list_connector_instances(WorkspaceId("ws-1"), limit=2)
+    assert len(first.items) == 2
+    assert first.next_cursor is not None
+
+    second = await adapter.list_connector_instances(
+        WorkspaceId("ws-1"), cursor=first.next_cursor, limit=2
+    )
+    assert len(second.items) == 2
+    # No overlap between pages.
+    assert {i.instance_id for i in first.items}.isdisjoint(
+        {i.instance_id for i in second.items}
+    )
