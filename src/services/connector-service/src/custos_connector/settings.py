@@ -161,7 +161,9 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
             DEFAULT_PULL_LOOP_MIN_INTERVAL_SEC,
             minimum=PULL_LOOP_HARD_FLOOR_SEC,
         ),
-        health_cache_ttl_s=_opt_int(ENV_HEALTH_CACHE_TTL_S, src, DEFAULT_HEALTH_CACHE_TTL_S),
+        health_cache_ttl_s=_opt_int(
+            ENV_HEALTH_CACHE_TTL_S, src, DEFAULT_HEALTH_CACHE_TTL_S, minimum=0
+        ),
         sidecar_mtls_issuer=mtls_issuer,
         environment=src.get(ENV_ENVIRONMENT, "development").strip() or "development",
     )
