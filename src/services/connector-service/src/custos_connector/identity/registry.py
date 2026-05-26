@@ -20,10 +20,10 @@ deliberately small but covers four responsibilities:
    wrong identity model.
 
 3. **TTL cache.** The cache key is ``(workspace_id, instance_id,
-   authentication_type, descriptor)``. Entries are aged out using the
-   resolved ``expires_at`` (or the supplied ``lease_ttl_seconds`` when
-   ``expires_at`` is ``None``). The cache means a noisy bind loop
-   (e.g. every BindForStep call inside a tight workflow) does not
+   authentication_type, descriptor_key)``, where ``descriptor_key`` is
+   a stable string derived from ``credentials_authentication``. Entries
+   are aged out using the resolved ``expires_at`` (or the supplied
+   ``lease_ttl_seconds`` when ``expires_at`` is ``None``).
    hammer the upstream identity provider; that pattern is exactly what
    the design's "lease TTL" guidance is about.
 
