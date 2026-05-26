@@ -221,8 +221,14 @@ class InstanceService:
         if lease_ttl_seconds is not None:
             self._validate_lease_ttl(lease_ttl_seconds)
 
-        effective_target_config: Mapping[str, Any] = target_config or {}
-        effective_credentials_auth: Mapping[str, Any] = credentials_authentication or {}
+        effective_target_config: Mapping[str, Any] = (
+            dict(target_config) if target_config is not None else {}
+        )
+        effective_credentials_auth: Mapping[str, Any] = (
+            dict(credentials_authentication)
+            if credentials_authentication is not None
+            else {}
+        )
 
         # 2. Catalog existence check. Stale-on-deprecation is fine
         #    (deprecation is a property of the catalog row); only
