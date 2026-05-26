@@ -265,7 +265,7 @@ class OidcFederatedResolver:
         cached = self._jwks_cache.get(jwks_uri)
         now_mono = time.monotonic()
         if cached is not None and (now_mono - cached[0]) < self._jwks_cache_ttl:
-            return cached[1]
+            return dict(cached[1])
 
         try:
             response = await self._http.request(
