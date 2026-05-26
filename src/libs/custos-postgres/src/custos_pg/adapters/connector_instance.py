@@ -29,7 +29,7 @@ import base64
 import json
 from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
-from datetime import datetime
+from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar, Final
 
@@ -250,7 +250,7 @@ class PgConnectorInstanceAdapter:
         for column in sorted(updates):
             params.append(updates[column])
             set_fragments.append(f"{column} = ${len(params)}")
-        params.append(datetime.now().astimezone())
+        params.append(datetime.now(UTC))
         set_fragments.append(f"updated_at = ${len(params)}")
         params.append(str(workspace_id))
         ws_idx = len(params)
