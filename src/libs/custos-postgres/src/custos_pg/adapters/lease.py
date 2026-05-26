@@ -314,6 +314,44 @@ class PgLeaseAdapter:
             return None
         return _row_to_lease(row)
 
+    async def revoke_lease(
+        self,
+        workspace_id: WorkspaceId,
+        lease_id: str,
+        revoke_reason: str,
+        revoked_at: datetime,
+    ) -> Lease | None:
+        pool = await self._pool_ref()
+        try:
+            async with pool.acquire() as conn:
+                # Triple-COALESCE keeps revoke idempotent: a second call
+                # preserves the original ``revoked_at`` + ``revoke_reason``
+                # + ``released_at`` and only bumps ``updated_at``. The
+                # ``released_at`` close-out is what lets
+                # ``count_active_for_step_attempt`` free the slot \u2014 it
+                # filters on ``released_at IS NULL``.
+                row = await conn.fetchrow(
+                    "UPDATE lease.lease "
+                    "SET revoked_at    = COALESCE(revoked_at, $3), "
+                    "    revoke_reason = COALESCE(revoke_reason, $4), "
+                    "    released_at   = COALESCE(released_at, $3), "
+                    "    updated_at    = $3 "
+                    "WHERE workspace_id = $1 AND lease_id = $2 "
+                    "RETURNING workspace_id, lease_id, run_id, step_id, attempt, "
+                    "slot, capability, connector_instance_id, token_type, "
+                    "issued_at, expires_at, released_at, revoked_at, "
+                    "revoke_reason, created_at, updated_at",
+                    str(workspace_id),
+                    lease_id,
+                    revoked_at,
+                    revoke_reason,
+                )
+        except Exception as exc:
+            raise self._classify(exc) from exc
+        if row is None:
+            return None
+        return _row_to_lease(row)
+
     async def count_active_for_step_attempt(
         self,
         workspace_id: WorkspaceId,

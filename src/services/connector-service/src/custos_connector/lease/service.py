@@ -1,7 +1,7 @@
-"""Lease Manager (CONN-IMPL-017 / Phase G/2).
+"""Lease Manager (CONN-IMPL-017 + CONN-IMPL-018 / Phase G/2 + G/3).
 
-The Lease Manager mints, refreshes, and releases activity-token leases
-used by the secret-bridge sidecar. It enforces:
+The Lease Manager mints, refreshes, releases, expires, and revokes
+activity-token leases used by the secret-bridge sidecar. It enforces:
 
 * Stable, unique ``lease_id`` per issuance \u2014 a 26-char Crockford
   base32 ULID with a ``lease_`` prefix.
@@ -10,22 +10,21 @@ used by the secret-bridge sidecar. It enforces:
   safety_buffer)``.
 * The concurrent-lease cap (default 16) per
   ``(workspace_id, run_id, step_id, attempt)``.
-* Audit emission of ``lease.issued`` / ``lease.refreshed`` /
-  ``lease.released`` after successful state changes.
+* Audit emission of the full lease-event taxonomy
+  (``lease.issued`` / ``lease.refreshed`` / ``lease.released`` /
+  ``lease.expired`` / ``lease.revoke-requested`` / ``lease.revoked``
+  / ``lease.denied``) after each state change or rejection.
 
 The actual lease persistence sits behind the SPL
 :class:`LeaseStoreProvider`; this service is a thin domain layer on
 top.
-
-The remaining four lease events (``lease.revoked``, ``lease.expired``,
-``lease.denied``, ``lease.revoke-requested``) ship in CONN-IMPL-018.
 """
 
 from __future__ import annotations
 
 import secrets
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Final
@@ -35,9 +34,13 @@ from custos_spl.interfaces.lease_store import Lease, LeaseStoreProvider
 from custos_spl.interfaces.metadata_store import MetadataStoreProvider
 
 from custos_connector.audit import (
+    audit_lease_denied,
+    audit_lease_expired,
     audit_lease_issued,
     audit_lease_refreshed,
     audit_lease_released,
+    audit_lease_revoke_requested,
+    audit_lease_revoked,
 )
 from custos_connector.lease.errors import LeaseError, LeaseErrorCode
 
@@ -49,6 +52,18 @@ _STEP_DEADLINE_SAFETY_BUFFER_SEC: Final[int] = 5
 #: ULID alphabet (Crockford base32). Excludes I, L, O, U to dodge
 #: visual ambiguity. Mirrors the canonical ULID spec.
 _CROCKFORD: Final[str] = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+#: Map :class:`LeaseErrorCode` to its surfaced HTTP status. Used by
+#: :meth:`LeaseManager._record_denied_for` so the ``lease.denied``
+#: event carries the same status the future REST handler will
+#: return; keeping the mapping next to the manager (not at the HTTP
+#: edge) means direct-call clients in tests see the same value.
+_LEASE_ERROR_HTTP_STATUS: Final[dict[LeaseErrorCode, int]] = {
+    LeaseErrorCode.CAPACITY_EXCEEDED: 429,
+    LeaseErrorCode.NOT_FOUND: 404,
+    LeaseErrorCode.ALREADY_RELEASED: 410,
+    LeaseErrorCode.INVALID_REQUEST: 400,
+}
 
 
 def _ulid(now_ms: int | None = None) -> str:
@@ -85,7 +100,7 @@ class TtlInputs:
 
 
 class LeaseManager:
-    """Issues, refreshes, and releases activity-token leases.
+    """Issues, refreshes, releases, expires, and revokes activity-token leases.
 
     Construction is bag-of-callables: the SPL stores, the metadata
     store (for audit emission), the cap-and-default settings, and the
@@ -164,6 +179,37 @@ class LeaseManager:
             )
         return min(candidates)
 
+    # ----- Audit helpers (denial wiring) -----
+
+    async def _record_denied_for(
+        self,
+        *,
+        workspace_id: WorkspaceId,
+        lease_id: str | None,
+        connector_instance_id: str | None,
+        op: str,
+        exc: LeaseError,
+    ) -> None:
+        """Emit ``lease.denied`` for a Lease-Manager-raised :class:`LeaseError`.
+
+        Internal wrapper around :meth:`record_denied`. Keeps the
+        emit-then-raise pattern compact in :meth:`issue` /
+        :meth:`refresh`. The mapping from
+        :class:`LeaseErrorCode` to HTTP status lives on
+        :data:`_LEASE_ERROR_HTTP_STATUS` so direct-call clients (unit
+        tests) see the same status the future REST handler will
+        return.
+        """
+        await self.record_denied(
+            workspace_id=workspace_id,
+            lease_id=lease_id,
+            connector_instance_id=connector_instance_id,
+            op=op,
+            reason_code=exc.code.value,
+            reason_detail=exc.detail,
+            http_status=_LEASE_ERROR_HTTP_STATUS[exc.code],
+        )
+
     # ----- Public surface -----
 
     async def issue(
@@ -194,33 +240,47 @@ class LeaseManager:
         ``(workspace_id, run_id, step_id, attempt)`` tuple is at the
         configured cap, and :class:`LeaseError(INVALID_REQUEST)` when
         the TTL precedence ladder cannot produce a positive value
-        (e.g. step deadline already in the past).
+        (e.g. step deadline already in the past). Every raise is
+        preceded by a ``lease.denied`` audit emission.
         """
-        if attempt <= 0:
-            raise LeaseError(
-                LeaseErrorCode.INVALID_REQUEST,
-                f"attempt must be positive; got {attempt}",
+        instance_id_str = str(connector_instance_id)
+        try:
+            if attempt <= 0:
+                raise LeaseError(
+                    LeaseErrorCode.INVALID_REQUEST,
+                    f"attempt must be positive; got {attempt}",
+                )
+            now = self._clock()
+            active = await self._lease_store.count_active_for_step_attempt(
+                workspace_id, run_id, step_id, attempt, now
             )
-        now = self._clock()
-        active = await self._lease_store.count_active_for_step_attempt(
-            workspace_id, run_id, step_id, attempt, now
-        )
-        if active >= self._max_concurrent_leases:
-            raise LeaseError(
-                LeaseErrorCode.CAPACITY_EXCEEDED,
-                f"concurrent-lease cap reached "
-                f"({active}/{self._max_concurrent_leases}) for "
-                f"(run_id={run_id}, step_id={step_id}, attempt={attempt})",
+            if active >= self._max_concurrent_leases:
+                raise LeaseError(
+                    LeaseErrorCode.CAPACITY_EXCEEDED,
+                    f"concurrent-lease cap reached "
+                    f"({active}/{self._max_concurrent_leases}) for "
+                    f"(run_id={run_id}, step_id={step_id}, attempt={attempt})",
+                )
+            ttl_sec = self._resolve_ttl_seconds(
+                now=now,
+                inputs=TtlInputs(
+                    requested_ttl_sec=requested_ttl_sec,
+                    type_max_ttl_sec=type_max_ttl_sec,
+                    instance_ttl_sec=instance_ttl_sec,
+                    step_deadline=step_deadline,
+                ),
             )
-        ttl_sec = self._resolve_ttl_seconds(
-            now=now,
-            inputs=TtlInputs(
-                requested_ttl_sec=requested_ttl_sec,
-                type_max_ttl_sec=type_max_ttl_sec,
-                instance_ttl_sec=instance_ttl_sec,
-                step_deadline=step_deadline,
-            ),
-        )
+        except LeaseError as exc:
+            # No lease_id yet at this stage; the cap and TTL
+            # validations fire before mint. Emit with lease_id=None.
+            await self._record_denied_for(
+                workspace_id=workspace_id,
+                lease_id=None,
+                connector_instance_id=instance_id_str,
+                op="issue",
+                exc=exc,
+            )
+            raise
         expires_at = now + timedelta(seconds=ttl_sec)
         lease_id = f"lease_{_ulid(int(now.timestamp() * 1000))}"
         lease = Lease(
@@ -280,43 +340,64 @@ class LeaseManager:
         Raises :class:`LeaseError(NOT_FOUND)` when no row exists for
         ``(workspace_id, lease_id)`` and
         :class:`LeaseError(ALREADY_RELEASED)` when the row exists but
-        ``released_at`` is set.
+        ``released_at`` is set. Every raise is preceded by a
+        ``lease.denied`` audit emission.
         """
-        current = await self._lease_store.get_lease(workspace_id, lease_id)
-        if current is None:
-            raise LeaseError(
-                LeaseErrorCode.NOT_FOUND,
-                f"no lease {lease_id} in workspace {workspace_id}",
+        instance_id_str: str | None = None
+        try:
+            current = await self._lease_store.get_lease(workspace_id, lease_id)
+            if current is None:
+                raise LeaseError(
+                    LeaseErrorCode.NOT_FOUND,
+                    f"no lease {lease_id} in workspace {workspace_id}",
+                )
+            instance_id_str = str(current.connector_instance_id)
+            if current.released_at is not None:
+                raise LeaseError(
+                    LeaseErrorCode.ALREADY_RELEASED,
+                    f"lease {lease_id} was released at {current.released_at.isoformat()}",
+                )
+            now = self._clock()
+            ttl_sec = self._resolve_ttl_seconds(
+                now=now,
+                inputs=TtlInputs(
+                    requested_ttl_sec=requested_ttl_sec,
+                    type_max_ttl_sec=type_max_ttl_sec,
+                    instance_ttl_sec=instance_ttl_sec,
+                    step_deadline=step_deadline,
+                ),
             )
-        if current.released_at is not None:
-            raise LeaseError(
-                LeaseErrorCode.ALREADY_RELEASED,
-                f"lease {lease_id} was released at {current.released_at.isoformat()}",
+            new_expires_at = now + timedelta(seconds=ttl_sec)
+            refreshed = await self._lease_store.refresh_lease(
+                workspace_id, lease_id, new_expires_at
             )
-        now = self._clock()
-        ttl_sec = self._resolve_ttl_seconds(
-            now=now,
-            inputs=TtlInputs(
-                requested_ttl_sec=requested_ttl_sec,
-                type_max_ttl_sec=type_max_ttl_sec,
-                instance_ttl_sec=instance_ttl_sec,
-                step_deadline=step_deadline,
-            ),
-        )
-        new_expires_at = now + timedelta(seconds=ttl_sec)
-        refreshed = await self._lease_store.refresh_lease(workspace_id, lease_id, new_expires_at)
-        if refreshed is None:
-            # Race: lease was released between get and refresh.
-            raise LeaseError(
-                LeaseErrorCode.ALREADY_RELEASED,
-                f"lease {lease_id} was released concurrently with refresh",
+            if refreshed is None:
+                # Race: lease was released between get and refresh.
+                raise LeaseError(
+                    LeaseErrorCode.ALREADY_RELEASED,
+                    f"lease {lease_id} was released concurrently with refresh",
+                )
+        except LeaseError as exc:
+            await self._record_denied_for(
+                workspace_id=workspace_id,
+                lease_id=lease_id,
+                connector_instance_id=instance_id_str,
+                op="refresh",
+                exc=exc,
             )
+            raise
         await audit_lease_refreshed(
             self._metadata_store,
             workspace_id=str(workspace_id),
             actor=self._actor,
             lease_id=refreshed.lease_id,
+            run_id=str(refreshed.run_id),
+            step_id=str(refreshed.step_id),
+            attempt=refreshed.attempt,
+            slot=refreshed.slot,
+            capability=refreshed.capability,
             connector_instance_id=str(refreshed.connector_instance_id),
+            token_type=refreshed.token_type,
             previous_expires_at=current.expires_at,
             new_expires_at=refreshed.expires_at,
         )
@@ -345,10 +426,163 @@ class LeaseManager:
             workspace_id=str(workspace_id),
             actor=self._actor,
             lease_id=released.lease_id,
+            run_id=str(released.run_id),
+            step_id=str(released.step_id),
+            attempt=released.attempt,
+            slot=released.slot,
+            capability=released.capability,
             connector_instance_id=str(released.connector_instance_id),
+            token_type=released.token_type,
             released_at=released.released_at or now,
         )
         return released
+
+    async def expire(
+        self,
+        *,
+        workspace_id: WorkspaceId,
+        lease_id: str,
+        reason: str = "ttl-reached",
+    ) -> Lease | None:
+        """Mark a lease as expired and emit ``lease.expired``.
+
+        The SPL has no separate ``expire_lease`` method because the
+        cap-check primitive treats released and revoked leases the
+        same way as expired ones (``released_at IS NULL`` is the
+        predicate). We therefore reuse :meth:`release_lease` to
+        close the slot but emit ``lease.expired`` rather than
+        ``lease.released`` so the audit consumer can distinguish
+        voluntary release from infrastructure-driven cleanup.
+
+        Callers are the future TTL sweeper (``reason="ttl-reached"``)
+        and the per-step sidecar shutdown hook
+        (``reason="sidecar-shutdown"``). Returns ``None`` when no row
+        exists for ``(workspace_id, lease_id)``; idempotent against
+        a previous release / expire / revoke.
+        """
+        now = self._clock()
+        released = await self._lease_store.release_lease(workspace_id, lease_id, now)
+        if released is None:
+            return None
+        await audit_lease_expired(
+            self._metadata_store,
+            workspace_id=str(workspace_id),
+            actor=self._actor,
+            lease_id=released.lease_id,
+            run_id=str(released.run_id),
+            step_id=str(released.step_id),
+            attempt=released.attempt,
+            slot=released.slot,
+            capability=released.capability,
+            connector_instance_id=str(released.connector_instance_id),
+            token_type=released.token_type,
+            expires_at=released.expires_at,
+            expired_at=released.released_at or now,
+            reason=reason,
+        )
+        return released
+
+    async def revoke(
+        self,
+        *,
+        workspace_id: WorkspaceId,
+        lease_id: str,
+        reason: str,
+    ) -> Lease | None:
+        """Revoke a lease and emit ``lease.revoked``.
+
+        Calls :meth:`LeaseStoreProvider.revoke_lease` which sets
+        ``revoked_at`` + ``revoke_reason`` and also closes
+        ``released_at`` so the cap-check primitive frees the slot.
+        Idempotent at the adapter level; emission fires on every
+        successful call so the audit trail records each request.
+
+        Returns the post-revoke row or ``None`` when no row exists
+        for ``(workspace_id, lease_id)``.
+        """
+        now = self._clock()
+        revoked = await self._lease_store.revoke_lease(workspace_id, lease_id, reason, now)
+        if revoked is None:
+            return None
+        await audit_lease_revoked(
+            self._metadata_store,
+            workspace_id=str(workspace_id),
+            actor=self._actor,
+            lease_id=revoked.lease_id,
+            run_id=str(revoked.run_id),
+            step_id=str(revoked.step_id),
+            attempt=revoked.attempt,
+            slot=revoked.slot,
+            capability=revoked.capability,
+            connector_instance_id=str(revoked.connector_instance_id),
+            token_type=revoked.token_type,
+            revoked_at=revoked.revoked_at or now,
+            revoke_reason=revoked.revoke_reason or reason,
+        )
+        return revoked
+
+    async def record_revoke_requested(
+        self,
+        *,
+        workspace_id: WorkspaceId,
+        selector_type: str,
+        selector_value: str,
+        lease_ids: Sequence[str],
+        reason: str,
+        operator: str,
+    ) -> None:
+        """Emit ``lease.revoke-requested`` for an operator-initiated revoke.
+
+        Pure emission helper; performs no state mutation. The
+        operator REST endpoint in CONN-IMPL-028 calls this once
+        before fanning out to per-lease :meth:`revoke` calls so the
+        audit trail records both the high-level intent (one
+        ``lease.revoke-requested``) and the per-lease outcome (N
+        ``lease.revoked`` events).
+        """
+        await audit_lease_revoke_requested(
+            self._metadata_store,
+            workspace_id=str(workspace_id),
+            actor=self._actor,
+            selector_type=selector_type,
+            selector_value=selector_value,
+            lease_ids=lease_ids,
+            reason=reason,
+            operator=operator,
+        )
+
+    async def record_denied(
+        self,
+        *,
+        workspace_id: WorkspaceId,
+        lease_id: str | None,
+        connector_instance_id: str | None,
+        op: str,
+        reason_code: str,
+        reason_detail: str,
+        http_status: int,
+    ) -> None:
+        """Emit ``lease.denied`` for a rejected lease request.
+
+        Pure emission helper; performs no state mutation. Used by
+        the future REST handler to record authorization or
+        capability rejections that bounce before reaching
+        :meth:`issue` / :meth:`refresh` / :meth:`release`, and
+        called internally by those methods (via
+        :meth:`_record_denied_for`) to auto-emit on every
+        :class:`LeaseError` raise.
+        """
+        await audit_lease_denied(
+            self._metadata_store,
+            workspace_id=str(workspace_id),
+            actor=self._actor,
+            lease_id=lease_id,
+            connector_instance_id=connector_instance_id,
+            op=op,
+            reason_code=reason_code,
+            reason_detail=reason_detail,
+            http_status=http_status,
+        )
 
 
 __all__ = ["LeaseManager", "TtlInputs"]
