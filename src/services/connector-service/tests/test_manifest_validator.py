@@ -516,13 +516,13 @@ def test_accepts_vendor_extension_event_token() -> None:
     validate_manifest(payload)
 
 
-def test_persists_cursor_encoding_through_normalization() -> None:
-    """``events.pull.cursorEncoding`` survives validation unchanged.
+def test_preserves_cursor_encoding_through_validate_manifest() -> None:
+    """``events.pull.cursorEncoding`` survives ``validate_manifest()`` unchanged.
 
-    Required by CONN-IMPL-022 encoding-migration: the persisted
-    normalized manifest carries the connector-declared encoding string
-    so the runtime can detect mismatches against stored cursor
-    envelopes.
+    Required by CONN-IMPL-022 encoding-migration: validation must retain
+    the connector-declared encoding string in the returned manifest so
+    callers can safely round-trip and inspect it alongside the pull
+    cursor behavior configuration.
     """
     payload = _baseline()
     payload["spec"]["events"] = {
