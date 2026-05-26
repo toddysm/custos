@@ -82,7 +82,12 @@ async def _reset_and_migrate(dsn: str) -> None:
     revisions when the FastAPI app's lifespan opens its own pool.
     """
     import asyncpg
-    from custos_pg import PgCatalogAdapter, PgConnectorInstanceAdapter, PgMetadataAdapter
+    from custos_pg import (
+        PgCatalogAdapter,
+        PgConnectorInstanceAdapter,
+        PgLeaseAdapter,
+        PgMetadataAdapter,
+    )
 
     pool = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=2)
     assert pool is not None
@@ -92,10 +97,12 @@ async def _reset_and_migrate(dsn: str) -> None:
             # ledger so the next ``apply_pending`` re-creates everything
             # cleanly. ``catalog`` (connector-type rows) +
             # ``connector_instance`` (workspace-scoped instance rows) +
+            # ``lease`` (activity-token leases) +
             # ``custos_state`` (cursors) + ``custos_meta`` (revision
             # ledger).
             await conn.execute("DROP SCHEMA IF EXISTS catalog CASCADE")
             await conn.execute("DROP SCHEMA IF EXISTS connector_instance CASCADE")
+            await conn.execute("DROP SCHEMA IF EXISTS lease CASCADE")
             await conn.execute("DROP SCHEMA IF EXISTS custos_state CASCADE")
             await conn.execute("DROP SCHEMA IF EXISTS custos_meta CASCADE")
         # Migrations: each adapter records its declared revisions into
@@ -103,6 +110,7 @@ async def _reset_and_migrate(dsn: str) -> None:
         # via ``refresh_declared``.
         await PgCatalogAdapter(pool=pool).apply_pending()
         await PgConnectorInstanceAdapter(pool=pool).apply_pending()
+        await PgLeaseAdapter(pool=pool).apply_pending()
         await PgMetadataAdapter(pool=pool).apply_pending()
     finally:
         await pool.close()
