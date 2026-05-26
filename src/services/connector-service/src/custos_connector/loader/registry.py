@@ -60,6 +60,7 @@ from custos_connector.manifest import (
     discover_manifest,
     validate_manifest,
 )
+from custos_connector.manifest.capabilities import extract_capability_name
 
 #: Audit event names. Centralised so tests + dashboards refer to them as
 #: constants rather than open-coded strings.
@@ -86,6 +87,91 @@ _ARTIFACT_MANIFEST_ACCEPT: Final[str] = ", ".join(
 _IMAGE_REF_RE: Final[re.Pattern[str]] = re.compile(
     r"^(?P<repository>[a-z0-9][a-z0-9._\-/]*[a-z0-9])@(?P<digest>sha256:[0-9a-fA-F]{64})$"
 )
+
+#: SemVer 2.0 pattern with named groups for ordering (mirrors the
+#: schema's ``metadata.version`` pattern).
+_SEMVER_RE: Final[re.Pattern[str]] = re.compile(
+    r"^(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)"
+    r"(?:-(?P<pre>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
+
+
+#: SemVer 2.0 §11.4.1 says a numeric identifier MUST NOT include leading
+#: zeros (except for ``"0"`` itself). Any all-digit identifier that has
+#: a leading zero is therefore treated as alphanumeric.
+def _is_numeric_identifier(ident: str) -> bool:
+    return ident.isdigit() and (len(ident) == 1 or not ident.startswith("0"))
+
+
+#: Per-identifier sort key. Numeric identifiers carry ``(0, int_value)``
+#: so they compare numerically and rank *below* alphanumeric identifiers
+#: which carry ``(1, str_value)``. This mirrors SemVer 2.0 §11.4.1-3:
+#: "Identifiers consisting of only digits are compared numerically. […]
+#: Numeric identifiers always have lower precedence than alphanumeric
+#: identifiers."
+_PreIdent = tuple[int, int] | tuple[int, str]
+
+
+def _pre_identifier_key(ident: str) -> _PreIdent:
+    if _is_numeric_identifier(ident):
+        return (0, int(ident))
+    return (1, ident)
+
+
+_SemverKey = tuple[int, int, int, int, tuple[_PreIdent, ...]]
+
+
+def _semver_key(
+    version: str,
+) -> _SemverKey:
+    """Return a sortable tuple for SemVer 2.0 ordering.
+
+    The tuple is ``(major, minor, patch, release_rank, pre_identifiers)``.
+
+    ``release_rank`` is ``1`` for a final release (no ``-pre``) and ``0``
+    for a pre-release, so a final release sorts *after* any pre-release
+    of the same ``(major, minor, patch)`` triple (SemVer 2.0 §11.3).
+
+    ``pre_identifiers`` is the dot-separated pre-release split into
+    per-identifier keys per §11.4:
+
+    * §11.4.1 — Identifiers consisting of only digits compare numerically.
+    * §11.4.2 — Identifiers with letters or hyphens compare lexically.
+    * §11.4.3 — Numeric identifiers always have lower precedence than
+      alphanumeric identifiers.
+    * §11.4.4 — A larger set of pre-release fields has higher precedence
+      than a smaller set, if all preceding identifiers are equal. Python
+      tuple comparison handles this naturally (shorter prefix < longer
+      when the prefix matches).
+
+    Final releases produce an empty ``()`` for ``pre_identifiers``; the
+    ``release_rank`` discriminator ensures finals still order correctly
+    against pre-releases despite the empty tuple sorting low.
+
+    Example::
+
+        >>> _semver_key("1.0.0-alpha.2") < _semver_key("1.0.0-alpha.10")
+        True   # numeric comparison — NOT lexicographic (where "10" < "2")
+        >>> _semver_key("1.0.0-alpha.1") < _semver_key("1.0.0-alpha.beta")
+        True   # numeric < alphanumeric
+        >>> _semver_key("1.0.0-alpha") < _semver_key("1.0.0-alpha.1")
+        True   # shorter prefix < longer
+        >>> _semver_key("1.0.0-rc.1") < _semver_key("1.0.0")
+        True   # pre-release < final
+    """
+    match = _SEMVER_RE.fullmatch(version)
+    if match is None:  # pragma: no cover - schema already rejects non-semver
+        raise ValueError(f"version {version!r} is not a SemVer 2.0 string")
+    major = int(match.group("major"))
+    minor = int(match.group("minor"))
+    patch = int(match.group("patch"))
+    pre = match.group("pre") or ""
+    release_rank = 0 if pre else 1
+    pre_identifiers: tuple[_PreIdent, ...] = (
+        tuple(_pre_identifier_key(ident) for ident in pre.split(".")) if pre else ()
+    )
+    return (major, minor, patch, release_rank, pre_identifiers)
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,6 +353,18 @@ class Loader:
         metadata = normalized.get("metadata", {})
         connector_type = metadata["type"]
         connector_version = metadata["version"]
+
+        # 6a) Capability-regression check (CONN-IMPL-009, design §
+        # Compatibility policy). Runs before put_connector_type_version
+        # so a regression is rejected with its own audit code rather
+        # than being silently persisted and discovered at bind time.
+        spec_caps = spec.get("capabilities", []) if isinstance(spec, dict) else []
+        await self._check_capability_regression(
+            connector_type=connector_type,
+            new_version=connector_version,
+            new_capabilities=list(spec_caps) if isinstance(spec_caps, list) else [],
+            image_ref=image_ref,
+        )
 
         try:
             row = await self._catalog.put_connector_type_version(
@@ -568,6 +666,86 @@ class Loader:
                 image_ref=image_ref,
             )
         return body
+
+    async def _check_capability_regression(
+        self,
+        *,
+        connector_type: str,
+        new_version: str,
+        new_capabilities: list[object],
+        image_ref: str,
+    ) -> None:
+        """Reject patch/minor bumps that drop a prior capability.
+
+        Per design § Compatibility policy: within the same major, the
+        new version's capability set MUST be a strict superset of the
+        immediate predecessor's. Capability removal is only permitted
+        at a major bump.
+
+        Implementation:
+
+        1. Parse the new version's major. (Validator already enforced
+           the SemVer pattern; ``_semver_key`` would raise on a stray
+           non-SemVer string but that path is unreachable in production.)
+        2. Walk every persisted version for ``connector_type``,
+           ignoring those in a different major.
+        3. Pick the predecessor — the highest version strictly less
+           than ``new_version`` in the same major.
+        4. If a predecessor exists, diff the capability name sets;
+           any name present in the predecessor but missing from the
+           new version is a regression.
+
+        ``new_capabilities`` is the list of capability entries (string
+        or object form) from the validated, normalized manifest.
+        """
+        new_key = _semver_key(new_version)
+        new_major = new_key[0]
+        new_names = {extract_capability_name(c) for c in new_capabilities}
+
+        predecessor: ConnectorTypeVersion | None = None
+        predecessor_key: _SemverKey | None = None
+        cursor = None
+        while True:
+            page = await self._catalog.list_connector_type_versions(
+                connector_type,
+                cursor=cursor,
+            )
+            for row in page.items:
+                try:
+                    row_key = _semver_key(row.version)
+                except ValueError:  # pragma: no cover - schema-blocked
+                    continue
+                if row_key[0] != new_major:
+                    continue
+                if row_key >= new_key:
+                    continue
+                if predecessor_key is None or row_key > predecessor_key:
+                    predecessor = row
+                    predecessor_key = row_key
+            if page.next_cursor is None:
+                break
+            cursor = page.next_cursor
+
+        if predecessor is None:
+            return
+
+        prior_spec = predecessor.normalized_manifest.get("spec", {})
+        prior_caps = prior_spec.get("capabilities", []) if isinstance(prior_spec, dict) else []
+        if not isinstance(prior_caps, list):  # pragma: no cover - schema-blocked
+            return
+        prior_names = {extract_capability_name(c) for c in prior_caps}
+        dropped = prior_names - new_names
+        if dropped:
+            raise self._reject(
+                code=LoaderErrorCode.CAPABILITY_REGRESSION,
+                detail=(
+                    f"capabilities {sorted(dropped)!r} present in parent version "
+                    f"{predecessor.version!r} are missing from {new_version!r}; "
+                    f"patch/minor bumps within the same major must add "
+                    f"capabilities, not drop them (major bump required to remove)"
+                ),
+                image_ref=image_ref,
+            )
 
     @staticmethod
     def _reject(

@@ -18,6 +18,17 @@ registry?"* and is consumed by the Plugin Loader (CONN-IMPL-008).
 
 from __future__ import annotations
 
+from custos_connector.manifest.capabilities import (
+    FORBIDDEN_IN_CAPABILITIES,
+    REGISTRY_VIEW,
+    TIER1_RESERVED_PREFIXES,
+    TIER1_TOKENS,
+    TIER2_VENDOR_RE,
+    CapabilityTier,
+    classify_capability_token,
+    extract_capability_name,
+    is_deprecated_entry,
+)
 from custos_connector.manifest.discovery import (
     AUDIT_EVENT_FALLBACK_IGNORED,
     AUDIT_EVENT_FALLBACK_REJECTED,
@@ -54,7 +65,13 @@ __all__ = [
     "AUDIT_EVENT_FALLBACK_USED",
     "CONNECTOR_MANIFEST_MEDIA_TYPE",
     "CONNECTOR_MANIFEST_V1_SCHEMA",
+    "FORBIDDEN_IN_CAPABILITIES",
     "MAX_OCI_TAG_LENGTH",
+    "REGISTRY_VIEW",
+    "TIER1_RESERVED_PREFIXES",
+    "TIER1_TOKENS",
+    "TIER2_VENDOR_RE",
+    "CapabilityTier",
     "DiscoveryErrorCode",
     "ManifestDescriptor",
     "ManifestDiscoveryError",
@@ -63,9 +80,12 @@ __all__ = [
     "ValidationErrorCode",
     "canonical_bytes",
     "canonical_json",
+    "classify_capability_token",
     "compute_digest",
     "discover_manifest",
+    "extract_capability_name",
     "fallback_tag_for_digest",
+    "is_deprecated_entry",
     "normalize_manifest",
     "resolve_fallback_tag",
     "resolve_referrers",

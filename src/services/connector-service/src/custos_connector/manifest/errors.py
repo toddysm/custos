@@ -55,8 +55,21 @@ class ValidationErrorCode(StrEnum):
     EVENT_TOKEN_IN_CAPABILITIES = "event-token-in-capabilities"
 
     #: A capability or event token violates the dot-delimited lowercase
-    #: token grammar.
+    #: token grammar. Retained for ``spec.events.produced`` tokens; new
+    #: capability rejections use the more specific
+    #: :attr:`UNKNOWN_CORE_CAPABILITY` /
+    #: :attr:`INVALID_CAPABILITY_SYNTAX` codes from CONN-IMPL-009.
     INVALID_TOKEN_SYNTAX = "invalid-token-syntax"
+
+    #: A capability token uses a reserved Tier 1 prefix (``oci.``,
+    #: ``s3.``, ``blob.``, ``http.``, ``sql.``, ``notification.``) but
+    #: is not in the curated Tier 1 registry
+    #: (``design/architecture/capabilities.md``).
+    UNKNOWN_CORE_CAPABILITY = "unknown-core-capability"
+
+    #: A capability token is neither a curated Tier 1 token nor a valid
+    #: Tier 2 vendor extension (``x-<vendor>.<verb>``).
+    INVALID_CAPABILITY_SYNTAX = "invalid-capability-syntax"
 
     #: ``spec.events.delivery`` carries a value outside ``{push, pull}``.
     INVALID_EVENT_DELIVERY = "invalid-event-delivery"

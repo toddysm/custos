@@ -535,7 +535,7 @@ Declares connector slots the activity needs. Workflow binds concrete connector i
 | `name` | yes | Logical slot name referenced from the workflow's `connectors:` binding. |
 | `type` | yes | Connector type (e.g. `oci-registry`, `github`). |
 | `required` | yes | Whether the workflow must bind an instance. |
-| `capabilities` | no | Advisory list of **data-plane verbs** the activity needs from the bound connector (e.g. `[oci.pull]`, `[oci.push, oci.tag]`, `[s3.read]`). Tokens MUST follow the dot-delimited lowercase convention defined by the Connector Service. The connector itself enforces; the Binder fails bind if a required capability is missing on the bound connector type version. `event.*` and bare tokens like `pull`/`push` are not valid here. |
+| `capabilities` | no | Advisory list of **data-plane verbs** the activity needs from the bound connector (e.g. `[oci.pull]`, `[oci.push, oci.list-tags]`, `[s3.read]`). Tokens MUST follow the dot-delimited lowercase convention defined by the Connector Service. The connector itself enforces; the Binder fails bind if a required capability is missing on the bound connector type version. `event.*` and bare tokens like `pull`/`push` are not valid here. |
 
 #### No `spec.secrets[]` in v1
 

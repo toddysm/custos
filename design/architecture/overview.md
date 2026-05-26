@@ -477,7 +477,7 @@ The normative definition of the connector manifest (capabilities, `events.delive
   "connectorType": "oci-registry",
   "instanceId": "prod-registry",
   "endpoints": { "api": "https://registry.example.com" },
-  "capabilities": ["oci.pull", "oci.push", "oci.tag", "oci.copy"],
+  "capabilities": ["oci.pull", "oci.push", "oci.list-tags", "oci.copy"],
   "version": "1"
 }
 ```
