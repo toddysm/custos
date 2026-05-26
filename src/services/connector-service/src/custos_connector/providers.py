@@ -46,6 +46,7 @@ from custos_spl.interfaces.catalog_store import CatalogStoreProvider
 from custos_spl.interfaces.connector_instance_store import (
     ConnectorInstanceStoreProvider,
 )
+from custos_spl.interfaces.lease_store import LeaseStoreProvider
 from custos_spl.interfaces.metadata_store import MetadataStoreProvider
 
 from custos_connector.binding import BindForStepService
@@ -57,6 +58,7 @@ from custos_connector.identity import (
     IdentityResolverRegistry,
     OidcFederatedResolver,
 )
+from custos_connector.lease import LeaseManager
 from custos_connector.runtime import DockerCliHookRunner, PluginInvoker
 from custos_connector.settings import Settings
 
@@ -69,6 +71,7 @@ from custos_connector.settings import Settings
 _REQUIRED_INTERFACES: tuple[type, ...] = (
     CatalogStoreProvider,
     ConnectorInstanceStoreProvider,
+    LeaseStoreProvider,
     MetadataStoreProvider,
 )
 
@@ -115,9 +118,11 @@ class Providers:
 
     catalog_store: CatalogStoreProvider
     instance_store: ConnectorInstanceStoreProvider
+    lease_store: LeaseStoreProvider
     metadata_store: MetadataStoreProvider
     identity_registry: IdentityResolverRegistry
     bind_for_step_service: BindForStepService
+    lease_manager: LeaseManager
 
 
 def load_providers(settings: Settings) -> Providers:
@@ -129,7 +134,12 @@ def load_providers(settings: Settings) -> Providers:
     """
     # Imported here so that test suites injecting fakes can avoid the
     # asyncpg dependency entirely.
-    from custos_pg import PgCatalogAdapter, PgConnectorInstanceAdapter, PgMetadataAdapter
+    from custos_pg import (
+        PgCatalogAdapter,
+        PgConnectorInstanceAdapter,
+        PgLeaseAdapter,
+        PgMetadataAdapter,
+    )
     from custos_pg.pool import LazyPool
 
     metadata_lazy_pool = LazyPool(settings.metadata_store_dsn)
@@ -143,6 +153,14 @@ def load_providers(settings: Settings) -> Providers:
     metadata_store = PgMetadataAdapter(
         lazy=metadata_lazy_pool,
     )
+    # The Lease store shares the metadata DB pool: lease rows are
+    # workspace-scoped operational state owned by the same connector
+    # service that owns the audit outbox, so co-locating them keeps
+    # the deployment footprint small. Operators that want to split
+    # them can swap the DSN via a follow-up wiring change.
+    lease_store = PgLeaseAdapter(
+        lazy=metadata_lazy_pool,
+    )
     # The adapters declare SCHEMA_REVISION as a bare class attr rather
     # than a ``ClassVar[int]``, so mypy can't see them as Protocol-conforming
     # at the consumer boundary. ``custos-postgres`` has its own strict mypy
@@ -151,10 +169,12 @@ def load_providers(settings: Settings) -> Providers:
     typed_catalog = cast(CatalogStoreProvider, catalog_store)
     typed_instances = cast(ConnectorInstanceStoreProvider, instance_store)
     typed_metadata = cast(MetadataStoreProvider, metadata_store)
+    typed_lease = cast(LeaseStoreProvider, lease_store)
     identity_registry = load_identity_registry(metadata_store=typed_metadata)
     return Providers(
         catalog_store=typed_catalog,
         instance_store=typed_instances,
+        lease_store=typed_lease,
         metadata_store=typed_metadata,
         identity_registry=identity_registry,
         bind_for_step_service=load_bind_for_step_service(
@@ -162,6 +182,11 @@ def load_providers(settings: Settings) -> Providers:
             instance_store=typed_instances,
             metadata_store=typed_metadata,
             identity_registry=identity_registry,
+        ),
+        lease_manager=load_lease_manager(
+            lease_store=typed_lease,
+            metadata_store=typed_metadata,
+            settings=settings,
         ),
     )
 
@@ -235,6 +260,28 @@ def load_bind_for_step_service(
     )
 
 
+def load_lease_manager(
+    *,
+    lease_store: LeaseStoreProvider,
+    metadata_store: MetadataStoreProvider,
+    settings: Settings,
+) -> LeaseManager:
+    """Build the default :class:`LeaseManager` (CONN-IMPL-017).
+
+    Threads the per-deployment sidecar TTL default and the concurrent-
+    lease cap from :class:`Settings` into the manager so the operator-
+    facing env vars ``CONN_SIDECAR_DEFAULT_TTL`` and
+    ``CONN_LEASE_MAX_CONCURRENT`` drive the runtime behaviour without
+    needing a per-call override on the BindForStep / sidecar paths.
+    """
+    return LeaseManager(
+        lease_store=lease_store,
+        metadata_store=metadata_store,
+        default_ttl_sec=settings.sidecar_default_ttl_sec,
+        max_concurrent_leases=settings.lease_max_concurrent,
+    )
+
+
 async def verify_schema_revisions(providers: Providers) -> None:
     """Refresh the per-adapter declared revisions and run the schema gate.
 
@@ -254,6 +301,7 @@ async def verify_schema_revisions(providers: Providers) -> None:
     adapters: list[_RefreshableAdapter] = [
         cast(_RefreshableAdapter, providers.catalog_store),
         cast(_RefreshableAdapter, providers.instance_store),
+        cast(_RefreshableAdapter, providers.lease_store),
         cast(_RefreshableAdapter, providers.metadata_store),
     ]
     for adapter in adapters:
@@ -297,6 +345,7 @@ __all__ = [
     "Providers",
     "load_bind_for_step_service",
     "load_identity_registry",
+    "load_lease_manager",
     "load_providers",
     "schema_gate_explainer",
     "verify_schema_revisions",

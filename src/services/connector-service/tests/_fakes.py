@@ -21,6 +21,8 @@ and the Phase B integration test that drives the real ``PgCatalogAdapter`` /
 
 from __future__ import annotations
 
+import base64
+import json
 from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 from datetime import UTC, datetime
@@ -28,7 +30,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, cast
 
 from custos_spl import ConflictDigest, ImmutableViolation
-from custos_spl.ids import ConnectorInstanceId, WorkspaceId
+from custos_spl.ids import ConnectorInstanceId, RunId, StepId, WorkspaceId
 from custos_spl.interfaces.catalog_store import (
     CatalogStoreProvider,
     ConnectorTypeVersion,
@@ -38,11 +40,13 @@ from custos_spl.interfaces.connector_instance_store import (
     ConnectorInstanceFilter,
     ConnectorInstanceStoreProvider,
 )
+from custos_spl.interfaces.lease_store import Lease, LeaseFilter
 from custos_spl.interfaces.metadata_store import MetadataStoreProvider
 from custos_spl.pagination import Cursor, Page
 
 from custos_connector.binding import BindForStepService
 from custos_connector.identity import IdentityResolverRegistry
+from custos_connector.lease import LeaseManager
 from custos_connector.runtime import ConnectorContext
 
 if TYPE_CHECKING:
@@ -364,12 +368,247 @@ class FakeConnectorInstanceAdapter:
         return Page(items=ws_rows[start:end], next_cursor=next_cursor)
 
 
+def _encode_lease_cursor(issued_at: datetime, lease_id: str) -> Cursor:
+    """Mirrors :func:`custos_pg.adapters.lease._encode_cursor`.
+
+    Base64-encoded JSON of ``[issued_at_iso, lease_id]`` so the fake's
+    cursor shape is wire-compatible with :class:`PgLeaseAdapter` — a
+    pagination-test that round-trips a cursor through the fake exercises
+    the same encoding that production parses.
+    """
+    raw = json.dumps([issued_at.isoformat(), lease_id]).encode("utf-8")
+    return Cursor(token=base64.urlsafe_b64encode(raw).decode("ascii"))
+
+
+def _decode_lease_cursor(cursor: Cursor) -> tuple[datetime, str]:
+    raw = base64.urlsafe_b64decode(cursor.token.encode("ascii"))
+    issued_at_iso, lease_id = json.loads(raw)
+    return datetime.fromisoformat(issued_at_iso), str(lease_id)
+
+
+class FakeLeaseAdapter:
+    """In-memory ``LeaseStoreProvider`` for Lease Manager unit tests.
+
+    Mirrors :class:`PgLeaseAdapter`'s contract:
+
+    * ``put_lease`` is create-only and raises :class:`ImmutableViolation`
+      on a duplicate ``(workspace_id, lease_id)``.
+    * ``get_lease`` / ``refresh_lease`` / ``release_lease`` return
+      ``None`` for cross-workspace ids so the workspace-scoping
+      contract is preserved.
+    * ``refresh_lease`` refuses released rows (returns ``None``) so
+      the Lease Manager's "refresh after release" guard is exercised.
+    * ``release_lease`` is idempotent: a second call preserves the
+      original ``released_at`` and only bumps ``updated_at``.
+    * ``count_active_for_step_attempt`` excludes released and
+      already-expired rows so the cap check matches the SQL adapter.
+    """
+
+    SCHEMA_REVISION = 1
+
+    def __init__(self, *, applied_revisions: AbstractSet[int] | None = None) -> None:
+        self._applied: set[int] = set(
+            {1} if applied_revisions is None else applied_revisions,
+        )
+        self.refresh_calls = 0
+        # Keyed on (workspace_id, lease_id).
+        self._rows: dict[tuple[str, str], Lease] = {}
+
+    @property
+    def declared_revisions(self) -> Mapping[str, AbstractSet[int]]:
+        return MappingProxyType({"LeaseStoreProvider": frozenset(self._applied)})
+
+    async def apply_pending(self) -> list[str]:  # pragma: no cover - not exercised
+        return []
+
+    async def refresh_declared(self) -> None:
+        self.refresh_calls += 1
+
+    def set_applied(self, revisions: AbstractSet[int]) -> None:
+        self._applied = set(revisions)
+
+    async def put_lease(
+        self,
+        workspace_id: WorkspaceId,
+        lease: Lease,
+    ) -> Lease:
+        if lease.workspace_id != workspace_id:
+            raise ValueError(
+                f"lease.workspace_id {lease.workspace_id!r} does not match "
+                f"workspace_id arg {workspace_id!r}"
+            )
+        key = (str(workspace_id), str(lease.lease_id))
+        if key in self._rows:
+            raise ImmutableViolation(
+                f"lease ({workspace_id}, {lease.lease_id}) already exists; "
+                f"use refresh_lease to extend or release_lease to close"
+            )
+        self._rows[key] = lease
+        return lease
+
+    async def get_lease(
+        self,
+        workspace_id: WorkspaceId,
+        lease_id: str,
+    ) -> Lease | None:
+        return self._rows.get((str(workspace_id), lease_id))
+
+    async def refresh_lease(
+        self,
+        workspace_id: WorkspaceId,
+        lease_id: str,
+        new_expires_at: datetime,
+    ) -> Lease | None:
+        key = (str(workspace_id), lease_id)
+        current = self._rows.get(key)
+        if current is None or current.released_at is not None:
+            return None
+        # ``updated_at`` is the wall clock of the mutation, not
+        # ``new_expires_at`` (which is in the future) — mirrors the
+        # SPL contract documented on ``LeaseStoreProvider.refresh_lease``
+        # and the SQL ``now()`` used by :class:`PgLeaseAdapter`.
+        updated = Lease(
+            workspace_id=current.workspace_id,
+            lease_id=current.lease_id,
+            run_id=current.run_id,
+            step_id=current.step_id,
+            attempt=current.attempt,
+            slot=current.slot,
+            capability=current.capability,
+            connector_instance_id=current.connector_instance_id,
+            token_type=current.token_type,
+            issued_at=current.issued_at,
+            expires_at=new_expires_at,
+            released_at=current.released_at,
+            revoked_at=current.revoked_at,
+            revoke_reason=current.revoke_reason,
+            created_at=current.created_at,
+            updated_at=datetime.now(UTC),
+        )
+        self._rows[key] = updated
+        return updated
+
+    async def release_lease(
+        self,
+        workspace_id: WorkspaceId,
+        lease_id: str,
+        released_at: datetime,
+    ) -> Lease | None:
+        key = (str(workspace_id), lease_id)
+        current = self._rows.get(key)
+        if current is None:
+            return None
+        # Idempotent: keep the original released_at if already set.
+        first_release = current.released_at or released_at
+        updated = Lease(
+            workspace_id=current.workspace_id,
+            lease_id=current.lease_id,
+            run_id=current.run_id,
+            step_id=current.step_id,
+            attempt=current.attempt,
+            slot=current.slot,
+            capability=current.capability,
+            connector_instance_id=current.connector_instance_id,
+            token_type=current.token_type,
+            issued_at=current.issued_at,
+            expires_at=current.expires_at,
+            released_at=first_release,
+            revoked_at=current.revoked_at,
+            revoke_reason=current.revoke_reason,
+            created_at=current.created_at,
+            updated_at=released_at,
+        )
+        self._rows[key] = updated
+        return updated
+
+    async def count_active_for_step_attempt(
+        self,
+        workspace_id: WorkspaceId,
+        run_id: RunId,
+        step_id: StepId,
+        attempt: int,
+        as_of: datetime,
+    ) -> int:
+        ws = str(workspace_id)
+        rid = str(run_id)
+        sid = str(step_id)
+        n = 0
+        for (row_ws, _), row in self._rows.items():
+            if row_ws != ws:
+                continue
+            if (
+                str(row.run_id) == rid
+                and str(row.step_id) == sid
+                and row.attempt == attempt
+                and row.released_at is None
+                and row.expires_at > as_of
+            ):
+                n += 1
+        return n
+
+    async def list_active_leases(
+        self,
+        workspace_id: WorkspaceId,
+        filter: LeaseFilter | None = None,
+        cursor: Cursor | None = None,
+        limit: int | None = None,
+    ) -> Page[Lease]:
+        ws = str(workspace_id)
+        # "Active" per the SPL contract excludes both released rows and
+        # already-expired rows — mirrors the ``expires_at > now()`` filter
+        # in :class:`PgLeaseAdapter.list_active_leases` so cap-rehydration
+        # tests cannot pass against the fake and fail in production.
+        now = datetime.now(UTC)
+        rows = [
+            row
+            for (row_ws, _), row in self._rows.items()
+            if row_ws == ws and row.released_at is None and row.expires_at > now
+        ]
+        if filter is not None:
+            if filter.run_id is not None:
+                rows = [r for r in rows if str(r.run_id) == str(filter.run_id)]
+            if filter.step_id is not None:
+                rows = [r for r in rows if str(r.step_id) == str(filter.step_id)]
+            if filter.attempt is not None:
+                rows = [r for r in rows if r.attempt == filter.attempt]
+            if filter.connector_instance_id is not None:
+                rows = [
+                    r
+                    for r in rows
+                    if str(r.connector_instance_id) == str(filter.connector_instance_id)
+                ]
+        rows.sort(key=lambda r: (-r.issued_at.timestamp(), str(r.lease_id)))
+        # Mirror PgLeaseAdapter's keyset cursor (base64-encoded JSON of
+        # ``[issued_at_iso, lease_id]``) so pagination shape matches
+        # production and a malformed token is rejected the same way.
+        start = 0
+        if cursor is not None:
+            ts, lid = _decode_lease_cursor(cursor)
+            for i, r in enumerate(rows):
+                # Same boundary as PgLeaseAdapter: rows ordered by
+                # ``(issued_at DESC, lease_id ASC)`` so the next page
+                # starts at the first row strictly past ``(ts, lid)``.
+                if r.issued_at < ts or (r.issued_at == ts and str(r.lease_id) > lid):
+                    start = i
+                    break
+            else:
+                start = len(rows)
+        end = len(rows) if limit is None else min(start + limit, len(rows))
+        next_cursor: Cursor | None = None
+        if end < len(rows):
+            last = rows[end - 1]
+            next_cursor = _encode_lease_cursor(last.issued_at, last.lease_id)
+        return Page(items=rows[start:end], next_cursor=next_cursor)
+
+
 __all__ = [
     "FakeCatalogAdapter",
     "FakeConnectorInstanceAdapter",
+    "FakeLeaseAdapter",
     "FakeMetadataAdapter",
     "StubPluginBinder",
     "build_bind_for_step_service",
+    "build_lease_manager",
 ]
 
 
@@ -487,5 +726,42 @@ def build_bind_for_step_service(
         ),
         identity_registry=identity_registry or IdentityResolverRegistry(),
         plugin_binder=plugin_binder or StubPluginBinder(),
+        **kwargs,
+    )
+
+
+def build_lease_manager(
+    *,
+    lease_store: Any | None = None,
+    metadata_store: Any | None = None,
+    default_ttl_sec: int = 600,
+    max_concurrent: int = 16,
+    clock: Any | None = None,
+) -> LeaseManager:
+    """Build a :class:`LeaseManager` wired to in-memory fakes.
+
+    Defaults: :class:`FakeLeaseAdapter`, :class:`FakeMetadataAdapter`,
+    a 600s TTL default, and the production cap of 16 concurrent
+    leases per ``(workspace, run, step, attempt)``. Tests override
+    individual components by passing them explicitly.
+
+    ``clock`` follows the same callable contract as
+    :class:`LeaseManager` itself \u2014 a zero-arg function returning a
+    timezone-aware :class:`datetime`.
+    """
+    kwargs: dict[str, Any] = {}
+    if clock is not None:
+        kwargs["clock"] = clock
+    return LeaseManager(
+        lease_store=cast(
+            "Any",
+            lease_store if lease_store is not None else FakeLeaseAdapter(),
+        ),
+        metadata_store=cast(
+            "Any",
+            metadata_store if metadata_store is not None else FakeMetadataAdapter(),
+        ),
+        default_ttl_sec=default_ttl_sec,
+        max_concurrent_leases=max_concurrent,
         **kwargs,
     )

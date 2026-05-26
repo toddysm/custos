@@ -14,19 +14,25 @@ from custos_connector.providers import (
 from tests._fakes import (
     FakeCatalogAdapter,
     FakeConnectorInstanceAdapter,
+    FakeLeaseAdapter,
     FakeMetadataAdapter,
     build_bind_for_step_service,
+    build_lease_manager,
 )
 
 
 @pytest.fixture
 def providers() -> Providers:
+    leases = FakeLeaseAdapter()
+    metadata = FakeMetadataAdapter()
     return Providers(
         catalog_store=FakeCatalogAdapter(),  # type: ignore[arg-type]
         instance_store=FakeConnectorInstanceAdapter(),  # type: ignore[arg-type]
-        metadata_store=FakeMetadataAdapter(),  # type: ignore[arg-type]
+        lease_store=leases,  # type: ignore[arg-type]
+        metadata_store=metadata,  # type: ignore[arg-type]
         identity_registry=IdentityResolverRegistry(),
         bind_for_step_service=build_bind_for_step_service(),
+        lease_manager=build_lease_manager(lease_store=leases, metadata_store=metadata),
     )
 
 
@@ -43,12 +49,16 @@ async def test_verify_schema_revisions_passes_when_ledger_is_current(
 
 
 async def test_verify_schema_revisions_raises_when_catalog_store_is_behind() -> None:
+    leases = FakeLeaseAdapter()
+    metadata = FakeMetadataAdapter()
     providers = Providers(
         catalog_store=FakeCatalogAdapter(applied_revisions=set()),  # type: ignore[arg-type]
         instance_store=FakeConnectorInstanceAdapter(),  # type: ignore[arg-type]
-        metadata_store=FakeMetadataAdapter(),  # type: ignore[arg-type]
+        lease_store=leases,  # type: ignore[arg-type]
+        metadata_store=metadata,  # type: ignore[arg-type]
         identity_registry=IdentityResolverRegistry(),
         bind_for_step_service=build_bind_for_step_service(),
+        lease_manager=build_lease_manager(lease_store=leases, metadata_store=metadata),
     )
     with pytest.raises(MigrationRequired) as exc_info:
         await verify_schema_revisions(providers)
@@ -56,12 +66,16 @@ async def test_verify_schema_revisions_raises_when_catalog_store_is_behind() -> 
 
 
 async def test_verify_schema_revisions_raises_when_metadata_store_is_behind() -> None:
+    leases = FakeLeaseAdapter()
+    metadata = FakeMetadataAdapter(applied_revisions=set())
     providers = Providers(
         catalog_store=FakeCatalogAdapter(),  # type: ignore[arg-type]
         instance_store=FakeConnectorInstanceAdapter(),  # type: ignore[arg-type]
-        metadata_store=FakeMetadataAdapter(applied_revisions=set()),  # type: ignore[arg-type]
+        lease_store=leases,  # type: ignore[arg-type]
+        metadata_store=metadata,  # type: ignore[arg-type]
         identity_registry=IdentityResolverRegistry(),
         bind_for_step_service=build_bind_for_step_service(),
+        lease_manager=build_lease_manager(lease_store=leases, metadata_store=metadata),
     )
     with pytest.raises(MigrationRequired) as exc_info:
         await verify_schema_revisions(providers)
@@ -69,27 +83,52 @@ async def test_verify_schema_revisions_raises_when_metadata_store_is_behind() ->
 
 
 async def test_verify_schema_revisions_raises_when_instance_store_is_behind() -> None:
+    leases = FakeLeaseAdapter()
+    metadata = FakeMetadataAdapter()
     providers = Providers(
         catalog_store=FakeCatalogAdapter(),  # type: ignore[arg-type]
         instance_store=FakeConnectorInstanceAdapter(  # type: ignore[arg-type]
             applied_revisions=set()
         ),
-        metadata_store=FakeMetadataAdapter(),  # type: ignore[arg-type]
+        lease_store=leases,  # type: ignore[arg-type]
+        metadata_store=metadata,  # type: ignore[arg-type]
         identity_registry=IdentityResolverRegistry(),
         bind_for_step_service=build_bind_for_step_service(),
+        lease_manager=build_lease_manager(lease_store=leases, metadata_store=metadata),
     )
     with pytest.raises(MigrationRequired) as exc_info:
         await verify_schema_revisions(providers)
     assert ("ConnectorInstanceStoreProvider", 1) in exc_info.value.gaps
 
 
+async def test_verify_schema_revisions_raises_when_lease_store_is_behind() -> None:
+    leases = FakeLeaseAdapter(applied_revisions=set())
+    metadata = FakeMetadataAdapter()
+    providers = Providers(
+        catalog_store=FakeCatalogAdapter(),  # type: ignore[arg-type]
+        instance_store=FakeConnectorInstanceAdapter(),  # type: ignore[arg-type]
+        lease_store=leases,  # type: ignore[arg-type]
+        metadata_store=metadata,  # type: ignore[arg-type]
+        identity_registry=IdentityResolverRegistry(),
+        bind_for_step_service=build_bind_for_step_service(),
+        lease_manager=build_lease_manager(lease_store=leases, metadata_store=metadata),
+    )
+    with pytest.raises(MigrationRequired) as exc_info:
+        await verify_schema_revisions(providers)
+    assert ("LeaseStoreProvider", 1) in exc_info.value.gaps
+
+
 async def test_verify_schema_revisions_collects_gaps_from_both_stores() -> None:
+    leases = FakeLeaseAdapter()
+    metadata = FakeMetadataAdapter(applied_revisions=set())
     providers = Providers(
         catalog_store=FakeCatalogAdapter(applied_revisions=set()),  # type: ignore[arg-type]
         instance_store=FakeConnectorInstanceAdapter(),  # type: ignore[arg-type]
-        metadata_store=FakeMetadataAdapter(applied_revisions=set()),  # type: ignore[arg-type]
+        lease_store=leases,  # type: ignore[arg-type]
+        metadata_store=metadata,  # type: ignore[arg-type]
         identity_registry=IdentityResolverRegistry(),
         bind_for_step_service=build_bind_for_step_service(),
+        lease_manager=build_lease_manager(lease_store=leases, metadata_store=metadata),
     )
     with pytest.raises(MigrationRequired) as exc_info:
         await verify_schema_revisions(providers)

@@ -16,8 +16,10 @@ from custos_connector.settings import Settings
 from tests._fakes import (
     FakeCatalogAdapter,
     FakeConnectorInstanceAdapter,
+    FakeLeaseAdapter,
     FakeMetadataAdapter,
     build_bind_for_step_service,
+    build_lease_manager,
 )
 
 _BASE_SETTINGS = Settings(
@@ -40,12 +42,15 @@ def _providers(*, behind: bool = False) -> Providers:
     catalog = FakeCatalogAdapter(applied_revisions=set() if behind else {1, 2})
     instances = FakeConnectorInstanceAdapter(applied_revisions=set() if behind else {1})
     metadata = FakeMetadataAdapter(applied_revisions=set() if behind else {1, 2, 3, 4})
+    leases = FakeLeaseAdapter(applied_revisions=set() if behind else {1})
     return Providers(
         catalog_store=catalog,  # type: ignore[arg-type]
         instance_store=instances,  # type: ignore[arg-type]
+        lease_store=leases,  # type: ignore[arg-type]
         metadata_store=metadata,  # type: ignore[arg-type]
         identity_registry=IdentityResolverRegistry(),
         bind_for_step_service=build_bind_for_step_service(),
+        lease_manager=build_lease_manager(lease_store=leases, metadata_store=metadata),
     )
 
 

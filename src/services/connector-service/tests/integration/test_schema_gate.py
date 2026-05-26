@@ -41,8 +41,9 @@ def test_readyz_returns_503_when_ledger_is_empty(stale_client: TestClient) -> No
     assert resp.status_code == 503
     body = resp.json()
     assert body["status"] == "not_ready"
-    # All three interfaces should be flagged.
+    # All four interfaces should be flagged.
     assert "CatalogStoreProvider@rev2" in body["detail"]
     assert "ConnectorInstanceStoreProvider@rev1" in body["detail"]
+    assert "LeaseStoreProvider@rev1" in body["detail"]
     assert "MetadataStoreProvider@rev4" in body["detail"]
     assert "custos migrate up" in body["detail"]

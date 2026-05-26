@@ -49,6 +49,11 @@ from custos_spl.interfaces.definition_store import (
     WorkflowTemplateVersion,
     WorkflowVersion,
 )
+from custos_spl.interfaces.lease_store import (
+    Lease,
+    LeaseFilter,
+    LeaseStoreProvider,
+)
 from custos_spl.interfaces.log_query import (
     LogFilter,
     LogPage,
@@ -123,7 +128,10 @@ __all__ = [
     "IdemReserved",
     "IdempotencyRecord",
     "KeyReuse",
+    "Lease",
+    "LeaseFilter",
     "LeaseHandle",
+    "LeaseStoreProvider",
     "LogFilter",
     "LogPage",
     "LogQueryProvider",

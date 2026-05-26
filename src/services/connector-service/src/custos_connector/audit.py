@@ -99,6 +99,10 @@ EVENT_BINDING_REJECTED: Final[str] = "connector.binding.rejected"
 #: per deprecated capability so they can plan migration.
 EVENT_CAPABILITY_DEPRECATED: Final[str] = "connector.capability.deprecated"
 
+EVENT_LEASE_ISSUED: Final[str] = "lease.issued"
+EVENT_LEASE_REFRESHED: Final[str] = "lease.refreshed"
+EVENT_LEASE_RELEASED: Final[str] = "lease.released"
+
 
 # ---------------------------------------------------------------------------
 # Core emission
@@ -501,6 +505,109 @@ async def audit_capability_deprecated(
 # ---------------------------------------------------------------------------
 
 
+async def audit_lease_issued(
+    metadata_store: MetadataStoreProvider,
+    *,
+    workspace_id: str,
+    actor: str,
+    lease_id: str,
+    run_id: str,
+    step_id: str,
+    attempt: int,
+    slot: str,
+    capability: str,
+    connector_instance_id: str,
+    token_type: str,
+    issued_at: datetime,
+    expires_at: datetime,
+) -> None:
+    """Emit ``lease.issued`` after the Lease Manager mints a lease.
+
+    Fired after a successful :meth:`LeaseManager.issue` — both the
+    cap check and the SPL ``put_lease`` write have already committed.
+    ``lease_id`` is the freshly minted ULID and is the join key for
+    the matching ``lease.refreshed`` / ``lease.released`` /
+    ``lease.revoked`` events.
+    """
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_LEASE_ISSUED,
+        actor=actor,
+        subject={"lease_id": lease_id, "connector_instance_id": connector_instance_id},
+        payload={
+            "run_id": run_id,
+            "step_id": step_id,
+            "attempt": attempt,
+            "slot": slot,
+            "capability": capability,
+            "token_type": token_type,
+            "issued_at": issued_at.isoformat(),
+            "expires_at": expires_at.isoformat(),
+        },
+    )
+
+
+async def audit_lease_refreshed(
+    metadata_store: MetadataStoreProvider,
+    *,
+    workspace_id: str,
+    actor: str,
+    lease_id: str,
+    connector_instance_id: str,
+    previous_expires_at: datetime,
+    new_expires_at: datetime,
+) -> None:
+    """Emit ``lease.refreshed`` after :meth:`LeaseManager.refresh`.
+
+    ``previous_expires_at`` is the pre-refresh deadline so the audit
+    trail can answer "by how much was this lease extended" without
+    needing to correlate against ``lease.issued``. The ``lease_id``
+    remains stable across refreshes.
+    """
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_LEASE_REFRESHED,
+        actor=actor,
+        subject={"lease_id": lease_id, "connector_instance_id": connector_instance_id},
+        payload={
+            "previous_expires_at": previous_expires_at.isoformat(),
+            "new_expires_at": new_expires_at.isoformat(),
+        },
+    )
+
+
+async def audit_lease_released(
+    metadata_store: MetadataStoreProvider,
+    *,
+    workspace_id: str,
+    actor: str,
+    lease_id: str,
+    connector_instance_id: str,
+    released_at: datetime,
+) -> None:
+    """Emit ``lease.released`` after :meth:`LeaseManager.release`.
+
+    Release is idempotent at the adapter level; emission is best-effort
+    but the Lease Manager fires it on every successful release call
+    (including no-op repeats) so the audit trail records each request.
+    """
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_LEASE_RELEASED,
+        actor=actor,
+        subject={"lease_id": lease_id, "connector_instance_id": connector_instance_id},
+        payload={"released_at": released_at.isoformat()},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Legacy log-only shim (call-context + authz decision events)
+# ---------------------------------------------------------------------------
+
+
 def emit_event(name: str, payload: Mapping[str, Any]) -> None:
     """Emit a structured audit-style log line.
 
@@ -541,6 +648,9 @@ __all__ = [
     "EVENT_INSTANCE_DISABLED",
     "EVENT_INSTANCE_ENABLED",
     "EVENT_INSTANCE_UPDATED",
+    "EVENT_LEASE_ISSUED",
+    "EVENT_LEASE_REFRESHED",
+    "EVENT_LEASE_RELEASED",
     "audit_binding_created",
     "audit_binding_rejected",
     "audit_capability_deprecated",
@@ -552,6 +662,9 @@ __all__ = [
     "audit_instance_disabled",
     "audit_instance_enabled",
     "audit_instance_updated",
+    "audit_lease_issued",
+    "audit_lease_refreshed",
+    "audit_lease_released",
     "emit_event",
     "logger",
 ]
