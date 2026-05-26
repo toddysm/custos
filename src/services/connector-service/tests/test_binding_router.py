@@ -342,6 +342,13 @@ def test_bind_for_step_returns_412_on_capability_shortfall() -> None:
 def test_bind_for_step_rejects_unknown_fields() -> None:
     """Pydantic ``extra=forbid`` makes typos fail with 422 before the
     request reaches the service.
+
+    The 422 must carry the service's canonical
+    ``{"error": {"code", "detail"}}`` envelope (rendered by the
+    :class:`fastapi.exceptions.RequestValidationError` handler in
+    :mod:`custos_connector`) rather than FastAPI's default
+    ``{"detail": [...]}`` body — clients only know how to parse the
+    former.
     """
     app = create_app(settings=_BASE_SETTINGS, providers=_build_providers())
     instance = _make_instance()
@@ -354,3 +361,8 @@ def test_bind_for_step_rejects_unknown_fields() -> None:
             headers=_ctx_header(),
         )
     assert resp.status_code == 422
+    body_json = resp.json()
+    assert body_json.keys() == {"error"}, "validation errors must render the standard envelope"
+    assert body_json["error"]["code"] == "invalid-request"
+    assert isinstance(body_json["error"]["detail"], str)
+    assert body_json["error"]["detail"], "detail must be a non-empty string"

@@ -677,15 +677,34 @@ class BindForStepService:
         is folded into :attr:`BindErrorCode.IDENTITY_FAILED`; the
         registry has already emitted ``connector.identity.failed`` by
         this point so we don't double-audit.
+
+        ``ConnectorInstance.lease_ttl_seconds`` is ``int | None``; we
+        reject ``None`` here rather than coercing it to ``0`` because
+        a 0s TTL silently disables identity-registry caching, which
+        would cause repeated upstream resolves (and audit noise) for
+        every step attempt. An unset lease TTL is an operator
+        configuration bug, so we surface it as ``invalid-request``
+        with the slot/instance attached.
         """
+        if instance.lease_ttl_seconds is None:
+            raise BindError(
+                BindErrorCode.INVALID_REQUEST,
+                (
+                    f"connector instance {instance.instance_id!r} has no "
+                    "lease_ttl_seconds configured; binding requires a "
+                    "positive lease TTL"
+                ),
+                slot=slot.name,
+                instance_id=str(instance.instance_id),
+            )
         try:
             return await self._identity.resolve(
                 workspace_id=workspace_id,
                 actor=request.actor,
                 instance_id=str(instance.instance_id),
-                authentication_type=_authentication_type(instance),
+                authentication_type=_authentication_type(instance, slot_name=slot.name),
                 credentials_authentication=instance.credentials_authentication,
-                lease_ttl_seconds=instance.lease_ttl_seconds or 0,
+                lease_ttl_seconds=instance.lease_ttl_seconds,
             )
         except IdentityResolverError as exc:
             raise BindError(
@@ -866,7 +885,11 @@ def _capability_index(
     return index
 
 
-def _authentication_type(instance: ConnectorInstance) -> str:
+def _authentication_type(
+    instance: ConnectorInstance,
+    *,
+    slot_name: str | None = None,
+) -> str:
     """Read the manifest ``authentication`` token from the instance.
 
     ``credentials_authentication`` is a frozen mapping shaped by the
@@ -875,6 +898,12 @@ def _authentication_type(instance: ConnectorInstance) -> str:
     token under the ``type`` key. We surface the absence as an
     invalid-request rather than a resolver failure so the operator
     sees the right diagnostic.
+
+    ``slot_name`` is threaded through so the raised :class:`BindError`
+    carries the slot context that the call site is currently
+    resolving. Without it, ``connector.binding.rejected`` audit events
+    for this class of error would omit the ``slot`` field, making
+    diagnosis harder.
     """
     auth_type = instance.credentials_authentication.get("type")
     if not isinstance(auth_type, str) or not auth_type:
@@ -882,6 +911,7 @@ def _authentication_type(instance: ConnectorInstance) -> str:
             BindErrorCode.INVALID_REQUEST,
             f"connector instance {instance.instance_id!r} "
             "credentials_authentication is missing 'type'",
+            slot=slot_name,
             instance_id=str(instance.instance_id),
         )
     return auth_type

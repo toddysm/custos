@@ -24,6 +24,10 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
+from fastapi.exceptions import RequestValidationError
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+
 from custos_connector.binding import binding_router
 from custos_connector.health import router as health_router
 from custos_connector.middleware import (
@@ -44,7 +48,6 @@ if TYPE_CHECKING:
     from fastapi import FastAPI
 
 __all__ = ["__version__", "create_app"]
-
 __version__ = "0.1.0"
 
 logger = logging.getLogger("custos_connector")
@@ -118,7 +121,49 @@ def create_app(
     # 4xx responses (get_call_context / require_permission) emit the same
     # ``{"error": {"code", "detail"}}`` envelope as the middleware itself.
     app.add_exception_handler(CallContextError, call_context_error_handler)
+    # FastAPI's default RequestValidationError handler returns a body of
+    # shape ``{"detail": [...]}``, which does not match the call-context
+    # envelope. Register our own handler so wire-shape failures from the
+    # binding (and any future) routers emit the canonical
+    # ``{"error": {"code", "detail"}}`` envelope.
+    app.add_exception_handler(
+        RequestValidationError,
+        _request_validation_error_handler,
+    )
 
     app.include_router(health_router)
     app.include_router(binding_router)
     return app
+
+
+async def _request_validation_error_handler(
+    _request: Request,
+    exc: Exception,
+) -> JSONResponse:
+    """Render :class:`RequestValidationError` as the service envelope.
+
+    The ``code`` is fixed to ``invalid-request`` to match the
+    :class:`~custos_connector.binding.errors.BindErrorCode` taxonomy;
+    the ``detail`` is a compact summary of the first validation error
+    (full pydantic context is preserved in the structured logs via
+    FastAPI's default logging — we don't echo a list to clients because
+    that surface is not stable across pydantic releases).
+
+    The signature accepts :class:`Exception` so it matches
+    :meth:`FastAPI.add_exception_handler` without an explicit ``# type:
+    ignore``; the implementation narrows back to
+    :class:`RequestValidationError` for the attribute access.
+    """
+    assert isinstance(exc, RequestValidationError)
+    errors = exc.errors()
+    if errors:
+        first = errors[0]
+        loc = ".".join(str(part) for part in first.get("loc", ()) if part != "body")
+        msg = first.get("msg", "validation failed")
+        detail = f"{loc}: {msg}" if loc else msg
+    else:
+        detail = "request validation failed"
+    return JSONResponse(
+        status_code=422,
+        content={"error": {"code": "invalid-request", "detail": detail}},
+    )

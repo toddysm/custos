@@ -142,7 +142,7 @@ def _make_instance(
     enabled: bool = True,
     health_status: str | None = "healthy",
     credentials_authentication: Mapping[str, Any] | None = None,
-    lease_ttl_seconds: int = 3600,
+    lease_ttl_seconds: int | None = 3600,
 ) -> ConnectorInstance:
     now = datetime.now(UTC)
     creds = dict(credentials_authentication or {"type": "oidc"})
@@ -730,6 +730,83 @@ async def test_bind_for_step_rejects_capability_with_surrounding_whitespace() ->
     with pytest.raises(BindError) as exc_info:
         await service.bind_for_step(workspace_id=_WORKSPACE, request=request)
     assert exc_info.value.code is BindErrorCode.INVALID_REQUEST
+
+
+# ---------------------------------------------------------------------------
+# Instance hygiene (configuration-level rejections during resolve)
+# ---------------------------------------------------------------------------
+
+
+async def test_bind_for_step_rejects_instance_with_no_lease_ttl() -> None:
+    """``lease_ttl_seconds=None`` must surface as ``invalid-request`` with
+    slot context.
+
+    Coercing ``None`` to ``0`` would silently disable the identity
+    registry's cache (the registry clamps to a 0s TTL), producing
+    repeated upstream resolves and audit noise per step attempt — see
+    the PR #331 review thread.
+    """
+    catalog = FakeCatalogAdapter()
+    instances = FakeConnectorInstanceAdapter()
+    metadata = FakeMetadataAdapter()
+    instance = _make_instance(
+        used_capabilities=("events.delivery",),
+        lease_ttl_seconds=None,
+    )
+    await _seed(
+        catalog=catalog,
+        instance_store=instances,
+        instance=instance,
+        connector_type=_make_connector_type(),
+    )
+    service = build_bind_for_step_service(
+        catalog_store=catalog,
+        instance_store=instances,
+        metadata_store=metadata,
+        identity_registry=_registry_with(_StubResolver()),
+    )
+
+    with pytest.raises(BindError) as exc_info:
+        await service.bind_for_step(workspace_id=_WORKSPACE, request=_make_request(instance))
+    assert exc_info.value.code is BindErrorCode.INVALID_REQUEST
+    assert exc_info.value.slot == "source", "slot context must be attached"
+    assert exc_info.value.instance_id == str(instance.instance_id)
+
+
+async def test_bind_for_step_missing_credential_type_attaches_slot() -> None:
+    """A missing ``credentials_authentication['type']`` token must
+    raise ``invalid-request`` with the slot context populated so the
+    ``connector.binding.rejected`` audit event carries the right
+    diagnostic field — see the PR #331 review thread.
+    """
+    catalog = FakeCatalogAdapter()
+    instances = FakeConnectorInstanceAdapter()
+    metadata = FakeMetadataAdapter()
+    instance = _make_instance(
+        used_capabilities=("events.delivery",),
+        # No 'type' key — _authentication_type() must reject this.
+        credentials_authentication={"issuerUri": "https://issuer.example.com"},
+    )
+    await _seed(
+        catalog=catalog,
+        instance_store=instances,
+        instance=instance,
+        connector_type=_make_connector_type(),
+    )
+    service = build_bind_for_step_service(
+        catalog_store=catalog,
+        instance_store=instances,
+        metadata_store=metadata,
+        identity_registry=_registry_with(_StubResolver()),
+    )
+
+    with pytest.raises(BindError) as exc_info:
+        await service.bind_for_step(workspace_id=_WORKSPACE, request=_make_request(instance))
+    assert exc_info.value.code is BindErrorCode.INVALID_REQUEST
+    assert exc_info.value.slot == "source", (
+        "BindError from _authentication_type must carry slot context"
+    )
+    assert exc_info.value.instance_id == str(instance.instance_id)
 
 
 async def test_protocol_error_from_plugin_is_bind_error() -> None:
