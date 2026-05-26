@@ -43,7 +43,14 @@ class ConnectorInstance:
     ----------------
 
     * **Immutable after create**: `workspace_id`, `instance_id`,
-      `type`, `version`, `created_at`.
+      `type`, `version`, `target_config`,
+      `credentials_authentication`, `used_capabilities`,
+      `created_at`. The three "config" maps are operator-supplied at
+      create time and validated against the referenced
+      `ConnectorTypeVersion` manifest by the service layer; once
+      persisted they pin the configuration the operator approved.
+      Re-configuring an instance requires deleting and recreating
+      (or, in M2+, a versioned config replace).
     * **Operator-mutable via patch**: `name`, `lease_ttl_seconds`,
       `enabled`.
     * **Server-mutated soft state**: `status`, `health_status`,
@@ -61,6 +68,9 @@ class ConnectorInstance:
     enabled: bool
     status: str
     health_status: str | None
+    target_config: Mapping[str, Any]
+    credentials_authentication: Mapping[str, Any]
+    used_capabilities: tuple[str, ...] | None
     created_at: datetime
     updated_at: datetime
 

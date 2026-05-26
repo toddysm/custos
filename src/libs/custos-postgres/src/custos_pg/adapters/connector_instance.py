@@ -85,9 +85,45 @@ def _row_to_instance(row: Record) -> ConnectorInstance:
         enabled=bool(row["enabled"]),
         status=row["status"],
         health_status=row["health_status"],
+        target_config=_frozen_mapping(_json_payload(row["target_config"])),
+        credentials_authentication=_frozen_mapping(
+            _json_payload(row["credentials_authentication"])
+        ),
+        used_capabilities=_decode_capabilities(_json_payload(row["used_capabilities"])),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
+
+
+def _json_payload(value: Any) -> Any:
+    """Decode a JSONB column that asyncpg surfaces as either a Python
+    object (when a codec is registered) or a JSON string."""
+
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes, bytearray)):
+        return json.loads(value)
+    return value
+
+
+def _frozen_mapping(value: Any) -> Mapping[str, Any]:
+    """Return an immutable view over a JSON-derived mapping.
+
+    Matches the repo-wide convention of wrapping JSONB-decoded blobs in
+    ``MappingProxyType(dict(...))`` (see ``catalog.py``, ``definition.py``,
+    ``metadata.py``) so callers cannot accidentally mutate the cached
+    decode through the frozen :class:`ConnectorInstance` dataclass.
+    """
+
+    if not isinstance(value, Mapping):
+        return MappingProxyType({})
+    return MappingProxyType(dict(value))
+
+
+def _decode_capabilities(value: Any) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    return tuple(str(item) for item in value)
 
 
 def _resolve_limit(limit: int | None) -> int:
@@ -177,11 +213,14 @@ class PgConnectorInstanceAdapter:
                     "INSERT INTO connector_instance.connector_instance "
                     "(workspace_id, instance_id, type, version, name, "
                     " lease_ttl_seconds, enabled, status, health_status, "
+                    " target_config, credentials_authentication, used_capabilities, "
                     " created_at, updated_at) "
-                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) "
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, "
+                    "        $10::jsonb, $11::jsonb, $12::jsonb, $13, $14) "
                     "ON CONFLICT (workspace_id, instance_id) DO NOTHING "
                     "RETURNING workspace_id, instance_id, type, version, name, "
                     "lease_ttl_seconds, enabled, status, health_status, "
+                    "target_config, credentials_authentication, used_capabilities, "
                     "created_at, updated_at",
                     str(workspace_id),
                     str(instance.instance_id),
@@ -192,6 +231,11 @@ class PgConnectorInstanceAdapter:
                     instance.enabled,
                     instance.status,
                     instance.health_status,
+                    json.dumps(dict(instance.target_config)),
+                    json.dumps(dict(instance.credentials_authentication)),
+                    json.dumps(list(instance.used_capabilities))
+                    if instance.used_capabilities is not None
+                    else None,
                     instance.created_at,
                     instance.updated_at,
                 )
@@ -218,6 +262,7 @@ class PgConnectorInstanceAdapter:
                 row = await conn.fetchrow(
                     "SELECT workspace_id, instance_id, type, version, name, "
                     "lease_ttl_seconds, enabled, status, health_status, "
+                    "target_config, credentials_authentication, used_capabilities, "
                     "created_at, updated_at "
                     "FROM connector_instance.connector_instance "
                     "WHERE workspace_id = $1 AND instance_id = $2",
@@ -262,6 +307,7 @@ class PgConnectorInstanceAdapter:
             f"WHERE workspace_id = ${ws_idx} AND instance_id = ${id_idx} "
             "RETURNING workspace_id, instance_id, type, version, name, "
             "lease_ttl_seconds, enabled, status, health_status, "
+            "target_config, credentials_authentication, used_capabilities, "
             "created_at, updated_at"
         )
         pool = await self._pool_ref()
@@ -314,6 +360,7 @@ class PgConnectorInstanceAdapter:
         sql = (
             "SELECT workspace_id, instance_id, type, version, name, "
             "lease_ttl_seconds, enabled, status, health_status, "
+            "target_config, credentials_authentication, used_capabilities, "
             "created_at, updated_at "
             "FROM connector_instance.connector_instance "
             f"WHERE {' AND '.join(where)} "

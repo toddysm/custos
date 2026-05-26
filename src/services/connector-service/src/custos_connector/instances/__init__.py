@@ -26,13 +26,23 @@ from custos_connector.instances.service import (
     InvalidInstancePayload,
     InvalidLeaseTtl,
 )
+from custos_connector.instances.validator import (
+    InstanceConfigCode,
+    InstanceConfigIssue,
+    InstanceConfigValidationError,
+    validate_instance_config,
+)
 
 __all__ = [
     "ConnectorInstanceNotFound",
     "ConnectorTypeNotRegistered",
     "ImmutableFieldUpdate",
+    "InstanceConfigCode",
+    "InstanceConfigIssue",
+    "InstanceConfigValidationError",
     "InstanceService",
     "InstanceServiceError",
     "InvalidInstancePayload",
     "InvalidLeaseTtl",
+    "validate_instance_config",
 ]

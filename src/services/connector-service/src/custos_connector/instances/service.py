@@ -59,6 +59,10 @@ from custos_spl.interfaces.connector_instance_store import (
 )
 
 from custos_connector.audit import audit_instance_created, audit_instance_updated
+from custos_connector.instances.validator import (
+    InstanceConfigValidationError,
+    validate_instance_config,
+)
 
 if TYPE_CHECKING:
     from custos_spl.interfaces.catalog_store import CatalogStoreProvider
@@ -191,18 +195,38 @@ class InstanceService:
         name: str | None = None,
         lease_ttl_seconds: int | None = None,
         enabled: bool = True,
+        target_config: Mapping[str, Any] | None = None,
+        credentials_authentication: Mapping[str, Any] | None = None,
+        used_capabilities: tuple[str, ...] | None = None,
     ) -> ConnectorInstance:
         """Create a new connector instance.
 
         Generates the ``instance_id`` server-side (UUIDv4) so callers
         never pick IDs — this matches the platform convention for
         run/workflow IDs.
+
+        Operator-supplied config (``target_config``,
+        ``credentials_authentication``, ``used_capabilities``) is
+        validated against the referenced ``ConnectorTypeVersion``
+        manifest via
+        :func:`custos_connector.instances.validator.validate_instance_config`
+        before persistence. Validation issues are aggregated into a
+        single :class:`InstanceConfigValidationError` (collect-all-
+        errors policy, mirrors the manifest-validator UX from
+        CONN-IMPL-005).
         """
         # 1. Surface-level validation (cheap; fails fast).
         if name is not None and not name.strip():
             raise InvalidInstancePayload("name must be non-empty when supplied")
         if lease_ttl_seconds is not None:
             self._validate_lease_ttl(lease_ttl_seconds)
+
+        effective_target_config: Mapping[str, Any] = (
+            dict(target_config) if target_config is not None else {}
+        )
+        effective_credentials_auth: Mapping[str, Any] = (
+            dict(credentials_authentication) if credentials_authentication is not None else {}
+        )
 
         # 2. Catalog existence check. Stale-on-deprecation is fine
         #    (deprecation is a property of the catalog row); only
@@ -211,7 +235,17 @@ class InstanceService:
         if catalog_row is None:
             raise ConnectorTypeNotRegistered(type=type, version=version)
 
-        # 3. Build the row and persist.
+        # 3. Manifest-driven config validation. Issues are collected
+        #    and surfaced as a single typed error so the API layer
+        #    can render one 400 response with the complete diff.
+        validate_instance_config(
+            manifest=catalog_row.normalized_manifest,
+            target_config=effective_target_config,
+            credentials_authentication=effective_credentials_auth,
+            used_capabilities=used_capabilities,
+        )
+
+        # 4. Build the row and persist.
         now = datetime.now(UTC)
         instance = ConnectorInstance(
             workspace_id=WorkspaceId(workspace_id),
@@ -223,12 +257,15 @@ class InstanceService:
             enabled=enabled,
             status="active",
             health_status=None,
+            target_config=effective_target_config,
+            credentials_authentication=effective_credentials_auth,
+            used_capabilities=used_capabilities,
             created_at=now,
             updated_at=now,
         )
         stored = await self._instances.put_connector_instance(WorkspaceId(workspace_id), instance)
 
-        # 4. Best-effort audit (failures logged + counted, never
+        # 5. Best-effort audit (failures logged + counted, never
         #    roll back the state we just persisted).
         await audit_instance_created(
             self._metadata,
@@ -360,6 +397,7 @@ __all__ = [
     "ConnectorInstanceNotFound",
     "ConnectorTypeNotRegistered",
     "ImmutableFieldUpdate",
+    "InstanceConfigValidationError",
     "InstanceService",
     "InstanceServiceError",
     "InvalidInstancePayload",

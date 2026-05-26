@@ -2979,6 +2979,9 @@ def _make_instance(
     name: str | None = None,
     lease_ttl_seconds: int | None = None,
     enabled: bool = True,
+    target_config: dict[str, object] | None = None,
+    credentials_authentication: dict[str, object] | None = None,
+    used_capabilities: tuple[str, ...] | None = None,
 ) -> ConnectorInstance:
 
     now = datetime.now(UTC)
@@ -2992,6 +2995,11 @@ def _make_instance(
         enabled=enabled,
         status="active",
         health_status=None,
+        target_config=target_config if target_config is not None else {},
+        credentials_authentication=credentials_authentication
+        if credentials_authentication is not None
+        else {},
+        used_capabilities=used_capabilities,
         created_at=now,
         updated_at=now,
     )
@@ -3013,12 +3021,50 @@ async def test_put_connector_instance_creates_row(pg_pool: Pool) -> None:
     assert put.enabled is True
     assert put.status == "active"
     assert put.health_status is None
+    assert put.target_config == {}
+    assert put.credentials_authentication == {}
+    assert put.used_capabilities is None
 
     got = await adapter.get_connector_instance(
         WorkspaceId("ws-1"), ConnectorInstanceId("inst-1")
     )
     assert got is not None
     assert got.name == "prod-http"
+
+
+async def test_put_connector_instance_persists_config_jsonb(pg_pool: Pool) -> None:
+
+    adapter = PgConnectorInstanceAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+
+    put = await adapter.put_connector_instance(
+        WorkspaceId("ws-1"),
+        _make_instance(
+            target_config={"repositoryNamespace": "acme/widgets"},
+            credentials_authentication={
+                "vaultUri": "https://kv.example.com",
+                "secretName": "prod-pat",
+            },
+            used_capabilities=("oci.registry.read", "oci.referrers.list"),
+        ),
+    )
+    assert put.target_config == {"repositoryNamespace": "acme/widgets"}
+    assert put.credentials_authentication == {
+        "vaultUri": "https://kv.example.com",
+        "secretName": "prod-pat",
+    }
+    assert put.used_capabilities == ("oci.registry.read", "oci.referrers.list")
+
+    got = await adapter.get_connector_instance(
+        WorkspaceId("ws-1"), ConnectorInstanceId("inst-1")
+    )
+    assert got is not None
+    assert got.target_config == {"repositoryNamespace": "acme/widgets"}
+    assert got.credentials_authentication == {
+        "vaultUri": "https://kv.example.com",
+        "secretName": "prod-pat",
+    }
+    assert got.used_capabilities == ("oci.registry.read", "oci.referrers.list")
 
 
 async def test_put_connector_instance_is_create_only(pg_pool: Pool) -> None:
