@@ -42,6 +42,7 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Final
 
 import httpx
@@ -137,10 +138,14 @@ class Loader:
         """
         self._catalog = catalog_store
         self._client = registry_client
-        # Defensive copy + frozen view so the loader's view of the map
-        # cannot be mutated by the caller after construction.
+        # Defensive copy + read-only view so the loader's view of the map
+        # cannot be mutated by the caller after construction. The copy
+        # captures the caller's snapshot; the ``MappingProxyType`` wrapper
+        # ensures the loader cannot accidentally mutate it either.
         self._vendor_overrides: Mapping[str, IdentityCategory] | None = (
-            dict(vendor_identity_categories) if vendor_identity_categories else None
+            MappingProxyType(dict(vendor_identity_categories))
+            if vendor_identity_categories
+            else None
         )
 
     # ------------------------------------------------------------------
