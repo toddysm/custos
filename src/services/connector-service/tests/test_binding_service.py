@@ -615,6 +615,123 @@ async def test_bind_for_step_rejects_slot_with_empty_required_capabilities() -> 
     assert exc_info.value.code is BindErrorCode.INVALID_REQUEST
 
 
+# ---------------------------------------------------------------------------
+# Free-text identifier hygiene (no surrounding whitespace)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("run_id", " run-1"),
+        ("run_id", "run-1 "),
+        ("step_id", " step-1"),
+        ("step_key", "copy.v1\t"),
+    ],
+)
+async def test_bind_for_step_rejects_top_level_field_with_whitespace(
+    field: str, value: str
+) -> None:
+    """Top-level identifiers with surrounding whitespace must be rejected.
+
+    Without the strip-equality check these values flow into the
+    idempotency key and audit envelope verbatim, where a retry with
+    the canonical form would be treated as a different request.
+    """
+    kwargs: dict[str, Any] = {
+        "run_id": "run-1",
+        "step_id": "step-1",
+        "attempt": 1,
+        "step_key": "copy.v1",
+        "slots": (
+            BindSlotRequest(
+                name="source",
+                instance_id=str(uuid4()),
+                required_capabilities=("events.delivery",),
+            ),
+        ),
+        "actor": _ACTOR,
+    }
+    kwargs[field] = value
+    request = BindForStepRequest(**kwargs)
+    service = build_bind_for_step_service()
+    with pytest.raises(BindError) as exc_info:
+        await service.bind_for_step(workspace_id=_WORKSPACE, request=request)
+    assert exc_info.value.code is BindErrorCode.INVALID_REQUEST
+
+
+async def test_bind_for_step_rejects_slot_name_with_surrounding_whitespace() -> None:
+    """A slot name with trailing whitespace must not slip past the
+    duplicate-name guard (``"source"`` vs ``"source "``) and must not
+    end up as a response-map key.
+    """
+    request = BindForStepRequest(
+        run_id="run-1",
+        step_id="step-1",
+        attempt=1,
+        step_key="copy.v1",
+        slots=(
+            BindSlotRequest(
+                name="source ",
+                instance_id=str(uuid4()),
+                required_capabilities=("events.delivery",),
+            ),
+        ),
+        actor=_ACTOR,
+    )
+    service = build_bind_for_step_service()
+    with pytest.raises(BindError) as exc_info:
+        await service.bind_for_step(workspace_id=_WORKSPACE, request=request)
+    assert exc_info.value.code is BindErrorCode.INVALID_REQUEST
+
+
+async def test_bind_for_step_rejects_instance_id_with_surrounding_whitespace() -> None:
+    """``slot.instance_id`` must be clean so the catalog lookup is
+    deterministic and audit events log the exact UUID the caller meant.
+    """
+    request = BindForStepRequest(
+        run_id="run-1",
+        step_id="step-1",
+        attempt=1,
+        step_key="copy.v1",
+        slots=(
+            BindSlotRequest(
+                name="source",
+                instance_id=f" {uuid4()!s}",
+                required_capabilities=("events.delivery",),
+            ),
+        ),
+        actor=_ACTOR,
+    )
+    service = build_bind_for_step_service()
+    with pytest.raises(BindError) as exc_info:
+        await service.bind_for_step(workspace_id=_WORKSPACE, request=request)
+    assert exc_info.value.code is BindErrorCode.INVALID_REQUEST
+
+
+async def test_bind_for_step_rejects_capability_with_surrounding_whitespace() -> None:
+    """A capability with surrounding whitespace would also confuse the
+    plugin's bind hook dispatch, so it must be rejected up front."""
+    request = BindForStepRequest(
+        run_id="run-1",
+        step_id="step-1",
+        attempt=1,
+        step_key="copy.v1",
+        slots=(
+            BindSlotRequest(
+                name="source",
+                instance_id=str(uuid4()),
+                required_capabilities=(" events.delivery",),
+            ),
+        ),
+        actor=_ACTOR,
+    )
+    service = build_bind_for_step_service()
+    with pytest.raises(BindError) as exc_info:
+        await service.bind_for_step(workspace_id=_WORKSPACE, request=request)
+    assert exc_info.value.code is BindErrorCode.INVALID_REQUEST
+
+
 async def test_protocol_error_from_plugin_is_bind_error() -> None:
     """A :class:`PluginProtocolError` (e.g. plugin returned bad payload)
     should fold into ``upstream-bind-failed`` like other plugin failures.

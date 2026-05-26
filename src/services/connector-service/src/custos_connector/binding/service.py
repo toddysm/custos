@@ -339,13 +339,20 @@ class BindForStepService:
     # ------------------------------------------------------------------
 
     def _validate_request_shape(self, request: BindForStepRequest) -> None:
-        """Cheap, sync request validation — fails fast before any I/O."""
-        if not request.run_id.strip():
-            raise BindError(BindErrorCode.INVALID_REQUEST, "run_id must be non-empty")
-        if not request.step_id.strip():
-            raise BindError(BindErrorCode.INVALID_REQUEST, "step_id must be non-empty")
-        if not request.step_key.strip():
-            raise BindError(BindErrorCode.INVALID_REQUEST, "step_key must be non-empty")
+        """Cheap, sync request validation — fails fast before any I/O.
+
+        Free-text identifiers (``run_id``, ``step_id``, ``step_key``,
+        ``slot.name``, ``slot.instance_id`` and each
+        ``required_capabilities`` entry) are rejected if they are empty
+        *or* contain surrounding whitespace. The strict check matters
+        because these values feed the idempotency key and the response
+        ``contexts`` map: tolerating ``"source"`` vs ``"source "`` would
+        let a caller bypass the duplicate-slot guard and produce
+        response keys that downstream consumers cannot match.
+        """
+        self._require_clean(request.run_id, field="run_id")
+        self._require_clean(request.step_id, field="step_id")
+        self._require_clean(request.step_key, field="step_key")
         if request.attempt < 1:
             raise BindError(BindErrorCode.INVALID_REQUEST, "attempt must be >= 1")
         if not request.slots:
@@ -353,8 +360,7 @@ class BindForStepService:
 
         seen_names: set[str] = set()
         for slot in request.slots:
-            if not slot.name.strip():
-                raise BindError(BindErrorCode.INVALID_REQUEST, "slot.name must be non-empty")
+            self._require_clean(slot.name, field="slot.name")
             if slot.name in seen_names:
                 raise BindError(
                     BindErrorCode.INVALID_REQUEST,
@@ -362,12 +368,11 @@ class BindForStepService:
                     slot=slot.name,
                 )
             seen_names.add(slot.name)
-            if not slot.instance_id.strip():
-                raise BindError(
-                    BindErrorCode.INVALID_REQUEST,
-                    f"slot {slot.name!r} instance_id must be non-empty",
-                    slot=slot.name,
-                )
+            self._require_clean(
+                slot.instance_id,
+                field=f"slot {slot.name!r} instance_id",
+                slot=slot.name,
+            )
             if not slot.required_capabilities:
                 raise BindError(
                     BindErrorCode.INVALID_REQUEST,
@@ -378,23 +383,12 @@ class BindForStepService:
 
             seen_capabilities: set[str] = set()
             for capability in slot.required_capabilities:
-                if not capability.strip():
-                    raise BindError(
-                        BindErrorCode.INVALID_REQUEST,
-                        f"slot {slot.name!r} required_capabilities must not contain empty entries",
-                        slot=slot.name,
-                        instance_id=slot.instance_id,
-                    )
-                if capability != capability.strip():
-                    raise BindError(
-                        BindErrorCode.INVALID_REQUEST,
-                        (
-                            f"slot {slot.name!r} capability {capability!r} "
-                            "must not contain surrounding whitespace"
-                        ),
-                        slot=slot.name,
-                        instance_id=slot.instance_id,
-                    )
+                self._require_clean(
+                    capability,
+                    field=f"slot {slot.name!r} capability",
+                    slot=slot.name,
+                    instance_id=slot.instance_id,
+                )
                 if capability in seen_capabilities:
                     raise BindError(
                         BindErrorCode.INVALID_REQUEST,
@@ -403,6 +397,32 @@ class BindForStepService:
                         instance_id=slot.instance_id,
                     )
                 seen_capabilities.add(capability)
+
+    @staticmethod
+    def _require_clean(
+        value: str,
+        *,
+        field: str,
+        slot: str | None = None,
+        instance_id: str | None = None,
+    ) -> None:
+        """Reject empty and surrounding-whitespace values.
+
+        Used by :meth:`_validate_request_shape` to enforce one rule
+        for every free-text identifier in :class:`BindForStepRequest`.
+        Centralising the check keeps the dedup / idempotency-key
+        invariants honest: a value that passes here is byte-identical
+        to its ``.strip()`` form, so the unstripped ``value`` is safe
+        to store in ``seen_*`` sets and to thread into downstream
+        cache keys and response maps.
+        """
+        if not value or value != value.strip():
+            raise BindError(
+                BindErrorCode.INVALID_REQUEST,
+                f"{field} must be non-empty and contain no surrounding whitespace",
+                slot=slot,
+                instance_id=instance_id,
+            )
 
     # ------------------------------------------------------------------
     # Internals: orchestration
