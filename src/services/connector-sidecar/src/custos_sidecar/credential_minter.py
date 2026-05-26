@@ -19,7 +19,6 @@ the fields the design's response envelope needs (``token`` +
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
@@ -162,17 +161,10 @@ def stub_minter_returning_unavailable() -> CredentialMinter:
     return StubCredentialMinter(behaviour=_StubBehaviour(raise_unavailable=True))
 
 
-# Callable factory shape exported so the router can accept a single
-# function and unit tests can supply lambdas without instantiating
-# protocol-checking gymnastics.
-MinterFactory = Callable[[], Awaitable[CredentialMinter]]
-
-
 __all__ = [
     "CredentialMinter",
     "InstanceUnavailable",
     "MintedCredential",
-    "MinterFactory",
     "StubCredentialMinter",
     "UpstreamMintFailure",
     "stub_minter_returning_unavailable",

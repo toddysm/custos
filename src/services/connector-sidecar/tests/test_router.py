@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from contextlib import contextmanager
 
-import pytest
 from fastapi.testclient import TestClient
 
 from custos_sidecar import create_app
@@ -165,6 +165,7 @@ def test_get_token_cs_unreachable_returns_503(
 # --------------------------------------------------------------------------- #
 
 
+@contextmanager
 def _client_with_minter(
     verifier: BootstrapTokenVerifier,
     registry: ContextRegistry,
@@ -188,11 +189,9 @@ def test_get_token_upstream_mint_failure_returns_502(
     fake_gateway: FakeLeaseGateway,
     bootstrap_token: str,
 ) -> None:
-    iterator = _client_with_minter(
+    with _client_with_minter(
         verifier, registry, fake_gateway, stub_minter_returning_upstream_failure()
-    )
-    client = next(iterator)
-    try:
+    ) as client:
         resp = client.get(
             "/v1/token",
             params={"slot": "primary", "purpose": "read"},
@@ -203,9 +202,6 @@ def test_get_token_upstream_mint_failure_returns_502(
         # Lease should have been issued then best-effort-released
         assert len(fake_gateway.issued) == 1
         assert fake_gateway.released == [fake_gateway.issued[0].lease_id]
-    finally:
-        with pytest.raises(StopIteration):
-            next(iterator)
 
 
 def test_get_token_minter_instance_unavailable_returns_503(
@@ -214,11 +210,9 @@ def test_get_token_minter_instance_unavailable_returns_503(
     fake_gateway: FakeLeaseGateway,
     bootstrap_token: str,
 ) -> None:
-    iterator = _client_with_minter(
+    with _client_with_minter(
         verifier, registry, fake_gateway, stub_minter_returning_unavailable()
-    )
-    client = next(iterator)
-    try:
+    ) as client:
         resp = client.get(
             "/v1/token",
             params={"slot": "primary", "purpose": "read"},
@@ -227,9 +221,6 @@ def test_get_token_minter_instance_unavailable_returns_503(
         assert resp.status_code == 503
         assert resp.json()["title"] == "connector-unavailable"
         assert fake_gateway.released == [fake_gateway.issued[0].lease_id]
-    finally:
-        with pytest.raises(StopIteration):
-            next(iterator)
 
 
 # --------------------------------------------------------------------------- #

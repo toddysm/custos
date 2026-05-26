@@ -88,3 +88,36 @@ def test_socket_path_override():
     env["CUSTOS_SIDECAR_SOCKET_PATH"] = "/tmp/sock"
     settings = load_settings(env)
     assert settings.socket_path == "/tmp/sock"
+
+
+def test_activity_gid_defaults_to_none():
+    settings = load_settings(_required_env())
+    assert settings.activity_gid is None
+
+
+def test_activity_gid_blank_treated_as_none():
+    env = _required_env()
+    env["CUSTOS_SIDECAR_ACTIVITY_GID"] = ""
+    settings = load_settings(env)
+    assert settings.activity_gid is None
+
+
+def test_activity_gid_parsed_when_set():
+    env = _required_env()
+    env["CUSTOS_SIDECAR_ACTIVITY_GID"] = "65532"
+    settings = load_settings(env)
+    assert settings.activity_gid == 65532
+
+
+def test_non_int_activity_gid_raises():
+    env = _required_env()
+    env["CUSTOS_SIDECAR_ACTIVITY_GID"] = "activity"
+    with pytest.raises(ValueError, match="ACTIVITY_GID must be an integer"):
+        load_settings(env)
+
+
+def test_negative_activity_gid_raises():
+    env = _required_env()
+    env["CUSTOS_SIDECAR_ACTIVITY_GID"] = "-1"
+    with pytest.raises(ValueError, match="ACTIVITY_GID must be non-negative"):
+        load_settings(env)

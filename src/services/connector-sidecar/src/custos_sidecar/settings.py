@@ -59,6 +59,12 @@ class Settings:
         contexts_wire: List of slot-context JSON envelopes ARM seeds
             at start; decoded into a :class:`ContextRegistry` by the
             app factory.
+        activity_gid: Optional numeric GID of the activity container.
+            When set, ``__main__`` ``chown``s the UDS file to this
+            group after uvicorn binds it (with mode ``0o660``) so the
+            activity UID can ``connect(2)`` to the socket. When
+            ``None``, only the chmod is performed and the socket
+            keeps the sidecar UID's primary group.
     """
 
     socket_path: str
@@ -71,6 +77,7 @@ class Settings:
     connector_service_url: str
     call_context: str
     contexts_wire: list[dict[str, object]] = field(default_factory=list)
+    activity_gid: int | None = None
 
 
 def _require(env: Mapping[str, str], name: str) -> str:
@@ -96,6 +103,9 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     * ``SOCKET_PATH`` (opt, default ``/custos/run/connector.sock``)
     * ``BOOTSTRAP_TOKEN_PATH`` (opt)
     * ``BOOTSTRAP_KEY_PATH`` (opt)
+    * ``ACTIVITY_GID`` (opt) — numeric GID of the activity container.
+      When set, the UDS file is ``chown``ed to this group so the
+      activity UID can connect.
     """
     import json
 
@@ -116,6 +126,19 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         raise ValueError(
             f"{_ENV_PREFIX}CONTEXTS_JSON must be a JSON array; got {type(contexts_wire).__name__}"
         )
+    activity_gid_raw = env.get(_ENV_PREFIX + "ACTIVITY_GID")
+    activity_gid: int | None
+    if activity_gid_raw is None or activity_gid_raw == "":
+        activity_gid = None
+    else:
+        try:
+            activity_gid = int(activity_gid_raw)
+        except ValueError as exc:
+            raise ValueError(
+                f"{_ENV_PREFIX}ACTIVITY_GID must be an integer; got {activity_gid_raw!r}"
+            ) from exc
+        if activity_gid < 0:
+            raise ValueError(f"{_ENV_PREFIX}ACTIVITY_GID must be non-negative; got {activity_gid}")
     return Settings(
         socket_path=env.get(_ENV_PREFIX + "SOCKET_PATH", DEFAULT_SOCKET_PATH),
         bootstrap_token_path=env.get(
@@ -129,6 +152,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         connector_service_url=_require(env, "CONNECTOR_SERVICE_URL"),
         call_context=_require(env, "CALL_CONTEXT"),
         contexts_wire=contexts_wire,
+        activity_gid=activity_gid,
     )
 
 
