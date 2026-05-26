@@ -20,12 +20,17 @@ from tests.integration.conftest import (
 
 pytestmark = pytest.mark.integration
 
+IMAGE_REF = (
+    "ghcr.io/custos/connector-oci-registry@sha256:"
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+)
+
 
 def test_connector_register_resolve_deprecate_round_trip(client: TestClient) -> None:
     # Register ---------------------------------------------------------
     reg = client.post(
         "/v1/catalog/connector-types",
-        json={"manifest": minimal_connector_manifest()},
+        json={"imageRef": IMAGE_REF, "manifest": minimal_connector_manifest()},
         headers=admin_header(),
     )
     assert reg.status_code == 201, reg.text
@@ -85,13 +90,13 @@ def test_connector_register_resolve_deprecate_round_trip(client: TestClient) -> 
 def test_connector_register_idempotent_on_same_digest(client: TestClient) -> None:
     first = client.post(
         "/v1/catalog/connector-types",
-        json={"manifest": minimal_connector_manifest()},
+        json={"imageRef": IMAGE_REF, "manifest": minimal_connector_manifest()},
         headers=admin_header(),
     )
     assert first.status_code == 201
     second = client.post(
         "/v1/catalog/connector-types",
-        json={"manifest": minimal_connector_manifest()},
+        json={"imageRef": IMAGE_REF, "manifest": minimal_connector_manifest()},
         headers=admin_header(),
     )
     assert second.status_code == 201
@@ -101,7 +106,7 @@ def test_connector_register_idempotent_on_same_digest(client: TestClient) -> Non
 def test_connector_register_conflict_on_different_digest(client: TestClient) -> None:
     first = client.post(
         "/v1/catalog/connector-types",
-        json={"manifest": minimal_connector_manifest()},
+        json={"imageRef": IMAGE_REF, "manifest": minimal_connector_manifest()},
         headers=admin_header(),
     )
     assert first.status_code == 201
@@ -111,7 +116,7 @@ def test_connector_register_conflict_on_different_digest(client: TestClient) -> 
     second_manifest["spec"]["capabilities"] = ["oci.pull", "oci.push"]
     second = client.post(
         "/v1/catalog/connector-types",
-        json={"manifest": second_manifest},
+        json={"imageRef": IMAGE_REF, "manifest": second_manifest},
         headers=admin_header(),
     )
     assert second.status_code == 409, second.text

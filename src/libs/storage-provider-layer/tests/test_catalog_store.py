@@ -41,6 +41,7 @@ def test_connector_type_version_is_frozen() -> None:
         type="github",
         version="1.0.0",
         digest="sha256:abc",
+        image_ref="example.test/github@sha256:abc",
         normalized_manifest={},
         parent_deprecated=False,
         published_at=_now(),
@@ -53,7 +54,7 @@ def test_connector_type_version_is_frozen() -> None:
 
 
 def test_protocol_declares_required_schema_revision() -> None:
-    assert CatalogStoreProvider.SCHEMA_REVISION == 1
+    assert CatalogStoreProvider.SCHEMA_REVISION == 2
 
 
 REQUIRED_METHODS = [
@@ -98,7 +99,7 @@ def test_catalog_methods_do_not_take_workspace_id() -> None:
 
 
 class _MinimalCatalogStore:
-    SCHEMA_REVISION = 1
+    SCHEMA_REVISION = 2
 
     async def put_activity_type_version(self, *a: object, **kw: object) -> None: ...
     async def get_activity_type_version(self, *a: object, **kw: object) -> None: ...

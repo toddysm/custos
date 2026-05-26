@@ -17,6 +17,11 @@ from tests.api.conftest import (
     seed_builtin_echo,
 )
 
+IMAGE_REF = (
+    "ghcr.io/custos/connector-oci-registry@sha256:"
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+)
+
 # ---------------------------------------------------------------------------
 # GET /rpc/v1/workflow-versions/{id}
 # ---------------------------------------------------------------------------
@@ -166,7 +171,7 @@ def test_rpc_resolve_connector_type_returns_row(
 ) -> None:
     client.post(
         "/v1/catalog/connector-types",
-        json={"manifest": minimal_connector_manifest()},
+        json={"imageRef": IMAGE_REF, "manifest": minimal_connector_manifest()},
         headers=admin_header(),
     )
 

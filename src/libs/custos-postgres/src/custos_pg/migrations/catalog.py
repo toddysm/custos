@@ -70,4 +70,24 @@ CATALOG_REV1 = Revision(
 )
 
 
-__all__ = ["CATALOG_REV1"]
+CATALOG_REV2 = Revision(
+    number=2,
+    statements=(
+        """
+        ALTER TABLE catalog.connector_type_version
+        ADD COLUMN IF NOT EXISTS image_ref TEXT
+        """,
+        """
+        UPDATE catalog.connector_type_version
+        SET image_ref = CONCAT('unresolved://', type, '@', digest)
+        WHERE image_ref IS NULL OR image_ref = ''
+        """,
+        """
+        ALTER TABLE catalog.connector_type_version
+        ALTER COLUMN image_ref SET NOT NULL
+        """,
+    ),
+)
+
+
+__all__ = ["CATALOG_REV1", "CATALOG_REV2"]

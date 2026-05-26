@@ -80,7 +80,13 @@ async def _register_type(catalog: FakeCatalogAdapter, type: str, version: str) -
             "capabilities": ["oci.registry.read", "oci.referrers.list"],
         },
     }
-    await catalog.put_connector_type_version(type, version, "sha256:fake", manifest)
+    await catalog.put_connector_type_version(
+        type,
+        version,
+        "sha256:fake",
+        f"example.test/{type}@sha256:fake",
+        manifest,
+    )
 
 
 # ---------------------------------------------------------------------------

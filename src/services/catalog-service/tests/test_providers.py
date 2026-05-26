@@ -54,7 +54,7 @@ async def test_verify_schema_revisions_raises_when_catalog_store_is_behind() -> 
     )
     with pytest.raises(MigrationRequired) as exc_info:
         await verify_schema_revisions(providers)
-    assert ("CatalogStoreProvider", 1) in exc_info.value.gaps
+    assert ("CatalogStoreProvider", 2) in exc_info.value.gaps
 
 
 async def test_verify_schema_revisions_raises_when_metadata_store_is_behind() -> None:
@@ -72,13 +72,13 @@ def test_schema_gate_explainer_mentions_each_interface_and_remediation() -> None
     err = MigrationRequired(
         [
             ("DefinitionStoreProvider", 1),
-            ("CatalogStoreProvider", 1),
+            ("CatalogStoreProvider", 2),
             ("MetadataStoreProvider", 4),
         ],
     )
     text = schema_gate_explainer(err)
     assert "DefinitionStoreProvider@rev1" in text
-    assert "CatalogStoreProvider@rev1" in text
+    assert "CatalogStoreProvider@rev2" in text
     assert "MetadataStoreProvider@rev4" in text
     assert "custos migrate up" in text
     assert "CAT_DEFINITION_STORE" in text

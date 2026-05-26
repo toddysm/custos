@@ -23,6 +23,10 @@ from tests._fakes import FakeMetadataStore
 
 PRINCIPAL = "connector-svc"
 WS = "ws-1"
+IMAGE_REF = (
+    "ghcr.io/custos/connector-oci-registry@sha256:"
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -49,6 +53,7 @@ class FakeCatalogStore:
         type: str,
         version: str,
         digest: str,
+        image_ref: str,
         normalized_manifest: Mapping[str, Any],
     ) -> ConnectorTypeVersion:
         key = (type, version)
@@ -62,6 +67,7 @@ class FakeCatalogStore:
             type=type,
             version=version,
             digest=digest,
+            image_ref=image_ref,
             normalized_manifest=dict(normalized_manifest),
             parent_deprecated=self.parent_deprecated.get(type, False),
             published_at=datetime.now(tz=UTC),
@@ -146,6 +152,7 @@ class FakeCatalogStore:
             type=row.type,
             version=row.version,
             digest=row.digest,
+            image_ref=row.image_ref,
             normalized_manifest=row.normalized_manifest,
             parent_deprecated=flag,
             published_at=row.published_at,
@@ -217,7 +224,9 @@ def _make_registry(store: FakeCatalogStore) -> ConnectorTypeRegistry:
 async def test_register_returns_ref() -> None:
     store = FakeCatalogStore()
     registry = _make_registry(store)
-    ref = await registry.register(workspace_id=WS, principal_id=PRINCIPAL, manifest=_manifest())
+    ref = await registry.register(
+        workspace_id=WS, principal_id=PRINCIPAL, image_ref=IMAGE_REF, manifest=_manifest()
+    )
     assert isinstance(ref, ConnectorTypeRef)
     assert ref.type == "oci-registry"
     assert ref.version == "2.3.1"
@@ -231,7 +240,9 @@ async def test_register_persists_normalized_manifest_with_sorted_keys() -> None:
     manifest = _manifest()
     # Insert keys in inverse-alphabetical order
     manifest["spec"] = {"zzz": "z", "aaa": "a", **manifest["spec"]}
-    await registry.register(workspace_id=WS, principal_id=PRINCIPAL, manifest=manifest)
+    await registry.register(
+        workspace_id=WS, principal_id=PRINCIPAL, image_ref=IMAGE_REF, manifest=manifest
+    )
     row = store.connector_versions[("oci-registry", "2.3.1")]
     spec_keys = list(row.normalized_manifest["spec"].keys())
     assert spec_keys == sorted(spec_keys)
@@ -240,8 +251,12 @@ async def test_register_persists_normalized_manifest_with_sorted_keys() -> None:
 async def test_register_idempotent_on_identical_manifest() -> None:
     store = FakeCatalogStore()
     registry = _make_registry(store)
-    ref1 = await registry.register(workspace_id=WS, principal_id=PRINCIPAL, manifest=_manifest())
-    ref2 = await registry.register(workspace_id=WS, principal_id=PRINCIPAL, manifest=_manifest())
+    ref1 = await registry.register(
+        workspace_id=WS, principal_id=PRINCIPAL, image_ref=IMAGE_REF, manifest=_manifest()
+    )
+    ref2 = await registry.register(
+        workspace_id=WS, principal_id=PRINCIPAL, image_ref=IMAGE_REF, manifest=_manifest()
+    )
     assert ref1 == ref2
     assert len(store.put_calls) == 2
 
@@ -252,6 +267,7 @@ async def test_register_sink_connector_without_events_block() -> None:
     ref = await registry.register(
         workspace_id=WS,
         principal_id=PRINCIPAL,
+        image_ref=IMAGE_REF,
         manifest=_manifest(
             type_="slack-notifier",
             version="1.0.0",
@@ -274,7 +290,9 @@ async def test_register_rejects_wrong_api_version() -> None:
     bad = _manifest()
     bad["apiVersion"] = "custos.dev/v1"  # the activity envelope, not connector
     with pytest.raises(ConnectorManifestError) as exc:
-        await registry.register(workspace_id=WS, principal_id=PRINCIPAL, manifest=bad)
+        await registry.register(
+            workspace_id=WS, principal_id=PRINCIPAL, image_ref=IMAGE_REF, manifest=bad
+        )
     paths = {issue.path for issue in exc.value.issues}
     assert "/apiVersion" in paths
 
@@ -285,7 +303,9 @@ async def test_register_rejects_wrong_kind() -> None:
     bad = _manifest()
     bad["kind"] = "ActivityManifest"
     with pytest.raises(ConnectorManifestError) as exc:
-        await registry.register(workspace_id=WS, principal_id=PRINCIPAL, manifest=bad)
+        await registry.register(
+            workspace_id=WS, principal_id=PRINCIPAL, image_ref=IMAGE_REF, manifest=bad
+        )
     paths = {issue.path for issue in exc.value.issues}
     assert "/kind" in paths
 
@@ -295,7 +315,9 @@ async def test_register_collects_multiple_envelope_issues() -> None:
     registry = _make_registry(store)
     bad: dict[str, Any] = {"apiVersion": "v0", "kind": "Bad", "metadata": {}}
     with pytest.raises(ConnectorManifestError) as exc:
-        await registry.register(workspace_id=WS, principal_id=PRINCIPAL, manifest=bad)
+        await registry.register(
+            workspace_id=WS, principal_id=PRINCIPAL, image_ref=IMAGE_REF, manifest=bad
+        )
     paths = {issue.path for issue in exc.value.issues}
     assert "/apiVersion" in paths
     assert "/kind" in paths
@@ -303,12 +325,41 @@ async def test_register_collects_multiple_envelope_issues() -> None:
     assert "/metadata/version" in paths
 
 
+async def test_register_rejects_synthetic_catalog_image_ref() -> None:
+    store = FakeCatalogStore()
+    registry = _make_registry(store)
+    with pytest.raises(ConnectorManifestError) as exc:
+        await registry.register(
+            workspace_id=WS,
+            principal_id=PRINCIPAL,
+            image_ref="catalog://connector/oci-registry@2.3.1",
+            manifest=_manifest(),
+        )
+    assert any(issue.path == "/imageRef" for issue in exc.value.issues)
+
+
+async def test_register_rejects_non_oci_image_ref_shape() -> None:
+    store = FakeCatalogStore()
+    registry = _make_registry(store)
+    with pytest.raises(ConnectorManifestError) as exc:
+        await registry.register(
+            workspace_id=WS,
+            principal_id=PRINCIPAL,
+            image_ref="not-an-oci-ref",
+            manifest=_manifest(),
+        )
+    assert any(issue.path == "/imageRef" for issue in exc.value.issues)
+
+
 async def test_register_rejects_partial_semver() -> None:
     store = FakeCatalogStore()
     registry = _make_registry(store)
     with pytest.raises(ConnectorManifestError) as exc:
         await registry.register(
-            workspace_id=WS, principal_id=PRINCIPAL, manifest=_manifest(version="2.3")
+            workspace_id=WS,
+            principal_id=PRINCIPAL,
+            image_ref=IMAGE_REF,
+            manifest=_manifest(version="2.3"),
         )
     paths = {issue.path for issue in exc.value.issues}
     assert "/metadata/version" in paths
@@ -319,7 +370,10 @@ async def test_register_rejects_bad_type_token() -> None:
     registry = _make_registry(store)
     with pytest.raises(ConnectorManifestError) as exc:
         await registry.register(
-            workspace_id=WS, principal_id=PRINCIPAL, manifest=_manifest(type_="Bad Type")
+            workspace_id=WS,
+            principal_id=PRINCIPAL,
+            image_ref=IMAGE_REF,
+            manifest=_manifest(type_="Bad Type"),
         )
     paths = {issue.path for issue in exc.value.issues}
     assert "/metadata/type" in paths
@@ -333,7 +387,9 @@ async def test_register_rejects_non_string_metadata_type() -> None:
     bad = _manifest()
     bad["metadata"]["type"] = 123
     with pytest.raises(ConnectorManifestError) as exc:
-        await registry.register(workspace_id=WS, principal_id=PRINCIPAL, manifest=bad)
+        await registry.register(
+            workspace_id=WS, principal_id=PRINCIPAL, image_ref=IMAGE_REF, manifest=bad
+        )
     issues = {(issue.path, issue.code) for issue in exc.value.issues}
     assert ("/metadata/type", "type") in issues
 
@@ -344,7 +400,9 @@ async def test_register_rejects_non_string_metadata_version() -> None:
     bad = _manifest()
     bad["metadata"]["version"] = 2
     with pytest.raises(ConnectorManifestError) as exc:
-        await registry.register(workspace_id=WS, principal_id=PRINCIPAL, manifest=bad)
+        await registry.register(
+            workspace_id=WS, principal_id=PRINCIPAL, image_ref=IMAGE_REF, manifest=bad
+        )
     issues = {(issue.path, issue.code) for issue in exc.value.issues}
     assert ("/metadata/version", "type") in issues
 
@@ -358,6 +416,7 @@ async def test_register_rejects_event_token_in_capabilities() -> None:
         await registry.register(
             workspace_id=WS,
             principal_id=PRINCIPAL,
+            image_ref=IMAGE_REF,
             manifest=_manifest(capabilities=["oci.pull", "event.image.pushed"]),
         )
     codes = {issue.code for issue in exc.value.issues}
@@ -371,6 +430,7 @@ async def test_register_rejects_malformed_capability_token() -> None:
         await registry.register(
             workspace_id=WS,
             principal_id=PRINCIPAL,
+            image_ref=IMAGE_REF,
             manifest=_manifest(capabilities=["BAD CAP"]),
         )
     paths = {issue.path for issue in exc.value.issues}
@@ -384,6 +444,7 @@ async def test_register_rejects_empty_events_delivery() -> None:
         await registry.register(
             workspace_id=WS,
             principal_id=PRINCIPAL,
+            image_ref=IMAGE_REF,
             manifest=_manifest(events={"delivery": [], "produced": ["x.y"]}),
         )
     paths = {issue.path for issue in exc.value.issues}
@@ -397,6 +458,7 @@ async def test_register_rejects_invalid_delivery_mode() -> None:
         await registry.register(
             workspace_id=WS,
             principal_id=PRINCIPAL,
+            image_ref=IMAGE_REF,
             manifest=_manifest(events={"delivery": ["push", "stream"], "produced": ["x.y"]}),
         )
     paths = {issue.path for issue in exc.value.issues}
@@ -410,6 +472,7 @@ async def test_register_rejects_empty_events_produced() -> None:
         await registry.register(
             workspace_id=WS,
             principal_id=PRINCIPAL,
+            image_ref=IMAGE_REF,
             manifest=_manifest(events={"delivery": ["push"], "produced": []}),
         )
     paths = {issue.path for issue in exc.value.issues}
@@ -422,7 +485,9 @@ async def test_register_rejects_non_object_spec() -> None:
     bad = _manifest()
     bad["spec"] = "oops"
     with pytest.raises(ConnectorManifestError) as exc:
-        await registry.register(workspace_id=WS, principal_id=PRINCIPAL, manifest=bad)
+        await registry.register(
+            workspace_id=WS, principal_id=PRINCIPAL, image_ref=IMAGE_REF, manifest=bad
+        )
     paths = {issue.path for issue in exc.value.issues}
     assert "/spec" in paths
 
@@ -435,13 +500,17 @@ async def test_register_rejects_non_object_spec() -> None:
 async def test_register_digest_conflict_surfaces_both_digests() -> None:
     store = FakeCatalogStore()
     registry = _make_registry(store)
-    await registry.register(workspace_id=WS, principal_id=PRINCIPAL, manifest=_manifest())
+    await registry.register(
+        workspace_id=WS, principal_id=PRINCIPAL, image_ref=IMAGE_REF, manifest=_manifest()
+    )
     stored_digest = store.connector_versions[("oci-registry", "2.3.1")].digest
     # Republish with a tweak so the digest differs.
     tweaked = _manifest()
     tweaked["spec"]["description"] = "Different description"
     with pytest.raises(ConnectorRegistryConflict) as exc:
-        await registry.register(workspace_id=WS, principal_id=PRINCIPAL, manifest=tweaked)
+        await registry.register(
+            workspace_id=WS, principal_id=PRINCIPAL, image_ref=IMAGE_REF, manifest=tweaked
+        )
     assert exc.value.type == "oci-registry"
     assert exc.value.version == "2.3.1"
     assert exc.value.supplied_digest != stored_digest
@@ -456,7 +525,9 @@ async def test_register_digest_conflict_surfaces_both_digests() -> None:
 async def test_get_returns_row() -> None:
     store = FakeCatalogStore()
     registry = _make_registry(store)
-    await registry.register(workspace_id=WS, principal_id=PRINCIPAL, manifest=_manifest())
+    await registry.register(
+        workspace_id=WS, principal_id=PRINCIPAL, image_ref=IMAGE_REF, manifest=_manifest()
+    )
     row = await registry.get(type="oci-registry", version="2.3.1")
     assert row.type == "oci-registry"
     assert row.version == "2.3.1"
@@ -473,10 +544,16 @@ async def test_list_returns_all_versions_for_type() -> None:
     store = FakeCatalogStore()
     registry = _make_registry(store)
     await registry.register(
-        workspace_id=WS, principal_id=PRINCIPAL, manifest=_manifest(version="2.3.1")
+        workspace_id=WS,
+        principal_id=PRINCIPAL,
+        image_ref=IMAGE_REF,
+        manifest=_manifest(version="2.3.1"),
     )
     await registry.register(
-        workspace_id=WS, principal_id=PRINCIPAL, manifest=_manifest(version="2.4.0")
+        workspace_id=WS,
+        principal_id=PRINCIPAL,
+        image_ref=IMAGE_REF,
+        manifest=_manifest(version="2.4.0"),
     )
     page = await registry.list(type="oci-registry")
     versions = sorted(row.version for row in page.items)
@@ -488,7 +565,10 @@ async def test_list_paginates() -> None:
     registry = _make_registry(store)
     for patch in range(3):
         await registry.register(
-            workspace_id=WS, principal_id=PRINCIPAL, manifest=_manifest(version=f"1.0.{patch}")
+            workspace_id=WS,
+            principal_id=PRINCIPAL,
+            image_ref=IMAGE_REF,
+            manifest=_manifest(version=f"1.0.{patch}"),
         )
     page1 = await registry.list(type="oci-registry", limit=2)
     assert len(page1.items) == 2
@@ -501,7 +581,9 @@ async def test_list_paginates() -> None:
 async def test_deprecate_flips_parent_flag() -> None:
     store = FakeCatalogStore()
     registry = _make_registry(store)
-    await registry.register(workspace_id=WS, principal_id=PRINCIPAL, manifest=_manifest())
+    await registry.register(
+        workspace_id=WS, principal_id=PRINCIPAL, image_ref=IMAGE_REF, manifest=_manifest()
+    )
     await registry.deprecate(
         workspace_id=WS,
         principal_id=PRINCIPAL,
