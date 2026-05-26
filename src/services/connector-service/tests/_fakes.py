@@ -25,16 +25,25 @@ from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 from datetime import UTC, datetime
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from custos_spl import ConflictDigest, ImmutableViolation
 from custos_spl.ids import ConnectorInstanceId, WorkspaceId
-from custos_spl.interfaces.catalog_store import ConnectorTypeVersion
+from custos_spl.interfaces.catalog_store import (
+    CatalogStoreProvider,
+    ConnectorTypeVersion,
+)
 from custos_spl.interfaces.connector_instance_store import (
     ConnectorInstance,
     ConnectorInstanceFilter,
+    ConnectorInstanceStoreProvider,
 )
+from custos_spl.interfaces.metadata_store import MetadataStoreProvider
 from custos_spl.pagination import Cursor, Page
+
+from custos_connector.binding import BindForStepService
+from custos_connector.identity import IdentityResolverRegistry
+from custos_connector.runtime import ConnectorContext
 
 if TYPE_CHECKING:
     from custos_spl.interfaces.metadata_store import AuditEvent
@@ -359,4 +368,124 @@ __all__ = [
     "FakeCatalogAdapter",
     "FakeConnectorInstanceAdapter",
     "FakeMetadataAdapter",
+    "StubPluginBinder",
+    "build_bind_for_step_service",
 ]
+
+
+class StubPluginBinder:
+    """In-memory :class:`PluginBinder` for binding-service unit tests.
+
+    Records every ``bind`` invocation and returns a deterministic
+    :class:`ConnectorContext` whose ``handle`` echoes the slot,
+    capability, and identity envelope keys so assertions can detect
+    cross-slot wiring bugs.
+    """
+
+    def __init__(
+        self,
+        *,
+        context_factory: Any | None = None,
+        raise_for_slot: Mapping[str, BaseException] | None = None,
+    ) -> None:
+        self._context_factory = context_factory
+        self._raise_for_slot: dict[str, BaseException] = dict(raise_for_slot or {})
+        self.calls: list[dict[str, Any]] = []
+
+    async def bind(
+        self,
+        *,
+        connector: ConnectorTypeVersion,
+        instance: ConnectorInstance,
+        slot: str,
+        capability: str,
+        identity_material: Mapping[str, Any],
+    ) -> ConnectorContext:
+        self.calls.append(
+            {
+                "connector_type": connector.type,
+                "connector_version": connector.version,
+                "instance_id": str(instance.instance_id),
+                "slot": slot,
+                "capability": capability,
+                "identity_material": dict(identity_material),
+            }
+        )
+        exc = self._raise_for_slot.get(slot)
+        if exc is not None:
+            raise exc
+        if self._context_factory is not None:
+            built = self._context_factory(slot, capability, instance)
+            assert isinstance(built, ConnectorContext)
+            return built
+        return ConnectorContext(
+            endpoint=f"stub://{slot}",
+            token_type_hint=None,
+            handle=MappingProxyType(
+                {
+                    "slot": slot,
+                    "capability": capability,
+                    "instance_id": str(instance.instance_id),
+                }
+            ),
+            extras=MappingProxyType(
+                {
+                    "identity_envelope_keys": tuple(sorted(identity_material.keys())),
+                }
+            ),
+        )
+
+
+def build_bind_for_step_service(
+    *,
+    catalog_store: Any | None = None,
+    instance_store: Any | None = None,
+    metadata_store: Any | None = None,
+    identity_registry: IdentityResolverRegistry | None = None,
+    plugin_binder: Any | None = None,
+    max_cache_entries: int | None = None,
+    cache_ttl_cap_seconds: int | None = None,
+    clock: Any | None = None,
+) -> BindForStepService:
+    """Build a :class:`BindForStepService` wired entirely to in-memory fakes.
+
+    Defaults: ``FakeCatalogAdapter``, ``FakeConnectorInstanceAdapter``,
+    ``FakeMetadataAdapter``, an empty :class:`IdentityResolverRegistry`,
+    and a :class:`StubPluginBinder`. Tests override individual
+    components by passing them explicitly.
+
+    The store parameters are typed as :data:`Any` so tests can pass the
+    in-process :class:`FakeCatalogAdapter` / :class:`FakeMetadataAdapter`
+    / :class:`FakeConnectorInstanceAdapter` instances directly without
+    needing per-call ``# type: ignore[arg-type]`` annotations to bridge
+    the SPL Protocol's ``ClassVar SCHEMA_REVISION`` to the fakes'
+    instance-attribute equivalent.
+
+    ``max_cache_entries``, ``cache_ttl_cap_seconds`` and ``clock`` thread
+    straight through to :class:`BindForStepService` so eviction tests
+    can pin the bind cache's size, TTL ceiling, and wall clock.
+    """
+    kwargs: dict[str, Any] = {}
+    if max_cache_entries is not None:
+        kwargs["max_cache_entries"] = max_cache_entries
+    if cache_ttl_cap_seconds is not None:
+        kwargs["cache_ttl_cap_seconds"] = cache_ttl_cap_seconds
+    if clock is not None:
+        kwargs["clock"] = clock
+    return BindForStepService(
+        catalog_store=cast(
+            "CatalogStoreProvider",
+            catalog_store if catalog_store is not None else FakeCatalogAdapter(),
+        ),
+        instance_store=cast(
+            "ConnectorInstanceStoreProvider",
+            instance_store if instance_store is not None else FakeConnectorInstanceAdapter(),
+        ),
+        metadata_store=cast(
+            "MetadataStoreProvider",
+            metadata_store if metadata_store is not None else FakeMetadataAdapter(),
+        ),
+        identity_registry=identity_registry or IdentityResolverRegistry(),
+        plugin_binder=plugin_binder or StubPluginBinder(),
+        **kwargs,
+    )

@@ -17,6 +17,7 @@ from tests._fakes import (
     FakeCatalogAdapter,
     FakeConnectorInstanceAdapter,
     FakeMetadataAdapter,
+    build_bind_for_step_service,
 )
 
 _BASE_SETTINGS = Settings(
@@ -44,6 +45,7 @@ def _providers(*, behind: bool = False) -> Providers:
         instance_store=instances,  # type: ignore[arg-type]
         metadata_store=metadata,  # type: ignore[arg-type]
         identity_registry=IdentityResolverRegistry(),
+        bind_for_step_service=build_bind_for_step_service(),
     )
 
 

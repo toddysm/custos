@@ -10,6 +10,12 @@ permission names that Phase J routes will enforce via
 * ``admin:connector`` — All revoke / revoke-all / pause / resume /
   force-health-check / rewind / enable / disable endpoints.
 
+Phase G adds one further name for the internal RPC surface:
+
+* ``connector:bind`` — ``POST /internal/v1/bind-for-step`` (CONN-IMPL-016).
+  Held by the Workflow Service's service identity; never granted to
+  human operators.
+
 Connector Service enforces by *name only*. The role hierarchy and binding
 rules belong to the Auth Service (COMP-002); this module is the single
 source of truth for the permission strings so the names appearing in
@@ -30,11 +36,17 @@ AUDIT_READ: Final[str] = "audit:read"
 #: force-health-check, rewind, enable, disable).
 ADMIN_CONNECTOR: Final[str] = "admin:connector"
 
+#: ``POST /internal/v1/bind-for-step`` (CONN-IMPL-016). Held by the
+#: Workflow Service's service identity; never granted to human
+#: operators.
+CONNECTOR_BIND: Final[str] = "connector:bind"
+
 #: The full set of permissions the design declares for this service. Useful
 #: for tests that build an "admin" call-context header carrying everything.
 ALL_PERMISSIONS: Final[tuple[str, ...]] = (
     ADMIN_CONNECTOR,
     AUDIT_READ,
+    CONNECTOR_BIND,
     CONNECTOR_READ,
 )
 
@@ -43,5 +55,6 @@ __all__ = [
     "ADMIN_CONNECTOR",
     "ALL_PERMISSIONS",
     "AUDIT_READ",
+    "CONNECTOR_BIND",
     "CONNECTOR_READ",
 ]
