@@ -166,7 +166,7 @@ def test_extract_name_from_object_entry() -> None:
 
 def test_extract_name_rejects_unknown_shape() -> None:
     with pytest.raises(TypeError):
-        extract_capability_name(42)  # type: ignore[arg-type]
+        extract_capability_name(42)
 
 
 # ---------------------------------------------------------------------------
