@@ -42,7 +42,7 @@ from custos_connector.audit import (
     audit_lease_revoke_requested,
     audit_lease_revoked,
 )
-from custos_connector.lease.errors import LeaseError, LeaseErrorCode
+from custos_connector.lease.errors import LeaseError, LeaseErrorCode, http_status_for
 
 #: Seconds shaved off the step deadline when it dominates the TTL
 #: precedence ladder. The buffer absorbs lease-refresh round-trip
@@ -52,18 +52,6 @@ _STEP_DEADLINE_SAFETY_BUFFER_SEC: Final[int] = 5
 #: ULID alphabet (Crockford base32). Excludes I, L, O, U to dodge
 #: visual ambiguity. Mirrors the canonical ULID spec.
 _CROCKFORD: Final[str] = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
-
-#: Map :class:`LeaseErrorCode` to its surfaced HTTP status. Used by
-#: :meth:`LeaseManager._record_denied_for` so the ``lease.denied``
-#: event carries the same status the future REST handler will
-#: return; keeping the mapping next to the manager (not at the HTTP
-#: edge) means direct-call clients in tests see the same value.
-_LEASE_ERROR_HTTP_STATUS: Final[dict[LeaseErrorCode, int]] = {
-    LeaseErrorCode.CAPACITY_EXCEEDED: 429,
-    LeaseErrorCode.NOT_FOUND: 404,
-    LeaseErrorCode.ALREADY_RELEASED: 410,
-    LeaseErrorCode.INVALID_REQUEST: 400,
-}
 
 
 def _ulid(now_ms: int | None = None) -> str:
@@ -196,9 +184,9 @@ class LeaseManager:
         emit-then-raise pattern compact in :meth:`issue` /
         :meth:`refresh`. The mapping from
         :class:`LeaseErrorCode` to HTTP status lives on
-        :data:`_LEASE_ERROR_HTTP_STATUS` so direct-call clients (unit
-        tests) see the same status the future REST handler will
-        return.
+        :func:`~custos_connector.lease.errors.http_status_for` so
+        direct-call clients (unit tests) see the same status the
+        wire-level handler will return.
         """
         await self.record_denied(
             workspace_id=workspace_id,
@@ -207,7 +195,7 @@ class LeaseManager:
             op=op,
             reason_code=exc.code.value,
             reason_detail=exc.detail,
-            http_status=_LEASE_ERROR_HTTP_STATUS[exc.code],
+            http_status=http_status_for(exc.code),
         )
 
     # ----- Public surface -----

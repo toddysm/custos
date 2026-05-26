@@ -26,6 +26,7 @@ exhaustiveness.
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Final
 
 
 class LeaseErrorCode(StrEnum):
@@ -51,4 +52,25 @@ class LeaseError(Exception):
         self.detail = detail
 
 
-__all__ = ["LeaseError", "LeaseErrorCode"]
+#: Map each :class:`LeaseErrorCode` to the HTTP status the internal
+#: lease RPC router (CONN-IMPL-019) surfaces. The same map is consumed
+#: by :class:`~custos_connector.lease.service.LeaseManager` so the
+#: ``lease.denied`` audit event carries the status the wire-level
+#: caller will see, and by the Phase H sidecar's ``LeaseGateway`` so a
+#: non-2xx response from Connector Service can be decoded back into a
+#: :class:`LeaseError` with the same code semantics direct-call test
+#: clients observe.
+_STATUS_BY_CODE: Final[dict[LeaseErrorCode, int]] = {
+    LeaseErrorCode.CAPACITY_EXCEEDED: 429,
+    LeaseErrorCode.NOT_FOUND: 404,
+    LeaseErrorCode.ALREADY_RELEASED: 410,
+    LeaseErrorCode.INVALID_REQUEST: 400,
+}
+
+
+def http_status_for(code: LeaseErrorCode) -> int:
+    """Return the HTTP status code the internal lease RPC emits for ``code``."""
+    return _STATUS_BY_CODE[code]
+
+
+__all__ = ["LeaseError", "LeaseErrorCode", "http_status_for"]

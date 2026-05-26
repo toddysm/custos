@@ -16,6 +16,15 @@ Phase G adds one further name for the internal RPC surface:
   Held by the Workflow Service's service identity; never granted to
   human operators.
 
+Phase H adds a second internal-RPC permission:
+
+* ``connector:lease-mint`` — ``POST /internal/v1/leases:issue``,
+  ``:refresh``, ``:release`` (CONN-IMPL-019). Held by the
+  secret-bridge sidecar's service identity; never granted to human
+  operators. The sidecar uses these RPCs to delegate the
+  capacity-tracked lease bookkeeping (and audit emission) to the
+  Connector Service while it mints upstream credentials locally.
+
 Connector Service enforces by *name only*. The role hierarchy and binding
 rules belong to the Auth Service (COMP-002); this module is the single
 source of truth for the permission strings so the names appearing in
@@ -41,12 +50,18 @@ ADMIN_CONNECTOR: Final[str] = "admin:connector"
 #: operators.
 CONNECTOR_BIND: Final[str] = "connector:bind"
 
+#: ``POST /internal/v1/leases:issue|refresh|release`` (CONN-IMPL-019).
+#: Held by the secret-bridge sidecar's service identity; never granted
+#: to human operators.
+CONNECTOR_LEASE_MINT: Final[str] = "connector:lease-mint"
+
 #: The full set of permissions the design declares for this service. Useful
 #: for tests that build an "admin" call-context header carrying everything.
 ALL_PERMISSIONS: Final[tuple[str, ...]] = (
     ADMIN_CONNECTOR,
     AUDIT_READ,
     CONNECTOR_BIND,
+    CONNECTOR_LEASE_MINT,
     CONNECTOR_READ,
 )
 
@@ -56,5 +71,6 @@ __all__ = [
     "ALL_PERMISSIONS",
     "AUDIT_READ",
     "CONNECTOR_BIND",
+    "CONNECTOR_LEASE_MINT",
     "CONNECTOR_READ",
 ]

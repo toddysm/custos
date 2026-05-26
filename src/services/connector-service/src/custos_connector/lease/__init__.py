@@ -7,7 +7,7 @@ needing to know which module each symbol lives in.
 
 from __future__ import annotations
 
-from custos_connector.lease.errors import LeaseError, LeaseErrorCode
+from custos_connector.lease.errors import LeaseError, LeaseErrorCode, http_status_for
 from custos_connector.lease.service import LeaseManager, TtlInputs
 
 __all__ = [
@@ -15,4 +15,5 @@ __all__ = [
     "LeaseErrorCode",
     "LeaseManager",
     "TtlInputs",
+    "http_status_for",
 ]
