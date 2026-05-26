@@ -479,7 +479,10 @@ class Loader:
             )
         layer_digest = layer.get("digest")
         layer_size = layer.get("size")
-        if not isinstance(layer_digest, str) or re.fullmatch(r"sha256:[0-9a-fA-F]{64}", layer_digest) is None:
+        if (
+            not isinstance(layer_digest, str)
+            or re.fullmatch(r"sha256:[0-9a-fA-F]{64}", layer_digest) is None
+        ):
             raise self._reject(
                 code=LoaderErrorCode.INVALID_ARTIFACT_MANIFEST,
                 detail=f"wrapper layer[0] digest={layer_digest!r} is not a sha256:<64-hex>",
