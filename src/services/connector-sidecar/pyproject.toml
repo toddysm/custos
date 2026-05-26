@@ -1,0 +1,140 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "custos-connector-sidecar"
+version = "0.1.0"
+description = "Custos Connector Sidecar (Phase H, CONN-IMPL-019..021) — per-pod secret-bridge that serves activity-token leases to the activity container over a Unix Domain Socket."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Custos contributors" }]
+keywords = ["custos", "connector", "sidecar", "secrets", "leases", "uds"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
+]
+# Runtime surfaces (per CONN-IMPL-019):
+#
+# * ``fastapi`` + ``uvicorn[standard]`` for the UDS HTTP/1.1 surface
+#   the activity calls. Uvicorn supports ``--uds`` natively.
+# * ``pydantic`` for request-body validation.
+# * ``httpx`` for the Lease Gateway HTTP/1.1 client to
+#   ``connector-service`` ``/internal/v1/leases:*``.
+# * ``opentelemetry-api`` so failure counters and span attributes can
+#   surface from day one without pulling the SDK at runtime.
+#
+# Path-installed locally and in CI the same way ``connector-service``
+# is installed, with no SPL dependency: the sidecar talks to
+# ``connector-service`` over HTTP for every lease op, so it has zero
+# need to import ``custos_spl`` / ``custos_pg`` itself.
+dependencies = [
+    "fastapi>=0.110,<1",
+    "uvicorn[standard]>=0.27,<1",
+    "pydantic>=2.6,<3",
+    "httpx>=0.27,<1",
+    "opentelemetry-api>=1.20,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "ruff>=0.4",
+    "mypy>=1.10",
+    # The UDS integration harness drives the running sidecar over an
+    # AF_UNIX socket; httpx's ``AsyncHTTPTransport(uds=...)`` covers the
+    # client side without a separate aiohttp dep.
+]
+
+[project.urls]
+Repository = "https://github.com/toddysm/custos"
+Issues = "https://github.com/toddysm/custos/issues"
+Design = "https://github.com/toddysm/custos/blob/main/design/components/connector-service/design.md"
+
+[project.scripts]
+custos-connector-sidecar = "custos_sidecar.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/custos_sidecar"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "W",
+    "F",
+    "I",
+    "B",
+    "UP",
+    "SIM",
+    "RUF",
+]
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B008", "B011"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_any_generics = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+check_untyped_defs = true
+namespace_packages = true
+explicit_package_bases = true
+mypy_path = "src"
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "-m",
+    "not integration",
+]
+asyncio_mode = "auto"
+markers = [
+    "integration: end-to-end sidecar UDS harness (CONN-IMPL-019 acceptance)",
+]
+
+[tool.coverage.run]
+branch = false
+source = ["custos_sidecar"]
+omit = [
+    "src/custos_sidecar/__main__.py",
+]
+
+[tool.coverage.report]
+precision = 1
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "if typing.TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "\\.\\.\\.",
+    "if __name__ == .__main__.:",
+    "@overload",
+]
