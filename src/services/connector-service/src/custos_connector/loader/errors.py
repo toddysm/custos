@@ -81,6 +81,13 @@ class LoaderErrorCode(StrEnum):
     #: normalized digest. Wraps :class:`custos_spl.ConflictDigest`.
     CONFLICT_DIGEST = "conflict-digest"
 
+    #: A patch- or minor-bump version drops one or more capabilities
+    #: from the prior highest version in the same major (CONN-IMPL-009,
+    #: design § Compatibility policy). Capability sets MUST be a strict
+    #: superset across patch/minor versions; capability removal is only
+    #: permitted at a major bump.
+    CAPABILITY_REGRESSION = "capability-regression"
+
 
 @dataclass(frozen=True, slots=True)
 class LoaderError(Exception):

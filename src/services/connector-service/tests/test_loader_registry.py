@@ -685,3 +685,179 @@ async def test_deprecate_toggles_flag_and_emits_audit(
     await loader.deprecate(payload["metadata"]["type"], deprecated=False)
     fetched2 = await cat.get_connector_type_version(loaded.row.type, loaded.row.version)
     assert fetched2 is not None and fetched2.parent_deprecated is False
+
+
+# ---------------------------------------------------------------------------
+# CONN-IMPL-009 — Capability regression check
+# ---------------------------------------------------------------------------
+
+
+async def _register_version(
+    *,
+    catalog: FakeCatalogAdapter,
+    version: str,
+    capabilities: list[Any],
+) -> Any:
+    """Register a fresh version of the baseline connector type.
+
+    Builds a manifest from ``_baseline_payload()`` with the given
+    ``metadata.version`` + ``spec.capabilities`` overrides, mocks the
+    registry transport, and calls :meth:`Loader.register`. Returns the
+    :class:`LoaderError` raised (if any) or the
+    :class:`LoadedConnectorType` row.
+    """
+    payload = _baseline_payload()
+    payload["metadata"]["version"] = version
+    payload["spec"]["capabilities"] = capabilities
+    handler = _make_handler(payload=payload)
+    loader, _, client = _make_loader(handler=handler, catalog=catalog)
+    async with client:
+        return await loader.register(IMAGE_REF)
+
+
+@pytest.mark.asyncio
+async def test_register_first_version_skips_regression_check() -> None:
+    """The first version in a major has no predecessor → no regression check."""
+    cat = FakeCatalogAdapter()
+    loaded = await _register_version(
+        catalog=cat,
+        version="2.3.0",
+        capabilities=["oci.pull", "oci.push", "oci.list-tags"],
+    )
+    assert loaded.row.version == "2.3.0"
+
+
+@pytest.mark.asyncio
+async def test_register_rejects_capability_regression_on_patch_bump(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Dropping a capability on a patch bump → CAPABILITY_REGRESSION."""
+    cat = FakeCatalogAdapter()
+    # Seed v2.3.0 with three capabilities.
+    await _register_version(
+        catalog=cat,
+        version="2.3.0",
+        capabilities=["oci.pull", "oci.push", "oci.list-tags"],
+    )
+
+    caplog.set_level("INFO", logger=audit_logger.name)
+    # v2.3.1 drops oci.list-tags.
+    payload = _baseline_payload()
+    payload["metadata"]["version"] = "2.3.1"
+    payload["spec"]["capabilities"] = ["oci.pull", "oci.push"]
+    handler = _make_handler(payload=payload)
+    loader, _, client = _make_loader(handler=handler, catalog=cat)
+    async with client:
+        with pytest.raises(LoaderError) as exc:
+            await loader.register(IMAGE_REF)
+
+    assert exc.value.code is LoaderErrorCode.CAPABILITY_REGRESSION
+    assert "oci.list-tags" in exc.value.detail
+    # Parent version is mentioned in the rejection so operators can
+    # diff against the right row.
+    assert "'2.3.0'" in exc.value.detail
+    # The reject audit carries the regression code.
+    rejected = _audit_records(caplog, AUDIT_EVENT_REGISTRATION_REJECTED)
+    assert any("capability-regression" in line for line in rejected)
+
+
+@pytest.mark.asyncio
+async def test_register_rejects_capability_regression_on_minor_bump() -> None:
+    cat = FakeCatalogAdapter()
+    await _register_version(
+        catalog=cat,
+        version="2.3.0",
+        capabilities=["oci.pull", "oci.push", "oci.list-tags"],
+    )
+    payload = _baseline_payload()
+    payload["metadata"]["version"] = "2.4.0"
+    payload["spec"]["capabilities"] = ["oci.pull", "oci.push"]
+    handler = _make_handler(payload=payload)
+    loader, _, client = _make_loader(handler=handler, catalog=cat)
+    async with client:
+        with pytest.raises(LoaderError) as exc:
+            await loader.register(IMAGE_REF)
+    assert exc.value.code is LoaderErrorCode.CAPABILITY_REGRESSION
+
+
+@pytest.mark.asyncio
+async def test_register_allows_capability_drop_across_major_bump() -> None:
+    """Major bump may freely change capabilities (no regression check)."""
+    cat = FakeCatalogAdapter()
+    await _register_version(
+        catalog=cat,
+        version="2.3.0",
+        capabilities=["oci.pull", "oci.push", "oci.list-tags"],
+    )
+    loaded = await _register_version(
+        catalog=cat,
+        version="3.0.0",
+        capabilities=["oci.pull", "oci.push"],
+    )
+    assert loaded.row.version == "3.0.0"
+
+
+@pytest.mark.asyncio
+async def test_register_allows_superset_capability_on_patch_bump() -> None:
+    """Adding a capability on a patch bump → accepted (strict superset)."""
+    cat = FakeCatalogAdapter()
+    await _register_version(
+        catalog=cat,
+        version="2.3.0",
+        capabilities=["oci.pull", "oci.push"],
+    )
+    loaded = await _register_version(
+        catalog=cat,
+        version="2.3.1",
+        capabilities=["oci.pull", "oci.push", "oci.list-tags"],
+    )
+    assert loaded.row.version == "2.3.1"
+
+
+@pytest.mark.asyncio
+async def test_register_regression_check_uses_immediate_predecessor_in_major() -> None:
+    """Predecessor lookup picks the highest version below the new one in the same major.
+
+    With 2.3.0 and 2.5.0 present, registering 2.4.0 must check against
+    2.3.0 (the immediate predecessor) — NOT 2.5.0 (which is higher).
+    """
+    cat = FakeCatalogAdapter()
+    await _register_version(
+        catalog=cat,
+        version="2.3.0",
+        capabilities=["oci.pull", "oci.push"],
+    )
+    await _register_version(
+        catalog=cat,
+        version="2.5.0",
+        capabilities=["oci.pull", "oci.push", "oci.list-tags", "oci.copy"],
+    )
+    # v2.4.0 adds oci.list-tags vs 2.3.0 (superset of predecessor) — accepted.
+    loaded = await _register_version(
+        catalog=cat,
+        version="2.4.0",
+        capabilities=["oci.pull", "oci.push", "oci.list-tags"],
+    )
+    assert loaded.row.version == "2.4.0"
+
+
+@pytest.mark.asyncio
+async def test_register_regression_check_accepts_object_form_in_new_version() -> None:
+    """Object-form capability entries count toward the new-version set."""
+    cat = FakeCatalogAdapter()
+    await _register_version(
+        catalog=cat,
+        version="2.3.0",
+        capabilities=["oci.pull", "oci.push", "oci.list-tags"],
+    )
+    loaded = await _register_version(
+        catalog=cat,
+        version="2.3.1",
+        capabilities=[
+            "oci.pull",
+            "oci.push",
+            {"name": "oci.list-tags", "deprecated": True, "since": "2.3.1"},
+        ],
+    )
+    # Deprecation does not count as removal — still a superset.
+    assert loaded.row.version == "2.3.1"

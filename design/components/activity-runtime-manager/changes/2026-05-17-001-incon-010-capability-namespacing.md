@@ -41,7 +41,7 @@ connectors:
 
 Field reference row:
 
-> Advisory list of **data-plane verbs** the activity needs from the bound connector (e.g. `[oci.pull]`, `[oci.push, oci.tag]`, `[s3.read]`). Tokens MUST follow the dot-delimited lowercase convention defined by the Connector Service. The connector itself enforces; the Binder fails bind if a required capability is missing on the bound connector type version. `event.*` and bare tokens like `pull`/`push` are not valid here.
+> Advisory list of **data-plane verbs** the activity needs from the bound connector (e.g. `[oci.pull]`, `[oci.push, oci.list-tags]`, `[s3.read]`). Tokens MUST follow the dot-delimited lowercase convention defined by the Connector Service. The connector itself enforces; the Binder fails bind if a required capability is missing on the bound connector type version. `event.*` and bare tokens like `pull`/`push` are not valid here.
 
 ## Impact
 

@@ -40,6 +40,10 @@ from typing import Any, Final
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
 
+from custos_connector.manifest.capabilities import (
+    classify_capability_token,
+    extract_capability_name,
+)
 from custos_connector.manifest.errors import (
     ManifestValidationError,
     ValidationErrorCode,
@@ -202,7 +206,22 @@ def _check_authentication_type(manifest: Mapping[str, Any]) -> None:
 
 
 def _check_capability_tokens(manifest: Mapping[str, Any]) -> None:
-    """Enforce capability/event token grammar with a stable error code.
+    """Enforce capability namespace governance with stable error codes.
+
+    Per design § Namespace governance (CONN-IMPL-009):
+
+    * ``event.*`` tokens MUST NOT appear in ``capabilities`` (their
+      verbs belong in ``spec.events``) → :attr:`EVENT_TOKEN_IN_CAPABILITIES`.
+    * Tokens whose first dot-segment is a reserved Tier 1 prefix
+      (``oci``, ``s3``, ``blob``, ``http``, ``sql``, ``notification``)
+      MUST be in the curated Tier 1 registry →
+      :attr:`UNKNOWN_CORE_CAPABILITY`.
+    * Tokens outside the Tier 1 registry MUST match the Tier 2 vendor
+      pattern ``x-<vendor>.<verb>`` → :attr:`INVALID_CAPABILITY_SYNTAX`.
+    * Duplicate names (any combination of string and object form) →
+      :attr:`SCHEMA_VIOLATION` with a duplicate-name detail (the
+      schema's ``uniqueItems`` works on deep equality and so cannot
+      catch a mixed-form duplicate).
 
     Defensive ``isinstance`` guards excluded from coverage; see
     :func:`_check_target_config`.
@@ -211,28 +230,53 @@ def _check_capability_tokens(manifest: Mapping[str, Any]) -> None:
     if not isinstance(spec, dict):  # pragma: no cover - defensive
         return
     capabilities = spec.get("capabilities")
-    if isinstance(capabilities, list):
-        for idx, cap in enumerate(capabilities):
-            if not isinstance(cap, str):  # pragma: no cover - defensive
-                continue
-            if cap.startswith("event.") or cap == "event":
-                raise ManifestValidationError(
-                    code=ValidationErrorCode.EVENT_TOKEN_IN_CAPABILITIES,
-                    detail=(
-                        f"capabilities[{idx}]={cap!r} uses the reserved 'event.*' "
-                        f"namespace; event-delivery verbs belong in spec.events"
-                    ),
-                    path=f"/spec/capabilities/{idx}",
-                )
-            if not _TOKEN_RE.fullmatch(cap):
-                raise ManifestValidationError(
-                    code=ValidationErrorCode.INVALID_TOKEN_SYNTAX,
-                    detail=(
-                        f"capabilities[{idx}]={cap!r} is not a valid dot-delimited "
-                        f"lowercase token (e.g. 'oci.pull')"
-                    ),
-                    path=f"/spec/capabilities/{idx}",
-                )
+    if not isinstance(capabilities, list):  # pragma: no cover - defensive
+        return
+
+    seen_names: set[str] = set()
+    for idx, cap in enumerate(capabilities):
+        # Extract the canonical name from string or object form. The
+        # schema already enforced the union; defensive guard is in
+        # extract_capability_name itself.
+        name = extract_capability_name(cap)
+        path = f"/spec/capabilities/{idx}"
+
+        if name in seen_names:
+            raise ManifestValidationError(
+                code=ValidationErrorCode.SCHEMA_VIOLATION,
+                detail=(
+                    f"capabilities[{idx}] duplicates capability {name!r}; "
+                    f"each capability token may appear at most once "
+                    f"(across string and object entry forms)"
+                ),
+                path=path,
+            )
+        seen_names.add(name)
+
+        # The schema's ``not: ^event\.`` catches event.* before we get
+        # here, but we re-check explicitly so direct callers of
+        # _check_capability_tokens (and schema-relaxation scenarios)
+        # still emit a stable EVENT_TOKEN_IN_CAPABILITIES code.
+        if name.startswith("event.") or name == "event":
+            raise ManifestValidationError(
+                code=ValidationErrorCode.EVENT_TOKEN_IN_CAPABILITIES,
+                detail=(
+                    f"capabilities[{idx}]={name!r} uses the reserved 'event.*' "
+                    f"namespace; event-delivery verbs belong in spec.events"
+                ),
+                path=path,
+            )
+
+        try:
+            classify_capability_token(name)
+        except ManifestValidationError as err:
+            # Re-raise with the per-index path attached so operators
+            # can pinpoint the offending entry.
+            raise ManifestValidationError(
+                code=err.code,
+                detail=err.detail,
+                path=path,
+            ) from None
 
 
 def _check_events(manifest: Mapping[str, Any]) -> None:

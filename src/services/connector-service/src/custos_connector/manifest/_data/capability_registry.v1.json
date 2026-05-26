@@ -1,0 +1,47 @@
+{
+  "$comment": "Tier 1 capability registry data sidecar — Generated from design/architecture/capabilities.md. Keep in sync with the markdown via tests/test_capability_registry_drift.py. The JSON is the runtime source; the markdown is the human-curated source of truth.",
+  "version": 1,
+  "reservedPrefixes": [
+    "oci",
+    "s3",
+    "blob",
+    "http",
+    "sql",
+    "notification",
+    "event"
+  ],
+  "forbiddenInCapabilities": [
+    "event"
+  ],
+  "tokens": [
+    "oci.pull",
+    "oci.push",
+    "oci.copy",
+    "oci.list-tags",
+    "oci.list-referrers",
+    "oci.delete",
+    "oci.sign",
+    "oci.verify",
+    "s3.read",
+    "s3.write",
+    "s3.list",
+    "s3.delete",
+    "s3.copy",
+    "blob.read",
+    "blob.write",
+    "blob.list",
+    "blob.delete",
+    "http.get",
+    "http.post",
+    "http.put",
+    "http.delete",
+    "sql.read",
+    "sql.write",
+    "sql.exec",
+    "notification.send",
+    "notification.broadcast",
+    "slack.post",
+    "teams.post",
+    "email.send"
+  ]
+}

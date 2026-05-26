@@ -286,3 +286,91 @@ def test_validation_error_str_without_path() -> None:
     rendered = str(err)
     assert "schema-violation" in rendered
     assert "root violation" in rendered
+
+
+# ---------------------------------------------------------------------------
+# CONN-IMPL-009 — Tier 1 / Tier 2 capability governance
+# ---------------------------------------------------------------------------
+
+
+def test_rejects_unknown_core_capability() -> None:
+    """Reserved-prefix verb not in the curated registry → unknown-core-capability."""
+    payload = _baseline()
+    payload["spec"]["capabilities"].append("oci.bogus")
+    with pytest.raises(ManifestValidationError) as exc_info:
+        validate_manifest(payload)
+    assert exc_info.value.code == ValidationErrorCode.UNKNOWN_CORE_CAPABILITY
+    assert "oci.bogus" in exc_info.value.detail
+    assert "/spec/capabilities/" in (exc_info.value.path or "")
+
+
+def test_rejects_invalid_capability_syntax_for_non_tier_token() -> None:
+    """Non-tier-1, non-tier-2 token slips past schema → invalid-capability-syntax.
+
+    We construct an entry whose first segment is not in any reserved
+    prefix and which does NOT match the ``x-<vendor>.<verb>`` pattern.
+    The schema's overall token-shape pattern still accepts it (the
+    grammar allows any dot-delimited lowercase token), so the post-check
+    is the one that rejects.
+    """
+    payload = _baseline()
+    payload["spec"]["capabilities"].append("weird.but.not-tier1")
+    with pytest.raises(ManifestValidationError) as exc_info:
+        validate_manifest(payload)
+    assert exc_info.value.code == ValidationErrorCode.INVALID_CAPABILITY_SYNTAX
+
+
+def test_accepts_tier2_vendor_capability() -> None:
+    payload = _baseline()
+    payload["spec"]["capabilities"].append("x-acme.foo")
+    validate_manifest(payload)
+
+
+def test_accepts_object_form_capability_entry() -> None:
+    """Object form ``{name, deprecated, since, removeIn}`` is accepted."""
+    payload = _baseline()
+    payload["spec"]["capabilities"].append(
+        {
+            "name": "oci.copy",
+            "deprecated": True,
+            "since": "2.4.0",
+            "removeIn": "3.0.0",
+        }
+    )
+    # ``oci.copy`` is in the curated registry, so this must validate.
+    validate_manifest(payload)
+
+
+def test_rejects_duplicate_capability_across_string_and_object_form() -> None:
+    """Same token appearing once as string and once as object → SCHEMA_VIOLATION."""
+    payload = _baseline()
+    # Baseline already contains ``oci.pull`` as a string.
+    payload["spec"]["capabilities"].append({"name": "oci.pull", "deprecated": True})
+    with pytest.raises(ManifestValidationError) as exc_info:
+        validate_manifest(payload)
+    assert exc_info.value.code == ValidationErrorCode.SCHEMA_VIOLATION
+    assert "oci.pull" in exc_info.value.detail
+
+
+def test_rejects_object_form_with_event_namespace() -> None:
+    """``{name: event.*}`` is rejected the same as the string form."""
+    payload = _baseline()
+    payload["spec"]["capabilities"].append({"name": "event.created"})
+    with pytest.raises(ManifestValidationError) as exc_info:
+        validate_manifest(payload)
+    # The schema's ``not`` pattern on the object form fires first
+    # (SCHEMA_VIOLATION); accept either that or the explicit
+    # EVENT_TOKEN_IN_CAPABILITIES from the post-check.
+    assert exc_info.value.code in {
+        ValidationErrorCode.SCHEMA_VIOLATION,
+        ValidationErrorCode.EVENT_TOKEN_IN_CAPABILITIES,
+    }
+
+
+def test_object_form_rejects_unknown_extra_property() -> None:
+    """``additionalProperties: false`` on the object form rejects unknown keys."""
+    payload = _baseline()
+    payload["spec"]["capabilities"].append({"name": "oci.pull", "bogus": True})
+    with pytest.raises(ManifestValidationError) as exc_info:
+        validate_manifest(payload)
+    assert exc_info.value.code == ValidationErrorCode.SCHEMA_VIOLATION
