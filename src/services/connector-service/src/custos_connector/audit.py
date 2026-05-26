@@ -335,6 +335,16 @@ async def audit_identity_failed(
     The taxonomy carried on ``error_code`` is the stable
     :class:`~custos_connector.identity.IdentityResolverErrorCode` set;
     the audit consumer treats it as an opaque string.
+
+    ``category`` is the resolved
+    :class:`~custos_connector.loader.identity.IdentityCategory` value
+    (e.g. ``"kms"``, ``"workload"``, ``"federated"``, ``"vendor"``) when
+    the registry got far enough to derive it. For failures raised
+    *before* category derivation — currently only
+    :class:`~custos_connector.identity.IdentityResolverErrorCode.UNKNOWN_AUTHENTICATION_TYPE`,
+    where there is no resolver and therefore no category — the registry
+    passes the sentinel string ``"unknown"`` so the audit subject shape
+    remains stable.
     """
     await _emit(
         metadata_store,

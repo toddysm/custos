@@ -151,6 +151,32 @@ class TestResolveLookup:
         assert info.value.code is (IdentityResolverErrorCode.UNKNOWN_AUTHENTICATION_TYPE)
 
     @pytest.mark.asyncio
+    async def test_unknown_authentication_type_emits_failure_audit(self) -> None:
+        # ``connector.identity.failed`` is contractually always-on; the
+        # registry must emit it even when ``_lookup`` raises before any
+        # resolver is invoked. The category is reported as ``"unknown"``
+        # since we never got far enough to derive it.
+        store = FakeMetadataAdapter()
+        registry = IdentityResolverRegistry(
+            metadata_store=store,  # type: ignore[arg-type]
+        )
+        with pytest.raises(IdentityResolverError):
+            await registry.resolve(
+                workspace_id="ws-1",
+                actor="connector-service",
+                instance_id="inst-1",
+                authentication_type="oidc",
+                credentials_authentication={},
+                lease_ttl_seconds=600,
+            )
+        assert len(store.append_audit_calls) == 1
+        _, event = store.append_audit_calls[0]
+        assert event.event_type == "connector.identity.failed"
+        assert event.subject["authentication_type"] == "oidc"
+        assert event.subject["category"] == "unknown"
+        assert event.payload["error_code"] == "unknown-authentication-type"
+
+    @pytest.mark.asyncio
     async def test_resolver_called_with_context_fields(self) -> None:
         resolver = _StubResolver()
         clock = _FixedClock(start=datetime(2026, 5, 1, tzinfo=UTC))

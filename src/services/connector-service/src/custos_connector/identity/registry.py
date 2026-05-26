@@ -281,8 +281,26 @@ class IdentityResolverRegistry:
                 exception is re-raised after the failure audit event is
                 emitted.
         """
-        resolver = self._lookup(authentication_type)
-        category = self._resolve_category(authentication_type)
+        try:
+            resolver = self._lookup(authentication_type)
+            category = self._resolve_category(authentication_type)
+        except IdentityResolverError as exc:
+            # ``_lookup`` raises ``UNKNOWN_AUTHENTICATION_TYPE`` before
+            # any resolver has run, so the failure-audit path inside
+            # the try/except below is unreachable for this class of
+            # error. Emit the event here too so the
+            # ``connector.identity.failed`` contract really is
+            # "always-on". Category is reported as ``"unknown"`` since
+            # we never got far enough to derive it.
+            await self._emit_failure(
+                workspace_id=workspace_id,
+                actor=actor,
+                instance_id=instance_id,
+                authentication_type=authentication_type,
+                category=None,
+                error=exc,
+            )
+            raise
         descriptor_key = _descriptor_key(authentication_type, credentials_authentication)
         cache_key = (workspace_id, instance_id, authentication_type, descriptor_key)
 
@@ -438,9 +456,10 @@ class IdentityResolverRegistry:
         actor: str,
         instance_id: str,
         authentication_type: str,
-        category: IdentityCategory,
+        category: IdentityCategory | None,
         error: IdentityResolverError,
     ) -> None:
+        category_value = category.value if category is not None else "unknown"
         if self._metadata_store is None:
             _LOGGER.warning(
                 "identity resolution failed instance=%s auth_type=%s code=%s detail=%s",
@@ -458,7 +477,7 @@ class IdentityResolverRegistry:
             actor=actor,
             instance_id=instance_id,
             authentication_type=authentication_type,
-            category=category.value,
+            category=category_value,
             error_code=error.code.value,
             error_detail=error.detail,
             error_data=dict(error.data),
