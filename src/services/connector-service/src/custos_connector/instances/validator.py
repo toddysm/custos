@@ -293,9 +293,19 @@ def validate_instance_config(
                 )
 
     if used_capabilities is not None:
-        advertised_raw = manifest.get("capabilities", ())
+        spec_block = manifest.get("spec", {}) if isinstance(manifest, Mapping) else {}
+        advertised_raw = (
+            spec_block.get("capabilities", ())
+            if isinstance(spec_block, Mapping)
+            else ()
+        )
         advertised: frozenset[str] = (
-            frozenset(c for c in advertised_raw if isinstance(c, str))
+            frozenset(
+                name
+                for capability in advertised_raw
+                for name in (extract_capability_name(capability),)
+                if isinstance(name, str)
+            )
             if isinstance(advertised_raw, (list, tuple))
             else frozenset()
         )
