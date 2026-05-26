@@ -85,7 +85,9 @@ class Providers:
     """Bundle of the SPL providers Connector Service consumes.
 
     Held on ``app.state.providers`` and used by the application's request-
-    handling layer to access the catalog and metadata stores.
+    handling layer to access the catalog store (connector type registry),
+    the connector-instance store (workspace-scoped instance rows), and the
+    metadata store (audit log and supporting metadata).
     """
 
     catalog_store: CatalogStoreProvider
