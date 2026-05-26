@@ -1,7 +1,7 @@
 """In-memory fakes for the SPL provider Protocols used by connector-service tests.
 
 Each fake implements the slice of the SPL Protocol surface that
-connector-service Phase B and Phase D actually exercises:
+connector-service Phase B and Phase D actually exercise:
 
 * ``MigrationCapable``: ``declared_revisions`` + ``refresh_declared`` so the
   schema-revision startup gate can run.
