@@ -443,6 +443,9 @@ def build_bind_for_step_service(
     metadata_store: Any | None = None,
     identity_registry: IdentityResolverRegistry | None = None,
     plugin_binder: Any | None = None,
+    max_cache_entries: int | None = None,
+    cache_ttl_cap_seconds: int | None = None,
+    clock: Any | None = None,
 ) -> BindForStepService:
     """Build a :class:`BindForStepService` wired entirely to in-memory fakes.
 
@@ -457,7 +460,18 @@ def build_bind_for_step_service(
     needing per-call ``# type: ignore[arg-type]`` annotations to bridge
     the SPL Protocol's ``ClassVar SCHEMA_REVISION`` to the fakes'
     instance-attribute equivalent.
+
+    ``max_cache_entries``, ``cache_ttl_cap_seconds`` and ``clock`` thread
+    straight through to :class:`BindForStepService` so eviction tests
+    can pin the bind cache's size, TTL ceiling, and wall clock.
     """
+    kwargs: dict[str, Any] = {}
+    if max_cache_entries is not None:
+        kwargs["max_cache_entries"] = max_cache_entries
+    if cache_ttl_cap_seconds is not None:
+        kwargs["cache_ttl_cap_seconds"] = cache_ttl_cap_seconds
+    if clock is not None:
+        kwargs["clock"] = clock
     return BindForStepService(
         catalog_store=cast(
             "CatalogStoreProvider",
@@ -473,4 +487,5 @@ def build_bind_for_step_service(
         ),
         identity_registry=identity_registry or IdentityResolverRegistry(),
         plugin_binder=plugin_binder or StubPluginBinder(),
+        **kwargs,
     )
