@@ -133,10 +133,11 @@ def load_providers(settings: Settings) -> Providers:
 async def verify_schema_revisions(providers: Providers) -> None:
     """Refresh the per-adapter declared revisions and run the schema gate.
 
-    The gate is scoped to the two interfaces connector-service owns
-    (``CatalogStoreProvider`` for the connector-type registry, and
-    ``MetadataStoreProvider`` for connector instances + cursors + the
-    audit outbox); revisions owned by sibling services are deliberately
+    The gate is scoped to the three interfaces connector-service owns:
+    ``CatalogStoreProvider`` for the connector-type registry,
+    ``ConnectorInstanceStoreProvider`` for workspace-scoped connector
+    instance rows, and ``MetadataStoreProvider`` for cursors and the
+    audit outbox. Revisions owned by sibling services are deliberately
     out of scope so this service can start independently.
 
     Raises:
