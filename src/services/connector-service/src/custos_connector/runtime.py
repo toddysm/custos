@@ -458,7 +458,7 @@ class PluginInvoker:
             case PluginErrorCode.INVOCATION_FAILED:
                 raise PluginInvocationFailed(detail, data=payload)
             case _:
-                raise PluginRuntimeError(detail, data={"code": raw_code, **dict(payload or {})})
+                raise PluginRuntimeError(detail, data={**dict(payload or {}), "code": raw_code})
 
 
 def _serialize_cursor(cursor: CursorEnvelope | None) -> Mapping[str, Any] | None:
