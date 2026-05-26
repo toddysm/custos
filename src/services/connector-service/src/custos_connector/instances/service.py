@@ -225,9 +225,7 @@ class InstanceService:
             dict(target_config) if target_config is not None else {}
         )
         effective_credentials_auth: Mapping[str, Any] = (
-            dict(credentials_authentication)
-            if credentials_authentication is not None
-            else {}
+            dict(credentials_authentication) if credentials_authentication is not None else {}
         )
 
         # 2. Catalog existence check. Stale-on-deprecation is fine

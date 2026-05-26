@@ -16,12 +16,14 @@ Validation rules
 
 For each create call, we resolve the referenced ``ConnectorTypeVersion``
 manifest and check the operator-supplied payload against three rule
-families:
+families. The connector-manifest v1 schema wraps all author-supplied
+content under a top-level ``spec`` key (sibling to ``metadata``), so
+every rule below reads from ``manifest["spec"]``:
 
-* **Per-kind ``target_config``**. The manifest's ``target.kind``
+* **Per-kind ``target_config``**. The manifest's ``spec.target.kind``
   picks a per-kind required-field tuple (mirrors the publish-time
   table in :mod:`custos_connector.manifest.validator`). The validator
-  merges ``manifest.target.config`` (publisher-supplied defaults)
+  merges ``spec.target.config`` (publisher-supplied defaults)
   with the operator's ``target_config`` (deploy-time overrides) and
   checks every required field is present in the merge. Missing keys
   emit a :attr:`InstanceConfigCode.MISSING_TARGET_CONFIG_FIELD`
@@ -29,17 +31,22 @@ families:
   short-circuit on the first so the operator can fix all of them in
   one round-trip.
 * **Per-auth ``credentials_authentication``**. The manifest's
-  ``credentials.authenticationType`` picks a per-auth required-field
-  tuple. Same merge-then-check pattern as target config. Vendor
-  ``x-<vendor>`` auth types are accepted with no additional field
-  checks: the plugin author owns the contract for their extension
-  and the platform has no way to know which keys are required.
+  ``spec.credentials.authenticationType`` picks a per-auth
+  required-field tuple. Same merge-then-check pattern as target
+  config. Vendor ``x-<vendor>`` auth types are accepted with no
+  additional field checks: the plugin author owns the contract for
+  their extension and the platform has no way to know which keys
+  are required.
 * **Capability availability**. Every token in
-  ``used_capabilities`` MUST appear in ``manifest.capabilities``.
-  This is the inverse of the manifest's "advertised superset" — the
-  operator pins which subset they actually intend to grant.
-  Unknown tokens emit
-  :attr:`InstanceConfigCode.UNKNOWN_CAPABILITY_ON_INSTANCE` failures.
+  ``used_capabilities`` MUST appear in ``spec.capabilities``.
+  Entries in ``spec.capabilities`` may be bare strings or
+  ``{"name": ..., "deprecated": ...}`` deprecation envelopes;
+  :func:`custos_connector.manifest.capabilities.extract_capability_name`
+  normalises both shapes before the subset check. This is the
+  inverse of the manifest's "advertised superset" — the operator
+  pins which subset they actually intend to grant. Unknown tokens
+  emit :attr:`InstanceConfigCode.UNKNOWN_CAPABILITY_ON_INSTANCE`
+  failures.
 
 Failure-aggregation policy
 --------------------------
@@ -68,6 +75,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Final
 
+from custos_connector.manifest.capabilities import extract_capability_name
+
 
 class InstanceConfigCode(StrEnum):
     """Stable rejection codes emitted by the instance config validator.
@@ -77,13 +86,13 @@ class InstanceConfigCode(StrEnum):
     """
 
     #: An operator-supplied ``target_config`` is missing a required
-    #: field for the manifest's ``target.kind`` (e.g.
+    #: field for the manifest's ``spec.target.kind`` (e.g.
     #: ``repositoryNamespace`` for ``oci-registry``). One issue is
     #: emitted per missing key; the :attr:`InstanceConfigIssue.path`
     #: identifies the offending key.
     MISSING_TARGET_CONFIG_FIELD = "missing-target-config-field"
 
-    #: The manifest declares a ``target.kind`` outside the known
+    #: The manifest declares a ``spec.target.kind`` outside the known
     #: v1 set (``oci-registry``, ``azure-blob-storage``,
     #: ``amazon-s3-bucket``). Indicates manifest/validator drift —
     #: a manifest that passed CONN-IMPL-005 should never trip this.
@@ -91,13 +100,14 @@ class InstanceConfigCode(StrEnum):
 
     #: An operator-supplied ``credentials_authentication`` is missing
     #: a required field for the manifest's
-    #: ``credentials.authenticationType``. Vendor ``x-<vendor>`` auth
-    #: types don't trigger this code (no platform-side field table).
+    #: ``spec.credentials.authenticationType``. Vendor ``x-<vendor>``
+    #: auth types don't trigger this code (no platform-side field
+    #: table).
     MISSING_AUTHENTICATION_FIELD = "missing-authentication-field"
 
     #: A token in ``used_capabilities`` is not present in the
-    #: manifest's ``capabilities`` array. The operator can only pin
-    #: a subset of what the connector type advertises.
+    #: manifest's ``spec.capabilities`` array. The operator can only
+    #: pin a subset of what the connector type advertises.
     UNKNOWN_CAPABILITY_ON_INSTANCE = "unknown-capability-on-instance"
 
 
@@ -203,18 +213,20 @@ def validate_instance_config(
 
     Args:
         manifest: The normalized manifest dict stored on the
-            ``ConnectorTypeVersion`` row (see CONN-IMPL-008). Must
-            contain ``target.kind``, ``target.config``,
-            ``credentials.authenticationType``,
-            ``credentials.authentication``, and ``capabilities``
-            keys — all guaranteed by CONN-IMPL-005's publish-time
-            validation.
+            ``ConnectorTypeVersion`` row (see CONN-IMPL-008). The
+            connector-manifest v1 schema wraps all author-supplied
+            content under a top-level ``spec`` key; this function
+            therefore reads ``spec.target.kind``, ``spec.target.config``,
+            ``spec.credentials.authenticationType``,
+            ``spec.credentials.authentication``, and
+            ``spec.capabilities`` — all guaranteed by CONN-IMPL-005's
+            publish-time validation.
         target_config: Operator-supplied target config overrides.
-            Merged on top of ``manifest.target.config`` before the
+            Merged on top of ``spec.target.config`` before the
             per-kind required-field check.
         credentials_authentication: Operator-supplied authentication
             field overrides. Merged on top of
-            ``manifest.credentials.authentication`` before the
+            ``spec.credentials.authentication`` before the
             per-auth required-field check.
         used_capabilities: Operator-pinned capability subset. ``None``
             means "leave the catalog superset in place" and skips the
@@ -227,7 +239,11 @@ def validate_instance_config(
     """
     issues: list[InstanceConfigIssue] = []
 
-    target_block = manifest.get("target", {})
+    spec = manifest.get("spec", {}) if isinstance(manifest, Mapping) else {}
+    if not isinstance(spec, Mapping):
+        spec = {}
+
+    target_block = spec.get("target", {})
     kind = target_block.get("kind") if isinstance(target_block, Mapping) else None
     manifest_target_config: Mapping[str, Any] = (
         target_block.get("config", {})
@@ -239,10 +255,10 @@ def validate_instance_config(
             InstanceConfigIssue(
                 code=InstanceConfigCode.UNKNOWN_TARGET_KIND,
                 detail=(
-                    f"manifest target.kind={kind!r} is not a known v1 kind; "
+                    f"manifest spec.target.kind={kind!r} is not a known v1 kind; "
                     "expected one of: " + ", ".join(sorted(_TARGET_CONFIG_REQUIRED))
                 ),
-                path="target/kind",
+                path="spec/target/kind",
             )
         )
     else:
@@ -256,14 +272,14 @@ def validate_instance_config(
                     InstanceConfigIssue(
                         code=InstanceConfigCode.MISSING_TARGET_CONFIG_FIELD,
                         detail=(
-                            f"target.kind={kind!r} requires "
+                            f"spec.target.kind={kind!r} requires "
                             f"target_config.{required_key!r} to be provided"
                         ),
                         path=f"target_config/{required_key}",
                     )
                 )
 
-    credentials_block = manifest.get("credentials", {})
+    credentials_block = spec.get("credentials", {})
     auth_type = (
         credentials_block.get("authenticationType")
         if isinstance(credentials_block, Mapping)
@@ -293,12 +309,7 @@ def validate_instance_config(
                 )
 
     if used_capabilities is not None:
-        spec_block = manifest.get("spec", {}) if isinstance(manifest, Mapping) else {}
-        advertised_raw = (
-            spec_block.get("capabilities", ())
-            if isinstance(spec_block, Mapping)
-            else ()
-        )
+        advertised_raw = spec.get("capabilities", ()) if isinstance(spec, Mapping) else ()
         advertised: frozenset[str] = (
             frozenset(
                 name
