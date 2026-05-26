@@ -98,6 +98,7 @@ async def register_connector_type(
     ref = await registry.register(
         workspace_id=ctx.workspace_id,
         principal_id=ctx.principal_id,
+        image_ref=body.image_ref,
         manifest=body.manifest,
     )
     return ConnectorTypeRefBody(

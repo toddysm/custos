@@ -15,12 +15,17 @@ from tests.api.conftest import (
     minimal_connector_manifest,
 )
 
+IMAGE_REF = (
+    "ghcr.io/custos/connector-oci-registry@sha256:"
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+)
+
 
 def _register(client: TestClient, **overrides: str) -> dict[str, str]:
     manifest = minimal_connector_manifest(**overrides)
     resp = client.post(
         "/v1/catalog/connector-types",
-        json={"manifest": manifest},
+        json={"imageRef": IMAGE_REF, "manifest": manifest},
         headers=admin_header(),
     )
     assert resp.status_code == 201, resp.text
@@ -42,7 +47,7 @@ def test_register_returns_ref(client: TestClient) -> None:
 def test_register_requires_write_permission(client: TestClient) -> None:
     resp = client.post(
         "/v1/catalog/connector-types",
-        json={"manifest": minimal_connector_manifest()},
+        json={"imageRef": IMAGE_REF, "manifest": minimal_connector_manifest()},
         headers=callctx_header(workspace_id="ws-1", permissions=["catalog:connector-types:read"]),
     )
     assert resp.status_code == 403
@@ -53,7 +58,7 @@ def test_register_manifest_envelope_failure_emits_envelope(client: TestClient) -
     del bad["apiVersion"]
     resp = client.post(
         "/v1/catalog/connector-types",
-        json={"manifest": bad},
+        json={"imageRef": IMAGE_REF, "manifest": bad},
         headers=admin_header(),
     )
     assert resp.status_code == 400

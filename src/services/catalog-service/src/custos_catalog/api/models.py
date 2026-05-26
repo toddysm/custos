@@ -388,6 +388,7 @@ class ActivityTypeListResponse(_Wire):
 class ConnectorTypeRegisterRequest(_Wire):
     """POST body for ``/v1/catalog/connector-types``."""
 
+    image_ref: str = Field(..., alias="imageRef", min_length=1)
     manifest: dict[str, Any]
 
     model_config = ConfigDict(
@@ -396,6 +397,10 @@ class ConnectorTypeRegisterRequest(_Wire):
         json_schema_extra={
             "examples": [
                 {
+                    "imageRef": (
+                        "ghcr.io/custos/connector-oci-registry@sha256:"
+                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    ),
                     "manifest": {
                         "apiVersion": "custos.dev/connector-manifest/v1",
                         "kind": "ConnectorManifest",

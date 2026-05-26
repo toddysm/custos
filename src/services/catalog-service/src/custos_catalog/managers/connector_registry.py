@@ -60,6 +60,7 @@ _EXACT_VERSION_RE: Final[re.Pattern[str]] = re.compile(
     r"^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$",
 )
 _CAPABILITY_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+$")
+_SYNTHETIC_IMAGE_REF_PREFIX: Final[str] = "catalog://connector/"
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,6 +193,7 @@ class ConnectorTypeRegistry:
         *,
         workspace_id: str,
         principal_id: str,
+        image_ref: str,
         manifest: Mapping[str, Any],
     ) -> ConnectorTypeRef:
         """Register a new connector-type version.
@@ -212,6 +214,8 @@ class ConnectorTypeRegistry:
             principal_id: Caller identity, recorded in the audit
                 event. Authorisation is enforced upstream by the
                 gateway.
+            image_ref: Authoritative OCI image reference for runtime
+                invocation (e.g. ``ghcr.io/org/connector@sha256:...``).
             manifest: Raw connector manifest mapping. Must carry the
                 ``custos.dev/connector-manifest/v1`` envelope.
         """
@@ -222,13 +226,14 @@ class ConnectorTypeRegistry:
                 ConnectorRegistryConflict: "digest_conflict",
             },
         ):
+            self._validate_image_ref(image_ref)
             projection = self._project_manifest(manifest)
             try:
                 stored = await self._store.put_connector_type_version(
                     type=projection.type,
                     version=projection.version,
                     digest=projection.digest,
-                    image_ref=f"catalog://connector/{projection.type}@{projection.version}",
+                    image_ref=image_ref,
                     normalized_manifest=projection.normalized,
                 )
             except ConflictDigest as exc:
@@ -384,6 +389,42 @@ class ConnectorTypeRegistry:
             )
             return None
         return row.digest if row is not None else None
+
+    def _validate_image_ref(self, image_ref: str) -> None:
+        normalized = image_ref.strip()
+        if not normalized:
+            raise ConnectorManifestError(
+                [
+                    ConnectorManifestIssue(
+                        path="/imageRef",
+                        code="required",
+                        message="imageRef is required",
+                    )
+                ]
+            )
+        if normalized.startswith(_SYNTHETIC_IMAGE_REF_PREFIX):
+            raise ConnectorManifestError(
+                [
+                    ConnectorManifestIssue(
+                        path="/imageRef",
+                        code="value",
+                        message="imageRef must be an OCI image reference, not a catalog URI",
+                    )
+                ]
+            )
+        if not _looks_like_oci_image_ref(normalized):
+            raise ConnectorManifestError(
+                [
+                    ConnectorManifestIssue(
+                        path="/imageRef",
+                        code="format",
+                        message=(
+                            "imageRef must look like an OCI reference "
+                            "(<registry>/<repo>:<tag> or <registry>/<repo>@sha256:<digest>)"
+                        ),
+                    )
+                ]
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -584,6 +625,16 @@ def _validate_envelope(manifest: Mapping[str, Any]) -> list[ConnectorManifestIss
                 )
 
     return issues
+
+
+def _looks_like_oci_image_ref(image_ref: str) -> bool:
+    """Best-effort check for OCI image references used by runtime invokers."""
+    if "://" in image_ref:
+        return False
+    if "/" not in image_ref:
+        return False
+    tail = image_ref.rsplit("/", 1)[1]
+    return ":" in tail or "@" in tail
 
 
 __all__ = [

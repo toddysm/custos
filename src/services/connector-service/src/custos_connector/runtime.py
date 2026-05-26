@@ -374,7 +374,24 @@ class PluginInvoker:
                 data={"hook": hook, "image_ref": connector.image_ref},
             ) from exc
 
-        body = self._decode_body(completed.stdout, hook=hook, image_ref=connector.image_ref)
+        try:
+            body = self._decode_body(completed.stdout, hook=hook, image_ref=connector.image_ref)
+        except PluginProtocolError as exc:
+            if completed.exit_code != 0:
+                raise PluginInvocationFailed(
+                    (
+                        f"plugin hook {hook!r} on {connector.image_ref!r} exited with "
+                        f"status {completed.exit_code} without a valid response"
+                    ),
+                    data={
+                        "hook": hook,
+                        "image_ref": connector.image_ref,
+                        "exit_code": completed.exit_code,
+                        "stderr": completed.stderr.decode("utf-8", "replace"),
+                        "stdout": completed.stdout.decode("utf-8", "replace"),
+                    },
+                ) from exc
+            raise
         ok = body.get("ok")
         if not isinstance(ok, bool):
             raise PluginProtocolError("plugin response must carry boolean field 'ok'")
@@ -458,7 +475,7 @@ class PluginInvoker:
             case PluginErrorCode.INVOCATION_FAILED:
                 raise PluginInvocationFailed(detail, data=payload)
             case _:
-                raise PluginRuntimeError(detail, data={"code": raw_code, **dict(payload or {})})
+                raise PluginRuntimeError(detail, data={**dict(payload or {}), "code": raw_code})
 
 
 def _serialize_cursor(cursor: CursorEnvelope | None) -> Mapping[str, Any] | None:

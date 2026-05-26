@@ -20,6 +20,11 @@ from tests.api.conftest import (
     seed_builtin_echo,
 )
 
+IMAGE_REF = (
+    "ghcr.io/custos/connector-oci-registry@sha256:"
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+)
+
 # ---------------------------------------------------------------------------
 # Generic envelope shape
 # ---------------------------------------------------------------------------
@@ -77,7 +82,7 @@ def test_connector_manifest_invalid_emits_envelope_with_issues(
     bad["apiVersion"] = "wrong"
     resp = client.post(
         "/v1/catalog/connector-types",
-        json={"manifest": bad},
+        json={"imageRef": IMAGE_REF, "manifest": bad},
         headers=admin_header(),
     )
     assert resp.status_code == 400
@@ -192,7 +197,7 @@ def test_connector_registry_conflict_emits_envelope_with_digests(
     manifest = minimal_connector_manifest()
     client.post(
         "/v1/catalog/connector-types",
-        json={"manifest": manifest},
+        json={"imageRef": IMAGE_REF, "manifest": manifest},
         headers=admin_header(),
     )
     second = minimal_connector_manifest()
@@ -200,7 +205,7 @@ def test_connector_registry_conflict_emits_envelope_with_digests(
     second["spec"]["secretSchema"] = {"type": "object", "properties": {"x": {"type": "string"}}}
     resp = client.post(
         "/v1/catalog/connector-types",
-        json={"manifest": second},
+        json={"imageRef": IMAGE_REF, "manifest": second},
         headers=admin_header(),
     )
     assert resp.status_code == 409
