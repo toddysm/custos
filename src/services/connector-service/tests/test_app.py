@@ -35,9 +35,7 @@ _BASE_SETTINGS = Settings(
 
 def _providers(*, behind: bool = False) -> Providers:
     catalog = FakeCatalogAdapter(applied_revisions=set() if behind else {1})
-    instances = FakeConnectorInstanceAdapter(
-        applied_revisions=set() if behind else {1}
-    )
+    instances = FakeConnectorInstanceAdapter(applied_revisions=set() if behind else {1})
     metadata = FakeMetadataAdapter(applied_revisions=set() if behind else {1, 2, 3, 4})
     return Providers(
         catalog_store=catalog,  # type: ignore[arg-type]
