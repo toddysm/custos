@@ -471,9 +471,9 @@ def _descriptor_key(
 ) -> str:
     """Build a stable cache key from a (token, credentials) pair.
 
-    We hash the credentials mapping's *keys + scalar values* so two
-    instances pointing at the same vault / secret name / issuer share a
-    cache entry, without persisting the secret material itself. JSON
+    We build a deterministic string from the credentials mapping's *keys + scalar values*.
+    Note the full registry cache key also includes ``(workspace_id, instance_id)``, so
+    entries are scoped per instance and never shared across instances.
     with ``sort_keys=True`` would also work but pulls in a JSON encode
     on every cache check; ``repr`` of a sorted tuple is enough because
     the registry only needs a stable string for the key.
