@@ -312,6 +312,9 @@ class FakeConnectorInstanceAdapter:
             "enabled": current.enabled,
             "status": current.status,
             "health_status": current.health_status,
+            "target_config": current.target_config,
+            "credentials_authentication": current.credentials_authentication,
+            "used_capabilities": current.used_capabilities,
             "created_at": current.created_at,
             "updated_at": datetime.now(UTC),
         }

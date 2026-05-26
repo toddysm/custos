@@ -15,6 +15,13 @@ the catalog at instance-create time.
 Soft-state columns (`status`, `health_status`) are present in v1 even
 though state-transition logic lands in CONN-IMPL-013 — keeping the
 schema stable lets CONN-IMPL-013 ship without a follow-up migration.
+
+The three JSONB columns (`target_config`,
+`credentials_authentication`, `used_capabilities`) carry the
+operator-supplied instance configuration that the service layer
+validates against the referenced connector-type manifest at
+instance-create time (CONN-IMPL-012). They are immutable after
+create.
 """
 
 from __future__ import annotations
@@ -27,17 +34,20 @@ CONNECTOR_INSTANCE_REV1 = Revision(
         "CREATE SCHEMA IF NOT EXISTS connector_instance",
         """
         CREATE TABLE IF NOT EXISTS connector_instance.connector_instance (
-            workspace_id       TEXT        NOT NULL,
-            instance_id        TEXT        NOT NULL,
-            type               TEXT        NOT NULL,
-            version            TEXT        NOT NULL,
-            name               TEXT,
-            lease_ttl_seconds  INTEGER,
-            enabled            BOOLEAN     NOT NULL DEFAULT TRUE,
-            status             TEXT        NOT NULL DEFAULT 'active',
-            health_status      TEXT,
-            created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-            updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+            workspace_id                TEXT        NOT NULL,
+            instance_id                 TEXT        NOT NULL,
+            type                        TEXT        NOT NULL,
+            version                     TEXT        NOT NULL,
+            name                        TEXT,
+            lease_ttl_seconds           INTEGER,
+            enabled                     BOOLEAN     NOT NULL DEFAULT TRUE,
+            status                      TEXT        NOT NULL DEFAULT 'active',
+            health_status               TEXT,
+            target_config               JSONB       NOT NULL DEFAULT '{}'::jsonb,
+            credentials_authentication  JSONB       NOT NULL DEFAULT '{}'::jsonb,
+            used_capabilities           JSONB,
+            created_at                  TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at                  TIMESTAMPTZ NOT NULL DEFAULT now(),
             PRIMARY KEY (workspace_id, instance_id)
         )
         """,

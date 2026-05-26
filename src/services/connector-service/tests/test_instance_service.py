@@ -18,6 +18,10 @@ from custos_connector.instances import (
     InvalidInstancePayload,
     InvalidLeaseTtl,
 )
+from custos_connector.instances.validator import (
+    InstanceConfigCode,
+    InstanceConfigValidationError,
+)
 from tests._fakes import (
     FakeCatalogAdapter,
     FakeConnectorInstanceAdapter,
@@ -45,7 +49,30 @@ def _build_service() -> tuple[
 
 
 async def _register_type(catalog: FakeCatalogAdapter, type: str, version: str) -> None:
-    await catalog.put_connector_type_version(type, version, "sha256:fake", {})
+    """Register a connector-type-version with a minimal valid manifest.
+
+    The manifest is a stub that satisfies CONN-IMPL-012's instance
+    config validator: ``target.kind=oci-registry`` with
+    ``repositoryNamespace`` already filled in by the manifest, plus
+    ``credentials.authenticationType=oidc`` with the required
+    ``issuerUri`` / ``audience`` already filled in. Tests that don't
+    pass per-instance overrides therefore validate cleanly.
+    """
+    manifest: dict[str, object] = {
+        "target": {
+            "kind": "oci-registry",
+            "config": {"repositoryNamespace": "tests/fake"},
+        },
+        "credentials": {
+            "authenticationType": "oidc",
+            "authentication": {
+                "issuerUri": "https://oidc.example.com",
+                "audience": "test-audience",
+            },
+        },
+        "capabilities": ["oci.registry.read", "oci.referrers.list"],
+    }
+    await catalog.put_connector_type_version(type, version, "sha256:fake", manifest)
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +122,43 @@ async def test_create_rejects_unknown_connector_type() -> None:
         )
     assert exc_info.value.type == "bogus"
     assert exc_info.value.version == "9.9.9"
+
+
+async def test_create_persists_operator_supplied_config() -> None:
+    """End-to-end: operator's target_config / credentials_authentication /
+    used_capabilities flow through validation and reach the row."""
+    service, _instances, catalog, _metadata = _build_service()
+    await _register_type(catalog, "http", "1.0.0")
+
+    row = await service.create(
+        "ws-1",
+        type="http",
+        version="1.0.0",
+        actor="user:alice",
+        target_config={"repositoryNamespace": "ws-1/prod"},
+        credentials_authentication={"issuerUri": "https://oidc.ws-1.example.com"},
+        used_capabilities=("oci.registry.read",),
+    )
+
+    assert row.target_config == {"repositoryNamespace": "ws-1/prod"}
+    assert row.credentials_authentication == {"issuerUri": "https://oidc.ws-1.example.com"}
+    assert row.used_capabilities == ("oci.registry.read",)
+
+
+async def test_create_rejects_unknown_capability_via_validator() -> None:
+    service, _instances, catalog, _metadata = _build_service()
+    await _register_type(catalog, "http", "1.0.0")
+
+    with pytest.raises(InstanceConfigValidationError) as excinfo:
+        await service.create(
+            "ws-1",
+            type="http",
+            version="1.0.0",
+            actor="user:alice",
+            used_capabilities=("oci.image.push",),
+        )
+    codes = [i.code for i in excinfo.value.issues]
+    assert InstanceConfigCode.UNKNOWN_CAPABILITY_ON_INSTANCE in codes
 
 
 async def test_create_rejects_invalid_lease_ttl() -> None:
