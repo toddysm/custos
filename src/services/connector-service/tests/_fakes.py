@@ -521,6 +521,46 @@ class FakeLeaseAdapter:
         self._rows[key] = updated
         return updated
 
+    async def revoke_lease(
+        self,
+        workspace_id: WorkspaceId,
+        lease_id: str,
+        revoke_reason: str,
+        revoked_at: datetime,
+    ) -> Lease | None:
+        key = (str(workspace_id), lease_id)
+        current = self._rows.get(key)
+        if current is None:
+            return None
+        # Idempotent: a second revoke preserves the original timestamps
+        # and reason. Mirrors the triple-COALESCE in
+        # :class:`PgLeaseAdapter.revoke_lease` so the cap-check primitive
+        # (which keys on ``released_at IS NULL``) frees the slot on the
+        # first revoke.
+        first_revoke = current.revoked_at or revoked_at
+        first_reason = current.revoke_reason or revoke_reason
+        first_release = current.released_at or revoked_at
+        updated = Lease(
+            workspace_id=current.workspace_id,
+            lease_id=current.lease_id,
+            run_id=current.run_id,
+            step_id=current.step_id,
+            attempt=current.attempt,
+            slot=current.slot,
+            capability=current.capability,
+            connector_instance_id=current.connector_instance_id,
+            token_type=current.token_type,
+            issued_at=current.issued_at,
+            expires_at=current.expires_at,
+            released_at=first_release,
+            revoked_at=first_revoke,
+            revoke_reason=first_reason,
+            created_at=current.created_at,
+            updated_at=revoked_at,
+        )
+        self._rows[key] = updated
+        return updated
+
     async def count_active_for_step_attempt(
         self,
         workspace_id: WorkspaceId,

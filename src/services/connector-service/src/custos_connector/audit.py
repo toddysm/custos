@@ -102,6 +102,33 @@ EVENT_CAPABILITY_DEPRECATED: Final[str] = "connector.capability.deprecated"
 EVENT_LEASE_ISSUED: Final[str] = "lease.issued"
 EVENT_LEASE_REFRESHED: Final[str] = "lease.refreshed"
 EVENT_LEASE_RELEASED: Final[str] = "lease.released"
+#: CONN-IMPL-018 (Phase G/3). Emitted when a lease reaches its
+#: ``expires_at`` deadline without an intervening refresh or release.
+#: Carries the same identifier tuple as :data:`EVENT_LEASE_ISSUED`
+#: plus the ``expired_at`` wall clock and a short ``reason`` tag
+#: ("ttl-reached" from the sweeper, "sidecar-shutdown" from the
+#: per-step sidecar shutdown hook).
+EVENT_LEASE_EXPIRED: Final[str] = "lease.expired"
+#: CONN-IMPL-018 (Phase G/3). Emitted by the operator revoke endpoint
+#: before any individual lease revocation begins. Carries the
+#: selector (lease | instance | run), the resolved lease IDs, the
+#: operator identity, and a free-form reason so the audit trail
+#: ties every subsequent ``lease.revoked`` back to a single
+#: operator action.
+EVENT_LEASE_REVOKE_REQUESTED: Final[str] = "lease.revoke-requested"
+#: CONN-IMPL-018 (Phase G/3). Emitted per lease after the SPL
+#: ``revoke_lease`` write commits (and, for sidecar-routed
+#: revocations, after the sidecar control-channel acks). Carries
+#: the full identifier tuple plus ``revoked_at`` and
+#: ``revoke_reason`` for forensic correlation with the matching
+#: ``lease.revoke-requested`` event.
+EVENT_LEASE_REVOKED: Final[str] = "lease.revoked"
+#: CONN-IMPL-018 (Phase G/3). Emitted whenever a lease operation is
+#: rejected. Auto-fired by the Lease Manager when ``issue`` /
+#: ``refresh`` / ``release`` raise :class:`LeaseError`, and fired
+#: directly by the future REST handler when authorization or
+#: capability checks bounce a request before it reaches the manager.
+EVENT_LEASE_DENIED: Final[str] = "lease.denied"
 
 
 # ---------------------------------------------------------------------------
@@ -501,7 +528,7 @@ async def audit_capability_deprecated(
 
 
 # ---------------------------------------------------------------------------
-# Legacy log-only shim (call-context + authz decision events)
+# Lease lifecycle events (CONN-IMPL-017 + CONN-IMPL-018)
 # ---------------------------------------------------------------------------
 
 
@@ -554,7 +581,13 @@ async def audit_lease_refreshed(
     workspace_id: str,
     actor: str,
     lease_id: str,
+    run_id: str,
+    step_id: str,
+    attempt: int,
+    slot: str,
+    capability: str,
     connector_instance_id: str,
+    token_type: str,
     previous_expires_at: datetime,
     new_expires_at: datetime,
 ) -> None:
@@ -564,6 +597,13 @@ async def audit_lease_refreshed(
     trail can answer "by how much was this lease extended" without
     needing to correlate against ``lease.issued``. The ``lease_id``
     remains stable across refreshes.
+
+    The full identifier tuple (``run_id``, ``step_id``, ``attempt``,
+    ``slot``, ``capability``, ``token_type``) is repeated on every
+    lease event per the audit-table contract in
+    ``design/components/connector-service/design.md`` so downstream
+    consumers can filter or group without first joining against
+    ``lease.issued``.
     """
     await _emit(
         metadata_store,
@@ -572,6 +612,12 @@ async def audit_lease_refreshed(
         actor=actor,
         subject={"lease_id": lease_id, "connector_instance_id": connector_instance_id},
         payload={
+            "run_id": run_id,
+            "step_id": step_id,
+            "attempt": attempt,
+            "slot": slot,
+            "capability": capability,
+            "token_type": token_type,
             "previous_expires_at": previous_expires_at.isoformat(),
             "new_expires_at": new_expires_at.isoformat(),
         },
@@ -584,7 +630,13 @@ async def audit_lease_released(
     workspace_id: str,
     actor: str,
     lease_id: str,
+    run_id: str,
+    step_id: str,
+    attempt: int,
+    slot: str,
+    capability: str,
     connector_instance_id: str,
+    token_type: str,
     released_at: datetime,
 ) -> None:
     """Emit ``lease.released`` after :meth:`LeaseManager.release`.
@@ -592,6 +644,9 @@ async def audit_lease_released(
     Release is idempotent at the adapter level; emission is best-effort
     but the Lease Manager fires it on every successful release call
     (including no-op repeats) so the audit trail records each request.
+
+    Carries the full identifier tuple for the same join-free
+    consumer experience documented on :func:`audit_lease_refreshed`.
     """
     await _emit(
         metadata_store,
@@ -599,7 +654,195 @@ async def audit_lease_released(
         event_type=EVENT_LEASE_RELEASED,
         actor=actor,
         subject={"lease_id": lease_id, "connector_instance_id": connector_instance_id},
-        payload={"released_at": released_at.isoformat()},
+        payload={
+            "run_id": run_id,
+            "step_id": step_id,
+            "attempt": attempt,
+            "slot": slot,
+            "capability": capability,
+            "token_type": token_type,
+            "released_at": released_at.isoformat(),
+        },
+    )
+
+
+async def audit_lease_expired(
+    metadata_store: MetadataStoreProvider,
+    *,
+    workspace_id: str,
+    actor: str,
+    lease_id: str,
+    run_id: str,
+    step_id: str,
+    attempt: int,
+    slot: str,
+    capability: str,
+    connector_instance_id: str,
+    token_type: str,
+    expires_at: datetime,
+    expired_at: datetime,
+    reason: str,
+) -> None:
+    """Emit ``lease.expired`` for a lease that reached its TTL.
+
+    ``expires_at`` is the originally scheduled deadline; ``expired_at``
+    is the wall clock at which the expiry was detected (sweeper tick
+    or sidecar shutdown). ``reason`` is a short tag — currently
+    ``"ttl-reached"`` (sweeper) or ``"sidecar-shutdown"`` (per-step
+    sidecar) — that lets operators distinguish routine TTL churn from
+    pod-lifecycle-driven mass expiries.
+
+    Distinct from :func:`audit_lease_released` because release is a
+    voluntary client-driven action whereas expiry is an
+    infrastructure-driven cleanup. Both close the slot for the
+    cap-check primitive, but only ``lease.released`` implies the
+    client knows the lease is gone.
+    """
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_LEASE_EXPIRED,
+        actor=actor,
+        subject={"lease_id": lease_id, "connector_instance_id": connector_instance_id},
+        payload={
+            "run_id": run_id,
+            "step_id": step_id,
+            "attempt": attempt,
+            "slot": slot,
+            "capability": capability,
+            "token_type": token_type,
+            "expires_at": expires_at.isoformat(),
+            "expired_at": expired_at.isoformat(),
+            "reason": reason,
+        },
+    )
+
+
+async def audit_lease_revoke_requested(
+    metadata_store: MetadataStoreProvider,
+    *,
+    workspace_id: str,
+    actor: str,
+    selector_type: str,
+    selector_value: str,
+    lease_ids: Sequence[str],
+    reason: str,
+    operator: str,
+) -> None:
+    """Emit ``lease.revoke-requested`` for an operator-initiated revoke.
+
+    Fired once per operator action, *before* any individual
+    :meth:`LeaseManager.revoke` call begins. ``selector_type`` is
+    one of ``"lease"`` (single lease ID), ``"instance"`` (all
+    active leases for a connector instance), or ``"run"`` (all
+    active leases for a workflow run). ``lease_ids`` is the
+    fully-resolved list at request time — the audit consumer can
+    correlate each subsequent ``lease.revoked`` to this single
+    request without re-resolving the selector.
+
+    ``operator`` is the human (or system principal) requesting the
+    revocation, distinct from ``actor`` which is the service that
+    actually emitted the event. ``reason`` is the free-form
+    operator-supplied justification.
+    """
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_LEASE_REVOKE_REQUESTED,
+        actor=actor,
+        subject={"selector_type": selector_type, "selector_value": selector_value},
+        payload={
+            "lease_ids": list(lease_ids),
+            "reason": reason,
+            "operator": operator,
+        },
+    )
+
+
+async def audit_lease_revoked(
+    metadata_store: MetadataStoreProvider,
+    *,
+    workspace_id: str,
+    actor: str,
+    lease_id: str,
+    run_id: str,
+    step_id: str,
+    attempt: int,
+    slot: str,
+    capability: str,
+    connector_instance_id: str,
+    token_type: str,
+    revoked_at: datetime,
+    revoke_reason: str,
+) -> None:
+    """Emit ``lease.revoked`` after :meth:`LeaseManager.revoke`.
+
+    Fired per lease, after the SPL ``revoke_lease`` write commits.
+    Carries the full identifier tuple plus ``revoked_at`` and the
+    forensic ``revoke_reason`` so the audit consumer can correlate
+    each revocation back to its initiating
+    ``lease.revoke-requested`` event without join. Idempotent at the
+    adapter level; emission fires on every successful revoke call.
+    """
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_LEASE_REVOKED,
+        actor=actor,
+        subject={"lease_id": lease_id, "connector_instance_id": connector_instance_id},
+        payload={
+            "run_id": run_id,
+            "step_id": step_id,
+            "attempt": attempt,
+            "slot": slot,
+            "capability": capability,
+            "token_type": token_type,
+            "revoked_at": revoked_at.isoformat(),
+            "revoke_reason": revoke_reason,
+        },
+    )
+
+
+async def audit_lease_denied(
+    metadata_store: MetadataStoreProvider,
+    *,
+    workspace_id: str,
+    actor: str,
+    lease_id: str | None,
+    connector_instance_id: str | None,
+    op: str,
+    reason_code: str,
+    reason_detail: str,
+    http_status: int,
+) -> None:
+    """Emit ``lease.denied`` whenever a lease request is rejected.
+
+    Auto-fired by the Lease Manager when ``issue`` / ``refresh`` /
+    ``release`` raise :class:`LeaseError`, and fired directly by the
+    future REST handler when authorization or capability checks
+    bounce a request before it reaches the manager.
+
+    ``op`` is ``"issue"``, ``"refresh"``, or ``"release"``.
+    ``reason_code`` is the stable taxonomy string from
+    :class:`custos_connector.lease.errors.LeaseErrorCode` (e.g.
+    ``"CAPACITY_EXCEEDED"``, ``"NOT_FOUND"``,
+    ``"ALREADY_RELEASED"``, ``"INVALID_REQUEST"``). ``lease_id`` and
+    ``connector_instance_id`` are nullable so request-level
+    rejections that never resolved an instance (e.g. capacity check
+    on issue, malformed request) still emit a well-formed event.
+    """
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_LEASE_DENIED,
+        actor=actor,
+        subject={"lease_id": lease_id, "connector_instance_id": connector_instance_id},
+        payload={
+            "op": op,
+            "reason_code": reason_code,
+            "reason_detail": reason_detail,
+            "http_status": http_status,
+        },
     )
 
 
@@ -648,9 +891,13 @@ __all__ = [
     "EVENT_INSTANCE_DISABLED",
     "EVENT_INSTANCE_ENABLED",
     "EVENT_INSTANCE_UPDATED",
+    "EVENT_LEASE_DENIED",
+    "EVENT_LEASE_EXPIRED",
     "EVENT_LEASE_ISSUED",
     "EVENT_LEASE_REFRESHED",
     "EVENT_LEASE_RELEASED",
+    "EVENT_LEASE_REVOKED",
+    "EVENT_LEASE_REVOKE_REQUESTED",
     "audit_binding_created",
     "audit_binding_rejected",
     "audit_capability_deprecated",
@@ -662,9 +909,13 @@ __all__ = [
     "audit_instance_disabled",
     "audit_instance_enabled",
     "audit_instance_updated",
+    "audit_lease_denied",
+    "audit_lease_expired",
     "audit_lease_issued",
     "audit_lease_refreshed",
     "audit_lease_released",
+    "audit_lease_revoke_requested",
+    "audit_lease_revoked",
     "emit_event",
     "logger",
 ]

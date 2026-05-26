@@ -54,6 +54,11 @@ Lifecycle
 * :meth:`release_lease` marks the row released without deleting it.
   Returns the post-release row so the service can emit the audit
   event with the canonical timestamps.
+* :meth:`revoke_lease` is the operator-initiated counterpart:
+  sets ``revoked_at`` + ``revoke_reason`` and also closes
+  ``released_at`` so the cap-check primitive frees up the slot.
+  Idempotent: a repeat revoke preserves the original timestamps and
+  reason.
 * :meth:`count_active_for_step_attempt` is the cap-check primitive:
   the number of non-released, non-expired leases for a given
   ``(workspace_id, run_id, step_id, attempt)`` tuple at ``as_of``.
@@ -217,6 +222,34 @@ class LeaseStoreProvider(Protocol):
         (``released_at`` is the original release timestamp, not the
         new one). Returns ``None`` when no row exists for
         ``(workspace_id, lease_id)``.
+        """
+        ...
+
+    async def revoke_lease(
+        self,
+        workspace_id: WorkspaceId,
+        lease_id: str,
+        revoke_reason: str,
+        revoked_at: datetime,
+    ) -> Lease | None:
+        """Mark a lease revoked (operator-initiated termination).
+
+        Distinct from :meth:`release_lease` because revocation is
+        an *administrative* action: the row is closed with a stored
+        ``revoke_reason`` and ``revoked_at`` for audit-trail
+        forensics, and ``released_at`` is also set so the cap-check
+        primitive (which uses ``released_at IS NULL``) frees up the
+        slot.
+
+        Returns the post-revoke row. Idempotent: revoking an already
+        revoked-or-released lease returns the existing row unchanged
+        (``revoked_at`` / ``revoke_reason`` are NOT overwritten on a
+        repeat call). Returns ``None`` when no row exists for
+        ``(workspace_id, lease_id)``.
+
+        Used by :meth:`custos_connector.lease.LeaseManager.revoke`
+        (CONN-IMPL-018) and the operator revoke endpoints
+        (CONN-IMPL-028).
         """
         ...
 

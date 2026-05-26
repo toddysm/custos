@@ -1,4 +1,4 @@
-"""Unit tests for :class:`LeaseManager` (CONN-IMPL-017 / Phase G/2).
+"""Unit tests for :class:`LeaseManager` (CONN-IMPL-017 + CONN-IMPL-018 / Phase G/2 + G/3).
 
 Drives the manager against :class:`FakeLeaseAdapter` + the existing
 :class:`FakeMetadataAdapter` so wall time, the cap, and the TTL
@@ -9,6 +9,7 @@ suite in ``src/libs/custos-postgres/tests/``.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
@@ -19,9 +20,13 @@ from custos_spl.interfaces.lease_store import LeaseStoreProvider
 from custos_spl.interfaces.metadata_store import MetadataStoreProvider
 
 from custos_connector.audit import (
+    EVENT_LEASE_DENIED,
+    EVENT_LEASE_EXPIRED,
     EVENT_LEASE_ISSUED,
     EVENT_LEASE_REFRESHED,
     EVENT_LEASE_RELEASED,
+    EVENT_LEASE_REVOKE_REQUESTED,
+    EVENT_LEASE_REVOKED,
 )
 from custos_connector.lease import LeaseError, LeaseErrorCode, LeaseManager
 
@@ -313,6 +318,15 @@ async def test_refresh_emits_lease_refreshed_audit_event() -> None:
     assert [ev.event_type for _, ev in md.append_audit_calls] == [EVENT_LEASE_REFRESHED]
     _, refreshed_evt = md.append_audit_calls[0]
     assert refreshed_evt.subject["lease_id"] == lease_id
+    assert refreshed_evt.subject["connector_instance_id"] == str(_INSTANCE)
+    # CONN-IMPL-018: every lease event carries the full identifier tuple.
+    assert refreshed_evt.payload["run_id"] == str(_RUN)
+    assert refreshed_evt.payload["step_id"] == str(_STEP)
+    assert refreshed_evt.payload["attempt"] == 1
+    assert refreshed_evt.payload["slot"] == "primary"
+    assert refreshed_evt.payload["capability"] == "read"
+    assert refreshed_evt.payload["token_type"] == "bearer"
+    assert refreshed_evt.payload["previous_expires_at"] == (_T0 + timedelta(seconds=60)).isoformat()
     assert refreshed_evt.payload["new_expires_at"] == (_T0 + timedelta(seconds=120)).isoformat()
 
 
@@ -324,7 +338,346 @@ async def test_release_emits_lease_released_audit_event() -> None:
     assert [ev.event_type for _, ev in md.append_audit_calls] == [EVENT_LEASE_RELEASED]
     _, released_evt = md.append_audit_calls[0]
     assert released_evt.subject["lease_id"] == lease_id
+    assert released_evt.subject["connector_instance_id"] == str(_INSTANCE)
+    # CONN-IMPL-018: every lease event carries the full identifier tuple.
+    assert released_evt.payload["run_id"] == str(_RUN)
+    assert released_evt.payload["step_id"] == str(_STEP)
+    assert released_evt.payload["attempt"] == 1
+    assert released_evt.payload["slot"] == "primary"
+    assert released_evt.payload["capability"] == "read"
+    assert released_evt.payload["token_type"] == "bearer"
     assert released_evt.payload["released_at"] == _T0.isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Expire (CONN-IMPL-018)
+# ---------------------------------------------------------------------------
+
+
+async def test_expire_releases_storage_and_emits_lease_expired() -> None:
+    """``expire`` reuses ``release_lease`` (the cap predicate is
+    ``released_at IS NULL``) but emits ``lease.expired`` so the audit
+    consumer can distinguish voluntary release from involuntary
+    expiry. The ``reason`` defaults to the sweeper tag.
+    """
+    mgr, ls, md = _make_manager(default_ttl_sec=60)
+    lease_id = await _issue(mgr)
+    md.append_audit_calls.clear()
+
+    expired = await mgr.expire(workspace_id=_WS, lease_id=lease_id)
+
+    assert expired is not None
+    assert expired.released_at == _T0
+    stored = await ls.get_lease(_WS, lease_id)
+    assert stored is not None
+    assert stored.released_at == _T0
+
+    assert [ev.event_type for _, ev in md.append_audit_calls] == [EVENT_LEASE_EXPIRED]
+    _, expired_evt = md.append_audit_calls[0]
+    assert expired_evt.subject["lease_id"] == lease_id
+    assert expired_evt.subject["connector_instance_id"] == str(_INSTANCE)
+    assert expired_evt.payload["run_id"] == str(_RUN)
+    assert expired_evt.payload["step_id"] == str(_STEP)
+    assert expired_evt.payload["attempt"] == 1
+    assert expired_evt.payload["slot"] == "primary"
+    assert expired_evt.payload["capability"] == "read"
+    assert expired_evt.payload["token_type"] == "bearer"
+    assert expired_evt.payload["expires_at"] == (_T0 + timedelta(seconds=60)).isoformat()
+    assert expired_evt.payload["expired_at"] == _T0.isoformat()
+    assert expired_evt.payload["reason"] == "ttl-reached"
+
+
+async def test_expire_accepts_custom_reason_for_sidecar_shutdown() -> None:
+    mgr, _, md = _make_manager()
+    lease_id = await _issue(mgr)
+    md.append_audit_calls.clear()
+    await mgr.expire(workspace_id=_WS, lease_id=lease_id, reason="sidecar-shutdown")
+    _, evt = md.append_audit_calls[0]
+    assert evt.payload["reason"] == "sidecar-shutdown"
+
+
+async def test_expire_returns_none_when_lease_absent() -> None:
+    mgr, _, md = _make_manager()
+    result = await mgr.expire(workspace_id=_WS, lease_id="lease_NOPE")
+    assert result is None
+    # No emission when there is no lease to expire.
+    assert md.append_audit_calls == []
+
+
+# ---------------------------------------------------------------------------
+# Revoke (CONN-IMPL-018)
+# ---------------------------------------------------------------------------
+
+
+async def test_revoke_sets_revoke_columns_and_closes_release_slot() -> None:
+    """Revoke must set ``revoked_at`` + ``revoke_reason`` *and* close
+    ``released_at`` so the cap-check primitive frees the slot.
+    """
+    mgr, ls, _ = _make_manager(max_concurrent=2)
+    lease_id = await _issue(mgr)
+    revoked = await mgr.revoke(workspace_id=_WS, lease_id=lease_id, reason="operator-rotation")
+
+    assert revoked is not None
+    assert revoked.revoked_at == _T0
+    assert revoked.revoke_reason == "operator-rotation"
+    assert revoked.released_at == _T0  # cap predicate now frees the slot
+
+    stored = await ls.get_lease(_WS, lease_id)
+    assert stored is not None
+    assert stored.revoked_at == _T0
+    assert stored.revoke_reason == "operator-rotation"
+    assert stored.released_at == _T0
+
+
+async def test_revoke_emits_lease_revoked_with_full_tuple() -> None:
+    mgr, _, md = _make_manager()
+    lease_id = await _issue(mgr)
+    md.append_audit_calls.clear()
+    await mgr.revoke(workspace_id=_WS, lease_id=lease_id, reason="suspected-leak")
+    assert [ev.event_type for _, ev in md.append_audit_calls] == [EVENT_LEASE_REVOKED]
+    _, evt = md.append_audit_calls[0]
+    assert evt.subject["lease_id"] == lease_id
+    assert evt.subject["connector_instance_id"] == str(_INSTANCE)
+    assert evt.payload["run_id"] == str(_RUN)
+    assert evt.payload["step_id"] == str(_STEP)
+    assert evt.payload["attempt"] == 1
+    assert evt.payload["slot"] == "primary"
+    assert evt.payload["capability"] == "read"
+    assert evt.payload["token_type"] == "bearer"
+    assert evt.payload["revoked_at"] == _T0.isoformat()
+    assert evt.payload["revoke_reason"] == "suspected-leak"
+
+
+async def test_revoke_is_idempotent_preserves_first_reason() -> None:
+    """A second revoke must not overwrite the original ``revoked_at``
+    or ``revoke_reason`` \u2014 forensics depend on the first cause
+    being stable.
+    """
+    mgr, _, _ = _make_manager()
+    lease_id = await _issue(mgr)
+    first = await mgr.revoke(workspace_id=_WS, lease_id=lease_id, reason="reason-1")
+    assert first is not None
+    second = await mgr.revoke(workspace_id=_WS, lease_id=lease_id, reason="reason-2")
+    assert second is not None
+    assert second.revoke_reason == "reason-1"  # unchanged
+    assert second.revoked_at == _T0  # unchanged
+
+
+async def test_revoke_returns_none_when_lease_absent() -> None:
+    mgr, _, md = _make_manager()
+    result = await mgr.revoke(workspace_id=_WS, lease_id="lease_NOPE", reason="x")
+    assert result is None
+    assert md.append_audit_calls == []
+
+
+async def test_revoke_frees_the_cap_slot() -> None:
+    """A revoked lease must not count toward the per-step concurrent cap."""
+    mgr, _, _ = _make_manager(max_concurrent=1)
+    a = await _issue(mgr)
+    with pytest.raises(LeaseError) as exc:
+        await _issue(mgr)
+    assert exc.value.code is LeaseErrorCode.CAPACITY_EXCEEDED
+    await mgr.revoke(workspace_id=_WS, lease_id=a, reason="rotate")
+    # Cap free again.
+    await _issue(mgr)
+
+
+# ---------------------------------------------------------------------------
+# Revoke-requested (CONN-IMPL-018)
+# ---------------------------------------------------------------------------
+
+
+async def test_record_revoke_requested_emits_event_with_selector_and_lease_ids() -> None:
+    mgr, _, md = _make_manager()
+    a = await _issue(mgr)
+    b = await _issue(mgr, attempt=2)
+    md.append_audit_calls.clear()
+    await mgr.record_revoke_requested(
+        workspace_id=_WS,
+        selector_type="instance",
+        selector_value=str(_INSTANCE),
+        lease_ids=[a, b],
+        reason="suspected-leak",
+        operator="alice@example.com",
+    )
+    assert [ev.event_type for _, ev in md.append_audit_calls] == [EVENT_LEASE_REVOKE_REQUESTED]
+    _, evt = md.append_audit_calls[0]
+    assert evt.subject == {"selector_type": "instance", "selector_value": str(_INSTANCE)}
+    assert evt.payload == {
+        "lease_ids": [a, b],
+        "reason": "suspected-leak",
+        "operator": "alice@example.com",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Denial auto-emission (CONN-IMPL-018)
+# ---------------------------------------------------------------------------
+
+
+async def test_issue_capacity_exceeded_auto_emits_lease_denied_429() -> None:
+    mgr, _, md = _make_manager(max_concurrent=1)
+    await _issue(mgr)  # uses the only slot
+    md.append_audit_calls.clear()
+    with pytest.raises(LeaseError):
+        await _issue(mgr)
+    assert [ev.event_type for _, ev in md.append_audit_calls] == [EVENT_LEASE_DENIED]
+    _, evt = md.append_audit_calls[0]
+    assert evt.subject["lease_id"] is None  # no lease was minted
+    assert evt.subject["connector_instance_id"] == str(_INSTANCE)
+    assert evt.payload["op"] == "issue"
+    assert evt.payload["reason_code"] == LeaseErrorCode.CAPACITY_EXCEEDED.value
+    assert evt.payload["http_status"] == 429
+
+
+async def test_issue_invalid_attempt_auto_emits_lease_denied_400() -> None:
+    mgr, _, md = _make_manager()
+    with pytest.raises(LeaseError):
+        await _issue(mgr, attempt=0)
+    assert [ev.event_type for _, ev in md.append_audit_calls] == [EVENT_LEASE_DENIED]
+    _, evt = md.append_audit_calls[0]
+    assert evt.payload["op"] == "issue"
+    assert evt.payload["reason_code"] == LeaseErrorCode.INVALID_REQUEST.value
+    assert evt.payload["http_status"] == 400
+
+
+async def test_refresh_not_found_auto_emits_lease_denied_404() -> None:
+    mgr, _, md = _make_manager()
+    with pytest.raises(LeaseError):
+        await mgr.refresh(workspace_id=_WS, lease_id="lease_NOPE")
+    assert [ev.event_type for _, ev in md.append_audit_calls] == [EVENT_LEASE_DENIED]
+    _, evt = md.append_audit_calls[0]
+    assert evt.subject["lease_id"] == "lease_NOPE"
+    assert evt.subject["connector_instance_id"] is None  # never resolved
+    assert evt.payload["op"] == "refresh"
+    assert evt.payload["reason_code"] == LeaseErrorCode.NOT_FOUND.value
+    assert evt.payload["http_status"] == 404
+
+
+async def test_refresh_already_released_auto_emits_lease_denied_410() -> None:
+    mgr, _, md = _make_manager()
+    lease_id = await _issue(mgr)
+    await mgr.release(workspace_id=_WS, lease_id=lease_id)
+    md.append_audit_calls.clear()
+    with pytest.raises(LeaseError):
+        await mgr.refresh(workspace_id=_WS, lease_id=lease_id)
+    assert [ev.event_type for _, ev in md.append_audit_calls] == [EVENT_LEASE_DENIED]
+    _, evt = md.append_audit_calls[0]
+    assert evt.subject["lease_id"] == lease_id
+    # After get_lease succeeded, we know the instance id.
+    assert evt.subject["connector_instance_id"] == str(_INSTANCE)
+    assert evt.payload["op"] == "refresh"
+    assert evt.payload["reason_code"] == LeaseErrorCode.ALREADY_RELEASED.value
+    assert evt.payload["http_status"] == 410
+
+
+async def test_record_denied_direct_call_for_external_rejection() -> None:
+    """Direct ``record_denied`` is used by the future REST handler
+    when authorization or capability checks bounce a request before
+    it reaches :meth:`issue` / :meth:`refresh` / :meth:`release`.
+    """
+    mgr, _, md = _make_manager()
+    await mgr.record_denied(
+        workspace_id=_WS,
+        lease_id=None,
+        connector_instance_id=str(_INSTANCE),
+        op="issue",
+        reason_code="AUTHZ_DENIED",
+        reason_detail="caller missing leases.issue permission",
+        http_status=403,
+    )
+    assert [ev.event_type for _, ev in md.append_audit_calls] == [EVENT_LEASE_DENIED]
+    _, evt = md.append_audit_calls[0]
+    assert evt.payload["http_status"] == 403
+    assert evt.payload["reason_code"] == "AUTHZ_DENIED"
+
+
+# ---------------------------------------------------------------------------
+# Token redaction property (CONN-IMPL-018 acceptance criterion)
+# ---------------------------------------------------------------------------
+
+
+_REDACTED_SUBSTRINGS = ("token_bytes", "secret", "material", "credential", "password")
+
+
+async def test_no_lease_event_leaks_token_bytes_across_full_lifecycle() -> None:
+    """End-to-end redaction guard: cycle through every lease code path
+    and assert no emitted event contains a field name or value that
+    smells like raw token material.
+
+    The manager never receives raw token bytes \u2014 the ``token_type``
+    field is the only token-adjacent value it knows about, and it is
+    a category tag (``"bearer"`` / ``"oauth"`` / ...), not a secret.
+    This test pins that contract so a future refactor that smuggles
+    secrets into the payload trips immediately.
+
+    ``token_type`` is allowed because it is a category tag; the screen
+    looks for the more specific ``token_bytes`` / ``secret`` /
+    ``material`` / ``credential`` / ``password`` substrings instead.
+    """
+    mgr, _, md = _make_manager(default_ttl_sec=60, max_concurrent=1)
+
+    # 1) issue success.
+    lease_id = await _issue(mgr)
+    # 2) refresh success.
+    await mgr.refresh(workspace_id=_WS, lease_id=lease_id, requested_ttl_sec=120)
+    # 3) issue denial (cap exhausted).
+    with pytest.raises(LeaseError):
+        await _issue(mgr)
+    # 4) revoke success.
+    await mgr.revoke(workspace_id=_WS, lease_id=lease_id, reason="operator-rotation")
+    # 5) refresh denial (already released by the revoke).
+    with pytest.raises(LeaseError):
+        await mgr.refresh(workspace_id=_WS, lease_id=lease_id)
+    # 6) release on the already-revoked lease (idempotent at storage).
+    await mgr.release(workspace_id=_WS, lease_id=lease_id)
+    # 7) issue another, then expire it.
+    lease_id2 = await _issue(mgr)
+    await mgr.expire(workspace_id=_WS, lease_id=lease_id2, reason="ttl-reached")
+    # 8) revoke-requested envelope.
+    await mgr.record_revoke_requested(
+        workspace_id=_WS,
+        selector_type="lease",
+        selector_value=lease_id2,
+        lease_ids=[lease_id2],
+        reason="audit-trail-probe",
+        operator="alice@example.com",
+    )
+    # 9) direct denied for an external rejection.
+    await mgr.record_denied(
+        workspace_id=_WS,
+        lease_id=None,
+        connector_instance_id=str(_INSTANCE),
+        op="issue",
+        reason_code="AUTHZ_DENIED",
+        reason_detail="caller missing leases.issue permission",
+        http_status=403,
+    )
+
+    # All seven event types must have fired at least once.
+    seen_types = {ev.event_type for _, ev in md.append_audit_calls}
+    expected = {
+        EVENT_LEASE_ISSUED,
+        EVENT_LEASE_REFRESHED,
+        EVENT_LEASE_DENIED,
+        EVENT_LEASE_REVOKED,
+        EVENT_LEASE_RELEASED,
+        EVENT_LEASE_EXPIRED,
+        EVENT_LEASE_REVOKE_REQUESTED,
+    }
+    assert expected.issubset(seen_types)
+
+    # Screen every emitted subject + payload for token-bytes substrings.
+    for _, evt in md.append_audit_calls:
+        serialized = json.dumps(
+            {"subject": evt.subject, "payload": evt.payload},
+            default=str,
+        ).lower()
+        for needle in _REDACTED_SUBSTRINGS:
+            assert needle not in serialized, (
+                f"event {evt.event_type} leaked a suspected secret "
+                f"substring {needle!r}: {serialized}"
+            )
 
 
 # ---------------------------------------------------------------------------
