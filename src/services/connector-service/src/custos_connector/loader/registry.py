@@ -168,7 +168,14 @@ class Loader:
                 ``connector.registration.rejected`` with the same code
                 in its payload before raising.
         """
-        repository, subject_digest = self._parse_image_ref(image_ref)
+        try:
+            repository, subject_digest = self._parse_image_ref(image_ref)
+        except LoaderError as exc:
+            raise self._reject(
+                code=exc.code,
+                detail=exc.detail,
+                image_ref=image_ref,
+            ) from exc
 
         # 1) Discover the OCI artifact descriptor that points at the
         # connector-manifest wrapper.
