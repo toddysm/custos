@@ -40,6 +40,7 @@ from custos_connector.loader import (
     LoaderError,
     LoaderErrorCode,
 )
+from custos_connector.loader.registry import _semver_key
 from custos_connector.manifest import (
     CONNECTOR_MANIFEST_MEDIA_TYPE,
     compute_digest,
@@ -861,3 +862,103 @@ async def test_register_regression_check_accepts_object_form_in_new_version() ->
     )
     # Deprecation does not count as removal — still a superset.
     assert loaded.row.version == "2.3.1"
+
+
+# ---------------------------------------------------------------------------
+# _semver_key — SemVer 2.0 §11 precedence
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("lower", "higher"),
+    [
+        # §11.2 — major / minor / patch compared numerically.
+        ("1.0.0", "2.0.0"),
+        ("1.9.0", "1.10.0"),
+        ("1.0.9", "1.0.10"),
+        # §11.3 — pre-release < final at the same triple.
+        ("1.0.0-alpha", "1.0.0"),
+        ("1.0.0-rc.1", "1.0.0"),
+        # §11.4.1 — numeric identifiers compare numerically (NOT lex).
+        # Under raw lexicographic ordering "10" < "2"; this is the bug.
+        ("1.0.0-alpha.2", "1.0.0-alpha.10"),
+        ("1.0.0-alpha.9", "1.0.0-alpha.11"),
+        # §11.4.3 — numeric < alphanumeric.
+        ("1.0.0-alpha.1", "1.0.0-alpha.beta"),
+        # §11.4.4 — a larger set of fields outranks a smaller prefix-equal set.
+        ("1.0.0-alpha", "1.0.0-alpha.1"),
+        ("1.0.0-alpha.1", "1.0.0-alpha.1.0"),
+        # §11 — full example chain from the SemVer spec.
+        ("1.0.0-alpha", "1.0.0-alpha.1"),
+        ("1.0.0-alpha.1", "1.0.0-alpha.beta"),
+        ("1.0.0-alpha.beta", "1.0.0-beta"),
+        ("1.0.0-beta", "1.0.0-beta.2"),
+        ("1.0.0-beta.2", "1.0.0-beta.11"),
+        ("1.0.0-beta.11", "1.0.0-rc.1"),
+        ("1.0.0-rc.1", "1.0.0"),
+    ],
+)
+def test_semver_key_orders_precedence_pairs(lower: str, higher: str) -> None:
+    """`_semver_key` produces a sort key matching SemVer 2.0 §11 precedence."""
+    assert _semver_key(lower) < _semver_key(higher)
+
+
+def test_semver_key_build_metadata_is_ignored() -> None:
+    """§10 — build metadata MUST be ignored for precedence."""
+    # Two versions differing only in build metadata compare equal.
+    assert _semver_key("1.0.0+build.1") == _semver_key("1.0.0+build.999")
+    assert _semver_key("1.0.0-alpha+exp.sha.5114f85") == _semver_key("1.0.0-alpha")
+
+
+def test_semver_key_sorts_full_spec_example() -> None:
+    """The §11 example chain sorts correctly under `_semver_key`."""
+    canonical_order = [
+        "1.0.0-alpha",
+        "1.0.0-alpha.1",
+        "1.0.0-alpha.beta",
+        "1.0.0-beta",
+        "1.0.0-beta.2",
+        "1.0.0-beta.11",
+        "1.0.0-rc.1",
+        "1.0.0",
+    ]
+    # Shuffle the input by reversing — any ordering should re-sort to canonical.
+    shuffled = list(reversed(canonical_order))
+    assert sorted(shuffled, key=_semver_key) == canonical_order
+
+
+@pytest.mark.asyncio
+async def test_register_rejects_regression_against_numerically_higher_prerelease() -> None:
+    """Predecessor selection across pre-releases uses numeric (not lex) ordering.
+
+    Regression for the §11.4.1 bug: with ``1.0.0-alpha.2`` registered,
+    a later ``1.0.0-alpha.11`` that drops a capability must be rejected
+    against ``1.0.0-alpha.2`` as the predecessor.
+
+    Under naïve lexicographic ordering on the pre-release string,
+    ``"alpha.11" < "alpha.2"`` (because ``"1" < "2"`` at position 6),
+    so ``1.0.0-alpha.11`` would (incorrectly) be treated as having no
+    predecessor in the same major and the regression check would be
+    skipped — letting the dropped capability slip through.
+    """
+    cat = FakeCatalogAdapter()
+    await _register_version(
+        catalog=cat,
+        version="1.0.0-alpha.2",
+        capabilities=["oci.pull", "oci.push", "oci.list-tags"],
+    )
+
+    payload = _baseline_payload()
+    payload["metadata"]["version"] = "1.0.0-alpha.11"
+    payload["spec"]["capabilities"] = ["oci.pull", "oci.push"]
+    handler = _make_handler(payload=payload)
+    loader, _, client = _make_loader(handler=handler, catalog=cat)
+    async with client:
+        with pytest.raises(LoaderError) as exc:
+            await loader.register(IMAGE_REF)
+
+    assert exc.value.code is LoaderErrorCode.CAPABILITY_REGRESSION
+    assert "oci.list-tags" in exc.value.detail
+    # The parent cited is the numeric predecessor (.2), not a lex
+    # predecessor (which would skip the check entirely).
+    assert "'1.0.0-alpha.2'" in exc.value.detail

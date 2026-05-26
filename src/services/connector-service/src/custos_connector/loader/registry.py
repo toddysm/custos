@@ -97,18 +97,68 @@ _SEMVER_RE: Final[re.Pattern[str]] = re.compile(
 )
 
 
-def _semver_key(version: str) -> tuple[int, int, int, int, str]:
+#: SemVer 2.0 §11.4.1 says a numeric identifier MUST NOT include leading
+#: zeros (except for ``"0"`` itself). Any all-digit identifier that has
+#: a leading zero is therefore treated as alphanumeric.
+def _is_numeric_identifier(ident: str) -> bool:
+    return ident.isdigit() and (len(ident) == 1 or not ident.startswith("0"))
+
+
+#: Per-identifier sort key. Numeric identifiers carry ``(0, int_value)``
+#: so they compare numerically and rank *below* alphanumeric identifiers
+#: which carry ``(1, str_value)``. This mirrors SemVer 2.0 §11.4.1-3:
+#: "Identifiers consisting of only digits are compared numerically. […]
+#: Numeric identifiers always have lower precedence than alphanumeric
+#: identifiers."
+_PreIdent = tuple[int, int] | tuple[int, str]
+
+
+def _pre_identifier_key(ident: str) -> _PreIdent:
+    if _is_numeric_identifier(ident):
+        return (0, int(ident))
+    return (1, ident)
+
+
+_SemverKey = tuple[int, int, int, int, tuple[_PreIdent, ...]]
+
+
+def _semver_key(
+    version: str,
+) -> _SemverKey:
     """Return a sortable tuple for SemVer 2.0 ordering.
 
-    The tuple is ``(major, minor, patch, release_rank, pre_release)`` where
+    The tuple is ``(major, minor, patch, release_rank, pre_identifiers)``.
+
     ``release_rank`` is ``1`` for a final release (no ``-pre``) and ``0``
-    for a pre-release. This makes a final release sort *after* any
-    pre-release of the same triple (per SemVer 11.4) without requiring
-    a per-identifier numeric/alphanumeric comparison; pre-releases of
-    the same triple fall back to lexicographic comparison on the raw
-    identifier string, which is sufficient for the loader's
-    "predecessor lookup" use case (we only need a total order within
-    the same major to pick the highest prior version).
+    for a pre-release, so a final release sorts *after* any pre-release
+    of the same ``(major, minor, patch)`` triple (SemVer 2.0 §11.3).
+
+    ``pre_identifiers`` is the dot-separated pre-release split into
+    per-identifier keys per §11.4:
+
+    * §11.4.1 — Identifiers consisting of only digits compare numerically.
+    * §11.4.2 — Identifiers with letters or hyphens compare lexically.
+    * §11.4.3 — Numeric identifiers always have lower precedence than
+      alphanumeric identifiers.
+    * §11.4.4 — A larger set of pre-release fields has higher precedence
+      than a smaller set, if all preceding identifiers are equal. Python
+      tuple comparison handles this naturally (shorter prefix < longer
+      when the prefix matches).
+
+    Final releases produce an empty ``()`` for ``pre_identifiers``; the
+    ``release_rank`` discriminator ensures finals still order correctly
+    against pre-releases despite the empty tuple sorting low.
+
+    Example::
+
+        >>> _semver_key("1.0.0-alpha.2") < _semver_key("1.0.0-alpha.10")
+        True   # numeric comparison — NOT lexicographic (where "10" < "2")
+        >>> _semver_key("1.0.0-alpha.1") < _semver_key("1.0.0-alpha.beta")
+        True   # numeric < alphanumeric
+        >>> _semver_key("1.0.0-alpha") < _semver_key("1.0.0-alpha.1")
+        True   # shorter prefix < longer
+        >>> _semver_key("1.0.0-rc.1") < _semver_key("1.0.0")
+        True   # pre-release < final
     """
     match = _SEMVER_RE.fullmatch(version)
     if match is None:  # pragma: no cover - schema already rejects non-semver
@@ -118,7 +168,10 @@ def _semver_key(version: str) -> tuple[int, int, int, int, str]:
     patch = int(match.group("patch"))
     pre = match.group("pre") or ""
     release_rank = 0 if pre else 1
-    return (major, minor, patch, release_rank, pre)
+    pre_identifiers: tuple[_PreIdent, ...] = (
+        tuple(_pre_identifier_key(ident) for ident in pre.split(".")) if pre else ()
+    )
+    return (major, minor, patch, release_rank, pre_identifiers)
 
 
 @dataclass(frozen=True, slots=True)
@@ -650,7 +703,7 @@ class Loader:
         new_names = {extract_capability_name(c) for c in new_capabilities}
 
         predecessor: ConnectorTypeVersion | None = None
-        predecessor_key: tuple[int, int, int, int, str] | None = None
+        predecessor_key: _SemverKey | None = None
         cursor = None
         while True:
             page = await self._catalog.list_connector_type_versions(
