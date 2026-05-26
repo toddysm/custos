@@ -41,6 +41,8 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
 
 from custos_connector.manifest.capabilities import (
+    TIER1_RESERVED_PREFIXES,
+    TIER2_VENDOR_RE,
     classify_capability_token,
     extract_capability_name,
 )
@@ -48,6 +50,20 @@ from custos_connector.manifest.errors import (
     ManifestValidationError,
     ValidationErrorCode,
 )
+
+#: Event-namespace prefixes that MUST NOT appear in ``events.produced``.
+#:
+#: This is the events-side analogue of
+#: :data:`custos_connector.manifest.capabilities.FORBIDDEN_IN_CAPABILITIES`:
+#: the ``event.*`` wrapper is reserved as a *capability*-side guard so
+#: capability tokens can't masquerade as event-stream verbs, but event
+#: types themselves use the noun-prefix grammar directly (e.g.
+#: ``oci.image.pushed``) — there is never a legitimate ``event.<...>``
+#: token in ``events.produced``. Keeping a dedicated constant here
+#: decouples the events governance logic from the capabilities
+#: registry's forbidden-set so the two namespaces can evolve
+#: independently.
+_FORBIDDEN_EVENT_PREFIXES: Final[frozenset[str]] = frozenset({"event"})
 
 #: Packaged resource path for the v1 schema. Kept in sync with the
 #: design source-of-truth via ``tests/test_manifest_schema_drift.py``.
@@ -131,6 +147,19 @@ def _classify_schema_error(err: ValidationError) -> ValidationErrorCode:
     # metadata.version pattern (SemVer) violation -> stable code.
     if path == ["metadata", "version"] and err.validator == "pattern":
         return ValidationErrorCode.INVALID_SEMVER
+    # spec.events.pull.initialCursorBehavior enum violation -> stable code.
+    if path == ["spec", "events", "pull", "initialCursorBehavior"] and err.validator == "enum":
+        return ValidationErrorCode.INVALID_INITIAL_CURSOR_BEHAVIOR
+    # spec.events allOf if/then violation: delivery contains "pull" but the
+    # pull cursor-semantics block is missing. jsonschema emits the "required"
+    # error at /spec/events with validator_value == ["pull"].
+    if (
+        path == ["spec", "events"]
+        and err.validator == "required"
+        and isinstance(err.validator_value, list)
+        and "pull" in err.validator_value
+    ):
+        return ValidationErrorCode.MISSING_PULL_BLOCK
     return ValidationErrorCode.SCHEMA_VIOLATION
 
 
@@ -330,6 +359,61 @@ def _check_events(manifest: Mapping[str, Any]) -> None:
                     ),
                     path=f"/spec/events/produced/{idx}",
                 )
+            _check_event_namespace(evt, idx)
+
+
+def _check_event_namespace(evt: str, idx: int) -> None:
+    """Enforce Tier 1 / vendor namespace governance on ``events.produced``.
+
+    Per CONN-IMPL-010 (mirroring CONN-IMPL-009 for capabilities), each
+    ``events.produced`` token MUST either:
+
+    * start with a Tier 1 reserved prefix (``oci``, ``s3``, ``blob``,
+      ``http``, ``sql``, ``notification``) — e.g. ``oci.image.pushed``,
+      ``s3.object.created``; **or**
+    * match the ``x-<vendor>.<...>`` extension pattern.
+
+    The reserved ``event.*`` namespace is FORBIDDEN here as well — it
+    exists only as a capability-side guard to keep capability-vs-event
+    verbs from colliding (see
+    :attr:`ValidationErrorCode.EVENT_TOKEN_IN_CAPABILITIES`); event
+    types use the same noun-prefix grammar as capabilities, not a
+    redundant ``event.`` wrapper. The check uses
+    :data:`_FORBIDDEN_EVENT_PREFIXES` (events-scoped) rather than the
+    capabilities-scoped ``FORBIDDEN_IN_CAPABILITIES`` so the two
+    governance domains stay decoupled.
+
+    Raises :class:`ManifestValidationError` with
+    :attr:`ValidationErrorCode.UNKNOWN_EVENT_NAMESPACE` on rejection.
+    The path points at the offending entry so operators can diff
+    against the manifest.
+    """
+    first_segment = evt.split(".", 1)[0]
+    path = f"/spec/events/produced/{idx}"
+    if first_segment in _FORBIDDEN_EVENT_PREFIXES:
+        raise ManifestValidationError(
+            code=ValidationErrorCode.UNKNOWN_EVENT_NAMESPACE,
+            detail=(
+                f"events.produced[{idx}]={evt!r} uses the reserved "
+                f"{first_segment!r} namespace; event types use the noun-"
+                f"prefix grammar directly (e.g. 'oci.image.pushed'), not "
+                f"an 'event.' wrapper"
+            ),
+            path=path,
+        )
+    if first_segment in TIER1_RESERVED_PREFIXES:
+        return
+    if TIER2_VENDOR_RE.fullmatch(evt):
+        return
+    raise ManifestValidationError(
+        code=ValidationErrorCode.UNKNOWN_EVENT_NAMESPACE,
+        detail=(
+            f"events.produced[{idx}]={evt!r} is neither in a reserved "
+            f"Tier 1 namespace ({sorted(TIER1_RESERVED_PREFIXES)}) "
+            f"nor a valid 'x-<vendor>.<...>' extension token"
+        ),
+        path=path,
+    )
 
 
 def _check_semver(manifest: Mapping[str, Any]) -> None:
