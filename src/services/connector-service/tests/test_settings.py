@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from custos_connector.settings import (
+    DEFAULT_HEALTH_CACHE_TTL_S,
     DEFAULT_LEASE_MAX_CONCURRENT,
     DEFAULT_OCI_REFERRERS_TIMEOUT_MS,
     DEFAULT_PUBLISH_MAX_BODY_MB,
@@ -32,6 +33,7 @@ def test_load_settings_applies_documented_defaults() -> None:
     assert s.sidecar_default_ttl_sec == DEFAULT_SIDECAR_DEFAULT_TTL
     assert s.lease_max_concurrent == DEFAULT_LEASE_MAX_CONCURRENT
     assert s.pull_loop_min_interval_sec == DEFAULT_PULL_LOOP_MIN_INTERVAL_SEC
+    assert s.health_cache_ttl_s == DEFAULT_HEALTH_CACHE_TTL_S
     assert s.sidecar_mtls_issuer is None
     assert s.environment == "development"
     assert s.use_callctx_dev_shim is True
@@ -82,3 +84,8 @@ def test_sidecar_mtls_issuer_blank_string_becomes_none() -> None:
 def test_sidecar_mtls_issuer_propagates_when_set() -> None:
     s = load_settings({**_MIN_ENV, "CONN_SIDECAR_MTLS_ISSUER": "custos-internal-ca"})
     assert s.sidecar_mtls_issuer == "custos-internal-ca"
+
+
+def test_health_cache_ttl_override() -> None:
+    s = load_settings({**_MIN_ENV, "CONN_HEALTH_CACHE_TTL_S": "15"})
+    assert s.health_cache_ttl_s == 15

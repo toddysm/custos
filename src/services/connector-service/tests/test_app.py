@@ -28,6 +28,7 @@ _BASE_SETTINGS = Settings(
     sidecar_default_ttl_sec=600,
     lease_max_concurrent=16,
     pull_loop_min_interval_sec=10,
+    health_cache_ttl_s=60,
     sidecar_mtls_issuer=None,
     environment="development",
 )

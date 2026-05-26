@@ -7,13 +7,24 @@ catalog precedent uses the same pattern (see
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
-from custos_connector.audit import EVENT_INSTANCE_CREATED, EVENT_INSTANCE_UPDATED
+from custos_connector.audit import (
+    EVENT_HEALTH_CHECK_COMPLETED,
+    EVENT_HEALTH_CHECK_INVOKED,
+    EVENT_INSTANCE_CREATED,
+    EVENT_INSTANCE_DISABLED,
+    EVENT_INSTANCE_ENABLED,
+    EVENT_INSTANCE_UPDATED,
+)
 from custos_connector.instances import (
+    ActivationProbeFailed,
     ConnectorInstanceNotFound,
     ConnectorTypeNotRegistered,
     ImmutableFieldUpdate,
+    InstanceHealthSnapshot,
     InstanceService,
     InvalidInstancePayload,
     InvalidLeaseTtl,
@@ -22,6 +33,7 @@ from custos_connector.instances.validator import (
     InstanceConfigCode,
     InstanceConfigValidationError,
 )
+from custos_connector.runtime import HealthResult, UpstreamUnreachable
 from tests._fakes import (
     FakeCatalogAdapter,
     FakeConnectorInstanceAdapter,
@@ -37,6 +49,17 @@ def _build_service() -> tuple[
     FakeCatalogAdapter,
     FakeMetadataAdapter,
 ]:
+    return _build_service_with_invoker(_FakePluginInvoker())
+
+
+def _build_service_with_invoker(
+    invoker: _FakePluginInvoker,
+) -> tuple[
+    InstanceService,
+    FakeConnectorInstanceAdapter,
+    FakeCatalogAdapter,
+    FakeMetadataAdapter,
+]:
     catalog = FakeCatalogAdapter()
     instances = FakeConnectorInstanceAdapter()
     metadata = FakeMetadataAdapter()
@@ -44,8 +67,39 @@ def _build_service() -> tuple[
         instance_store=instances,  # type: ignore[arg-type]
         catalog_store=catalog,  # type: ignore[arg-type]
         metadata_store=metadata,  # type: ignore[arg-type]
+        plugin_invoker=invoker,  # type: ignore[arg-type]
+        health_cache_ttl_seconds=60,
     )
     return service, instances, catalog, metadata
+
+
+class _FakePluginInvoker:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, str]] = []
+        self._next_results: list[HealthResult | Exception] = []
+
+    def queue(self, value: HealthResult | Exception) -> None:
+        self._next_results.append(value)
+
+    async def health(
+        self,
+        *,
+        connector: object,
+        instance: object,
+    ) -> HealthResult:
+        del connector
+        assert hasattr(instance, "workspace_id")
+        assert hasattr(instance, "instance_id")
+        assert hasattr(instance, "type")
+        self.calls.append(
+            (str(instance.workspace_id), str(instance.instance_id), str(instance.type))
+        )
+        if not self._next_results:
+            raise AssertionError("_FakePluginInvoker queue is empty")
+        nxt = self._next_results.pop(0)
+        if isinstance(nxt, Exception):
+            raise nxt
+        return nxt
 
 
 async def _register_type(catalog: FakeCatalogAdapter, type: str, version: str) -> None:
@@ -412,3 +466,96 @@ async def test_list_enforces_workspace_isolation() -> None:
     a_ids = {i.instance_id for i in page_a.items}
     b_ids = {i.instance_id for i in page_b.items}
     assert a_ids.isdisjoint(b_ids)
+
+
+# ---------------------------------------------------------------------------
+# Activation + health (CONN-IMPL-013)
+# ---------------------------------------------------------------------------
+
+
+def _health(*, healthy: bool, detail: str | None = None) -> HealthResult:
+    return HealthResult(
+        healthy=healthy,
+        detail=detail,
+        checked_at=datetime.now(UTC),
+        extras={"source": "fake"},
+    )
+
+
+async def test_enable_requires_successful_probe_and_emits_audit() -> None:
+    invoker = _FakePluginInvoker()
+    service, _instances, catalog, metadata = _build_service_with_invoker(invoker)
+    await _register_type(catalog, "http", "1.0.0")
+    created = await service.create(
+        "ws-1", type="http", version="1.0.0", actor="user:alice", enabled=False
+    )
+
+    invoker.queue(_health(healthy=True, detail="ok"))
+    metadata.append_audit_calls.clear()
+    enabled = await service.enable("ws-1", str(created.instance_id), actor="user:bob")
+
+    assert enabled.enabled is True
+    assert enabled.status == "active"
+    assert enabled.health_status == "healthy"
+    event_types = [event.event_type for _ws, event in metadata.append_audit_calls]
+    assert EVENT_HEALTH_CHECK_COMPLETED in event_types
+    assert EVENT_INSTANCE_ENABLED in event_types
+
+
+async def test_enable_fails_when_probe_is_unhealthy() -> None:
+    invoker = _FakePluginInvoker()
+    service, _instances, catalog, _metadata = _build_service_with_invoker(invoker)
+    await _register_type(catalog, "http", "1.0.0")
+    created = await service.create(
+        "ws-1", type="http", version="1.0.0", actor="user:alice", enabled=False
+    )
+
+    invoker.queue(UpstreamUnreachable("dial tcp timeout"))
+    with pytest.raises(ActivationProbeFailed):
+        await service.enable("ws-1", str(created.instance_id), actor="user:bob")
+
+    row = await service.get("ws-1", str(created.instance_id))
+    assert row.enabled is False
+    assert row.status == "disabled"
+    assert row.health_status == "unhealthy"
+
+
+async def test_disable_transitions_and_emits_audit() -> None:
+    service, _instances, catalog, metadata = _build_service()
+    await _register_type(catalog, "http", "1.0.0")
+    created = await service.create("ws-1", type="http", version="1.0.0", actor="user:alice")
+
+    metadata.append_audit_calls.clear()
+    disabled = await service.disable("ws-1", str(created.instance_id), actor="user:bob")
+
+    assert disabled.enabled is False
+    assert disabled.status == "disabled"
+    event_types = [event.event_type for _ws, event in metadata.append_audit_calls]
+    assert EVENT_INSTANCE_DISABLED in event_types
+
+
+async def test_force_health_check_bypasses_cache_and_emits_invoked() -> None:
+    invoker = _FakePluginInvoker()
+    service, _instances, catalog, metadata = _build_service_with_invoker(invoker)
+    await _register_type(catalog, "http", "1.0.0")
+    created = await service.create("ws-1", type="http", version="1.0.0", actor="user:alice")
+
+    invoker.queue(_health(healthy=True, detail="ok"))
+    first = await service.get_health("ws-1", str(created.instance_id))
+    assert isinstance(first, InstanceHealthSnapshot)
+    assert first.source == "probe"
+    assert len(invoker.calls) == 1
+
+    second = await service.get_health("ws-1", str(created.instance_id))
+    assert second.source == "cache"
+    assert len(invoker.calls) == 1
+
+    invoker.queue(_health(healthy=False, detail="upstream 500"))
+    metadata.append_audit_calls.clear()
+    forced = await service.force_health_check("ws-1", str(created.instance_id), actor="user:ops")
+    assert forced.source == "probe"
+    assert forced.healthy is False
+    assert len(invoker.calls) == 2
+    event_types = [event.event_type for _ws, event in metadata.append_audit_calls]
+    assert EVENT_HEALTH_CHECK_INVOKED in event_types
+    assert EVENT_HEALTH_CHECK_COMPLETED in event_types

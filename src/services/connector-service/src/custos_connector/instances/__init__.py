@@ -10,17 +10,18 @@ service composes three SPL providers:
   helpers in :mod:`custos_connector.audit`).
 
 Activation, health probing, and lease leasing are intentionally
-**not** in this module — they ship in CONN-IMPL-013 (activation
-controller) and CONN-IMPL-027 (sidecar lease loop). What lives here
-is the CRUD foundation those tickets build on.
+live in this package's service layer. Lease leasing and sidecar token
+loops remain outside this module and land in later phases.
 """
 
 from __future__ import annotations
 
 from custos_connector.instances.service import (
+    ActivationProbeFailed,
     ConnectorInstanceNotFound,
     ConnectorTypeNotRegistered,
     ImmutableFieldUpdate,
+    InstanceHealthSnapshot,
     InstanceService,
     InstanceServiceError,
     InvalidInstancePayload,
@@ -34,12 +35,14 @@ from custos_connector.instances.validator import (
 )
 
 __all__ = [
+    "ActivationProbeFailed",
     "ConnectorInstanceNotFound",
     "ConnectorTypeNotRegistered",
     "ImmutableFieldUpdate",
     "InstanceConfigCode",
     "InstanceConfigIssue",
     "InstanceConfigValidationError",
+    "InstanceHealthSnapshot",
     "InstanceService",
     "InstanceServiceError",
     "InvalidInstancePayload",
