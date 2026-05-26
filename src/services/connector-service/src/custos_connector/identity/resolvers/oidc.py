@@ -308,8 +308,9 @@ class OidcFederatedResolver:
                 data={"jwks_uri": jwks_uri},
             )
 
-        self._jwks_cache[jwks_uri] = (now_mono, body)
-        return body
+        body_dict = dict(body)
+        self._jwks_cache[jwks_uri] = (now_mono, body_dict)
+        return dict(body_dict)
 
 
 def _require_str(payload: Mapping[str, Any], field: str) -> str:
