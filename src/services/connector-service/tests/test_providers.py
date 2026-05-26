@@ -10,13 +10,18 @@ from custos_connector.providers import (
     schema_gate_explainer,
     verify_schema_revisions,
 )
-from tests._fakes import FakeCatalogAdapter, FakeMetadataAdapter
+from tests._fakes import (
+    FakeCatalogAdapter,
+    FakeConnectorInstanceAdapter,
+    FakeMetadataAdapter,
+)
 
 
 @pytest.fixture
 def providers() -> Providers:
     return Providers(
         catalog_store=FakeCatalogAdapter(),  # type: ignore[arg-type]
+        instance_store=FakeConnectorInstanceAdapter(),  # type: ignore[arg-type]
         metadata_store=FakeMetadataAdapter(),  # type: ignore[arg-type]
     )
 
@@ -36,6 +41,7 @@ async def test_verify_schema_revisions_passes_when_ledger_is_current(
 async def test_verify_schema_revisions_raises_when_catalog_store_is_behind() -> None:
     providers = Providers(
         catalog_store=FakeCatalogAdapter(applied_revisions=set()),  # type: ignore[arg-type]
+        instance_store=FakeConnectorInstanceAdapter(),  # type: ignore[arg-type]
         metadata_store=FakeMetadataAdapter(),  # type: ignore[arg-type]
     )
     with pytest.raises(MigrationRequired) as exc_info:
@@ -46,6 +52,7 @@ async def test_verify_schema_revisions_raises_when_catalog_store_is_behind() -> 
 async def test_verify_schema_revisions_raises_when_metadata_store_is_behind() -> None:
     providers = Providers(
         catalog_store=FakeCatalogAdapter(),  # type: ignore[arg-type]
+        instance_store=FakeConnectorInstanceAdapter(),  # type: ignore[arg-type]
         metadata_store=FakeMetadataAdapter(applied_revisions=set()),  # type: ignore[arg-type]
     )
     with pytest.raises(MigrationRequired) as exc_info:
@@ -53,9 +60,23 @@ async def test_verify_schema_revisions_raises_when_metadata_store_is_behind() ->
     assert ("MetadataStoreProvider", 4) in exc_info.value.gaps
 
 
+async def test_verify_schema_revisions_raises_when_instance_store_is_behind() -> None:
+    providers = Providers(
+        catalog_store=FakeCatalogAdapter(),  # type: ignore[arg-type]
+        instance_store=FakeConnectorInstanceAdapter(  # type: ignore[arg-type]
+            applied_revisions=set()
+        ),
+        metadata_store=FakeMetadataAdapter(),  # type: ignore[arg-type]
+    )
+    with pytest.raises(MigrationRequired) as exc_info:
+        await verify_schema_revisions(providers)
+    assert ("ConnectorInstanceStoreProvider", 1) in exc_info.value.gaps
+
+
 async def test_verify_schema_revisions_collects_gaps_from_both_stores() -> None:
     providers = Providers(
         catalog_store=FakeCatalogAdapter(applied_revisions=set()),  # type: ignore[arg-type]
+        instance_store=FakeConnectorInstanceAdapter(),  # type: ignore[arg-type]
         metadata_store=FakeMetadataAdapter(applied_revisions=set()),  # type: ignore[arg-type]
     )
     with pytest.raises(MigrationRequired) as exc_info:

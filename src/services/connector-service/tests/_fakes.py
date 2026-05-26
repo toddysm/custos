@@ -27,8 +27,13 @@ from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
-from custos_spl import ConflictDigest
+from custos_spl import ConflictDigest, ImmutableViolation
+from custos_spl.ids import ConnectorInstanceId, WorkspaceId
 from custos_spl.interfaces.catalog_store import ConnectorTypeVersion
+from custos_spl.interfaces.connector_instance_store import (
+    ConnectorInstance,
+    ConnectorInstanceFilter,
+)
 from custos_spl.pagination import Cursor, Page
 
 if TYPE_CHECKING:
@@ -190,7 +195,7 @@ class FakeMetadataAdapter:
             {1, 2, 3, 4} if applied_revisions is None else applied_revisions,
         )
         self.refresh_calls = 0
-        self.append_audit_calls: list[tuple[str, object]] = []
+        self.append_audit_calls: list[tuple[str, AuditEvent]] = []
 
     @property
     def declared_revisions(self) -> Mapping[str, AbstractSet[int]]:
@@ -216,7 +221,134 @@ class FakeMetadataAdapter:
         self.append_audit_calls.append((str(workspace_id), event))
 
 
+class FakeConnectorInstanceAdapter:
+    """In-memory ``ConnectorInstanceStoreProvider`` for service-layer tests.
+
+    Mirrors the contract of :class:`PgConnectorInstanceAdapter`:
+    create-only put, ``None`` on absent reads, allowlist-validated
+    patches, and workspace isolation.
+    """
+
+    SCHEMA_REVISION = 1
+
+    #: Mirror of the adapter's patchable-column allowlist. Kept in
+    #: sync by hand because the SPL Protocol does not export it
+    #: (per-adapter implementation detail).
+    _PATCHABLE: frozenset[str] = frozenset(
+        {"name", "lease_ttl_seconds", "enabled", "status", "health_status"}
+    )
+
+    def __init__(self, *, applied_revisions: AbstractSet[int] | None = None) -> None:
+        self._applied: set[int] = set(
+            {1} if applied_revisions is None else applied_revisions,
+        )
+        self.refresh_calls = 0
+        # Keyed on (workspace_id, instance_id).
+        self._rows: dict[tuple[str, str], ConnectorInstance] = {}
+
+    @property
+    def declared_revisions(self) -> Mapping[str, AbstractSet[int]]:
+        return MappingProxyType(
+            {"ConnectorInstanceStoreProvider": frozenset(self._applied)},
+        )
+
+    async def apply_pending(self) -> list[str]:  # pragma: no cover - not exercised
+        return []
+
+    async def refresh_declared(self) -> None:
+        self.refresh_calls += 1
+
+    def set_applied(self, revisions: AbstractSet[int]) -> None:
+        self._applied = set(revisions)
+
+    async def put_connector_instance(
+        self,
+        workspace_id: WorkspaceId,
+        instance: ConnectorInstance,
+    ) -> ConnectorInstance:
+        if instance.workspace_id != workspace_id:
+            raise ValueError(
+                f"instance.workspace_id {instance.workspace_id!r} does not match "
+                f"workspace_id arg {workspace_id!r}"
+            )
+        key = (str(workspace_id), str(instance.instance_id))
+        if key in self._rows:
+            raise ImmutableViolation(
+                f"connector_instance ({workspace_id}, {instance.instance_id}) "
+                f"already exists; use patch_connector_instance to update"
+            )
+        self._rows[key] = instance
+        return instance
+
+    async def get_connector_instance(
+        self,
+        workspace_id: WorkspaceId,
+        instance_id: ConnectorInstanceId,
+    ) -> ConnectorInstance | None:
+        return self._rows.get((str(workspace_id), str(instance_id)))
+
+    async def patch_connector_instance(
+        self,
+        workspace_id: WorkspaceId,
+        instance_id: ConnectorInstanceId,
+        updates: Mapping[str, Any],
+    ) -> ConnectorInstance | None:
+        unknown = set(updates) - self._PATCHABLE
+        if unknown:
+            raise ValueError(
+                f"unknown patch fields: {sorted(unknown)!r}; allowed: {sorted(self._PATCHABLE)!r}"
+            )
+        key = (str(workspace_id), str(instance_id))
+        current = self._rows.get(key)
+        if current is None:
+            return None
+        new_kwargs: dict[str, Any] = {
+            "workspace_id": current.workspace_id,
+            "instance_id": current.instance_id,
+            "type": current.type,
+            "version": current.version,
+            "name": current.name,
+            "lease_ttl_seconds": current.lease_ttl_seconds,
+            "enabled": current.enabled,
+            "status": current.status,
+            "health_status": current.health_status,
+            "created_at": current.created_at,
+            "updated_at": datetime.now(UTC),
+        }
+        for k, v in updates.items():
+            new_kwargs[k] = v
+        updated = ConnectorInstance(**new_kwargs)
+        self._rows[key] = updated
+        return updated
+
+    async def list_connector_instances(
+        self,
+        workspace_id: WorkspaceId,
+        filter: ConnectorInstanceFilter | None = None,
+        cursor: Cursor | None = None,
+        limit: int | None = None,
+    ) -> Page[ConnectorInstance]:
+        ws_rows = [row for (ws, _), row in self._rows.items() if ws == str(workspace_id)]
+        if filter is not None:
+            if filter.type is not None:
+                ws_rows = [r for r in ws_rows if r.type == filter.type]
+            if filter.enabled is not None:
+                ws_rows = [r for r in ws_rows if r.enabled is filter.enabled]
+        # Deterministic order: created_at DESC, instance_id ASC.
+        ws_rows.sort(key=lambda r: (-r.created_at.timestamp(), str(r.instance_id)))
+        start = 0
+        if cursor is not None:
+            try:
+                start = int(cursor.token)
+            except ValueError:  # pragma: no cover - defensive
+                start = 0
+        end = len(ws_rows) if limit is None else min(start + limit, len(ws_rows))
+        next_cursor = Cursor(token=str(end)) if end < len(ws_rows) else None
+        return Page(items=ws_rows[start:end], next_cursor=next_cursor)
+
+
 __all__ = [
     "FakeCatalogAdapter",
+    "FakeConnectorInstanceAdapter",
     "FakeMetadataAdapter",
 ]

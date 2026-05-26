@@ -16,6 +16,10 @@ from custos_pg.adapters.auth import PgAuthAdapter
 from custos_pg.adapters.auth import make_adapter as make_auth_adapter
 from custos_pg.adapters.catalog import PgCatalogAdapter
 from custos_pg.adapters.catalog import make_adapter as make_catalog_adapter
+from custos_pg.adapters.connector_instance import PgConnectorInstanceAdapter
+from custos_pg.adapters.connector_instance import (
+    make_adapter as make_connector_instance_adapter,
+)
 from custos_pg.adapters.definition import (
     PgDefinitionAdapter,
 )
@@ -28,10 +32,12 @@ from custos_pg.adapters.metadata import make_adapter as make_metadata_adapter
 __all__ = [
     "PgAuthAdapter",
     "PgCatalogAdapter",
+    "PgConnectorInstanceAdapter",
     "PgDefinitionAdapter",
     "PgMetadataAdapter",
     "make_auth_adapter",
     "make_catalog_adapter",
+    "make_connector_instance_adapter",
     "make_definition_adapter",
     "make_metadata_adapter",
 ]
