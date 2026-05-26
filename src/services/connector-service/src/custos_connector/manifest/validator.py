@@ -41,7 +41,6 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
 
 from custos_connector.manifest.capabilities import (
-    FORBIDDEN_IN_CAPABILITIES,
     TIER1_RESERVED_PREFIXES,
     TIER2_VENDOR_RE,
     classify_capability_token,
@@ -51,6 +50,20 @@ from custos_connector.manifest.errors import (
     ManifestValidationError,
     ValidationErrorCode,
 )
+
+#: Event-namespace prefixes that MUST NOT appear in ``events.produced``.
+#:
+#: This is the events-side analogue of
+#: :data:`custos_connector.manifest.capabilities.FORBIDDEN_IN_CAPABILITIES`:
+#: the ``event.*`` wrapper is reserved as a *capability*-side guard so
+#: capability tokens can't masquerade as event-stream verbs, but event
+#: types themselves use the noun-prefix grammar directly (e.g.
+#: ``oci.image.pushed``) — there is never a legitimate ``event.<...>``
+#: token in ``events.produced``. Keeping a dedicated constant here
+#: decouples the events governance logic from the capabilities
+#: registry's forbidden-set so the two namespaces can evolve
+#: independently.
+_FORBIDDEN_EVENT_PREFIXES: Final[frozenset[str]] = frozenset({"event"})
 
 #: Packaged resource path for the v1 schema. Kept in sync with the
 #: design source-of-truth via ``tests/test_manifest_schema_drift.py``.
@@ -361,10 +374,14 @@ def _check_event_namespace(evt: str, idx: int) -> None:
     * match the ``x-<vendor>.<...>`` extension pattern.
 
     The reserved ``event.*`` namespace is FORBIDDEN here as well — it
-    exists only to keep capability-vs-event verbs from colliding (see
+    exists only as a capability-side guard to keep capability-vs-event
+    verbs from colliding (see
     :attr:`ValidationErrorCode.EVENT_TOKEN_IN_CAPABILITIES`); event
     types use the same noun-prefix grammar as capabilities, not a
-    redundant ``event.`` wrapper.
+    redundant ``event.`` wrapper. The check uses
+    :data:`_FORBIDDEN_EVENT_PREFIXES` (events-scoped) rather than the
+    capabilities-scoped ``FORBIDDEN_IN_CAPABILITIES`` so the two
+    governance domains stay decoupled.
 
     Raises :class:`ManifestValidationError` with
     :attr:`ValidationErrorCode.UNKNOWN_EVENT_NAMESPACE` on rejection.
@@ -373,7 +390,7 @@ def _check_event_namespace(evt: str, idx: int) -> None:
     """
     first_segment = evt.split(".", 1)[0]
     path = f"/spec/events/produced/{idx}"
-    if first_segment in FORBIDDEN_IN_CAPABILITIES:
+    if first_segment in _FORBIDDEN_EVENT_PREFIXES:
         raise ManifestValidationError(
             code=ValidationErrorCode.UNKNOWN_EVENT_NAMESPACE,
             detail=(
@@ -392,7 +409,7 @@ def _check_event_namespace(evt: str, idx: int) -> None:
         code=ValidationErrorCode.UNKNOWN_EVENT_NAMESPACE,
         detail=(
             f"events.produced[{idx}]={evt!r} is neither in a reserved "
-            f"Tier 1 namespace ({sorted(TIER1_RESERVED_PREFIXES - FORBIDDEN_IN_CAPABILITIES)}) "
+            f"Tier 1 namespace ({sorted(TIER1_RESERVED_PREFIXES)}) "
             f"nor a valid 'x-<vendor>.<...>' extension token"
         ),
         path=path,
