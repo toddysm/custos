@@ -8,11 +8,9 @@ call-context middleware still applies — every request must carry the
 :data:`~custos_connector.permissions.CONNECTOR_BIND` permission that
 the Workflow Service's service identity holds.
 
-The request body is validated through a pydantic model so the router
-returns the same ``{"error": {"code", "detail"}}`` envelope used by
-the rest of the service for bad inputs. Domain errors raised by
-:class:`BindForStepService` come through as :class:`BindError` and are
-mapped to HTTP status codes via
+The request body is validated through pydantic/FastAPI request parsing.
+Domain errors raised by :class:`BindForStepService` come through as
+:class:`BindError` and are mapped to HTTP status codes via
 :func:`custos_connector.binding.errors.http_status_for`.
 """
 
