@@ -28,15 +28,18 @@ def _manifest(
 ) -> dict[str, object]:
     """Build a minimal normalized-manifest dict for the validator."""
     return {
-        "target": {
-            "kind": kind,
-            "config": dict(target_config) if target_config is not None else {},
+        "metadata": {},
+        "spec": {
+            "target": {
+                "kind": kind,
+                "config": dict(target_config) if target_config is not None else {},
+            },
+            "credentials": {
+                "authenticationType": auth_type,
+                "authentication": dict(authentication) if authentication is not None else {},
+            },
+            "capabilities": list(capabilities),
         },
-        "credentials": {
-            "authenticationType": auth_type,
-            "authentication": dict(authentication) if authentication is not None else {},
-        },
-        "capabilities": list(capabilities),
     }
 
 
