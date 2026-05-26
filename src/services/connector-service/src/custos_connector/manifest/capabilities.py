@@ -143,12 +143,12 @@ def is_deprecated_entry(entry: object) -> bool:
 
 
 def classify_capability_token(token: str) -> CapabilityTier:
-    """Classify ``token`` into a Tier without raising.
+    """Classify ``token`` into a capability Tier.
 
     Returns the matching :class:`CapabilityTier` if the token is
     accepted under either tier's rules. Raises
-    :class:`ManifestValidationError` otherwise — the validator wraps
-    this into the per-index error path.
+    :class:`ManifestValidationError` for reserved or invalid tokens —
+    the validator wraps this into the per-index error path.
     """
     # First, drop the reserved-in-capabilities case (``event.*``) — the
     # validator already raises a distinct EVENT_TOKEN_IN_CAPABILITIES
