@@ -51,26 +51,34 @@ def _build_service() -> tuple[
 async def _register_type(catalog: FakeCatalogAdapter, type: str, version: str) -> None:
     """Register a connector-type-version with a minimal valid manifest.
 
-    The manifest is a stub that satisfies CONN-IMPL-012's instance
-    config validator: ``target.kind=oci-registry`` with
-    ``repositoryNamespace`` already filled in by the manifest, plus
+    The manifest mirrors the production catalog shape by using
+    top-level ``metadata`` / ``spec`` keys. The ``spec`` payload
+    satisfies CONN-IMPL-012's instance config validator:
+    ``target.kind=oci-registry`` with ``repositoryNamespace``
+    already filled in by the manifest, plus
     ``credentials.authenticationType=oidc`` with the required
     ``issuerUri`` / ``audience`` already filled in. Tests that don't
     pass per-instance overrides therefore validate cleanly.
     """
     manifest: dict[str, object] = {
-        "target": {
-            "kind": "oci-registry",
-            "config": {"repositoryNamespace": "tests/fake"},
+        "metadata": {
+            "type": type,
+            "version": version,
         },
-        "credentials": {
-            "authenticationType": "oidc",
-            "authentication": {
-                "issuerUri": "https://oidc.example.com",
-                "audience": "test-audience",
+        "spec": {
+            "target": {
+                "kind": "oci-registry",
+                "config": {"repositoryNamespace": "tests/fake"},
             },
+            "credentials": {
+                "authenticationType": "oidc",
+                "authentication": {
+                    "issuerUri": "https://oidc.example.com",
+                    "audience": "test-audience",
+                },
+            },
+            "capabilities": ["oci.registry.read", "oci.referrers.list"],
         },
-        "capabilities": ["oci.registry.read", "oci.referrers.list"],
     }
     await catalog.put_connector_type_version(type, version, "sha256:fake", manifest)
 
