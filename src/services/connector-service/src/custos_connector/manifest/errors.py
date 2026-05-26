@@ -78,6 +78,24 @@ class ValidationErrorCode(StrEnum):
     #: block is present.
     EMPTY_EVENT_PRODUCED = "empty-event-produced"
 
+    #: ``spec.events.delivery`` contains ``"pull"`` but the
+    #: ``spec.events.pull`` cursor-semantics block is missing. The pull
+    #: block declares ``cursorEncoding`` (required by the encoding-
+    #: migration flow, CONN-IMPL-022) and ``initialCursorBehavior``.
+    MISSING_PULL_BLOCK = "missing-pull-block"
+
+    #: ``spec.events.pull.initialCursorBehavior`` is not one of
+    #: ``{now, beginning, custom}``.
+    INVALID_INITIAL_CURSOR_BEHAVIOR = "invalid-initial-cursor-behavior"
+
+    #: A token in ``spec.events.produced`` is neither in a reserved
+    #: Tier 1 namespace (``oci.``, ``s3.``, ``blob.``, ``http.``,
+    #: ``sql.``, ``notification.``) nor a valid ``x-<vendor>``
+    #: extension. Event-type names mirror the capability namespace
+    #: governance from CONN-IMPL-009 so the catalog stays predictable
+    #: across connector types.
+    UNKNOWN_EVENT_NAMESPACE = "unknown-event-namespace"
+
 
 class DiscoveryErrorCode(StrEnum):
     """Stable rejection codes emitted by :func:`discover_manifest`.

@@ -374,3 +374,165 @@ def test_object_form_rejects_unknown_extra_property() -> None:
     with pytest.raises(ManifestValidationError) as exc_info:
         validate_manifest(payload)
     assert exc_info.value.code == ValidationErrorCode.SCHEMA_VIOLATION
+
+
+# ---------------------------------------------------------------------------
+# CONN-IMPL-010 — events block validation
+# ---------------------------------------------------------------------------
+
+
+def test_accepts_sink_connector_with_no_events_block() -> None:
+    """Sink connectors omit the ``events`` block entirely → accepted."""
+    payload = _baseline()
+    payload["spec"].pop("events", None)
+    validate_manifest(payload)
+
+
+def test_accepts_push_only_delivery() -> None:
+    """``delivery=[push]`` with no ``pull`` block → accepted."""
+    payload = _baseline()
+    payload["spec"]["events"] = {
+        "delivery": ["push"],
+        "produced": ["oci.image.pushed"],
+    }
+    validate_manifest(payload)
+
+
+def test_accepts_pull_only_delivery_with_pull_block() -> None:
+    """``delivery=[pull]`` with a valid ``pull`` block → accepted."""
+    payload = _baseline()
+    payload["spec"]["events"] = {
+        "delivery": ["pull"],
+        "produced": ["oci.image.pushed"],
+        "pull": {
+            "cursorEncoding": "oci-list-tags-v1",
+            "initialCursorBehavior": "now",
+        },
+    }
+    validate_manifest(payload)
+
+
+def test_rejects_pull_delivery_without_pull_block_as_missing_pull_block() -> None:
+    """``delivery`` contains ``pull`` but ``events.pull`` is absent → stable code."""
+    payload = _baseline()
+    payload["spec"]["events"] = {
+        "delivery": ["pull"],
+        "produced": ["oci.image.pushed"],
+    }
+    with pytest.raises(ManifestValidationError) as exc_info:
+        validate_manifest(payload)
+    assert exc_info.value.code is ValidationErrorCode.MISSING_PULL_BLOCK
+    assert exc_info.value.path == "/spec/events"
+
+
+def test_rejects_invalid_initial_cursor_behavior_with_stable_code() -> None:
+    """``initialCursorBehavior`` outside ``{now, beginning, custom}`` → stable code."""
+    payload = _baseline()
+    payload["spec"]["events"] = {
+        "delivery": ["pull"],
+        "produced": ["oci.image.pushed"],
+        "pull": {
+            "cursorEncoding": "oci-list-tags-v1",
+            "initialCursorBehavior": "yesterday",
+        },
+    }
+    with pytest.raises(ManifestValidationError) as exc_info:
+        validate_manifest(payload)
+    assert exc_info.value.code is ValidationErrorCode.INVALID_INITIAL_CURSOR_BEHAVIOR
+    assert exc_info.value.path == "/spec/events/pull/initialCursorBehavior"
+
+
+def test_accepts_each_initial_cursor_behavior() -> None:
+    """All three legal ``initialCursorBehavior`` values are accepted."""
+    for behavior in ("now", "beginning", "custom"):
+        payload = _baseline()
+        payload["spec"]["events"] = {
+            "delivery": ["pull"],
+            "produced": ["oci.image.pushed"],
+            "pull": {
+                "cursorEncoding": "oci-list-tags-v1",
+                "initialCursorBehavior": behavior,
+            },
+        }
+        validate_manifest(payload)
+
+
+def test_accepts_both_delivery_modes_with_pull_block() -> None:
+    """``delivery=[push, pull]`` requires the pull block but otherwise OK."""
+    payload = _baseline()
+    payload["spec"]["events"] = {
+        "delivery": ["push", "pull"],
+        "produced": ["oci.image.pushed", "oci.tag.updated"],
+        "pull": {
+            "cursorEncoding": "oci-list-tags-v1",
+            "initialCursorBehavior": "now",
+        },
+    }
+    validate_manifest(payload)
+
+
+def test_rejects_event_in_reserved_event_namespace() -> None:
+    """``events.produced`` MUST NOT use the reserved ``event.*`` wrapper."""
+    payload = _baseline()
+    payload["spec"]["events"]["produced"].append("event.something.happened")
+    with pytest.raises(ManifestValidationError) as exc_info:
+        validate_manifest(payload)
+    assert exc_info.value.code is ValidationErrorCode.UNKNOWN_EVENT_NAMESPACE
+
+
+def test_rejects_event_outside_tier1_and_vendor() -> None:
+    """Non-Tier-1, non-vendor event token → UNKNOWN_EVENT_NAMESPACE."""
+    payload = _baseline()
+    # ``slack`` is individually-curated as Tier 1 *capability* but its
+    # prefix is NOT namespace-reserved — an unknown ``slack.*`` event
+    # token falls outside both Tier 1 (oci/s3/blob/http/sql/notification)
+    # and the ``x-<vendor>`` extension grammar.
+    payload["spec"]["events"]["produced"].append("slack.message.received")
+    with pytest.raises(ManifestValidationError) as exc_info:
+        validate_manifest(payload)
+    assert exc_info.value.code is ValidationErrorCode.UNKNOWN_EVENT_NAMESPACE
+    assert exc_info.value.path == "/spec/events/produced/2"
+
+
+def test_accepts_tier1_event_namespaces() -> None:
+    """Every reserved Tier 1 prefix is accepted for events.produced."""
+    for token in (
+        "oci.image.pushed",
+        "s3.object.created",
+        "blob.object.deleted",
+        "http.request.received",
+        "sql.row.inserted",
+        "notification.message.sent",
+    ):
+        payload = _baseline()
+        payload["spec"]["events"]["produced"] = [token]
+        validate_manifest(payload)
+
+
+def test_accepts_vendor_extension_event_token() -> None:
+    """``x-<vendor>.<...>`` event tokens are accepted as vendor extensions."""
+    payload = _baseline()
+    payload["spec"]["events"]["produced"] = ["x-acme.thing.happened"]
+    validate_manifest(payload)
+
+
+def test_persists_cursor_encoding_through_normalization() -> None:
+    """``events.pull.cursorEncoding`` survives validation unchanged.
+
+    Required by CONN-IMPL-022 encoding-migration: the persisted
+    normalized manifest carries the connector-declared encoding string
+    so the runtime can detect mismatches against stored cursor
+    envelopes.
+    """
+    payload = _baseline()
+    payload["spec"]["events"] = {
+        "delivery": ["pull"],
+        "produced": ["oci.image.pushed"],
+        "pull": {
+            "cursorEncoding": "oci-list-tags-v2",
+            "initialCursorBehavior": "beginning",
+        },
+    }
+    normalized = validate_manifest(payload)
+    assert normalized["spec"]["events"]["pull"]["cursorEncoding"] == "oci-list-tags-v2"
+    assert normalized["spec"]["events"]["pull"]["initialCursorBehavior"] == "beginning"
