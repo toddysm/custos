@@ -130,6 +130,26 @@ EVENT_LEASE_REVOKED: Final[str] = "lease.revoked"
 #: capability checks bounce a request before it reaches the manager.
 EVENT_LEASE_DENIED: Final[str] = "lease.denied"
 
+#: CONN-IMPL-022 (Phase I). Emitted by :class:`CursorService` after
+#: every successful pull tick that publishes a batch and commits the
+#: cursor. Carries audit envelopes (``encoding`` + ``valueFingerprint``
+#: + optional ``valueLength``; never the raw ``value``) for both the
+#: pre-tick and post-tick cursor positions plus ``reason="tick"`` and
+#: ``eventCount``.
+EVENT_CURSOR_ADVANCED: Final[str] = "cursor.advanced"
+#: CONN-IMPL-022 (Phase I). Emitted by :class:`CursorService` when a
+#: plugin returns :class:`CursorExpired` from ``listen(mode=pull)``.
+#: Carries the last-known cursor in audit-envelope form (no raw
+#: value) plus the upstream error detail. Ticks for the instance
+#: halt pending operator action.
+EVENT_CURSOR_EXPIRED: Final[str] = "cursor.expired"
+#: CONN-IMPL-022 (Phase I). Emitted by :class:`CursorService` when a
+#: plugin returns :class:`CursorEncodingMismatch` from
+#: ``listen(mode=pull)``. Carries the persisted (manifest-declared)
+#: encoding and the plugin-declared encoding so operators can correlate
+#: a connector-type upgrade with the migration that needs a rewind.
+EVENT_CURSOR_ENCODING_MISMATCH: Final[str] = "cursor.encoding_mismatch"
+
 
 # ---------------------------------------------------------------------------
 # Core emission
@@ -847,6 +867,142 @@ async def audit_lease_denied(
 
 
 # ---------------------------------------------------------------------------
+# Cursor lifecycle events (CONN-IMPL-022)
+# ---------------------------------------------------------------------------
+
+
+def _cursor_envelope_audit(
+    encoding: str,
+    value_fingerprint: str | None,
+    value_length: int | None,
+) -> Mapping[str, Any]:
+    """Build the non-sensitive audit envelope for a cursor position.
+
+    Per ``design/components/connector-service/design.md`` § Pull Cursor
+    Model → Cursor audit events, audit consumers MUST receive only
+    ``encoding`` + a non-reversible fingerprint of ``value`` plus the
+    optional ``value`` length, never the raw ``value`` (cursor values
+    are opaque and MUST NOT embed secrets).
+
+    ``value_fingerprint`` / ``value_length`` are both ``None`` for the
+    uninitialized cursor sentinel so consumers can distinguish a
+    first-tick cursor from a committed-then-rewound-to-empty cursor.
+    """
+    return {
+        "encoding": encoding,
+        "valueFingerprint": value_fingerprint,
+        "valueLength": value_length,
+    }
+
+
+async def audit_cursor_advanced(
+    metadata_store: MetadataStoreProvider,
+    *,
+    workspace_id: str,
+    actor: str,
+    instance_id: str,
+    from_encoding: str,
+    from_value_fingerprint: str | None,
+    from_value_length: int | None,
+    to_encoding: str,
+    to_value_fingerprint: str | None,
+    to_value_length: int | None,
+    event_count: int,
+    reason: str = "tick",
+) -> None:
+    """Emit ``cursor.advanced`` after a successful pull tick commit.
+
+    Carries ``from``/``to`` audit envelopes (`encoding`,
+    `valueFingerprint`, `valueLength`; never raw `value`), ``reason``
+    (currently always ``"tick"`` from :class:`CursorService`; operator
+    rewinds emit ``cursor.rewound`` via SPL's ``rewind_cursor`` instead),
+    and ``eventCount`` so operators can correlate cursor advance with
+    the size of the batch that was published.
+    """
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_CURSOR_ADVANCED,
+        actor=actor,
+        subject={"instance_id": instance_id},
+        payload={
+            "from": _cursor_envelope_audit(
+                from_encoding, from_value_fingerprint, from_value_length
+            ),
+            "to": _cursor_envelope_audit(to_encoding, to_value_fingerprint, to_value_length),
+            "reason": reason,
+            "eventCount": event_count,
+        },
+    )
+
+
+async def audit_cursor_expired(
+    metadata_store: MetadataStoreProvider,
+    *,
+    workspace_id: str,
+    actor: str,
+    instance_id: str,
+    encoding: str,
+    value_fingerprint: str | None,
+    value_length: int | None,
+    error_detail: str,
+) -> None:
+    """Emit ``cursor.expired`` when the plugin returns ``CursorExpired``.
+
+    Carries the last-known cursor in the same envelope form as
+    :func:`audit_cursor_advanced` plus the plugin-supplied
+    ``error_detail`` so the audit trail records why the upstream
+    rejected the persisted position. Ticks for the instance halt
+    pending operator action (status flipped to ``cursor_expired`` by
+    the :class:`CursorService` caller).
+    """
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_CURSOR_EXPIRED,
+        actor=actor,
+        subject={"instance_id": instance_id},
+        payload={
+            "lastKnown": _cursor_envelope_audit(encoding, value_fingerprint, value_length),
+            "errorDetail": error_detail,
+        },
+    )
+
+
+async def audit_cursor_encoding_mismatch(
+    metadata_store: MetadataStoreProvider,
+    *,
+    workspace_id: str,
+    actor: str,
+    instance_id: str,
+    persisted_encoding: str | None,
+    plugin_encoding: str | None,
+    error_detail: str,
+) -> None:
+    """Emit ``cursor.encoding_mismatch`` on a connector-type encoding bump.
+
+    Carries the persisted (manifest-declared) and plugin-declared
+    encodings so operators can correlate a connector-type upgrade with
+    the migration that needs a rewind. Either side may be ``None`` when
+    the plugin's error payload omits the corresponding hint. Ticks for
+    the instance halt pending operator action (status flipped to
+    ``cursor_migration_required`` by the :class:`CursorService` caller).
+    """
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_CURSOR_ENCODING_MISMATCH,
+        actor=actor,
+        subject={"instance_id": instance_id},
+        payload={
+            "persistedEncoding": persisted_encoding,
+            "pluginEncoding": plugin_encoding,
+            "errorDetail": error_detail,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
 # Legacy log-only shim (call-context + authz decision events)
 # ---------------------------------------------------------------------------
 
@@ -883,6 +1039,9 @@ __all__ = [
     "EVENT_BINDING_CREATED",
     "EVENT_BINDING_REJECTED",
     "EVENT_CAPABILITY_DEPRECATED",
+    "EVENT_CURSOR_ADVANCED",
+    "EVENT_CURSOR_ENCODING_MISMATCH",
+    "EVENT_CURSOR_EXPIRED",
     "EVENT_HEALTH_CHECK_COMPLETED",
     "EVENT_HEALTH_CHECK_INVOKED",
     "EVENT_IDENTITY_FAILED",
@@ -901,6 +1060,9 @@ __all__ = [
     "audit_binding_created",
     "audit_binding_rejected",
     "audit_capability_deprecated",
+    "audit_cursor_advanced",
+    "audit_cursor_encoding_mismatch",
+    "audit_cursor_expired",
     "audit_health_check_completed",
     "audit_health_check_invoked",
     "audit_identity_failed",
