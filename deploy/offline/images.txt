@@ -8,6 +8,7 @@ ghcr.io/toddysm/custos/auth-service:dev
 ghcr.io/toddysm/custos/workflow-service:dev
 ghcr.io/toddysm/custos/trigger-service:dev
 ghcr.io/toddysm/custos/connector-service:dev
+ghcr.io/toddysm/custos/connector-sidecar:dev
 ghcr.io/toddysm/custos/activity-runtime-manager:dev
 ghcr.io/toddysm/custos/catalog-service:dev
 ghcr.io/toddysm/custos/observability-audit-service:dev
