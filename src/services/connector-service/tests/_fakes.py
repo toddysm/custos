@@ -23,9 +23,10 @@ from __future__ import annotations
 
 import base64
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from collections.abc import Set as AbstractSet
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, cast
 
@@ -41,7 +42,11 @@ from custos_spl.interfaces.connector_instance_store import (
     ConnectorInstanceStoreProvider,
 )
 from custos_spl.interfaces.lease_store import Lease, LeaseFilter
-from custos_spl.interfaces.metadata_store import MetadataStoreProvider
+from custos_spl.interfaces.metadata_store import (
+    ConnectorCursor,
+    LeaseHandle,
+    MetadataStoreProvider,
+)
 from custos_spl.pagination import Cursor, Page
 
 from custos_connector.binding import BindForStepService
@@ -199,21 +204,47 @@ class FakeCatalogAdapter:
             self._deprecated_types.discard(type)
 
 
+@dataclass(frozen=True, slots=True)
+class FakeCursorLeaseHandle(LeaseHandle):
+    """In-memory lease handle minted by :class:`FakeMetadataAdapter`.
+
+    Mirrors :class:`custos_pg.adapters.metadata.PgLeaseHandle` — opaque
+    to callers, carries enough state to round-trip through ``commit`` /
+    ``release``.
+    """
+
+    workspace_id: str
+    instance_id: str
+    holder_id: str
+
+
 class FakeMetadataAdapter:
     """In-memory ``MetadataStoreProvider`` for wiring tests.
 
-    Covers the migration surface plus a minimal ``append_audit`` recorder
-    so middleware audit emission can be asserted without Postgres.
+    Covers the migration surface, the ``append_audit`` recorder
+    (so audit emission can be asserted without Postgres), and the
+    pull-cursor primitive (acquire / commit / release / read / rewind)
+    that :class:`custos_connector.cursor.CursorService` drives.
     """
 
     SCHEMA_REVISION = 4
 
-    def __init__(self, *, applied_revisions: AbstractSet[int] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        applied_revisions: AbstractSet[int] | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self._applied: set[int] = set(
             {1, 2, 3, 4} if applied_revisions is None else applied_revisions,
         )
         self.refresh_calls = 0
         self.append_audit_calls: list[tuple[str, AuditEvent]] = []
+        # Cursor rows keyed on (workspace_id, instance_id).
+        self._cursor_rows: dict[tuple[str, str], ConnectorCursor] = {}
+        self._clock: Callable[[], datetime] = (
+            clock if clock is not None else lambda: datetime.now(UTC)
+        )
 
     @property
     def declared_revisions(self) -> Mapping[str, AbstractSet[int]]:
@@ -237,6 +268,151 @@ class FakeMetadataAdapter:
         tx: object = None,
     ) -> None:
         self.append_audit_calls.append((str(workspace_id), event))
+
+    # ------------------------------------------------------------------
+    # Connector pull cursors (mirrors PgMetadataAdapter)
+    # ------------------------------------------------------------------
+
+    async def acquire_cursor_lease(
+        self,
+        workspace_id: object,
+        instance_id: object,
+        holder_id: str,
+        ttl_seconds: int,
+    ) -> tuple[ConnectorCursor, LeaseHandle]:
+        ws = str(workspace_id)
+        inst = str(instance_id)
+        now = self._clock()
+        existing = self._cursor_rows.get((ws, inst))
+        if existing is None:
+            existing = ConnectorCursor(
+                workspace_id=WorkspaceId(ws),
+                instance_id=ConnectorInstanceId(inst),
+                value="",
+                advanced_at=now,
+                lease_holder=None,
+                lease_expires_at=None,
+            )
+            self._cursor_rows[(ws, inst)] = existing
+        if (
+            existing.lease_holder is not None
+            and existing.lease_holder != holder_id
+            and existing.lease_expires_at is not None
+            and existing.lease_expires_at > now
+        ):
+            from custos_spl import LeaseBusy  # local import to avoid top-level cycles
+
+            raise LeaseBusy(
+                f"connector_cursor {ws!r}/{inst!r} held by {existing.lease_holder!r} "
+                f"until {existing.lease_expires_at.isoformat()}"
+            )
+        new_expires = now + timedelta(seconds=ttl_seconds)
+        leased = ConnectorCursor(
+            workspace_id=existing.workspace_id,
+            instance_id=existing.instance_id,
+            value=existing.value,
+            advanced_at=existing.advanced_at,
+            lease_holder=holder_id,
+            lease_expires_at=new_expires,
+        )
+        self._cursor_rows[(ws, inst)] = leased
+        return leased, FakeCursorLeaseHandle(workspace_id=ws, instance_id=inst, holder_id=holder_id)
+
+    async def commit_cursor(
+        self,
+        workspace_id: object,
+        lease: LeaseHandle,
+        new_value: str,
+        new_advanced_at: datetime,
+    ) -> ConnectorCursor:
+        from custos_spl import LeaseExpired  # local import
+
+        if not isinstance(lease, FakeCursorLeaseHandle):
+            raise LeaseExpired(
+                f"lease handle was not issued by FakeMetadataAdapter (got {type(lease).__name__})"
+            )
+        ws = str(workspace_id)
+        if lease.workspace_id != ws:
+            raise LeaseExpired("lease handle workspace does not match commit_cursor argument")
+        key = (ws, lease.instance_id)
+        existing = self._cursor_rows.get(key)
+        now = self._clock()
+        if (
+            existing is None
+            or existing.lease_holder != lease.holder_id
+            or existing.lease_expires_at is None
+            or existing.lease_expires_at <= now
+        ):
+            raise LeaseExpired(
+                f"lease on {ws!r}/{lease.instance_id!r} held by "
+                f"{lease.holder_id!r} has expired or been reassigned"
+            )
+        committed = ConnectorCursor(
+            workspace_id=existing.workspace_id,
+            instance_id=existing.instance_id,
+            value=new_value,
+            advanced_at=new_advanced_at,
+            lease_holder=None,
+            lease_expires_at=None,
+        )
+        self._cursor_rows[key] = committed
+        return committed
+
+    async def release_cursor_lease(
+        self,
+        workspace_id: object,
+        lease: LeaseHandle,
+    ) -> None:
+        if not isinstance(lease, FakeCursorLeaseHandle):
+            return
+        ws = str(workspace_id)
+        if lease.workspace_id != ws:
+            return
+        key = (ws, lease.instance_id)
+        existing = self._cursor_rows.get(key)
+        if existing is None or existing.lease_holder != lease.holder_id:
+            return
+        self._cursor_rows[key] = ConnectorCursor(
+            workspace_id=existing.workspace_id,
+            instance_id=existing.instance_id,
+            value=existing.value,
+            advanced_at=existing.advanced_at,
+            lease_holder=None,
+            lease_expires_at=None,
+        )
+
+    async def read_cursor(
+        self,
+        workspace_id: object,
+        instance_id: object,
+    ) -> ConnectorCursor | None:
+        return self._cursor_rows.get((str(workspace_id), str(instance_id)))
+
+    async def rewind_cursor(
+        self,
+        workspace_id: object,
+        instance_id: object,
+        new_value: str,
+        actor: str,
+        reason: str,
+    ) -> ConnectorCursor:
+        del actor, reason  # parity with PgMetadataAdapter's TODO(#129)
+        ws = str(workspace_id)
+        inst = str(instance_id)
+        key = (ws, inst)
+        existing = self._cursor_rows.get(key)
+        if existing is None:
+            raise ValueError(f"unknown connector_cursor: {ws!r}/{inst!r}")
+        rewound = ConnectorCursor(
+            workspace_id=existing.workspace_id,
+            instance_id=existing.instance_id,
+            value=new_value,
+            advanced_at=self._clock(),
+            lease_holder=None,
+            lease_expires_at=None,
+        )
+        self._cursor_rows[key] = rewound
+        return rewound
 
 
 class FakeConnectorInstanceAdapter:
@@ -644,6 +820,7 @@ class FakeLeaseAdapter:
 __all__ = [
     "FakeCatalogAdapter",
     "FakeConnectorInstanceAdapter",
+    "FakeCursorLeaseHandle",
     "FakeLeaseAdapter",
     "FakeMetadataAdapter",
     "StubPluginBinder",
