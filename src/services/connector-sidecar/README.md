@@ -35,3 +35,55 @@ for the normative contract.
 | #302 (CONN-IMPL-019) | Sidecar UDS server | This package + integration harness |
 | #303 (CONN-IMPL-020) | Sidecar mTLS revoke control-channel | Adds `/sidecar-admin/v1/revoke` |
 | #304 (CONN-IMPL-021) | Container image + standalone integration | Dockerfile + e2e wiring |
+
+## Container image (CONN-IMPL-021)
+
+The sidecar ships as the `ghcr.io/toddysm/custos/connector-sidecar`
+OCI image. The image runs the `custos-connector-sidecar` console
+script (which calls `custos_sidecar.__main__:main`) and reads its
+configuration from `CUSTOS_SIDECAR_*` environment variables seeded by
+ARM (see [`src/custos_sidecar/settings.py`](src/custos_sidecar/settings.py)
+for the full list).
+
+Build locally:
+
+```sh
+docker build -t custos-connector-sidecar:dev .
+```
+
+The image is multi-stage (`python:3.11-slim` builder → `python:3.11-slim`
+runtime), runs as a non-root `sidecar` user (UID 1000), and exposes
+the control-channel port `9443/tcp`. The UDS path
+`/custos/run/connector.sock` and the bootstrap-state directory
+`/custos/in/` are pre-created (owned by `sidecar:sidecar`) so ARM can
+mount tmpfs volumes over them without `chown` gymnastics.
+
+CI builds the image on every push to `main` and on pull requests
+that touch `src/services/connector-sidecar/**`. On pull requests the
+image is built but not pushed (forked-PR `GITHUB_TOKEN`s cannot write
+to `ghcr.io`). On `main` the build is pushed with two tags:
+
+| Tag | When |
+|---|---|
+| `:dev`        | `push` to `main` (overwrites the previous build) |
+| `:sha-<sha>`  | `push` to `main`, immutable |
+
+### Standalone integration harness
+
+[`tests/test_e2e.py`](tests/test_e2e.py) spins up the production
+entrypoint wiring (both the UDS server and the mTLS control server,
+sharing one `RevocationRegistry` and one `LeaseGateway`) plus a fake
+Connector Service stub on a free TCP port and exercises the full
+lease lifecycle in one test run:
+
+1. `GET /v1/token` → 200, lease envelope.
+2. `POST /v1/token/refresh` → 200, same `leaseId`.
+3. `GET /v1/token` again → 200, second lease.
+4. mTLS `POST /sidecar-admin/v1/revoke` for lease #1 → 200.
+5. `POST /v1/token/refresh` for lease #1 → 410 `lease-revoked` (no
+   CS round-trip — registry hit).
+6. `POST /v1/token/release` for lease #1 → 410 `lease-revoked`.
+7. `POST /v1/token/release` for lease #2 → 204.
+
+Marked `@pytest.mark.integration` so it stays out of the default
+unit-test gate; run with `pytest -m integration`.

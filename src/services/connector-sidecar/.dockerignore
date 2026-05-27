@@ -1,0 +1,47 @@
+# Dockerignore for the connector-sidecar image build context.
+#
+# Keeps the build context small and deterministic. The Dockerfile
+# only needs ``pyproject.toml``, ``README.md`` and ``src/``; tests,
+# caches and editor scratch dirs are excluded.
+
+# Editor / OS noise
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Python build artefacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Tests are not needed at runtime. The CI image-build job and any
+# ``docker build`` invocation produces a runtime-only image; the
+# E2E harness runs against ``python -m custos_sidecar`` from the
+# checked-out source tree, not against an image-built copy of
+# ``tests/``.
+tests/
+
+# Local Docker scratch
+Dockerfile.local
+docker-compose*.yml
+
+# Git
+.git/
+.gitignore
