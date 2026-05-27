@@ -5,12 +5,14 @@
 # Multi-stage build:
 #
 #   * ``builder`` — python:3.11-slim. Installs build prerequisites and
-#     produces a wheel for ``custos-connector-sidecar`` plus its
-#     runtime dependencies (fastapi, uvicorn, pydantic, httpx,
-#     opentelemetry-api).
-#   * ``runtime`` — python:3.11-slim. Copies the resolved
-#     ``site-packages`` and the ``custos-connector-sidecar`` console
-#     script from the builder and runs as a non-root ``sidecar`` user.
+#     produces a wheel for ``custos-connector-sidecar`` plus pre-fetched
+#     wheels for its runtime dependencies (fastapi, uvicorn, pydantic,
+#     httpx, opentelemetry-api) in ``/wheels``.
+#   * ``runtime`` — python:3.11-slim. Copies ``/wheels`` from the
+#     builder into ``/tmp/wheels`` and ``pip install``s the sidecar
+#     wheel offline (``--no-index --find-links``) into a dedicated
+#     virtualenv at ``/opt/custos/venv``. Runs as a non-root
+#     ``sidecar`` user.
 #
 # The sidecar has zero dependencies on other in-repo Python packages
 # (SPL / custos-postgres / etc.); it talks to Connector Service over

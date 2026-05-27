@@ -58,10 +58,14 @@ the control-channel port `9443/tcp`. The UDS path
 `/custos/in/` are pre-created (owned by `sidecar:sidecar`) so ARM can
 mount tmpfs volumes over them without `chown` gymnastics.
 
-CI builds the image on every push to `main` and on pull requests
-that touch `src/services/connector-sidecar/**`. On pull requests the
-image is built but not pushed (forked-PR `GITHUB_TOKEN`s cannot write
-to `ghcr.io`). On `main` the build is pushed with two tags:
+CI builds the image as part of the `python-services` workflow, which
+fires on every `push` to `main` and on every pull request that
+touches anything under `src/services/**` (the workflow shares the
+filter across all per-service jobs). The image job runs after the
+sidecar's lint + types + tests and integration jobs succeed. On
+pull requests the image is built but not pushed (forked-PR
+`GITHUB_TOKEN`s cannot write to `ghcr.io`). On `main` the build is
+pushed with two tags:
 
 | Tag | When |
 |---|---|
