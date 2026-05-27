@@ -25,6 +25,17 @@ Phase H adds a second internal-RPC permission:
   capacity-tracked lease bookkeeping (and audit emission) to the
   Connector Service while it mints upstream credentials locally.
 
+Phase J (CONN-IMPL-027) adds two more internal-RPC permissions:
+
+* ``connector:validate`` — ``POST /internal/v1/connectors:validate``.
+  Held by Catalog Service and Workflow Service for the preflight
+  capability + config validation surface; never granted to human
+  operators.
+* ``events:subscribe`` — ``POST /internal/v1/events:subscribe``.
+  Held by the Trigger Service so it can discover the Dapr Pub/Sub
+  subscription metadata (component name, topic, filter spec) for
+  ``custos.connector.events``; never granted to human operators.
+
 Connector Service enforces by *name only*. The role hierarchy and binding
 rules belong to the Auth Service (COMP-002); this module is the single
 source of truth for the permission strings so the names appearing in
@@ -55,6 +66,17 @@ CONNECTOR_BIND: Final[str] = "connector:bind"
 #: to human operators.
 CONNECTOR_LEASE_MINT: Final[str] = "connector:lease-mint"
 
+#: ``POST /internal/v1/connectors:validate`` (CONN-IMPL-027). Held by
+#: Catalog Service and Workflow Service for the preflight capability +
+#: config validation surface; never granted to human operators.
+CONNECTOR_VALIDATE: Final[str] = "connector:validate"
+
+#: ``POST /internal/v1/events:subscribe`` (CONN-IMPL-027). Held by the
+#: Trigger Service so it can discover the Dapr Pub/Sub subscription
+#: metadata for ``custos.connector.events``; never granted to human
+#: operators.
+EVENTS_SUBSCRIBE: Final[str] = "events:subscribe"
+
 #: The full set of permissions the design declares for this service. Useful
 #: for tests that build an "admin" call-context header carrying everything.
 ALL_PERMISSIONS: Final[tuple[str, ...]] = (
@@ -63,6 +85,8 @@ ALL_PERMISSIONS: Final[tuple[str, ...]] = (
     CONNECTOR_BIND,
     CONNECTOR_LEASE_MINT,
     CONNECTOR_READ,
+    CONNECTOR_VALIDATE,
+    EVENTS_SUBSCRIBE,
 )
 
 
@@ -73,4 +97,6 @@ __all__ = [
     "CONNECTOR_BIND",
     "CONNECTOR_LEASE_MINT",
     "CONNECTOR_READ",
+    "CONNECTOR_VALIDATE",
+    "EVENTS_SUBSCRIBE",
 ]

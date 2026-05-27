@@ -41,6 +41,7 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from typing import Protocol, cast
 
+import httpx
 from custos_spl import MigrationRequired
 from custos_spl.interfaces.catalog_store import CatalogStoreProvider
 from custos_spl.interfaces.connector_instance_store import (
@@ -62,10 +63,15 @@ from custos_connector.identity import (
 from custos_connector.instances import InstanceService
 from custos_connector.lease import LeaseManager
 from custos_connector.listen.manager import ListenManager
-from custos_connector.listen.publisher import EventPublisher
+from custos_connector.listen.publisher import (
+    DaprPubSubEventPublisher,
+    EventPublisher,
+    NoOpEventPublisher,
+)
 from custos_connector.runtime import DockerCliHookRunner, PluginInvoker
 from custos_connector.scheduler import PullLoopScheduler
 from custos_connector.settings import Settings
+from custos_connector.validate import ValidateConnectorService
 
 # The interfaces connector-service actually owns. ``custos_spl.check_revisions``
 # checks the global SPL set which is the right thing for the platform-wide
@@ -135,10 +141,10 @@ class Providers:
     startup-wiring :class:`RuntimeError` when called against a service
     missing either field. Pull-mode connector instances continue to
     function without them as long as the CursorService is wired with
-    its own publisher; the lifespan wiring of the Listen Manager and
-    the production Dapr publisher lands in a follow-up
-    (CONN-IMPL-027 Phase J) when the Trigger Service's
-    ``SubscribeEvents`` internal RPC is in place.
+    its own publisher; CONN-IMPL-027 (Phase J) wires the production
+    :class:`DaprPubSubEventPublisher` whenever the deployment sets
+    ``CONN_DAPR_HTTP_ENDPOINT`` so the Trigger Service receives
+    normalized events through Dapr Pub/Sub.
 
     The :class:`InstanceService` entry (CONN-IMPL-014) is optional
     on the dataclass so the test fixtures that only need a subset of
@@ -146,6 +152,12 @@ class Providers:
     instance REST surface (CONN-IMPL-026) requires it; the route
     handlers raise a startup-wiring :class:`RuntimeError` when called
     against a service missing the field.
+
+    The :class:`ValidateConnectorService` entry (CONN-IMPL-027) is
+    optional for the same reason: only the
+    ``POST /internal/v1/connectors:validate`` route reads it, and
+    the route handler raises a startup-wiring :class:`RuntimeError`
+    when called against a service missing the field.
     """
 
     catalog_store: CatalogStoreProvider
@@ -160,6 +172,11 @@ class Providers:
     listen_manager: ListenManager | None = field(default=None)
     event_publisher: EventPublisher | None = field(default=None)
     instance_service: InstanceService | None = field(default=None)
+    validate_service: ValidateConnectorService | None = field(default=None)
+    #: httpx client the lifespan hook closes on shutdown when the
+    #: Dapr Pub/Sub publisher owns it (CONN-IMPL-027). ``None`` when
+    #: the deployment uses the dev :class:`NoOpEventPublisher`.
+    dapr_http_client: httpx.AsyncClient | None = field(default=None)
 
 
 def load_providers(settings: Settings) -> Providers:
@@ -208,6 +225,7 @@ def load_providers(settings: Settings) -> Providers:
     typed_metadata = cast(MetadataStoreProvider, metadata_store)
     typed_lease = cast(LeaseStoreProvider, lease_store)
     identity_registry = load_identity_registry(metadata_store=typed_metadata)
+    event_publisher, dapr_http_client = load_event_publisher(settings=settings)
     return Providers(
         catalog_store=typed_catalog,
         instance_store=typed_instances,
@@ -231,6 +249,12 @@ def load_providers(settings: Settings) -> Providers:
             metadata_store=typed_metadata,
             settings=settings,
         ),
+        validate_service=ValidateConnectorService(
+            catalog_store=typed_catalog,
+            instance_store=typed_instances,
+        ),
+        event_publisher=event_publisher,
+        dapr_http_client=dapr_http_client,
     )
 
 
@@ -272,6 +296,40 @@ def load_identity_registry(
         metadata_store=metadata_store,
         http_transport=transport,
     )
+
+
+def load_event_publisher(
+    *,
+    settings: Settings,
+) -> tuple[EventPublisher, httpx.AsyncClient | None]:
+    """Build the :class:`EventPublisher` the listen path publishes through.
+
+    Returns a ``(publisher, http_client)`` pair so the FastAPI lifespan
+    hook can :meth:`httpx.AsyncClient.aclose` the client on shutdown
+    when the production :class:`DaprPubSubEventPublisher` owns it.
+
+    Wiring rule (CONN-IMPL-027, Phase J):
+
+    * ``CONN_DAPR_HTTP_ENDPOINT`` set → construct
+      :class:`DaprPubSubEventPublisher` against
+      :attr:`Settings.dapr_pubsub_name` and
+      :attr:`Settings.dapr_event_topic` with a dedicated
+      :class:`httpx.AsyncClient` (returned as the second tuple
+      element so the lifespan hook closes it).
+    * ``CONN_DAPR_HTTP_ENDPOINT`` unset → :class:`NoOpEventPublisher`
+      (the dev / test default). ``http_client`` is ``None`` because
+      there is nothing to close.
+    """
+    if not settings.dapr_pubsub_enabled:
+        return NoOpEventPublisher(), None
+    client = httpx.AsyncClient()
+    publisher = DaprPubSubEventPublisher(
+        http_client=client,
+        dapr_endpoint=settings.dapr_http_endpoint,
+        pubsub_name=settings.dapr_pubsub_name,
+        topic=settings.dapr_event_topic,
+    )
+    return publisher, client
 
 
 def load_bind_for_step_service(

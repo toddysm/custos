@@ -596,6 +596,180 @@
         ],
         "title": "_RewindWire",
         "type": "object"
+      },
+      "_SubscribeRequestWire": {
+        "additionalProperties": false,
+        "description": "Wire shape of the SubscribeEvents request body.",
+        "properties": {
+          "connectorInstanceIds": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional filter: subscriber will only act on events whose ``source.instanceId`` is in this list. Empty list narrows to no instances (useful for a no-op subscription handshake); omitted means 'fan out every event the subscriber receives'.",
+            "title": "Connectorinstanceids"
+          }
+        },
+        "title": "_SubscribeRequestWire",
+        "type": "object"
+      },
+      "_SubscribeResponseWire": {
+        "description": "Wire shape of the SubscribeEvents response body.\n\nThe ``workspaceId`` echo lets the subscriber verify it routed the\nrequest through the right call-context (defence-in-depth against\na misconfigured Trigger Service principal mapping).",
+        "properties": {
+          "instanceFilter": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Instancefilter"
+          },
+          "pubsubName": {
+            "title": "Pubsubname",
+            "type": "string"
+          },
+          "topic": {
+            "title": "Topic",
+            "type": "string"
+          },
+          "workspaceId": {
+            "title": "Workspaceid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pubsubName",
+          "topic",
+          "workspaceId"
+        ],
+        "title": "_SubscribeResponseWire",
+        "type": "object"
+      },
+      "_ValidateInstanceWire": {
+        "additionalProperties": false,
+        "description": "Wire shape for the instance-mode preflight body.",
+        "properties": {
+          "connectorInstanceId": {
+            "minLength": 1,
+            "title": "Connectorinstanceid",
+            "type": "string"
+          },
+          "mode": {
+            "const": "instance",
+            "title": "Mode",
+            "type": "string"
+          },
+          "requiredCapabilities": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requiredcapabilities"
+          }
+        },
+        "required": [
+          "mode",
+          "connectorInstanceId"
+        ],
+        "title": "_ValidateInstanceWire",
+        "type": "object"
+      },
+      "_ValidateManifestWire": {
+        "additionalProperties": false,
+        "description": "Wire shape for the manifest-mode preflight body.",
+        "properties": {
+          "credentialsAuthentication": {
+            "additionalProperties": true,
+            "title": "Credentialsauthentication",
+            "type": "object"
+          },
+          "mode": {
+            "const": "manifest",
+            "title": "Mode",
+            "type": "string"
+          },
+          "targetConfig": {
+            "additionalProperties": true,
+            "title": "Targetconfig",
+            "type": "object"
+          },
+          "type": {
+            "minLength": 1,
+            "title": "Type",
+            "type": "string"
+          },
+          "usedCapabilities": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Usedcapabilities"
+          },
+          "version": {
+            "minLength": 1,
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode",
+          "type",
+          "version"
+        ],
+        "title": "_ValidateManifestWire",
+        "type": "object"
+      },
+      "_ValidateResponseWire": {
+        "description": "Wire shape of the success response body.",
+        "properties": {
+          "ok": {
+            "const": true,
+            "default": true,
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "version"
+        ],
+        "title": "_ValidateResponseWire",
+        "type": "object"
       }
     }
   },
@@ -644,6 +818,98 @@
         "summary": "Bind For Step",
         "tags": [
           "binding"
+        ]
+      }
+    },
+    "/internal/v1/connectors:validate": {
+      "post": {
+        "description": "Preflight a connector instance or manifest payload.\n\nWorkspace comes from the call context \u2014 instance-mode lookup\nscopes the row to ``ctx.workspace_id`` and manifest mode runs\nagainst the platform-wide catalog (workspace still carried for\naudit attribution in a follow-up).",
+        "operationId": "validate_connector_internal_v1_connectors_validate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/_ValidateInstanceWire"
+                  },
+                  {
+                    "$ref": "#/components/schemas/_ValidateManifestWire"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/_ValidateResponseWire"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Validate Connector",
+        "tags": [
+          "validate"
+        ]
+      }
+    },
+    "/internal/v1/events:subscribe": {
+      "post": {
+        "description": "Return the Pub/Sub subscription metadata for connector events.\n\nIdempotent and cacheable per\n``(workspace, connectorInstanceIds)`` \u2014 the response only changes\nwhen an operator reconfigures the Helm values for the topic /\npubsub component or scales the publisher down. Trigger Service\nis expected to refresh the metadata on a slow timer and on\nsuccessive 503 responses (Dapr coming online after Connector\nService).",
+        "operationId": "subscribe_events_internal_v1_events_subscribe_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_SubscribeRequestWire"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/_SubscribeResponseWire"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Subscribe Events",
+        "tags": [
+          "subscribe"
         ]
       }
     },

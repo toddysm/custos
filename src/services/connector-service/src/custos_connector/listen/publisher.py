@@ -3,12 +3,11 @@
 Two collaborators live here:
 
 * :class:`EventPublisher` — the Protocol the Listen Manager publishes
-  normalized events through. Concrete implementations
-  (:class:`NoOpEventPublisher`, :class:`RecordingEventPublisher`,
-  :class:`LocalEventBus`) ship for dev / test deployments. The
-  Dapr Pub/Sub HTTP implementation lands in CONN-IMPL-027 (Phase J)
-  when the Trigger Service's ``SubscribeEvents`` internal RPC is
-  in place.
+  normalized events through. Concrete implementations:
+  :class:`NoOpEventPublisher`, :class:`RecordingEventPublisher`,
+  :class:`LocalEventBus` for dev / test deployments, and
+  :class:`DaprPubSubEventPublisher` for the production fan-out path
+  through Dapr Pub/Sub (CONN-IMPL-027, Phase J).
 
 * :class:`PublisherBridge` (returned by :func:`build_publisher_bridge`)
   — the callable that satisfies
@@ -56,13 +55,14 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, Protocol
 
+import httpx
 from custos_spl.ids import WorkspaceId
 
 from custos_connector.audit import (
     audit_event_normalized,
     audit_event_rejected,
 )
-from custos_connector.listen.errors import EventNormalizationError
+from custos_connector.listen.errors import EventNormalizationError, EventPublishError
 from custos_connector.listen.normalizer import (
     DELIVERY_MODE_PULL,
     EventNormalizer,
@@ -76,6 +76,7 @@ if TYPE_CHECKING:
 _LOGGER: Final[logging.Logger] = logging.getLogger("custos_connector.listen.publisher")
 
 __all__ = [
+    "DaprPubSubEventPublisher",
     "EventPublisher",
     "EventPublisherHandler",
     "LocalEventBus",
@@ -120,15 +121,13 @@ class EventPublisher(Protocol):
 
 
 class NoOpEventPublisher:
-    """Default publisher used until CONN-IMPL-027 wires Dapr Pub/Sub.
+    """Dev-mode publisher that logs each event and otherwise does nothing.
 
-    Logs each event at INFO so operators can grep the audit trail and
-    otherwise does nothing. Picked as the default in
-    :class:`custos_connector.providers.Providers` because the
-    Trigger Service does not yet subscribe to
-    ``custos.connector.events``; once it does, deployments swap in
-    the real Dapr publisher and this implementation moves to the
-    test set.
+    Wired by :func:`custos_connector.providers.load_providers` whenever
+    ``CONN_DAPR_HTTP_ENDPOINT`` is unset (single-node dev deployments and
+    the test suite). Production deployments set the env var so the
+    provider factory swaps in :class:`DaprPubSubEventPublisher` instead
+    (CONN-IMPL-027).
     """
 
     async def publish(self, event: NormalizedEvent) -> None:
@@ -180,7 +179,7 @@ class LocalEventBus:
     bridge boundary: a handler that raises does *not* halt cursor
     advance because the bus has already absorbed the error here.
     Operators who need per-handler at-least-once must wire a real
-    Pub/Sub publisher (CONN-IMPL-027) instead.
+    Pub/Sub publisher (:class:`DaprPubSubEventPublisher`) instead.
     """
 
     handlers: list[EventPublisherHandler] = field(default_factory=list)
@@ -205,6 +204,121 @@ class LocalEventBus:
                     "event handler raised; continuing",
                     exc_info=True,
                 )
+
+
+# ---------------------------------------------------------------------------
+# Dapr Pub/Sub publisher — production fan-out path
+# ---------------------------------------------------------------------------
+
+
+#: Default per-request HTTP timeout (seconds) for the Dapr Pub/Sub
+#: publish call. Picked to be well above the in-cluster Dapr round-trip
+#: budget but tight enough that a stuck Dapr sidecar surfaces as a
+#: publish failure quickly (so the cursor stops advancing and the pull
+#: loop retries from the previous committed envelope).
+_DAPR_DEFAULT_TIMEOUT_SEC: Final[float] = 10.0
+
+
+@dataclass(slots=True)
+class DaprPubSubEventPublisher:
+    """Production :class:`EventPublisher` that fans out via Dapr Pub/Sub.
+
+    Posts each :class:`NormalizedEvent` as ``Content-Type:
+    application/json`` to the Dapr sidecar's
+    ``/v1.0/publish/{pubsub_name}/{topic}`` endpoint (see Dapr
+    Pub/Sub HTTP API). The Trigger Service binds its Dapr subscription
+    against the same ``(pubsub_name, topic)`` pair — returned to it by
+    the ``SubscribeEvents`` internal RPC — and filters delivery on
+    ``source.instanceId`` locally so one topic shard fans out to N
+    subscriptions per the design's per-instance ownership model.
+
+    Failure semantics
+    -----------------
+
+    Any non-2xx HTTP response or transport error is wrapped in
+    :class:`EventPublishError` so the publisher contract holds: the
+    :class:`PublisherBridge` re-raises, :meth:`CursorService.tick`
+    refuses to commit the cursor, and the next tick re-emits the
+    batch from the prior committed envelope — preserving the at-
+    least-once delivery guarantee documented at design § Cursor
+    Ownership.
+
+    Lifecycle
+    ---------
+
+    The publisher does **not** own the :class:`httpx.AsyncClient` — it
+    receives an already-constructed client. The FastAPI lifespan hook
+    in :func:`custos_connector.providers.load_providers` builds a
+    dedicated :class:`httpx.AsyncClient` for the Dapr publisher and
+    stores it on :attr:`Providers.dapr_http_client` so the lifespan
+    ``finally`` block can :meth:`aclose` it on shutdown. The identity
+    registry owns a separate :class:`HttpxAsyncHttpClient` for its own
+    outbound calls; the two clients are intentionally not shared
+    because their lifetimes, retry/timeout policies, and shutdown
+    paths are independent.
+    """
+
+    http_client: httpx.AsyncClient
+    dapr_endpoint: str
+    pubsub_name: str
+    topic: str
+    request_timeout_seconds: float = _DAPR_DEFAULT_TIMEOUT_SEC
+    _publish_url: str = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        # Strip trailing slash so the join doesn't produce
+        # ``http://localhost:3500//v1.0/publish/...``.
+        endpoint = self.dapr_endpoint.rstrip("/")
+        if not endpoint:
+            raise ValueError(
+                "DaprPubSubEventPublisher requires a non-empty dapr_endpoint; "
+                "an empty string disables Dapr publishing and the caller should "
+                "wire NoOpEventPublisher instead"
+            )
+        if not self.pubsub_name:
+            raise ValueError("DaprPubSubEventPublisher requires a non-empty pubsub_name")
+        if not self.topic:
+            raise ValueError("DaprPubSubEventPublisher requires a non-empty topic")
+        # ``object.__setattr__`` because the dataclass is ``slots=True``
+        # and we're setting an ``init=False`` field from ``__post_init__``.
+        object.__setattr__(
+            self,
+            "_publish_url",
+            f"{endpoint}/v1.0/publish/{self.pubsub_name}/{self.topic}",
+        )
+
+    async def publish(self, event: NormalizedEvent) -> None:
+        """Publish exactly one normalized event through Dapr Pub/Sub."""
+        wire = event.to_wire()
+        try:
+            response = await self.http_client.post(
+                self._publish_url,
+                json=wire,
+                timeout=self.request_timeout_seconds,
+                headers={"Content-Type": "application/json"},
+            )
+        except httpx.HTTPError as exc:
+            raise EventPublishError(
+                f"Dapr publish failed (transport): {exc!r} "
+                f"(pubsub={self.pubsub_name!r}, topic={self.topic!r})"
+            ) from exc
+        if response.status_code // 100 != 2:
+            # Truncate the body so log payloads stay bounded; the Dapr
+            # sidecar typically returns a short JSON envelope so 200
+            # chars is plenty for diagnostics.
+            body_preview = response.text[:200] if response.text else ""
+            raise EventPublishError(
+                f"Dapr publish failed: status={response.status_code} "
+                f"body={body_preview!r} "
+                f"(pubsub={self.pubsub_name!r}, topic={self.topic!r})"
+            )
+        _LOGGER.debug(
+            "event-published (dapr) event_id=%s event_type=%s pubsub=%s topic=%s",
+            event.event_id,
+            event.event_type,
+            self.pubsub_name,
+            self.topic,
+        )
 
 
 # ---------------------------------------------------------------------------

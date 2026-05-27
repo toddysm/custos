@@ -18,6 +18,7 @@ exercise.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -52,9 +53,17 @@ _ENCODING = "my-encoding-v1"
 
 
 class _FakeListenInvoker:
-    def __init__(self) -> None:
+    def __init__(self, *, hold_gate: asyncio.Event | None = None) -> None:
         self.calls: list[dict[str, Any]] = []
         self._results: list[ListenResult | Exception] = []
+        # Optional barrier: when set, ``listen()`` waits on the event
+        # before returning. Used by the single-writer race test to
+        # guarantee the winner holds the lease long enough for the
+        # loser's ``SELECT ... FOR UPDATE`` to observe the held row
+        # (otherwise the winner's fast in-memory tick + lease release
+        # can finish before the loser's acquire query even reaches
+        # the DB, and the test flakes with two ``ticked`` outcomes).
+        self._hold_gate: asyncio.Event | None = hold_gate
 
     def queue(self, item: ListenResult | Exception) -> None:
         self._results.append(item)
@@ -73,6 +82,8 @@ class _FakeListenInvoker:
                 "cursor_value": None if cursor is None else cursor.value,
             }
         )
+        if self._hold_gate is not None:
+            await self._hold_gate.wait()
         if not self._results:
             raise AssertionError("listen queue empty")
         nxt = self._results.pop(0)
@@ -165,8 +176,15 @@ async def test_two_scheduler_replicas_share_single_writer(pg_dsn: str) -> None:
     try:
         instance = await _seed(pool=pool, instance_id=str(uuid4()))
 
-        invoker_a = _FakeListenInvoker()
-        invoker_b = _FakeListenInvoker()
+        # Shared barrier so the winning replica's listen() blocks
+        # until the loser has had a chance to attempt lease acquire.
+        # Without this, the in-memory invoker finishes so fast that
+        # the lease can be acquired + released before the second
+        # replica's SELECT ... FOR UPDATE even runs, and both
+        # replicas report ``ticked``.
+        hold_gate = asyncio.Event()
+        invoker_a = _FakeListenInvoker(hold_gate=hold_gate)
+        invoker_b = _FakeListenInvoker(hold_gate=hold_gate)
         publisher_a = _RecordingPublisher()
         publisher_b = _RecordingPublisher()
 
@@ -202,9 +220,17 @@ async def test_two_scheduler_replicas_share_single_writer(pg_dsn: str) -> None:
             )
         )
 
-        import asyncio
+        async def _release_after_delay() -> None:
+            # 200ms is generous on GitHub Actions runners but still
+            # finishes well under the 60s lease TTL.
+            await asyncio.sleep(0.2)
+            hold_gate.set()
 
-        result_a, result_b = await asyncio.gather(sched_a.tick_once(), sched_b.tick_once())
+        result_a, result_b, _ = await asyncio.gather(
+            sched_a.tick_once(),
+            sched_b.tick_once(),
+            _release_after_delay(),
+        )
 
         statuses = sorted([result_a.outcomes[0].status, result_b.outcomes[0].status])
         assert statuses == ["lease_busy", "ticked"], (
