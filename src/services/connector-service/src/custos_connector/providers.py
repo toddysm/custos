@@ -38,7 +38,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol, cast
 
 from custos_spl import MigrationRequired
@@ -50,6 +50,7 @@ from custos_spl.interfaces.lease_store import LeaseStoreProvider
 from custos_spl.interfaces.metadata_store import MetadataStoreProvider
 
 from custos_connector.binding import BindForStepService
+from custos_connector.cursor import CursorService
 from custos_connector.identity import (
     AmazonKmsResolver,
     AzureKeyVaultResolver,
@@ -60,6 +61,7 @@ from custos_connector.identity import (
 )
 from custos_connector.lease import LeaseManager
 from custos_connector.runtime import DockerCliHookRunner, PluginInvoker
+from custos_connector.scheduler import PullLoopScheduler
 from custos_connector.settings import Settings
 
 # The interfaces connector-service actually owns. ``custos_spl.check_revisions``
@@ -114,6 +116,15 @@ class Providers:
     RPC — it carries the in-memory idempotency cache that collapses
     concurrent re-binds for the same ``(workspace_id, run_id, step_id,
     attempt)`` onto a single resolve.
+
+    The :class:`CursorService` (CONN-IMPL-022) and the
+    :class:`PullLoopScheduler` (CONN-IMPL-023) entries are optional
+    on the dataclass even though their bodies have shipped, because
+    full lifespan wiring (passing in an :class:`EventPublisher` for
+    the pull loop and managing the scheduler's lifetime) lands as a
+    follow-up. CONN-IMPL-024 (this slice) wires the admin REST surface
+    that reads from them when present — when missing, the admin
+    handlers raise a startup-wiring :class:`RuntimeError`.
     """
 
     catalog_store: CatalogStoreProvider
@@ -123,6 +134,8 @@ class Providers:
     identity_registry: IdentityResolverRegistry
     bind_for_step_service: BindForStepService
     lease_manager: LeaseManager
+    cursor_service: CursorService | None = field(default=None)
+    pull_loop_scheduler: PullLoopScheduler | None = field(default=None)
 
 
 def load_providers(settings: Settings) -> Providers:
