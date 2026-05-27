@@ -149,6 +149,19 @@ EVENT_CURSOR_EXPIRED: Final[str] = "cursor.expired"
 #: encoding and the plugin-declared encoding so operators can correlate
 #: a connector-type upgrade with the migration that needs a rewind.
 EVENT_CURSOR_ENCODING_MISMATCH: Final[str] = "cursor.encoding_mismatch"
+#: CONN-IMPL-024 (Phase I). Emitted by the cursor admin router on a
+#: successful ``POST /v1/workspaces/{ws}/connectors/{id}/cursor:rewind``.
+#: Per design § Pull Cursor Model the SPL ``rewind_cursor`` adapter is
+#: the eventual audit emitter (tracked under #129); until that lands
+#: the connector-service admin router emits the event itself so the
+#: operator surface ships with the canonical audit trail.
+EVENT_CURSOR_REWOUND: Final[str] = "cursor.rewound"
+#: CONN-IMPL-024 (Phase I). Emitted by the pull-loop admin router on a
+#: successful ``POST /v1/workspaces/{ws}/connectors/{id}/pull-loop:pause``.
+EVENT_PULL_LOOP_PAUSED: Final[str] = "connector.pull-loop.paused"
+#: CONN-IMPL-024 (Phase I). Emitted by the pull-loop admin router on a
+#: successful ``POST /v1/workspaces/{ws}/connectors/{id}/pull-loop:resume``.
+EVENT_PULL_LOOP_RESUMED: Final[str] = "connector.pull-loop.resumed"
 
 
 # ---------------------------------------------------------------------------
@@ -1002,6 +1015,101 @@ async def audit_cursor_encoding_mismatch(
     )
 
 
+async def audit_cursor_rewound(
+    metadata_store: MetadataStoreProvider,
+    *,
+    workspace_id: str,
+    actor: str,
+    instance_id: str,
+    from_encoding: str,
+    from_value_fingerprint: str | None,
+    from_value_length: int | None,
+    to_encoding: str,
+    to_value_fingerprint: str | None,
+    to_value_length: int | None,
+    reason: str,
+) -> None:
+    """Emit ``cursor.rewound`` after an operator-initiated rewind.
+
+    Per ``design/components/connector-service/design.md`` § Pull Cursor
+    Model → Admin rewind / replay, the SPL ``rewind_cursor`` adapter
+    is the documented audit emitter for this event. Until that wiring
+    lands (tracked as ``TODO(#129)`` in ``custos_pg``'s metadata
+    adapter) the connector-service admin router emits the event
+    itself, using the same audit-envelope shape as
+    :func:`audit_cursor_advanced` so consumers do not need to special-case
+    the operator path.
+
+    Carries ``from``/``to`` audit envelopes (``encoding``,
+    ``valueFingerprint``, ``valueLength``; never raw ``value``), the
+    operator ``actor`` (call-context ``principal_id``), and the
+    mandatory operator-supplied ``reason``.
+    """
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_CURSOR_REWOUND,
+        actor=actor,
+        subject={"instance_id": instance_id},
+        payload={
+            "from": _cursor_envelope_audit(
+                from_encoding, from_value_fingerprint, from_value_length
+            ),
+            "to": _cursor_envelope_audit(to_encoding, to_value_fingerprint, to_value_length),
+            "reason": reason,
+        },
+    )
+
+
+async def audit_pull_loop_paused(
+    metadata_store: MetadataStoreProvider,
+    *,
+    workspace_id: str,
+    actor: str,
+    instance_id: str,
+    reason: str | None,
+) -> None:
+    """Emit ``connector.pull-loop.paused`` after a successful pause.
+
+    Per design § Operator Admin Surface → Pull-loop lifecycle
+    operations, an operator-initiated ``pull-loop:pause`` produces
+    one ``connector.pull-loop.paused`` audit event carrying the
+    operator identity and the optional free-form reason.
+    """
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_PULL_LOOP_PAUSED,
+        actor=actor,
+        subject={"instance_id": instance_id},
+        payload={"reason": reason},
+    )
+
+
+async def audit_pull_loop_resumed(
+    metadata_store: MetadataStoreProvider,
+    *,
+    workspace_id: str,
+    actor: str,
+    instance_id: str,
+) -> None:
+    """Emit ``connector.pull-loop.resumed`` after a successful resume.
+
+    Per design § Operator Admin Surface → Pull-loop lifecycle
+    operations, an operator-initiated ``pull-loop:resume`` produces
+    one ``connector.pull-loop.resumed`` audit event carrying the
+    operator identity.
+    """
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_PULL_LOOP_RESUMED,
+        actor=actor,
+        subject={"instance_id": instance_id},
+        payload={},
+    )
+
+
 # ---------------------------------------------------------------------------
 # Legacy log-only shim (call-context + authz decision events)
 # ---------------------------------------------------------------------------
@@ -1042,6 +1150,7 @@ __all__ = [
     "EVENT_CURSOR_ADVANCED",
     "EVENT_CURSOR_ENCODING_MISMATCH",
     "EVENT_CURSOR_EXPIRED",
+    "EVENT_CURSOR_REWOUND",
     "EVENT_HEALTH_CHECK_COMPLETED",
     "EVENT_HEALTH_CHECK_INVOKED",
     "EVENT_IDENTITY_FAILED",
@@ -1057,12 +1166,15 @@ __all__ = [
     "EVENT_LEASE_RELEASED",
     "EVENT_LEASE_REVOKED",
     "EVENT_LEASE_REVOKE_REQUESTED",
+    "EVENT_PULL_LOOP_PAUSED",
+    "EVENT_PULL_LOOP_RESUMED",
     "audit_binding_created",
     "audit_binding_rejected",
     "audit_capability_deprecated",
     "audit_cursor_advanced",
     "audit_cursor_encoding_mismatch",
     "audit_cursor_expired",
+    "audit_cursor_rewound",
     "audit_health_check_completed",
     "audit_health_check_invoked",
     "audit_identity_failed",
@@ -1078,6 +1190,8 @@ __all__ = [
     "audit_lease_released",
     "audit_lease_revoke_requested",
     "audit_lease_revoked",
+    "audit_pull_loop_paused",
+    "audit_pull_loop_resumed",
     "emit_event",
     "logger",
 ]

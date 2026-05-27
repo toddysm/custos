@@ -712,3 +712,27 @@ def _resolve_committed_value(
     if next_cursor is None:
         return previous_persisted
     return _envelope_value_to_persisted(next_cursor.value)
+
+
+# ---------------------------------------------------------------------------
+# Package-internal public re-exports (CONN-IMPL-024)
+# ---------------------------------------------------------------------------
+
+#: Public alias of :func:`_envelope_value_to_persisted` for the cursor
+#: admin router (:mod:`custos_connector.cursor.router`). The underscore
+#: helper remains the source of truth so the tick path stays untouched;
+#: the alias gives the router a stable name to import without reaching
+#: across the module-private boundary.
+encode_envelope_value = _envelope_value_to_persisted
+
+#: Public alias of :func:`_fingerprint_persisted` for the cursor admin
+#: router. ``None`` for the uninitialized sentinel.
+fingerprint_persisted_value = _fingerprint_persisted
+
+#: Public alias of :func:`_length_persisted` for the cursor admin
+#: router. Byte-length; ``None`` for the uninitialized sentinel.
+persisted_value_byte_length = _length_persisted
+
+#: Public alias of the persisted "never written" sentinel used by the
+#: cursor admin router when an operator rewinds ``to: "beginning"``.
+UNINITIALIZED_PERSISTED_CURSOR = _UNINITIALIZED_PERSISTED

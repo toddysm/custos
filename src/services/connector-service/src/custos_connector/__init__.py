@@ -29,6 +29,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from custos_connector.binding import binding_router
+from custos_connector.cursor.router import router as cursor_admin_router
 from custos_connector.health import router as health_router
 from custos_connector.lease.router import router as lease_router
 from custos_connector.middleware import (
@@ -135,6 +136,7 @@ def create_app(
     app.include_router(health_router)
     app.include_router(binding_router)
     app.include_router(lease_router)
+    app.include_router(cursor_admin_router)
     return app
 
 
