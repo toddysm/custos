@@ -25,9 +25,9 @@ pattern).
 
 Successful response: ``200 {"ok": true, "type": "...", "version": "..."}``.
 Lookup misses: ``404`` with code ``connector.instance_not_found`` or
-``connector.type_not_registered``. Validation failures: ``400`` with
-code ``connector.instance_config_invalid`` and a sibling ``issues``
-array carrying every collected issue (matching the public
+``connector.instance_type_not_registered``. Validation failures:
+``400`` with code ``connector.instance_config_invalid`` and a sibling
+``issues`` array carrying every collected issue (matching the public
 :func:`custos_connector.api.instances._validation_error_response`
 shape so cross-surface tooling parses one schema).
 """

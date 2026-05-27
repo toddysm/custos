@@ -248,10 +248,14 @@ class DaprPubSubEventPublisher:
 
     The publisher does **not** own the :class:`httpx.AsyncClient` — it
     receives an already-constructed client. The FastAPI lifespan hook
-    in :func:`custos_connector.providers.load_providers` builds one
-    shared httpx client for every outbound HTTP collaborator
-    (identity resolvers, Dapr publisher) and closes it on shutdown so
-    we don't accidentally leak connections per subsystem.
+    in :func:`custos_connector.providers.load_providers` builds a
+    dedicated :class:`httpx.AsyncClient` for the Dapr publisher and
+    stores it on :attr:`Providers.dapr_http_client` so the lifespan
+    ``finally`` block can :meth:`aclose` it on shutdown. The identity
+    registry owns a separate :class:`HttpxAsyncHttpClient` for its own
+    outbound calls; the two clients are intentionally not shared
+    because their lifetimes, retry/timeout policies, and shutdown
+    paths are independent.
     """
 
     http_client: httpx.AsyncClient

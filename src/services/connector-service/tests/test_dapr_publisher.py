@@ -138,7 +138,8 @@ async def test_publish_wraps_transport_errors() -> None:
     assert "transport" in str(exc_info.value).lower()
 
 
-def test_publisher_rejects_empty_endpoint() -> None:
+@pytest.mark.asyncio
+async def test_publisher_rejects_empty_endpoint() -> None:
     client = httpx.AsyncClient()
     try:
         with pytest.raises(ValueError, match="dapr_endpoint"):
@@ -149,27 +150,34 @@ def test_publisher_rejects_empty_endpoint() -> None:
                 topic="custos.connector.events",
             )
     finally:
-        # Sync test — close the client via the synchronous path.
-        client.is_closed  # noqa: B018 — touch attribute to keep mypy quiet
+        await client.aclose()
 
 
-def test_publisher_rejects_empty_pubsub_name() -> None:
+@pytest.mark.asyncio
+async def test_publisher_rejects_empty_pubsub_name() -> None:
     client = httpx.AsyncClient()
-    with pytest.raises(ValueError, match="pubsub_name"):
-        DaprPubSubEventPublisher(
-            http_client=client,
-            dapr_endpoint="http://localhost:3500",
-            pubsub_name="",
-            topic="custos.connector.events",
-        )
+    try:
+        with pytest.raises(ValueError, match="pubsub_name"):
+            DaprPubSubEventPublisher(
+                http_client=client,
+                dapr_endpoint="http://localhost:3500",
+                pubsub_name="",
+                topic="custos.connector.events",
+            )
+    finally:
+        await client.aclose()
 
 
-def test_publisher_rejects_empty_topic() -> None:
+@pytest.mark.asyncio
+async def test_publisher_rejects_empty_topic() -> None:
     client = httpx.AsyncClient()
-    with pytest.raises(ValueError, match="topic"):
-        DaprPubSubEventPublisher(
-            http_client=client,
-            dapr_endpoint="http://localhost:3500",
-            pubsub_name="custos-pubsub",
-            topic="",
-        )
+    try:
+        with pytest.raises(ValueError, match="topic"):
+            DaprPubSubEventPublisher(
+                http_client=client,
+                dapr_endpoint="http://localhost:3500",
+                pubsub_name="custos-pubsub",
+                topic="",
+            )
+    finally:
+        await client.aclose()
