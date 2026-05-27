@@ -320,8 +320,16 @@ async def test_get_cursor_returns_redacted_envelope() -> None:
         json.dumps({"offset": 42}, sort_keys=True, separators=(",", ":")).encode("utf-8")
     )
     # Redaction: the raw value MUST NOT appear anywhere in the response.
+    # We assert the JSON-encoded form of the value does not leak rather
+    # than checking for the literal ``42`` — the latter is a flaky test
+    # because that pair of digits regularly appears in SHA-256 hex,
+    # UUIDs, and ISO timestamps that legitimately ship in the response.
     assert "value" not in body
-    assert "42" not in resp.text
+    raw_value_fragment = json.dumps({"offset": 42}, sort_keys=True, separators=(",", ":"))
+    assert raw_value_fragment not in resp.text
+    # The JSON key inside the raw value is also a useful redaction
+    # tripwire because no field in the redacted wire model contains
+    # the substring "offset".
     assert "offset" not in resp.text
 
 
@@ -338,7 +346,30 @@ async def test_get_cursor_404_when_no_row_yet() -> None:
             headers=_ctx_header(permissions=[CONNECTOR_READ]),
         )
     assert resp.status_code == 404, resp.text
-    assert resp.json()["detail"]["error"]["code"] == "connector.cursor.not_found"
+    assert resp.json()["error"]["code"] == "connector.cursor.not_found"
+
+
+@pytest.mark.asyncio
+async def test_get_cursor_404_when_instance_does_not_exist() -> None:
+    """A request for an unknown ``instance_id`` returns ``connector.instance_not_found``.
+
+    Regression guard for the PR-339 review: previously the handler
+    conflated "instance row missing" with "instance exists but has
+    never ticked", surfacing both as ``connector.cursor.not_found``
+    with a misleading "connector has never ticked" detail. The
+    instance-existence check now runs before the cursor read and
+    returns a distinct code so operators / tooling can tell the two
+    cases apart.
+    """
+    providers = _build_providers()
+    # Deliberately do NOT seed a catalog row or an instance row.
+    with _make_client(providers=providers) as (client, _):
+        resp = client.get(
+            f"/v1/workspaces/{_WORKSPACE}/connectors/does-not-exist/cursor",
+            headers=_ctx_header(permissions=[CONNECTOR_READ]),
+        )
+    assert resp.status_code == 404, resp.text
+    assert resp.json()["error"]["code"] == "connector.instance_not_found"
 
 
 @pytest.mark.asyncio
@@ -369,7 +400,7 @@ async def test_get_cursor_403_when_path_workspace_does_not_match_ctx() -> None:
             headers=_ctx_header(workspace_id=_WORKSPACE, permissions=[CONNECTOR_READ]),
         )
     assert resp.status_code == 403, resp.text
-    assert resp.json()["detail"]["error"]["code"] == "connector.workspace_mismatch"
+    assert resp.json()["error"]["code"] == "connector.workspace_mismatch"
 
 
 # ---------------------------------------------------------------------------
@@ -518,7 +549,7 @@ async def test_rewind_rejects_encoding_mismatch_400() -> None:
             headers=_ctx_header(),
         )
     assert resp.status_code == 400, resp.text
-    assert resp.json()["detail"]["error"]["code"] == "connector.cursor.encoding_mismatch"
+    assert resp.json()["error"]["code"] == "connector.cursor.encoding_mismatch"
     # No ``cursor.rewound`` audit emitted on the rejected path.
     assert _events_of(providers.metadata_store, EVENT_CURSOR_REWOUND) == []  # type: ignore[arg-type]
 
@@ -554,7 +585,28 @@ async def test_rewind_404_when_no_cursor_row_yet() -> None:
             headers=_ctx_header(),
         )
     assert resp.status_code == 404, resp.text
-    assert resp.json()["detail"]["error"]["code"] == "connector.cursor.not_found"
+    assert resp.json()["error"]["code"] == "connector.cursor.not_found"
+
+
+@pytest.mark.asyncio
+async def test_rewind_404_when_instance_does_not_exist() -> None:
+    """Rewind against an unknown instance returns ``connector.instance_not_found``.
+
+    Mirrors :func:`test_get_cursor_404_when_instance_does_not_exist`
+    so the rewind endpoint surfaces the same distinct code for an
+    unknown instance vs. an instance that exists but has never
+    ticked.
+    """
+    providers = _build_providers()
+    # No catalog / instance row seeded.
+    with _make_client(providers=providers) as (client, _):
+        resp = client.post(
+            f"/v1/workspaces/{_WORKSPACE}/connectors/does-not-exist/cursor:rewind",
+            json={"to": "beginning", "reason": "no-op"},
+            headers=_ctx_header(),
+        )
+    assert resp.status_code == 404, resp.text
+    assert resp.json()["error"]["code"] == "connector.instance_not_found"
 
 
 @pytest.mark.asyncio
@@ -587,7 +639,7 @@ async def test_rewind_403_when_workspace_path_mismatch() -> None:
             headers=_ctx_header(workspace_id=_WORKSPACE),
         )
     assert resp.status_code == 403, resp.text
-    assert resp.json()["detail"]["error"]["code"] == "connector.workspace_mismatch"
+    assert resp.json()["error"]["code"] == "connector.workspace_mismatch"
 
 
 # ---------------------------------------------------------------------------
@@ -744,4 +796,4 @@ async def test_resume_403_when_workspace_path_mismatch() -> None:
             headers=_ctx_header(workspace_id=_WORKSPACE),
         )
     assert resp.status_code == 403, resp.text
-    assert resp.json()["detail"]["error"]["code"] == "connector.workspace_mismatch"
+    assert resp.json()["error"]["code"] == "connector.workspace_mismatch"

@@ -43,8 +43,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, cast
 
 from custos_spl.ids import ConnectorInstanceId, WorkspaceId
+from custos_spl.interfaces.connector_instance_store import ConnectorInstanceStoreProvider
 from custos_spl.interfaces.metadata_store import MetadataStoreProvider
-from fastapi import APIRouter, Depends, HTTPException, Path, Request
+from fastapi import APIRouter, Depends, Path, Request
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.responses import JSONResponse, Response
 
@@ -139,28 +140,72 @@ class _PullLoopPauseWire(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _enforce_workspace(ctx: CallContext, ws: str) -> None:
-    """Reject the request if the ``{ws}`` path does not match the call-context.
+def _error_response(*, status_code: int, code: str, detail: str) -> JSONResponse:
+    """Render the canonical connector-service error envelope.
 
-    Returns ``None`` on a successful check; raises
-    :class:`HTTPException` 403 ``connector.workspace_mismatch``
-    otherwise. The call-context's ``workspace_id`` is the source of
-    truth — the URL path segment is an additional guard for log /
-    tooling clarity.
+    All endpoints under this router share the ``{"error": {"code",
+    "detail"}}`` shape used by the binding and lease routers (the
+    same envelope the sidecar's ``LeaseGateway`` unwraps), so
+    clients never need to special-case cursor admin errors.
+    """
+    return JSONResponse(
+        status_code=status_code,
+        content={"error": {"code": code, "detail": detail}},
+    )
+
+
+def _workspace_mismatch_response(ctx: CallContext, ws: str) -> JSONResponse | None:
+    """Return a 403 envelope when the URL workspace does not match the call-context.
+
+    Returns ``None`` on a successful check; the caller treats a
+    non-``None`` return as the response to short-circuit on. The
+    call-context's ``workspace_id`` is the source of truth — the
+    URL path segment is an additional guard for log / tooling
+    clarity.
     """
     if ctx.workspace_id != ws:
-        raise HTTPException(
+        return _error_response(
             status_code=403,
-            detail={
-                "error": {
-                    "code": _WORKSPACE_MISMATCH_CODE,
-                    "detail": (
-                        f"call context workspace {ctx.workspace_id!r} does not match "
-                        f"URL workspace {ws!r}"
-                    ),
-                }
-            },
+            code=_WORKSPACE_MISMATCH_CODE,
+            detail=(
+                f"call context workspace {ctx.workspace_id!r} does not match URL workspace {ws!r}"
+            ),
         )
+    return None
+
+
+async def _instance_not_found_response(
+    instance_store: ConnectorInstanceStoreProvider,
+    ws: str,
+    instance_id: str,
+) -> JSONResponse | None:
+    """Return a 404 envelope when the connector instance row is missing.
+
+    Distinguishes "instance does not exist" (returns
+    ``connector.instance_not_found``) from "instance exists but has
+    never ticked" (handled by the per-endpoint cursor-row check,
+    which returns ``connector.cursor.not_found``). Without this
+    disambiguation both cases would surface as the same
+    ``connector.cursor.not_found`` 404 with a "connector has never
+    ticked" detail, which is misleading for a genuinely unknown
+    instance.
+    """
+    instance = await instance_store.get_connector_instance(
+        WorkspaceId(ws), ConnectorInstanceId(instance_id)
+    )
+    if instance is None:
+        return _error_response(
+            status_code=404,
+            code="connector.instance_not_found",
+            detail=f"connector instance {instance_id!r} not found in workspace {ws!r}",
+        )
+    return None
+
+
+def _resolve_instance_store(request: Request) -> ConnectorInstanceStoreProvider:
+    """Pull :class:`ConnectorInstanceStoreProvider` off ``app.state.providers``."""
+    providers = cast("Providers", request.app.state.providers)
+    return providers.instance_store
 
 
 def _resolve_metadata_store(request: Request) -> MetadataStoreProvider:
@@ -263,15 +308,23 @@ async def read_cursor(
 ) -> Response:
     """Read the current cursor envelope (redacted).
 
-    Returns 200 with the redacted envelope; 404 if no cursor row has
-    been written yet for the instance (the connector has never
-    ticked). The ``encoding`` field is sourced from the connector
-    type's current manifest, not from the persisted row — a
-    connector-type that has bumped its ``cursorEncoding`` will report
-    the new encoding even though the persisted value is still in the
-    old format. The next tick will surface the mismatch.
+    Returns 200 with the redacted envelope; 404
+    ``connector.instance_not_found`` if the instance row does not
+    exist; 404 ``connector.cursor.not_found`` if the instance
+    exists but the connector has never ticked. The ``encoding``
+    field is sourced from the connector type's current manifest,
+    not from the persisted row — a connector-type that has bumped
+    its ``cursorEncoding`` will report the new encoding even though
+    the persisted value is still in the old format. The next tick
+    will surface the mismatch.
     """
-    _enforce_workspace(ctx, ws)
+    mismatch = _workspace_mismatch_response(ctx, ws)
+    if mismatch is not None:
+        return mismatch
+    instance_store = _resolve_instance_store(request)
+    missing_instance = await _instance_not_found_response(instance_store, ws, instance_id)
+    if missing_instance is not None:
+        return missing_instance
     cursor_service = _resolve_cursor_service(request)
     try:
         envelope = await cursor_service.read_envelope(ws, instance_id)
@@ -281,27 +334,19 @@ async def read_cursor(
         # surfaces as a 404 because the instance _does_ exist; this
         # is an internal misconfiguration the operator needs to fix
         # in the catalog. Return 409 with the diagnostic message.
-        raise HTTPException(
+        return _error_response(
             status_code=409,
-            detail={
-                "error": {
-                    "code": "connector.cursor.unavailable",
-                    "detail": str(exc),
-                }
-            },
-        ) from exc
+            code="connector.cursor.unavailable",
+            detail=str(exc),
+        )
     if envelope is None:
-        raise HTTPException(
+        return _error_response(
             status_code=404,
-            detail={
-                "error": {
-                    "code": "connector.cursor.not_found",
-                    "detail": (
-                        f"no cursor row for workspace {ws!r} instance {instance_id!r} "
-                        "(connector has never ticked)"
-                    ),
-                }
-            },
+            code="connector.cursor.not_found",
+            detail=(
+                f"no cursor row for workspace {ws!r} instance {instance_id!r} "
+                "(connector has never ticked)"
+            ),
         )
     return JSONResponse(status_code=200, content=_envelope_to_redacted_wire(envelope))
 
@@ -339,7 +384,13 @@ async def rewind_cursor(
     drop is logged + counted on ``custos_audit_emit_failures_total``
     but does not fail the request.
     """
-    _enforce_workspace(ctx, ws)
+    mismatch = _workspace_mismatch_response(ctx, ws)
+    if mismatch is not None:
+        return mismatch
+    instance_store = _resolve_instance_store(request)
+    missing_instance = await _instance_not_found_response(instance_store, ws, instance_id)
+    if missing_instance is not None:
+        return missing_instance
     cursor_service = _resolve_cursor_service(request)
     metadata_store = _resolve_metadata_store(request)
 
@@ -352,44 +403,32 @@ async def rewind_cursor(
     try:
         before = await cursor_service.read_envelope(ws, instance_id)
     except CursorInstanceUnavailable as exc:
-        raise HTTPException(
+        return _error_response(
             status_code=409,
-            detail={
-                "error": {
-                    "code": "connector.cursor.unavailable",
-                    "detail": str(exc),
-                }
-            },
-        ) from exc
+            code="connector.cursor.unavailable",
+            detail=str(exc),
+        )
     if before is None:
-        raise HTTPException(
+        return _error_response(
             status_code=404,
-            detail={
-                "error": {
-                    "code": "connector.cursor.not_found",
-                    "detail": (
-                        f"no cursor row for workspace {ws!r} instance {instance_id!r}; "
-                        "wait for the first tick before issuing an admin rewind"
-                    ),
-                }
-            },
+            code="connector.cursor.not_found",
+            detail=(
+                f"no cursor row for workspace {ws!r} instance {instance_id!r}; "
+                "wait for the first tick before issuing an admin rewind"
+            ),
         )
 
     current_encoding = before.encoding
 
     new_persisted, target_encoding = _resolve_rewind_target(body.to, current_encoding)
     if target_encoding != current_encoding:
-        raise HTTPException(
+        return _error_response(
             status_code=400,
-            detail={
-                "error": {
-                    "code": "connector.cursor.encoding_mismatch",
-                    "detail": (
-                        f"rewind envelope encoding {target_encoding!r} does not "
-                        f"match connector-type encoding {current_encoding!r}"
-                    ),
-                }
-            },
+            code="connector.cursor.encoding_mismatch",
+            detail=(
+                f"rewind envelope encoding {target_encoding!r} does not "
+                f"match connector-type encoding {current_encoding!r}"
+            ),
         )
 
     # SPL ``rewind_cursor`` writes the new value, bumps
@@ -454,7 +493,9 @@ async def pause_pull_loop(
     Cursor state and consecutive-failure count are preserved across
     the pause/resume cycle so the loop picks up where it left off.
     """
-    _enforce_workspace(ctx, ws)
+    mismatch = _workspace_mismatch_response(ctx, ws)
+    if mismatch is not None:
+        return mismatch
     scheduler = _resolve_pull_loop_scheduler(request)
     scheduler.pause(ws, instance_id)
     metadata_store = _resolve_metadata_store(request)
@@ -488,7 +529,9 @@ async def resume_pull_loop(
     :class:`CursorInstanceUnavailable` and the scheduler will drop
     the instance from the rotation again.
     """
-    _enforce_workspace(ctx, ws)
+    mismatch = _workspace_mismatch_response(ctx, ws)
+    if mismatch is not None:
+        return mismatch
     scheduler = _resolve_pull_loop_scheduler(request)
     scheduler.resume(ws, instance_id)
     metadata_store = _resolve_metadata_store(request)

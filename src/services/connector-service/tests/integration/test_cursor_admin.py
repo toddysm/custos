@@ -287,7 +287,7 @@ def test_get_cursor_returns_404_when_no_row(
         headers=_ctx_header(),
     )
     assert resp.status_code == 404, resp.text
-    assert resp.json()["detail"]["error"]["code"] == "connector.cursor.not_found"
+    assert resp.json()["error"]["code"] == "connector.cursor.not_found"
 
 
 # ---------------------------------------------------------------------------
@@ -440,7 +440,7 @@ def test_rewind_rejects_encoding_mismatch(
         },
     )
     assert resp.status_code == 400, resp.text
-    assert resp.json()["detail"]["error"]["code"] == "connector.cursor.encoding_mismatch"
+    assert resp.json()["error"]["code"] == "connector.cursor.encoding_mismatch"
 
 
 # ---------------------------------------------------------------------------
@@ -530,4 +530,4 @@ def test_rewind_403_on_workspace_mismatch(
         json={"to": "beginning", "reason": "x"},
     )
     assert resp.status_code == 403, resp.text
-    assert resp.json()["detail"]["error"]["code"] == "connector.workspace_mismatch"
+    assert resp.json()["error"]["code"] == "connector.workspace_mismatch"
