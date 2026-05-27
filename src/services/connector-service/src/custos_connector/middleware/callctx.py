@@ -48,6 +48,15 @@ CALLCTX_HEADER: str = "x-custos-callctx"
 #: Paths the middleware deliberately bypasses (no auth on probes).
 _BYPASS_PATHS: frozenset[str] = frozenset({"/healthz", "/readyz"})
 
+#: Path prefixes the middleware bypasses because they authenticate
+#: externally (e.g. push webhook receivers verifying an HMAC signature
+#: on the request body, not a call-context JWT). The push receiver
+#: mounted at ``POST /v1/webhooks/connectors/{instance_id}/events``
+#: (CONN-IMPL-025) enters the listen pipeline with its own
+#: :class:`custos_connector.listen.signature.SignatureVerifier` and
+#: explicitly does not have an internal call-context.
+_BYPASS_PREFIXES: tuple[str, ...] = ("/v1/webhooks/",)
+
 logger = logging.getLogger(__name__)
 
 
@@ -182,6 +191,8 @@ class CallContextMiddleware(BaseHTTPMiddleware):
         call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
         if request.url.path in _BYPASS_PATHS:
+            return await call_next(request)
+        if any(request.url.path.startswith(prefix) for prefix in _BYPASS_PREFIXES):
             return await call_next(request)
 
         raw_header = request.headers.get(CALLCTX_HEADER)

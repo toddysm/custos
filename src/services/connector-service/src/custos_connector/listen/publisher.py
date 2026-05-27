@@ -1,0 +1,395 @@
+"""Event publisher seam + the shared publisher bridge (CONN-IMPL-025, #308).
+
+Two collaborators live here:
+
+* :class:`EventPublisher` — the Protocol the Listen Manager publishes
+  normalized events through. Concrete implementations
+  (:class:`NoOpEventPublisher`, :class:`RecordingEventPublisher`,
+  :class:`LocalEventBus`) ship for dev / test deployments. The
+  Dapr Pub/Sub HTTP implementation lands in CONN-IMPL-027 (Phase J)
+  when the Trigger Service's ``SubscribeEvents`` internal RPC is
+  in place.
+
+* :class:`PublisherBridge` (returned by :func:`build_publisher_bridge`)
+  — the callable that satisfies
+  :data:`custos_connector.cursor.service.EventPublisher` and is wired
+  into :class:`CursorService` as its tick-time publisher. Same callable
+  is also used by the push receiver
+  (:func:`custos_connector.listen.router.post_events`) so both delivery
+  paths flow through one normalize → audit → publish pipeline. This is
+  what makes the issue #308 acceptance criterion
+  "both paths produce identical normalized envelopes" hold by
+  construction: there is exactly one normalizer call site.
+
+Bridge semantics
+----------------
+
+Per plugin event, the bridge:
+
+1. calls :meth:`EventNormalizer.normalize` with the workspace + instance
+   + delivery mode + batch-shared receive timestamp;
+2. on :class:`EventNormalizationError` (missing eventId, missing
+   eventType, unknown eventType, or malformed object): audits
+   ``event.rejected`` with the stable ``reason`` carried on the
+   exception and the ``batch_index`` of the offending event, then
+   **continues** with the next event. The cursor still advances —
+   poison-pill quarantine per design § 22.4
+   "Push receiver and pull fan-out";
+3. on success: audits ``event.normalized`` and forwards the envelope
+   to the wired :class:`EventPublisher`. If the publisher raises
+   :class:`EventPublishError` (or any other exception), the bridge
+   re-raises so :meth:`CursorService.tick` refuses to commit the
+   cursor (the "MUST raise on partial publish" contract on
+   :data:`custos_connector.cursor.service.EventPublisher`).
+
+Receive-timestamp policy: every event in one batch receives the
+*same* ``source.receivedAt`` value (captured once at the top of the
+bridge call). This keeps per-batch ordering observable in the audit
+log even after fan-out into Pub/Sub.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Final, Protocol
+
+from custos_spl.ids import WorkspaceId
+
+from custos_connector.audit import (
+    audit_event_normalized,
+    audit_event_rejected,
+)
+from custos_connector.listen.errors import EventNormalizationError
+from custos_connector.listen.normalizer import (
+    DELIVERY_MODE_PULL,
+    EventNormalizer,
+    NormalizedEvent,
+)
+
+if TYPE_CHECKING:
+    from custos_spl import MetadataStoreProvider
+    from custos_spl.interfaces.connector_instance_store import ConnectorInstance
+
+_LOGGER: Final[logging.Logger] = logging.getLogger("custos_connector.listen.publisher")
+
+__all__ = [
+    "EventPublisher",
+    "EventPublisherHandler",
+    "LocalEventBus",
+    "NoOpEventPublisher",
+    "PublisherBridge",
+    "RecordingEventPublisher",
+    "build_publisher_bridge",
+]
+
+
+# ---------------------------------------------------------------------------
+# Publisher Protocol + canonical implementations
+# ---------------------------------------------------------------------------
+
+
+class EventPublisher(Protocol):
+    """Downstream sink for normalized connector events.
+
+    Implementations MUST raise on failure so the calling bridge can
+    propagate the error back to :meth:`CursorService.tick` and keep
+    the cursor untouched (the at-least-once contract).
+
+    Implementations SHOULD be idempotent on retry: the connector
+    service may invoke ``publish`` again with the same envelope after
+    a transient failure, and downstream consumers already de-duplicate
+    on :attr:`NormalizedEvent.event_id`.
+    """
+
+    async def publish(self, event: NormalizedEvent) -> None:
+        """Publish exactly one normalized event."""
+        ...
+
+
+class NoOpEventPublisher:
+    """Default publisher used until CONN-IMPL-027 wires Dapr Pub/Sub.
+
+    Logs each event at INFO so operators can grep the audit trail and
+    otherwise does nothing. Picked as the default in
+    :class:`custos_connector.providers.Providers` because the
+    Trigger Service does not yet subscribe to
+    ``custos.connector.events``; once it does, deployments swap in
+    the real Dapr publisher and this implementation moves to the
+    test set.
+    """
+
+    async def publish(self, event: NormalizedEvent) -> None:
+        _LOGGER.info(
+            "event-published (no-op) event_id=%s event_type=%s instance=%s mode=%s",
+            event.event_id,
+            event.event_type,
+            event.source.get("instanceId"),
+            event.source.get("deliveryMode"),
+        )
+
+
+class RecordingEventPublisher:
+    """Test-only publisher that captures every event in :attr:`published`.
+
+    Mirrors the shape of
+    :class:`custos_auth.token_revoked_events.RecordingTokenRevokedPublisher`
+    so test code across services follows one pattern.
+    """
+
+    def __init__(self) -> None:
+        self.published: list[NormalizedEvent] = []
+
+    async def publish(self, event: NormalizedEvent) -> None:
+        self.published.append(event)
+
+
+#: Signature of an in-process event handler attached to
+#: :class:`LocalEventBus`.
+EventPublisherHandler = Callable[[NormalizedEvent], Awaitable[None]]
+
+
+@dataclass(slots=True)
+class LocalEventBus:
+    """In-process publisher that synchronously fans out to local handlers.
+
+    Plays two roles:
+
+    * Implements :class:`EventPublisher` so the listen path can
+      publish through the same interface a real Dapr publisher uses.
+    * Holds a list of subscribed handlers that fire synchronously on
+      :meth:`publish`. This is the in-process fan-out used by the
+      integration test suite (and the future single-replica dev
+      profile) where standing up Dapr would be over-kill.
+
+    Handlers that raise are logged at WARNING and skipped so one
+    misbehaving consumer cannot break the publish path. The bridge's
+    "raise on publish failure" contract is still honored at the
+    bridge boundary: a handler that raises does *not* halt cursor
+    advance because the bus has already absorbed the error here.
+    Operators who need per-handler at-least-once must wire a real
+    Pub/Sub publisher (CONN-IMPL-027) instead.
+    """
+
+    handlers: list[EventPublisherHandler] = field(default_factory=list)
+
+    def subscribe(self, handler: EventPublisherHandler) -> None:
+        """Register ``handler`` to receive every published event."""
+        self.handlers.append(handler)
+
+    async def publish(self, event: NormalizedEvent) -> None:
+        """Deliver ``event`` to every subscribed handler in order."""
+        _LOGGER.info(
+            "event-published (local bus) event_id=%s event_type=%s mode=%s",
+            event.event_id,
+            event.event_type,
+            event.source.get("deliveryMode"),
+        )
+        for handler in self.handlers:
+            try:
+                await handler(event)
+            except Exception:  # guard the publish path
+                _LOGGER.warning(
+                    "event handler raised; continuing",
+                    exc_info=True,
+                )
+
+
+# ---------------------------------------------------------------------------
+# Publisher bridge — the single normalize+audit+publish pipeline
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class BridgeResult:
+    """Summary returned by :meth:`PublisherBridge.process_batch`.
+
+    The pull-tick path discards this (CursorService doesn't read it),
+    but the push receiver uses it to build the HTTP response body
+    (``{accepted, rejected}``).
+    """
+
+    accepted: int
+    rejected: int
+
+
+class PublisherBridge:
+    """Single normalize → audit → publish pipeline used by both paths.
+
+    Wraps an :class:`EventNormalizer`, an :class:`EventPublisher`, and
+    a :class:`MetadataStoreProvider` (for audit emission). Exposes two
+    entry points:
+
+    * :meth:`__call__` — implements the
+      :data:`custos_connector.cursor.service.EventPublisher` Callable
+      contract so :class:`CursorService` can drive the pull-tick path
+      without knowing about the listen module.
+    * :meth:`process_batch` — the explicit version used by the push
+      receiver, which needs the
+      :class:`BridgeResult` counts for its HTTP response.
+
+    Both entry points share one helper (:meth:`_run_batch`) so the
+    pull and push paths cannot drift. This is what makes the
+    "identical normalized envelopes" acceptance criterion structural.
+
+    The ``actor`` field carries the audit-pipeline identity attributed
+    to the publish (``connector-service:listen`` for pull, the
+    authenticated webhook principal for push). The bridge does not
+    re-authenticate; the caller is responsible for handing in an
+    accurate ``actor`` value.
+    """
+
+    __slots__ = (
+        "_actor",
+        "_metadata_store",
+        "_normalizer",
+        "_publisher",
+    )
+
+    def __init__(
+        self,
+        *,
+        normalizer: EventNormalizer,
+        publisher: EventPublisher,
+        metadata_store: MetadataStoreProvider,
+        actor: str,
+    ) -> None:
+        self._normalizer = normalizer
+        self._publisher = publisher
+        self._metadata_store = metadata_store
+        self._actor = actor
+
+    async def __call__(
+        self,
+        workspace_id: WorkspaceId,
+        instance: ConnectorInstance,
+        events: Sequence[Mapping[str, object]],
+    ) -> None:
+        """Pull-tick :class:`EventPublisher` callable.
+
+        Drops the :class:`BridgeResult` because
+        :class:`CursorService` does not consume it.
+        """
+        await self._run_batch(
+            workspace_id=str(workspace_id),
+            instance_id=str(instance.instance_id),
+            events=events,
+            delivery_mode=DELIVERY_MODE_PULL,
+            received_at=datetime.now(UTC),
+        )
+
+    async def process_batch(
+        self,
+        *,
+        workspace_id: str,
+        instance_id: str,
+        events: Sequence[Mapping[str, object]],
+        delivery_mode: str,
+        received_at: datetime,
+    ) -> BridgeResult:
+        """Push-receiver entry point.
+
+        Returns counts the HTTP layer surfaces back to the webhook
+        caller so operators can see at the call site how many events
+        in their POST were quarantined.
+        """
+        return await self._run_batch(
+            workspace_id=workspace_id,
+            instance_id=instance_id,
+            events=events,
+            delivery_mode=delivery_mode,
+            received_at=received_at,
+        )
+
+    async def _run_batch(
+        self,
+        *,
+        workspace_id: str,
+        instance_id: str,
+        events: Sequence[Mapping[str, object]],
+        delivery_mode: str,
+        received_at: datetime,
+    ) -> BridgeResult:
+        accepted = 0
+        rejected = 0
+        for index, raw in enumerate(events):
+            try:
+                normalized = self._normalizer.normalize(
+                    raw,
+                    workspace_id=workspace_id,
+                    instance_id=instance_id,
+                    delivery_mode=delivery_mode,
+                    received_at=received_at,
+                )
+            except EventNormalizationError as err:
+                rejected += 1
+                await audit_event_rejected(
+                    self._metadata_store,
+                    workspace_id=workspace_id,
+                    actor=self._actor,
+                    instance_id=instance_id,
+                    delivery_mode=delivery_mode,
+                    batch_index=index,
+                    reason=err.reason,
+                    event_id=_safe_str(raw, "eventId") if isinstance(raw, Mapping) else None,
+                    event_type=_safe_str(raw, "eventType") if isinstance(raw, Mapping) else None,
+                    detail=err.detail,
+                )
+                continue
+
+            # Publish first, audit-on-success second: if the publish
+            # raises, we have not yet emitted ``event.normalized`` so
+            # the audit log doesn't lie about events that never
+            # actually went out.
+            await self._publisher.publish(normalized)
+            accepted += 1
+            await audit_event_normalized(
+                self._metadata_store,
+                workspace_id=workspace_id,
+                actor=self._actor,
+                instance_id=instance_id,
+                event_id=normalized.event_id,
+                event_type=normalized.event_type,
+                delivery_mode=delivery_mode,
+                batch_index=index,
+            )
+        return BridgeResult(accepted=accepted, rejected=rejected)
+
+
+def build_publisher_bridge(
+    *,
+    normalizer: EventNormalizer,
+    publisher: EventPublisher,
+    metadata_store: MetadataStoreProvider,
+    actor: str = "connector-service:listen",
+) -> PublisherBridge:
+    """Convenience constructor used by the app factory + tests.
+
+    The default ``actor`` matches the pull-tick path. The push
+    receiver constructs its own bridge with the authenticated webhook
+    principal so audit emissions on the push path carry the right
+    identity.
+    """
+    return PublisherBridge(
+        normalizer=normalizer,
+        publisher=publisher,
+        metadata_store=metadata_store,
+        actor=actor,
+    )
+
+
+def _safe_str(raw: Mapping[str, object], key: str) -> str | None:
+    """Return ``raw[key]`` if it is a non-empty string, else ``None``.
+
+    Used by :meth:`PublisherBridge._run_batch` when assembling the
+    ``event.rejected`` audit payload: a present-but-wrong ``eventId``
+    or ``eventType`` is still useful provenance for the operator,
+    while an absent or malformed value collapses to ``None`` so the
+    audit payload never carries garbage.
+    """
+    val = raw.get(key)
+    if isinstance(val, str) and val:
+        return val
+    return None

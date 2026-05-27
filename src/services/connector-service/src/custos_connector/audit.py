@@ -163,6 +163,39 @@ EVENT_PULL_LOOP_PAUSED: Final[str] = "connector.pull-loop.paused"
 #: successful ``POST /v1/workspaces/{ws}/connectors/{id}/pull-loop:resume``.
 EVENT_PULL_LOOP_RESUMED: Final[str] = "connector.pull-loop.resumed"
 
+#: CONN-IMPL-025 (Phase I). Emitted by the push receiver
+#: (:func:`custos_connector.listen.router.post_events`) after a
+#: well-formed ``POST /v1/connectors/{instance_id}/events`` body has
+#: passed signature verification and basic JSON parsing. Carries the
+#: ``delivery_mode`` (always ``"push"`` here, retained for symmetry
+#: with the pull path), the total ``event_count`` in the batch, and a
+#: ``source`` hint identifying the request as webhook-borne.
+#: Per-event ``event.normalized`` / ``event.rejected`` rows still fire
+#: from the shared publisher bridge after this one ``event.received``.
+EVENT_RECEIVED: Final[str] = "event.received"
+#: CONN-IMPL-025 (Phase I). Emitted by the shared publisher bridge
+#: (:func:`custos_connector.listen.publisher.process_batch`) once per
+#: plugin event that passes :class:`EventNormalizer` validation and
+#: was successfully forwarded to the wired
+#: :class:`EventPublisher`. Carries ``event_id``, ``event_type``,
+#: ``delivery_mode`` (``"pull"`` | ``"push"``), and the ``batch_index``
+#: of the event inside its origin batch so operators can reconstruct
+#: per-batch ordering even after fan-out.
+EVENT_NORMALIZED: Final[str] = "event.normalized"
+#: CONN-IMPL-025 (Phase I). Emitted by the shared publisher bridge
+#: whenever :class:`EventNormalizer` raises (missing/empty
+#: ``eventId``, missing/empty ``eventType``, ``eventType`` not in the
+#: connector type's ``events.produced`` catalog, or malformed event
+#: object). Carries a stable ``reason`` code
+#: (``missing-event-id`` | ``missing-event-type`` |
+#: ``unknown-event-type`` | ``malformed``) plus the ``batch_index`` and
+#: the ``event_type`` / partial-``event_id`` if they were
+#: present-but-rejected. The cursor still advances (rejections are
+#: poison-pill quarantined per design §22.4 "Push receiver and pull
+#: fan-out"); operators reading the audit log can choose to halt the
+#: connector via ``pull-loop:pause`` if reject rate spikes.
+EVENT_REJECTED: Final[str] = "event.rejected"
+
 
 # ---------------------------------------------------------------------------
 # Core emission
@@ -1107,6 +1140,160 @@ async def audit_pull_loop_resumed(
         actor=actor,
         subject={"instance_id": instance_id},
         payload={},
+    )
+
+
+async def audit_event_received(
+    metadata_store: MetadataStoreProvider,
+    *,
+    workspace_id: str,
+    actor: str,
+    instance_id: str,
+    delivery_mode: str,
+    event_count: int,
+    source: str,
+) -> None:
+    """Emit ``event.received`` after a push webhook batch arrives.
+
+    Fired by the push receiver
+    (:func:`custos_connector.listen.router.post_events`) once per
+    accepted POST after signature verification and JSON parsing
+    succeed but before any per-event normalization runs. Per-event
+    rows (``event.normalized`` / ``event.rejected``) follow from the
+    shared publisher bridge.
+
+    Args:
+        workspace_id: Workspace owning the connector instance.
+        actor: Authenticated principal (call-context ``principal_id``)
+            credited with the receive — typically a service identity
+            on the inbound webhook path.
+        instance_id: Connector instance the events are routed to.
+        delivery_mode: Always ``"push"`` from the router today;
+            retained as a parameter so future delivery channels (e.g.
+            internal RPC ingest) reuse the same audit shape.
+        event_count: Number of event objects in the parsed batch
+            before any normalization filtering.
+        source: Free-form provenance hint
+            (``"webhook"`` for the push router). Provides a
+            machine-readable discriminator for operators reading audit
+            logs across delivery channels.
+    """
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_RECEIVED,
+        actor=actor,
+        subject={"instance_id": instance_id},
+        payload={
+            "deliveryMode": delivery_mode,
+            "eventCount": event_count,
+            "source": source,
+        },
+    )
+
+
+async def audit_event_normalized(
+    metadata_store: MetadataStoreProvider,
+    *,
+    workspace_id: str,
+    actor: str,
+    instance_id: str,
+    event_id: str,
+    event_type: str,
+    delivery_mode: str,
+    batch_index: int,
+) -> None:
+    """Emit ``event.normalized`` for a single successfully normalized event.
+
+    Fired by the shared publisher bridge
+    (:func:`custos_connector.listen.publisher.process_batch`) once per
+    plugin event that passes :class:`EventNormalizer` validation and
+    was forwarded to the wired :class:`EventPublisher`.
+
+    Args:
+        workspace_id: Workspace owning the connector instance.
+        actor: Authenticated principal credited with the publish.
+        instance_id: Connector instance that produced the event.
+        event_id: Plugin-supplied stable identifier (the same value
+            that gates duplicate suppression downstream in the Trigger
+            Service).
+        event_type: Connector-type catalog token (e.g.
+            ``"oci.image.pushed"``).
+        delivery_mode: ``"pull"`` | ``"push"``.
+        batch_index: Zero-based position of the event inside its
+            origin batch so operators can reconstruct per-batch
+            ordering even after fan-out.
+    """
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_NORMALIZED,
+        actor=actor,
+        subject={"instance_id": instance_id},
+        payload={
+            "eventId": event_id,
+            "eventType": event_type,
+            "deliveryMode": delivery_mode,
+            "batchIndex": batch_index,
+        },
+    )
+
+
+async def audit_event_rejected(
+    metadata_store: MetadataStoreProvider,
+    *,
+    workspace_id: str,
+    actor: str,
+    instance_id: str,
+    delivery_mode: str,
+    batch_index: int,
+    reason: str,
+    event_id: str | None = None,
+    event_type: str | None = None,
+    detail: str | None = None,
+) -> None:
+    """Emit ``event.rejected`` for a single plugin event that failed normalization.
+
+    Fired by the shared publisher bridge when
+    :class:`EventNormalizer` raises. The cursor still advances
+    (rejections are poison-pill quarantined per design § 22.4
+    "Push receiver and pull fan-out"); operators reading the audit
+    log can choose to halt the connector via ``pull-loop:pause`` if
+    reject rate spikes.
+
+    Args:
+        reason: Stable machine-readable code: ``"missing-event-id"``,
+            ``"missing-event-type"``, ``"unknown-event-type"``, or
+            ``"malformed"``. The Trigger Service alerting consumes
+            this code, so do not localise.
+        event_id: The plugin-supplied identifier if present-but-other
+            validation failed; ``None`` for the missing-eventId case.
+        event_type: The plugin-supplied event type if present-but-not
+            in the connector type's ``events.produced`` catalog;
+            ``None`` for the missing-eventType case.
+        detail: Optional free-form detail string carrying the
+            exception message for the ``malformed`` case. Never
+            carries raw payload bytes — only the normalizer error
+            description.
+    """
+    payload: dict[str, Any] = {
+        "deliveryMode": delivery_mode,
+        "batchIndex": batch_index,
+        "reason": reason,
+    }
+    if event_id is not None:
+        payload["eventId"] = event_id
+    if event_type is not None:
+        payload["eventType"] = event_type
+    if detail is not None:
+        payload["detail"] = detail
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_REJECTED,
+        actor=actor,
+        subject={"instance_id": instance_id},
+        payload=payload,
     )
 
 
