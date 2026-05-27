@@ -309,3 +309,147 @@ async def test_bridge_pull_and_push_produce_identical_envelopes() -> None:
     # Only delivery mode differs.
     assert pull_event.source["deliveryMode"] == DELIVERY_MODE_PULL
     assert push_event.source["deliveryMode"] == DELIVERY_MODE_PUSH
+
+
+# ---------------------------------------------------------------------------
+# PublisherBridge — selector mode (per-instance normalizer lookup)
+# ---------------------------------------------------------------------------
+
+
+async def test_bridge_selector_mode_resolves_per_instance() -> None:
+    """The pull path wires one bridge for the whole pod; the bridge
+    MUST select the per-instance normalizer at call time so a tick
+    on one connector type version does not validate against another
+    type's ``produced`` catalog."""
+    metadata = FakeMetadataAdapter()
+    publisher = RecordingEventPublisher()
+
+    type_a_normalizer = EventNormalizer(produced_event_types=("type-a.event",))
+    type_b_normalizer = EventNormalizer(produced_event_types=("type-b.event",))
+    looked_up: list[str] = []
+
+    async def selector(instance: ConnectorInstance) -> EventNormalizer:
+        looked_up.append(instance.type)
+        if instance.type == "type-a":
+            return type_a_normalizer
+        return type_b_normalizer
+
+    bridge = PublisherBridge(
+        normalizer_selector=selector,
+        publisher=publisher,
+        metadata_store=metadata,  # type: ignore[arg-type]
+        actor="connector-service:listen",
+    )
+
+    # Two instances of two different types share one bridge.
+    instance_a = ConnectorInstance(
+        workspace_id=WorkspaceId(_WORKSPACE),
+        instance_id=ConnectorInstanceId("inst-a"),
+        type="type-a",
+        version="1.0.0",
+        name="a",
+        lease_ttl_seconds=300,
+        enabled=True,
+        status="enabled",
+        health_status="healthy",
+        target_config={},
+        credentials_authentication={},
+        used_capabilities=(),
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    instance_b = ConnectorInstance(
+        workspace_id=WorkspaceId(_WORKSPACE),
+        instance_id=ConnectorInstanceId("inst-b"),
+        type="type-b",
+        version="1.0.0",
+        name="b",
+        lease_ttl_seconds=300,
+        enabled=True,
+        status="enabled",
+        health_status="healthy",
+        target_config={},
+        credentials_authentication={},
+        used_capabilities=(),
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    await bridge(
+        WorkspaceId(_WORKSPACE),
+        instance_a,
+        [{"eventId": "ea", "eventType": "type-a.event"}],
+    )
+    await bridge(
+        WorkspaceId(_WORKSPACE),
+        instance_b,
+        [{"eventId": "eb", "eventType": "type-b.event"}],
+    )
+
+    assert looked_up == ["type-a", "type-b"]
+    assert [e.event_type for e in publisher.published] == [
+        "type-a.event",
+        "type-b.event",
+    ]
+
+    # Cross-type rejection: a type-b event arriving on a type-a tick
+    # would be rejected because the selector picks type_a_normalizer
+    # whose catalog only knows "type-a.event".
+    await bridge(
+        WorkspaceId(_WORKSPACE),
+        instance_a,
+        [{"eventId": "ec", "eventType": "type-b.event"}],
+    )
+    rejected_audits = [e for _, e in metadata.append_audit_calls if e.event_type == EVENT_REJECTED]
+    assert len(rejected_audits) == 1
+    assert rejected_audits[0].payload["reason"] == "unknown-event-type"
+
+
+async def test_bridge_requires_exactly_one_normalizer() -> None:
+    """Constructor MUST accept exactly one of normalizer / normalizer_selector."""
+    publisher = RecordingEventPublisher()
+    metadata = FakeMetadataAdapter()
+    with pytest.raises(ValueError, match="exactly one"):
+        PublisherBridge(
+            publisher=publisher,
+            metadata_store=metadata,  # type: ignore[arg-type]
+            actor="x",
+        )
+
+    async def selector(_inst: ConnectorInstance) -> EventNormalizer:
+        return EventNormalizer(produced_event_types=())
+
+    with pytest.raises(ValueError, match="exactly one"):
+        PublisherBridge(
+            normalizer=EventNormalizer(produced_event_types=()),
+            normalizer_selector=selector,
+            publisher=publisher,
+            metadata_store=metadata,  # type: ignore[arg-type]
+            actor="x",
+        )
+
+
+async def test_bridge_selector_mode_process_batch_raises() -> None:
+    """``process_batch`` requires a fixed normalizer; calling it on a
+    selector-mode bridge is a programmer error (the push path always
+    builds its own per-request bridge with a fixed normalizer)."""
+    metadata = FakeMetadataAdapter()
+    publisher = RecordingEventPublisher()
+
+    async def selector(_inst: ConnectorInstance) -> EventNormalizer:
+        return EventNormalizer(produced_event_types=_CATALOG)
+
+    bridge = PublisherBridge(
+        normalizer_selector=selector,
+        publisher=publisher,
+        metadata_store=metadata,  # type: ignore[arg-type]
+        actor="connector-service:listen",
+    )
+    with pytest.raises(RuntimeError, match="fixed normalizer"):
+        await bridge.process_batch(
+            workspace_id=_WORKSPACE,
+            instance_id=_INSTANCE_ID,
+            events=[{"eventId": "e1", "eventType": "oci.image.pushed"}],
+            delivery_mode=DELIVERY_MODE_PUSH,
+            received_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )

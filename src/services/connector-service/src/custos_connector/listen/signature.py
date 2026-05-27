@@ -133,8 +133,11 @@ class AllowAllSignatureVerifier:
     """Test-only verifier that accepts every request.
 
     Constructor takes a mandatory ``test_only`` flag to prevent
-    accidental production wiring. The flag has no runtime effect
-    beyond the assertion; the comment is a guard for code review.
+    accidental production wiring. The flag is validated by an explicit
+    runtime check (NOT ``assert``) so the guard still fires under
+    ``python -O`` — an environment where assertions are stripped
+    would otherwise silently accept ``test_only=False`` and start
+    accepting every webhook in production.
     Production deployments MUST use :class:`HmacSignatureVerifier`
     or :class:`RejectAllSignatureVerifier`.
     """
@@ -144,11 +147,13 @@ class AllowAllSignatureVerifier:
         # form forces every call site to spell out "yes, this is a
         # test"; a search for ``AllowAllSignatureVerifier`` in a code
         # review of a production wiring change is then a stop-the-line
-        # signal.
-        assert test_only, (
-            "AllowAllSignatureVerifier must not be used in production. "
-            "Use RejectAllSignatureVerifier (default) or HmacSignatureVerifier."
-        )
+        # signal. Using ``raise`` instead of ``assert`` so this guard
+        # survives ``PYTHONOPTIMIZE`` / ``python -O``.
+        if test_only is not True:
+            raise RuntimeError(
+                "AllowAllSignatureVerifier must not be used in production. "
+                "Use RejectAllSignatureVerifier (default) or HmacSignatureVerifier."
+            )
 
     async def verify(
         self,

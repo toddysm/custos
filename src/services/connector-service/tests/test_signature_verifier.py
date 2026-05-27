@@ -44,7 +44,11 @@ async def test_reject_all_denies_everything() -> None:
 
 
 async def test_allow_all_requires_test_only_flag() -> None:
-    with pytest.raises(AssertionError):
+    # Use ``raise RuntimeError`` (not ``assert``) so the guard fires
+    # even under ``python -O`` / ``PYTHONOPTIMIZE=1``. Any of those
+    # environments would silently strip an ``assert`` and accept
+    # every webhook in production.
+    with pytest.raises(RuntimeError, match="must not be used in production"):
         AllowAllSignatureVerifier(test_only=False)
     verifier = AllowAllSignatureVerifier(test_only=True)
     ok = await verifier.verify(body=_BODY, headers={}, instance_id=_INSTANCE)

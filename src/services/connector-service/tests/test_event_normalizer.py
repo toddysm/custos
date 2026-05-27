@@ -119,6 +119,24 @@ def test_normalize_naive_received_at_treated_as_utc() -> None:
     assert normalized.source["receivedAt"] == "2026-01-01T00:00:00+00:00"
 
 
+def test_normalize_aware_non_utc_received_at_converted_to_utc() -> None:
+    """An upstream that hands in a ``+05:30`` timestamp MUST surface
+    on the wire as ``+00:00`` per the normalizer contract."""
+    from datetime import timedelta, timezone
+
+    ist = timezone(timedelta(hours=5, minutes=30), name="IST")
+    aware_non_utc = datetime(2026, 1, 1, 5, 30, 0, tzinfo=ist)
+    normalized = _normalizer().normalize(
+        {"eventId": "e1", "eventType": "oci.image.pushed"},
+        workspace_id=_WORKSPACE,
+        instance_id=_INSTANCE,
+        delivery_mode=DELIVERY_MODE_PULL,
+        received_at=aware_non_utc,
+    )
+    # 05:30 IST == 00:00 UTC.
+    assert normalized.source["receivedAt"] == "2026-01-01T00:00:00+00:00"
+
+
 @pytest.mark.parametrize("event_id", [None, "", 123, 1.5, []])
 def test_normalize_missing_event_id_raises(event_id: object) -> None:
     raw: dict[str, object] = {"eventType": "oci.image.pushed"}

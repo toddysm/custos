@@ -257,12 +257,19 @@ def _default_now() -> datetime:
 def _format_iso8601(ts: datetime) -> str:
     """Canonical ISO-8601 UTC string for ``source.receivedAt``.
 
-    Naive datetimes are interpreted as UTC (the platform contract
-    everywhere is "always UTC-aware in flight, naïve = UTC at the
-    boundary") so a test that passes ``datetime(2026,1,1,0,0,0)``
-    still produces ``"2026-01-01T00:00:00+00:00"`` instead of
-    crashing the audit pipeline downstream.
+    The normalizer contract is that ``receivedAt`` is canonical UTC
+    (``"+00:00"`` suffix). The two boundary cases the formatter
+    handles:
+
+    * **Naive** datetimes are interpreted as UTC — the platform-wide
+      convention is "always UTC-aware in flight, naïve = UTC at the
+      boundary" so a test that passes ``datetime(2026,1,1,0,0,0)``
+      still produces ``"2026-01-01T00:00:00+00:00"`` instead of
+      crashing the audit pipeline downstream.
+    * **Aware non-UTC** datetimes are converted with
+      :meth:`datetime.astimezone` so an upstream that hands in a
+      ``+05:30`` timestamp still ends up serialized as
+      ``+00:00`` per the contract.
     """
-    if ts.tzinfo is None:
-        ts = ts.replace(tzinfo=UTC)
+    ts = ts.replace(tzinfo=UTC) if ts.tzinfo is None else ts.astimezone(UTC)
     return ts.isoformat()

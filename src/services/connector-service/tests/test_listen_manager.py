@@ -284,3 +284,69 @@ async def test_deactivate_unknown_instance_is_idempotent() -> None:
     scheduler = _FakeScheduler()
     manager = _manager(catalog, scheduler)
     assert await manager.deactivate("nope", "nope") is False
+
+
+async def test_get_normalizer_for_instance_returns_per_type_normalizer() -> None:
+    """The pull path needs a normalizer pinned to the instance's
+    connector type version, not one global catalog."""
+    catalog = FakeCatalogAdapter()
+    scheduler = _FakeScheduler()
+    await _seed_type(
+        catalog,
+        events_block={
+            "delivery": ["pull"],
+            "produced": ["oci.image.pushed"],
+            "pull": {"cursorEncoding": "my-enc", "initialCursorBehavior": "now"},
+        },
+    )
+    manager = _manager(catalog, scheduler)
+
+    # Activate primes the cache; the lookup MUST return that same
+    # normalizer (the test checks reference equality so a cache miss
+    # would build a fresh one).
+    await manager.activate(_instance())
+    n1 = await manager.get_normalizer_for_instance(_instance())
+    n2 = await manager.get_normalizer_for_instance(_instance())
+    assert n1 is n2
+
+    # The normalizer accepts the produced event type.
+    normalized = n1.normalize(
+        {"eventId": "e1", "eventType": "oci.image.pushed"},
+        workspace_id=_WORKSPACE,
+        instance_id=_INSTANCE_ID,
+        delivery_mode="pull",
+    )
+    assert normalized.event_type == "oci.image.pushed"
+
+
+async def test_get_normalizer_for_instance_lazy_lookup() -> None:
+    """First lookup populates the cache without prior activate."""
+    catalog = FakeCatalogAdapter()
+    scheduler = _FakeScheduler()
+    await _seed_type(
+        catalog,
+        events_block={
+            "delivery": ["pull"],
+            "produced": ["oci.image.pushed"],
+        },
+    )
+    manager = _manager(catalog, scheduler)
+    # No activate() called.
+    n1 = await manager.get_normalizer_for_instance(_instance())
+    assert (
+        n1.normalize(
+            {"eventId": "e1", "eventType": "oci.image.pushed"},
+            workspace_id=_WORKSPACE,
+            instance_id=_INSTANCE_ID,
+            delivery_mode="pull",
+        ).event_type
+        == "oci.image.pushed"
+    )
+
+
+async def test_get_normalizer_for_instance_unknown_type_raises() -> None:
+    catalog = FakeCatalogAdapter()
+    scheduler = _FakeScheduler()
+    manager = _manager(catalog, scheduler)
+    with pytest.raises(UnknownConnectorTypeError):
+        await manager.get_normalizer_for_instance(_instance())

@@ -1,6 +1,6 @@
 """Unit tests for the push receiver router (CONN-IMPL-025, #308).
 
-Drives ``POST /v1/webhooks/connectors/{instance_id}/events`` end-to-end
+Drives ``POST /v1/webhooks/workspaces/{workspace_id}/connectors/{instance_id}/events`` end-to-end
 through :func:`custos_connector.create_app` so the
 :class:`CallContextMiddleware` bypass, the signature verifier, the
 JSON parser, and the :class:`PublisherBridge` are all exercised.
@@ -215,7 +215,7 @@ async def test_post_events_happy_path_accepts_and_publishes() -> None:
 
     with _make_client(providers) as client:
         resp = client.post(
-            f"/v1/webhooks/connectors/{_INSTANCE_ID}/events",
+            f"/v1/webhooks/workspaces/{_WORKSPACE}/connectors/{_INSTANCE_ID}/events",
             json=body,
         )
 
@@ -249,7 +249,7 @@ async def test_post_events_missing_event_id_audits_rejected() -> None:
 
     with _make_client(providers) as client:
         resp = client.post(
-            f"/v1/webhooks/connectors/{_INSTANCE_ID}/events",
+            f"/v1/webhooks/workspaces/{_WORKSPACE}/connectors/{_INSTANCE_ID}/events",
             json={
                 "events": [
                     {"eventType": "oci.image.pushed"},  # no eventId
@@ -286,7 +286,7 @@ async def test_post_events_signature_rejected_returns_401() -> None:
 
     with _make_client(providers) as client:
         resp = client.post(
-            f"/v1/webhooks/connectors/{_INSTANCE_ID}/events",
+            f"/v1/webhooks/workspaces/{_WORKSPACE}/connectors/{_INSTANCE_ID}/events",
             json={"events": [{"eventId": "e1", "eventType": "oci.image.pushed"}]},
         )
 
@@ -315,7 +315,7 @@ async def test_post_events_unknown_instance_returns_404() -> None:
 
     with _make_client(providers) as client:
         resp = client.post(
-            "/v1/webhooks/connectors/nope/events",
+            f"/v1/webhooks/workspaces/{_WORKSPACE}/connectors/nope/events",
             json={"events": [{"eventId": "e1", "eventType": "oci.image.pushed"}]},
         )
 
@@ -342,7 +342,7 @@ async def test_post_events_pull_only_instance_returns_404() -> None:
 
     with _make_client(providers) as client:
         resp = client.post(
-            f"/v1/webhooks/connectors/{_INSTANCE_ID}/events",
+            f"/v1/webhooks/workspaces/{_WORKSPACE}/connectors/{_INSTANCE_ID}/events",
             json={"events": [{"eventId": "e1", "eventType": "oci.image.pushed"}]},
         )
 
@@ -368,7 +368,7 @@ async def test_post_events_malformed_json_returns_400() -> None:
 
     with _make_client(providers) as client:
         resp = client.post(
-            f"/v1/webhooks/connectors/{_INSTANCE_ID}/events",
+            f"/v1/webhooks/workspaces/{_WORKSPACE}/connectors/{_INSTANCE_ID}/events",
             content=b"not json {",
             headers={"content-type": "application/json"},
         )
@@ -395,9 +395,82 @@ async def test_post_events_missing_events_array_returns_400() -> None:
 
     with _make_client(providers) as client:
         resp = client.post(
-            f"/v1/webhooks/connectors/{_INSTANCE_ID}/events",
+            f"/v1/webhooks/workspaces/{_WORKSPACE}/connectors/{_INSTANCE_ID}/events",
             json={"not_events": []},
         )
 
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "webhook.malformed"
+
+
+async def test_post_events_workspace_mismatch_returns_404() -> None:
+    """Routing by ``(workspace_id, instance_id)`` prevents cross-tenant delivery.
+
+    Two workspaces that happen to reuse the same instance id (allowed
+    by :class:`custos_spl.ids.ConnectorInstanceId` — opaque string,
+    not globally unique) MUST NOT cross-route on the push path. The
+    workspace segment in the URL is the discriminator.
+    """
+    catalog = FakeCatalogAdapter()
+    metadata = FakeMetadataAdapter()
+    await _seed_type(catalog, delivery=["push"])
+    publisher = RecordingEventPublisher()
+    manager = await _build_active_manager(
+        catalog=catalog,
+        verifier=AllowAllSignatureVerifier(test_only=True),
+    )
+    providers = _build_providers(
+        catalog=catalog,
+        metadata=metadata,
+        listen_manager=manager,
+        publisher=publisher,
+    )
+
+    with _make_client(providers) as client:
+        # Same instance id, different workspace → 404, NOT cross-routed.
+        resp = client.post(
+            f"/v1/webhooks/workspaces/different-ws/connectors/{_INSTANCE_ID}/events",
+            json={"events": [{"eventId": "e1", "eventType": "oci.image.pushed"}]},
+        )
+
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "connector.instance_not_listening"
+    assert publisher.published == []
+
+
+async def test_post_events_body_over_cap_returns_413() -> None:
+    """The webhook path is unauthenticated until the signature step;
+    a body over ``publish_max_body_mb`` MUST be refused before being
+    buffered / parsed."""
+    catalog = FakeCatalogAdapter()
+    metadata = FakeMetadataAdapter()
+    await _seed_type(catalog, delivery=["push"])
+    publisher = RecordingEventPublisher()
+    manager = await _build_active_manager(
+        catalog=catalog,
+        verifier=AllowAllSignatureVerifier(test_only=True),
+    )
+    providers = _build_providers(
+        catalog=catalog,
+        metadata=metadata,
+        listen_manager=manager,
+        publisher=publisher,
+    )
+
+    # Build a body just over the 4 MB cap on _BASE_SETTINGS.
+    over_cap_bytes = (_BASE_SETTINGS.publish_max_body_mb * 1024 * 1024) + 1
+    big = b"x" * over_cap_bytes
+
+    with _make_client(providers) as client:
+        resp = client.post(
+            f"/v1/webhooks/workspaces/{_WORKSPACE}/connectors/{_INSTANCE_ID}/events",
+            content=big,
+            headers={"content-type": "application/octet-stream"},
+        )
+
+    assert resp.status_code == 413
+    assert resp.json()["error"]["code"] == "webhook.body_too_large"
+    assert publisher.published == []
+    # No audit row should have been written — the cap fires before
+    # we know whether the instance even exists.
+    assert metadata.append_audit_calls == []

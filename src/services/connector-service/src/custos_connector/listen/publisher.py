@@ -80,10 +80,20 @@ __all__ = [
     "EventPublisherHandler",
     "LocalEventBus",
     "NoOpEventPublisher",
+    "NormalizerSelector",
     "PublisherBridge",
     "RecordingEventPublisher",
     "build_publisher_bridge",
 ]
+
+
+#: Callable seam the pull-path bridge calls on every tick to resolve
+#: the per-instance normalizer. Typically wired to
+#: :meth:`custos_connector.listen.manager.ListenManager.get_normalizer_for_instance`
+#: which caches by ``(type, version)``. Defined as a module-level
+#: ``TypeAlias`` so subclasses / tests can name the type explicitly
+#: when stubbing.
+NormalizerSelector = Callable[["ConnectorInstance"], Awaitable[EventNormalizer]]
 
 
 # ---------------------------------------------------------------------------
@@ -245,18 +255,35 @@ class PublisherBridge:
         "_actor",
         "_metadata_store",
         "_normalizer",
+        "_normalizer_selector",
         "_publisher",
     )
 
     def __init__(
         self,
         *,
-        normalizer: EventNormalizer,
+        normalizer: EventNormalizer | None = None,
+        normalizer_selector: NormalizerSelector | None = None,
         publisher: EventPublisher,
         metadata_store: MetadataStoreProvider,
         actor: str,
     ) -> None:
+        # Exactly one of ``normalizer`` (push path / tests — the
+        # normalizer is pinned to the instance's connector type
+        # version at activation time) or ``normalizer_selector``
+        # (pull path — resolves per-instance at tick time so a single
+        # bridge wired into ``CursorService`` validates every
+        # connector instance against the right ``produced`` catalog)
+        # must be supplied. Both modes are accepted because the push
+        # receiver builds a per-request bridge with the registration's
+        # frozen normalizer, while the pull path uses one shared
+        # bridge across every registered instance.
+        if (normalizer is None) == (normalizer_selector is None):
+            raise ValueError(
+                "PublisherBridge requires exactly one of normalizer / normalizer_selector"
+            )
         self._normalizer = normalizer
+        self._normalizer_selector = normalizer_selector
         self._publisher = publisher
         self._metadata_store = metadata_store
         self._actor = actor
@@ -270,9 +297,14 @@ class PublisherBridge:
         """Pull-tick :class:`EventPublisher` callable.
 
         Drops the :class:`BridgeResult` because
-        :class:`CursorService` does not consume it.
+        :class:`CursorService` does not consume it. Resolves the
+        per-instance normalizer via the selector when configured so
+        a single bridge can serve every instance across every
+        connector type version registered on the pod.
         """
+        normalizer = await self._resolve_normalizer(instance)
         await self._run_batch(
+            normalizer=normalizer,
             workspace_id=str(workspace_id),
             instance_id=str(instance.instance_id),
             events=events,
@@ -294,8 +326,23 @@ class PublisherBridge:
         Returns counts the HTTP layer surfaces back to the webhook
         caller so operators can see at the call site how many events
         in their POST were quarantined.
+
+        The push path always supplies a fixed ``normalizer`` at
+        construction time (the per-instance one from the
+        :class:`PushRegistration`), so the bridge MUST have been
+        built with ``normalizer=...`` rather than
+        ``normalizer_selector=...``; calling this on a
+        selector-mode bridge raises :class:`RuntimeError` because
+        there is no ``ConnectorInstance`` in scope to resolve the
+        normalizer for.
         """
+        if self._normalizer is None:
+            raise RuntimeError(
+                "PublisherBridge.process_batch requires a fixed normalizer; "
+                "selector-mode bridges may only be invoked via __call__"
+            )
         return await self._run_batch(
+            normalizer=self._normalizer,
             workspace_id=workspace_id,
             instance_id=instance_id,
             events=events,
@@ -303,9 +350,27 @@ class PublisherBridge:
             received_at=received_at,
         )
 
+    async def _resolve_normalizer(self, instance: ConnectorInstance) -> EventNormalizer:
+        """Return the :class:`EventNormalizer` to validate ``instance``'s events.
+
+        Hot path on every pull tick; selector-mode bridges defer to
+        the configured callable (typically
+        :meth:`ListenManager.get_normalizer_for_instance` which
+        caches by ``(type, version)``) so the catalog read happens
+        at most once per type version.
+        """
+        if self._normalizer_selector is not None:
+            return await self._normalizer_selector(instance)
+        # _normalizer is non-None when _normalizer_selector is None
+        # (the constructor enforces the XOR), but mypy can't see
+        # that across the call so we narrow defensively.
+        assert self._normalizer is not None
+        return self._normalizer
+
     async def _run_batch(
         self,
         *,
+        normalizer: EventNormalizer,
         workspace_id: str,
         instance_id: str,
         events: Sequence[Mapping[str, object]],
@@ -316,7 +381,7 @@ class PublisherBridge:
         rejected = 0
         for index, raw in enumerate(events):
             try:
-                normalized = self._normalizer.normalize(
+                normalized = normalizer.normalize(
                     raw,
                     workspace_id=workspace_id,
                     instance_id=instance_id,
@@ -360,20 +425,25 @@ class PublisherBridge:
 
 def build_publisher_bridge(
     *,
-    normalizer: EventNormalizer,
+    normalizer: EventNormalizer | None = None,
+    normalizer_selector: NormalizerSelector | None = None,
     publisher: EventPublisher,
     metadata_store: MetadataStoreProvider,
     actor: str = "connector-service:listen",
 ) -> PublisherBridge:
     """Convenience constructor used by the app factory + tests.
 
-    The default ``actor`` matches the pull-tick path. The push
-    receiver constructs its own bridge with the authenticated webhook
-    principal so audit emissions on the push path carry the right
-    identity.
+    Forwards exactly one of ``normalizer`` (push path / fixed
+    catalog) or ``normalizer_selector`` (pull path / per-instance
+    lookup) — the same XOR :class:`PublisherBridge` enforces in its
+    own constructor. The default ``actor`` matches the pull-tick
+    path; the push receiver constructs its own bridge with the
+    authenticated webhook principal so audit emissions on the push
+    path carry the right identity.
     """
     return PublisherBridge(
         normalizer=normalizer,
+        normalizer_selector=normalizer_selector,
         publisher=publisher,
         metadata_store=metadata_store,
         actor=actor,

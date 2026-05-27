@@ -175,6 +175,7 @@ class ListenManager:
         "_catalog_store",
         "_default_signature_verifier",
         "_lock",
+        "_normalizers",
         "_push_registry",
         "_scheduler",
     )
@@ -195,6 +196,14 @@ class ListenManager:
         )
         self._push_registry: dict[tuple[str, str], PushRegistration] = {}
         self._activations: dict[tuple[str, str], ActivationResult] = {}
+        # Per-(type, version) normalizer cache so the pull-tick path
+        # can resolve the right ``produced`` catalog for every
+        # connector instance regardless of which connector type it
+        # was bound to. Keyed by the manifest coordinates because the
+        # normalizer is fully determined by the manifest's
+        # ``spec.events.produced`` tuple — two instances of the same
+        # connector type version share one normalizer.
+        self._normalizers: dict[tuple[str, str], EventNormalizer] = {}
         # Activations mutate three structures (push registry,
         # scheduler, activation cache); serialize concurrent
         # activate / deactivate calls per Manager instance so
@@ -258,7 +267,10 @@ class ListenManager:
 
             delivery_modes = _read_delivery_modes(events_block)
             produced = _read_produced_event_types(events_block)
-            normalizer = EventNormalizer(produced_event_types=produced)
+            normalizer = self._normalizers.setdefault(
+                (instance.type, instance.version),
+                EventNormalizer(produced_event_types=produced),
+            )
 
             registered_modes: list[str] = []
             if DELIVERY_MODE_PULL in delivery_modes:
@@ -329,6 +341,49 @@ class ListenManager:
         unknown instance — both surface as 404 on the wire).
         """
         return self._push_registry.get((workspace_id, instance_id))
+
+    async def get_normalizer_for_instance(self, instance: ConnectorInstance) -> EventNormalizer:
+        """Resolve the per-(type, version) :class:`EventNormalizer`.
+
+        The pull-tick path needs to validate every connector
+        instance's events against the ``produced`` catalog declared
+        on the *instance's* connector type — a single global
+        normalizer would either over-accept (no validation) or
+        spuriously reject (when its catalog does not match the
+        instance's type version). This method is the seam the
+        pull-side bridge calls on every tick to fetch the right
+        normalizer for the instance at hand.
+
+        Cached by ``(type, version)`` because the normalizer is
+        fully determined by the manifest's ``spec.events.produced``
+        tuple; the cache hit on every subsequent tick keeps the
+        catalog read off the hot path. The cache is populated
+        either by :meth:`activate` (first activation of an instance
+        of the same type version) or lazily here on first lookup
+        when the bridge is called for an instance that the manager
+        has not yet activated through its own path (e.g. startup
+        re-hydration).
+
+        Raises :class:`UnknownConnectorTypeError` when the catalog
+        has no row for ``(type, version)`` — same contract as
+        :meth:`activate`.
+        """
+        key = (instance.type, instance.version)
+        cached = self._normalizers.get(key)
+        if cached is not None:
+            return cached
+        type_version = await self._catalog_store.get_connector_type_version(
+            instance.type, instance.version
+        )
+        if type_version is None:
+            raise UnknownConnectorTypeError(
+                f"connector type version not found: {instance.type}@{instance.version}"
+            )
+        events_block = _extract_events_block(type_version.normalized_manifest)
+        produced = _read_produced_event_types(events_block) if events_block else ()
+        normalizer = EventNormalizer(produced_event_types=produced)
+        self._normalizers[key] = normalizer
+        return normalizer
 
     def activations(self) -> Mapping[tuple[str, str], ActivationResult]:
         """Snapshot of the activation cache. Intended for tests / metrics."""

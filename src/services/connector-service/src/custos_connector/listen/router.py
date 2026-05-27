@@ -1,9 +1,17 @@
 """Push receiver router (CONN-IMPL-025, issue #308).
 
-Mounts ``POST /v1/webhooks/connectors/{instance_id}/events`` so
-upstream targets that deliver events by webhook can hand off batches
-to the platform. The path is deliberately under ``/v1/webhooks/`` so
-the :class:`custos_connector.middleware.CallContextMiddleware` skips
+Mounts ``POST /v1/webhooks/workspaces/{workspace_id}/connectors/{instance_id}/events``
+so upstream targets that deliver events by webhook can hand off
+batches to the platform. The workspace segment is part of the URL
+because :class:`custos_spl.ids.ConnectorInstanceId` is an opaque
+string, not a globally-unique identifier — two workspaces are free
+to reuse the same instance id locally — so routing a webhook by
+``instance_id`` alone would risk delivering an event to the wrong
+tenant. With the workspace in the URL the lookup is an exact match
+on ``(workspace_id, instance_id)``.
+
+The path is deliberately under ``/v1/webhooks/`` so the
+:class:`custos_connector.middleware.CallContextMiddleware` skips
 its call-context check (webhooks authenticate via signature, not via
 the internal-RPC bearer token); see ``_BYPASS_PREFIXES`` in
 ``middleware/callctx.py``.
@@ -11,27 +19,37 @@ the internal-RPC bearer token); see ``_BYPASS_PREFIXES`` in
 Request flow
 ------------
 
-1. Resolve the :class:`PushRegistration` for the path's
-   ``instance_id`` (via the wired
-   :class:`custos_connector.listen.ListenManager`). 404 with
+1. Validate the request size against
+   ``settings.publish_max_body_mb`` *before* buffering the body. The
+   webhook path is unauthenticated until step 4 (signature check),
+   so an attacker that knows the workspace + instance id can
+   trivially exhaust memory if the size cap is enforced only inside
+   FastAPI's JSON parser. The cap is checked twice:
+   the ``Content-Length`` header is rejected early when present and
+   over the cap, and the streamed body is rejected if it grows past
+   the cap during reading (``Content-Length`` is advisory; clients
+   can lie or send ``Transfer-Encoding: chunked``).
+2. Resolve the :class:`PushRegistration` for
+   ``(workspace_id, instance_id)`` from the wired
+   :class:`custos_connector.listen.ListenManager`. 404 with
    ``connector.instance_not_listening`` when the instance is not
    registered for push delivery (unknown instance OR pull-only
    instance OR deactivated instance — the wire shape collapses
    these so an attacker cannot probe the registry).
-2. Read the raw request body bytes.
-3. Verify the signature via the registration's
+3. Read the raw request body bytes (already size-capped).
+4. Verify the signature via the registration's
    :class:`SignatureVerifier`. 401
    ``webhook.signature_invalid`` on failure. The signature is checked
    *before* parsing the JSON so an attacker that finds a JSON parser
    bug cannot reach it on an unauthenticated request.
-4. Parse the body as JSON. 400 ``webhook.malformed`` on bad JSON or
+5. Parse the body as JSON. 400 ``webhook.malformed`` on bad JSON or
    on a non-object top-level value.
-5. Audit ``event.received`` with the batch size.
-6. Build a :class:`PublisherBridge` keyed to the registration's
+6. Audit ``event.received`` with the batch size.
+7. Build a :class:`PublisherBridge` keyed to the registration's
    normalizer + the app-level publisher and call ``process_batch``.
    Per-event ``event.normalized`` / ``event.rejected`` rows fire from
    the bridge.
-7. Return ``200 {accepted, rejected}``.
+8. Return ``200 {accepted, rejected}``.
 
 The router does not surface 5xx from publisher failures with a
 custom code: an :class:`EventPublishError` raised by the wired
@@ -81,6 +99,7 @@ from custos_connector.listen.publisher import (
     EventPublisher,
     PublisherBridge,
 )
+from custos_connector.settings import Settings
 
 if TYPE_CHECKING:
     from custos_connector.providers import Providers
@@ -98,6 +117,9 @@ router = APIRouter(prefix="/v1/webhooks", tags=["push-receiver"])
 _PUSH_ACTOR: Final[str] = "connector-service:webhook"
 #: Free-form provenance code on the ``event.received`` audit payload.
 _PUSH_SOURCE: Final[str] = "webhook"
+#: Bytes per megabyte for the body-size cap. Pulled out as a module
+#: constant so the conversion is one place to grep.
+_BYTES_PER_MB: Final[int] = 1024 * 1024
 
 
 def _error_response(*, status_code: int, code: str, detail: str) -> JSONResponse:
@@ -147,13 +169,69 @@ def _resolve_metadata_store(request: Request) -> MetadataStoreProvider:
     return providers.metadata_store
 
 
+def _resolve_settings(request: Request) -> Settings:
+    """Pull :class:`Settings` off ``app.state.settings``.
+
+    Required for the body-size cap; the webhook path is the only
+    request path on the service that runs before call-context
+    authentication and therefore has to enforce its own resource
+    limits.
+    """
+    settings = getattr(request.app.state, "settings", None)
+    if not isinstance(settings, Settings):
+        raise RuntimeError(
+            "Settings is not wired on app.state.settings; this is a startup wiring bug"
+        )
+    return settings
+
+
+async def _read_body_with_cap(request: Request, *, max_bytes: int) -> bytes | None:
+    """Stream the request body, refusing to buffer past ``max_bytes``.
+
+    Returns the body bytes on success, or ``None`` when the cap was
+    breached (caller surfaces a 413). The cap is checked twice:
+
+    * **Header pre-check.** When the upstream sets
+      ``Content-Length`` we refuse before reading any chunks so a
+      hostile client cannot allocate up to the cap before being
+      rejected.
+    * **Streaming check.** The body is read chunk-by-chunk and we
+      bail as soon as the buffered total crosses the cap; this
+      handles ``Transfer-Encoding: chunked`` and lying
+      ``Content-Length`` headers.
+    """
+    content_length_raw = request.headers.get("content-length")
+    if content_length_raw is not None:
+        try:
+            declared = int(content_length_raw)
+        except ValueError:
+            return None
+        if declared > max_bytes:
+            return None
+
+    buffered = bytearray()
+    async for chunk in request.stream():
+        buffered.extend(chunk)
+        if len(buffered) > max_bytes:
+            return None
+    return bytes(buffered)
+
+
 @router.post(
-    "/connectors/{instance_id}/events",
+    "/workspaces/{workspace_id}/connectors/{instance_id}/events",
     summary="Webhook receiver for push-mode connector events",
     status_code=200,
 )
 async def post_events(
     request: Request,
+    workspace_id: Annotated[
+        str,
+        Path(
+            min_length=1,
+            max_length=200,
+            description="Workspace the connector instance is bound to.",
+        ),
+    ],
     instance_id: Annotated[
         str,
         Path(
@@ -171,34 +249,47 @@ async def post_events(
     manager = _resolve_listen_manager(request)
     publisher = _resolve_event_publisher(request)
     metadata_store = _resolve_metadata_store(request)
+    settings = _resolve_settings(request)
 
-    # Step 1 — resolve the push registration. We do not have a
-    # workspace path segment on the webhook URL (upstream callers do
-    # not know it), so the lookup walks the registry to find the
-    # instance. The registry is keyed by (ws, inst); collisions on
-    # instance_id across workspaces are impossible because instance
-    # ids are workspace-scoped UUIDs.
-    registration = _find_push_registration(manager, instance_id)
+    # Step 1 — enforce the body-size cap before any work. The webhook
+    # path is unauthenticated until the signature check (step 4); the
+    # cap is the first defence against trivial memory exhaustion.
+    max_body_bytes = settings.publish_max_body_mb * _BYTES_PER_MB
+    body = await _read_body_with_cap(request, max_bytes=max_body_bytes)
+    if body is None:
+        return _error_response(
+            status_code=413,
+            code="webhook.body_too_large",
+            detail=(f"request body exceeds the {settings.publish_max_body_mb} MB limit"),
+        )
+
+    # Step 2 — resolve the push registration by the exact
+    # (workspace, instance) tuple from the URL. Workspace-scoped
+    # lookup means two workspaces using the same instance id (allowed
+    # by SPL: ``ConnectorInstanceId`` is an opaque string, not
+    # globally unique) cannot cross-tenant route.
+    registration = manager.get_push_registration(workspace_id, instance_id)
     if registration is None:
         return _error_response(
             status_code=404,
             code="connector.instance_not_listening",
-            detail=(f"connector instance {instance_id!r} is not registered for push delivery"),
+            detail=(
+                f"connector instance {instance_id!r} in workspace {workspace_id!r} "
+                "is not registered for push delivery"
+            ),
         )
 
     if not registration.active:
         return _error_response(
             status_code=404,
             code="connector.instance_not_listening",
-            detail=(f"connector instance {instance_id!r} is not registered for push delivery"),
+            detail=(
+                f"connector instance {instance_id!r} in workspace {workspace_id!r} "
+                "is not registered for push delivery"
+            ),
         )
 
-    # Step 2 — read raw bytes BEFORE signature verification so we
-    # sign over the bytes that arrived on the wire (re-encoding loses
-    # canonical ordering and breaks HMAC).
-    body = await request.body()
-
-    # Step 3 — verify the signature.
+    # Step 4 — verify the signature.
     headers = {key: value for key, value in request.headers.items()}
     try:
         signature_ok = await registration.signature_verifier.verify(
@@ -208,7 +299,8 @@ async def post_events(
         )
     except Exception:
         _LOGGER.exception(
-            "signature verifier raised; treating as failed verification instance=%s",
+            "signature verifier raised; treating as failed verification ws=%s instance=%s",
+            workspace_id,
             instance_id,
         )
         signature_ok = False
@@ -219,7 +311,7 @@ async def post_events(
             detail="webhook signature verification failed",
         )
 
-    # Step 4 — parse the JSON body.
+    # Step 5 — parse the JSON body.
     try:
         parsed: Any = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as err:
@@ -242,7 +334,7 @@ async def post_events(
             detail="request body must contain an 'events' array",
         )
 
-    # Step 5 — audit ``event.received`` with the pre-normalization
+    # Step 6 — audit ``event.received`` with the pre-normalization
     # batch size. Per-event audit rows fire from the bridge below.
     await audit_event_received(
         metadata_store,
@@ -254,7 +346,7 @@ async def post_events(
         source=_PUSH_SOURCE,
     )
 
-    # Step 6 — build a per-request bridge with the registration's
+    # Step 7 — build a per-request bridge with the registration's
     # normalizer (so the produced-event-types catalog matches the
     # connector-type version the instance was bound to) and the
     # app-level publisher.
@@ -276,24 +368,3 @@ async def post_events(
         status_code=200,
         content={"accepted": result.accepted, "rejected": result.rejected},
     )
-
-
-def _find_push_registration(manager: ListenManager, instance_id: str) -> Any:
-    """Walk the push registry looking for ``instance_id`` across workspaces.
-
-    Instance ids are workspace-scoped UUIDs (see
-    :class:`custos_spl.ids.ConnectorInstanceId`) so a single instance
-    id has at most one matching entry. The walk is O(n) over the
-    push registry which is acceptable at the M1 single-replica scale
-    (registries hold tens to hundreds of push instances per pod);
-    when the registry grows to thousands a follow-up will replace
-    the walk with a second index keyed by instance id only.
-    """
-    # Touch the private state directly so we don't have to widen the
-    # ListenManager public surface for the router. The router lives
-    # in the same package so this is intra-module access.
-    registry: Mapping[tuple[str, str], Any] = manager._push_registry
-    for (_workspace_id, candidate_instance_id), reg in registry.items():
-        if candidate_instance_id == instance_id:
-            return reg
-    return None
