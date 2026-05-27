@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import socket
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -98,6 +99,8 @@ HALT_STATUS_EXPIRED: Final[str] = "cursor_expired"
 
 
 _DEFAULT_ACTOR: Final[str] = "connector-service"
+
+_LOGGER = logging.getLogger("custos_connector.cursor")
 
 
 # ---------------------------------------------------------------------------
@@ -585,18 +588,32 @@ class CursorService:
         instance_id: ConnectorInstanceId,
         status: str,
     ) -> None:
-        """Patch the instance ``status`` to a halt sentinel.
+        """Patch the instance ``status`` to a halt sentinel (best-effort).
 
-        Best-effort: a patch failure is logged inside the SPL provider
-        but does not raise, so the halt audit event still lands even
-        if the durable status flip fails. The next tick will replay
-        the halt path (plugin returns the same error, audit fires
-        again, scheduler keeps the instance out of the rotation
-        through whatever fallback it uses).
+        ``patch_connector_instance`` can raise on classified DB errors
+        or unknown-field ``ValueError``. We deliberately swallow those
+        here and log a warning so the typed :class:`CursorHalted`
+        subclass is what propagates out of :meth:`tick` rather than
+        the patch error — the halt audit event has already landed,
+        and the next tick will replay the halt path (plugin returns
+        the same error, audit fires again, scheduler keeps the
+        instance out of the rotation through whatever fallback it
+        uses).
         """
-        await self._instances.patch_connector_instance(
-            workspace_id, instance_id, {"status": status}
-        )
+        try:
+            await self._instances.patch_connector_instance(
+                workspace_id, instance_id, {"status": status}
+            )
+        except Exception:
+            _LOGGER.warning(
+                "failed to flip connector instance %s/%s to halt status %r; "
+                "halt audit was emitted but the durable status flip did not land, "
+                "next tick will retry the halt path",
+                str(workspace_id),
+                str(instance_id),
+                status,
+                exc_info=True,
+            )
 
     async def _release_lease_quietly(
         self,

@@ -453,6 +453,70 @@ async def test_cursor_expired_halts_instance() -> None:
     assert _audit_events(metadata, EVENT_CURSOR_ADVANCED) == []
 
 
+async def test_halt_status_flip_failure_does_not_mask_typed_halt(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """If the status-flip patch raises, the typed ``CursorHalted``
+    subclass MUST still propagate (not the patch error), the halt
+    audit MUST still have landed, and the failure MUST be logged.
+
+    Guards the contract documented on ``_flip_instance_status`` — a
+    transient DB hiccup on the patch call should never mask the
+    halt signal from the scheduler.
+    """
+    import logging
+
+    invoker = _FakeListenInvoker()
+    publisher = _RecordingPublisher()
+    service, metadata, catalog, instances = _build_service(invoker=invoker, publisher=publisher)
+    ctype = _make_connector_type()
+    instance = _make_instance()
+    await _seed(catalog=catalog, instances=instances, connector_type=ctype, instance=instance)
+
+    # Make every patch call blow up.
+    original_patch = instances.patch_connector_instance
+
+    async def _boom(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("simulated DB outage during status flip")
+
+    instances.patch_connector_instance = _boom  # type: ignore[method-assign]
+
+    invoker.queue(CursorExpired("upstream rejected cursor"))
+
+    # The CursorExpiredHalt MUST surface, not the RuntimeError from the patch.
+    with (
+        caplog.at_level(logging.WARNING, logger="custos_connector.cursor"),
+        pytest.raises(CursorExpiredHalt),
+    ):
+        await service.tick(_WORKSPACE, str(instance.instance_id))
+
+    # Halt audit landed even though the status flip did not.
+    expired = _audit_events(metadata, EVENT_CURSOR_EXPIRED)
+    assert len(expired) == 1
+
+    # Status remains "active" — the durable flip failed.
+    instances.patch_connector_instance = original_patch  # type: ignore[method-assign]
+    refreshed = await instances.get_connector_instance(
+        WorkspaceId(_WORKSPACE), ConnectorInstanceId(str(instance.instance_id))
+    )
+    assert refreshed is not None
+    assert refreshed.status == "active"
+
+    # Operator-visible warning was logged.
+    assert any(
+        "failed to flip connector instance" in rec.message
+        and "halt audit was emitted" in rec.message
+        for rec in caplog.records
+    )
+
+    # Lease was still released.
+    row = await metadata.read_cursor(
+        WorkspaceId(_WORKSPACE), ConnectorInstanceId(str(instance.instance_id))
+    )
+    assert row is not None
+    assert row.lease_holder is None
+
+
 # ---------------------------------------------------------------------------
 # Publisher / failure semantics
 # ---------------------------------------------------------------------------
