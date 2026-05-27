@@ -185,3 +185,111 @@ async def test_transport_error_wraps_httpx_error():
             await gw.issue({})
     finally:
         await gw.aclose()
+
+
+# ---------------------------------------------------------------------------
+# revoke_many (CONN-IMPL-020)
+# ---------------------------------------------------------------------------
+
+
+async def test_revoke_many_happy_path_returns_per_lease_acks():
+    seen: dict[str, object] = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen["url"] = str(req.url)
+        seen["body"] = json.loads(req.content)
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"leaseId": "lease_A", "status": "revoked"},
+                    {"leaseId": "lease_B", "status": "not-found"},
+                ]
+            },
+        )
+
+    gw = _gateway(httpx.MockTransport(handler))
+    try:
+        acks = await gw.revoke_many(["lease_A", "lease_B"], reason="rotate")
+    finally:
+        await gw.aclose()
+    assert acks == [
+        {"leaseId": "lease_A", "status": "revoked"},
+        {"leaseId": "lease_B", "status": "not-found"},
+    ]
+    assert seen["url"] == "http://test/internal/v1/leases:revoke"
+    assert seen["body"] == {"leaseIds": ["lease_A", "lease_B"], "reason": "rotate"}
+
+
+async def test_revoke_many_transport_error_on_connect():
+    def handler(_: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused")
+
+    gw = _gateway(httpx.MockTransport(handler))
+    try:
+        with pytest.raises(GatewayTransportError):
+            await gw.revoke_many(["lease_A"], reason="x")
+    finally:
+        await gw.aclose()
+
+
+async def test_revoke_many_5xx_is_transport():
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="boom")
+
+    gw = _gateway(httpx.MockTransport(handler))
+    try:
+        with pytest.raises(GatewayTransportError):
+            await gw.revoke_many(["lease_A"], reason="x")
+    finally:
+        await gw.aclose()
+
+
+async def test_revoke_many_4xx_is_transport():
+    """Any non-200 (including 422) is transport-level for revoke."""
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(422, json={"detail": "bad"})
+
+    gw = _gateway(httpx.MockTransport(handler))
+    try:
+        with pytest.raises(GatewayTransportError):
+            await gw.revoke_many(["lease_A"], reason="x")
+    finally:
+        await gw.aclose()
+
+
+async def test_revoke_many_malformed_body_is_transport():
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"unexpected": True})
+
+    gw = _gateway(httpx.MockTransport(handler))
+    try:
+        with pytest.raises(GatewayTransportError):
+            await gw.revoke_many(["lease_A"], reason="x")
+    finally:
+        await gw.aclose()
+
+
+async def test_revoke_many_non_list_results_is_transport():
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"results": "nope"})
+
+    gw = _gateway(httpx.MockTransport(handler))
+    try:
+        with pytest.raises(GatewayTransportError, match="must be a list"):
+            await gw.revoke_many(["lease_A"], reason="x")
+    finally:
+        await gw.aclose()
+
+
+async def test_revoke_many_entry_missing_status_is_transport():
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"results": [{"leaseId": "lease_A"}]})
+
+    gw = _gateway(httpx.MockTransport(handler))
+    try:
+        with pytest.raises(GatewayTransportError, match="missing key"):
+            await gw.revoke_many(["lease_A"], reason="x")
+    finally:
+        await gw.aclose()

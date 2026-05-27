@@ -27,6 +27,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from typing import Final
 
 from custos_spl.ids import ConnectorInstanceId, RunId, StepId, WorkspaceId
@@ -85,6 +86,32 @@ class TtlInputs:
     type_max_ttl_sec: int | None
     instance_ttl_sec: int | None
     step_deadline: datetime | None
+
+
+class RevokeOutcomeStatus(StrEnum):
+    """Per-lease ack values returned by :meth:`LeaseManager.revoke_with_status`.
+
+    Wire-stable: the sidecar control channel surfaces these strings
+    verbatim in its ``{leaseId, status}`` ack list (CONN-IMPL-020).
+    """
+
+    REVOKED = "revoked"
+    ALREADY_REVOKED = "already-revoked"
+    ALREADY_EXPIRED = "already-expired"
+    NOT_FOUND = "not-found"
+
+
+@dataclass(frozen=True, slots=True)
+class RevokeOutcome:
+    """Outcome of :meth:`LeaseManager.revoke_with_status`.
+
+    ``lease`` carries the post-revoke row for :attr:`RevokeOutcomeStatus.REVOKED`,
+    the unchanged row for :attr:`ALREADY_REVOKED` / :attr:`ALREADY_EXPIRED`,
+    and ``None`` for :attr:`NOT_FOUND`.
+    """
+
+    status: RevokeOutcomeStatus
+    lease: Lease | None
 
 
 class LeaseManager:
@@ -509,6 +536,65 @@ class LeaseManager:
         )
         return revoked
 
+    async def revoke_with_status(
+        self,
+        *,
+        workspace_id: WorkspaceId,
+        lease_id: str,
+        reason: str,
+    ) -> RevokeOutcome:
+        """Revoke with a 4-way status discriminator (CONN-IMPL-020).
+
+        The control-channel endpoint needs to ack one of four states
+        to its caller:
+
+        * :attr:`RevokeOutcomeStatus.REVOKED` — fresh revoke; the
+          lease was active and is now marked revoked. Audit fires.
+        * :attr:`RevokeOutcomeStatus.ALREADY_REVOKED` — the lease was
+          already revoked by a prior call; no state change, no audit
+          emission (forensics keep the first reason).
+        * :attr:`RevokeOutcomeStatus.ALREADY_EXPIRED` — the lease has
+          been released or has aged past ``expires_at``; no revoke
+          mutation, no audit emission.
+        * :attr:`RevokeOutcomeStatus.NOT_FOUND` — no row exists for
+          ``(workspace_id, lease_id)``; no audit emission.
+
+        This wrapper exists so :meth:`revoke` (which always mutates +
+        emits) keeps its CONN-IMPL-018 contract for operator-driven
+        revokes; the discriminating variant is used only by the
+        sidecar control channel where per-lease idempotency matters
+        to the caller.
+        """
+        now = self._clock()
+        existing = await self._lease_store.get_lease(workspace_id, lease_id)
+        if existing is None:
+            return RevokeOutcome(status=RevokeOutcomeStatus.NOT_FOUND, lease=None)
+        if existing.revoked_at is not None:
+            return RevokeOutcome(status=RevokeOutcomeStatus.ALREADY_REVOKED, lease=existing)
+        if existing.released_at is not None or existing.expires_at <= now:
+            return RevokeOutcome(status=RevokeOutcomeStatus.ALREADY_EXPIRED, lease=existing)
+        revoked = await self._lease_store.revoke_lease(workspace_id, lease_id, reason, now)
+        if revoked is None:
+            # Race: the row vanished between the peek and the revoke.
+            # Treat as not-found so the caller's ack is consistent.
+            return RevokeOutcome(status=RevokeOutcomeStatus.NOT_FOUND, lease=None)
+        await audit_lease_revoked(
+            self._metadata_store,
+            workspace_id=str(workspace_id),
+            actor=self._actor,
+            lease_id=revoked.lease_id,
+            run_id=str(revoked.run_id),
+            step_id=str(revoked.step_id),
+            attempt=revoked.attempt,
+            slot=revoked.slot,
+            capability=revoked.capability,
+            connector_instance_id=str(revoked.connector_instance_id),
+            token_type=revoked.token_type,
+            revoked_at=revoked.revoked_at or now,
+            revoke_reason=revoked.revoke_reason or reason,
+        )
+        return RevokeOutcome(status=RevokeOutcomeStatus.REVOKED, lease=revoked)
+
     async def record_revoke_requested(
         self,
         *,
@@ -573,4 +659,4 @@ class LeaseManager:
         )
 
 
-__all__ = ["LeaseManager", "TtlInputs"]
+__all__ = ["LeaseManager", "RevokeOutcome", "RevokeOutcomeStatus", "TtlInputs"]

@@ -334,3 +334,73 @@ def test_healthz_open(client: TestClient) -> None:
     resp = client.get("/healthz")
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok"}
+
+
+# --------------------------------------------------------------------------- #
+# Revocation enforcement (CONN-IMPL-020)
+# --------------------------------------------------------------------------- #
+
+
+def test_refresh_after_revoke_returns_410_with_reason(
+    client: TestClient, bootstrap_token: str, fake_gateway: FakeLeaseGateway
+) -> None:
+    """After the control surface revokes a lease, ``refresh`` returns 410
+    ``lease-revoked`` with the recorded reason in the problem detail."""
+    import asyncio
+
+    # Pre-seed the registry as if the control surface had received a revoke.
+    registry = client.app.state.revocation_registry  # type: ignore[attr-defined]
+    asyncio.run(registry.mark_revoked("lease_under_test", "operator-rotation"))
+
+    resp = client.post(
+        "/v1/token/refresh",
+        json={"leaseId": "lease_under_test"},
+        headers=_hdrs(bootstrap_token),
+    )
+    assert resp.status_code == 410
+    body = resp.json()
+    assert body["title"] == "lease-revoked"
+    assert body["detail"] == "operator-rotation"
+    # The gateway must NOT be hit for a locally-revoked lease.
+    assert fake_gateway.refreshed == []
+
+
+def test_release_after_revoke_returns_410_with_reason(
+    client: TestClient, bootstrap_token: str, fake_gateway: FakeLeaseGateway
+) -> None:
+    """``release`` against a revoked lease also returns 410, not 204.
+
+    Activities should observe the same terminal-state envelope on every
+    op against a revoked id so the failure surface is uniform.
+    """
+    import asyncio
+
+    registry = client.app.state.revocation_registry  # type: ignore[attr-defined]
+    asyncio.run(registry.mark_revoked("lease_under_test", "suspected-leak"))
+
+    resp = client.post(
+        "/v1/token/release",
+        json={"leaseId": "lease_under_test"},
+        headers=_hdrs(bootstrap_token),
+    )
+    assert resp.status_code == 410
+    body = resp.json()
+    assert body["title"] == "lease-revoked"
+    assert body["detail"] == "suspected-leak"
+    # Best-effort release upstream is skipped.
+    assert fake_gateway.released == []
+
+
+def test_refresh_not_revoked_proceeds(client: TestClient, bootstrap_token: str) -> None:
+    """Sanity: an unrevoked lease still refreshes normally."""
+    issued = client.get(
+        "/v1/token",
+        params={"slot": "primary", "purpose": "read"},
+        headers=_hdrs(bootstrap_token),
+    ).json()
+    resp = client.post(
+        "/v1/token/refresh",
+        json={"leaseId": issued["leaseId"]},
+        headers=_hdrs(bootstrap_token),
+    )
+    assert resp.status_code == 200

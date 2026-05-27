@@ -432,3 +432,148 @@ def test_issue_payload_round_trips_through_spl_id_newtypes() -> None:
         lease = resp.json()["lease"]
         assert lease["runId"] == body["runId"]
         assert lease["stepId"] == body["stepId"]
+
+
+# ---------------------------------------------------------------------------
+# Revoke (CONN-IMPL-020)
+# ---------------------------------------------------------------------------
+
+
+def test_revoke_single_lease_returns_revoked_status() -> None:
+    """Happy path: issue + revoke → 200 with one ``revoked`` ack."""
+    with _make_client(providers=_build_providers()) as client:
+        issued = client.post(
+            "/internal/v1/leases:issue", json=_issue_body(), headers=_ctx_header()
+        ).json()["lease"]
+        resp = client.post(
+            "/internal/v1/leases:revoke",
+            json={"leaseIds": [issued["leaseId"]], "reason": "rotation"},
+            headers=_ctx_header(),
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"results": [{"leaseId": issued["leaseId"], "status": "revoked"}]}
+
+
+def test_revoke_unknown_lease_returns_not_found_status() -> None:
+    with _make_client(providers=_build_providers()) as client:
+        resp = client.post(
+            "/internal/v1/leases:revoke",
+            json={"leaseIds": ["lease_NOPE"], "reason": "x"},
+            headers=_ctx_header(),
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"results": [{"leaseId": "lease_NOPE", "status": "not-found"}]}
+
+
+def test_revoke_already_revoked_returns_already_revoked_status() -> None:
+    with _make_client(providers=_build_providers()) as client:
+        issued = client.post(
+            "/internal/v1/leases:issue", json=_issue_body(), headers=_ctx_header()
+        ).json()["lease"]
+        first = client.post(
+            "/internal/v1/leases:revoke",
+            json={"leaseIds": [issued["leaseId"]], "reason": "first"},
+            headers=_ctx_header(),
+        )
+        assert first.json()["results"][0]["status"] == "revoked"
+        second = client.post(
+            "/internal/v1/leases:revoke",
+            json={"leaseIds": [issued["leaseId"]], "reason": "second"},
+            headers=_ctx_header(),
+        )
+        assert second.status_code == 200
+        assert second.json()["results"][0]["status"] == "already-revoked"
+
+
+def test_revoke_already_released_returns_already_expired_status() -> None:
+    with _make_client(providers=_build_providers()) as client:
+        issued = client.post(
+            "/internal/v1/leases:issue", json=_issue_body(), headers=_ctx_header()
+        ).json()["lease"]
+        client.post(
+            "/internal/v1/leases:release",
+            json={"leaseId": issued["leaseId"]},
+            headers=_ctx_header(),
+        )
+        resp = client.post(
+            "/internal/v1/leases:revoke",
+            json={"leaseIds": [issued["leaseId"]], "reason": "too-late"},
+            headers=_ctx_header(),
+        )
+        assert resp.status_code == 200
+        assert resp.json()["results"][0]["status"] == "already-expired"
+
+
+def test_revoke_batch_preserves_input_order_and_mixed_statuses() -> None:
+    with _make_client(providers=_build_providers()) as client:
+        a = client.post(
+            "/internal/v1/leases:issue", json=_issue_body(), headers=_ctx_header()
+        ).json()["lease"]["leaseId"]
+        b = client.post(
+            "/internal/v1/leases:issue",
+            json=_issue_body(stepId="step-2"),
+            headers=_ctx_header(),
+        ).json()["lease"]["leaseId"]
+        # Pre-release `b` so it surfaces as `already-expired`.
+        client.post(
+            "/internal/v1/leases:release",
+            json={"leaseId": b},
+            headers=_ctx_header(),
+        )
+        resp = client.post(
+            "/internal/v1/leases:revoke",
+            json={"leaseIds": [a, b, "lease_missing"], "reason": "batch"},
+            headers=_ctx_header(),
+        )
+        assert resp.status_code == 200
+        results = resp.json()["results"]
+        assert [r["leaseId"] for r in results] == [a, b, "lease_missing"]
+        assert [r["status"] for r in results] == [
+            "revoked",
+            "already-expired",
+            "not-found",
+        ]
+
+
+def test_revoke_empty_lease_ids_returns_422() -> None:
+    with _make_client(providers=_build_providers()) as client:
+        resp = client.post(
+            "/internal/v1/leases:revoke",
+            json={"leaseIds": [], "reason": "x"},
+            headers=_ctx_header(),
+        )
+        assert resp.status_code == 422
+
+
+def test_revoke_without_lease_mint_permission_returns_403() -> None:
+    with _make_client(providers=_build_providers()) as client:
+        resp = client.post(
+            "/internal/v1/leases:revoke",
+            json={"leaseIds": ["lease_x"], "reason": "x"},
+            headers=_ctx_header(permissions=[ADMIN_CONNECTOR]),
+        )
+        assert resp.status_code == 403
+
+
+def test_revoke_cross_workspace_isolation() -> None:
+    """A revoke from another workspace must see ``not-found``, not leak existence."""
+    with _make_client(providers=_build_providers()) as client:
+        issued = client.post(
+            "/internal/v1/leases:issue", json=_issue_body(), headers=_ctx_header()
+        ).json()["lease"]
+        other_ctx = {
+            CALLCTX_HEADER: json.dumps(
+                {
+                    "workspace_id": "ws-other",
+                    "principal_id": "svc:connector-sidecar",
+                    "permissions": [CONNECTOR_LEASE_MINT],
+                }
+            )
+        }
+        resp = client.post(
+            "/internal/v1/leases:revoke",
+            json={"leaseIds": [issued["leaseId"]], "reason": "x"},
+            headers=other_ctx,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["results"][0]["status"] == "not-found"

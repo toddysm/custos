@@ -483,6 +483,107 @@ async def test_revoke_frees_the_cap_slot() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Revoke-with-status (CONN-IMPL-020)
+# ---------------------------------------------------------------------------
+
+
+async def test_revoke_with_status_fresh_returns_revoked_and_emits_audit() -> None:
+    from custos_connector.lease.service import RevokeOutcomeStatus
+
+    mgr, _, md = _make_manager()
+    lease_id = await _issue(mgr)
+    md.append_audit_calls.clear()
+    outcome = await mgr.revoke_with_status(workspace_id=_WS, lease_id=lease_id, reason="rotation")
+    assert outcome.status is RevokeOutcomeStatus.REVOKED
+    assert outcome.lease is not None
+    assert outcome.lease.revoked_at == _T0
+    assert outcome.lease.revoke_reason == "rotation"
+    assert [ev.event_type for _, ev in md.append_audit_calls] == [EVENT_LEASE_REVOKED]
+
+
+async def test_revoke_with_status_already_revoked_no_second_audit() -> None:
+    from custos_connector.lease.service import RevokeOutcomeStatus
+
+    mgr, _, md = _make_manager()
+    lease_id = await _issue(mgr)
+    await mgr.revoke(workspace_id=_WS, lease_id=lease_id, reason="first-pass")
+    md.append_audit_calls.clear()
+    outcome = await mgr.revoke_with_status(
+        workspace_id=_WS, lease_id=lease_id, reason="second-pass"
+    )
+    assert outcome.status is RevokeOutcomeStatus.ALREADY_REVOKED
+    assert outcome.lease is not None
+    # First reason preserved; no fresh audit.
+    assert outcome.lease.revoke_reason == "first-pass"
+    assert md.append_audit_calls == []
+
+
+async def test_revoke_with_status_not_found_returns_not_found() -> None:
+    from custos_connector.lease.service import RevokeOutcomeStatus
+
+    mgr, _, md = _make_manager()
+    outcome = await mgr.revoke_with_status(workspace_id=_WS, lease_id="lease_NOPE", reason="x")
+    assert outcome.status is RevokeOutcomeStatus.NOT_FOUND
+    assert outcome.lease is None
+    assert md.append_audit_calls == []
+
+
+async def test_revoke_with_status_released_returns_already_expired() -> None:
+    """A released lease (released_at set) is reported as ``already-expired``;
+    no revoke mutation or audit emission."""
+    from custos_connector.lease.service import RevokeOutcomeStatus
+
+    mgr, ls, md = _make_manager()
+    lease_id = await _issue(mgr)
+    await mgr.release(workspace_id=_WS, lease_id=lease_id)
+    md.append_audit_calls.clear()
+    outcome = await mgr.revoke_with_status(workspace_id=_WS, lease_id=lease_id, reason="too-late")
+    assert outcome.status is RevokeOutcomeStatus.ALREADY_EXPIRED
+    assert outcome.lease is not None
+    # No revoked_at set.
+    assert outcome.lease.revoked_at is None
+    assert md.append_audit_calls == []
+    # Underlying row not mutated.
+    stored = await ls.get_lease(_WS, lease_id)
+    assert stored is not None
+    assert stored.revoked_at is None
+
+
+async def test_revoke_with_status_expired_by_ttl_returns_already_expired() -> None:
+    """A lease whose ``expires_at`` has passed is reported as
+    ``already-expired`` even if it was never released."""
+    from custos_connector.lease.service import RevokeOutcomeStatus
+
+    now = _T0
+    later = now + timedelta(hours=2)
+    ls = FakeLeaseAdapter()
+    md = FakeMetadataAdapter()
+
+    # Issue at _T0 with 1h TTL.
+    mgr_now = LeaseManager(
+        lease_store=cast("LeaseStoreProvider", ls),
+        metadata_store=cast("MetadataStoreProvider", md),
+        default_ttl_sec=3600,
+        max_concurrent_leases=4,
+        clock=lambda: now,
+    )
+    lease_id = await _issue(mgr_now)
+
+    # Now advance the wall clock past expiry and revoke.
+    mgr_later = LeaseManager(
+        lease_store=cast("LeaseStoreProvider", ls),
+        metadata_store=cast("MetadataStoreProvider", md),
+        default_ttl_sec=3600,
+        max_concurrent_leases=4,
+        clock=lambda: later,
+    )
+    md.append_audit_calls.clear()
+    outcome = await mgr_later.revoke_with_status(workspace_id=_WS, lease_id=lease_id, reason="late")
+    assert outcome.status is RevokeOutcomeStatus.ALREADY_EXPIRED
+    assert md.append_audit_calls == []
+
+
+# ---------------------------------------------------------------------------
 # Revoke-requested (CONN-IMPL-018)
 # ---------------------------------------------------------------------------
 

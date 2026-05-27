@@ -24,6 +24,11 @@ DEFAULT_SOCKET_PATH: Final[str] = "/custos/run/connector.sock"
 DEFAULT_BOOTSTRAP_TOKEN_PATH: Final[str] = "/custos/in/sidecar-token"
 #: Default path to the shared HMAC verification key.
 DEFAULT_BOOTSTRAP_KEY_PATH: Final[str] = "/custos/in/sidecar-key"
+#: Default TCP port the control-channel HTTPS server binds (CONN-IMPL-020).
+DEFAULT_CONTROL_PORT: Final[int] = 9443
+#: Default bind host for the control channel. ``0.0.0.0`` so an
+#: in-cluster operator (ARM or CS) can reach the pod IP.
+DEFAULT_CONTROL_HOST: Final[str] = "0.0.0.0"
 
 _ENV_PREFIX: Final[str] = "CUSTOS_SIDECAR_"
 
@@ -65,6 +70,25 @@ class Settings:
             activity UID can ``connect(2)`` to the socket. When
             ``None``, only the chmod is performed and the socket
             keeps the sidecar UID's primary group.
+        control_enabled: Whether to start the control-channel HTTPS
+            server (CONN-IMPL-020). When ``True``, all four
+            ``control_*`` fields below must be set. When ``False``
+            (typical for unit tests / dev), the sidecar only serves
+            the UDS surface and revoke is unavailable.
+        control_host: Bind host for the control channel; defaults to
+            ``0.0.0.0`` so a peer reaching the pod IP can connect.
+        control_port: TCP port for the control channel. Defaults to
+            9443 per the design's locked port allocation.
+        control_tls_cert_path: PEM-encoded server certificate the
+            control server presents during the TLS handshake. The
+            sidecar reads it once at start (via uvicorn / ssl).
+        control_tls_key_path: PEM-encoded private key matching
+            :attr:`control_tls_cert_path`.
+        control_tls_ca_path: PEM-encoded CA bundle the control server
+            uses to verify client certificates. mTLS is mandatory:
+            uvicorn is configured with ``ssl_cert_reqs=CERT_REQUIRED``
+            so any peer presenting an unsigned client cert is
+            rejected at the TLS layer (before any handler runs).
     """
 
     socket_path: str
@@ -78,6 +102,35 @@ class Settings:
     call_context: str
     contexts_wire: list[dict[str, object]] = field(default_factory=list)
     activity_gid: int | None = None
+    control_enabled: bool = False
+    control_host: str = DEFAULT_CONTROL_HOST
+    control_port: int = DEFAULT_CONTROL_PORT
+    control_tls_cert_path: str | None = None
+    control_tls_key_path: str | None = None
+    control_tls_ca_path: str | None = None
+
+    def __post_init__(self) -> None:
+        """Validate cross-field invariants the env loader cannot express.
+
+        When :attr:`control_enabled` is true the three mTLS path
+        fields must all be set; otherwise the sidecar would start the
+        TLS listener with a half-configured SSL context and silently
+        accept unauthenticated peers.
+        """
+        if self.control_enabled:
+            missing = [
+                name
+                for name, value in (
+                    ("control_tls_cert_path", self.control_tls_cert_path),
+                    ("control_tls_key_path", self.control_tls_key_path),
+                    ("control_tls_ca_path", self.control_tls_ca_path),
+                )
+                if value is None or value == ""
+            ]
+            if missing:
+                raise ValueError(
+                    "control_enabled is true but mTLS paths are missing: " + ", ".join(missing)
+                )
 
 
 def _require(env: Mapping[str, str], name: str) -> str:
@@ -106,6 +159,20 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     * ``ACTIVITY_GID`` (opt) — numeric GID of the activity container.
       When set, the UDS file is ``chown``ed to this group so the
       activity UID can connect.
+    * ``CONTROL_ENABLED`` (opt, default ``false``) — when ``true``, the
+      sidecar starts the control-channel HTTPS server (CONN-IMPL-020)
+      on :data:`DEFAULT_CONTROL_PORT` (overridable via
+      ``CONTROL_PORT``). When ``true``, ``CONTROL_TLS_CERT_PATH``,
+      ``CONTROL_TLS_KEY_PATH`` and ``CONTROL_TLS_CA_PATH`` are all
+      required.
+    * ``CONTROL_HOST`` (opt, default ``0.0.0.0``) — bind host.
+    * ``CONTROL_PORT`` (opt, default ``9443``) — bind port.
+    * ``CONTROL_TLS_CERT_PATH`` (req when control enabled) — path to
+      PEM server certificate.
+    * ``CONTROL_TLS_KEY_PATH`` (req when control enabled) — path to
+      PEM server private key.
+    * ``CONTROL_TLS_CA_PATH`` (req when control enabled) — path to
+      PEM CA bundle for client-cert verification (mTLS).
     """
     import json
 
@@ -139,6 +206,19 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
             ) from exc
         if activity_gid < 0:
             raise ValueError(f"{_ENV_PREFIX}ACTIVITY_GID must be non-negative; got {activity_gid}")
+    control_enabled = _parse_bool(env.get(_ENV_PREFIX + "CONTROL_ENABLED"), default=False)
+    control_port_raw = env.get(_ENV_PREFIX + "CONTROL_PORT")
+    if control_port_raw is None or control_port_raw == "":
+        control_port = DEFAULT_CONTROL_PORT
+    else:
+        try:
+            control_port = int(control_port_raw)
+        except ValueError as exc:
+            raise ValueError(
+                f"{_ENV_PREFIX}CONTROL_PORT must be an integer; got {control_port_raw!r}"
+            ) from exc
+        if not (1 <= control_port <= 65535):
+            raise ValueError(f"{_ENV_PREFIX}CONTROL_PORT must be in 1..65535; got {control_port}")
     return Settings(
         socket_path=env.get(_ENV_PREFIX + "SOCKET_PATH", DEFAULT_SOCKET_PATH),
         bootstrap_token_path=env.get(
@@ -153,12 +233,38 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         call_context=_require(env, "CALL_CONTEXT"),
         contexts_wire=contexts_wire,
         activity_gid=activity_gid,
+        control_enabled=control_enabled,
+        control_host=env.get(_ENV_PREFIX + "CONTROL_HOST", DEFAULT_CONTROL_HOST),
+        control_port=control_port,
+        control_tls_cert_path=env.get(_ENV_PREFIX + "CONTROL_TLS_CERT_PATH") or None,
+        control_tls_key_path=env.get(_ENV_PREFIX + "CONTROL_TLS_KEY_PATH") or None,
+        control_tls_ca_path=env.get(_ENV_PREFIX + "CONTROL_TLS_CA_PATH") or None,
     )
+
+
+def _parse_bool(raw: str | None, *, default: bool) -> bool:
+    """Parse a permissive truthy/falsy env var value.
+
+    Recognises ``1/0``, ``true/false``, ``yes/no``, ``on/off`` in any
+    case. Empty / missing falls back to ``default``. Anything else
+    raises :class:`ValueError` so a typo in the operator's manifest
+    crashes the pod at start instead of silently defaulting.
+    """
+    if raw is None or raw == "":
+        return default
+    lowered = raw.strip().lower()
+    if lowered in {"1", "true", "yes", "on"}:
+        return True
+    if lowered in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"unrecognised boolean: {raw!r}")
 
 
 __all__ = [
     "DEFAULT_BOOTSTRAP_KEY_PATH",
     "DEFAULT_BOOTSTRAP_TOKEN_PATH",
+    "DEFAULT_CONTROL_HOST",
+    "DEFAULT_CONTROL_PORT",
     "DEFAULT_SOCKET_PATH",
     "Settings",
     "load_settings",

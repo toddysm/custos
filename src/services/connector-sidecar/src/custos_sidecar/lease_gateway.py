@@ -221,6 +221,70 @@ class LeaseGateway:
                 f"connector-service returned {response.status_code} on release"
             )
 
+    async def revoke_many(
+        self,
+        lease_ids: list[str],
+        reason: str,
+    ) -> list[dict[str, str]]:
+        """Revoke a batch of leases via CS internal RPC (CONN-IMPL-020).
+
+        Wire body: ``{leaseIds: [...], reason: "..."}``.
+
+        Returns the per-lease ack list as decoded JSON
+        ``[{leaseId, status}, ...]`` where ``status`` is one of
+        ``revoked`` / ``already-revoked`` / ``already-expired`` /
+        ``not-found``. The endpoint always responds 200; non-200 or a
+        malformed body surfaces as :class:`GatewayTransportError`.
+
+        Order is preserved 1:1 with the input list. Duplicate ids in
+        the input produce one ack each (second one sees
+        ``already-revoked``).
+        """
+        try:
+            response = await self._client.post(
+                "/internal/v1/leases:revoke",
+                json={"leaseIds": list(lease_ids), "reason": reason},
+                headers=self._headers,
+            )
+        except httpx.HTTPError as exc:
+            raise GatewayTransportError(
+                f"connector-service unreachable on revoke: {exc!s}"
+            ) from exc
+        if response.status_code != 200:
+            raise GatewayTransportError(
+                f"connector-service returned {response.status_code} on revoke"
+            )
+        try:
+            payload = response.json()
+            raw_results = payload["results"]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise GatewayTransportError(
+                f"connector-service returned malformed 200 body on revoke: {exc!s}"
+            ) from exc
+        if not isinstance(raw_results, list):
+            raise GatewayTransportError(
+                "connector-service revoke 'results' must be a list; got "
+                f"{type(raw_results).__name__}"
+            )
+        decoded: list[dict[str, str]] = []
+        for entry in raw_results:
+            if not isinstance(entry, dict):
+                raise GatewayTransportError(
+                    "connector-service revoke 'results' entry is not an object"
+                )
+            try:
+                decoded.append(
+                    {
+                        "leaseId": str(entry["leaseId"]),
+                        "status": str(entry["status"]),
+                    }
+                )
+            except KeyError as exc:
+                raise GatewayTransportError(
+                    f"connector-service revoke 'results' entry missing key: {exc!s}"
+                ) from exc
+        return decoded
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------

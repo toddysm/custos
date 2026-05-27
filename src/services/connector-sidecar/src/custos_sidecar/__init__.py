@@ -24,6 +24,7 @@ from custos_sidecar.context_registry import ContextRegistry
 from custos_sidecar.credential_minter import CredentialMinter
 from custos_sidecar.errors import SidecarError, problem_response
 from custos_sidecar.lease_gateway import LeaseGateway
+from custos_sidecar.revocation import RevocationRegistry
 from custos_sidecar.router import router as sidecar_router
 
 __all__ = ["create_app"]
@@ -36,10 +37,11 @@ def create_app(
     lease_gateway: LeaseGateway,
     credential_minter: CredentialMinter,
     bound_triple: tuple[str, str, int],
+    revocation_registry: RevocationRegistry | None = None,
 ) -> FastAPI:
     """Build the sidecar FastAPI app from its collaborators.
 
-    All collaborators are required so the wiring is explicit \u2014
+    All collaborators are required so the wiring is explicit —
     tests cannot accidentally use the real Lease Gateway, and
     production cannot accidentally use a stub. The factory:
 
@@ -53,6 +55,14 @@ def create_app(
       backstop.
     * Adds a small ``/healthz`` endpoint with no auth; ARM uses it to
       gate the readiness probe.
+
+    The ``revocation_registry`` argument is optional for backward
+    compatibility with tests that pre-date CONN-IMPL-020. When omitted
+    the factory builds a fresh empty :class:`RevocationRegistry` so
+    the UDS router's 410 check always has something to consult; the
+    registry stays empty unless the control surface (built separately
+    via :func:`custos_sidecar.control_app.create_control_app`) shares
+    the same instance.
     """
     app = FastAPI(
         title="Custos Connector Sidecar",
@@ -66,6 +76,9 @@ def create_app(
     app.state.lease_gateway = lease_gateway
     app.state.credential_minter = credential_minter
     app.state.bound_triple = bound_triple
+    app.state.revocation_registry = (
+        revocation_registry if revocation_registry is not None else RevocationRegistry()
+    )
 
     @app.exception_handler(SidecarError)
     async def _sidecar_error_handler(request: Request, exc: SidecarError) -> Response:
