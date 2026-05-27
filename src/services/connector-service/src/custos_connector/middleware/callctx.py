@@ -45,8 +45,12 @@ if TYPE_CHECKING:
 #: API Gateway design (COMP-001) pins the canonical lowercase form.
 CALLCTX_HEADER: str = "x-custos-callctx"
 
-#: Paths the middleware deliberately bypasses (no auth on probes).
-_BYPASS_PATHS: frozenset[str] = frozenset({"/healthz", "/readyz"})
+#: Paths the middleware deliberately bypasses (no auth on probes,
+#: nor on the OpenAPI documentation surface — the schema is part of
+#: the service's public-by-design REST contract per CONN-IMPL-026).
+_BYPASS_PATHS: frozenset[str] = frozenset(
+    {"/healthz", "/readyz", "/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
+)
 
 #: Path prefixes the middleware bypasses because they authenticate
 #: externally (e.g. push webhook receivers verifying an HMAC signature
