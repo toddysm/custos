@@ -45,11 +45,12 @@ class _ScriptedCursorService:
     """A :class:`CursorService` stand-in keyed by ``(workspace, instance)``.
 
     Each registered queue is consumed in FIFO order. A queued
-    :class:`BaseException` instance is raised, anything else (a
-    callable returning :class:`TickResult` or a literal
-    :class:`TickResult`) yields a tick result. Callables are
-    awaited if they return an awaitable; that lets a test inject
-    "tick takes N steps of fake-clock time" behaviour.
+    :class:`BaseException` instance is raised, a literal
+    :class:`TickResult` is returned as-is, and a queued callable is
+    treated as an async factory: it is invoked and its returned
+    awaitable is awaited. The callable form lets a test inject
+    "tick takes N steps of fake-clock time" behaviour by advancing
+    the clock inside the awaitable before it resolves.
     """
 
     def __init__(self) -> None:

@@ -30,6 +30,8 @@ and § Single-writer safety:
 
 from custos_connector.scheduler.pull_loop import (
     DEFAULT_BACKOFF_CAP_SECONDS,
+    DEFAULT_MAX_CONCURRENT_TICKS,
+    DEFAULT_SCAN_INTERVAL_SECONDS,
     PULL_LOOP_HARD_FLOOR_SEC,
     InstanceSchedule,
     PullLoopScheduler,
@@ -39,6 +41,8 @@ from custos_connector.scheduler.pull_loop import (
 
 __all__ = [
     "DEFAULT_BACKOFF_CAP_SECONDS",
+    "DEFAULT_MAX_CONCURRENT_TICKS",
+    "DEFAULT_SCAN_INTERVAL_SECONDS",
     "PULL_LOOP_HARD_FLOOR_SEC",
     "InstanceSchedule",
     "PullLoopScheduler",

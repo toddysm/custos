@@ -38,6 +38,7 @@ import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
 from custos_spl import LeaseBusy
@@ -130,10 +131,12 @@ class TickOutcome:
     instance_id: str
     #: One of ``"ticked"`` (success), ``"lease_busy"`` (skipped — another
     #: replica owned the cursor lease), ``"halted"`` (the cursor service
-    #: raised :class:`CursorHalted`; the instance has been dropped from
-    #: the rotation), ``"unavailable"`` (the instance is no longer a
-    #: valid tick target — dropped from the rotation), or ``"failed"``
-    #: (generic exception; backoff applied).
+    #: raised :class:`CursorHalted`; the schedule is marked ``halted`` and
+    #: skipped on subsequent passes until :meth:`PullLoopScheduler.resume`
+    #: is called, but the entry remains in the registry), ``"unavailable"``
+    #: (the instance is no longer a valid tick target — actually removed
+    #: from the registry), or ``"failed"`` (generic exception; backoff
+    #: applied).
     status: str
     event_count: int | None = None
     error: BaseException | None = None
@@ -289,8 +292,17 @@ class PullLoopScheduler:
         sched.next_earliest_tick_at = self._clock()
 
     def schedules(self) -> Mapping[tuple[str, str], InstanceSchedule]:
-        """Read-only view of the current registry. Intended for tests / metrics."""
-        return dict(self._schedules)
+        """Snapshot of the current registry. Intended for tests / metrics.
+
+        The returned mapping is an immutable :class:`MappingProxyType`
+        over a shallow copy of the registry — adding or removing entries
+        on it has no effect on the scheduler. The contained
+        :class:`InstanceSchedule` objects are the live registry values
+        and remain mutable; callers must treat them as read-only outside
+        of tests (use :meth:`pause` / :meth:`resume` / :meth:`register` /
+        :meth:`unregister` to mutate scheduler state).
+        """
+        return MappingProxyType(dict(self._schedules))
 
     # ------------------------------------------------------------------
     # Pass driver
@@ -371,9 +383,10 @@ class PullLoopScheduler:
         except CursorHalted as exc:
             # The cursor service has already flipped the instance
             # status to a halt sentinel and emitted the matching
-            # audit event. Drop the instance from the rotation — the
-            # operator must call resume() (typically via the admin
-            # rewind in CONN-IMPL-024) before it ticks again.
+            # audit event. Mark the schedule halted — the entry stays
+            # in the registry but is_eligible_at() will return False
+            # for it until resume() (typically via the admin rewind in
+            # CONN-IMPL-024) clears the flag.
             sched.halted = True
             sched.halt_reason = type(exc).__name__
             _LOGGER.info(
@@ -407,10 +420,11 @@ class PullLoopScheduler:
                 error=exc,
             )
         except Exception as exc:
+            now = self._clock()
             sched.consecutive_failures += 1
             backoff = self._backoff_seconds(sched)
-            sched.next_earliest_tick_at = self._clock() + timedelta(seconds=backoff)
-            sched.last_tick_at = self._clock()
+            sched.next_earliest_tick_at = now + timedelta(seconds=backoff)
+            sched.last_tick_at = now
             _LOGGER.warning(
                 "pull tick for %s/%s failed (attempt %d); backing off %ds",
                 sched.workspace_id,
