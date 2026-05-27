@@ -545,6 +545,17 @@ def test_revoke_empty_lease_ids_returns_422() -> None:
         assert resp.status_code == 422
 
 
+def test_revoke_empty_string_lease_id_returns_422() -> None:
+    """Per-item ``min_length=1`` rejects ``[""]`` before it reaches the manager."""
+    with _make_client(providers=_build_providers()) as client:
+        resp = client.post(
+            "/internal/v1/leases:revoke",
+            json={"leaseIds": [""], "reason": "x"},
+            headers=_ctx_header(),
+        )
+        assert resp.status_code == 422
+
+
 def test_revoke_without_lease_mint_permission_returns_403() -> None:
     with _make_client(providers=_build_providers()) as client:
         resp = client.post(

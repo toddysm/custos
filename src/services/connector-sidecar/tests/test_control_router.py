@@ -147,6 +147,20 @@ def test_revoke_empty_lease_ids_returns_422(control_client: TestClient) -> None:
     assert resp.status_code == 422
 
 
+def test_revoke_empty_string_lease_id_returns_422(
+    control_client: TestClient,
+    fake_gateway: FakeLeaseGateway,
+) -> None:
+    """Per-item ``min_length=1`` rejects ``["", "lease_x"]``-style inputs
+    before they reach the gateway."""
+    resp = control_client.post(
+        "/sidecar-admin/v1/revoke",
+        json={"leaseIds": [""], "reason": "x"},
+    )
+    assert resp.status_code == 422
+    assert fake_gateway.revoke_calls == []
+
+
 def test_revoke_missing_reason_returns_422(control_client: TestClient) -> None:
     resp = control_client.post(
         "/sidecar-admin/v1/revoke",

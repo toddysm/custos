@@ -15,10 +15,12 @@ id:
    ``already-revoked`` without touching CS so the audit pipeline does
    not record a duplicate emission.
 2. Otherwise call the CS internal RPC
-   ``POST /internal/v1/leases:revoke`` (batched as a single-id call to
-   keep the per-lease ack mapping straight). CS does the discrimination
-   (``revoked`` / ``already-revoked`` / ``already-expired`` /
-   ``not-found``) and is the canonical source of the audit emission.
+   ``POST /internal/v1/leases:revoke`` once with the full set of
+   lease ids that missed the registry (the wire contract preserves
+   input order so per-lease acks align positionally). CS does the
+   discrimination (``revoked`` / ``already-revoked`` /
+   ``already-expired`` / ``not-found``) and is the canonical source
+   of the audit emission.
 3. On CS ack ``revoked``, mark the lease in the local registry so
    subsequent UDS ``refresh`` / ``release`` requests serve a 410
    ``lease-revoked`` problem document with the recorded reason.
@@ -31,7 +33,7 @@ document.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -56,7 +58,9 @@ class _RevokeBody(BaseModel):
     """Wire shape of ``POST /sidecar-admin/v1/revoke``."""
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
-    lease_ids: list[str] = Field(..., min_length=1, alias="leaseIds")
+    lease_ids: list[Annotated[str, Field(min_length=1)]] = Field(
+        ..., min_length=1, alias="leaseIds"
+    )
     reason: str = Field(..., min_length=1)
 
 

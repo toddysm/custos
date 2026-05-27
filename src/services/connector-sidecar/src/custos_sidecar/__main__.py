@@ -159,11 +159,20 @@ def _build_control_server(
     :attr:`Settings.control_tls_key_path`, and
     :attr:`Settings.control_tls_ca_path` to be non-None; the settings
     loader validates this invariant at parse time so a bad config
-    crashes the pod at start.
+    crashes the pod at start. The defensive ``ValueError`` below is a
+    belt-and-braces check (not an ``assert`` so it survives ``python
+    -O``) in case this helper is ever called with a hand-built
+    :class:`Settings` that bypassed ``load_settings``.
     """
-    assert settings.control_tls_cert_path is not None
-    assert settings.control_tls_key_path is not None
-    assert settings.control_tls_ca_path is not None
+    if (
+        settings.control_tls_cert_path is None
+        or settings.control_tls_key_path is None
+        or settings.control_tls_ca_path is None
+    ):
+        raise ValueError(
+            "_build_control_server requires control_tls_{cert,key,ca}_path "
+            "to be set; load_settings() enforces this when control_enabled is true"
+        )
     config = uvicorn.Config(
         app=app,
         host=settings.control_host,

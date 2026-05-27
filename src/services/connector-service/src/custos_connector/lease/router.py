@@ -115,7 +115,9 @@ class _RevokeWire(BaseModel):
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    lease_ids: list[str] = Field(..., min_length=1, alias="leaseIds")
+    lease_ids: list[Annotated[str, Field(min_length=1)]] = Field(
+        ..., min_length=1, alias="leaseIds"
+    )
     reason: str = Field(..., min_length=1)
 
 

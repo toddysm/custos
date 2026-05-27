@@ -71,10 +71,13 @@ class Settings:
             ``None``, only the chmod is performed and the socket
             keeps the sidecar UID's primary group.
         control_enabled: Whether to start the control-channel HTTPS
-            server (CONN-IMPL-020). When ``True``, all four
-            ``control_*`` fields below must be set. When ``False``
-            (typical for unit tests / dev), the sidecar only serves
-            the UDS surface and revoke is unavailable.
+            server (CONN-IMPL-020). When ``True``, the three mTLS path
+            fields (:attr:`control_tls_cert_path`,
+            :attr:`control_tls_key_path`, :attr:`control_tls_ca_path`)
+            must all be set; ``control_host`` and ``control_port`` keep
+            their defaults if unset. When ``False`` (typical for unit
+            tests / dev), the sidecar only serves the UDS surface and
+            revoke is unavailable.
         control_host: Bind host for the control channel; defaults to
             ``0.0.0.0`` so a peer reaching the pod IP can connect.
         control_port: TCP port for the control channel. Defaults to
