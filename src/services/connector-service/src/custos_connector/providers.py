@@ -60,6 +60,8 @@ from custos_connector.identity import (
     OidcFederatedResolver,
 )
 from custos_connector.lease import LeaseManager
+from custos_connector.listen.manager import ListenManager
+from custos_connector.listen.publisher import EventPublisher
 from custos_connector.runtime import DockerCliHookRunner, PluginInvoker
 from custos_connector.scheduler import PullLoopScheduler
 from custos_connector.settings import Settings
@@ -125,6 +127,17 @@ class Providers:
     follow-up. CONN-IMPL-024 (this slice) wires the admin REST surface
     that reads from them when present — when missing, the admin
     handlers raise a startup-wiring :class:`RuntimeError`.
+
+    The :class:`ListenManager` and :class:`EventPublisher` entries
+    (CONN-IMPL-025) are likewise optional. The push receiver
+    (:func:`custos_connector.listen.router.post_events`) raises a
+    startup-wiring :class:`RuntimeError` when called against a service
+    missing either field. Pull-mode connector instances continue to
+    function without them as long as the CursorService is wired with
+    its own publisher; the lifespan wiring of the Listen Manager and
+    the production Dapr publisher lands in a follow-up
+    (CONN-IMPL-027 Phase J) when the Trigger Service's
+    ``SubscribeEvents`` internal RPC is in place.
     """
 
     catalog_store: CatalogStoreProvider
@@ -136,6 +149,8 @@ class Providers:
     lease_manager: LeaseManager
     cursor_service: CursorService | None = field(default=None)
     pull_loop_scheduler: PullLoopScheduler | None = field(default=None)
+    listen_manager: ListenManager | None = field(default=None)
+    event_publisher: EventPublisher | None = field(default=None)
 
 
 def load_providers(settings: Settings) -> Providers:
