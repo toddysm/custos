@@ -59,6 +59,7 @@ from custos_connector.identity import (
     IdentityResolverRegistry,
     OidcFederatedResolver,
 )
+from custos_connector.instances import InstanceService
 from custos_connector.lease import LeaseManager
 from custos_connector.listen.manager import ListenManager
 from custos_connector.listen.publisher import EventPublisher
@@ -138,6 +139,13 @@ class Providers:
     the production Dapr publisher lands in a follow-up
     (CONN-IMPL-027 Phase J) when the Trigger Service's
     ``SubscribeEvents`` internal RPC is in place.
+
+    The :class:`InstanceService` entry (CONN-IMPL-014) is optional
+    on the dataclass so the test fixtures that only need a subset of
+    collaborators can keep using the existing helper. The public
+    instance REST surface (CONN-IMPL-026) requires it; the route
+    handlers raise a startup-wiring :class:`RuntimeError` when called
+    against a service missing the field.
     """
 
     catalog_store: CatalogStoreProvider
@@ -151,6 +159,7 @@ class Providers:
     pull_loop_scheduler: PullLoopScheduler | None = field(default=None)
     listen_manager: ListenManager | None = field(default=None)
     event_publisher: EventPublisher | None = field(default=None)
+    instance_service: InstanceService | None = field(default=None)
 
 
 def load_providers(settings: Settings) -> Providers:
@@ -213,6 +222,12 @@ def load_providers(settings: Settings) -> Providers:
         ),
         lease_manager=load_lease_manager(
             lease_store=typed_lease,
+            metadata_store=typed_metadata,
+            settings=settings,
+        ),
+        instance_service=load_instance_service(
+            catalog_store=typed_catalog,
+            instance_store=typed_instances,
             metadata_store=typed_metadata,
             settings=settings,
         ),
@@ -307,6 +322,35 @@ def load_lease_manager(
         metadata_store=metadata_store,
         default_ttl_sec=settings.sidecar_default_ttl_sec,
         max_concurrent_leases=settings.lease_max_concurrent,
+    )
+
+
+def load_instance_service(
+    *,
+    catalog_store: CatalogStoreProvider,
+    instance_store: ConnectorInstanceStoreProvider,
+    metadata_store: MetadataStoreProvider,
+    settings: Settings,
+    plugin_invoker: PluginInvoker | None = None,
+) -> InstanceService:
+    """Build the default :class:`InstanceService` (CONN-IMPL-014).
+
+    Threads :class:`Settings.health_cache_ttl_s` into the per-instance
+    health snapshot cache so the operator-facing env var
+    ``CONN_HEALTH_CACHE_TTL_S`` drives the cache window without
+    needing a per-call override on the routes in
+    :mod:`custos_connector.api.instances`. The plugin invoker is
+    constructed eagerly (Docker CLI hook runner by default) so the
+    instance ``:enable`` / ``/health`` / ``:force-health-check``
+    routes can probe plugin liveness without a per-request bootstrap.
+    """
+    invoker = plugin_invoker if plugin_invoker is not None else PluginInvoker(DockerCliHookRunner())
+    return InstanceService(
+        instance_store=instance_store,
+        catalog_store=catalog_store,
+        metadata_store=metadata_store,
+        plugin_invoker=invoker,
+        health_cache_ttl_seconds=settings.health_cache_ttl_s,
     )
 
 

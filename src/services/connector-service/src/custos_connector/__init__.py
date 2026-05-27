@@ -13,8 +13,10 @@ Phase A (CONN-IMPL-001, #284) shipped the package skeleton plus the
 ``/healthz`` + ``/readyz`` probes so the Phase A Helm chart could deploy.
 Phase B (CONN-IMPL-003 + CONN-IMPL-004) ships the SPL provider wiring,
 the schema-revision startup gate, and the call-context middleware (with
-dev shim). REST routes land in CONN-IMPL-026; the secret-bridge sidecar
-lands in Phase H (CONN-IMPL-019..021).
+dev shim). Phase J (CONN-IMPL-026) lands the public REST surface --
+connector-types listing, instance CRUD + lifecycle, lease admin, and
+lease-audit history -- backed by the services shipped in Phases B-I.
+The secret-bridge sidecar lands in Phase H (CONN-IMPL-019..021).
 """
 
 from __future__ import annotations
@@ -28,6 +30,12 @@ from fastapi.exceptions import RequestValidationError
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from custos_connector.api import (
+    audit_router,
+    connector_types_router,
+    instances_router,
+    lease_admin_router,
+)
 from custos_connector.binding import binding_router
 from custos_connector.cursor.router import router as cursor_admin_router
 from custos_connector.health import router as health_router
@@ -139,6 +147,11 @@ def create_app(
     app.include_router(lease_router)
     app.include_router(cursor_admin_router)
     app.include_router(listen_router)
+    # CONN-IMPL-026 — public REST surface.
+    app.include_router(connector_types_router)
+    app.include_router(instances_router)
+    app.include_router(lease_admin_router)
+    app.include_router(audit_router)
     return app
 
 

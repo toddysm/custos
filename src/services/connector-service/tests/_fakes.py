@@ -269,6 +269,46 @@ class FakeMetadataAdapter:
     ) -> None:
         self.append_audit_calls.append((str(workspace_id), event))
 
+    async def query_audit(
+        self,
+        workspace_id: object,
+        filter: object = None,
+        cursor: Cursor | None = None,
+        limit: int | None = None,
+    ) -> Page[AuditEvent]:
+        """In-memory ``query_audit`` for CONN-IMPL-026 routes.
+
+        Filters the recorded ``append_audit_calls`` by workspace and
+        the same conjunctive ``AuditFilter`` fields the SPL surface
+        accepts. ``cursor`` is interpreted as the integer index into
+        the filtered, newest-first row list — the fake does NOT mint
+        opaque tokens (PgMetadataAdapter does), but the route only
+        echoes ``next_cursor`` back to the caller so a stringified
+        integer is round-trip safe.
+        """
+        ws = str(workspace_id)
+        rows = [evt for (rec_ws, evt) in self.append_audit_calls if rec_ws == ws]
+        if filter is not None:
+            event_type = getattr(filter, "event_type", None)
+            actor = getattr(filter, "actor", None)
+            occurred_after = getattr(filter, "occurred_after", None)
+            occurred_before = getattr(filter, "occurred_before", None)
+            if event_type is not None:
+                rows = [r for r in rows if r.event_type == event_type]
+            if actor is not None:
+                rows = [r for r in rows if r.actor == actor]
+            if occurred_after is not None:
+                rows = [r for r in rows if r.occurred_at > occurred_after]
+            if occurred_before is not None:
+                rows = [r for r in rows if r.occurred_at < occurred_before]
+        rows.sort(key=lambda r: r.occurred_at, reverse=True)
+        start = int(str(cursor)) if cursor is not None else 0
+        end = len(rows) if limit is None else min(start + limit, len(rows))
+        next_cursor: Cursor | None = None
+        if end < len(rows):
+            next_cursor = Cursor(str(end))
+        return Page(items=tuple(rows[start:end]), next_cursor=next_cursor)
+
     # ------------------------------------------------------------------
     # Connector pull cursors (mirrors PgMetadataAdapter)
     # ------------------------------------------------------------------

@@ -1,0 +1,2164 @@
+{
+  "components": {
+    "schemas": {
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      },
+      "_BindForStepResponseWire": {
+        "description": "Wire shape of the ``BindForStep`` response body.",
+        "properties": {
+          "contexts": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/_ConnectorContextWire"
+            },
+            "title": "Contexts",
+            "type": "object"
+          }
+        },
+        "required": [
+          "contexts"
+        ],
+        "title": "_BindForStepResponseWire",
+        "type": "object"
+      },
+      "_BindForStepWire": {
+        "additionalProperties": false,
+        "description": "Wire shape of the ``BindForStep`` request body.",
+        "properties": {
+          "attempt": {
+            "minimum": 1.0,
+            "title": "Attempt",
+            "type": "integer"
+          },
+          "runId": {
+            "minLength": 1,
+            "title": "Runid",
+            "type": "string"
+          },
+          "slots": {
+            "items": {
+              "$ref": "#/components/schemas/_BindSlotWire"
+            },
+            "title": "Slots",
+            "type": "array"
+          },
+          "stepId": {
+            "minLength": 1,
+            "title": "Stepid",
+            "type": "string"
+          },
+          "stepKey": {
+            "minLength": 1,
+            "title": "Stepkey",
+            "type": "string"
+          }
+        },
+        "required": [
+          "runId",
+          "stepId",
+          "attempt",
+          "stepKey",
+          "slots"
+        ],
+        "title": "_BindForStepWire",
+        "type": "object"
+      },
+      "_BindSlotWire": {
+        "additionalProperties": false,
+        "description": "Wire shape of a single slot in the ``BindForStep`` request.",
+        "properties": {
+          "instanceId": {
+            "minLength": 1,
+            "title": "Instanceid",
+            "type": "string"
+          },
+          "name": {
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "requiredCapabilities": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Requiredcapabilities",
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "instanceId",
+          "requiredCapabilities"
+        ],
+        "title": "_BindSlotWire",
+        "type": "object"
+      },
+      "_ConnectorContextWire": {
+        "description": "Wire shape of a single resolved slot context.",
+        "properties": {
+          "endpoint": {
+            "title": "Endpoint",
+            "type": "string"
+          },
+          "extras": {
+            "additionalProperties": true,
+            "title": "Extras",
+            "type": "object"
+          },
+          "handle": {
+            "additionalProperties": true,
+            "title": "Handle",
+            "type": "object"
+          },
+          "tokenTypeHint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tokentypehint"
+          }
+        },
+        "required": [
+          "endpoint",
+          "handle",
+          "extras"
+        ],
+        "title": "_ConnectorContextWire",
+        "type": "object"
+      },
+      "_CreateConnectorRequest": {
+        "additionalProperties": false,
+        "description": "Body for ``POST /v1/workspaces/{ws}/connectors``.",
+        "properties": {
+          "credentialsAuthentication": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Credentialsauthentication"
+          },
+          "enabled": {
+            "default": true,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "leaseTtlSeconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Leasettlseconds"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "targetConfig": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Targetconfig"
+          },
+          "type": {
+            "minLength": 1,
+            "title": "Type",
+            "type": "string"
+          },
+          "usedCapabilities": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Usedcapabilities"
+          },
+          "version": {
+            "minLength": 1,
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "version"
+        ],
+        "title": "_CreateConnectorRequest",
+        "type": "object"
+      },
+      "_IssueWire": {
+        "additionalProperties": false,
+        "description": "Wire shape of the ``issue`` request body.\n\n``workspaceId`` is intentionally absent \u2014 it comes from the\ncall-context header so the sidecar cannot forge a lease across\nworkspaces.",
+        "properties": {
+          "attempt": {
+            "minimum": 1.0,
+            "title": "Attempt",
+            "type": "integer"
+          },
+          "capability": {
+            "minLength": 1,
+            "title": "Capability",
+            "type": "string"
+          },
+          "connectorInstanceId": {
+            "minLength": 1,
+            "title": "Connectorinstanceid",
+            "type": "string"
+          },
+          "instanceTtlSec": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Instancettlsec"
+          },
+          "requestedTtlSec": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requestedttlsec"
+          },
+          "runId": {
+            "minLength": 1,
+            "title": "Runid",
+            "type": "string"
+          },
+          "slot": {
+            "minLength": 1,
+            "title": "Slot",
+            "type": "string"
+          },
+          "stepDeadline": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stepdeadline"
+          },
+          "stepId": {
+            "minLength": 1,
+            "title": "Stepid",
+            "type": "string"
+          },
+          "tokenType": {
+            "minLength": 1,
+            "title": "Tokentype",
+            "type": "string"
+          },
+          "typeMaxTtlSec": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Typemaxttlsec"
+          }
+        },
+        "required": [
+          "runId",
+          "stepId",
+          "attempt",
+          "slot",
+          "capability",
+          "connectorInstanceId",
+          "tokenType"
+        ],
+        "title": "_IssueWire",
+        "type": "object"
+      },
+      "_PatchConnectorRequest": {
+        "additionalProperties": false,
+        "description": "Body for ``PATCH /v1/workspaces/{ws}/connectors/{id}``.\n\nAll fields are optional; only present keys are forwarded to\n:meth:`InstanceService.patch`. Setting ``leaseTtlSeconds`` to\n``null`` clears the per-instance override and restores the\ndeployment default. The handler never silently drops unknown\nfields \u2014 Pydantic's ``extra=\"forbid\"`` rejects them at parse\ntime so the API surface speaks with one voice (rather than\ndelegating the \"unknown field\" 400 to ``ImmutableFieldUpdate``).",
+        "properties": {
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "leaseTtlSeconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Leasettlseconds"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          }
+        },
+        "title": "_PatchConnectorRequest",
+        "type": "object"
+      },
+      "_PullLoopPauseWire": {
+        "additionalProperties": false,
+        "description": "Wire shape of the ``pull-loop:pause`` request body.\n\n``reason`` is optional but recorded verbatim in the\n``connector.pull-loop.paused`` audit event when present.",
+        "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "title": "_PullLoopPauseWire",
+        "type": "object"
+      },
+      "_RefreshWire": {
+        "additionalProperties": false,
+        "description": "Wire shape of the ``refresh`` request body.",
+        "properties": {
+          "instanceTtlSec": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Instancettlsec"
+          },
+          "leaseId": {
+            "minLength": 1,
+            "title": "Leaseid",
+            "type": "string"
+          },
+          "requestedTtlSec": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requestedttlsec"
+          },
+          "stepDeadline": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stepdeadline"
+          },
+          "typeMaxTtlSec": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Typemaxttlsec"
+          }
+        },
+        "required": [
+          "leaseId"
+        ],
+        "title": "_RefreshWire",
+        "type": "object"
+      },
+      "_ReleaseWire": {
+        "additionalProperties": false,
+        "description": "Wire shape of the ``release`` request body.",
+        "properties": {
+          "leaseId": {
+            "minLength": 1,
+            "title": "Leaseid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "leaseId"
+        ],
+        "title": "_ReleaseWire",
+        "type": "object"
+      },
+      "_RevokeRequest": {
+        "additionalProperties": false,
+        "description": "Body for ``POST /v1/workspaces/{ws}/leases/{leaseId}:revoke``.",
+        "properties": {
+          "reason": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "_RevokeRequest",
+        "type": "object"
+      },
+      "_RevokeWire": {
+        "additionalProperties": false,
+        "description": "Wire shape of the ``revoke`` request body (CONN-IMPL-020).\n\nSidecar control channel sends ``{leaseIds: [...], reason: \"...\"}``.\nThe endpoint returns a per-lease ack list so callers can\ndistinguish ``revoked`` / ``already-revoked`` / ``already-expired``\n/ ``not-found`` outcomes in a single round-trip.",
+        "properties": {
+          "leaseIds": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Leaseids",
+            "type": "array"
+          },
+          "reason": {
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "leaseIds",
+          "reason"
+        ],
+        "title": "_RevokeWire",
+        "type": "object"
+      },
+      "_RewindExplicit": {
+        "additionalProperties": false,
+        "description": "Wire shape of an explicit-envelope rewind request.\n\n``encoding`` MUST match the connector-type's current\n``cursorEncoding`` \u2014 otherwise the handler rejects the request\nwith 400 ``connector.cursor.encoding_mismatch``. The value is\nJSON-encoded with :func:`encode_envelope_value` and persisted\nas-is; the plugin sees it on the next tick.",
+        "properties": {
+          "encoding": {
+            "minLength": 1,
+            "title": "Encoding",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value"
+          }
+        },
+        "required": [
+          "encoding",
+          "value"
+        ],
+        "title": "_RewindExplicit",
+        "type": "object"
+      },
+      "_RewindWire": {
+        "additionalProperties": false,
+        "description": "Wire shape of the ``cursor:rewind`` request body.\n\n``to`` is one of:\n\n* ``\"beginning\"`` (string shorthand)\n* ``\"now\"`` (string shorthand)\n* ``{\"encoding\": \"...\", \"value\": <any JSON>}`` (explicit envelope)\n\n``reason`` is mandatory and free-form; it lands verbatim in the\n``cursor.rewound`` audit event so the audit trail records *why*\nthe operator rewound (e.g. ``\"replay after upstream backfill\"``,\n``\"unblock cursor_migration_required after type bump\"``).",
+        "properties": {
+          "reason": {
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "to": {
+            "anyOf": [
+              {
+                "enum": [
+                  "beginning",
+                  "now"
+                ],
+                "type": "string"
+              },
+              {
+                "$ref": "#/components/schemas/_RewindExplicit"
+              }
+            ],
+            "title": "To"
+          }
+        },
+        "required": [
+          "to",
+          "reason"
+        ],
+        "title": "_RewindWire",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "Custos Connector Service",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/internal/v1/bind-for-step": {
+      "post": {
+        "description": "Resolve every connector slot a step references.\n\nIdempotent on ``(workspace_id, run_id, step_id, attempt)`` \u2014 see\n:class:`BindForStepService` for the cache semantics and the M1\ndurability caveat.",
+        "operationId": "bind_for_step_internal_v1_bind_for_step_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_BindForStepWire"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/_BindForStepResponseWire"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Bind For Step",
+        "tags": [
+          "binding"
+        ]
+      }
+    },
+    "/internal/v1/leases:issue": {
+      "post": {
+        "description": "Mint a new lease for the calling sidecar.\n\nThe ``workspaceId`` is taken from the call-context (not the body).\nOn success returns the full lease envelope; on ``LeaseError`` the\nresponse carries the ``{\"error\": {\"code\", \"detail\"}}`` envelope and\nthe HTTP status :func:`http_status_for` selects.",
+        "operationId": "issue_lease_internal_v1_leases_issue_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_IssueWire"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Issue Lease",
+        "tags": [
+          "lease"
+        ]
+      }
+    },
+    "/internal/v1/leases:refresh": {
+      "post": {
+        "description": "Extend the expiry of an existing lease without changing its id.",
+        "operationId": "refresh_lease_internal_v1_leases_refresh_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_RefreshWire"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Refresh Lease",
+        "tags": [
+          "lease"
+        ]
+      }
+    },
+    "/internal/v1/leases:release": {
+      "post": {
+        "description": "Mark a lease as released. Always 204 (idempotent, best-effort).\n\nThe design contract: release is best-effort and clients should not\ndistinguish \"lease found and released\" from \"lease unknown / already\nreleased\". Either way the activity's hold on the upstream credential\nis over.",
+        "operationId": "release_lease_internal_v1_leases_release_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_ReleaseWire"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Release Lease",
+        "tags": [
+          "lease"
+        ]
+      }
+    },
+    "/internal/v1/leases:revoke": {
+      "post": {
+        "description": "Revoke a batch of leases. Returns a per-lease ack list (CONN-IMPL-020).\n\nBody shape: ``{leaseIds: [...], reason: \"...\"}``.\n\nResponse shape: ``{results: [{leaseId, status}, ...]}`` where\n``status`` is one of ``revoked`` / ``already-revoked`` /\n``already-expired`` / ``not-found`` (see\n:class:`~custos_connector.lease.service.RevokeOutcomeStatus`).\n\nThe endpoint always returns 200; per-lease failures are not HTTP\nerrors. This matches the sidecar control-channel contract \u2014 the\ncaller is interested in the per-lease outcome, not a single\npass/fail for the whole batch. Duplicate ids in the request body\nproduce one ack each, in input order; the second ack for a\nduplicate sees ``already-revoked`` because the first call moved\nthe lease into the revoked state.",
+        "operationId": "revoke_leases_internal_v1_leases_revoke_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_RevokeWire"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Revoke Leases",
+        "tags": [
+          "lease"
+        ]
+      }
+    },
+    "/v1/webhooks/workspaces/{workspace_id}/connectors/{instance_id}/events": {
+      "post": {
+        "description": "Accept a webhook batch and route it through the listen pipeline.\n\nSee module docstring for the request / response shape and the\nerror vocabulary.",
+        "operationId": "post_events_v1_webhooks_workspaces__workspace_id__connectors__instance_id__events_post",
+        "parameters": [
+          {
+            "description": "Workspace the connector instance is bound to.",
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "description": "Workspace the connector instance is bound to.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Connector instance identifier the webhook targets.",
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "description": "Connector instance identifier the webhook targets.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Instance Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Webhook receiver for push-mode connector events",
+        "tags": [
+          "push-receiver"
+        ]
+      }
+    },
+    "/v1/workspaces/{ws}/audit/leases": {
+      "get": {
+        "description": "List lease audit events for a workspace, newest-first.\n\nWhen ``eventType`` is omitted, the route fetches without an\nSPL-level event filter and post-filters to events whose\n``event_type`` starts with ``lease.``. Callers narrowing to a\nsingle lease event type SHOULD pass ``eventType`` so the SPL\nsurface does the filter and pagination stays dense.",
+        "operationId": "list_lease_audit_events_v1_workspaces__ws__audit_leases_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ws",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Ws",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional single event-type filter. Must be one of: lease.issued, lease.refreshed, lease.released, lease.expired, lease.revoke-requested, lease.revoked, lease.denied. Omit to query all lease events.",
+            "in": "query",
+            "name": "eventType",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional single event-type filter. Must be one of: lease.issued, lease.refreshed, lease.released, lease.expired, lease.revoke-requested, lease.revoked, lease.denied. Omit to query all lease events.",
+              "title": "Eventtype"
+            }
+          },
+          {
+            "in": "query",
+            "name": "actor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Actor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "occurredAfter",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Occurredafter"
+            }
+          },
+          {
+            "in": "query",
+            "name": "occurredBefore",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Occurredbefore"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 500,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Query the audit log for lease-related events.",
+        "tags": [
+          "audit"
+        ]
+      }
+    },
+    "/v1/workspaces/{ws}/connector-types": {
+      "get": {
+        "description": "List every persisted version of a single connector type.\n\nConnector types themselves are global, but this route is mounted\nunder ``/v1/workspaces/{ws}/...`` so the operator surface has a\nconsistent shape and the call-context's ``workspace_id`` must\nstill match the ``{ws}`` path segment \u2014 that keeps the route\ntable workspace-pivoted even where the underlying data is not.\n\nReturns 200 with ``{items: [...], nextCursor: ...}``. The cursor\nis opaque; callers MUST pass it back verbatim to advance through\npages.",
+        "operationId": "list_connector_type_versions_v1_workspaces__ws__connector_types_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ws",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Ws",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Connector type to list.",
+            "in": "query",
+            "name": "type",
+            "required": true,
+            "schema": {
+              "description": "Connector type to list.",
+              "minLength": 1,
+              "title": "Type",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Opaque pagination cursor.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Opaque pagination cursor.",
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 500,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List connector-type versions for a given type.",
+        "tags": [
+          "connector-types"
+        ]
+      }
+    },
+    "/v1/workspaces/{ws}/connectors": {
+      "get": {
+        "operationId": "list_connectors_v1_workspaces__ws__connectors_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ws",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Ws",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "type",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Type"
+            }
+          },
+          {
+            "in": "query",
+            "name": "enabled",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Enabled"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 500,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List connector instances in a workspace.",
+        "tags": [
+          "connectors"
+        ]
+      },
+      "post": {
+        "operationId": "create_connector_v1_workspaces__ws__connectors_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ws",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Ws",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_CreateConnectorRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create a connector instance.",
+        "tags": [
+          "connectors"
+        ]
+      }
+    },
+    "/v1/workspaces/{ws}/connectors/{instance_id}": {
+      "get": {
+        "operationId": "get_connector_v1_workspaces__ws__connectors__instance_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ws",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Ws",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Instance Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read a connector instance.",
+        "tags": [
+          "connectors"
+        ]
+      },
+      "patch": {
+        "operationId": "patch_connector_v1_workspaces__ws__connectors__instance_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ws",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Ws",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Instance Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_PatchConnectorRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Partially update a connector instance.",
+        "tags": [
+          "connectors"
+        ]
+      }
+    },
+    "/v1/workspaces/{ws}/connectors/{instance_id}/cursor": {
+      "get": {
+        "description": "Read the current cursor envelope (redacted).\n\nReturns 200 with the redacted envelope; 404\n``connector.instance_not_found`` if the instance row does not\nexist; 404 ``connector.cursor.not_found`` if the instance\nexists but the connector has never ticked. The ``encoding``\nfield is sourced from the connector type's current manifest,\nnot from the persisted row \u2014 a connector-type that has bumped\nits ``cursorEncoding`` will report the new encoding even though\nthe persisted value is still in the old format. The next tick\nwill surface the mismatch.",
+        "operationId": "read_cursor_v1_workspaces__ws__connectors__instance_id__cursor_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ws",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Ws",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Instance Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Cursor",
+        "tags": [
+          "cursor-admin"
+        ]
+      }
+    },
+    "/v1/workspaces/{ws}/connectors/{instance_id}/cursor:rewind": {
+      "post": {
+        "description": "Rewind the cursor to a new position.\n\nThree rewind targets:\n\n* ``\"beginning\"`` writes the empty-string sentinel so the next\n  tick passes ``cursor=None`` to the plugin (replay from the\n  producer's oldest available position).\n* ``\"now\"`` writes a JSON-encoded UTC RFC 3339 timestamp string\n  captured at request handling time. Whether the plugin accepts\n  this position depends on the connector-type \u2014 pull sources\n  that expect, say, a Kafka offset will reject it on the next\n  tick with :class:`CursorEncodingMismatch`.\n* ``{\"encoding\": \"...\", \"value\": <any JSON>}`` writes an\n  explicit envelope. ``encoding`` MUST match the connector-type's\n  current ``cursorEncoding``.\n\nOn success returns 200 with the new redacted envelope and emits a\n``cursor.rewound`` audit event carrying the operator identity,\nfree-form ``reason``, and ``from``/``to`` audit envelopes\n(encoding + value fingerprint + value length \u2014 never the raw\nvalue). Audit emission is best-effort: the rewind has already\ncommitted to SPL by the time the audit emit runs, so an audit\ndrop is logged + counted on ``custos_audit_emit_failures_total``\nbut does not fail the request.",
+        "operationId": "rewind_cursor_v1_workspaces__ws__connectors__instance_id__cursor_rewind_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ws",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Ws",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Instance Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_RewindWire"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rewind Cursor",
+        "tags": [
+          "cursor-admin"
+        ]
+      }
+    },
+    "/v1/workspaces/{ws}/connectors/{instance_id}/health": {
+      "get": {
+        "operationId": "read_connector_health_v1_workspaces__ws__connectors__instance_id__health_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ws",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Ws",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Instance Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Return the cached health snapshot (probes only when stale).",
+        "tags": [
+          "connectors"
+        ]
+      }
+    },
+    "/v1/workspaces/{ws}/connectors/{instance_id}/leases": {
+      "get": {
+        "operationId": "list_leases_for_instance_v1_workspaces__ws__connectors__instance_id__leases_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ws",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Ws",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Instance Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 500,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List active leases for a connector instance.",
+        "tags": [
+          "lease-admin"
+        ]
+      }
+    },
+    "/v1/workspaces/{ws}/connectors/{instance_id}/leases:revoke-all": {
+      "post": {
+        "operationId": "revoke_all_for_instance_v1_workspaces__ws__connectors__instance_id__leases_revoke_all_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ws",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Ws",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Instance Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_RevokeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Revoke every active lease for a connector instance.",
+        "tags": [
+          "lease-admin"
+        ]
+      }
+    },
+    "/v1/workspaces/{ws}/connectors/{instance_id}/pull-loop:pause": {
+      "post": {
+        "description": "Pause the pull-loop for a connector instance.\n\nIdempotent: pausing an already-paused (or never-registered)\ninstance still emits a fresh ``connector.pull-loop.paused``\naudit event so the operator action is recorded. Any in-flight\ntick completes; the scheduler refuses to dispatch a new tick\nuntil :func:`resume_pull_loop` is called.\n\nCursor state and consecutive-failure count are preserved across\nthe pause/resume cycle so the loop picks up where it left off.",
+        "operationId": "pause_pull_loop_v1_workspaces__ws__connectors__instance_id__pull_loop_pause_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ws",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Ws",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Instance Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/_PullLoopPauseWire"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Pause Pull Loop",
+        "tags": [
+          "cursor-admin"
+        ]
+      }
+    },
+    "/v1/workspaces/{ws}/connectors/{instance_id}/pull-loop:resume": {
+      "post": {
+        "description": "Resume the pull-loop for a connector instance.\n\nIdempotent: resuming an already-running (or never-registered)\ninstance still emits a fresh ``connector.pull-loop.resumed``\naudit event. Clears the in-memory ``halted`` flag \u2014 operators\nare expected to also clear the durable ``status`` flip via\n:func:`rewind_cursor` when the halt was triggered by a cursor\nmigration. If ``status`` is still a halt sentinel on the next\ntick, the cursor service will refuse the tick with\n:class:`CursorInstanceUnavailable` and the scheduler will drop\nthe instance from the rotation again.",
+        "operationId": "resume_pull_loop_v1_workspaces__ws__connectors__instance_id__pull_loop_resume_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ws",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Ws",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Instance Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Resume Pull Loop",
+        "tags": [
+          "cursor-admin"
+        ]
+      }
+    },
+    "/v1/workspaces/{ws}/connectors/{instance_id}:disable": {
+      "post": {
+        "operationId": "disable_connector_v1_workspaces__ws__connectors__instance_id__disable_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ws",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Ws",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Instance Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Disable a connector instance.",
+        "tags": [
+          "connectors"
+        ]
+      }
+    },
+    "/v1/workspaces/{ws}/connectors/{instance_id}:enable": {
+      "post": {
+        "operationId": "enable_connector_v1_workspaces__ws__connectors__instance_id__enable_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ws",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Ws",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Instance Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Enable a connector instance (synchronous health probe).",
+        "tags": [
+          "connectors"
+        ]
+      }
+    },
+    "/v1/workspaces/{ws}/connectors/{instance_id}:force-health-check": {
+      "post": {
+        "operationId": "force_connector_health_check_v1_workspaces__ws__connectors__instance_id__force_health_check_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ws",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Ws",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Instance Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Force a synchronous health probe (bypasses the cache).",
+        "tags": [
+          "connectors"
+        ]
+      }
+    },
+    "/v1/workspaces/{ws}/leases/{lease_id}:revoke": {
+      "post": {
+        "description": "Revoke one lease.\n\nReturns 200 with ``{leaseId, status}`` when the lease was found\n(``status`` is one of ``revoked`` / ``already-revoked`` /\n``already-expired``); returns 404 with the same envelope when\nthe lease does not exist in this workspace.",
+        "operationId": "revoke_single_lease_v1_workspaces__ws__leases__lease_id__revoke_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ws",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Ws",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "lease_id",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Lease Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_RevokeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Revoke a single lease.",
+        "tags": [
+          "lease-admin"
+        ]
+      }
+    },
+    "/v1/workspaces/{ws}/runs/{run_id}/leases": {
+      "get": {
+        "operationId": "list_leases_for_run_v1_workspaces__ws__runs__run_id__leases_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ws",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Ws",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 500,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List active leases for a run.",
+        "tags": [
+          "lease-admin"
+        ]
+      }
+    },
+    "/v1/workspaces/{ws}/runs/{run_id}/leases:revoke-all": {
+      "post": {
+        "operationId": "revoke_all_for_run_v1_workspaces__ws__runs__run_id__leases_revoke_all_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ws",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Ws",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_RevokeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Revoke every active lease for a run.",
+        "tags": [
+          "lease-admin"
+        ]
+      }
+    }
+  }
+}

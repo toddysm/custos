@@ -70,6 +70,12 @@ dev = [
     # exercise the permutation-invariance + mutation-sensitivity
     # guarantees that ``compute_digest`` must satisfy.
     "hypothesis>=6.99",
+    # OpenAPI snapshot validation (CONN-IMPL-026): the public REST
+    # surface ships a committed ``openapi.json`` snapshot — the test
+    # at ``tests/test_openapi_snapshot.py`` validates the generated
+    # spec against the OpenAPI 3.1 schema and diffs against the
+    # committed file.
+    "openapi-spec-validator>=0.7",
     # OCI Referrers integration tests (CONN-IMPL-007) spin up a local
     # registry container when ``CUSTOS_OCI_REGISTRY_DISTRIBUTION_URL`` and
     # ``CUSTOS_OCI_REGISTRY_ZOT_URL`` are not provided.
