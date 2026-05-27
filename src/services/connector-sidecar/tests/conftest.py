@@ -17,8 +17,10 @@ from fastapi.testclient import TestClient
 from custos_sidecar import create_app
 from custos_sidecar.auth import BootstrapTokenVerifier, BoundTriple, mint_bootstrap_token
 from custos_sidecar.context_registry import ContextRegistry, SlotContext
+from custos_sidecar.control_app import create_control_app
 from custos_sidecar.credential_minter import StubCredentialMinter
 from custos_sidecar.lease_gateway import LeaseRecord
+from custos_sidecar.revocation import RevocationRegistry
 
 # --------------------------------------------------------------------------- #
 # Bootstrap / triple
@@ -99,9 +101,14 @@ class FakeLeaseGateway:
         self.issued: list[LeaseRecord] = []
         self.refreshed: list[str] = []
         self.released: list[str] = []
+        self.revoke_calls: list[tuple[list[str], str]] = []
         self.next_issue_error: GatewayLeaseError | GatewayTransportError | None = None
         self.next_refresh_error: GatewayLeaseError | GatewayTransportError | None = None
         self.next_release_error: GatewayTransportError | None = None
+        self.next_revoke_error: GatewayTransportError | None = None
+        #: Per-call status override queue for ``revoke_many`` — pops the
+        #: front entry for each lease id. Defaults to ``"revoked"``.
+        self.next_revoke_statuses: list[str] = []
         self._counter = 0
 
     def _make_record(self, body: dict[str, object]) -> LeaseRecord:
@@ -183,6 +190,22 @@ class FakeLeaseGateway:
             raise err
         self.released.append(lease_id)
 
+    async def revoke_many(
+        self,
+        lease_ids: list[str],
+        reason: str,
+    ) -> list[dict[str, str]]:
+        if self.next_revoke_error is not None:
+            err = self.next_revoke_error
+            self.next_revoke_error = None
+            raise err
+        self.revoke_calls.append((list(lease_ids), reason))
+        results: list[dict[str, str]] = []
+        for lease_id in lease_ids:
+            status = self.next_revoke_statuses.pop(0) if self.next_revoke_statuses else "revoked"
+            results.append({"leaseId": lease_id, "status": status})
+        return results
+
 
 @pytest.fixture
 def fake_gateway() -> FakeLeaseGateway:
@@ -205,6 +228,7 @@ def client(
     registry: ContextRegistry,
     fake_gateway: FakeLeaseGateway,
     stub_minter: StubCredentialMinter,
+    revocation_registry: RevocationRegistry,
 ) -> Iterator[TestClient]:
     app = create_app(
         bootstrap_verifier=verifier,
@@ -212,6 +236,39 @@ def client(
         lease_gateway=fake_gateway,  # type: ignore[arg-type]
         credential_minter=stub_minter,
         bound_triple=(RUN_ID, STEP_ID, ATTEMPT),
+        revocation_registry=revocation_registry,
+    )
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def revocation_registry() -> RevocationRegistry:
+    """Shared registry across the UDS client and the control client.
+
+    Allows a single test to revoke via the control surface and then
+    observe the 410 on the UDS surface, mirroring production where
+    both surfaces share an instance in :mod:`custos_sidecar.__main__`.
+    """
+    return RevocationRegistry()
+
+
+@pytest.fixture
+def control_client(
+    revocation_registry: RevocationRegistry,
+    fake_gateway: FakeLeaseGateway,
+) -> Iterator[TestClient]:
+    """TestClient over the control-channel FastAPI app.
+
+    Stand-alone fixture so tests that exercise the control surface
+    only do not pay for UDS wiring. The control app shares the
+    :class:`RevocationRegistry` and :class:`FakeLeaseGateway` fixtures
+    with the UDS ``client`` fixture so cross-surface tests can use
+    both at once.
+    """
+    app = create_control_app(
+        revocation_registry=revocation_registry,
+        lease_gateway=fake_gateway,  # type: ignore[arg-type]
     )
     with TestClient(app) as test_client:
         yield test_client

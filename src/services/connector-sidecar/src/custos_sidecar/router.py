@@ -60,6 +60,7 @@ from custos_sidecar.lease_gateway import (
     LeaseGateway,
     LeaseRecord,
 )
+from custos_sidecar.revocation import RevocationRegistry
 
 router = APIRouter(prefix="/v1", tags=["sidecar"])
 
@@ -138,6 +139,31 @@ def _resolve_minter(request: Request) -> CredentialMinter:
     """Pull the :class:`CredentialMinter` off ``app.state``."""
     minter: CredentialMinter = request.app.state.credential_minter
     return minter
+
+
+def _resolve_revocation_registry(request: Request) -> RevocationRegistry:
+    """Pull the :class:`RevocationRegistry` off ``app.state``.
+
+    The registry is populated by the control surface
+    (:mod:`custos_sidecar.control_router`). The UDS router consults
+    it before every per-lease op so a revoked lease serves a 410
+    ``lease-revoked`` problem document without an upstream
+    round-trip.
+    """
+    registry: RevocationRegistry = request.app.state.revocation_registry
+    return registry
+
+
+def _enforce_not_revoked(registry: RevocationRegistry, lease_id: str) -> None:
+    """Raise :class:`SidecarError(LEASE_REVOKED)` if ``lease_id`` is revoked.
+
+    The detail string is the operator-supplied revocation reason so the
+    activity's log surface carries the actionable explanation (e.g.
+    ``"key rotation"``, ``"suspected leak"``).
+    """
+    if registry.is_revoked(lease_id):
+        reason = registry.reason_for(lease_id) or "lease revoked"
+        raise SidecarError(SidecarErrorCode.LEASE_REVOKED, reason)
 
 
 def _bound_triple(request: Request) -> tuple[str, str, int]:
@@ -240,6 +266,7 @@ async def refresh_token(
 ) -> Response:
     """Re-mint the credential for an existing lease (same id, new token)."""
     try:
+        _enforce_not_revoked(_resolve_revocation_registry(request), body.lease_id)
         gateway = _resolve_gateway(request)
         minter = _resolve_minter(request)
         registry = _resolve_registry(request)
@@ -293,7 +320,15 @@ async def release_token(
     A failed release leaves the lease to expire by TTL; the design's
     contract is that the activity must not block on a successful
     release acknowledgement, so the sidecar absorbs any CS error.
+
+    Revoked leases also return 410 ``lease-revoked`` so the activity
+    observes the same terminal-state envelope on every operation
+    against a revoked id (refresh + release).
     """
+    try:
+        _enforce_not_revoked(_resolve_revocation_registry(request), body.lease_id)
+    except SidecarError as exc:
+        return problem_response(exc, instance=str(request.url.path))
     gateway = _resolve_gateway(request)
     with contextlib.suppress(GatewayTransportError):
         # Swallow: best-effort contract. The lease will expire via TTL.

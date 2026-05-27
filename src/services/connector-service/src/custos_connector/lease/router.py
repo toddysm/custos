@@ -104,6 +104,23 @@ class _ReleaseWire(BaseModel):
     lease_id: str = Field(..., min_length=1, alias="leaseId")
 
 
+class _RevokeWire(BaseModel):
+    """Wire shape of the ``revoke`` request body (CONN-IMPL-020).
+
+    Sidecar control channel sends ``{leaseIds: [...], reason: "..."}``.
+    The endpoint returns a per-lease ack list so callers can
+    distinguish ``revoked`` / ``already-revoked`` / ``already-expired``
+    / ``not-found`` outcomes in a single round-trip.
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    lease_ids: list[Annotated[str, Field(min_length=1)]] = Field(
+        ..., min_length=1, alias="leaseIds"
+    )
+    reason: str = Field(..., min_length=1)
+
+
 # ---------------------------------------------------------------------------
 # Serialization
 # ---------------------------------------------------------------------------
@@ -253,6 +270,42 @@ async def release_lease(
     lease_manager = _resolve_lease_manager(request)
     await lease_manager.release(workspace_id=WorkspaceId(ctx.workspace_id), lease_id=body.lease_id)
     return Response(status_code=204)
+
+
+@router.post("/leases:revoke")
+async def revoke_leases(
+    body: _RevokeWire,
+    request: Request,
+    ctx: Annotated[CallContext, Depends(require_permission(CONNECTOR_LEASE_MINT))],
+) -> Response:
+    """Revoke a batch of leases. Returns a per-lease ack list (CONN-IMPL-020).
+
+    Body shape: ``{leaseIds: [...], reason: "..."}``.
+
+    Response shape: ``{results: [{leaseId, status}, ...]}`` where
+    ``status`` is one of ``revoked`` / ``already-revoked`` /
+    ``already-expired`` / ``not-found`` (see
+    :class:`~custos_connector.lease.service.RevokeOutcomeStatus`).
+
+    The endpoint always returns 200; per-lease failures are not HTTP
+    errors. This matches the sidecar control-channel contract — the
+    caller is interested in the per-lease outcome, not a single
+    pass/fail for the whole batch. Duplicate ids in the request body
+    produce one ack each, in input order; the second ack for a
+    duplicate sees ``already-revoked`` because the first call moved
+    the lease into the revoked state.
+    """
+    lease_manager = _resolve_lease_manager(request)
+    workspace = WorkspaceId(ctx.workspace_id)
+    results: list[dict[str, str]] = []
+    for lease_id in body.lease_ids:
+        outcome = await lease_manager.revoke_with_status(
+            workspace_id=workspace,
+            lease_id=lease_id,
+            reason=body.reason,
+        )
+        results.append({"leaseId": lease_id, "status": outcome.status.value})
+    return JSONResponse(status_code=200, content={"results": results})
 
 
 __all__ = ["router"]

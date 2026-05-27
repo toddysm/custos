@@ -49,6 +49,9 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.4",
     "mypy>=1.10",
+    # cryptography drives the self-signed CA + server/client cert
+    # generation used by the mTLS integration test (CONN-IMPL-020).
+    "cryptography>=42",
     # The UDS integration harness drives the running sidecar over an
     # AF_UNIX socket; httpx's ``AsyncHTTPTransport(uds=...)`` covers the
     # client side without a separate aiohttp dep.
