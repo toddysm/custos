@@ -62,6 +62,25 @@ ENV_HEALTH_CACHE_TTL_S: Final[str] = "CONN_HEALTH_CACHE_TTL_S"
 #: (CONN-IMPL-020).
 ENV_SIDECAR_MTLS_ISSUER: Final[str] = "CONN_SIDECAR_MTLS_ISSUER"
 
+#: Optional. Dapr sidecar HTTP base URL. When set, Connector Service
+#: publishes normalized connector events through Dapr Pub/Sub instead
+#: of the dev-mode no-op publisher (CONN-IMPL-027). Empty disables Dapr
+#: publishing and keeps the in-process :class:`LocalEventBus` /
+#: :class:`NoOpEventPublisher` wiring for local dev + tests.
+ENV_DAPR_HTTP_ENDPOINT: Final[str] = "CONN_DAPR_HTTP_ENDPOINT"
+
+#: Optional. Name of the Dapr Pub/Sub component the Connector Service
+#: publishes events through. Returned to Trigger Service in the
+#: ``SubscribeEvents`` RPC response so the subscriber wires its Dapr
+#: subscription against the same component (CONN-IMPL-027). Defaults to
+#: ``custos-pubsub`` to match the Helm subchart default.
+ENV_DAPR_PUBSUB_NAME: Final[str] = "CONN_DAPR_PUBSUB_NAME"
+
+#: Optional. Name of the Dapr Pub/Sub topic the Connector Service
+#: publishes connector events on. Defaults to ``custos.connector.events``
+#: per design § Public Interface → Internal RPCs (CONN-IMPL-027).
+ENV_DAPR_EVENT_TOPIC: Final[str] = "CONN_DAPR_EVENT_TOPIC"
+
 #: Operational env tag. The call-context dev shim refuses to run when this
 #: is ``production`` (case-insensitive).
 ENV_ENVIRONMENT: Final[str] = "ENVIRONMENT"
@@ -72,6 +91,8 @@ DEFAULT_SIDECAR_DEFAULT_TTL: Final[int] = 600
 DEFAULT_LEASE_MAX_CONCURRENT: Final[int] = 16
 DEFAULT_PULL_LOOP_MIN_INTERVAL_SEC: Final[int] = 10
 DEFAULT_HEALTH_CACHE_TTL_S: Final[int] = 60
+DEFAULT_DAPR_PUBSUB_NAME: Final[str] = "custos-pubsub"
+DEFAULT_DAPR_EVENT_TOPIC: Final[str] = "custos.connector.events"
 
 #: Minimum pull-loop interval the design allows (CONN-IMPL-023). Set
 #: ``CONN_PULL_LOOP_MIN_INTERVAL_SEC`` above this; smaller values are rejected.
@@ -98,11 +119,30 @@ class Settings:
     health_cache_ttl_s: int
     sidecar_mtls_issuer: str | None
     environment: str
+    # CONN-IMPL-027 (Phase J) — Dapr Pub/Sub wiring. Defaults keep
+    # local-dev + the existing test fixtures (which construct
+    # ``Settings`` positionally-by-name) working without per-call updates:
+    # empty endpoint = dev-mode :class:`NoOpEventPublisher`.
+    dapr_http_endpoint: str = ""  # empty string means "Dapr publishing disabled"
+    dapr_pubsub_name: str = DEFAULT_DAPR_PUBSUB_NAME
+    dapr_event_topic: str = DEFAULT_DAPR_EVENT_TOPIC
 
     @property
     def use_callctx_dev_shim(self) -> bool:
         """True when the dev-shim call-context middleware should be wired."""
         return self.authz_endpoint == ""
+
+    @property
+    def dapr_pubsub_enabled(self) -> bool:
+        """True when Connector Service should publish events through Dapr.
+
+        Toggled by ``CONN_DAPR_HTTP_ENDPOINT``: when set, the
+        :class:`custos_connector.listen.publisher.DaprPubSubEventPublisher`
+        is wired as the production event publisher (CONN-IMPL-027). Empty
+        keeps the dev-mode :class:`NoOpEventPublisher` so single-node
+        development continues to work without standing up Dapr.
+        """
+        return self.dapr_http_endpoint != ""
 
     @property
     def is_production(self) -> bool:
@@ -165,11 +205,16 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
             ENV_HEALTH_CACHE_TTL_S, src, DEFAULT_HEALTH_CACHE_TTL_S, minimum=0
         ),
         sidecar_mtls_issuer=mtls_issuer,
+        dapr_http_endpoint=src.get(ENV_DAPR_HTTP_ENDPOINT, "").strip(),
+        dapr_pubsub_name=src.get(ENV_DAPR_PUBSUB_NAME, "").strip() or DEFAULT_DAPR_PUBSUB_NAME,
+        dapr_event_topic=src.get(ENV_DAPR_EVENT_TOPIC, "").strip() or DEFAULT_DAPR_EVENT_TOPIC,
         environment=src.get(ENV_ENVIRONMENT, "development").strip() or "development",
     )
 
 
 __all__ = [
+    "DEFAULT_DAPR_EVENT_TOPIC",
+    "DEFAULT_DAPR_PUBSUB_NAME",
     "DEFAULT_HEALTH_CACHE_TTL_S",
     "DEFAULT_LEASE_MAX_CONCURRENT",
     "DEFAULT_OCI_REFERRERS_TIMEOUT_MS",
@@ -179,6 +224,9 @@ __all__ = [
     "ENV_AUTHZ_ENDPOINT",
     "ENV_CATALOG_ENDPOINT",
     "ENV_CATALOG_STORE",
+    "ENV_DAPR_EVENT_TOPIC",
+    "ENV_DAPR_HTTP_ENDPOINT",
+    "ENV_DAPR_PUBSUB_NAME",
     "ENV_ENVIRONMENT",
     "ENV_HEALTH_CACHE_TTL_S",
     "ENV_LEASE_MAX_CONCURRENT",

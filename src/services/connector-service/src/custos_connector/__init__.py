@@ -16,6 +16,13 @@ the schema-revision startup gate, and the call-context middleware (with
 dev shim). Phase J (CONN-IMPL-026) lands the public REST surface --
 connector-types listing, instance CRUD + lifecycle, lease admin, and
 lease-audit history -- backed by the services shipped in Phases B-I.
+Phase J (CONN-IMPL-027) lands the inbound internal-RPC surface for
+Workflow / Catalog / Trigger services: ``BindForStep`` (already shipped
+in Phase G) + ``leases:refresh`` (Phase H) joined by the new
+``connectors:validate`` preflight and ``events:subscribe`` Pub/Sub
+metadata discovery routes, plus the production
+:class:`DaprPubSubEventPublisher` so the listen path fans normalized
+events out through Dapr Pub/Sub.
 The secret-bridge sidecar lands in Phase H (CONN-IMPL-019..021).
 """
 
@@ -35,6 +42,8 @@ from custos_connector.api import (
     connector_types_router,
     instances_router,
     lease_admin_router,
+    subscribe_router,
+    validate_router,
 )
 from custos_connector.binding import binding_router
 from custos_connector.cursor.router import router as cursor_admin_router
@@ -111,6 +120,15 @@ def create_app(
                 await local_providers.identity_registry.aclose()
             except Exception:
                 logger.exception("identity registry aclose failed during shutdown")
+            # Release the httpx client the Dapr Pub/Sub publisher owns
+            # (CONN-IMPL-027). ``None`` whenever the deployment uses the
+            # dev :class:`NoOpEventPublisher`, so the guard keeps the
+            # test path side-effect free.
+            if local_providers.dapr_http_client is not None:
+                try:
+                    await local_providers.dapr_http_client.aclose()
+                except Exception:
+                    logger.exception("dapr publisher http client aclose failed during shutdown")
 
     app = FastAPI(
         title="Custos Connector Service",
@@ -147,6 +165,11 @@ def create_app(
     app.include_router(lease_router)
     app.include_router(cursor_admin_router)
     app.include_router(listen_router)
+    # CONN-IMPL-027 (Phase J) — ValidateConnector + SubscribeEvents
+    # internal RPCs (service-to-service preflight + Pub/Sub metadata
+    # discovery for the Trigger Service).
+    app.include_router(validate_router)
+    app.include_router(subscribe_router)
     # CONN-IMPL-026 — public REST surface.
     app.include_router(connector_types_router)
     app.include_router(instances_router)

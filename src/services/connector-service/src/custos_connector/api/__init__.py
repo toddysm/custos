@@ -11,8 +11,9 @@ this layer is the route table glue + permission enforcement + workspace-
 mismatch guard.
 
 The internal RPC surface lives in sibling routers — ``binding``,
-``lease``, ``listen`` — and is mounted by :mod:`custos_connector`
-alongside the routers exported from here.
+``lease``, ``listen``, plus the CONN-IMPL-027 (Phase J) routers
+``validate`` and ``subscribe`` exported from here — and is mounted
+by :mod:`custos_connector` alongside the public routers.
 
 Module layout
 -------------
@@ -24,6 +25,10 @@ Module layout
   ``/health``, ``:force-health-check``.
 * :mod:`.lease_admin` — admin live-state and revoke endpoints.
 * :mod:`.audit` — ``GET /v1/workspaces/{ws}/audit/leases``.
+* :mod:`.validate` — ``POST /internal/v1/connectors:validate``
+  (CONN-IMPL-027).
+* :mod:`.subscribe` — ``POST /internal/v1/events:subscribe``
+  (CONN-IMPL-027).
 """
 
 from __future__ import annotations
@@ -32,10 +37,14 @@ from custos_connector.api.audit import router as audit_router
 from custos_connector.api.connector_types import router as connector_types_router
 from custos_connector.api.instances import router as instances_router
 from custos_connector.api.lease_admin import router as lease_admin_router
+from custos_connector.api.subscribe import router as subscribe_router
+from custos_connector.api.validate import router as validate_router
 
 __all__ = [
     "audit_router",
     "connector_types_router",
     "instances_router",
     "lease_admin_router",
+    "subscribe_router",
+    "validate_router",
 ]
