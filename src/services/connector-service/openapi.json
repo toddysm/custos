@@ -867,7 +867,7 @@
     },
     "/v1/workspaces/{ws}/audit/leases": {
       "get": {
-        "description": "List lease audit events for a workspace, newest-first.\n\nWhen ``eventType`` is omitted, the route fetches without an\nSPL-level event filter and post-filters to events whose\n``event_type`` starts with ``lease.``. Callers narrowing to a\nsingle lease event type SHOULD pass ``eventType`` so the SPL\nsurface does the filter and pagination stays dense.",
+        "description": "List lease audit events for a workspace, newest-first.\n\nWhen ``eventType`` is omitted, the route fetches without an\nSPL-level event filter and post-filters to events whose\n``event_type`` is one of the known lease event types in\n:data:`_LEASE_EVENT_TYPES`. Callers narrowing to a single lease\nevent type SHOULD pass ``eventType`` so the SPL surface does the\nfilter and pagination stays dense.",
         "operationId": "list_lease_audit_events_v1_workspaces__ws__audit_leases_get",
         "parameters": [
           {

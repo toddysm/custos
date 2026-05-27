@@ -20,7 +20,7 @@ This module is private to :mod:`custos_connector.api`. It centralizes:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Final
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -107,26 +107,9 @@ def resolve_metadata_store(request: Request) -> MetadataStoreProvider:
     return providers.metadata_store
 
 
-def page_query_params(cursor: str | None, limit: int | None) -> dict[str, Any]:
-    """Shared `cursor`/`limit` clean-up for list endpoints.
-
-    Empty-string ``cursor`` is treated as ``None`` (FastAPI's default
-    parser surfaces missing query params as ``None`` already, but a
-    client that sends ``?cursor=`` would otherwise reach the store
-    with an empty opaque cursor and crash deep in the adapter).
-    """
-    cleaned: dict[str, Any] = {}
-    if cursor:
-        cleaned["cursor"] = cursor
-    if limit is not None:
-        cleaned["limit"] = limit
-    return cleaned
-
-
 __all__ = [
     "WORKSPACE_MISMATCH_CODE",
     "error_response",
-    "page_query_params",
     "resolve_catalog_store",
     "resolve_instance_service",
     "resolve_lease_manager",

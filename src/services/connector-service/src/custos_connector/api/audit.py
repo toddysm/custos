@@ -10,12 +10,18 @@ event types.
 :class:`~custos_spl.interfaces.metadata_store.MetadataStoreProvider`
 accepts a single ``event_type`` exact-match filter. When the caller
 omits ``eventType`` the route fetches without an SPL-level event
-filter and post-filters to events whose ``event_type`` starts with
-``lease.`` — that's how the route can return the union of lease
-events without requiring an SPL surface change. The post-filter is
-applied after pagination, so callers MAY see "short pages" (fewer
-items than ``limit``); the documented contract is "the SPL cursor
-is opaque; pass ``nextCursor`` back to advance".
+filter and post-filters to events whose ``event_type`` is one of the
+known lease event types enumerated in :data:`_LEASE_EVENT_TYPES` --
+that's how the route can return the union of lease events without
+requiring an SPL surface change. Any future ``lease.*`` event type
+must be added to the whitelist (and to the ``eventType`` query-param
+docstring) before it becomes visible through this route -- the
+closed-set design is intentional so the public surface stays a
+documented contract rather than implicitly widening whenever a new
+audit constant is added downstream. The post-filter is applied
+after pagination, so callers MAY see "short pages" (fewer items
+than ``limit``); the documented contract is "the SPL cursor is
+opaque; pass ``nextCursor`` back to advance".
 """
 
 from __future__ import annotations
@@ -124,9 +130,10 @@ async def list_lease_audit_events(
 
     When ``eventType`` is omitted, the route fetches without an
     SPL-level event filter and post-filters to events whose
-    ``event_type`` starts with ``lease.``. Callers narrowing to a
-    single lease event type SHOULD pass ``eventType`` so the SPL
-    surface does the filter and pagination stays dense.
+    ``event_type`` is one of the known lease event types in
+    :data:`_LEASE_EVENT_TYPES`. Callers narrowing to a single lease
+    event type SHOULD pass ``eventType`` so the SPL surface does the
+    filter and pagination stays dense.
     """
     mismatch = workspace_mismatch_response(ctx, ws)
     if mismatch is not None:
