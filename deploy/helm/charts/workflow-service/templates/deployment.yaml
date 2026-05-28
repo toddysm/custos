@@ -25,6 +25,10 @@ spec:
         - name: {{ .Chart.Name }}
           image: {{ include "svc.image" . | quote }}
           imagePullPolicy: {{ include "svc.imagePullPolicy" . }}
+          # WF-IMPL-015 wires the FastAPI surface through
+          # ``python -m custos_workflow`` which launches uvicorn against
+          # ``custos_workflow:create_app`` honouring HOST / PORT env vars.
+          command: ["python", "-m", "custos_workflow"]
           ports:
             - name: http
               containerPort: {{ .Values.service.port }}
