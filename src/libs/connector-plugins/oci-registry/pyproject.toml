@@ -32,6 +32,12 @@ custos-oci-registry-plugin = "oci_registry_plugin.__main__:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/oci_registry_plugin"]
 
+[tool.hatch.build.targets.wheel.force-include]
+# Hatchling includes ``py.typed`` automatically for packages it
+# discovers, but force-include guarantees the PEP 561 marker is
+# present in the wheel even if the auto-discovery rules change.
+"src/oci_registry_plugin/py.typed" = "oci_registry_plugin/py.typed"
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
