@@ -77,9 +77,7 @@ def test_create_app_honours_env_flag_production(_clean_env: None) -> None:
         # A non-bypass route without headers would be 401, but WF-IMPL-015
         # has no non-probe routes yet, so we assert the middleware
         # construction picked up the strict flag via attribute inspection.
-    installed = next(
-        m for m in app.user_middleware if m.cls is CallContextMiddleware
-    )
+    installed = next(m for m in app.user_middleware if m.cls is CallContextMiddleware)
     # Starlette stores the kwargs on the wrapper's ``kwargs`` mapping.
     assert installed.kwargs == {"require_call_context": True}
 
@@ -89,9 +87,7 @@ def test_create_app_env_flag_only_truthy_on_exact_1(_clean_env: None) -> None:
     for non_truthy in ("true", "yes", "TRUE", "1 ", "", "0"):
         os.environ["WF_REQUIRE_CALL_CONTEXT"] = non_truthy
         app = create_app()
-        installed = next(
-            m for m in app.user_middleware if m.cls is CallContextMiddleware
-        )
+        installed = next(m for m in app.user_middleware if m.cls is CallContextMiddleware)
         assert installed.kwargs == {"require_call_context": False}, (
             f"WF_REQUIRE_CALL_CONTEXT={non_truthy!r} must not enable production "
             "mode — only the literal string '1' may flip the gate."
@@ -102,7 +98,5 @@ def test_explicit_kwarg_overrides_env(_clean_env: None) -> None:
     """The explicit ``require_call_context`` kwarg wins over the env var."""
     os.environ["WF_REQUIRE_CALL_CONTEXT"] = "1"
     app = create_app(require_call_context=False)
-    installed = next(
-        m for m in app.user_middleware if m.cls is CallContextMiddleware
-    )
+    installed = next(m for m in app.user_middleware if m.cls is CallContextMiddleware)
     assert installed.kwargs == {"require_call_context": False}

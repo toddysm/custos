@@ -29,17 +29,13 @@ from custos_workflow.call_context import (
 
 def _mount_echo_app(*, require_call_context: bool) -> FastAPI:
     app = FastAPI()
-    app.add_middleware(
-        CallContextMiddleware, require_call_context=require_call_context
-    )
+    app.add_middleware(CallContextMiddleware, require_call_context=require_call_context)
 
     @app.get("/echo")
     async def echo(request: Request) -> JSONResponse:
         ctx = request.state.call_context
         assert isinstance(ctx, CallContext)
-        return JSONResponse(
-            {"workspace": ctx.workspace, "principal": ctx.principal}
-        )
+        return JSONResponse({"workspace": ctx.workspace, "principal": ctx.principal})
 
     @app.get("/healthz")
     async def healthz(request: Request) -> JSONResponse:
