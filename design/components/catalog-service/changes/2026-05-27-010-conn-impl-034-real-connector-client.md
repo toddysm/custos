@@ -1,3 +1,12 @@
+# Change: real-connector-client
+
+Date: 2026-05-27
+Type: component-design
+Component: catalog-service
+Sequence: 010
+GitHub Issue: #317
+Status: open
+
 # 2026-05-27-010 — CONN-IMPL-034 / CS-IMPL-023: real Connector Service client
 
 **Phase:** M (final phase of #318 connector umbrella)

@@ -102,10 +102,20 @@ def create_app(
         # Test code can preempt the lifespan-owned factory by setting
         # ``app.state.connector_client`` before any request runs; the
         # dependency in ``api/dependencies.py`` honours that override.
-        if connector_factory is not None:
-            cfactory: ConnectorClientFactory | ConnectorClient = connector_factory
-        else:
-            cfactory = build_connector_client_factory(
+        #
+        # The ``connector_factory`` kwarg accepts either a
+        # :class:`ConnectorClientFactory` (lifespan owns its pool and
+        # closes it on shutdown) or a plain :class:`ConnectorClient`
+        # (a hand-rolled fake that does not own a pool — e.g.
+        # :class:`StubConnectorClient`). To keep
+        # :func:`get_connector_client` honest we pin a plain client into
+        # ``app.state.connector_client`` (the dependency's first-choice
+        # override slot) and only stash a real factory into
+        # ``app.state.connector_client_factory``.
+        cfactory: ConnectorClientFactory | None
+        built: ConnectorClientFactory | ConnectorClient
+        if connector_factory is None:
+            built = build_connector_client_factory(
                 endpoint=effective_settings.connector_endpoint,
                 timeout_seconds=effective_settings.connector_timeout_seconds,
                 negative_cache_ttl_seconds=(
@@ -113,7 +123,14 @@ def create_app(
                 ),
                 use_stub=effective_settings.use_stub_connector_client,
             )
-        app.state.connector_client_factory = cfactory
+        else:
+            built = connector_factory
+        if isinstance(built, ConnectorClientFactory):
+            cfactory = built
+            app.state.connector_client_factory = built
+        else:
+            cfactory = None
+            app.state.connector_client = built
         app.state.ready = False
         app.state.schema_gate_error = None
         try:

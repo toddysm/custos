@@ -152,6 +152,13 @@ class StubConnectorClient:
 # ---------------------------------------------------------------------------
 
 
+#: Hard cap on the number of distinct (workspace, name) entries the
+#: negative cache will hold. Bounds memory in the face of accidental
+#: fan-out (a misconfigured workflow document referencing many distinct
+#: missing names within the TTL window) or hostile input.
+_NEGATIVE_CACHE_MAX_ENTRIES: Final[int] = 1024
+
+
 class _NegativeCache:
     """Tiny TTL cache of negative existence results.
 
@@ -164,10 +171,23 @@ class _NegativeCache:
     :func:`custos_catalog.resolve.collect_connector_instance_calls`
     before this cache is consulted (the cache only matters across
     *distinct* batches issued within the TTL window).
+
+    Memory is bounded two ways: every insertion opportunistically
+    sweeps expired entries, and the cache enforces a hard
+    :data:`_NEGATIVE_CACHE_MAX_ENTRIES` cap (evicting the
+    soonest-to-expire entry once the cap is reached) so a runaway
+    caller (or a hostile workflow stuffed with thousands of distinct
+    bogus connector names) cannot grow the dict without limit.
     """
 
-    def __init__(self, *, ttl_seconds: float) -> None:
+    def __init__(
+        self,
+        *,
+        ttl_seconds: float,
+        max_entries: int = _NEGATIVE_CACHE_MAX_ENTRIES,
+    ) -> None:
         self._ttl = max(0.0, ttl_seconds)
+        self._max_entries = max(0, max_entries)
         self._entries: dict[tuple[str, str], float] = {}
 
     def get(self, workspace_id: str, name: str) -> bool | None:
@@ -187,7 +207,25 @@ class _NegativeCache:
         """Record a fresh negative result with TTL."""
         if self._ttl <= 0.0:
             return
-        self._entries[(workspace_id, name)] = time.monotonic() + self._ttl
+        # Opportunistic prune: drop already-expired entries on every
+        # write so the dict cannot grow unbounded purely on TTL churn.
+        now = time.monotonic()
+        if self._entries:
+            expired = [key for key, deadline in self._entries.items() if deadline <= now]
+            for key in expired:
+                self._entries.pop(key, None)
+        # Hard cap: if still at capacity after pruning, evict the entry
+        # closest to expiry to make room. This is O(n) but n is bounded
+        # to ``_NEGATIVE_CACHE_MAX_ENTRIES`` and only fires on the
+        # cap-hit path.
+        if (
+            self._max_entries > 0
+            and len(self._entries) >= self._max_entries
+            and (workspace_id, name) not in self._entries
+        ):
+            evict_key = min(self._entries, key=lambda k: self._entries[k])
+            self._entries.pop(evict_key, None)
+        self._entries[(workspace_id, name)] = now + self._ttl
 
 
 class ConnectorClientFactory:
@@ -341,6 +379,19 @@ class HttpConnectorClient:
             )
             return True
         if 500 <= status < 600:
+            # Log the body snippet server-side for operator triage but
+            # keep it OUT of the exception message: the API error
+            # handler renders ``str(exc)`` into the public 503 envelope
+            # and we must not leak Connector Service internals to the
+            # publish caller.
+            self._logger.warning(
+                "connector-service returned %s for ValidateConnector "
+                "(workspace=%r name=%r); body=%s",
+                status,
+                workspace_id,
+                name,
+                _safe_snippet(response),
+            )
             raise ConnectorServiceUnavailable(
                 f"connector-service returned {status} for "
                 f"ValidateConnector(workspace={workspace_id!r}, name={name!r})",
@@ -349,10 +400,19 @@ class HttpConnectorClient:
         # 401/403 are catalog-service mis-wiring (missing perm) — surface
         # the same way as 5xx so the operator sees a clear 503 with
         # ``catalog.dependency_unavailable`` rather than a silent True.
+        # Log the body snippet server-side; do NOT include it in the
+        # raised exception message (it ends up in the 503 response body).
+        self._logger.warning(
+            "connector-service returned unexpected status %s for "
+            "ValidateConnector (workspace=%r name=%r); body=%s",
+            status,
+            workspace_id,
+            name,
+            _safe_snippet(response),
+        )
         raise ConnectorServiceUnavailable(
             f"connector-service returned unexpected status {status} for "
-            f"ValidateConnector(workspace={workspace_id!r}, name={name!r}); "
-            f"body={_safe_snippet(response)!r}",
+            f"ValidateConnector(workspace={workspace_id!r}, name={name!r})",
             status_code=status,
         )
 
