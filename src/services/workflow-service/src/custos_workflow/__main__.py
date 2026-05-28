@@ -1,10 +1,9 @@
 """Workflow Service ASGI entry point.
 
-Thin wrapper that launches :func:`custos_workflow.create_app` under uvicorn.
-The application factory is a scaffold stub until WF-IMPL-015 lands; this
-module exists so the package is launchable as ``python -m custos_workflow``
-or via the ``custos-workflow-service`` console script declared in
-``pyproject.toml``.
+Thin wrapper that launches :func:`custos_workflow.create_app` under
+uvicorn. WF-IMPL-015 wires the real factory; later WF-IMPL-* tasks
+extend the lifespan with the Definition Compiler bootstrap and the
+Catalog client warm-up without touching this entry point.
 """
 
 from __future__ import annotations
@@ -17,9 +16,8 @@ def main() -> None:
 
     Honours ``HOST`` / ``PORT`` env vars (defaults ``0.0.0.0`` / ``8080``)
     so the deployment manifests can override without code changes. The
-    actual FastAPI application is constructed by
-    :func:`custos_workflow.create_app`, which currently raises
-    :class:`NotImplementedError` — that is intentional for the scaffold.
+    FastAPI application is constructed by
+    :func:`custos_workflow.create_app`.
     """
     # Imported lazily so ``python -m custos_workflow --help``-style probes
     # do not require uvicorn to be installed for non-runtime tooling.
