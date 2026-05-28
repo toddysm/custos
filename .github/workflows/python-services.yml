@@ -492,9 +492,23 @@ jobs:
         # Each reference plugin lives under src/libs/connector-plugins/<plugin>
         # and is self-contained (its own pyproject + Dockerfile + tests).
         # Matrix-parallelise so a regression in one plugin doesn't mask
-        # the other.
-        plugin: [oci-registry, slack-notifier]
-        python-version: ["3.11", "3.12"]
+        # the other. ``package`` is the importable name (``-`` -> ``_`` +
+        # ``_plugin`` suffix) we hand to mypy so it can analyze the
+        # installed package alongside the test sources without
+        # double-discovering the in-tree ``src/`` layout.
+        include:
+          - plugin: oci-registry
+            package: oci_registry_plugin
+            python-version: "3.11"
+          - plugin: oci-registry
+            package: oci_registry_plugin
+            python-version: "3.12"
+          - plugin: slack-notifier
+            package: slack_notifier_plugin
+            python-version: "3.11"
+          - plugin: slack-notifier
+            package: slack_notifier_plugin
+            python-version: "3.12"
     defaults:
       run:
         working-directory: src/libs/connector-plugins/${{ matrix.plugin }}
@@ -516,11 +530,15 @@ jobs:
         run: ruff format --check .
 
       - name: Mypy (strict)
-        # --explicit-package-bases lets mypy treat the in-tree
-        # ``src/<package>`` and ``tests/`` layout as namespace packages
-        # without forcing a ``packages =`` table in pyproject; this
-        # keeps both reference plugins' configuration uniform.
-        run: mypy --explicit-package-bases src tests
+        # Two invocations so we don't mix mypy's mutually-exclusive
+        # ``-p <package>`` and positional-files modes. Passing ``src``
+        # AND having the package installed in the venv (editable) would
+        # otherwise make mypy discover the same source files twice
+        # (under ``src.<package>`` and ``<package>``) and abort with
+        # "Source file found twice under different module names".
+        run: |
+          mypy -p ${{ matrix.package }}
+          mypy tests
 
       - name: Pytest (unit)
         run: pytest -q
