@@ -23,10 +23,11 @@ and § Operation: Sub-Workflow Reference Resolution:
   ``definition_store.get_workflow_version_by_name``. Cross-workspace
   refs are rejected (M1).
 * Connector-instance refs: the Connector Service is consulted via
-  :class:`ConnectorClient`. In M1 the resolver ships with a
-  :class:`StubConnectorClient` that returns ``True`` for every name
-  and emits a single batched ``WARNING`` log entry — real wiring
-  lands in CS-IMPL-023 (issue #224).
+  :class:`ConnectorClient`. The live
+  :class:`custos_catalog.clients.HttpConnectorClient` (CONN-IMPL-034 /
+  CS-IMPL-023) is wired by default; the legacy
+  :class:`StubConnectorClient` is retained behind
+  ``CAT_USE_STUB_CONNECTOR_CLIENT`` for offline test scenarios.
 """
 
 from __future__ import annotations
@@ -38,6 +39,11 @@ from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
+from custos_catalog.clients.connector import (
+    ConnectorClient,
+    ConnectorServiceUnavailable,
+    StubConnectorClient,
+)
 from custos_catalog.normalize import (
     NormalizedTemplate,
     NormalizedWorkflow,
@@ -266,72 +272,6 @@ class SubworkflowResolver(Protocol):
         """Return the same tuple by friendly-name triple."""
 
 
-@runtime_checkable
-class ConnectorClient(Protocol):
-    """Connector Service client surface used by the resolver.
-
-    Real client lands in CS-IMPL-023; M1 ships
-    :class:`StubConnectorClient`.
-    """
-
-    async def exists_connector_instance(
-        self,
-        workspace_id: str,
-        name: str,
-    ) -> bool:
-        """Return ``True`` iff a connector instance with ``name`` exists in ``workspace_id``."""
-
-
-class StubConnectorClient:
-    """M1 stub for the Connector Service ``ExistsConnectorInstance`` RPC.
-
-    Returns ``True`` for every name and tracks the per-batch call
-    list. The first call in a batch emits a single ``WARNING`` log
-    line so operators see the stub is being used at publish time;
-    subsequent calls in the same batch are silent. Call
-    :meth:`reset_batch` between batches when a new publish operation
-    starts.
-
-    The real Connector Service client lands in CS-IMPL-023 (#224);
-    until then this stub means publishes will succeed even if the
-    connector instance does not actually exist. The deferred-work
-    PR replaces the stub with the live client.
-    """
-
-    def __init__(self, *, logger: logging.Logger | None = None) -> None:
-        self._logger = logger or _LOGGER
-        self._calls: list[tuple[str, str]] = []
-        self._warned: bool = False
-
-    async def exists_connector_instance(self, workspace_id: str, name: str) -> bool:
-        """Stub: always ``True``; logs ``WARNING`` once per batch."""
-        self._calls.append((workspace_id, name))
-        if not self._warned:
-            self._logger.warning(
-                "StubConnectorClient: connector-instance existence checks "
-                "are stubbed (real Connector Service client lands in CS-IMPL-023). "
-                "First call this batch was workspace=%r name=%r.",
-                workspace_id,
-                name,
-            )
-            self._warned = True
-        return True
-
-    @property
-    def calls(self) -> tuple[tuple[str, str], ...]:
-        """Snapshot of all calls made in the current batch."""
-        return tuple(self._calls)
-
-    def reset_batch(self) -> None:
-        """Begin a new batch.
-
-        Resets the warning latch and the call log so the next call
-        produces a fresh ``WARNING``.
-        """
-        self._calls.clear()
-        self._warned = False
-
-
 # ---------------------------------------------------------------------------
 # Activity ref resolution
 # ---------------------------------------------------------------------------
@@ -552,11 +492,22 @@ async def resolve_connector_instance(
 ) -> ResolvedConnectorInstance:
     """Confirm a connector-instance exists in ``workspace_id``.
 
-    The current M1 :class:`StubConnectorClient` returns ``True`` for
-    every name; CS-IMPL-023 replaces it with the real Connector
-    Service client. Resolution does NOT rewrite the connector name in
-    the document — connector references stay in their original
+    The live :class:`custos_catalog.clients.HttpConnectorClient`
+    (CONN-IMPL-034) calls Connector Service's ``ValidateConnector``
+    internal RPC; the offline :class:`StubConnectorClient` (gated by
+    ``CAT_USE_STUB_CONNECTOR_CLIENT``) returns ``True`` for every
+    name. Resolution does NOT rewrite the connector name in the
+    document — connector references stay in their original
     short-name form.
+
+    Raises:
+        ConnectorInstanceMissing: When Connector Service returns 404
+            for the reference. Mapped to a structured
+            ``resolve.connector_instance_missing`` publish error.
+        ConnectorServiceUnavailable: When Connector Service is
+            unreachable or returns 5xx. Propagated by the manager and
+            rendered as a 503 ``catalog.dependency_unavailable``
+            response (design § Failure Modes).
     """
     exists = await client.exists_connector_instance(workspace_id, name)
     if not exists:
@@ -752,3 +703,40 @@ def _set_at_path(doc: dict[str, Any], path: tuple[str | int, ...], value: Any) -
     for segment in path[:-1]:
         cursor = cursor[segment]
     cursor[path[-1]] = value
+
+
+# ---------------------------------------------------------------------------
+# Public surface
+# ---------------------------------------------------------------------------
+
+#: Names re-exported from :mod:`custos_catalog.clients.connector` are
+#: listed here so existing call sites of
+#: ``from custos_catalog.resolve import ConnectorClient`` /
+#: ``StubConnectorClient`` keep working after CONN-IMPL-034 moved the
+#: implementations under the ``clients`` package.
+__all__ = [
+    "ActivityTypeDeprecated",
+    "ActivityTypeNotFound",
+    "ActivityTypeRegistry",
+    "ConnectorClient",
+    "ConnectorInstanceMissing",
+    "ConnectorServiceUnavailable",
+    "CrossWorkspaceSubworkflowRejected",
+    "InvalidReferenceFormat",
+    "MajorMinorRefRejected",
+    "ResolveError",
+    "ResolvedActivityRef",
+    "ResolvedConnectorInstance",
+    "ResolvedSubworkflowRef",
+    "ShortFormRefRejected",
+    "StubConnectorClient",
+    "SubworkflowDeprecated",
+    "SubworkflowNotFound",
+    "SubworkflowResolver",
+    "apply_resolutions",
+    "apply_template_resolutions",
+    "collect_connector_instance_calls",
+    "resolve_activity_ref",
+    "resolve_connector_instance",
+    "resolve_subworkflow_ref",
+]

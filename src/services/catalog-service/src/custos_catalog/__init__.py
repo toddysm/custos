@@ -26,6 +26,11 @@ from custos_catalog.api import (
     register_exception_handlers,
     rpc_router,
 )
+from custos_catalog.clients.connector import (
+    ConnectorClient,
+    ConnectorClientFactory,
+    build_connector_client_factory,
+)
 from custos_catalog.health import router as health_router
 from custos_catalog.middleware import (
     CallContextError,
@@ -55,6 +60,7 @@ def create_app(
     *,
     settings: Settings | None = None,
     providers: Providers | None = None,
+    connector_factory: ConnectorClientFactory | ConnectorClient | None = None,
 ) -> FastAPI:
     """Build and return the Catalog Service FastAPI application.
 
@@ -65,6 +71,14 @@ def create_app(
         providers: Pre-built :class:`Providers` (used by tests to inject
             in-memory fakes). When ``None``, the lifespan hook constructs
             the real Postgres adapters from the settings DSNs.
+        connector_factory: Pre-built :class:`ConnectorClientFactory`
+            (or :class:`StubConnectorClient`) for tests that need to
+            steer outbound Connector Service traffic through a custom
+            transport (e.g. :class:`httpx.ASGITransport` against an
+            in-process test double). When ``None``, the lifespan hook
+            constructs the factory from ``settings.connector_*``. Test
+            code that supplies a factory is responsible for nothing
+            extra: the lifespan still owns ``aclose()`` on shutdown.
 
     The factory is import-safe: no DSN lookups, no socket connections.
     All side-effecting work happens inside the FastAPI lifespan context.
@@ -84,6 +98,22 @@ def create_app(
             )
         )
         app.state.providers = local_providers
+        # Connector Service client (CONN-IMPL-034 / CS-IMPL-023).
+        # Test code can preempt the lifespan-owned factory by setting
+        # ``app.state.connector_client`` before any request runs; the
+        # dependency in ``api/dependencies.py`` honours that override.
+        if connector_factory is not None:
+            cfactory: ConnectorClientFactory | ConnectorClient = connector_factory
+        else:
+            cfactory = build_connector_client_factory(
+                endpoint=effective_settings.connector_endpoint,
+                timeout_seconds=effective_settings.connector_timeout_seconds,
+                negative_cache_ttl_seconds=(
+                    effective_settings.connector_negative_cache_ttl_seconds
+                ),
+                use_stub=effective_settings.use_stub_connector_client,
+            )
+        app.state.connector_client_factory = cfactory
         app.state.ready = False
         app.state.schema_gate_error = None
         try:
@@ -93,7 +123,11 @@ def create_app(
         except MigrationRequired as exc:
             app.state.schema_gate_error = exc
             logger.error("%s", schema_gate_explainer(exc))
-        yield
+        try:
+            yield
+        finally:
+            if isinstance(cfactory, ConnectorClientFactory):
+                await cfactory.aclose()
 
     app = FastAPI(
         title="Custos Catalog Service",

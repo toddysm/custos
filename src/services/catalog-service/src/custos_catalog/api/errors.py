@@ -16,6 +16,7 @@ from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import JSONResponse
 
+from custos_catalog.clients.connector import ConnectorServiceUnavailable
 from custos_catalog.managers.activity_registry import (
     ActivityManifestError,
     ActivityNamespaceError,
@@ -82,6 +83,28 @@ async def handle_publish_validation_error(_request: Request, exc: Exception) -> 
         code=f"catalog.publish.{exc.stage}",
         detail=str(exc),
         issues=_issues_from_dataclasses(exc.issues),
+    )
+
+
+async def handle_connector_service_unavailable(
+    _request: Request,
+    exc: Exception,
+) -> JSONResponse:
+    """Map :class:`ConnectorServiceUnavailable` to a 503 envelope.
+
+    Connector Service is the only outbound dependency at workflow
+    publish time; when it is unreachable or returns 5xx the publish
+    cannot proceed and the caller may retry. Per design § Failure
+    Modes (catalog-service / CS-IMPL-023) we surface this as a 503
+    with code ``catalog.dependency_unavailable`` so operators (and
+    SDKs) distinguish a transient infra fault from the 4xx publish
+    rejections handled by :func:`handle_publish_validation_error`.
+    """
+    assert isinstance(exc, ConnectorServiceUnavailable)
+    return _envelope(
+        status_code=503,
+        code=exc.code,
+        detail=str(exc),
     )
 
 
@@ -338,6 +361,7 @@ def register_exception_handlers(app: FastAPI) -> None:
     """
     # ----- workflow / template managers -----
     app.add_exception_handler(PublishValidationError, handle_publish_validation_error)
+    app.add_exception_handler(ConnectorServiceUnavailable, handle_connector_service_unavailable)
     app.add_exception_handler(WorkflowNotFound, handle_workflow_not_found)
     app.add_exception_handler(TemplateNotFound, handle_template_not_found)
     app.add_exception_handler(ExtractionError, handle_extraction_error)

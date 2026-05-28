@@ -56,6 +56,15 @@ config:
 # different address (e.g. via a sidecar / out-of-cluster proxy).
 connector:
   endpoint: http://connector-service:8080
+  # Per-call timeout for the ValidateConnector internal RPC
+  # (CONN-IMPL-034 / CS-IMPL-023). Default matches design § Failure Modes.
+  timeoutSeconds: 2.0
+  # TTL for the per-process negative-result cache used on 404 responses.
+  negativeCacheTtlSeconds: 5.0
+  # Offline / airgapped tests can flip this true to wire the
+  # StubConnectorClient (always-True existence check); production must
+  # leave this false.
+  useStubClient: false
 auth:
   endpoint: http://auth-service:8080
 

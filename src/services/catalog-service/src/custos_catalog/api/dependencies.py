@@ -19,6 +19,12 @@ from collections.abc import Awaitable, Callable
 
 from fastapi import Depends, Path, Request
 
+from custos_catalog.clients.connector import (
+    ConnectorClient,
+    ConnectorClientFactory,
+    StubConnectorClient,
+    request_callctx_header,
+)
 from custos_catalog.managers.activity_registry import ActivityTypeRegistry
 from custos_catalog.managers.connector_registry import ConnectorTypeRegistry
 from custos_catalog.managers.definition import DefinitionManager
@@ -29,7 +35,6 @@ from custos_catalog.middleware.callctx import (
     get_call_context,
 )
 from custos_catalog.providers import Providers
-from custos_catalog.resolve import ConnectorClient, StubConnectorClient
 from custos_catalog.versioning import VersioningManager
 
 # ---------------------------------------------------------------------------
@@ -53,14 +58,42 @@ def get_providers(request: Request) -> Providers:
 def get_connector_client(request: Request) -> ConnectorClient:
     """Return the connector-client used by the resolver pipeline.
 
-    Falls back to a per-request :class:`StubConnectorClient` until
-    CS-IMPL-023 lands. Tests can override the fallback by assigning
-    ``app.state.connector_client``.
+    Resolution order:
+
+    1. ``app.state.connector_client`` — explicit test override; honoured
+       as-is so tests can plug in a hand-rolled fake without going
+       through the factory.
+    2. ``app.state.connector_client_factory`` — the
+       :class:`ConnectorClientFactory` (or :class:`StubConnectorClient`
+       when ``CAT_USE_STUB_CONNECTOR_CLIENT=true``) built by the FastAPI
+       lifespan. For the live factory we return a per-request
+       :class:`HttpConnectorClient` bound to the inbound
+       ``x-custos-callctx`` header so Connector Service sees the
+       caller's workspace and permission set; for the stub we return
+       it directly because the stub ignores the call context.
+
+    Raises:
+        RuntimeError: When neither override nor factory is wired — a
+            startup misconfiguration since
+            :func:`custos_catalog.create_app` always installs the
+            factory.
     """
-    client = getattr(request.app.state, "connector_client", None)
-    if client is None:
-        client = StubConnectorClient()
-    return client
+    pinned = getattr(request.app.state, "connector_client", None)
+    if pinned is not None:
+        assert isinstance(pinned, ConnectorClient)
+        return pinned
+    factory = getattr(request.app.state, "connector_client_factory", None)
+    if factory is None:  # pragma: no cover - lifespan misconfigured
+        raise RuntimeError(
+            "connector_client_factory not initialized on app.state; "
+            "create_app() lifespan failed to install the Connector Service client."
+        )
+    if isinstance(factory, StubConnectorClient):
+        return factory
+    assert isinstance(factory, ConnectorClientFactory)
+    return factory.for_request(
+        callctx_header_value=request_callctx_header(request.headers),
+    )
 
 
 def get_activity_registry(
