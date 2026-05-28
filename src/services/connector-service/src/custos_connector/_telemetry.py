@@ -50,7 +50,7 @@ Span names
 * ``custos_connector.lease.issue``
 * ``custos_connector.lease.refresh``
 * ``custos_connector.pull_tick``
-* ``custos_connector.manifest.discover``
+* ``custos_connector.manifest.discovery``
 * ``custos_connector.identity.resolve``
 
 Each context manager records into the appropriate histogram (when one
@@ -454,7 +454,7 @@ def observe_pull_tick() -> AbstractContextManager[Span]:
 
 def observe_manifest_discovery() -> AbstractContextManager[Span]:
     """Wrap a :func:`discover_manifest` call with a span only."""
-    return _SpanOnly("custos_connector.manifest.discover")
+    return _SpanOnly("custos_connector.manifest.discovery")
 
 
 def observe_identity_resolution() -> AbstractContextManager[Span]:

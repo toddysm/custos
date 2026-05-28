@@ -13,13 +13,15 @@ Production wiring
   :class:`~opentelemetry.exporter.prometheus.PrometheusMetricReader`,
   which registers every meter with the global
   ``prometheus_client`` registry that backs the ``/metrics`` endpoint.
-* :class:`~opentelemetry.sdk.trace.TracerProvider` is installed without
-  exporters. Production deployments configure an OTLP exporter to a
-  Helm-managed Collector sidecar via standard
-  ``OTEL_EXPORTER_OTLP_*`` environment variables; the SDK auto-installs
-  the matching span processor when those variables are present (the
-  ``opentelemetry-sdk`` package's autoinstrumentation entry point is
-  outside the scope of this module).
+* :class:`~opentelemetry.sdk.trace.TracerProvider` is wired with an
+  OTLP HTTP/gRPC span exporter when ``OTEL_EXPORTER_OTLP_ENDPOINT`` (or
+  the trace-specific ``OTEL_EXPORTER_OTLP_TRACES_ENDPOINT``) is set in
+  the process environment, sending spans to the Helm-managed Collector
+  sidecar via a :class:`~opentelemetry.sdk.trace.export.BatchSpanProcessor`.
+  When neither variable is set (development / unit-test mode) the
+  provider is installed without a span processor; spans are still ended
+  in-process so the helpers in :mod:`custos_connector._telemetry`
+  behave correctly, but nothing is exported off-host.
 
 Idempotency
 -----------
@@ -36,6 +38,7 @@ service.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from typing import Final
 
@@ -44,6 +47,7 @@ from opentelemetry.exporter.prometheus import PrometheusMetricReader
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.resources import SERVICE_NAME, SERVICE_VERSION, Resource
 from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 from custos_connector._telemetry import _INSTRUMENTATION_NAME, _INSTRUMENTATION_VERSION
 
@@ -53,14 +57,63 @@ _INIT_LOCK: Final[threading.Lock] = threading.Lock()
 _INITIALIZED: bool = False
 
 
+def _maybe_build_otlp_span_processor() -> BatchSpanProcessor | None:
+    """Build an OTLP :class:`BatchSpanProcessor` from environment vars.
+
+    Returns ``None`` when no OTLP endpoint is configured. The OTel SDK
+    does NOT automatically wire an OTLP exporter from
+    ``OTEL_EXPORTER_OTLP_*`` env vars — those variables only control
+    the *configuration* of an explicitly-constructed exporter. This
+    helper inspects the standard env vars and constructs the matching
+    exporter so spans actually reach the collector sidecar.
+
+    The function is import-tolerant: when the
+    ``opentelemetry-exporter-otlp-proto-http`` /
+    ``opentelemetry-exporter-otlp-proto-grpc`` packages are not
+    installed (development setups), it returns ``None`` and logs a
+    warning, leaving the tracer provider exporter-less. Production
+    images carry one of the exporter packages.
+    """
+    endpoint = os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") or os.environ.get(
+        "OTEL_EXPORTER_OTLP_ENDPOINT"
+    )
+    if not endpoint:
+        return None
+    protocol = (
+        os.environ.get("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL")
+        or os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL")
+        or "http/protobuf"
+    ).lower()
+    try:
+        if protocol.startswith("grpc"):
+            from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (  # type: ignore[import-not-found]
+                OTLPSpanExporter,
+            )
+        else:
+            from opentelemetry.exporter.otlp.proto.http.trace_exporter import (  # type: ignore[import-not-found]
+                OTLPSpanExporter,
+            )
+    except ImportError:
+        logger.warning(
+            "OTEL_EXPORTER_OTLP_ENDPOINT=%r set but no matching OTLP exporter "
+            "package is installed; tracing will not be exported",
+            endpoint,
+        )
+        return None
+    return BatchSpanProcessor(OTLPSpanExporter())
+
+
 def install_otel_providers() -> None:
     """Install process-wide OTel SDK providers.
 
-    Idempotent: the first call wins, subsequent calls are no-ops. The
-    function reads no environment variables of its own; OTLP exporter
-    wiring (when present) is left to the SDK's standard
-    ``OTEL_EXPORTER_OTLP_*`` autoinstrumentation that fires on
-    :class:`TracerProvider` construction.
+    Idempotent: the first call wins, subsequent calls are no-ops. When
+    ``OTEL_EXPORTER_OTLP_ENDPOINT`` (or the trace-specific variant) is
+    set in the environment, an OTLP :class:`BatchSpanProcessor` is
+    attached to the tracer provider so spans actually leave the
+    process. Without the env var, the tracer provider has no span
+    processor — spans are still ended in-process (the helpers in
+    :mod:`custos_connector._telemetry` rely on that) but nothing is
+    exported off-host.
     """
     global _INITIALIZED
     if _INITIALIZED:
@@ -77,17 +130,17 @@ def install_otel_providers() -> None:
         )
 
         # ----- Tracer provider -----
-        # The default :class:`TracerProvider` ships with no exporters; an
-        # OTLP exporter activates automatically when standard
-        # ``OTEL_EXPORTER_OTLP_*`` environment variables are set.
         tracer_provider = TracerProvider(resource=resource)
+        span_processor = _maybe_build_otlp_span_processor()
+        if span_processor is not None:
+            tracer_provider.add_span_processor(span_processor)
+            logger.info("OTLP span exporter wired from environment")
         trace.set_tracer_provider(tracer_provider)
 
         # ----- Meter provider -----
         # :class:`PrometheusMetricReader` registers each metric with the
-        # default ``prometheus_client`` registry; the ASGI app mounted by
-        # :func:`mount_metrics_endpoint` then exposes them at
-        # ``/metrics``.
+        # default ``prometheus_client`` registry; the ASGI app mounted
+        # by ``create_app`` at ``/metrics`` then exposes them.
         reader = PrometheusMetricReader()
         meter_provider = MeterProvider(
             resource=resource,

@@ -260,7 +260,7 @@ def test_observe_pull_tick_records_under_pull_tick_histogram(
     [
         (observe_lease_issue, "custos_connector.lease.issue"),
         (observe_lease_refresh, "custos_connector.lease.refresh"),
-        (observe_manifest_discovery, "custos_connector.manifest.discover"),
+        (observe_manifest_discovery, "custos_connector.manifest.discovery"),
         (observe_identity_resolution, "custos_connector.identity.resolve"),
     ],
 )

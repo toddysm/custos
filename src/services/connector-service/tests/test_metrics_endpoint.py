@@ -122,9 +122,13 @@ def _touch_all_instruments() -> None:
 
 def test_metrics_endpoint_returns_prometheus_text() -> None:
     """``GET /metrics`` returns HTTP 200 with Prometheus exposition text."""
-    _touch_all_instruments()
-
     with _client() as client:
+        # Touch each instrument once AFTER the app is created so the
+        # writes go through the SDK provider installed by
+        # ``install_otel_providers()`` rather than a pre-install
+        # proxy/no-op meter. Without these writes the exporter would
+        # omit instruments that have never been observed.
+        _touch_all_instruments()
         resp = client.get("/metrics")
     assert resp.status_code == 200
     # ``prometheus_client.make_asgi_app`` returns ``text/plain;
@@ -152,9 +156,11 @@ def test_metrics_endpoint_exposes_phase_k_named_metrics(metric_name: str) -> Non
     review rather than silently breaking the Helm-shipped
     Prometheus scrape rules.
     """
-    _touch_all_instruments()
-
     with _client() as client:
+        # Touch the instruments AFTER the SDK provider is installed by
+        # ``create_app()`` so the samples are recorded by the real
+        # meter, not by the pre-install proxy meter.
+        _touch_all_instruments()
         resp = client.get("/metrics")
     body = resp.text
     assert metric_name in body, f"metric {metric_name!r} missing from /metrics body"

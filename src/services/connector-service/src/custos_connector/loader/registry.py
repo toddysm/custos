@@ -224,6 +224,21 @@ class Loader:
     of its own beyond the injected dependencies and is safe to construct
     per-request or per-app; the underlying ``httpx.AsyncClient`` and
     :class:`CatalogStoreProvider` are the resource-holding parts.
+
+    .. note:: Audit emission wiring (Phase K, CONN-IMPL-029)
+
+        Typed audit events
+        (``connector.registration.{accepted,rejected}``,
+        ``connector.deprecation.toggled``) fire **only** when the caller
+        constructs ``Loader`` with ``metadata_store=<provider>``. The
+        connector-service runtime does not yet expose an HTTP surface
+        that constructs a ``Loader`` (registration is currently
+        performed via tooling and test harnesses); when that surface
+        lands in a future phase, the caller MUST thread
+        ``providers.metadata_store`` into this constructor so the
+        platform-scoped audit rows are written. Until then the legacy
+        :func:`emit_event` log-only shim is the sole record of these
+        lifecycle events.
     """
 
     def __init__(
