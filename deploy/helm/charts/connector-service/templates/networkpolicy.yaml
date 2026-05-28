@@ -1,0 +1,49 @@
+{{- /*
+NetworkPolicy: connector-service Prometheus scrape allow.
+
+Phase K (CONN-IMPL-029) adds an unauthenticated ``/metrics`` endpoint
+to the service. The call-context middleware deliberately bypasses
+``/metrics`` so the in-cluster Prometheus scraper can read it without
+minting an internal token. The trust boundary for the scrape MUST
+therefore be a NetworkPolicy that allows ingress on the HTTP port
+only from the Prometheus pod's namespace.
+
+This template emits exactly one ingress allow rule (Prometheus ->
+connector-service:http) and is gated on the umbrella
+``networkPolicies.enabled`` flag. When the umbrella deny-all is
+enabled (currently behind TODO-004 in
+``design/architecture/reference-deployment.md``) this rule is the
+sole path that keeps the scrape working.
+
+For local-dev / eval profiles where ``networkPolicies.enabled=false``
+the policy is omitted entirely; the cluster ingress posture remains
+unchanged, but the ``/metrics`` exposure is still bounded by the
+ClusterIP service surface (no Ingress / NodePort by default).
+*/ -}}
+{{- if .Values.networkPolicy.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "svc.fullname" . }}-prometheus-scrape
+  labels:
+    {{- include "svc.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "svc.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.prometheusNamespaceSelector | nindent 14 }}
+          {{- with .Values.networkPolicy.prometheusPodSelector }}
+          podSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+          {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.port }}
+{{- end }}

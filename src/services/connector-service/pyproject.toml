@@ -58,6 +58,14 @@ dependencies = [
     # exporter only feeds the local scrape endpoint.
     "opentelemetry-sdk>=1.20,<2",
     "opentelemetry-exporter-prometheus>=0.41b0",
+    # OTLP trace exporter — required so spans actually leave the
+    # process and reach the Helm-managed Collector sidecar when
+    # ``OTEL_EXPORTER_OTLP_*`` env vars are set. Without this package
+    # the ``_runtime._maybe_build_otlp_span_processor`` helper logs a
+    # warning and drops spans. Pinned to the same minor as the SDK to
+    # avoid a partial-bump producing protocol drift between the
+    # exporter wire format and the SDK's batch processor.
+    "opentelemetry-exporter-otlp>=1.20,<2",
     "prometheus_client>=0.19,<1",
 ]
 

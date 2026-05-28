@@ -51,9 +51,14 @@ CALLCTX_HEADER: str = "x-custos-callctx"
 #: ``/metrics`` is the Prometheus exposition endpoint mounted by
 #: CONN-IMPL-029; it MUST NOT require a call-context header so the
 #: Helm-deployed Prometheus scraper can reach it without minting
-#: an internal token. (Per the Phase K design the network policy
-#: restricts the scrape to the in-cluster Prometheus pod; that is
-#: the trust boundary, not the call-context middleware.)
+#: an internal token. The trust boundary for that exposure is the
+#: NetworkPolicy template shipped at
+#: ``deploy/helm/charts/connector-service/templates/networkpolicy.yaml``,
+#: which (when enabled alongside the umbrella deny-all) allows
+#: ingress on the service port only from the Prometheus pod's
+#: namespace. Operators MUST flip ``networkPolicy.enabled=true`` on
+#: this subchart whenever the umbrella ``networkPolicies.enabled``
+#: is enabled.
 _BYPASS_PATHS: frozenset[str] = frozenset(
     {"/healthz", "/readyz", "/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
 )

@@ -86,13 +86,14 @@ def _maybe_build_otlp_span_processor() -> BatchSpanProcessor | None:
     ).lower()
     try:
         if protocol.startswith("grpc"):
-            from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (  # type: ignore[import-not-found]
-                OTLPSpanExporter,
+            from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+                OTLPSpanExporter as _GrpcExporter,
             )
-        else:
-            from opentelemetry.exporter.otlp.proto.http.trace_exporter import (  # type: ignore[import-not-found]
-                OTLPSpanExporter,
-            )
+
+            return BatchSpanProcessor(_GrpcExporter())
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+            OTLPSpanExporter as _HttpExporter,
+        )
     except ImportError:
         logger.warning(
             "OTEL_EXPORTER_OTLP_ENDPOINT=%r set but no matching OTLP exporter "
@@ -100,7 +101,7 @@ def _maybe_build_otlp_span_processor() -> BatchSpanProcessor | None:
             endpoint,
         )
         return None
-    return BatchSpanProcessor(OTLPSpanExporter())
+    return BatchSpanProcessor(_HttpExporter())
 
 
 def install_otel_providers() -> None:
