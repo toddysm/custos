@@ -71,6 +71,11 @@ from custos_connector.listen.publisher import (
 from custos_connector.runtime import DockerCliHookRunner, PluginInvoker
 from custos_connector.scheduler import PullLoopScheduler
 from custos_connector.settings import Settings
+from custos_connector.sidecar_admin import (
+    InMemorySidecarRegistry,
+    SidecarAdminClient,
+    SidecarRegistry,
+)
 from custos_connector.validate import ValidateConnectorService
 
 # The interfaces connector-service actually owns. ``custos_spl.check_revisions``
@@ -177,6 +182,18 @@ class Providers:
     #: Dapr Pub/Sub publisher owns it (CONN-IMPL-027). ``None`` when
     #: the deployment uses the dev :class:`NoOpEventPublisher`.
     dapr_http_client: httpx.AsyncClient | None = field(default=None)
+    #: Sidecar control-channel client for operator-driven revoke
+    #: fan-out (CONN-IMPL-028). ``None`` keeps the operator routes
+    #: on the DB-only terminal-revoke path; production wiring sets
+    #: this alongside :attr:`sidecar_registry` once ARM lands the
+    #: cert plumbing.
+    sidecar_admin_client: SidecarAdminClient | None = field(default=None)
+    #: Lookup of ``lease_id → sidecar control-channel base URL``
+    #: used by the operator revoke routes (CONN-IMPL-028).
+    #: Populated by ARM at runtime. Default is an empty in-memory
+    #: registry so the operator routes can no-op-fan-out without a
+    #: None guard at every call site.
+    sidecar_registry: SidecarRegistry = field(default_factory=InMemorySidecarRegistry)
 
 
 def load_providers(settings: Settings) -> Providers:

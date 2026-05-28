@@ -502,23 +502,6 @@
         "title": "_ReleaseWire",
         "type": "object"
       },
-      "_RevokeRequest": {
-        "additionalProperties": false,
-        "description": "Body for ``POST /v1/workspaces/{ws}/leases/{leaseId}:revoke``.",
-        "properties": {
-          "reason": {
-            "maxLength": 500,
-            "minLength": 1,
-            "title": "Reason",
-            "type": "string"
-          }
-        },
-        "required": [
-          "reason"
-        ],
-        "title": "_RevokeRequest",
-        "type": "object"
-      },
       "_RevokeWire": {
         "additionalProperties": false,
         "description": "Wire shape of the ``revoke`` request body (CONN-IMPL-020).\n\nSidecar control channel sends ``{leaseIds: [...], reason: \"...\"}``.\nThe endpoint returns a per-lease ack list so callers can\ndistinguish ``revoked`` / ``already-revoked`` / ``already-expired``\n/ ``not-found`` outcomes in a single round-trip.",
@@ -1912,7 +1895,19 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/_RevokeRequest"
+                "additionalProperties": false,
+                "properties": {
+                  "reason": {
+                    "description": "Operator-supplied justification for the revoke. Flows to the lease.revoke-requested and lease.revoked audit events.",
+                    "maxLength": 500,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "reason"
+                ],
+                "type": "object"
               }
             }
           },
@@ -2220,7 +2215,7 @@
     },
     "/v1/workspaces/{ws}/leases/{lease_id}:revoke": {
       "post": {
-        "description": "Revoke one lease.\n\nReturns 200 with ``{leaseId, status}`` when the lease was found\n(``status`` is one of ``revoked`` / ``already-revoked`` /\n``already-expired``); returns 404 with the same envelope when\nthe lease does not exist in this workspace.",
+        "description": "Revoke one lease.\n\nReturns 200 with ``{leaseId, status}`` when the lease was found\n(``status`` is one of ``revoked`` / ``already-revoked`` /\n``already-expired``); returns 404 with the same envelope when\nthe lease does not exist in this workspace; returns 400\n``connector.reason_required`` when ``reason`` is missing/empty.\n\nEmits ``lease.revoke-requested`` once before the terminal-revoke\nwrite and ``lease.revoked`` from the SPL store on a successful\nstate change. Both audit rows carry the call-context principal\nid as the ``actor`` so the forensic trail records the operator\nwho initiated the revoke.",
         "operationId": "revoke_single_lease_v1_workspaces__ws__leases__lease_id__revoke_post",
         "parameters": [
           {
@@ -2248,7 +2243,19 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/_RevokeRequest"
+                "additionalProperties": false,
+                "properties": {
+                  "reason": {
+                    "description": "Operator-supplied justification for the revoke. Flows to the lease.revoke-requested and lease.revoked audit events.",
+                    "maxLength": 500,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "reason"
+                ],
+                "type": "object"
               }
             }
           },
@@ -2394,7 +2401,19 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/_RevokeRequest"
+                "additionalProperties": false,
+                "properties": {
+                  "reason": {
+                    "description": "Operator-supplied justification for the revoke. Flows to the lease.revoke-requested and lease.revoked audit events.",
+                    "maxLength": 500,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "reason"
+                ],
+                "type": "object"
               }
             }
           },

@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from custos_connector.lease.service import LeaseManager
     from custos_connector.middleware import CallContext
     from custos_connector.providers import Providers
+    from custos_connector.sidecar_admin import SidecarAdminClient, SidecarRegistry
 
 
 #: HTTP error code returned by every workspace-scoped handler when
@@ -107,6 +108,32 @@ def resolve_metadata_store(request: Request) -> MetadataStoreProvider:
     return providers.metadata_store
 
 
+def resolve_sidecar_admin_client(request: Request) -> SidecarAdminClient | None:
+    """Pull the optional :class:`SidecarAdminClient` off ``app.state``.
+
+    Returns ``None`` when no fan-out client is wired (the M1 cut
+    without ARM and the unit-test path that doesn't exercise the
+    sidecar control channel). Callers MUST treat ``None`` as "skip
+    fan-out" rather than as an error — the DB-only revoke path
+    remains correct in that case.
+    """
+    providers = resolve_providers(request)
+    return providers.sidecar_admin_client
+
+
+def resolve_sidecar_registry(request: Request) -> SidecarRegistry:
+    """Pull the :class:`SidecarRegistry` off ``app.state``.
+
+    Always returns a registry (the default factory on
+    :class:`Providers` is an empty
+    :class:`~custos_connector.sidecar_admin.InMemorySidecarRegistry`)
+    so route handlers can call :meth:`SidecarRegistry.endpoint_for`
+    unconditionally.
+    """
+    providers = resolve_providers(request)
+    return providers.sidecar_registry
+
+
 __all__ = [
     "WORKSPACE_MISMATCH_CODE",
     "error_response",
@@ -116,5 +143,7 @@ __all__ = [
     "resolve_lease_store",
     "resolve_metadata_store",
     "resolve_providers",
+    "resolve_sidecar_admin_client",
+    "resolve_sidecar_registry",
     "workspace_mismatch_response",
 ]

@@ -542,6 +542,7 @@ class LeaseManager:
         workspace_id: WorkspaceId,
         lease_id: str,
         reason: str,
+        actor: str | None = None,
     ) -> RevokeOutcome:
         """Revoke with a 4-way status discriminator (CONN-IMPL-020).
 
@@ -564,6 +565,14 @@ class LeaseManager:
         revokes; the discriminating variant is used only by the
         sidecar control channel where per-lease idempotency matters
         to the caller.
+
+        ``actor`` overrides the constructor-time service-identity
+        actor used on the emitted ``lease.revoked`` audit row
+        (CONN-IMPL-028). Operator routes pass the call-context
+        ``principal_id`` here so the audit trail records *who*
+        initiated the revoke; the internal control-channel path
+        leaves it ``None`` to keep the existing
+        ``actor="connector-service"`` semantics.
         """
         now = self._clock()
         existing = await self._lease_store.get_lease(workspace_id, lease_id)
@@ -581,7 +590,7 @@ class LeaseManager:
         await audit_lease_revoked(
             self._metadata_store,
             workspace_id=str(workspace_id),
-            actor=self._actor,
+            actor=actor if actor is not None else self._actor,
             lease_id=revoked.lease_id,
             run_id=str(revoked.run_id),
             step_id=str(revoked.step_id),
@@ -604,6 +613,7 @@ class LeaseManager:
         lease_ids: Sequence[str],
         reason: str,
         operator: str,
+        actor: str | None = None,
     ) -> None:
         """Emit ``lease.revoke-requested`` for an operator-initiated revoke.
 
@@ -613,11 +623,17 @@ class LeaseManager:
         audit trail records both the high-level intent (one
         ``lease.revoke-requested``) and the per-lease outcome (N
         ``lease.revoked`` events).
+
+        ``actor`` overrides the constructor-time service-identity
+        actor on the emitted row. Operator routes pass the call-
+        context ``principal_id`` so the forensic ``actor`` matches
+        the ``operator`` field; internal callers omit it to keep the
+        existing ``actor="connector-service"`` semantics.
         """
         await audit_lease_revoke_requested(
             self._metadata_store,
             workspace_id=str(workspace_id),
-            actor=self._actor,
+            actor=actor if actor is not None else self._actor,
             selector_type=selector_type,
             selector_value=selector_value,
             lease_ids=lease_ids,
