@@ -452,14 +452,18 @@ class LeaseManager:
         a successful no-op or surface ``NOT_FOUND`` to the user.
         """
         now = self._clock()
+        # CONN-IMPL-029: pre-read so the active-lease gauge only drops
+        # on the first close transition. The SPL ``release_lease`` is
+        # idempotent — it returns the existing row for an already-
+        # released lease — so without this gate a second release call
+        # would drive the per-instance gauge down by two.
+        existing = await self._lease_store.get_lease(workspace_id, lease_id)
+        was_active = existing is not None and existing.released_at is None
         released = await self._lease_store.release_lease(workspace_id, lease_id, now)
         if released is None:
             return None
-        # CONN-IMPL-029: drop the active-lease gauge on the release
-        # success path. Idempotent: the SPL ``release_lease`` returns
-        # ``None`` for already-closed leases so this only fires once
-        # per lease lifetime.
-        record_lease_closed(str(released.connector_instance_id))
+        if was_active:
+            record_lease_closed(str(released.connector_instance_id))
         await audit_lease_released(
             self._metadata_store,
             workspace_id=str(workspace_id),
@@ -500,13 +504,16 @@ class LeaseManager:
         a previous release / expire / revoke.
         """
         now = self._clock()
+        # CONN-IMPL-029: pre-read so the active-lease gauge only drops
+        # on the first close transition (the SPL ``release_lease`` is
+        # idempotent against an already-closed row).
+        existing = await self._lease_store.get_lease(workspace_id, lease_id)
+        was_active = existing is not None and existing.released_at is None
         released = await self._lease_store.release_lease(workspace_id, lease_id, now)
         if released is None:
             return None
-        # CONN-IMPL-029: drop the active-lease gauge on the expire
-        # success path. The SPL ``release_lease`` is idempotent so
-        # this only fires once per lease lifetime.
-        record_lease_closed(str(released.connector_instance_id))
+        if was_active:
+            record_lease_closed(str(released.connector_instance_id))
         await audit_lease_expired(
             self._metadata_store,
             workspace_id=str(workspace_id),
@@ -544,12 +551,19 @@ class LeaseManager:
         for ``(workspace_id, lease_id)``.
         """
         now = self._clock()
+        # CONN-IMPL-029: pre-read so the active-lease gauge only drops
+        # when this call performs the first close transition. The SPL
+        # ``revoke_lease`` is idempotent against already-revoked /
+        # already-released rows.
+        existing = await self._lease_store.get_lease(workspace_id, lease_id)
+        was_active = (
+            existing is not None and existing.released_at is None and existing.revoked_at is None
+        )
         revoked = await self._lease_store.revoke_lease(workspace_id, lease_id, reason, now)
         if revoked is None:
             return None
-        # CONN-IMPL-029: drop the active-lease gauge on the revoke
-        # success path.
-        record_lease_closed(str(revoked.connector_instance_id))
+        if was_active:
+            record_lease_closed(str(revoked.connector_instance_id))
         await audit_lease_revoked(
             self._metadata_store,
             workspace_id=str(workspace_id),
@@ -619,7 +633,14 @@ class LeaseManager:
             # Treat as not-found so the caller's ack is consistent.
             return RevokeOutcome(status=RevokeOutcomeStatus.NOT_FOUND, lease=None)
         # CONN-IMPL-029: drop the active-lease gauge on the
-        # discriminating-revoke success path.
+        # discriminating-revoke success path. The pre-read above
+        # already gated to the active branch (released_at is None,
+        # revoked_at is None, expires_at > now), so emission is
+        # bounded to the first close transition. A residual TOCTOU
+        # window remains if two callers race past the pre-read on
+        # the same lease — bounded to one extra decrement per lease
+        # lifetime — and is acceptable until the SPL grows an
+        # atomic "was this the close transition" discriminator.
         record_lease_closed(str(revoked.connector_instance_id))
         await audit_lease_revoked(
             self._metadata_store,

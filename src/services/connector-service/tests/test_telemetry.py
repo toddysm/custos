@@ -40,6 +40,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from opentelemetry import metrics, trace
@@ -132,17 +133,17 @@ def metric_reader() -> InMemoryMetricReader:
         telemetry_mod._INSTRUMENTATION_NAME,
         telemetry_mod._INSTRUMENTATION_VERSION,
     )
-    telemetry_mod.BIND_LATENCY_SECONDS = telemetry_mod._meter.create_histogram(
+    telemetry_mod.BIND_LATENCY_SECONDS = telemetry_mod._meter.create_histogram(  # type: ignore[misc]
         name="custos_connector_bind_latency_seconds", unit="s"
     )
-    telemetry_mod.PULL_TICK_DURATION_SECONDS = telemetry_mod._meter.create_histogram(
+    telemetry_mod.PULL_TICK_DURATION_SECONDS = telemetry_mod._meter.create_histogram(  # type: ignore[misc]
         name="custos_connector_pull_tick_duration_seconds", unit="s"
     )
     telemetry_mod.ACTIVE_LEASES = telemetry_mod._meter.create_observable_gauge(
         name="custos_connector_active_leases",
         callbacks=[telemetry_mod._active_leases_observable_callback],
     )
-    telemetry_mod.MANIFEST_FALLBACK_TOTAL = telemetry_mod._meter.create_counter(
+    telemetry_mod.MANIFEST_FALLBACK_TOTAL = telemetry_mod._meter.create_counter(  # type: ignore[misc]
         name="custos_connector_manifest_fallback_total"
     )
     telemetry_mod.CURSOR_LAG_SECONDS = telemetry_mod._meter.create_observable_gauge(
@@ -186,12 +187,12 @@ def _sum_histogram_count(reader: InMemoryMetricReader, name: str) -> int:
 
 def _data_points_by_label(
     reader: InMemoryMetricReader, name: str, label_key: str
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """Return ``{label_value: data_point}`` for the given metric + label."""
     metric = _find_metric(reader, name)
     if metric is None:
         return {}
-    out: dict[str, object] = {}
+    out: dict[str, Any] = {}
     for point in metric.data.data_points:  # type: ignore[attr-defined]
         attrs = dict(point.attributes or {})
         if label_key in attrs:
@@ -224,7 +225,7 @@ def test_observe_bind_records_success_span_and_histogram_sample(
         metric_reader, "custos_connector_bind_latency_seconds", "outcome"
     )
     assert "success" in by_outcome
-    assert by_outcome["success"].count == 1  # type: ignore[union-attr]
+    assert by_outcome["success"].count == 1
 
 
 def test_observe_bind_records_error_span_and_histogram_sample(
@@ -246,7 +247,7 @@ def test_observe_bind_records_error_span_and_histogram_sample(
         metric_reader, "custos_connector_bind_latency_seconds", "outcome"
     )
     assert "error" in by_outcome
-    assert by_outcome["error"].count == 1  # type: ignore[union-attr]
+    assert by_outcome["error"].count == 1
 
 
 def test_observe_pull_tick_records_under_pull_tick_histogram(
@@ -272,7 +273,7 @@ def test_observe_pull_tick_records_under_pull_tick_histogram(
 )
 def test_span_only_helpers_open_canonical_span_names(
     span_exporter: InMemorySpanExporter,
-    observe_fn,
+    observe_fn: Any,
     expected_span_name: str,
 ) -> None:
     """Each span-only helper produces exactly one span with the canonical name."""
@@ -345,8 +346,8 @@ def test_record_lease_issued_and_closed_bump_active_leases_gauge(
     by_instance = _data_points_by_label(
         metric_reader, "custos_connector_active_leases", "connectorInstanceId"
     )
-    assert by_instance["inst-A"].value == 1  # type: ignore[union-attr]
-    assert by_instance["inst-B"].value == 1  # type: ignore[union-attr]
+    assert by_instance["inst-A"].value == 1
+    assert by_instance["inst-B"].value == 1
 
 
 # ---------------------------------------------------------------------------
@@ -368,7 +369,7 @@ def test_record_manifest_fallback_accepts_known_outcomes(
         metric_reader, "custos_connector_manifest_fallback_total", "outcome"
     )
     assert outcome in by_outcome
-    assert by_outcome[outcome].value == 1  # type: ignore[union-attr]
+    assert by_outcome[outcome].value == 1
 
 
 def test_record_manifest_fallback_unknown_label_falls_back_to_unknown(
@@ -434,7 +435,7 @@ def test_cursor_lag_observable_gauge_emits_per_registered_entry(
         # The gauge math runs at scrape time so the exact value
         # drifts on every read; assert it landed in a plausible
         # window rather than a hard equality.
-        assert by_instance["inst-lag"].value >= 0.0  # type: ignore[union-attr]
+        assert by_instance["inst-lag"].value >= 0.0
     finally:
         CURSOR_LAG_REGISTRY.forget(workspace_id="ws-1", instance_id="inst-lag")
 

@@ -20,6 +20,8 @@ already covered by the pre-existing audit unit tests.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from custos_connector.audit import (
@@ -109,7 +111,7 @@ async def test_audit_deprecation_toggled_carries_flag_in_payload() -> None:
     ],
 )
 async def test_audit_manifest_fallback_used_ignored_emit_platform_scope(
-    helper,
+    helper: Any,
     event_type: str,
 ) -> None:
     """``used`` and ``ignored`` share the same call signature.

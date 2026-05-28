@@ -65,10 +65,11 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections import Counter as _Counter
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from opentelemetry import context, metrics, trace
 from opentelemetry.metrics import (
@@ -79,6 +80,10 @@ from opentelemetry.metrics import (
     Observation,
 )
 from opentelemetry.trace import Span, Status, StatusCode, Tracer
+
+if TYPE_CHECKING:  # pragma: no cover
+    from custos_spl.ids import WorkspaceId
+    from custos_spl.interfaces.lease_store import LeaseStoreProvider
 
 _LOGGER = logging.getLogger("custos_connector.telemetry")
 
@@ -276,6 +281,51 @@ ACTIVE_LEASES = _meter.create_observable_gauge(
 def record_lease_issued(connector_instance_id: str) -> None:
     """Increment the active-lease count for ``connector_instance_id`` by one."""
     ACTIVE_LEASES_REGISTRY.incr(connector_instance_id)
+
+
+async def hydrate_active_leases_from_store(
+    lease_store: LeaseStoreProvider,
+    workspace_ids: Iterable[WorkspaceId],
+    *,
+    page_size: int = 500,
+) -> int:
+    """Seed :data:`ACTIVE_LEASES_REGISTRY` from the authoritative lease store.
+
+    Walks :meth:`LeaseStoreProvider.list_active_leases` for each
+    workspace in ``workspace_ids``, tallies the per-instance counts,
+    and overwrites the corresponding registry entries via
+    :meth:`ActiveLeasesRegistry.seed`. Returns the total number of
+    rows enumerated.
+
+    Designed to run once during the FastAPI lifespan startup so the
+    ``custos_connector_active_leases`` gauge survives pod restarts /
+    HA failovers. The connector-service does not yet enumerate
+    workspaces itself; callers (the lifespan, an admin tool) supply
+    the workspace list. When ``workspace_ids`` is empty the helper
+    is a no-op and returns 0 \u2014 the registry will then start at
+    zero and converge to the truth via subsequent issue/close
+    events; a follow-up issue will close the gap by wiring workspace
+    enumeration.
+    """
+    total = 0
+    for workspace_id in workspace_ids:
+        per_instance: _Counter[str] = _Counter()
+        cursor = None
+        while True:
+            page = await lease_store.list_active_leases(
+                workspace_id,
+                cursor=cursor,
+                limit=page_size,
+            )
+            for lease in page.items:
+                per_instance[str(lease.connector_instance_id)] += 1
+                total += 1
+            cursor = page.next_cursor
+            if cursor is None:
+                break
+        for instance_id, count in per_instance.items():
+            ACTIVE_LEASES_REGISTRY.seed(instance_id=instance_id, count=count)
+    return total
 
 
 def record_lease_closed(connector_instance_id: str) -> None:
