@@ -47,6 +47,18 @@ dependencies = [
     "jsonschema>=4.21,<5",
     "httpx>=0.27,<1",
     "opentelemetry-api>=1.20,<2",
+    # CONN-IMPL-029 (Phase K) — the connector-service exposes its own
+    # ``/metrics`` endpoint per the issue acceptance criteria. The SDK
+    # configures a process-local ``MeterProvider`` + ``TracerProvider``
+    # on first :func:`custos_connector.create_app` call; the Prometheus
+    # exporter registers the resulting metrics with the global
+    # ``prometheus_client`` registry that backs the ``/metrics`` ASGI
+    # app. Production deployments keep the Helm-managed Collector
+    # sidecar for OTLP export of spans; the in-process Prometheus
+    # exporter only feeds the local scrape endpoint.
+    "opentelemetry-sdk>=1.20,<2",
+    "opentelemetry-exporter-prometheus>=0.41b0",
+    "prometheus_client>=0.19,<1",
 ]
 
 [project.optional-dependencies]
@@ -59,8 +71,10 @@ dev = [
     "mypy>=1.10",
     "types-PyYAML>=6.0",
     "types-jsonschema>=4.21",
-    # OTel SDK is dev-only so tests can install in-memory exporters when
-    # CONN-IMPL-029 lands. The library itself only depends on the API.
+    # OTel SDK is also pulled in as a runtime dependency above for the
+    # in-process ``/metrics`` endpoint (CONN-IMPL-029). Keeping it
+    # listed under ``dev`` is redundant but harmless; tests use the
+    # SDK's in-memory exporters to assert spans + metric samples.
     "opentelemetry-sdk>=1.20,<2",
     # Integration tests (CONN-IMPL-031) need testcontainers to spin up
     # Postgres locally when ``CUSTOS_PG_DSN`` is not provided.

@@ -43,13 +43,27 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import httpx
 from custos_spl import ConflictDigest
 from custos_spl.interfaces.catalog_store import CatalogStoreProvider, ConnectorTypeVersion
 
-from custos_connector.audit import emit_event
+from custos_connector.audit import (
+    EVENT_DEPRECATION_TOGGLED as AUDIT_EVENT_DEPRECATION_TOGGLED,
+)
+from custos_connector.audit import (
+    EVENT_REGISTRATION_ACCEPTED as AUDIT_EVENT_REGISTRATION_ACCEPTED,
+)
+from custos_connector.audit import (
+    EVENT_REGISTRATION_REJECTED as AUDIT_EVENT_REGISTRATION_REJECTED,
+)
+from custos_connector.audit import (
+    audit_deprecation_toggled,
+    audit_registration_accepted,
+    audit_registration_rejected,
+    emit_event,
+)
 from custos_connector.loader.errors import LoaderError, LoaderErrorCode
 from custos_connector.loader.identity import IdentityCategory, derive_identity_category
 from custos_connector.manifest import (
@@ -62,11 +76,19 @@ from custos_connector.manifest import (
 )
 from custos_connector.manifest.capabilities import extract_capability_name
 
+if TYPE_CHECKING:
+    from custos_spl import MetadataStoreProvider
+
 #: Audit event names. Centralised so tests + dashboards refer to them as
-#: constants rather than open-coded strings.
-AUDIT_EVENT_REGISTRATION_ACCEPTED: Final[str] = "connector.registration.accepted"
-AUDIT_EVENT_REGISTRATION_REJECTED: Final[str] = "connector.registration.rejected"
-AUDIT_EVENT_DEPRECATION_TOGGLED: Final[str] = "connector.deprecation.toggled"
+#: constants rather than open-coded strings. Re-exported from
+#: :mod:`custos_connector.audit` so the canonical strings live in one
+#: place; the local aliases retain back-compat for existing callers /
+#: tests that imported them from this module before CONN-IMPL-029.
+__all_audit_events__ = (
+    "AUDIT_EVENT_REGISTRATION_ACCEPTED",
+    "AUDIT_EVENT_REGISTRATION_REJECTED",
+    "AUDIT_EVENT_DEPRECATION_TOGGLED",
+)
 
 #: ``Accept`` value sent on the artifact-manifest GET. The OCI artifact
 #: wrapper always serialises as an image manifest; we list the legacy
@@ -210,6 +232,7 @@ class Loader:
         catalog_store: CatalogStoreProvider,
         registry_client: httpx.AsyncClient,
         vendor_identity_categories: Mapping[str, IdentityCategory] | None = None,
+        metadata_store: MetadataStoreProvider | None = None,
     ) -> None:
         """
         Args:
@@ -221,9 +244,20 @@ class Loader:
             vendor_identity_categories: Optional out-of-band identity
                 categories for ``x-<vendor>`` ``authenticationType``
                 tokens. Built-in token mappings are NOT overridable.
+            metadata_store: Optional
+                :class:`~custos_spl.MetadataStoreProvider`. When
+                provided, the loader writes
+                ``connector.registration.{accepted,rejected}`` and
+                ``connector.deprecation.toggled`` audit rows through the
+                SPL outbox under :data:`PLATFORM_WORKSPACE_ID`. When
+                ``None`` (the unit-test path), the loader falls back
+                to the legacy log-only :func:`emit_event` shim so
+                existing tests continue to assert on the structured
+                log line.
         """
         self._catalog = catalog_store
         self._client = registry_client
+        self._metadata_store = metadata_store
         # Defensive copy + read-only view so the loader's view of the map
         # cannot be mutated by the caller after construction. The copy
         # captures the caller's snapshot; the ``MappingProxyType`` wrapper
@@ -260,6 +294,28 @@ class Loader:
                 in its payload before raising.
         """
         try:
+            return await self._register_impl(image_ref)
+        except LoaderError as exc:
+            # CONN-IMPL-029 (Phase K) — emit the typed
+            # ``connector.registration.rejected`` audit row through the
+            # SPL outbox in addition to the log-only line that
+            # :meth:`_reject` already wrote. The legacy log line stays
+            # so unit tests that don't wire a metadata store keep
+            # passing; the SPL row lands whenever a metadata store is
+            # available.
+            if self._metadata_store is not None:
+                await audit_registration_rejected(
+                    self._metadata_store,
+                    image_ref=image_ref,
+                    code=str(exc.code),
+                    detail=exc.detail,
+                )
+            raise
+
+    async def _register_impl(self, image_ref: str) -> LoadedConnectorType:
+        """Run the registration pipeline; see :meth:`register` for the
+        public contract."""
+        try:
             repository, subject_digest = self._parse_image_ref(image_ref)
         except LoaderError as exc:
             raise self._reject(
@@ -275,6 +331,7 @@ class Loader:
                 self._client,
                 repository=repository,
                 subject_digest=subject_digest,
+                metadata_store=self._metadata_store,
             )
         except ManifestDiscoveryError as exc:
             raise self._reject(
@@ -395,6 +452,14 @@ class Loader:
                 "authentication_type": authentication_type,
             },
         )
+        if self._metadata_store is not None:
+            await audit_registration_accepted(
+                self._metadata_store,
+                type_name=connector_type,
+                version=connector_version,
+                image_ref=image_ref,
+                manifest_digest=payload_digest,
+            )
 
         return LoadedConnectorType(row=row, identity_category=identity_category)
 
@@ -480,6 +545,17 @@ class Loader:
             AUDIT_EVENT_DEPRECATION_TOGGLED,
             {"type": connector_type, "deprecated": deprecated},
         )
+        if self._metadata_store is not None:
+            # The loader exposes no per-version surface here (the SPL
+            # call deprecates the whole connector-type, not one
+            # version). Emit with version="*" so the typed subject
+            # still pins (type, version) per the helper contract.
+            await audit_deprecation_toggled(
+                self._metadata_store,
+                type_name=connector_type,
+                version="*",
+                deprecated=deprecated,
+            )
 
     # ------------------------------------------------------------------
     # Internals

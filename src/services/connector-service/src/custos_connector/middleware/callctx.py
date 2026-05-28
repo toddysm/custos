@@ -36,7 +36,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
-from custos_connector.audit import emit_event
+from custos_connector.audit import audit_authz_decision, emit_event
 
 if TYPE_CHECKING:
     from starlette.types import ASGIApp
@@ -48,6 +48,12 @@ CALLCTX_HEADER: str = "x-custos-callctx"
 #: Paths the middleware deliberately bypasses (no auth on probes,
 #: nor on the OpenAPI documentation surface — the schema is part of
 #: the service's public-by-design REST contract per CONN-IMPL-026).
+#: ``/metrics`` is the Prometheus exposition endpoint mounted by
+#: CONN-IMPL-029; it MUST NOT require a call-context header so the
+#: Helm-deployed Prometheus scraper can reach it without minting
+#: an internal token. (Per the Phase K design the network policy
+#: restricts the scrape to the in-cluster Prometheus pod; that is
+#: the trust boundary, not the call-context middleware.)
 _BYPASS_PATHS: frozenset[str] = frozenset(
     {"/healthz", "/readyz", "/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
 )
@@ -58,8 +64,10 @@ _BYPASS_PATHS: frozenset[str] = frozenset(
 #: mounted at ``POST /v1/webhooks/connectors/{instance_id}/events``
 #: (CONN-IMPL-025) enters the listen pipeline with its own
 #: :class:`custos_connector.listen.signature.SignatureVerifier` and
-#: explicitly does not have an internal call-context.
-_BYPASS_PREFIXES: tuple[str, ...] = ("/v1/webhooks/",)
+#: explicitly does not have an internal call-context. The ``/metrics``
+#: prefix covers the Prometheus mount whose internal path is
+#: ``/metrics`` plus any trailing slash variant.
+_BYPASS_PREFIXES: tuple[str, ...] = ("/v1/webhooks/", "/metrics")
 
 logger = logging.getLogger(__name__)
 
@@ -290,10 +298,14 @@ def require_permission(
     """Build a FastAPI dependency that requires ``name`` on the call context.
 
     Every authorization decision (allow or deny) emits an
-    ``authz.decision`` audit event so the operator can trace exactly which
-    permission gated which route during dev-shim runs. The real audit
-    pipeline (CONN-IMPL-029) will rewire this hook to write through the
-    SPL outbox.
+    ``authz.decision`` audit event so the operator can trace exactly
+    which permission gated which route. CONN-IMPL-029 (Phase K)
+    promoted this emission onto the typed SPL audit pipeline: when the
+    FastAPI application's ``Providers`` are reachable from
+    ``request.app.state``, the dependency writes through
+    :func:`audit_authz_decision`; the legacy log-only
+    :func:`emit_event` line still fires alongside so dev / test paths
+    without a metadata store keep their structured log signal.
     """
 
     async def _dep(request: Request) -> CallContext:
@@ -310,6 +322,19 @@ def require_permission(
                 "principal_id": ctx.principal_id,
             },
         )
+        providers = getattr(request.app.state, "providers", None)
+        metadata_store = getattr(providers, "metadata_store", None) if providers else None
+        if metadata_store is not None:
+            await audit_authz_decision(
+                metadata_store,
+                workspace_id=ctx.workspace_id,
+                actor=ctx.principal_id,
+                principal_id=ctx.principal_id,
+                path=request.url.path,
+                method=request.method,
+                permission=name,
+                allowed=allowed,
+            )
         if not allowed:
             raise CallContextError(
                 403,

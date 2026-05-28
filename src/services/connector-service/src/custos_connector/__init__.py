@@ -34,9 +34,11 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 from fastapi.exceptions import RequestValidationError
+from prometheus_client import make_asgi_app
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from custos_connector._runtime import install_otel_providers
 from custos_connector.api import (
     audit_router,
     connector_types_router,
@@ -92,6 +94,14 @@ def create_app(
     All side-effecting work happens inside the FastAPI lifespan context.
     """
     from fastapi import FastAPI
+
+    # CONN-IMPL-029 (Phase K) — install the process-wide OTel SDK
+    # providers eagerly so the ``/metrics`` endpoint mounted below
+    # serves the Prometheus-formatted output for instruments created at
+    # module import time. ``install_otel_providers`` is idempotent;
+    # repeated ``create_app`` calls in the same process (e.g. test
+    # parametrization) share a single provider.
+    install_otel_providers()
 
     effective_settings = settings if settings is not None else load_settings()
 
@@ -184,6 +194,14 @@ def create_app(
     app.include_router(instances_router)
     app.include_router(lease_admin_router)
     app.include_router(audit_router)
+
+    # CONN-IMPL-029 (Phase K) — Prometheus scrape endpoint. Mounted as a
+    # plain ASGI app rather than a FastAPI route so it stays out of the
+    # OpenAPI schema (the snapshot test in ``tests/test_openapi_snapshot.py``
+    # only diffs the FastAPI-routed surface). The reader installed by
+    # :func:`install_otel_providers` populates the default
+    # ``prometheus_client`` registry that ``make_asgi_app`` serves.
+    app.mount("/metrics", make_asgi_app())
     return app
 
 

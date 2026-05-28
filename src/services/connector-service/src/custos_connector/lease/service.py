@@ -34,6 +34,12 @@ from custos_spl.ids import ConnectorInstanceId, RunId, StepId, WorkspaceId
 from custos_spl.interfaces.lease_store import Lease, LeaseStoreProvider
 from custos_spl.interfaces.metadata_store import MetadataStoreProvider
 
+from custos_connector._telemetry import (
+    observe_lease_issue,
+    observe_lease_refresh,
+    record_lease_closed,
+    record_lease_issued,
+)
 from custos_connector.audit import (
     audit_lease_denied,
     audit_lease_expired,
@@ -259,80 +265,89 @@ class LeaseManager:
         preceded by a ``lease.denied`` audit emission.
         """
         instance_id_str = str(connector_instance_id)
-        try:
-            if attempt <= 0:
-                raise LeaseError(
-                    LeaseErrorCode.INVALID_REQUEST,
-                    f"attempt must be positive; got {attempt}",
+        with observe_lease_issue() as _span:
+            _span.set_attribute("workspaceId", str(workspace_id))
+            _span.set_attribute("connectorInstanceId", instance_id_str)
+            _span.set_attribute("capability", capability)
+            try:
+                if attempt <= 0:
+                    raise LeaseError(
+                        LeaseErrorCode.INVALID_REQUEST,
+                        f"attempt must be positive; got {attempt}",
+                    )
+                now = self._clock()
+                active = await self._lease_store.count_active_for_step_attempt(
+                    workspace_id, run_id, step_id, attempt, now
                 )
-            now = self._clock()
-            active = await self._lease_store.count_active_for_step_attempt(
-                workspace_id, run_id, step_id, attempt, now
-            )
-            if active >= self._max_concurrent_leases:
-                raise LeaseError(
-                    LeaseErrorCode.CAPACITY_EXCEEDED,
-                    f"concurrent-lease cap reached "
-                    f"({active}/{self._max_concurrent_leases}) for "
-                    f"(run_id={run_id}, step_id={step_id}, attempt={attempt})",
+                if active >= self._max_concurrent_leases:
+                    raise LeaseError(
+                        LeaseErrorCode.CAPACITY_EXCEEDED,
+                        f"concurrent-lease cap reached "
+                        f"({active}/{self._max_concurrent_leases}) for "
+                        f"(run_id={run_id}, step_id={step_id}, attempt={attempt})",
+                    )
+                ttl_sec = self._resolve_ttl_seconds(
+                    now=now,
+                    inputs=TtlInputs(
+                        requested_ttl_sec=requested_ttl_sec,
+                        type_max_ttl_sec=type_max_ttl_sec,
+                        instance_ttl_sec=instance_ttl_sec,
+                        step_deadline=step_deadline,
+                    ),
                 )
-            ttl_sec = self._resolve_ttl_seconds(
-                now=now,
-                inputs=TtlInputs(
-                    requested_ttl_sec=requested_ttl_sec,
-                    type_max_ttl_sec=type_max_ttl_sec,
-                    instance_ttl_sec=instance_ttl_sec,
-                    step_deadline=step_deadline,
-                ),
-            )
-        except LeaseError as exc:
-            # No lease_id yet at this stage; the cap and TTL
-            # validations fire before mint. Emit with lease_id=None.
-            await self._record_denied_for(
+            except LeaseError as exc:
+                # No lease_id yet at this stage; the cap and TTL
+                # validations fire before mint. Emit with lease_id=None.
+                await self._record_denied_for(
+                    workspace_id=workspace_id,
+                    lease_id=None,
+                    connector_instance_id=instance_id_str,
+                    op="issue",
+                    exc=exc,
+                )
+                raise
+            expires_at = now + timedelta(seconds=ttl_sec)
+            lease_id = f"lease_{_ulid(int(now.timestamp() * 1000))}"
+            lease = Lease(
                 workspace_id=workspace_id,
-                lease_id=None,
-                connector_instance_id=instance_id_str,
-                op="issue",
-                exc=exc,
+                lease_id=lease_id,
+                run_id=run_id,
+                step_id=step_id,
+                attempt=attempt,
+                slot=slot,
+                capability=capability,
+                connector_instance_id=connector_instance_id,
+                token_type=token_type,
+                issued_at=now,
+                expires_at=expires_at,
+                released_at=None,
+                revoked_at=None,
+                revoke_reason=None,
+                created_at=now,
+                updated_at=now,
             )
-            raise
-        expires_at = now + timedelta(seconds=ttl_sec)
-        lease_id = f"lease_{_ulid(int(now.timestamp() * 1000))}"
-        lease = Lease(
-            workspace_id=workspace_id,
-            lease_id=lease_id,
-            run_id=run_id,
-            step_id=step_id,
-            attempt=attempt,
-            slot=slot,
-            capability=capability,
-            connector_instance_id=connector_instance_id,
-            token_type=token_type,
-            issued_at=now,
-            expires_at=expires_at,
-            released_at=None,
-            revoked_at=None,
-            revoke_reason=None,
-            created_at=now,
-            updated_at=now,
-        )
-        stored = await self._lease_store.put_lease(workspace_id, lease)
-        await audit_lease_issued(
-            self._metadata_store,
-            workspace_id=str(workspace_id),
-            actor=self._actor,
-            lease_id=stored.lease_id,
-            run_id=str(run_id),
-            step_id=str(step_id),
-            attempt=attempt,
-            slot=slot,
-            capability=capability,
-            connector_instance_id=str(connector_instance_id),
-            token_type=token_type,
-            issued_at=stored.issued_at,
-            expires_at=stored.expires_at,
-        )
-        return stored
+            stored = await self._lease_store.put_lease(workspace_id, lease)
+            # CONN-IMPL-029: bump the active-lease gauge on the
+            # storage-commit success path so failures upstream of
+            # ``put_lease`` do not leak counts.
+            record_lease_issued(instance_id_str)
+            _span.set_attribute("leaseId", stored.lease_id)
+            await audit_lease_issued(
+                self._metadata_store,
+                workspace_id=str(workspace_id),
+                actor=self._actor,
+                lease_id=stored.lease_id,
+                run_id=str(run_id),
+                step_id=str(step_id),
+                attempt=attempt,
+                slot=slot,
+                capability=capability,
+                connector_instance_id=str(connector_instance_id),
+                token_type=token_type,
+                issued_at=stored.issued_at,
+                expires_at=stored.expires_at,
+            )
+            return stored
 
     async def refresh(
         self,
@@ -359,64 +374,68 @@ class LeaseManager:
         ``lease.denied`` audit emission.
         """
         instance_id_str: str | None = None
-        try:
-            current = await self._lease_store.get_lease(workspace_id, lease_id)
-            if current is None:
-                raise LeaseError(
-                    LeaseErrorCode.NOT_FOUND,
-                    f"no lease {lease_id} in workspace {workspace_id}",
+        with observe_lease_refresh() as _span:
+            _span.set_attribute("workspaceId", str(workspace_id))
+            _span.set_attribute("leaseId", lease_id)
+            try:
+                current = await self._lease_store.get_lease(workspace_id, lease_id)
+                if current is None:
+                    raise LeaseError(
+                        LeaseErrorCode.NOT_FOUND,
+                        f"no lease {lease_id} in workspace {workspace_id}",
+                    )
+                instance_id_str = str(current.connector_instance_id)
+                _span.set_attribute("connectorInstanceId", instance_id_str)
+                if current.released_at is not None:
+                    raise LeaseError(
+                        LeaseErrorCode.ALREADY_RELEASED,
+                        f"lease {lease_id} was released at {current.released_at.isoformat()}",
+                    )
+                now = self._clock()
+                ttl_sec = self._resolve_ttl_seconds(
+                    now=now,
+                    inputs=TtlInputs(
+                        requested_ttl_sec=requested_ttl_sec,
+                        type_max_ttl_sec=type_max_ttl_sec,
+                        instance_ttl_sec=instance_ttl_sec,
+                        step_deadline=step_deadline,
+                    ),
                 )
-            instance_id_str = str(current.connector_instance_id)
-            if current.released_at is not None:
-                raise LeaseError(
-                    LeaseErrorCode.ALREADY_RELEASED,
-                    f"lease {lease_id} was released at {current.released_at.isoformat()}",
+                new_expires_at = now + timedelta(seconds=ttl_sec)
+                refreshed = await self._lease_store.refresh_lease(
+                    workspace_id, lease_id, new_expires_at
                 )
-            now = self._clock()
-            ttl_sec = self._resolve_ttl_seconds(
-                now=now,
-                inputs=TtlInputs(
-                    requested_ttl_sec=requested_ttl_sec,
-                    type_max_ttl_sec=type_max_ttl_sec,
-                    instance_ttl_sec=instance_ttl_sec,
-                    step_deadline=step_deadline,
-                ),
-            )
-            new_expires_at = now + timedelta(seconds=ttl_sec)
-            refreshed = await self._lease_store.refresh_lease(
-                workspace_id, lease_id, new_expires_at
-            )
-            if refreshed is None:
-                # Race: lease was released between get and refresh.
-                raise LeaseError(
-                    LeaseErrorCode.ALREADY_RELEASED,
-                    f"lease {lease_id} was released concurrently with refresh",
+                if refreshed is None:
+                    # Race: lease was released between get and refresh.
+                    raise LeaseError(
+                        LeaseErrorCode.ALREADY_RELEASED,
+                        f"lease {lease_id} was released concurrently with refresh",
+                    )
+            except LeaseError as exc:
+                await self._record_denied_for(
+                    workspace_id=workspace_id,
+                    lease_id=lease_id,
+                    connector_instance_id=instance_id_str,
+                    op="refresh",
+                    exc=exc,
                 )
-        except LeaseError as exc:
-            await self._record_denied_for(
-                workspace_id=workspace_id,
-                lease_id=lease_id,
-                connector_instance_id=instance_id_str,
-                op="refresh",
-                exc=exc,
+                raise
+            await audit_lease_refreshed(
+                self._metadata_store,
+                workspace_id=str(workspace_id),
+                actor=self._actor,
+                lease_id=refreshed.lease_id,
+                run_id=str(refreshed.run_id),
+                step_id=str(refreshed.step_id),
+                attempt=refreshed.attempt,
+                slot=refreshed.slot,
+                capability=refreshed.capability,
+                connector_instance_id=str(refreshed.connector_instance_id),
+                token_type=refreshed.token_type,
+                previous_expires_at=current.expires_at,
+                new_expires_at=refreshed.expires_at,
             )
-            raise
-        await audit_lease_refreshed(
-            self._metadata_store,
-            workspace_id=str(workspace_id),
-            actor=self._actor,
-            lease_id=refreshed.lease_id,
-            run_id=str(refreshed.run_id),
-            step_id=str(refreshed.step_id),
-            attempt=refreshed.attempt,
-            slot=refreshed.slot,
-            capability=refreshed.capability,
-            connector_instance_id=str(refreshed.connector_instance_id),
-            token_type=refreshed.token_type,
-            previous_expires_at=current.expires_at,
-            new_expires_at=refreshed.expires_at,
-        )
-        return refreshed
+            return refreshed
 
     async def release(
         self,
@@ -436,6 +455,11 @@ class LeaseManager:
         released = await self._lease_store.release_lease(workspace_id, lease_id, now)
         if released is None:
             return None
+        # CONN-IMPL-029: drop the active-lease gauge on the release
+        # success path. Idempotent: the SPL ``release_lease`` returns
+        # ``None`` for already-closed leases so this only fires once
+        # per lease lifetime.
+        record_lease_closed(str(released.connector_instance_id))
         await audit_lease_released(
             self._metadata_store,
             workspace_id=str(workspace_id),
@@ -479,6 +503,10 @@ class LeaseManager:
         released = await self._lease_store.release_lease(workspace_id, lease_id, now)
         if released is None:
             return None
+        # CONN-IMPL-029: drop the active-lease gauge on the expire
+        # success path. The SPL ``release_lease`` is idempotent so
+        # this only fires once per lease lifetime.
+        record_lease_closed(str(released.connector_instance_id))
         await audit_lease_expired(
             self._metadata_store,
             workspace_id=str(workspace_id),
@@ -519,6 +547,9 @@ class LeaseManager:
         revoked = await self._lease_store.revoke_lease(workspace_id, lease_id, reason, now)
         if revoked is None:
             return None
+        # CONN-IMPL-029: drop the active-lease gauge on the revoke
+        # success path.
+        record_lease_closed(str(revoked.connector_instance_id))
         await audit_lease_revoked(
             self._metadata_store,
             workspace_id=str(workspace_id),
@@ -587,6 +618,9 @@ class LeaseManager:
             # Race: the row vanished between the peek and the revoke.
             # Treat as not-found so the caller's ack is consistent.
             return RevokeOutcome(status=RevokeOutcomeStatus.NOT_FOUND, lease=None)
+        # CONN-IMPL-029: drop the active-lease gauge on the
+        # discriminating-revoke success path.
+        record_lease_closed(str(revoked.connector_instance_id))
         await audit_lease_revoked(
             self._metadata_store,
             workspace_id=str(workspace_id),

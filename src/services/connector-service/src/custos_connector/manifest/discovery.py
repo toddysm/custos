@@ -54,15 +54,39 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import httpx
 
-from custos_connector.audit import emit_event
+from custos_connector._telemetry import (
+    FALLBACK_OUTCOME_IGNORED,
+    FALLBACK_OUTCOME_REJECTED,
+    FALLBACK_OUTCOME_USED,
+    observe_manifest_discovery,
+    record_manifest_fallback,
+)
+from custos_connector.audit import (
+    EVENT_MANIFEST_FALLBACK_IGNORED as AUDIT_EVENT_FALLBACK_IGNORED,
+)
+from custos_connector.audit import (
+    EVENT_MANIFEST_FALLBACK_REJECTED as AUDIT_EVENT_FALLBACK_REJECTED,
+)
+from custos_connector.audit import (
+    EVENT_MANIFEST_FALLBACK_USED as AUDIT_EVENT_FALLBACK_USED,
+)
+from custos_connector.audit import (
+    audit_manifest_fallback_ignored,
+    audit_manifest_fallback_rejected,
+    audit_manifest_fallback_used,
+    emit_event,
+)
 from custos_connector.manifest.errors import (
     DiscoveryErrorCode,
     ManifestDiscoveryError,
 )
+
+if TYPE_CHECKING:
+    from custos_spl import MetadataStoreProvider
 
 #: OCI media type for a v1 connector manifest artifact.
 #:
@@ -103,10 +127,11 @@ _HEX_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]+$")
 _SHA256_HEX_LEN: Final[int] = 64
 
 #: Audit event suffix names. Centralised so callers can refer to them
-#: as constants in tests + dashboards.
-AUDIT_EVENT_FALLBACK_USED: Final[str] = "connector.manifest.fallback-used"
-AUDIT_EVENT_FALLBACK_IGNORED: Final[str] = "connector.manifest.fallback-ignored"
-AUDIT_EVENT_FALLBACK_REJECTED: Final[str] = "connector.manifest.fallback-rejected"
+#: as constants in tests + dashboards. Re-exported from
+#: :mod:`custos_connector.audit` so the canonical strings live in one
+#: place; the local aliases retain back-compat for existing callers /
+#: tests that imported them from this module before CONN-IMPL-029.
+#: (Aliases are bound at import time via ``from ... import ... as``.)
 
 
 @dataclass(frozen=True, slots=True)
@@ -312,6 +337,7 @@ async def discover_manifest(
     *,
     repository: str,
     subject_digest: str,
+    metadata_store: MetadataStoreProvider | None = None,
 ) -> ManifestDescriptor:
     """Run Referrers + fallback discovery; enforce "exactly one valid manifest".
 
@@ -342,6 +368,13 @@ async def discover_manifest(
         repository: OCI repository name (e.g. ``team-a/oci-registry-conn``).
         subject_digest: ``sha256:<hex>`` of the connector image the
             manifest references.
+        metadata_store: Optional
+            :class:`~custos_spl.MetadataStoreProvider`. When provided,
+            each emission site additionally writes a typed
+            ``connector.manifest.fallback-{used,ignored,rejected}``
+            audit row to the SPL outbox under the
+            :data:`PLATFORM_WORKSPACE_ID` sentinel workspace.
+            CONN-IMPL-029 (Phase K).
 
     Returns:
         The single :class:`ManifestDescriptor` the Plugin Loader should
@@ -350,6 +383,24 @@ async def discover_manifest(
     Raises:
         ManifestDiscoveryError: With one of the codes documented above.
     """
+    with observe_manifest_discovery():
+        return await _discover_manifest_inner(
+            client,
+            repository=repository,
+            subject_digest=subject_digest,
+            metadata_store=metadata_store,
+        )
+
+
+async def _discover_manifest_inner(
+    client: httpx.AsyncClient,
+    *,
+    repository: str,
+    subject_digest: str,
+    metadata_store: MetadataStoreProvider | None,
+) -> ManifestDescriptor:
+    """Discovery body separated from the OTel span wrapper so the
+    success/failure code paths are easier to read."""
     # Resolve fallback tag derivation first so a malformed digest fails
     # fast with a stable code instead of leaking through the Referrers
     # API call (which would otherwise serialize an invalid URL).
@@ -365,6 +416,15 @@ async def discover_manifest(
                 "detail": exc.detail,
             },
         )
+        record_manifest_fallback(FALLBACK_OUTCOME_REJECTED)
+        if metadata_store is not None:
+            await audit_manifest_fallback_rejected(
+                metadata_store,
+                repository=repository,
+                subject_digest=subject_digest,
+                code=str(exc.code),
+                detail=exc.detail,
+            )
         raise
 
     referrers = await resolve_referrers(
@@ -374,17 +434,27 @@ async def discover_manifest(
     )
 
     if len(referrers) > 1:
+        ambiguous_detail = (
+            f"Referrers API returned {len(referrers)} descriptors; v1 requires exactly one"
+        )
         emit_event(
             AUDIT_EVENT_FALLBACK_REJECTED,
             {
                 "repository": repository,
                 "subject_digest": subject_digest,
                 "code": str(DiscoveryErrorCode.AMBIGUOUS_MANIFEST),
-                "detail": (
-                    f"Referrers API returned {len(referrers)} descriptors; v1 requires exactly one"
-                ),
+                "detail": ambiguous_detail,
             },
         )
+        record_manifest_fallback(FALLBACK_OUTCOME_REJECTED)
+        if metadata_store is not None:
+            await audit_manifest_fallback_rejected(
+                metadata_store,
+                repository=repository,
+                subject_digest=subject_digest,
+                code=str(DiscoveryErrorCode.AMBIGUOUS_MANIFEST),
+                detail=ambiguous_detail,
+            )
         raise ManifestDiscoveryError(
             code=DiscoveryErrorCode.AMBIGUOUS_MANIFEST,
             detail=(
@@ -409,6 +479,14 @@ async def discover_manifest(
                 "resolved_via": "referrers",
             },
         )
+        record_manifest_fallback(FALLBACK_OUTCOME_IGNORED)
+        if metadata_store is not None:
+            await audit_manifest_fallback_ignored(
+                metadata_store,
+                repository=repository,
+                subject_digest=subject_digest,
+                fallback_tag=fallback_tag,
+            )
         return referrers[0]
 
     # Referrers said nothing. Try the fallback tag.
@@ -418,17 +496,27 @@ async def discover_manifest(
         subject_digest=subject_digest,
     )
     if fallback_descriptor is None:
+        no_manifest_detail = (
+            "neither the Referrers API nor the fallback tag yielded a manifest descriptor"
+        )
         emit_event(
             AUDIT_EVENT_FALLBACK_REJECTED,
             {
                 "repository": repository,
                 "subject_digest": subject_digest,
                 "code": str(DiscoveryErrorCode.NO_MANIFEST_FOUND),
-                "detail": (
-                    "neither the Referrers API nor the fallback tag yielded a manifest descriptor"
-                ),
+                "detail": no_manifest_detail,
             },
         )
+        record_manifest_fallback(FALLBACK_OUTCOME_REJECTED)
+        if metadata_store is not None:
+            await audit_manifest_fallback_rejected(
+                metadata_store,
+                repository=repository,
+                subject_digest=subject_digest,
+                code=str(DiscoveryErrorCode.NO_MANIFEST_FOUND),
+                detail=no_manifest_detail,
+            )
         raise ManifestDiscoveryError(
             code=DiscoveryErrorCode.NO_MANIFEST_FOUND,
             detail=(
@@ -448,6 +536,14 @@ async def discover_manifest(
             "resolved_via": "fallback-tag",
         },
     )
+    record_manifest_fallback(FALLBACK_OUTCOME_USED)
+    if metadata_store is not None:
+        await audit_manifest_fallback_used(
+            metadata_store,
+            repository=repository,
+            subject_digest=subject_digest,
+            fallback_tag=fallback_tag,
+        )
     return fallback_descriptor
 
 

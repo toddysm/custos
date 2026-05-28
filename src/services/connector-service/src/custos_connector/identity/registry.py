@@ -44,6 +44,7 @@ from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Final
 
+from custos_connector._telemetry import observe_identity_resolution
 from custos_connector.identity.errors import (
     IdentityResolverError,
     IdentityResolverErrorCode,
@@ -350,21 +351,29 @@ class IdentityResolverRegistry:
                     lease_ttl_seconds=lease_ttl_seconds,
                     now=self._clock,
                 )
-                try:
-                    resolved = await resolver.resolve(
-                        credentials_authentication=credentials_authentication,
-                        context=context,
-                    )
-                except IdentityResolverError as exc:
-                    await self._emit_failure(
-                        workspace_id=workspace_id,
-                        actor=actor,
-                        instance_id=instance_id,
-                        authentication_type=authentication_type,
-                        category=category,
-                        error=exc,
-                    )
-                    raise
+                # CONN-IMPL-029: scope the identity-resolve OTel span
+                # to the cache-miss path so cache hits don't pollute
+                # the trace.
+                with observe_identity_resolution() as _span:
+                    _span.set_attribute("workspaceId", workspace_id)
+                    _span.set_attribute("connectorInstanceId", instance_id)
+                    _span.set_attribute("authenticationType", authentication_type)
+                    _span.set_attribute("category", str(category))
+                    try:
+                        resolved = await resolver.resolve(
+                            credentials_authentication=credentials_authentication,
+                            context=context,
+                        )
+                    except IdentityResolverError as exc:
+                        await self._emit_failure(
+                            workspace_id=workspace_id,
+                            actor=actor,
+                            instance_id=instance_id,
+                            authentication_type=authentication_type,
+                            category=category,
+                            error=exc,
+                        )
+                        raise
 
                 if resolved.category is not category:
                     # A resolver returning a category that disagrees with
