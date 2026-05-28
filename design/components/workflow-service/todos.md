@@ -18,7 +18,7 @@ Second sub-module under construction: **Definition Compiler**, packaged inside t
 
 ### Phase B — Compiler input contract
 
-- [ ] WF-IMPL-016: `WorkflowDocument` Pydantic models (issue #350; depends on #347).
+- [x] WF-IMPL-016: `WorkflowDocument` Pydantic models (issue #350; depends on #347).
 - [ ] WF-IMPL-017: Per-step `SchemaBindings` derivation + `ActivityTypeRegistry` interface (issue #351; depends on #350).
 
 ### Phase C — Compiler core

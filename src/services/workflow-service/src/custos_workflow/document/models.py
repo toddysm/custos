@@ -1,0 +1,445 @@
+"""Pydantic v2 models for the Workflow YAML document (WF-IMPL-016).
+
+The shape mirrors ``src/services/catalog-service/src/custos_catalog/schema/workflow.py``
+(`WORKFLOW_SCHEMA`) and the design lock in ``design/architecture/overview.md``
+§ Workflow and Template Schema. Catalog is the on-the-wire source of
+truth; this module is the typed Python view the Definition Compiler
+walks. Keep the two in lockstep — any field added to the JSON Schema
+MUST appear here in the same PR.
+
+Step kinds covered (v1 wire schema):
+
+- :class:`ActivityStep` — ``activity: <ref>`` + ``connector:`` or
+  ``connectors:`` map binding.
+- :class:`LetStep` — ``let: {…}`` inline expression bindings.
+- :class:`WorkflowStep` — ``workflow: <id>`` sub-workflow invocation.
+
+Step *modifiers* (`if` / `when` / `unless` / `forEach` / `where` /
+`retry` / `on_error`) are shared properties on every kind, not
+separate kinds — they correspond to the "Step forms" table in
+``design/architecture/overview.md`` rather than the "Step Kinds
+Handled" table in the Workflow Service design. The latter table
+mentions ``parallel:`` / ``approval:`` / ``wait:`` / ``waitFor:``
+which are not yet in the v1 wire schema (Catalog rejects them) and
+therefore not modelled here; they will land alongside the
+corresponding Catalog schema extension.
+"""
+
+from __future__ import annotations
+
+import re
+from enum import StrEnum
+from typing import Annotated, Any, Final, Literal, NewType
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Discriminator,
+    Field,
+    Tag,
+    model_validator,
+)
+
+#: A CEL expression source string, preserved verbatim from YAML.
+#:
+#: Workflow authors wrap CEL in ``${{ ... }}`` tokens; we keep the
+#: full token (including the wrapper) so the call-site collector
+#: (WF-IMPL-020) and the type-checker (WF-IMPL-022) can parse the
+#: exact source the author wrote. This is a typing-only newtype —
+#: at runtime it is a plain ``str``.
+CelSource = NewType("CelSource", str)
+
+#: Pattern matching the CEL ``${{ ... }}`` wrapper. Mirrors the
+#: Catalog schema's ``_CEL_TOKEN_PATTERN``.
+_CEL_TOKEN_PATTERN: Final[re.Pattern[str]] = re.compile(r"^\$\{\{[\s\S]+\}\}$")
+
+#: Step id grammar (DNS-1123-like). Mirrors the Catalog schema.
+_STEP_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
+
+#: Workspace / workflow / template name grammar. Same as step id.
+_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
+
+#: Fully-qualified activity reference: ``<ns>/<type>@<version>``.
+_ACTIVITY_REF_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^[a-z][a-z0-9._-]*/[a-z][a-z0-9._-]*@"
+    r"(?:[0-9]+|[0-9]+\.[0-9]+|[0-9]+\.[0-9]+\.[0-9]+)$"
+)
+
+#: UUID4 pattern for ``workflowVersionId`` references.
+_UUID_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+#: ``<workspace>/<name>@<version>`` triple for sub-workflow refs.
+_WORKFLOW_TRIPLE_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^[a-z][a-z0-9-]{0,62}/[a-z][a-z0-9-]{0,62}@[0-9]+(?:\.[0-9]+){0,2}$"
+)
+
+
+# ---------------------------------------------------------------------------
+# Enums
+# ---------------------------------------------------------------------------
+
+
+class BackoffStrategy(StrEnum):
+    """Backoff curve for the retry mechanics layer."""
+
+    CONSTANT = "constant"
+    LINEAR = "linear"
+    EXPONENTIAL = "exponential"
+
+
+class JitterStrategy(StrEnum):
+    """Jitter strategy applied on top of the backoff curve."""
+
+    NONE = "none"
+    FULL = "full"
+    EQUAL = "equal"
+    DECORRELATED = "decorrelated"
+
+
+class OnErrorAction(StrEnum):
+    """The action a matched ``on_error`` arm takes."""
+
+    SKIP = "skip"
+    RETRY = "retry"
+    FAIL = "fail"
+
+
+# ---------------------------------------------------------------------------
+# Base model
+# ---------------------------------------------------------------------------
+
+
+class _StrictModel(BaseModel):
+    """Base for every WorkflowDocument node.
+
+    ``extra="forbid"`` mirrors the Catalog JSON Schema's
+    ``additionalProperties: false`` so an unknown key fails the same
+    way at publish time and at ``StartRun`` defensive re-validation.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
+
+
+# ---------------------------------------------------------------------------
+# Retry policy + on-error routing
+# ---------------------------------------------------------------------------
+
+
+class BackoffPolicy(_StrictModel):
+    """Backoff curve. All fields optional — overlays fill from defaults."""
+
+    strategy: BackoffStrategy | None = None
+    initial_delay: str | None = Field(default=None, alias="initialDelay")
+    max_delay: str | None = Field(default=None, alias="maxDelay")
+    multiplier: float | None = Field(default=None, gt=0.0)
+
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+
+
+class RetryPolicy(_StrictModel):
+    """Workflow retry mechanics (overlay-merged at runtime).
+
+    Field-by-field optionality is intentional: the precedence overlay
+    described in ``design/components/workflow-service/design.md``
+    § Retry Policy fills in unset fields from the next layer down
+    (per-match → step → ``spec.defaults`` → platform defaults).
+    """
+
+    max_attempts: int | None = Field(default=None, alias="maxAttempts", ge=1)
+    backoff: BackoffPolicy | None = None
+    jitter: JitterStrategy | None = None
+    respect_retry_after: bool | None = Field(default=None, alias="respectRetryAfter")
+
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+
+
+class OnErrorMatch(_StrictModel):
+    """Match clause for an ``on_error[]`` arm.
+
+    Exactly one of ``code`` / ``code_prefix`` / ``cls`` MUST be set;
+    the Catalog schema enforces this via ``oneOf`` and the
+    :func:`_one_of_match` validator below mirrors that rule.
+    """
+
+    code: str | None = None
+    code_prefix: str | None = Field(default=None, alias="codePrefix")
+    # ``class`` is a Python keyword. The wire field stays ``class``;
+    # the Python attribute is ``cls`` so the rest of the codebase can
+    # use ordinary attribute access.
+    cls: str | None = Field(default=None, alias="class")
+
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+
+    @model_validator(mode="after")
+    def _exactly_one_of_match(self) -> OnErrorMatch:
+        present = sum(1 for v in (self.code, self.code_prefix, self.cls) if v is not None)
+        if present != 1:
+            raise ValueError(
+                "on_error[].match must specify exactly one of: code, codePrefix, class"
+            )
+        return self
+
+
+class OnErrorArm(_StrictModel):
+    """One entry in a step or workflow-level ``on_error:`` list."""
+
+    match: OnErrorMatch
+    do: OnErrorAction
+    retry: RetryPolicy | None = None
+    # Shorthand for ``retry: { maxAttempts: N }`` on a ``do: retry``
+    # arm. Both the shorthand and a structured ``retry:`` can be
+    # present at the same time; the merge resolution is the
+    # responsibility of WF-IMPL-019+, not this model.
+    max_attempts: int | None = Field(default=None, alias="maxAttempts", ge=1)
+
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Spec-level surface
+# ---------------------------------------------------------------------------
+
+
+class InputDefinition(_StrictModel):
+    """One entry under ``spec.inputs.<name>``."""
+
+    type: Literal["string", "integer", "number", "boolean", "object", "array"]
+    required: bool | None = None
+    # ``default`` may be a literal scalar/object OR a CEL expression
+    # token. We keep the open shape; downstream code (WF-IMPL-017)
+    # owns the per-input value validation.
+    default: Any = None
+    description: str | None = None
+
+
+class Defaults(_StrictModel):
+    """``spec.defaults`` — currently only ``retry`` is defined."""
+
+    retry: RetryPolicy | None = None
+
+
+class Trigger(_StrictModel):
+    """One entry under ``spec.triggers[]``."""
+
+    type: str = Field(min_length=1)
+    # Connector name or CEL expression token. The structural validator
+    # does not parse the CEL — see WF-IMPL-022 for the type checker.
+    connector: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Steps
+# ---------------------------------------------------------------------------
+
+
+class _StepCommon(_StrictModel):
+    """Properties shared by every step kind.
+
+    These mirror the ``_step_common_properties()`` block in the
+    Catalog schema. Each CEL slot is typed as :data:`CelSource` so
+    grepping for expression sites is straightforward.
+    """
+
+    id: str = Field(pattern=_STEP_ID_PATTERN.pattern)
+    description: str | None = None
+    if_: CelSource | None = Field(default=None, alias="if")
+    when: CelSource | None = None
+    unless: CelSource | None = None
+    for_each: CelSource | None = Field(default=None, alias="forEach")
+    where: CelSource | None = None
+    retry: RetryPolicy | None = None
+    on_error: list[OnErrorArm] | None = None
+
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+
+    @model_validator(mode="after")
+    def _check_cel_wrappers(self) -> _StepCommon:
+        for field_name, value in (
+            ("if", self.if_),
+            ("when", self.when),
+            ("unless", self.unless),
+            ("forEach", self.for_each),
+            ("where", self.where),
+        ):
+            if value is not None and not _CEL_TOKEN_PATTERN.match(value):
+                raise ValueError(
+                    f"step {self.id!r}: {field_name!r} must be a CEL "
+                    "expression token of the form '${{ ... }}'"
+                )
+        return self
+
+
+class ActivityStep(_StepCommon):
+    """Activity step: bind a containerized activity to one or more connectors.
+
+    Exactly one binding form is permitted at a time: ``connector:``
+    (singular string) OR ``connectors:`` (alias map). Both absent is
+    allowed for connectorless activities.
+    """
+
+    activity: str
+    connector: str | None = None
+    connectors: dict[str, str] | None = None
+    with_: dict[str, Any] | None = Field(default=None, alias="with")
+
+    @model_validator(mode="after")
+    def _connector_xor_connectors(self) -> ActivityStep:
+        if self.connector is not None and self.connectors is not None:
+            raise ValueError(
+                f"step {self.id!r}: 'connector' and 'connectors' are "
+                "mutually exclusive; choose one binding form"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _activity_ref_shape(self) -> ActivityStep:
+        # CEL tokens (``${{ placeholders.scanActivity }}``) are
+        # accepted unchanged — template materialisation has already
+        # happened by the time the compiler runs, so a CEL token here
+        # is a contract violation; flag it.
+        if _CEL_TOKEN_PATTERN.match(self.activity):
+            raise ValueError(
+                f"step {self.id!r}: activity reference is still a CEL "
+                "token; template materialisation must precede compilation"
+            )
+        if not _ACTIVITY_REF_PATTERN.match(self.activity):
+            raise ValueError(
+                f"step {self.id!r}: activity reference must be "
+                "fully-qualified '<namespace>/<type>@<version>'"
+            )
+        return self
+
+
+class LetStep(_StepCommon):
+    """Pure-data step: inline expression bindings evaluated by the CEL engine."""
+
+    let: dict[str, Any] = Field(min_length=1)
+
+
+class WorkflowStep(_StepCommon):
+    """Sub-workflow invocation.
+
+    ``workflow:`` references must be either a UUID
+    ``workflowVersionId`` or a ``<workspace>/<name>@<version>`` triple
+    (REQ-025 immutability — no name-only references).
+    """
+
+    workflow: str
+    with_: dict[str, Any] | None = Field(default=None, alias="with")
+
+    @model_validator(mode="after")
+    def _workflow_ref_shape(self) -> WorkflowStep:
+        if _CEL_TOKEN_PATTERN.match(self.workflow):
+            raise ValueError(
+                f"step {self.id!r}: workflow reference is still a CEL "
+                "token; template materialisation must precede compilation"
+            )
+        if not (
+            _UUID_PATTERN.match(self.workflow) or _WORKFLOW_TRIPLE_PATTERN.match(self.workflow)
+        ):
+            raise ValueError(
+                f"step {self.id!r}: workflow reference must be a "
+                "workflowVersionId UUID or '<workspace>/<name>@<version>'"
+            )
+        return self
+
+
+def _step_discriminator(v: Any) -> str | None:
+    """Pick the step kind by keyword presence (no ``kind:`` field).
+
+    Returns the tag for the present kind, or ``None`` when the input
+    is ambiguous or missing — Pydantic translates ``None`` into a
+    clean :class:`ValidationError` with the union's tag list. A
+    friendlier diagnostic ("exactly one of…") will be reinstated by
+    the error-taxonomy work in WF-IMPL-024.
+    """
+    if isinstance(v, dict):
+        present = [k for k in ("activity", "let", "workflow") if k in v]
+        if len(present) == 1:
+            return present[0]
+        return None
+    # Already-constructed model instance (e.g. round-tripping).
+    if isinstance(v, ActivityStep):
+        return "activity"
+    if isinstance(v, LetStep):
+        return "let"
+    if isinstance(v, WorkflowStep):
+        return "workflow"
+    return None
+
+
+#: Discriminated union over the three step kinds. The Catalog schema
+#: enforces the same ``oneOf`` shape; we mirror it so a mistyped
+#: workflow document fails at parse time with a precise error
+#: pointing at the offending branch.
+Step = Annotated[
+    Annotated[ActivityStep, Tag("activity")]
+    | Annotated[LetStep, Tag("let")]
+    | Annotated[WorkflowStep, Tag("workflow")],
+    Discriminator(_step_discriminator),
+]
+
+
+# ---------------------------------------------------------------------------
+# Spec + root
+# ---------------------------------------------------------------------------
+
+
+class WorkflowSpec(_StrictModel):
+    """``spec`` block of a WorkflowDocument."""
+
+    inputs: dict[str, InputDefinition] | None = None
+    defaults: Defaults | None = None
+    triggers: list[Trigger] | None = None
+    steps: list[Step] = Field(min_length=1)
+    on_error: list[OnErrorArm] | None = None
+
+    @model_validator(mode="after")
+    def _step_ids_unique(self) -> WorkflowSpec:
+        seen: set[str] = set()
+        for step in self.steps:
+            if step.id in seen:
+                raise ValueError(f"duplicate step id: {step.id!r}")
+            seen.add(step.id)
+        return self
+
+
+class Metadata(_StrictModel):
+    """``metadata`` block of a WorkflowDocument."""
+
+    name: str = Field(pattern=_NAME_PATTERN.pattern)
+    workspace: str | None = Field(default=None, pattern=_NAME_PATTERN.pattern)
+    description: str | None = None
+    labels: dict[str, str] | None = None
+
+
+class WorkflowDocument(_StrictModel):
+    """The root WorkflowDocument."""
+
+    api_version: Literal["custos.dev/v1"] = Field(alias="apiVersion")
+    kind: Literal["Workflow"]
+    metadata: Metadata
+    spec: WorkflowSpec
+
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
