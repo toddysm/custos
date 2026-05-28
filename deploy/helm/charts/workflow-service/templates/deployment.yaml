@@ -32,6 +32,15 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "svc.fullname" . }}
+            {{- if .Values.externalSecret.enabled }}
+            # ExternalSecret materializes a Secret under the same name carrying
+            # any secret-store-backed env vars (none in v1 — this branch is a
+            # forward-compatible stub). Order matters: ConfigMap first so env
+            # vars common to all profiles are set; Secret last so the
+            # secret-store-backed entries win on overlap.
+            - secretRef:
+                name: {{ include "svc.fullname" . }}
+            {{- end }}
           {{- with .Values.env }}
           env:
             {{- toYaml . | nindent 12 }}
