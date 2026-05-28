@@ -13,7 +13,7 @@ Second sub-module under construction: **Definition Compiler**, packaged inside t
 ### Phase A — Service host scaffolding
 
 - [ ] WF-IMPL-013: Scaffold `custos-workflow-service` service package + CI gate (issue #347).
-- [ ] WF-IMPL-014: Wire workflow-service Helm subchart — env vars, ConfigMap, ExternalSecret (issue #348; depends on #347).
+- [x] WF-IMPL-014: Wire workflow-service Helm subchart — env vars, ConfigMap, ExternalSecret (issue #348; depends on #347).
 - [ ] WF-IMPL-015: FastAPI app skeleton + `healthz` / `readyz` + call-context middleware shim (issue #349; depends on #347, #348).
 
 ### Phase B — Compiler input contract

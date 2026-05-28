@@ -6,3 +6,15 @@ metadata:
     {{- include "svc.labels" . | nindent 4 }}
 data:
   CUSTOS_SERVICE_NAME: {{ .Chart.Name | quote }}
+  # Non-secret WF_* env vars per design.md § Configuration.
+  WF_DAPR_WORKFLOW_COMPONENT: {{ .Values.config.daprWorkflowComponent | quote }}
+  WF_PUBLISH_TOPIC: {{ .Values.config.publishTopic | quote }}
+  WF_ARM_ENDPOINT: {{ .Values.arm.endpoint | quote }}
+  WF_TS_ENDPOINT: {{ .Values.trigger.endpoint | quote }}
+  WF_CONNECTOR_ENDPOINT: {{ .Values.connector.endpoint | quote }}
+  WF_CATALOG_ENDPOINT: {{ .Values.catalog.endpoint | quote }}
+  WF_RUN_HISTORY_RETENTION: {{ .Values.config.runHistoryRetention | quote }}
+  WF_RESUME_SUB_DEFAULT_TTL: {{ .Values.config.resumeSubDefaultTtl | quote }}
+  WF_REGISTER_SUB_MAX_RETRIES: {{ .Values.config.registerSubMaxRetries | quote }}
+  WF_EXPR_TIMEOUT_MS: {{ .Values.config.exprTimeoutMs | quote }}
+  WF_IDEMPOTENCY_KEY_TTL: {{ .Values.config.idempotencyKeyTtl | quote }}

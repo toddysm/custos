@@ -9,6 +9,12 @@ dependencies = [
     "types-PyYAML>=6.0",
 ]
 
+# The tests/helm/ directory holds a flat layout of standalone test modules
+# (no shared package). Pin py-modules to the empty list so setuptools'
+# auto-discovery does not trip when a second top-level test module lands.
+[tool.setuptools]
+py-modules = []
+
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["."]

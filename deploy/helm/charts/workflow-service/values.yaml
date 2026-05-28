@@ -1,12 +1,24 @@
 # workflow-service — leave image.repository/tag/pullPolicy and replicaCount/resources
 # empty to inherit umbrella global.* values. Set them here only to override
 # the umbrella for this one subchart.
+#
+# Configuration variables come from
+# design/components/workflow-service/design.md § Configuration. Non-secret
+# vars are projected through the ConfigMap (`config:` block below). The
+# Workflow Service has no secret env vars in v1 — service-to-service
+# authentication is delegated to Dapr / SPIFFE — so the ExternalSecret
+# block is kept as a disabled stub for forward compatibility.
 
 enabled: true
 
 replicaCount: ""
 
 image:
+  # Leave repository empty so templates/_helpers.tpl `svc.image` composes
+  # `<global.imageRegistry>/<chart name>`. This keeps airgapped profiles
+  # honouring `global.imageRegistry: registry.internal/custos` and falls
+  # back to the umbrella GHCR default in connected profiles. Override
+  # only when a profile genuinely needs a different per-subchart repo.
   repository: ""
   tag: ""
   pullPolicy: ""
@@ -17,6 +29,8 @@ service:
 
 resources: {}
 
+# Per-pod env overrides. Most config flows through envFrom (ConfigMap +
+# optional ExternalSecret); this list is for ad-hoc overrides only.
 env: []
 
 dapr:
@@ -28,6 +42,42 @@ dapr:
 serviceMonitor:
   enabled: false
 
+# Non-secret WF_* env vars projected into the ConfigMap.
+#
+# Required-but-unset values (the four endpoint URLs and the Dapr Workflow
+# component name) carry sane in-cluster defaults matching the Service names
+# emitted by the sibling subcharts. Override per-profile when those services
+# are reached through a different address.
+config:
+  # design.md § Configuration — Dapr Workflow component binding.
+  daprWorkflowComponent: workflow-dapr
+  publishTopic: custos.workflow.events
+  # Run-state retention + idempotency windows (ISO-8601 durations or the
+  # day-suffix format documented in the design table).
+  runHistoryRetention: 90d
+  resumeSubDefaultTtl: PT24H
+  registerSubMaxRetries: 5
+  exprTimeoutMs: 100
+  idempotencyKeyTtl: PT24H
+
+# Sibling-service endpoints. Defaults match the in-cluster Service names
+# emitted by the corresponding subcharts; override per-profile when those
+# services are reached through a different address (e.g. via a sidecar / out-
+# of-cluster proxy).
+arm:
+  endpoint: http://activity-runtime-manager:8080
+trigger:
+  endpoint: http://trigger-service:8080
+connector:
+  endpoint: http://connector-service:8080
+catalog:
+  endpoint: http://catalog-service:8080
+
+# ExternalSecret stub. The Workflow Service has no secret env vars in v1,
+# so this block stays disabled by default. Profiles that need to inject
+# secret-store-backed env vars (e.g. a future privileged signing key for
+# inter-component auth) flip `enabled: true` and append their entries to
+# `data:`.
 externalSecret:
   enabled: false
   refreshInterval: 1h
