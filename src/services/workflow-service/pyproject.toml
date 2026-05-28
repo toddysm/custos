@@ -3,7 +3,7 @@ requires = ["hatchling>=1.21"]
 build-backend = "hatchling.build"
 
 [project]
-name = "custos-workflow"
+name = "custos-workflow-service"
 version = "0.1.0"
 description = "Custos Workflow Service (COMP-003) — Run / Step / StepAttempt orchestration over Dapr Workflow, Definition Compiler, Expression Evaluator integration."
 readme = "README.md"

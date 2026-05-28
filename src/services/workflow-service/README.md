@@ -52,7 +52,7 @@ Process bind:
 
 ```bash
 cd src/services/workflow-service
-pip install -e ../../libs/custos-cel[dev]
+pip install -e "../../libs/custos-cel[dev]"
 pip install -e ".[dev]"
 ruff check .
 ruff format --check .
