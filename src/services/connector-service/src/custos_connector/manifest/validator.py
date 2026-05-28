@@ -117,6 +117,7 @@ _TARGET_CONFIG_REQUIRED: Final[dict[str, tuple[str, ...]]] = {
     "oci-registry": ("repositoryNamespace",),
     "azure-blob-storage": ("storageAccount", "container"),
     "amazon-s3-bucket": ("bucket", "region"),
+    "slack-webhook": ("channel",),
 }
 
 #: Valid ``events.delivery`` modes.

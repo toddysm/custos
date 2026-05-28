@@ -1,0 +1,30 @@
+{
+  "apiVersion": "custos.dev/connector-manifest/v1",
+  "kind": "ConnectorManifest",
+  "metadata": {
+    "type": "custos-slack-notifier",
+    "version": "1.0.0",
+    "contractVersion": "1"
+  },
+  "spec": {
+    "description": "Reference minimal sink connector. Posts workflow notifications to a Slack incoming webhook. Has no spec.events block — the connector-service uses it to validate the optional-events code path. Used as the fallback-tag publish-path fixture for the connector-service integration suite (CONN-IMPL-031).",
+    "capabilities": [
+      "slack.post"
+    ],
+    "target": {
+      "kind": "slack-webhook",
+      "endpoint": "https://hooks.slack.com",
+      "verifyTls": true,
+      "config": {
+        "channel": "#deploys"
+      }
+    },
+    "credentials": {
+      "authenticationType": "azure-managed-identity",
+      "authentication": {
+        "identityRef": "azure://managed-identity/custos-connector-mi",
+        "audience": "api://hooks.slack.com"
+      }
+    }
+  }
+}

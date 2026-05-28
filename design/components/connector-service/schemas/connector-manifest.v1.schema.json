@@ -79,7 +79,8 @@
               "enum": [
                 "oci-registry",
                 "azure-blob-storage",
-                "amazon-s3-bucket"
+                "amazon-s3-bucket",
+                "slack-webhook"
               ]
             },
             "endpoint": {
@@ -143,6 +144,22 @@
                 "properties": {
                   "config": {
                     "$ref": "#/$defs/amazonS3BucketConfig"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "kind": {
+                    "const": "slack-webhook"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "config": {
+                    "$ref": "#/$defs/slackWebhookConfig"
                   }
                 }
               }
@@ -310,6 +327,20 @@
         "region": {
           "type": "string",
           "pattern": "^[a-z]{2}-[a-z]+-[0-9]$"
+        }
+      }
+    },
+    "slackWebhookConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "channel"
+      ],
+      "properties": {
+        "channel": {
+          "type": "string",
+          "pattern": "^#?[a-z0-9][a-z0-9._-]{0,79}$",
+          "description": "Display channel name the notifier posts to. Optional leading '#' is allowed for readability; the runtime strips it before invoking the incoming-webhook URL, which is itself addressed by spec.target.endpoint."
         }
       }
     },

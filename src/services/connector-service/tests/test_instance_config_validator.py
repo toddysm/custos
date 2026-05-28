@@ -84,6 +84,12 @@ def test_validates_when_operator_supplies_required_overrides() -> None:
         ("oci-registry", {"repositoryNamespace": "acme/widgets"}),
         ("azure-blob-storage", {"storageAccount": "acmeprod", "container": "data"}),
         ("amazon-s3-bucket", {"bucket": "acme-prod", "region": "us-east-1"}),
+        # ``slack-webhook`` was added in Phase L (CONN-IMPL-032) as a
+        # minimal sink target so the ``slack-notifier`` sample plugin
+        # can publish a valid v1 manifest without owning a new
+        # target-kind extension lane in the schema. The per-kind
+        # required field is just ``channel``.
+        ("slack-webhook", {"channel": "#deploys"}),
     ],
 )
 def test_validates_each_known_target_kind(kind: str, config: dict[str, object]) -> None:

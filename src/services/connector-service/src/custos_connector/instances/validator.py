@@ -94,8 +94,9 @@ class InstanceConfigCode(StrEnum):
 
     #: The manifest declares a ``spec.target.kind`` outside the known
     #: v1 set (``oci-registry``, ``azure-blob-storage``,
-    #: ``amazon-s3-bucket``). Indicates manifest/validator drift —
-    #: a manifest that passed CONN-IMPL-005 should never trip this.
+    #: ``amazon-s3-bucket``, ``slack-webhook``). Indicates manifest /
+    #: validator drift — a manifest that passed CONN-IMPL-005 should
+    #: never trip this.
     UNKNOWN_TARGET_KIND = "unknown-target-kind"
 
     #: An operator-supplied ``credentials_authentication`` is missing
@@ -121,6 +122,7 @@ _TARGET_CONFIG_REQUIRED: Final[dict[str, tuple[str, ...]]] = {
     "oci-registry": ("repositoryNamespace",),
     "azure-blob-storage": ("storageAccount", "container"),
     "amazon-s3-bucket": ("bucket", "region"),
+    "slack-webhook": ("channel",),
 }
 
 #: Per-auth required fields for the merged
