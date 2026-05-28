@@ -144,7 +144,7 @@ class SidecarAdminClient:
         try:
             payload = response.json()
             raw_results = payload["results"]
-        except (KeyError, ValueError) as exc:
+        except (KeyError, TypeError, ValueError) as exc:
             _logger.warning(
                 "sidecar-admin revoke response was malformed",
                 extra={"endpoint": endpoint, "error": str(exc)},

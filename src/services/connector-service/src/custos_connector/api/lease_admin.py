@@ -48,6 +48,7 @@ Each operator-driven revoke endpoint:
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from typing import Annotated, Any
 
@@ -157,6 +158,40 @@ class _RevokeAllResponse(BaseModel):
 #: so cross-service tooling can key off a stable string rather than
 #: pydantic's variable detail-array shape.
 _REASON_REQUIRED_CODE: str = "connector.reason_required"
+
+
+#: OpenAPI request-body schema shared by all three revoke endpoints.
+#: Hand-rolled so the generated spec still advertises the required
+#: ``reason`` field even though we parse the body manually in the
+#: handler (we need the canonical ``connector.reason_required`` 400
+#: envelope rather than pydantic's default 422 detail-array, which is
+#: what binding ``_RevokeRequest`` via ``Body(...)`` would give us).
+_REVOKE_REQUEST_OPENAPI_EXTRA: dict[str, Any] = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["reason"],
+                    "properties": {
+                        "reason": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 500,
+                            "description": (
+                                "Operator-supplied justification for the "
+                                "revoke. Flows to the lease.revoke-requested "
+                                "and lease.revoked audit events."
+                            ),
+                        },
+                    },
+                },
+            },
+        },
+    },
+}
 
 
 async def _read_revoke_body(request: Request) -> _RevokeRequest | JSONResponse:
@@ -343,6 +378,14 @@ async def _fan_out_to_sidecars(
     revoke is the authoritative terminal state; the sidecar fan-out
     is purely an in-flight short-circuit optimization).
 
+    Buckets are dispatched concurrently via :func:`asyncio.gather`
+    with ``return_exceptions=True`` so a slow or unreachable sidecar
+    in one bucket does not linearly inflate the operator request
+    latency. The bounded per-call timeout in
+    :class:`SidecarAdminClient` caps the worst-case wait at one
+    sidecar round-trip regardless of how many endpoints we fan out
+    to.
+
     Transport failures and non-2xx responses are logged inside
     :meth:`SidecarAdminClient.revoke` and not raised back to the
     operator route.
@@ -355,8 +398,15 @@ async def _fan_out_to_sidecars(
         if endpoint is None:
             continue
         buckets.setdefault(endpoint, []).append(lease_id)
-    for endpoint, ids in buckets.items():
-        await client.revoke(endpoint=endpoint, lease_ids=ids, reason=reason)
+    if not buckets:
+        return
+    await asyncio.gather(
+        *(
+            client.revoke(endpoint=endpoint, lease_ids=ids, reason=reason)
+            for endpoint, ids in buckets.items()
+        ),
+        return_exceptions=True,
+    )
 
 
 async def _enumerate_active_lease_ids(
@@ -394,6 +444,7 @@ async def _enumerate_active_lease_ids(
 @router.post(
     "/workspaces/{ws}/leases/{lease_id}:revoke",
     summary="Revoke a single lease.",
+    openapi_extra=_REVOKE_REQUEST_OPENAPI_EXTRA,
 )
 async def revoke_single_lease(
     request: Request,
@@ -523,6 +574,7 @@ async def _revoke_many(
 @router.post(
     "/workspaces/{ws}/connectors/{instance_id}/leases:revoke-all",
     summary="Revoke every active lease for a connector instance.",
+    openapi_extra=_REVOKE_REQUEST_OPENAPI_EXTRA,
 )
 async def revoke_all_for_instance(
     request: Request,
@@ -553,6 +605,7 @@ async def revoke_all_for_instance(
 @router.post(
     "/workspaces/{ws}/runs/{run_id}/leases:revoke-all",
     summary="Revoke every active lease for a run.",
+    openapi_extra=_REVOKE_REQUEST_OPENAPI_EXTRA,
 )
 async def revoke_all_for_run(
     request: Request,

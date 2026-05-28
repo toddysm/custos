@@ -1194,6 +1194,115 @@ def test_revoke_succeeds_when_sidecar_transport_error() -> None:
     assert resp.json() == {"leaseId": "lx", "status": "revoked"}
 
 
+def test_revoke_succeeds_when_sidecar_returns_non_object_json() -> None:
+    """Malformed 200 (e.g. JSON array instead of object) is swallowed.
+
+    Regression test for the case where the sidecar control listener
+    returns ``200 OK`` with a payload that is not a mapping. Indexing
+    into a list with ``["results"]`` raises ``TypeError``, which the
+    client now catches alongside ``KeyError`` / ``ValueError``.
+    """
+    import httpx
+
+    metadata = FakeMetadataAdapter(applied_revisions={1, 2, 3, 4})
+    leases = FakeLeaseAdapter(applied_revisions={1})
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        # 200, but the body is a JSON array, not the expected object.
+        return httpx.Response(status_code=200, json=[])
+
+    registry = InMemorySidecarRegistry()
+    registry.register(lease_id="lx", endpoint="http://sidecar:9443")
+
+    providers = _build_providers(
+        metadata=metadata,
+        leases=leases,
+        sidecar_admin_client=_make_sidecar_admin_client(_handler),
+        sidecar_registry=registry,
+    )
+
+    import asyncio
+
+    async def _seed() -> None:
+        await leases.put_lease(WorkspaceId(_WORKSPACE), _build_lease(lease_id="lx"))
+
+    asyncio.run(_seed())
+    with _make_client(providers=providers) as (client, _):
+        resp = client.post(
+            f"/v1/workspaces/{_WORKSPACE}/leases/lx:revoke",
+            json={"reason": "malformed"},
+            headers=_ctx_header(),
+        )
+    assert resp.status_code == 200
+    assert resp.json() == {"leaseId": "lx", "status": "revoked"}
+
+
+def test_revoke_all_fans_out_to_sidecar_buckets_concurrently() -> None:
+    """Concurrent fan-out caps wall time at one sidecar round-trip.
+
+    Two sidecars each artificially delay their ack by 200ms. Sequential
+    dispatch would take ~400ms; with :func:`asyncio.gather` the operator
+    request should complete in ~200ms. We leave a generous safety margin
+    in the assertion to avoid CI flake while still catching a regression
+    to the linear path.
+    """
+    import asyncio
+    import time
+
+    import httpx
+
+    metadata = FakeMetadataAdapter(applied_revisions={1, 2, 3, 4})
+    leases = FakeLeaseAdapter(applied_revisions={1})
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        # The MockTransport supports either sync or async handlers.
+        await asyncio.sleep(0.2)
+        body = json.loads(request.content.decode())
+        return httpx.Response(
+            status_code=200,
+            json={"results": [{"leaseId": lid, "status": "revoked"} for lid in body["leaseIds"]]},
+        )
+
+    transport = httpx.MockTransport(_handler)
+    http_client = httpx.AsyncClient(transport=transport)
+    sidecar_client = SidecarAdminClient(http_client=http_client)
+    registry = InMemorySidecarRegistry()
+    registry.register(lease_id="la", endpoint="http://sidecar-a:9443")
+    registry.register(lease_id="lb", endpoint="http://sidecar-b:9443")
+
+    providers = _build_providers(
+        metadata=metadata,
+        leases=leases,
+        sidecar_admin_client=sidecar_client,
+        sidecar_registry=registry,
+    )
+
+    async def _seed() -> None:
+        await leases.put_lease(
+            WorkspaceId(_WORKSPACE),
+            _build_lease(lease_id="la", run_id="run-x"),
+        )
+        await leases.put_lease(
+            WorkspaceId(_WORKSPACE),
+            _build_lease(lease_id="lb", run_id="run-x"),
+        )
+
+    asyncio.run(_seed())
+    with _make_client(providers=providers) as (client, _):
+        started = time.perf_counter()
+        resp = client.post(
+            f"/v1/workspaces/{_WORKSPACE}/runs/run-x/leases:revoke-all",
+            json={"reason": "concurrent"},
+            headers=_ctx_header(),
+        )
+        elapsed = time.perf_counter() - started
+    assert resp.status_code == 200
+    # Two 0.2s sleeps run concurrently → expect ~0.2s; the linear path
+    # would be ~0.4s. The 0.35s budget catches the regression without
+    # flaking on slow CI executors.
+    assert elapsed < 0.35, f"fan-out appears sequential: took {elapsed:.3f}s"
+
+
 def test_list_leases_aggregates_active_set_via_cs_store() -> None:
     """Authoritative live-state listing reads the CS lease store, not sidecars.
 
