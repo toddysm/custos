@@ -77,7 +77,6 @@ from opentelemetry.metrics import (
     Histogram,
     Meter,
     Observation,
-    UpDownCounter,
 )
 from opentelemetry.trace import Span, Status, StatusCode, Tracer
 
@@ -138,18 +137,8 @@ PULL_TICK_DURATION_SECONDS: Final[Histogram] = _meter.create_histogram(
 
 
 # ---------------------------------------------------------------------------
-# Counters + up-down counters
+# Counters + observable gauges
 # ---------------------------------------------------------------------------
-
-ACTIVE_LEASES: Final[UpDownCounter] = _meter.create_up_down_counter(
-    name="custos_connector_active_leases",
-    description=(
-        "Current count of un-released, un-expired, un-revoked leases the "
-        "Lease Manager has issued, labelled by connectorInstanceId. "
-        "Bumped +1 on LeaseManager.issue success; -1 on release / sweeper "
-        "expiry / revoke. Treated as a gauge by the Prometheus exporter."
-    ),
-)
 
 
 MANIFEST_FALLBACK_TOTAL: Final[Counter] = _meter.create_counter(
@@ -180,21 +169,123 @@ def record_manifest_fallback(outcome: str) -> None:
     MANIFEST_FALLBACK_TOTAL.add(1, {"outcome": outcome})
 
 
+# ---------------------------------------------------------------------------
+# Active leases observable gauge
+# ---------------------------------------------------------------------------
+
+
+class ActiveLeasesRegistry:
+    """Per-process registry of active-lease counts keyed by instance id.
+
+    Backs the :data:`ACTIVE_LEASES` observable gauge. The gauge's
+    contract is "current count of un-released, un-expired,
+    un-revoked leases per connectorInstanceId"; an UpDownCounter
+    maintained only from in-process deltas would report 0 immediately
+    after a pod restart (or in an HA deployment that comes up with
+    leases already present in the store) and could be driven negative
+    by close events with no prior issue. An observable gauge backed by
+    this registry sidesteps both failure modes:
+
+    * Production deployments call :meth:`seed` from an app-startup
+      hook after enumerating
+      ``MetadataStoreProvider.list_active_leases`` so the in-process
+      count starts equal to the authoritative store count.
+    * Subsequent :meth:`incr` / :meth:`decr` calls from the lease
+      lifecycle maintain the count.
+    * :meth:`decr` clamps at zero, so a stray close event without a
+      prior issue cannot push the gauge below zero.
+
+    Thread safety: a single :class:`threading.Lock` guards the dict so
+    the SDK collector thread sees a consistent snapshot.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._counts: dict[str, int] = {}
+
+    def seed(self, *, instance_id: str, count: int) -> None:
+        """Set the absolute count for ``instance_id``.
+
+        Intended for app-startup hydration from
+        ``MetadataStoreProvider.list_active_leases`` (or equivalent).
+        Overwrites any prior value. ``count`` is clamped to
+        non-negative.
+        """
+        if count < 0:
+            count = 0
+        with self._lock:
+            self._counts[instance_id] = count
+
+    def incr(self, instance_id: str) -> None:
+        """Increment the count for ``instance_id`` by one."""
+        with self._lock:
+            self._counts[instance_id] = self._counts.get(instance_id, 0) + 1
+
+    def decr(self, instance_id: str) -> None:
+        """Decrement the count for ``instance_id`` by one, clamped at zero."""
+        with self._lock:
+            current = self._counts.get(instance_id, 0)
+            self._counts[instance_id] = max(0, current - 1)
+
+    def forget(self, instance_id: str) -> None:
+        """Drop the entry for ``instance_id``. No-op if absent."""
+        with self._lock:
+            self._counts.pop(instance_id, None)
+
+    def snapshot(self) -> Mapping[str, int]:
+        """Return a shallow copy of the current count map."""
+        with self._lock:
+            return dict(self._counts)
+
+
+#: Process-wide registry. The lease service writes to this via
+#: :func:`record_lease_issued` / :func:`record_lease_closed`; the
+#: gauge callback below reads from it on every scrape. Production
+#: deployments hydrate it at startup from the lease store; tests
+#: rebind the module-level instance directly.
+ACTIVE_LEASES_REGISTRY: Final[ActiveLeasesRegistry] = ActiveLeasesRegistry()
+
+
+def _active_leases_observable_callback(
+    _options: CallbackOptions,
+) -> Iterator[Observation]:
+    """Emit one observation per registered ``connectorInstanceId``.
+
+    Run by the OTel SDK on every scrape. Yields nothing when the
+    registry is empty (the exporter encodes that as an absent series).
+    """
+    for instance_id, count in ACTIVE_LEASES_REGISTRY.snapshot().items():
+        yield Observation(count, {"connectorInstanceId": instance_id})
+
+
+ACTIVE_LEASES = _meter.create_observable_gauge(
+    name="custos_connector_active_leases",
+    description=(
+        "Current count of un-released, un-expired, un-revoked leases "
+        "the Lease Manager has issued, labelled by connectorInstanceId. "
+        "Backed by ACTIVE_LEASES_REGISTRY: the lease service bumps the "
+        "registry on issue/release/expire/revoke and operators MUST "
+        "hydrate it at app startup from "
+        "MetadataStoreProvider.list_active_leases() so the gauge "
+        "survives restarts and HA failovers."
+    ),
+    callbacks=[_active_leases_observable_callback],
+)
+
+
 def record_lease_issued(connector_instance_id: str) -> None:
-    """Increment :data:`ACTIVE_LEASES` by one for ``connector_instance_id``."""
-    ACTIVE_LEASES.add(1, {"connectorInstanceId": connector_instance_id})
+    """Increment the active-lease count for ``connector_instance_id`` by one."""
+    ACTIVE_LEASES_REGISTRY.incr(connector_instance_id)
 
 
 def record_lease_closed(connector_instance_id: str) -> None:
-    """Decrement :data:`ACTIVE_LEASES` by one for ``connector_instance_id``.
+    """Decrement the active-lease count for ``connector_instance_id`` by one.
 
-    Called from the release / expiry / revoke success paths. The
-    up-down counter is allowed to go negative if a deployment restarts
-    mid-flight (the in-memory baseline does not survive process
-    restarts); operators should rely on the lease store's authoritative
-    count for forensic reconciliation.
+    Called from the release / expiry / revoke success paths. Clamped
+    at zero so a stray close event without a prior issue cannot push
+    the gauge negative.
     """
-    ACTIVE_LEASES.add(-1, {"connectorInstanceId": connector_instance_id})
+    ACTIVE_LEASES_REGISTRY.decr(connector_instance_id)
 
 
 # ---------------------------------------------------------------------------

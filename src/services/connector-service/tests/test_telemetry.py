@@ -138,8 +138,9 @@ def metric_reader() -> InMemoryMetricReader:
     telemetry_mod.PULL_TICK_DURATION_SECONDS = telemetry_mod._meter.create_histogram(
         name="custos_connector_pull_tick_duration_seconds", unit="s"
     )
-    telemetry_mod.ACTIVE_LEASES = telemetry_mod._meter.create_up_down_counter(
-        name="custos_connector_active_leases"
+    telemetry_mod.ACTIVE_LEASES = telemetry_mod._meter.create_observable_gauge(
+        name="custos_connector_active_leases",
+        callbacks=[telemetry_mod._active_leases_observable_callback],
     )
     telemetry_mod.MANIFEST_FALLBACK_TOTAL = telemetry_mod._meter.create_counter(
         name="custos_connector_manifest_fallback_total"
@@ -149,6 +150,11 @@ def metric_reader() -> InMemoryMetricReader:
         callbacks=[telemetry_mod._cursor_lag_observable_callback],
         unit="s",
     )
+    # Reset the process-wide registries so a previous test's writes
+    # don't leak into this one. Both gauges are backed by module-level
+    # singletons whose state outlives the meter-provider rebind.
+    telemetry_mod.ACTIVE_LEASES_REGISTRY._counts.clear()
+    telemetry_mod.CURSOR_LAG_REGISTRY._advanced_at.clear()
     return reader
 
 

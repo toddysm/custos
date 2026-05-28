@@ -70,6 +70,14 @@ networkPolicy:
   # (any pod in the matched namespace). Pin to a specific pod label
   # set for the strictest trust boundary.
   prometheusPodSelector: {}
+  # Pod selector for in-namespace service-to-service callers (API
+  # Gateway, Catalog Service, etc.) — required because ``/metrics``
+  # and the API surface share a single port, so the policy must
+  # admit both Prometheus and legitimate API callers. Default matches
+  # the umbrella's ``app.kubernetes.io/part-of: custos`` convention;
+  # override per-profile when ops uses a different label scheme.
+  serviceClientsPodSelector:
+    app.kubernetes.io/part-of: custos
 
 # Non-secret CONN_* env vars projected into the ConfigMap.
 #
