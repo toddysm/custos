@@ -7,11 +7,13 @@ on:
   pull_request:
     paths:
       - "src/services/**"
+      - "src/libs/connector-plugins/**"
       - ".github/workflows/python-services.yml"
   push:
     branches: [main]
     paths:
       - "src/services/**"
+      - "src/libs/connector-plugins/**"
       - ".github/workflows/python-services.yml"
 
 jobs:
@@ -479,4 +481,82 @@ jobs:
           cache-to: type=gha,mode=max,scope=connector-sidecar
           # Pin platforms explicitly. We ship linux/amd64 only for
           # now; ARM follows when the runtime story is locked.
+          platforms: linux/amd64
+
+  connector-plugins:
+    name: connector-plugins (lint + types + tests + docker build)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each reference plugin lives under src/libs/connector-plugins/<plugin>
+        # and is self-contained (its own pyproject + Dockerfile + tests).
+        # Matrix-parallelise so a regression in one plugin doesn't mask
+        # the other. ``package`` is the importable name (``-`` -> ``_`` +
+        # ``_plugin`` suffix) we hand to mypy so it can analyze the
+        # installed package alongside the test sources without
+        # double-discovering the in-tree ``src/`` layout.
+        include:
+          - plugin: oci-registry
+            package: oci_registry_plugin
+            python-version: "3.11"
+          - plugin: oci-registry
+            package: oci_registry_plugin
+            python-version: "3.12"
+          - plugin: slack-notifier
+            package: slack_notifier_plugin
+            python-version: "3.11"
+          - plugin: slack-notifier
+            package: slack_notifier_plugin
+            python-version: "3.12"
+    defaults:
+      run:
+        working-directory: src/libs/connector-plugins/${{ matrix.plugin }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install package and dev dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Ruff lint
+        run: ruff check .
+
+      - name: Ruff format check
+        run: ruff format --check .
+
+      - name: Mypy (strict)
+        # Two invocations so we don't mix mypy's mutually-exclusive
+        # ``-p <package>`` and positional-files modes. Passing ``src``
+        # AND having the package installed in the venv (editable) would
+        # otherwise make mypy discover the same source files twice
+        # (under ``src.<package>`` and ``<package>``) and abort with
+        # "Source file found twice under different module names".
+        run: |
+          mypy -p ${{ matrix.package }}
+          mypy tests
+
+      - name: Pytest (unit)
+        run: pytest -q
+
+      - name: Set up Docker Buildx
+        # Only build the image on one Python version to keep CI fast;
+        # the Dockerfile pins its own ``python:3.12-slim`` base.
+        if: matrix.python-version == '3.12'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build plugin image (no push)
+        if: matrix.python-version == '3.12'
+        uses: docker/build-push-action@v6
+        with:
+          context: src/libs/connector-plugins/${{ matrix.plugin }}
+          file: src/libs/connector-plugins/${{ matrix.plugin }}/Dockerfile
+          push: false
+          tags: custos-plugin-${{ matrix.plugin }}:ci
+          cache-from: type=gha,scope=connector-plugin-${{ matrix.plugin }}
+          cache-to: type=gha,mode=max,scope=connector-plugin-${{ matrix.plugin }}
           platforms: linux/amd64

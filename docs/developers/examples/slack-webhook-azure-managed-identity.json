@@ -1,0 +1,30 @@
+{
+  "apiVersion": "custos.dev/connector-manifest/v1",
+  "kind": "ConnectorManifest",
+  "metadata": {
+    "type": "slack-notifier",
+    "version": "1.0.0",
+    "contractVersion": "1"
+  },
+  "spec": {
+    "description": "Reference sink connector. Posts workflow notifications to a Slack incoming webhook via an Azure managed-identity-protected secret.",
+    "capabilities": [
+      "slack.post"
+    ],
+    "target": {
+      "kind": "slack-webhook",
+      "endpoint": "https://hooks.slack.com",
+      "verifyTls": true,
+      "config": {
+        "channel": "#deploys"
+      }
+    },
+    "credentials": {
+      "authenticationType": "azure-managed-identity",
+      "authentication": {
+        "identityRef": "azure://managed-identity/custos-notifier-mi",
+        "audience": "api://hooks.slack.com"
+      }
+    }
+  }
+}

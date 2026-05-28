@@ -16,6 +16,7 @@ For the normative schema, see `design/components/connector-service/schemas/conne
 | [oci-registry-oidc-federated.json](oci-registry-oidc-federated.json) | `oci-registry` | `oidc` | `federated` |
 | [amazon-s3-bucket-amazon-kms.json](amazon-s3-bucket-amazon-kms.json) | `amazon-s3-bucket` | `amazon-kms` | `kms` |
 | [azure-blob-storage-azure-key-vault.json](azure-blob-storage-azure-key-vault.json) | `azure-blob-storage` | `azure-key-vault` | `kms` |
+| [slack-webhook-azure-managed-identity.json](slack-webhook-azure-managed-identity.json) | `slack-webhook` | `azure-managed-identity` | `workload` |
 
 ## How to use these examples
 

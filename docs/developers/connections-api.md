@@ -153,7 +153,7 @@ Describes the external system this connector binds to. Common fields are kind-ag
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `kind` | enum | Yes | One of `oci-registry`, `azure-blob-storage`, `amazon-s3-bucket`. |
+| `kind` | enum | Yes | One of `oci-registry`, `azure-blob-storage`, `amazon-s3-bucket`, `slack-webhook`. |
 | `endpoint` | string | Yes | HTTPS base endpoint URI of the target. Must start with `https://`. |
 | `verifyTls` | boolean | No | Whether the connector must verify the server TLS certificate. Defaults to `true`. Set to `false` only for development against self-signed targets. |
 | `config` | object | Yes | Type-specific configuration interpreted based on `kind`. See per-kind schemas below. |
@@ -201,6 +201,20 @@ The shape of `target.config` is validated against a different sub-schema dependi
 |---|---|---|---|
 | `bucket` | string | Yes | S3 bucket name. Pattern: `^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`. |
 | `region` | string | Yes | AWS region code, e.g. `us-east-1`. Pattern: `^[a-z]{2}-[a-z]+-[0-9]$`. |
+
+#### `kind: slack-webhook`
+
+```json
+"config": {
+  "channel": "#deploys"
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `channel` | string | Yes | Slack channel that the incoming-webhook posts target. Leading `#` is optional. Pattern: `^#?[a-z0-9][a-z0-9._-]{0,79}$` (max 80 chars). |
+
+The `slack-webhook` kind is used by sink connectors that POST to a Slack incoming-webhook URL. Because the webhook URL itself is a secret, `target.endpoint` SHOULD be the Slack API host (`https://hooks.slack.com`) and the per-channel URL MUST be supplied at runtime via the credentials block — never embedded in `target.endpoint`. The reference sample is [`src/libs/connector-plugins/slack-notifier/connector-manifest.json`](../../src/libs/connector-plugins/slack-notifier/connector-manifest.json); see also the [Connector Plugin Author Guide](connector-plugin-author.md).
 
 ---
 

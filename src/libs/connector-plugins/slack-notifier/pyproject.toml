@@ -1,0 +1,50 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "custos-sample-slack-notifier-plugin"
+version = "1.0.0"
+description = "Reference sink connector plugin (custos-slack-notifier@1.0.0)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Custos contributors" }]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+custos-slack-notifier-plugin = "slack_notifier_plugin.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/slack_notifier_plugin"]
+
+[tool.hatch.build.targets.wheel.force-include]
+# Hatchling includes ``py.typed`` automatically for packages it
+# discovers, but force-include guarantees the PEP 561 marker is
+# present in the wheel even if the auto-discovery rules change.
+"src/slack_notifier_plugin/py.typed" = "slack_notifier_plugin/py.typed"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+namespace_packages = true
+explicit_package_bases = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers", "--strict-config"]
