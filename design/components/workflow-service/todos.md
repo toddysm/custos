@@ -25,7 +25,7 @@ Second sub-module under construction: **Definition Compiler**, packaged inside t
 
 - [x] WF-IMPL-018: `ExecutionGraph` data model + byte-stable JSON serializer (issue #352; depends on #347).
 - [x] WF-IMPL-019: Topology builder — explicit + implicit edges, cycle detection, stable sort (issue #353; depends on #350, #352, #354).
-- [ ] WF-IMPL-020: Call-site collector — every CEL call site with source position + parsed AST (issue #354; depends on #350).
+- [x] WF-IMPL-020: Call-site collector — every CEL call site with source position + parsed AST (issue #354; depends on #350).
 - [ ] WF-IMPL-021: Compiler driver — parse → type-check → topology → typed-AST caching (issue #355; depends on #351, #352, #353, #354, #356, #357, #358).
 
 ### Phase D — Retry policy materialization
