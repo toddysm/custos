@@ -17,8 +17,9 @@ WF-IMPL-013 ([#347](https://github.com/toddysm/custos/issues/347)),
 WF-IMPL-014 ([#348](https://github.com/toddysm/custos/issues/348)),
 WF-IMPL-015 ([#349](https://github.com/toddysm/custos/issues/349)),
 WF-IMPL-016 ([#350](https://github.com/toddysm/custos/issues/350)),
-WF-IMPL-017 ([#351](https://github.com/toddysm/custos/issues/351)), and
-WF-IMPL-018 ([#352](https://github.com/toddysm/custos/issues/352)). The
+WF-IMPL-017 ([#351](https://github.com/toddysm/custos/issues/351)),
+WF-IMPL-018 ([#352](https://github.com/toddysm/custos/issues/352)), and
+WF-IMPL-019 ([#353](https://github.com/toddysm/custos/issues/353)). The
 package skeleton, the runnable `create_app()` factory, the
 `python -m custos_workflow` entry point, the `/healthz` and `/readyz`
 probes, the call-context middleware shim, the Helm subchart, the
@@ -28,7 +29,7 @@ CI gate (`.github/workflows/python-services.yml`), the typed
 Protocol), and the frozen `ExecutionGraph` dataclasses with a
 byte-stable JSON serializer are real. The remaining Definition
 Compiler internals (topology builder, retry / on-error compilation,
-compiler driver) land in WF-IMPL-019 onwards, tracked under
+compiler driver) land in WF-IMPL-020 onwards, tracked under
 [#363](https://github.com/toddysm/custos/issues/363) (WF-IMPL-000-COMPILER).
 
 The Expression Evaluator (the first sub-module) is already in
@@ -108,10 +109,11 @@ src/services/workflow-service/
 │       │   ├── __init__.py    # public re-exports
 │       │   ├── registry.py    # ActivityTypeRegistry Protocol + in-memory impl
 │       │   └── derive.py      # derive_bindings(doc, registry) → {step_id: bindings}
-│       ├── graph/             # ExecutionGraph dataclasses + byte-stable JSON
+│       ├── graph/             # ExecutionGraph dataclasses + byte-stable JSON + topology
 │       │   ├── __init__.py    # public re-exports
 │       │   ├── model.py       # frozen dataclasses + enum tags
-│       │   └── serialize.py   # to_json / from_json + GraphSerializationError
+│       │   ├── serialize.py   # to_json / from_json + GraphSerializationError
+│       │   └── topology.py    # explicit/implicit edges + cycle detection + stable sort
 │       └── py.typed
 └── tests/
     ├── test_smoke.py             # package import + factory smoke
@@ -123,7 +125,8 @@ src/services/workflow-service/
     ├── test_bindings_registry.py # InMemoryActivityTypeRegistry contract
     ├── test_bindings_derive.py   # per-step ordering + activity / let / sub-wf
     ├── test_graph_model.py       # frozen invariants + __post_init__ checks
-    └── test_graph_serialize.py   # round-trip + byte-stability + schema guards
+    ├── test_graph_serialize.py   # round-trip + byte-stability + schema guards
+    └── test_graph_topology.py    # explicit/implicit edges + cycles + stable sort
 ```
 
 Subsequent WF-IMPL-* tasks add the remaining Definition Compiler
