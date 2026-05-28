@@ -13,4 +13,7 @@ data:
   CAT_DEFAULT_NAMESPACE_TIER_VENDOR: {{ . | quote }}
   {{- end }}
   CAT_CONNECTOR_ENDPOINT: {{ .Values.connector.endpoint | quote }}
+  CAT_CONNECTOR_TIMEOUT_SECONDS: {{ .Values.connector.timeoutSeconds | quote }}
+  CAT_CONNECTOR_NEGATIVE_CACHE_TTL_SECONDS: {{ .Values.connector.negativeCacheTtlSeconds | quote }}
+  CAT_USE_STUB_CONNECTOR_CLIENT: {{ .Values.connector.useStubClient | quote }}
   CAT_AUTHZ_ENDPOINT: {{ .Values.auth.endpoint | quote }}

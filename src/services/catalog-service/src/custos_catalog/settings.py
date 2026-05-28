@@ -33,6 +33,23 @@ ENV_METADATA_STORE: Final[str] = "CAT_METADATA_STORE"
 #: Required. URL of the in-cluster Connector Service.
 ENV_CONNECTOR_ENDPOINT: Final[str] = "CAT_CONNECTOR_ENDPOINT"
 
+#: Optional. Per-call timeout for the Connector Service
+#: ``ValidateConnector`` Internal RPC (CONN-IMPL-027). Defaults to 2 s
+#: per design § Failure Modes (CONN-IMPL-034 / CS-IMPL-023).
+ENV_CONNECTOR_TIMEOUT_SECONDS: Final[str] = "CAT_CONNECTOR_TIMEOUT_SECONDS"
+
+#: Optional. TTL (seconds) for the per-process negative-result cache the
+#: live Connector Service client keeps on 404 responses. Defaults to
+#: 5 s; tune higher in development if Connector Service is being
+#: hammered by misconfigured publishes.
+ENV_CONNECTOR_NEGATIVE_CACHE_TTL_SECONDS: Final[str] = "CAT_CONNECTOR_NEGATIVE_CACHE_TTL_SECONDS"
+
+#: Optional feature flag. When ``true`` (case-insensitive), the catalog
+#: app factory wires the offline :class:`StubConnectorClient` instead of
+#: the live :class:`HttpConnectorClient`. Used only in airgapped /
+#: offline test scenarios; production must leave this unset.
+ENV_USE_STUB_CONNECTOR_CLIENT: Final[str] = "CAT_USE_STUB_CONNECTOR_CLIENT"
+
 #: Required in production. Empty switches the service to the dev-shim
 #: call-context middleware (CS-IMPL-004), which refuses to start when
 #: ``ENVIRONMENT=production``. See
@@ -55,6 +72,12 @@ ENV_ENVIRONMENT: Final[str] = "ENVIRONMENT"
 DEFAULT_PUBLISH_MAX_BODY_MB: Final[int] = 4
 DEFAULT_CEL_PARSE_TIMEOUT_MS: Final[int] = 500
 
+#: Default per-call timeout for the live Connector Service client.
+DEFAULT_CONNECTOR_TIMEOUT_SECONDS: Final[float] = 2.0
+
+#: Default TTL for the live client's negative-result cache.
+DEFAULT_CONNECTOR_NEGATIVE_CACHE_TTL_SECONDS: Final[float] = 5.0
+
 
 class SettingsError(RuntimeError):
     """Raised when the environment is missing a required setting or carries a malformed value."""
@@ -68,6 +91,9 @@ class Settings:
     catalog_store_dsn: str
     metadata_store_dsn: str
     connector_endpoint: str
+    connector_timeout_seconds: float
+    connector_negative_cache_ttl_seconds: float
+    use_stub_connector_client: bool
     authz_endpoint: str  # empty string means "dev shim active"
     publish_max_body_mb: int
     cel_parse_timeout_ms: int
@@ -104,6 +130,33 @@ def _opt_int(name: str, env: dict[str, str], default: int) -> int:
         raise SettingsError(f"{name} must be an integer (got {raw!r})") from exc
 
 
+def _opt_float(name: str, env: dict[str, str], default: float) -> float:
+    raw = env.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise SettingsError(f"{name} must be a non-negative float (got {raw!r})") from exc
+    if value < 0.0:
+        raise SettingsError(f"{name} must be a non-negative float (got {raw!r})")
+    return value
+
+
+def _opt_bool(name: str, env: dict[str, str], default: bool) -> bool:
+    raw = env.get(name)
+    if raw is None or raw == "":
+        return default
+    lowered = raw.strip().lower()
+    if lowered in {"true", "1", "yes", "on"}:
+        return True
+    if lowered in {"false", "0", "no", "off"}:
+        return False
+    raise SettingsError(
+        f"{name} must be a boolean-like string (true/false/1/0/yes/no/on/off); got {raw!r}"
+    )
+
+
 def load_settings(env: dict[str, str] | None = None) -> Settings:
     """Parse a :class:`Settings` from the supplied env mapping (default ``os.environ``).
 
@@ -119,6 +172,15 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         catalog_store_dsn=_require(ENV_CATALOG_STORE, src),
         metadata_store_dsn=_require(ENV_METADATA_STORE, src),
         connector_endpoint=_require(ENV_CONNECTOR_ENDPOINT, src),
+        connector_timeout_seconds=_opt_float(
+            ENV_CONNECTOR_TIMEOUT_SECONDS, src, DEFAULT_CONNECTOR_TIMEOUT_SECONDS
+        ),
+        connector_negative_cache_ttl_seconds=_opt_float(
+            ENV_CONNECTOR_NEGATIVE_CACHE_TTL_SECONDS,
+            src,
+            DEFAULT_CONNECTOR_NEGATIVE_CACHE_TTL_SECONDS,
+        ),
+        use_stub_connector_client=_opt_bool(ENV_USE_STUB_CONNECTOR_CLIENT, src, default=False),
         authz_endpoint=src.get(ENV_AUTHZ_ENDPOINT, "").strip(),
         publish_max_body_mb=_opt_int(ENV_PUBLISH_MAX_BODY_MB, src, DEFAULT_PUBLISH_MAX_BODY_MB),
         cel_parse_timeout_ms=_opt_int(ENV_CEL_PARSE_TIMEOUT_MS, src, DEFAULT_CEL_PARSE_TIMEOUT_MS),
@@ -129,16 +191,21 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
 
 __all__ = [
     "DEFAULT_CEL_PARSE_TIMEOUT_MS",
+    "DEFAULT_CONNECTOR_NEGATIVE_CACHE_TTL_SECONDS",
+    "DEFAULT_CONNECTOR_TIMEOUT_SECONDS",
     "DEFAULT_PUBLISH_MAX_BODY_MB",
     "ENV_AUTHZ_ENDPOINT",
     "ENV_CATALOG_STORE",
     "ENV_CEL_PARSE_TIMEOUT_MS",
     "ENV_CONNECTOR_ENDPOINT",
+    "ENV_CONNECTOR_NEGATIVE_CACHE_TTL_SECONDS",
+    "ENV_CONNECTOR_TIMEOUT_SECONDS",
     "ENV_DEFAULT_NAMESPACE_TIER_VENDOR",
     "ENV_DEFINITION_STORE",
     "ENV_ENVIRONMENT",
     "ENV_METADATA_STORE",
     "ENV_PUBLISH_MAX_BODY_MB",
+    "ENV_USE_STUB_CONNECTOR_CLIENT",
     "Settings",
     "SettingsError",
     "load_settings",

@@ -44,6 +44,10 @@ def test_configmap_has_documented_defaults(
     assert data["CAT_PUBLISH_MAX_BODY_MB"] == "4"
     assert data["CAT_CEL_PARSE_TIMEOUT_MS"] == "500"
     assert data["CAT_CONNECTOR_ENDPOINT"] == "http://connector-service:8080"
+    # Phase M / CONN-IMPL-034 tunables (defaults from design § Configuration).
+    assert data["CAT_CONNECTOR_TIMEOUT_SECONDS"] == "2"
+    assert data["CAT_CONNECTOR_NEGATIVE_CACHE_TTL_SECONDS"] == "5"
+    assert data["CAT_USE_STUB_CONNECTOR_CLIENT"] == "false"
     assert data["CAT_AUTHZ_ENDPOINT"] == "http://auth-service:8080"
     # DSN env vars MUST flow through the Secret, never the ConfigMap.
     assert "CAT_DEFINITION_STORE" not in data

@@ -6,6 +6,8 @@ import pytest
 
 from custos_catalog.settings import (
     DEFAULT_CEL_PARSE_TIMEOUT_MS,
+    DEFAULT_CONNECTOR_NEGATIVE_CACHE_TTL_SECONDS,
+    DEFAULT_CONNECTOR_TIMEOUT_SECONDS,
     DEFAULT_PUBLISH_MAX_BODY_MB,
     SettingsError,
     load_settings,
@@ -81,3 +83,44 @@ def test_environment_defaults_to_development() -> None:
 def test_environment_production_is_detected_case_insensitively() -> None:
     cfg = load_settings({**_REQUIRED, "ENVIRONMENT": "Production"})
     assert cfg.is_production is True
+
+
+# ---------------------------------------------------------------------------
+# Connector client tunables (CONN-IMPL-034 / CS-IMPL-023)
+# ---------------------------------------------------------------------------
+
+
+def test_connector_client_tunables_default_to_design_values() -> None:
+    cfg = load_settings(_REQUIRED)
+    assert cfg.connector_timeout_seconds == DEFAULT_CONNECTOR_TIMEOUT_SECONDS
+    assert cfg.connector_negative_cache_ttl_seconds == DEFAULT_CONNECTOR_NEGATIVE_CACHE_TTL_SECONDS
+    assert cfg.use_stub_connector_client is False
+
+
+def test_connector_client_tunables_parse_from_env() -> None:
+    cfg = load_settings(
+        {
+            **_REQUIRED,
+            "CAT_CONNECTOR_TIMEOUT_SECONDS": "0.75",
+            "CAT_CONNECTOR_NEGATIVE_CACHE_TTL_SECONDS": "30",
+            "CAT_USE_STUB_CONNECTOR_CLIENT": "true",
+        },
+    )
+    assert cfg.connector_timeout_seconds == pytest.approx(0.75)
+    assert cfg.connector_negative_cache_ttl_seconds == pytest.approx(30.0)
+    assert cfg.use_stub_connector_client is True
+
+
+def test_connector_timeout_negative_value_is_rejected() -> None:
+    with pytest.raises(SettingsError, match="must be a non-negative float"):
+        load_settings({**_REQUIRED, "CAT_CONNECTOR_TIMEOUT_SECONDS": "-1"})
+
+
+def test_connector_timeout_non_float_is_rejected() -> None:
+    with pytest.raises(SettingsError, match="must be a non-negative float"):
+        load_settings({**_REQUIRED, "CAT_CONNECTOR_TIMEOUT_SECONDS": "fast"})
+
+
+def test_use_stub_connector_client_rejects_garbage() -> None:
+    with pytest.raises(SettingsError, match="must be a boolean"):
+        load_settings({**_REQUIRED, "CAT_USE_STUB_CONNECTOR_CLIENT": "maybe"})

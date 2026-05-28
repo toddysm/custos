@@ -325,7 +325,7 @@ async def test_resolve_subworkflow_rejects_garbage() -> None:
 
 async def test_stub_connector_client_returns_true(caplog: pytest.LogCaptureFixture) -> None:
     client = StubConnectorClient()
-    with caplog.at_level(logging.WARNING, logger="custos_catalog.resolve"):
+    with caplog.at_level(logging.WARNING, logger="custos_catalog.clients.connector"):
         assert await client.exists_connector_instance("ws-1", "name-a") is True
         assert await client.exists_connector_instance("ws-1", "name-b") is True
         assert await client.exists_connector_instance("ws-1", "name-c") is True
@@ -337,7 +337,7 @@ async def test_stub_connector_client_returns_true(caplog: pytest.LogCaptureFixtu
 
 async def test_stub_connector_client_resets_batch(caplog: pytest.LogCaptureFixture) -> None:
     client = StubConnectorClient()
-    with caplog.at_level(logging.WARNING, logger="custos_catalog.resolve"):
+    with caplog.at_level(logging.WARNING, logger="custos_catalog.clients.connector"):
         await client.exists_connector_instance("ws-1", "a")
         client.reset_batch()
         await client.exists_connector_instance("ws-1", "b")

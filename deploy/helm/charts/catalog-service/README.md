@@ -12,7 +12,7 @@ the service reads at startup. The Deployment binds:
 
 | Container env source | Carries |
 |---|---|
-| ConfigMap `<release>-catalog-service` | `CAT_PUBLISH_MAX_BODY_MB`, `CAT_CEL_PARSE_TIMEOUT_MS`, `CAT_CONNECTOR_ENDPOINT`, `CAT_AUTHZ_ENDPOINT`, optional `CAT_DEFAULT_NAMESPACE_TIER_VENDOR` |
+| ConfigMap `<release>-catalog-service` | `CAT_PUBLISH_MAX_BODY_MB`, `CAT_CEL_PARSE_TIMEOUT_MS`, `CAT_CONNECTOR_ENDPOINT`, `CAT_CONNECTOR_TIMEOUT_SECONDS`, `CAT_CONNECTOR_NEGATIVE_CACHE_TTL_SECONDS`, `CAT_USE_STUB_CONNECTOR_CLIENT`, `CAT_AUTHZ_ENDPOINT`, optional `CAT_DEFAULT_NAMESPACE_TIER_VENDOR` |
 | Secret `<release>-catalog-service` (materialized by ExternalSecret when `externalSecret.enabled=true`) | `CAT_DEFINITION_STORE`, `CAT_CATALOG_STORE` (Postgres DSNs) |
 
 `HOST` / `PORT` come from the container image defaults (`0.0.0.0:8080`); the
