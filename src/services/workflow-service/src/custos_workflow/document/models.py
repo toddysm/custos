@@ -260,6 +260,7 @@ class _StepCommon(_StrictModel):
 
     id: str = Field(pattern=_STEP_ID_PATTERN.pattern)
     description: str | None = None
+    needs: list[str] | None = Field(default=None, min_length=1)
     if_: CelSource | None = Field(default=None, alias="if")
     when: CelSource | None = None
     unless: CelSource | None = None
@@ -287,6 +288,18 @@ class _StepCommon(_StrictModel):
                     f"step {self.id!r}: {field_name!r} must be a CEL "
                     "expression token of the form '${{ ... }}'"
                 )
+        if self.needs is not None:
+            seen: set[str] = set()
+            for dep in self.needs:
+                if not _STEP_ID_PATTERN.match(dep):
+                    raise ValueError(
+                        f"step {self.id!r}: needs entry {dep!r} does not match the step-id grammar"
+                    )
+                if dep == self.id:
+                    raise ValueError(f"step {self.id!r}: needs entry refers to itself")
+                if dep in seen:
+                    raise ValueError(f"step {self.id!r}: needs entry {dep!r} is duplicated")
+                seen.add(dep)
         return self
 
 

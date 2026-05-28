@@ -56,6 +56,13 @@ from custos_workflow.graph.serialize import (
     from_json,
     to_json,
 )
+from custos_workflow.graph.topology import (
+    TopologyError,
+    collect_data_dependencies,
+    collect_explicit_edges,
+    detect_cycles,
+    topological_sort,
+)
 
 __all__ = [
     "GRAPH_SCHEMA_VERSION",
@@ -74,7 +81,12 @@ __all__ = [
     "ResolvedBackoffPolicy",
     "ResolvedRetryPolicy",
     "StepKind",
+    "TopologyError",
     "TypedCallSite",
+    "collect_data_dependencies",
+    "collect_explicit_edges",
+    "detect_cycles",
     "from_json",
     "to_json",
+    "topological_sort",
 ]
