@@ -46,7 +46,7 @@ will touch:
 
 ## Failure modes covered
 
-`livenessProbe` / `readinessProbe` both hit `/healthz` and `/readyz`. The
+`livenessProbe` hits `/healthz` and `readinessProbe` hits `/readyz`. The
 process implementing those endpoints is WF-IMPL-015's responsibility;
 until that lands, deploying the chart produces a pod that crash-loops on
 the not-yet-implemented FastAPI factory. This is intentional: deploys do
