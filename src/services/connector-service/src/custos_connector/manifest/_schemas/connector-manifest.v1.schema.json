@@ -340,7 +340,8 @@
         "channel": {
           "type": "string",
           "pattern": "^#?[a-z0-9][a-z0-9._-]{0,79}$",
-          "description": "Display channel name the notifier posts to. Optional leading '#' is allowed for readability; the runtime strips it before invoking the incoming-webhook URL, which is itself addressed by spec.target.endpoint."
+          "maxLength": 80,
+          "description": "Display channel name the notifier posts to. Optional leading '#' is allowed for readability; the runtime strips it before invoking the incoming-webhook URL, which is itself addressed by spec.target.endpoint. The total length (including the optional leading '#') is capped at 80 characters; the regex alone would otherwise admit 81 when '#' is present."
         }
       }
     },

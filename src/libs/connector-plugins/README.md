@@ -12,9 +12,13 @@ They serve two purposes:
 2. **Integration test fixtures** — the connector-service integration
    suite (`tests/integration/test_sample_plugins.py`,
    [CONN-IMPL-031](https://github.com/toddysm/custos/issues/314)) publishes
-   each plugin's `connector-manifest.json` to a fixture OCI registry and
-   exercises the end-to-end registration + bind + listen + revoke flow
-   against it.
+   each plugin's `connector-manifest.json` to a fixture OCI registry
+   (Zot for the Referrers path, distribution for the fallback-tag path),
+   resolves it back through the Connector Service's discovery code, and
+   re-validates the retrieved manifest body against the v1 schema. Hook
+   flows (`bind` / `listen` / `revoke`) are covered by each plugin's
+   unit tests under its own `tests/` directory, not by the integration
+   suite.
 
 | Plugin | Target kind | Events block | Exercises |
 |---|---|---|---|

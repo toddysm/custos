@@ -89,6 +89,18 @@ def test_bind_requires_slot_and_capability() -> None:
     assert exc.value.code == "invalid-response"
 
 
+def test_bind_rejects_unadvertised_capability() -> None:
+    """A bind request for a capability the manifest does not advertise
+    must surface as an invalid-response error rather than silently
+    handing back a registry endpoint.
+    """
+    request = _request("bind", hook_input={"slot": "source", "capability": "s3.read"})
+    with pytest.raises(PluginError) as exc:
+        handle("bind", request)
+    assert exc.value.code == "invalid-response"
+    assert "s3.read" in exc.value.detail
+
+
 def test_bind_fails_when_manifest_endpoint_missing() -> None:
     request = _request("bind", hook_input={"slot": "source", "capability": "oci.pull"})
     request["connector"]["manifest"]["spec"]["target"]["endpoint"] = ""

@@ -24,6 +24,21 @@ from typing import Any, Final
 
 _API_VERSION: Final[int] = 1
 
+# Capabilities advertised by ``connector-manifest.json``. Keep the two
+# lists in lock-step: the plugin only knows how to bind / listen for
+# this exact set, so a bind request for any other token is an
+# integration mismatch we want to surface at runtime rather than
+# silently producing a registry endpoint for (e.g.) ``s3.read``.
+_ADVERTISED_CAPABILITIES: Final[frozenset[str]] = frozenset(
+    {
+        "oci.pull",
+        "oci.push",
+        "oci.copy",
+        "oci.list-tags",
+        "oci.list-referrers",
+    }
+)
+
 
 class PluginError(Exception):
     """Typed error raised by hook handlers.
@@ -99,6 +114,16 @@ def _bind(
         raise PluginError("invalid-response", "bind input requires non-empty slot")
     if not isinstance(capability, str) or not capability:
         raise PluginError("invalid-response", "bind input requires non-empty capability")
+    if capability not in _ADVERTISED_CAPABILITIES:
+        # The reference plugin advertises a fixed OCI capability set in
+        # its manifest. Reject anything outside that set so the runtime
+        # surfaces a clear integration error rather than silently
+        # handing back a registry endpoint for, e.g., ``s3.read``.
+        raise PluginError(
+            "invalid-response",
+            f"oci-registry plugin does not advertise capability {capability!r}; "
+            f"supported: {sorted(_ADVERTISED_CAPABILITIES)}",
+        )
     target_config = instance.get("targetConfig") or {}
     if not isinstance(target_config, dict):
         raise PluginError("invalid-response", "instance.targetConfig must be a JSON object")

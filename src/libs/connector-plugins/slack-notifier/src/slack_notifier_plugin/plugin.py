@@ -65,7 +65,7 @@ def _bind(
 ) -> dict[str, Any]:
     """Return a ConnectorContext pointing at the configured webhook channel.
 
-    The plugin advertises a single capability (``slack.notify``); any
+    The plugin advertises a single capability (``slack.post``); any
     other capability requested at bind time is treated as an
     integration mismatch.
     """

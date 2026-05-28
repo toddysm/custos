@@ -221,7 +221,9 @@ A connector whose only role is to receive data — for example, a Slack/Teams no
       "kind": "slack-webhook",
       "endpoint": "https://hooks.slack.com",
       "verifyTls": true,
-      "config": {}
+      "config": {
+        "channel": "#deploys"
+      }
     },
     "credentials": {
       "authenticationType": "azure-key-vault",
