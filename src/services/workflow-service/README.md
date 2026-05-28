@@ -12,12 +12,16 @@ Design: [`design/components/workflow-service/design.md`](../../../design/compone
 
 ## Status
 
-**Scaffold only** — WF-IMPL-013 ([#347](https://github.com/toddysm/custos/issues/347)).
-The package skeleton, the `create_app()` factory placeholder, the
-`python -m custos_workflow` entry point, and the CI gate
-(`.github/workflows/python-services.yml`) are real. Everything else is
-incremental work tracked under [#363](https://github.com/toddysm/custos/issues/363)
-(WF-IMPL-000-COMPILER), starting with the Definition Compiler sub-module.
+**Phase A scaffold + FastAPI surface** — WF-IMPL-013 ([#347](https://github.com/toddysm/custos/issues/347)),
+WF-IMPL-014 ([#348](https://github.com/toddysm/custos/issues/348)), and
+WF-IMPL-015 ([#349](https://github.com/toddysm/custos/issues/349)). The
+package skeleton, the runnable `create_app()` factory, the
+`python -m custos_workflow` entry point, the `/healthz` and `/readyz`
+probes, the call-context middleware shim, the Helm subchart, and the
+CI gate (`.github/workflows/python-services.yml`) are real. Definition
+Compiler internals (DAG construction, graph compilation, retry / on-error
+binding) land in WF-IMPL-016 onwards, tracked under
+[#363](https://github.com/toddysm/custos/issues/363) (WF-IMPL-000-COMPILER).
 
 The Expression Evaluator (the first sub-module) is already in
 [`src/libs/custos-cel/`](../../libs/custos-cel) and shipped via
@@ -47,6 +51,7 @@ Process bind:
 |---|---|---|
 | `HOST` | `0.0.0.0` | Address the uvicorn process binds to. |
 | `PORT` | `8080` | Port the uvicorn process listens on. |
+| `WF_REQUIRE_CALL_CONTEXT` | `""` (dev shim) | Set to the exact literal `"1"` to enforce that every non-probe request carries `X-Custos-Workspace` and `X-Custos-Principal` headers (returns `401` `callctx_missing` otherwise). Any other value — including `"true"`, `"yes"`, `"TRUE"` — leaves the dev shim active. |
 
 ## Local development
 
@@ -60,9 +65,18 @@ mypy src tests
 pytest -q
 ```
 
-`python -m custos_workflow` will currently raise `NotImplementedError` from
-`create_app()` — that is the documented scaffold behaviour. The factory is
-wired in WF-IMPL-015 ([#349](https://github.com/toddysm/custos/issues/349)).
+`python -m custos_workflow` starts uvicorn against
+`custos_workflow:create_app` (`factory=True`), honouring `HOST` /
+`PORT`. The lifespan flips `app.state.ready` immediately because Phase A
+has no startup dependencies; WF-IMPL-016+ gates the readiness flip on
+the Definition Compiler bootstrap and the Catalog client warm-up.
+
+Probe quick-check:
+
+```bash
+curl -fsS http://localhost:8080/healthz
+curl -fsS http://localhost:8080/readyz
+```
 
 ## Layout
 
@@ -72,14 +86,20 @@ src/services/workflow-service/
 ├── README.md
 ├── src/
 │   └── custos_workflow/
-│       ├── __init__.py        # scaffold: __version__ + create_app stub
+│       ├── __init__.py        # re-exports __version__ + create_app
 │       ├── __main__.py        # python -m custos_workflow entry point
+│       ├── _version.py        # package version
+│       ├── app.py             # FastAPI factory + lifespan
+│       ├── call_context.py    # CallContext + middleware shim
+│       ├── healthz.py         # /healthz + /readyz routes
 │       └── py.typed
 └── tests/
-    └── test_smoke.py          # scaffold import + stub-contract assertions
+    ├── test_smoke.py          # package import + factory smoke
+    ├── test_app.py            # factory shape + lifespan + env flag
+    ├── test_call_context.py   # header presence/absence + dev/prod mode
+    └── test_healthz.py        # liveness/readiness status codes
 ```
 
-Subsequent WF-IMPL-* tasks add modules under `src/custos_workflow/`
-(`document/`, `bindings/`, `graph/`, `callsites/`, `retry/`, `on_error/`,
-`errors.py`, `compiler.py`, `_telemetry.py`) plus the FastAPI surface
-under `app.py`, `healthz.py`, `call_context.py`.
+Subsequent WF-IMPL-* tasks add the Definition Compiler modules under
+`src/custos_workflow/` (`document/`, `bindings/`, `graph/`, `callsites/`,
+`retry/`, `on_error/`, `errors.py`, `compiler.py`, `_telemetry.py`).
