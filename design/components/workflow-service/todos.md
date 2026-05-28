@@ -1,14 +1,55 @@
 # TODOs: Workflow Service
 
-Last Updated: 2026-05-22
+Last Updated: 2026-05-27
 
 ## Open
 
 - [ ] TODO-001: Finalize canonical workflow event taxonomy (`workflow.*`, `run.*`, `step.*`) jointly with Trigger Service TS-TODO-001 (#18) and ARM TODO-009 (INCON-013 cross-link). Tracked under those existing issues; no separate WF issue. (added 2026-05-17)
 
-## Implementation
+## Implementation — Definition Compiler
 
-First sub-module under construction: **Expression Evaluator** (ADR-011), packaged as the shared library `src/libs/custos-cel/` (also consumed by Catalog Service for publish-time syntactic validation per [2026-05-18-003-bundle-h-cel-parse-surface.md](changes/2026-05-18-003-bundle-h-cel-parse-surface.md)).
+Second sub-module under construction: **Definition Compiler**, packaged inside the service host `src/services/workflow-service/` (Python package `custos_workflow`). Reads a `WorkflowVersion` and produces a runtime-ready `ExecutionGraph` with cached typed ASTs per design.md § Internal Structure + § `let` Primitive. Tracked under #363 (WF-IMPL-000-COMPILER).
+
+### Phase A — Service host scaffolding
+
+- [ ] WF-IMPL-013: Scaffold `custos-workflow` service package + CI gate (issue #347).
+- [ ] WF-IMPL-014: Wire workflow-service Helm subchart — env vars, ConfigMap, ExternalSecret (issue #348; depends on #347).
+- [ ] WF-IMPL-015: FastAPI app skeleton + `healthz` / `readyz` + call-context middleware shim (issue #349; depends on #347, #348).
+
+### Phase B — Compiler input contract
+
+- [ ] WF-IMPL-016: `WorkflowDocument` Pydantic models (issue #350; depends on #347).
+- [ ] WF-IMPL-017: Per-step `SchemaBindings` derivation + `ActivityTypeRegistry` interface (issue #351; depends on #350).
+
+### Phase C — Compiler core
+
+- [ ] WF-IMPL-018: `ExecutionGraph` data model + byte-stable JSON serializer (issue #352; depends on #347).
+- [ ] WF-IMPL-019: Topology builder — explicit + implicit edges, cycle detection, stable sort (issue #353; depends on #350, #352, #354).
+- [ ] WF-IMPL-020: Call-site collector — every CEL call site with source position + parsed AST (issue #354; depends on #350).
+- [ ] WF-IMPL-021: Compiler driver — parse → type-check → topology → typed-AST caching (issue #355; depends on #351, #352, #353, #354, #356, #357, #358).
+
+### Phase D — Retry policy materialization
+
+- [ ] WF-IMPL-022: Effective retry-policy resolver — per-match → step → defaults → platform overlay (issue #356; depends on #350).
+- [ ] WF-IMPL-023: `on_error` route compiler — implicit policy + cancelled short-circuit + disallowed-kind rejection (issue #357; depends on #350, #356).
+
+### Phase E — Error taxonomy
+
+- [ ] WF-IMPL-024: Public compiler error taxonomy — `CompileError` + 4 subclasses, locked `kind` strings (issue #358; depends on #347).
+
+### Phase F — Verification
+
+- [ ] WF-IMPL-025: Unit test suite — every step kind / call site / error class; ≥ 90 % coverage gate (issue #359; depends on #355).
+- [ ] WF-IMPL-026: Property-based determinism tests (Hypothesis) (issue #360; depends on #355).
+
+### Phase G — Observability + docs
+
+- [ ] WF-IMPL-027: Observability hooks — OTel spans, per-stage histograms, error counter (issue #361; depends on #355, #358).
+- [ ] WF-IMPL-028: Developer documentation — `docs/developers/workflow-compilation.md` (issue #362; depends on #355, #358, #359).
+
+## Implementation — Expression Evaluator
+
+First sub-module: **Expression Evaluator** (ADR-011), packaged as the shared library `src/libs/custos-cel/` (also consumed by Catalog Service for publish-time syntactic validation per [2026-05-18-003-bundle-h-cel-parse-surface.md](changes/2026-05-18-003-bundle-h-cel-parse-surface.md)).
 
 ### Phase A — Scaffolding
 
