@@ -167,7 +167,7 @@ class OnErrorMatch(_StrictModel):
 
     Exactly one of ``code`` / ``code_prefix`` / ``cls`` MUST be set;
     the Catalog schema enforces this via ``oneOf`` and the
-    :func:`_one_of_match` validator below mirrors that rule.
+    :func:`_exactly_one_of_match` validator below mirrors that rule.
     """
 
     code: str | None = None
@@ -237,9 +237,12 @@ class Trigger(_StrictModel):
     """One entry under ``spec.triggers[]``."""
 
     type: str = Field(min_length=1)
-    # Connector name or CEL expression token. The structural validator
-    # does not parse the CEL — see WF-IMPL-022 for the type checker.
-    connector: str | None = None
+    # Connector name or CEL expression token. Mirrors the Catalog
+    # schema's ``minLength: 1`` so an empty connector reference fails
+    # the defensive re-check rather than silently propagating. The
+    # structural validator does not parse the CEL — see WF-IMPL-022
+    # for the type checker.
+    connector: str | None = Field(default=None, min_length=1)
 
 
 # ---------------------------------------------------------------------------
@@ -296,8 +299,15 @@ class ActivityStep(_StepCommon):
     """
 
     activity: str
-    connector: str | None = None
-    connectors: dict[str, str] | None = None
+    # Mirror the Catalog schema's ``minLength: 1`` on the singular
+    # binding and ``minProperties: 1`` (plus non-empty values) on the
+    # map binding so an empty connector reference fails the defensive
+    # re-check rather than reaching the compiler.
+    connector: str | None = Field(default=None, min_length=1)
+    connectors: dict[str, Annotated[str, Field(min_length=1)]] | None = Field(
+        default=None,
+        min_length=1,
+    )
     with_: dict[str, Any] | None = Field(default=None, alias="with")
 
     @model_validator(mode="after")
@@ -311,10 +321,10 @@ class ActivityStep(_StepCommon):
 
     @model_validator(mode="after")
     def _activity_ref_shape(self) -> ActivityStep:
-        # CEL tokens (``${{ placeholders.scanActivity }}``) are
-        # accepted unchanged — template materialisation has already
-        # happened by the time the compiler runs, so a CEL token here
-        # is a contract violation; flag it.
+        # CEL tokens (``${{ placeholders.scanActivity }}``) are NOT
+        # accepted here — template materialisation must have happened
+        # by the time the compiler walks the document, so a CEL token
+        # in ``activity:`` is a publish-pipeline bug and is rejected.
         if _CEL_TOKEN_PATTERN.match(self.activity):
             raise ValueError(
                 f"step {self.id!r}: activity reference is still a CEL "

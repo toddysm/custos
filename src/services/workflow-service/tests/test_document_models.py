@@ -205,6 +205,20 @@ class TestActivityStep:
         assert step.connector is None
         assert step.connectors is None
 
+    def test_empty_connector_string_rejected(self) -> None:
+        # Mirrors Catalog schema's ``minLength: 1`` on connector
+        # strings so an empty value fails the defensive re-check.
+        with pytest.raises(ValidationError):
+            ActivityStep.model_validate(_valid_activity_payload(connector=""))
+
+    def test_empty_connectors_map_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            ActivityStep.model_validate(_valid_activity_payload(connectors={}))
+
+    def test_empty_connectors_map_value_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            ActivityStep.model_validate(_valid_activity_payload(connectors={"source": ""}))
+
 
 # ---------------------------------------------------------------------------
 # Let / Workflow steps
@@ -341,6 +355,21 @@ class TestWorkflowSpec:
         assert isinstance(spec.defaults, Defaults)
         assert spec.defaults.retry is not None
         assert spec.defaults.retry.max_attempts == 4
+
+
+class TestTrigger:
+    def test_happy_path(self) -> None:
+        from custos_workflow.document import Trigger
+
+        trig = Trigger.model_validate({"type": "schedule", "connector": "sched"})
+        assert trig.type == "schedule"
+        assert trig.connector == "sched"
+
+    def test_empty_connector_string_rejected(self) -> None:
+        from custos_workflow.document import Trigger
+
+        with pytest.raises(ValidationError):
+            Trigger.model_validate({"type": "schedule", "connector": ""})
 
 
 class TestWorkflowDocument:
