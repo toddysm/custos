@@ -167,27 +167,62 @@ def _collect_common_slots(step: Step, base_path: str) -> Iterator[CallSite]:
 def _collect_let_bindings(step: LetStep, base_path: str) -> Iterator[CallSite]:
     """Emit one :class:`CallSite` per ``let.<name>`` string-CEL binding.
 
-    Only string values that wear the ``${{ ... }}`` wrapper are
-    treated as CEL. Plain literals (numbers, booleans, dicts, lists,
-    or bare strings) are skipped — the runtime carries them as data
-    on ``Step.outputs`` without an evaluator round-trip.
+    ``LetStep.let`` is typed ``dict[str, Any]`` and the document
+    model does NOT enforce the ``${{ ... }}`` wrapper for its
+    values, so the discrimination happens here:
+
+    - Non-string values (numbers, booleans, dicts, lists) are
+      carried through as data and skipped.
+    - Strings with no ``${{ ... }}`` segment are carried through
+      as data and skipped.
+    - Strings whose entire content is a single ``${{ ... }}``
+      placeholder (allowing surrounding whitespace) become a
+      ``LET``-kind call site.
+    - Mixed-content strings (interleaved literals and
+      placeholders, or multiple placeholders) are rejected as
+      :class:`CallSiteParseError`. A ``let`` binding is a single
+      expression by design, so a mixed string is almost always a
+      typo; raising eagerly here gives a clean diagnostic instead
+      of feeding wrapper-stripped garbage to ``custos_cel.parse``.
     """
     for name, value in step.let.items():
         if not isinstance(value, str):
             continue
-        if not _is_complete_token(value):
-            continue
         path = f"let.{name}"
-        document_path = f"{base_path}.let.{name}"
-        inner = _strip_wrapper(value)
-        ast = _parse_or_raise(step.id, path, value, inner)
-        yield CallSite(
-            step_id=step.id,
-            kind=CallSiteKind.LET,
-            path=path,
-            source=value,
-            position=SourcePosition(document_path=document_path, text_offset=0),
-            parsed_ast=ast,
+        try:
+            segments = extract_placeholders(value)
+        except ValueError as exc:
+            raise CallSiteParseError(step.id, path, value, str(exc)) from exc
+        if not segments:
+            # Plain literal data — carried through, no call site.
+            continue
+        if len(segments) == 1 and _segment_covers_value(value, segments[0]):
+            segment = segments[0]
+            document_path = f"{base_path}.let.{name}"
+            ast = _parse_or_raise(step.id, path, value, segment.inner)
+            yield CallSite(
+                step_id=step.id,
+                kind=CallSiteKind.LET,
+                path=path,
+                source=value,
+                position=SourcePosition(
+                    document_path=document_path,
+                    text_offset=0,
+                ),
+                parsed_ast=ast,
+            )
+            continue
+        # Multiple placeholders OR a single placeholder with
+        # surrounding non-whitespace literal text. Either shape is
+        # malformed for a ``let`` binding (which is a single
+        # expression by design).
+        raise CallSiteParseError(
+            step.id,
+            path,
+            value,
+            "let bindings must be either a literal value or a single "
+            "'${{ ... }}' expression; mixed-content strings are not "
+            "supported under let:",
         )
 
 
@@ -239,32 +274,34 @@ def _emit_with_segments(
         )
 
 
-def _is_complete_token(value: str) -> bool:
-    """Return ``True`` iff ``value`` is exactly one ``${{ ... }}`` token.
+def _segment_covers_value(value: str, segment: PlaceholderSegment) -> bool:
+    """Return ``True`` iff ``segment`` spans the whole of ``value``.
 
-    Mirrors the structural check ``_StepCommon._check_cel_wrappers``
-    performs for ``if`` / ``when`` / etc., but only as a *predicate*
-    — ``let`` values may legitimately be plain literals, so we use
-    this to discriminate rather than to reject.
+    Leading and trailing whitespace OUTSIDE the placeholder is
+    tolerated so a YAML scalar like ``"  ${{ x }}  "`` still counts
+    as a single CEL expression — whitespace is not significant in
+    CEL and a workflow author legitimately may insert it for
+    readability. Any non-whitespace literal text around the
+    placeholder disqualifies the value as a single-CEL binding;
+    this is what guards against the false positive on values like
+    ``"${{ a }}-${{ b }}"`` (which both starts with ``${{`` and
+    ends with ``}}`` but is actually two distinct placeholders).
     """
-    stripped = value.strip()
-    if not stripped.startswith(_CEL_TOKEN_PREFIX):
-        return False
-    if not stripped.endswith(_CEL_TOKEN_SUFFIX):
-        return False
-    # Reject the degenerate ``${{}}`` form (no inner expression).
-    return len(stripped) > len(_CEL_TOKEN_PREFIX) + len(_CEL_TOKEN_SUFFIX)
+    before = value[: segment.start]
+    after = value[segment.end :]
+    return before.strip() == "" and after.strip() == ""
 
 
 def _strip_wrapper(token: str) -> str:
     """Return the inner CEL expression text of a complete ``${{ ... }}`` token.
 
-    Assumes the caller has already verified the wrapper is present
-    (either through the document validator or
-    :func:`_is_complete_token`). The leading / trailing whitespace
-    of the token is preserved so the parser sees the same source
-    the author wrote (CEL is whitespace-insensitive but the
-    invariant aids debugging).
+    Used only by :func:`_collect_common_slots` — each common slot
+    has already been wrapper-validated by the document model
+    (``_StepCommon._check_cel_wrappers``) so the assumption holds
+    structurally. The leading / trailing whitespace of the token
+    is preserved so the parser sees the same source the author
+    wrote (CEL is whitespace-insensitive but the invariant aids
+    debugging).
     """
     stripped = token.strip()
     return stripped[len(_CEL_TOKEN_PREFIX) : -len(_CEL_TOKEN_SUFFIX)]

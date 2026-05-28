@@ -277,23 +277,90 @@ class TestCollectLetBindings:
         sites = collect_call_sites(doc)["derive"]
         assert [s.path for s in sites] == ["let.expr"]
 
-    def test_let_string_without_close_wrapper_treated_as_literal(self) -> None:
-        # A string that opens with ``${{`` but never closes is data,
-        # not CEL — the document model carries it through and the
-        # collector must skip it (parsing would raise).
+    def test_let_string_without_close_wrapper_raises(self) -> None:
+        # A string that opens with ``${{`` but never closes is now
+        # treated as a typo rather than literal data: the document
+        # model carries it through with no validation, so the
+        # collector eagerly raises ``CallSiteParseError`` with a
+        # locator that points at the offending ``let`` binding.
+        # (Pre-fix behaviour was to silently treat it as literal;
+        # WF-IMPL-020 review feedback flagged that as too
+        # forgiving.)
         doc = _doc(
             [
                 {
                     "id": "derive",
                     "let": {
                         "almost": "${{ but no close",
-                        "expr": "${{ inputs.target }}",
+                    },
+                },
+            ]
+        )
+        with pytest.raises(CallSiteParseError) as ei:
+            collect_call_sites(doc)
+        assert ei.value.step_id == "derive"
+        assert ei.value.path == "let.almost"
+
+    def test_let_mixed_content_string_rejected(self) -> None:
+        # ``"${{ a }}-${{ b }}"`` starts with ``${{`` and ends with
+        # ``}}`` but is actually two distinct placeholders. The
+        # simpler "starts and ends with wrapper" check would
+        # false-positively treat this as a single CEL expression
+        # and feed ``" a }}-${{ b "`` to ``custos_cel.parse`` —
+        # producing a confusing diagnostic. The collector now
+        # validates that the single matched segment covers the
+        # whole value before accepting the binding as CEL.
+        doc = _doc(
+            [
+                {
+                    "id": "derive",
+                    "let": {
+                        "mixed": "${{ a }}-${{ b }}",
+                    },
+                },
+            ]
+        )
+        with pytest.raises(CallSiteParseError) as ei:
+            collect_call_sites(doc)
+        assert ei.value.path == "let.mixed"
+        assert "mixed-content" in str(ei.value)
+
+    def test_let_literal_with_embedded_placeholder_rejected(self) -> None:
+        # A single placeholder surrounded by literal text is also
+        # mixed-content under ``let:`` and is rejected with the
+        # same diagnostic.
+        doc = _doc(
+            [
+                {
+                    "id": "derive",
+                    "let": {
+                        "decorated": "prefix-${{ x }}-suffix",
+                    },
+                },
+            ]
+        )
+        with pytest.raises(CallSiteParseError) as ei:
+            collect_call_sites(doc)
+        assert ei.value.path == "let.decorated"
+        assert "mixed-content" in str(ei.value)
+
+    def test_let_accepts_surrounding_whitespace(self) -> None:
+        # Whitespace around the placeholder is tolerated since CEL
+        # is whitespace-insensitive and authors legitimately may
+        # insert it for readability.
+        doc = _doc(
+            [
+                {
+                    "id": "derive",
+                    "let": {
+                        "padded": "   ${{ inputs.target }}   ",
                     },
                 },
             ]
         )
         sites = collect_call_sites(doc)["derive"]
-        assert [s.path for s in sites] == ["let.expr"]
+        assert [s.path for s in sites] == ["let.padded"]
+        assert sites[0].kind is CallSiteKind.LET
 
 
 # ===========================================================================

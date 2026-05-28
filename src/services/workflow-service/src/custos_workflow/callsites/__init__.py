@@ -27,10 +27,21 @@ YAML surface                   :class:`CallSiteKind`
 ============================  =================
 
 Single-call-site fields (``if``, ``when``, ``unless``, ``forEach``,
-``where``, ``let.<name>``) are validated by the document model
+``where``) are validated by the document model
 (``_StepCommon._check_cel_wrappers``) to be a complete
 ``${{ ... }}`` token; the collector emits one :class:`CallSite` per
 field with ``text_offset = 0``.
+
+``let.<name>`` bindings are NOT wrapper-validated by the document
+model — ``LetStep.let`` is typed ``dict[str, Any]`` so any value
+shape is structurally permitted. The collector itself discriminates:
+a string whose entire content is a single ``${{ ... }}`` placeholder
+(modulo surrounding whitespace) becomes a ``LET``-kind call site;
+anything else is carried through as literal data. Mixed-content
+``let:`` values (interleaved literals and placeholders, or multiple
+placeholders) are rejected as :class:`CallSiteParseError` so the
+ambiguity is surfaced at parse time rather than producing a
+confusing downstream CEL diagnostic.
 
 ``with`` values are arbitrary scalars and MAY contain *embedded*
 placeholders — e.g. ``image: "registry/${{ inputs.image }}:latest"``
