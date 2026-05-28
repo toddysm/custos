@@ -129,6 +129,15 @@ def create_app(
                     await local_providers.dapr_http_client.aclose()
                 except Exception:
                     logger.exception("dapr publisher http client aclose failed during shutdown")
+            # Release the httpx client the sidecar-admin fan-out owns
+            # (CONN-IMPL-028). ``None`` whenever no sidecar fan-out is
+            # wired (the test path and the M1 cut without ARM); the
+            # guard keeps the side-effect free in those cases.
+            if local_providers.sidecar_admin_client is not None:
+                try:
+                    await local_providers.sidecar_admin_client.aclose()
+                except Exception:
+                    logger.exception("sidecar-admin http client aclose failed during shutdown")
 
     app = FastAPI(
         title="Custos Connector Service",

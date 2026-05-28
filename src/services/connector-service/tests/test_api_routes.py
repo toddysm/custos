@@ -29,6 +29,7 @@ from custos_spl.interfaces.metadata_store import AuditEvent
 from fastapi.testclient import TestClient
 
 from custos_connector import create_app
+from custos_connector.audit import EVENT_LEASE_REVOKE_REQUESTED, EVENT_LEASE_REVOKED
 from custos_connector.identity import IdentityResolverRegistry
 from custos_connector.instances.service import InstanceService
 from custos_connector.middleware import CALLCTX_HEADER
@@ -40,6 +41,11 @@ from custos_connector.permissions import (
 from custos_connector.providers import Providers
 from custos_connector.runtime import HealthResult
 from custos_connector.settings import Settings
+from custos_connector.sidecar_admin import (
+    InMemorySidecarRegistry,
+    SidecarAdminClient,
+    SidecarRegistry,
+)
 from tests._fakes import (
     FakeCatalogAdapter,
     FakeConnectorInstanceAdapter,
@@ -154,6 +160,8 @@ def _build_providers(
     instances: FakeConnectorInstanceAdapter | None = None,
     leases: FakeLeaseAdapter | None = None,
     plugin_invoker: _StubPluginInvoker | None = None,
+    sidecar_admin_client: SidecarAdminClient | None = None,
+    sidecar_registry: SidecarRegistry | None = None,
 ) -> Providers:
     catalog_store = catalog or FakeCatalogAdapter(applied_revisions={1, 2})
     instance_store = instances or FakeConnectorInstanceAdapter(applied_revisions={1})
@@ -186,6 +194,8 @@ def _build_providers(
             metadata_store=metadata_store,
         ),
         instance_service=instance_service,
+        sidecar_admin_client=sidecar_admin_client,
+        sidecar_registry=sidecar_registry or InMemorySidecarRegistry(),
     )
 
 
@@ -796,6 +806,433 @@ def test_revoke_all_for_run_revokes_only_matching_run() -> None:
     assert body["total"] == 1
     assert body["revoked"] == 1
     assert body["results"][0]["leaseId"] == "a"
+
+
+# ---------------------------------------------------------------------------
+# Revoke flows — CONN-IMPL-028
+# ---------------------------------------------------------------------------
+#
+# These tests exercise the four behaviors added in CONN-IMPL-028:
+#   1. canonical ``connector.reason_required`` 400 on missing/empty reason
+#      (the design refuses pydantic's default 422 detail-array shape).
+#   2. ``lease.revoke-requested`` is emitted exactly once per operator
+#      action and ``lease.revoked`` once per actually-revoked lease.
+#   3. the audit ``actor`` on both event types is the operator's
+#      call-context ``principal_id`` (not the static lease-manager actor).
+#   4. best-effort sidecar fan-out per the design § Sidecar revoke
+#      control-channel API: leases bucketed by registered endpoint, one
+#      POST per bucket, transport errors and 503-shutting-down swallowed.
+
+
+def _audit_event_types(
+    metadata: FakeMetadataAdapter, *, workspace_id: str = _WORKSPACE
+) -> list[str]:
+    return [evt.event_type for ws, evt in metadata.append_audit_calls if ws == workspace_id]
+
+
+def _audit_events(
+    metadata: FakeMetadataAdapter, *, workspace_id: str = _WORKSPACE
+) -> list[AuditEvent]:
+    return [evt for ws, evt in metadata.append_audit_calls if ws == workspace_id]
+
+
+def test_revoke_single_missing_reason_returns_reason_required_400() -> None:
+    leases = FakeLeaseAdapter(applied_revisions={1})
+    providers = _build_providers(leases=leases)
+
+    import asyncio
+
+    async def _seed() -> None:
+        await leases.put_lease(WorkspaceId(_WORKSPACE), _build_lease(lease_id="lx"))
+
+    asyncio.run(_seed())
+    with _make_client(providers=providers) as (client, _):
+        # No body at all.
+        resp = client.post(
+            f"/v1/workspaces/{_WORKSPACE}/leases/lx:revoke",
+            headers=_ctx_header(),
+        )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "connector.reason_required"
+
+
+@pytest.mark.parametrize("body", [{"reason": ""}, {"reason": "   "}, {}])
+def test_revoke_single_empty_reason_returns_reason_required_400(
+    body: dict[str, str],
+) -> None:
+    leases = FakeLeaseAdapter(applied_revisions={1})
+    providers = _build_providers(leases=leases)
+
+    import asyncio
+
+    async def _seed() -> None:
+        await leases.put_lease(WorkspaceId(_WORKSPACE), _build_lease(lease_id="lx"))
+
+    asyncio.run(_seed())
+    with _make_client(providers=providers) as (client, _):
+        resp = client.post(
+            f"/v1/workspaces/{_WORKSPACE}/leases/lx:revoke",
+            json=body,
+            headers=_ctx_header(),
+        )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "connector.reason_required"
+
+
+def test_revoke_all_for_instance_missing_reason_returns_reason_required_400() -> None:
+    providers = _build_providers()
+    with _make_client(providers=providers) as (client, _):
+        resp = client.post(
+            f"/v1/workspaces/{_WORKSPACE}/connectors/instance-1/leases:revoke-all",
+            headers=_ctx_header(),
+        )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "connector.reason_required"
+
+
+def test_revoke_all_for_run_empty_reason_returns_reason_required_400() -> None:
+    providers = _build_providers()
+    with _make_client(providers=providers) as (client, _):
+        resp = client.post(
+            f"/v1/workspaces/{_WORKSPACE}/runs/run-a/leases:revoke-all",
+            json={"reason": "   "},
+            headers=_ctx_header(),
+        )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "connector.reason_required"
+
+
+def test_revoke_single_emits_requested_and_revoked_with_operator_actor() -> None:
+    """Single revoke emits one `lease.revoke-requested` + one `lease.revoked`,
+    both carrying the operator's call-context ``principal_id`` as ``actor``.
+    """
+    metadata = FakeMetadataAdapter(applied_revisions={1, 2, 3, 4})
+    leases = FakeLeaseAdapter(applied_revisions={1})
+    providers = _build_providers(metadata=metadata, leases=leases)
+
+    import asyncio
+
+    async def _seed() -> None:
+        await leases.put_lease(WorkspaceId(_WORKSPACE), _build_lease(lease_id="lx"))
+
+    asyncio.run(_seed())
+    with _make_client(providers=providers) as (client, _):
+        resp = client.post(
+            f"/v1/workspaces/{_WORKSPACE}/leases/lx:revoke",
+            json={"reason": "ops-incident"},
+            headers=_ctx_header(principal_id="op:carol"),
+        )
+    assert resp.status_code == 200
+    assert _audit_event_types(metadata) == [
+        EVENT_LEASE_REVOKE_REQUESTED,
+        EVENT_LEASE_REVOKED,
+    ]
+    events = _audit_events(metadata)
+    assert events[0].actor == "op:carol"
+    assert events[0].payload["operator"] == "op:carol"
+    assert events[0].payload["lease_ids"] == ["lx"]
+    assert events[0].subject == {"selector_type": "lease", "selector_value": "lx"}
+    assert events[1].actor == "op:carol"
+    assert events[1].payload["revoke_reason"] == "ops-incident"
+
+
+def test_revoke_all_for_instance_emits_one_requested_and_n_revoked() -> None:
+    metadata = FakeMetadataAdapter(applied_revisions={1, 2, 3, 4})
+    leases = FakeLeaseAdapter(applied_revisions={1})
+    providers = _build_providers(metadata=metadata, leases=leases)
+
+    import asyncio
+
+    async def _seed() -> None:
+        for i in range(3):
+            await leases.put_lease(
+                WorkspaceId(_WORKSPACE),
+                _build_lease(lease_id=f"r-{i}", instance_id="instance-1"),
+            )
+
+    asyncio.run(_seed())
+    with _make_client(providers=providers) as (client, _):
+        resp = client.post(
+            f"/v1/workspaces/{_WORKSPACE}/connectors/instance-1/leases:revoke-all",
+            json={"reason": "rotate"},
+            headers=_ctx_header(principal_id="op:dave"),
+        )
+    assert resp.status_code == 200
+    types = _audit_event_types(metadata)
+    assert types.count(EVENT_LEASE_REVOKE_REQUESTED) == 1
+    assert types.count(EVENT_LEASE_REVOKED) == 3
+    requested = next(
+        evt for evt in _audit_events(metadata) if evt.event_type == EVENT_LEASE_REVOKE_REQUESTED
+    )
+    assert requested.actor == "op:dave"
+    assert requested.payload["operator"] == "op:dave"
+    assert sorted(requested.payload["lease_ids"]) == ["r-0", "r-1", "r-2"]
+    assert requested.subject == {"selector_type": "instance", "selector_value": "instance-1"}
+    for evt in _audit_events(metadata):
+        if evt.event_type == EVENT_LEASE_REVOKED:
+            assert evt.actor == "op:dave"
+
+
+def test_revoke_all_for_run_emits_one_requested_and_only_matching_revoked() -> None:
+    metadata = FakeMetadataAdapter(applied_revisions={1, 2, 3, 4})
+    leases = FakeLeaseAdapter(applied_revisions={1})
+    providers = _build_providers(metadata=metadata, leases=leases)
+
+    import asyncio
+
+    async def _seed() -> None:
+        await leases.put_lease(
+            WorkspaceId(_WORKSPACE),
+            _build_lease(lease_id="ra", run_id="run-a"),
+        )
+        await leases.put_lease(
+            WorkspaceId(_WORKSPACE),
+            _build_lease(lease_id="rb", run_id="run-b"),
+        )
+
+    asyncio.run(_seed())
+    with _make_client(providers=providers) as (client, _):
+        resp = client.post(
+            f"/v1/workspaces/{_WORKSPACE}/runs/run-a/leases:revoke-all",
+            json={"reason": "cancel"},
+            headers=_ctx_header(principal_id="op:erin"),
+        )
+    assert resp.status_code == 200
+    types = _audit_event_types(metadata)
+    assert types.count(EVENT_LEASE_REVOKE_REQUESTED) == 1
+    assert types.count(EVENT_LEASE_REVOKED) == 1
+    requested = next(
+        evt for evt in _audit_events(metadata) if evt.event_type == EVENT_LEASE_REVOKE_REQUESTED
+    )
+    assert requested.payload["lease_ids"] == ["ra"]
+    assert requested.subject == {"selector_type": "run", "selector_value": "run-a"}
+
+
+def _make_sidecar_admin_client(
+    handler: Any,
+) -> SidecarAdminClient:
+    """Build a SidecarAdminClient backed by an in-process httpx MockTransport.
+
+    Tests pass a single ``handler(httpx.Request) -> httpx.Response`` that
+    captures the incoming POSTs for later assertion.
+    """
+    import httpx
+
+    transport = httpx.MockTransport(handler)
+    http_client = httpx.AsyncClient(transport=transport)
+    return SidecarAdminClient(http_client=http_client)
+
+
+def test_revoke_all_for_run_fans_out_to_each_registered_sidecar() -> None:
+    """Two leases on two different sidecars → two endpoint-scoped POSTs."""
+    import httpx
+
+    metadata = FakeMetadataAdapter(applied_revisions={1, 2, 3, 4})
+    leases = FakeLeaseAdapter(applied_revisions={1})
+
+    captured: list[tuple[str, dict[str, Any]]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured.append((str(request.url), json.loads(request.content.decode())))
+        # Echo every lease as ``revoked`` for whichever bucket called us.
+        body = json.loads(request.content.decode())
+        return httpx.Response(
+            status_code=200,
+            json={"results": [{"leaseId": lid, "status": "revoked"} for lid in body["leaseIds"]]},
+        )
+
+    sidecar_client = _make_sidecar_admin_client(_handler)
+    registry = InMemorySidecarRegistry()
+    registry.register(lease_id="la", endpoint="http://sidecar-a:9443")
+    registry.register(lease_id="lb", endpoint="http://sidecar-b:9443")
+
+    providers = _build_providers(
+        metadata=metadata,
+        leases=leases,
+        sidecar_admin_client=sidecar_client,
+        sidecar_registry=registry,
+    )
+
+    import asyncio
+
+    async def _seed() -> None:
+        await leases.put_lease(
+            WorkspaceId(_WORKSPACE),
+            _build_lease(lease_id="la", run_id="run-x"),
+        )
+        await leases.put_lease(
+            WorkspaceId(_WORKSPACE),
+            _build_lease(lease_id="lb", run_id="run-x"),
+        )
+
+    asyncio.run(_seed())
+    with _make_client(providers=providers) as (client, _):
+        resp = client.post(
+            f"/v1/workspaces/{_WORKSPACE}/runs/run-x/leases:revoke-all",
+            json={"reason": "fan-out-test"},
+            headers=_ctx_header(),
+        )
+    assert resp.status_code == 200
+    # Exactly one call per registered endpoint, each carrying only its own
+    # lease id. The bucket-by-endpoint reduction is the key contract.
+    urls = sorted(url for url, _ in captured)
+    assert urls == [
+        "http://sidecar-a:9443/sidecar-admin/v1/revoke",
+        "http://sidecar-b:9443/sidecar-admin/v1/revoke",
+    ]
+    by_url = dict(captured)
+    assert by_url["http://sidecar-a:9443/sidecar-admin/v1/revoke"]["leaseIds"] == ["la"]
+    assert by_url["http://sidecar-b:9443/sidecar-admin/v1/revoke"]["leaseIds"] == ["lb"]
+
+
+def test_revoke_succeeds_with_no_sidecar_registered() -> None:
+    """Empty registry → DB revoke only, no fan-out, operator gets 200."""
+    import httpx
+
+    metadata = FakeMetadataAdapter(applied_revisions={1, 2, 3, 4})
+    leases = FakeLeaseAdapter(applied_revisions={1})
+
+    calls: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(status_code=200, json={"results": []})
+
+    providers = _build_providers(
+        metadata=metadata,
+        leases=leases,
+        sidecar_admin_client=_make_sidecar_admin_client(_handler),
+        sidecar_registry=InMemorySidecarRegistry(),
+    )
+
+    import asyncio
+
+    async def _seed() -> None:
+        await leases.put_lease(WorkspaceId(_WORKSPACE), _build_lease(lease_id="lx"))
+
+    asyncio.run(_seed())
+    with _make_client(providers=providers) as (client, _):
+        resp = client.post(
+            f"/v1/workspaces/{_WORKSPACE}/leases/lx:revoke",
+            json={"reason": "no-sidecar"},
+            headers=_ctx_header(),
+        )
+    assert resp.status_code == 200
+    assert resp.json() == {"leaseId": "lx", "status": "revoked"}
+    assert calls == []  # zero fan-out attempts
+
+
+def test_revoke_succeeds_when_sidecar_returns_503_shutting_down() -> None:
+    """Sidecar 503 (shutting down) is treated as terminal-revoke success."""
+    import httpx
+
+    metadata = FakeMetadataAdapter(applied_revisions={1, 2, 3, 4})
+    leases = FakeLeaseAdapter(applied_revisions={1})
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code=503)
+
+    registry = InMemorySidecarRegistry()
+    registry.register(lease_id="lx", endpoint="http://sidecar:9443")
+
+    providers = _build_providers(
+        metadata=metadata,
+        leases=leases,
+        sidecar_admin_client=_make_sidecar_admin_client(_handler),
+        sidecar_registry=registry,
+    )
+
+    import asyncio
+
+    async def _seed() -> None:
+        await leases.put_lease(WorkspaceId(_WORKSPACE), _build_lease(lease_id="lx"))
+
+    asyncio.run(_seed())
+    with _make_client(providers=providers) as (client, _):
+        resp = client.post(
+            f"/v1/workspaces/{_WORKSPACE}/leases/lx:revoke",
+            json={"reason": "shutting-down"},
+            headers=_ctx_header(),
+        )
+    assert resp.status_code == 200
+    assert resp.json() == {"leaseId": "lx", "status": "revoked"}
+
+
+def test_revoke_succeeds_when_sidecar_transport_error() -> None:
+    """Transport failure → swallowed; operator gets 200 from DB revoke."""
+    import httpx
+
+    metadata = FakeMetadataAdapter(applied_revisions={1, 2, 3, 4})
+    leases = FakeLeaseAdapter(applied_revisions={1})
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    registry = InMemorySidecarRegistry()
+    registry.register(lease_id="lx", endpoint="http://sidecar:9443")
+
+    providers = _build_providers(
+        metadata=metadata,
+        leases=leases,
+        sidecar_admin_client=_make_sidecar_admin_client(_handler),
+        sidecar_registry=registry,
+    )
+
+    import asyncio
+
+    async def _seed() -> None:
+        await leases.put_lease(WorkspaceId(_WORKSPACE), _build_lease(lease_id="lx"))
+
+    asyncio.run(_seed())
+    with _make_client(providers=providers) as (client, _):
+        resp = client.post(
+            f"/v1/workspaces/{_WORKSPACE}/leases/lx:revoke",
+            json={"reason": "transport-down"},
+            headers=_ctx_header(),
+        )
+    assert resp.status_code == 200
+    assert resp.json() == {"leaseId": "lx", "status": "revoked"}
+
+
+def test_list_leases_aggregates_active_set_via_cs_store() -> None:
+    """Authoritative live-state listing reads the CS lease store, not sidecars.
+
+    The design § Operator Admin Surface contract is that ``GET .../leases``
+    returns every active lease across every registered sidecar. The store
+    is the canonical aggregate so a single ``list_active_leases`` covers
+    it — no per-sidecar fan-in. This regression-tests that three leases
+    nominally hosted across two sidecars (modeled by two distinct
+    ``runId``s under the same instance) all surface in a single response.
+    """
+    leases = FakeLeaseAdapter(applied_revisions={1})
+    providers = _build_providers(leases=leases)
+
+    import asyncio
+
+    async def _seed() -> None:
+        # Two on sidecar A (run-a), one on sidecar B (run-b) — same instance.
+        await leases.put_lease(
+            WorkspaceId(_WORKSPACE),
+            _build_lease(lease_id="agg-1", instance_id="instance-1", run_id="run-a"),
+        )
+        await leases.put_lease(
+            WorkspaceId(_WORKSPACE),
+            _build_lease(lease_id="agg-2", instance_id="instance-1", run_id="run-a"),
+        )
+        await leases.put_lease(
+            WorkspaceId(_WORKSPACE),
+            _build_lease(lease_id="agg-3", instance_id="instance-1", run_id="run-b"),
+        )
+
+    asyncio.run(_seed())
+    with _make_client(providers=providers) as (client, _):
+        resp = client.get(
+            f"/v1/workspaces/{_WORKSPACE}/connectors/instance-1/leases",
+            headers=_ctx_header(),
+        )
+    assert resp.status_code == 200
+    items = resp.json()["items"]
+    assert sorted(item["leaseId"] for item in items) == ["agg-1", "agg-2", "agg-3"]
 
 
 # ===========================================================================
