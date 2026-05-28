@@ -12,18 +12,21 @@ Design: [`design/components/workflow-service/design.md`](../../../design/compone
 
 ## Status
 
-**Phase A scaffold + FastAPI surface + WorkflowDocument models** —
+**Phase A scaffold + FastAPI surface + WorkflowDocument models + SchemaBindings derivation** —
 WF-IMPL-013 ([#347](https://github.com/toddysm/custos/issues/347)),
 WF-IMPL-014 ([#348](https://github.com/toddysm/custos/issues/348)),
-WF-IMPL-015 ([#349](https://github.com/toddysm/custos/issues/349)), and
-WF-IMPL-016 ([#350](https://github.com/toddysm/custos/issues/350)). The
+WF-IMPL-015 ([#349](https://github.com/toddysm/custos/issues/349)),
+WF-IMPL-016 ([#350](https://github.com/toddysm/custos/issues/350)), and
+WF-IMPL-017 ([#351](https://github.com/toddysm/custos/issues/351)). The
 package skeleton, the runnable `create_app()` factory, the
 `python -m custos_workflow` entry point, the `/healthz` and `/readyz`
 probes, the call-context middleware shim, the Helm subchart, the
-CI gate (`.github/workflows/python-services.yml`), and the typed
-`WorkflowDocument` model + YAML loader are real. The remaining
-Definition Compiler internals (DAG construction, retry / on-error
-binding) land in WF-IMPL-017 onwards, tracked under
+CI gate (`.github/workflows/python-services.yml`), the typed
+`WorkflowDocument` model + YAML loader, and the per-step
+`SchemaBindings` derivation (with an `ActivityTypeRegistry`
+Protocol) are real. The remaining Definition Compiler internals
+(DAG construction, retry / on-error binding) land in WF-IMPL-018
+onwards, tracked under
 [#363](https://github.com/toddysm/custos/issues/363) (WF-IMPL-000-COMPILER).
 
 The Expression Evaluator (the first sub-module) is already in
@@ -99,6 +102,10 @@ src/services/workflow-service/
 │       │   ├── __init__.py    # public re-exports
 │       │   ├── models.py      # WorkflowDocument + Step union + RetryPolicy …
 │       │   └── loader.py      # parse_document() + DocumentParseError
+│       ├── bindings/          # per-step SchemaBindings + ActivityTypeRegistry
+│       │   ├── __init__.py    # public re-exports
+│       │   ├── registry.py    # ActivityTypeRegistry Protocol + in-memory impl
+│       │   └── derive.py      # derive_bindings(doc, registry) → {step_id: bindings}
 │       └── py.typed
 └── tests/
     ├── test_smoke.py             # package import + factory smoke
@@ -106,10 +113,11 @@ src/services/workflow-service/
     ├── test_call_context.py      # header presence/absence + dev/prod mode
     ├── test_healthz.py           # liveness/readiness status codes
     ├── test_document_models.py   # WorkflowDocument + Step union + retry
-    └── test_document_loader.py   # YAML → WorkflowDocument + error wrapping
+    ├── test_document_loader.py   # YAML → WorkflowDocument + error wrapping
+    ├── test_bindings_registry.py # InMemoryActivityTypeRegistry contract
+    └── test_bindings_derive.py   # per-step ordering + activity / let / sub-wf
 ```
 
 Subsequent WF-IMPL-* tasks add the remaining Definition Compiler
-modules under `src/custos_workflow/` (`bindings/`, `graph/`,
-`callsites/`, `retry/`, `on_error/`, `errors.py`, `compiler.py`,
-`_telemetry.py`).
+modules under `src/custos_workflow/` (`graph/`, `callsites/`,
+`retry/`, `on_error/`, `errors.py`, `compiler.py`, `_telemetry.py`).
