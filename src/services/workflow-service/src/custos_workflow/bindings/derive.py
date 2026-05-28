@@ -76,6 +76,16 @@ def _inputs_schema(doc: WorkflowDocument) -> dict[str, Any]:
     inputs = doc.spec.inputs or {}
     for name, decl in inputs.items():
         prop: dict[str, Any] = {"type": decl.type}
+        # ``custos_cel._schema_to_celtype`` rejects an array schema
+        # without an ``items`` sub-schema, so an ``inputs.targets`` of
+        # type ``array`` would make every reference to that input fail
+        # type-check. The Catalog ``InputDefinition`` does not yet
+        # carry an element schema, so we emit a permissive object
+        # fallback (``ListType(MapType(string→null))`` in CEL terms).
+        # Tightening element types is a follow-up alongside richer
+        # ``InputDefinition`` shape.
+        if decl.type == "array":
+            prop["items"] = {"type": "object"}
         if decl.description is not None:
             prop["description"] = decl.description
         if decl.default is not None:
@@ -101,12 +111,16 @@ def _activity_outputs_schema(
     """
     try:
         return registry.get_outputs_schema(step.activity)
-    except ActivityTypeNotFoundError:
-        # Re-raise with a richer message; the public taxonomy lift
-        # happens in WF-IMPL-024.
+    except ActivityTypeNotFoundError as exc:
+        # Re-raise carrying both the machine-readable ref (preserved
+        # in ``args[0]`` and ``.activity_ref``) and a richer human
+        # message. The public taxonomy lift happens in WF-IMPL-024.
         raise ActivityTypeNotFoundError(
-            f"step {step.id!r}: activity reference {step.activity!r} is not "
-            "registered with the ActivityTypeRegistry"
+            exc.activity_ref,
+            message=(
+                f"step {step.id!r}: activity reference {step.activity!r} is not "
+                "registered with the ActivityTypeRegistry"
+            ),
         ) from None
 
 
@@ -115,11 +129,15 @@ def _let_outputs_schema(step: LetStep) -> dict[str, Any]:
 
     The Compiler does not yet know each let value's type — that is
     WF-IMPL-022's responsibility (the type checker walks each let
-    value's CEL AST and records its inferred type). Emit one open
-    property per let key so downstream type-check resolves
-    ``steps.<id>.outputs.<name>`` to a permissive type until tightened.
+    value's CEL AST and records its inferred type). Emit one
+    permissive object property per let key so downstream type-check
+    resolves ``steps.<id>.outputs.<name>`` to an opaque object
+    (``MapType(string→null)`` in CEL terms) until tightened. A plain
+    ``{}`` is rejected by ``custos_cel._schema_to_celtype`` because
+    it has no ``type`` key, which would silently break every later
+    reference to a derived let value.
     """
-    properties: dict[str, dict[str, Any]] = {name: {} for name in step.let}
+    properties: dict[str, dict[str, Any]] = {name: {"type": "object"} for name in step.let}
     return {
         "type": "object",
         "properties": properties,

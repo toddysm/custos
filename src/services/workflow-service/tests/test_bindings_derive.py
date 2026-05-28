@@ -49,6 +49,8 @@ _DOC_YAML = textwrap.dedent(
           type: integer
           default: 10
           description: critical-count threshold
+        regions:
+          type: array
       steps:
         - id: scan
           activity: security/scan@1
@@ -76,6 +78,12 @@ class TestInputsSchema:
         assert scan_inputs["properties"]["threshold"]["type"] == "integer"
         assert scan_inputs["properties"]["threshold"]["default"] == 10
         assert scan_inputs["properties"]["threshold"]["description"] == ("critical-count threshold")
+        # Array inputs MUST carry a fallback ``items`` so the CEL
+        # type checker can drill into them. See review comment
+        # #3315703814.
+        regions = scan_inputs["properties"]["regions"]
+        assert regions["type"] == "array"
+        assert regions["items"] == {"type": "object"}
         assert scan_inputs["required"] == ["target"]
 
     def test_inputs_omitted_when_spec_has_none(self) -> None:
@@ -146,6 +154,12 @@ class TestActivityOutputs:
         # Error message names the offending step + ref.
         assert "scan" in str(exc_info.value)
         assert "security/scan@1" in str(exc_info.value)
+        # ``args[0]`` and ``.activity_ref`` must remain the raw
+        # reference so downstream taxonomy code can read it without
+        # re-parsing the diagnostic string. See review comment
+        # #3315703861.
+        assert exc_info.value.args[0] == "security/scan@1"
+        assert exc_info.value.activity_ref == "security/scan@1"
 
 
 class TestLetOutputs:
@@ -157,9 +171,11 @@ class TestLetOutputs:
         assert derive_schema["type"] == "object"
         props = derive_schema["properties"]
         assert set(props.keys()) == {"severity", "verdict"}
-        # Permissive value types until WF-IMPL-022 tightens them.
-        assert props["severity"] == {}
-        assert props["verdict"] == {}
+        # Permissive object types so the CEL type checker can drill
+        # into them; WF-IMPL-022 tightens these to inferred per-value
+        # types. See review comment #3315703836.
+        assert props["severity"] == {"type": "object"}
+        assert props["verdict"] == {"type": "object"}
 
 
 class TestSubWorkflowStub:

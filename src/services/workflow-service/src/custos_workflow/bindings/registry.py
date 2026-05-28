@@ -23,10 +23,25 @@ from typing import Any, Protocol
 class ActivityTypeNotFoundError(LookupError):
     """Raised when an activity reference is not known to the registry.
 
-    Carries the activity reference as ``args[0]`` so the compiler can
-    surface a precise error pointing at the offending step. WF-IMPL-024
-    will lift this into the public ``CompileError`` taxonomy.
+    The missing reference is always preserved as ``args[0]`` *and* as
+    the :attr:`activity_ref` attribute so downstream taxonomy code
+    (WF-IMPL-024) can extract it programmatically. An optional
+    diagnostic ``message`` augments ``str(exc)`` for human readers
+    without disturbing the machine-readable form. Re-raise sites that
+    want a richer message should use ``raise ActivityTypeNotFoundError(
+    activity_ref, message=...) from exc`` rather than re-formatting
+    ``args[0]``.
     """
+
+    def __init__(self, activity_ref: str, *, message: str | None = None) -> None:
+        # ``args[0]`` MUST remain the raw reference so callers can
+        # rely on it as a stable, machine-readable handle.
+        super().__init__(activity_ref)
+        self.activity_ref = activity_ref
+        self._message = message
+
+    def __str__(self) -> str:
+        return self._message if self._message is not None else self.activity_ref
 
 
 class ActivityTypeRegistry(Protocol):
