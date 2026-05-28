@@ -154,6 +154,48 @@ class TestStepCommonCelSlots:
             ActivityStep.model_validate(_valid_activity_payload(parallel=[{"id": "x"}]))
 
 
+class TestStepCommonNeeds:
+    def test_accepts_well_formed_list(self) -> None:
+        step = ActivityStep.model_validate(
+            _valid_activity_payload(id="b", needs=["a", "scan-1"]),
+        )
+        assert step.needs == ["a", "scan-1"]
+
+    def test_none_when_omitted(self) -> None:
+        step = ActivityStep.model_validate(_valid_activity_payload())
+        assert step.needs is None
+
+    def test_empty_list_rejected(self) -> None:
+        # ``min_length=1``: \"needs:\" must either be absent or have
+        # at least one entry; an empty list is a YAML smell and is
+        # blocked at parse time.
+        with pytest.raises(ValidationError):
+            ActivityStep.model_validate(_valid_activity_payload(needs=[]))
+
+    def test_invalid_step_id_grammar_rejected(self) -> None:
+        # ``Scan-Step`` violates the DNS-1123-style step-id grammar
+        # (capital letter). The validator surfaces the offending
+        # entry verbatim.
+        with pytest.raises(ValidationError, match="does not match the step-id grammar"):
+            ActivityStep.model_validate(
+                _valid_activity_payload(id="b", needs=["Scan-Step"]),
+            )
+
+    def test_self_reference_rejected(self) -> None:
+        # A step listing its own id in ``needs:`` is rejected at
+        # parse time so the topology layer never sees a self-loop.
+        with pytest.raises(ValidationError, match="refers to itself"):
+            ActivityStep.model_validate(
+                _valid_activity_payload(id="scan", needs=["scan"]),
+            )
+
+    def test_duplicate_entries_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="duplicated"):
+            ActivityStep.model_validate(
+                _valid_activity_payload(id="b", needs=["a", "a"]),
+            )
+
+
 # ---------------------------------------------------------------------------
 # Activity step
 # ---------------------------------------------------------------------------
