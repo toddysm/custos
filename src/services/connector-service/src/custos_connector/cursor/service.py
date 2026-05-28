@@ -54,6 +54,7 @@ from custos_spl import LeaseBusy, LeaseExpired, LeaseHandle
 from custos_spl.ids import ConnectorInstanceId, WorkspaceId
 from custos_spl.interfaces.metadata_store import ConnectorCursor
 
+from custos_connector._telemetry import CURSOR_LAG_REGISTRY, observe_pull_tick
 from custos_connector.audit import (
     audit_cursor_advanced,
     audit_cursor_encoding_mismatch,
@@ -417,73 +418,88 @@ class CursorService:
         """
         ws = WorkspaceId(workspace_id)
         inst_id = ConnectorInstanceId(instance_id)
-        instance = await self._load_eligible_instance(ws, inst_id)
-        type_version = await self._catalog.get_connector_type_version(
-            instance.type, instance.version
-        )
-        if type_version is None:
-            raise CursorInstanceUnavailable(
-                instance_id,
-                f"connector-type ({instance.type!r}, {instance.version!r}) "
-                "is not registered in the catalog",
+        with observe_pull_tick() as _span:
+            _span.set_attribute("workspaceId", workspace_id)
+            _span.set_attribute("connectorInstanceId", instance_id)
+            instance = await self._load_eligible_instance(ws, inst_id)
+            type_version = await self._catalog.get_connector_type_version(
+                instance.type, instance.version
             )
-        encoding = _extract_cursor_encoding(type_version)
+            if type_version is None:
+                raise CursorInstanceUnavailable(
+                    instance_id,
+                    f"connector-type ({instance.type!r}, {instance.version!r}) "
+                    "is not registered in the catalog",
+                )
+            encoding = _extract_cursor_encoding(type_version)
 
-        row_before, lease = await self._metadata.acquire_cursor_lease(
-            ws, inst_id, self._holder_id, self._lease_ttl_seconds
-        )
-        envelope_before = _row_to_envelope_record(row_before, encoding)
+            row_before, lease = await self._metadata.acquire_cursor_lease(
+                ws, inst_id, self._holder_id, self._lease_ttl_seconds
+            )
+            envelope_before = _row_to_envelope_record(row_before, encoding)
 
-        try:
-            listen_result = await self._call_plugin(
-                instance=instance,
-                type_version=type_version,
-                encoding=encoding,
-                envelope_before=envelope_before,
-                row_before=row_before,
-                lease=lease,
+            try:
+                listen_result = await self._call_plugin(
+                    instance=instance,
+                    type_version=type_version,
+                    encoding=encoding,
+                    envelope_before=envelope_before,
+                    row_before=row_before,
+                    lease=lease,
+                    workspace_id=workspace_id,
+                )
+
+                # ---- at-least-once: publish-ack EVERYTHING before commit
+                await self._publisher(ws, instance, listen_result.events)
+
+                new_persisted = _resolve_committed_value(
+                    listen_result.next_cursor, row_before.value
+                )
+                commit_at = self._clock()
+                row_after = await self._metadata.commit_cursor(ws, lease, new_persisted, commit_at)
+                envelope_after = _row_to_envelope_record(row_after, encoding)
+            except (LeaseBusy, LeaseExpired):
+                await self._release_lease_quietly(ws, lease)
+                raise
+            except CursorHalted:
+                # Already handled (audit + halt + release) inside ``_call_plugin``.
+                raise
+            except BaseException:
+                await self._release_lease_quietly(ws, lease)
+                raise
+
+            await audit_cursor_advanced(
+                self._metadata,
                 workspace_id=workspace_id,
+                actor=self._actor,
+                instance_id=instance_id,
+                from_encoding=envelope_before.encoding,
+                from_value_fingerprint=_fingerprint_persisted(row_before.value),
+                from_value_length=_length_persisted(row_before.value),
+                to_encoding=envelope_after.encoding,
+                to_value_fingerprint=_fingerprint_persisted(row_after.value),
+                to_value_length=_length_persisted(row_after.value),
+                event_count=len(listen_result.events),
+                reason="tick",
             )
 
-            # ---- at-least-once: publish-ack EVERYTHING before commit
-            await self._publisher(ws, instance, listen_result.events)
+            # CONN-IMPL-029: record the advancedAt timestamp under the
+            # registry so the cursor-lag observable gauge reports a
+            # fresh (now - advancedAt) age on every Prometheus scrape.
+            CURSOR_LAG_REGISTRY.record_advanced(
+                workspace_id=workspace_id,
+                instance_id=instance_id,
+                advanced_at=commit_at,
+            )
+            _span.set_attribute("eventCount", len(listen_result.events))
 
-            new_persisted = _resolve_committed_value(listen_result.next_cursor, row_before.value)
-            commit_at = self._clock()
-            row_after = await self._metadata.commit_cursor(ws, lease, new_persisted, commit_at)
-            envelope_after = _row_to_envelope_record(row_after, encoding)
-        except (LeaseBusy, LeaseExpired):
-            await self._release_lease_quietly(ws, lease)
-            raise
-        except CursorHalted:
-            # Already handled (audit + halt + release) inside ``_call_plugin``.
-            raise
-        except BaseException:
-            await self._release_lease_quietly(ws, lease)
-            raise
-
-        await audit_cursor_advanced(
-            self._metadata,
-            workspace_id=workspace_id,
-            actor=self._actor,
-            instance_id=instance_id,
-            from_encoding=envelope_before.encoding,
-            from_value_fingerprint=_fingerprint_persisted(row_before.value),
-            from_value_length=_length_persisted(row_before.value),
-            to_encoding=envelope_after.encoding,
-            to_value_fingerprint=_fingerprint_persisted(row_after.value),
-            to_value_length=_length_persisted(row_after.value),
-            event_count=len(listen_result.events),
-            reason="tick",
-        )
-
-        return TickResult(
-            instance_id=instance_id,
-            event_count=len(listen_result.events),
-            cursor_before=envelope_before,
-            cursor_after=envelope_after,
-            receiver_endpoint=listen_result.receiver_endpoint,
-        )
+            return TickResult(
+                instance_id=instance_id,
+                event_count=len(listen_result.events),
+                cursor_before=envelope_before,
+                cursor_after=envelope_after,
+                receiver_endpoint=listen_result.receiver_endpoint,
+            )
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -558,6 +574,13 @@ class CursorService:
                 HALT_STATUS_ENCODING_MISMATCH,
             )
             await self._release_lease_quietly(WorkspaceId(workspace_id), lease)
+            # CONN-IMPL-029: forget the cursor-lag entry on halt so
+            # the gauge stops reporting stale lag for an instance
+            # the scheduler is no longer ticking.
+            CURSOR_LAG_REGISTRY.forget(
+                workspace_id=workspace_id,
+                instance_id=str(instance.instance_id),
+            )
             raise CursorEncodingMismatchHalt(
                 exc.detail,
                 persisted_encoding=exc.persisted_encoding or encoding,
@@ -580,6 +603,12 @@ class CursorService:
                 HALT_STATUS_EXPIRED,
             )
             await self._release_lease_quietly(WorkspaceId(workspace_id), lease)
+            # CONN-IMPL-029: forget the cursor-lag entry on expired
+            # halt for the same reason as the encoding-mismatch path.
+            CURSOR_LAG_REGISTRY.forget(
+                workspace_id=workspace_id,
+                instance_id=str(instance.instance_id),
+            )
             raise CursorExpiredHalt(exc.detail) from exc
 
     async def _flip_instance_status(

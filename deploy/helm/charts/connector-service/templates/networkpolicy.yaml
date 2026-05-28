@@ -1,0 +1,70 @@
+{{- /*
+NetworkPolicy: connector-service ingress allow.
+
+Phase K (CONN-IMPL-029) adds an unauthenticated ``/metrics`` endpoint
+to the service. The call-context middleware deliberately bypasses
+``/metrics`` so the in-cluster Prometheus scraper can read it without
+minting an internal token. The trust boundary for that exposure is
+this NetworkPolicy.
+
+Because ``/metrics`` and the rest of the connector-service API share
+a single port (``service.port``), this policy MUST also allow the
+legitimate service-to-service callers (API Gateway, Catalog Service,
+etc.) — otherwise enabling the umbrella deny-all would block normal
+API traffic. The two ingress rules below cover:
+
+1. Prometheus scrape from the configured monitoring namespace
+   (default: ``kubernetes.io/metadata.name: monitoring``). Optional
+   pod-selector narrows the source further.
+2. In-release service-to-service traffic from any pod that carries
+   the umbrella's release label (default selector matches the
+   release's app-tier label set; override per-profile if the
+   umbrella's labeling scheme changes).
+
+When ``networkPolicy.enabled=false`` (the umbrella's current
+``networkPolicies.enabled: false`` posture) the template is omitted
+entirely; the cluster ingress posture remains unchanged and
+``/metrics`` exposure is still bounded by the ClusterIP service
+surface.
+*/ -}}
+{{- if .Values.networkPolicy.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "svc.fullname" . }}-ingress
+  labels:
+    {{- include "svc.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "svc.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    # Rule 1: Prometheus scrape.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.prometheusNamespaceSelector | nindent 14 }}
+          {{- with .Values.networkPolicy.prometheusPodSelector }}
+          podSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+          {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.port }}
+    # Rule 2: In-cluster service-to-service callers (API Gateway,
+    # Catalog Service, Workflow Service, etc.) reach the
+    # connector-service API on the same port. Allow ingress from any
+    # pod in the same namespace carrying the release's umbrella
+    # ``app.kubernetes.io/part-of`` label by default; override the
+    # selector per-profile when ops uses a different label scheme.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.serviceClientsPodSelector | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.port }}
+{{- end }}

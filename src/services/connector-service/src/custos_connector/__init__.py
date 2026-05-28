@@ -31,12 +31,14 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from fastapi.exceptions import RequestValidationError
+from prometheus_client import make_asgi_app
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from custos_connector._runtime import install_otel_providers
 from custos_connector.api import (
     audit_router,
     connector_types_router,
@@ -93,6 +95,14 @@ def create_app(
     """
     from fastapi import FastAPI
 
+    # CONN-IMPL-029 (Phase K) — install the process-wide OTel SDK
+    # providers eagerly so the ``/metrics`` endpoint mounted below
+    # serves the Prometheus-formatted output for instruments created at
+    # module import time. ``install_otel_providers`` is idempotent;
+    # repeated ``create_app`` calls in the same process (e.g. test
+    # parametrization) share a single provider.
+    install_otel_providers()
+
     effective_settings = settings if settings is not None else load_settings()
 
     @asynccontextmanager
@@ -109,6 +119,34 @@ def create_app(
         except MigrationRequired as exc:
             app.state.schema_gate_error = exc
             logger.error("%s", schema_gate_explainer(exc))
+        # CONN-IMPL-029 (Phase K): hydrate the active-lease gauge from
+        # the authoritative lease store so the metric survives pod
+        # restarts / HA failovers. The connector-service does not yet
+        # enumerate workspaces itself; until that wiring lands the
+        # call is a no-op (empty workspace list) and the gauge
+        # converges to the truth via subsequent issue/close events.
+        # See ``hydrate_active_leases_from_store`` for the helper API.
+        try:
+            from custos_connector._telemetry import hydrate_active_leases_from_store
+
+            startup_workspace_ids: list[Any] = []
+            total = await hydrate_active_leases_from_store(
+                local_providers.lease_store, startup_workspace_ids
+            )
+            if not startup_workspace_ids:
+                logger.info(
+                    "active-lease gauge hydration deferred: connector-service "
+                    "does not yet enumerate workspaces at startup; the gauge "
+                    "will start at zero and converge via lifecycle events"
+                )
+            else:
+                logger.info(
+                    "active-lease gauge hydrated from lease store: %d rows across %d workspaces",
+                    total,
+                    len(startup_workspace_ids),
+                )
+        except Exception:  # pragma: no cover - defensive guard
+            logger.exception("active-lease gauge hydration failed; continuing startup")
         try:
             yield
         finally:
@@ -184,6 +222,14 @@ def create_app(
     app.include_router(instances_router)
     app.include_router(lease_admin_router)
     app.include_router(audit_router)
+
+    # CONN-IMPL-029 (Phase K) — Prometheus scrape endpoint. Mounted as a
+    # plain ASGI app rather than a FastAPI route so it stays out of the
+    # OpenAPI schema (the snapshot test in ``tests/test_openapi_snapshot.py``
+    # only diffs the FastAPI-routed surface). The reader installed by
+    # :func:`install_otel_providers` populates the default
+    # ``prometheus_client`` registry that ``make_asgi_app`` serves.
+    app.mount("/metrics", make_asgi_app())
     return app
 
 

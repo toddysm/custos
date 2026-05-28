@@ -44,6 +44,41 @@ dapr:
 serviceMonitor:
   enabled: false
 
+# NetworkPolicy (Phase K, CONN-IMPL-029).
+#
+# The Phase K ``/metrics`` endpoint is unauthenticated by design — the
+# call-context middleware bypasses it so the in-cluster Prometheus
+# scraper can read it without minting an internal token. The trust
+# boundary for that exposure is THIS NetworkPolicy: when enabled it
+# allows ingress on ``service.port`` only from the Prometheus pod's
+# namespace. Pair this with the umbrella deny-all
+# (``networkPolicies.enabled=true`` in the umbrella chart, TODO-004
+# in design/architecture/reference-deployment.md).
+#
+# Off by default to match the umbrella's current
+# ``networkPolicies.enabled: false`` posture (eval / local-dev). Flip
+# ON when the umbrella deny-all is flipped on.
+networkPolicy:
+  enabled: false
+  # Labels the connector-service template matches when selecting the
+  # Prometheus namespace. Default matches the kube-prometheus-stack
+  # convention; override per-profile when ops places Prometheus in a
+  # differently-labelled namespace.
+  prometheusNamespaceSelector:
+    kubernetes.io/metadata.name: monitoring
+  # Optional pod selector inside that namespace. Empty by default
+  # (any pod in the matched namespace). Pin to a specific pod label
+  # set for the strictest trust boundary.
+  prometheusPodSelector: {}
+  # Pod selector for in-namespace service-to-service callers (API
+  # Gateway, Catalog Service, etc.) — required because ``/metrics``
+  # and the API surface share a single port, so the policy must
+  # admit both Prometheus and legitimate API callers. Default matches
+  # the umbrella's ``app.kubernetes.io/part-of: custos`` convention;
+  # override per-profile when ops uses a different label scheme.
+  serviceClientsPodSelector:
+    app.kubernetes.io/part-of: custos
+
 # Non-secret CONN_* env vars projected into the ConfigMap.
 #
 # CONN_CATALOG_STORE / CONN_METADATA_STORE intentionally NOT listed here —

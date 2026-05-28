@@ -83,6 +83,7 @@ from custos_spl.interfaces.connector_instance_store import (
 from custos_spl.interfaces.metadata_store import MetadataStoreProvider
 from opentelemetry import metrics
 
+from custos_connector._telemetry import observe_bind
 from custos_connector.audit import (
     audit_binding_created,
     audit_binding_rejected,
@@ -325,7 +326,7 @@ class BindForStepService:
                 if cached is not None:
                     return cached
 
-                response, min_lease_ttl_seconds = await self._resolve_uncached(
+                response, min_lease_ttl_seconds = await self._resolve_uncached_observed(
                     workspace_id=workspace_id,
                     request=request,
                 )
@@ -333,6 +334,25 @@ class BindForStepService:
                 return response
         finally:
             await self._release_key_lock(cache_key)
+
+    async def _resolve_uncached_observed(
+        self,
+        *,
+        workspace_id: str,
+        request: BindForStepRequest,
+    ) -> tuple[BindForStepResponse, int]:
+        """Run :meth:`_resolve_uncached` inside the bind-latency span.
+
+        CONN-IMPL-029 (Phase K). The OTel span + bind-latency histogram
+        sample are intentionally scoped to the cache-miss path so the
+        ``custos_connector_bind_latency_seconds`` histogram tracks
+        actual resolver work; cache-hit fast paths are not recorded.
+        """
+        with observe_bind():
+            return await self._resolve_uncached(
+                workspace_id=workspace_id,
+                request=request,
+            )
 
     # ------------------------------------------------------------------
     # Internals: request shape

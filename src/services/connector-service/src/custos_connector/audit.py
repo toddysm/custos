@@ -2,25 +2,36 @@
 
 Two emission paths live here:
 
-1. **Typed audit pipeline** (used by :class:`InstanceService` and
-   future managers). Each domain event has a typed helper such as
-   :func:`audit_instance_created`. Helpers call :func:`_emit` which
-   builds an :class:`custos_spl.AuditEvent` and writes it through
+1. **Typed audit pipeline** (used by :class:`InstanceService`, the
+   Loader, the manifest discovery flow, the authorization decision
+   hook, and every future manager). Each domain event has a typed
+   helper such as :func:`audit_instance_created`. Helpers call
+   :func:`_emit` which builds an :class:`custos_spl.AuditEvent` and
+   writes it through
    :meth:`custos_spl.MetadataStoreProvider.append_audit`. Failures
    are best-effort: they are logged at WARNING + counted on
    :data:`EMIT_FAILURES_TOTAL` but never roll back the state
    mutation that triggered the emission. This mirrors the
    catalog-service post-CS-IMPL-019 pattern.
 
-2. **Legacy log-only shim** :func:`emit_event` for events fired
-   before the FastAPI DI machinery has yielded a configured
-   metadata store: the call-context dev-shim hook
-   (``auth.callctx.shim_used``) and the FastAPI authorization
-   decision hook (``authz.decision``). Both fire from middleware /
-   dependency layers where the SPL provider is not yet available.
-   CONN-IMPL-029 (Phase K) will replace these with proper
-   audit-pipeline emissions; until then the warning log is the
-   operator signal.
+2. **Legacy log-only shim** :func:`emit_event` retained for the
+   call-context dev-shim hook (``auth.callctx.shim_used``) which
+   fires from middleware that runs *before* the FastAPI DI machinery
+   has yielded a configured metadata store. CONN-IMPL-029 (Phase K)
+   promoted every other previously-log-only event to the typed
+   pipeline; the shim hangs on solely for the dev-shim warning.
+
+Platform-scope events
+---------------------
+
+Some events are logically platform-global: connector-type
+registration / deprecation / discovery flows mutate the platform
+catalog rather than a single workspace, but
+:meth:`MetadataStoreProvider.append_audit` is workspace-keyed.
+Following the auth-service convention (AS-IMPL-006) we write those
+rows under the sentinel workspace id :data:`PLATFORM_WORKSPACE_ID`
+(``"__platform__"``); the Observability Service treats that id as the
+control-plane bucket.
 """
 
 from __future__ import annotations
@@ -61,6 +72,15 @@ EMIT_FAILURES_TOTAL = _meter.create_counter(
         "SPL audit outbox. Labelled by event_type."
     ),
 )
+
+
+#: Sentinel workspace id used for platform-scope audit rows
+#: (connector-type registration, deprecation, manifest-fallback
+#: discovery, and any future platform-global event). The
+#: Observability Service indexes the literal ``__platform__`` workspace
+#: as the control-plane bucket; see auth-service for the prior art
+#: (``custos_auth.audit.PLATFORM_WORKSPACE_ID``).
+PLATFORM_WORKSPACE_ID: Final[str] = "__platform__"
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +215,38 @@ EVENT_NORMALIZED: Final[str] = "event.normalized"
 #: fan-out"); operators reading the audit log can choose to halt the
 #: connector via ``pull-loop:pause`` if reject rate spikes.
 EVENT_REJECTED: Final[str] = "event.rejected"
+
+
+# ---------------------------------------------------------------------------
+# CONN-IMPL-029 (Phase K) — platform-scope + middleware events
+# ---------------------------------------------------------------------------
+
+
+#: Emitted by the Plugin Loader when a connector-type registration
+#: succeeds. Platform-scope; written under :data:`PLATFORM_WORKSPACE_ID`.
+EVENT_REGISTRATION_ACCEPTED: Final[str] = "connector.registration.accepted"
+#: Emitted by the Plugin Loader when a connector-type registration
+#: fails. Platform-scope; written under :data:`PLATFORM_WORKSPACE_ID`.
+EVENT_REGISTRATION_REJECTED: Final[str] = "connector.registration.rejected"
+#: Emitted by the Plugin Loader on a successful deprecation toggle.
+#: Platform-scope; written under :data:`PLATFORM_WORKSPACE_ID`.
+EVENT_DEPRECATION_TOGGLED: Final[str] = "connector.deprecation.toggled"
+#: Emitted by :func:`discover_manifest` when the deterministic fallback
+#: tag resolved authoritatively. Platform-scope.
+EVENT_MANIFEST_FALLBACK_USED: Final[str] = "connector.manifest.fallback-used"
+#: Emitted by :func:`discover_manifest` when the Referrers API
+#: resolved and the deterministic fallback tag was deliberately not
+#: consulted. Platform-scope.
+EVENT_MANIFEST_FALLBACK_IGNORED: Final[str] = "connector.manifest.fallback-ignored"
+#: Emitted by :func:`discover_manifest` when discovery rejected on the
+#: fallback path or during final resolution (ambiguous, unknown digest
+#: algorithm, tag too long, no manifest found). Platform-scope.
+EVENT_MANIFEST_FALLBACK_REJECTED: Final[str] = "connector.manifest.fallback-rejected"
+#: Emitted by :func:`require_permission` in the middleware layer.
+#: Carries the request path, method, permission, decision, and
+#: principal so the audit log answers "who was allowed/denied what
+#: when". Workspace-scoped via the verified call context.
+EVENT_AUTHZ_DECISION: Final[str] = "authz.decision"
 
 
 # ---------------------------------------------------------------------------
@@ -1298,24 +1350,215 @@ async def audit_event_rejected(
 
 
 # ---------------------------------------------------------------------------
-# Legacy log-only shim (call-context + authz decision events)
+# CONN-IMPL-029 (Phase K) — registration / discovery / authz helpers
+# ---------------------------------------------------------------------------
+
+
+_REGISTRATION_ACTOR_DEFAULT: Final[str] = "connector-loader"
+_DISCOVERY_ACTOR_DEFAULT: Final[str] = "connector-loader"
+
+
+async def audit_registration_accepted(
+    metadata_store: MetadataStoreProvider,
+    *,
+    type_name: str,
+    version: str,
+    image_ref: str,
+    manifest_digest: str,
+    actor: str = _REGISTRATION_ACTOR_DEFAULT,
+) -> None:
+    """Emit ``connector.registration.accepted`` (platform-scope).
+
+    Fired by :class:`Loader` after the connector-type registration
+    pipeline succeeds (manifest fetched, validated, normalized,
+    digested, persisted). Subject pins the (type, version) tuple;
+    payload carries the image reference + manifest digest so the
+    audit trail ties the catalog row to the OCI artifact bytes.
+    """
+    await _emit(
+        metadata_store,
+        workspace_id=PLATFORM_WORKSPACE_ID,
+        event_type=EVENT_REGISTRATION_ACCEPTED,
+        actor=actor,
+        subject={"type": type_name, "version": version},
+        payload={
+            "image_ref": image_ref,
+            "manifest_digest": manifest_digest,
+        },
+    )
+
+
+async def audit_registration_rejected(
+    metadata_store: MetadataStoreProvider,
+    *,
+    image_ref: str,
+    code: str,
+    detail: str,
+    type_name: str | None = None,
+    version: str | None = None,
+    actor: str = _REGISTRATION_ACTOR_DEFAULT,
+) -> None:
+    """Emit ``connector.registration.rejected`` (platform-scope).
+
+    Fired by :class:`Loader` whenever the registration pipeline
+    raises. ``type_name`` and ``version`` are best-effort: they may be
+    ``None`` when the rejection happens before manifest parse
+    (e.g. ``image_ref`` unparseable, fetch failed). The subject
+    always carries at least the image reference so operators can
+    correlate the row with the failing source artifact.
+    """
+    subject: dict[str, Any] = {"image_ref": image_ref}
+    if type_name is not None:
+        subject["type"] = type_name
+    if version is not None:
+        subject["version"] = version
+    await _emit(
+        metadata_store,
+        workspace_id=PLATFORM_WORKSPACE_ID,
+        event_type=EVENT_REGISTRATION_REJECTED,
+        actor=actor,
+        subject=subject,
+        payload={"code": code, "detail": detail},
+    )
+
+
+async def audit_deprecation_toggled(
+    metadata_store: MetadataStoreProvider,
+    *,
+    type_name: str,
+    version: str,
+    deprecated: bool,
+    actor: str = _REGISTRATION_ACTOR_DEFAULT,
+) -> None:
+    """Emit ``connector.deprecation.toggled`` (platform-scope).
+
+    Fired by :class:`Loader.set_deprecated` after a successful flip of
+    the catalog row's ``deprecated`` flag.
+    """
+    await _emit(
+        metadata_store,
+        workspace_id=PLATFORM_WORKSPACE_ID,
+        event_type=EVENT_DEPRECATION_TOGGLED,
+        actor=actor,
+        subject={"type": type_name, "version": version},
+        payload={"deprecated": deprecated},
+    )
+
+
+async def audit_manifest_fallback_used(
+    metadata_store: MetadataStoreProvider,
+    *,
+    repository: str,
+    subject_digest: str,
+    fallback_tag: str,
+    actor: str = _DISCOVERY_ACTOR_DEFAULT,
+) -> None:
+    """Emit ``connector.manifest.fallback-used`` (platform-scope)."""
+    await _emit(
+        metadata_store,
+        workspace_id=PLATFORM_WORKSPACE_ID,
+        event_type=EVENT_MANIFEST_FALLBACK_USED,
+        actor=actor,
+        subject={"repository": repository, "subject_digest": subject_digest},
+        payload={
+            "fallback_tag": fallback_tag,
+            "resolved_via": "fallback-tag",
+        },
+    )
+
+
+async def audit_manifest_fallback_ignored(
+    metadata_store: MetadataStoreProvider,
+    *,
+    repository: str,
+    subject_digest: str,
+    fallback_tag: str,
+    actor: str = _DISCOVERY_ACTOR_DEFAULT,
+) -> None:
+    """Emit ``connector.manifest.fallback-ignored`` (platform-scope)."""
+    await _emit(
+        metadata_store,
+        workspace_id=PLATFORM_WORKSPACE_ID,
+        event_type=EVENT_MANIFEST_FALLBACK_IGNORED,
+        actor=actor,
+        subject={"repository": repository, "subject_digest": subject_digest},
+        payload={
+            "fallback_tag": fallback_tag,
+            "resolved_via": "referrers",
+        },
+    )
+
+
+async def audit_manifest_fallback_rejected(
+    metadata_store: MetadataStoreProvider,
+    *,
+    repository: str,
+    subject_digest: str,
+    code: str,
+    detail: str,
+    actor: str = _DISCOVERY_ACTOR_DEFAULT,
+) -> None:
+    """Emit ``connector.manifest.fallback-rejected`` (platform-scope)."""
+    await _emit(
+        metadata_store,
+        workspace_id=PLATFORM_WORKSPACE_ID,
+        event_type=EVENT_MANIFEST_FALLBACK_REJECTED,
+        actor=actor,
+        subject={"repository": repository, "subject_digest": subject_digest},
+        payload={"code": code, "detail": detail},
+    )
+
+
+async def audit_authz_decision(
+    metadata_store: MetadataStoreProvider,
+    *,
+    workspace_id: str,
+    actor: str,
+    principal_id: str,
+    path: str,
+    method: str,
+    permission: str,
+    allowed: bool,
+) -> None:
+    """Emit ``authz.decision`` from the middleware permission gate.
+
+    Workspace-scoped: the audit row lands in the workspace the call
+    context carries. Subject pins the requesting principal; payload
+    carries the request shape (path/method/permission) and the
+    boolean decision.
+    """
+    await _emit(
+        metadata_store,
+        workspace_id=workspace_id,
+        event_type=EVENT_AUTHZ_DECISION,
+        actor=actor,
+        subject={"principal_id": principal_id},
+        payload={
+            "path": path,
+            "method": method,
+            "permission": permission,
+            "allowed": allowed,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Legacy log-only shim (call-context dev-shim hook only post-Phase K)
 # ---------------------------------------------------------------------------
 
 
 def emit_event(name: str, payload: Mapping[str, Any]) -> None:
     """Emit a structured audit-style log line.
 
-    Retained for the call-context dev-shim hook + the
-    authorization-decision hook fired from
-    :func:`custos_connector.middleware.require_permission`. Both fire
-    before the FastAPI DI machinery has yielded a configured
-    :class:`~custos_spl.MetadataStoreProvider`, so the legacy log-only
-    hook is the right tool until CONN-IMPL-029 rewires them onto the
-    real audit pipeline.
+    Retained for the call-context dev-shim hook
+    (``auth.callctx.shim_used``) which fires from middleware that runs
+    *before* the FastAPI DI machinery has yielded a configured
+    :class:`~custos_spl.MetadataStoreProvider`. Every other previously
+    log-only event was promoted to the typed audit pipeline under
+    CONN-IMPL-029 (Phase K).
 
     Args:
-        name: Canonical event name (e.g. ``auth.callctx.shim_used``,
-            ``authz.decision``).
+        name: Canonical event name.
         payload: Per-event attributes. Values that aren't directly
             JSON-serialisable are coerced via ``str`` during JSON
             encoding so the audit log line is never lost; if JSON
@@ -1331,6 +1574,7 @@ def emit_event(name: str, payload: Mapping[str, Any]) -> None:
 
 __all__ = [
     "EMIT_FAILURES_TOTAL",
+    "EVENT_AUTHZ_DECISION",
     "EVENT_BINDING_CREATED",
     "EVENT_BINDING_REJECTED",
     "EVENT_CAPABILITY_DEPRECATED",
@@ -1338,6 +1582,7 @@ __all__ = [
     "EVENT_CURSOR_ENCODING_MISMATCH",
     "EVENT_CURSOR_EXPIRED",
     "EVENT_CURSOR_REWOUND",
+    "EVENT_DEPRECATION_TOGGLED",
     "EVENT_HEALTH_CHECK_COMPLETED",
     "EVENT_HEALTH_CHECK_INVOKED",
     "EVENT_IDENTITY_FAILED",
@@ -1353,8 +1598,15 @@ __all__ = [
     "EVENT_LEASE_RELEASED",
     "EVENT_LEASE_REVOKED",
     "EVENT_LEASE_REVOKE_REQUESTED",
+    "EVENT_MANIFEST_FALLBACK_IGNORED",
+    "EVENT_MANIFEST_FALLBACK_REJECTED",
+    "EVENT_MANIFEST_FALLBACK_USED",
     "EVENT_PULL_LOOP_PAUSED",
     "EVENT_PULL_LOOP_RESUMED",
+    "EVENT_REGISTRATION_ACCEPTED",
+    "EVENT_REGISTRATION_REJECTED",
+    "PLATFORM_WORKSPACE_ID",
+    "audit_authz_decision",
     "audit_binding_created",
     "audit_binding_rejected",
     "audit_capability_deprecated",
@@ -1362,6 +1614,7 @@ __all__ = [
     "audit_cursor_encoding_mismatch",
     "audit_cursor_expired",
     "audit_cursor_rewound",
+    "audit_deprecation_toggled",
     "audit_health_check_completed",
     "audit_health_check_invoked",
     "audit_identity_failed",
@@ -1377,8 +1630,13 @@ __all__ = [
     "audit_lease_released",
     "audit_lease_revoke_requested",
     "audit_lease_revoked",
+    "audit_manifest_fallback_ignored",
+    "audit_manifest_fallback_rejected",
+    "audit_manifest_fallback_used",
     "audit_pull_loop_paused",
     "audit_pull_loop_resumed",
+    "audit_registration_accepted",
+    "audit_registration_rejected",
     "emit_event",
     "logger",
 ]

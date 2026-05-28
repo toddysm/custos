@@ -827,13 +827,31 @@ def test_revoke_all_for_run_revokes_only_matching_run() -> None:
 def _audit_event_types(
     metadata: FakeMetadataAdapter, *, workspace_id: str = _WORKSPACE
 ) -> list[str]:
-    return [evt.event_type for ws, evt in metadata.append_audit_calls if ws == workspace_id]
+    # ``authz.decision`` is emitted by the ``require_permission``
+    # dependency on every authenticated route hit (CONN-IMPL-029).
+    # The lease-revoke tests in this module assert the *domain*
+    # event sequence (``lease.revoke-requested`` / ``lease.revoked``
+    # / etc.), so filter the orthogonal authz events out of the
+    # helper's return value. ``authz.decision`` is verified
+    # end-to-end in ``tests/test_callctx.py``.
+    return [
+        evt.event_type
+        for ws, evt in metadata.append_audit_calls
+        if ws == workspace_id and evt.event_type != "authz.decision"
+    ]
 
 
 def _audit_events(
     metadata: FakeMetadataAdapter, *, workspace_id: str = _WORKSPACE
 ) -> list[AuditEvent]:
-    return [evt for ws, evt in metadata.append_audit_calls if ws == workspace_id]
+    # Mirrors :func:`_audit_event_types`: exclude ``authz.decision``
+    # so existing assertions about domain audit subjects /
+    # actors / payloads continue to match by positional index.
+    return [
+        evt
+        for ws, evt in metadata.append_audit_calls
+        if ws == workspace_id and evt.event_type != "authz.decision"
+    ]
 
 
 def test_revoke_single_missing_reason_returns_reason_required_400() -> None:

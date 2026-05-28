@@ -54,6 +54,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
+from custos_connector._telemetry import CURSOR_LAG_REGISTRY
 from custos_connector.listen.normalizer import (
     DELIVERY_MODE_PULL,
     DELIVERY_MODE_PUSH,
@@ -320,6 +321,12 @@ class ListenManager:
             scheduler_dropped = self._scheduler.unregister(workspace_id, instance_id)
             if push_entry is not None:
                 push_entry.active = False
+            # Phase K (CONN-IMPL-029): drop the cursor-lag series for
+            # this instance so the observable gauge stops reporting an
+            # ever-growing stale lag after deactivation. ``forget`` is
+            # idempotent — when the registry has no entry for the
+            # (workspace, instance) pair it is a no-op.
+            CURSOR_LAG_REGISTRY.forget(workspace_id=workspace_id, instance_id=instance_id)
             unwound = previous is not None or push_entry is not None or scheduler_dropped
             if unwound:
                 _LOGGER.info(
