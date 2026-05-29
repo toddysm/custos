@@ -39,7 +39,7 @@ Second sub-module under construction: **Definition Compiler**, packaged inside t
 
 ### Phase F — Verification
 
-- [ ] WF-IMPL-025: Unit test suite — every step kind / call site / error class; ≥ 90 % coverage gate (issue #359; depends on #355).
+- [x] WF-IMPL-025: Unit test suite — every step kind / call site / error class; ≥ 90 % coverage gate (issue #359; depends on #355).
 - [ ] WF-IMPL-026: Property-based determinism tests (Hypothesis) (issue #360; depends on #355).
 
 ### Phase G — Observability + docs
