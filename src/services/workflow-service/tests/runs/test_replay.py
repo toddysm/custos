@@ -14,9 +14,10 @@ Covers every acceptance criterion from #394:
 * When ``reconciler.on_replay`` is bound to the orchestrator's
   :data:`ReplayHook` slot, the orchestrator fires it exactly once
   per orchestrator entry, BEFORE the first node dispatch.
-* The reconciler fires even for a minimal one-step graph (the
-  smallest graph the compiler accepts) so a stale-state sweep can
-  always run regardless of whether any step is about to dispatch.
+* The reconciler fires even when zero steps dispatch (proved
+  with an all-gated-out workflow paired with a handler that fails
+  the test if called) so a stale-state sweep can always run
+  regardless of whether any step is about to dispatch.
 * Across 50 simulated orchestrator entries (fresh runtime per
   entry — Dapr replays are an opaque internal property of the
   runtime that the FakeWorkflowRuntime does not simulate, so we
@@ -116,14 +117,18 @@ _LINEAR_DOC = """\
 """
 
 
-_SINGLE_STEP_DOC = """\
+_ALL_GATED_OUT_DOC = """\
     apiVersion: custos.dev/v1
     kind: Workflow
-    metadata: {name: single, workspace: ws}
+    metadata: {name: all-gated-out, workspace: ws}
     spec:
       steps:
-        - id: only
+        - id: a
+          unless: '${{ true }}'
           let: {x: '${{ true }}'}
+        - id: b
+          unless: '${{ true }}'
+          let: {y: '${{ true }}'}
 """
 
 
@@ -322,24 +327,40 @@ class TestReconcilerFiredExactlyOncePerEntry:
         assert order == ["reconcile", "dispatch", "dispatch"]
 
 
-class TestReconcilerFiresOnMinimalGraph:
-    def test_single_step_graph_still_invokes_reconciler(self) -> None:
-        # The compiler does not accept a truly empty graph; the
-        # smallest representable workflow has one step. The hook
-        # must still fire on this minimal graph so a stale-state
-        # sweep can always run regardless of step count.
-        graph = _compile(_SINGLE_STEP_DOC)
+class TestReconcilerFiresWhenNoStepsDispatch:
+    def test_all_gated_out_workflow_still_invokes_reconciler(self) -> None:
+        # Acceptance criterion: the reconciler must fire even when
+        # there are zero step dispatches — the hook is there so a
+        # stale-state sweep can always run. We prove this with an
+        # all-gated-out workflow (``if: ${{ inputs.run_anything }}``
+        # is false by default) paired with a handler that fails
+        # the test if it ever gets called.
+        graph = _compile(_ALL_GATED_OUT_DOC)
         runtime = FakeWorkflowRuntime(now=FIXED_NOW)
         reconciler = _CountingReconciler()
+
+        @dataclass
+        class _FailingHandler:
+            def execute(
+                self,
+                _ctx: StepExecutionContext,
+                _g: ExecutionGraph,
+                step_id: str,
+            ) -> StepResult:
+                raise AssertionError(
+                    f"handler must not be called for all-gated-out graph; got {step_id!r}"
+                )
 
         _drive(
             runtime,
             runtime.client(),
-            NoopStepHandler(),
+            _FailingHandler(),
             _run_input(graph),
             on_replay=reconciler.on_replay,
         )
 
+        # Reconciler fires exactly once even though zero nodes
+        # dispatched.
         assert len(reconciler.calls) == 1
 
 

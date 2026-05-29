@@ -16,7 +16,8 @@ contract:
   first node dispatch on every orchestrator entry.
 * The reconciler hook MUST be idempotent — re-registering an already
   registered subscription is a no-op on the Trigger Service side
-  (it dedups on ``(run_id, step_id, event_kind)``).
+  (it dedups on ``(runId, stepId, eventKey)`` per
+  design.md § Resume Subscription Replay Protocol).
 * The hook MUST fire even when the graph has zero waiting steps, so
   the reconciler gets a chance to sweep stale subscriptions that
   are no longer needed.
@@ -59,12 +60,13 @@ class ReplayReconciler(Protocol):
     The hook MUST be idempotent: replays can fire it arbitrarily
     many times against the same reconstructed state, and the
     Trigger Service (the v1 reconcile target) dedups on
-    ``(run_id, step_id, event_kind)``. Implementations MUST NOT
-    raise; any failure must be logged and swallowed so a flapping
-    reconcile dependency cannot wedge the orchestrator. The
-    orchestrator does not catch exceptions thrown here — a raise
-    will propagate into Dapr's non-determinism handling and abort
-    the run.
+    ``(runId, stepId, eventKey)`` — the resume-subscription
+    idempotency tuple locked by design.md § Resume Subscription
+    Replay Protocol. Implementations MUST NOT raise; any failure
+    must be logged and swallowed so a flapping reconcile
+    dependency cannot wedge the orchestrator. The orchestrator
+    does not catch exceptions thrown here — a raise will propagate
+    into Dapr's non-determinism handling and abort the run.
     """
 
     def on_replay(self, ctx: StepExecutionContext, graph: ExecutionGraph) -> None:
