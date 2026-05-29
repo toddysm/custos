@@ -23,6 +23,13 @@ from custos_workflow.runs.errors import (
     RunStateCorruptError,
     WorkflowRuntimeUnavailableError,
 )
+from custos_workflow.runs.events import (
+    DEFAULT_DAPR_PUBLISH_TIMEOUT_SECONDS,
+    DEFAULT_DEDUP_CACHE_SIZE,
+    DaprPubSubLifecyclePublisher,
+    DedupingLifecyclePublisher,
+    LifecycleEventPublishError,
+)
 from custos_workflow.runs.ids import RUN_ID_NAMESPACE, RunId, derive_run_id
 from custos_workflow.runs.model import (
     STATUS_TRANSITIONS,
@@ -57,6 +64,8 @@ from custos_workflow.runs.wait import (
 )
 
 __all__ = [
+    "DEFAULT_DAPR_PUBLISH_TIMEOUT_SECONDS",
+    "DEFAULT_DEDUP_CACHE_SIZE",
     "DEFAULT_TERMINATE_POLL_ATTEMPTS",
     "DEFAULT_TERMINATE_POLL_INTERVAL_S",
     "LIFECYCLE_KIND_WORKFLOW_CANCELLED",
@@ -69,9 +78,12 @@ __all__ = [
     "TERMINAL_STATUSES",
     "WORKFLOW_NAME",
     "CatalogClient",
+    "DaprPubSubLifecyclePublisher",
+    "DedupingLifecyclePublisher",
     "InMemoryLifecycleEventPublisher",
     "InProcessRunStore",
     "LifecycleEvent",
+    "LifecycleEventPublishError",
     "LifecycleEventPublisher",
     "NoopStepHandler",
     "ReplayHook",

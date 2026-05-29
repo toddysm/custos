@@ -190,6 +190,22 @@ class CatalogClient(Protocol):
 # ---------------------------------------------------------------------------
 
 
+#: Default ``status`` value embedded in the
+#: :meth:`LifecycleEvent.to_wire` envelope for each canonical
+#: lifecycle kind, when the caller has not already placed an
+#: explicit ``status`` key on :attr:`LifecycleEvent.extra`.
+#: ``workflow.started`` deliberately has no default — the run is
+#: ``running`` at that point but the design's envelope reserves
+#: ``status`` for terminal / state-snapshot kinds.
+_LIFECYCLE_KIND_WIRE_STATUS: Final[dict[str, str]] = {
+    "workflow.completed": "succeeded",
+    "workflow.failed": "failed",
+    "workflow.cancelled": "cancelled",
+    "workflow.paused": "paused",
+    "workflow.resumed": "running",
+}
+
+
 @dataclass(frozen=True, slots=True)
 class LifecycleEvent:
     """One workflow-lifecycle event the controller emits.
@@ -218,6 +234,41 @@ class LifecycleEvent:
             "occurred_at": self.occurred_at.isoformat(),
             "extra": dict(self.extra),
         }
+
+    def to_wire(self) -> dict[str, Any]:
+        """Canonical Pub/Sub envelope per design.md § Dapr Pub/Sub Publications.
+
+        Field names follow the design's camelCase convention
+        (``workflowVersionId`` / ``runId`` / ``workspace`` /
+        ``occurredAt``) so downstream consumers (Trigger Service
+        Internal Event Receiver and any future ``custos.workflow.events``
+        subscriber) can route off a stable wire shape. ``status`` is
+        derived from :attr:`kind` for the canonical lifecycle kinds
+        (``workflow.completed`` -> ``succeeded``,
+        ``workflow.failed`` -> ``failed``,
+        ``workflow.cancelled`` -> ``cancelled``,
+        ``workflow.paused`` -> ``paused``,
+        ``workflow.resumed`` -> ``running``); callers may override by
+        placing an explicit ``status`` key on :attr:`extra`.
+        ``outputs`` is emitted only when :attr:`extra` carries one
+        (relevant for ``workflow.completed``).
+        """
+        envelope: dict[str, Any] = {
+            "kind": self.kind,
+            "workflowVersionId": self.workflow_version_id,
+            "runId": str(self.run_id),
+            "workspace": self.workspace_id,
+            "occurredAt": self.occurred_at.isoformat(),
+        }
+        status = self.extra.get("status") if self.extra else None
+        if status is None:
+            status = _LIFECYCLE_KIND_WIRE_STATUS.get(self.kind)
+        if status is not None:
+            envelope["status"] = status
+        outputs = self.extra.get("outputs") if self.extra else None
+        if outputs is not None:
+            envelope["outputs"] = dict(outputs)
+        return envelope
 
 
 @runtime_checkable

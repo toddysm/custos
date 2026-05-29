@@ -46,6 +46,12 @@ dependencies = [
     # service can be exercised under FakeWorkflowRuntime / -Client
     # without a live sidecar.
     "dapr-ext-workflow>=1.17,<2",
+    # httpx — used by custos_workflow.runs.events.DaprPubSubLifecyclePublisher
+    # (WF-IMPL-041, #393) to POST envelopes against the Dapr sidecar's
+    # /v1.0/publish/{pubsub}/{topic} HTTP API. Same pattern as
+    # custos-connector's DaprPubSubEventPublisher (no Dapr SDK runtime
+    # dependency beyond dapr-ext-workflow).
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
