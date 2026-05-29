@@ -37,6 +37,7 @@ These rules are non-negotiable. Re-read them at the start of every session.
 - Plans are derived **fresh** from `design/components/<comp>/`. Never seed tasks from existing `todos.md` entries — those are stale or partial.
 - At the start of Phase 3 (Execute), **ask the user for the Copilot review wait window**. If unanswered within a short prompt, default to **10 minutes**.
 - `PAGER=cat` on **every** `gh` command.
+- **Never** inline a multi-line or backtick-bearing body into a double-quoted `gh` argument (`--body "..."`, `--comment "..."`, `-f body="..."`). The shell can expand backticks (command substitution) and other metacharacters before `gh` ever sees the text. Always write the rendered body to a temp file first and pass it via `--body-file <path>`, `--body-file -` (stdin), or `--field body=@<path>`. For `gh api ... -f body=...`, use `-F body=@<path>` (capital `-F` with `@<path>`) to read from a file.
 - One task per branch; one branch per PR; one PR closes exactly one task issue via `Closes #NNN`.
 - Branch name = `<prefix>-<NNN>-<slug>` derived from the task issue title (e.g. `wf-impl-028-docs`).
 - Branches are always created from a freshly pulled `main`.
@@ -179,9 +180,12 @@ Repeat until the tracker has zero `- [ ]` lines:
    - Conventional Commits subject: `<type>(<scope>): <PREFIX>-NNN <short summary>`.
    - Body: changed files, quality summary, ends with `Closes #NNN`.
    - `git push -u origin <branch>`.
-8. **Open PR** using `templates/pr-body.md`:
+8. **Open PR** using `templates/pr-body.md`. Render the body to a temp file first, then pass it via `--body-file` so backticks and other shell metacharacters in the body are not expanded by the shell:
    ```
-   PAGER=cat gh pr create --title "<PREFIX>-NNN: <summary>" --body "<rendered body containing Closes #NNN>"
+   # Render the body into /tmp/pr-body.md from templates/pr-body.md with placeholders substituted.
+   PAGER=cat gh pr create \
+     --title "<PREFIX>-NNN: <summary>" \
+     --body-file /tmp/pr-body.md
    ```
 9. **Watch CI** (sync, never async):
    ```
@@ -193,9 +197,12 @@ Repeat until the tracker has zero `- [ ]` lines:
     1. Apply the fix locally.
     2. Commit (`fix(<scope>): address Copilot review — <short>`).
     3. Push.
-    4. Reply on the thread:
+    4. Reply on the thread. Render the reply text (which contains backticks around the short SHA) into a temp file first, then pass it via `-F body=@<file>` so the shell cannot expand backticks before `gh` receives it:
        ```
-       PAGER=cat gh api -X POST repos/<owner>/<repo>/pulls/<PR#>/comments/<comment_id>/replies -f body="<fix description, ideally referencing the commit sha>"
+       # Render templates/review-reply.md into /tmp/reply.md with the sha + description substituted.
+       PAGER=cat gh api -X POST \
+         repos/<owner>/<repo>/pulls/<PR#>/comments/<comment_id>/replies \
+         -F body=@/tmp/reply.md
        ```
        Use `templates/review-reply.md` for the reply text.
     5. Resolve the thread with the GraphQL mutation:
@@ -215,8 +222,12 @@ Repeat until the tracker has zero `- [ ]` lines:
 ### Stop condition
 
 When no `- [ ] #` lines remain in the tracker body:
-1. Compose a milestone-summary comment using `templates/tracker-close-comment.md` (tasks completed, phases delivered, key files added, total commits, total PRs, total review comments addressed).
-2. Close the tracker: `PAGER=cat gh issue close <tracker#> --comment "<summary>"`.
+1. Compose a milestone-summary comment using `templates/tracker-close-comment.md` (tasks completed, phases delivered, key files added, total commits, total PRs, total review comments addressed). Render the summary into a temp file (e.g. `/tmp/tracker-close.md`) so the multi-line, backtick-bearing Markdown is never inlined into a shell argument.
+2. Post the summary as a comment, then close the tracker without re-passing the body:
+   ```
+   PAGER=cat gh issue comment <tracker#> --body-file /tmp/tracker-close.md
+   PAGER=cat gh issue close   <tracker#>
+   ```
 3. Print the final summary to the user and stop, awaiting further instructions.
 
 ---
@@ -247,8 +258,10 @@ PAGER=cat gh api repos/<owner>/<repo>/pulls/<PR#>/reviews
 # Review threads (id + resolved state + comments)
 PAGER=cat gh api graphql -f query='query { repository(owner:"<owner>", name:"<repo>") { pullRequest(number:<PR#>) { reviewThreads(first:50) { nodes { id isResolved comments(first:5) { nodes { databaseId author{login} body path line } } } } } } }'
 
-# Reply to a review comment
-PAGER=cat gh api -X POST repos/<owner>/<repo>/pulls/<PR#>/comments/<comment_id>/replies -f body="Fixed in <sha>. <description>."
+# Reply to a review comment (read body from file so the shell cannot expand backticks)
+PAGER=cat gh api -X POST \
+  repos/<owner>/<repo>/pulls/<PR#>/comments/<comment_id>/replies \
+  -F body=@/tmp/reply.md
 
 # Resolve a review thread
 PAGER=cat gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "<id>"}) { thread { isResolved } } }'
