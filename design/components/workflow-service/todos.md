@@ -54,7 +54,7 @@ Third sub-module: **Run Controller**, packaged inside the service host `src/serv
 ### Phase A — Foundations (Dapr runtime, IDs, errors)
 
 - [x] WF-IMPL-029 (#381): Add Dapr Workflow runtime + client wrappers — thin adapter around `dapr-ext-workflow` so tests use `FakeWorkflowRuntime`.
-- [F] WF-IMPL-030 (#382): Deterministic runId derivation — UUIDv5 over `(workflow_version_id, trigger_correlation_id)` for idempotent re-trigger.
+- [F] WF-IMPL-030 (#382): Deterministic runId derivation — UUIDv5 over `(workspace_id, idempotency_key)` when supplied; UUIDv4 otherwise.
 - [F] WF-IMPL-031 (#383): Public Run Controller error taxonomy — `RunControllerError` + subclasses, locked `kind` strings.
 
 ### Phase B — Run row persistence

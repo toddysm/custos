@@ -238,6 +238,7 @@ class _InstanceState:
     last_updated_at: datetime | None = None
     # Internal fields below.
     generator: Generator[Any, Any, Any] | None = None
+    ctx: FakeWorkflowContext | None = None
     next_result: Any = None
     pending_exception: BaseException | None = None
     waiting_for_event: str | None = None
@@ -367,8 +368,11 @@ class FakeWorkflowRuntime:
         )
         fn = self._workflows[name]
         ctx = FakeWorkflowContext(instance_id=instance_id, now=self.now)
+        state.ctx = ctx
         result = fn(ctx, request.input)
         state.history.append(HistoryEvent(kind="started", detail={"input": request.input}))
+        # Capture any custom status the workflow set before its first yield.
+        state.custom_status = ctx.custom_status
         if hasattr(result, "send") and hasattr(result, "throw"):
             state.generator = result
             state.status = RunStatus.RUNNING
@@ -401,12 +405,16 @@ class FakeWorkflowRuntime:
                 else:
                     task = generator.send(state.next_result)
             except StopIteration as stop:
+                if state.ctx is not None:
+                    state.custom_status = state.ctx.custom_status
                 state.status = RunStatus.COMPLETED
                 state.output = stop.value
                 state.last_updated_at = self.now
                 state.history.append(HistoryEvent(kind="completed", detail={"output": stop.value}))
                 return
             except Exception as exc:
+                if state.ctx is not None:
+                    state.custom_status = state.ctx.custom_status
                 state.status = RunStatus.FAILED
                 state.failure_message = str(exc)
                 state.failure_type = type(exc).__name__
@@ -423,6 +431,13 @@ class FakeWorkflowRuntime:
                 return
 
             state.next_result = None
+
+            # After every advance through the generator, propagate any
+            # custom_status the workflow set on its context onto the
+            # observable instance state so ``runtime.instance(id)`` reflects
+            # what the workflow last published.
+            if state.ctx is not None:
+                state.custom_status = state.ctx.custom_status
 
             if isinstance(task, _ActivityTask):
                 self._dispatch_activity(state, task)

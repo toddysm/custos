@@ -214,32 +214,56 @@ async def test_external_event_arrives_after_wait(
 async def test_external_event_queued_before_wait_drains_fifo(
     runtime: FakeWorkflowRuntime, client: FakeWorkflowClient
 ) -> None:
+    """Events raised before any matching ``wait_for_external_event`` must be
+    buffered and delivered in FIFO order on subsequent waits.
+
+    We need to exercise the genuine buffering path: an event raised while
+    nothing is waiting goes into ``pending_events`` and is drained by the
+    next wait. To force the second raise to land in the buffer (rather
+    than being delivered directly to the second wait as the generator
+    advances), we pause the instance before raising — pause holds the
+    generator at the first wait so the second raise has no active waiter
+    and is buffered. Resume then drains the buffer FIFO.
+    """
+
     def orchestrator(ctx: FakeWorkflowContext, _payload: Any) -> Generator[Any, Any, list[Any]]:
         first = yield ctx.wait_for_external_event("ev")
         second = yield ctx.wait_for_external_event("ev")
         return [first, second]
 
     runtime.register_workflow(orchestrator, name="two_events")
-    runtime.register_workflow(_noop_workflow, name="noop")
-    seeded = await client.schedule_new_workflow(
-        ScheduleWorkflowRequest(workflow="noop", instance_id="ev-seed")
-    )
-    assert seeded == "ev-seed"
-
     instance_id = await client.schedule_new_workflow(
         ScheduleWorkflowRequest(workflow="two_events", instance_id="ev-run")
     )
-    # Two events arrive before the second wait — they must be drained FIFO.
+    state = runtime.instance(instance_id)
+    # Orchestrator is blocked on the first wait.
+    assert state.status == RunStatus.RUNNING
+    assert state.waiting_for_event == "ev"
+
+    # Pause so the generator cannot advance past the first wait while we
+    # raise the events. With nothing actively waiting once paused, both
+    # raises must land in ``pending_events`` for FIFO delivery on resume.
+    await client.pause_workflow(PauseRunRequest(instance_id=instance_id))
+    state = runtime.instance(instance_id)
+    assert state.status == RunStatus.SUSPENDED
+
     await client.raise_workflow_event(
         RaiseRunEventRequest(instance_id=instance_id, event_name="ev", data="A")
     )
-    state = runtime.instance(instance_id)
-    # First event consumed; second is queued for the second wait.
     await client.raise_workflow_event(
         RaiseRunEventRequest(instance_id=instance_id, event_name="ev", data="B")
     )
+    # Both events were buffered while suspended; nothing was delivered yet.
+    state = runtime.instance(instance_id)
+    assert state.status == RunStatus.SUSPENDED
+    assert list(state.pending_events["ev"]) == ["A", "B"]
+
+    await client.resume_workflow(ResumeRunRequest(instance_id=instance_id))
+    state = runtime.instance(instance_id)
     assert state.status == RunStatus.COMPLETED
+    # FIFO order preserved: first raise → first wait, second raise → second wait.
     assert state.output == ["A", "B"]
+    assert "ev" not in state.pending_events
 
 
 async def test_external_event_on_terminal_instance_is_noop(
@@ -294,6 +318,38 @@ async def test_set_custom_status_surfaces_on_context() -> None:
     assert ctx.is_replaying is False
     ctx.set_custom_status("midway")
     assert ctx.custom_status == "midway"
+
+
+async def test_workflow_custom_status_is_mirrored_on_instance_state(
+    runtime: FakeWorkflowRuntime, client: FakeWorkflowClient
+) -> None:
+    """``ctx.set_custom_status(...)`` calls inside the orchestrator must be
+    observable through ``runtime.instance(id).custom_status`` — both for
+    statuses set before the workflow yields and for statuses updated as
+    the workflow advances between waits."""
+
+    def orchestrator(ctx: FakeWorkflowContext, _payload: Any) -> Generator[Any, Any, str]:
+        ctx.set_custom_status("starting")
+        first = yield ctx.wait_for_external_event("ev")
+        ctx.set_custom_status("processing")
+        return f"done:{first}"
+
+    runtime.register_workflow(orchestrator, name="status_wf")
+    instance_id = await client.schedule_new_workflow(ScheduleWorkflowRequest(workflow="status_wf"))
+    # The pre-yield status is mirrored as soon as the orchestrator
+    # blocks on the first wait.
+    state = runtime.instance(instance_id)
+    assert state.status == RunStatus.RUNNING
+    assert state.custom_status == "starting"
+
+    await client.raise_workflow_event(
+        RaiseRunEventRequest(instance_id=instance_id, event_name="ev", data="payload")
+    )
+    state = runtime.instance(instance_id)
+    assert state.status == RunStatus.COMPLETED
+    assert state.output == "done:payload"
+    # The final status update set immediately before return is mirrored too.
+    assert state.custom_status == "processing"
 
 
 # ---------------------------------------------------------------------------
