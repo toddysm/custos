@@ -22,5 +22,20 @@ from __future__ import annotations
 
 from custos_workflow._version import __version__
 from custos_workflow.app import create_app
+from custos_workflow.errors import (
+    CompileError,
+    CompileParseError,
+    CompileRetryPolicyError,
+    CompileTopologyError,
+    CompileTypeError,
+)
 
-__all__ = ["__version__", "create_app"]
+__all__ = [
+    "CompileError",
+    "CompileParseError",
+    "CompileRetryPolicyError",
+    "CompileTopologyError",
+    "CompileTypeError",
+    "__version__",
+    "create_app",
+]

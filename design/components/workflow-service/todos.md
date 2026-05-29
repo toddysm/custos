@@ -35,7 +35,7 @@ Second sub-module under construction: **Definition Compiler**, packaged inside t
 
 ### Phase E — Error taxonomy
 
-- [ ] WF-IMPL-024: Public compiler error taxonomy — `CompileError` + 4 subclasses, locked `kind` strings (issue #358; depends on #347).
+- [x] WF-IMPL-024: Public compiler error taxonomy — `CompileError` + 4 subclasses, locked `kind` strings (issue #358; depends on #347).
 
 ### Phase F — Verification
 
