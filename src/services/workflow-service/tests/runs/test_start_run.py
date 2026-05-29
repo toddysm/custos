@@ -124,7 +124,10 @@ class _RecordingWorkflowClient:
 
     ``raise_on_call`` lets tests inject a runtime failure to drive
     the no-half-persisted-record path. ``requests`` captures the
-    invocation order for assertion.
+    invocation order for assertion. ``terminate_workflow`` and
+    ``get_workflow_state`` exist purely to satisfy the controller's
+    structural Workflow-client Protocol; the start-run tests never
+    drive them.
     """
 
     raise_on_call: Exception | None = None
@@ -135,6 +138,12 @@ class _RecordingWorkflowClient:
         if self.raise_on_call is not None:
             raise self.raise_on_call
         return request.instance_id or ""
+
+    async def terminate_workflow(self, request: Any) -> None:  # pragma: no cover
+        raise NotImplementedError("start_run never calls terminate_workflow")
+
+    async def get_workflow_state(self, request: Any) -> Any:  # pragma: no cover
+        raise NotImplementedError("start_run never calls get_workflow_state")
 
 
 def _store() -> InProcessRunStore:

@@ -1,6 +1,7 @@
 """Public re-exports for the ``custos_workflow.runs`` subpackage."""
 
 from custos_workflow.runs.controller import (
+    LIFECYCLE_KIND_WORKFLOW_CANCELLED,
     LIFECYCLE_KIND_WORKFLOW_STARTED,
     CatalogClient,
     InMemoryLifecycleEventPublisher,
@@ -52,6 +53,7 @@ from custos_workflow.runs.wait import (
 )
 
 __all__ = [
+    "LIFECYCLE_KIND_WORKFLOW_CANCELLED",
     "LIFECYCLE_KIND_WORKFLOW_STARTED",
     "LOCKED_RUN_KINDS",
     "RUN_ID_NAMESPACE",

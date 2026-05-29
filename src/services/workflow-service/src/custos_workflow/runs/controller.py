@@ -66,9 +66,10 @@ fingerprint is tracked separately under the persistence-layer work.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Final, Protocol, runtime_checkable
@@ -77,13 +78,22 @@ from custos_workflow.compiler import RunMeta
 from custos_workflow.compiler import compile as compile_workflow
 from custos_workflow.graph.serialize import to_json
 from custos_workflow.runs.errors import (
+    RunNotFoundError,
     RunStateConflictError,
     WorkflowRuntimeUnavailableError,
 )
 from custos_workflow.runs.ids import RunId, derive_run_id
 from custos_workflow.runs.model import RunRecord, RunStatus
 from custos_workflow.runs.orchestrator import WORKFLOW_NAME, RunInput
-from custos_workflow.runtime._common import ScheduleWorkflowRequest
+from custos_workflow.runtime._common import (
+    TERMINAL_STATUSES as RUNTIME_TERMINAL_STATUSES,
+)
+from custos_workflow.runtime._common import (
+    GetRunStateRequest,
+    ScheduleWorkflowRequest,
+    TerminateRunRequest,
+)
+from custos_workflow.runtime._common import RunState as RuntimeRunState
 
 if TYPE_CHECKING:
     from custos_cel.clock import Clock
@@ -93,6 +103,9 @@ if TYPE_CHECKING:
     from custos_workflow.runs.store import RunStore
 
 __all__ = [
+    "DEFAULT_TERMINATE_POLL_ATTEMPTS",
+    "DEFAULT_TERMINATE_POLL_INTERVAL_S",
+    "LIFECYCLE_KIND_WORKFLOW_CANCELLED",
     "LIFECYCLE_KIND_WORKFLOW_STARTED",
     "CatalogClient",
     "InMemoryLifecycleEventPublisher",
@@ -279,6 +292,26 @@ def _fingerprint_inputs(workflow_version_id: str, inputs: Mapping[str, Any]) -> 
 #: Wire-stable kind tag for the start-run lifecycle event.
 LIFECYCLE_KIND_WORKFLOW_STARTED: Final[str] = "workflow.started"
 
+#: Wire-stable kind tag for the cancel-run lifecycle event.
+LIFECYCLE_KIND_WORKFLOW_CANCELLED: Final[str] = "workflow.cancelled"
+
+
+# ---------------------------------------------------------------------------
+# Terminate poll-loop budget defaults
+# ---------------------------------------------------------------------------
+
+
+#: Default number of ``get_workflow_state`` polls :meth:`RunController.cancel_run`
+#: will issue after :meth:`~custos_workflow.runtime.WorkflowClient.terminate_workflow`
+#: before surfacing :class:`WorkflowRuntimeUnavailableError`. Sized to give a
+#: cooperatively-terminating workflow about half a minute at the default
+#: per-poll interval; production callers tune this through the constructor.
+DEFAULT_TERMINATE_POLL_ATTEMPTS: Final[int] = 30
+
+#: Default per-poll sleep (seconds) between ``get_workflow_state`` calls. Tests
+#: inject a no-op sleeper so the loop completes synchronously.
+DEFAULT_TERMINATE_POLL_INTERVAL_S: Final[float] = 1.0
+
 
 # ---------------------------------------------------------------------------
 # WorkflowClient surface (structural)
@@ -298,6 +331,14 @@ class _WorkflowClient(Protocol):
 
     async def schedule_new_workflow(self, request: ScheduleWorkflowRequest) -> str:
         """Schedule a new workflow run; return Dapr's ``instance_id``."""
+        ...
+
+    async def terminate_workflow(self, request: TerminateRunRequest) -> None:
+        """Terminate the Dapr Workflow instance identified by ``request.instance_id``."""
+        ...
+
+    async def get_workflow_state(self, request: GetRunStateRequest) -> RuntimeRunState | None:
+        """Return the current runtime snapshot, or ``None`` if Dapr forgot the instance."""
         ...
 
 
@@ -330,13 +371,23 @@ class RunController:
         activity_registry: ActivityTypeRegistry,
         lifecycle_publisher: LifecycleEventPublisher,
         clock: Clock,
+        terminate_poll_attempts: int = DEFAULT_TERMINATE_POLL_ATTEMPTS,
+        terminate_poll_interval_seconds: float = DEFAULT_TERMINATE_POLL_INTERVAL_S,
+        sleep: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
+        if terminate_poll_attempts < 1:
+            raise ValueError("terminate_poll_attempts must be >= 1")
+        if terminate_poll_interval_seconds < 0:
+            raise ValueError("terminate_poll_interval_seconds must be >= 0")
         self._catalog: CatalogClient = catalog
         self._store: RunStore = store
         self._workflow_client: _WorkflowClient = workflow_client
         self._activity_registry: ActivityTypeRegistry = activity_registry
         self._lifecycle_publisher: LifecycleEventPublisher = lifecycle_publisher
         self._clock: Clock = clock
+        self._terminate_poll_attempts: int = terminate_poll_attempts
+        self._terminate_poll_interval: float = terminate_poll_interval_seconds
+        self._sleep: Callable[[float], Awaitable[None]] = sleep or asyncio.sleep
         # In-process dedup-fingerprint map. Key is the dedup-stable
         # ``(workspace_id, run_id)`` pair; value is the SHA-256 of
         # the canonical-JSON ``(workflow_version_id, inputs)`` pair.
@@ -526,8 +577,164 @@ class RunController:
         )
 
     # ------------------------------------------------------------------
+    # cancel_run
+    # ------------------------------------------------------------------
+
+    async def cancel_run(
+        self,
+        *,
+        workspace_id: str,
+        run_id: RunId,
+        reason: str | None = None,
+    ) -> RunRef:
+        """Cancel an in-flight run; return a :class:`RunRef`.
+
+        Implements design.md § Operation: Cancel Run:
+
+        1. Load the :class:`RunRecord` (raise :class:`RunNotFoundError`).
+        2. Short-circuit on the idempotent path. A run that is already
+           ``cancelled`` returns its current :class:`RunRef` with no
+           Dapr call and no event re-publish. A run that is already
+           ``cancelling`` is treated as another caller's in-flight
+           cancel — we do NOT re-issue ``terminate_workflow`` and we
+           do NOT re-emit ``workflow.cancelled``; the original caller
+           owns the terminal transition.
+        3. Transition ``{queued, running, pausing, paused} \u2192 cancelling``.
+           Illegal sources (``succeeded``, ``failed``) surface
+           :class:`RunStateConflictError` through
+           :meth:`RunStore.update_run_status`.
+        4. ``terminate_workflow(instance_id=run_id)``. Any runtime
+           exception surfaces as
+           :class:`WorkflowRuntimeUnavailableError`; the row stays
+           ``cancelling`` so an operator can retry.
+        5. Poll ``get_workflow_state`` until the runtime reports a
+           terminal status (``terminated`` / ``completed`` /
+           ``failed``) or until Dapr forgets the instance. The
+           per-poll sleep and attempt count are constructor-injected
+           for deterministic test runs. Budget exhaustion surfaces
+           :class:`WorkflowRuntimeUnavailableError`.
+        6. Transition to ``cancelled`` and emit
+           ``workflow.cancelled`` carrying the cancellation
+           ``reason`` (when supplied) on :attr:`LifecycleEvent.extra`.
+
+        Args:
+            workspace_id: The owning workspace.
+            run_id: The :class:`RunId` to cancel.
+            reason: Operator-supplied cancellation reason. Persisted
+                on :attr:`RunRecord.reason` and surfaced in
+                ``workflow.cancelled.extra.reason``.
+
+        Returns:
+            A :class:`RunRef` carrying the run's current status.
+            On the active-cancel path the returned status is
+            ``cancelled``; on the idempotent-replay path the status
+            is whatever the store currently holds
+            (``cancelling`` or ``cancelled``).
+
+        Raises:
+            RunNotFoundError: No record exists at
+                ``(workspace_id, run_id)``.
+            RunStateConflictError: The record is in a terminal
+                non-cancel status (``succeeded`` / ``failed``)
+                from which the cancel transition is illegal.
+            WorkflowRuntimeUnavailableError: The Dapr runtime
+                refused the terminate call OR did not confirm
+                termination within
+                ``terminate_poll_attempts``.
+        """
+        record = await self._store.get_run(workspace_id, run_id)
+        if record is None:
+            raise RunNotFoundError(
+                f"run {run_id} not found in workspace {workspace_id!r}",
+                run_id=str(run_id),
+            )
+
+        # Idempotent no-op: another caller is/has handled this cancel.
+        if record.status in (RunStatus.CANCELLED, RunStatus.CANCELLING):
+            return RunRef(
+                workspace_id=workspace_id,
+                run_id=run_id,
+                workflow_version_id=record.workflow_version,
+                status=record.status,
+            )
+
+        # Gate 3: transition to ``cancelling``. ``RunStateConflictError``
+        # from an illegal source (``succeeded`` / ``failed``) is the
+        # documented surface for the API Adapter and propagates as-is.
+        await self._store.update_run_status(
+            workspace_id, run_id, RunStatus.CANCELLING, reason=reason
+        )
+
+        # Gate 4: terminate the Dapr instance.
+        try:
+            await self._workflow_client.terminate_workflow(
+                TerminateRunRequest(instance_id=str(run_id))
+            )
+        except Exception as exc:
+            raise WorkflowRuntimeUnavailableError(
+                f"failed to terminate run {run_id} on the workflow runtime",
+                run_id=str(run_id),
+                cause=str(exc),
+            ) from exc
+
+        # Gate 5: poll until Dapr confirms termination.
+        await self._poll_until_terminated(run_id)
+
+        # Gate 6: transition to ``cancelled`` and emit lifecycle event.
+        finalised = await self._store.update_run_status(
+            workspace_id, run_id, RunStatus.CANCELLED, reason=reason
+        )
+        extra: dict[str, Any] = {"reason": reason} if reason is not None else {}
+        await self._lifecycle_publisher.publish(
+            LifecycleEvent(
+                kind=LIFECYCLE_KIND_WORKFLOW_CANCELLED,
+                workspace_id=workspace_id,
+                run_id=run_id,
+                workflow_version_id=record.workflow_version,
+                occurred_at=self._clock.now(),
+                extra=extra,
+            )
+        )
+        return RunRef(
+            workspace_id=workspace_id,
+            run_id=run_id,
+            workflow_version_id=record.workflow_version,
+            status=finalised.status,
+        )
+
+    # ------------------------------------------------------------------
     # internals
     # ------------------------------------------------------------------
+
+    async def _poll_until_terminated(self, run_id: RunId) -> None:
+        """Poll Dapr's ``get_workflow_state`` until the instance is terminal.
+
+        Returns silently when the runtime reports a terminal
+        :class:`~custos_workflow.runtime._common.RunStatus`
+        (``completed`` / ``failed`` / ``terminated``) or when Dapr
+        has no record of the instance (``None`` return). Raises
+        :class:`WorkflowRuntimeUnavailableError` if the
+        per-controller attempt budget is exhausted without a
+        terminal observation.
+
+        The per-poll sleep is the constructor-injected
+        ``sleep`` callable, defaulting to :func:`asyncio.sleep`;
+        tests inject a no-op sleeper so the loop runs synchronously.
+        The final attempt deliberately skips the trailing sleep
+        because the loop is about to bail out either way.
+        """
+        request = GetRunStateRequest(instance_id=str(run_id))
+        for attempt in range(self._terminate_poll_attempts):
+            state = await self._workflow_client.get_workflow_state(request)
+            if state is None or state.status in RUNTIME_TERMINAL_STATUSES:
+                return
+            if attempt < self._terminate_poll_attempts - 1:
+                await self._sleep(self._terminate_poll_interval)
+        raise WorkflowRuntimeUnavailableError(
+            f"workflow runtime did not confirm termination of run {run_id} "
+            f"after {self._terminate_poll_attempts} attempts",
+            run_id=str(run_id),
+        )
 
     def _assert_dedup_compatible(
         self,
