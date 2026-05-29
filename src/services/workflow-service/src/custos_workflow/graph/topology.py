@@ -48,6 +48,7 @@ __all__ = [
     "collect_explicit_edges",
     "detect_cycles",
     "topological_sort",
+    "validate_step_refs",
 ]
 
 
@@ -236,6 +237,71 @@ def collect_data_dependencies(
                     Edge(from_step=producer, to_step=step_id, kind=EdgeKind.DATA_DEPENDENCY),
                 )
     return edges
+
+
+def validate_step_refs(
+    doc: WorkflowDocument,
+    refs: Iterable[tuple[str, str, Node]],
+) -> None:
+    """Surface forward / unknown / self ``steps.X.outputs`` refs as topology errors.
+
+    The Definition Compiler driver (WF-IMPL-021) runs this pre-flight
+    before the type-check stage so that graph-shape problems
+    (referencing a later step, an unknown step, or the consuming
+    step's own outputs) surface as :class:`TopologyError` instead of
+    as ``expression.unbound_name`` type-check failures.
+
+    Without this pass the type checker would reject those references
+    first — the per-step :class:`~custos_cel.SchemaBindings`
+    deliberately only exposes prior steps — and the caller would see
+    a "name not bound" diagnostic instead of the structurally
+    correct "step appears later in document order".
+
+    Parameters
+    ----------
+    doc
+        The workflow document — used for the document-order index.
+    refs
+        Iterable of ``(consumer_step_id, document_path, ast)`` triples.
+        The ``ast`` is the parsed CEL :class:`~custos_cel.ast.Node`
+        for the call site (typed or untyped — the walker only looks
+        at the syntactic shape, not the ``cel_type`` annotations).
+
+    Raises
+    ------
+    TopologyError
+        For self-references, references to unknown step ids, and
+        forward references (a step referencing a step that appears
+        later in document order). The same conditions that
+        :func:`collect_data_dependencies` raises after type-check.
+    """
+    steps = doc.spec.steps
+    index: dict[str, int] = {step.id: i for i, step in enumerate(steps)}
+    for step_id, doc_path, ast in refs:
+        if step_id not in index:
+            raise TopologyError(
+                f"validate_step_refs references unknown step {step_id!r}",
+            )
+        consumer_idx = index[step_id]
+        for node in _iter_subnodes(ast):
+            producer = _step_ref_target(node)
+            if producer is None:
+                continue
+            if producer == step_id:
+                raise TopologyError(
+                    f"step {step_id!r}: CEL expression at {doc_path!r} "
+                    "references the step's own outputs",
+                )
+            if producer not in index:
+                raise TopologyError(
+                    f"step {step_id!r}: CEL expression at {doc_path!r} "
+                    f"references unknown step {producer!r}",
+                )
+            if index[producer] >= consumer_idx:
+                raise TopologyError(
+                    f"step {step_id!r}: CEL expression at {doc_path!r} "
+                    f"references step {producer!r} declared later in document order",
+                )
 
 
 def detect_cycles(edges: Iterable[Edge]) -> list[list[str]]:
