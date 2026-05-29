@@ -167,6 +167,13 @@ class WorkflowRuntime:
         # build the real runtime on first registration.
         self._runtime = runtime
         self._started = False
+        # ``_worker_ready`` flips to True the first time
+        # :meth:`wait_for_worker_ready` resolves truthy. It is the
+        # signal :attr:`is_ready` gates ``/readyz`` on (WF-IMPL-043).
+        # Kept distinct from ``_started`` so callers can observe the
+        # "worker started but not yet pulling work" window without a
+        # race on the SDK's internal threads.
+        self._worker_ready = False
 
     def _ensure_runtime(self) -> _DaprWorkflowRuntime:
         if self._runtime is None:
@@ -200,12 +207,22 @@ class WorkflowRuntime:
         runtime = self._runtime
         await asyncio.to_thread(runtime.shutdown)
         self._started = False
+        self._worker_ready = False
 
     async def wait_for_worker_ready(self, *, timeout: float = 30.0) -> bool:
-        """Block (in a worker thread) until the worker is ready or ``timeout`` elapses."""
+        """Block (in a worker thread) until the worker is ready or ``timeout`` elapses.
+
+        Latches :attr:`is_ready` to ``True`` on the first truthy
+        return so subsequent ``/readyz`` polls do not re-cross the
+        thread boundary. Subsequent timed-out calls do **not** flip
+        the flag back to ``False`` — once ready, always ready until
+        :meth:`shutdown`.
+        """
 
         runtime = self._ensure_runtime()
         result = await asyncio.to_thread(runtime.wait_for_worker_ready, timeout)
+        if result:
+            self._worker_ready = True
         return bool(result)
 
     @property
@@ -213,6 +230,17 @@ class WorkflowRuntime:
         """``True`` between :meth:`start` and :meth:`shutdown`."""
 
         return self._started
+
+    @property
+    def is_ready(self) -> bool:
+        """``True`` once :meth:`wait_for_worker_ready` has returned truthy.
+
+        This is the signal the FastAPI lifespan in
+        :mod:`custos_workflow.app` gates ``/readyz`` on per
+        WF-IMPL-043's design.md § Configuration entry.
+        """
+
+        return self._started and self._worker_ready
 
 
 # ---------------------------------------------------------------------------
