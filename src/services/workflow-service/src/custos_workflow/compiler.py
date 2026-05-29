@@ -72,23 +72,20 @@ from custos_workflow.callsites import (
 from custos_workflow.document import (
     ActivityStep,
     LetStep,
+    OnErrorAction,
     OnErrorArm,
-    RetryPolicy,
     Step,
     WorkflowDocument,
     WorkflowStep,
 )
 from custos_workflow.graph import (
-    BackoffStrategyTag,
     Edge,
     ExecutionGraph,
     ExecutionNode,
     GraphMetadata,
-    JitterStrategyTag,
     OnErrorActionTag,
     OnErrorRoute,
     PrimitiveHandler,
-    ResolvedBackoffPolicy,
     ResolvedRetryPolicy,
     StepKind,
     TopologyError,
@@ -99,6 +96,11 @@ from custos_workflow.graph import (
     topological_sort,
     validate_step_refs,
 )
+from custos_workflow.retry import (
+    RetryResolutionError,
+    resolve_arm_retry,
+    resolve_step_retry,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -108,12 +110,14 @@ if TYPE_CHECKING:
 
     from custos_workflow.bindings import ActivityTypeRegistry
     from custos_workflow.callsites import CallSite
+    from custos_workflow.document import Defaults
 
 
 __all__ = [
     "BindingsCompileError",
     "CallSiteCompileError",
     "CompileError",
+    "RetryPolicyCompileError",
     "RunMeta",
     "TopologyCompileError",
     "TypeCheckCompileError",
@@ -234,6 +238,21 @@ class TopologyCompileError(CompileError):
     """
 
 
+class RetryPolicyCompileError(CompileError):
+    """Stage 5 failure — retry-policy overlay produced an invalid policy.
+
+    Wraps :class:`~custos_workflow.retry.RetryResolutionError` raised
+    by :func:`~custos_workflow.retry.resolve_step_retry` /
+    :func:`~custos_workflow.retry.resolve_arm_retry` when a layered
+    retry policy contains a malformed ISO-8601 duration, a backoff
+    with ``maxDelay < initialDelay``, or an ``on_error[]`` arm whose
+    inline ``maxAttempts:`` shorthand disagrees with its structured
+    ``retry: { maxAttempts: ... }`` value. The Catalog publish-time
+    validator should catch every one of these, so seeing this at
+    compile time means a document slipped past validation.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -280,6 +299,9 @@ def compile(
             failure so the caller can render a full report.
         TopologyCompileError: cycle detected, forward reference,
             unknown step id, or duplicate step id in the graph.
+        RetryPolicyCompileError: a layered retry policy is invalid
+            (malformed duration, ``maxDelay < initialDelay``, or
+            conflicting ``maxAttempts:`` shorthand vs structured).
     """
     log = logger if logger is not None else logging.getLogger(__name__)
 
@@ -368,7 +390,16 @@ def compile(
 
     # ---- Stage 5+6: assemble ExecutionGraph ---------------------------
     by_id: dict[str, Step] = {s.id: s for s in document.spec.steps}
-    nodes = tuple(_build_node(by_id[sid], node_call_sites[sid]) for sid in topological_order)
+    spec_defaults = document.spec.defaults
+    try:
+        nodes = tuple(
+            _build_node(by_id[sid], node_call_sites[sid], spec_defaults)
+            for sid in topological_order
+        )
+    except RetryResolutionError as exc:
+        raise RetryPolicyCompileError(
+            f"compile: retry-policy resolver rejected the graph: {exc}",
+        ) from exc
     return ExecutionGraph(
         nodes=nodes,
         edges=tuple(all_edges),
@@ -453,11 +484,37 @@ _STEP_DISPATCH: dict[type[Step], tuple[StepKind, PrimitiveHandler]] = {
 def _build_node(
     step: Step,
     typed_call_sites: dict[str, TypedCallSite],
+    spec_defaults: Defaults | None,
 ) -> ExecutionNode:
-    """Assemble one :class:`ExecutionNode` from a source step + its typed sites."""
+    """Assemble one :class:`ExecutionNode` from a source step + its typed sites.
+
+    The step-level :class:`ResolvedRetryPolicy` is computed once
+    here (layers: ``step.retry`` → ``spec.defaults.retry`` →
+    platform defaults — see :func:`resolve_step_retry`) and
+    threaded into each ``on_error`` arm so the per-match overlay
+    runs against the cached step-level resolution rather than
+    re-walking the chain.
+
+    A non-activity step keeps ``retry_policy=None``: ``let:`` and
+    ``workflow:`` kinds never participate in workflow-level retry
+    (design.md § Retry Policy → § Where ``retry:`` may appear).
+    The structured Catalog rejection of disallowed-kind ``retry:``
+    blocks lands in WF-IMPL-023; for now the document model itself
+    only attaches ``retry`` to :class:`~custos_workflow.document.ActivityStep`
+    so this branch is the natural enforcement point.
+    """
     step_kind, handler = _STEP_DISPATCH[type(step)]
-    retry_policy = _resolve_retry_policy(step.retry) if step.retry else None
-    on_error_routes = tuple(_resolve_on_error_route(a) for a in step.on_error or ())
+    retry_policy: ResolvedRetryPolicy | None
+    on_error_routes: tuple[OnErrorRoute, ...]
+    if isinstance(step, ActivityStep):
+        step_resolved = resolve_step_retry(step.retry, spec_defaults)
+        retry_policy = step_resolved
+        on_error_routes = tuple(
+            _resolve_on_error_route(arm, step_resolved) for arm in step.on_error or ()
+        )
+    else:
+        retry_policy = None
+        on_error_routes = ()
     return ExecutionNode(
         step_id=step.id,
         kind=step_kind,
@@ -470,64 +527,36 @@ def _build_node(
 
 
 # ---------------------------------------------------------------------------
-# WF-IMPL-022 / WF-IMPL-023 stubs
+# WF-IMPL-023 stub
 # ---------------------------------------------------------------------------
 #
-# Both resolvers below are deliberately conservative pass-throughs.
-# The structured precedence overlay (per-match → step →
-# ``spec.defaults`` → platform overlay) and the full on_error route
-# taxonomy (implicit policy synthesis, cancelled short-circuit,
-# disallowed-kind rejection) land in WF-IMPL-022 and WF-IMPL-023
-# respectively. Until then the helpers fill any field the document
-# omits with safe defaults so the compiled :class:`ExecutionGraph`
-# remains well-formed at this milestone.
-
-#: Platform-default backoff curve fed in for any field the
-#: document does not pin. Replaced wholesale by WF-IMPL-022's
-#: real precedence overlay.
-_DEFAULT_BACKOFF = ResolvedBackoffPolicy(
-    strategy=BackoffStrategyTag.EXPONENTIAL,
-    initial_delay_ms=100,
-    max_delay_ms=30_000,
-    multiplier=2.0,
-)
+# The full on_error route compiler (implicit policy synthesis,
+# cancelled short-circuit, disallowed-kind rejection — design.md
+# § Implicit on_error policy) lands in WF-IMPL-023. Until then
+# this helper just maps a single :class:`OnErrorArm` 1:1 onto an
+# :class:`OnErrorRoute` and folds the resolved retry policy for
+# ``do: retry`` arms.
 
 
-def _resolve_retry_policy(policy: RetryPolicy) -> ResolvedRetryPolicy:
-    """STUB resolver for WF-IMPL-022.
-
-    Passes ``max_attempts``, ``jitter`` and ``respect_retry_after``
-    through from the document where set; substitutes the
-    :data:`_DEFAULT_BACKOFF` curve unconditionally (parsing
-    duration strings like ``"100ms"`` and merging the per-match →
-    step → defaults precedence chain are WF-IMPL-022's job).
-    """
-    return ResolvedRetryPolicy(
-        max_attempts=policy.max_attempts if policy.max_attempts is not None else 3,
-        backoff=_DEFAULT_BACKOFF,
-        jitter=(
-            JitterStrategyTag(policy.jitter.value)
-            if policy.jitter is not None
-            else JitterStrategyTag.FULL
-        ),
-        respect_retry_after=(
-            policy.respect_retry_after if policy.respect_retry_after is not None else True
-        ),
-    )
-
-
-def _resolve_on_error_route(arm: OnErrorArm) -> OnErrorRoute:
+def _resolve_on_error_route(
+    arm: OnErrorArm,
+    step_resolved: ResolvedRetryPolicy,
+) -> OnErrorRoute:
     """STUB resolver for WF-IMPL-023.
 
-    Maps one :class:`OnErrorArm` 1:1 onto an
-    :class:`OnErrorRoute`. The implicit-policy synthesis,
-    cancelled short-circuit, and disallowed-kind rejection
-    (design.md § Implicit on_error policy) land in WF-IMPL-023.
+    Folds the per-match retry overlay (when ``do: retry``) on top
+    of the step-level resolved policy via
+    :func:`~custos_workflow.retry.resolve_arm_retry`. ``do: skip``
+    and ``do: fail`` arms carry no retry policy so their resolved
+    field stays ``None``.
     """
+    resolved: ResolvedRetryPolicy | None = (
+        resolve_arm_retry(arm, step_resolved) if arm.do is OnErrorAction.RETRY else None
+    )
     return OnErrorRoute(
         action=OnErrorActionTag(arm.do.value),
         code=arm.match.code,
         code_prefix=arm.match.code_prefix,
         cls=arm.match.cls,
-        retry=_resolve_retry_policy(arm.retry) if arm.retry is not None else None,
+        retry=resolved,
     )

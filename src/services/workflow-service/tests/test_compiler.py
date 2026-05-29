@@ -482,8 +482,8 @@ class TestEdgeDeduplication:
 class TestRetryAndOnErrorResolvers:
     def test_retry_policy_filled_with_defaults(self) -> None:
         # ``maxAttempts: 5`` should pass through; every other field is
-        # taken from the platform-default curve until WF-IMPL-022
-        # tightens the resolver.
+        # taken from the platform-default curve resolved by WF-IMPL-022
+        # (PT1S = 1000 ms, PT5M = 300 000 ms).
         doc = _doc(
             [
                 {
@@ -498,22 +498,49 @@ class TestRetryAndOnErrorResolvers:
         policy = graph.nodes[0].retry_policy
         assert policy is not None
         assert policy.max_attempts == 5
-        # Defaults from the stub:
-        assert policy.backoff.initial_delay_ms == 100
-        assert policy.backoff.max_delay_ms == 30_000
+        # Platform defaults (design.md § Retry Policy → § Precedence):
+        assert policy.backoff.initial_delay_ms == 1_000
+        assert policy.backoff.max_delay_ms == 300_000
+        assert policy.backoff.multiplier == 2.0
         assert policy.respect_retry_after is True
         assert policy.jitter is JitterStrategyTag.FULL
 
-    def test_step_without_retry_has_none_policy(self) -> None:
+    def test_step_without_retry_inherits_platform_defaults(self) -> None:
+        # An activity step always carries a resolved retry policy now —
+        # the overlay falls back to platform defaults when neither
+        # ``step.retry`` nor ``spec.defaults.retry`` is set.
         doc = _doc(
             [
                 {"id": "scan", "activity": "security/scan@1", "connector": "primary"},
             ]
         )
         graph = compile_workflow(doc, _run_meta(), _registry())
+        policy = graph.nodes[0].retry_policy
+        assert policy is not None
+        assert policy.max_attempts == 3
+        assert policy.backoff.initial_delay_ms == 1_000
+        assert policy.backoff.max_delay_ms == 300_000
+
+    def test_let_step_has_no_retry_policy(self) -> None:
+        # ``let:`` steps never participate in workflow-level retry —
+        # design.md § Where ``retry:`` may appear forbids it.
+        doc = _doc(
+            [
+                {
+                    "id": "compute",
+                    "let": {"verdict": "fail"},
+                },
+            ]
+        )
+        graph = compile_workflow(doc, _run_meta(), _registry())
         assert graph.nodes[0].retry_policy is None
+        assert graph.nodes[0].on_error_routes == ()
 
     def test_on_error_arm_passes_through_to_route(self) -> None:
+        # Inline ``maxAttempts:`` shorthand and structured
+        # ``retry: { maxAttempts: ... }`` may NOT conflict — the
+        # resolver raises ``RetryPolicyCompileError``. Matching values
+        # are allowed (the shorthand is just redundant).
         doc = _doc(
             [
                 {
@@ -524,7 +551,7 @@ class TestRetryAndOnErrorResolvers:
                         {
                             "match": {"code": "E_TIMEOUT"},
                             "do": "retry",
-                            "maxAttempts": 2,
+                            "maxAttempts": 7,
                             "retry": {"maxAttempts": 7},
                         },
                         {"match": {"codePrefix": "E_RATE_"}, "do": "skip"},
@@ -538,8 +565,6 @@ class TestRetryAndOnErrorResolvers:
         assert routes[0].action is OnErrorActionTag.RETRY
         assert routes[0].code == "E_TIMEOUT"
         assert routes[0].retry is not None
-        # ``retry:`` block wins over the shorthand ``maxAttempts:`` at
-        # this stub — WF-IMPL-023 will sort out the merge precedence.
         assert routes[0].retry.max_attempts == 7
         assert routes[1].action is OnErrorActionTag.SKIP
         assert routes[1].code_prefix == "E_RATE_"
