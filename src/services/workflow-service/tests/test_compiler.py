@@ -541,6 +541,12 @@ class TestRetryAndOnErrorResolvers:
         # ``retry: { maxAttempts: ... }`` may NOT conflict — the
         # resolver raises ``RetryPolicyCompileError``. Matching values
         # are allowed (the shorthand is just redundant).
+        #
+        # The compiled route table also includes the implicit
+        # cancelled-short-circuit (prepended) and the implicit
+        # retryable / permanent fallback (appended) per
+        # design.md § Implicit ``on_error`` policy — see the
+        # ``custos_workflow.on_error`` package for the layering.
         doc = _doc(
             [
                 {
@@ -561,14 +567,25 @@ class TestRetryAndOnErrorResolvers:
         )
         graph = compile_workflow(doc, _run_meta(), _registry())
         routes = graph.nodes[0].on_error_routes
-        assert len(routes) == 2
-        assert routes[0].action is OnErrorActionTag.RETRY
-        assert routes[0].code == "E_TIMEOUT"
-        assert routes[0].retry is not None
-        assert routes[0].retry.max_attempts == 7
-        assert routes[1].action is OnErrorActionTag.SKIP
-        assert routes[1].code_prefix == "E_RATE_"
-        assert routes[1].retry is None
+        # 1 (cancelled short-circuit) + 2 (user arms) + 2 (fallback)
+        assert len(routes) == 5
+        # Prepended cancelled short-circuit always wins for class:cancelled.
+        assert routes[0].action is OnErrorActionTag.FAIL
+        assert routes[0].cls == "cancelled"
+        assert routes[0].retry is None
+        # User arms in declaration order.
+        assert routes[1].action is OnErrorActionTag.RETRY
+        assert routes[1].code == "E_TIMEOUT"
+        assert routes[1].retry is not None
+        assert routes[1].retry.max_attempts == 7
+        assert routes[2].action is OnErrorActionTag.SKIP
+        assert routes[2].code_prefix == "E_RATE_"
+        assert routes[2].retry is None
+        # Implicit fallback for retryable / permanent.
+        assert routes[3].action is OnErrorActionTag.RETRY
+        assert routes[3].cls == "retryable"
+        assert routes[4].action is OnErrorActionTag.FAIL
+        assert routes[4].cls == "permanent"
 
 
 # ---------------------------------------------------------------------------

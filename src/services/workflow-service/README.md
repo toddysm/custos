@@ -12,7 +12,7 @@ Design: [`design/components/workflow-service/design.md`](../../../design/compone
 
 ## Status
 
-**Phase A scaffold + FastAPI surface + WorkflowDocument models + SchemaBindings derivation + ExecutionGraph data model + call-site collector + Definition Compiler driver + effective retry-policy resolver** —
+**Phase A scaffold + FastAPI surface + WorkflowDocument models + SchemaBindings derivation + ExecutionGraph data model + call-site collector + Definition Compiler driver + effective retry-policy resolver + on-error route compiler** —
 WF-IMPL-013 ([#347](https://github.com/toddysm/custos/issues/347)),
 WF-IMPL-014 ([#348](https://github.com/toddysm/custos/issues/348)),
 WF-IMPL-015 ([#349](https://github.com/toddysm/custos/issues/349)),
@@ -21,8 +21,9 @@ WF-IMPL-017 ([#351](https://github.com/toddysm/custos/issues/351)),
 WF-IMPL-018 ([#352](https://github.com/toddysm/custos/issues/352)),
 WF-IMPL-019 ([#353](https://github.com/toddysm/custos/issues/353)),
 WF-IMPL-020 ([#354](https://github.com/toddysm/custos/issues/354)),
-WF-IMPL-021 ([#355](https://github.com/toddysm/custos/issues/355)), and
-WF-IMPL-022 ([#356](https://github.com/toddysm/custos/issues/356)). The
+WF-IMPL-021 ([#355](https://github.com/toddysm/custos/issues/355)),
+WF-IMPL-022 ([#356](https://github.com/toddysm/custos/issues/356)), and
+WF-IMPL-023 ([#357](https://github.com/toddysm/custos/issues/357)). The
 package skeleton, the runnable `create_app()` factory, the
 `python -m custos_workflow` entry point, the `/healthz` and `/readyz`
 probes, the call-context middleware shim, the Helm subchart, the
@@ -34,12 +35,13 @@ byte-stable JSON serializer, the topology layer (explicit edges,
 data-dependency edges, cycle detection, stable topological sort),
 the CEL call-site collector, the Definition Compiler driver
 (`compile(document, run_meta, registry) -> ExecutionGraph` —
-wiring stages 1–6 of the pipeline), and the effective retry-policy
+wiring stages 1–6 of the pipeline), the effective retry-policy
 resolver (`resolve_step_retry` / `resolve_arm_retry` — per-match →
-step → `spec.defaults` → platform overlay, field-by-field) are
-real. The remaining resolvers (on-error route compilation,
-structured error envelope, telemetry hooks) land in WF-IMPL-023
-onwards under stubs the driver already calls; tracker
+step → `spec.defaults` → platform overlay, field-by-field), and
+the on-error route compiler (`compile_on_error` — implicit-policy
+synthesis, prepended `cancelled` short-circuit, disallowed-kind
+rejection) are real. The remaining resolvers (structured error
+envelope, telemetry hooks) land in WF-IMPL-024 onwards; tracker
 [#363](https://github.com/toddysm/custos/issues/363) (WF-IMPL-000-COMPILER).
 
 
@@ -135,6 +137,9 @@ src/services/workflow-service/
 │       │   ├── __init__.py    # public re-exports
 │       │   ├── defaults.py    # PLATFORM_RETRY_DEFAULTS (layer 4)
 │       │   └── resolve.py     # resolve_step_retry + resolve_arm_retry overlays
+│       ├── on_error/          # On-error route compiler (WF-IMPL-023)
+│       │   ├── __init__.py    # public re-exports
+│       │   └── compile.py     # compile_on_error — implicit policy + cancelled short-circuit
 │       └── py.typed
 └── tests/
     ├── test_smoke.py             # package import + factory smoke
@@ -150,9 +155,9 @@ src/services/workflow-service/
     ├── test_graph_topology.py    # explicit/implicit edges + cycles + stable sort
     ├── test_callsites.py         # placeholder scanner + call-site collector
     ├── test_compiler.py          # compile() driver: happy path, errors, stubs
-    └── test_retry_resolver.py    # resolve_step_retry + resolve_arm_retry overlays
+    ├── test_retry_resolver.py    # resolve_step_retry + resolve_arm_retry overlays
+    └── test_on_error_compile.py  # compile_on_error: implicit + rejections
 ```
 
-Subsequent WF-IMPL-* tasks tighten the in-driver stubs for
-on-error compilation, add structured error envelopes, and wire
-telemetry hooks (`on_error/`, `errors.py`, `_telemetry.py`).
+Subsequent WF-IMPL-* tasks add structured error envelopes and
+wire telemetry hooks (`errors.py`, `_telemetry.py`).
