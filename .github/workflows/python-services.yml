@@ -231,7 +231,12 @@ jobs:
         run: mypy src tests
 
       - name: Pytest (with 90% coverage gate)
-        run: pytest -q --cov=custos_workflow --cov-report=term-missing --cov-fail-under=90
+        # ``--hypothesis-seed=0`` pins the property-based determinism
+        # tests in ``tests/test_determinism_property.py`` (WF-IMPL-026,
+        # #360) so PR/push runs are byte-stable across re-runs. The
+        # broader random-seed exploration is run nightly by
+        # ``.github/workflows/workflow-service-nightly.yml``.
+        run: pytest -q --cov=custos_workflow --cov-report=term-missing --cov-fail-under=90 --hypothesis-seed=0
 
   connector-service:
     name: connector-service (lint + types + tests)

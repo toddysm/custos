@@ -1,0 +1,78 @@
+name: workflow-service-nightly
+
+# Nightly property-test exploration with a random Hypothesis seed.
+# WF-IMPL-026 / #360 requires that the PR/push job runs with
+# ``--hypothesis-seed=0`` for reproducibility (pinned in
+# ``.github/workflows/python-services.yml``); this scheduled job is
+# the broader exploration counterpart that the issue acceptance
+# criterion calls out ("All four properties pass with the default
+# seed and with at least one random seed"). A regression the
+# locked-seed CI run misses but a random seed catches will fail
+# this job, leaving a counter-example in the Hypothesis database
+# for follow-up triage.
+#
+# Mirrors ``.github/workflows/custos-cel-nightly.yml`` (WF-IMPL-010
+# / #185) — same cron, same matrix, same conventions.
+
+permissions:
+  contents: read
+
+on:
+  schedule:
+    # 07:00 UTC every day. Off-hours for the maintainer's timezone so
+    # a failure is visible by morning.
+    - cron: "0 7 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  property-tests-random-seed:
+    name: workflow-service property tests (random seed)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    defaults:
+      run:
+        working-directory: src/services/workflow-service
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install custos-cel library from path
+        working-directory: ${{ github.workspace }}
+        run: |
+          pip install -e src/libs/custos-cel[dev]
+
+      - name: Install package and dev dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Pytest (property tests, random seed)
+        # No ``--hypothesis-seed`` — Hypothesis picks a fresh seed
+        # per invocation, and any falsifying example is recorded
+        # into the Hypothesis database for replay. ``--no-cov``
+        # skips the 90 % coverage gate since this job only runs the
+        # property-test module, not the full unit-test suite.
+        run: pytest -q tests/test_determinism_property.py --no-cov
+
+      - name: Upload Hypothesis database on failure
+        # The minimized counter-example lives in
+        # ``src/services/workflow-service/.hypothesis`` and would
+        # otherwise vanish with the runner. Uploading it as an
+        # artifact lets a maintainer download the directory and
+        # replay the failing example locally with
+        # ``pytest tests/test_determinism_property.py``
+        # (Hypothesis automatically replays examples from a
+        # restored database). Scoped to ``if: failure()`` so green
+        # runs do not produce noise artifacts.
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hypothesis-db-py${{ matrix.python-version }}
+          path: src/services/workflow-service/.hypothesis
+          if-no-files-found: ignore
+          retention-days: 14
