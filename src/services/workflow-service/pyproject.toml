@@ -39,6 +39,12 @@ dependencies = [
     "pydantic>=2.6,<3",
     "pyyaml>=6.0,<7",
     "opentelemetry-api>=1.20,<2",
+    # Dapr Workflow Python SDK — required by custos_workflow.runtime
+    # (WF-IMPL-029, #381). All imports of dapr.ext.workflow are
+    # confined to custos_workflow.runtime.dapr so the rest of the
+    # service can be exercised under FakeWorkflowRuntime / -Client
+    # without a live sidecar.
+    "dapr-ext-workflow>=1.17,<2",
 ]
 
 [project.optional-dependencies]

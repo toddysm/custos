@@ -47,6 +47,46 @@ Second sub-module under construction: **Definition Compiler**, packaged inside t
 - [x] WF-IMPL-027: Observability hooks — OTel spans, per-stage histograms, error counter (issue #361; depends on #355, #358).
 - [x] WF-IMPL-028: Developer documentation — `docs/developers/workflow-compilation.md` (issue #362; depends on #355, #358, #359).
 
+## Implementation — Run Controller
+
+Third sub-module: **Run Controller**, packaged inside the service host `src/services/workflow-service/` (Python package `custos_workflow.run_controller`). Owns the lifecycle of an `ExecutionGraph` run as a Dapr Workflow (start / cancel / pause / resume / observe), persists the Run row via `MetadataStoreProvider`, dispatches step execution to the (separately-shipped) Step Coordinator through a `StepHandler` Protocol, and emits the canonical `workflow.*` / `run.*` lifecycle events. Tracked under #399 (WF-IMPL-000-RUN-CONTROLLER). Plan: [`implementation-plan.md`](implementation-plan.md).
+
+### Phase A — Foundations (Dapr runtime, IDs, errors)
+
+- [x] WF-IMPL-029 (#381): Add Dapr Workflow runtime + client wrappers — thin adapter around `dapr-ext-workflow` so tests use `FakeWorkflowRuntime`.
+- [F] WF-IMPL-030 (#382): Deterministic runId derivation — UUIDv5 over `(workspace_id, idempotency_key)` when supplied; UUIDv4 otherwise.
+- [F] WF-IMPL-031 (#383): Public Run Controller error taxonomy — `RunControllerError` + subclasses, locked `kind` strings.
+
+### Phase B — Run row persistence
+
+- [F] WF-IMPL-032 (#384): Run row CRUD against `MetadataStoreProvider` — `put_run`/`update_run_status`/`get_run`/`list_runs`.
+- [F] WF-IMPL-033 (#385): Compiled `ExecutionGraph` JSON round-trip on Run — store + reload the byte-stable compiler artifact.
+
+### Phase C — Workflow function + step-dispatch boundary
+
+- [F] WF-IMPL-034 (#386): `StepHandler` Protocol — formal boundary with the Step Coordinator (out of scope for this sub-module).
+- [F] WF-IMPL-035 (#387): `run_orchestrator` Dapr Workflow function — top-level orchestrator that walks the `ExecutionGraph`.
+- [F] WF-IMPL-036 (#388): `wait:` step handler — uses a Dapr durable timer (only built-in step kind owned here).
+
+### Phase D — Public lifecycle API
+
+- [F] WF-IMPL-037 (#389): `RunController.start_run` — entry point invoked by Trigger Service / API Gateway.
+- [F] WF-IMPL-038 (#390): `RunController.cancel_run` — terminate-in-flight + persist final state.
+- [F] WF-IMPL-039 (#391): `RunController.pause_run` / `resume_run` — Dapr Workflow pause + external-event resume.
+- [F] WF-IMPL-040 (#392): `RunController.get_run` / `list_runs` — read API on top of `MetadataStoreProvider`.
+
+### Phase E — Events, replay, service wiring
+
+- [F] WF-IMPL-041 (#393): Workflow lifecycle event publication — emit `workflow.*` / `run.*` via shared `LifecycleEventPublisher`.
+- [F] WF-IMPL-042 (#394): Replay reconciliation hook — recover Run rows on worker restart from the Dapr state store.
+- [F] WF-IMPL-043 (#395): FastAPI lifespan worker wiring — start/stop the `WorkflowRuntime` with the service host.
+
+### Phase F — Observability, verification, docs
+
+- [F] WF-IMPL-044 (#396): OTel observability hooks — spans for `start_run`/`cancel_run`/orchestrator + lifecycle-event counters.
+- [F] WF-IMPL-045 (#397): Unit + integration test suite — `FakeWorkflowRuntime` driven; ≥ 90 % coverage gate.
+- [F] WF-IMPL-046 (#398): Developer documentation — `docs/developers/workflow-run-controller.md`.
+
 ## Implementation — Expression Evaluator
 
 First sub-module: **Expression Evaluator** (ADR-011), packaged as the shared library `src/libs/custos-cel/` (also consumed by Catalog Service for publish-time syntactic validation per [2026-05-18-003-bundle-h-cel-parse-surface.md](changes/2026-05-18-003-bundle-h-cel-parse-surface.md)).
