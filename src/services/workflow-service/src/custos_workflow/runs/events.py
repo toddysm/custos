@@ -60,10 +60,11 @@ __all__ = [
 
 
 #: Default HTTP request timeout (seconds) the production publisher
-#: applies to each Dapr ``/v1.0/publish`` POST. Mirrors the
-#: connector-service publisher default so operators see one
-#: tunable across the platform.
-DEFAULT_DAPR_PUBLISH_TIMEOUT_SECONDS: Final[float] = 5.0
+#: applies to each Dapr ``/v1.0/publish`` POST. Aligned with the
+#: connector-service publisher default
+#: (:data:`custos_connector.listen.publisher.DEFAULT_PUBLISH_TIMEOUT_SECONDS`,
+#: 10.0) so operators see one tunable across the platform.
+DEFAULT_DAPR_PUBLISH_TIMEOUT_SECONDS: Final[float] = 10.0
 
 #: Default maximum number of ``(run_id, kind, occurred_at)`` keys
 #: :class:`DedupingLifecyclePublisher` will remember. The cache
@@ -125,19 +126,30 @@ class DedupingLifecyclePublisher:
         ``(run_id, kind, occurred_at)`` triple.
 
         On a duplicate this returns immediately without calling
-        :attr:`inner`. On a first-seen key the event is
-        forwarded; the key is recorded only AFTER the inner
-        publish succeeds, so a transient publish failure
-        leaves the cache in a state where a retry will still
-        forward the event."""
+        :attr:`inner`. On a first-seen key the key is
+        **reserved before the awaited inner publish**, so two
+        concurrent ``publish()`` calls for the same triple cannot
+        both observe the key as absent and both forward — the
+        second caller sees the reservation and short-circuits.
+        If the inner publish raises, the reservation is removed
+        so a retry still forwards the event."""
         key = (str(event.run_id), event.kind, event.occurred_at.isoformat())
         if key in self._seen:
             # Touch — keep this key as recently-seen.
             self._seen.move_to_end(key)
             return
-        await self.inner.publish(event)
+        # Reserve BEFORE the await so a concurrent publish() for
+        # the same key finds the reservation and short-circuits.
         self._seen[key] = None
+        try:
+            await self.inner.publish(event)
+        except BaseException:
+            # Drop the reservation so a retry will forward.
+            self._seen.pop(key, None)
+            raise
         # Evict the oldest entry once we've exceeded the bound.
+        # The key we just inserted is at the tail, so popitem(last=False)
+        # cannot evict it.
         if len(self._seen) > self.max_seen_keys:
             self._seen.popitem(last=False)
 
