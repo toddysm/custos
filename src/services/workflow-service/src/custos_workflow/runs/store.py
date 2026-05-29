@@ -1,6 +1,6 @@
 """``RunStore`` Protocol + in-process :class:`MetadataStoreProvider` adapter.
 
-This module wires the Run Controller to the workspace-service's
+This module wires the Run Controller to the workflow-service's
 persistence story. The :class:`RunStore` Protocol pins the
 narrow surface every higher-level Run Controller sub-module
 keys off; the :class:`InProcessRunStore` adapter delegates each
