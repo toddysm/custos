@@ -48,7 +48,12 @@ from custos_spl.interfaces.metadata_store import (
 )
 from custos_spl.pagination import Cursor, Page
 
-from custos_workflow.runs.errors import RunStateConflictError
+from custos_workflow.graph.serialize import (
+    GraphSerializationError,
+    from_json,
+    to_json,
+)
+from custos_workflow.runs.errors import RunStateConflictError, RunStateCorruptError
 from custos_workflow.runs.ids import RunId
 from custos_workflow.runs.model import STATUS_TRANSITIONS, RunRecord, RunStatus
 
@@ -124,9 +129,12 @@ class InProcessRunStore:
     Delegates to an injected
     :class:`custos_spl.interfaces.metadata_store.MetadataStoreProvider`
     for the persistent fields (everything :class:`SplRun` carries)
-    and keeps :attr:`RunRecord.compiled_graph` in an internal
-    side-map until WF-IMPL-033 (#385) lands the serialization
-    layer.
+    and persists :attr:`RunRecord.compiled_graph` as the
+    byte-stable WF-IMPL-018 JSON envelope in an internal side-map
+    keyed by ``(workspace_id, run_id)``. WF-IMPL-033 (#385) wires
+    the JSON round-trip; once a future SPL revision exposes a
+    compiled-graph column on :class:`SplRun`, the side-map can
+    drop in as a thin pass-through.
 
     The adapter does not own any global state — instantiate one
     per process (or per test) and pass it through the dependency
@@ -135,10 +143,14 @@ class InProcessRunStore:
 
     def __init__(self, provider: MetadataStoreProvider) -> None:
         self._provider: MetadataStoreProvider = provider
-        # Side-map for the compiled graph until WF-IMPL-033 lands
-        # the serialization round-trip into the SPL ``Run`` row.
+        # Side-map for the compiled-graph JSON envelope. Stored as
+        # the WF-IMPL-018 byte-stable ``to_json()`` output so the
+        # serialization round-trip is exercised on every read —
+        # corruption is surfaced as :class:`RunStateCorruptError`
+        # at :meth:`get_run` / :meth:`list_runs` time, not at the
+        # next code path that happens to touch ``.compiled_graph``.
         # Key: ``(workspace_id, run_id)``.
-        self._graphs: dict[tuple[str, str], ExecutionGraph] = {}
+        self._graphs: dict[tuple[str, str], str] = {}
 
     # ----- helpers ------------------------------------------------------
 
@@ -156,6 +168,8 @@ class InProcessRunStore:
         )
 
     def _to_record(self, spl: SplRun) -> RunRecord:
+        key = (str(spl.workspace_id), str(spl.run_id))
+        graph = self._load_graph(key, run_id=cast(RunId, str(spl.run_id)))
         return RunRecord(
             workspace_id=str(spl.workspace_id),
             run_id=cast(RunId, str(spl.run_id)),
@@ -165,8 +179,38 @@ class InProcessRunStore:
             reason=spl.reason,
             started_at=spl.started_at,
             updated_at=spl.updated_at,
-            compiled_graph=self._graphs.get((str(spl.workspace_id), str(spl.run_id))),
+            compiled_graph=graph,
         )
+
+    def _load_graph(
+        self,
+        key: tuple[str, str],
+        *,
+        run_id: RunId,
+    ) -> ExecutionGraph | None:
+        """Re-hydrate the persisted graph JSON for *key*.
+
+        Returns ``None`` when no graph was ever associated with
+        the run (every Run Controller entry point that has not yet
+        compiled / attached a graph). Raises
+        :class:`RunStateCorruptError` when the stored JSON exists
+        but fails the WF-IMPL-018 :func:`from_json` schema check.
+        The originating :class:`GraphSerializationError` message
+        is preserved verbatim in :attr:`RunStateCorruptError.cause`
+        for audit correlation.
+        """
+
+        graph_json = self._graphs.get(key)
+        if graph_json is None:
+            return None
+        try:
+            return from_json(graph_json)
+        except GraphSerializationError as exc:
+            raise RunStateCorruptError(
+                "compiled graph JSON failed to deserialize",
+                run_id=run_id,
+                cause=str(exc),
+            ) from exc
 
     # ----- RunStore surface ---------------------------------------------
 
@@ -213,7 +257,7 @@ class InProcessRunStore:
             ) from None
 
         if run.compiled_graph is not None:
-            self._graphs[(run.workspace_id, str(run.run_id))] = run.compiled_graph
+            self._graphs[(run.workspace_id, str(run.run_id))] = to_json(run.compiled_graph)
         return self._to_record(spl_persisted)
 
     async def update_run_status(
