@@ -12,7 +12,7 @@ Design: [`design/components/workflow-service/design.md`](../../../design/compone
 
 ## Status
 
-**Phase A scaffold + FastAPI surface + WorkflowDocument models + SchemaBindings derivation + ExecutionGraph data model + call-site collector + Definition Compiler driver + effective retry-policy resolver + on-error route compiler + locked compile-time error taxonomy + exhaustive kind-grid test suite (≥90 % coverage gate)** —
+**Phase A scaffold + FastAPI surface + WorkflowDocument models + SchemaBindings derivation + ExecutionGraph data model + call-site collector + Definition Compiler driver + effective retry-policy resolver + on-error route compiler + locked compile-time error taxonomy + exhaustive kind-grid test suite + Hypothesis-driven determinism property tests (≥90 % coverage gate)** —
 WF-IMPL-013 ([#347](https://github.com/toddysm/custos/issues/347)),
 WF-IMPL-014 ([#348](https://github.com/toddysm/custos/issues/348)),
 WF-IMPL-015 ([#349](https://github.com/toddysm/custos/issues/349)),
@@ -24,8 +24,9 @@ WF-IMPL-020 ([#354](https://github.com/toddysm/custos/issues/354)),
 WF-IMPL-021 ([#355](https://github.com/toddysm/custos/issues/355)),
 WF-IMPL-022 ([#356](https://github.com/toddysm/custos/issues/356)),
 WF-IMPL-023 ([#357](https://github.com/toddysm/custos/issues/357)),
-WF-IMPL-024 ([#358](https://github.com/toddysm/custos/issues/358)), and
-WF-IMPL-025 ([#359](https://github.com/toddysm/custos/issues/359)). The
+WF-IMPL-024 ([#358](https://github.com/toddysm/custos/issues/358)),
+WF-IMPL-025 ([#359](https://github.com/toddysm/custos/issues/359)), and
+WF-IMPL-026 ([#360](https://github.com/toddysm/custos/issues/360)). The
 package skeleton, the runnable `create_app()` factory, the
 `python -m custos_workflow` entry point, the `/healthz` and `/readyz`
 probes, the call-context middleware shim, the Helm subchart, the
@@ -53,12 +54,21 @@ every documented `StepKind` / `CallSiteKind` / `EdgeKind` /
 `PrimitiveHandler` / `BackoffStrategy` / `JitterStrategy` /
 `OnErrorAction` member and every locked `compile.*` `kind`,
 guarded by `set(observed) == set(EnumClass)` so adding an enum
-member without adding a grid row fails the build) backed by the
+member without adding a grid row fails the build), and the
+Hypothesis-driven determinism property tests
+(`tests/test_determinism_property.py` — four properties locking
+the replay-safety contract: (1) byte-equal `to_json(compile())`
+across 100 repeats, (2) topological-order stability under
+`spec.steps` shuffle, (3) `from_json(to_json(g)) == g` JSON
+round-trip, (4) per-step `ResolvedRetryPolicy` stability; PR/push
+CI runs with `--hypothesis-seed=0` for reproducibility while the
+broader random-seed exploration is run nightly by
+`.github/workflows/workflow-service-nightly.yml`) backed by the
 `--cov-fail-under=90` floor wired into the package's pytest
 defaults (current coverage ≈ 99 %, `errors.py` and
 `graph/serialize.py` at 100 %)
 are real. The remaining resolvers (telemetry hooks) land in
-WF-IMPL-026 onwards; tracker
+WF-IMPL-027 onwards; tracker
 [#363](https://github.com/toddysm/custos/issues/363) (WF-IMPL-000-COMPILER).
 
 
@@ -176,7 +186,8 @@ src/services/workflow-service/
     ├── test_retry_resolver.py    # resolve_step_retry + resolve_arm_retry overlays
     ├── test_on_error_compile.py  # compile_on_error: implicit + rejections
     ├── test_errors.py            # CompileError taxonomy: kinds, to_dict, hash, repr
-    └── test_kind_grid.py         # Parametrized kind grids + exhaustiveness guards (WF-IMPL-025)
+    ├── test_kind_grid.py         # Parametrized kind grids + exhaustiveness guards (WF-IMPL-025)
+    └── test_determinism_property.py  # Hypothesis property-based determinism tests (WF-IMPL-026)
 ```
 
 Subsequent WF-IMPL-* tasks wire telemetry hooks
