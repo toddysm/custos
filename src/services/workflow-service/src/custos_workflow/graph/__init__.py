@@ -62,6 +62,7 @@ from custos_workflow.graph.topology import (
     collect_explicit_edges,
     detect_cycles,
     topological_sort,
+    validate_step_refs,
 )
 
 __all__ = [
@@ -89,4 +90,5 @@ __all__ = [
     "from_json",
     "to_json",
     "topological_sort",
+    "validate_step_refs",
 ]

@@ -386,6 +386,93 @@ class TestTopologyErrors:
         assert "a" in str(ei.value) or "b" in str(ei.value)
         assert isinstance(ei.value, CompileError)
 
+    def test_forward_cel_step_ref_raises_topology_not_typecheck(self) -> None:
+        # ``steps.later.outputs.x`` from an earlier step is a graph
+        # shape problem, NOT a type problem. The pre-flight
+        # ``validate_step_refs`` stage surfaces it as
+        # TopologyCompileError before the type checker runs (where it
+        # would otherwise show up as expression.unbound_name because
+        # derive_bindings only exposes prior steps).
+        doc = _doc(
+            [
+                {
+                    "id": "early",
+                    "activity": "security/scan@1",
+                    "connector": "primary",
+                    "if": "${{ steps.late.outputs.critical }}",
+                },
+                {
+                    "id": "late",
+                    "activity": "security/scan@1",
+                    "connector": "primary",
+                },
+            ]
+        )
+        with pytest.raises(TopologyCompileError) as ei:
+            compile_workflow(doc, _run_meta(), _registry())
+        # The diagnostic must point at the actual offender, not at
+        # the type checker's misleading "unbound name" framing.
+        assert "later in document order" in str(ei.value)
+        assert "late" in str(ei.value)
+
+    def test_unknown_cel_step_ref_raises_topology_not_typecheck(self) -> None:
+        # ``steps.ghost.outputs.x`` — same reasoning as the forward
+        # case: graph-shape problem, must surface as topology.
+        doc = _doc(
+            [
+                {
+                    "id": "scan",
+                    "activity": "security/scan@1",
+                    "connector": "primary",
+                    "if": "${{ steps.ghost.outputs.critical }}",
+                },
+            ]
+        )
+        with pytest.raises(TopologyCompileError) as ei:
+            compile_workflow(doc, _run_meta(), _registry())
+        assert "ghost" in str(ei.value)
+
+    def test_self_cel_step_ref_raises_topology_not_typecheck(self) -> None:
+        # ``steps.self.outputs.x`` from inside ``self`` is also a
+        # graph-shape problem.
+        doc = _doc(
+            [
+                {
+                    "id": "scan",
+                    "activity": "security/scan@1",
+                    "connector": "primary",
+                    "if": "${{ steps.scan.outputs.critical }}",
+                },
+            ]
+        )
+        with pytest.raises(TopologyCompileError) as ei:
+            compile_workflow(doc, _run_meta(), _registry())
+        assert "own outputs" in str(ei.value)
+
+
+class TestEdgeDeduplication:
+    def test_explicit_needs_plus_cel_ref_produces_single_edge(self) -> None:
+        # When the author writes BOTH ``needs: [scan]`` and a CEL
+        # reference to ``steps.scan.outputs.*`` on the same consumer,
+        # the compiled graph must contain ONE edge — not two —
+        # tagged as EXPLICIT_NEEDS (the author's intent).
+        doc = _doc(
+            [
+                {"id": "scan", "activity": "security/scan@1", "connector": "primary"},
+                {
+                    "id": "consumer",
+                    "activity": "security/scan@1",
+                    "connector": "primary",
+                    "needs": ["scan"],
+                    "with": {"image": "${{ steps.scan.outputs.findings[0] }}"},
+                },
+            ]
+        )
+        graph = compile_workflow(doc, _run_meta(), _registry())
+        pair_edges = [e for e in graph.edges if (e.from_step, e.to_step) == ("scan", "consumer")]
+        assert len(pair_edges) == 1
+        assert pair_edges[0].kind is EdgeKind.EXPLICIT_NEEDS
+
 
 # ---------------------------------------------------------------------------
 # Stubbed retry / on_error resolvers (WF-IMPL-022 / WF-IMPL-023)

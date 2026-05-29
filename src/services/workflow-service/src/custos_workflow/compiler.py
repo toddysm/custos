@@ -16,21 +16,31 @@ Compiler row):
    permissive object schema for sub-workflow outputs (the
    :func:`derive_bindings` function emits a structured warning when
    it does so).
-3. **Type-check** — every untyped call site is lifted to a
+3. **Validate step references** — :func:`validate_step_refs`
+   pre-flights the untyped call-site ASTs so forward / unknown /
+   self ``steps.X.outputs.*`` references surface as
+   :class:`TopologyCompileError`. Without this pass the type checker
+   would reject those references as ``expression.unbound_name``
+   first — the per-step bindings only expose prior steps — and the
+   caller would see a structurally wrong "name not bound"
+   diagnostic.
+4. **Type-check** — every untyped call site is lifted to a
    :class:`~custos_workflow.graph.TypedCallSite` via
    :func:`custos_cel.type_check`. Errors **accumulate across the
    stage** so callers see every type problem at once rather than
    fix-then-recompile.
-4. **Topology** — explicit ``needs:`` edges and implicit
-   ``${{ steps.X.outputs.* }}`` edges are collected, cycles are
-   detected, and a stable topological order is produced.
-5. **Retry + on-error resolution** — per-step policies are translated
+5. **Topology** — explicit ``needs:`` edges and implicit
+   ``${{ steps.X.outputs.* }}`` edges are collected, **deduplicated
+   by ``(from_step, to_step)`` pair** (explicit needs wins so the
+   compiled edge carries the author's intent), cycles are detected,
+   and a stable topological order is produced.
+6. **Retry + on-error resolution** — per-step policies are translated
    from the document model into the wire-stable resolved shapes the
    :class:`~custos_workflow.graph.ExecutionNode` carries. The full
    precedence overlay and route taxonomy land in WF-IMPL-022 /
    WF-IMPL-023; today the resolvers are deliberately conservative
    pass-throughs so the compiled graph remains well-formed.
-6. **Assemble graph** — the
+7. **Assemble graph** — the
    :class:`~custos_workflow.graph.ExecutionGraph` is built from
    :class:`~custos_workflow.graph.ExecutionNode` instances in
    topological order plus the canonicalised edge tuple.
@@ -87,6 +97,7 @@ from custos_workflow.graph import (
     collect_explicit_edges,
     detect_cycles,
     topological_sort,
+    validate_step_refs,
 )
 
 if TYPE_CHECKING:
@@ -295,6 +306,29 @@ def compile(
             "type-checking)",
         ) from exc
 
+    # ---- Stage 2.5: surface graph-shape step refs as topology errors --
+    # Without this pre-pass, a CEL reference like
+    # ``steps.later_step.outputs.x`` (forward), ``steps.ghost.outputs.x``
+    # (unknown), or a step's own ``steps.self.outputs.x`` (self) would
+    # surface as ``expression.unbound_name`` type-check failures
+    # because :func:`derive_bindings` only exposes prior steps. Those
+    # diagnostics are structurally wrong — they are graph-shape
+    # problems, not type problems — so we validate first and translate
+    # to :class:`TopologyCompileError` before the type checker runs.
+    try:
+        validate_step_refs(
+            document,
+            (
+                (step_id, site.position.document_path, site.parsed_ast)
+                for step_id, sites in untyped_by_step.items()
+                for site in sites
+            ),
+        )
+    except TopologyError as exc:
+        raise TopologyCompileError(
+            f"compile: topology stage rejected the graph: {exc}",
+        ) from exc
+
     # ---- Stage 3: type-check call sites -------------------------------
     typed_by_step, node_call_sites, failures = _type_check_all(
         untyped_by_step,
@@ -307,7 +341,18 @@ def compile(
     try:
         explicit_edges = collect_explicit_edges(document)
         implicit_edges = collect_data_dependencies(document, typed_by_step)
-        all_edges: list[Edge] = [*explicit_edges, *implicit_edges]
+        # Dedupe ``(from_step, to_step)`` pairs across the explicit
+        # and implicit edge lists. When the author both writes
+        # ``needs: [X]`` and references ``steps.X.outputs.*``, the
+        # explicit edge wins because it carries the author's intent
+        # — downstream schedulers process the prerequisite once,
+        # tagged as EXPLICIT_NEEDS rather than DATA_DEPENDENCY.
+        edge_by_pair: dict[tuple[str, str], Edge] = {}
+        for edge in explicit_edges:
+            edge_by_pair[(edge.from_step, edge.to_step)] = edge
+        for edge in implicit_edges:
+            edge_by_pair.setdefault((edge.from_step, edge.to_step), edge)
+        all_edges: list[Edge] = list(edge_by_pair.values())
         cycles = detect_cycles(all_edges)
         if cycles:
             cyc_repr = "; ".join(" -> ".join(c) for c in cycles)
