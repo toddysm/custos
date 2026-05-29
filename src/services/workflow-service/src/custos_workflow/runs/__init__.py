@@ -1,5 +1,15 @@
 """Public re-exports for the ``custos_workflow.runs`` subpackage."""
 
+from custos_workflow.runs.controller import (
+    LIFECYCLE_KIND_WORKFLOW_STARTED,
+    CatalogClient,
+    InMemoryLifecycleEventPublisher,
+    LifecycleEvent,
+    LifecycleEventPublisher,
+    RunController,
+    RunRef,
+    WorkflowVersion,
+)
 from custos_workflow.runs.errors import (
     LOCKED_RUN_KINDS,
     RunControllerError,
@@ -42,20 +52,27 @@ from custos_workflow.runs.wait import (
 )
 
 __all__ = [
+    "LIFECYCLE_KIND_WORKFLOW_STARTED",
     "LOCKED_RUN_KINDS",
     "RUN_ID_NAMESPACE",
     "STATUS_TRANSITIONS",
     "TERMINAL_STATUSES",
     "WORKFLOW_NAME",
+    "CatalogClient",
+    "InMemoryLifecycleEventPublisher",
     "InProcessRunStore",
+    "LifecycleEvent",
+    "LifecycleEventPublisher",
     "NoopStepHandler",
     "ReplayHook",
+    "RunController",
     "RunControllerError",
     "RunId",
     "RunInput",
     "RunNotFoundError",
     "RunOutput",
     "RunRecord",
+    "RunRef",
     "RunStateConflictError",
     "RunStateCorruptError",
     "RunStatus",
@@ -71,6 +88,7 @@ __all__ = [
     "WaitStepHandler",
     "WorkflowContext",
     "WorkflowRuntimeUnavailableError",
+    "WorkflowVersion",
     "derive_run_id",
     "is_terminal",
     "make_run_orchestrator",
