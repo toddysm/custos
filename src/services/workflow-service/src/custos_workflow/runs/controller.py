@@ -93,6 +93,7 @@ if TYPE_CHECKING:
     from custos_workflow.runs.store import RunStore
 
 __all__ = [
+    "LIFECYCLE_KIND_WORKFLOW_STARTED",
     "CatalogClient",
     "InMemoryLifecycleEventPublisher",
     "LifecycleEvent",
@@ -435,7 +436,40 @@ class RunController:
             updated_at=now,
             compiled_graph=graph,
         )
-        await self._store.put_run(record)
+        try:
+            await self._store.put_run(record)
+        except RunStateConflictError:
+            # Concurrent ``start_run`` race: another caller won the
+            # ``put_run`` between our Gate-2 ``get_run`` and now.
+            # The loser re-reads the persisted row and re-runs the
+            # dedup compatibility check; a byte-equal
+            # ``(workflow_version_id, inputs)`` payload still
+            # collapses to an idempotent :class:`RunRef`, matching
+            # the dedup contract. ``InProcessRunStore.put_run``
+            # compares the full :class:`RunRecord` (including
+            # ``started_at``/``updated_at`` clock samples and
+            # status), so two byte-equal requests issued back-to-
+            # back commonly look divergent at the store layer even
+            # when their dedup-relevant fields match — the
+            # controller is the right layer to reconcile that.
+            existing = await self._store.get_run(workspace_id, run_id)
+            if existing is None:
+                # Defensive: ``put_run`` raised state-conflict but
+                # the row vanished by the time we re-read. Surface
+                # as the original conflict for the operator.
+                raise
+            self._assert_dedup_compatible(
+                existing=existing,
+                run_id=run_id,
+                workflow_version_id=workflow_version_id,
+                fingerprint=fingerprint,
+            )
+            return RunRef(
+                workspace_id=workspace_id,
+                run_id=run_id,
+                workflow_version_id=existing.workflow_version,
+                status=existing.status,
+            )
         self._input_fingerprints[(workspace_id, run_id)] = fingerprint
 
         # ---- Gate 5: schedule on Dapr. -------------------------------

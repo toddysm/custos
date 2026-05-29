@@ -27,9 +27,10 @@ from __future__ import annotations
 
 import json
 import textwrap
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import NamedTuple, cast
+from typing import Any, NamedTuple, cast
 
 import pytest
 from custos_cel import FixedClock
@@ -46,6 +47,7 @@ from custos_workflow.runs import (
     LifecycleEvent,
     LifecycleEventPublisher,
     RunController,
+    RunRecord,
     RunRef,
     RunStateConflictError,
     RunStatus,
@@ -55,6 +57,7 @@ from custos_workflow.runs import (
     derive_run_id,
 )
 from custos_workflow.runs.controller import _fingerprint_inputs
+from custos_workflow.runs.ids import RunId
 from custos_workflow.runtime._common import ScheduleWorkflowRequest
 from tests.runs._fakes import FakeMetadataStoreProvider
 
@@ -560,6 +563,154 @@ class TestArgumentValidation:
         with pytest.raises(ValueError, match="workspace_id"):
             await controller.start_run(
                 workspace_id="",
+                workflow_version_id=WORKFLOW_VERSION_ID,
+                inputs={},
+                idempotency_key=IDEMPOTENCY_KEY,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Module-surface conventions
+# ---------------------------------------------------------------------------
+
+
+class TestModuleSurface:
+    def test_lifecycle_kind_constant_in_module_all(self) -> None:
+        """``LIFECYCLE_KIND_WORKFLOW_STARTED`` is a documented surface;
+        star imports from ``custos_workflow.runs.controller`` must
+        re-export it."""
+        from custos_workflow.runs import controller as controller_module
+
+        assert "LIFECYCLE_KIND_WORKFLOW_STARTED" in controller_module.__all__
+
+
+# ---------------------------------------------------------------------------
+# Concurrent start race
+# ---------------------------------------------------------------------------
+
+
+class _RaceConditionStore:
+    """:class:`RunStore` that injects a concurrent insert between
+    the controller's ``get_run`` (Gate 2) and its ``put_run``
+    (Gate 4).
+
+    Wraps a real :class:`InProcessRunStore`. On the first ``get_run``
+    call it returns ``None`` (no existing row); RIGHT BEFORE the
+    following ``put_run`` it synthesises a "winner's" row using the
+    delegate's own ``put_run`` so the race fires deterministically.
+    Subsequent ``get_run`` calls return the persisted winner so the
+    controller can complete the dedup recheck.
+    """
+
+    def __init__(
+        self,
+        delegate: InProcessRunStore,
+        winner_factory: Callable[[], RunRecord],
+    ) -> None:
+        self._delegate = delegate
+        self._winner_factory = winner_factory
+        self._tripped = False
+
+    async def get_run(self, workspace_id: str, run_id: RunId) -> RunRecord | None:
+        return await self._delegate.get_run(workspace_id, run_id)
+
+    async def put_run(self, run: RunRecord) -> RunRecord:
+        if not self._tripped:
+            self._tripped = True
+            # Simulate the winning racer landing FIRST.
+            await self._delegate.put_run(self._winner_factory())
+        return await self._delegate.put_run(run)
+
+    async def update_run_status(
+        self,
+        workspace_id: str,
+        run_id: RunId,
+        status: RunStatus,
+        *,
+        reason: str | None = None,
+    ) -> RunRecord:
+        return await self._delegate.update_run_status(workspace_id, run_id, status, reason=reason)
+
+    async def list_runs(self, workspace_id: str, **kwargs: Any) -> Any:
+        return await self._delegate.list_runs(workspace_id, **kwargs)
+
+
+@pytest.mark.asyncio
+class TestConcurrentStartRace:
+    async def test_loser_returns_idempotent_runref_on_byte_equal_payload(self) -> None:
+        """Two concurrent ``start_run`` calls with the same dedup key
+        must both return idempotent :class:`RunRef`-s rather than the
+        loser hitting :class:`RunStateConflictError`."""
+        delegate = _store()
+        run_id = derive_run_id(WORKSPACE, IDEMPOTENCY_KEY)
+
+        # The winner persists a record at a different clock sample so
+        # the loser's payload is NOT byte-equal at the store layer
+        # (timestamps differ) \u2014 the controller must still recognise
+        # the dedup-relevant fields match.
+        def _winner_factory() -> RunRecord:
+            winner_ts = datetime(2026, 5, 1, 11, 59, 59, tzinfo=UTC)
+            return RunRecord(
+                workspace_id=WORKSPACE,
+                run_id=run_id,
+                workflow_id=WORKFLOW_ID,
+                workflow_version=WORKFLOW_VERSION_ID,
+                status=RunStatus.QUEUED,
+                reason=None,
+                started_at=winner_ts,
+                updated_at=winner_ts,
+                compiled_graph=None,
+            )
+
+        race_store = _RaceConditionStore(delegate, _winner_factory)
+        controller = RunController(
+            catalog=_RecordingCatalogClient(_workflow_version()),
+            store=cast(RunStore, race_store),
+            workflow_client=_RecordingWorkflowClient(),
+            activity_registry=InMemoryActivityTypeRegistry({}),
+            lifecycle_publisher=InMemoryLifecycleEventPublisher(),
+            clock=FixedClock(FIXED_NOW),
+        )
+
+        ref = await controller.start_run(
+            workspace_id=WORKSPACE,
+            workflow_version_id=WORKFLOW_VERSION_ID,
+            inputs={"a": 1},
+            idempotency_key=IDEMPOTENCY_KEY,
+        )
+        assert ref.run_id == run_id
+        assert ref.workflow_version_id == WORKFLOW_VERSION_ID
+
+    async def test_loser_with_divergent_workflow_version_still_raises(self) -> None:
+        """The race-recovery path must NOT swallow genuine divergence."""
+        delegate = _store()
+        run_id = derive_run_id(WORKSPACE, IDEMPOTENCY_KEY)
+
+        def _winner_factory() -> RunRecord:
+            return RunRecord(
+                workspace_id=WORKSPACE,
+                run_id=run_id,
+                workflow_id=WORKFLOW_ID,
+                workflow_version="wfv-OTHER",  # divergent
+                status=RunStatus.QUEUED,
+                reason=None,
+                started_at=FIXED_NOW,
+                updated_at=FIXED_NOW,
+                compiled_graph=None,
+            )
+
+        race_store = _RaceConditionStore(delegate, _winner_factory)
+        controller = RunController(
+            catalog=_RecordingCatalogClient(_workflow_version()),
+            store=cast(RunStore, race_store),
+            workflow_client=_RecordingWorkflowClient(),
+            activity_registry=InMemoryActivityTypeRegistry({}),
+            lifecycle_publisher=InMemoryLifecycleEventPublisher(),
+            clock=FixedClock(FIXED_NOW),
+        )
+        with pytest.raises(RunStateConflictError):
+            await controller.start_run(
+                workspace_id=WORKSPACE,
                 workflow_version_id=WORKFLOW_VERSION_ID,
                 inputs={},
                 idempotency_key=IDEMPOTENCY_KEY,
