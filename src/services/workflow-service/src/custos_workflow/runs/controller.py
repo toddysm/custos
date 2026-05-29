@@ -87,6 +87,7 @@ from custos_workflow.runs.errors import (
 from custos_workflow.runs.ids import RunId, derive_run_id
 from custos_workflow.runs.model import TERMINAL_STATUSES, RunRecord, RunStatus
 from custos_workflow.runs.orchestrator import WORKFLOW_NAME, RunInput
+from custos_workflow.runs.replay import NoopReplayReconciler, ReplayReconciler
 from custos_workflow.runtime._common import (
     TERMINAL_STATUSES as RUNTIME_TERMINAL_STATUSES,
 )
@@ -488,6 +489,7 @@ class RunController:
         activity_registry: ActivityTypeRegistry,
         lifecycle_publisher: LifecycleEventPublisher,
         clock: Clock,
+        replay_reconciler: ReplayReconciler | None = None,
         terminate_poll_attempts: int = DEFAULT_TERMINATE_POLL_ATTEMPTS,
         terminate_poll_interval_seconds: float = DEFAULT_TERMINATE_POLL_INTERVAL_S,
         sleep: Callable[[float], Awaitable[None]] | None = None,
@@ -502,6 +504,16 @@ class RunController:
         self._activity_registry: ActivityTypeRegistry = activity_registry
         self._lifecycle_publisher: LifecycleEventPublisher = lifecycle_publisher
         self._clock: Clock = clock
+        # Replay reconciler is injected so the Run Controller can pass
+        # ``self._replay_reconciler.on_replay`` to ``make_run_orchestrator``
+        # whenever it (re-)registers the workflow function with the Dapr
+        # runtime. Defaults to :class:`NoopReplayReconciler` so callers
+        # that don't yet care about the Phase-E Step Coordinator path
+        # (development environments, unit tests) compose without
+        # boilerplate. design.md § Resume Subscription Replay Protocol.
+        self._replay_reconciler: ReplayReconciler = (
+            replay_reconciler if replay_reconciler is not None else NoopReplayReconciler()
+        )
         self._terminate_poll_attempts: int = terminate_poll_attempts
         self._terminate_poll_interval: float = terminate_poll_interval_seconds
         self._sleep: Callable[[float], Awaitable[None]] = sleep or asyncio.sleep
