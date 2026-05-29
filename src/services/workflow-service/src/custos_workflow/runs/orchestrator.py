@@ -82,6 +82,7 @@ from custos_cel import (
 )
 from custos_cel.clock import Clock
 
+from custos_workflow._telemetry import observe_run_replay
 from custos_workflow.graph.model import ExecutionGraph, ExecutionNode, StepKind
 from custos_workflow.graph.serialize import from_json
 from custos_workflow.runs.ids import RunId
@@ -344,9 +345,18 @@ def make_run_orchestrator(
 
         # Phase E hook — fire once, BEFORE the first dispatch, even
         # when there is zero work to do (so a stale-state sweep can
-        # run on an empty graph).
+        # run on an empty graph). Wrapped in the WF-IMPL-044
+        # ``observe_run_replay`` span so the replay-path latency is
+        # observable alongside the user-facing lifecycle operations
+        # in the same ``custos_workflow_run_lifecycle_call_duration_ms``
+        # histogram (operation label ``replay``). The reconciler
+        # MUST NOT raise per its Protocol contract, so in practice
+        # this wrapper only emits ``outcome=ok`` samples; a buggy
+        # reconciler that does raise still surfaces on the
+        # ``internal_error`` outcome via the shared error path.
         if on_replay is not None:
-            on_replay(_step_ctx(ctx, run_input, output_bag, clock), graph)
+            with observe_run_replay():
+                on_replay(_step_ctx(ctx, run_input, output_bag, clock), graph)
 
         nodes_by_id: dict[str, ExecutionNode] = {node.step_id: node for node in graph.nodes}
 
