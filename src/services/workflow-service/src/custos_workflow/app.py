@@ -245,6 +245,20 @@ async def _shutdown_components(components: RunComponents, worker_shutdown_timeou
     except Exception:
         logger.exception("workflow runtime shutdown raised; ignoring")
 
+    # The default Dapr-backed ``WorkflowClient`` opens a lazy gRPC channel via
+    # ``_ensure_client()`` the first time the API layer schedules / terminates
+    # / inspects a workflow; we own the matching ``aclose()`` so the channel
+    # is released on shutdown. The structural ``_WorkflowClient`` Protocol the
+    # controller depends on does not declare ``aclose`` (only the lifecycle
+    # RPCs), so we discover it reflectively — exotic clients that lack a close
+    # hook are simply left alone.
+    workflow_client_close = getattr(components.workflow_client, "aclose", None)
+    if callable(workflow_client_close):
+        try:
+            await workflow_client_close()
+        except Exception:
+            logger.exception("workflow client aclose failed during shutdown")
+
     dapr_http_client = components.dapr_http_client
     if dapr_http_client is not None:
         try:

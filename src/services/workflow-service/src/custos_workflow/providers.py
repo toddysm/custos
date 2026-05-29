@@ -224,6 +224,11 @@ class _InProcessMetadataStoreProvider:
         existing = self._runs.get(key)
         if existing is None:
             raise KeyError(key)
+        # Mirror the SPL Postgres adapter
+        # (``custos_pg/adapters/metadata.py``: ``SET ..., updated_at = now()``)
+        # so consumers see a fresh ``updated_at`` on every status transition;
+        # otherwise runs started against the default in-process wiring would
+        # report stale timestamps after moving queued -> running -> failed.
         updated = SplRun(
             workspace_id=existing.workspace_id,
             run_id=existing.run_id,
@@ -232,7 +237,7 @@ class _InProcessMetadataStoreProvider:
             status=status,
             reason=reason,
             started_at=existing.started_at,
-            updated_at=existing.updated_at,
+            updated_at=datetime.now(UTC),
         )
         self._runs[key] = updated
         return updated

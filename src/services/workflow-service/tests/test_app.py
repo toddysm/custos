@@ -393,3 +393,49 @@ def test_lifespan_swallows_dapr_http_client_close_errors(
     with TestClient(app) as client:
         assert client.get("/healthz").status_code == 200
     assert any("dapr publisher http client aclose failed" in r.getMessage() for r in caplog.records)
+
+
+def test_lifespan_closes_workflow_client_on_shutdown() -> None:
+    """The lifespan must call ``workflow_client.aclose()`` if present.
+
+    The default Dapr-backed ``WorkflowClient`` opens a lazy gRPC
+    channel via ``_ensure_client()`` the first time the API layer
+    issues a workflow RPC; the lifespan is the only party that
+    knows the bundle is being torn down and so owns the matching
+    ``aclose`` call.
+    """
+    from dataclasses import replace
+
+    closed = {"n": 0}
+
+    class _RecordingWorkflowClient:
+        async def aclose(self) -> None:
+            closed["n"] += 1
+
+    runtime = _RecordingFakeRuntime()
+    base = _components_with(runtime)
+    components = replace(base, workflow_client=_RecordingWorkflowClient())  # type: ignore[arg-type]
+    app = create_app(require_call_context=False, run_components=components)
+    with TestClient(app):
+        assert closed["n"] == 0  # not closed until lifespan exit
+    assert closed["n"] == 1
+
+
+def test_lifespan_swallows_workflow_client_close_errors(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A raising ``workflow_client.aclose()`` must not crash the lifespan exit."""
+    from dataclasses import replace
+
+    class _ExplodingWorkflowClient:
+        async def aclose(self) -> None:
+            raise RuntimeError("grpc channel already torn down")
+
+    runtime = _RecordingFakeRuntime()
+    base = _components_with(runtime)
+    components = replace(base, workflow_client=_ExplodingWorkflowClient())  # type: ignore[arg-type]
+    app = create_app(require_call_context=False, run_components=components)
+    caplog.set_level("ERROR", logger="custos_workflow")
+    with TestClient(app) as client:
+        assert client.get("/healthz").status_code == 200
+    assert any("workflow client aclose failed" in r.getMessage() for r in caplog.records)
