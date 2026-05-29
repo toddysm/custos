@@ -12,7 +12,7 @@ Design: [`design/components/workflow-service/design.md`](../../../design/compone
 
 ## Status
 
-**Phase A scaffold + FastAPI surface + WorkflowDocument models + SchemaBindings derivation + ExecutionGraph data model + call-site collector + Definition Compiler driver + effective retry-policy resolver + on-error route compiler + locked compile-time error taxonomy + exhaustive kind-grid test suite + Hypothesis-driven determinism property tests + OpenTelemetry observability hooks (≥90 % coverage gate)** —
+**Phase A scaffold + FastAPI surface + WorkflowDocument models + SchemaBindings derivation + ExecutionGraph data model + call-site collector + Definition Compiler driver + effective retry-policy resolver + on-error route compiler + locked compile-time error taxonomy + exhaustive kind-grid test suite + Hypothesis-driven determinism property tests + OpenTelemetry observability hooks + developer-facing documentation (≥90 % coverage gate)** —
 WF-IMPL-013 ([#347](https://github.com/toddysm/custos/issues/347)),
 WF-IMPL-014 ([#348](https://github.com/toddysm/custos/issues/348)),
 WF-IMPL-015 ([#349](https://github.com/toddysm/custos/issues/349)),
@@ -26,8 +26,9 @@ WF-IMPL-022 ([#356](https://github.com/toddysm/custos/issues/356)),
 WF-IMPL-023 ([#357](https://github.com/toddysm/custos/issues/357)),
 WF-IMPL-024 ([#358](https://github.com/toddysm/custos/issues/358)),
 WF-IMPL-025 ([#359](https://github.com/toddysm/custos/issues/359)),
-WF-IMPL-026 ([#360](https://github.com/toddysm/custos/issues/360)), and
-WF-IMPL-027 ([#361](https://github.com/toddysm/custos/issues/361)). The
+WF-IMPL-026 ([#360](https://github.com/toddysm/custos/issues/360)),
+WF-IMPL-027 ([#361](https://github.com/toddysm/custos/issues/361)), and
+WF-IMPL-028 ([#362](https://github.com/toddysm/custos/issues/362)). The
 package skeleton, the runnable `create_app()` factory, the
 `python -m custos_workflow` entry point, the `/healthz` and `/readyz`
 probes, the call-context middleware shim, the Helm subchart, the
@@ -78,13 +79,22 @@ carry `step_count` / `edge_count` / `call_site_count`
 attributes; instrumentation is no-op when no OTel SDK is
 installed because only `opentelemetry-api` is a runtime
 dependency — the SDK is dev-only and only the test harness wires
-in-memory exporters) backed by the
+in-memory exporters), and the developer-facing documentation
+([`docs/developers/workflow-compilation.md`](../../../docs/developers/workflow-compilation.md)
+— pipeline overview with Mermaid sequence, `WorkflowDocument`
+input contract, `ExecutionGraph` output contract, full error
+taxonomy table (every `compile.*` `kind`), retry-policy resolution
+worked example, and three end-to-end YAML examples; backed by
+`tests/test_docs_examples.py` which parses every fenced ```yaml```
+block in the doc, runs it through `compile()`, and asserts the
+resulting graph shape so the doc cannot drift away from the code)
+backed by the
 `--cov-fail-under=90` floor wired into the package's pytest
 defaults (current coverage ≈ 99 %, `_telemetry.py`, `errors.py`,
 and `graph/serialize.py` at 100 %)
-are real. The remaining resolvers (developer documentation) land
-in WF-IMPL-028 onwards; tracker
-[#363](https://github.com/toddysm/custos/issues/363) (WF-IMPL-000-COMPILER).
+are real. The WF-IMPL-000-COMPILER milestone is complete; tracker
+[#363](https://github.com/toddysm/custos/issues/363) closes with
+this task.
 
 
 The Expression Evaluator (the first sub-module) is already in
@@ -204,8 +214,8 @@ src/services/workflow-service/
     ├── test_errors.py            # CompileError taxonomy: kinds, to_dict, hash, repr
     ├── test_kind_grid.py         # Parametrized kind grids + exhaustiveness guards (WF-IMPL-025)
     ├── test_determinism_property.py  # Hypothesis property-based determinism tests (WF-IMPL-026)
-    └── test_observability.py     # OTel span / metric instrumentation tests (WF-IMPL-027)
+    ├── test_observability.py     # OTel span / metric instrumentation tests (WF-IMPL-027)
+    └── test_docs_examples.py     # Doc-block round-trip smoke test (WF-IMPL-028)
 ```
 
-Subsequent WF-IMPL-* tasks wire developer documentation
-(`docs/developers/workflow-compilation.md`).
+The WF-IMPL-000-COMPILER milestone is complete.
