@@ -279,6 +279,10 @@ class FakeWorkflowRuntime:
         self._activities: dict[str, FakeActivityFn] = {}
         self._instances: dict[str, _InstanceState] = {}
         self._started = False
+        # Mirrors :attr:`custos_workflow.runtime.WorkflowRuntime._worker_ready`
+        # so the FastAPI lifespan (WF-IMPL-043) can swap the fake in
+        # for the real runtime without touching readiness wiring.
+        self._worker_ready = False
         self.now: datetime = now if now is not None else _DEFAULT_EPOCH
 
     # --- registration ----------------------------------------------------
@@ -306,16 +310,30 @@ class FakeWorkflowRuntime:
         """Mark the runtime stopped. Existing instance state is retained."""
 
         self._started = False
+        self._worker_ready = False
 
     async def wait_for_worker_ready(self, *, timeout: float = 30.0) -> bool:
         """Always returns ``True`` once :meth:`start` has been called."""
 
         del timeout  # explicitly unused — fake is always-ready
+        if self._started:
+            self._worker_ready = True
         return self._started
 
     @property
     def is_started(self) -> bool:
         return self._started
+
+    @property
+    def is_ready(self) -> bool:
+        """``True`` once :meth:`wait_for_worker_ready` has been called post-start.
+
+        Mirrors :attr:`custos_workflow.runtime.WorkflowRuntime.is_ready`
+        so the FastAPI lifespan (WF-IMPL-043) gates ``/readyz``
+        identically against the fake.
+        """
+
+        return self._started and self._worker_ready
 
     # --- client ----------------------------------------------------------
 

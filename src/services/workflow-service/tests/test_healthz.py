@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from fastapi.testclient import TestClient
 
 from custos_workflow import create_app
+from custos_workflow.providers import RunComponents
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -16,21 +17,21 @@ if TYPE_CHECKING:
 
 
 @contextmanager
-def _client(**kwargs: bool) -> Iterator[tuple[TestClient, FastAPI]]:
-    app = create_app(require_call_context=False, **kwargs)
+def _client(components: RunComponents, **kwargs: Any) -> Iterator[tuple[TestClient, FastAPI]]:
+    app = create_app(require_call_context=False, run_components=components, **kwargs)
     with TestClient(app) as tc:
         yield tc, app
 
 
-def test_healthz_is_always_200() -> None:
-    with _client() as (client, _app):
+def test_healthz_is_always_200(fake_run_components: RunComponents) -> None:
+    with _client(fake_run_components) as (client, _app):
         response = client.get("/healthz")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
 
-def test_readyz_is_200_after_lifespan_startup() -> None:
-    with _client() as (client, _app):
+def test_readyz_is_200_after_lifespan_startup(fake_run_components: RunComponents) -> None:
+    with _client(fake_run_components) as (client, _app):
         # TestClient enters the lifespan on ``__enter__`` so by the time
         # we issue a request, ``app.state.ready`` has been flipped.
         response = client.get("/readyz")
@@ -38,7 +39,9 @@ def test_readyz_is_200_after_lifespan_startup() -> None:
     assert response.json() == {"status": "ready"}
 
 
-def test_readyz_is_503_before_lifespan_flips_ready() -> None:
+def test_readyz_is_503_before_lifespan_flips_ready(
+    fake_run_components: RunComponents,
+) -> None:
     """When the lifespan has not run, ``/readyz`` reports 503 with detail.
 
     We construct the app, override ``state.ready`` to ``False`` manually,
@@ -46,7 +49,7 @@ def test_readyz_is_503_before_lifespan_flips_ready() -> None:
     closed-state behaviour. This is the operator-facing failure mode
     the next compiler bootstrap task will exercise for real.
     """
-    app = create_app(require_call_context=False)
+    app = create_app(require_call_context=False, run_components=fake_run_components)
     app.state.ready = False
     app.state.ready_detail = "compiler bootstrap pending"
     # Use TestClient WITHOUT the ``with`` block so the lifespan does not run.
@@ -59,9 +62,11 @@ def test_readyz_is_503_before_lifespan_flips_ready() -> None:
     }
 
 
-def test_readyz_503_uses_default_detail_when_unset() -> None:
+def test_readyz_503_uses_default_detail_when_unset(
+    fake_run_components: RunComponents,
+) -> None:
     """Missing ``ready_detail`` falls back to a stable default string."""
-    app = create_app(require_call_context=False)
+    app = create_app(require_call_context=False, run_components=fake_run_components)
     app.state.ready = False
     # Explicitly remove the attribute populated by the lifespan default.
     if hasattr(app.state, "ready_detail"):
@@ -74,9 +79,11 @@ def test_readyz_503_uses_default_detail_when_unset() -> None:
     assert payload["detail"] == "workflow-service has not finished startup"
 
 
-def test_healthz_and_readyz_are_excluded_from_openapi_schema() -> None:
+def test_healthz_and_readyz_are_excluded_from_openapi_schema(
+    fake_run_components: RunComponents,
+) -> None:
     """Probes are noise on the public OpenAPI surface."""
-    with _client() as (client, _app):
+    with _client(fake_run_components) as (client, _app):
         schema = client.get("/openapi.json").json()
     assert "/healthz" not in schema["paths"]
     assert "/readyz" not in schema["paths"]
