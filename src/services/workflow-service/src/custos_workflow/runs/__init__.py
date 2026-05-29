@@ -16,6 +16,13 @@ from custos_workflow.runs.model import (
     RunStatus,
     is_terminal,
 )
+from custos_workflow.runs.orchestrator import (
+    WORKFLOW_NAME,
+    ReplayHook,
+    RunInput,
+    RunOutput,
+    make_run_orchestrator,
+)
 from custos_workflow.runs.step_handler import (
     NoopStepHandler,
     StepExecutionContext,
@@ -34,11 +41,15 @@ __all__ = [
     "RUN_ID_NAMESPACE",
     "STATUS_TRANSITIONS",
     "TERMINAL_STATUSES",
+    "WORKFLOW_NAME",
     "InProcessRunStore",
     "NoopStepHandler",
+    "ReplayHook",
     "RunControllerError",
     "RunId",
+    "RunInput",
     "RunNotFoundError",
+    "RunOutput",
     "RunRecord",
     "RunStateConflictError",
     "RunStateCorruptError",
@@ -55,4 +66,5 @@ __all__ = [
     "WorkflowRuntimeUnavailableError",
     "derive_run_id",
     "is_terminal",
+    "make_run_orchestrator",
 ]
