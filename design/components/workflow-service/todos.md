@@ -44,7 +44,7 @@ Second sub-module under construction: **Definition Compiler**, packaged inside t
 
 ### Phase G — Observability + docs
 
-- [ ] WF-IMPL-027: Observability hooks — OTel spans, per-stage histograms, error counter (issue #361; depends on #355, #358).
+- [x] WF-IMPL-027: Observability hooks — OTel spans, per-stage histograms, error counter (issue #361; depends on #355, #358).
 - [ ] WF-IMPL-028: Developer documentation — `docs/developers/workflow-compilation.md` (issue #362; depends on #355, #358, #359).
 
 ## Implementation — Expression Evaluator

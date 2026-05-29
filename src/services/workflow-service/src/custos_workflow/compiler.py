@@ -66,6 +66,13 @@ from typing import TYPE_CHECKING, Any, Final
 from custos_cel import CelError
 from custos_cel import type_check as cel_type_check
 
+from custos_workflow._telemetry import (
+    observe_compile_parse,
+    observe_compile_retry_policy,
+    observe_compile_topology,
+    observe_compile_total,
+    observe_compile_type_check,
+)
 from custos_workflow.bindings import (
     ActivityTypeNotFoundError,
     derive_bindings,
@@ -356,119 +363,160 @@ def compile(
     # have to refactor once it lights up.
     _ = run_meta
 
-    # ---- Stage 1: collect untyped call sites --------------------------
-    try:
-        untyped_by_step = collect_call_sites(document)
-    except CallSiteParseError as exc:
-        # ``CallSiteParseError.__cause__`` carries the original
-        # :class:`custos_cel.CelError` raised by the parser. Forward
-        # it as the structured ``cause`` so
-        # ``CompileParseError.to_dict()["cause"]`` preserves the
-        # underlying ``kind`` / ``message`` for audit correlation
-        # (the canonical contract documented in
-        # :mod:`custos_workflow.errors`).
-        cel_cause = exc.__cause__ if isinstance(exc.__cause__, CelError) else None
-        raise CallSiteCompileError(
-            f"compile: failed to parse call site at step {exc.step_id!r}/{exc.path!r}: {exc}",
-            step_id=exc.step_id,
-            call_site_path=exc.path,
-            cause=cel_cause,
-        ) from exc
+    with observe_compile_total() as total_span:
+        # Step count is known upfront — set the attribute before any
+        # stage runs so a failure mid-pipeline still carries graph
+        # size on the parent span. ``call_site_count`` / ``edge_count``
+        # land after stages 1 and 4 respectively.
+        if total_span.is_recording():
+            total_span.set_attribute(
+                "custos_workflow.step_count",
+                len(document.spec.steps),
+            )
 
-    # ---- Stage 2: derive per-step schema bindings ---------------------
-    try:
-        bindings_by_step = derive_bindings(document, registry, logger=log)
-    except ActivityTypeNotFoundError as exc:
-        raise BindingsCompileError(
-            f"compile: activity type {exc.activity_ref!r} is not "
-            "registered (cannot derive its output schema for "
-            "type-checking)",
-        ) from exc
+        # ---- Stage 1: collect untyped call sites ----------------------
+        with observe_compile_parse():
+            try:
+                untyped_by_step = collect_call_sites(document)
+            except CallSiteParseError as exc:
+                # ``CallSiteParseError.__cause__`` carries the original
+                # :class:`custos_cel.CelError` raised by the parser.
+                # Forward it as the structured ``cause`` so
+                # ``CompileParseError.to_dict()["cause"]`` preserves
+                # the underlying ``kind`` / ``message`` for audit
+                # correlation (the canonical contract documented in
+                # :mod:`custos_workflow.errors`).
+                cel_cause = exc.__cause__ if isinstance(exc.__cause__, CelError) else None
+                raise CallSiteCompileError(
+                    f"compile: failed to parse call site at step "
+                    f"{exc.step_id!r}/{exc.path!r}: {exc}",
+                    step_id=exc.step_id,
+                    call_site_path=exc.path,
+                    cause=cel_cause,
+                ) from exc
 
-    # ---- Stage 2.5: surface graph-shape step refs as topology errors --
-    # Without this pre-pass, a CEL reference like
-    # ``steps.later_step.outputs.x`` (forward), ``steps.ghost.outputs.x``
-    # (unknown), or a step's own ``steps.self.outputs.x`` (self) would
-    # surface as ``expression.unbound_name`` type-check failures
-    # because :func:`derive_bindings` only exposes prior steps. Those
-    # diagnostics are structurally wrong — they are graph-shape
-    # problems, not type problems — so we validate first and translate
-    # to :class:`TopologyCompileError` before the type checker runs.
-    try:
-        validate_step_refs(
-            document,
-            (
-                (step_id, site.position.document_path, site.parsed_ast)
-                for step_id, sites in untyped_by_step.items()
-                for site in sites
+        if total_span.is_recording():
+            total_span.set_attribute(
+                "custos_workflow.call_site_count",
+                sum(len(sites) for sites in untyped_by_step.values()),
+            )
+
+        # ---- Stage 2: derive per-step schema bindings -----------------
+        # Bindings derivation is not gated by a dedicated histogram
+        # (the issue scope names only four per-stage histograms); a
+        # ``BindingsCompileError`` still reaches the outer total
+        # wrapper, which records the ``bindings_error`` outcome on
+        # ``custos_workflow_compile_total_duration_ms`` and bumps
+        # ``custos_workflow_compile_errors_total`` with
+        # ``kind=compile.bindings_error``.
+        try:
+            bindings_by_step = derive_bindings(document, registry, logger=log)
+        except ActivityTypeNotFoundError as exc:
+            raise BindingsCompileError(
+                f"compile: activity type {exc.activity_ref!r} is not "
+                "registered (cannot derive its output schema for "
+                "type-checking)",
+            ) from exc
+
+        # ---- Stage 2.5: surface graph-shape step refs as topology errors
+        # Without this pre-pass, a CEL reference like
+        # ``steps.later_step.outputs.x`` (forward),
+        # ``steps.ghost.outputs.x`` (unknown), or a step's own
+        # ``steps.self.outputs.x`` (self) would surface as
+        # ``expression.unbound_name`` type-check failures because
+        # :func:`derive_bindings` only exposes prior steps. Those
+        # diagnostics are structurally wrong — they are graph-shape
+        # problems, not type problems — so we validate first and
+        # translate to :class:`TopologyCompileError` before the type
+        # checker runs.
+        with observe_compile_topology():
+            try:
+                validate_step_refs(
+                    document,
+                    (
+                        (step_id, site.position.document_path, site.parsed_ast)
+                        for step_id, sites in untyped_by_step.items()
+                        for site in sites
+                    ),
+                )
+            except TopologyError as exc:
+                raise TopologyCompileError(
+                    f"compile: topology stage rejected the graph: {exc}",
+                ) from exc
+
+        # ---- Stage 3: type-check call sites ---------------------------
+        with observe_compile_type_check():
+            typed_by_step, node_call_sites, failures = _type_check_all(
+                untyped_by_step,
+                bindings_by_step,
+            )
+            if failures:
+                raise TypeCheckCompileError(failures)
+
+        # ---- Stage 4: build graph topology ----------------------------
+        with observe_compile_topology():
+            try:
+                explicit_edges = collect_explicit_edges(document)
+                implicit_edges = collect_data_dependencies(document, typed_by_step)
+                # Dedupe ``(from_step, to_step)`` pairs across the
+                # explicit and implicit edge lists. When the author
+                # both writes ``needs: [X]`` and references
+                # ``steps.X.outputs.*``, the explicit edge wins
+                # because it carries the author's intent —
+                # downstream schedulers process the prerequisite
+                # once, tagged as EXPLICIT_NEEDS rather than
+                # DATA_DEPENDENCY.
+                edge_by_pair: dict[tuple[str, str], Edge] = {}
+                for edge in explicit_edges:
+                    edge_by_pair[(edge.from_step, edge.to_step)] = edge
+                for edge in implicit_edges:
+                    edge_by_pair.setdefault((edge.from_step, edge.to_step), edge)
+                all_edges: list[Edge] = list(edge_by_pair.values())
+                cycles = detect_cycles(all_edges)
+                if cycles:
+                    cyc_repr = "; ".join(" -> ".join(c) for c in cycles)
+                    raise TopologyCompileError(
+                        f"compile: graph contains cycle(s): {cyc_repr}",
+                        cycle=tuple(cycles[0]),
+                    )
+                step_ids = [s.id for s in document.spec.steps]
+                topological_order = topological_sort(step_ids, all_edges)
+            except TopologyError as exc:
+                raise TopologyCompileError(
+                    f"compile: topology stage rejected the graph: {exc}",
+                ) from exc
+
+        if total_span.is_recording():
+            total_span.set_attribute(
+                "custos_workflow.edge_count",
+                len(all_edges),
+            )
+
+        # ---- Stage 5+6: assemble ExecutionGraph -----------------------
+        with observe_compile_retry_policy():
+            by_id: dict[str, Step] = {s.id: s for s in document.spec.steps}
+            spec_defaults = document.spec.defaults
+            try:
+                nodes = tuple(
+                    _build_node(by_id[sid], node_call_sites[sid], spec_defaults)
+                    for sid in topological_order
+                )
+            except RetryResolutionError as exc:
+                raise RetryPolicyCompileError(
+                    f"compile: retry-policy resolver rejected the graph: {exc}",
+                    reason=str(exc),
+                ) from exc
+
+        return ExecutionGraph(
+            nodes=nodes,
+            edges=tuple(all_edges),
+            topological_order=topological_order,
+            metadata=GraphMetadata(
+                workflow_name=document.metadata.name,
+                workflow_workspace=document.metadata.workspace,
+                document_api_version=document.api_version,
             ),
         )
-    except TopologyError as exc:
-        raise TopologyCompileError(
-            f"compile: topology stage rejected the graph: {exc}",
-        ) from exc
-
-    # ---- Stage 3: type-check call sites -------------------------------
-    typed_by_step, node_call_sites, failures = _type_check_all(
-        untyped_by_step,
-        bindings_by_step,
-    )
-    if failures:
-        raise TypeCheckCompileError(failures)
-
-    # ---- Stage 4: build graph topology --------------------------------
-    try:
-        explicit_edges = collect_explicit_edges(document)
-        implicit_edges = collect_data_dependencies(document, typed_by_step)
-        # Dedupe ``(from_step, to_step)`` pairs across the explicit
-        # and implicit edge lists. When the author both writes
-        # ``needs: [X]`` and references ``steps.X.outputs.*``, the
-        # explicit edge wins because it carries the author's intent
-        # — downstream schedulers process the prerequisite once,
-        # tagged as EXPLICIT_NEEDS rather than DATA_DEPENDENCY.
-        edge_by_pair: dict[tuple[str, str], Edge] = {}
-        for edge in explicit_edges:
-            edge_by_pair[(edge.from_step, edge.to_step)] = edge
-        for edge in implicit_edges:
-            edge_by_pair.setdefault((edge.from_step, edge.to_step), edge)
-        all_edges: list[Edge] = list(edge_by_pair.values())
-        cycles = detect_cycles(all_edges)
-        if cycles:
-            cyc_repr = "; ".join(" -> ".join(c) for c in cycles)
-            raise TopologyCompileError(
-                f"compile: graph contains cycle(s): {cyc_repr}",
-                cycle=tuple(cycles[0]),
-            )
-        step_ids = [s.id for s in document.spec.steps]
-        topological_order = topological_sort(step_ids, all_edges)
-    except TopologyError as exc:
-        raise TopologyCompileError(
-            f"compile: topology stage rejected the graph: {exc}",
-        ) from exc
-
-    # ---- Stage 5+6: assemble ExecutionGraph ---------------------------
-    by_id: dict[str, Step] = {s.id: s for s in document.spec.steps}
-    spec_defaults = document.spec.defaults
-    try:
-        nodes = tuple(
-            _build_node(by_id[sid], node_call_sites[sid], spec_defaults)
-            for sid in topological_order
-        )
-    except RetryResolutionError as exc:
-        raise RetryPolicyCompileError(
-            f"compile: retry-policy resolver rejected the graph: {exc}",
-            reason=str(exc),
-        ) from exc
-    return ExecutionGraph(
-        nodes=nodes,
-        edges=tuple(all_edges),
-        topological_order=topological_order,
-        metadata=GraphMetadata(
-            workflow_name=document.metadata.name,
-            workflow_workspace=document.metadata.workspace,
-            document_api_version=document.api_version,
-        ),
-    )
 
 
 # ---------------------------------------------------------------------------
