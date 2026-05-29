@@ -145,6 +145,12 @@ class _RecordingWorkflowClient:
     async def get_workflow_state(self, request: Any) -> Any:  # pragma: no cover
         raise NotImplementedError("start_run never calls get_workflow_state")
 
+    async def pause_workflow(self, request: Any) -> None:  # pragma: no cover
+        raise NotImplementedError("start_run never calls pause_workflow")
+
+    async def resume_workflow(self, request: Any) -> None:  # pragma: no cover
+        raise NotImplementedError("start_run never calls resume_workflow")
+
 
 def _store() -> InProcessRunStore:
     provider = FakeMetadataStoreProvider()
