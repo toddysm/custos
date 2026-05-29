@@ -58,3 +58,21 @@ jobs:
         # skips the 90 % coverage gate since this job only runs the
         # property-test module, not the full unit-test suite.
         run: pytest -q tests/test_determinism_property.py --no-cov
+
+      - name: Upload Hypothesis database on failure
+        # The minimized counter-example lives in
+        # ``src/services/workflow-service/.hypothesis`` and would
+        # otherwise vanish with the runner. Uploading it as an
+        # artifact lets a maintainer download the directory and
+        # replay the failing example locally with
+        # ``pytest tests/test_determinism_property.py``
+        # (Hypothesis automatically replays examples from a
+        # restored database). Scoped to ``if: failure()`` so green
+        # runs do not produce noise artifacts.
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hypothesis-db-py${{ matrix.python-version }}
+          path: src/services/workflow-service/.hypothesis
+          if-no-files-found: ignore
+          retention-days: 14
