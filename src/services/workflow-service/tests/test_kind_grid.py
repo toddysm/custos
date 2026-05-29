@@ -121,7 +121,7 @@ def _doc(steps: Sequence[dict[str, Any]], *, name: str = "pipeline") -> Workflow
 # ---------------------------------------------------------------------------
 
 #: One minimal step body per :class:`StepKind`. The compiler must
-#: accept all three and tag the resulting node with the matching
+#: accept all four and tag the resulting node with the matching
 #: ``kind`` / ``primitive_handler`` pair.
 _STEP_KIND_DOCS: dict[StepKind, dict[str, Any]] = {
     StepKind.ACTIVITY: {
@@ -137,6 +137,10 @@ _STEP_KIND_DOCS: dict[StepKind, dict[str, Any]] = {
         "id": "child",
         "workflow": "security/child@1",
     },
+    StepKind.WAIT: {
+        "id": "pause",
+        "wait": "PT5S",
+    },
 }
 
 #: Documented step-kind → handler dispatch, mirroring
@@ -145,6 +149,7 @@ _STEP_KIND_TO_HANDLER: dict[StepKind, PrimitiveHandler] = {
     StepKind.ACTIVITY: PrimitiveHandler.ACTIVITY_RUNTIME,
     StepKind.LET: PrimitiveHandler.EXPRESSION_INLINE,
     StepKind.WORKFLOW: PrimitiveHandler.SUB_ORCHESTRATION,
+    StepKind.WAIT: PrimitiveHandler.RUN_CONTROLLER_TIMER,
 }
 
 

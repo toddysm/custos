@@ -67,7 +67,7 @@ Protocol).
 from __future__ import annotations
 
 import copy
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Generator, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Final, cast, get_args
@@ -82,7 +82,7 @@ from custos_cel import (
 )
 from custos_cel.clock import Clock
 
-from custos_workflow.graph.model import ExecutionGraph, ExecutionNode
+from custos_workflow.graph.model import ExecutionGraph, ExecutionNode, StepKind
 from custos_workflow.graph.serialize import from_json
 from custos_workflow.runs.ids import RunId
 from custos_workflow.runs.model import RunStatus
@@ -97,6 +97,7 @@ from custos_workflow.runs.step_handler import (
     StepWaiting,
     WorkflowContext,
 )
+from custos_workflow.runs.wait import WaitStepHandler
 
 __all__ = [
     "WORKFLOW_NAME",
@@ -276,20 +277,32 @@ def make_run_orchestrator(
     *,
     on_replay: ReplayHook | None = None,
     expression_timeout_ms: int | None = None,
-) -> Callable[[WorkflowContext, Any], RunOutput]:
+    wait_handler: WaitStepHandler | None = None,
+) -> Callable[[WorkflowContext, Any], Generator[Any, Any, RunOutput]]:
     """Build the workflow function bound to a concrete :class:`StepHandler`.
 
     The returned callable matches the shape Dapr's Python SDK
-    expects from a workflow function:
-    ``Callable[[ctx, input], Any]``. Tests register it on a
-    :class:`~custos_workflow.runtime.FakeWorkflowRuntime`;
+    expects from a generator-style workflow function:
+    ``Callable[[ctx, input], Generator[Any, Any, Any]]``. Tests
+    register it on a :class:`~custos_workflow.runtime.FakeWorkflowRuntime`;
     production wiring (WF-IMPL-037) registers it on the real
     :class:`~custos_workflow.runtime.WorkflowRuntime` under
     :data:`WORKFLOW_NAME`.
 
+    The orchestrator is a Python generator function: every
+    invocation returns a generator, which the Dapr runtime drives
+    forward by sending it the resolved value of each task token
+    the body yields. Today the body only yields when a
+    :attr:`~custos_workflow.graph.model.StepKind.WAIT` node opens
+    a durable timer through :class:`WaitStepHandler` (WF-IMPL-036);
+    every other path returns via :class:`StopIteration` immediately
+    after the topological walk completes. The generator shape is
+    fixed so future kinds the Run Controller adopts inline
+    (``approval:``) can land without changing the dispatch surface.
+
     Args:
-        handler: The :class:`StepHandler` every surviving node is
-            dispatched through.
+        handler: The :class:`StepHandler` every surviving non-wait
+            node is dispatched through.
         on_replay: Optional callback fired exactly once per
             orchestrator entry, BEFORE the first dispatch. Phase E
             uses this for resume-subscription re-registration.
@@ -297,14 +310,21 @@ def make_run_orchestrator(
             to whatever :func:`custos_cel.evaluate` picks
             (``WF_EXPR_TIMEOUT_MS`` env var or
             :data:`custos_cel.DEFAULT_TIMEOUT_MS`).
+        wait_handler: Optional :class:`WaitStepHandler` override.
+            Tests inject a stub to assert dispatch routing; the
+            default is a stateless module-level instance that opens
+            a Dapr durable timer per :attr:`WaitStep.wait`.
 
     Returns:
         The workflow function. Its ``__name__`` is :data:`WORKFLOW_NAME`,
         so :meth:`WorkflowRuntime.register_workflow` picks up the
         Dapr workflow name automatically.
     """
+    wait_dispatcher: WaitStepHandler = (
+        wait_handler if wait_handler is not None else WaitStepHandler()
+    )
 
-    def run_orchestrator(ctx: WorkflowContext, raw: Any) -> RunOutput:
+    def run_orchestrator(ctx: WorkflowContext, raw: Any) -> Generator[Any, Any, RunOutput]:
         run_input = raw if isinstance(raw, RunInput) else RunInput.from_dict(raw)
         graph = from_json(run_input.compiled_graph_json)
         clock = DaprWorkflowClock(ctx)
@@ -346,6 +366,18 @@ def make_run_orchestrator(
                 # A gate excluded the step. Record an empty entry so
                 # downstream references still resolve, then advance.
                 output_bag[step_id] = {}
+                continue
+
+            if node.kind is StepKind.WAIT:
+                # Run Controller owns ``wait:`` inline (design.md §
+                # Workflow Schema: Step Kinds Handled — Wait /
+                # sleep → Run Controller → Durable timer). The
+                # WaitStepHandler is a generator that yields a Dapr
+                # durable timer token; we re-yield it via
+                # ``yield from`` so the runtime suspends the workflow
+                # instance until the timer fires.
+                wait_result = yield from wait_dispatcher.execute(ctx, node)
+                output_bag[step_id] = copy.deepcopy(dict(wait_result.outputs))
                 continue
 
             result = handler.execute(

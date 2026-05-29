@@ -37,16 +37,22 @@ class StepKind(StrEnum):
     """The structural step kind, mirroring the YAML keyword.
 
     Today's :class:`~custos_workflow.document.Step` discriminated
-    union covers exactly these three kinds. The design lists more
-    primitives (``parallel`` / ``approval`` / ``wait`` / ``waitFor``)
+    union covers exactly these four kinds. The design lists more
+    primitives (``parallel`` / ``approval`` / ``waitFor``)
     that the wire schema does not yet expose; they will land as
     additional members here without disturbing the JSON envelope
     because :class:`StrEnum` values are forward-compatible.
+
+    :attr:`WAIT` is the one kind the Run Controller orchestrator
+    handles inline (no Step Coordinator dispatch): it issues a
+    Dapr durable timer for the ISO-8601 duration carried on
+    :attr:`~custos_workflow.document.WaitStep.wait`.
     """
 
     ACTIVITY = "activity"
     LET = "let"
     WORKFLOW = "workflow"
+    WAIT = "wait"
 
 
 class PrimitiveHandler(StrEnum):
@@ -56,11 +62,17 @@ class PrimitiveHandler(StrEnum):
     Kinds Handled. The Step Coordinator dispatches strictly off this
     tag — we resolve it at compile time so each step's handler is
     durable, not re-derived on every replay.
+
+    :attr:`RUN_CONTROLLER_TIMER` is the sentinel for the one kind
+    (:attr:`StepKind.WAIT`) that the Run Controller orchestrator
+    handles directly via :meth:`~dapr.ext.workflow.DaprWorkflowContext.create_timer`;
+    no Step Coordinator handler is invoked for these nodes.
     """
 
     ACTIVITY_RUNTIME = "activity_runtime"
     EXPRESSION_INLINE = "expression_inline"
     SUB_ORCHESTRATION = "sub_orchestration"
+    RUN_CONTROLLER_TIMER = "run_controller_timer"
 
 
 class EdgeKind(StrEnum):

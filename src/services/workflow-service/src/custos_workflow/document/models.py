@@ -13,14 +13,19 @@ Step kinds covered (v1 wire schema):
   ``connectors:`` map binding.
 - :class:`LetStep` — ``let: {…}`` inline expression bindings.
 - :class:`WorkflowStep` — ``workflow: <id>`` sub-workflow invocation.
+- :class:`WaitStep` — ``wait: <ISO-8601 duration>`` durable sleep.
+  The Run Controller handles this kind directly via a Dapr durable
+  timer (design.md § Workflow Schema: Step Kinds Handled — Wait /
+  sleep → Run Controller → Durable timer); no Step Coordinator
+  handler is involved.
 
 Step *modifiers* (`if` / `when` / `unless` / `forEach` / `where` /
 `retry` / `on_error`) are shared properties on every kind, not
 separate kinds — they correspond to the "Step forms" table in
 ``design/architecture/overview.md`` rather than the "Step Kinds
 Handled" table in the Workflow Service design. The latter table
-mentions ``parallel:`` / ``approval:`` / ``wait:`` / ``waitFor:``
-which are not yet in the v1 wire schema (Catalog rejects them) and
+also mentions ``parallel:`` / ``approval:`` / ``waitFor:`` which
+are not yet in the v1 wire schema (Catalog rejects them) and
 therefore not modelled here; they will land alongside the
 corresponding Catalog schema extension.
 """
@@ -69,6 +74,23 @@ _ACTIVITY_REF_PATTERN: Final[re.Pattern[str]] = re.compile(
 _UUID_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+#: ISO-8601 duration grammar for ``wait:`` step durations.
+#:
+#: The Catalog publish gate validates the exact same shape on the
+#: wire; the document model rejects malformed strings at parse time
+#: so the compiler never sees an unparseable duration. The regex
+#: matches the common ``PnDTnHnMnS`` subset (no months / years —
+#: those are calendar-dependent and incompatible with a durable
+#: timer) and ``PnW`` weeks form. At least one component is required.
+_ISO8601_DURATION_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^P(?:"
+    r"(?P<weeks>\d+)W"  # weeks form: ``PnW``
+    r"|"
+    r"(?:(?P<days>\d+)D)?"
+    r"(?:T(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+(?:\.\d+)?)S)?)?"
+    r")$"
 )
 
 #: ``<workspace>/<name>@<version>`` triple for sub-workflow refs.
@@ -385,6 +407,56 @@ class WorkflowStep(_StepCommon):
         return self
 
 
+class WaitStep(_StepCommon):
+    """Durable sleep step: pause the run for the configured ISO-8601 duration.
+
+    Per design.md § Workflow Schema — ``Wait / sleep`` is the one step
+    kind the Run Controller handles directly via a Dapr durable timer;
+    no Step Coordinator handler is involved (the orchestrator dispatches
+    inline). The duration is a constant string, not a CEL expression,
+    so the durable-timer payload is fully resolved at compile time and
+    survives a worker restart byte-identically on replay.
+
+    ``retry:`` and ``on_error:`` are inherited from :class:`_StepCommon`
+    for parsing uniformity but the compiler rejects them on wait steps
+    (the durable timer is non-failing by definition — design.md §
+    Where ``retry:`` may appear).
+    """
+
+    wait: str = Field(min_length=2)
+
+    @model_validator(mode="after")
+    def _wait_duration_shape(self) -> WaitStep:
+        if _CEL_TOKEN_PATTERN.match(self.wait):
+            raise ValueError(
+                f"step {self.id!r}: 'wait:' must be a constant ISO-8601 "
+                "duration string, not a CEL expression — the durable "
+                "timer payload is resolved at compile time"
+            )
+        match = _ISO8601_DURATION_PATTERN.match(self.wait)
+        if match is None:
+            raise ValueError(
+                f"step {self.id!r}: 'wait:' {self.wait!r} is not a valid "
+                "ISO-8601 duration (expected 'P[nD][T[nH][nM][nS]]' or 'PnW')"
+            )
+        # The regex permits structurally-empty shapes (``P``, ``PT``)
+        # and zero values (``PT0S``, ``P0D``) because each component
+        # is optional. Reject them here so publish-time validation
+        # matches the runtime guarantee: a durable timer requires a
+        # positive duration, anything else is a configuration bug.
+        weeks = int(match.group("weeks") or 0)
+        days = int(match.group("days") or 0)
+        hours = int(match.group("hours") or 0)
+        minutes = int(match.group("minutes") or 0)
+        seconds = float(match.group("seconds") or 0.0)
+        if weeks == 0 and days == 0 and hours == 0 and minutes == 0 and seconds == 0.0:
+            raise ValueError(
+                f"step {self.id!r}: 'wait:' {self.wait!r} must specify a "
+                "positive duration (at least one non-zero component)"
+            )
+        return self
+
+
 def _step_discriminator(v: Any) -> str | None:
     """Pick the step kind by keyword presence (no ``kind:`` field).
 
@@ -395,7 +467,7 @@ def _step_discriminator(v: Any) -> str | None:
     the error-taxonomy work in WF-IMPL-024.
     """
     if isinstance(v, dict):
-        present = [k for k in ("activity", "let", "workflow") if k in v]
+        present = [k for k in ("activity", "let", "workflow", "wait") if k in v]
         if len(present) == 1:
             return present[0]
         return None
@@ -406,17 +478,20 @@ def _step_discriminator(v: Any) -> str | None:
         return "let"
     if isinstance(v, WorkflowStep):
         return "workflow"
+    if isinstance(v, WaitStep):
+        return "wait"
     return None
 
 
-#: Discriminated union over the three step kinds. The Catalog schema
+#: Discriminated union over the four step kinds. The Catalog schema
 #: enforces the same ``oneOf`` shape; we mirror it so a mistyped
 #: workflow document fails at parse time with a precise error
 #: pointing at the offending branch.
 Step = Annotated[
     Annotated[ActivityStep, Tag("activity")]
     | Annotated[LetStep, Tag("let")]
-    | Annotated[WorkflowStep, Tag("workflow")],
+    | Annotated[WorkflowStep, Tag("workflow")]
+    | Annotated[WaitStep, Tag("wait")],
     Discriminator(_step_discriminator),
 ]
 

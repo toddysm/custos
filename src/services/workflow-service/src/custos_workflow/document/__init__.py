@@ -23,9 +23,9 @@ Implementation notes:
   schema's ``additionalProperties: false`` so unknown keys fail at the
   same boundary they fail at publish time.
 - The :class:`Step` union is discriminated by **presence** of the
-  ``activity`` / ``let`` / ``workflow`` keyword (not by a ``kind:``
-  field, because the YAML contract has no such field). Pydantic v2's
-  ``Discriminator(callable)`` makes this clean.
+  ``activity`` / ``let`` / ``workflow`` / ``wait`` keyword (not by a
+  ``kind:`` field, because the YAML contract has no such field).
+  Pydantic v2's ``Discriminator(callable)`` makes this clean.
 - CEL expression strings are preserved verbatim as :data:`CelSource`
   instances. Parsing into ASTs is the call-site collector's job
   (WF-IMPL-020).
@@ -50,6 +50,7 @@ from custos_workflow.document.models import (
     RetryPolicy,
     Step,
     Trigger,
+    WaitStep,
     WorkflowDocument,
     WorkflowSpec,
     WorkflowStep,
@@ -72,6 +73,7 @@ __all__ = [
     "RetryPolicy",
     "Step",
     "Trigger",
+    "WaitStep",
     "WorkflowDocument",
     "WorkflowSpec",
     "WorkflowStep",

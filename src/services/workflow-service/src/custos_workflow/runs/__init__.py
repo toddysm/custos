@@ -35,6 +35,11 @@ from custos_workflow.runs.step_handler import (
     WorkflowContext,
 )
 from custos_workflow.runs.store import InProcessRunStore, RunStore
+from custos_workflow.runs.wait import (
+    WaitDurationError,
+    WaitStepHandler,
+    parse_wait_duration,
+)
 
 __all__ = [
     "LOCKED_RUN_KINDS",
@@ -62,9 +67,12 @@ __all__ = [
     "StepSkipped",
     "StepSucceeded",
     "StepWaiting",
+    "WaitDurationError",
+    "WaitStepHandler",
     "WorkflowContext",
     "WorkflowRuntimeUnavailableError",
     "derive_run_id",
     "is_terminal",
     "make_run_orchestrator",
+    "parse_wait_duration",
 ]

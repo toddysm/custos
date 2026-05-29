@@ -51,6 +51,7 @@ from custos_workflow.bindings.registry import (
 from custos_workflow.document import (
     ActivityStep,
     LetStep,
+    WaitStep,
     WorkflowDocument,
     WorkflowStep,
 )
@@ -168,7 +169,7 @@ def _sub_workflow_outputs_schema(step: WorkflowStep, logger: logging.Logger) -> 
 
 
 def _step_outputs_schema(
-    step: ActivityStep | LetStep | WorkflowStep,
+    step: ActivityStep | LetStep | WorkflowStep | WaitStep,
     registry: ActivityTypeRegistry,
     logger: logging.Logger,
 ) -> Mapping[str, Any]:
@@ -176,6 +177,12 @@ def _step_outputs_schema(
         return _activity_outputs_schema(step, registry)
     if isinstance(step, LetStep):
         return _let_outputs_schema(step)
+    if isinstance(step, WaitStep):
+        # ``wait:`` produces no outputs — it is a pure delay primitive.
+        # The empty-properties object lets the type checker resolve
+        # ``steps.<id>.outputs`` to an empty map without any
+        # field-level lookups (which would all be unbound names).
+        return {"type": "object", "properties": {}}
     # WorkflowStep — narrowed by exhaustion.
     return _sub_workflow_outputs_schema(step, logger)
 
