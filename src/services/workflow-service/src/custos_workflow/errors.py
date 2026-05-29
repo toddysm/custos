@@ -3,12 +3,18 @@
 This module implements WF-IMPL-024 (issue #358): a single, frozen
 hierarchy of error classes that every public ``custos_workflow``
 compile-time entry point raises. Each class carries a stable
-:attr:`KIND` string that maps 1:1 to the audit ``kind`` field per
-``design/components/workflow-service/design.md`` § Failure Modes.
-The strings are intentionally narrow and stable — audit consumers
-(Observability Service, Step Coordinator emission, the Catalog
-Service publish flow) key off them, so any change here is a
-downstream contract break.
+:attr:`KIND` string used as the audit ``kind`` field for
+compile-time failures.
+
+The compile-time path is described in
+``design/components/workflow-service/design.md`` § Expression
+Evaluator — type errors surface at ``StartRun``, and "Defensive
+re-parse failures at this stage are a contract violation … and
+surface as compile errors". The four canonical ``compile.*``
+``kind`` strings below are the wire-stable names those audit
+emissions carry; downstream consumers (Observability Service,
+Step Coordinator emission, Catalog Service publish flow) key off
+them, so any change here is a downstream contract break.
 
 The hierarchy:
 

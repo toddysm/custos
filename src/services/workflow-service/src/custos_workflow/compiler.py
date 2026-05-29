@@ -360,10 +360,19 @@ def compile(
     try:
         untyped_by_step = collect_call_sites(document)
     except CallSiteParseError as exc:
+        # ``CallSiteParseError.__cause__`` carries the original
+        # :class:`custos_cel.CelError` raised by the parser. Forward
+        # it as the structured ``cause`` so
+        # ``CompileParseError.to_dict()["cause"]`` preserves the
+        # underlying ``kind`` / ``message`` for audit correlation
+        # (the canonical contract documented in
+        # :mod:`custos_workflow.errors`).
+        cel_cause = exc.__cause__ if isinstance(exc.__cause__, CelError) else None
         raise CallSiteCompileError(
             f"compile: failed to parse call site at step {exc.step_id!r}/{exc.path!r}: {exc}",
             step_id=exc.step_id,
             call_site_path=exc.path,
+            cause=cel_cause,
         ) from exc
 
     # ---- Stage 2: derive per-step schema bindings ---------------------

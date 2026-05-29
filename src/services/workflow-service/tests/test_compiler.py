@@ -297,6 +297,35 @@ class TestCallSiteErrors:
         assert "scan" in str(ei.value)
         assert "with.image" in str(ei.value)
 
+    def test_cel_syntax_error_preserves_cause_in_to_dict(self) -> None:
+        # A well-formed ``${{ ... }}`` placeholder containing
+        # malformed CEL surfaces as a ``CallSiteParseError`` whose
+        # ``__cause__`` is the underlying :class:`custos_cel.CelError`.
+        # The compiler must forward that cause into the structured
+        # ``CompileParseError`` envelope so
+        # ``to_dict()["cause"]`` preserves the upstream
+        # ``kind`` / ``message`` for audit correlation (per
+        # WF-IMPL-024 spec — issue #358).
+        doc = _doc(
+            [
+                {
+                    "id": "scan",
+                    "activity": "security/scan@1",
+                    "connector": "primary",
+                    "with": {"image": "${{ 1 + }}"},
+                },
+            ]
+        )
+        with pytest.raises(CallSiteCompileError) as ei:
+            compile_workflow(doc, _run_meta(), _registry())
+        envelope = ei.value.to_dict()
+        assert envelope["kind"] == "compile.parse_error"
+        assert envelope["step_id"] == "scan"
+        assert envelope["call_site_path"] == "with.image"
+        assert envelope["cause"] is not None
+        assert envelope["cause"]["kind"] == "expression.parse_error"
+        assert envelope["cause"]["message"]
+
 
 class TestBindingsErrors:
     def test_unknown_activity_raises_bindings_error(self) -> None:
