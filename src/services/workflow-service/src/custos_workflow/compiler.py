@@ -45,18 +45,23 @@ Compiler row):
    :class:`~custos_workflow.graph.ExecutionNode` instances in
    topological order plus the canonicalised edge tuple.
 
-A more detailed structured error taxonomy (``CompileError`` →
-``ParseError`` / ``BindingsError`` / ``TypeCheckError`` /
-``TopologyError`` / ``UnknownActivityError`` with stable ``kind``
-strings) lands in WF-IMPL-024; the subclass set in this module is the
-minimum shape that lets callers branch on the *stage* that failed.
+The structured error taxonomy lives in
+:mod:`custos_workflow.errors` (WF-IMPL-024, issue #358). This module
+re-exports the legacy stage-named subclasses
+(``CallSiteCompileError`` / ``BindingsCompileError`` /
+``TypeCheckCompileError`` / ``TopologyCompileError`` /
+``RetryPolicyCompileError``) which are now thin specializations of
+the canonical structured classes (:class:`CompileParseError` /
+:class:`CompileTypeError` / :class:`CompileTopologyError` /
+:class:`CompileRetryPolicyError`) and carry the locked
+``compile.*`` ``kind`` strings.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Final
 
 from custos_cel import CelError
 from custos_cel import type_check as cel_type_check
@@ -75,6 +80,13 @@ from custos_workflow.document import (
     Step,
     WorkflowDocument,
     WorkflowStep,
+)
+from custos_workflow.errors import (
+    CompileError,
+    CompileParseError,
+    CompileRetryPolicyError,
+    CompileTopologyError,
+    CompileTypeError,
 )
 from custos_workflow.graph import (
     Edge,
@@ -113,6 +125,10 @@ __all__ = [
     "BindingsCompileError",
     "CallSiteCompileError",
     "CompileError",
+    "CompileParseError",
+    "CompileRetryPolicyError",
+    "CompileTopologyError",
+    "CompileTypeError",
     "RetryPolicyCompileError",
     "RunMeta",
     "TopologyCompileError",
@@ -186,66 +202,100 @@ class TypeCheckFailure:
 # ---------------------------------------------------------------------------
 
 
-class CompileError(ValueError):
-    """Top-level compiler failure.
+class CallSiteCompileError(CompileParseError):
+    """Stage 1 failure — at least one ``${{ ... }}`` did not parse.
 
-    WF-IMPL-024 will replace this hierarchy with the structured
-    workflow-service error taxonomy (stable ``kind`` strings,
-    locator envelopes). Until then the subclasses below pin only
-    the failing pipeline stage so callers can branch without
-    parsing messages.
+    Specialisation of :class:`CompileParseError` (``kind =
+    "compile.parse_error"``) used by the compiler's call-site
+    collection stage. Callers can either ``except
+    CompileParseError:`` (canonical, prefer this) or ``except
+    CallSiteCompileError:`` (legacy, kept for backwards
+    compatibility).
     """
 
 
-class CallSiteCompileError(CompileError):
-    """Stage 1 failure — at least one ``${{ ... }}`` did not parse."""
-
-
-class BindingsCompileError(CompileError):
+class BindingsCompileError(CompileError, ValueError):
     """Stage 2 failure — schema bindings could not be derived.
 
     The most common cause today is an
     :class:`~custos_workflow.bindings.ActivityTypeNotFoundError` for
-    an activity ref that the registry does not know.
+    an activity ref that the registry does not know. The bindings
+    stage is not one of the four canonical compile-time failures
+    (parse / type / topology / retry-policy) so it carries its own
+    ``compile.bindings_error`` ``kind`` string; ``isinstance(...,
+    CompileError)`` still holds.
     """
 
+    KIND: Final[str] = "compile.bindings_error"  # type: ignore[misc]
 
-class TypeCheckCompileError(CompileError):
+
+class TypeCheckCompileError(CompileTypeError):
     """Stage 3 failure — at least one call site did not type-check.
 
-    Carries the per-call-site error list on :attr:`errors` so callers
-    can render every diagnostic at once rather than fix-then-recompile.
+    Aggregating specialisation of :class:`CompileTypeError`. The
+    canonical class carries a single ``step_id`` /
+    ``call_site_path`` per the WF-IMPL-024 taxonomy; this subclass
+    additionally exposes :attr:`errors` (the full per-call-site
+    failure list) so callers can render every diagnostic at once
+    rather than fix-then-recompile. The first failure's
+    ``step_id`` / ``call_site_path`` are surfaced through the
+    canonical fields so audit consumers do not need to special-case
+    the aggregator.
     """
 
     def __init__(self, errors: list[TypeCheckFailure]) -> None:
         self.errors: list[TypeCheckFailure] = errors
         lines = [f"  - step {f.step_id!r} at {f.path!r} ({f.kind}): {f.message}" for f in errors]
+        message = f"compile: type-check stage produced {len(errors)} error(s):\n" + "\n".join(lines)
+        primary = errors[0] if errors else None
         super().__init__(
-            f"compile: type-check stage produced {len(errors)} error(s):\n" + "\n".join(lines)
+            message,
+            step_id=primary.step_id if primary is not None else None,
+            call_site_path=primary.path if primary is not None else None,
         )
 
+    def _extra_fields(self) -> dict[str, Any]:
+        extras = super()._extra_fields()
+        extras["errors"] = [
+            {
+                "step_id": f.step_id,
+                "path": f.path,
+                "source": f.source,
+                "message": f.message,
+                "kind": f.kind,
+            }
+            for f in self.errors
+        ]
+        return extras
 
-class TopologyCompileError(CompileError):
+
+class TopologyCompileError(CompileTopologyError):
     """Stage 4 failure — explicit/implicit edges or topology rejected.
 
-    Wraps :class:`~custos_workflow.graph.TopologyError` raised by the
+    Specialisation of :class:`CompileTopologyError` (``kind =
+    "compile.topology_error"``). Wraps
+    :class:`~custos_workflow.graph.TopologyError` raised by the
     edge collectors, cycle detector, or topological sorter. Cycle
-    diagnostics include the offending step ids in declaration order.
+    diagnostics include the offending step ids in declaration
+    order on the canonical :attr:`cycle` field.
     """
 
 
-class RetryPolicyCompileError(CompileError):
+class RetryPolicyCompileError(CompileRetryPolicyError):
     """Stage 5 failure — retry-policy overlay produced an invalid policy.
 
-    Wraps :class:`~custos_workflow.retry.RetryResolutionError` raised
-    by :func:`~custos_workflow.retry.resolve_step_retry` /
+    Specialisation of :class:`CompileRetryPolicyError` (``kind =
+    "compile.retry_policy_error"``). Wraps
+    :class:`~custos_workflow.retry.RetryResolutionError` raised by
+    :func:`~custos_workflow.retry.resolve_step_retry` /
     :func:`~custos_workflow.retry.resolve_arm_retry` when a layered
     retry policy contains a malformed ISO-8601 duration, a backoff
-    with ``maxDelay < initialDelay``, or an ``on_error[]`` arm whose
-    inline ``maxAttempts:`` shorthand disagrees with its structured
-    ``retry: { maxAttempts: ... }`` value. The Catalog publish-time
-    validator should catch every one of these, so seeing this at
-    compile time means a document slipped past validation.
+    with ``maxDelay < initialDelay``, or an ``on_error[]`` arm
+    whose inline ``maxAttempts:`` shorthand disagrees with its
+    structured ``retry: { maxAttempts: ... }`` value. The Catalog
+    publish-time validator should catch every one of these, so
+    seeing this at compile time means a document slipped past
+    validation.
     """
 
 
@@ -310,8 +360,19 @@ def compile(
     try:
         untyped_by_step = collect_call_sites(document)
     except CallSiteParseError as exc:
+        # ``CallSiteParseError.__cause__`` carries the original
+        # :class:`custos_cel.CelError` raised by the parser. Forward
+        # it as the structured ``cause`` so
+        # ``CompileParseError.to_dict()["cause"]`` preserves the
+        # underlying ``kind`` / ``message`` for audit correlation
+        # (the canonical contract documented in
+        # :mod:`custos_workflow.errors`).
+        cel_cause = exc.__cause__ if isinstance(exc.__cause__, CelError) else None
         raise CallSiteCompileError(
             f"compile: failed to parse call site at step {exc.step_id!r}/{exc.path!r}: {exc}",
+            step_id=exc.step_id,
+            call_site_path=exc.path,
+            cause=cel_cause,
         ) from exc
 
     # ---- Stage 2: derive per-step schema bindings ---------------------
@@ -376,6 +437,7 @@ def compile(
             cyc_repr = "; ".join(" -> ".join(c) for c in cycles)
             raise TopologyCompileError(
                 f"compile: graph contains cycle(s): {cyc_repr}",
+                cycle=tuple(cycles[0]),
             )
         step_ids = [s.id for s in document.spec.steps]
         topological_order = topological_sort(step_ids, all_edges)
@@ -395,6 +457,7 @@ def compile(
     except RetryResolutionError as exc:
         raise RetryPolicyCompileError(
             f"compile: retry-policy resolver rejected the graph: {exc}",
+            reason=str(exc),
         ) from exc
     return ExecutionGraph(
         nodes=nodes,

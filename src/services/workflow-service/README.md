@@ -22,8 +22,9 @@ WF-IMPL-018 ([#352](https://github.com/toddysm/custos/issues/352)),
 WF-IMPL-019 ([#353](https://github.com/toddysm/custos/issues/353)),
 WF-IMPL-020 ([#354](https://github.com/toddysm/custos/issues/354)),
 WF-IMPL-021 ([#355](https://github.com/toddysm/custos/issues/355)),
-WF-IMPL-022 ([#356](https://github.com/toddysm/custos/issues/356)), and
-WF-IMPL-023 ([#357](https://github.com/toddysm/custos/issues/357)). The
+WF-IMPL-022 ([#356](https://github.com/toddysm/custos/issues/356)),
+WF-IMPL-023 ([#357](https://github.com/toddysm/custos/issues/357)), and
+WF-IMPL-024 ([#358](https://github.com/toddysm/custos/issues/358)). The
 package skeleton, the runnable `create_app()` factory, the
 `python -m custos_workflow` entry point, the `/healthz` and `/readyz`
 probes, the call-context middleware shim, the Helm subchart, the
@@ -40,8 +41,13 @@ resolver (`resolve_step_retry` / `resolve_arm_retry` — per-match →
 step → `spec.defaults` → platform overlay, field-by-field), and
 the on-error route compiler (`compile_on_error` — implicit-policy
 synthesis, prepended `cancelled` short-circuit, disallowed-kind
-rejection) are real. The remaining resolvers (structured error
-envelope, telemetry hooks) land in WF-IMPL-024 onwards; tracker
+rejection), and the locked public compiler error taxonomy
+(`custos_workflow.errors` — `CompileError` base + four canonical
+subclasses `CompileParseError` / `CompileTypeError` /
+`CompileTopologyError` / `CompileRetryPolicyError`, each pinning
+a stable `compile.*` `kind` string with JSON-safe `to_dict()`)
+are real. The remaining resolvers (telemetry hooks) land in
+WF-IMPL-025 onwards; tracker
 [#363](https://github.com/toddysm/custos/issues/363) (WF-IMPL-000-COMPILER).
 
 
@@ -140,6 +146,7 @@ src/services/workflow-service/
 │       ├── on_error/          # On-error route compiler (WF-IMPL-023)
 │       │   ├── __init__.py    # public re-exports
 │       │   └── compile.py     # compile_on_error — implicit policy + cancelled short-circuit
+│       ├── errors.py          # Locked compile-time error taxonomy (WF-IMPL-024)
 │       └── py.typed
 └── tests/
     ├── test_smoke.py             # package import + factory smoke
@@ -156,8 +163,9 @@ src/services/workflow-service/
     ├── test_callsites.py         # placeholder scanner + call-site collector
     ├── test_compiler.py          # compile() driver: happy path, errors, stubs
     ├── test_retry_resolver.py    # resolve_step_retry + resolve_arm_retry overlays
-    └── test_on_error_compile.py  # compile_on_error: implicit + rejections
+    ├── test_on_error_compile.py  # compile_on_error: implicit + rejections
+    └── test_errors.py            # CompileError taxonomy: kinds, to_dict, hash, repr
 ```
 
-Subsequent WF-IMPL-* tasks add structured error envelopes and
-wire telemetry hooks (`errors.py`, `_telemetry.py`).
+Subsequent WF-IMPL-* tasks wire telemetry hooks
+(`_telemetry.py`).
