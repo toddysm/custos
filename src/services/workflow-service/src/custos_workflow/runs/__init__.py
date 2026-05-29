@@ -45,6 +45,10 @@ from custos_workflow.runs.orchestrator import (
     RunOutput,
     make_run_orchestrator,
 )
+from custos_workflow.runs.replay import (
+    NoopReplayReconciler,
+    ReplayReconciler,
+)
 from custos_workflow.runs.step_handler import (
     NoopStepHandler,
     StepExecutionContext,
@@ -85,8 +89,10 @@ __all__ = [
     "LifecycleEvent",
     "LifecycleEventPublishError",
     "LifecycleEventPublisher",
+    "NoopReplayReconciler",
     "NoopStepHandler",
     "ReplayHook",
+    "ReplayReconciler",
     "RunController",
     "RunControllerError",
     "RunId",
