@@ -72,8 +72,6 @@ from custos_workflow.callsites import (
 from custos_workflow.document import (
     ActivityStep,
     LetStep,
-    OnErrorAction,
-    OnErrorArm,
     Step,
     WorkflowDocument,
     WorkflowStep,
@@ -83,8 +81,6 @@ from custos_workflow.graph import (
     ExecutionGraph,
     ExecutionNode,
     GraphMetadata,
-    OnErrorActionTag,
-    OnErrorRoute,
     PrimitiveHandler,
     ResolvedRetryPolicy,
     StepKind,
@@ -96,9 +92,9 @@ from custos_workflow.graph import (
     topological_sort,
     validate_step_refs,
 )
+from custos_workflow.on_error import compile_on_error
 from custos_workflow.retry import (
     RetryResolutionError,
-    resolve_arm_retry,
     resolve_step_retry,
 )
 
@@ -490,31 +486,24 @@ def _build_node(
 
     The step-level :class:`ResolvedRetryPolicy` is computed once
     here (layers: ``step.retry`` → ``spec.defaults.retry`` →
-    platform defaults — see :func:`resolve_step_retry`) and
-    threaded into each ``on_error`` arm so the per-match overlay
-    runs against the cached step-level resolution rather than
-    re-walking the chain.
+    platform defaults — see :func:`resolve_step_retry`) and then
+    handed to :func:`compile_on_error`, which both folds the
+    per-arm overlay for any declared ``on_error`` arms and
+    synthesises the implicit fallback routes documented in
+    design.md § Implicit ``on_error`` policy.
 
-    A non-activity step keeps ``retry_policy=None``: ``let:`` and
-    ``workflow:`` kinds never participate in workflow-level retry
-    (design.md § Retry Policy → § Where ``retry:`` may appear).
-    The structured Catalog rejection of disallowed-kind ``retry:``
-    blocks lands in WF-IMPL-023; for now the document model itself
-    only attaches ``retry`` to :class:`~custos_workflow.document.ActivityStep`
-    so this branch is the natural enforcement point.
+    A non-activity step keeps ``retry_policy=None`` and is rejected
+    by :func:`compile_on_error` if it carries a ``retry:`` or
+    ``on_error:`` block (design.md § Retry Policy → § Where
+    ``retry:`` may appear).
     """
     step_kind, handler = _STEP_DISPATCH[type(step)]
     retry_policy: ResolvedRetryPolicy | None
-    on_error_routes: tuple[OnErrorRoute, ...]
     if isinstance(step, ActivityStep):
-        step_resolved = resolve_step_retry(step.retry, spec_defaults)
-        retry_policy = step_resolved
-        on_error_routes = tuple(
-            _resolve_on_error_route(arm, step_resolved) for arm in step.on_error or ()
-        )
+        retry_policy = resolve_step_retry(step.retry, spec_defaults)
     else:
         retry_policy = None
-        on_error_routes = ()
+    on_error_routes = compile_on_error(step, retry_policy)
     return ExecutionNode(
         step_id=step.id,
         kind=step_kind,
@@ -523,40 +512,4 @@ def _build_node(
         on_error_routes=on_error_routes,
         call_sites=typed_call_sites,
         step_source=step,
-    )
-
-
-# ---------------------------------------------------------------------------
-# WF-IMPL-023 stub
-# ---------------------------------------------------------------------------
-#
-# The full on_error route compiler (implicit policy synthesis,
-# cancelled short-circuit, disallowed-kind rejection — design.md
-# § Implicit on_error policy) lands in WF-IMPL-023. Until then
-# this helper just maps a single :class:`OnErrorArm` 1:1 onto an
-# :class:`OnErrorRoute` and folds the resolved retry policy for
-# ``do: retry`` arms.
-
-
-def _resolve_on_error_route(
-    arm: OnErrorArm,
-    step_resolved: ResolvedRetryPolicy,
-) -> OnErrorRoute:
-    """STUB resolver for WF-IMPL-023.
-
-    Folds the per-match retry overlay (when ``do: retry``) on top
-    of the step-level resolved policy via
-    :func:`~custos_workflow.retry.resolve_arm_retry`. ``do: skip``
-    and ``do: fail`` arms carry no retry policy so their resolved
-    field stays ``None``.
-    """
-    resolved: ResolvedRetryPolicy | None = (
-        resolve_arm_retry(arm, step_resolved) if arm.do is OnErrorAction.RETRY else None
-    )
-    return OnErrorRoute(
-        action=OnErrorActionTag(arm.do.value),
-        code=arm.match.code,
-        code_prefix=arm.match.code_prefix,
-        cls=arm.match.cls,
-        retry=resolved,
     )

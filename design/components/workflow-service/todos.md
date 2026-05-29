@@ -31,7 +31,7 @@ Second sub-module under construction: **Definition Compiler**, packaged inside t
 ### Phase D — Retry policy materialization
 
 - [x] WF-IMPL-022: Effective retry-policy resolver — per-match → step → defaults → platform overlay (issue #356; depends on #350).
-- [ ] WF-IMPL-023: `on_error` route compiler — implicit policy + cancelled short-circuit + disallowed-kind rejection (issue #357; depends on #350, #356).
+- [x] WF-IMPL-023: `on_error` route compiler — implicit policy + cancelled short-circuit + disallowed-kind rejection (issue #357; depends on #350, #356).
 
 ### Phase E — Error taxonomy
 
