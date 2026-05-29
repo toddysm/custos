@@ -12,15 +12,16 @@ Design: [`design/components/workflow-service/design.md`](../../../design/compone
 
 ## Status
 
-**Phase A scaffold + FastAPI surface + WorkflowDocument models + SchemaBindings derivation + ExecutionGraph data model + call-site collector** —
+**Phase A scaffold + FastAPI surface + WorkflowDocument models + SchemaBindings derivation + ExecutionGraph data model + call-site collector + Definition Compiler driver** —
 WF-IMPL-013 ([#347](https://github.com/toddysm/custos/issues/347)),
 WF-IMPL-014 ([#348](https://github.com/toddysm/custos/issues/348)),
 WF-IMPL-015 ([#349](https://github.com/toddysm/custos/issues/349)),
 WF-IMPL-016 ([#350](https://github.com/toddysm/custos/issues/350)),
 WF-IMPL-017 ([#351](https://github.com/toddysm/custos/issues/351)),
 WF-IMPL-018 ([#352](https://github.com/toddysm/custos/issues/352)),
-WF-IMPL-019 ([#353](https://github.com/toddysm/custos/issues/353)), and
-WF-IMPL-020 ([#354](https://github.com/toddysm/custos/issues/354)). The
+WF-IMPL-019 ([#353](https://github.com/toddysm/custos/issues/353)),
+WF-IMPL-020 ([#354](https://github.com/toddysm/custos/issues/354)), and
+WF-IMPL-021 ([#355](https://github.com/toddysm/custos/issues/355)). The
 package skeleton, the runnable `create_app()` factory, the
 `python -m custos_workflow` entry point, the `/healthz` and `/readyz`
 probes, the call-context middleware shim, the Helm subchart, the
@@ -30,11 +31,14 @@ CI gate (`.github/workflows/python-services.yml`), the typed
 Protocol), the frozen `ExecutionGraph` dataclasses with a
 byte-stable JSON serializer, the topology layer (explicit edges,
 data-dependency edges, cycle detection, stable topological sort),
-and the CEL call-site collector are real. The remaining Definition
-Compiler internals (type-checking driver, retry / on-error
-compilation, compiler driver) land in WF-IMPL-021 onwards, tracked
-under
+the CEL call-site collector, and the Definition Compiler driver
+(`compile(document, run_meta, registry) -> ExecutionGraph` —
+wiring stages 1–6 of the pipeline) are real. The remaining
+resolvers (effective retry-policy curve, on-error route
+compilation, structured error envelope, telemetry hooks) land in
+WF-IMPL-022 onwards under stubs the driver already calls; tracker
 [#363](https://github.com/toddysm/custos/issues/363) (WF-IMPL-000-COMPILER).
+
 
 The Expression Evaluator (the first sub-module) is already in
 [`src/libs/custos-cel/`](../../libs/custos-cel) and shipped via
@@ -123,6 +127,7 @@ src/services/workflow-service/
 │       │   ├── model.py       # CallSite + SourcePosition dataclasses
 │       │   ├── placeholders.py # ${{ ... }} segment extractor
 │       │   └── collect.py     # collect_call_sites(doc) -> {step_id: [CallSite]}
+│       ├── compiler.py        # Definition Compiler driver (WF-IMPL-021)
 │       └── py.typed
 └── tests/
     ├── test_smoke.py             # package import + factory smoke
@@ -136,9 +141,11 @@ src/services/workflow-service/
     ├── test_graph_model.py       # frozen invariants + __post_init__ checks
     ├── test_graph_serialize.py   # round-trip + byte-stability + schema guards
     ├── test_graph_topology.py    # explicit/implicit edges + cycles + stable sort
-    └── test_callsites.py         # placeholder scanner + call-site collector
+    ├── test_callsites.py         # placeholder scanner + call-site collector
+    └── test_compiler.py          # compile() driver: happy path, errors, stubs
 ```
 
-Subsequent WF-IMPL-* tasks add the remaining Definition Compiler
-modules under `src/custos_workflow/` (`retry/`, `on_error/`,
-`errors.py`, `compiler.py`, `_telemetry.py`).
+Subsequent WF-IMPL-* tasks tighten the in-driver stubs for retry /
+on-error compilation, add structured error envelopes, and wire
+telemetry hooks (`retry/`, `on_error/`, `errors.py`,
+`_telemetry.py`).
