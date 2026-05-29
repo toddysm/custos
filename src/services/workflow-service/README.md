@@ -96,6 +96,16 @@ are real. The WF-IMPL-000-COMPILER milestone is complete; tracker
 [#363](https://github.com/toddysm/custos/issues/363) closes with
 this task.
 
+**WF-IMPL-000-RUN-CONTROLLER** is now in progress. WF-IMPL-029
+([#381](https://github.com/toddysm/custos/issues/381)) lands the
+thin `WorkflowRuntime` + `WorkflowClient` async adapters around
+`dapr-ext-workflow>=1.17,<2` plus the in-memory
+`FakeWorkflowRuntime` + `FakeWorkflowClient` test substitute.
+Every subsequent Run Controller task (WF-IMPL-030 +) consumes
+only these adapters; no other module imports
+`dapr.ext.workflow`. Tracker:
+[#399](https://github.com/toddysm/custos/issues/399).
+
 
 The Expression Evaluator (the first sub-module) is already in
 [`src/libs/custos-cel/`](../../libs/custos-cel) and shipped via
@@ -194,6 +204,11 @@ src/services/workflow-service/
 │       │   └── compile.py     # compile_on_error — implicit policy + cancelled short-circuit
 │       ├── errors.py          # Locked compile-time error taxonomy (WF-IMPL-024)
 │       ├── _telemetry.py      # OpenTelemetry instrumentation (WF-IMPL-027)
+│       ├── runtime/           # Dapr Workflow runtime + client adapters (WF-IMPL-029)
+│       │   ├── __init__.py    # public re-exports
+│       │   ├── _common.py     # RunStatus, RunState, request dataclasses
+│       │   ├── dapr.py        # WorkflowRuntime + WorkflowClient (real adapter)
+│       │   └── fake.py        # FakeWorkflowRuntime + FakeWorkflowClient test substitute
 │       └── py.typed
 └── tests/
     ├── test_smoke.py             # package import + factory smoke
@@ -215,7 +230,10 @@ src/services/workflow-service/
     ├── test_kind_grid.py         # Parametrized kind grids + exhaustiveness guards (WF-IMPL-025)
     ├── test_determinism_property.py  # Hypothesis property-based determinism tests (WF-IMPL-026)
     ├── test_observability.py     # OTel span / metric instrumentation tests (WF-IMPL-027)
-    └── test_docs_examples.py     # Doc-block round-trip smoke test (WF-IMPL-028)
+    ├── test_docs_examples.py     # Doc-block round-trip smoke test (WF-IMPL-028)
+    └── runtime/                  # Dapr runtime + client adapter tests (WF-IMPL-029)
+        ├── test_fake.py          # FakeWorkflowRuntime + FakeWorkflowClient behaviour
+        └── test_dapr_adapter_shape.py # Real adapter import-safety + delegation shape
 ```
 
 The WF-IMPL-000-COMPILER milestone is complete.
