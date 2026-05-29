@@ -199,6 +199,15 @@ class TestParseWaitDuration:
             parse_wait_duration("pause", raw)
         assert "greater than zero" in exc_info.value.reason
 
+    @pytest.mark.parametrize("raw", ["P", "PT"])
+    def test_rejects_structurally_empty_durations(self, raw: str) -> None:
+        # ``P`` / ``PT`` carry no components at all — a different
+        # failure shape from explicit-zero (``PT0S``) and worth
+        # surfacing distinctly in the audit envelope.
+        with pytest.raises(WaitDurationError) as exc_info:
+            parse_wait_duration("pause", raw)
+        assert "at least one component" in exc_info.value.reason
+
     def test_error_envelope_round_trip(self) -> None:
         # ``compile.wait_duration`` is the kind tag the
         # observability-audit-service indexes against. The error's
@@ -341,6 +350,15 @@ class TestWaitStepDocumentModel:
             "5",
             # CEL token — rejected (wait: is a constant-only field).
             "${{ inputs.delay }}",
+            # Structurally empty / zero — the regex permits these
+            # because every component is optional, but a durable
+            # timer requires a positive duration. Publish-time
+            # validation must catch them so they cannot reach
+            # runtime.
+            "PT0S",
+            "P0D",
+            "P0W",
+            "PT0H0M0S",
         ],
     )
     def test_rejects_non_grammar(self, wait_value: str) -> None:
@@ -348,6 +366,17 @@ class TestWaitStepDocumentModel:
 
         # The document model rejects these at parse time, before
         # they reach the compiler / runtime.
+        with pytest.raises(ValidationError):
+            _compile(_wait_doc(wait_value))
+
+    @pytest.mark.parametrize("wait_value", ["P", "PT"])
+    def test_rejects_empty_grammar(self, wait_value: str) -> None:
+        # ``P`` / ``PT`` violate the document model's ``min_length=2``
+        # guard or its zero-component check, depending on which
+        # check fires first. Either way the document refuses to
+        # parse them.
+        from pydantic import ValidationError
+
         with pytest.raises(ValidationError):
             _compile(_wait_doc(wait_value))
 

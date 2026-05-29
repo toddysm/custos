@@ -153,16 +153,24 @@ def parse_wait_duration(step_id: str, duration: str) -> timedelta:
     hours = int(match.group("hours") or 0)
     minutes = int(match.group("minutes") or 0)
     seconds = float(match.group("seconds") or 0.0)
-    total = timedelta(
+    # The regex permits structurally-empty shapes (``P``, ``PT``)
+    # because every component is optional. Surface those as a
+    # distinct "no components" failure so the audit envelope
+    # distinguishes a missing-payload bug from an explicit-zero bug.
+    if weeks == 0 and days == 0 and hours == 0 and minutes == 0 and seconds == 0.0:
+        if any(ch.isdigit() for ch in duration):
+            raise WaitDurationError(step_id, duration, "duration must be greater than zero")
+        raise WaitDurationError(step_id, duration, "duration must specify at least one component")
+    # ``\d+`` in the regex forbids negative components, and the
+    # all-zero shape is already rejected above, so the constructed
+    # timedelta is guaranteed positive here.
+    return timedelta(
         weeks=weeks,
         days=days,
         hours=hours,
         minutes=minutes,
         seconds=seconds,
     )
-    if total <= timedelta(0):
-        raise WaitDurationError(step_id, duration, "duration must be greater than zero")
-    return total
 
 
 # ---------------------------------------------------------------------------

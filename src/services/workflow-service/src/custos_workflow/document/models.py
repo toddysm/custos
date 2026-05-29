@@ -433,10 +433,26 @@ class WaitStep(_StepCommon):
                 "duration string, not a CEL expression — the durable "
                 "timer payload is resolved at compile time"
             )
-        if not _ISO8601_DURATION_PATTERN.match(self.wait):
+        match = _ISO8601_DURATION_PATTERN.match(self.wait)
+        if match is None:
             raise ValueError(
                 f"step {self.id!r}: 'wait:' {self.wait!r} is not a valid "
                 "ISO-8601 duration (expected 'P[nD][T[nH][nM][nS]]' or 'PnW')"
+            )
+        # The regex permits structurally-empty shapes (``P``, ``PT``)
+        # and zero values (``PT0S``, ``P0D``) because each component
+        # is optional. Reject them here so publish-time validation
+        # matches the runtime guarantee: a durable timer requires a
+        # positive duration, anything else is a configuration bug.
+        weeks = int(match.group("weeks") or 0)
+        days = int(match.group("days") or 0)
+        hours = int(match.group("hours") or 0)
+        minutes = int(match.group("minutes") or 0)
+        seconds = float(match.group("seconds") or 0.0)
+        if weeks == 0 and days == 0 and hours == 0 and minutes == 0 and seconds == 0.0:
+            raise ValueError(
+                f"step {self.id!r}: 'wait:' {self.wait!r} must specify a "
+                "positive duration (at least one non-zero component)"
             )
         return self
 
