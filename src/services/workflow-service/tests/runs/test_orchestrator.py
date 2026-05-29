@@ -398,6 +398,56 @@ class TestFanOut:
 # ---------------------------------------------------------------------------
 
 
+class TestStepSucceededIsolation:
+    def test_handler_cannot_mutate_orchestrator_bag_after_return(self) -> None:
+        """Deep-copy at ingest defends against handler-held references.
+
+        A handler can legitimately retain a reference to the list /
+        mapping it returned in :class:`StepSucceeded`. If the
+        orchestrator stored that reference verbatim, a later
+        mutation by the handler would leak into ``output_bag`` and
+        change gate evaluation for downstream steps, breaking the
+        replay-determinism guarantee for the Step Coordinator
+        boundary.
+        """
+
+        graph = _compile(_LINEAR_DOC)
+        runtime = FakeWorkflowRuntime()
+
+        shared_list: list[int] = [1, 2, 3]
+        shared_outputs: dict[str, Any] = {"items": shared_list, "nested": {"k": "v"}}
+
+        @dataclass
+        class _MutatingHandler:
+            mutated: bool = False
+
+            def execute(
+                self,
+                _ctx: StepExecutionContext,
+                _g: ExecutionGraph,
+                step_id: str,
+            ) -> StepResult:
+                if step_id == "a":
+                    return StepSucceeded(outputs=shared_outputs)
+                # By the time later steps dispatch, mutate the
+                # references we handed back from "a". The
+                # orchestrator's bag entry for "a" must NOT see
+                # these mutations.
+                if not self.mutated:
+                    shared_list.append(999)
+                    shared_outputs["nested"]["k"] = "mutated"
+                    self.mutated = True
+                return StepSucceeded(outputs={})
+
+        out = _schedule(runtime, runtime.client(), _MutatingHandler(), _run_input(graph))
+
+        assert out.status == RunStatus.SUCCEEDED.value
+        # Bag entry for "a" reflects the values at the moment
+        # the handler returned them — not the later mutation.
+        assert list(out.outputs["a"]["items"]) == [1, 2, 3]
+        assert dict(out.outputs["a"]["nested"]) == {"k": "v"}
+
+
 class TestStepFailedShortCircuits:
     def test_first_failure_returns_failed_status_and_envelope(self) -> None:
         graph = _compile(_LINEAR_DOC)
@@ -559,9 +609,10 @@ class TestReplayHook:
         assert order[0] == "on_replay"
         assert order[1] == "dispatch"
 
-    def test_fires_with_empty_graph(self) -> None:
-        # Graph with one step is the minimum the compiler accepts;
-        # the hook still must fire exactly once.
+    def test_fires_with_single_step_graph(self) -> None:
+        # The compiler does not accept a truly empty graph; the
+        # smallest representable workflow has one step. The hook
+        # must still fire exactly once on this minimal graph.
         graph = _compile(
             """\
             apiVersion: custos.dev/v1

@@ -66,6 +66,7 @@ Protocol).
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -360,7 +361,14 @@ def make_run_orchestrator(
             # at import time so this match-block must be updated
             # before the new variant can ship.
             if isinstance(result, StepSucceeded):
-                output_bag[step_id] = dict(result.outputs)
+                # Deep-copy at the ingest boundary so handlers that
+                # retain references to the mappings/lists they emit
+                # cannot mutate ``output_bag`` after the fact. This
+                # is the replay-determinism guarantee for the Step
+                # Coordinator boundary: every dispatch must observe
+                # outputs as they were at the moment the producing
+                # step completed.
+                output_bag[step_id] = copy.deepcopy(dict(result.outputs))
                 continue
             if isinstance(result, StepSkipped):
                 output_bag[step_id] = {}
@@ -410,8 +418,18 @@ def _step_ctx(
     """Build a frozen :class:`StepExecutionContext` snapshot.
 
     A fresh snapshot is produced before every handler dispatch so
-    the handler observes the outputs of every preceding step but
-    cannot mutate the bag through this view.
+    the handler observes the outputs of every preceding step.
+
+    The snapshot's outer surface is read-only: the top-level
+    mapping and every per-step mapping are wrapped in
+    :class:`MappingProxyType`, so handlers cannot rebind step ids
+    or output keys through this view. Nested values are not deeply
+    frozen, but they are deep-copies of what handlers originally
+    returned (see the :class:`StepSucceeded` ingest path in
+    ``run_orchestrator``), so any in-place mutation a handler
+    performs on its own retained references — or on values it
+    fishes out of ``ctx.outputs`` — cannot affect the orchestrator's
+    ``output_bag`` or subsequent gate evaluation.
     """
 
     snapshot: dict[str, Mapping[str, Any]] = {
