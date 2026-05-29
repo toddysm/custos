@@ -354,6 +354,23 @@ _RUNTIME_STATUS_OVERLAY: Final[dict[RuntimeRunStatus, RunStatus]] = {
 }
 
 
+#: Persisted statuses representing an in-flight controller-side
+#: transition that has no Dapr counterpart (the runtime stays
+#: ``RUNNING`` / ``SUSPENDED`` while the controller drives the
+#: transition through the store). For these statuses
+#: :meth:`RunController.get_run` MUST surface the persisted row
+#: verbatim — overlaying the runtime here would silently regress
+#: ``cancelling`` back to ``running`` (and ``pausing`` back to
+#: ``running`` / ``paused``) until the runtime finishes terminating
+#: / suspending. The runtime is therefore never consulted for these
+#: rows; the next controller-driven transition will write the
+#: terminal / paused status to the store, and a subsequent
+#: ``get_run`` will then read it.
+_PERSISTED_TRANSITIONAL_STATUSES: Final[frozenset[RunStatus]] = frozenset(
+    {RunStatus.PAUSING, RunStatus.CANCELLING}
+)
+
+
 # ---------------------------------------------------------------------------
 # WorkflowClient surface (structural)
 # ---------------------------------------------------------------------------
@@ -1015,23 +1032,30 @@ class RunController:
         1. Hydrate the :class:`RunRecord` from :class:`RunStore`
            (raise :class:`RunNotFoundError`).
         2. If the persisted status is **terminal** (member of
-           :data:`~custos_workflow.runs.model.TERMINAL_STATUSES`),
-           return the record verbatim. The runtime is never queried
-           because the persisted row is already authoritative
-           (acceptance criterion: terminal-status reads never call
-           ``get_workflow_state``).
+           :data:`~custos_workflow.runs.model.TERMINAL_STATUSES`)
+           or a **persisted-only transitional** status
+           (:data:`_PERSISTED_TRANSITIONAL_STATUSES` — ``PAUSING``
+           / ``CANCELLING``), return the record verbatim. The
+           runtime is never queried because either the persisted
+           row is already authoritative (terminal) or the runtime
+           has no equivalent state and would silently regress the
+           persisted intent back to ``RUNNING`` / ``PAUSED``
+           (acceptance criterion: terminal-status reads never
+           call ``get_workflow_state``).
         3. Otherwise, call
-           :meth:`_WorkflowClient.get_workflow_state` for the
-           freshest runtime snapshot. Translate the runtime status
-           via :data:`_RUNTIME_STATUS_OVERLAY` and return a
-           :func:`dataclasses.replace`-d copy of the record carrying
-           the overlaid status. The persisted row is **never**
-           mutated (acceptance criterion: store snapshot before /
-           after is byte-equal). Runtime statuses without a clean
-           mapping (``UNKNOWN`` / ``STALLED``) and an entirely
-           absent runtime instance (``None`` return) fall back to
-           the persisted status. Any exception from the runtime
-           call surfaces as
+           :meth:`_WorkflowClient.get_workflow_state` with
+           ``fetch_payloads=False`` (status-only — skip the
+           potentially large serialized input / output payloads)
+           for the freshest runtime snapshot. Translate the
+           runtime status via :data:`_RUNTIME_STATUS_OVERLAY` and
+           return a :func:`dataclasses.replace`-d copy of the
+           record carrying the overlaid status. The persisted row
+           is **never** mutated (acceptance criterion: store
+           snapshot before / after is byte-equal). Runtime
+           statuses without a clean mapping (``UNKNOWN`` /
+           ``STALLED``) and an entirely absent runtime instance
+           (``None`` return) fall back to the persisted status.
+           Any exception from the runtime call surfaces as
            :class:`WorkflowRuntimeUnavailableError`, matching the
            single frozen Run Controller error taxonomy.
 
@@ -1060,10 +1084,19 @@ class RunController:
 
         if record.status in TERMINAL_STATUSES:
             return record
+        if record.status in _PERSISTED_TRANSITIONAL_STATUSES:
+            # The runtime has no `PAUSING` / `CANCELLING` equivalent
+            # and would still report `RUNNING` / `SUSPENDED` while
+            # the controller is mid-transition. Overlaying here
+            # would silently regress the persisted intent.
+            return record
 
         try:
             snapshot = await self._workflow_client.get_workflow_state(
-                GetRunStateRequest(instance_id=str(run_id))
+                # Status-only read — skip serialized input/output
+                # payloads so polling does not transfer large
+                # workflow payloads on every get_run call.
+                GetRunStateRequest(instance_id=str(run_id), fetch_payloads=False)
             )
         except Exception as exc:
             raise WorkflowRuntimeUnavailableError(

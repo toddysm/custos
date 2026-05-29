@@ -444,6 +444,54 @@ class TestGetRunOverlay:
         record = await fx.controller.get_run(workspace_id=WORKSPACE, run_id=RUN_ID)
         assert record == seeded
 
+    async def test_overlay_request_skips_payload_fetch(self) -> None:
+        """Status-only reads MUST pass ``fetch_payloads=False`` so the
+        Dapr adapter does not transfer potentially large serialized
+        input / output payloads on every poll."""
+        client = _RecordingWorkflowClient(state_sequence=[_runtime_state(RuntimeRunStatus.RUNNING)])
+        fx = _make_controller(workflow_client=client)
+        await _seed_run(fx.store, status=RunStatus.RUNNING)
+        await fx.controller.get_run(workspace_id=WORKSPACE, run_id=RUN_ID)
+        assert len(client.state_requests) == 1
+        assert client.state_requests[0].fetch_payloads is False
+
+
+# ---------------------------------------------------------------------------
+# get_run: persisted-only transitional statuses bypass overlay
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestGetRunTransitionalStatus:
+    """``PAUSING`` / ``CANCELLING`` have no Dapr counterpart — the
+    runtime is still ``RUNNING`` / ``SUSPENDED`` while the controller
+    drives the transition through the store. Overlaying here would
+    silently regress the persisted intent back to ``RUNNING`` /
+    ``PAUSED``, so the runtime MUST NOT be consulted."""
+
+    async def test_pausing_status_does_not_call_runtime(self) -> None:
+        client = _ExplodingGetStateClient()
+        fx = _make_controller(workflow_client=client)
+        await _seed_run(fx.store, status=RunStatus.PAUSING)
+        record = await fx.controller.get_run(workspace_id=WORKSPACE, run_id=RUN_ID)
+        assert record.status == RunStatus.PAUSING
+
+    async def test_cancelling_status_does_not_call_runtime(self) -> None:
+        client = _ExplodingGetStateClient()
+        fx = _make_controller(workflow_client=client)
+        await _seed_run(fx.store, status=RunStatus.CANCELLING)
+        record = await fx.controller.get_run(workspace_id=WORKSPACE, run_id=RUN_ID)
+        assert record.status == RunStatus.CANCELLING
+
+    async def test_pausing_row_unchanged_after_get(self) -> None:
+        client = _ExplodingGetStateClient()
+        fx = _make_controller(workflow_client=client)
+        await _seed_run(fx.store, status=RunStatus.PAUSING)
+        before = await fx.store.get_run(WORKSPACE, RUN_ID)
+        await fx.controller.get_run(workspace_id=WORKSPACE, run_id=RUN_ID)
+        after = await fx.store.get_run(WORKSPACE, RUN_ID)
+        assert before == after
+
 
 # ---------------------------------------------------------------------------
 # get_run: runtime unavailable
