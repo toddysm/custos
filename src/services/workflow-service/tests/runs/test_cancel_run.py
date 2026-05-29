@@ -638,6 +638,27 @@ class TestRuntimeUnavailable:
         assert record.status == RunStatus.CANCELLING
         assert fx.publisher.events == []
 
+    async def test_get_state_failure_wraps_as_runtime_unavailable(self) -> None:
+        """``get_workflow_state`` exceptions must be wrapped — the public
+        Run Controller surface is the single frozen error taxonomy,
+        so raw runtime exceptions must NEVER bubble out of the poll
+        loop (Copilot review feedback)."""
+        client = _RecordingWorkflowClient(get_state_raise=ConnectionError("kapow"))
+        fx = _make_controller(workflow_client=client)
+        await _seed_run(fx.store, status=RunStatus.RUNNING)
+        with pytest.raises(WorkflowRuntimeUnavailableError) as excinfo:
+            await fx.controller.cancel_run(
+                workspace_id=WORKSPACE, run_id=RUN_ID, reason="user-cancel"
+            )
+        assert excinfo.value.cause == "kapow"
+        assert "poll workflow runtime" in str(excinfo.value)
+        # Only one poll attempted; the row stays cancelling; no event.
+        assert len(client.state_requests) == 1
+        record = await fx.store.get_run(WORKSPACE, RUN_ID)
+        assert record is not None
+        assert record.status == RunStatus.CANCELLING
+        assert fx.publisher.events == []
+
 
 # ---------------------------------------------------------------------------
 # Module surface
@@ -667,3 +688,15 @@ class TestModuleSurface:
         envelope = event.to_dict()
         assert envelope["kind"] == "workflow.cancelled"
         assert envelope["extra"] == {"reason": "user"}
+
+    def test_package_re_exports_terminate_poll_defaults(self) -> None:
+        """The poll-budget defaults are part of the documented public
+        surface (the PR description advertises them) and MUST be
+        re-exported by ``custos_workflow.runs`` (Copilot review
+        feedback)."""
+        from custos_workflow import runs as runs_pkg
+
+        assert "DEFAULT_TERMINATE_POLL_ATTEMPTS" in runs_pkg.__all__
+        assert "DEFAULT_TERMINATE_POLL_INTERVAL_S" in runs_pkg.__all__
+        assert runs_pkg.DEFAULT_TERMINATE_POLL_ATTEMPTS == 30
+        assert runs_pkg.DEFAULT_TERMINATE_POLL_INTERVAL_S == 1.0

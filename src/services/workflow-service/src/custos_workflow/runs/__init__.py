@@ -1,6 +1,8 @@
 """Public re-exports for the ``custos_workflow.runs`` subpackage."""
 
 from custos_workflow.runs.controller import (
+    DEFAULT_TERMINATE_POLL_ATTEMPTS,
+    DEFAULT_TERMINATE_POLL_INTERVAL_S,
     LIFECYCLE_KIND_WORKFLOW_CANCELLED,
     LIFECYCLE_KIND_WORKFLOW_STARTED,
     CatalogClient,
@@ -53,6 +55,8 @@ from custos_workflow.runs.wait import (
 )
 
 __all__ = [
+    "DEFAULT_TERMINATE_POLL_ATTEMPTS",
+    "DEFAULT_TERMINATE_POLL_INTERVAL_S",
     "LIFECYCLE_KIND_WORKFLOW_CANCELLED",
     "LIFECYCLE_KIND_WORKFLOW_STARTED",
     "LOCKED_RUN_KINDS",

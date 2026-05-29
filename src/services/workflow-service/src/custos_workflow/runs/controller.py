@@ -715,7 +715,12 @@ class RunController:
         has no record of the instance (``None`` return). Raises
         :class:`WorkflowRuntimeUnavailableError` if the
         per-controller attempt budget is exhausted without a
-        terminal observation.
+        terminal observation, OR if any
+        :meth:`_WorkflowClient.get_workflow_state` call raises —
+        every exception path out of this loop must be the
+        documented :class:`WorkflowRuntimeUnavailableError` so
+        callers see the single frozen Run Controller error
+        taxonomy.
 
         The per-poll sleep is the constructor-injected
         ``sleep`` callable, defaulting to :func:`asyncio.sleep`;
@@ -725,7 +730,14 @@ class RunController:
         """
         request = GetRunStateRequest(instance_id=str(run_id))
         for attempt in range(self._terminate_poll_attempts):
-            state = await self._workflow_client.get_workflow_state(request)
+            try:
+                state = await self._workflow_client.get_workflow_state(request)
+            except Exception as exc:
+                raise WorkflowRuntimeUnavailableError(
+                    f"failed to poll workflow runtime for run {run_id}",
+                    run_id=str(run_id),
+                    cause=str(exc),
+                ) from exc
             if state is None or state.status in RUNTIME_TERMINAL_STATUSES:
                 return
             if attempt < self._terminate_poll_attempts - 1:
