@@ -132,9 +132,13 @@ class TestResolveStepRetry:
             resolve_step_retry(step, None)
 
     def test_max_delay_below_initial_delay_raises(self) -> None:
-        # Step lowers maxDelay below the inherited platform initialDelay.
-        step = RetryPolicy(backoff=BackoffPolicy(maxDelay="PT500MS"))
-        with pytest.raises(RetryResolutionError):
+        # Step lowers maxDelay to 500 ms (PT0.5S) which is below the
+        # inherited platform initialDelay of PT1S (1000 ms). The
+        # ``maxDelay`` is a valid duration token — it must reach the
+        # ``max_ms < initial_ms`` check in ``_to_resolved`` rather
+        # than short-circuiting on the duration parser.
+        step = RetryPolicy(backoff=BackoffPolicy(maxDelay="PT0.5S"))
+        with pytest.raises(RetryResolutionError, match="maxDelay"):
             resolve_step_retry(step, None)
 
     def test_constant_strategy_keeps_multiplier_value(self) -> None:
