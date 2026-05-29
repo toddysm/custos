@@ -1206,8 +1206,12 @@ class TestRunLifecycleErrorOutcomes:
 
     @pytest.mark.asyncio
     async def test_resume_run_state_conflict_outcome(self) -> None:
-        # Resume from RUNNING is illegal — the controller refuses
-        # BEFORE calling Dapr (see Gate 3 commentary).
+        # Resume from a non-PAUSED, non-RUNNING source is a state
+        # conflict: RunController.resume_run() raises
+        # RunStateConflictError for anything other than PAUSED
+        # (RUNNING is treated as an idempotent no-op). We seed
+        # SUCCEEDED here so the controller refuses before any
+        # Dapr call (see Gate 3 commentary).
         fx = _make_obs_fixture()
         await _seed_obs_run(fx.store, status=_RunStatus.SUCCEEDED)
         with pytest.raises(_RunStateConflictError):

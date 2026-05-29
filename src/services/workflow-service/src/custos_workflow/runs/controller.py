@@ -1372,15 +1372,19 @@ class RunController:
 
         Wraps :meth:`LifecycleEventPublisher.publish` so the
         :data:`~custos_workflow._telemetry.WORKFLOW_EVENTS_EMITTED_TOTAL`
-        counter only ticks on a successful publish — publisher
-        failures (which are deliberately absorbed by the
-        controller call sites to preserve the
-        persisted-state→event ordering invariant) do not inflate
-        the emitted-event total. The ``kind`` label is taken
-        verbatim from :attr:`LifecycleEvent.kind`; unknown kinds
-        raise :class:`ValueError` (a contract violation — the
-        controller MUST register the kind in
-        :mod:`custos_workflow._telemetry` before emitting it).
+        counter only ticks on a successful publish: publisher
+        failures are *not* suppressed here —
+        :meth:`LifecycleEventPublisher.publish` is documented to
+        propagate exceptions and the controller call sites let
+        them surface so the caller observes the failure. The
+        counter intentionally stays in lock-step with the wire
+        publish, so an absorbed/retried publish (if a future call
+        site ever wraps the publish) still wouldn't inflate the
+        emitted-event total. The ``kind`` label is taken verbatim
+        from :attr:`LifecycleEvent.kind`; unknown kinds raise
+        :class:`ValueError` (a contract violation — the controller
+        MUST register the kind in :mod:`custos_workflow._telemetry`
+        before emitting it).
         """
         await self._lifecycle_publisher.publish(event)
         record_workflow_event_emitted(event.kind)
