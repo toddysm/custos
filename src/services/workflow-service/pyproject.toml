@@ -34,6 +34,7 @@ classifiers = [
 # end-to-end through the `/healthz` and `/readyz` routes.
 dependencies = [
     "custos-cel",
+    "custos-spl",
     "fastapi>=0.110,<1",
     "uvicorn[standard]>=0.27,<1",
     "pydantic>=2.6,<3",
@@ -109,7 +110,7 @@ no_implicit_optional = true
 check_untyped_defs = true
 namespace_packages = true
 explicit_package_bases = true
-mypy_path = "src:../../libs/custos-cel/src"
+mypy_path = "src:../../libs/custos-cel/src:../../libs/storage-provider-layer/src"
 
 [[tool.mypy.overrides]]
 module = "tests.*"

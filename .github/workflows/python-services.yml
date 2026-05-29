@@ -218,6 +218,11 @@ jobs:
         run: |
           pip install -e src/libs/custos-cel[dev]
 
+      - name: Install custos-spl library from path
+        working-directory: ${{ github.workspace }}
+        run: |
+          pip install -e src/libs/storage-provider-layer[dev]
+
       - name: Install package and dev dependencies
         run: pip install -e ".[dev]"
 
