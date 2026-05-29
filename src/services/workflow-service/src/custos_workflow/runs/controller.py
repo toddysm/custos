@@ -70,9 +70,11 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Final, Protocol, runtime_checkable
+
+from custos_spl.pagination import Cursor, Page
 
 from custos_workflow.compiler import RunMeta
 from custos_workflow.compiler import compile as compile_workflow
@@ -83,7 +85,7 @@ from custos_workflow.runs.errors import (
     WorkflowRuntimeUnavailableError,
 )
 from custos_workflow.runs.ids import RunId, derive_run_id
-from custos_workflow.runs.model import RunRecord, RunStatus
+from custos_workflow.runs.model import TERMINAL_STATUSES, RunRecord, RunStatus
 from custos_workflow.runs.orchestrator import WORKFLOW_NAME, RunInput
 from custos_workflow.runtime._common import (
     TERMINAL_STATUSES as RUNTIME_TERMINAL_STATUSES,
@@ -96,6 +98,7 @@ from custos_workflow.runtime._common import (
     TerminateRunRequest,
 )
 from custos_workflow.runtime._common import RunState as RuntimeRunState
+from custos_workflow.runtime._common import RunStatus as RuntimeRunStatus
 
 if TYPE_CHECKING:
     from custos_cel.clock import Clock
@@ -321,6 +324,51 @@ DEFAULT_TERMINATE_POLL_ATTEMPTS: Final[int] = 30
 #: Default per-poll sleep (seconds) between ``get_workflow_state`` calls. Tests
 #: inject a no-op sleeper so the loop completes synchronously.
 DEFAULT_TERMINATE_POLL_INTERVAL_S: Final[float] = 1.0
+
+
+# ---------------------------------------------------------------------------
+# Runtime -> persisted RunStatus overlay map
+# ---------------------------------------------------------------------------
+
+
+#: Translation table from the Dapr-side
+#: :class:`~custos_workflow.runtime._common.RunStatus` enum to the
+#: persisted Run-Controller :class:`~custos_workflow.runs.model.RunStatus`
+#: enum. Used by :meth:`RunController.get_run` to overlay a fresh
+#: runtime status snapshot on top of the persisted row WITHOUT mutating
+#: the row (read-through projection — design.md § Public Interface).
+#:
+#: Statuses with no clean mapping (``UNKNOWN`` / ``STALLED``) are
+#: deliberately absent so the overlay falls back to the persisted
+#: status. ``PAUSING`` / ``CANCELLING`` have no runtime counterpart
+#: either; the runtime stays ``RUNNING`` / ``SUSPENDED`` during those
+#: transitions, so the overlay reflects the actual runtime state
+#: rather than the controller's transitional intent.
+_RUNTIME_STATUS_OVERLAY: Final[dict[RuntimeRunStatus, RunStatus]] = {
+    RuntimeRunStatus.PENDING: RunStatus.QUEUED,
+    RuntimeRunStatus.RUNNING: RunStatus.RUNNING,
+    RuntimeRunStatus.SUSPENDED: RunStatus.PAUSED,
+    RuntimeRunStatus.COMPLETED: RunStatus.SUCCEEDED,
+    RuntimeRunStatus.FAILED: RunStatus.FAILED,
+    RuntimeRunStatus.TERMINATED: RunStatus.CANCELLED,
+}
+
+
+#: Persisted statuses representing an in-flight controller-side
+#: transition that has no Dapr counterpart (the runtime stays
+#: ``RUNNING`` / ``SUSPENDED`` while the controller drives the
+#: transition through the store). For these statuses
+#: :meth:`RunController.get_run` MUST surface the persisted row
+#: verbatim — overlaying the runtime here would silently regress
+#: ``cancelling`` back to ``running`` (and ``pausing`` back to
+#: ``running`` / ``paused``) until the runtime finishes terminating
+#: / suspending. The runtime is therefore never consulted for these
+#: rows; the next controller-driven transition will write the
+#: terminal / paused status to the store, and a subsequent
+#: ``get_run`` will then read it.
+_PERSISTED_TRANSITIONAL_STATUSES: Final[frozenset[RunStatus]] = frozenset(
+    {RunStatus.PAUSING, RunStatus.CANCELLING}
+)
 
 
 # ---------------------------------------------------------------------------
@@ -964,6 +1012,159 @@ class RunController:
             run_id=run_id,
             workflow_version_id=record.workflow_version,
             status=finalised.status,
+        )
+
+    # ------------------------------------------------------------------
+    # get_run
+    # ------------------------------------------------------------------
+
+    async def get_run(
+        self,
+        *,
+        workspace_id: str,
+        run_id: RunId,
+    ) -> RunRecord:
+        """Read a run; overlay the runtime status snapshot when in-flight.
+
+        Implements design.md § Public Interface (Run Controller read
+        surface):
+
+        1. Hydrate the :class:`RunRecord` from :class:`RunStore`
+           (raise :class:`RunNotFoundError`).
+        2. If the persisted status is **terminal** (member of
+           :data:`~custos_workflow.runs.model.TERMINAL_STATUSES`)
+           or a **persisted-only transitional** status
+           (:data:`_PERSISTED_TRANSITIONAL_STATUSES` — ``PAUSING``
+           / ``CANCELLING``), return the record verbatim. The
+           runtime is never queried because either the persisted
+           row is already authoritative (terminal) or the runtime
+           has no equivalent state and would silently regress the
+           persisted intent back to ``RUNNING`` / ``PAUSED``
+           (acceptance criterion: terminal-status reads never
+           call ``get_workflow_state``).
+        3. Otherwise, call
+           :meth:`_WorkflowClient.get_workflow_state` with
+           ``fetch_payloads=False`` (status-only — skip the
+           potentially large serialized input / output payloads)
+           for the freshest runtime snapshot. Translate the
+           runtime status via :data:`_RUNTIME_STATUS_OVERLAY` and
+           return a :func:`dataclasses.replace`-d copy of the
+           record carrying the overlaid status. The persisted row
+           is **never** mutated (acceptance criterion: store
+           snapshot before / after is byte-equal). Runtime
+           statuses without a clean mapping (``UNKNOWN`` /
+           ``STALLED``) and an entirely absent runtime instance
+           (``None`` return) fall back to the persisted status.
+           Any exception from the runtime call surfaces as
+           :class:`WorkflowRuntimeUnavailableError`, matching the
+           single frozen Run Controller error taxonomy.
+
+        Args:
+            workspace_id: The owning workspace.
+            run_id: The :class:`RunId` to read.
+
+        Returns:
+            A :class:`RunRecord`. On the in-flight overlay path the
+            ``status`` may differ from the persisted row's status;
+            every other field mirrors the row.
+
+        Raises:
+            RunNotFoundError: No record exists at
+                ``(workspace_id, run_id)``.
+            WorkflowRuntimeUnavailableError: The runtime call
+                raised — the persisted row is unchanged and the
+                caller can safely retry.
+        """
+        record = await self._store.get_run(workspace_id, run_id)
+        if record is None:
+            raise RunNotFoundError(
+                f"run {run_id} not found in workspace {workspace_id!r}",
+                run_id=str(run_id),
+            )
+
+        if record.status in TERMINAL_STATUSES:
+            return record
+        if record.status in _PERSISTED_TRANSITIONAL_STATUSES:
+            # The runtime has no `PAUSING` / `CANCELLING` equivalent
+            # and would still report `RUNNING` / `SUSPENDED` while
+            # the controller is mid-transition. Overlaying here
+            # would silently regress the persisted intent.
+            return record
+
+        try:
+            snapshot = await self._workflow_client.get_workflow_state(
+                # Status-only read — skip serialized input/output
+                # payloads so polling does not transfer large
+                # workflow payloads on every get_run call.
+                GetRunStateRequest(instance_id=str(run_id), fetch_payloads=False)
+            )
+        except Exception as exc:
+            raise WorkflowRuntimeUnavailableError(
+                f"failed to read runtime state for run {run_id}",
+                run_id=str(run_id),
+                cause=str(exc),
+            ) from exc
+
+        if snapshot is None:
+            return record
+        overlaid_status = _RUNTIME_STATUS_OVERLAY.get(snapshot.status)
+        if overlaid_status is None or overlaid_status == record.status:
+            return record
+        return replace(record, status=overlaid_status)
+
+    # ------------------------------------------------------------------
+    # list_runs
+    # ------------------------------------------------------------------
+
+    async def list_runs(
+        self,
+        *,
+        workspace_id: str,
+        cursor: Cursor | None = None,
+        limit: int | None = None,
+    ) -> Page[RunRef]:
+        """Return a paginated slice of the workspace's runs.
+
+        Delegates to :meth:`RunStore.list_runs` for the persisted
+        page and maps each :class:`RunRecord` to its caller-facing
+        :class:`RunRef`. The runtime is **never** consulted — that
+        would inflate one user request into N runtime round-trips,
+        and the live-status overlay belongs on the singular
+        :meth:`get_run` path only.
+
+        Filtering (by status, workflow id, started-at window, ...)
+        is intentionally not surfaced here yet; the
+        :class:`~custos_spl.interfaces.metadata_store.RunFilter`
+        builder lands with the HTTP surface in a later task and
+        will flow through unchanged.
+
+        Args:
+            workspace_id: The owning workspace.
+            cursor: Opaque pagination token returned by a prior
+                call's :attr:`Page.next_cursor`; ``None`` requests
+                the first page.
+            limit: Maximum number of items the caller is willing
+                to receive in this page. ``None`` defers to the
+                store's default (which is the provider's default).
+
+        Returns:
+            A :class:`Page` of :class:`RunRef` carrying the runs in
+            the persisted (insertion) order. The
+            :attr:`Page.next_cursor` is ``None`` when this is the
+            final page.
+        """
+        page = await self._store.list_runs(workspace_id, cursor=cursor, limit=limit)
+        return Page(
+            items=tuple(
+                RunRef(
+                    workspace_id=record.workspace_id,
+                    run_id=record.run_id,
+                    workflow_version_id=record.workflow_version,
+                    status=record.status,
+                )
+                for record in page.items
+            ),
+            next_cursor=page.next_cursor,
         )
 
     # ------------------------------------------------------------------
