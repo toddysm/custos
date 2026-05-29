@@ -64,9 +64,9 @@ Acceptance criteria (mirrored from #386):
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
@@ -97,15 +97,28 @@ __all__ = [
 class WorkflowContext(Protocol):
     """Structural surface every Run Controller code path keys off.
 
-    Mirrors the four properties / one mutator the orchestrator
-    actually consumes from the Dapr Workflow context. Pinning the
-    surface here (instead of importing
-    :class:`dapr.ext.workflow.DaprWorkflowContext` everywhere)
-    means tests can drop in
-    :class:`~custos_workflow.runtime.FakeWorkflowContext` and the
-    real Dapr context interchangeably, and the Run Controller
-    package keeps its Dapr import to the
-    :mod:`custos_workflow.runtime.dapr` adapter alone.
+    Covers two slices of the Dapr Workflow context that Run
+    Controller code drives:
+
+    1. **Observability / lifecycle properties** — ``instance_id``,
+       ``current_utc_datetime``, ``is_replaying``, plus the
+       :meth:`set_custom_status` mutator.
+    2. **Durable I/O yield-targets** — :meth:`call_activity`,
+       :meth:`wait_for_external_event`, :meth:`create_timer`.
+       Step Coordinator handlers (WF-IMPL-035+) drive these to
+       request external work; the orchestrator yields the returned
+       opaque task token back to the Dapr runtime, which suspends
+       the workflow until the corresponding result arrives.
+
+    Both :class:`~custos_workflow.runtime.FakeWorkflowContext` and
+    the real :class:`dapr.ext.workflow.DaprWorkflowContext`
+    structurally satisfy this surface, so the orchestrator and
+    Step Coordinator handlers can target a single type and tests
+    can drop the fake in interchangeably. Yield-target return
+    values are typed as :class:`typing.Any` — they are opaque
+    tokens whose concrete type differs between the Dapr SDK
+    (``Task``) and the fake (private dataclasses), and they are
+    never inspected by Run Controller code, only re-yielded.
     """
 
     @property
@@ -118,6 +131,17 @@ class WorkflowContext(Protocol):
     def is_replaying(self) -> bool: ...
 
     def set_custom_status(self, custom_status: str) -> None: ...
+
+    def call_activity(
+        self,
+        activity: Callable[..., Any] | str,
+        *,
+        input: Any = None,
+    ) -> Any: ...
+
+    def wait_for_external_event(self, name: str) -> Any: ...
+
+    def create_timer(self, fire_at: datetime | timedelta) -> Any: ...
 
 
 # ---------------------------------------------------------------------------
