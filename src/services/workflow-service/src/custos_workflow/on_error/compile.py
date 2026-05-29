@@ -46,7 +46,7 @@ from custos_workflow.graph import (
     OnErrorActionTag,
     OnErrorRoute,
 )
-from custos_workflow.retry import resolve_arm_retry
+from custos_workflow.retry import RetryResolutionError, resolve_arm_retry
 
 if TYPE_CHECKING:
     from custos_workflow.document import OnErrorArm, Step
@@ -104,7 +104,10 @@ def compile_on_error(
                 f"on step kind {kind_name} (design.md § Where retry: "
                 "may appear)",
             )
-        if step.on_error:
+        if step.on_error is not None:
+            # Check presence rather than truthiness so an explicit
+            # empty ``on_error: []`` on a disallowed step kind is
+            # rejected the same way as a populated block.
             raise RetryPolicyCompileError(
                 f"compile: step {step.id!r}: 'on_error:' is not "
                 f"allowed on step kind {kind_name} (design.md § "
@@ -191,9 +194,22 @@ def _compile_arm(
     # Fold per-arm retry overlay (shorthand expansion + field-by-
     # field merge over the step-level policy) for ``do: retry``.
     # SKIP / FAIL arms carry no retry policy.
-    resolved: ResolvedRetryPolicy | None = (
-        resolve_arm_retry(arm, step_retry) if arm.do is OnErrorAction.RETRY else None
-    )
+    # Wrap ``RetryResolutionError`` (raised by the resolver for
+    # validation failures such as conflicting inline
+    # ``maxAttempts`` vs structured ``retry.maxAttempts``, or
+    # ``maxDelay < initialDelay`` after overlay) in
+    # :class:`RetryPolicyCompileError` so direct callers of
+    # :func:`compile_on_error` see the same exception type the
+    # :func:`~custos_workflow.compiler.compile` driver surfaces.
+    if arm.do is OnErrorAction.RETRY:
+        try:
+            resolved: ResolvedRetryPolicy | None = resolve_arm_retry(arm, step_retry)
+        except RetryResolutionError as exc:
+            raise RetryPolicyCompileError(
+                f"compile: step {step_id!r}: on_error arm rejected by retry-policy resolver: {exc}",
+            ) from exc
+    else:
+        resolved = None
     return OnErrorRoute(
         action=OnErrorActionTag(arm.do.value),
         code=arm.match.code,

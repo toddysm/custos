@@ -268,6 +268,37 @@ class TestRejections:
         with pytest.raises(RetryPolicyCompileError, match="'retry:'"):
             compile_on_error(step, None)
 
+    def test_empty_on_error_list_on_let_step_rejected(self) -> None:
+        # An explicit ``on_error: []`` on a disallowed step kind
+        # is rejected the same way as a populated block — presence
+        # of the field, not truthiness, gates the check.
+        step = LetStep(
+            id="compute",
+            let={"verdict": "fail"},
+            on_error=[],
+        )
+        with pytest.raises(RetryPolicyCompileError, match="'on_error:'"):
+            compile_on_error(step, None)
+
+    def test_conflicting_shorthand_wrapped_as_compile_error(self) -> None:
+        # When ``resolve_arm_retry`` raises ``RetryResolutionError``
+        # (e.g. inline ``maxAttempts: 3`` conflicting with structured
+        # ``retry: { maxAttempts: 7 }``), compile_on_error must
+        # surface it as ``RetryPolicyCompileError`` so direct callers
+        # see the same exception type the compile() driver does.
+        step = _activity(
+            on_error=[
+                _arm(
+                    code="E_TIMEOUT",
+                    do=OnErrorAction.RETRY,
+                    max_attempts=3,
+                    retry=RetryPolicy(maxAttempts=7),
+                ),
+            ],
+        )
+        with pytest.raises(RetryPolicyCompileError, match="retry-policy resolver"):
+            compile_on_error(step, _step_retry())
+
 
 # ---------------------------------------------------------------------------
 # Non-activity happy paths
