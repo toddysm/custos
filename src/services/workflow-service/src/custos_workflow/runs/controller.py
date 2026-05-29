@@ -67,15 +67,27 @@ fingerprint is tracked separately under the persistence-layer work.
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import json
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Final, Protocol, runtime_checkable
 
 from custos_spl.pagination import Cursor, Page
 
+from custos_workflow._telemetry import (
+    observe_run_cancel,
+    observe_run_get,
+    observe_run_list,
+    observe_run_pause,
+    observe_run_resume,
+    observe_run_start,
+    record_run_status_transition,
+    record_workflow_event_emitted,
+)
 from custos_workflow.compiler import RunMeta
 from custos_workflow.compiler import compile as compile_workflow
 from custos_workflow.graph.serialize import to_json
@@ -465,6 +477,51 @@ class _WorkflowClient(Protocol):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# WF-IMPL-044: span + duration-histogram decorator
+# ---------------------------------------------------------------------------
+#
+# The decorator wraps every public RunController lifecycle method in
+# the matching ``observe_run_*()`` context manager from
+# :mod:`custos_workflow._telemetry`. Keeping the wiring at the
+# decorator layer keeps each method body free of observability
+# boilerplate while still recording the closed
+# ``operation`` x ``outcome`` matrix on every call (success or
+# RunControllerError). Status-transition and lifecycle-event counter
+# bumps stay inline at the call sites where they happen, so failed
+# updates / absorbed publisher failures do not falsely increment.
+
+
+def _trace_run_method(
+    observer: Callable[[], AbstractContextManager[Any]],
+) -> Callable[
+    [Callable[..., Awaitable[Any]]],
+    Callable[..., Awaitable[Any]],
+]:
+    """Decorate a :class:`RunController` lifecycle method with a span.
+
+    The returned wrapper opens ``observer()`` as a sync context
+    manager around the awaited call. On success the histogram
+    records ``outcome=ok``; on a :class:`RunControllerError` the
+    outcome is the locked taxonomy
+    (``not_found|state_conflict|state_corrupt|runtime_unavailable``).
+    Anything else falls back to ``internal_error`` so totals stay
+    consistent with the call count.
+    """
+
+    def decorator(
+        fn: Callable[..., Awaitable[Any]],
+    ) -> Callable[..., Awaitable[Any]]:
+        @functools.wraps(fn)
+        async def wrapper(self: RunController, *args: Any, **kwargs: Any) -> Any:
+            with observer():
+                return await fn(self, *args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
+
 class RunController:
     """Lifecycle entry point for the workflow-service Run Controller.
 
@@ -526,6 +583,7 @@ class RunController:
     # start_run
     # ------------------------------------------------------------------
 
+    @_trace_run_method(observe_run_start)
     async def start_run(
         self,
         *,
@@ -681,6 +739,10 @@ class RunController:
                 RunStatus.FAILED,
                 reason=f"runtime_unavailable: {exc}",
             )
+            record_run_status_transition(
+                RunStatus.QUEUED.value,
+                RunStatus.FAILED.value,
+            )
             raise WorkflowRuntimeUnavailableError(
                 f"failed to schedule run {run_id} on the workflow runtime",
                 run_id=str(run_id),
@@ -689,7 +751,11 @@ class RunController:
 
         # ---- Gate 6: transition to running + emit started event. ----
         updated = await self._store.update_run_status(workspace_id, run_id, RunStatus.RUNNING)
-        await self._lifecycle_publisher.publish(
+        record_run_status_transition(
+            RunStatus.QUEUED.value,
+            RunStatus.RUNNING.value,
+        )
+        await self._publish_lifecycle(
             LifecycleEvent(
                 kind=LIFECYCLE_KIND_WORKFLOW_STARTED,
                 workspace_id=workspace_id,
@@ -709,6 +775,7 @@ class RunController:
     # cancel_run
     # ------------------------------------------------------------------
 
+    @_trace_run_method(observe_run_cancel)
     async def cancel_run(
         self,
         *,
@@ -793,6 +860,10 @@ class RunController:
         await self._store.update_run_status(
             workspace_id, run_id, RunStatus.CANCELLING, reason=reason
         )
+        record_run_status_transition(
+            record.status.value,
+            RunStatus.CANCELLING.value,
+        )
 
         # Gate 4: terminate the Dapr instance.
         try:
@@ -813,8 +884,12 @@ class RunController:
         finalised = await self._store.update_run_status(
             workspace_id, run_id, RunStatus.CANCELLED, reason=reason
         )
+        record_run_status_transition(
+            RunStatus.CANCELLING.value,
+            RunStatus.CANCELLED.value,
+        )
         extra: dict[str, Any] = {"reason": reason} if reason is not None else {}
-        await self._lifecycle_publisher.publish(
+        await self._publish_lifecycle(
             LifecycleEvent(
                 kind=LIFECYCLE_KIND_WORKFLOW_CANCELLED,
                 workspace_id=workspace_id,
@@ -835,6 +910,7 @@ class RunController:
     # pause_run
     # ------------------------------------------------------------------
 
+    @_trace_run_method(observe_run_pause)
     async def pause_run(
         self,
         *,
@@ -897,6 +973,10 @@ class RunController:
         # from an illegal source (e.g. ``queued``, ``cancelling``,
         # terminal statuses) propagates as-is.
         await self._store.update_run_status(workspace_id, run_id, RunStatus.PAUSING)
+        record_run_status_transition(
+            record.status.value,
+            RunStatus.PAUSING.value,
+        )
 
         # Gate 4: pause the Dapr instance.
         try:
@@ -933,7 +1013,11 @@ class RunController:
                 workflow_version_id=current.workflow_version,
                 status=current.status,
             )
-        await self._lifecycle_publisher.publish(
+        record_run_status_transition(
+            RunStatus.PAUSING.value,
+            RunStatus.PAUSED.value,
+        )
+        await self._publish_lifecycle(
             LifecycleEvent(
                 kind=LIFECYCLE_KIND_WORKFLOW_PAUSED,
                 workspace_id=workspace_id,
@@ -953,6 +1037,7 @@ class RunController:
     # resume_run
     # ------------------------------------------------------------------
 
+    @_trace_run_method(observe_run_resume)
     async def resume_run(
         self,
         *,
@@ -1061,7 +1146,11 @@ class RunController:
                 workflow_version_id=current.workflow_version,
                 status=current.status,
             )
-        await self._lifecycle_publisher.publish(
+        record_run_status_transition(
+            RunStatus.PAUSED.value,
+            RunStatus.RUNNING.value,
+        )
+        await self._publish_lifecycle(
             LifecycleEvent(
                 kind=LIFECYCLE_KIND_WORKFLOW_RESUMED,
                 workspace_id=workspace_id,
@@ -1081,6 +1170,7 @@ class RunController:
     # get_run
     # ------------------------------------------------------------------
 
+    @_trace_run_method(observe_run_get)
     async def get_run(
         self,
         *,
@@ -1179,6 +1269,7 @@ class RunController:
     # list_runs
     # ------------------------------------------------------------------
 
+    @_trace_run_method(observe_run_list)
     async def list_runs(
         self,
         *,
@@ -1275,6 +1366,28 @@ class RunController:
             f"after {self._terminate_poll_attempts} attempts",
             run_id=str(run_id),
         )
+
+    async def _publish_lifecycle(self, event: LifecycleEvent) -> None:
+        """Publish ``event`` and bump the WF-IMPL-044 events counter.
+
+        Wraps :meth:`LifecycleEventPublisher.publish` so the
+        :data:`~custos_workflow._telemetry.WORKFLOW_EVENTS_EMITTED_TOTAL`
+        counter only ticks on a successful publish: publisher
+        failures are *not* suppressed here —
+        :meth:`LifecycleEventPublisher.publish` is documented to
+        propagate exceptions and the controller call sites let
+        them surface so the caller observes the failure. The
+        counter intentionally stays in lock-step with the wire
+        publish, so an absorbed/retried publish (if a future call
+        site ever wraps the publish) still wouldn't inflate the
+        emitted-event total. The ``kind`` label is taken verbatim
+        from :attr:`LifecycleEvent.kind`; unknown kinds raise
+        :class:`ValueError` (a contract violation — the controller
+        MUST register the kind in :mod:`custos_workflow._telemetry`
+        before emitting it).
+        """
+        await self._lifecycle_publisher.publish(event)
+        record_workflow_event_emitted(event.kind)
 
     def _assert_dedup_compatible(
         self,
