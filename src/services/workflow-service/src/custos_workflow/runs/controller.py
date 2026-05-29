@@ -798,7 +798,30 @@ class RunController:
             ) from exc
 
         # Gate 5: transition to ``paused`` and emit lifecycle event.
-        finalised = await self._store.update_run_status(workspace_id, run_id, RunStatus.PAUSED)
+        # A concurrent ``cancel_run`` (or any other status update) is
+        # allowed to move the row ``pausing -> cancelling`` between
+        # our successful ``pause_workflow`` call and the final
+        # ``pausing -> paused`` transition (the documented
+        # :data:`STATUS_TRANSITIONS` table permits this). When that
+        # happens, the runtime is paused but the row now reflects
+        # the winning concurrent operation's status; the winner owns
+        # the next lifecycle event (e.g. ``workflow.cancelled``), so
+        # we surface the winner's current :class:`RunRef` without
+        # re-emitting ``workflow.paused`` and without forcing the
+        # row back to ``paused``. This keeps the row authoritative
+        # for callers while honouring the runtime side-effect.
+        try:
+            finalised = await self._store.update_run_status(workspace_id, run_id, RunStatus.PAUSED)
+        except RunStateConflictError:
+            current = await self._store.get_run(workspace_id, run_id)
+            if current is None:
+                raise
+            return RunRef(
+                workspace_id=workspace_id,
+                run_id=run_id,
+                workflow_version_id=current.workflow_version,
+                status=current.status,
+            )
         await self._lifecycle_publisher.publish(
             LifecycleEvent(
                 kind=LIFECYCLE_KIND_WORKFLOW_PAUSED,
@@ -903,7 +926,30 @@ class RunController:
             ) from exc
 
         # Gate 5: transition to ``running`` and emit lifecycle event.
-        finalised = await self._store.update_run_status(workspace_id, run_id, RunStatus.RUNNING)
+        # As with :meth:`pause_run`, the documented
+        # :data:`STATUS_TRANSITIONS` table permits a concurrent
+        # ``cancel_run`` to move the row ``paused -> cancelling``
+        # between our successful ``resume_workflow`` call and the
+        # final ``paused -> running`` transition. When that happens,
+        # the runtime is resumed but the row reflects the winning
+        # concurrent operation's status; the winner owns the next
+        # lifecycle event, so we surface its current :class:`RunRef`
+        # without re-emitting ``workflow.resumed`` and without
+        # forcing the row back to ``running``. The store stays
+        # authoritative for callers while honouring the runtime
+        # side-effect.
+        try:
+            finalised = await self._store.update_run_status(workspace_id, run_id, RunStatus.RUNNING)
+        except RunStateConflictError:
+            current = await self._store.get_run(workspace_id, run_id)
+            if current is None:
+                raise
+            return RunRef(
+                workspace_id=workspace_id,
+                run_id=run_id,
+                workflow_version_id=current.workflow_version,
+                status=current.status,
+            )
         await self._lifecycle_publisher.publish(
             LifecycleEvent(
                 kind=LIFECYCLE_KIND_WORKFLOW_RESUMED,

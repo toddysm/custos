@@ -10,6 +10,7 @@ The pause / resume operations do not use a poll loop, so no sleeper.
 from __future__ import annotations
 
 import textwrap
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, NamedTuple, cast
@@ -114,6 +115,8 @@ class _RecordingWorkflowClient:
 
     pause_raise: Exception | None = None
     resume_raise: Exception | None = None
+    on_pause_success: Callable[[], Awaitable[None]] | None = None
+    on_resume_success: Callable[[], Awaitable[None]] | None = None
 
     pause_requests: list[PauseRunRequest] = field(default_factory=list)
     resume_requests: list[ResumeRunRequest] = field(default_factory=list)
@@ -133,11 +136,15 @@ class _RecordingWorkflowClient:
         self.pause_requests.append(request)
         if self.pause_raise is not None:
             raise self.pause_raise
+        if self.on_pause_success is not None:
+            await self.on_pause_success()
 
     async def resume_workflow(self, request: ResumeRunRequest) -> None:
         self.resume_requests.append(request)
         if self.resume_raise is not None:
             raise self.resume_raise
+        if self.on_resume_success is not None:
+            await self.on_resume_success()
 
 
 def _store() -> InProcessRunStore:
@@ -233,7 +240,7 @@ class TestProtocolConformance:
         assert callable(client.pause_workflow)
         assert callable(client.resume_workflow)
 
-    def test_recording_workflow_client_protocol_for_in_memory_publisher(self) -> None:
+    def test_in_memory_publisher_satisfies_lifecycle_publisher_protocol(self) -> None:
         assert isinstance(InMemoryLifecycleEventPublisher(), LifecycleEventPublisher)
 
     def test_recording_catalog_satisfies_protocol(self) -> None:
@@ -598,6 +605,73 @@ class TestRuntimeUnavailable:
         record = await fx.store.get_run(WORKSPACE, RUN_ID)
         assert record is not None
         assert record.status == RunStatus.PAUSED
+
+
+# ---------------------------------------------------------------------------
+# Concurrent lifecycle race — final transition reconciliation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestConcurrentCancelRace:
+    """A concurrent ``cancel_run`` can win the race between the runtime
+    pause / resume call and the final store transition. The controller
+    MUST reconcile by surfacing the winning operation's :class:`RunRef`
+    rather than raising :class:`RunStateConflictError` and leaving the
+    runtime and store in an unrecoverable disagreement (Copilot review
+    feedback)."""
+
+    async def test_pause_run_reconciles_when_concurrent_cancel_wins(self) -> None:
+        # Hook: between ``pause_workflow`` returning and the final
+        # ``pausing -> paused`` transition, a concurrent ``cancel_run``
+        # walks the row ``pausing -> cancelling``.
+        store = _store()
+
+        async def _concurrent_cancel() -> None:
+            await store.update_run_status(WORKSPACE, RUN_ID, RunStatus.CANCELLING)
+
+        client = _RecordingWorkflowClient(on_pause_success=_concurrent_cancel)
+        fx = _make_controller(store=store, workflow_client=client)
+        await _seed_run(store, status=RunStatus.RUNNING)
+
+        ref = await fx.controller.pause_run(workspace_id=WORKSPACE, run_id=RUN_ID)
+
+        # The runtime was paused (Dapr side-effect honoured).
+        assert len(client.pause_requests) == 1
+        # The row reflects the winning concurrent cancel.
+        assert ref.status == RunStatus.CANCELLING
+        record = await store.get_run(WORKSPACE, RUN_ID)
+        assert record is not None
+        assert record.status == RunStatus.CANCELLING
+        # No ``workflow.paused`` event — the winner owns the lifecycle
+        # event chain.
+        assert fx.publisher.events == []
+
+    async def test_resume_run_reconciles_when_concurrent_cancel_wins(self) -> None:
+        # Hook: between ``resume_workflow`` returning and the final
+        # ``paused -> running`` transition, a concurrent ``cancel_run``
+        # walks the row ``paused -> cancelling``.
+        store = _store()
+
+        async def _concurrent_cancel() -> None:
+            await store.update_run_status(WORKSPACE, RUN_ID, RunStatus.CANCELLING)
+
+        client = _RecordingWorkflowClient(on_resume_success=_concurrent_cancel)
+        fx = _make_controller(store=store, workflow_client=client)
+        await _seed_run(store, status=RunStatus.PAUSED)
+
+        ref = await fx.controller.resume_run(workspace_id=WORKSPACE, run_id=RUN_ID)
+
+        # The runtime was resumed (Dapr side-effect honoured).
+        assert len(client.resume_requests) == 1
+        # The row reflects the winning concurrent cancel.
+        assert ref.status == RunStatus.CANCELLING
+        record = await store.get_run(WORKSPACE, RUN_ID)
+        assert record is not None
+        assert record.status == RunStatus.CANCELLING
+        # No ``workflow.resumed`` event — the winner owns the lifecycle
+        # event chain.
+        assert fx.publisher.events == []
 
 
 # ---------------------------------------------------------------------------
