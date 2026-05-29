@@ -145,6 +145,12 @@ class _RecordingWorkflowClient:
             return self.state_sequence[len(self.state_requests) - 1]
         return self.state_sequence[-1]
 
+    async def pause_workflow(self, request: Any) -> None:  # pragma: no cover
+        raise NotImplementedError("cancel_run never calls pause_workflow")
+
+    async def resume_workflow(self, request: Any) -> None:  # pragma: no cover
+        raise NotImplementedError("cancel_run never calls resume_workflow")
+
 
 @dataclass
 class _RecordingSleeper:

@@ -90,6 +90,8 @@ from custos_workflow.runtime._common import (
 )
 from custos_workflow.runtime._common import (
     GetRunStateRequest,
+    PauseRunRequest,
+    ResumeRunRequest,
     ScheduleWorkflowRequest,
     TerminateRunRequest,
 )
@@ -106,6 +108,8 @@ __all__ = [
     "DEFAULT_TERMINATE_POLL_ATTEMPTS",
     "DEFAULT_TERMINATE_POLL_INTERVAL_S",
     "LIFECYCLE_KIND_WORKFLOW_CANCELLED",
+    "LIFECYCLE_KIND_WORKFLOW_PAUSED",
+    "LIFECYCLE_KIND_WORKFLOW_RESUMED",
     "LIFECYCLE_KIND_WORKFLOW_STARTED",
     "CatalogClient",
     "InMemoryLifecycleEventPublisher",
@@ -295,6 +299,12 @@ LIFECYCLE_KIND_WORKFLOW_STARTED: Final[str] = "workflow.started"
 #: Wire-stable kind tag for the cancel-run lifecycle event.
 LIFECYCLE_KIND_WORKFLOW_CANCELLED: Final[str] = "workflow.cancelled"
 
+#: Wire-stable kind tag for the pause-run lifecycle event.
+LIFECYCLE_KIND_WORKFLOW_PAUSED: Final[str] = "workflow.paused"
+
+#: Wire-stable kind tag for the resume-run lifecycle event.
+LIFECYCLE_KIND_WORKFLOW_RESUMED: Final[str] = "workflow.resumed"
+
 
 # ---------------------------------------------------------------------------
 # Terminate poll-loop budget defaults
@@ -339,6 +349,14 @@ class _WorkflowClient(Protocol):
 
     async def get_workflow_state(self, request: GetRunStateRequest) -> RuntimeRunState | None:
         """Return the current runtime snapshot, or ``None`` if Dapr forgot the instance."""
+        ...
+
+    async def pause_workflow(self, request: PauseRunRequest) -> None:
+        """Pause (suspend) the Dapr Workflow instance identified by ``request.instance_id``."""
+        ...
+
+    async def resume_workflow(self, request: ResumeRunRequest) -> None:
+        """Resume the Dapr Workflow instance identified by ``request.instance_id``."""
         ...
 
 
@@ -693,6 +711,206 @@ class RunController:
                 workflow_version_id=record.workflow_version,
                 occurred_at=self._clock.now(),
                 extra=extra,
+            )
+        )
+        return RunRef(
+            workspace_id=workspace_id,
+            run_id=run_id,
+            workflow_version_id=record.workflow_version,
+            status=finalised.status,
+        )
+
+    # ------------------------------------------------------------------
+    # pause_run
+    # ------------------------------------------------------------------
+
+    async def pause_run(
+        self,
+        *,
+        workspace_id: str,
+        run_id: RunId,
+    ) -> RunRef:
+        """Pause an in-flight run; return a :class:`RunRef`.
+
+        Implements design.md § Internal Structure (Run Controller):
+
+        1. Load the :class:`RunRecord` (raise :class:`RunNotFoundError`).
+        2. Short-circuit on the idempotent path. A run that is already
+           ``paused`` or ``pausing`` returns its current
+           :class:`RunRef` with no Dapr re-call and no event
+           re-publish.
+        3. Transition ``running → pausing``. Illegal sources surface
+           :class:`RunStateConflictError` through
+           :meth:`RunStore.update_run_status`.
+        4. ``pause_workflow(instance_id=run_id)``. Any runtime exception
+           surfaces as :class:`WorkflowRuntimeUnavailableError`; the
+           row stays ``pausing`` so an operator can reconcile.
+        5. Transition ``pausing → paused`` and emit ``workflow.paused``.
+
+        Args:
+            workspace_id: The owning workspace.
+            run_id: The :class:`RunId` to pause.
+
+        Returns:
+            A :class:`RunRef` carrying the run's current status. On
+            the active-pause path the status is ``paused``; on the
+            idempotent-replay path the status is whatever the store
+            currently holds (``pausing`` or ``paused``).
+
+        Raises:
+            RunNotFoundError: No record exists at
+                ``(workspace_id, run_id)``.
+            RunStateConflictError: The record is in a status from
+                which the pause transition is illegal (anything
+                other than ``running`` / ``pausing`` / ``paused``).
+            WorkflowRuntimeUnavailableError: The Dapr runtime
+                refused the pause call.
+        """
+        record = await self._store.get_run(workspace_id, run_id)
+        if record is None:
+            raise RunNotFoundError(
+                f"run {run_id} not found in workspace {workspace_id!r}",
+                run_id=str(run_id),
+            )
+
+        # Idempotent no-op: another caller is/has handled this pause.
+        if record.status in (RunStatus.PAUSED, RunStatus.PAUSING):
+            return RunRef(
+                workspace_id=workspace_id,
+                run_id=run_id,
+                workflow_version_id=record.workflow_version,
+                status=record.status,
+            )
+
+        # Gate 3: transition to ``pausing``. ``RunStateConflictError``
+        # from an illegal source (e.g. ``queued``, ``cancelling``,
+        # terminal statuses) propagates as-is.
+        await self._store.update_run_status(workspace_id, run_id, RunStatus.PAUSING)
+
+        # Gate 4: pause the Dapr instance.
+        try:
+            await self._workflow_client.pause_workflow(PauseRunRequest(instance_id=str(run_id)))
+        except Exception as exc:
+            raise WorkflowRuntimeUnavailableError(
+                f"failed to pause run {run_id} on the workflow runtime",
+                run_id=str(run_id),
+                cause=str(exc),
+            ) from exc
+
+        # Gate 5: transition to ``paused`` and emit lifecycle event.
+        finalised = await self._store.update_run_status(workspace_id, run_id, RunStatus.PAUSED)
+        await self._lifecycle_publisher.publish(
+            LifecycleEvent(
+                kind=LIFECYCLE_KIND_WORKFLOW_PAUSED,
+                workspace_id=workspace_id,
+                run_id=run_id,
+                workflow_version_id=record.workflow_version,
+                occurred_at=self._clock.now(),
+            )
+        )
+        return RunRef(
+            workspace_id=workspace_id,
+            run_id=run_id,
+            workflow_version_id=record.workflow_version,
+            status=finalised.status,
+        )
+
+    # ------------------------------------------------------------------
+    # resume_run
+    # ------------------------------------------------------------------
+
+    async def resume_run(
+        self,
+        *,
+        workspace_id: str,
+        run_id: RunId,
+    ) -> RunRef:
+        """Resume a paused run; return a :class:`RunRef`.
+
+        Implements design.md § Internal Structure (Run Controller):
+
+        1. Load the :class:`RunRecord` (raise :class:`RunNotFoundError`).
+        2. Short-circuit on the idempotent path. A run that is already
+           ``running`` returns its current :class:`RunRef` with no
+           Dapr re-call and no event re-publish.
+        3. Refuse any source state that is not ``paused`` (the only
+           legal transition for a resume) with
+           :class:`RunStateConflictError`. We validate here — BEFORE
+           touching Dapr — because the design does not define a
+           transitional ``resuming`` status, so a runtime call from
+           an illegal source would leave the row and the runtime in
+           an unreconcilable disagreement.
+        4. ``resume_workflow(instance_id=run_id)``. Any runtime
+           exception surfaces as
+           :class:`WorkflowRuntimeUnavailableError`; the row stays
+           ``paused`` so an operator can retry.
+        5. Transition ``paused → running`` and emit ``workflow.resumed``.
+
+        Args:
+            workspace_id: The owning workspace.
+            run_id: The :class:`RunId` to resume.
+
+        Returns:
+            A :class:`RunRef` carrying the run's current status. On
+            the active-resume path the status is ``running``; on the
+            idempotent-replay path the status is ``running`` already.
+
+        Raises:
+            RunNotFoundError: No record exists at
+                ``(workspace_id, run_id)``.
+            RunStateConflictError: The record is in a status from
+                which the resume transition is illegal (anything
+                other than ``paused`` / ``running``).
+            WorkflowRuntimeUnavailableError: The Dapr runtime
+                refused the resume call.
+        """
+        record = await self._store.get_run(workspace_id, run_id)
+        if record is None:
+            raise RunNotFoundError(
+                f"run {run_id} not found in workspace {workspace_id!r}",
+                run_id=str(run_id),
+            )
+
+        # Idempotent no-op: caller is observing an already-resumed row.
+        if record.status == RunStatus.RUNNING:
+            return RunRef(
+                workspace_id=workspace_id,
+                run_id=run_id,
+                workflow_version_id=record.workflow_version,
+                status=record.status,
+            )
+
+        # Gate 3: refuse non-paused sources BEFORE calling Dapr — there
+        # is no transitional ``resuming`` state to fall back on, so
+        # Dapr-and-row divergence here is unrecoverable.
+        if record.status != RunStatus.PAUSED:
+            raise RunStateConflictError(
+                f"cannot resume run {run_id}: current status is "
+                f"{record.status.value!r}, expected 'paused'",
+                run_id=str(run_id),
+                current_status=record.status.value,
+                attempted_status=RunStatus.RUNNING.value,
+            )
+
+        # Gate 4: resume the Dapr instance.
+        try:
+            await self._workflow_client.resume_workflow(ResumeRunRequest(instance_id=str(run_id)))
+        except Exception as exc:
+            raise WorkflowRuntimeUnavailableError(
+                f"failed to resume run {run_id} on the workflow runtime",
+                run_id=str(run_id),
+                cause=str(exc),
+            ) from exc
+
+        # Gate 5: transition to ``running`` and emit lifecycle event.
+        finalised = await self._store.update_run_status(workspace_id, run_id, RunStatus.RUNNING)
+        await self._lifecycle_publisher.publish(
+            LifecycleEvent(
+                kind=LIFECYCLE_KIND_WORKFLOW_RESUMED,
+                workspace_id=workspace_id,
+                run_id=run_id,
+                workflow_version_id=record.workflow_version,
+                occurred_at=self._clock.now(),
             )
         )
         return RunRef(
