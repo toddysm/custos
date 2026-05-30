@@ -32,7 +32,7 @@ Fourth sub-module: **Step Coordinator**, packaged inside the service host `src/s
 
 ### Phase C — Step Coordinator core
 
-- [F] WF-IMPL-051 (#422): `WithInputResolver` — evaluate `with:` CEL expressions.
+- [x] WF-IMPL-051 (#422): `WithInputResolver` — evaluate `with:` CEL expressions.
 - [F] WF-IMPL-052 (#423): `LetStepHandler` — inline expression evaluation (depends on #422).
 - [F] WF-IMPL-053 (#424): Retry decision driver — `on_error` route walk + effective delay (depends on #419).
 - [F] WF-IMPL-054 (#425): `ActivityStepHandler` — full activity step lifecycle (depends on #418, #420, #421, #422, #424).
