@@ -114,11 +114,13 @@ async def test_doc_example_yaml_runs_to_documented_terminal_status(
 
     if expected_status == "cancelled":
         # Example 2 in the doc: caller cancels after start_run
-        # returns. The fake's orchestrator completes synchronously
+        # returns. start_run always transitions the persisted row
+        # queued -> running before returning (gate 6 of the start
+        # algorithm), so the cancel call here moves the persisted
+        # row running -> cancelling -> cancelled. The fake's
+        # orchestrator completes synchronously during _schedule,
         # so the cancel-poll budget short-circuits on the first
-        # poll (the instance is already terminal); the row still
-        # transitions queued -> cancelling -> cancelled per the
-        # documented contract.
+        # poll (the runtime instance is already terminal).
         cancel_ref = await h.controller.cancel_run(
             workspace_id=WORKSPACE,
             run_id=ref.run_id,

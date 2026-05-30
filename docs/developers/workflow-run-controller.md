@@ -67,11 +67,12 @@ The Python entry point lives at
 from custos_workflow.runs import RunController
 
 controller = RunController(
-    store=store,
     catalog=catalog,
+    store=store,
     workflow_client=workflow_client,
-    publisher=publisher,
-    orchestrator_factory=orchestrator_factory,
+    activity_registry=activity_registry,
+    lifecycle_publisher=lifecycle_publisher,
+    clock=clock,
 )
 
 ref = await controller.start_run(
@@ -85,7 +86,8 @@ ref = await controller.start_run(
 The controller does not own the API surface (the HTTP / RPC
 adapter — WF-IMPL-047 — wraps these methods); the audit /
 metrics surfaces flow through the
-[`LifecycleEventPublisher`](#lifecycle-events) injection.
+[`LifecycleEventPublisher`](#lifecycle-events) injection (the
+``lifecycle_publisher`` constructor argument above).
 
 ## Lifecycle state machine
 
@@ -141,13 +143,17 @@ regress `pausing` back to `running` because Dapr only flips to
 
 All six methods are `async`, kw-only, and live on
 [`custos_workflow.runs.RunController`](../../src/services/workflow-service/src/custos_workflow/runs/controller.py).
-Every method emits at most one lifecycle event and, on its
-successful active path, exactly one row mutation. Every method
-rolls up the error taxonomy below.
+Every method emits at most one lifecycle event on its successful
+active path, and never more than two persisted-row mutations on
+that same path (active two-phase paths — `start_run`'s
+`queued → running`, `cancel_run`'s
+`<source> → cancelling → cancelled`, `pause_run`'s
+`running → pausing → paused` — are documented explicitly below).
+Every method rolls up the error taxonomy below.
 
 | Method | Inputs | Returns | Mutates | Publishes | Notes |
 |---|---|---|---|---|---|
-| `start_run` | `workspace_id`, `workflow_version_id`, `inputs?`, `idempotency_key?` | `RunRef` | inserts row at `running`; on runtime refusal, transitions to `failed` | `workflow.started` (active path only) | Idempotent on `(workspace, idem)` → derived `run_id`. |
+| `start_run` | `workspace_id`, `workflow_version_id`, `inputs?`, `idempotency_key?` | `RunRef` | inserts row at `queued`, then transitions to `running` after the runtime schedule succeeds; on runtime refusal, the same row transitions `queued → failed` | `workflow.started` (active path only) | Idempotent on `(workspace, idem)` → derived `run_id`. The `queued → failed` transition keeps operator triage coherent: a runtime outage never leaves a row stuck mid-state. |
 | `cancel_run` | `workspace_id`, `run_id`, `reason?` | `RunRef` | `{queued, running, pausing, paused} → cancelling → cancelled` | `workflow.cancelled` (active path only; `reason` on `.extra`) | Idempotent on `cancelled`; no re-publish on `cancelling`. |
 | `pause_run` | `workspace_id`, `run_id` | `RunRef` | `running → pausing → paused` | `workflow.paused` (active path only) | Idempotent on `pausing` / `paused`. |
 | `resume_run` | `workspace_id`, `run_id` | `RunRef` | `paused → running` | `workflow.resumed` (active path only) | Idempotent on `running`; refuses non-`paused` sources before touching Dapr. |
@@ -234,7 +240,7 @@ not invent a parallel runtime. The mapping is:
 | `RunController.cancel_run` | `terminate_workflow` + poll until terminal | Poll budget (`terminate_poll_attempts`, `terminate_poll_interval_seconds`) is constructor-injected for deterministic tests. |
 | `RunController.pause_run` / `resume_run` | `pause_workflow` / `resume_workflow` | The persisted-only `pausing` / `cancelling` transitionals exist *because* Dapr has no equivalent. |
 | `RunController.get_run` (in-flight overlay) | `get_workflow_state(fetch_payloads=False)` | Status-only read — skips large input/output payloads to keep `get_run` cheap. |
-| `wait:` step (workflow YAML) | `create_durable_timer` (orchestrator generator yield) | Replay-safe sleep; the durable timer is materialised as a `StepWaiting` return inside the run's dispatch loop. |
+| `wait:` step (workflow YAML) | `create_timer` on the `WorkflowContext` (orchestrator generator yield) | Replay-safe sleep; the durable timer is materialised as a `StepWaiting` return inside the run's dispatch loop. The shipped `WaitStepHandler` (see [`custos_workflow.runs.WaitStepHandler`](../../src/services/workflow-service/src/custos_workflow/runs/wait.py)) yields a `ctx.create_timer(duration)` token. |
 | Lifecycle event publication | `LifecycleEventPublisher` (Pub/Sub at production wiring; in-memory in tests) | Publication is **synchronous on the controller's request thread** so a publisher outage propagates to the caller (audit-loss-on-failure is unacceptable by design). |
 
 The orchestrator function is registered exactly once per
@@ -259,7 +265,7 @@ hold:
    production, `FixedClock` in tests); no `random` calls; no
    reliance on hash-randomised set ordering.
 2. **Same compiled graph + same `RunInput` → byte-equal runtime
-   history.** Every `ctx.create_durable_timer` /
+   history.** Every `ctx.create_timer` /
    `ctx.wait_for_external_event` / yield call must derive its
    arguments from the graph or the `RunInput`, never from a
    non-replayable source.
@@ -329,7 +335,7 @@ counter's allowed label set.
 |---|---|---|---|
 | `run.not_found` | `RunNotFoundError` | `get_run` / `cancel_run` / `pause_run` / `resume_run` against a `(workspace, run_id)` that has no row. | The id is wrong, the workspace is wrong, or the row was archived. No retry; the API adapter maps this to HTTP `404`. |
 | `run.state_conflict` | `RunStateConflictError` | (a) `start_run` retry with divergent `(workflow_version_id, inputs)`; (b) `cancel_run` / `pause_run` / `resume_run` from a status not in `STATUS_TRANSITIONS`. | Inspect the persisted status (`get_run`) and decide. No automatic retry: the caller's intent and the persisted state disagree. |
-| `run.state_corrupt` | `RunStateCorruptError` | The store returned a row whose status is not a member of `RunStatus`. | Operator-only path; the store / migration is broken. The API adapter maps this to HTTP `500`. |
+| `run.state_corrupt` | `RunStateCorruptError` | The store loaded a `Run` row whose persisted `compiled_graph` JSON failed to deserialize through the WF-IMPL-018 `from_json` schema check (the originating `GraphSerializationError` message is preserved verbatim on `.cause`). | Operator-only path; the store / migration / serializer is broken. The API adapter maps this to HTTP `500`. |
 | `run.runtime_unavailable` | `WorkflowRuntimeUnavailableError` | Dapr's `schedule_new_workflow` / `terminate_workflow` / `pause_workflow` / `resume_workflow` / `get_workflow_state` raised, or the cancel-poll budget exhausted before the runtime reached a terminal status. | Safe to retry after the runtime recovers; persisted rows are left in a deliberately recoverable state (`start_run` failures transition to `failed`; `cancel_run` failures stay `cancelling` for operator reconciliation). |
 
 The trailing `cause` attribute on `WorkflowRuntimeUnavailableError`
@@ -340,7 +346,7 @@ Python traceback to the wire.
 ## Worked examples
 
 The three examples below are exercised end-to-end by
-[`tests/test_docs_examples.py`](../../src/services/workflow-service/tests/test_docs_examples.py),
+[`tests/test_docs_examples_run_controller.py`](../../src/services/workflow-service/tests/test_docs_examples_run_controller.py),
 which parses each fenced ` ```yaml ` block in this file, runs it
 through `custos_workflow.compiler.compile`, and drives the
 resulting graph through the
@@ -379,11 +385,15 @@ reconciler's, WF-IMPL-042).
 
 ### Example 2 — start → cancel
 
-The same linear pipeline; the caller issues `cancel_run` after
-`start_run` returns. Because the fake runtime's orchestrator
-completes synchronously, the cancel-poll budget short-circuits on
-the first poll (instance already terminal) and the row transitions
-`queued → cancelling → cancelled`.
+A single-step pipeline; the caller issues `cancel_run` after
+`start_run` returns. `start_run` always transitions the persisted
+row `queued → running` before it returns (gate 6 of the start
+algorithm), so the cancel call moves the row
+`running → cancelling → cancelled`. The fake runtime's
+orthcestrator completes synchronously during `_schedule`, so the
+cancel-poll budget short-circuits on the first poll (the runtime
+instance is already terminal); the persisted lifecycle
+transitions still match the documented contract end-to-end.
 
 ```yaml
 apiVersion: custos.dev/v1
