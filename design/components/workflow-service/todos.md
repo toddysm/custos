@@ -1,6 +1,6 @@
 # TODOs: Workflow Service
 
-Last Updated: 2026-05-29 (Step Coordinator task issues filed: #418–#431, tracker #432)
+Last Updated: 2026-05-30 (WF-IMPL-048 merged — public Step Coordinator error taxonomy)
 
 ## Open
 
@@ -23,7 +23,7 @@ Fourth sub-module: **Step Coordinator**, packaged inside the service host `src/s
 ### Phase A — Foundations (IDs, errors)
 
 - [x] WF-IMPL-047 (#418): Idempotency Tracker — deterministic `(runId, stepId, attempt)` triples.
-- [F] WF-IMPL-048 (#419): Public Step Coordinator error taxonomy — `StepCoordinatorError` + 5 subclasses, locked `kind` strings.
+- [x] WF-IMPL-048 (#419): Public Step Coordinator error taxonomy — `StepCoordinatorError` + 5 subclasses, locked `kind` strings.
 
 ### Phase B — Outbound client boundaries
 
