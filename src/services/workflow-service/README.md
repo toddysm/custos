@@ -113,6 +113,18 @@ contract, `run.*` error taxonomy, worked examples — pinned to the
 running code by `tests/test_docs_examples_run_controller.py`).
 Tracker: [#399](https://github.com/toddysm/custos/issues/399).
 
+**WF-IMPL-000-STEP-COORDINATOR** is now in progress. WF-IMPL-047
+([#418](https://github.com/toddysm/custos/issues/418)) lands the
+foundation for the fourth workflow-service sub-module: the
+deterministic `(runId, stepId, attempt)` idempotency triple at
+`custos_workflow.steps.IdempotencyTriple`, with canonical wire
+form `f"{run_id}|{step_id}|{attempt}"` and round-trip
+`IdempotencyTriple.from_str()`. The triple becomes the shared
+scheduling key for the Activity Runtime Manager
+(`ScheduleActivity`), the Connector Service lease key, and the
+audit-event correlation key across replays. Tracker:
+[#432](https://github.com/toddysm/custos/issues/432).
+
 
 The Expression Evaluator (the first sub-module) is already in
 [`src/libs/custos-cel/`](../../libs/custos-cel) and shipped via
