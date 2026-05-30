@@ -104,6 +104,8 @@ def _ctx() -> StepExecutionContext:
     return StepExecutionContext(
         run_id=RunId("run-1"),
         workspace_id="ws-1",
+        workflow_version_id="wf-version-1",
+        inputs={},
         workflow_context=FakeWorkflowContext(
             instance_id="run-1", now=datetime(2026, 1, 1, tzinfo=UTC)
         ),

@@ -156,18 +156,19 @@ class LetStepHandler:
         # across every binding in this block. The orchestrator
         # already deep-copies ctx.outputs so we can use it by
         # reference here without risk of mutation leakage.
+        #
+        # ``workflow.version`` MUST resolve to the same string the
+        # orchestrator's gate evaluator uses (``run_input.workflow_version_id``)
+        # so a single ``${{ workflow.version }}`` reference inside a
+        # workflow document binds identically whether it appears in
+        # an ``if:`` gate or a ``let:`` binding. WF-IMPL-052 widens
+        # :class:`StepExecutionContext` to carry both
+        # ``workflow_version_id`` and ``inputs`` so the handler can
+        # honour that consistency requirement.
         run_info = RunInfo(id=str(ctx.run_id), workspace=ctx.workspace_id)
         workflow_info = WorkflowInfo(
             name=graph.metadata.workflow_name,
-            # ``document_api_version`` is the closest stable workflow
-            # version identifier exposed on the compiled graph. The
-            # real ``workflowVersionId`` UUID is carried on
-            # ``RunInput`` (and so on the workflow context's input),
-            # but the StepHandler Protocol does not surface it today;
-            # WF-IMPL-055 may widen the surface so this falls back to
-            # the published version pin. For now this is good enough
-            # for ``workflow.name`` / ``workflow.version`` references.
-            version=graph.metadata.document_api_version,
+            version=ctx.workflow_version_id,
         )
         steps_view: Mapping[str, StepBinding] = MappingProxyType(
             {sid: StepBinding(out, sealed=True) for sid, out in ctx.outputs.items()}
@@ -262,13 +263,14 @@ def _resolve_binding(
         run=run_info,
         workflow=workflow_info,
         now=ctx.clock.now,
-        # ``inputs`` is not surfaced through the StepHandler
-        # Protocol today; the dispatcher (WF-IMPL-055) may widen
-        # the bundle later. For now, ``let:`` expressions that
-        # reference ``inputs.*`` raise an UnboundNameError, which
-        # the caller catches and surfaces as
-        # ``step.with_input_resolution_error``.
-        inputs={},
+        # ``inputs`` flows from :attr:`StepExecutionContext.inputs`,
+        # which is the orchestrator's read-only snapshot of
+        # :attr:`RunInput.inputs`. WF-IMPL-052 widened the
+        # StepExecutionContext surface specifically so ``let:``
+        # bindings observe the same ``inputs.*`` namespace as the
+        # orchestrator's gate evaluator — keeping
+        # ``${{ inputs.x }}`` consistent across slots.
+        inputs=ctx.inputs,
         steps=steps_view,
         let=overlay,
     )

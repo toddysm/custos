@@ -110,12 +110,16 @@ def _graph(*nodes: ExecutionNode) -> ExecutionGraph:
 def _ctx(
     *,
     outputs: dict[str, dict[str, Any]] | None = None,
+    inputs: dict[str, Any] | None = None,
     run_id: str = "run-1",
     workspace_id: str = "ws-1",
+    workflow_version_id: str = "wf-version-1",
 ) -> StepExecutionContext:
     return StepExecutionContext(
         run_id=RunId(run_id),
         workspace_id=workspace_id,
+        workflow_version_id=workflow_version_id,
+        inputs=MappingProxyType(dict(inputs or {})),
         workflow_context=FakeWorkflowContext(instance_id=run_id, now=_CLOCK_NOW),
         outputs=MappingProxyType(
             {sid: MappingProxyType(dict(out)) for sid, out in (outputs or {}).items()}
@@ -235,6 +239,74 @@ class TestLetStepHandlerHappyPath:
         assert isinstance(result, StepSucceeded)
         assert dict(result.outputs) == {"echo": 42}
 
+    def test_binding_can_reference_run_inputs(self) -> None:
+        # WF-IMPL-052: ``StepExecutionContext.inputs`` was widened so
+        # ``let:`` expressions observe the same ``inputs.*`` namespace
+        # as the orchestrator's gate evaluator. This regression test
+        # pins that ``${{ inputs.x }}`` resolves end-to-end.
+        node = _let_node(
+            let_block={"echo": "${{ inputs.threshold + 1 }}"},
+            call_sites={
+                "let.echo": TypedCallSite(
+                    source="${{ inputs.threshold + 1 }}",
+                    typed_ast=type_check(
+                        parse("inputs.threshold + 1"),
+                        SchemaBindings(
+                            inputs={
+                                "type": "object",
+                                "properties": {"threshold": {"type": "integer"}},
+                                "required": ["threshold"],
+                            }
+                        ),
+                    ),
+                    kind=CallSiteKind.LET,
+                    document_path="spec.steps[0].let.echo",
+                )
+            },
+        )
+        graph = _graph(node)
+
+        result = LetStepHandler().execute(
+            _ctx(inputs={"threshold": 5}),
+            graph,
+            "derive",
+        )
+
+        assert isinstance(result, StepSucceeded)
+        assert dict(result.outputs) == {"echo": 6}
+
+    def test_workflow_version_matches_step_execution_context(self) -> None:
+        # WF-IMPL-052 consistency fix: ``workflow.version`` MUST
+        # resolve to ``ctx.workflow_version_id`` (the same string the
+        # orchestrator's gate evaluator uses via
+        # ``run_input.workflow_version_id``) — NOT to the graph
+        # metadata's ``document_api_version``. This regression test
+        # pins that contract.
+        node = _let_node(
+            let_block={"v": "${{ workflow.version }}"},
+            call_sites={
+                "let.v": TypedCallSite(
+                    source="${{ workflow.version }}",
+                    typed_ast=type_check(
+                        parse("workflow.version"),
+                        SchemaBindings(inputs={"type": "object", "properties": {}, "required": []}),
+                    ),
+                    kind=CallSiteKind.LET,
+                    document_path="spec.steps[0].let.v",
+                )
+            },
+        )
+        graph = _graph(node)
+
+        result = LetStepHandler().execute(
+            _ctx(workflow_version_id="wf-version-uuid-7"),
+            graph,
+            "derive",
+        )
+
+        assert isinstance(result, StepSucceeded)
+        assert dict(result.outputs) == {"v": "wf-version-uuid-7"}
+
     def test_outputs_mapping_is_immutable(self) -> None:
         node = _let_node(
             let_block={"v": "${{ 1 + 1 }}"},
@@ -279,11 +351,14 @@ class TestLetStepHandlerHappyPath:
 
 
 class TestLetStepHandlerErrorWrapping:
-    def test_type_error_returns_step_failed_envelope(self) -> None:
-        # Trigger a real CEL type error by referencing an unbound name.
-        # ``let.missing`` is not in the overlay when ``let.broken``
-        # evaluates, so the type-check produces an UnboundNameError
-        # at evaluation time.
+    def test_unbound_name_returns_step_failed_envelope(self) -> None:
+        # Trigger a real CEL ``expression.unbound_name`` error at
+        # evaluation time by referencing an ``inputs.*`` field that
+        # the test context's ``inputs`` snapshot does not carry. The
+        # call site type-checks fine against the declared schema,
+        # but the runtime BindingScope (built from
+        # :attr:`StepExecutionContext.inputs`) is empty, so
+        # :func:`custos_cel.evaluate` raises ``UnboundNameError``.
         node = _let_node(
             let_block={"broken": "${{ inputs.absent }}"},
             call_sites={
@@ -306,9 +381,9 @@ class TestLetStepHandlerErrorWrapping:
         )
         graph = _graph(node)
 
-        # Production handler builds BindingScope with empty inputs,
-        # so ``inputs.absent`` raises UnboundNameError at evaluate
-        # time → wrapped as ``step.with_input_resolution_error``.
+        # Empty ``inputs`` on the context → ``inputs.absent`` raises
+        # UnboundNameError at evaluate time → wrapped as
+        # ``step.with_input_resolution_error``.
         result = LetStepHandler().execute(_ctx(), graph, "derive")
 
         assert isinstance(result, StepFailed)

@@ -162,6 +162,16 @@ class StepExecutionContext:
     Attributes:
         run_id: The Run instance id.
         workspace_id: The owning workspace.
+        workflow_version_id: The Catalog Workflow Version id this
+            run was started against (frozen at start time). Surfaced
+            so handlers can build a :class:`custos_cel.BindingScope`
+            whose ``workflow.version`` resolves to the same string
+            the orchestrator's gate evaluator uses (WF-IMPL-052
+            consistency fix).
+        inputs: User-supplied run inputs — the values keyed off
+            ``inputs.*`` in CEL expressions. Wrapped in
+            :class:`MappingProxyType` by :func:`_step_ctx` so
+            handlers cannot mutate the orchestrator's snapshot.
         workflow_context: Typed view of the Dapr Workflow context
             (see :class:`WorkflowContext`). Both the real
             :class:`dapr.ext.workflow.DaprWorkflowContext` and the
@@ -177,6 +187,8 @@ class StepExecutionContext:
 
     run_id: RunId
     workspace_id: str
+    workflow_version_id: str
+    inputs: Mapping[str, Any]
     workflow_context: WorkflowContext
     outputs: Mapping[str, Mapping[str, Any]]
     clock: Clock
