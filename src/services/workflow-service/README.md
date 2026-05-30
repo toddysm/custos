@@ -173,7 +173,23 @@ unbound-name / timeout / evaluation) round-trips into
 on `cause_kind` so audit consumers can still dispatch on the
 root cause — meeting the five-locked-`kind` acceptance criterion
 from #422. The resolver is pure (no I/O, fully replay-safe) and
-feeds `ActivityStepHandler` (WF-IMPL-054). Tracker:
+feeds `ActivityStepHandler` (WF-IMPL-054). WF-IMPL-052
+([#423](https://github.com/toddysm/custos/issues/423)) adds the
+`LetStepHandler` at `custos_workflow.steps.let_step`: implements
+the shared `StepHandler` Protocol for `StepKind.LET` by walking
+the step's `let:` block in declaration order, evaluating each
+single-`${{ ... }}`-placeholder string against a per-binding
+`BindingScope` derived from `ctx.outputs` plus the
+already-resolved overlay (so later bindings observe earlier ones
+as `let.<name>`), and returning the resolved bag as a
+`MappingProxyType` `StepSucceeded.outputs`. Non-string values and
+literal strings pass through unchanged. Any `CelError` short-circuits
+the remaining bindings and surfaces as a
+`step.with_input_resolution_error` envelope on `StepFailed` —
+sharing the WF-IMPL-051 taxonomy because the failure mode is
+identical. `NoopStepHandler` now delegates `StepKind.LET` to
+this dedicated handler via a module-local import, replacing the
+former empty-outputs placeholder behaviour. Tracker:
 [#432](https://github.com/toddysm/custos/issues/432).
 
 

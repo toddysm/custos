@@ -37,6 +37,7 @@ from custos_workflow.steps.idempotency import (
     IdempotencyTripleError,
     derive_triple,
 )
+from custos_workflow.steps.let_step import LetStepHandler
 from custos_workflow.steps.with_inputs import WithInputResolver
 
 __all__ = [
@@ -45,6 +46,7 @@ __all__ = [
     "ConnectorBindError",
     "IdempotencyTriple",
     "IdempotencyTripleError",
+    "LetStepHandler",
     "RetryBudgetExhaustedError",
     "StepCoordinatorError",
     "StepKindNotImplementedError",

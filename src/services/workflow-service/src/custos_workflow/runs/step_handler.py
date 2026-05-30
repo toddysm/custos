@@ -296,12 +296,16 @@ class NoopStepHandler:
 
     Handles exactly one step kind inline:
 
-    * :class:`~custos_workflow.graph.model.StepKind.LET` — returns
-      an empty-:attr:`outputs` :class:`StepSucceeded` because
-      ``let:`` bindings are evaluated by the orchestrator's CEL
-      driver, not by the Step Coordinator. The handler exists for
-      that kind only to keep dispatch symmetric: every node in the
-      walk goes through ``StepHandler.execute(...)``.
+    * :class:`~custos_workflow.graph.model.StepKind.LET` — delegates
+      to :class:`custos_workflow.steps.LetStepHandler`, the dedicated
+      WF-IMPL-052 handler that evaluates the step's ``let:`` bindings
+      against the current per-run scope. The handler ships behind a
+      module-local import so the
+      :mod:`custos_workflow.runs.step_handler` module stays free of
+      any inbound dependency from
+      :mod:`custos_workflow.steps` — that subpackage is allowed to
+      import from :mod:`custos_workflow.runs`, but not the other way
+      round.
 
     Every other :class:`~custos_workflow.graph.model.StepKind`
     raises :class:`NotImplementedError`. Tests that need a real
@@ -317,10 +321,11 @@ class NoopStepHandler:
         step_id: str,
     ) -> StepResult:
         from custos_workflow.graph.model import StepKind
+        from custos_workflow.steps.let_step import LetStepHandler
 
         node = next((n for n in graph.nodes if n.step_id == step_id), None)
         if node is None:
             raise KeyError(step_id)
         if node.kind is StepKind.LET:
-            return StepSucceeded(outputs={})
+            return LetStepHandler().execute(ctx, graph, step_id)
         raise NotImplementedError("StepHandler.execute")
