@@ -158,7 +158,22 @@ doubles — the Step Coordinator's `ActivityStepHandler`
 (WF-IMPL-054) binds every slot through this surface before
 calling `ScheduleActivity`, and the production Dapr Service
 Invocation adapter plugs in behind the same Protocol via the
-deferred *Real Connector Client* sub-module. Tracker:
+deferred *Real Connector Client* sub-module. WF-IMPL-051
+([#422](https://github.com/toddysm/custos/issues/422)) lands the
+pure `WithInputResolver` at `custos_workflow.steps.with_inputs`:
+walks an `ExecutionNode`'s `with:` block, evaluates each
+pre-typed `${{ ... }}` placeholder against the per-run
+`BindingScope` via `custos_cel.evaluate`, and assembles the
+resulting input mapping as a `MappingProxyType`. Single-placeholder
+values preserve their raw CEL type (an `int` lands as an `int`,
+not a stringified `"42"`); mixed strings are interpolated via
+`str()` of each segment. Any `CelError` (parse / type /
+unbound-name / timeout / evaluation) round-trips into
+`WithInputResolutionError` with the underlying `kind` preserved
+on `cause_kind` so audit consumers can still dispatch on the
+root cause — meeting the five-locked-`kind` acceptance criterion
+from #422. The resolver is pure (no I/O, fully replay-safe) and
+feeds `ActivityStepHandler` (WF-IMPL-054). Tracker:
 [#432](https://github.com/toddysm/custos/issues/432).
 
 
