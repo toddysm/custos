@@ -136,9 +136,7 @@ class TestScheduleActivityRequestImmutability:
 
     def test_slots_blocks_new_attributes(self) -> None:
         req = _request()
-        with pytest.raises(
-            (AttributeError, TypeError, dataclasses.FrozenInstanceError)
-        ):
+        with pytest.raises((AttributeError, TypeError, dataclasses.FrozenInstanceError)):
             req.new_attr = "nope"  # type: ignore[attr-defined]
 
 
@@ -164,9 +162,7 @@ class TestActivityResultEnvelope:
 
     def test_slots_blocks_new_attributes(self) -> None:
         env = _success_envelope()
-        with pytest.raises(
-            (AttributeError, TypeError, dataclasses.FrozenInstanceError)
-        ):
+        with pytest.raises((AttributeError, TypeError, dataclasses.FrozenInstanceError)):
             env.new_attr = "nope"  # type: ignore[attr-defined]
 
     def test_success_envelope_carries_outputs(self) -> None:
