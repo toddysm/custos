@@ -122,7 +122,17 @@ form `f"{run_id}|{step_id}|{attempt}"` and round-trip
 `IdempotencyTriple.from_str()`. The triple becomes the shared
 scheduling key for the Activity Runtime Manager
 (`ScheduleActivity`), the Connector Service lease key, and the
-audit-event correlation key across replays. Tracker:
+audit-event correlation key across replays. WF-IMPL-048
+([#419](https://github.com/toddysm/custos/issues/419)) lands the
+public Step Coordinator error taxonomy at
+`custos_workflow.steps`: a frozen `StepCoordinatorError` hierarchy
+with the five locked `step.*` `kind` strings pinned on
+`LOCKED_STEP_KINDS` — `step.kind_not_implemented`,
+`step.with_input_resolution_error`, `step.connector_bind_error`,
+`step.activity_schedule_error`, and `step.retry_budget_exhausted` —
+mirroring the Run Controller pattern from WF-IMPL-031 and
+becoming the closed label set the WF-IMPL-058 OTel counter and
+downstream audit consumers will rely on. Tracker:
 [#432](https://github.com/toddysm/custos/issues/432).
 
 
