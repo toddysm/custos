@@ -1,6 +1,6 @@
 # TODOs: Workflow Service
 
-Last Updated: 2026-05-30 (WF-IMPL-048 merged — public Step Coordinator error taxonomy)
+Last Updated: 2026-05-30 (WF-IMPL-049 merged — ActivityRuntimeClient Protocol + result envelope)
 
 ## Open
 
@@ -27,7 +27,7 @@ Fourth sub-module: **Step Coordinator**, packaged inside the service host `src/s
 
 ### Phase B — Outbound client boundaries
 
-- [F] WF-IMPL-049 (#420): `ActivityRuntimeClient` Protocol + `ActivityResultEnvelope` (+ fake test client).
+- [x] WF-IMPL-049 (#420): `ActivityRuntimeClient` Protocol + `ActivityResultEnvelope` (+ fake test client).
 - [F] WF-IMPL-050 (#421): `ConnectorClient` Protocol + `ConnectorContext` (+ fake test client).
 
 ### Phase C — Step Coordinator core

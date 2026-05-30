@@ -132,7 +132,19 @@ with the five locked `step.*` `kind` strings pinned on
 `step.activity_schedule_error`, and `step.retry_budget_exhausted` —
 mirroring the Run Controller pattern from WF-IMPL-031 and
 becoming the closed label set the WF-IMPL-058 OTel counter and
-downstream audit consumers will rely on. Tracker:
+downstream audit consumers will rely on. WF-IMPL-049
+([#420](https://github.com/toddysm/custos/issues/420)) lands the
+first outbound client boundary at `custos_workflow.clients`: the
+runtime-checkable `ActivityRuntimeClient` Protocol with frozen
+`ScheduleActivityRequest` / `ActivityResultEnvelope` envelopes
+(four-value `ActivityResultClass` Literal pinned on
+`ACTIVITY_RESULT_CLASSES`) plus `NoopActivityRuntimeClient`
+(refuses every call) and `FakeActivityRuntimeClient` (returns
+canned envelopes, records calls + cancellations) test doubles —
+the Step Coordinator's `ActivityStepHandler` (WF-IMPL-054) and
+retry decision driver (WF-IMPL-053) consume this surface, and
+the production Dapr-Workflow adapter plugs in behind the same
+Protocol via the deferred *Real ARM Client* sub-module. Tracker:
 [#432](https://github.com/toddysm/custos/issues/432).
 
 
