@@ -436,3 +436,18 @@ class TestWithInputResolverDefensiveGuards:
             WithInputResolver().resolve(node, _scope(inputs={"target": "ok", "count": 3}), _CLOCK)
         assert "missing TypedAST" in str(ei.value)
         assert ei.value.binding_name == "image"
+
+    def test_unterminated_placeholder_wraps_value_error(self) -> None:
+        # ``extract_placeholders`` raises ``ValueError`` for an
+        # unterminated ``${{`` segment. The resolver wraps it in a
+        # structured ``WithInputResolutionError`` so callers never
+        # see an unstructured exception leak across the Step
+        # Coordinator boundary.
+        node = _node(with_block={"image": "broken ${{ inputs.target"})
+        with pytest.raises(WithInputResolutionError) as ei:
+            WithInputResolver().resolve(node, _scope(inputs={"target": "ok"}), _CLOCK)
+        assert "failed to scan placeholders" in str(ei.value)
+        assert ei.value.binding_name == "image"
+        assert ei.value.step_id == "scan"
+        assert ei.value.source == "broken ${{ inputs.target"
+        assert isinstance(ei.value.__cause__, ValueError)

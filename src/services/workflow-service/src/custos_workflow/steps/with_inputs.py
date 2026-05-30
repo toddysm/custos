@@ -161,7 +161,24 @@ class WithInputResolver:
         if not isinstance(value, str):
             return value
 
-        segments = extract_placeholders(value)
+        # ``extract_placeholders`` raises ``ValueError`` for
+        # structurally broken inputs (e.g. an unterminated
+        # ``${{`` with no closing ``}}``). In production the
+        # Catalog Service has already rejected such documents at
+        # publish time, but we still wrap the failure so the Step
+        # Coordinator never leaks an unstructured exception across
+        # its public boundary.
+        try:
+            segments = extract_placeholders(value)
+        except ValueError as exc:
+            raise WithInputResolutionError(
+                f"failed to scan placeholders in with:{key!r} on step {node.step_id!r}: {exc}",
+                run_id=run_id,
+                step_id=node.step_id,
+                attempt=attempt,
+                binding_name=key,
+                source=value,
+            ) from exc
 
         # Plain literal string — no CEL involvement.
         if not segments:
