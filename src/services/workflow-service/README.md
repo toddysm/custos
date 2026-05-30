@@ -144,7 +144,21 @@ canned envelopes, records calls + cancellations) test doubles —
 the Step Coordinator's `ActivityStepHandler` (WF-IMPL-054) and
 retry decision driver (WF-IMPL-053) consume this surface, and
 the production Dapr-Workflow adapter plugs in behind the same
-Protocol via the deferred *Real ARM Client* sub-module. Tracker:
+Protocol via the deferred *Real ARM Client* sub-module. WF-IMPL-050
+([#421](https://github.com/toddysm/custos/issues/421)) extends
+`custos_workflow.clients` with the matching outbound boundary to
+Connector Service: the runtime-checkable `ConnectorClient`
+Protocol with frozen `BindForStepRequest` (carrying a tuple of
+`SlotSpec(name, connector_ref, capabilities)`) and
+`BindForStepResponse` (whose `contexts` is always a
+`MappingProxyType` snapshot of `slot_name → ConnectorContext`)
+envelopes, the hashable `ConnectorContext` slot-handle dataclass,
+plus `NoopConnectorClient` and `FakeConnectorClient` test
+doubles — the Step Coordinator's `ActivityStepHandler`
+(WF-IMPL-054) binds every slot through this surface before
+calling `ScheduleActivity`, and the production Dapr Service
+Invocation adapter plugs in behind the same Protocol via the
+deferred *Real Connector Client* sub-module. Tracker:
 [#432](https://github.com/toddysm/custos/issues/432).
 
 

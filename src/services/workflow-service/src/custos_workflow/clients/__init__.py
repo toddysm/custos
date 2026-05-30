@@ -22,6 +22,12 @@ plug in behind the same Protocols.
   frozen dataclasses and the
   :class:`NoopActivityRuntimeClient` / :class:`FakeActivityRuntimeClient`
   test doubles.
+* WF-IMPL-050 lands :class:`ConnectorClient` — the outbound
+  boundary to Connector Service (``BindForStep``) — together with
+  the :class:`SlotSpec` / :class:`BindForStepRequest` /
+  :class:`BindForStepResponse` / :class:`ConnectorContext` frozen
+  dataclasses and the :class:`NoopConnectorClient` /
+  :class:`FakeConnectorClient` test doubles.
 """
 
 from __future__ import annotations
@@ -35,13 +41,29 @@ from custos_workflow.clients.activity_runtime import (
     NoopActivityRuntimeClient,
     ScheduleActivityRequest,
 )
+from custos_workflow.clients.connector import (
+    BindForStepRequest,
+    BindForStepResponse,
+    ConnectorClient,
+    ConnectorContext,
+    FakeConnectorClient,
+    NoopConnectorClient,
+    SlotSpec,
+)
 
 __all__ = [
     "ACTIVITY_RESULT_CLASSES",
     "ActivityResultClass",
     "ActivityResultEnvelope",
     "ActivityRuntimeClient",
+    "BindForStepRequest",
+    "BindForStepResponse",
+    "ConnectorClient",
+    "ConnectorContext",
     "FakeActivityRuntimeClient",
+    "FakeConnectorClient",
     "NoopActivityRuntimeClient",
+    "NoopConnectorClient",
     "ScheduleActivityRequest",
+    "SlotSpec",
 ]

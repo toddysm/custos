@@ -28,7 +28,7 @@ Fourth sub-module: **Step Coordinator**, packaged inside the service host `src/s
 ### Phase B — Outbound client boundaries
 
 - [x] WF-IMPL-049 (#420): `ActivityRuntimeClient` Protocol + `ActivityResultEnvelope` (+ fake test client).
-- [F] WF-IMPL-050 (#421): `ConnectorClient` Protocol + `ConnectorContext` (+ fake test client).
+- [x] WF-IMPL-050 (#421): `ConnectorClient` Protocol + `ConnectorContext` (+ fake test client).
 
 ### Phase C — Step Coordinator core
 
