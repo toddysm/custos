@@ -1,10 +1,55 @@
 # TODOs: Workflow Service
 
-Last Updated: 2026-05-27
+Last Updated: 2026-05-29 (Step Coordinator task issues filed: #418–#431, tracker #432)
 
 ## Open
 
 - [ ] TODO-001: Finalize canonical workflow event taxonomy (`workflow.*`, `run.*`, `step.*`) jointly with Trigger Service TS-TODO-001 (#18) and ARM TODO-009 (INCON-013 cross-link). Tracked under those existing issues; no separate WF issue. (added 2026-05-17)
+
+## Deferred sub-modules
+
+Sub-modules of the workflow-service host whose design is already locked in [`design.md`](design.md) § Internal Structure but whose implementation plan has not yet been derived. Each will get its own `implement-component` plan, tracker, and task issue set when prioritised. (added 2026-05-29 during the Step Coordinator plan derivation.)
+
+- [ ] **Resume Subscription Manager** — `waitFor:` step kind + `TriggerServiceClient` Protocol + `RegisterResumeSubscription` / `CancelResumeSubscription` RPC + `ResumeSubscriptionMirror` persistence (`MetadataStoreProvider`) + replay re-registration through the WF-IMPL-042 reconciler hook. Design refs: § Operation: Step Resume on External Event, § Resume Subscription Replay Protocol. Step Coordinator (WF-IMPL-055) currently returns `StepFailed(step.kind_not_implemented)` for `waitFor:`.
+- [ ] **Sub-Orchestration Manager** — `for:` (dynamic loop) + `approval:` (gate + timeout) + `workflow:` (sub-workflow call); spawns child Dapr Workflow instances with deterministic `<parentRunId>/<stepId>/<iterationKey>` ids; awaits via `when_all` / `when_any`; merges outputs. Design refs: § Operation: Sub-Orchestration, § Sub-Orchestration Manager (ADR-007). Step Coordinator currently returns `StepFailed(step.kind_not_implemented)` for all three.
+- [ ] **API Adapter + Validator** — public REST surface (`POST /v1/workspaces/{ws}/runs`, `GET …/{runId}`, `POST …/{runId}:cancel`, list, step fetch, log stream) + inbound RPC for Trigger Service / API Gateway + `(workspaceId, idempotencyKey)` dedup window + inputs JSON-Schema match. Design refs: § Public Interface, § Idempotency Model. The internal `RunController.start_run` (WF-IMPL-037) is already the in-process entry point.
+- [ ] **Real ARM Client + Connector Client adapters** — production `ActivityRuntimeClient` / `ConnectorClient` Dapr Service Invocation bridges behind the Protocols that ship with the Step Coordinator (WF-IMPL-049 / WF-IMPL-050). Design refs: § Internal RPC (outbound).
+- [ ] **Full Observability Client integration** — Audit-event sink wiring + cross-component event taxonomy unification (TS-TODO-001 / ARM TODO-009 under INCON-013) + log-stream delegation for `GET …/steps/{stepId}/logs`. Design refs: § Observability Client. `workflow.*` / `step.*` event publication already lands via the existing `LifecycleEventPublisher`.
+
+## Implementation — Step Coordinator
+
+Fourth sub-module: **Step Coordinator**, packaged inside the service host `src/services/workflow-service/` under the new `custos_workflow.steps` + `custos_workflow.clients` packages. Drives execution of one step at a time within a Run: evaluates `with:` inputs through `custos_cel`, derives the per-attempt `(runId, stepId, attempt)` idempotency triple, dispatches to the Activity Runtime Manager via a typed client boundary, applies the workflow-level retry policy on retryable failures, and emits `step.*` lifecycle events. Concrete `StepHandler` for the Protocol the Run Controller orchestrator (WF-IMPL-035) already publishes. Plan: [`implementation-plan.md`](implementation-plan.md).
+
+### Phase A — Foundations (IDs, errors)
+
+- [x] WF-IMPL-047 (#418): Idempotency Tracker — deterministic `(runId, stepId, attempt)` triples.
+- [F] WF-IMPL-048 (#419): Public Step Coordinator error taxonomy — `StepCoordinatorError` + 5 subclasses, locked `kind` strings.
+
+### Phase B — Outbound client boundaries
+
+- [F] WF-IMPL-049 (#420): `ActivityRuntimeClient` Protocol + `ActivityResultEnvelope` (+ fake test client).
+- [F] WF-IMPL-050 (#421): `ConnectorClient` Protocol + `ConnectorContext` (+ fake test client).
+
+### Phase C — Step Coordinator core
+
+- [F] WF-IMPL-051 (#422): `WithInputResolver` — evaluate `with:` CEL expressions.
+- [F] WF-IMPL-052 (#423): `LetStepHandler` — inline expression evaluation (depends on #422).
+- [F] WF-IMPL-053 (#424): Retry decision driver — `on_error` route walk + effective delay (depends on #419).
+- [F] WF-IMPL-054 (#425): `ActivityStepHandler` — full activity step lifecycle (depends on #418, #420, #421, #422, #424).
+
+### Phase D — Coordinator integration
+
+- [F] WF-IMPL-055 (#426): `StepCoordinator` — concrete `StepHandler` dispatcher (depends on #419, #423, #425).
+- [F] WF-IMPL-056 (#427): `step.*` lifecycle event emission (depends on #426).
+- [F] WF-IMPL-057 (#428): FastAPI lifespan worker wiring (depends on #426).
+
+### Phase E — Observability, verification, docs
+
+- [F] WF-IMPL-058 (#429): OTel observability hooks for the Step Coordinator (depends on #427, #428).
+- [F] WF-IMPL-059 (#430): Unit + integration test suite (≥ 90 % coverage gate) (depends on #429).
+- [F] WF-IMPL-060 (#431): Developer documentation — `docs/developers/workflow-step-coordinator.md` (depends on #430).
+
+Tracker: #432 — `WF-IMPL-000-STEP-COORDINATOR`.
 
 ## Implementation — Definition Compiler
 
