@@ -103,8 +103,15 @@ thin `WorkflowRuntime` + `WorkflowClient` async adapters around
 `FakeWorkflowRuntime` + `FakeWorkflowClient` test substitute.
 Every subsequent Run Controller task (WF-IMPL-030 +) consumes
 only these adapters; no other module imports
-`dapr.ext.workflow`. Tracker:
-[#399](https://github.com/toddysm/custos/issues/399).
+`dapr.ext.workflow`. WF-IMPL-046
+([#398](https://github.com/toddysm/custos/issues/398)) ships the
+Run Controller developer documentation at
+[`docs/developers/workflow-run-controller.md`](../../../docs/developers/workflow-run-controller.md)
+(lifecycle state machine, `RunController` public API, `StepHandler`
+Protocol, Dapr Workflow primitive mapping, replay determinism
+contract, `run.*` error taxonomy, worked examples — pinned to the
+running code by `tests/test_docs_examples_run_controller.py`).
+Tracker: [#399](https://github.com/toddysm/custos/issues/399).
 
 
 The Expression Evaluator (the first sub-module) is already in
