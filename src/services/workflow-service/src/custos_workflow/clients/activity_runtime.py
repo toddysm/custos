@@ -33,6 +33,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Final, Literal, Protocol, get_args, runtime_checkable
 
+from custos_workflow.steps.idempotency import IdempotencyTriple
+
 __all__ = [
     "ACTIVITY_RESULT_CLASSES",
     "ActivityResultClass",
@@ -80,6 +82,16 @@ class ScheduleActivityRequest:
     The ``(run_id, step_id, attempt)`` triple is the same
     idempotency key the Activity Runtime Manager uses to
     deduplicate retries (see WF-IMPL-047 ``IdempotencyTriple``).
+    Construction re-uses the WF-IMPL-047 validation pipeline so
+    the same rules apply here: ``run_id`` and ``step_id`` must be
+    non-empty and free of the canonical ``|`` separator, and
+    ``attempt`` must be a positive integer (``bool`` rejected
+    explicitly). ``activity_ref`` must also be non-empty.
+
+    :raises IdempotencyTripleError: If any of the triple
+        components is malformed.
+    :raises ValueError: If ``attempt`` is not a positive int or
+        ``activity_ref`` is empty.
     """
 
     run_id: str
@@ -95,6 +107,20 @@ class ScheduleActivityRequest:
     connector_contexts: Mapping[str, Any]
     deadline: datetime
 
+    def __post_init__(self) -> None:
+        # Re-use the WF-IMPL-047 idempotency-triple validation so
+        # ``ScheduleActivityRequest`` and ``IdempotencyTriple`` agree
+        # byte-for-byte on what counts as a valid scheduling key:
+        # non-empty ``run_id`` / ``step_id`` free of the canonical
+        # ``|`` separator, integer ``attempt >= 1`` (``bool`` rejected
+        # explicitly). Any failure surfaces as
+        # :class:`IdempotencyTripleError` (a ``ValueError`` subclass),
+        # which the Step Coordinator's
+        # :class:`ActivityScheduleError` adapter wraps on the way out.
+        IdempotencyTriple(run_id=self.run_id, step_id=self.step_id, attempt=self.attempt)
+        if not self.activity_ref:
+            raise ValueError("activity_ref must be a non-empty string")
+
 
 @dataclass(frozen=True, slots=True)
 class ActivityResultEnvelope:
@@ -105,22 +131,57 @@ class ActivityResultEnvelope:
     → ARM → Step Coordinator → ``step.completed`` /
     ``step.failed`` audit event.
 
-    Exactly one of :attr:`outputs` and :attr:`error` is populated
-    for any given :attr:`class_`:
+    Construction enforces the documented invariants so adapters
+    and tests can never accidentally synthesize a malformed
+    envelope:
 
     * ``"success"``  — :attr:`outputs` populated, :attr:`error` is ``None``.
     * ``"retryable"`` / ``"permanent"`` / ``"cancelled"`` —
       :attr:`error` populated, :attr:`outputs` is ``None``.
+    * :attr:`attempt` must be a positive integer (``bool`` rejected
+      explicitly).
 
     The retry decision driver (WF-IMPL-053) consumes
     :attr:`class_` + :attr:`error` to choose between scheduling
     a fresh attempt and tipping the step into terminal failure.
+
+    :raises ValueError: If the ``outputs``/``error`` shape does
+        not match :attr:`class_` or ``attempt < 1``.
     """
 
     class_: ActivityResultClass
     outputs: Mapping[str, Any] | None
     error: Mapping[str, Any] | None
     attempt: int
+
+    def __post_init__(self) -> None:
+        # ``attempt`` must mirror the per-step attempt counter the
+        # Step Coordinator passed in. Reject 0 / negative / bool so
+        # an invalid envelope can never be confused with a fresh
+        # first attempt downstream.
+        if isinstance(self.attempt, bool) or not isinstance(self.attempt, int):
+            raise ValueError(f"attempt must be an int, got {type(self.attempt).__name__}")
+        if self.attempt < 1:
+            raise ValueError(f"attempt must be >= 1, got {self.attempt}")
+        # The ``design.md`` § *Activity Result Envelope* contract:
+        # success carries outputs (no error), every other class
+        # carries an error (no outputs). The retry decision driver
+        # (WF-IMPL-053) and the audit emitter (WF-IMPL-056) both
+        # rely on this invariant; enforce it at the boundary so
+        # malformed envelopes fail fast instead of silently
+        # corrupting downstream behavior.
+        if self.class_ == "success":
+            if self.outputs is None:
+                raise ValueError("ActivityResultEnvelope(class_='success') must carry outputs")
+            if self.error is not None:
+                raise ValueError("ActivityResultEnvelope(class_='success') must not carry error")
+        else:
+            if self.error is None:
+                raise ValueError(f"ActivityResultEnvelope(class_={self.class_!r}) must carry error")
+            if self.outputs is not None:
+                raise ValueError(
+                    f"ActivityResultEnvelope(class_={self.class_!r}) must not carry outputs"
+                )
 
 
 # ---------------------------------------------------------------------------

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Any, Literal, get_args
@@ -18,6 +19,7 @@ from custos_workflow.clients import (
     NoopActivityRuntimeClient,
     ScheduleActivityRequest,
 )
+from custos_workflow.steps.idempotency import IdempotencyTripleError
 
 # ---------------------------------------------------------------------------
 # Test fixtures
@@ -212,6 +214,140 @@ class TestActivityResultEnvelope:
 
 
 # ---------------------------------------------------------------------------
+# Boundary validation — ScheduleActivityRequest
+# ---------------------------------------------------------------------------
+
+
+class TestScheduleActivityRequestValidation:
+    """The dataclass must reject malformed idempotency keys at the
+    boundary so adapters and tests can never propagate them
+    downstream (mirrors WF-IMPL-047 ``IdempotencyTriple`` rules)."""
+
+    def _kwargs(self, **overrides: Any) -> dict[str, Any]:
+        base: dict[str, Any] = {
+            "run_id": "run-1",
+            "step_id": "step-1",
+            "attempt": 1,
+            "activity_ref": "arm/echo",
+            "inputs": MappingProxyType({}),
+            "connector_contexts": MappingProxyType({}),
+            "deadline": datetime(2026, 5, 30, tzinfo=UTC),
+        }
+        base.update(overrides)
+        return base
+
+    def test_rejects_empty_run_id(self) -> None:
+        with pytest.raises(IdempotencyTripleError, match="run_id"):
+            ScheduleActivityRequest(**self._kwargs(run_id=""))
+
+    def test_rejects_run_id_with_canonical_separator(self) -> None:
+        with pytest.raises(IdempotencyTripleError, match="run_id"):
+            ScheduleActivityRequest(**self._kwargs(run_id="bad|id"))
+
+    def test_rejects_empty_step_id(self) -> None:
+        with pytest.raises(IdempotencyTripleError, match="step_id"):
+            ScheduleActivityRequest(**self._kwargs(step_id=""))
+
+    def test_rejects_step_id_with_canonical_separator(self) -> None:
+        with pytest.raises(IdempotencyTripleError, match="step_id"):
+            ScheduleActivityRequest(**self._kwargs(step_id="bad|step"))
+
+    def test_rejects_attempt_zero(self) -> None:
+        with pytest.raises(ValueError, match=r"attempt must be >= 1"):
+            ScheduleActivityRequest(**self._kwargs(attempt=0))
+
+    def test_rejects_attempt_negative(self) -> None:
+        with pytest.raises(ValueError, match=r"attempt must be >= 1"):
+            ScheduleActivityRequest(**self._kwargs(attempt=-1))
+
+    def test_rejects_attempt_bool(self) -> None:
+        with pytest.raises(ValueError, match=r"attempt must be an int"):
+            ScheduleActivityRequest(**self._kwargs(attempt=True))
+
+    def test_rejects_empty_activity_ref(self) -> None:
+        with pytest.raises(ValueError, match=r"activity_ref must be a non-empty string"):
+            ScheduleActivityRequest(**self._kwargs(activity_ref=""))
+
+    def test_accepts_minimal_valid_request(self) -> None:
+        # Sanity check that the validation pipeline doesn't reject
+        # the canonical happy-path shape used everywhere else in
+        # this suite.
+        req = ScheduleActivityRequest(**self._kwargs())
+        assert req.run_id == "run-1"
+        assert req.attempt == 1
+
+
+# ---------------------------------------------------------------------------
+# Boundary validation — ActivityResultEnvelope
+# ---------------------------------------------------------------------------
+
+
+class TestActivityResultEnvelopeValidation:
+    """The dataclass must enforce the ``class_`` / outputs / error
+    invariant from ``design.md`` § *Activity Result Envelope* and
+    reject ``attempt < 1`` so retry/audit consumers never see a
+    contradictory envelope."""
+
+    _SUCCESS_OUTPUTS: Mapping[str, Any] = MappingProxyType({"echo": "hi"})
+    _ERROR_PAYLOAD: Mapping[str, Any] = MappingProxyType({"kind": "x", "message": "x"})
+
+    def test_rejects_success_without_outputs(self) -> None:
+        with pytest.raises(ValueError, match="must carry outputs"):
+            ActivityResultEnvelope(class_="success", outputs=None, error=None, attempt=1)
+
+    def test_rejects_success_with_error(self) -> None:
+        with pytest.raises(ValueError, match="must not carry error"):
+            ActivityResultEnvelope(
+                class_="success",
+                outputs=self._SUCCESS_OUTPUTS,
+                error=self._ERROR_PAYLOAD,
+                attempt=1,
+            )
+
+    @pytest.mark.parametrize("cls", ["retryable", "permanent", "cancelled"])
+    def test_rejects_non_success_without_error(self, cls: ActivityResultClass) -> None:
+        with pytest.raises(ValueError, match="must carry error"):
+            ActivityResultEnvelope(class_=cls, outputs=None, error=None, attempt=1)
+
+    @pytest.mark.parametrize("cls", ["retryable", "permanent", "cancelled"])
+    def test_rejects_non_success_with_outputs(self, cls: ActivityResultClass) -> None:
+        with pytest.raises(ValueError, match="must not carry outputs"):
+            ActivityResultEnvelope(
+                class_=cls,
+                outputs=self._SUCCESS_OUTPUTS,
+                error=self._ERROR_PAYLOAD,
+                attempt=1,
+            )
+
+    def test_rejects_attempt_zero(self) -> None:
+        with pytest.raises(ValueError, match=r"attempt must be >= 1"):
+            ActivityResultEnvelope(
+                class_="success",
+                outputs=self._SUCCESS_OUTPUTS,
+                error=None,
+                attempt=0,
+            )
+
+    def test_rejects_attempt_negative(self) -> None:
+        with pytest.raises(ValueError, match=r"attempt must be >= 1"):
+            ActivityResultEnvelope(
+                class_="success",
+                outputs=self._SUCCESS_OUTPUTS,
+                error=None,
+                attempt=-1,
+            )
+
+    def test_rejects_attempt_bool(self) -> None:
+        with pytest.raises(ValueError, match=r"attempt must be an int"):
+            ActivityResultEnvelope(
+                class_="success",
+                outputs=self._SUCCESS_OUTPUTS,
+                error=None,
+                attempt=True,
+            )
+
+
+# ---------------------------------------------------------------------------
 # NoopActivityRuntimeClient — explicit refusal
 # ---------------------------------------------------------------------------
 
@@ -282,13 +418,20 @@ class TestFakeActivityRuntimeClient:
 
 def test_class_field_accepts_all_literal_values_at_runtime() -> None:
     """Round-trip every Literal value through the dataclass to catch
-    any future tightening that would break a published outcome."""
+    any future tightening that would break a published outcome.
+    Each outcome class is built with the minimal valid shape its
+    invariant requires (success → outputs, others → error)."""
+
+    success_outputs: Mapping[str, Any] = MappingProxyType({"echo": "hi"})
+    error_payload: Mapping[str, Any] = MappingProxyType({"kind": "x", "message": "x"})
 
     for value in get_args(ActivityResultClass):
+        outputs = success_outputs if value == "success" else None
+        error = None if value == "success" else error_payload
         env = ActivityResultEnvelope(
             class_=value,
-            outputs=None,
-            error=None,
+            outputs=outputs,
+            error=error,
             attempt=1,
         )
         assert env.class_ == value
