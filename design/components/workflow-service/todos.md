@@ -1,6 +1,6 @@
 # TODOs: Workflow Service
 
-Last Updated: 2026-05-30 (WF-IMPL-057 merged — FastAPI lifespan wires StepCoordinator + Noop ARM/Connector stubs)
+Last Updated: 2026-05-31 (WF-IMPL-057 in PR — FastAPI lifespan wires StepCoordinator + Noop ARM/Connector stubs)
 
 ## Open
 
