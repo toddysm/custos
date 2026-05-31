@@ -1,6 +1,6 @@
 # TODOs: Workflow Service
 
-Last Updated: 2026-05-31 (WF-IMPL-060 in PR — Step Coordinator developer documentation)
+Last Updated: 2026-05-31 (WF-IMPL-061..072 filed for the API Adapter + Validator sub-module; tracker #459)
 
 ## Open
 
@@ -12,9 +12,43 @@ Sub-modules of the workflow-service host whose design is already locked in [`des
 
 - [ ] **Resume Subscription Manager** — `waitFor:` step kind + `TriggerServiceClient` Protocol + `RegisterResumeSubscription` / `CancelResumeSubscription` RPC + `ResumeSubscriptionMirror` persistence (`MetadataStoreProvider`) + replay re-registration through the WF-IMPL-042 reconciler hook. Design refs: § Operation: Step Resume on External Event, § Resume Subscription Replay Protocol. Step Coordinator (WF-IMPL-055) currently returns `StepFailed(step.kind_not_implemented)` for `waitFor:`.
 - [ ] **Sub-Orchestration Manager** — `for:` (dynamic loop) + `approval:` (gate + timeout) + `workflow:` (sub-workflow call); spawns child Dapr Workflow instances with deterministic `<parentRunId>/<stepId>/<iterationKey>` ids; awaits via `when_all` / `when_any`; merges outputs. Design refs: § Operation: Sub-Orchestration, § Sub-Orchestration Manager (ADR-007). Step Coordinator currently returns `StepFailed(step.kind_not_implemented)` for all three.
-- [ ] **API Adapter + Validator** — public REST surface (`POST /v1/workspaces/{ws}/runs`, `GET …/{runId}`, `POST …/{runId}:cancel`, list, step fetch, log stream) + inbound RPC for Trigger Service / API Gateway + `(workspaceId, idempotencyKey)` dedup window + inputs JSON-Schema match. Design refs: § Public Interface, § Idempotency Model. The internal `RunController.start_run` (WF-IMPL-037) is already the in-process entry point.
+- [-] **API Adapter + Validator** — _in progress_ as the fifth sub-module under tracker [#459](https://github.com/toddysm/custos/issues/459); tasks WF-IMPL-061..072 filed 2026-05-31. See the dedicated section below + [`implementation-plan.md`](implementation-plan.md).
 - [ ] **Real ARM Client + Connector Client adapters** — production `ActivityRuntimeClient` / `ConnectorClient` Dapr Service Invocation bridges behind the Protocols that ship with the Step Coordinator (WF-IMPL-049 / WF-IMPL-050). Design refs: § Internal RPC (outbound).
 - [ ] **Full Observability Client integration** — Audit-event sink wiring + cross-component event taxonomy unification (TS-TODO-001 / ARM TODO-009 under INCON-013) + log-stream delegation for `GET …/steps/{stepId}/logs`. Design refs: § Observability Client. `workflow.*` / `step.*` event publication already lands via the existing `LifecycleEventPublisher`.
+- [ ] **Durable `IdempotencyLedger`** — `MetadataStoreProvider`-backed adapter for the `(workspaceId, idempotencyKey)` ledger introduced in WF-IMPL-063; in-memory adapter ships with the API Adapter sub-module. Filed as a separate follow-up issue once the in-memory adapter merges. (added 2026-05-31 during the API Adapter plan derivation.)
+
+## Implementation — API Adapter + Validator
+
+Fifth sub-module: **API Adapter + Validator**, packaged inside the service host `src/services/workflow-service/` under the new `custos_workflow.api` + `custos_workflow.validator` packages. Owns the inbound REST and Internal RPC surface, plus the pre-execution checks that gate every `StartRun` (workflow-version existence, inputs schema match, workspace authorization, `(workspaceId, idempotencyKey)` dedup). After this sub-module lands, the workflow-service stops being reachable only in-process. Plan: [`implementation-plan.md`](implementation-plan.md).
+
+### Phase A — Foundations (errors, models, validator)
+
+- [F] WF-IMPL-061 (#447): Public API error taxonomy + RFC 7807 problem envelope.
+- [F] WF-IMPL-062 (#448): API wire Pydantic models (depends on #447).
+- [F] WF-IMPL-063 (#449): Validator package + Idempotency-Key ledger (depends on #448).
+
+### Phase B — Public REST surface
+
+- [F] WF-IMPL-064 (#450): FastAPI dependency factories (depends on #449).
+- [F] WF-IMPL-065 (#451): REST routes — runs (depends on #450).
+- [F] WF-IMPL-066 (#452): REST routes — steps + log-stream stub (depends on #450).
+
+### Phase C — Internal RPC inbound surface
+
+- [F] WF-IMPL-067 (#453): Internal RPC routes — `StartRun` / `CancelRun` (depends on #451).
+- [F] WF-IMPL-068 (#454): `RaiseExternalEvent` bridge (depends on #453).
+
+### Phase D — App wiring + observability
+
+- [F] WF-IMPL-069 (#455): Mount routers + exception handlers in `create_app` (depends on #451, #452, #453, #454).
+- [F] WF-IMPL-070 (#456): OTel HTTP-server observability (depends on #455).
+
+### Phase E — Verification + documentation
+
+- [F] WF-IMPL-071 (#457): Unit + integration test suite (≥ 90 % coverage gate) (depends on #456).
+- [F] WF-IMPL-072 (#458): Developer documentation — `docs/developers/workflow-api.md` (depends on #457).
+
+Tracker: #459 — `WF-IMPL-000-API-ADAPTER`.
 
 ## Implementation — Step Coordinator
 

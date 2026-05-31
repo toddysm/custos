@@ -1,347 +1,239 @@
-# `workflow-service` — Step Coordinator Implementation Plan
+# `workflow-service` — API Adapter + Validator Implementation Plan
 
-> Derived from [`design/components/workflow-service/design.md`](design.md) on 2026-05-29.
-> Source of truth: that design doc plus [`design/architecture/components.md`](../../architecture/components.md) § COMP-003 and [`design/architecture/overview.md`](../../architecture/overview.md) § Execution Model.
+> Derived from [`design/components/workflow-service/design.md`](design.md) on 2026-05-31.
+> Source of truth: that design doc (§ Internal Structure rows for **API Adapter** + **Validator**, § Operation: Start Run, § Public Interface, § Idempotency Model, § Configuration, § Failure Modes) and the existing [`RunController`](../../../src/services/workflow-service/src/custos_workflow/runs/controller.py) public surface already shipped via WF-IMPL-037..040.
 > This plan is owned by the `implement-component` skill; regenerate fresh whenever the design changes.
 
 ## Summary
 
-The **Step Coordinator** is the fourth sub-module to land inside the workflow-service host (`src/services/workflow-service/`, Python package `custos_workflow`), after the Expression Evaluator (`src/libs/custos-cel/`), the Definition Compiler (`custos_workflow.compiler` + `custos_workflow.graph` + `custos_workflow.retry` + `custos_workflow.on_error`, tracker [#363](https://github.com/toddysm/custos/issues/363)), and the Run Controller (`custos_workflow.runs`, tracker [#399](https://github.com/toddysm/custos/issues/399)). Per design.md § Internal Structure it *drives execution of one step at a time within a Run*: evaluates `with:` input expressions through `custos_cel`, derives the per-attempt `(runId, stepId, attempt)` idempotency triple, dispatches to the Activity Runtime Manager via a typed client boundary, applies the workflow-level retry policy on retryable failures (consuming the WF-IMPL-022/023 compiler outputs already materialised on every `ExecutionNode`), and emits the canonical `step.*` lifecycle events through the existing `LifecycleEventPublisher` (WF-IMPL-041).
-
-Landing this sub-module is the unblock for end-to-end activity step execution: the Run Controller orchestrator (WF-IMPL-035) already routes every non-`wait:` node through the `StepHandler` Protocol (WF-IMPL-034); today's `NoopStepHandler` raises `NotImplementedError` for every kind except `let:`. After this sub-module merges, the orchestrator dispatches `activity:` + `let:` steps through real handlers and four step kinds (`waitFor:` / `for:` / `approval:` / `workflow:`) raise a typed `StepKindNotImplementedError` envelope until their owning sub-modules ship.
+The **API Adapter + Validator** is the fifth sub-module to land inside the workflow-service host (`src/services/workflow-service/`, Python package `custos_workflow`), after the Expression Evaluator (`src/libs/custos-cel/`), the Definition Compiler (`custos_workflow.compiler` + adjacent packages, tracker [#363](https://github.com/toddysm/custos/issues/363)), the Run Controller (`custos_workflow.runs`, tracker [#399](https://github.com/toddysm/custos/issues/399)), and the Step Coordinator (`custos_workflow.steps` + `custos_workflow.clients`, tracker [#432](https://github.com/toddysm/custos/issues/432)). Per design.md § Internal Structure it owns *the inbound REST and Internal RPC surface and the pre-execution checks that gate every `StartRun`* — workflow-version existence, inputs schema match, workspace authorization, and `(workspaceId, idempotencyKey)` dedup. After this sub-module merges, the workflow-service stops being reachable only in-process: the public REST API surface (`POST /v1/workspaces/{ws}/runs`, GET / list / `:cancel`, step fetch + log-stream stub) and the internal RPC surface (`StartRun`, `CancelRun`, `RaiseExternalEvent`) consumed by the Trigger Service and API Gateway both come online. This is the prerequisite for any end-to-end test against COMP-004 (Trigger Service) and COMP-001 (API Gateway), and for any subsequent sub-module to be exercised in a real cluster.
 
 ## Boundary with the deferred sub-modules
 
-| Deferred sub-module | What it owns | Why it's out of scope here |
+| Deferred sub-module | What it owns | What this plan ships as a stub |
 |---|---|---|
-| **Resume Subscription Manager** | `waitFor:` step kind, `TriggerServiceClient` Protocol, `RegisterResumeSubscription` / `CancelResumeSubscription` RPC, `ResumeSubscriptionMirror` persistence (`MetadataStoreProvider`), replay re-registration through the WF-IMPL-042 reconciler hook. | Needs a new document-model step kind + a new outbound client + new persistence rows + replay plumbing — large enough to merit its own plan. The `step.waiting` lifecycle event slot already lands here (WF-IMPL-056) so the eventual sub-module just emits into it. |
-| **Sub-Orchestration Manager** | `for:` (dynamic loop), `approval:` (gate + timeout), `workflow:` (sub-workflow call). Spawns child Dapr Workflow instances with deterministic `<parentRunId>/<stepId>/<iterationKey>` ids; awaits via `when_all` / `when_any`; merges outputs. | Each is a new document-model step kind, a new Dapr primitive, and a new lifecycle table. Step Coordinator dispatcher (WF-IMPL-055) returns `StepFailed(step.kind_not_implemented)` for all three until this sub-module ships. |
-| **API Adapter + Validator** | Public REST surface (`POST /v1/workspaces/{ws}/runs`, `GET …/{runId}`, `POST …/{runId}:cancel`, …), inbound RPC for Trigger Service / API Gateway, `(workspaceId, idempotencyKey)` dedup window per design.md § Idempotency Model, inputs JSON-Schema match. | The Run Controller's internal `RunController.start_run` (WF-IMPL-037) is already the in-process entry point; the public-facing surface is a separate sub-module. |
-| **Real ARM Client + Connector Client adapters** | Production `ActivityRuntimeClient` / `ConnectorClient` implementations that bridge Dapr Service Invocation to ARM (COMP-006) and Connector Service (COMP-005). | Protocols + test fakes ship here so Step Coordinator code is testable in isolation; the Dapr-backed adapters slot in behind the same Protocols without changing handler code. |
-| **Full Observability Client integration** | Canonical workflow event taxonomy unification with TS-TODO-001 / ARM TODO-009 (INCON-013), Audit-event sink wiring, log-stream delegation for `GET …/steps/{stepId}/logs`. | `step.*` event publication lands here via the existing `LifecycleEventPublisher` shape (WF-IMPL-056). Cross-component taxonomy lock is tracked separately under TODO-001. |
+| **Resume Subscription Manager** | `waitFor:` step kind + replay re-registration. | `RaiseExternalEvent` RPC handler + thin `RunController.raise_external_event` adapter that calls Dapr Workflow's `raise_event` primitive. Useful even without `waitFor:` (Dapr buffers events on the instance); becomes load-bearing once `waitFor:` lands. |
+| **Sub-Orchestration Manager** | `for:` / `approval:` / `workflow:` step kinds. | No surface change — `StartRun` already accepts any compiled definition; `for:` / `approval:` / `workflow:` continue to fail at the Step Coordinator with `step.kind_not_implemented`. |
+| **Real ARM / Connector Client adapters** | Production Dapr Service Invocation bridges. | None. Wiring stays behind the WF-IMPL-049 / WF-IMPL-050 Protocols. |
+| **Full Observability Client integration** | Audit-event sink wiring + log-stream delegation. | `GET …/steps/{stepId}/logs` route ships returning **501 Not Implemented** with an explanatory envelope until Observability integration lands; OTel HTTP-server spans / latency histograms / error counters DO land here. |
+| **Durable `IdempotencyLedger` (Postgres-backed adapter)** | `MetadataStoreProvider`-resident persistence of the `(workspaceId, idempotencyKey)` ledger. | `InMemoryIdempotencyLedger` ships behind the Protocol so every test path is exercised; the Postgres adapter is a separate follow-up issue filed post-tracker. |
 
 ## Conventions
 
 - Task prefix: `WF-IMPL-`.
-- Numbering starts at `WF-IMPL-047` (next free id after the WF-IMPL-001..046 range used by `custos-cel`, the Definition Compiler, and the Run Controller; verified via `gh issue list --label component:workflow-service`).
+- Numbering starts at `WF-IMPL-061` (next free id after the WF-IMPL-001..060 range used by `custos-cel`, the Definition Compiler, the Run Controller, and the Step Coordinator; verified via `gh issue list --label component:workflow-service --search "WF-IMPL- in:title"`).
 - One task = one PR = one GitHub issue.
 - Labels per existing repo convention: `component:workflow-service`, `phase:implementation`, `type:implementation`. (No `phase:A`/`phase:B` labels in this repo — the phase grouping is reflected in this plan only.)
 - Phases run sequentially; tasks within a phase may run in parallel if dependencies allow.
 - Quality gate: `ruff format . && ruff check . && mypy src tests && pytest -q` from `src/services/workflow-service/`, honoring the existing `--cov-fail-under=90` floor.
-- New code lives under `src/services/workflow-service/src/custos_workflow/steps/` (new package) plus `src/custos_workflow/clients/` (new package for outbound RPC client Protocols + test doubles). The existing `runs/` package keeps the Run-Controller-owned modules.
+- New code lives under `src/services/workflow-service/src/custos_workflow/api/` (mirroring the existing `custos_catalog.api` layout: `dependencies.py`, `models.py`, `routes/`, `rpc.py`, `errors.py`) plus `src/custos_workflow/validator/` (separate package — pre-execution checks are a distinct concern from HTTP wire).
 
 ## Dependency graph
 
 ```mermaid
 flowchart TD
-    A047[WF-IMPL-047: idempotency tracker]
-    A048[WF-IMPL-048: step-coordinator error taxonomy]
+    A061[WF-IMPL-061: API error taxonomy + RFC 7807 envelope]
+    A062[WF-IMPL-062: wire Pydantic models]
+    A063[WF-IMPL-063: Validator package + IdempotencyKey ledger]
 
-    B049[WF-IMPL-049: ActivityRuntimeClient Protocol]
-    B050[WF-IMPL-050: ConnectorClient Protocol]
+    B064[WF-IMPL-064: FastAPI dependency factories]
+    B065[WF-IMPL-065: REST routes — runs]
+    B066[WF-IMPL-066: REST routes — steps + log-stream stub]
 
-    C051[WF-IMPL-051: WithInputResolver]
-    C052[WF-IMPL-052: LetStepHandler]
-    C053[WF-IMPL-053: retry decision driver]
-    C054[WF-IMPL-054: ActivityStepHandler]
+    C067[WF-IMPL-067: Internal RPC routes — StartRun/CancelRun]
+    C068[WF-IMPL-068: RaiseExternalEvent bridge]
 
-    D055[WF-IMPL-055: StepCoordinator dispatcher]
-    D056[WF-IMPL-056: step.* lifecycle event emission]
-    D057[WF-IMPL-057: FastAPI lifespan wiring]
+    D069[WF-IMPL-069: App wiring — mount routers + exception handlers]
+    D070[WF-IMPL-070: OTel HTTP-server observability]
 
-    E058[WF-IMPL-058: OTel observability hooks]
-    E059[WF-IMPL-059: unit + integration test suite]
-    E060[WF-IMPL-060: developer documentation]
+    E071[WF-IMPL-071: Unit + integration test suite (>=90%)]
+    E072[WF-IMPL-072: Developer documentation]
 
-    A047 --> C054
-    A048 --> C053
-    A048 --> C054
-    A048 --> D055
-    B049 --> C054
-    B050 --> C054
-    C051 --> C052
-    C051 --> C054
-    C052 --> D055
-    C053 --> C054
-    C054 --> D055
-    D055 --> D056
-    D055 --> D057
-    D056 --> E058
-    D057 --> E058
-    E058 --> E059
-    E059 --> E060
+    A061 --> A062
+    A062 --> A063
+    A063 --> B064
+    B064 --> B065
+    B064 --> B066
+    B065 --> C067
+    C067 --> C068
+    B065 --> D069
+    B066 --> D069
+    C067 --> D069
+    C068 --> D069
+    D069 --> D070
+    D070 --> E071
+    E071 --> E072
 ```
 
-## Phase A — Foundations (IDs, errors)
+## Phase A — Foundations (errors, models, validator)
 
-### `WF-IMPL-047`: Idempotency Tracker — deterministic `(runId, stepId, attempt)` triples
+### `WF-IMPL-061`: Public API error taxonomy + RFC 7807 problem envelope
 
 - **Scope**:
-  - New package `src/custos_workflow/steps/__init__.py`.
-  - `src/custos_workflow/steps/idempotency.py` — `IdempotencyTriple` frozen dataclass (`run_id`, `step_id`, `attempt`); `derive_triple(run_id, step_id, attempt) -> IdempotencyTriple`; canonical wire form via `to_str()` = `f"{run_id}|{step_id}|{attempt}"` and `from_str()` round-trip; `IdempotencyTripleError` on parse failures.
-  - `tests/steps/test_idempotency.py` — determinism (same inputs → byte-equal triple, 500 Hypothesis examples); `attempt >= 1` validation; round-trip `to_str() → from_str()`; rejection of `|` in `step_id`.
+  - New package `src/custos_workflow/api/__init__.py` (re-exports + `register_exception_handlers`).
+  - `src/custos_workflow/api/errors.py` — `ProblemDetail` Pydantic model (`type`, `title`, `status`, `detail`, `instance`, plus extension fields `runId`, `workspaceId`, `idempotencyKey`, `validation` for field-level rejections). Exception-handler functions that translate every `RunController` and `Validator` error class to a single `application/problem+json` envelope (RFC 7807). Locked taxonomy: `workflow.run_not_found` → 404, `workflow.run_state_conflict` → 409, `workflow.workflow_runtime_unavailable` → 503, `workflow.validator.workflow_version_not_found` → 404 (mapped from `CatalogClient` 404), `workflow.validator.inputs_schema_error` → 422, `workflow.validator.idempotency_conflict` → 409, `workflow.validator.workspace_unauthorized` → 403, `workflow.api.bad_request` → 400 catch-all.
+  - `tests/api/test_errors.py` — every documented kind round-trips through the handler, the wire body matches `application/problem+json` content-type, extension fields are preserved.
 - **Acceptance criteria**:
-  - Same `(run_id, step_id, attempt)` produces byte-equal `to_str()` across 500 calls.
-  - `attempt < 1` raises `ValueError`.
-  - Round-trip `from_str(triple.to_str()) == triple` holds for 200 Hypothesis examples.
-  - Coverage on `steps/idempotency.py` = 100 %.
+  - 8 documented kinds each have a dedicated handler test; status code and `type` URI verified.
+  - `register_exception_handlers(app)` is idempotent (safe to call twice in tests).
+  - Coverage on `api/errors.py` = 100 %.
 - **Depends on**: _(none)_.
 - **Complexity**: S.
 
-### `WF-IMPL-048`: Public Step Coordinator error taxonomy
+### `WF-IMPL-062`: API wire Pydantic models
 
 - **Scope**:
-  - `src/custos_workflow/steps/errors.py` — `StepCoordinatorError` base + five locked subclasses:
-    | Class | `kind` | Underlying builtin | Trigger |
-    |---|---|---|---|
-    | `StepKindNotImplementedError` | `step.kind_not_implemented` | `NotImplementedError` | Dispatcher sees a step kind owned by a deferred sub-module (`waitFor`/`for`/`approval`/`workflow`). |
-    | `WithInputResolutionError` | `step.with_input_resolution_error` | `ValueError` | A `with:` CEL expression fails type-check or evaluation. Wraps the underlying `custos_cel.CelError`. |
-    | `ConnectorBindError` | `step.connector_bind_error` | `RuntimeError` | `ConnectorClient.bind_for_step` fails (RPC error, slot resolution failure). |
-    | `ActivityScheduleError` | `step.activity_schedule_error` | `RuntimeError` | `ActivityRuntimeClient.schedule_activity` raises before returning an envelope. |
-    | `RetryBudgetExhaustedError` | `step.retry_budget_exhausted` | `RuntimeError` | Retry driver detects `attempt >= maxAttempts` after a `do:retry` decision. Carries the last failure envelope. |
-  - Every error: `to_dict()` JSON-safe with stable key ordering; structured `__repr__`; hashable; carries `run_id` / `step_id` when available.
-  - `tests/steps/test_errors.py` — every class + every `kind` round-trips through `to_dict()`; subclass relationships hold; `LOCKED_STEP_KINDS` frozenset matches the table.
+  - `src/custos_workflow/api/models.py` — `StartRunRequest` (`workflow_version_id`, `inputs`, `idempotency_key?` — body field; the wire camelCase / snake_case mapping uses `ConfigDict(populate_by_name=True, alias_generator=to_camel)`), `StartRunResponse` / `RunRefResponse` (`run_id`, `status`, `workspace_id`, `workflow_version_id`, `started_at?`), `RunResponse` (full run + `Step[]` timeline + `inputs` + `outputs?`), `StepResponse` (per-step state + `attempts[]` summary), `CancelRunRequest` (`reason?`), `RaiseExternalEventRequest` (`event_name`, `payload`, `idempotency_key?`), `RunListResponse` + `RunListQuery` (status filter, `workflow_version_id` filter, page cursor + limit).
+  - `tests/api/test_models.py` — JSON round-trip for every model; alias generator produces wire camelCase; `extra="forbid"` rejects unknown fields; serialization tag on every request model.
 - **Acceptance criteria**:
-  - `custos_workflow.steps.errors.LOCKED_STEP_KINDS` is a `frozenset` of exactly the five locked strings.
-  - 100 % coverage on `steps/errors.py`.
-- **Depends on**: _(none)_.
+  - All request / response shapes documented in design.md § Public Interface have a corresponding Pydantic model exported from `api.models`.
+  - 100 % round-trip coverage; unknown fields rejected.
+- **Depends on**: `WF-IMPL-061`.
 - **Complexity**: S.
 
-## Phase B — Outbound client boundaries
-
-### `WF-IMPL-049`: `ActivityRuntimeClient` Protocol + result envelope
+### `WF-IMPL-063`: Validator package + Idempotency-Key ledger
 
 - **Scope**:
-  - New package `src/custos_workflow/clients/__init__.py`.
-  - `src/custos_workflow/clients/activity_runtime.py`:
-    - `ActivityRuntimeClient` runtime-checkable Protocol: `schedule_activity(request: ScheduleActivityRequest) -> ActivityResultEnvelope` (sync — matches the `StepHandler.execute` sync contract; the production adapter yields through `ctx.call_activity`).
-    - `ScheduleActivityRequest` frozen dataclass: `run_id`, `step_id`, `attempt`, `activity_ref`, `inputs` (mapping), `connector_contexts` (mapping `slot_name → ConnectorContext`), `deadline` (datetime).
-    - `ActivityResultEnvelope` frozen dataclass: `class_` (`Literal["success", "retryable", "permanent", "cancelled"]`), `outputs` (mapping or `None`), `error` (mapping or `None` — `{kind, message, code, codePrefix, retryAfter?}`), `attempt`.
-    - `cancel_activity(run_id, step_id) -> None`.
-    - `NoopActivityRuntimeClient` test default that raises `NotImplementedError`; tests wire a `FakeActivityRuntimeClient` that returns canned envelopes.
-  - `tests/clients/test_activity_runtime.py` — Protocol runtime check; envelope immutability; round-trip a representative envelope through dataclass `replace`.
+  - New package `src/custos_workflow/validator/__init__.py`.
+  - `src/custos_workflow/validator/errors.py` — `ValidatorError` base + 4 locked subclasses (`WorkflowVersionNotFoundError`, `InputsSchemaError`, `IdempotencyConflictError`, `WorkspaceUnauthorizedError`); each with a locked `kind` string consumed by `api/errors.py`.
+  - `src/custos_workflow/validator/idempotency_ledger.py` — `IdempotencyLedger` Protocol (`record_or_replay(workspace_id, idempotency_key, request_fingerprint) -> LedgerEntry`); `InMemoryIdempotencyLedger` with `WF_IDEMPOTENCY_KEY_TTL` (default `PT24H`, design.md § Configuration); deterministic `request_fingerprint = sha256(workflow_version_id || canonical_json(inputs))`. Returns hit (replay) on `(workspace_id, idempotency_key)` if fingerprint matches; raises `IdempotencyConflictError` on fingerprint mismatch within TTL window.
+  - `src/custos_workflow/validator/inputs.py` — `validate_inputs_against_schema(inputs, schema)` using `jsonschema` (already a workflow-service dep through Pydantic / Catalog client); raises `InputsSchemaError` with the failing JSON Pointer.
+  - `src/custos_workflow/validator/service.py` — `StartRunValidator` orchestrator: looks up `WorkflowVersion` via `CatalogClient` (already wired through `RunController`), checks workspace match against `CallContext`, runs inputs schema match, consults ledger; returns a `ValidatedStartRun` value object the API hands to `RunController.start_run`.
+  - `tests/validator/test_idempotency_ledger.py`, `tests/validator/test_inputs.py`, `tests/validator/test_service.py` — Hypothesis tests for ledger TTL semantics + fingerprint determinism; positive + negative inputs schema cases; service-level error mapping.
 - **Acceptance criteria**:
-  - Protocol is `runtime_checkable`.
-  - `ActivityResultEnvelope.class_` is constrained to the four design.md values (Literal type asserted by mypy in tests).
-  - Coverage on `clients/activity_runtime.py` = 100 %.
-- **Depends on**: _(none)_.
+  - Same `(workspace_id, idempotency_key, fingerprint)` → ledger hit; different fingerprint within TTL → `IdempotencyConflictError`.
+  - `validate_inputs_against_schema` produces a stable JSON-pointer string for nested failures (Hypothesis test, 200 examples).
+  - `StartRunValidator` raises `WorkspaceUnauthorizedError` when `CallContext.workspace_id != path workspace`.
+  - Coverage on `validator/` = 95 %+.
+- **Depends on**: `WF-IMPL-062`.
 - **Complexity**: M.
 
-### `WF-IMPL-050`: `ConnectorClient` Protocol + `ConnectorContext`
+## Phase B — Public REST surface
+
+### `WF-IMPL-064`: FastAPI dependency factories
 
 - **Scope**:
-  - `src/custos_workflow/clients/connector.py`:
-    - `ConnectorClient` runtime-checkable Protocol: `bind_for_step(request: BindForStepRequest) -> BindForStepResponse`.
-    - `BindForStepRequest`: `step_key` (string), `slots` (tuple of `SlotSpec(name, connector_ref, capabilities)`).
-    - `BindForStepResponse`: `contexts` (mapping `slot_name → ConnectorContext`).
-    - `ConnectorContext` frozen dataclass: `slot_name`, `handle` (opaque string the sidecar dereferences), `expires_at` (datetime), `connector_kind` (string).
-    - `NoopConnectorClient` raising `NotImplementedError`; `FakeConnectorClient` returning canned contexts.
-  - `tests/clients/test_connector.py` — Protocol runtime check; immutability; `ConnectorContext` is hashable.
+  - `src/custos_workflow/api/dependencies.py` — `get_run_controller(request) -> RunController` (off `app.state.run_components`), `get_validator(request) -> StartRunValidator`, `get_call_context(request) -> CallContext` (off `request.state.call_context`), `WorkspacePath` param dependency (`Path(...)` with regex from design.md § Public Interface).
+  - `tests/api/test_dependencies.py` — every factory returns the bound component; missing `app.state.run_components` raises a clear 503.
 - **Acceptance criteria**:
-  - Protocol is `runtime_checkable`.
-  - `BindForStepResponse.contexts` is a `MappingProxyType` snapshot (caller can't mutate).
-  - Coverage on `clients/connector.py` = 100 %.
-- **Depends on**: _(none)_.
+  - Dependencies are FastAPI-Depends-compatible and reusable across `routes/` and `rpc.py`.
+  - Missing state raises 503 with `workflow.api.bad_request` body, not a 500.
+- **Depends on**: `WF-IMPL-063`.
 - **Complexity**: S.
 
-## Phase C — Step Coordinator core
-
-### `WF-IMPL-051`: `WithInputResolver` — evaluate `with:` CEL expressions
+### `WF-IMPL-065`: REST routes — runs
 
 - **Scope**:
-  - `src/custos_workflow/steps/with_inputs.py`:
-    - `WithInputResolver` class; `resolve(node: ExecutionNode, scope: BindingScope, clock: Clock) -> Mapping[str, Any]`.
-    - Walks the node's `CallSiteKind.WITH` typed call-sites (already attached by the compiler in WF-IMPL-020), evaluates each via `custos_cel.evaluate`, and assembles the resolved input mapping for `ScheduleActivityRequest.inputs`.
-    - Any underlying `custos_cel.CelError` is wrapped in `WithInputResolutionError` carrying `step_id` + source position + the original `kind` on `.cause_kind`.
-  - `tests/steps/test_with_inputs.py` — empty `with:` block; nested `${{ }}` placeholder; type error path; evaluation error path; binding scope sees prior step outputs.
+  - `src/custos_workflow/api/routes/__init__.py` — `all_routers` tuple (mirrors catalog-service convention).
+  - `src/custos_workflow/api/routes/runs.py` — `POST /v1/workspaces/{ws}/runs` (start; reads `Idempotency-Key` HTTP header per RFC, body-field `idempotencyKey` overrides header; returns 202 with `RunRefResponse`); `GET /v1/workspaces/{ws}/runs` (list with filters + cursor); `GET /v1/workspaces/{ws}/runs/{runId}` (full `RunResponse` with timeline); `POST /v1/workspaces/{ws}/runs/{runId}:cancel` (202 on success).
+  - Wires every route through `StartRunValidator` (where applicable) → `RunController` → response model.
+  - `tests/api/routes/test_runs.py` — happy path for each verb against `httpx.AsyncClient(app=app)` with fake runtime + fake catalog client; header-vs-body idempotency precedence; replay returns original `runId`; conflict on divergent inputs returns 409 with `idempotency_conflict` body.
 - **Acceptance criteria**:
-  - All five locked CEL `kind`s round-trip into `WithInputResolutionError` with the underlying `kind` preserved on `.cause_kind`.
-  - Resolver is pure (no I/O); receives the immutable per-run output bag via scope.
-  - Coverage on the module = 100 %.
-- **Depends on**: _(none)_.
+  - Every endpoint matches the design.md § Public Interface — REST API table (path, method, status code, body shape).
+  - `Idempotency-Key` header fallback works; body field takes precedence per design note.
+  - Replay returns the original `run_id` with status from the persisted record.
+- **Depends on**: `WF-IMPL-064`.
 - **Complexity**: M.
 
-### `WF-IMPL-052`: `LetStepHandler` — inline expression evaluation
+### `WF-IMPL-066`: REST routes — steps + log-stream stub
 
 - **Scope**:
-  - `src/custos_workflow/steps/let_step.py`:
-    - `LetStepHandler.execute(ctx, graph, step_id) -> StepResult` matching the existing `StepHandler` Protocol.
-    - Walks the `LetStep.let` mapping, evaluates each `name: expr` pair via `custos_cel.evaluate` against a `BindingScope` derived from `ctx.outputs` + the per-`let` overlay (later expressions in the same block see earlier `let.<name>` bindings, per design.md § `let` Primitive).
-    - Returns `StepSucceeded(outputs={...})`; never schedules an activity, never binds a connector.
-    - Wraps CEL errors as `StepFailed(envelope={kind: "step.with_input_resolution_error", …})` — `let:` errors map to the same taxonomy because they're semantically identical (CEL evaluation failure inside a step body).
-  - Today the `NoopStepHandler` in `runs/step_handler.py` already handles `let:` inline — this task **moves** that logic into the dedicated handler and updates the `NoopStepHandler` to delegate to it.
-  - `tests/steps/test_let_step.py` — single-binding; multi-binding with `let.<name>` cross-reference; type error; replay-determinism (two evaluations under same `FixedClock` produce byte-equal outputs).
+  - `src/custos_workflow/api/routes/steps.py` — `GET /v1/workspaces/{ws}/runs/{runId}/steps/{stepId}` (full `StepResponse`); `GET /v1/workspaces/{ws}/runs/{runId}/steps/{stepId}/logs` returns **501 Not Implemented** with body `{type: "...not_implemented", detail: "Step log streaming is delegated to the Observability Service (COMP-009); deferred until the Full Observability Client integration sub-module lands."}`.
+  - `tests/api/routes/test_steps.py` — step fetch returns the persisted attempts; log endpoint returns 501 with the locked body.
 - **Acceptance criteria**:
-  - `let.a + let.b` reads `a` then `b` from the same-step overlay, not from `steps.*.outputs`.
-  - Two `execute()` calls under the same `FixedClock` produce byte-equal `StepSucceeded.outputs`.
-  - Coverage on `steps/let_step.py` = 100 %.
-- **Depends on**: WF-IMPL-051.
+  - Step fetch round-trips state for completed + in-flight steps.
+  - Log endpoint returns exactly 501 with the documented body; no streaming attempted.
+- **Depends on**: `WF-IMPL-064`.
 - **Complexity**: S.
 
-### `WF-IMPL-053`: Retry decision driver — `on_error` route walk + effective delay
+## Phase C — Internal RPC inbound surface
+
+### `WF-IMPL-067`: Internal RPC routes — `StartRun` / `CancelRun`
 
 - **Scope**:
-  - `src/custos_workflow/steps/retry_driver.py`:
-    - `RetryDecision` frozen union: `RetryNow(delay_seconds, next_attempt)` / `Skip(reason)` / `FailNow(envelope)`.
-    - `decide(node, envelope, attempt, prev_delay_seconds, rng) -> RetryDecision`:
-      1. Walk `node.on_error_routes` (already compiled — see [`src/services/workflow-service/src/custos_workflow/on_error/compile.py`](../../../src/services/workflow-service/src/custos_workflow/on_error/compile.py)) in declaration order; first match wins.
-      2. On a `do:retry` arm: if `attempt + 1 > policy.max_attempts` → `FailNow` with a `step.retry_budget_exhausted` envelope; else compute `effectiveDelay`.
-      3. Effective delay: `jitteredBackoff` per `policy.backoff.strategy` × `policy.jitter`, then `max(jitteredBackoff, retryAfter)` when `policy.respect_retry_after` is true AND envelope carries a `retryAfter` AND `class != cancelled/permanent`. Mirror the design.md § Backoff formulas + § Jitter strategies tables byte-for-byte.
-    - `emit_retry_scheduled(node, decision, publisher)` — emits the `step.retry_scheduled` lifecycle event per design.md § Runtime behavior.
-  - `tests/steps/test_retry_driver.py`:
-    - All four `class` values routed correctly under the implicit-policy default and under explicit `on_error:` blocks.
-    - All three `backoff.strategy` × all four `jitter` strategies produce delays within their documented intervals (50 Hypothesis examples per combination, `rng=Random(0)` for determinism).
-    - `retryAfter` clamp: `effectiveDelay >= retryAfter` whenever `respectRetryAfter=true` and the class allows it.
-    - `cancelled` short-circuits to `FailNow` even when `on_error:` declares a `do:retry` arm for it.
+  - `src/custos_workflow/api/rpc.py` — `POST /internal/runs:start` (`StartRun` RPC, body = `StartRunRequest` + `workspaceId`), `POST /internal/runs/{runId}:cancel` (`CancelRun` RPC). Routes share the same `StartRunValidator` + `RunController` plumbing as the public surface; the `/internal/` prefix is distinct so the Helm chart / mesh can pin mTLS-only access (actual mTLS gate is out of scope — comes with the API Gateway integration).
+  - `tests/api/test_rpc.py` — Trigger-Service-shaped `StartRun` call succeeds; idempotent replay returns the same `runId`; cancel-by-id works for an in-flight run.
 - **Acceptance criteria**:
-  - Delay-bound assertions from design.md pinned as a single table-driven test.
-  - `RetryBudgetExhaustedError` envelope carries the last underlying `code` / `codePrefix` / `class`.
-  - Coverage on `steps/retry_driver.py` ≥ 98 %.
-- **Depends on**: WF-IMPL-048.
+  - Internal `StartRun` accepts the same body shape as the public POST, plus an explicit `workspaceId` (no path param at the `/internal/` prefix).
+  - `CancelRun` dispatches to `RunController.cancel_run` and returns 202 on success, 404 on unknown run id.
+- **Depends on**: `WF-IMPL-065`.
 - **Complexity**: M.
 
-### `WF-IMPL-054`: `ActivityStepHandler` — full activity step lifecycle
+### `WF-IMPL-068`: `RaiseExternalEvent` bridge (Trigger Service inbound RPC)
 
 - **Scope**:
-  - `src/custos_workflow/steps/activity_step.py`:
-    - `ActivityStepHandler(activity_client, connector_client, idempotency_tracker, retry_driver, publisher, clock)` — concrete `StepHandler.execute` for `StepKind.ACTIVITY`.
-    - Body (matches design.md § Operation: Step Execution sequence diagram):
-      1. Resolve `with:` inputs via `WithInputResolver`.
-      2. Start `attempt = 1`. Loop:
-         - `triple = idempotency_tracker.derive(run_id, step_id, attempt)`.
-         - `contexts = connector_client.bind_for_step(...)` (fresh lease per attempt).
-         - `publisher.emit_step_started(run_id, step_id, attempt)`.
-         - `envelope = activity_client.schedule_activity(ScheduleActivityRequest(...))`.
-         - Map envelope `class`:
-           - `success` → `publisher.emit_step_completed(...)` → return `StepSucceeded(envelope.outputs)`.
-           - `retryable` / `permanent` / `cancelled` → `retry_driver.decide(...)`:
-             - `RetryNow(delay)` → `ctx.create_timer(delay)`; `attempt += 1`; loop.
-             - `Skip(reason)` → `publisher.emit_step_skipped(...)` → return `StepSkipped(reason)`.
-             - `FailNow(envelope)` → `publisher.emit_step_failed(...)` → return `StepFailed(envelope)`.
-  - `tests/steps/test_activity_step.py` — success on first attempt; retryable → retry → success on second; retryable → policy exhausted → `StepFailed`; permanent → no retry; cancelled → immediate fail; `with:` resolution failure; `bind_for_step` failure; replay determinism (byte-equal results under same fakes + `FixedClock`).
+  - Extend `custos_workflow.runs.controller.RunController` with `async def raise_external_event(*, run_id, step_id, event_name, payload, idempotency_key) -> None` that calls the Dapr Workflow wrapper's `raise_event` primitive idempotent on `(runId, stepId, eventName, idempotencyKey)` — dedup key persisted via the existing `RunStore` (new column / table TBD; minimal addition since no historical state is required, only a "seen recently" set with the same TTL window as `WF_IDEMPOTENCY_KEY_TTL`).
+  - `src/custos_workflow/api/rpc.py` — `POST /internal/runs/{runId}/steps/{stepId}:raiseEvent` route mapping the RPC body to the controller method.
+  - `tests/runs/test_raise_external_event.py` + `tests/api/test_rpc_raise_event.py` — replay of the same `(runId, stepId, eventName, idempotencyKey)` produces a single Dapr call; calling on an unknown `runId` returns 404; calling on a terminal-state run returns 409.
 - **Acceptance criteria**:
-  - Every code-path in design.md § Operation: Step Execution sequence diagram has at least one test.
-  - Coverage on `steps/activity_step.py` ≥ 95 %.
-- **Depends on**: WF-IMPL-047, WF-IMPL-049, WF-IMPL-050, WF-IMPL-051, WF-IMPL-053.
-- **Complexity**: L.
+  - Duplicate `(runId, stepId, eventName, idempotencyKey)` within TTL → one Dapr `raise_event` call (verified by the fake runtime).
+  - Method is safe to call even when no `waitFor:` step is currently buffering the event (Dapr stores it on the instance — confirmed against the Dapr Workflow Python SDK semantics in the test harness).
+  - This task is the public bridge that the Resume Subscription Manager sub-module will load-bear on; until then the route is reachable but does not produce any visible step progress.
+- **Depends on**: `WF-IMPL-067`.
+- **Complexity**: M.
 
-## Phase D — Coordinator integration
+## Phase D — App wiring + observability
 
-### `WF-IMPL-055`: `StepCoordinator` — concrete `StepHandler` dispatcher
+### `WF-IMPL-069`: Mount routers + exception handlers in `create_app`
 
 - **Scope**:
-  - `src/custos_workflow/steps/coordinator.py`:
-    - `StepCoordinator(activity_handler, let_handler)` implements `StepHandler.execute(ctx, graph, step_id)`.
-    - Dispatch table keyed by the node's `PrimitiveHandler` tag (see [`src/services/workflow-service/src/custos_workflow/graph/model.py`](../../../src/services/workflow-service/src/custos_workflow/graph/model.py)):
-      | `PrimitiveHandler` | Routed to |
-      |---|---|
-      | `EXPRESSION_INLINE` (`let:`) | `LetStepHandler` |
-      | `ACTIVITY_RUNTIME` (`activity:`) | `ActivityStepHandler` |
-      | `RUN_CONTROLLER_TIMER` (`wait:`) | Defensive raise — this kind belongs to the Run Controller, not the dispatcher. |
-      | `SUB_ORCHESTRATION` (`for:` / `approval:` / `workflow:`) | `StepFailed(envelope={kind: "step.kind_not_implemented", …})`. |
-    - Build-time exhaustiveness: a one-line `assert` over `PrimitiveHandler` mirrors WF-IMPL-035's `_STEP_RESULT_VARIANTS` guard so a new handler tag must extend the dispatch table.
-  - `tests/steps/test_coordinator.py` — every dispatch arm; `wait:` raises; `SUB_ORCHESTRATION` returns `StepFailed` with the deferred-kind envelope.
+  - `src/custos_workflow/app.py` — call `register_exception_handlers(app)` and `app.include_router(...)` for every router from `api.routes.all_routers` + `api.rpc.router`; tag the public surface with `tags=["runs", "steps"]` and the internal surface with `tags=["internal"]` (drives OpenAPI grouping).
+  - Update `src/custos_workflow/_telemetry.py` if needed to extend the OTel `RequestsInstrumentor` scope.
+  - `tests/app/test_app.py` (extension): asserts every documented route is in `app.routes`; asserts `application/problem+json` content-type on a forced 404; OpenAPI `paths` dict contains the documented endpoints.
 - **Acceptance criteria**:
-  - Coordinator passes `isinstance(coord, StepHandler)`.
-  - Adding a hypothetical `PrimitiveHandler.FOO` member without extending the table fails a unit test.
-  - Coverage on `steps/coordinator.py` = 100 %.
-- **Depends on**: WF-IMPL-048, WF-IMPL-052, WF-IMPL-054.
+  - `create_app()` returns an app with the full public + internal surface mounted.
+  - OpenAPI `/openapi.json` lists every documented endpoint with the right tag.
+- **Depends on**: `WF-IMPL-065`, `WF-IMPL-066`, `WF-IMPL-067`, `WF-IMPL-068`.
 - **Complexity**: S.
 
-### `WF-IMPL-056`: `step.*` lifecycle event emission
+### `WF-IMPL-070`: OTel HTTP-server observability
 
 - **Scope**:
-  - `src/custos_workflow/steps/events.py`:
-    - `StepLifecyclePublisher` Protocol: `emit_step_started`, `emit_step_completed`, `emit_step_failed`, `emit_step_skipped`, `emit_step_waiting`, `emit_step_retry_scheduled`.
-    - `LifecycleEventPublisherAdapter` — adapts the existing `runs.controller.LifecycleEventPublisher` (the `workflow.*` publisher) so we get one HTTP path. Adapter constructs the per-event envelope (`kind`, `runId`, `stepId`, `attempt`, `occurredAt`, optional `outputs` / `error` / `retry` block) per design.md § Dapr Pub/Sub Publications, dedup keyed on `(run_id, step_id, attempt, kind)`.
-  - `tests/steps/test_events.py` — every emit method round-trips through `InMemoryLifecycleEventPublisher`; dedup absorbs replays; envelope schema asserted byte-for-byte against a fixture.
+  - Extend the existing OTel scaffolding (WF-IMPL-044 / WF-IMPL-058) with HTTP-server spans (`http.server.duration` histogram), per-endpoint latency histogram tagged by `http.route`, error counter tagged by `wf.error.kind` (the locked taxonomy from WF-IMPL-061), idempotency-cache hit/miss counter (from the Validator ledger).
+  - Span attributes: `wf.run.id` (start / cancel / get), `wf.workspace.id`, `wf.workflow_version.id`, `wf.idempotency.outcome ∈ {fresh, replay, conflict}`.
+  - `tests/api/test_observability.py` — span attributes + counter increments asserted via the in-memory OTel meter / tracer.
 - **Acceptance criteria**:
-  - Locked `step.*` event kinds (`step.started`, `step.completed`, `step.failed`, `step.skipped`, `step.waiting`, `step.retry_scheduled`) exported as a `frozenset`.
-  - Envelope JSON ordering is stable (lexical key order).
-  - Coverage on `steps/events.py` ≥ 95 %.
-- **Depends on**: WF-IMPL-055.
+  - Every public + internal route emits exactly one server span tagged with the documented attributes.
+  - Idempotency-cache outcome counter ticks for fresh / replay / conflict — one increment per request.
+- **Depends on**: `WF-IMPL-069`.
 - **Complexity**: M.
 
-### `WF-IMPL-057`: FastAPI lifespan worker wiring
+## Phase E — Verification + documentation
+
+### `WF-IMPL-071`: Unit + integration test suite (≥90 % coverage gate)
 
 - **Scope**:
-  - `src/custos_workflow/app.py` — extend the existing FastAPI lifespan (set up by WF-IMPL-043) so the `WorkflowRuntime` registers `make_run_orchestrator(step_handler=StepCoordinator(...))` instead of today's `NoopStepHandler`. Wire the production `ActivityRuntimeClient` / `ConnectorClient` **stubs** (the test doubles from WF-IMPL-049/050 — real Dapr-backed adapters land in the deferred sub-modules) so production startup doesn't crash before those land. Document the stub-only status in the README.
-  - `tests/test_app_lifespan.py` — additional assertion that the orchestrator's `step_handler` is a `StepCoordinator` instance, not the `Noop` default.
+  - End-to-end suite under `tests/integration/test_api_end_to_end.py` driving the full app via `httpx.AsyncClient(app=create_app(run_components=fake_components))` — start run → poll status → cancel → verify lifecycle events + Validator ledger state.
+  - Negative path suites — validator errors, run-state conflicts, runtime-unavailable, unknown workspace, header-vs-body idempotency precedence.
+  - Coverage budget pinned at `--cov-fail-under=90` (matches existing workflow-service floor).
 - **Acceptance criteria**:
-  - `pytest` exercises both the existing lifespan path and the new step-handler wiring.
-  - README "Status" block updated to mention the Step Coordinator landing + stub clients.
-- **Depends on**: WF-IMPL-055.
-- **Complexity**: S.
-
-## Phase E — Observability, verification, docs
-
-### `WF-IMPL-058`: OTel observability hooks for the Step Coordinator
-
-- **Scope**:
-  - Extend `src/custos_workflow/_telemetry.py` with:
-    - Spans: `custos_workflow.step.execute`, `custos_workflow.step.bind_connectors`, `custos_workflow.step.schedule_activity`, `custos_workflow.step.retry_decision`.
-    - Histograms: `custos_workflow_step_execute_duration_ms` (labelled `step_kind`, `outcome`), `custos_workflow_activity_schedule_duration_ms` (labelled `step_kind`, `class`), `custos_workflow_step_attempts_total` (counter, labelled `step_kind`, `final_class`).
-    - Counter: `custos_workflow_step_errors_total` (labelled `kind` — closed set = `LOCKED_STEP_KINDS` from WF-IMPL-048).
-  - All metrics follow the existing `instrument(...)` helper pattern (no-op when SDK absent).
-  - `tests/test_observability_steps.py` — in-memory exporter; every (handler, outcome) combination produces the expected metric sample + span status.
-- **Acceptance criteria**:
-  - Error counter only emits `kind` values present in `LOCKED_STEP_KINDS`.
-  - Span attribute schema matches the documented set (one assertion per attribute).
-  - Coverage delta on `_telemetry.py` does not regress the existing floor.
-- **Depends on**: WF-IMPL-056, WF-IMPL-057.
+  - All happy + failure paths from design.md § Failure Modes have at least one test.
+  - Total workflow-service coverage stays ≥ 90 % after this task lands.
+- **Depends on**: `WF-IMPL-070`.
 - **Complexity**: M.
 
-### `WF-IMPL-059`: Unit + integration test suite (≥ 90 % coverage gate)
+### `WF-IMPL-072`: Developer documentation — `docs/developers/workflow-api.md`
 
 - **Scope**:
-  - `tests/integration/test_step_coordinator_end_to_end.py` — drive the full orchestrator using `FakeWorkflowRuntime` + `FakeActivityRuntimeClient` + `FakeConnectorClient` + a real `RunStore` + a real `LifecycleEventPublisher` (in-memory) + the real `StepCoordinator`. Scenarios:
-    1. Single activity step success → `RunRecord.status == "succeeded"` + ordered `workflow.started`, `step.started`, `step.completed`, `workflow.completed` events.
-    2. Multi-step graph (`let → activity → let`) with cross-step `${{ steps.X.outputs.* }}` references.
-    3. Activity retry loop (envelope = retryable for attempts 1–2, success on 3) → `step.retry_scheduled` fired twice; final `step.completed`.
-    4. Retry budget exhaustion → `RunRecord.status == "failed"` + `step.failed` with `step.retry_budget_exhausted` envelope.
-    5. Cancelled mid-flight → `cancel_run` during `wait:` between retries → orchestrator returns `RunOutput(status="cancelled", …)`.
-    6. Replay determinism — drive the orchestrator twice with the same `FakeWorkflowRuntime` history snapshot and assert byte-equal event stream + byte-equal final `RunRecord`.
-  - `pyproject.toml` — ensure the `--cov-fail-under=90` gate applies to the new `steps/` + `clients/` packages (≥ 90 % each).
+  - New doc with audience + cross-references + REST surface (mirrors design.md § Public Interface tables) + RPC surface + Validator semantics + locked error taxonomy table + idempotency model (header / body precedence + TTL + fingerprint + replay vs conflict) + log-stream stub explanation + extension points + worked `curl` + `httpx` examples.
+  - Mermaid sequence: caller → API Adapter → Validator → RunController → Dapr Workflow.
+  - `tests/test_docs_examples_api.py` — extracts every ```yaml``` / ```json``` fence + every documented kind string + every documented endpoint from the markdown and verifies they exhaustively match the live `api.models` / `api.errors` / `api.routes` surface (mirrors the WF-IMPL-060 pattern).
+  - Update `docs/developers/README.md` index row.
+  - Update `src/services/workflow-service/README.md` status block.
 - **Acceptance criteria**:
-  - All six integration scenarios pass.
-  - Coverage report: `steps/` ≥ 90 %, `clients/` ≥ 90 %, package total ≥ 90 % (existing floor preserved).
-- **Depends on**: WF-IMPL-058.
-- **Complexity**: L.
-
-### `WF-IMPL-060`: Developer documentation — `docs/developers/workflow-step-coordinator.md`
-
-- **Scope**:
-  - New `docs/developers/workflow-step-coordinator.md` modelled on the existing [`docs/developers/workflow-run-controller.md`](../../../docs/developers/workflow-run-controller.md). Sections:
-    1. Sub-module overview + boundary with Run Controller and the deferred sub-modules.
-    2. Dispatch table (`PrimitiveHandler` → handler).
-    3. Activity step lifecycle (sequence diagram lifted from design.md).
-    4. Retry policy application (precedence overlay + backoff/jitter + `retryAfter` interaction, with worked examples for each backoff/jitter combination).
-    5. Idempotency triple — derivation, wire form, downstream usage (ARM / Connector lease / audit correlation).
-    6. `step.*` event taxonomy — every kind + envelope schema + producer-side dedup rule.
-    7. Locked error taxonomy table (one row per `LOCKED_STEP_KINDS` entry).
-    8. Configuration knobs.
-    9. Extension points — how the deferred sub-modules slot in on top of the existing Protocols.
-  - Update [`docs/developers/README.md`](../../../docs/developers/README.md) index.
-  - `tests/test_docs_step_coordinator_examples.py` — every CEL source string in the doc is parsed, type-checked, and evaluated against representative bindings (same pattern as `test_docs_examples.py`).
-- **Acceptance criteria**:
-  - Doc cross-references `design.md` § Internal Structure / § Operation: Step Execution / § Retry Policy.
-  - All worked examples are exercised by the doc-examples test.
-  - Coverage on any new docstrings ≥ 90 %.
-- **Depends on**: WF-IMPL-059.
+  - Doc-examples test ticks for every documented endpoint, every documented kind, every documented model.
+  - All ```json``` request / response examples are valid against the live Pydantic models.
+- **Depends on**: `WF-IMPL-071`.
 - **Complexity**: M.
 
-## Out of scope (deferred sub-modules)
+## Out of scope (deferred)
 
-The following sub-modules are tracked in [`todos.md`](todos.md) § Deferred sub-modules and will each get their own implementation plan when prioritised:
-
-- **Resume Subscription Manager** (`waitFor:` step kind + Trigger Service client + `ResumeSubscriptionMirror` persistence + replay re-registration).
-- **Sub-Orchestration Manager** (`for:` / `approval:` / `workflow:` step kinds).
-- **API Adapter + Validator** (public REST + inbound RPC + idempotency dedup window + inputs schema match).
-- **Real ARM Client + Connector Client adapters** (Dapr Service Invocation bridges behind the Protocols this plan ships).
-- **Full Observability Client integration** (cross-component event taxonomy lock per TODO-001).
+- **`waitFor:` step kind + Resume Subscription Manager** — `RaiseExternalEvent` ships as a thin bridge here; the buffering side (`waitFor:` step kind + `ResumeSubscriptionMirror` replay) is its own sub-module.
+- **API Gateway mTLS gating of the `/internal/` prefix** — the prefix and tag ship here; the mesh / mTLS policy ships with the API Gateway integration.
+- **Real Catalog Service HTTP client** — the validator continues to use the `CatalogClient` Protocol the Run Controller already exposes; the real Dapr Service Invocation adapter is part of the deferred "Real ARM / Connector / Catalog client adapters" sub-module.
+- **`GET …/steps/{stepId}/logs` actual streaming** — returns 501 here; ships with "Full Observability Client integration".
+- **`(workspaceId, idempotencyKey)` ledger durability** — `InMemoryIdempotencyLedger` is what ships; the Postgres-backed adapter (`MetadataStoreProvider`-resident) is a separate follow-up issue filed post-tracker.
 
 ## Open questions
 
-1. Should `LetStepHandler` failures map to a *separate* `step.let_evaluation_error` kind, or share `step.with_input_resolution_error` as proposed? The plan currently reuses the latter to keep the taxonomy tight; flip if distinct kinds are preferred.
-2. Should the `StepCoordinator` dispatcher return `StepFailed(step.kind_not_implemented)` for the four deferred kinds (current proposal) or raise an exception that the orchestrator converts to a run-level failure? Both are workable; the `StepFailed` route keeps the run alive long enough to capture the `step.failed` event in audit.
-3. Coverage floor for `steps/activity_step.py` — proposed at 95 % because retry-loop branches are easy to under-cover; lower to 90 % to match the package floor exactly if preferred.
+_(All resolved during plan approval on 2026-05-31: tracker slug = `WF-IMPL-000-API-ADAPTER`; durable ledger split to a follow-up issue; tracker auto-closes via `Closes #NNN` linkage on the final task PR — same convention as WF-IMPL-000-STEP-COORDINATOR.)_
