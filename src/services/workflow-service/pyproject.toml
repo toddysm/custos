@@ -70,6 +70,10 @@ dev = [
     "ruff>=0.4",
     "mypy>=1.10",
     "types-PyYAML>=6.0",
+    # Stubs for the runtime jsonschema dependency added in WF-IMPL-063
+    # for inputs JSON-Schema validation. The matching upstream version
+    # (4.21+) is pinned in `dependencies` above.
+    "types-jsonschema>=4.21",
     # OTel SDK is dev-only so tests can install in-memory exporters when
     # WF-IMPL-027 lands. The library itself only depends on the API.
     "opentelemetry-sdk>=1.20,<2",
