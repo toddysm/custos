@@ -1,6 +1,6 @@
 # TODOs: Workflow Service
 
-Last Updated: 2026-05-31 (WF-IMPL-061..072 filed for the API Adapter + Validator sub-module; tracker #459)
+Last Updated: 2026-05-31 (WF-IMPL-061 merged via PR #460; WF-IMPL-062..072 outstanding under tracker #459)
 
 ## Open
 
@@ -23,7 +23,7 @@ Fifth sub-module: **API Adapter + Validator**, packaged inside the service host 
 
 ### Phase A — Foundations (errors, models, validator)
 
-- [P] WF-IMPL-061 (#447): Public API error taxonomy + RFC 7807 problem envelope. PR: #460.
+- [x] WF-IMPL-061 (#447): Public API error taxonomy + RFC 7807 problem envelope. Merged: PR #460.
 - [F] WF-IMPL-062 (#448): API wire Pydantic models (depends on #447).
 - [F] WF-IMPL-063 (#449): Validator package + Idempotency-Key ledger (depends on #448).
 
