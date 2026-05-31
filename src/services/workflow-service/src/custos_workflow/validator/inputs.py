@@ -34,6 +34,7 @@ See the issue: https://github.com/toddysm/custos/issues/449
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from jsonschema import Draft202012Validator
@@ -41,7 +42,7 @@ from jsonschema import Draft202012Validator
 from custos_workflow.validator.errors import InputsSchemaError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Iterable
 
     from custos_workflow.document.models import InputDefinition
 
@@ -107,8 +108,10 @@ def _format_loc(absolute_path: Iterable[Any]) -> str:
 
     ``absolute_path`` is a :class:`~collections.deque` of path
     segments (strings for object keys, ints for array indices). The
-    output follows RFC 6901: ``/`` for the root, escaped ``/`` and
-    ``~`` characters per the spec.
+    output follows RFC 6901: the root document is the empty string
+    ``""``; non-root pointers are ``/``-separated reference tokens
+    with ``~`` escaped as ``~0`` and ``/`` escaped as ``~1`` per the
+    spec.
 
     Args:
         absolute_path: The validator-context path attribute (an
@@ -168,6 +171,30 @@ def validate_inputs_against_schema(
     validator = Draft202012Validator(dict(schema))
     issues: list[dict[str, Any]] = []
     for error in validator.iter_errors(payload):
+        # jsonschema reports ``additionalProperties`` failures with
+        # ``absolute_path`` pointing at the *parent* object (root in
+        # the typical workflow-inputs case). That hides which key was
+        # unexpected, which is exactly the diagnostic the caller needs.
+        # Recover the offending property names from ``error.message``
+        # (the upstream message is the canonical source — see
+        # ``jsonschema._keywords.additionalProperties``) and emit one
+        # entry per offender pointing at ``<parent>/<key>`` so the
+        # JSON-Pointer ``loc`` matches the field the caller sent.
+        if error.validator == "additionalProperties" and error.validator_value is False:
+            instance = error.instance if isinstance(error.instance, Mapping) else {}
+            declared = set(error.schema.get("properties", {}))
+            extras = sorted(set(instance) - declared)
+            parent_loc = _format_loc(error.absolute_path)
+            for extra in extras:
+                token = str(extra).replace("~", "~0").replace("/", "~1")
+                issues.append(
+                    {
+                        "loc": f"{parent_loc}/{token}",
+                        "code": "additionalProperties",
+                        "message": error.message,
+                    },
+                )
+            continue
         issues.append(
             {
                 "loc": _format_loc(error.absolute_path),

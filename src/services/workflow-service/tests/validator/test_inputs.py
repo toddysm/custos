@@ -119,12 +119,51 @@ def test_validate_rejects_missing_required_with_root_pointer() -> None:
 
 
 def test_validate_rejects_unknown_field() -> None:
-    """``additionalProperties: false`` rejects unknown keys."""
+    """``additionalProperties: false`` rejects unknown keys.
+
+    The pointer must locate the *offending field* (``/extra``), not
+    the parent object, so the diagnostic the caller renders is
+    actionable.
+    """
     schema = derive_inputs_schema({"name": InputDefinition(type="string", required=True)})
     with pytest.raises(InputsSchemaError) as info:
         validate_inputs_against_schema({"name": "alice", "extra": True}, schema)
-    codes = {issue["code"] for issue in info.value.validation}
-    assert "additionalProperties" in codes
+    by_loc = {issue["loc"]: issue for issue in info.value.validation}
+    assert "/extra" in by_loc
+    assert by_loc["/extra"]["code"] == "additionalProperties"
+
+
+def test_validate_emits_one_entry_per_unexpected_field() -> None:
+    """A single ``additionalProperties`` violation with N extras
+    fans out into N pointer entries, sorted deterministically."""
+    schema = derive_inputs_schema({"name": InputDefinition(type="string", required=True)})
+    with pytest.raises(InputsSchemaError) as info:
+        validate_inputs_against_schema({"name": "alice", "b": 1, "a": 2}, schema)
+    locs = [issue["loc"] for issue in info.value.validation]
+    assert locs == ["/a", "/b"]
+    assert all(issue["code"] == "additionalProperties" for issue in info.value.validation)
+
+
+def test_validate_emits_nested_additional_properties_pointer() -> None:
+    """Nested ``additionalProperties`` failures point at
+    ``/<parent>/<extra>`` so the caller can locate the field inside
+    a nested object too."""
+    schema: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "config": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {"port": {"type": "integer"}},
+            },
+        },
+    }
+    with pytest.raises(InputsSchemaError) as info:
+        validate_inputs_against_schema({"config": {"port": 8080, "host": "x"}}, schema)
+    by_loc = {issue["loc"]: issue for issue in info.value.validation}
+    assert "/config/host" in by_loc
+    assert by_loc["/config/host"]["code"] == "additionalProperties"
 
 
 def test_validate_emits_deterministic_issue_order() -> None:

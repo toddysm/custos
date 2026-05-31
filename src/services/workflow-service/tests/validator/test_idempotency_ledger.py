@@ -55,6 +55,27 @@ def test_env_var_name_is_wf_idempotency_key_ttl() -> None:
     assert IDEMPOTENCY_TTL_ENV_VAR == "WF_IDEMPOTENCY_KEY_TTL"
 
 
+def test_iso8601_duration_pattern_byte_equal_to_runs_wait() -> None:
+    """The ledger's ISO-8601 grammar must stay in lockstep with
+    :data:`custos_workflow.runs.wait._ISO8601_DURATION_PATTERN`.
+
+    The header comment in
+    :mod:`custos_workflow.validator.idempotency_ledger` promises this
+    parity; pin it with byte-equality on the pattern source so a
+    silent drift in either module fails CI rather than diverging at
+    runtime.
+    """
+    from custos_workflow.runs.wait import (
+        _ISO8601_DURATION_PATTERN as _WAIT_PATTERN,
+    )
+    from custos_workflow.validator.idempotency_ledger import (
+        _ISO8601_DURATION_PATTERN as _LEDGER_PATTERN,
+    )
+
+    assert _LEDGER_PATTERN.pattern == _WAIT_PATTERN.pattern
+    assert _LEDGER_PATTERN.flags == _WAIT_PATTERN.flags
+
+
 # ---------------------------------------------------------------------------
 # request_fingerprint
 # ---------------------------------------------------------------------------
