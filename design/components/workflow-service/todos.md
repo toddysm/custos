@@ -1,6 +1,6 @@
 # TODOs: Workflow Service
 
-Last Updated: 2026-05-30 (WF-IMPL-055 merged — StepCoordinator dispatcher)
+Last Updated: 2026-05-30 (WF-IMPL-056 merged — step.* lifecycle event emission)
 
 ## Open
 
@@ -40,7 +40,7 @@ Fourth sub-module: **Step Coordinator**, packaged inside the service host `src/s
 ### Phase D — Coordinator integration
 
 - [x] WF-IMPL-055 (#426): `StepCoordinator` — concrete `StepHandler` dispatcher (depends on #419, #423, #425).
-- [F] WF-IMPL-056 (#427): `step.*` lifecycle event emission (depends on #426).
+- [x] WF-IMPL-056 (#427): `step.*` lifecycle event emission (depends on #426).
 - [F] WF-IMPL-057 (#428): FastAPI lifespan worker wiring (depends on #426).
 
 ### Phase E — Observability, verification, docs
