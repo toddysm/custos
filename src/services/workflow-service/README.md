@@ -192,6 +192,35 @@ this dedicated handler via a module-local import, replacing the
 former empty-outputs placeholder behaviour. Tracker:
 [#432](https://github.com/toddysm/custos/issues/432).
 
+WF-IMPL-053
+([#424](https://github.com/toddysm/custos/issues/424)) lands the
+**retry decision driver** at `custos_workflow.steps.retry_driver`.
+The pure `decide(node, envelope, attempt, prev_delay_seconds, rng)`
+function walks the compiled `OnErrorRoute`-s in declaration order
+(first match wins; the compiler always prepends the
+`cls=cancelled → FAIL` short-circuit so operator-initiated
+cancellation can never be converted into a retry loop), then for a
+matched `do: retry` arm enforces `attempt + 1 <= max_attempts` —
+exhaustion emits a `step.retry_budget_exhausted` envelope carrying
+the last underlying `code` / `codePrefix` / `class` for audit
+correlation. The effective delay pipeline mirrors `design.md`
+§ *Backoff formulas* + § *Jitter strategies* byte-for-byte:
+constant / linear / exponential pre-jitter base, clamped to
+`max_delay`, then jittered per `none` / `full` / `equal` /
+`decorrelated`, and finally `max(jittered, min(retryAfter,
+max_delay))` when the prevailing policy's `respect_retry_after`
+is true and the envelope carries a parseable ISO-8601 hint.
+The three-arm `RetryDecision` union (`RetryNow` / `Skip` /
+`FailNow`) is dispatched on by `ActivityStepHandler`
+(WF-IMPL-054). The companion `emit_retry_scheduled` /
+`build_retry_scheduled_event` helpers publish the
+`step.retry_scheduled` lifecycle event through the
+`LifecycleEventPublisher` Protocol — its kind constant
+(`LIFECYCLE_KIND_STEP_RETRY_SCHEDULED`) is owned here today and
+will be folded into the full `step.*` taxonomy in WF-IMPL-056.
+Tracker:
+[#432](https://github.com/toddysm/custos/issues/432).
+
 
 The Expression Evaluator (the first sub-module) is already in
 [`src/libs/custos-cel/`](../../libs/custos-cel) and shipped via
