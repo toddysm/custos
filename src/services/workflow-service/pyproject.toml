@@ -114,6 +114,11 @@ ignore = []
 # documented FastAPI idiom; B008 fires on every such call. B011 covers
 # `assert ... is None` patterns used in fixture wiring.
 "tests/**" = ["B008", "B011"]
+# API routers + dependency factories rely on the documented FastAPI
+# `Depends(...)` / `Path(...)` / `Query(...)` idiom in argument defaults;
+# B008 fires on every such default value (Annotated[..., Depends(...)]
+# avoids B008 but mypy strict then loses some flow analysis).
+"src/custos_workflow/api/**" = ["B008"]
 
 [tool.mypy]
 python_version = "3.11"
