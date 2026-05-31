@@ -290,11 +290,17 @@ computes the effective delay in four stages:
 3. **Clamp** — the result is clamped against
    `ResolvedBackoffPolicy.max_delay_ms`.
 
-4. **`retryAfter` override** — if the envelope carries a
-   `retryAfter` hint (ISO-8601 duration or epoch seconds) **and**
-   the prevailing policy's `respect_retry_after` is true, the
-   computed delay is replaced by the hint (still clamped against
-   `max_delay_ms`).
+4. **`retryAfter` lower bound** — if the envelope carries a
+   `retryAfter` ISO-8601 duration hint **and** the prevailing
+   policy's `respect_retry_after` is true, the hint is first
+   clamped against `max_delay_ms` and then taken as a **lower
+   bound** on the computed delay:
+   `effective = max(jittered, min(retry_after, max_delay_ms))`.
+   The hint never *replaces* the computed delay and never
+   *exceeds* the prevailing `max_delay_ms` ceiling. Malformed
+   or non-positive hints are silently ignored (envelope-side
+   data is third-party; a parse failure degrades to "no
+   hint" rather than failing the retry decision).
 
 Worked examples (all delays in milliseconds; `initial=100`,
 `max=10000`, `multiplier=2.0`, `attempt=3`):
@@ -308,7 +314,7 @@ Worked examples (all delays in milliseconds; `initial=100`,
 | `linear` | `none` | n/a | `300` (`100 * 3`) |
 | `linear` | `equal` | `0.0` | `150` (`150 + 0 * 150`) |
 | `constant` | `full` | `0.9` | `90` (`0.9 * 100`) |
-| `constant` | `none` | n/a (`retryAfter=PT2S`, `respect=true`) | `2000` |
+| `constant` | `none` | n/a (`retryAfter=PT2S`, `respect=true`) | `2000` (`max(100, min(2000, 10000))`) |
 
 The driver returns `RetryNow(delay_seconds=delay_ms / 1000,
 next_attempt=attempt + 1)`; the activity handler then opens a
