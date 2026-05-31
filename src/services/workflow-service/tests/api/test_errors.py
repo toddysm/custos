@@ -107,10 +107,14 @@ class _EchoBody(BaseModel):
 class TestLockedTaxonomy:
     """The taxonomy table is the contract surface — any drift breaks SDKs."""
 
-    def test_table_has_eight_entries(self) -> None:
+    def test_table_has_ten_entries(self) -> None:
         # Adding or removing a kind requires a coordinated change to
         # the SDK + the dev docs (WF-IMPL-072). Pin the size.
-        assert len(LOCKED_API_KIND_TO_STATUS) == 8
+        # WF-IMPL-066 extended the table with ``workflow.step_not_found``
+        # (404, for the Step REST surface) and
+        # ``workflow.api.not_implemented`` (501, for the deferred
+        # step-log streaming stub).
+        assert len(LOCKED_API_KIND_TO_STATUS) == 10
 
     def test_table_keys_match_kinds_frozenset(self) -> None:
         assert frozenset(LOCKED_API_KIND_TO_STATUS) == LOCKED_API_KINDS

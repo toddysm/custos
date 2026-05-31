@@ -7,7 +7,7 @@ half of the workflow-service error contract. Every error a
 raise is translated here into a single
 ``application/problem+json`` envelope.
 
-The locked taxonomy (8 kinds; the last is a catch-all):
+The locked taxonomy (10 kinds; the last is a catch-all):
 
 * ``workflow.run_not_found`` (404) — :class:`RunNotFoundError`
 * ``workflow.run_state_conflict`` (409) — :class:`RunStateConflictError`
@@ -21,6 +21,13 @@ The locked taxonomy (8 kinds; the last is a catch-all):
   :class:`IdempotencyConflictError`
 * ``workflow.validator.workspace_unauthorized`` (403) —
   :class:`WorkspaceUnauthorizedError`
+* ``workflow.step_not_found`` (404) — surfaced by REST routes that
+  fetch a single step (WF-IMPL-066) when the persisted run has
+  no compiled step with the requested id.
+* ``workflow.api.not_implemented`` (501) — surfaced by routes that
+  ship as a documented stub (today: the step log-stream endpoint;
+  see WF-IMPL-066) until a follow-on sub-module lands the real
+  behaviour.
 * ``workflow.api.bad_request`` (400 / 422) — catch-all for
   :exc:`RequestValidationError` and :class:`StarletteHTTPException`
 
@@ -85,6 +92,7 @@ __all__ = [
     "PROBLEM_MEDIA_TYPE",
     "PROBLEM_TYPE_PREFIX",
     "ProblemDetail",
+    "problem_response",
     "register_exception_handlers",
 ]
 
@@ -109,8 +117,15 @@ PROBLEM_TYPE_PREFIX: Final[str] = "https://errors.custos.dev/"
 #: Kind-string → HTTP status mapping. Mirrors the table in the
 #: module docstring. The keys form the closed set
 #: :data:`LOCKED_API_KINDS`. Adding a new kind requires adding an
-#: entry here AND adding a handler below AND extending the
-#: WF-IMPL-061 test suite.
+#: entry here AND either (a) adding a dedicated exception handler
+#: below — the pattern for kinds raised by
+#: :mod:`custos_workflow.runs.errors` /
+#: :mod:`custos_workflow.validator.errors` — or (b) emitting the
+#: envelope directly from a route via :func:`problem_response` —
+#: the pattern for route-local kinds such as
+#: ``workflow.step_not_found`` and ``workflow.api.not_implemented``
+#: introduced by WF-IMPL-066. Either way the WF-IMPL-061 test
+#: suite must be extended to cover the new kind.
 LOCKED_API_KIND_TO_STATUS: Final[dict[str, int]] = {
     # Run Controller (custos_workflow.runs.errors)
     "workflow.run_not_found": 404,
@@ -121,6 +136,12 @@ LOCKED_API_KIND_TO_STATUS: Final[dict[str, int]] = {
     "workflow.validator.inputs_schema_error": 422,
     "workflow.validator.idempotency_conflict": 409,
     "workflow.validator.workspace_unauthorized": 403,
+    # REST step-fetch (WF-IMPL-066) — the persisted run carries no
+    # compiled step with the requested id.
+    "workflow.step_not_found": 404,
+    # Documented stub routes that ship before the real handler
+    # lands (WF-IMPL-066: step log streaming; see module docstring).
+    "workflow.api.not_implemented": 501,
     # Catch-all for FastAPI request-body / query validation
     # rejections (Pydantic) — keeps the wire shape uniform so the
     # SDK never sees the raw FastAPI default envelope.
@@ -141,6 +162,8 @@ _TITLE_FOR_KIND: Final[dict[str, str]] = {
     "workflow.validator.inputs_schema_error": "Inputs failed schema validation",
     "workflow.validator.idempotency_conflict": "Idempotency key conflict",
     "workflow.validator.workspace_unauthorized": "Workspace access denied",
+    "workflow.step_not_found": "Step not found",
+    "workflow.api.not_implemented": "Not implemented",
     "workflow.api.bad_request": "Bad request",
 }
 
@@ -276,6 +299,15 @@ def _problem_response(
         media_type=PROBLEM_MEDIA_TYPE,
         content=problem.model_dump(exclude_none=True),
     )
+
+
+#: Public alias of :func:`_problem_response` for route modules that
+#: render envelopes for kinds without a dedicated exception class
+#: (e.g. ``workflow.step_not_found``, ``workflow.api.not_implemented``).
+#: Keeping the original underscore-prefixed name as the
+#: implementation symbol preserves the previously-shipped private
+#: contract; route code SHOULD reach for :func:`problem_response`.
+problem_response = _problem_response
 
 
 def _instance_for(request: Request) -> str:
