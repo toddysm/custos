@@ -23,7 +23,7 @@ Pinned to ``design.md`` § *Retry Policy* → § *Runtime behavior*:
   cancellation.
 * A ``do: retry`` arm enforces ``attempt + 1 <= max_attempts``;
   otherwise the decision is
-  :class:`FailNow` carrying a :class:`step.retry_budget_exhausted`
+  :class:`FailNow` carrying a ``step.retry_budget_exhausted``
   envelope built from
   :class:`~custos_workflow.steps.errors.RetryBudgetExhaustedError`.
 * The effective delay is computed per the design's
@@ -309,9 +309,9 @@ def build_retry_scheduled_event(
         extra={
             "step_id": step_id,
             "previous_attempt": decision.next_attempt - 1,
-            "previous_code": envelope.get("code"),
-            "previous_code_prefix": envelope.get("codePrefix"),
-            "previous_class": envelope.get("class"),
+            "previous_code": _str_or_none(envelope.get("code")),
+            "previous_code_prefix": _str_or_none(envelope.get("codePrefix")),
+            "previous_class": _str_or_none(envelope.get("class")),
             "action": OnErrorActionTag.RETRY.value,
             "effective_delay_seconds": decision.delay_seconds,
             "next_attempt": decision.next_attempt,

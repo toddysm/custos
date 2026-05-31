@@ -727,6 +727,26 @@ class TestEmitRetryScheduled:
         assert event.extra["previous_code"] is None
         assert event.extra["previous_code_prefix"] is None
 
+    def test_build_event_coerces_non_string_envelope_fields(self) -> None:
+        # Activity envelopes are third-party data; non-string ``code`` /
+        # ``codePrefix`` / ``class`` values must be defensively coerced
+        # to ``str | None`` so the lifecycle event remains JSON-safe and
+        # matches the documented ``step.*`` schema (mirrors the budget-
+        # exhausted envelope path).
+        decision = RetryNow(delay_seconds=1.0, next_attempt=2)
+        event = build_retry_scheduled_event(
+            workspace_id="ws-1",
+            run_id=RunId("run-1"),
+            workflow_version_id="wf-version-1",
+            step_id="probe",
+            decision=decision,
+            envelope={"class": "retryable", "code": 503, "codePrefix": 5},
+            occurred_at=self._OCC,
+        )
+        assert event.extra["previous_code"] == "503"
+        assert event.extra["previous_code_prefix"] == "5"
+        assert event.extra["previous_class"] == "retryable"
+
     def test_emit_publishes_via_publisher(self) -> None:
         publisher = InMemoryLifecycleEventPublisher()
         decision = RetryNow(delay_seconds=2.0, next_attempt=2)
