@@ -1,6 +1,6 @@
 # TODOs: Workflow Service
 
-Last Updated: 2026-05-30 (WF-IMPL-056 merged — step.* lifecycle event emission)
+Last Updated: 2026-05-30 (WF-IMPL-057 merged — FastAPI lifespan wires StepCoordinator + Noop ARM/Connector stubs)
 
 ## Open
 
@@ -41,7 +41,7 @@ Fourth sub-module: **Step Coordinator**, packaged inside the service host `src/s
 
 - [x] WF-IMPL-055 (#426): `StepCoordinator` — concrete `StepHandler` dispatcher (depends on #419, #423, #425).
 - [x] WF-IMPL-056 (#427): `step.*` lifecycle event emission (depends on #426).
-- [F] WF-IMPL-057 (#428): FastAPI lifespan worker wiring (depends on #426).
+- [x] WF-IMPL-057 (#428): FastAPI lifespan worker wiring (depends on #426).
 
 ### Phase E — Observability, verification, docs
 

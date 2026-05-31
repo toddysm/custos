@@ -443,6 +443,14 @@ def make_run_orchestrator(
         )
 
     run_orchestrator.__name__ = WORKFLOW_NAME
+    # Surface the bound :class:`StepHandler` for introspection
+    # (e.g. the WF-IMPL-057 lifespan-wiring test asserts the
+    # registered orchestrator is bound to a :class:`StepCoordinator`,
+    # not the default :class:`NoopStepHandler`). The attribute is a
+    # one-liner read-only handle — the orchestrator function itself
+    # still closes over ``handler`` so removing this attribute would
+    # not change runtime behaviour.
+    run_orchestrator.step_handler = handler  # type: ignore[attr-defined]
     return run_orchestrator
 
 

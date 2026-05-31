@@ -332,6 +332,31 @@ constants. Tracker:
 [#432](https://github.com/toddysm/custos/issues/432).
 
 
+WF-IMPL-057 ([#428](https://github.com/toddysm/custos/issues/428))
+**wires the Step Coordinator into the FastAPI lifespan worker**.
+The `create_app()` lifespan now builds an `ActivityStepHandler`
+(WF-IMPL-054) bound to `RunComponents.activity_client` /
+`RunComponents.connector_client`, wraps it in a `StepCoordinator`
+(WF-IMPL-055), and registers `make_run_orchestrator(step_handler=…)`
+against the `WorkflowRuntime` under the canonical workflow name —
+replacing the WF-IMPL-043 `NoopStepHandler` placeholder.
+`RunComponents` (the `load_run_components()` bundle) grows two new
+fields, `activity_client: ActivityRuntimeClient` and
+`connector_client: ConnectorClient`, defaulting to the
+WF-IMPL-049 / WF-IMPL-050 `NoopActivityRuntimeClient` /
+`NoopConnectorClient` stubs so production startup does not crash
+before the real Dapr-Workflow-backed adapters land in the
+deferred *Real ARM Client* / *Real Connector Client* sub-modules
+(both Noop variants raise `NotImplementedError` on every call, so
+any code path that reaches them surfaces loudly in tests).
+`make_run_orchestrator` exposes the bound handler via a
+`step_handler` attribute so the lifespan-wiring test
+(`tests/test_app.py::test_lifespan_binds_step_coordinator_not_noop_handler`)
+can assert the registered orchestrator is a `StepCoordinator`,
+not the Noop default. Tracker:
+[#432](https://github.com/toddysm/custos/issues/432).
+
+
 The Expression Evaluator (the first sub-module) is already in
 [`src/libs/custos-cel/`](../../libs/custos-cel) and shipped via
 WF-IMPL-001 through WF-IMPL-012 (#176–#187).

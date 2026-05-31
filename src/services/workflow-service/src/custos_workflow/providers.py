@@ -50,6 +50,12 @@ from custos_workflow.bindings.registry import (
     ActivityTypeRegistry,
     InMemoryActivityTypeRegistry,
 )
+from custos_workflow.clients import (
+    ActivityRuntimeClient,
+    ConnectorClient,
+    NoopActivityRuntimeClient,
+    NoopConnectorClient,
+)
 from custos_workflow.runs.controller import (
     CatalogClient,
     InMemoryLifecycleEventPublisher,
@@ -292,6 +298,23 @@ class RunComponents:
             every collaborator above is observed in the same shape
             the API layer (WF-IMPL-037+) will pull from
             ``app.state``.
+        activity_client: WF-IMPL-049's
+            :class:`~custos_workflow.clients.ActivityRuntimeClient`
+            stub that the
+            :class:`~custos_workflow.steps.activity_step.ActivityStepHandler`
+            schedules attempts through. WF-IMPL-057 defaults this to
+            :class:`~custos_workflow.clients.NoopActivityRuntimeClient`
+            — the production Dapr-backed adapter is owned by the
+            deferred *Real ARM Client* sub-module.
+        connector_client: WF-IMPL-050's
+            :class:`~custos_workflow.clients.ConnectorClient` stub
+            that the
+            :class:`~custos_workflow.steps.activity_step.ActivityStepHandler`
+            leases connector contexts through. WF-IMPL-057 defaults
+            this to
+            :class:`~custos_workflow.clients.NoopConnectorClient`
+            — the production Dapr-backed adapter is owned by the
+            deferred *Real Connector Client* sub-module.
         dapr_http_client: HTTP client owned by the Dapr Pub/Sub
             publisher when in production mode. ``None`` for the
             in-memory publisher path. The lifespan ``aclose()`` it
@@ -304,6 +327,8 @@ class RunComponents:
     lifecycle_publisher: LifecycleEventPublisher
     replay_reconciler: ReplayReconciler
     run_controller: RunController
+    activity_client: ActivityRuntimeClient
+    connector_client: ConnectorClient
     dapr_http_client: httpx.AsyncClient | None = field(default=None)
 
 
@@ -369,6 +394,8 @@ def load_run_components(
     replay_reconciler: ReplayReconciler | None = None,
     catalog: CatalogClient | None = None,
     activity_registry: ActivityTypeRegistry | None = None,
+    activity_client: ActivityRuntimeClient | None = None,
+    connector_client: ConnectorClient | None = None,
 ) -> RunComponents:
     """Build the default :class:`RunComponents` from ``env``.
 
@@ -389,6 +416,20 @@ def load_run_components(
             :class:`_NotConfiguredCatalogClient`.
         activity_registry: Pre-built registry override. Defaults to
             an empty :class:`InMemoryActivityTypeRegistry`.
+        activity_client: Pre-built
+            :class:`~custos_workflow.clients.ActivityRuntimeClient`
+            override. Defaults to
+            :class:`~custos_workflow.clients.NoopActivityRuntimeClient`
+            — the production Dapr-backed adapter is owned by the
+            deferred *Real ARM Client* sub-module. Tests inject
+            :class:`~custos_workflow.clients.FakeActivityRuntimeClient`.
+        connector_client: Pre-built
+            :class:`~custos_workflow.clients.ConnectorClient`
+            override. Defaults to
+            :class:`~custos_workflow.clients.NoopConnectorClient`
+            — the production Dapr-backed adapter is owned by the
+            deferred *Real Connector Client* sub-module. Tests
+            inject :class:`~custos_workflow.clients.FakeConnectorClient`.
 
     Returns:
         A fully-wired :class:`RunComponents` bundle. The caller is
@@ -415,6 +456,12 @@ def load_run_components(
     registry: ActivityTypeRegistry = (
         activity_registry if activity_registry is not None else InMemoryActivityTypeRegistry({})
     )
+    activity: ActivityRuntimeClient = (
+        activity_client if activity_client is not None else NoopActivityRuntimeClient()
+    )
+    connector: ConnectorClient = (
+        connector_client if connector_client is not None else NoopConnectorClient()
+    )
     store: RunStore = InProcessRunStore(
         cast(MetadataStoreProvider, _InProcessMetadataStoreProvider())
     )
@@ -434,5 +481,7 @@ def load_run_components(
         lifecycle_publisher=publisher,
         replay_reconciler=reconciler,
         run_controller=controller,
+        activity_client=activity,
+        connector_client=connector,
         dapr_http_client=dapr_http_client,
     )
