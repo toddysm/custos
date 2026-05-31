@@ -1,6 +1,6 @@
 # TODOs: Workflow Service
 
-Last Updated: 2026-05-31 (WF-IMPL-063 merged via PR #464; WF-IMPL-064..072 outstanding under tracker #459)
+Last Updated: 2026-05-31 (WF-IMPL-064 merged via PR #466; WF-IMPL-065..072 outstanding under tracker #459)
 
 ## Open
 
@@ -29,7 +29,7 @@ Fifth sub-module: **API Adapter + Validator**, packaged inside the service host 
 
 ### Phase B — Public REST surface
 
-- [F] WF-IMPL-064 (#450): FastAPI dependency factories (depends on #449).
+- [x] WF-IMPL-064 (#450): FastAPI dependency factories (depends on #449). Merged: PR #466.
 - [F] WF-IMPL-065 (#451): REST routes — runs (depends on #450).
 - [F] WF-IMPL-066 (#452): REST routes — steps + log-stream stub (depends on #450).
 
