@@ -44,9 +44,25 @@ from pydantic.alias_generators import to_camel
 
 from custos_workflow.runs.model import RunStatus
 
+#: Canonical workspace identifier grammar enforced on every Internal
+#: RPC request body that carries an explicit ``workspaceId`` (the
+#: public surface enforces the same grammar at the routing layer via
+#: :data:`custos_workflow.api.dependencies.WORKSPACE_ID_PATTERN`).
+#: The two declarations are intentionally kept byte-equal so the
+#: internal + public surfaces accept exactly the same workspace ids;
+#: ``tests/api/test_models.py`` (and ``tests/api/routes/test_rpc.py``)
+#: assert the equality so any future drift fails CI. The regex is
+#: inlined rather than imported to keep ``api/models.py``
+#: FastAPI-free — importing from ``api.dependencies`` would drag
+#: FastAPI through the validator package, which is intentionally
+#: framework-agnostic.
+_WORKSPACE_ID_PATTERN: Final[str] = r"^[a-z][a-z0-9-]{0,62}$"
+
 __all__ = [
     "MAX_LIST_LIMIT",
     "CancelRunRequest",
+    "InternalCancelRunRequest",
+    "InternalStartRunRequest",
     "PageRefResponse",
     "RaiseExternalEventRequest",
     "RunListQuery",
@@ -294,6 +310,66 @@ class CancelRunRequest(_CamelModel):
         default=None,
         max_length=1024,
         description="Operator- or system-supplied cancellation explanation.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Internal RPC bodies (WF-IMPL-067)
+# ---------------------------------------------------------------------------
+
+
+class InternalStartRunRequest(StartRunRequest):
+    """Request body for ``POST /internal/runs:start``.
+
+    The Internal RPC surface ships under a flat ``/internal/`` prefix
+    (no ``/v1/workspaces/{ws}/`` segment) so the Helm chart / mesh
+    can pin mTLS-only access to a single path stem (see
+    ``design/components/workflow-service/design.md`` § Internal RPC).
+    Because the workspace is no longer carried in the URL it has to
+    travel in the body — internal callers like the Trigger Service
+    typically issue ``StartRun`` on behalf of a workflow run whose
+    workspace is determined by their own ledger, not by the inbound
+    request, so promoting ``workspaceId`` to a top-level body field
+    keeps the contract explicit at the wire.
+
+    All other fields are inherited unchanged from
+    :class:`StartRunRequest` so the public + internal surfaces stay
+    in lockstep — anything the public POST accepts the internal
+    RPC accepts too.
+    """
+
+    workspace_id: str = Field(
+        min_length=1,
+        max_length=63,
+        pattern=_WORKSPACE_ID_PATTERN,
+        description=(
+            "Owning workspace for the run. Required on the Internal "
+            "RPC surface (the path carries no `{ws}` segment). Must "
+            "match the canonical DNS-1123-like workspace grammar the "
+            "public surface enforces on its `{ws}` path segment."
+        ),
+    )
+
+
+class InternalCancelRunRequest(CancelRunRequest):
+    """Request body for ``POST /internal/runs/{runId}:cancel``.
+
+    Mirrors :class:`InternalStartRunRequest`: the Internal RPC
+    surface has no ``{ws}`` path segment so the workspace travels
+    in the body. ``reason`` is inherited unchanged from
+    :class:`CancelRunRequest`.
+    """
+
+    workspace_id: str = Field(
+        min_length=1,
+        max_length=63,
+        pattern=_WORKSPACE_ID_PATTERN,
+        description=(
+            "Owning workspace for the run. Required on the Internal "
+            "RPC surface (the path carries no `{ws}` segment). Must "
+            "match the canonical DNS-1123-like workspace grammar the "
+            "public surface enforces on its `{ws}` path segment."
+        ),
     )
 
 

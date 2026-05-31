@@ -16,9 +16,10 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from custos_workflow.api.routes.rpc import router as rpc_router
 from custos_workflow.api.routes.runs import router as runs_router
 from custos_workflow.api.routes.steps import router as steps_router
 
-all_routers: tuple[APIRouter, ...] = (runs_router, steps_router)
+all_routers: tuple[APIRouter, ...] = (runs_router, steps_router, rpc_router)
 
-__all__ = ["all_routers", "runs_router", "steps_router"]
+__all__ = ["all_routers", "rpc_router", "runs_router", "steps_router"]

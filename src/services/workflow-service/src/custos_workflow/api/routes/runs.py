@@ -86,7 +86,7 @@ from custos_workflow.runs.ids import RunId
 from custos_workflow.runs.model import RunRecord, RunStatus
 from custos_workflow.validator import StartRunValidator
 
-__all__ = ["router"]
+__all__ = ["ref_response_from_ref", "resolve_idempotency_key", "router"]
 
 router = APIRouter(tags=["runs"])
 
@@ -96,7 +96,7 @@ router = APIRouter(tags=["runs"])
 # ---------------------------------------------------------------------------
 
 
-def _ref_response_from_ref(ref: RunRef) -> RunRefResponse:
+def ref_response_from_ref(ref: RunRef) -> RunRefResponse:
     """Translate a controller :class:`RunRef` to its wire shape.
 
     The controller's :class:`RunRef` carries the four identity
@@ -104,6 +104,9 @@ def _ref_response_from_ref(ref: RunRef) -> RunRefResponse:
     handle is minted before the runtime stamps a start time. The
     full :class:`RunResponse` reads fill ``startedAt`` from the
     persisted :class:`RunRecord`.
+
+    Re-used by the Internal RPC routes (WF-IMPL-067) which share
+    the same wire envelope, so this helper is module-public.
     """
     return RunRefResponse(
         run_id=str(ref.run_id),
@@ -140,7 +143,7 @@ def _run_response_from_record(record: RunRecord) -> RunResponse:
     )
 
 
-def _resolve_idempotency_key(
+def resolve_idempotency_key(
     *,
     body_key: str | None,
     header_key: str | None,
@@ -153,6 +156,9 @@ def _resolve_idempotency_key(
     ``None`` so callers can opt out by sending ``""``. The
     validator + ledger both treat ``None`` as "no key supplied",
     so we keep the same convention here.
+
+    Re-used by the Internal RPC routes (WF-IMPL-067) which share
+    the same idempotency contract, so this helper is module-public.
     """
     body = (body_key or "").strip() or None
     header = (header_key or "").strip() or None
@@ -195,7 +201,7 @@ async def start_run(
     ledger entry returns the original ``runId`` without scheduling
     a second workflow instance.
     """
-    effective_key = _resolve_idempotency_key(
+    effective_key = resolve_idempotency_key(
         body_key=body.idempotency_key,
         header_key=idempotency_key_header,
     )
@@ -212,7 +218,7 @@ async def start_run(
         inputs=validated.inputs,
         idempotency_key=validated.idempotency_key,
     )
-    return _ref_response_from_ref(ref)
+    return ref_response_from_ref(ref)
 
 
 # ---------------------------------------------------------------------------
@@ -279,7 +285,7 @@ async def list_runs(
             workflow_version_id is not None and ref.workflow_version_id != workflow_version_id
         )
 
-    items = [_ref_response_from_ref(ref) for ref in page.items if _matches(ref)]
+    items = [ref_response_from_ref(ref) for ref in page.items if _matches(ref)]
     return RunListResponse(
         items=items,
         next_cursor=page.next_cursor.token if page.next_cursor is not None else None,
@@ -359,4 +365,4 @@ async def cancel_run(
         run_id=RunId(run_id),
         reason=reason,
     )
-    return _ref_response_from_ref(ref)
+    return ref_response_from_ref(ref)
