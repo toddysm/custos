@@ -357,6 +357,39 @@ not the Noop default. Tracker:
 [#432](https://github.com/toddysm/custos/issues/432).
 
 
+WF-IMPL-058 ([#429](https://github.com/toddysm/custos/issues/429))
+**adds OpenTelemetry observability hooks for the Step
+Coordinator**, completing the visibility surface promised by the
+WF-IMPL-048 error taxonomy. Four new instruments land on
+`custos_workflow._telemetry`: the histogram
+`custos_workflow_step_execute_duration_ms` (labelled `step_kind`,
+`outcome`) records every `StepCoordinator.execute` dispatch; the
+histogram `custos_workflow_activity_schedule_duration_ms`
+(labelled `step_kind`, `class`) records every
+`ActivityRuntimeClient.schedule_activity` call with the envelope
+class from the response (or `internal_error` when the call
+raises); the counter `custos_workflow_step_attempts_total`
+(labelled `step_kind`, `final_class`) bumps once per attempt
+inside `ActivityStepHandler` with the envelope's class; and the
+counter `custos_workflow_step_errors_total` (labelled `kind`)
+bumps once per Step Coordinator failure — the `kind` label is
+pinned by a build-time assertion to be exactly the
+`LOCKED_STEP_KINDS` frozenset, so adding a
+`StepCoordinatorError` subclass without updating the locked set
+fails the import. Four spans accompany them:
+`custos_workflow.step.execute` wraps the dispatcher arm,
+`custos_workflow.step.bind_connectors` wraps each per-attempt
+connector lease, `custos_workflow.step.schedule_activity` wraps
+each schedule call, and `custos_workflow.step.retry_decision`
+wraps each `retry_driver.decide()` consultation. Every span
+carries the `step_kind` attribute. Instrumentation remains no-op
+when no OTel SDK is installed because only `opentelemetry-api`
+is a runtime dependency — the SDK is dev-only and only the test
+harness (`tests/test_observability_steps.py`, save/restore
+fixture, in-memory exporter) wires SDK-backed instruments.
+Tracker: [#432](https://github.com/toddysm/custos/issues/432).
+
+
 The Expression Evaluator (the first sub-module) is already in
 [`src/libs/custos-cel/`](../../libs/custos-cel) and shipped via
 WF-IMPL-001 through WF-IMPL-012 (#176–#187).

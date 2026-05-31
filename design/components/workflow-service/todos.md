@@ -1,6 +1,6 @@
 # TODOs: Workflow Service
 
-Last Updated: 2026-05-31 (WF-IMPL-057 in PR — FastAPI lifespan wires StepCoordinator + Noop ARM/Connector stubs)
+Last Updated: 2026-05-31 (WF-IMPL-058 in PR — OTel observability hooks for the Step Coordinator)
 
 ## Open
 
@@ -45,7 +45,7 @@ Fourth sub-module: **Step Coordinator**, packaged inside the service host `src/s
 
 ### Phase E — Observability, verification, docs
 
-- [F] WF-IMPL-058 (#429): OTel observability hooks for the Step Coordinator (depends on #427, #428).
+- [x] WF-IMPL-058 (#429): OTel observability hooks for the Step Coordinator (depends on #427, #428).
 - [F] WF-IMPL-059 (#430): Unit + integration test suite (≥ 90 % coverage gate) (depends on #429).
 - [F] WF-IMPL-060 (#431): Developer documentation — `docs/developers/workflow-step-coordinator.md` (depends on #430).
 

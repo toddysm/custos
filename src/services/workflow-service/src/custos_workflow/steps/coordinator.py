@@ -68,8 +68,22 @@ from custos_workflow.runs.step_handler import (
     StepHandler,
     StepResult,
 )
-from custos_workflow.steps.errors import StepKindNotImplementedError
+from custos_workflow.steps.errors import (
+    LOCKED_STEP_KINDS,
+    StepCoordinatorError,
+    StepKindNotImplementedError,
+)
 from custos_workflow.steps.let_step import LetStepHandler
+
+# NOTE: ``custos_workflow._telemetry`` is imported lazily inside
+# :meth:`StepCoordinator.execute` rather than at module level.
+# ``_telemetry`` pulls in ``custos_workflow.runs.errors`` which
+# transitively triggers ``custos_workflow.runs.__init__`` — and
+# this module is itself loaded during ``custos_workflow.steps``
+# package initialisation (via
+# ``clients.activity_runtime → steps.idempotency``). Eager loading
+# would close the cycle. A function-scope import keeps the
+# dispatcher import surface flat.
 
 if TYPE_CHECKING:
     from custos_workflow.graph.model import ExecutionGraph
@@ -164,36 +178,89 @@ class StepCoordinator:
         if node is None:
             raise KeyError(step_id)
 
+        # Lazy import — see module-level NOTE on the
+        # ``_telemetry`` ⇄ ``runs`` ⇄ ``steps`` circular import.
+        from custos_workflow._telemetry import (
+            observe_step_execute,
+            record_step_error,
+        )
+
         primitive = node.primitive_handler
 
-        if primitive is PrimitiveHandler.EXPRESSION_INLINE:
-            return self._let_handler.execute(ctx, graph, step_id)
-        if primitive is PrimitiveHandler.ACTIVITY_RUNTIME:
-            return self._activity_handler.execute(ctx, graph, step_id)
-        if primitive is PrimitiveHandler.SUB_ORCHESTRATION:
-            err = StepKindNotImplementedError(
-                f"step {step_id!r} kind={node.kind.value!r} "
-                f"primitive_handler={primitive.value!r} is deferred "
-                "to the Sub-Orchestration Manager sub-module",
-                run_id=str(ctx.run_id),
-                step_id=step_id,
-                step_kind=node.kind.value,
-                primitive_handler=primitive.value,
-            )
-            return StepFailed(envelope=MappingProxyType(err.to_dict()))
-        # PrimitiveHandler.RUN_CONTROLLER_TIMER — wait: nodes are
-        # dispatched inline by the Run Controller orchestrator via
-        # ``ctx.create_timer`` (see WF-IMPL-035 / the Resume
-        # Subscription Manager sub-module for the durable-timer
-        # path). The dispatcher should never see one; if it does,
-        # there's a compile-time mis-tag and we want to fail loudly.
-        raise StepKindNotImplementedError(
-            f"step {step_id!r} kind={node.kind.value!r} "
-            f"primitive_handler={primitive.value!r} is handled inline "
-            "by the Run Controller orchestrator, not by the Step "
-            "Coordinator dispatcher",
-            run_id=str(ctx.run_id),
-            step_id=step_id,
-            step_kind=node.kind.value,
-            primitive_handler=primitive.value,
-        )
+        # WF-IMPL-058: wrap the dispatch in
+        # ``custos_workflow.step.execute`` so every primitive (let,
+        # activity, sub-orchestration stub) records exactly one
+        # span + one ``custos_workflow_step_execute_duration_ms``
+        # sample. The wrapper observes raised exceptions only; the
+        # ``custos_workflow_step_errors_total`` counter is then
+        # bumped from *both* directions below so the error counter
+        # stays in sync with every Step Coordinator failure surface:
+        #
+        # * Raised ``StepCoordinatorError`` (e.g. the
+        #   ``RUN_CONTROLLER_TIMER`` mis-tag below): the
+        #   ``except StepCoordinatorError`` arm bumps the counter
+        #   keyed off ``exc.kind`` and re-raises.
+        # * Returned ``StepFailed`` envelope (the activity /
+        #   sub-orchestration stub error envelopes): the
+        #   ``isinstance(result, StepFailed)`` arm bumps the
+        #   counter keyed off the envelope ``kind``.
+        try:
+            with observe_step_execute(node.kind.value):
+                if primitive is PrimitiveHandler.EXPRESSION_INLINE:
+                    result = self._let_handler.execute(ctx, graph, step_id)
+                elif primitive is PrimitiveHandler.ACTIVITY_RUNTIME:
+                    result = self._activity_handler.execute(ctx, graph, step_id)
+                elif primitive is PrimitiveHandler.SUB_ORCHESTRATION:
+                    err = StepKindNotImplementedError(
+                        f"step {step_id!r} kind={node.kind.value!r} "
+                        f"primitive_handler={primitive.value!r} is deferred "
+                        "to the Sub-Orchestration Manager sub-module",
+                        run_id=str(ctx.run_id),
+                        step_id=step_id,
+                        step_kind=node.kind.value,
+                        primitive_handler=primitive.value,
+                    )
+                    result = StepFailed(envelope=MappingProxyType(err.to_dict()))
+                else:
+                    # PrimitiveHandler.RUN_CONTROLLER_TIMER — wait: nodes are
+                    # dispatched inline by the Run Controller orchestrator via
+                    # ``ctx.create_timer`` (see WF-IMPL-035 / the Resume
+                    # Subscription Manager sub-module for the durable-timer
+                    # path). The dispatcher should never see one; if it does,
+                    # there's a compile-time mis-tag and we want to fail
+                    # loudly. Raising propagates through
+                    # ``observe_step_execute`` so the histogram sample
+                    # carries ``outcome=kind_not_implemented`` and the
+                    # ``custos_workflow_step_errors_total`` counter is
+                    # bumped via the ``except StepCoordinatorError`` arm
+                    # below.
+                    raise StepKindNotImplementedError(
+                        f"step {step_id!r} kind={node.kind.value!r} "
+                        f"primitive_handler={primitive.value!r} is handled inline "
+                        "by the Run Controller orchestrator, not by the Step "
+                        "Coordinator dispatcher",
+                        run_id=str(ctx.run_id),
+                        step_id=step_id,
+                        step_kind=node.kind.value,
+                        primitive_handler=primitive.value,
+                    )
+        except StepCoordinatorError as exc:
+            # Raised-error path. The structured ``kind`` comes from
+            # the LOCKED_STEP_KINDS taxonomy by construction; the
+            # ``in`` guard is defence in depth against a hand-rolled
+            # subclass that forgot to pin :attr:`KIND`.
+            if exc.kind in LOCKED_STEP_KINDS:
+                record_step_error(exc.kind)
+            raise
+
+        # ``StepFailed``-envelope path bumps the error counter. The
+        # envelope ``kind`` is the structured error string from the
+        # locked LOCKED_STEP_KINDS taxonomy; anything outside that
+        # set is ignored (defensive — a sub-handler returning a
+        # malformed envelope should never silently pollute the
+        # error histogram with an unknown kind).
+        if isinstance(result, StepFailed):
+            envelope_kind = result.envelope.get("kind")
+            if isinstance(envelope_kind, str) and envelope_kind in LOCKED_STEP_KINDS:
+                record_step_error(envelope_kind)
+        return result

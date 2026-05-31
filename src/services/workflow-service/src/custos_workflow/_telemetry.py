@@ -65,6 +65,7 @@ from opentelemetry.metrics import Counter, Histogram, Meter
 from opentelemetry.trace import Span, Status, StatusCode, Tracer
 
 from custos_workflow.runs.errors import LOCKED_RUN_KINDS
+from custos_workflow.steps.errors import LOCKED_STEP_KINDS
 
 _INSTRUMENTATION_NAME: Final[str] = "custos_workflow"
 _INSTRUMENTATION_VERSION: Final[str] = "0.1.0"
@@ -548,12 +549,352 @@ def record_workflow_event_emitted(kind: str) -> None:
     WORKFLOW_EVENTS_EMITTED_TOTAL.add(1, {"kind": kind})
 
 
+# ---------------------------------------------------------------------------
+# WF-IMPL-058: Step Coordinator observability hooks
+# ---------------------------------------------------------------------------
+#
+# Spans, histograms, and counters that make every Step Coordinator
+# dispatch observable end-to-end. Mirrors the WF-IMPL-044 Run
+# Controller pattern: per-call-site context-manager wrappers
+# (:func:`observe_step_execute`, :func:`observe_step_bind_connectors`,
+# :func:`observe_step_schedule_activity`,
+# :func:`observe_step_retry_decision`) record into a duration
+# histogram and emit one span each; explicit recorder functions
+# (:func:`record_step_attempt`, :func:`record_step_error`) bump
+# the per-attempt and per-error counters at the call sites that
+# already know the right ``final_class`` / ``kind`` label.
+#
+# Label sets
+# ----------
+# * ``step_kind`` — the
+#   :class:`~custos_workflow.graph.model.StepKind` enum value
+#   (the ``"activity"`` / ``"let"`` / ``"workflow"`` / ``"wait"``
+#   wire strings). ``wait`` is dispatched by the Run Controller
+#   inline and never reaches the Step Coordinator, so practical
+#   values are ``activity`` / ``let`` / ``workflow``.
+# * ``outcome`` — ``ok`` on success, one of the
+#   :data:`~custos_workflow.steps.errors.LOCKED_STEP_KINDS`
+#   suffixes (the ``step.`` prefix stripped — keeps the histogram
+#   label short, mirrors the WF-IMPL-044 convention) on a
+#   :class:`StepCoordinatorError`, or ``internal_error`` for any
+#   other exception that escapes the wrapper.
+# * ``class`` — the
+#   :data:`~custos_workflow.clients.activity_runtime.ACTIVITY_RESULT_CLASSES`
+#   value carried on the schedule envelope. The
+#   ``custos_workflow.step.schedule_activity`` span records this
+#   alongside ``step_kind`` so dashboards can pivot retryable vs
+#   permanent failures without re-parsing the envelope.
+# * ``final_class`` — same closed set as ``class``; recorded by
+#   :func:`record_step_attempt` once per attempt so the counter
+#   surfaces both the attempt count *and* its outcome class with
+#   a single instrument.
+# * ``kind`` — one of
+#   :data:`~custos_workflow.steps.errors.LOCKED_STEP_KINDS`. The
+#   build-time assertion below pins the
+#   :data:`STEP_ERRORS_TOTAL` label set to that frozenset so
+#   adding a :class:`StepCoordinatorError` subclass without
+#   updating the locked set fails loudly.
+
+STEP_EXECUTE_DURATION_MS: Final[Histogram] = _meter.create_histogram(
+    name="custos_workflow_step_execute_duration_ms",
+    unit="ms",
+    description=(
+        "Wall-clock time spent in StepCoordinator.execute() per dispatch, "
+        "labelled by ``step_kind`` (StepKind value) and ``outcome`` "
+        "(``ok``, one of the LOCKED_STEP_KINDS suffixes, or "
+        "``internal_error``). One sample per dispatch."
+    ),
+)
+
+ACTIVITY_SCHEDULE_DURATION_MS: Final[Histogram] = _meter.create_histogram(
+    name="custos_workflow_activity_schedule_duration_ms",
+    unit="ms",
+    description=(
+        "Wall-clock time spent in a single "
+        "ActivityRuntimeClient.schedule_activity() call, labelled by "
+        "``step_kind`` (always ``activity`` today) and ``class`` "
+        "(one of the ACTIVITY_RESULT_CLASSES values plus "
+        "``internal_error`` for client-side exceptions). One sample "
+        "per attempt."
+    ),
+)
+
+STEP_ATTEMPTS_TOTAL: Final[Counter] = _meter.create_counter(
+    name="custos_workflow_step_attempts_total",
+    description=(
+        "Count of step attempts executed by the Step Coordinator, "
+        "labelled by ``step_kind`` and ``final_class`` (the "
+        "ActivityResultClass value the attempt resolved to, or "
+        "``internal_error`` when the attempt raised). Bumped exactly "
+        "once per attempt — both retried and terminal attempts "
+        "increment by one."
+    ),
+)
+
+STEP_ERRORS_TOTAL: Final[Counter] = _meter.create_counter(
+    name="custos_workflow_step_errors_total",
+    description=(
+        "Count of Step Coordinator dispatch failures, labelled by "
+        "the structured error ``kind`` from the locked "
+        "LOCKED_STEP_KINDS taxonomy (WF-IMPL-048). Bumped exactly "
+        "once per failed StepCoordinator.execute() that surfaces a "
+        "StepFailed envelope or raises a StepCoordinatorError."
+    ),
+)
+
+#: ``outcome`` label is the locked LOCKED_STEP_KINDS taxonomy
+#: with the ``step.`` prefix stripped (mirrors the WF-IMPL-044
+#: Run Controller convention so dashboards can lift the same
+#: post-processing across both surfaces).
+_STEP_EXECUTE_OUTCOMES: Final[Mapping[str, str]] = {
+    "step.kind_not_implemented": "kind_not_implemented",
+    "step.with_input_resolution_error": "with_input_resolution_error",
+    "step.connector_bind_error": "connector_bind_error",
+    "step.activity_schedule_error": "activity_schedule_error",
+    "step.retry_budget_exhausted": "retry_budget_exhausted",
+}
+
+# Build-time check: the outcome map keys MUST equal the locked
+# Step Coordinator kind set. Adding or removing a
+# :class:`StepCoordinatorError` subclass without updating
+# ``_STEP_EXECUTE_OUTCOMES`` fails import — a noisy fail-fast
+# keeps the observability contract honest (parallel to the
+# WF-IMPL-044 ``_RUN_LIFECYCLE_OUTCOMES`` assertion).
+assert frozenset(_STEP_EXECUTE_OUTCOMES) == LOCKED_STEP_KINDS, (
+    "_STEP_EXECUTE_OUTCOMES keys must equal LOCKED_STEP_KINDS; "
+    f"map={sorted(_STEP_EXECUTE_OUTCOMES)} "
+    f"kinds={sorted(LOCKED_STEP_KINDS)}"
+)
+
+
+@contextmanager
+def _instrument_step(
+    span_name: str,
+    histogram: Histogram | None,
+    step_kind: str,
+) -> Iterator[Span]:
+    """Span + (optional) duration-histogram wrapper for Step Coordinator call sites.
+
+    Kept distinct from :func:`instrument` for the same reason
+    :func:`_instrument_run` is: the Step Coordinator histograms
+    carry a ``step_kind`` label that the generic helper does not
+    thread. When ``histogram`` is :data:`None` the wrapper still
+    emits the span (so spans without a paired histogram — like
+    ``custos_workflow.step.bind_connectors`` and
+    ``custos_workflow.step.retry_decision`` — get the same span
+    shape) but records no sample. Errors mark the span ``ERROR``
+    and are re-raised; the duration histogram (when present)
+    receives a sample labelled with the locked outcome string or
+    ``internal_error``.
+    """
+    start = time.perf_counter()
+    with _tracer.start_as_current_span(span_name) as span:
+        span.set_attribute("step_kind", step_kind)
+        try:
+            yield span
+        except Exception as exc:
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            if histogram is not None:
+                outcome = _outcome_for(exc, _STEP_EXECUTE_OUTCOMES)
+                histogram.record(
+                    elapsed_ms,
+                    {"step_kind": step_kind, "outcome": outcome},
+                )
+            span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
+            span.record_exception(exc)
+            raise
+        else:
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            if histogram is not None:
+                histogram.record(
+                    elapsed_ms,
+                    {"step_kind": step_kind, "outcome": _RUN_OK},
+                )
+
+
+def observe_step_execute(step_kind: str) -> AbstractContextManager[Span]:
+    """Context manager wrapping one :meth:`StepCoordinator.execute` dispatch.
+
+    Records into :data:`STEP_EXECUTE_DURATION_MS` and emits the
+    ``custos_workflow.step.execute`` span. The caller is
+    responsible for bumping :data:`STEP_ERRORS_TOTAL` via
+    :func:`record_step_error` when the dispatch returns a
+    :class:`StepFailed` envelope (the wrapper cannot see the
+    envelope — it only sees raised exceptions — so the
+    StepFailed-return path goes through the explicit recorder).
+    """
+    return _instrument_step(
+        "custos_workflow.step.execute",
+        STEP_EXECUTE_DURATION_MS,
+        step_kind,
+    )
+
+
+def observe_step_bind_connectors(step_kind: str) -> AbstractContextManager[Span]:
+    """Context manager wrapping a :meth:`ConnectorClient.bind_for_step` call.
+
+    Emits the ``custos_workflow.step.bind_connectors`` span. No
+    duration histogram is paired — bind latency is captured by
+    upstream Connector Service instrumentation in the deferred
+    *Real Connector Client* sub-module, and double-counting it
+    here would skew the per-step total.
+    """
+    return _instrument_step(
+        "custos_workflow.step.bind_connectors",
+        None,
+        step_kind,
+    )
+
+
+def observe_step_schedule_activity(step_kind: str) -> AbstractContextManager[Span]:
+    """Context manager wrapping an :meth:`ActivityRuntimeClient.schedule_activity` call.
+
+    Emits the ``custos_workflow.step.schedule_activity`` span and
+    records a sample into :data:`ACTIVITY_SCHEDULE_DURATION_MS`.
+    The ``class`` label on the histogram sample is *not* set by
+    this wrapper — the caller records it explicitly via
+    :func:`record_activity_schedule_sample` after the envelope
+    lands, because the class is carried on the returned envelope
+    rather than raised. The wrapper still records an
+    ``internal_error`` sample (with ``class=internal_error``) on
+    a raised exception so histogram totals stay consistent with
+    the call count.
+    """
+    return _instrument_schedule_activity(step_kind)
+
+
+@contextmanager
+def _instrument_schedule_activity(step_kind: str) -> Iterator[Span]:
+    """Internal context-manager implementation for :func:`observe_step_schedule_activity`."""
+    start = time.perf_counter()
+    with _tracer.start_as_current_span("custos_workflow.step.schedule_activity") as span:
+        span.set_attribute("step_kind", step_kind)
+        try:
+            yield span
+        except Exception as exc:
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            ACTIVITY_SCHEDULE_DURATION_MS.record(
+                elapsed_ms,
+                {"step_kind": step_kind, "class": _INTERNAL_ERROR},
+            )
+            span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
+            span.record_exception(exc)
+            raise
+
+
+def record_activity_schedule_sample(elapsed_ms: float, step_kind: str, class_: str) -> None:
+    """Record a successful :func:`observe_step_schedule_activity` sample.
+
+    Called by :class:`ActivityStepHandler` after the
+    ``schedule_activity`` envelope lands so the histogram sample
+    carries the ``class`` label from the envelope (one of
+    :data:`ACTIVITY_RESULT_CLASSES`). The separate-recorder
+    pattern (rather than a context-manager that owns the sample)
+    is needed because the class value is *returned*, not raised,
+    so the wrapper cannot see it.
+
+    Unknown ``class_`` values raise :class:`ValueError` so a typo
+    fails loudly. Negative ``elapsed_ms`` is rejected for the
+    same reason.
+
+    Args:
+        elapsed_ms: The wall-clock time spent in the schedule
+            call, in milliseconds (matches the histogram unit).
+        step_kind: The :class:`StepKind` value of the dispatching
+            node (always ``activity`` today, but threaded so the
+            label set stays uniform if other kinds ever schedule
+            activities).
+        class_: The :data:`ActivityResultClass` value from the
+            envelope.
+    """
+    # Lazy import — see module-top NOTE on the
+    # ``_telemetry`` ⇄ ``clients.activity_runtime`` cycle. This
+    # function is only ever called from the request-handling
+    # path, by which time the ``clients`` package is fully
+    # initialised.
+    from custos_workflow.clients.activity_runtime import ACTIVITY_RESULT_CLASSES
+
+    if class_ not in ACTIVITY_RESULT_CLASSES:
+        raise ValueError(
+            f"unknown activity result class {class_!r}; "
+            f"expected one of {sorted(ACTIVITY_RESULT_CLASSES)}"
+        )
+    if elapsed_ms < 0:
+        raise ValueError(f"elapsed_ms must be non-negative; got {elapsed_ms!r}")
+    ACTIVITY_SCHEDULE_DURATION_MS.record(
+        elapsed_ms,
+        {"step_kind": step_kind, "class": class_},
+    )
+
+
+def observe_step_retry_decision(step_kind: str) -> AbstractContextManager[Span]:
+    """Context manager wrapping a :func:`retry_driver.decide` call.
+
+    Emits the ``custos_workflow.step.retry_decision`` span. No
+    duration histogram is paired — the decide function is pure
+    arithmetic over the route table and its latency is well below
+    the resolution of the surrounding step-execute histogram.
+    """
+    return _instrument_step(
+        "custos_workflow.step.retry_decision",
+        None,
+        step_kind,
+    )
+
+
+def record_step_attempt(step_kind: str, final_class: str) -> None:
+    """Bump :data:`STEP_ATTEMPTS_TOTAL` for one completed attempt.
+
+    Called by :class:`ActivityStepHandler` exactly once per
+    attempt with the activity envelope's class (one of
+    :data:`ACTIVITY_RESULT_CLASSES`) or ``internal_error`` when
+    the attempt raised before producing an envelope. Unknown
+    ``final_class`` values raise :class:`ValueError` so a typo
+    fails loudly.
+    """
+    # Lazy import — see module-top NOTE on the
+    # ``_telemetry`` ⇄ ``clients.activity_runtime`` cycle.
+    from custos_workflow.clients.activity_runtime import ACTIVITY_RESULT_CLASSES
+
+    if final_class not in ACTIVITY_RESULT_CLASSES and final_class != _INTERNAL_ERROR:
+        raise ValueError(
+            f"unknown final_class {final_class!r}; expected one of "
+            f"{sorted(ACTIVITY_RESULT_CLASSES)} plus {_INTERNAL_ERROR!r}"
+        )
+    STEP_ATTEMPTS_TOTAL.add(
+        1,
+        {"step_kind": step_kind, "final_class": final_class},
+    )
+
+
+def record_step_error(kind: str) -> None:
+    """Bump :data:`STEP_ERRORS_TOTAL` for a Step Coordinator failure.
+
+    Called by :class:`StepCoordinator` (and the activity-step
+    sub-handler) immediately after a :class:`StepFailed` is
+    returned or a :class:`StepCoordinatorError` is raised. The
+    ``kind`` MUST be one of :data:`LOCKED_STEP_KINDS`; unknown
+    kinds raise :class:`ValueError` so a typo or unregistered
+    error subclass fails loudly instead of silently dropping the
+    sample (mirrors :func:`record_workflow_event_emitted`).
+    """
+    if kind not in LOCKED_STEP_KINDS:
+        raise ValueError(
+            f"unknown step error kind {kind!r}; expected one of {sorted(LOCKED_STEP_KINDS)}"
+        )
+    STEP_ERRORS_TOTAL.add(1, {"kind": kind})
+
+
 __all__ = [
+    "ACTIVITY_SCHEDULE_DURATION_MS",
     "ERRORS_TOTAL",
     "PARSE_DURATION_MS",
     "RETRY_POLICY_DURATION_MS",
     "RUN_LIFECYCLE_DURATION_MS",
     "RUN_STATUS_TRANSITIONS_TOTAL",
+    "STEP_ATTEMPTS_TOTAL",
+    "STEP_ERRORS_TOTAL",
+    "STEP_EXECUTE_DURATION_MS",
     "TOPOLOGY_DURATION_MS",
     "TOTAL_DURATION_MS",
     "TYPE_CHECK_DURATION_MS",
@@ -571,6 +912,13 @@ __all__ = [
     "observe_run_replay",
     "observe_run_resume",
     "observe_run_start",
+    "observe_step_bind_connectors",
+    "observe_step_execute",
+    "observe_step_retry_decision",
+    "observe_step_schedule_activity",
+    "record_activity_schedule_sample",
     "record_run_status_transition",
+    "record_step_attempt",
+    "record_step_error",
     "record_workflow_event_emitted",
 ]

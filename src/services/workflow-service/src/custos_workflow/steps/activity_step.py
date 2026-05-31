@@ -117,6 +117,7 @@ from __future__ import annotations
 
 import hashlib
 import random
+import time
 from collections.abc import Mapping
 from datetime import timedelta
 from types import MappingProxyType
@@ -151,6 +152,14 @@ from custos_workflow.steps.errors import (
 )
 from custos_workflow.steps.idempotency import derive_triple
 from custos_workflow.steps.with_inputs import WithInputResolver
+
+# NOTE: ``custos_workflow._telemetry`` is imported lazily inside
+# :meth:`ActivityStepHandler.execute` rather than at module level.
+# ``_telemetry`` pulls in ``custos_workflow.runs.errors`` which
+# transitively triggers ``custos_workflow.runs.__init__`` — and
+# this module is loaded during ``custos_workflow.steps`` package
+# initialisation (via ``clients.activity_runtime →
+# steps.idempotency``). Eager loading would close the cycle.
 
 if TYPE_CHECKING:
     pass
@@ -283,6 +292,20 @@ class ActivityStepHandler:
 
         slot_specs = _build_slot_specs(activity_step)
         run_id_str = str(ctx.run_id)
+        # Lazy import — see module-level NOTE on the
+        # ``_telemetry`` ⇄ ``runs`` ⇄ ``steps`` circular import.
+        from custos_workflow._telemetry import (
+            observe_step_bind_connectors,
+            observe_step_retry_decision,
+            observe_step_schedule_activity,
+            record_activity_schedule_sample,
+            record_step_attempt,
+        )
+
+        # WF-IMPL-058: cache the StepKind value once — it labels
+        # every span / histogram / counter the handler emits for
+        # this dispatch.
+        step_kind_label = node.kind.value
 
         attempt = 1
         prev_delay_seconds: float | None = None
@@ -295,10 +318,16 @@ class ActivityStepHandler:
             # ``step.connector_bind_error`` envelope and stop the
             # loop (no automatic retry on infrastructure errors).
             try:
-                bind_response = self._connector_client.bind_for_step(
-                    BindForStepRequest(step_key=triple.to_str(), slots=slot_specs),
-                )
+                with observe_step_bind_connectors(step_kind_label):
+                    bind_response = self._connector_client.bind_for_step(
+                        BindForStepRequest(step_key=triple.to_str(), slots=slot_specs),
+                    )
             except ConnectorBindError as exc:
+                # Bind failure short-circuits the attempt loop
+                # without scheduling, so the attempt counter
+                # records ``internal_error`` (no envelope class
+                # was produced).
+                record_step_attempt(step_kind_label, "internal_error")
                 return StepFailed(envelope=MappingProxyType(exc.to_dict()))
             except Exception as exc:
                 wrapped = ConnectorBindError(
@@ -308,22 +337,26 @@ class ActivityStepHandler:
                     attempt=attempt,
                     cause=repr(exc),
                 )
+                record_step_attempt(step_kind_label, "internal_error")
                 return StepFailed(envelope=MappingProxyType(wrapped.to_dict()))
 
             deadline = ctx.workflow_context.current_utc_datetime + self._default_activity_deadline
+            schedule_start = time.perf_counter()
             try:
-                envelope = self._activity_client.schedule_activity(
-                    ScheduleActivityRequest(
-                        run_id=triple.run_id,
-                        step_id=triple.step_id,
-                        attempt=triple.attempt,
-                        activity_ref=activity_step.activity,
-                        inputs=inputs,
-                        connector_contexts=bind_response.contexts,
-                        deadline=deadline,
-                    ),
-                )
+                with observe_step_schedule_activity(step_kind_label):
+                    envelope = self._activity_client.schedule_activity(
+                        ScheduleActivityRequest(
+                            run_id=triple.run_id,
+                            step_id=triple.step_id,
+                            attempt=triple.attempt,
+                            activity_ref=activity_step.activity,
+                            inputs=inputs,
+                            connector_contexts=bind_response.contexts,
+                            deadline=deadline,
+                        ),
+                    )
             except ActivityScheduleError as exc:
+                record_step_attempt(step_kind_label, "internal_error")
                 return StepFailed(envelope=MappingProxyType(exc.to_dict()))
             except Exception as exc:
                 wrapped_schedule = ActivityScheduleError(
@@ -334,19 +367,32 @@ class ActivityStepHandler:
                     activity_ref=activity_step.activity,
                     cause=repr(exc),
                 )
+                record_step_attempt(step_kind_label, "internal_error")
                 return StepFailed(envelope=MappingProxyType(wrapped_schedule.to_dict()))
+
+            # WF-IMPL-058: schedule succeeded — record the
+            # envelope class on the duration histogram and bump
+            # the per-attempt counter with the envelope's class
+            # label. ``record_activity_schedule_sample`` validates
+            # that ``envelope.class_`` is in ACTIVITY_RESULT_CLASSES
+            # so a malformed envelope fails the recorder rather
+            # than silently polluting the dashboard.
+            schedule_elapsed_ms = (time.perf_counter() - schedule_start) * 1000.0
+            record_activity_schedule_sample(schedule_elapsed_ms, step_kind_label, envelope.class_)
+            record_step_attempt(step_kind_label, envelope.class_)
 
             if envelope.class_ == "success":
                 outputs = envelope.outputs or {}
                 return StepSucceeded(outputs=MappingProxyType(dict(outputs)))
 
-            decision = retry_driver.decide(
-                node,
-                _error_envelope_for_decide(envelope),
-                attempt,
-                prev_delay_seconds,
-                _make_rng(run_id_str, step_id, attempt),
-            )
+            with observe_step_retry_decision(step_kind_label):
+                decision = retry_driver.decide(
+                    node,
+                    _error_envelope_for_decide(envelope),
+                    attempt,
+                    prev_delay_seconds,
+                    _make_rng(run_id_str, step_id, attempt),
+                )
 
             if isinstance(decision, retry_driver.Skip):
                 return StepSkipped(reason=decision.reason)
