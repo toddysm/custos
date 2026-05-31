@@ -1,6 +1,6 @@
 # TODOs: Workflow Service
 
-Last Updated: 2026-05-30 (WF-IMPL-053 merged — retry decision driver)
+Last Updated: 2026-05-30 (WF-IMPL-054 merged — ActivityStepHandler)
 
 ## Open
 
@@ -35,7 +35,7 @@ Fourth sub-module: **Step Coordinator**, packaged inside the service host `src/s
 - [x] WF-IMPL-051 (#422): `WithInputResolver` — evaluate `with:` CEL expressions.
 - [x] WF-IMPL-052 (#423): `LetStepHandler` — inline expression evaluation (depends on #422).
 - [x] WF-IMPL-053 (#424): Retry decision driver — `on_error` route walk + effective delay (depends on #419).
-- [F] WF-IMPL-054 (#425): `ActivityStepHandler` — full activity step lifecycle (depends on #418, #420, #421, #422, #424).
+- [x] WF-IMPL-054 (#425): `ActivityStepHandler` — full activity step lifecycle (depends on #418, #420, #421, #422, #424).
 
 ### Phase D — Coordinator integration
 
