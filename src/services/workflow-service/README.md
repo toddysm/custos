@@ -390,6 +390,48 @@ fixture, in-memory exporter) wires SDK-backed instruments.
 Tracker: [#432](https://github.com/toddysm/custos/issues/432).
 
 
+WF-IMPL-059 ([#430](https://github.com/toddysm/custos/issues/430))
+**ships the Step Coordinator end-to-end integration suite**,
+locking the visible contract of the `RunController` →
+`make_run_orchestrator` → `StepCoordinator` →
+`ActivityStepHandler` → `FakeActivityRuntimeClient` /
+`FakeConnectorClient` pipeline against six scenarios:
+(1) single-activity success — the orchestrator carries the
+envelope outputs onto `RunOutput.outputs[step_id]`, exactly one
+bind and one schedule are observed, the lifecycle tape carries
+only `workflow.started`; (2) `let → activity → let` with
+cross-step references — the second `let:` consumes
+`${{ steps.scan.outputs.* }}` and observes the envelope outputs
+verbatim; (3) retry loop succeeds on attempt 3 — two
+`retryable` envelopes followed by a `success` yield three
+schedule calls with attempts `[1, 2, 3]` and three fresh
+connector binds (bind-per-attempt is design-locked); (4) retry
+budget exhaustion — three `retryable` envelopes with
+`maxAttempts: 3` produce a `failed` `RunOutput` carrying the
+locked `step.retry_budget_exhausted` envelope kind; (5) cancel
+mid-flight — `cancel_run` drives the store row through
+`cancelling → cancelled` and emits `workflow.cancelled` on the
+publisher tape (the Run Controller cancel surface, preserved
+verbatim by the WF-IMPL-055 wiring); (6) replay determinism —
+two independent runs with identical inputs and identical canned
+fake responses produce byte-equal `RunOutput.to_dict()` payloads
+and byte-equal lifecycle event-kind tapes, evidencing that the
+StepCoordinator dispatch + retry decision + envelope inflation
+paths are pure functions of their inputs. The suite extends
+`tests/integration/_harness.py` with an `activity_registry`
+parameter so scenarios that drive real `activity:` steps can
+seed the compile-time output-schema registry the
+`${{ steps.X.outputs.* }}` references type-check against.
+Coverage gate remains ≥ 90 % service-wide (currently 98.82 %
+across the 117 source files). The Run Controller's
+`workflow.completed` event and the orchestrator-side `step.*`
+event-emitter wiring (which the WF-IMPL-056 adapter publishes
+once the orchestrator threads it through) remain on the deferred
+sub-module list and are intentionally **not** asserted by the
+suite so it locks only the currently-shipped observable surface.
+Tracker: [#432](https://github.com/toddysm/custos/issues/432).
+
+
 The Expression Evaluator (the first sub-module) is already in
 [`src/libs/custos-cel/`](../../libs/custos-cel) and shipped via
 WF-IMPL-001 through WF-IMPL-012 (#176–#187).

@@ -1,6 +1,6 @@
 # TODOs: Workflow Service
 
-Last Updated: 2026-05-31 (WF-IMPL-058 in PR — OTel observability hooks for the Step Coordinator)
+Last Updated: 2026-05-31 (WF-IMPL-059 in PR — Step Coordinator integration test suite)
 
 ## Open
 

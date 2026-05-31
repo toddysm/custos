@@ -257,8 +257,17 @@ def make_harness(
     clock: FixedClock | None = None,
     terminate_poll_attempts: int = 5,
     terminate_poll_interval_seconds: float = 0.01,
+    activity_registry: InMemoryActivityTypeRegistry | None = None,
 ) -> Harness:
-    """Wire a complete end-to-end harness for one integration test."""
+    """Wire a complete end-to-end harness for one integration test.
+
+    ``activity_registry`` defaults to an empty
+    :class:`InMemoryActivityTypeRegistry`. WF-IMPL-059 integration
+    tests that drive real ``activity:`` steps through the
+    :class:`StepCoordinator` pass a registry pre-populated with
+    the activity output schemas the document's
+    ``${{ steps.X.outputs.* }}`` references type-check against.
+    """
 
     runtime = FakeWorkflowRuntime()
     fake_client = FakeWorkflowClient(runtime=runtime)
@@ -275,7 +284,9 @@ def make_harness(
         catalog=catalog,
         store=store,
         workflow_client=cast(Any, bridge),
-        activity_registry=InMemoryActivityTypeRegistry({}),
+        activity_registry=activity_registry
+        if activity_registry is not None
+        else InMemoryActivityTypeRegistry({}),
         lifecycle_publisher=publisher,
         clock=clock or FixedClock(FIXED_NOW),
         terminate_poll_attempts=terminate_poll_attempts,
