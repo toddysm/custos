@@ -164,13 +164,20 @@ class TestStartRunSucceeds:
         # The fake drives the orchestrator inline during
         # ``schedule_new_workflow``, so the moment ``start_run``
         # returns the runtime instance is already terminal with
-        # a ``succeeded`` ``RunOutput`` carrying the empty bag
-        # the linear NoopStepHandler produced.
+        # a ``succeeded`` ``RunOutput`` carrying the resolved
+        # ``let:`` bindings the linear NoopStepHandler produced
+        # (WF-IMPL-052 delegates ``StepKind.LET`` to
+        # :class:`custos_workflow.steps.LetStepHandler`, which
+        # evaluates ``${{ true }}`` to ``True``).
         state = h.runtime.instance(str(ref.run_id))
         assert isinstance(state.output, RunOutput)
         assert state.output.status == RunStatus.SUCCEEDED.value
         assert state.output.failed_step is None
-        assert state.output.outputs == {"a": {}, "b": {}, "c": {}}
+        assert state.output.outputs == {
+            "a": {"x": True},
+            "b": {"y": True},
+            "c": {"z": True},
+        }
 
     async def test_lifecycle_event_started_published(self) -> None:
         h = make_harness(doc_yaml=_SINGLE_STEP_DOC)

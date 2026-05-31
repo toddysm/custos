@@ -12,7 +12,9 @@ Covers the four acceptance criteria from #386:
 3. Every variant is a frozen dataclass — attribute assignment
    raises :class:`dataclasses.FrozenInstanceError`.
 4. :class:`NoopStepHandler` returns
-   :class:`StepSucceeded` for :class:`StepKind.LET` and raises
+   :class:`StepSucceeded` for :class:`StepKind.LET` (by
+   delegating to :class:`custos_workflow.steps.LetStepHandler`
+   per WF-IMPL-052) and raises
    :class:`NotImplementedError` for every other kind; unknown
    ``step_id`` raises :class:`KeyError`.
 
@@ -102,6 +104,8 @@ def _ctx() -> StepExecutionContext:
     return StepExecutionContext(
         run_id=RunId("run-1"),
         workspace_id="ws-1",
+        workflow_version_id="wf-version-1",
+        inputs={},
         workflow_context=FakeWorkflowContext(
             instance_id="run-1", now=datetime(2026, 1, 1, tzinfo=UTC)
         ),
@@ -179,14 +183,29 @@ class TestStepExecutionContext:
 
 
 class TestNoopStepHandler:
-    def test_let_kind_returns_succeeded_with_empty_outputs(self) -> None:
+    def test_let_kind_delegates_to_let_step_handler(self) -> None:
+        # WF-IMPL-052: NoopStepHandler delegates ``StepKind.LET`` to
+        # :class:`custos_workflow.steps.LetStepHandler`. With a
+        # literal (non-string) binding value and an empty
+        # ``call_sites`` map the handler short-circuits to a pure
+        # passthrough — letting us assert delegation without
+        # standing up a compiled CEL call site.
         handler = NoopStepHandler()
-        graph = _graph(_let_node("a"))
+        node = ExecutionNode(
+            step_id="a",
+            kind=StepKind.LET,
+            primitive_handler=PrimitiveHandler.EXPRESSION_INLINE,
+            retry_policy=None,
+            on_error_routes=(),
+            call_sites={},
+            step_source=LetStep.model_validate({"id": "a", "let": {"v": 42}}),
+        )
+        graph = _graph(node)
 
         result = handler.execute(_ctx(), graph, "a")
 
         assert isinstance(result, StepSucceeded)
-        assert dict(result.outputs) == {}
+        assert dict(result.outputs) == {"v": 42}
 
     def test_non_let_kind_raises_not_implemented(self) -> None:
         handler = NoopStepHandler()

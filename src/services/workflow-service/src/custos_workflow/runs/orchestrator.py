@@ -480,6 +480,8 @@ def _step_ctx(
     return StepExecutionContext(
         run_id=cast(RunId, ctx.instance_id),
         workspace_id=run_input.workspace_id,
+        workflow_version_id=run_input.workflow_version_id,
+        inputs=MappingProxyType(dict(run_input.inputs)),
         workflow_context=ctx,
         outputs=MappingProxyType(snapshot),
         clock=clock,
