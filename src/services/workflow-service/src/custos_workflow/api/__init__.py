@@ -45,6 +45,7 @@ from custos_workflow.api.models import (
     StepAttemptSummary,
     StepResponse,
 )
+from custos_workflow.api.routes import all_routers
 
 __all__ = [
     "LOCKED_API_KINDS",
@@ -64,6 +65,7 @@ __all__ = [
     "StartRunResponse",
     "StepAttemptSummary",
     "StepResponse",
+    "all_routers",
     "get_call_context",
     "get_run_components",
     "get_run_controller",
