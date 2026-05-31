@@ -52,6 +52,13 @@ dependencies = [
     # custos-connector's DaprPubSubEventPublisher (no Dapr SDK runtime
     # dependency beyond dapr-ext-workflow).
     "httpx>=0.27",
+    # jsonschema — used by custos_workflow.validator.inputs
+    # (WF-IMPL-063, #449) to evaluate the StartRun ``inputs`` payload
+    # against the JSON Schema derived from ``WorkflowSpec.inputs``.
+    # Draft 2020-12 validator is the default; failures are translated
+    # into structured :class:`InputsSchemaError` rejections with a
+    # JSON-pointer ``loc`` per failure.
+    "jsonschema>=4.21,<5",
 ]
 
 [project.optional-dependencies]
