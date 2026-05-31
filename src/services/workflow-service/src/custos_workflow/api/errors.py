@@ -343,10 +343,12 @@ async def handle_run_controller_error(request: Request, exc: Exception) -> JSONR
 
     Today this only catches :class:`RunStateCorruptError` (which is
     a server-side data-integrity bug, not a contract surface): we
-    emit a generic ``workflow.api.bad_request`` envelope at 500-ish
-    semantics by mapping to the catch-all kind so SDKs see a
-    consistent envelope shape. The audit pipeline (LifecycleEvent
-    publisher) already captures the underlying ``kind`` separately.
+    emit the catch-all ``workflow.api.bad_request`` envelope at the
+    locked status (400) so SDK clients still see a uniform envelope
+    shape. The audit pipeline (LifecycleEvent publisher) captures
+    the underlying ``kind`` separately, and the wire body preserves
+    it under the ``underlyingKind`` extension so operators debugging
+    from the response still see the precise failure mode.
     """
     assert isinstance(exc, RunControllerError)
     return _problem_response(
@@ -466,15 +468,20 @@ async def handle_http_exception(request: Request, exc: Exception) -> JSONRespons
 
     Route handlers that need to short-circuit (e.g. ``raise HTTPException(404)``
     for a path token Pydantic could not type-narrow) get a uniform
-    envelope: kind ``workflow.api.bad_request`` for 4xx, generic
-    HTTP-status code as ``code`` for 5xx so the SDK never sees the
-    FastAPI default ``{"detail": "..."}`` shape.
+    envelope: ``code`` is always ``workflow.api.bad_request`` and the
+    original ``exc.status_code`` is preserved verbatim in the body's
+    ``status`` field (and the HTTP response status), so the SDK never
+    sees the FastAPI default ``{"detail": "..."}`` shape regardless
+    of whether the underlying status is 4xx or 5xx.
     """
     assert isinstance(exc, StarletteHTTPException)
-    # Map 404 to a dedicated bad_request envelope but preserve the
-    # original status; for everything else we still emit the
-    # bad_request envelope (status synthesised from the exception)
-    # so the wire shape is uniform.
+    # Every StarletteHTTPException flows through the same envelope:
+    # `code` is the catch-all `workflow.api.bad_request` and the
+    # original `exc.status_code` is preserved verbatim on both the
+    # HTTP response and the body's `status` field. The locked-table
+    # status for the catch-all is 400 by default; this handler
+    # bypasses :func:`_problem_response` so the HTTPException's
+    # actual status is honoured (404, 405, 415, 500, …).
     status = exc.status_code
     detail = str(exc.detail) if exc.detail is not None else ""
     # We bypass _problem_response because the locked-table status

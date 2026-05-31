@@ -170,6 +170,26 @@ class TestInputsSchemaError:
         assert len(err.validation) == 2
         assert err.validation[0]["loc"] == ["inputs", "count"]
 
+    def test_validation_property_returns_defensive_copy(self) -> None:
+        # Reviewer concern from PR #460: instances are hashable but
+        # ``validation`` exposed a mutable list. Ensure the property
+        # returns a fresh copy so external mutation cannot violate
+        # hash invariants.
+        err = InputsSchemaError("bad", workspace_id="ws-2", validation=self._issues())
+        original_hash = hash(err)
+        original_dump = err.to_dict()["validation"]
+
+        # Mutate the returned list AND a dict inside it.
+        snapshot = err.validation
+        snapshot.append({"loc": ["evil"], "code": "x", "message": "y"})
+        snapshot[0]["loc"] = ["mutated"]
+
+        # The instance is unchanged.
+        assert hash(err) == original_hash
+        assert err.to_dict()["validation"] == original_dump
+        assert len(err.validation) == 2
+        assert err.validation[0]["loc"] == ["inputs", "count"]
+
     def test_validation_defaults_to_empty_list(self) -> None:
         err = InputsSchemaError("bad", workspace_id="ws-2")
         assert err.validation == []

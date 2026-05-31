@@ -251,11 +251,21 @@ class InputsSchemaError(ValidatorError, ValueError):
     subclasses :class:`ValueError` so callers using
     ``except ValueError:`` still catch it.
 
+    The class is effectively immutable to external callers:
+    :attr:`validation` is exposed via a read-only property that
+    returns a fresh defensive copy on every access. The constructor
+    also deep-copies the caller's list into a private
+    :attr:`_validation` attribute. Together these guarantees keep
+    :meth:`__hash__` invariants intact even if a caller stashes the
+    error in a ``dict`` / ``set`` and later attempts to mutate the
+    rejection list — the mutation has no effect on the instance.
+
     Attributes:
-        validation: List of ``{"loc": [...], "code": str, "message": str}``
-            dicts, one per rejected field. Always a list (possibly
-            empty). The dicts are JSON-safe so they round-trip
-            verbatim through :meth:`to_dict`.
+        validation: Read-only property. List of
+            ``{"loc": [...], "code": str, "message": str}`` dicts,
+            one per rejected field. Always a list (possibly empty).
+            The dicts are JSON-safe so they round-trip verbatim
+            through :meth:`to_dict`.
     """
 
     KIND: Final[str] = "workflow.validator.inputs_schema_error"  # type: ignore[misc]
@@ -268,15 +278,31 @@ class InputsSchemaError(ValidatorError, ValueError):
         validation: list[dict[str, Any]] | None = None,
     ) -> None:
         super().__init__(message, workspace_id=workspace_id)
-        # Defensive shallow copy so the caller's list is not
-        # captured by reference (audit emission may stash this
-        # error for later serialization).
-        self.validation: list[dict[str, Any]] = (
+        # Store a defensive deep-ish copy under a private name so
+        # the public attribute surface is read-only via the
+        # :attr:`validation` property below. Each issue dict is
+        # shallow-copied; values are JSON primitives (strings,
+        # ints, lists of strings) so a one-level copy is enough
+        # to insulate the error from caller mutation of the
+        # outer list and the issue dicts.
+        self._validation: list[dict[str, Any]] = (
             [dict(item) for item in validation] if validation is not None else []
         )
 
+    @property
+    def validation(self) -> list[dict[str, Any]]:
+        """Defensive copy of the rejection list.
+
+        Returns a fresh ``list`` of fresh ``dict`` copies on every
+        access so external callers cannot mutate the instance and
+        violate :meth:`__hash__` invariants. The audit emitter and
+        the WF-IMPL-061 RFC 7807 handler both call this property
+        rather than touching the private :attr:`_validation` field.
+        """
+        return [dict(item) for item in self._validation]
+
     def _extra_fields(self) -> dict[str, Any]:
-        return {"validation": list(self.validation)}
+        return {"validation": self.validation}
 
 
 class IdempotencyConflictError(ValidatorError):
