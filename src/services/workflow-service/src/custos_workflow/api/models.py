@@ -45,6 +45,7 @@ from pydantic.alias_generators import to_camel
 from custos_workflow.runs.model import RunStatus
 
 __all__ = [
+    "MAX_LIST_LIMIT",
     "CancelRunRequest",
     "PageRefResponse",
     "RaiseExternalEventRequest",
@@ -148,11 +149,12 @@ class RunRefResponse(_CamelModel):
     subsequent read.
     """
 
-    run_id: str = Field(description="The opaque run identifier.")
+    run_id: str = Field(min_length=1, description="The opaque run identifier.")
     status: RunStatus = Field(description="Current run lifecycle status.")
-    workspace_id: str = Field(description="Owning workspace.")
+    workspace_id: str = Field(min_length=1, description="Owning workspace.")
     workflow_version_id: str = Field(
-        description="The Catalog `WorkflowVersion.id` this run instantiates."
+        min_length=1,
+        description="The Catalog `WorkflowVersion.id` this run instantiates.",
     )
     started_at: datetime | None = Field(
         default=None,
@@ -262,10 +264,10 @@ class RunResponse(_CamelModel):
     on the happy path.
     """
 
-    run_id: str
+    run_id: str = Field(min_length=1)
     status: RunStatus
-    workspace_id: str
-    workflow_version_id: str
+    workspace_id: str = Field(min_length=1)
+    workflow_version_id: str = Field(min_length=1)
     reason: str | None = Field(default=None)
     started_at: datetime
     updated_at: datetime
@@ -349,10 +351,12 @@ class RunListQuery(_CamelModel):
     )
     workflow_version_id: str | None = Field(
         default=None,
+        min_length=1,
         description="Restrict to runs of this `WorkflowVersion.id`.",
     )
     cursor: str | None = Field(
         default=None,
+        min_length=1,
         description="Opaque pagination token from a previous page's `nextCursor`.",
     )
     limit: int | None = Field(
@@ -376,6 +380,7 @@ class RunListResponse(_CamelModel):
     items: list[RunRefResponse] = Field(default_factory=list)
     next_cursor: str | None = Field(
         default=None,
+        min_length=1,
         description="Opaque token to pass as `cursor` on the next request; None on the final page.",
     )
 
@@ -398,4 +403,4 @@ class PageRefResponse(_CamelModel):
     """
 
     items: list[dict[str, Any]] = Field(default_factory=list)
-    next_cursor: str | None = Field(default=None)
+    next_cursor: str | None = Field(default=None, min_length=1)

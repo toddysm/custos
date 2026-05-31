@@ -154,6 +154,21 @@ class TestRunRefResponse:
                 }
             )
 
+    @pytest.mark.parametrize("field", ["runId", "workspaceId", "workflowVersionId"])
+    def test_identifier_fields_reject_empty_string(self, field: str) -> None:
+        # Lock the min_length=1 constraint added in response to PR #462 review:
+        # opaque IDs must be non-empty so clients cannot smuggle invalid
+        # references through the public wire surface.
+        wire = {
+            "runId": "r",
+            "status": "queued",
+            "workspaceId": "ws",
+            "workflowVersionId": "wfv",
+        }
+        wire[field] = ""
+        with pytest.raises(ValidationError):
+            RunRefResponse.model_validate(wire)
+
 
 # ---------------------------------------------------------------------------
 # StepAttemptSummary + StepResponse
@@ -297,6 +312,20 @@ class TestRunResponse:
                 }
             )
 
+    @pytest.mark.parametrize("field", ["runId", "workspaceId", "workflowVersionId"])
+    def test_identifier_fields_reject_empty_string(self, field: str) -> None:
+        wire = {
+            "runId": "r",
+            "status": "running",
+            "workspaceId": "ws",
+            "workflowVersionId": "wfv",
+            "startedAt": "2026-05-31T12:00:00Z",
+            "updatedAt": "2026-05-31T12:00:00Z",
+        }
+        wire[field] = ""
+        with pytest.raises(ValidationError):
+            RunResponse.model_validate(wire)
+
 
 # ---------------------------------------------------------------------------
 # CancelRunRequest
@@ -402,6 +431,14 @@ class TestRunListQuery:
         with pytest.raises(ValidationError):
             RunListQuery.model_validate({"extra": "no"})
 
+    @pytest.mark.parametrize("field", ["workflowVersionId", "cursor"])
+    def test_optional_strings_reject_empty(self, field: str) -> None:
+        # min_length=1 was added in response to PR #462 review so callers
+        # cannot conflate "unset" with an empty string on either the
+        # workflow filter or the opaque cursor.
+        with pytest.raises(ValidationError):
+            RunListQuery.model_validate({field: ""})
+
 
 class TestRunListResponse:
     def test_round_trip(self) -> None:
@@ -451,3 +488,7 @@ class TestPageRefResponse:
         page = PageRefResponse.model_validate({})
         assert page.items == []
         assert page.next_cursor is None
+
+    def test_next_cursor_rejects_empty_string(self) -> None:
+        with pytest.raises(ValidationError):
+            PageRefResponse.model_validate({"nextCursor": ""})
