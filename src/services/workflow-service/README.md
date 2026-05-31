@@ -288,6 +288,50 @@ table. Re-exported from `custos_workflow.steps` as
 [#432](https://github.com/toddysm/custos/issues/432).
 
 
+`StepLifecyclePublisher` / `LifecycleEventPublisherAdapter`
+(WF-IMPL-056, `src/custos_workflow/steps/events.py`) is the
+*publishing* surface that the dispatcher will be wired through in
+WF-IMPL-057. The `StepLifecyclePublisher` Protocol exposes one
+typed `emit_step_*` method per locked `step.*` kind
+(`step.started`, `step.completed`, `step.failed`, `step.skipped`,
+`step.waiting`, `step.retry_scheduled` — the full set is pinned
+by the `LOCKED_STEP_EVENT_KINDS` frozenset, with a module-level
+`assert` keeping the Protocol surface and the locked set in
+lockstep). The `LifecycleEventPublisherAdapter` *adapts* — it
+does not implement — the wire transport: its inner
+`LifecycleEventPublisher` is the same surface the Run Controller
+already drives for `workflow.*` events, so every
+`custos.workflow.events` publication funnels through one HTTP
+client and one Dapr Pub/Sub endpoint. Each emit method builds a
+`LifecycleEvent` whose `extra` carries `step_id` + `attempt` +
+the kind-specific payload (`outputs` / `error` / `reason` /
+`wait_token`), and `LifecycleEvent.to_wire` (extended by this
+task) surfaces those fields as first-class wire keys (`stepId` /
+`attempt` / `error` / `reason` / `waitToken`) so subscribers see
+one envelope shape regardless of producer. `step.retry_scheduled`
+delegates envelope construction to WF-IMPL-053's
+`build_retry_scheduled_event` and is special-cased in `to_wire`
+to re-pack the flat `previous_attempt` / `next_attempt` /
+`effective_delay_seconds` / `action` / `previous_*` keys into a
+nested `retry` wire block. Dapr Workflow's at-least-once
+activity semantics replay each step boundary, so the adapter
+maintains an in-memory LRU dedup keyed on
+`(run_id, step_id, attempt, kind)` (the existing
+`DedupingLifecyclePublisher`'s `(run_id, kind, occurred_at)` key
+is too coarse — the same step `kind` legitimately fires for
+every step in a graph). The key reservation happens *before* the
+awaited inner publish so two concurrent emits for the same key
+cannot both forward; if the inner publish raises, the
+reservation is dropped so a retry still forwards the event.
+**Emission is not yet wired into the dispatcher** — that wiring
+lands in WF-IMPL-057 (FastAPI lifespan worker registration).
+Re-exported from `custos_workflow.steps` as
+`StepLifecyclePublisher`, `LifecycleEventPublisherAdapter`,
+`LOCKED_STEP_EVENT_KINDS`, and the six `LIFECYCLE_KIND_STEP_*`
+constants. Tracker:
+[#432](https://github.com/toddysm/custos/issues/432).
+
+
 The Expression Evaluator (the first sub-module) is already in
 [`src/libs/custos-cel/`](../../libs/custos-cel) and shipped via
 WF-IMPL-001 through WF-IMPL-012 (#176–#187).

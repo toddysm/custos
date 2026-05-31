@@ -265,6 +265,17 @@ class LifecycleEvent:
         placing an explicit ``status`` key on :attr:`extra`.
         ``outputs`` is emitted only when :attr:`extra` carries one
         (relevant for ``workflow.completed``).
+
+        For ``step.*`` kinds (WF-IMPL-056) the envelope additionally
+        surfaces ``stepId`` and ``attempt`` from :attr:`extra` as
+        first-class fields and forwards the optional ``error`` /
+        ``reason`` / ``waitToken`` blocks verbatim. ``step.retry_scheduled``
+        is special-cased to surface ``previous_attempt`` as
+        ``attempt`` and to re-pack WF-IMPL-053's flat
+        ``next_attempt`` / ``effective_delay_seconds`` / ``action``
+        / ``previous_*`` keys into a single nested ``retry`` block.
+        Subscribers therefore see one envelope shape regardless
+        of which producer wrote the event.
         """
         envelope: dict[str, Any] = {
             "kind": self.kind,
@@ -281,6 +292,56 @@ class LifecycleEvent:
         outputs = self.extra.get("outputs") if self.extra else None
         if outputs is not None:
             envelope["outputs"] = dict(outputs)
+        # step.* envelopes carry stepId / attempt as first-class
+        # wire fields per design.md § Dapr Pub/Sub Publications.
+        # Producer (the WF-IMPL-056 step lifecycle adapter, or
+        # the WF-IMPL-053 :func:`build_retry_scheduled_event`)
+        # populates ``extra`` with these keys; we forward any
+        # present value verbatim and never synthesize defaults
+        # — a missing key is a producer bug, not a consumer
+        # concern.
+        if self.kind.startswith("step."):
+            step_id = self.extra.get("step_id") if self.extra else None
+            if step_id is not None:
+                envelope["stepId"] = step_id
+            if self.kind == "step.retry_scheduled":
+                # WF-IMPL-053's build_retry_scheduled_event flattens
+                # the retry payload into extra (``previous_attempt``,
+                # ``next_attempt``, ``effective_delay_seconds``,
+                # ``action``, ``previous_*``). Re-pack into a single
+                # ``retry`` wire block and surface ``previous_attempt``
+                # as the canonical ``attempt`` wire field (the
+                # attempt that failed and triggered this retry).
+                previous_attempt = self.extra.get("previous_attempt")
+                if previous_attempt is not None:
+                    envelope["attempt"] = previous_attempt
+                retry_block: dict[str, Any] = {}
+                for src_key, wire_key in (
+                    ("next_attempt", "nextAttempt"),
+                    ("effective_delay_seconds", "effectiveDelaySeconds"),
+                    ("action", "action"),
+                    ("previous_code", "previousCode"),
+                    ("previous_code_prefix", "previousCodePrefix"),
+                    ("previous_class", "previousClass"),
+                ):
+                    val = self.extra.get(src_key)
+                    if val is not None:
+                        retry_block[wire_key] = val
+                if retry_block:
+                    envelope["retry"] = retry_block
+            else:
+                attempt = self.extra.get("attempt")
+                if attempt is not None:
+                    envelope["attempt"] = attempt
+                error = self.extra.get("error")
+                if error is not None:
+                    envelope["error"] = dict(error)
+                reason = self.extra.get("reason")
+                if reason is not None:
+                    envelope["reason"] = reason
+                wait_token = self.extra.get("wait_token")
+                if wait_token is not None:
+                    envelope["waitToken"] = wait_token
         return envelope
 
 
