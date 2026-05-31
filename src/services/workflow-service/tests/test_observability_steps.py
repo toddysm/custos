@@ -530,13 +530,28 @@ class TestWaitNodeRaisesAndRecords:
         with pytest.raises(StepKindNotImplementedError):
             coord.execute(_ctx(), _graph(_wait_node()), "pause")
 
-        samples = _by_name(_collect_points(), "custos_workflow_step_execute_duration_ms")
-        assert len(samples) == 1
-        attrs, _value = samples[0]
+        # Drain DELTA temporality once and assert both the
+        # histogram sample and the error counter from the same
+        # snapshot — Copilot review #444 thread:
+        # ``StepCoordinator.execute`` must bump
+        # ``custos_workflow_step_errors_total`` for *raised*
+        # ``StepCoordinatorError``s, not just ``StepFailed``
+        # envelopes.
+        points = _collect_points()
+
+        hist = _by_name(points, "custos_workflow_step_execute_duration_ms")
+        assert len(hist) == 1
+        attrs, _value = hist[0]
         # The outcome label is the bare suffix of the
         # ``step.kind_not_implemented`` kind, as pinned by
         # ``_STEP_EXECUTE_OUTCOMES``.
         assert attrs == {"step_kind": "wait", "outcome": "kind_not_implemented"}
+
+        errors = _by_name(points, "custos_workflow_step_errors_total")
+        assert len(errors) == 1
+        err_attrs, err_value = errors[0]
+        assert err_attrs == {"kind": "step.kind_not_implemented"}
+        assert err_value == 1
 
     def test_wait_step_span_status_is_error_with_exception(self) -> None:
         coord = StepCoordinator(
