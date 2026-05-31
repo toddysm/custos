@@ -44,6 +44,20 @@ from pydantic.alias_generators import to_camel
 
 from custos_workflow.runs.model import RunStatus
 
+#: Canonical workspace identifier grammar enforced on every Internal
+#: RPC request body that carries an explicit ``workspaceId`` (the
+#: public surface enforces the same grammar at the routing layer via
+#: :data:`custos_workflow.api.dependencies.WORKSPACE_ID_PATTERN`).
+#: The two declarations are intentionally kept byte-equal so the
+#: internal + public surfaces accept exactly the same workspace ids;
+#: ``tests/api/test_models.py`` (and ``tests/api/routes/test_rpc.py``)
+#: assert the equality so any future drift fails CI. The regex is
+#: inlined rather than imported to keep ``api/models.py``
+#: FastAPI-free — importing from ``api.dependencies`` would drag
+#: FastAPI through the validator package, which is intentionally
+#: framework-agnostic.
+_WORKSPACE_ID_PATTERN: Final[str] = r"^[a-z][a-z0-9-]{0,62}$"
+
 __all__ = [
     "MAX_LIST_LIMIT",
     "CancelRunRequest",
@@ -326,9 +340,13 @@ class InternalStartRunRequest(StartRunRequest):
 
     workspace_id: str = Field(
         min_length=1,
+        max_length=63,
+        pattern=_WORKSPACE_ID_PATTERN,
         description=(
             "Owning workspace for the run. Required on the Internal "
-            "RPC surface (the path carries no `{ws}` segment)."
+            "RPC surface (the path carries no `{ws}` segment). Must "
+            "match the canonical DNS-1123-like workspace grammar the "
+            "public surface enforces on its `{ws}` path segment."
         ),
     )
 
@@ -344,9 +362,13 @@ class InternalCancelRunRequest(CancelRunRequest):
 
     workspace_id: str = Field(
         min_length=1,
+        max_length=63,
+        pattern=_WORKSPACE_ID_PATTERN,
         description=(
             "Owning workspace for the run. Required on the Internal "
-            "RPC surface (the path carries no `{ws}` segment)."
+            "RPC surface (the path carries no `{ws}` segment). Must "
+            "match the canonical DNS-1123-like workspace grammar the "
+            "public surface enforces on its `{ws}` path segment."
         ),
     )
 

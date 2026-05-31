@@ -46,10 +46,15 @@ The error taxonomy is identical to the public surface: every
 :class:`RunControllerError` / :class:`ValidatorError` is mapped
 through the WF-IMPL-061 handler chain to the locked RFC 7807
 envelope. ``CancelRun`` of an unknown run id returns the
-``workflow.run_not_found`` (404) envelope; an
-already-cancelled run returns the
-``workflow.run_state_conflict`` (409) envelope. The Internal
-RPC routes do NOT introduce any new ``code`` values.
+``workflow.run_not_found`` (404) envelope. ``CancelRun`` of a
+run that is already in a terminal *non-cancel* status
+(``succeeded`` / ``failed``) returns the
+``workflow.run_state_conflict`` (409) envelope; calling
+``CancelRun`` on a run that is already ``cancelling`` /
+``cancelled`` is an idempotent no-op that returns 202 with the
+current :class:`RunRef` (the controller short-circuits without
+re-issuing the terminate). The Internal RPC routes do NOT
+introduce any new ``code`` values.
 """
 
 from __future__ import annotations
@@ -167,10 +172,13 @@ async def cancel_run(
     through to
     :meth:`~custos_workflow.runs.controller.RunController.cancel_run`
     unchanged. Unknown run ids surface the
-    ``workflow.run_not_found`` (404) envelope; an
-    already-cancelled run surfaces the
-    ``workflow.run_state_conflict`` (409) envelope \u2014 both
-    locked by the WF-IMPL-061 handler chain.
+    ``workflow.run_not_found`` (404) envelope. A run that is
+    already in a terminal non-cancel state (``succeeded`` /
+    ``failed``) surfaces the ``workflow.run_state_conflict``
+    (409) envelope. A run that is already ``cancelling`` /
+    ``cancelled`` is an idempotent no-op handled by the
+    controller — the route returns 202 with the run's current
+    :class:`RunRef` without re-issuing the terminate.
     """
     ref = await controller.cancel_run(
         workspace_id=body.workspace_id,

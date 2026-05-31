@@ -39,11 +39,15 @@ from fastapi import FastAPI
 from httpx import ASGITransport
 
 from custos_workflow.api.dependencies import (
+    WORKSPACE_ID_PATTERN,
     get_call_context,
     get_run_controller,
     get_validator,
 )
 from custos_workflow.api.errors import register_exception_handlers
+from custos_workflow.api.models import (
+    _WORKSPACE_ID_PATTERN as _MODEL_WORKSPACE_ID_PATTERN,
+)
 from custos_workflow.api.routes import all_routers, rpc_router
 from custos_workflow.call_context import CallContext
 from custos_workflow.document.models import WorkflowDocument
@@ -325,6 +329,51 @@ class TestInternalStartRun:
         assert response.status_code == 400
         harness.controller.start_run.assert_not_called()
 
+    async def test_malformed_workspace_id_returns_400(
+        self, client: httpx.AsyncClient, harness: _Harness
+    ) -> None:
+        """The body's `workspaceId` must match the canonical grammar."""
+        response = await client.post(
+            "/internal/runs:start",
+            json={
+                "workspaceId": "NOT-VALID-CAPS",
+                "workflowVersionId": WORKFLOW_VERSION_ID,
+                "inputs": {},
+            },
+        )
+
+        assert response.status_code == 400
+        assert response.json()["code"] == "workflow.api.bad_request"
+        harness.controller.start_run.assert_not_called()
+
+    async def test_empty_idempotency_key_body_opts_out(
+        self, client: httpx.AsyncClient, harness: _Harness
+    ) -> None:
+        """An empty `idempotencyKey` body field normalises to None.
+
+        The public surface (WF-IMPL-065) documents "empty string opts
+        out" and ``StartRunRequest.idempotency_key`` carries no
+        ``min_length`` constraint, so the wire body ``{"idempotencyKey": ""}``
+        survives Pydantic validation and is normalised away by
+        ``resolve_idempotency_key`` before it reaches the validator.
+        """
+        harness.controller.start_run.return_value = _make_ref()
+
+        response = await client.post(
+            "/internal/runs:start",
+            json={
+                "workspaceId": WORKSPACE,
+                "workflowVersionId": WORKFLOW_VERSION_ID,
+                "inputs": {},
+                "idempotencyKey": "",
+            },
+            headers={"Idempotency-Key": ""},
+        )
+
+        assert response.status_code == 202
+        call_kwargs = harness.controller.start_run.await_args.kwargs
+        assert call_kwargs["idempotency_key"] is None
+
 
 # ---------------------------------------------------------------------------
 # /internal/runs/{run_id}:cancel
@@ -384,14 +433,29 @@ class TestInternalCancelRun:
         assert body["code"] == "workflow.run_not_found"
         assert body["runId"] == RUN_ID
 
-    async def test_already_cancelled_returns_409_envelope(
+    async def test_already_cancelled_returns_202_idempotent_replay(
         self, client: httpx.AsyncClient, harness: _Harness
     ) -> None:
+        """The controller treats already-cancelled as a no-op (RunRef)."""
+        harness.controller.cancel_run.return_value = _make_ref(status=RunStatus.CANCELLED)
+
+        response = await client.post(
+            f"/internal/runs/{RUN_ID}:cancel",
+            json={"workspaceId": WORKSPACE},
+        )
+
+        assert response.status_code == 202
+        assert response.json()["status"] == RunStatus.CANCELLED.value
+
+    async def test_terminal_non_cancel_state_returns_409_envelope(
+        self, client: httpx.AsyncClient, harness: _Harness
+    ) -> None:
+        """Cancelling a `succeeded` / `failed` run is a state conflict."""
         harness.controller.cancel_run.side_effect = RunStateConflictError(
-            f"run {RUN_ID!r} already cancelled",
+            f"run {RUN_ID!r} already in terminal status",
             run_id=RUN_ID,
-            current_status=RunStatus.CANCELLED.value,
-            attempted_status="cancelling",
+            current_status=RunStatus.SUCCEEDED.value,
+            attempted_status=RunStatus.CANCELLING.value,
         )
 
         response = await client.post(
@@ -411,6 +475,19 @@ class TestInternalCancelRun:
         )
 
         assert response.status_code == 400
+        harness.controller.cancel_run.assert_not_called()
+
+    async def test_malformed_workspace_id_returns_400(
+        self, client: httpx.AsyncClient, harness: _Harness
+    ) -> None:
+        """The body's `workspaceId` must match the canonical grammar."""
+        response = await client.post(
+            f"/internal/runs/{RUN_ID}:cancel",
+            json={"workspaceId": "NOT-VALID-CAPS"},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["code"] == "workflow.api.bad_request"
         harness.controller.cancel_run.assert_not_called()
 
 
@@ -433,3 +510,15 @@ def test_rpc_router_exposes_expected_paths() -> None:
     }
     assert ("/internal/runs:start", frozenset({"POST"})) in paths
     assert ("/internal/runs/{run_id}:cancel", frozenset({"POST"})) in paths
+
+
+def test_internal_workspace_id_pattern_matches_dependencies_pattern() -> None:
+    """The Internal RPC body grammar must stay byte-equal to the path grammar.
+
+    The public surface enforces
+    :data:`custos_workflow.api.dependencies.WORKSPACE_ID_PATTERN`
+    on its ``{ws}`` path segment; the Internal RPC body inlines the
+    same regex (to keep ``api/models.py`` FastAPI-free). This test
+    locks the two together so any future drift fails CI.
+    """
+    assert WORKSPACE_ID_PATTERN.pattern == _MODEL_WORKSPACE_ID_PATTERN
