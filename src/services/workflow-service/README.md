@@ -221,6 +221,40 @@ will be folded into the full `step.*` taxonomy in WF-IMPL-056.
 Tracker:
 [#432](https://github.com/toddysm/custos/issues/432).
 
+`ActivityStepHandler` (WF-IMPL-054, `src/custos_workflow/steps/activity_step.py`)
+is the Step Coordinator handler for `StepKind.ACTIVITY` nodes. It
+implements the synchronous `StepHandler` Protocol so it runs
+inside the Dapr Workflow orchestrator generator. Per attempt, it
+resolves the node, builds a `BindingScope` (mirroring
+`LetStepHandler`), resolves the step's `with:` block exactly
+once before the retry loop, then for each attempt: derives the
+`IdempotencyTriple` (`run_id|step_id|attempt`), calls
+`ConnectorClient.bind_for_step` for a *fresh per-attempt lease*
+(slots specs derived from singular `connector:` → `default` slot
+or map → one per alias), and dispatches
+`ActivityRuntimeClient.schedule_activity` with the bind contexts
+and a 24-hour default per-attempt deadline. On success it returns
+`StepSucceeded(outputs)` with a `MappingProxyType` snapshot. On
+typed `ActivityResultEnvelope` errors it delegates to the retry
+driver, dispatching `RetryNow` (sleeps via
+`ctx.workflow_context.create_timer(fire_at)`), `Skip`
+(`StepSkipped` with synthesized reason), or `FailNow`
+(`StepFailed`). Bind / schedule infrastructure exceptions are
+wrapped into `ConnectorBindError` / `ActivityScheduleError`
+envelopes (typed instances pass through verbatim; untyped are
+wrapped with `cause=repr(exc)`). Replay determinism: a per-attempt
+RNG seeded by `sha256("{run_id}|{step_id}|{attempt}")` feeds the
+retry driver so jitter is reproducible across replays. **Caveats
+for follow-ups**: the constructor does *not* take a lifecycle
+publisher — `step.*` event emission is owned by WF-IMPL-056,
+which will wrap the dispatcher. Durable timer suspension is not
+yet wired: `create_timer` is called for backoff but its task
+token is currently discarded, with full durable-task plumbing
+deferred to WF-IMPL-055 / WF-IMPL-057. Not yet exported from
+`custos_workflow.steps` — import directly from
+`custos_workflow.steps.activity_step`. Tracker:
+[#432](https://github.com/toddysm/custos/issues/432).
+
 
 The Expression Evaluator (the first sub-module) is already in
 [`src/libs/custos-cel/`](../../libs/custos-cel) and shipped via
