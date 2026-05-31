@@ -444,12 +444,15 @@ def _error_envelope_for_decide(envelope: ActivityResultEnvelope) -> Mapping[str,
     populated whenever ``envelope.class_`` is not ``"success"``
     (validated by :class:`ActivityResultEnvelope.__post_init__`),
     so this helper just inflates the mapping into a fresh dict and
-    pins the ``"class"`` field from :attr:`class_` if ARM omitted
-    it (defence in depth — the retry driver matches routes on
-    ``envelope["class"]``).
+    **forces** the ``"class"`` field to match :attr:`class_`.
+    Forcing (not :meth:`dict.setdefault`-ing) is intentional: the
+    retry driver routes on ``envelope["class"]``, so any drift
+    between the envelope-level ``class_`` and a stale / mismatched
+    ``error["class"]`` value (should one ever leak through) would
+    silently mis-route. Defence in depth.
     """
     payload: dict[str, Any] = dict(envelope.error or {})
-    payload.setdefault("class", envelope.class_)
+    payload["class"] = envelope.class_
     return payload
 
 

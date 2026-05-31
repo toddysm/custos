@@ -203,9 +203,9 @@ def _ctx_with_recorder(
         timer_calls.append(fire_at)
         return real_create(fire_at)
 
-    # Bypass FakeWorkflowContext's setattr restrictions by sticking
-    # the recording closure on the instance dict; FakeWorkflowContext
-    # is a plain (non-slot) class so this is safe.
+    # Install the recording wrapper directly on the instance.
+    # ``FakeWorkflowContext`` is a plain class, so the per-instance
+    # binding shadows the bound method on the class.
     wf_ctx.create_timer = _record  # type: ignore[method-assign]
     return StepExecutionContext(
         run_id=RunId(run_id),
@@ -532,6 +532,43 @@ class TestRetryLoop:
         result = handler.execute(ctx, graph, "scan")
 
         assert isinstance(result, StepFailed)
+
+    def test_envelope_with_mismatched_class_field_is_force_corrected(self) -> None:
+        """Drift defence: handler overwrites a wrong ``error[\"class\"]``.
+
+        The error envelope advertises ``class=permanent`` but its
+        embedded ``error`` mapping claims ``class=retryable``. If
+        the handler used :meth:`dict.setdefault` it would route as
+        retryable and try again — the test confirms the handler
+        force-overwrites the field with :attr:`class_` so the
+        retry driver routes (correctly) to fail-now.
+        """
+        node = _activity_node()
+        graph = _graph(node)
+        ctx = _ctx()
+        # ``class_`` says permanent, but the embedded error
+        # claims retryable. The handler MUST trust ``class_``.
+        mismatched = ActivityResultEnvelope(
+            class_="permanent",
+            outputs=None,
+            error={"class": "retryable", "code": "x.y", "message": "boom"},
+            attempt=1,
+        )
+        activity = FakeActivityRuntimeClient(results=[mismatched])
+        connector = FakeConnectorClient(responses=[_bind_response("default")])
+        handler = ActivityStepHandler(activity, connector)
+
+        result = handler.execute(ctx, graph, "scan")
+
+        # If the handler had used setdefault, the retry driver
+        # would have routed on ``class=retryable`` and the call
+        # would have looped (and the second bind/schedule pair
+        # would not exist in the fakes' canned lists, raising).
+        # The fact that we land on StepFailed with a single
+        # bind+schedule cycle proves the force-overwrite.
+        assert isinstance(result, StepFailed)
+        assert len(connector.calls) == 1
+        assert len(activity.calls) == 1
 
 
 # ---------------------------------------------------------------------------

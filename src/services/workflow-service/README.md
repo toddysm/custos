@@ -230,7 +230,7 @@ resolves the node, builds a `BindingScope` (mirroring
 once before the retry loop, then for each attempt: derives the
 `IdempotencyTriple` (`run_id|step_id|attempt`), calls
 `ConnectorClient.bind_for_step` for a *fresh per-attempt lease*
-(slots specs derived from singular `connector:` → `default` slot
+(slot specs derived from singular `connector:` → `default` slot
 or map → one per alias), and dispatches
 `ActivityRuntimeClient.schedule_activity` with the bind contexts
 and a 24-hour default per-attempt deadline. On success it returns
