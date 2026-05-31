@@ -26,6 +26,7 @@ from fastapi import Depends, FastAPI, Request
 from httpx import ASGITransport
 
 from custos_workflow.api import (
+    WORKSPACE_ID_PATTERN,
     get_call_context,
     get_run_components,
     get_run_controller,
@@ -209,6 +210,59 @@ def test_workspace_path_returns_segment_verbatim() -> None:
     assert workspace_path(ws="ws-a") == "ws-a"
 
 
+@pytest.mark.parametrize(
+    "ws",
+    [
+        "a",
+        "workspace",
+        "ws-1",
+        "a" + "0" * 62,  # boundary: 63 chars
+    ],
+)
+def test_workspace_path_accepts_canonical_grammar(ws: str) -> None:
+    """Names matching the canonical DNS-1123-like grammar round-trip."""
+    assert workspace_path(ws=ws) == ws
+
+
+@pytest.mark.parametrize(
+    "ws",
+    [
+        "",  # empty
+        "A",  # uppercase
+        "1ws",  # leading digit
+        "-ws",  # leading hyphen
+        "ws_a",  # underscore
+        "ws a",  # whitespace
+        "ws/a",  # path separator
+        "a" * 64,  # over the 63-char ceiling
+    ],
+)
+def test_workspace_path_rejects_invalid_grammar_direct_call(ws: str) -> None:
+    """Direct callers (tests, in-process composition) get a ValueError.
+
+    FastAPI rejects the same shape at the routing layer with a 400
+    envelope; the function-body re-check exists so the dependency
+    cannot silently leak a bogus identifier when invoked outside
+    the request pipeline.
+    """
+    with pytest.raises(ValueError, match="workspace id"):
+        workspace_path(ws=ws)
+
+
+def test_workspace_id_pattern_byte_equal_to_document_grammar() -> None:
+    """Pin the canonical grammar to ``document.models._NAME_PATTERN``.
+
+    A silent drift between the two regexes would let the API accept
+    workspace identifiers the document model later rejects, or vice
+    versa, which would break round-tripping. The parity test fires
+    in CI before any router merges that depends on either grammar.
+    """
+    from custos_workflow.document.models import _NAME_PATTERN
+
+    assert WORKSPACE_ID_PATTERN.pattern == _NAME_PATTERN.pattern
+    assert WORKSPACE_ID_PATTERN.flags == _NAME_PATTERN.flags
+
+
 # ---------------------------------------------------------------------------
 # End-to-end: 503 envelope is rendered on the wire
 # ---------------------------------------------------------------------------
@@ -301,3 +355,23 @@ async def test_bare_app_renders_503_problem_envelope(_bare_client: httpx.AsyncCl
     assert body["status"] == 503
     assert body["code"] == "workflow.workflow_runtime_unavailable"
     assert "run_components" in body["detail"]
+
+
+async def test_wired_app_rejects_invalid_workspace_segment_at_routing_layer(
+    _wired_client: httpx.AsyncClient,
+) -> None:
+    """A malformed ``{ws}`` segment fails the ``Path(pattern=...)`` constraint.
+
+    FastAPI raises ``RequestValidationError`` which the WF-IMPL-061
+    handler chain renders as a 400 ``workflow.api.bad_request``
+    envelope. Confirms the regex enforcement at the routing layer
+    matches the function-body grammar checked by
+    :func:`test_workspace_path_rejects_invalid_grammar_direct_call`.
+    """
+    async with _wired_client as client:
+        resp = await client.get("/probe/Bad_WS")
+    assert resp.status_code == 400
+    assert resp.headers["content-type"].startswith("application/problem+json")
+    body = resp.json()
+    assert body["status"] == 400
+    assert body["code"] == "workflow.api.bad_request"

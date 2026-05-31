@@ -35,20 +35,23 @@ Three accessor families ship here:
   declare ``ws: str = Depends(workspace_path)`` so the wire surface
   stays uniform across routes/ and rpc.py.
 
-Missing-state failures from the first two accessors raise
+Missing-state failures from every state-reading accessor
+(:func:`get_run_components`, :func:`get_run_controller` transitively,
+:func:`get_validator`, and :func:`get_call_context`) raise
 :class:`~custos_workflow.runs.errors.WorkflowRuntimeUnavailableError`,
 which the WF-IMPL-061 exception handler chain renders as a 503
 :class:`~custos_workflow.api.errors.ProblemDetail` envelope with the
 ``workflow.workflow_runtime_unavailable`` kind. That is the locked
 public-API kind that means *the workflow runtime is not currently
-serving requests*; reading it on a lifespan-startup failure is
-semantically right and lines up with the kind→status table in
-:mod:`custos_workflow.api.errors`.
+serving requests*; reading it on a lifespan-startup failure or a
+missing middleware install is semantically right and lines up with
+the kind→status table in :mod:`custos_workflow.api.errors`.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import re
+from typing import TYPE_CHECKING, Final
 
 from fastapi import Depends, Path, Request
 
@@ -62,12 +65,26 @@ if TYPE_CHECKING:
 
 
 __all__ = [
+    "WORKSPACE_ID_PATTERN",
     "get_call_context",
     "get_run_components",
     "get_run_controller",
     "get_validator",
     "workspace_path",
 ]
+
+
+#: Canonical workspace identifier grammar. Byte-equal to
+#: :data:`custos_workflow.document.models._NAME_PATTERN` — the
+#: DNS-1123-like grammar the Catalog already validates against when
+#: a workspace is published. Mirroring the regex here lets FastAPI
+#: reject malformed ``{ws}`` segments at the routing layer (via
+#: ``Path(pattern=...)``) instead of letting them reach the
+#: validator + controller as bogus workspace identifiers. The
+#: declaration is intentionally a module-level constant so the
+#: regex can be reused by future routers and matched byte-equal in
+#: tests if the document grammar ever drifts.
+WORKSPACE_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 
 
 # ---------------------------------------------------------------------------
@@ -232,9 +249,12 @@ def workspace_path(
             "Workspace id from the URL path. Echoed verbatim into the "
             "downstream RunController + StartRunValidator calls so the "
             "request workspace is the same identifier audit + idempotency "
-            "ledger use."
+            "ledger use. Validated against the canonical DNS-1123-like "
+            "workspace grammar the Catalog publishes."
         ),
         min_length=1,
+        max_length=63,
+        pattern=WORKSPACE_ID_PATTERN.pattern,
     ),
 ) -> str:
     """Pull the ``{ws}`` URL segment as the workspace identifier.
@@ -243,17 +263,34 @@ def workspace_path(
     wire surface is uniform across the REST routes (``WF-IMPL-065``
     / ``-066``) and Internal RPC routes (``WF-IMPL-067`` / ``-068``).
     Centralising the parameter here lets later tasks tighten the
-    constraint (regex, max length) in one place without touching
-    every route.
+    constraint in one place without touching every route.
+
+    FastAPI enforces :data:`WORKSPACE_ID_PATTERN`,
+    ``min_length=1``, and ``max_length=63`` at the routing layer
+    — a malformed ``{ws}`` segment fails the ``RequestValidationError``
+    handler and surfaces as a 400
+    :class:`~custos_workflow.api.errors.ProblemDetail` with the
+    ``workflow.api.bad_request`` kind. The function-body re-check
+    catches the same grammar drift for callers that invoke the
+    dependency directly (unit tests, in-process composition), where
+    FastAPI's ``Path`` defaults do not run; that path raises
+    :class:`ValueError` so misuse is obvious in the test failure.
 
     Args:
-        ws: The path segment value FastAPI injected. The
-            ``min_length=1`` floor stops an empty segment from
-            slipping through; FastAPI's own route matching prevents
-            the empty case in practice but the explicit guard keeps
-            the dependency safe when called directly from tests.
+        ws: The path segment value FastAPI injected.
 
     Returns:
         The workspace identifier string.
+
+    Raises:
+        ValueError: ``ws`` does not match
+            :data:`WORKSPACE_ID_PATTERN`. Only reachable on direct
+            calls; FastAPI rejects the same shape at the routing
+            layer before this body runs.
     """
+    if not WORKSPACE_ID_PATTERN.fullmatch(ws):
+        raise ValueError(
+            f"workspace id {ws!r} does not match the canonical workspace "
+            f"grammar {WORKSPACE_ID_PATTERN.pattern!r}."
+        )
     return ws

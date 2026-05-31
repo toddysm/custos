@@ -17,6 +17,7 @@ package incrementally.
 from __future__ import annotations
 
 from custos_workflow.api.dependencies import (
+    WORKSPACE_ID_PATTERN,
     get_call_context,
     get_run_components,
     get_run_controller,
@@ -50,6 +51,7 @@ __all__ = [
     "LOCKED_API_KIND_TO_STATUS",
     "MAX_LIST_LIMIT",
     "PROBLEM_TYPE_PREFIX",
+    "WORKSPACE_ID_PATTERN",
     "CancelRunRequest",
     "PageRefResponse",
     "ProblemDetail",
