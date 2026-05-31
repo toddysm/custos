@@ -229,6 +229,34 @@ def test_lifespan_registers_orchestrator_and_starts_runtime(
     assert any(name == WORKFLOW_NAME for name, _fn in runtime.registered)
 
 
+def test_lifespan_binds_step_coordinator_not_noop_handler(
+    fake_run_components: RunComponents,
+) -> None:
+    """WF-IMPL-057: the registered orchestrator is bound to a
+    :class:`StepCoordinator`, not the WF-IMPL-043 :class:`NoopStepHandler` default.
+
+    The orchestrator surfaces its bound :class:`StepHandler` via
+    the ``step_handler`` attribute (set by
+    :func:`make_run_orchestrator`); we assert against the concrete
+    type so a regression that wires a different handler under the
+    same Protocol fails this test.
+    """
+    from custos_workflow.runs.orchestrator import WORKFLOW_NAME
+    from custos_workflow.runs.step_handler import NoopStepHandler
+    from custos_workflow.steps import StepCoordinator
+
+    runtime = _RecordingFakeRuntime()
+    components = _components_with(runtime)
+    app = create_app(require_call_context=False, run_components=components)
+    with TestClient(app):
+        pass
+    registered = {name: fn for name, fn in runtime.registered}
+    orchestrator_fn = registered[WORKFLOW_NAME]
+    bound_handler = orchestrator_fn.step_handler
+    assert isinstance(bound_handler, StepCoordinator)
+    assert not isinstance(bound_handler, NoopStepHandler)
+
+
 def test_lifespan_exposes_run_components_on_app_state(
     fake_run_components: RunComponents,
 ) -> None:
@@ -242,6 +270,10 @@ def test_lifespan_exposes_run_components_on_app_state(
     assert bundle.run_store is not None
     assert bundle.lifecycle_publisher is not None
     assert bundle.replay_reconciler is not None
+    # WF-IMPL-057: step-coordinator collaborators (defaults to the
+    # WF-IMPL-049/050 Noop stubs that fail loud on use).
+    assert bundle.activity_client is not None
+    assert bundle.connector_client is not None
 
 
 def test_readyz_503_when_worker_never_reports_ready() -> None:

@@ -50,7 +50,8 @@ from custos_workflow.providers import (
     load_run_components,
 )
 from custos_workflow.runs.orchestrator import WORKFLOW_NAME, make_run_orchestrator
-from custos_workflow.runs.step_handler import NoopStepHandler
+from custos_workflow.steps import StepCoordinator
+from custos_workflow.steps.activity_step import ActivityStepHandler
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -140,15 +141,30 @@ def create_app(
         runtime = components.workflow_runtime
 
         # Register the WF-IMPL-035 ``run_orchestrator`` under the
-        # canonical :data:`WORKFLOW_NAME`. We bind a stateless
-        # :class:`NoopStepHandler` here — the Phase E Step
-        # Coordinator (WF-IMPL-046) will swap in the real handler
-        # without touching the lifespan. ``WaitStepHandler`` is
-        # constructed inline by :func:`make_run_orchestrator`, so
-        # there is nothing to register separately for the wait
-        # step kind.
+        # canonical :data:`WORKFLOW_NAME`. WF-IMPL-057 wires the
+        # real :class:`StepCoordinator` (WF-IMPL-055) so every
+        # non-wait node dispatches through the production
+        # ``let:`` / ``activity:`` handlers; ``wait:`` is still
+        # served inline by :class:`WaitStepHandler` (constructed
+        # by :func:`make_run_orchestrator`). The coordinator's
+        # :class:`ActivityStepHandler` is wired against the
+        # ``ActivityRuntimeClient`` / ``ConnectorClient`` stubs
+        # the bundle ships with — production replaces those
+        # noop stubs with the deferred *Real ARM Client* /
+        # *Real Connector Client* sub-modules behind the same
+        # Protocols, so swapping in the real adapters does NOT
+        # require touching the lifespan. The previous
+        # :class:`NoopStepHandler` default (WF-IMPL-043) is no
+        # longer instantiated; if a future task needs it, the
+        # symbol remains importable from
+        # :mod:`custos_workflow.runs.step_handler`.
+        activity_handler = ActivityStepHandler(
+            activity_client=components.activity_client,
+            connector_client=components.connector_client,
+        )
+        step_coordinator = StepCoordinator(activity_handler=activity_handler)
         orchestrator_fn = make_run_orchestrator(
-            NoopStepHandler(),
+            step_coordinator,
             on_replay=components.replay_reconciler.on_replay,
         )
         runtime.register_workflow(orchestrator_fn, name=WORKFLOW_NAME)
