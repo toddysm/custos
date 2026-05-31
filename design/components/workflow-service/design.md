@@ -598,7 +598,7 @@ On every retry decision the Step Coordinator emits a `step.retry_scheduled` even
 | POST | `/v1/workspaces/{ws}/runs/{runId}:cancel` | `{ reason }` | 202 | Initiate cancellation. |
 | GET | `/v1/workspaces/{ws}/runs/{runId}/steps/{stepId}` | — | `Step` | Fetch a specific step's state and outputs. |
 | GET | `/v1/workspaces/{ws}/runs/{runId}/steps/{stepId}/logs` | (streaming) | log lines | Stream step logs; delegates to Observability Service. |
-| GET | `/v1/workspaces/{ws}/runs` | filters | `[RunRef]` | List runs in workspace. |
+| GET | `/v1/workspaces/{ws}/runs` | `RunListQuery` (filters + opaque `cursor` + `limit ≤ 200`) | `RunListResponse` (`{items: RunRef[], nextCursor?}`) | List runs in workspace; cursor-paginated. The Run Controller already returns `Page[RunRef]` so the public surface mirrors that envelope. |
 
 `StartRunRequest`:
 
