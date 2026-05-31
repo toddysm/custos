@@ -1,6 +1,6 @@
 # Developer Guide: Custos — Plugins, Connections & Activities
 
-Last Updated: 2026-05-27
+Last Updated: 2026-05-31
 
 ## Overview
 
@@ -25,6 +25,7 @@ Custos is a pluggable workflow orchestrator. Developers extend the platform by w
 | [CEL Expressions](cel-expressions.md) | Reference for workflow expressions: bindings, operators, sandbox guarantees, failure modes, worked examples |
 | [Workflow Compilation](workflow-compilation.md) | Definition Compiler pipeline, input/output contract, error taxonomy, retry-policy resolution, worked examples |
 | [Workflow Run Controller](workflow-run-controller.md) | Run lifecycle state machine, `RunController` public API, `StepHandler` Protocol, Dapr Workflow primitive mapping, replay determinism contract, `run.*` error taxonomy, worked examples |
+| [Workflow Step Coordinator](workflow-step-coordinator.md) | Step dispatch by primitive kind, activity step lifecycle, retry policy application, idempotency triple, `step.*` event taxonomy, locked `step.*` error taxonomy, worked examples |
 | [Examples](examples/) | Reference connector manifests for the supported target and authentication combinations |
 
 ## Quick Start for Connection Developers

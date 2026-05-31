@@ -432,6 +432,42 @@ suite so it locks only the currently-shipped observable surface.
 Tracker: [#432](https://github.com/toddysm/custos/issues/432).
 
 
+WF-IMPL-060 ([#431](https://github.com/toddysm/custos/issues/431))
+**ships the Step Coordinator developer documentation** at
+[`docs/developers/workflow-step-coordinator.md`](../../../docs/developers/workflow-step-coordinator.md).
+The doc is pinned to the running code by
+`tests/test_docs_examples_step_coordinator.py`, which (a) parses
+every fenced ```yaml``` block in the doc, compiles it through
+`custos_workflow.compiler.compile` against the populated
+`InMemoryActivityTypeRegistry`, and drives it through the
+in-memory integration harness wired with a real `StepCoordinator`
+over fake activity / connector clients — every documented
+example reaches the prose-asserted terminal `RunOutput.status`
+in CI; (b) reflects the `PrimitiveHandler` enum, the
+`LOCKED_STEP_KINDS` frozenset, and the `LOCKED_STEP_EVENT_KINDS`
+frozenset against the doc's dispatch table, error taxonomy, and
+event-taxonomy tables respectively, with exhaustiveness guards
+that fail the build on any drift. The doc itself covers the
+sub-module boundary with the Run Controller and the deferred
+Sub-Orchestration / Resume Subscription managers, the dispatch
+table mapping `PrimitiveHandler` → handler, the eight-stage
+activity step lifecycle (Mermaid sequence diagram), retry-policy
+application (backoff / jitter formulas with worked examples and
+`retryAfter` interaction), the locked `run_id|step_id|attempt`
+idempotency triple with its downstream consumers (Activity
+Runtime Manager, Connector Service, Observability + Audit
+Service), the six `step.*` lifecycle event kinds with envelope
+schemas and producer-side dedup contract, the five `step.*`
+error taxonomy entries with their Python classes and recovery
+semantics, the four OTel spans + four OTel instruments shipped
+by WF-IMPL-058, the configuration knobs (`DEFAULT_ACTIVITY_DEADLINE
+= 24h` and the constructor-injected protocol clients), and the
+extension points the deferred sub-modules slot into. Quality
+gate remains ≥ 90 % service-wide (currently 98.82 % across the
+118 source files).
+Tracker: [#432](https://github.com/toddysm/custos/issues/432).
+
+
 The Expression Evaluator (the first sub-module) is already in
 [`src/libs/custos-cel/`](../../libs/custos-cel) and shipped via
 WF-IMPL-001 through WF-IMPL-012 (#176–#187).

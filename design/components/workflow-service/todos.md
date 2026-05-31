@@ -1,6 +1,6 @@
 # TODOs: Workflow Service
 
-Last Updated: 2026-05-31 (WF-IMPL-059 in PR — Step Coordinator integration test suite)
+Last Updated: 2026-05-31 (WF-IMPL-060 in PR — Step Coordinator developer documentation)
 
 ## Open
 
@@ -46,7 +46,7 @@ Fourth sub-module: **Step Coordinator**, packaged inside the service host `src/s
 ### Phase E — Observability, verification, docs
 
 - [x] WF-IMPL-058 (#429): OTel observability hooks for the Step Coordinator (depends on #427, #428).
-- [F] WF-IMPL-059 (#430): Unit + integration test suite (≥ 90 % coverage gate) (depends on #429).
+- [x] WF-IMPL-059 (#430): Unit + integration test suite (≥ 90 % coverage gate) (depends on #429).
 - [F] WF-IMPL-060 (#431): Developer documentation — `docs/developers/workflow-step-coordinator.md` (depends on #430).
 
 Tracker: #432 — `WF-IMPL-000-STEP-COORDINATOR`.
