@@ -105,7 +105,7 @@ def _step_response_from_record(record: RunRecord, *, step_id: str) -> StepRespon
         return None
     return StepResponse(
         step_id=node.step_id,
-        kind=str(node.kind),
+        kind=node.kind.value,
         status="pending",
         attempts=[],
         started_at=None,
@@ -123,6 +123,15 @@ def _step_not_found_response(
 ) -> JSONResponse:
     """Render the locked ``workflow.step_not_found`` (404) envelope.
 
+    The same envelope is used for both branches of
+    :func:`_step_response_from_record` returning ``None``: the
+    persisted run has no compiled graph yet, OR the compiled
+    graph does not carry a node with the requested ``stepId``.
+    From the wire those two cases are indistinguishable on
+    purpose — collapsing them into one envelope keeps SDK branch
+    logic uniform and avoids leaking whether the run has reached
+    the compile stage.
+
     The ``workspaceId`` / ``runId`` / ``stepId`` extension fields
     mirror the equivalents on
     :class:`~custos_workflow.runs.errors.RunNotFoundError` so SDK
@@ -132,9 +141,10 @@ def _step_not_found_response(
     return problem_response(
         kind="workflow.step_not_found",
         detail=(
-            f"No step {step_id!r} in run {run_id!r} for workspace "
-            f"{workspace_id!r}; the run exists but its compiled "
-            "graph does not carry that step id."
+            f"No step {step_id!r} is reachable in run {run_id!r} for "
+            f"workspace {workspace_id!r}; either the run has not yet "
+            "been compiled, or its compiled graph carries no node "
+            "with that step id."
         ),
         instance=request.url.path,
         extras={

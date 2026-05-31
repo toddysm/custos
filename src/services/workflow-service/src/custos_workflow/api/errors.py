@@ -7,7 +7,7 @@ half of the workflow-service error contract. Every error a
 raise is translated here into a single
 ``application/problem+json`` envelope.
 
-The locked taxonomy (8 kinds; the last is a catch-all):
+The locked taxonomy (10 kinds; the last is a catch-all):
 
 * ``workflow.run_not_found`` (404) — :class:`RunNotFoundError`
 * ``workflow.run_state_conflict`` (409) — :class:`RunStateConflictError`
@@ -117,8 +117,15 @@ PROBLEM_TYPE_PREFIX: Final[str] = "https://errors.custos.dev/"
 #: Kind-string → HTTP status mapping. Mirrors the table in the
 #: module docstring. The keys form the closed set
 #: :data:`LOCKED_API_KINDS`. Adding a new kind requires adding an
-#: entry here AND adding a handler below AND extending the
-#: WF-IMPL-061 test suite.
+#: entry here AND either (a) adding a dedicated exception handler
+#: below — the pattern for kinds raised by
+#: :mod:`custos_workflow.runs.errors` /
+#: :mod:`custos_workflow.validator.errors` — or (b) emitting the
+#: envelope directly from a route via :func:`problem_response` —
+#: the pattern for route-local kinds such as
+#: ``workflow.step_not_found`` and ``workflow.api.not_implemented``
+#: introduced by WF-IMPL-066. Either way the WF-IMPL-061 test
+#: suite must be extended to cover the new kind.
 LOCKED_API_KIND_TO_STATUS: Final[dict[str, int]] = {
     # Run Controller (custos_workflow.runs.errors)
     "workflow.run_not_found": 404,
