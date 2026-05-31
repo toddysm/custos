@@ -23,6 +23,7 @@ and the top-level ``StepCoordinator`` dispatcher.
 
 from __future__ import annotations
 
+from custos_workflow.steps.coordinator import StepCoordinator
 from custos_workflow.steps.errors import (
     LOCKED_STEP_KINDS,
     ActivityScheduleError,
@@ -63,6 +64,7 @@ __all__ = [
     "RetryDecision",
     "RetryNow",
     "Skip",
+    "StepCoordinator",
     "StepCoordinatorError",
     "StepKindNotImplementedError",
     "WithInputResolutionError",

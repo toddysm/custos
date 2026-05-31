@@ -256,6 +256,38 @@ deferred to WF-IMPL-055 / WF-IMPL-057. Not yet exported from
 [#432](https://github.com/toddysm/custos/issues/432).
 
 
+`StepCoordinator` (WF-IMPL-055, `src/custos_workflow/steps/coordinator.py`)
+is the concrete `StepHandler` the Run Controller orchestrator
+(WF-IMPL-035) drives every step through. It is a pure dispatcher
+that routes execution strictly by the compile-time
+`PrimitiveHandler` tag on each `ExecutionNode`: `EXPRESSION_INLINE`
+(`let:`) flows to `LetStepHandler` (WF-IMPL-049), `ACTIVITY_RUNTIME`
+(`activity:`) flows to `ActivityStepHandler` (WF-IMPL-054),
+`SUB_ORCHESTRATION` (`for:` / `approval:` / `workflow:`) returns a
+`StepFailed` carrying the canonical `step.kind_not_implemented`
+envelope (the Sub-Orchestration Manager sub-module owns the real
+implementation), and `RUN_CONTROLLER_TIMER` (`wait:`) raises
+`StepKindNotImplementedError` — that kind is dispatched inline by
+the Run Controller orchestrator via `ctx.create_timer`, so reaching
+the dispatcher with one is a compile-time bug we surface loudly. A
+module-level `assert` over `set(PrimitiveHandler)` guarantees that
+adding a new tag without extending the dispatch table fails at
+import time (mirroring WF-IMPL-035's `_STEP_RESULT_VARIANTS`
+pattern), and a companion unit test re-derives the same set so the
+guard is exercised on every run. The constructor takes the wired
+`ActivityStepHandler` (which the dispatcher does not know how to
+build — connector / activity-runtime clients are application
+concerns) and an optional `LetStepHandler` that defaults to a fresh
+instance because `LetStepHandler` is stateless. **No `step.*`
+lifecycle events are emitted from this module**; event emission
+(`step.started` / `step.completed` / etc.) is owned by WF-IMPL-056,
+which wraps this dispatcher with a publisher. Keeping the surfaces
+separate lets WF-IMPL-056 land without re-opening the dispatch
+table. Re-exported from `custos_workflow.steps` as
+`StepCoordinator`. Tracker:
+[#432](https://github.com/toddysm/custos/issues/432).
+
+
 The Expression Evaluator (the first sub-module) is already in
 [`src/libs/custos-cel/`](../../libs/custos-cel) and shipped via
 WF-IMPL-001 through WF-IMPL-012 (#176–#187).
