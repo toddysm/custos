@@ -1,6 +1,6 @@
 # TODOs: Workflow Service
 
-Last Updated: 2026-06-04 (WF-IMPL-071 merged via PR #480; WF-IMPL-072 outstanding under tracker #459)
+Last Updated: 2026-06-04 (WF-IMPL-072 merged via PR #482; API Adapter + Validator sub-module complete; tracker #459 closed)
 
 ## Open
 
@@ -12,7 +12,7 @@ Sub-modules of the workflow-service host whose design is already locked in [`des
 
 - [ ] **Resume Subscription Manager** — `waitFor:` step kind + `TriggerServiceClient` Protocol + `RegisterResumeSubscription` / `CancelResumeSubscription` RPC + `ResumeSubscriptionMirror` persistence (`MetadataStoreProvider`) + replay re-registration through the WF-IMPL-042 reconciler hook. Design refs: § Operation: Step Resume on External Event, § Resume Subscription Replay Protocol. Step Coordinator (WF-IMPL-055) currently returns `StepFailed(step.kind_not_implemented)` for `waitFor:`.
 - [ ] **Sub-Orchestration Manager** — `for:` (dynamic loop) + `approval:` (gate + timeout) + `workflow:` (sub-workflow call); spawns child Dapr Workflow instances with deterministic `<parentRunId>/<stepId>/<iterationKey>` ids; awaits via `when_all` / `when_any`; merges outputs. Design refs: § Operation: Sub-Orchestration, § Sub-Orchestration Manager (ADR-007). Step Coordinator currently returns `StepFailed(step.kind_not_implemented)` for all three.
-- [ ] **API Adapter + Validator** — _in progress_ as the fifth sub-module under tracker [#459](https://github.com/toddysm/custos/issues/459); tasks WF-IMPL-061..072 filed 2026-05-31. See the dedicated section below + [`implementation-plan.md`](implementation-plan.md).
+- [x] **API Adapter + Validator** — _complete_ as the fifth sub-module under tracker [#459](https://github.com/toddysm/custos/issues/459) (closed 2026-06-04); tasks WF-IMPL-061..072 merged across PRs #463–#480 and #482. See the dedicated section below + [`implementation-plan.md`](implementation-plan.md).
 - [ ] **Real ARM Client + Connector Client adapters** — production `ActivityRuntimeClient` / `ConnectorClient` Dapr Service Invocation bridges behind the Protocols that ship with the Step Coordinator (WF-IMPL-049 / WF-IMPL-050). Design refs: § Internal RPC (outbound).
 - [ ] **Full Observability Client integration** — Audit-event sink wiring + cross-component event taxonomy unification (TS-TODO-001 / ARM TODO-009 under INCON-013) + log-stream delegation for `GET …/steps/{stepId}/logs`. Design refs: § Observability Client. `workflow.*` / `step.*` event publication already lands via the existing `LifecycleEventPublisher`.
 - [ ] **Durable `IdempotencyLedger`** — `MetadataStoreProvider`-backed adapter for the `(workspaceId, idempotencyKey)` ledger introduced in WF-IMPL-063; in-memory adapter ships with the API Adapter sub-module. Filed as a separate follow-up issue once the in-memory adapter merges. (added 2026-05-31 during the API Adapter plan derivation.)
@@ -46,7 +46,7 @@ Fifth sub-module: **API Adapter + Validator**, packaged inside the service host 
 ### Phase E — Verification + documentation
 
 - [x] WF-IMPL-071 (#457): Unit + integration test suite (≥ 90 % coverage gate) (depends on #456). Merged: PR #480.
-- [F] WF-IMPL-072 (#458): Developer documentation — `docs/developers/workflow-api.md` (depends on #457).
+- [x] WF-IMPL-072 (#458): Developer documentation — `docs/developers/workflow-api.md` (depends on #457). Merged: PR #482.
 
 Tracker: #459 — `WF-IMPL-000-API-ADAPTER`.
 
