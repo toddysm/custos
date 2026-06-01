@@ -134,6 +134,19 @@ def test_iteration_key_falls_through_null_id_to_key_field() -> None:
     assert iteration_key({"id": None, "key": "k"}, 1) == "k"
 
 
+def test_iteration_key_empty_string_item_falls_back_to_index() -> None:
+    assert iteration_key("", 4) == "4"
+
+
+def test_iteration_key_empty_id_field_falls_back_to_index() -> None:
+    assert iteration_key({"id": ""}, 7) == "7"
+
+
+def test_iteration_key_empty_id_falls_through_to_key_field() -> None:
+    # An empty ``id`` is "no stable identity"; the present ``key`` wins.
+    assert iteration_key({"id": "", "key": "k2"}, 3) == "k2"
+
+
 # ---------------------------------------------------------------------------
 # iteration_key — escaping
 # ---------------------------------------------------------------------------

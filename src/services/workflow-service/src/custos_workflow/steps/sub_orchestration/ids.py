@@ -132,11 +132,17 @@ def iteration_key(item: Any, index: int) -> str:
     ``%2F``) so the result never contains :data:`CHILD_INSTANCE_ID_SEPARATOR`
     and is therefore always a valid :func:`child_instance_id` component.
 
+    An *empty* derived identity (e.g. ``item == ""`` or ``{"id": ""}``)
+    is treated as "no stable identity" and also falls back to the
+    index, so the returned key is always non-empty.
+
     :param item: The loop item to derive a key from.
     :param index: The item's 0-based position in the expanded iterable;
-        used as the fallback identity. Must be ``>= 0``.
+        used as the fallback identity. Must be a non-negative ``int``
+        (``bool`` is rejected).
     :returns: A non-empty, separator-free iteration key.
-    :raises ChildInstanceIdError: If ``index`` is negative.
+    :raises ChildInstanceIdError: If ``index`` is not an ``int``, is a
+        ``bool``, or is negative.
     """
 
     if isinstance(index, bool) or not isinstance(index, int):
@@ -145,7 +151,9 @@ def iteration_key(item: Any, index: int) -> str:
         raise ChildInstanceIdError(f"index must be >= 0, got {index}")
 
     derived = _derive_identity(item)
-    if derived is None:
+    if not derived:
+        # ``None`` (no stable identity) or an empty string both fall
+        # back to the index so the key is never empty.
         derived = str(index)
     return _escape(derived)
 
@@ -166,10 +174,10 @@ def _derive_identity(item: Any) -> str | None:
         for field in _IDENTITY_FIELDS:
             if field in item:
                 value = item[field]
-                if _is_primitive(value):
+                if _is_primitive(value) and str(value):
                     return str(value)
         return None
-    if _is_primitive(item):
+    if _is_primitive(item) and str(item):
         return str(item)
     return None
 
