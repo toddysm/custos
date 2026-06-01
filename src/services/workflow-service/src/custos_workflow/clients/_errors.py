@@ -148,12 +148,10 @@ MAX_CAUSE_DEPTH: Final[int] = 3
 class OutboundRpcError(ValueError):
     """Base class for every structured outbound-RPC failure.
 
-    Subclasses ``ValueError`` so adapter code that already catches
-    ``ValueError`` (e.g. the existing
-    :class:`~custos_workflow.steps.errors.ConnectorBindError`
-    surface) keeps working — but every concrete subclass below
-    also carries the ``kind`` / ``detail`` machine-readable
-    attributes the envelope mapper consumes.
+    Subclasses ``ValueError`` so adapter code that catches the
+    generic ``ValueError`` family keeps working, while every
+    concrete subclass below also carries the ``kind`` / ``detail``
+    machine-readable attributes the envelope mapper consumes.
 
     :param detail: Human-readable summary of the failure. Surfaced
         on the envelope as the ``message`` field.
