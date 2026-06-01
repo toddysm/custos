@@ -720,8 +720,7 @@ class FakeWorkflowRuntime:
                 continue
 
             if isinstance(task, _WhenAllTask):
-                not_ready = [t for t in task.tasks if not self._task_ready(state, t)]
-                if not_ready:
+                if not self._when_all_ready(state, task.tasks):
                     self._fail_instance(
                         state,
                         "when_all cannot resolve tasks that are not immediately "
@@ -863,6 +862,27 @@ class FakeWorkflowRuntime:
             return True
         raise TypeError(  # pragma: no cover - defensive; combinators only see known tokens
             f"unsupported task type in fan-in combinator: {type(token).__name__}"
+        )
+
+    def _when_all_ready(self, state: _InstanceState, tokens: tuple[Any, ...]) -> bool:
+        """Whether every token in a ``when_all`` can commit without blocking.
+
+        Beyond the per-token :meth:`_task_ready` check, this validates
+        that there are *enough* buffered payloads to satisfy multiple
+        external-event tasks waiting on the same ``event_name`` — each
+        commit consumes one payload, so two tasks on one name need two
+        queued events. Without this guard the second commit would pop
+        from an exhausted (deleted) queue.
+        """
+
+        required: dict[str, int] = {}
+        for token in tokens:
+            if isinstance(token, _ExternalEventTask):
+                required[token.event_name] = required.get(token.event_name, 0) + 1
+            elif not self._task_ready(state, token):
+                return False
+        return all(
+            len(state.pending_events.get(name, ())) >= count for name, count in required.items()
         )
 
     def _commit_task(self, state: _InstanceState, token: Any) -> None:

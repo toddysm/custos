@@ -349,6 +349,70 @@ async def test_when_all_unready_task_fails_instance(
     assert state.failure_type == "UnsupportedWhenAllError"
 
 
+async def test_when_all_duplicate_event_name_requires_enough_buffered_payloads(
+    runtime: FakeWorkflowRuntime, client: FakeWorkflowClient
+) -> None:
+    """Two event tasks on one name fail loudly unless two payloads are queued."""
+
+    def parent(ctx: FakeWorkflowContext, _payload: Any) -> Generator[Any, Any, Any]:
+        yield ctx.wait_for_external_event("go")
+        return (
+            yield ctx.when_all(
+                [ctx.wait_for_external_event("dup"), ctx.wait_for_external_event("dup")]
+            )
+        )
+
+    runtime.register_workflow(parent, name="parent")
+
+    instance_id = await client.schedule_new_workflow(
+        ScheduleWorkflowRequest(workflow="parent", input=None, instance_id="p")
+    )
+    # Buffer a single "dup" payload, then release the gate — the fan-in
+    # then cannot satisfy both event tasks from one buffered payload.
+    await client.raise_workflow_event(
+        RaiseRunEventRequest(instance_id="p", event_name="dup", data={"n": 1})
+    )
+    await client.raise_workflow_event(
+        RaiseRunEventRequest(instance_id="p", event_name="go", data=None)
+    )
+    state = runtime.instance(instance_id)
+    assert state.status == RunStatus.FAILED
+    assert state.failure_type == "UnsupportedWhenAllError"
+
+
+async def test_when_all_duplicate_event_name_resolves_with_enough_payloads(
+    runtime: FakeWorkflowRuntime, client: FakeWorkflowClient
+) -> None:
+    """Two event tasks on one name resolve in order once both payloads queue."""
+
+    def parent(ctx: FakeWorkflowContext, _payload: Any) -> Generator[Any, Any, Any]:
+        yield ctx.wait_for_external_event("go")
+        return (
+            yield ctx.when_all(
+                [ctx.wait_for_external_event("dup"), ctx.wait_for_external_event("dup")]
+            )
+        )
+
+    runtime.register_workflow(parent, name="parent")
+
+    instance_id = await client.schedule_new_workflow(
+        ScheduleWorkflowRequest(workflow="parent", input=None, instance_id="p")
+    )
+    # Buffer both "dup" payloads while blocked, then release the gate.
+    await client.raise_workflow_event(
+        RaiseRunEventRequest(instance_id="p", event_name="dup", data={"n": 1})
+    )
+    await client.raise_workflow_event(
+        RaiseRunEventRequest(instance_id="p", event_name="dup", data={"n": 2})
+    )
+    await client.raise_workflow_event(
+        RaiseRunEventRequest(instance_id="p", event_name="go", data=None)
+    )
+    state = runtime.instance(instance_id)
+    assert state.status == RunStatus.COMPLETED
+    assert state.output == [{"n": 1}, {"n": 2}]
+
+
 # ---------------------------------------------------------------------------
 # when_any
 # ---------------------------------------------------------------------------

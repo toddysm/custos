@@ -6,7 +6,7 @@
 
 ## Summary
 
-The Sub-Orchestration Manager is the sixth-and-final core sub-module of the workflow-service (COMP-003). It unblocks the three step kinds that spawn **child Dapr Workflow instances**: dynamic loops (`forEach:`), sub-workflow invocation (`workflow:`), and approval gates (`approval:`). Children get deterministic instance ids `<parentRunId>/<stepId>/<iterationKey>` so Dapr replay reproduces the exact child set and outputs are addressable from `steps.<stepId>.outputs` in the parent's expression scope. Loops await via `when_all`; approval gates via `when_any([signal, durableTimer])`. It plugs into the orchestrator's inline-dispatch surface (the same path `wait:` uses), replacing the current `step.kind_not_implemented` stub the Step Coordinator returns for `PrimitiveHandler.SUB_ORCHESTRATION`.
+The Sub-Orchestration Manager is a core sub-module of the workflow-service (COMP-003). It unblocks the three step kinds that spawn **child Dapr Workflow instances**: dynamic loops (`forEach:`), sub-workflow invocation (`workflow:`), and approval gates (`approval:`). Children get deterministic instance ids `<parentRunId>/<stepId>/<iterationKey>` so Dapr replay reproduces the exact child set and outputs are addressable from `steps.<stepId>.outputs` in the parent's expression scope. Loops await via `when_all`; approval gates via `when_any([signal, durableTimer])`. It plugs into the orchestrator's inline-dispatch surface (the same path `wait:` uses), replacing the current `step.kind_not_implemented` stub the Step Coordinator returns for `PrimitiveHandler.SUB_ORCHESTRATION`.
 
 ## Conventions
 
