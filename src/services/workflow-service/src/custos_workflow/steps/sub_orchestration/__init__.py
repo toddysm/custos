@@ -38,6 +38,7 @@ from custos_workflow.steps.sub_orchestration.ids import (
     child_instance_id,
     iteration_key,
 )
+from custos_workflow.steps.sub_orchestration.manager import SubOrchestrationManager
 
 __all__ = [
     "APPROVAL_ITERATION_KEY",
@@ -48,6 +49,7 @@ __all__ = [
     "ChildInstanceIdError",
     "ChildStepInput",
     "ChildStepResult",
+    "SubOrchestrationManager",
     "child_instance_id",
     "iteration_key",
     "make_child_step_orchestrator",

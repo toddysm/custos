@@ -1,0 +1,353 @@
+"""Sub-Orchestration Manager — dynamic loop fan-out (WF-IMPL-089).
+
+The Sub-Orchestration Manager (ADR-007) is the parent-side driver that
+spawns and awaits the child Dapr Workflow instances WF-IMPL-088 ships.
+This module lands its first operation: :meth:`SubOrchestrationManager.run_loop`,
+the dynamic-loop (``forEach``) fan-out path.
+
+What ``run_loop`` does
+----------------------
+
+For a ``forEach``-bearing step the manager:
+
+1. Evaluates the ``forEach`` CEL call site against a
+   :class:`custos_cel.BindingScope` built from the step's
+   :class:`~custos_workflow.runs.StepExecutionContext` — the same
+   ``inputs`` / ``steps`` / ``run`` / ``workflow`` / ``now`` roots the
+   top-level orchestrator's gate evaluator uses — to obtain the
+   iterable list of items.
+2. Spawns **one child workflow instance per item**, each running the
+   loop body (the same node) under :data:`CHILD_STEP_WORKFLOW_NAME`,
+   with a deterministic instance id
+   ``<parentRunId>/<stepId>/<iterationKey>`` (WF-IMPL-085) so Dapr
+   replay reproduces an identical child set.
+3. Awaits every child with a single ``when_all`` (WF-IMPL-084).
+4. Merges the children's outputs into an **ordered list** that matches
+   the input list order — the value that becomes
+   ``steps.<stepId>.outputs`` in the parent's expression scope.
+
+Result & failure contract
+-------------------------
+
+``run_loop`` is a **generator** (it ``yield``s the ``when_all`` task
+token back to the runtime). On success it *returns* (via
+``StopIteration.value``) the ordered ``list`` of per-child output
+mappings. On failure it *raises* a
+:class:`~custos_workflow.steps.errors.StepCoordinatorError` subclass so
+the WF-IMPL-093 dispatch path can map it uniformly to a
+``StepFailed`` envelope:
+
+* :class:`~custos_workflow.steps.errors.LoopExpansionError`
+  (``step.loop_expansion_error``) — the ``forEach`` expression failed
+  to evaluate or did not yield a list.
+* :class:`~custos_workflow.steps.errors.SubOrchestrationSpawnError`
+  (``step.sub_orchestration_spawn_error``) — a deterministic child
+  instance id could not be derived (e.g. a malformed id component).
+* :class:`~custos_workflow.steps.errors.SubWorkflowFailedError`
+  (``step.sub_workflow_failed``) — a single awaited child ran and
+  surfaced a terminal failure; the first such child (in spawn order)
+  short-circuits the whole loop.
+
+An empty iterable is handled here: it spawns no children and returns an
+empty list (without yielding a ``when_all`` over zero tasks).
+
+Out of scope (later tasks)
+--------------------------
+
+The ``where:`` pre-filter and duplicate iteration-key collision
+detection land in WF-IMPL-090; the orchestrator dispatch that routes
+``PrimitiveHandler.SUB_ORCHESTRATION`` nodes through this manager (and
+stores the returned list under ``steps.<stepId>.outputs``) lands in
+WF-IMPL-093.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Generator, Mapping
+from types import MappingProxyType
+from typing import Any
+
+import custos_cel
+from custos_cel.errors import CelError
+from custos_cel.scope import BindingScope, RunInfo, StepBinding, WorkflowInfo
+
+from custos_workflow.graph.model import CallSiteKind, ExecutionGraph, ExecutionNode
+from custos_workflow.graph.serialize import to_json
+from custos_workflow.runs import StepExecutionContext
+from custos_workflow.steps.errors import (
+    LoopExpansionError,
+    SubOrchestrationSpawnError,
+    SubWorkflowFailedError,
+)
+from custos_workflow.steps.sub_orchestration.child import (
+    CHILD_STEP_WORKFLOW_NAME,
+    DEFAULT_LOOP_VAR,
+    ChildStepInput,
+    ChildStepResult,
+)
+from custos_workflow.steps.sub_orchestration.ids import (
+    ChildInstanceIdError,
+    child_instance_id,
+    iteration_key,
+)
+
+__all__ = ["SubOrchestrationManager"]
+
+#: Wire-name (and ``call_sites`` key) of the ``forEach`` slot. The
+#: call-site collector keys typed call sites by ``CallSite.path``,
+#: which for the ``forEach`` slot is the wire-name ``"forEach"`` (see
+#: ``custos_workflow.callsites.collect._COMMON_SLOTS``).
+_FOR_EACH_SLOT: str = "forEach"
+
+
+class SubOrchestrationManager:
+    """Parent-side driver for child-workflow fan-out (ADR-007).
+
+    Stateless for the loop path — instances are interchangeable and
+    may be reused across runs. WF-IMPL-091 / WF-IMPL-092 extend this
+    class with the ``workflow:`` invocation and ``approval:`` gate
+    operations; for now it exposes the single :meth:`run_loop`
+    generator.
+    """
+
+    def run_loop(
+        self,
+        ctx: StepExecutionContext,
+        graph: ExecutionGraph,
+        step_id: str,
+    ) -> Generator[Any, Any, list[Any]]:
+        """Fan out the ``forEach`` loop for ``step_id`` and merge results.
+
+        :param ctx: Per-dispatch context bundle. The handler reads
+            :attr:`ctx.inputs` / :attr:`ctx.outputs` to build the CEL
+            scope, :attr:`ctx.run_id` for the deterministic child
+            instance ids, and :attr:`ctx.workflow_context` to spawn and
+            await the children.
+        :param graph: The compiled execution graph. The loop body is
+            the node identified by ``step_id``; its serialized
+            single-node graph is what each child runs.
+        :param step_id: The id of the ``forEach``-bearing node.
+
+        :returns: The ordered ``list`` of per-child output mappings
+            (one entry per item, in input list order). Delivered as the
+            generator's ``StopIteration.value``.
+
+        :raises LoopExpansionError: The ``forEach`` expression failed to
+            evaluate, or did not yield a list.
+        :raises SubOrchestrationSpawnError: A deterministic child
+            instance id could not be derived for an item.
+        :raises SubWorkflowFailedError: A single awaited child ran and
+            surfaced a terminal failure (first failure short-circuits).
+        :raises KeyError: ``step_id`` is not present in ``graph``.
+        """
+        node = _resolve_node(graph, step_id)
+        run_id = str(ctx.run_id)
+
+        items = self._expand_for_each(ctx, graph, node, step_id, run_id)
+
+        # The loop body each child runs is a byte-stable single-node
+        # graph carrying this node; identical for every item (only the
+        # per-iteration ``item`` differs), so the child set is
+        # reproducible under replay.
+        child_graph_json = to_json(_child_graph(graph, node))
+
+        spawned: list[tuple[str, str, Any]] = []
+        for index, item in enumerate(items):
+            key = iteration_key(item, index)
+            try:
+                instance_id = child_instance_id(run_id, step_id, key)
+            except ChildInstanceIdError as exc:
+                raise SubOrchestrationSpawnError(
+                    f"failed to derive a child instance id for iteration "
+                    f"{key!r} of step {step_id!r}: {exc}",
+                    run_id=run_id,
+                    step_id=step_id,
+                    iteration_key=key,
+                    cause=repr(exc),
+                ) from exc
+            child_input = ChildStepInput(
+                workspace_id=ctx.workspace_id,
+                workflow_version_id=ctx.workflow_version_id,
+                compiled_graph_json=child_graph_json,
+                step_id=step_id,
+                inputs=ctx.inputs,
+                parent_outputs=ctx.outputs,
+                loop_var=DEFAULT_LOOP_VAR,
+                item=item,
+            )
+            task = ctx.workflow_context.call_child_workflow(
+                CHILD_STEP_WORKFLOW_NAME,
+                input=child_input.to_dict(),
+                instance_id=instance_id,
+            )
+            spawned.append((key, instance_id, task))
+
+        # An empty iterable spawns no children and produces an empty
+        # output list; this early return keeps the zero-child path from
+        # yielding a ``when_all`` over no tasks. (The ``where:`` pre-filter
+        # and duplicate-key collision detection are added in WF-IMPL-090.)
+        if not spawned:
+            return []
+
+        raw_results = yield from self._await_children(ctx, step_id, run_id, spawned)
+        return self._merge(step_id, run_id, spawned, raw_results)
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+
+    def _expand_for_each(
+        self,
+        ctx: StepExecutionContext,
+        graph: ExecutionGraph,
+        node: ExecutionNode,
+        step_id: str,
+        run_id: str,
+    ) -> list[Any]:
+        """Evaluate the ``forEach`` call site to a list of items."""
+        call_site = node.call_sites.get(_FOR_EACH_SLOT)
+        if call_site is None or call_site.kind is not CallSiteKind.FOR_EACH:
+            # Defensive: the dispatcher only routes ``forEach``-bearing
+            # steps here, and the document model guarantees the slot is a
+            # complete ``${{ ... }}`` token (so a call site always
+            # exists). A missing slot is a programmer error.
+            raise LoopExpansionError(
+                f"step {step_id!r} has no forEach call site to expand",
+                run_id=run_id,
+                step_id=step_id,
+            )
+
+        scope = BindingScope(
+            run=RunInfo(id=run_id, workspace=ctx.workspace_id),
+            workflow=WorkflowInfo(
+                name=graph.metadata.workflow_name,
+                version=ctx.workflow_version_id,
+            ),
+            now=ctx.clock.now,
+            inputs=ctx.inputs,
+            steps=MappingProxyType(
+                {sid: StepBinding(out, sealed=True) for sid, out in ctx.outputs.items()}
+            ),
+        )
+        try:
+            raw = custos_cel.evaluate(call_site.typed_ast, scope, ctx.clock)
+        except CelError as exc:
+            raise LoopExpansionError(
+                f"failed to evaluate forEach on step {step_id!r}: {exc}",
+                run_id=run_id,
+                step_id=step_id,
+                cause_kind=exc.kind,
+                source=call_site.source,
+            ) from exc
+
+        if not isinstance(raw, list):
+            raise LoopExpansionError(
+                f"forEach on step {step_id!r} evaluated to a {type(raw).__name__}, expected a list",
+                run_id=run_id,
+                step_id=step_id,
+                source=call_site.source,
+            )
+        return raw
+
+    def _await_children(
+        self,
+        ctx: StepExecutionContext,
+        step_id: str,
+        run_id: str,
+        spawned: list[tuple[str, str, Any]],
+    ) -> Generator[Any, Any, list[Any]]:
+        """Await all spawned children via a single ``when_all``."""
+        from custos_workflow.runtime import ChildWorkflowError
+
+        tasks = [task for _key, _instance_id, task in spawned]
+        try:
+            results = yield ctx.workflow_context.when_all(tasks)
+        except ChildWorkflowError as exc:
+            # A child instance failed *abnormally* (an unhandled
+            # exception inside the child workflow, not a normal
+            # ``status="failed"`` return). Surface the proximate child
+            # as a terminal sub-workflow failure.
+            key = _iteration_key_for_instance(spawned, exc.instance_id)
+            raise SubWorkflowFailedError(
+                f"child {exc.instance_id!r} of step {step_id!r} failed: {exc}",
+                run_id=run_id,
+                step_id=step_id,
+                child_instance_id=exc.instance_id,
+                iteration_key=key,
+                child_kind=exc.error_type,
+            ) from exc
+        return list(results)
+
+    def _merge(
+        self,
+        step_id: str,
+        run_id: str,
+        spawned: list[tuple[str, str, Any]],
+        raw_results: list[Any],
+    ) -> list[Any]:
+        """Merge ordered child results, short-circuiting on first failure."""
+        merged: list[Any] = []
+        for (key, instance_id, _task), raw_result in zip(spawned, raw_results, strict=True):
+            child_result = ChildStepResult.from_dict(raw_result)
+            if child_result.status == "failed":
+                envelope = child_result.failure_envelope or {}
+                raise SubWorkflowFailedError(
+                    f"child {instance_id!r} of step {step_id!r} returned a terminal failure",
+                    run_id=run_id,
+                    step_id=step_id,
+                    child_instance_id=instance_id,
+                    iteration_key=key,
+                    child_kind=_envelope_kind(envelope),
+                )
+            merged.append(dict(child_result.outputs))
+        return merged
+
+
+# ---------------------------------------------------------------------------
+# Module-private helpers
+# ---------------------------------------------------------------------------
+
+
+def _resolve_node(graph: ExecutionGraph, step_id: str) -> ExecutionNode:
+    """Return the node for ``step_id`` or raise :class:`KeyError`."""
+    for node in graph.nodes:
+        if node.step_id == step_id:
+            return node
+    raise KeyError(step_id)
+
+
+def _child_graph(graph: ExecutionGraph, node: ExecutionNode) -> ExecutionGraph:
+    """Build the byte-stable single-node graph the children run.
+
+    The child runs exactly one node — the loop body — so it needs no
+    edges and a trivial topological order. ``forEach`` / ``where:`` call
+    sites on the node are inert in the child (the body handler dispatches
+    on the structural kind and never re-expands the loop), so the node is
+    carried through unchanged; the per-iteration item flows through
+    :attr:`ChildStepInput.item` instead.
+    """
+    return ExecutionGraph(
+        nodes=(node,),
+        edges=(),
+        topological_order=(node.step_id,),
+        metadata=graph.metadata,
+    )
+
+
+def _envelope_kind(envelope: Mapping[str, Any]) -> str | None:
+    """Extract the ``kind`` from a child failure envelope, if present."""
+    kind = envelope.get("kind")
+    return str(kind) if kind is not None else None
+
+
+def _iteration_key_for_instance(
+    spawned: list[tuple[str, str, Any]],
+    instance_id: str | None,
+) -> str | None:
+    """Map a failed child's instance id back to its iteration key."""
+    if instance_id is None:
+        return None
+    for key, candidate_id, _task in spawned:
+        if candidate_id == instance_id:
+            return key
+    return None
