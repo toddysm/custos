@@ -1,4 +1,4 @@
-"""Tests for :mod:`custos_workflow.providers` (WF-IMPL-043).
+"""Tests for :mod:`custos_workflow.providers` (WF-IMPL-043, WF-IMPL-080).
 
 The default in-process metadata-store provider must mirror the
 SPL Postgres adapter's ``updated_at`` semantics so consumers see
@@ -6,6 +6,13 @@ a fresh timestamp on every status transition. Without this the
 default in-memory wiring would silently report stale ``updated_at``
 values, which is a hard pitfall to debug downstream (alerts /
 observability dashboards that key off the freshness of the row).
+
+The WF-IMPL-080 tests pin :func:`load_run_components` against the
+four ARM / Connector env-var combinations and assert that the
+single lifespan-owned :class:`httpx.AsyncClient` is shared across
+the publisher + ARM + Connector adapters (no second client, no
+second socket pool). The Noop-fallback assertions guard the
+sidecar-free dev / test path that WF-IMPL-043 established.
 """
 
 from __future__ import annotations
@@ -18,7 +25,22 @@ from custos_spl.ids import WorkflowId as SplWorkflowId
 from custos_spl.ids import WorkspaceId as SplWorkspaceId
 from custos_spl.interfaces.metadata_store import Run as SplRun
 
-from custos_workflow.providers import _InProcessMetadataStoreProvider
+from custos_workflow.clients import (
+    DaprActivityRuntimeClient,
+    DaprConnectorClient,
+    NoopActivityRuntimeClient,
+    NoopConnectorClient,
+)
+from custos_workflow.providers import (
+    DEFAULT_OUTBOUND_RPC_TIMEOUT_MS,
+    ENV_ARM_APP_ID,
+    ENV_CONNECTOR_APP_ID,
+    ENV_OUTBOUND_RPC_TIMEOUT_MS,
+    _InProcessMetadataStoreProvider,
+    _resolve_outbound_rpc_timeout_seconds,
+    load_run_components,
+)
+from custos_workflow.runtime import FakeWorkflowRuntime
 
 
 @pytest.mark.asyncio
@@ -52,3 +74,192 @@ async def test_update_run_status_refreshes_updated_at() -> None:
     assert updated.started_at == initial_ts  # immutable on status transitions
     assert before - timedelta(seconds=1) <= updated.updated_at <= after + timedelta(seconds=1)
     assert updated.updated_at > initial_ts
+
+
+# ---------------------------------------------------------------------------
+# WF-IMPL-080 — Configuration knobs + lifespan-owned HTTP client wiring
+# ---------------------------------------------------------------------------
+
+
+def _arm_endpoint_env() -> dict[str, str]:
+    """Env map activating the ARM Dapr adapter only.
+
+    Uses ``WF_ARM_ENDPOINT`` plus the default ``DAPR_HTTP_HOST`` /
+    ``DAPR_HTTP_PORT`` fallbacks baked into
+    :func:`custos_workflow.clients._dapr_invoke.read_dapr_env` so the
+    test does not need to spin up a real sidecar.
+    """
+    return {ENV_ARM_APP_ID: "arm-app"}
+
+
+def _connector_endpoint_env() -> dict[str, str]:
+    """Env map activating the Connector Dapr adapter only."""
+    return {ENV_CONNECTOR_APP_ID: "connector-app"}
+
+
+def test_load_run_components_noop_when_endpoints_unset() -> None:
+    """Both env vars unset → ``Noop`` adapters + no shared HTTP client.
+
+    Pins the WF-IMPL-043 sidecar-free dev / test path so the
+    in-process default never accidentally opens a socket pool
+    against ``127.0.0.1:3500``.
+    """
+    components = load_run_components(env={}, workflow_runtime=FakeWorkflowRuntime())
+
+    assert isinstance(components.activity_client, NoopActivityRuntimeClient)
+    assert isinstance(components.connector_client, NoopConnectorClient)
+    assert components.dapr_http_client is None
+
+
+def test_load_run_components_dapr_arm_only_shares_http_client() -> None:
+    """Only ARM env set → Dapr ARM + Noop Connector + shared HTTP client.
+
+    Asserts the WF-IMPL-080 acceptance criterion that the
+    lifespan-owned :class:`httpx.AsyncClient` is the *same object*
+    the production adapter holds (one socket pool, never two).
+    """
+    components = load_run_components(
+        env=_arm_endpoint_env(), workflow_runtime=FakeWorkflowRuntime()
+    )
+
+    try:
+        assert isinstance(components.activity_client, DaprActivityRuntimeClient)
+        assert isinstance(components.connector_client, NoopConnectorClient)
+        assert components.dapr_http_client is not None
+        # Same instance — no second client, no second pool.
+        assert components.activity_client.http_client is components.dapr_http_client
+    finally:
+        # Lifespan owns the client; the test must aclose() it
+        # itself because no FastAPI lifespan ran here.
+        if components.dapr_http_client is not None:
+            import asyncio
+
+            asyncio.run(components.dapr_http_client.aclose())
+
+
+def test_load_run_components_dapr_connector_only_shares_http_client() -> None:
+    """Only Connector env set → Noop ARM + Dapr Connector + shared HTTP client."""
+    components = load_run_components(
+        env=_connector_endpoint_env(), workflow_runtime=FakeWorkflowRuntime()
+    )
+
+    try:
+        assert isinstance(components.activity_client, NoopActivityRuntimeClient)
+        assert isinstance(components.connector_client, DaprConnectorClient)
+        assert components.dapr_http_client is not None
+        assert components.connector_client.http_client is components.dapr_http_client
+    finally:
+        if components.dapr_http_client is not None:
+            import asyncio
+
+            asyncio.run(components.dapr_http_client.aclose())
+
+
+def test_load_run_components_dapr_both_share_single_http_client() -> None:
+    """Both env vars set → Dapr ARM + Dapr Connector + *single* HTTP client.
+
+    The headline WF-IMPL-080 invariant: a worker configured to talk
+    to *both* upstreams must keep exactly one ``httpx.AsyncClient``
+    (the lifespan-owned one on :attr:`RunComponents.dapr_http_client`)
+    so production traffic shares a single socket pool.
+    """
+    components = load_run_components(
+        env={**_arm_endpoint_env(), **_connector_endpoint_env()},
+        workflow_runtime=FakeWorkflowRuntime(),
+    )
+
+    try:
+        assert isinstance(components.activity_client, DaprActivityRuntimeClient)
+        assert isinstance(components.connector_client, DaprConnectorClient)
+        assert components.dapr_http_client is not None
+        # The same instance reaches *both* adapters.
+        assert (
+            components.activity_client.http_client
+            is components.connector_client.http_client
+            is components.dapr_http_client
+        )
+    finally:
+        if components.dapr_http_client is not None:
+            import asyncio
+
+            asyncio.run(components.dapr_http_client.aclose())
+
+
+def test_load_run_components_honours_explicit_overrides() -> None:
+    """Caller-supplied overrides win even when env vars are set.
+
+    Mirrors the existing override contract for ``lifecycle_publisher``
+    so tests can swap in :class:`FakeActivityRuntimeClient` /
+    :class:`FakeConnectorClient` without the factory spinning up a
+    real Dapr adapter (and without allocating an HTTP client only
+    the production path needs).
+    """
+    fake_arm = NoopActivityRuntimeClient()
+    fake_connector = NoopConnectorClient()
+    components = load_run_components(
+        env={**_arm_endpoint_env(), **_connector_endpoint_env()},
+        workflow_runtime=FakeWorkflowRuntime(),
+        activity_client=fake_arm,
+        connector_client=fake_connector,
+    )
+
+    assert components.activity_client is fake_arm
+    assert components.connector_client is fake_connector
+    # Overrides short-circuit the ``need_http_for_*`` predicates so
+    # no socket pool is opened (the publisher env is unset here).
+    assert components.dapr_http_client is None
+
+
+# ---------------------------------------------------------------------------
+# WF-IMPL-080 — Outbound-RPC timeout knob
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_outbound_rpc_timeout_default_when_unset() -> None:
+    """Unset ``WF_OUTBOUND_RPC_TIMEOUT_MS`` → the 10 s default."""
+    timeout = _resolve_outbound_rpc_timeout_seconds({})
+
+    assert timeout == DEFAULT_OUTBOUND_RPC_TIMEOUT_MS / 1000.0
+
+
+def test_resolve_outbound_rpc_timeout_parses_positive_int() -> None:
+    """Positive integer ms → seconds float."""
+    timeout = _resolve_outbound_rpc_timeout_seconds({ENV_OUTBOUND_RPC_TIMEOUT_MS: "2500"})
+
+    assert timeout == 2.5
+
+
+@pytest.mark.parametrize("bad", ["abc", "1.5", "1e3"])
+def test_resolve_outbound_rpc_timeout_rejects_non_integer(bad: str) -> None:
+    """Non-integer values are surfaced eagerly at process start.
+
+    Bad operator config must not be deferred to first-request
+    so :func:`load_run_components` (called from the FastAPI
+    lifespan) crashes the worker before /readyz flips to 200.
+    """
+    with pytest.raises(ValueError):
+        _resolve_outbound_rpc_timeout_seconds({ENV_OUTBOUND_RPC_TIMEOUT_MS: bad})
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "-100"])
+def test_resolve_outbound_rpc_timeout_rejects_non_positive(bad: str) -> None:
+    """Zero or negative timeouts are operator typos, never intent."""
+    with pytest.raises(ValueError):
+        _resolve_outbound_rpc_timeout_seconds({ENV_OUTBOUND_RPC_TIMEOUT_MS: bad})
+
+
+def test_resolve_outbound_rpc_timeout_threaded_into_dapr_adapter() -> None:
+    """The knob flows end-to-end into the Dapr adapter's ``timeout`` field."""
+    components = load_run_components(
+        env={**_arm_endpoint_env(), ENV_OUTBOUND_RPC_TIMEOUT_MS: "2500"},
+        workflow_runtime=FakeWorkflowRuntime(),
+    )
+
+    try:
+        assert isinstance(components.activity_client, DaprActivityRuntimeClient)
+        assert components.activity_client.timeout == 2.5
+    finally:
+        if components.dapr_http_client is not None:
+            import asyncio
+
+            asyncio.run(components.dapr_http_client.aclose())

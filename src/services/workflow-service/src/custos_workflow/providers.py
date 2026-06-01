@@ -53,8 +53,13 @@ from custos_workflow.bindings.registry import (
 from custos_workflow.clients import (
     ActivityRuntimeClient,
     ConnectorClient,
+    DaprActivityRuntimeClient,
+    DaprConnectorClient,
     NoopActivityRuntimeClient,
     NoopConnectorClient,
+)
+from custos_workflow.clients._dapr_invoke import (
+    read_dapr_env,
 )
 from custos_workflow.runs.controller import (
     CatalogClient,
@@ -65,7 +70,6 @@ from custos_workflow.runs.controller import (
     _WorkflowClient,
 )
 from custos_workflow.runs.events import (
-    DEFAULT_DAPR_PUBLISH_TIMEOUT_SECONDS,
     DaprPubSubLifecyclePublisher,
 )
 from custos_workflow.runs.replay import NoopReplayReconciler, ReplayReconciler
@@ -79,8 +83,12 @@ from custos_workflow.validator import (
 
 __all__ = [
     "DEFAULT_DAPR_PUBLISH_TOPIC",
+    "DEFAULT_OUTBOUND_RPC_TIMEOUT_MS",
+    "ENV_ARM_APP_ID",
+    "ENV_CONNECTOR_APP_ID",
     "ENV_DAPR_ENDPOINT",
     "ENV_DAPR_WORKFLOW_COMPONENT",
+    "ENV_OUTBOUND_RPC_TIMEOUT_MS",
     "ENV_PUBLISH_PUBSUB",
     "ENV_PUBLISH_TOPIC",
     "RunComponents",
@@ -117,6 +125,37 @@ ENV_DAPR_ENDPOINT = "WF_DAPR_HTTP_ENDPOINT"
 
 #: design.md § Configuration default for ``WF_PUBLISH_TOPIC``.
 DEFAULT_DAPR_PUBLISH_TOPIC = "custos.workflow.events"
+
+#: Required at lifespan startup to activate the production
+#: :class:`~custos_workflow.clients.DaprActivityRuntimeClient`.
+#: Value is the Activity Runtime Manager Dapr app-id (used by
+#: :func:`~custos_workflow.clients._dapr_invoke.read_dapr_env` to
+#: build the canonical ``…/v1.0/invoke/<app-id>/method/…`` URL).
+#: When unset, the lifespan falls back to
+#: :class:`~custos_workflow.clients.NoopActivityRuntimeClient`.
+ENV_ARM_APP_ID = "WF_ARM_ENDPOINT"
+
+#: Required at lifespan startup to activate the production
+#: :class:`~custos_workflow.clients.DaprConnectorClient`.
+#: Value is the Connector Service Dapr app-id. When unset, the
+#: lifespan falls back to
+#: :class:`~custos_workflow.clients.NoopConnectorClient`.
+ENV_CONNECTOR_APP_ID = "WF_CONNECTOR_ENDPOINT"
+
+#: Optional. Per-request timeout shared by both the ARM and
+#: Connector outbound adapters, expressed in milliseconds.
+#: Defaults to :data:`DEFAULT_OUTBOUND_RPC_TIMEOUT_MS`. The value
+#: is parsed once at lifespan startup and passed to every adapter
+#: as a float (seconds).
+ENV_OUTBOUND_RPC_TIMEOUT_MS = "WF_OUTBOUND_RPC_TIMEOUT_MS"
+
+#: Default for :data:`ENV_OUTBOUND_RPC_TIMEOUT_MS` (10 s, matching
+#: the per-adapter
+#: :data:`~custos_workflow.clients._dapr_invoke.DEFAULT_OUTBOUND_RPC_TIMEOUT_SECONDS`
+#: default — kept in lock-step so an operator that does not set
+#: the env var sees the same behaviour as the adapter's own
+#: dataclass default).
+DEFAULT_OUTBOUND_RPC_TIMEOUT_MS: int = 10_000
 
 
 # ---------------------------------------------------------------------------
@@ -307,23 +346,29 @@ class RunComponents:
             :class:`~custos_workflow.clients.ActivityRuntimeClient`
             stub that the
             :class:`~custos_workflow.steps.activity_step.ActivityStepHandler`
-            schedules attempts through. WF-IMPL-057 defaults this to
-            :class:`~custos_workflow.clients.NoopActivityRuntimeClient`
-            — the production Dapr-backed adapter is owned by the
-            deferred *Real ARM Client* sub-module.
+            schedules attempts through. WF-IMPL-057 defaulted this
+            to :class:`~custos_workflow.clients.NoopActivityRuntimeClient`;
+            WF-IMPL-080 promotes the default to the production
+            :class:`~custos_workflow.clients.DaprActivityRuntimeClient`
+            when :data:`ENV_ARM_APP_ID` is set (and falls back to
+            the Noop adapter otherwise).
         connector_client: WF-IMPL-050's
             :class:`~custos_workflow.clients.ConnectorClient` stub
             that the
             :class:`~custos_workflow.steps.activity_step.ActivityStepHandler`
-            leases connector contexts through. WF-IMPL-057 defaults
-            this to
-            :class:`~custos_workflow.clients.NoopConnectorClient`
-            — the production Dapr-backed adapter is owned by the
-            deferred *Real Connector Client* sub-module.
-        dapr_http_client: HTTP client owned by the Dapr Pub/Sub
-            publisher when in production mode. ``None`` for the
-            in-memory publisher path. The lifespan ``aclose()`` it
-            on shutdown.
+            leases connector contexts through. WF-IMPL-057
+            defaulted this to
+            :class:`~custos_workflow.clients.NoopConnectorClient`;
+            WF-IMPL-080 promotes the default to the production
+            :class:`~custos_workflow.clients.DaprConnectorClient`
+            when :data:`ENV_CONNECTOR_APP_ID` is set (and falls
+            back to the Noop adapter otherwise).
+        dapr_http_client: HTTP client lifespan-owned and shared by
+            the Dapr Pub/Sub publisher (when active) and the
+            WF-IMPL-080 ARM / Connector adapters (when their env
+            vars are set). ``None`` when none of the production
+            paths are active. The lifespan ``aclose()`` it on
+            shutdown.
     """
 
     workflow_runtime: WorkflowRuntimeProtocol
@@ -360,36 +405,165 @@ def _build_workflow_client(
     return WorkflowClient()
 
 
+def _publisher_env_active(env: Mapping[str, str]) -> bool:
+    """``True`` when the env flags request the Dapr Pub/Sub publisher.
+
+    Mirrors the gate inside :func:`_build_lifecycle_publisher` so
+    :func:`load_run_components` can decide whether the shared
+    :class:`httpx.AsyncClient` needs to exist *before* the
+    publisher is built. Keeping a single source of truth avoids
+    the lifespan accidentally constructing a socket pool that
+    nothing ever uses (and would silently leak on shutdown).
+    """
+    return bool(env.get(ENV_PUBLISH_TOPIC) or env.get(ENV_PUBLISH_PUBSUB))
+
+
 def _build_lifecycle_publisher(
     *,
     env: Mapping[str, str],
-) -> tuple[LifecycleEventPublisher, httpx.AsyncClient | None]:
-    """Return ``(publisher, owned_http_client)`` per the env flags.
+    http_client: httpx.AsyncClient | None,
+) -> LifecycleEventPublisher:
+    """Return the publisher chosen by the env flags.
 
     Production wiring activates when *either* ``WF_PUBLISH_TOPIC``
     *or* ``WF_PUBLISH_PUBSUB`` is set. Both default to their
     design.md values when only one side is supplied so operators
-    have a single knob to flip. The returned ``owned_http_client``
-    is the lifespan's responsibility to ``aclose()`` on shutdown;
-    ``None`` in the in-memory path.
+    have a single knob to flip. In the production path the caller
+    is responsible for supplying a non-``None`` ``http_client`` (the
+    lifespan-owned shared client constructed by
+    :func:`load_run_components`); the publisher does **not** own
+    it, mirroring the WF-IMPL-079 adapter contract.
     """
+    if not _publisher_env_active(env):
+        return InMemoryLifecycleEventPublisher()
+    if http_client is None:  # pragma: no cover - defensive
+        raise RuntimeError(
+            "_build_lifecycle_publisher: production path requires a "
+            "lifespan-owned httpx.AsyncClient; load_run_components "
+            "must build the shared client before invoking this helper."
+        )
     topic = env.get(ENV_PUBLISH_TOPIC)
     pubsub = env.get(ENV_PUBLISH_PUBSUB)
-    if not topic and not pubsub:
-        return InMemoryLifecycleEventPublisher(), None
     effective_topic = topic or DEFAULT_DAPR_PUBLISH_TOPIC
     effective_pubsub = pubsub or "pubsub"
     dapr_endpoint = env.get(ENV_DAPR_ENDPOINT, "http://127.0.0.1:3500")
-    http_client = httpx.AsyncClient(
-        timeout=httpx.Timeout(DEFAULT_DAPR_PUBLISH_TIMEOUT_SECONDS),
-    )
-    publisher = DaprPubSubLifecyclePublisher(
+    return DaprPubSubLifecyclePublisher(
         http_client=http_client,
         dapr_endpoint=dapr_endpoint,
         pubsub_name=effective_pubsub,
         topic=effective_topic,
     )
-    return publisher, http_client
+
+
+def _resolve_outbound_rpc_timeout_seconds(env: Mapping[str, str]) -> float:
+    """Parse :data:`ENV_OUTBOUND_RPC_TIMEOUT_MS` once at startup.
+
+    The env var is documented in milliseconds (the operator-facing
+    unit used across the rest of the workflow-service config
+    surface, e.g. ``WF_EXPR_TIMEOUT_MS``); both Dapr adapters take
+    a float in *seconds*, so this helper does the conversion in a
+    single place.
+
+    :raises ValueError: When the value is set but is not a
+        positive integer. The message names the env var so the
+        operator can find it without grepping.
+    """
+    raw = env.get(ENV_OUTBOUND_RPC_TIMEOUT_MS, "").strip()
+    if not raw:
+        return DEFAULT_OUTBOUND_RPC_TIMEOUT_MS / 1000.0
+    try:
+        ms = int(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"{ENV_OUTBOUND_RPC_TIMEOUT_MS} must be a positive integer (milliseconds), got {raw!r}"
+        ) from exc
+    if ms <= 0:
+        raise ValueError(
+            f"{ENV_OUTBOUND_RPC_TIMEOUT_MS} must be a positive integer (milliseconds), got {raw!r}"
+        )
+    return ms / 1000.0
+
+
+def _build_activity_client(
+    *,
+    env: Mapping[str, str],
+    http_client: httpx.AsyncClient | None,
+    timeout_seconds: float,
+) -> ActivityRuntimeClient:
+    """Return the production or Noop ARM client per the env flags.
+
+    The production :class:`DaprActivityRuntimeClient` activates
+    only when :data:`ENV_ARM_APP_ID` is set; otherwise the
+    in-process :class:`NoopActivityRuntimeClient` keeps the dev /
+    test path sidecar-free. When the production path activates,
+    the caller must supply the lifespan-owned shared
+    :class:`httpx.AsyncClient` so the adapter never owns its own
+    socket pool (mirroring the WF-IMPL-079 contract and the
+    :class:`DaprPubSubLifecyclePublisher` precedent).
+
+    The return type is the sync :class:`ActivityRuntimeClient`
+    Protocol the Step Coordinator depends on; the production
+    :class:`DaprActivityRuntimeClient` exposes ``async`` methods
+    and is adapted to the sync surface by the WF-IMPL-079
+    activity-bridge (registered by
+    :meth:`~custos_workflow.runtime.WorkflowRuntime.start`),
+    which is the layer that calls :func:`inspect.isawaitable` to
+    drive either flavour. The :func:`cast` therefore reflects
+    the runtime contract: the orchestrator-side bridge is the
+    sole consumer of the production async client.
+    """
+    if not env.get(ENV_ARM_APP_ID, "").strip():
+        return NoopActivityRuntimeClient()
+    if http_client is None:  # pragma: no cover - defensive
+        raise RuntimeError(
+            "_build_activity_client: production path requires a "
+            "lifespan-owned httpx.AsyncClient; load_run_components "
+            "must build the shared client before invoking this helper."
+        )
+    endpoint = read_dapr_env(env, ENV_ARM_APP_ID)
+    return cast(
+        ActivityRuntimeClient,
+        DaprActivityRuntimeClient(
+            http_client=http_client,
+            endpoint=endpoint,
+            timeout=timeout_seconds,
+        ),
+    )
+
+
+def _build_connector_client(
+    *,
+    env: Mapping[str, str],
+    http_client: httpx.AsyncClient | None,
+    timeout_seconds: float,
+) -> ConnectorClient:
+    """Return the production or Noop Connector client per the env flags.
+
+    Mirrors :func:`_build_activity_client` for the Connector
+    Service path: production activates only when
+    :data:`ENV_CONNECTOR_APP_ID` is set, and the lifespan-owned
+    shared :class:`httpx.AsyncClient` is reused so a worker
+    configured to talk to both upstreams keeps a single socket
+    pool. See :func:`_build_activity_client` for the rationale
+    behind the :func:`cast` to the sync Protocol.
+    """
+    if not env.get(ENV_CONNECTOR_APP_ID, "").strip():
+        return NoopConnectorClient()
+    if http_client is None:  # pragma: no cover - defensive
+        raise RuntimeError(
+            "_build_connector_client: production path requires a "
+            "lifespan-owned httpx.AsyncClient; load_run_components "
+            "must build the shared client before invoking this helper."
+        )
+    endpoint = read_dapr_env(env, ENV_CONNECTOR_APP_ID)
+    return cast(
+        ConnectorClient,
+        DaprConnectorClient(
+            http_client=http_client,
+            endpoint=endpoint,
+            timeout=timeout_seconds,
+        ),
+    )
 
 
 def load_run_components(
@@ -425,18 +599,20 @@ def load_run_components(
             an empty :class:`InMemoryActivityTypeRegistry`.
         activity_client: Pre-built
             :class:`~custos_workflow.clients.ActivityRuntimeClient`
-            override. Defaults to
-            :class:`~custos_workflow.clients.NoopActivityRuntimeClient`
-            — the production Dapr-backed adapter is owned by the
-            deferred *Real ARM Client* sub-module. Tests inject
+            override. When unset, the default is selected per the
+            env: :class:`~custos_workflow.clients.DaprActivityRuntimeClient`
+            when :data:`ENV_ARM_APP_ID` is set, otherwise
+            :class:`~custos_workflow.clients.NoopActivityRuntimeClient`.
+            Tests inject
             :class:`~custos_workflow.clients.FakeActivityRuntimeClient`.
         connector_client: Pre-built
             :class:`~custos_workflow.clients.ConnectorClient`
-            override. Defaults to
-            :class:`~custos_workflow.clients.NoopConnectorClient`
-            — the production Dapr-backed adapter is owned by the
-            deferred *Real Connector Client* sub-module. Tests
-            inject :class:`~custos_workflow.clients.FakeConnectorClient`.
+            override. When unset, the default is selected per the
+            env: :class:`~custos_workflow.clients.DaprConnectorClient`
+            when :data:`ENV_CONNECTOR_APP_ID` is set, otherwise
+            :class:`~custos_workflow.clients.NoopConnectorClient`.
+            Tests inject
+            :class:`~custos_workflow.clients.FakeConnectorClient`.
         idempotency_ledger: Pre-built
             :class:`~custos_workflow.validator.IdempotencyLedger`
             override that backs the WF-IMPL-063
@@ -454,15 +630,82 @@ def load_run_components(
         shutdown.
     """
     resolved_env: Mapping[str, str] = env if env is not None else os.environ
+
+    # Decide upfront whether *any* lifespan-owned Dapr HTTP client
+    # consumer is active. Building a shared ``httpx.AsyncClient``
+    # only when needed keeps the in-memory dev / test path
+    # sidecar-free (the existing WF-IMPL-043 invariant) and
+    # guarantees that *one* socket pool is reused across the
+    # publisher + the WF-IMPL-080 ARM / Connector adapters when
+    # the production paths activate — no second client, no second
+    # pool. Caller-supplied overrides (``lifecycle_publisher`` /
+    # ``activity_client`` / ``connector_client``) are honoured even
+    # when the corresponding env vars are set so tests can swap in
+    # Fakes without spinning up an unused HTTP client.
+    timeout_seconds = _resolve_outbound_rpc_timeout_seconds(resolved_env)
+    need_http_for_publisher = lifecycle_publisher is None and _publisher_env_active(resolved_env)
+    need_http_for_arm = activity_client is None and bool(
+        resolved_env.get(ENV_ARM_APP_ID, "").strip()
+    )
+    need_http_for_connector = connector_client is None and bool(
+        resolved_env.get(ENV_CONNECTOR_APP_ID, "").strip()
+    )
+    dapr_http_client: httpx.AsyncClient | None
+    if need_http_for_publisher or need_http_for_arm or need_http_for_connector:
+        # The per-request ``timeout=`` arg every adapter passes
+        # overrides the client-default; we still set a sane
+        # default here so an adapter added later without a
+        # per-request timeout does not fall back to httpx's
+        # implicit 5 s default.
+        dapr_http_client = httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds))
+    else:
+        dapr_http_client = None
+
+    activity: ActivityRuntimeClient = (
+        activity_client
+        if activity_client is not None
+        else _build_activity_client(
+            env=resolved_env,
+            http_client=dapr_http_client,
+            timeout_seconds=timeout_seconds,
+        )
+    )
+    connector: ConnectorClient = (
+        connector_client
+        if connector_client is not None
+        else _build_connector_client(
+            env=resolved_env,
+            http_client=dapr_http_client,
+            timeout_seconds=timeout_seconds,
+        )
+    )
+
+    # WorkflowRuntime is constructed *after* the outbound clients
+    # so the WF-IMPL-079 bridge activities (``schedule_activity``
+    # and ``bind_for_step``) can be registered against them on
+    # ``runtime.start()``. The runtime kwargs gate on
+    # ``not None``: when the env vars are unset the factories
+    # above hand us the Noop adapters, which the bridge will
+    # surface as ``OutboundRpcError`` envelopes if invoked — the
+    # explicit Noop wiring keeps the dev path sidecar-free
+    # without leaving the bridge un-registered (a missing bridge
+    # would surface as an opaque ``ActivityNotFound`` from the
+    # Dapr SDK at workflow time, which is much harder to
+    # diagnose than the Noop's own ``NotImplementedError``).
     runtime: WorkflowRuntimeProtocol = (
-        workflow_runtime if workflow_runtime is not None else WorkflowRuntime()
+        workflow_runtime
+        if workflow_runtime is not None
+        else WorkflowRuntime(
+            activity_runtime_client=activity,
+            connector_client=connector,
+        )
     )
     workflow_client = _build_workflow_client(runtime)
+
     if lifecycle_publisher is None:
-        publisher, dapr_http_client = _build_lifecycle_publisher(env=resolved_env)
+        publisher = _build_lifecycle_publisher(env=resolved_env, http_client=dapr_http_client)
     else:
         publisher = lifecycle_publisher
-        dapr_http_client = None
     reconciler: ReplayReconciler = (
         replay_reconciler if replay_reconciler is not None else NoopReplayReconciler()
     )
@@ -471,12 +714,6 @@ def load_run_components(
     )
     registry: ActivityTypeRegistry = (
         activity_registry if activity_registry is not None else InMemoryActivityTypeRegistry({})
-    )
-    activity: ActivityRuntimeClient = (
-        activity_client if activity_client is not None else NoopActivityRuntimeClient()
-    )
-    connector: ConnectorClient = (
-        connector_client if connector_client is not None else NoopConnectorClient()
     )
     store: RunStore = InProcessRunStore(
         cast(MetadataStoreProvider, _InProcessMetadataStoreProvider())
