@@ -39,7 +39,9 @@ the WF-IMPL-093 dispatch path can map it uniformly to a
 
 * :class:`~custos_workflow.steps.errors.LoopExpansionError`
   (``step.loop_expansion_error``) — the ``forEach`` expression failed
-  to evaluate or did not yield a list.
+  to evaluate or did not yield a list, the optional ``where:`` predicate
+  failed to evaluate or did not yield a bool, or the ``forEach`` list
+  derived two equal iteration keys.
 * :class:`~custos_workflow.steps.errors.SubOrchestrationSpawnError`
   (``step.sub_orchestration_spawn_error``) — a deterministic child
   instance id could not be derived (e.g. a malformed id component).
