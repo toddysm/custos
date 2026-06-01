@@ -488,7 +488,7 @@ the caller opted out).
 
 ## Configuration
 
-The API Adapter sub-module reads three environment variables
+The API Adapter sub-module reads six environment variables
 directly; the rest of the workflow-service host's config
 ([`README.md` § Configuration](../../src/services/workflow-service/README.md#configuration))
 remains the source of truth for the variables the validator
@@ -500,6 +500,9 @@ bind against.
 | `WF_REQUIRE_CALL_CONTEXT` | No | unset (dev mode) | When set to `"1"`, `CallContextMiddleware` rejects requests lacking either the `X-Custos-Workspace` or `X-Custos-Principal` header with a 401. Dev mode (any other value) injects placeholder values so test fixtures and local-dev runs do not need to mint real auth headers. |
 | `WF_IDEMPOTENCY_KEY_TTL` | No | `PT24H` | ISO-8601 duration window for `(workspaceId, idempotencyKey)` dedup. Months/years are rejected (the resulting calendar-dependent window is incompatible with the ledger contract). |
 | `WF_CATALOG_ENDPOINT` | Yes (production) | — | Catalog Service endpoint the validator's `CatalogClient` resolves `workflowVersionId` against. |
+| `WF_ARM_ENDPOINT` | Yes (production) | — | Activity Runtime Manager Dapr app-id the outbound ARM adapter resolves `schedule_activity` / `cancel_activity` calls against. When unset, the workflow-service falls back to the in-process `NoopActivityRuntimeClient` so the dev / test path stays sidecar-free. |
+| `WF_CONNECTOR_ENDPOINT` | Yes (production) | — | Connector Service Dapr app-id the outbound Connector adapter resolves `bind_for_step` against. When unset, the workflow-service falls back to the in-process `NoopConnectorClient` so the dev / test path stays sidecar-free. |
+| `WF_OUTBOUND_RPC_TIMEOUT_MS` | No | `10000` | Per-request timeout (in milliseconds) shared by both the ARM and Connector outbound Dapr adapters. Both adapters reuse the single lifespan-owned `httpx.AsyncClient` (one socket pool per worker), and this value is converted to seconds and threaded into each adapter's per-request `httpx` timeout. Must be a positive integer; bad values fail at startup so the worker never flips `/readyz` to 200 with a misconfigured timeout. |
 
 ## Observability
 
