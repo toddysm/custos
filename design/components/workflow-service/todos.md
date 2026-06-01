@@ -1,6 +1,6 @@
 # TODOs: Workflow Service
 
-Last Updated: 2026-06-02 (WF-IMPL-069 merged via PR #476; WF-IMPL-070..072 outstanding under tracker #459)
+Last Updated: 2026-06-03 (WF-IMPL-070 merged via PR #478; WF-IMPL-071..072 outstanding under tracker #459)
 
 ## Open
 
@@ -41,7 +41,7 @@ Fifth sub-module: **API Adapter + Validator**, packaged inside the service host 
 ### Phase D — App wiring + observability
 
 - [x] WF-IMPL-069 (#455): Mount routers + exception handlers in `create_app` (depends on #451, #452, #453, #454). Merged: PR #476.
-- [F] WF-IMPL-070 (#456): OTel HTTP-server observability (depends on #455).
+- [x] WF-IMPL-070 (#456): OTel HTTP-server observability (depends on #455). Merged: PR #478.
 
 ### Phase E — Verification + documentation
 
