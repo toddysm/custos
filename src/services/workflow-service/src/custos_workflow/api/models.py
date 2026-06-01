@@ -381,9 +381,13 @@ class RaiseExternalEventRequest(_CamelModel):
     ``runId`` and ``stepId`` are path-bound (not body-bound) so the
     body carries only the workspace + event payload + dedup key.
     Idempotency on this surface is keyed by
-    ``(runId, stepId, eventName, idempotencyKey)`` per design.md —
-    the controller's in-process event-dispatch ledger (WF-IMPL-068)
-    owns the dedup decision; this model is a plain envelope.
+    ``(workspaceId, runId, stepId, eventName, idempotencyKey)`` —
+    the controller's in-process event-dispatch ledger
+    (WF-IMPL-068) owns the dedup decision and includes
+    ``workspaceId`` in the tuple alongside the design.md
+    ``(runId, stepId, eventName, idempotencyKey)`` shape so two
+    workspaces that pick identical run / step / event / key
+    quadruples cannot collide. This model is a plain envelope.
 
     ``workspaceId`` rides in the body for the same reason the
     Internal Start / Cancel bodies (WF-IMPL-067) carry it: the
@@ -415,7 +419,7 @@ class RaiseExternalEventRequest(_CamelModel):
         default=None,
         description=(
             "Optional client-supplied dedup key for the "
-            "(runId, stepId, eventName, idempotencyKey) ledger."
+            "(workspaceId, runId, stepId, eventName, idempotencyKey) ledger."
         ),
     )
 

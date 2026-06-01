@@ -360,7 +360,7 @@ class TestHappyPath:
                 f"expected dispatch for status {status.value}"
             )
 
-    async def test_payload_defaults_to_none_when_omitted(self) -> None:
+    async def test_payload_defaults_to_empty_dict_when_omitted(self) -> None:
         fx = _make_controller()
         await _seed_run(fx.store, status=RunStatus.RUNNING)
 
@@ -371,7 +371,11 @@ class TestHappyPath:
             event_name=EVENT_NAME,
         )
 
-        assert fx.workflow_client.raise_event_requests[0].data is None
+        # ``payload`` defaults to ``{}`` so direct-call and HTTP-call
+        # paths produce identical Dapr ``data`` payloads when the
+        # caller omits the field (matches
+        # :class:`RaiseExternalEventRequest`'s wire default).
+        assert fx.workflow_client.raise_event_requests[0].data == {}
 
 
 # ---------------------------------------------------------------------------

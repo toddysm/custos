@@ -355,10 +355,10 @@ RUN_LIFECYCLE_DURATION_MS: Final[Histogram] = _meter.create_histogram(
     description=(
         "Wall-clock time spent in each public RunController lifecycle "
         "method, labelled by ``operation`` ∈ {start,cancel,pause,"
-        "resume,get,list} (replay is also recorded for the "
-        "orchestrator replay path) and ``outcome`` ∈ {ok,not_found,"
-        "state_conflict,state_corrupt,runtime_unavailable,"
-        "internal_error}."
+        "resume,get,list,raise_external_event} (replay is also "
+        "recorded for the orchestrator replay path) and ``outcome`` "
+        "∈ {ok,not_found,state_conflict,state_corrupt,"
+        "runtime_unavailable,internal_error}."
     ),
 )
 
@@ -499,6 +499,19 @@ def observe_run_list() -> AbstractContextManager[Span]:
     span here so the ``operation`` label is fully covered.
     """
     return _instrument_run("custos_workflow.run.list", "list")
+
+
+def observe_run_raise_external_event() -> AbstractContextManager[Span]:
+    """Context manager wrapping :meth:`RunController.raise_external_event`.
+
+    Span name is ``custos_workflow.run.raise_external_event``.
+    The bridge is a write-side lifecycle entry point (Trigger
+    Service inbound RPC) so it joins the same WF-IMPL-044
+    ``operation`` x ``outcome`` matrix as ``start_run`` /
+    ``cancel_run`` — the histogram description above pins
+    ``raise_external_event`` as a permitted ``operation`` value.
+    """
+    return _instrument_run("custos_workflow.run.raise_external_event", "raise_external_event")
 
 
 def observe_run_replay() -> AbstractContextManager[Span]:
@@ -909,6 +922,7 @@ __all__ = [
     "observe_run_get",
     "observe_run_list",
     "observe_run_pause",
+    "observe_run_raise_external_event",
     "observe_run_replay",
     "observe_run_resume",
     "observe_run_start",

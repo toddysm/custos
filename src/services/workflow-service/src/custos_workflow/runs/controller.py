@@ -83,6 +83,7 @@ from custos_workflow._telemetry import (
     observe_run_get,
     observe_run_list,
     observe_run_pause,
+    observe_run_raise_external_event,
     observe_run_resume,
     observe_run_start,
     record_run_status_transition,
@@ -1007,6 +1008,7 @@ class RunController:
     # raise_external_event
     # ------------------------------------------------------------------
 
+    @_trace_run_method(observe_run_raise_external_event)
     async def raise_external_event(
         self,
         *,
@@ -1014,7 +1016,7 @@ class RunController:
         run_id: RunId,
         step_id: str,
         event_name: str,
-        payload: Any = None,
+        payload: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
     ) -> None:
         """Forward a Trigger-Service ``RaiseExternalEvent`` into Dapr.
@@ -1062,7 +1064,12 @@ class RunController:
             event_name: Wire-stable event name the workflow's
                 ``waitFor:`` step subscribed to.
             payload: Optional event payload delivered into the
-                ``raise_event`` call's ``data`` argument.
+                ``raise_event`` call's ``data`` argument. Defaults
+                to ``{}`` (matching
+                :class:`~custos_workflow.api.models.RaiseExternalEventRequest`)
+                so direct-call and HTTP-call paths produce
+                identical Dapr ``data`` payloads when the caller
+                omits the field.
             idempotency_key: Caller-supplied dedup token. ``None``
                 or empty opts out of dedup.
 
@@ -1125,7 +1132,7 @@ class RunController:
                 RaiseRunEventRequest(
                     instance_id=str(run_id),
                     event_name=event_name,
-                    data=payload,
+                    data=payload if payload is not None else {},
                 )
             )
         except Exception as exc:
