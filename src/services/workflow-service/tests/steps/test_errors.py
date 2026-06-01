@@ -9,10 +9,14 @@ import pytest
 from custos_workflow.steps import (
     LOCKED_STEP_KINDS,
     ActivityScheduleError,
+    ApprovalTimeoutError,
     ConnectorBindError,
+    LoopExpansionError,
     RetryBudgetExhaustedError,
     StepCoordinatorError,
     StepKindNotImplementedError,
+    SubOrchestrationSpawnError,
+    SubWorkflowFailedError,
     WithInputResolutionError,
 )
 
@@ -39,6 +43,10 @@ def test_locked_step_kinds_pins_published_strings() -> None:
                 "step.connector_bind_error",
                 "step.activity_schedule_error",
                 "step.retry_budget_exhausted",
+                "step.loop_expansion_error",
+                "step.sub_orchestration_spawn_error",
+                "step.sub_workflow_failed",
+                "step.approval_timeout",
             }
         )
         == LOCKED_STEP_KINDS
@@ -390,3 +398,133 @@ def test_can_be_caught_by_builtin_for_step_kind_not_implemented() -> None:
 
     with pytest.raises(NotImplementedError):
         raise StepKindNotImplementedError("no handler", step_kind="workflow")
+
+
+# ---------------------------------------------------------------------------
+# Sub-Orchestration Manager subclasses (WF-IMPL-086)
+# ---------------------------------------------------------------------------
+
+
+def test_loop_expansion_error_kind_builtin_and_to_dict() -> None:
+    err = LoopExpansionError(
+        "forEach evaluation failed",
+        run_id="r-1",
+        step_id="s-1",
+        attempt=1,
+        cause_kind="cel.evaluation_error",
+        source="steps.fetch.outputs.items",
+        colliding_key=None,
+    )
+    assert err.kind == LoopExpansionError.KIND == "step.loop_expansion_error"
+    assert isinstance(err, ValueError)
+    assert isinstance(err, StepCoordinatorError)
+    assert err.to_dict() == {
+        "kind": "step.loop_expansion_error",
+        "message": "forEach evaluation failed",
+        "run_id": "r-1",
+        "step_id": "s-1",
+        "attempt": 1,
+        "cause_kind": "cel.evaluation_error",
+        "source": "steps.fetch.outputs.items",
+        "colliding_key": None,
+    }
+
+
+def test_loop_expansion_error_collision_records_key() -> None:
+    err = LoopExpansionError(
+        "duplicate iteration key",
+        run_id="r-1",
+        step_id="s-1",
+        colliding_key="dup",
+    )
+    assert err.colliding_key == "dup"
+    assert err.cause_kind is None
+    assert json.loads(json.dumps(err.to_dict()))["colliding_key"] == "dup"
+
+
+def test_sub_orchestration_spawn_error_kind_builtin_and_to_dict() -> None:
+    err = SubOrchestrationSpawnError(
+        "start_child_workflow rejected",
+        run_id="r-1",
+        step_id="s-1",
+        attempt=1,
+        child_instance_id="r-1/s-1/0",
+        iteration_key="0",
+        cause="RuntimeError(...)",
+    )
+    assert err.kind == SubOrchestrationSpawnError.KIND == "step.sub_orchestration_spawn_error"
+    assert isinstance(err, StepCoordinatorError)
+    assert isinstance(err, RuntimeError)
+    assert err.to_dict() == {
+        "kind": "step.sub_orchestration_spawn_error",
+        "message": "start_child_workflow rejected",
+        "run_id": "r-1",
+        "step_id": "s-1",
+        "attempt": 1,
+        "child_instance_id": "r-1/s-1/0",
+        "iteration_key": "0",
+        "cause": "RuntimeError(...)",
+    }
+
+
+def test_sub_workflow_failed_error_kind_builtin_and_to_dict() -> None:
+    err = SubWorkflowFailedError(
+        "child returned a failure envelope",
+        run_id="r-1",
+        step_id="s-1",
+        attempt=1,
+        child_instance_id="r-1/s-1/2",
+        iteration_key="2",
+        child_kind="step.retry_budget_exhausted",
+    )
+    assert err.kind == SubWorkflowFailedError.KIND == "step.sub_workflow_failed"
+    assert isinstance(err, StepCoordinatorError)
+    assert isinstance(err, RuntimeError)
+    assert err.to_dict() == {
+        "kind": "step.sub_workflow_failed",
+        "message": "child returned a failure envelope",
+        "run_id": "r-1",
+        "step_id": "s-1",
+        "attempt": 1,
+        "child_instance_id": "r-1/s-1/2",
+        "iteration_key": "2",
+        "child_kind": "step.retry_budget_exhausted",
+    }
+
+
+def test_approval_timeout_error_kind_builtin_and_to_dict() -> None:
+    err = ApprovalTimeoutError(
+        "approval gate timed out",
+        run_id="r-1",
+        step_id="s-1",
+        attempt=1,
+        child_instance_id="r-1/s-1/approval",
+        timeout="PT1H",
+    )
+    assert err.kind == ApprovalTimeoutError.KIND == "step.approval_timeout"
+    assert isinstance(err, StepCoordinatorError)
+    assert isinstance(err, RuntimeError)
+    assert err.to_dict() == {
+        "kind": "step.approval_timeout",
+        "message": "approval gate timed out",
+        "run_id": "r-1",
+        "step_id": "s-1",
+        "attempt": 1,
+        "child_instance_id": "r-1/s-1/approval",
+        "timeout": "PT1H",
+    }
+
+
+def test_sub_orchestration_errors_optional_fields_default_to_none() -> None:
+    for err in (
+        LoopExpansionError("x"),
+        SubOrchestrationSpawnError("x"),
+        SubWorkflowFailedError("x"),
+        ApprovalTimeoutError("x"),
+    ):
+        payload = err.to_dict()
+        assert payload["run_id"] is None
+        assert payload["step_id"] is None
+        assert payload["attempt"] is None
+        # JSON-safe with the default encoder.
+        assert json.loads(json.dumps(payload))["kind"] == err.kind
