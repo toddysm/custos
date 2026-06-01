@@ -26,7 +26,7 @@ Seventh sub-module: **Sub-Orchestration Manager**, packaged inside the service h
 - [x] WF-IMPL-084 (#507): Child-workflow + `when_all`/`when_any` runtime primitives. _merged_.
 - [x] WF-IMPL-085 (#508): Deterministic child-instance-id + iteration-key derivation.
 - [x] WF-IMPL-086 (#509): Sub-orchestration error taxonomy additions.
-- [F] WF-IMPL-087 (#510): `approval:` step kind + model + compiler primitive tagging.
+- [x] WF-IMPL-087 (#510): `approval:` step kind + model + compiler primitive tagging.
 
 ### Phase B — Child workflow + dynamic loop
 

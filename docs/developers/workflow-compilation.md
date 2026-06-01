@@ -154,7 +154,7 @@ Each `ExecutionNode` carries:
 | Field | Type | Notes |
 |---|---|---|
 | `step_id` | `str` | Unique within the graph. |
-| `kind` | `StepKind` | `activity` \| `let` \| `workflow`. |
+| `kind` | `StepKind` | `activity` \| `let` \| `workflow` \| `wait` \| `approval`. |
 | `primitive_handler` | `PrimitiveHandler` | Dispatch tag for the Step Coordinator. |
 | `retry_policy` | `ResolvedRetryPolicy \| None` | Field-by-field overlay of per-match → step → `spec.defaults` → platform. |
 | `on_error_routes` | `tuple[OnErrorRoute, ...]` | Empty when the implicit policy applies. |

@@ -141,6 +141,10 @@ _STEP_KIND_DOCS: dict[StepKind, dict[str, Any]] = {
         "id": "pause",
         "wait": "PT5S",
     },
+    StepKind.APPROVAL: {
+        "id": "gate",
+        "approval": {"approvers": ["alice"]},
+    },
 }
 
 #: Documented step-kind → handler dispatch, mirroring
@@ -150,6 +154,7 @@ _STEP_KIND_TO_HANDLER: dict[StepKind, PrimitiveHandler] = {
     StepKind.LET: PrimitiveHandler.EXPRESSION_INLINE,
     StepKind.WORKFLOW: PrimitiveHandler.SUB_ORCHESTRATION,
     StepKind.WAIT: PrimitiveHandler.RUN_CONTROLLER_TIMER,
+    StepKind.APPROVAL: PrimitiveHandler.SUB_ORCHESTRATION,
 }
 
 

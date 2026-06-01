@@ -197,6 +197,73 @@ class TestCompileHappyPath:
         assert by_id["promote"].primitive_handler is PrimitiveHandler.SUB_ORCHESTRATION
         assert by_id["notify"].kind is StepKind.ACTIVITY
 
+    def test_approval_step_maps_to_sub_orchestration(self) -> None:
+        doc = parse_document(
+            """
+apiVersion: custos.dev/v1
+kind: Workflow
+metadata:
+  name: pipeline
+  workspace: security
+spec:
+  steps:
+    - id: gate
+      approval:
+        approvers: [alice]
+"""
+        )
+        graph = compile_workflow(doc, _run_meta(), _registry())
+        gate = graph.nodes[0]
+        assert gate.kind is StepKind.APPROVAL
+        assert gate.primitive_handler is PrimitiveHandler.SUB_ORCHESTRATION
+
+    def test_for_each_step_is_tagged_sub_orchestration(self) -> None:
+        # A ``forEach``-bearing step is loop-expanded by the
+        # Sub-Orchestration Manager, so its handler is overridden to
+        # SUB_ORCHESTRATION even though the inner kind stays ACTIVITY.
+        doc = parse_document(
+            """
+apiVersion: custos.dev/v1
+kind: Workflow
+metadata:
+  name: pipeline
+  workspace: security
+spec:
+  inputs:
+    targets:
+      type: array
+      default: []
+  steps:
+    - id: scan-all
+      activity: security/scan@1
+      connector: primary
+      forEach: ${{ inputs.targets }}
+"""
+        )
+        graph = compile_workflow(doc, _run_meta(), _registry())
+        node = graph.nodes[0]
+        assert node.kind is StepKind.ACTIVITY
+        assert node.primitive_handler is PrimitiveHandler.SUB_ORCHESTRATION
+
+    def test_non_for_each_activity_keeps_activity_runtime(self) -> None:
+        # Guard the override does not leak to plain activity steps.
+        doc = parse_document(
+            """
+apiVersion: custos.dev/v1
+kind: Workflow
+metadata:
+  name: pipeline
+  workspace: security
+spec:
+  steps:
+    - id: scan
+      activity: security/scan@1
+      connector: primary
+"""
+        )
+        graph = compile_workflow(doc, _run_meta(), _registry())
+        assert graph.nodes[0].primitive_handler is PrimitiveHandler.ACTIVITY_RUNTIME
+
     def test_call_sites_keyed_by_collector_path(self) -> None:
         doc = parse_document(_HAPPY_DOC)
         graph = compile_workflow(doc, _run_meta(), _registry())
