@@ -124,6 +124,15 @@ class TestBuildInvokeUrl:
         url = build_invoke_url(endpoint, "/ScheduleActivity")
         assert url == "http://127.0.0.1:3500/v1.0/invoke/arm/method/ScheduleActivity"
 
+    def test_multiple_leading_slashes_in_method_are_normalised(self) -> None:
+        # ``str.lstrip("/")`` strips *every* leading slash, not just
+        # one. Pin the docstring promise so future "strip exactly one
+        # slash" refactors break a test rather than silently produce
+        # ``…/method//ScheduleActivity``.
+        endpoint = DaprInvokeEndpoint(host="127.0.0.1", http_port=3500, app_id="arm")
+        url = build_invoke_url(endpoint, "///ScheduleActivity")
+        assert url == "http://127.0.0.1:3500/v1.0/invoke/arm/method/ScheduleActivity"
+
     def test_empty_method_rejected(self) -> None:
         endpoint = DaprInvokeEndpoint(host="127.0.0.1", http_port=3500, app_id="arm")
         with pytest.raises(ValueError, match="non-empty method name"):

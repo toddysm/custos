@@ -136,12 +136,15 @@ def build_invoke_url(endpoint: DaprInvokeEndpoint, method: str) -> str:
     """Render the canonical Dapr Service-Invocation HTTP URL.
 
     Returns ``http://{host}:{port}/v1.0/invoke/{app_id}/method/{method}``
-    verbatim — no path normalisation beyond stripping a single
-    leading ``/`` from ``method`` so callers can pass either
-    ``"ScheduleActivity"`` or ``"/ScheduleActivity"`` without
-    double-slashing the URL.
+    verbatim — no path normalisation beyond stripping **any leading
+    ``/`` characters** from ``method`` (via :py:meth:`str.lstrip`),
+    so callers can pass either ``"ScheduleActivity"``,
+    ``"/ScheduleActivity"``, or even ``"///ScheduleActivity"`` without
+    double-slashing the URL. A method that is empty or consists only
+    of slash characters is rejected.
 
-    :raises ValueError: If ``method`` is empty.
+    :raises ValueError: If ``method`` is empty or contains only
+        slash characters.
     """
     if not method:
         raise ValueError("build_invoke_url requires a non-empty method name")
