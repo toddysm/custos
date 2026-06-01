@@ -424,7 +424,7 @@ async def test_arbitrary_http_error_mapped_to_transport(
     assert env.error["code"] == "workflow.client.transport"
 
 
-async def test_invalid_json_body_mapped_to_retryable_decode(
+async def test_invalid_json_body_mapped_to_permanent_decode(
     endpoint: DaprInvokeEndpoint, request_obj: ScheduleActivityRequest
 ) -> None:
     def handler(req: httpx.Request) -> httpx.Response:
@@ -434,12 +434,11 @@ async def test_invalid_json_body_mapped_to_retryable_decode(
     client = _make_client(endpoint, handler)
     env = await _drive(client, request_obj)
 
-    # Per WF-IMPL-075: decode -> permanent. Acceptance criterion
-    # says ``class_="retryable"`` and ``code=workflow.client.decode``.
-    # The taxonomy module maps decode -> permanent (a malformed
-    # response is a contract violation, not transient). The
-    # adapter must surface decode failures faithfully — assert the
-    # locked code namespace and let the class follow the taxonomy.
+    # Per the WF-IMPL-075 locked taxonomy: decode -> permanent (a
+    # malformed response is a contract violation, not a
+    # transient). The WF-IMPL-076 acceptance criteria bullet on
+    # decode → retryable conflicts with the taxonomy lock; the
+    # adapter follows the taxonomy.
     assert env.error is not None
     assert env.error["code"] == "workflow.client.decode"
     assert env.class_ == "permanent"
@@ -552,19 +551,17 @@ async def test_outbound_url_targets_arm_app_id(
 # ---------------------------------------------------------------------------
 
 
-def test_cancel_activity_raises_not_implemented(endpoint: DaprInvokeEndpoint) -> None:
+async def test_cancel_activity_raises_not_implemented(endpoint: DaprInvokeEndpoint) -> None:
     transport = httpx.MockTransport(
         lambda req: httpx.Response(
             200,
             json={"class": "success", "outputs": {}, "attempt": 1, "error": None},
         )
     )
-    client = DaprActivityRuntimeClient(
-        http_client=httpx.AsyncClient(transport=transport),
-        endpoint=endpoint,
-    )
-    with pytest.raises(NotImplementedError, match="WF-IMPL-077"):
-        client.cancel_activity("r", "s")
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = DaprActivityRuntimeClient(http_client=http, endpoint=endpoint)
+        with pytest.raises(NotImplementedError, match="WF-IMPL-077"):
+            client.cancel_activity("r", "s")
 
 
 # ---------------------------------------------------------------------------
@@ -572,23 +569,22 @@ def test_cancel_activity_raises_not_implemented(endpoint: DaprInvokeEndpoint) ->
 # ---------------------------------------------------------------------------
 
 
-def test_default_timeout_matches_constant(endpoint: DaprInvokeEndpoint) -> None:
+async def test_default_timeout_matches_constant(endpoint: DaprInvokeEndpoint) -> None:
     transport = httpx.MockTransport(lambda req: httpx.Response(200))
-    client = DaprActivityRuntimeClient(
-        http_client=httpx.AsyncClient(transport=transport),
-        endpoint=endpoint,
-    )
-    assert client.timeout == DEFAULT_OUTBOUND_RPC_TIMEOUT_SECONDS
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = DaprActivityRuntimeClient(http_client=http, endpoint=endpoint)
+        assert client.timeout == DEFAULT_OUTBOUND_RPC_TIMEOUT_SECONDS
 
 
-def test_timeout_override_honoured(endpoint: DaprInvokeEndpoint) -> None:
+async def test_timeout_override_honoured(endpoint: DaprInvokeEndpoint) -> None:
     transport = httpx.MockTransport(lambda req: httpx.Response(200))
-    client = DaprActivityRuntimeClient(
-        http_client=httpx.AsyncClient(transport=transport),
-        endpoint=endpoint,
-        timeout=0.5,
-    )
-    assert client.timeout == 0.5
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = DaprActivityRuntimeClient(
+            http_client=http,
+            endpoint=endpoint,
+            timeout=0.5,
+        )
+        assert client.timeout == 0.5
 
 
 async def test_timeout_propagated_to_post(

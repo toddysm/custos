@@ -320,21 +320,22 @@ def _iso_utc(value: datetime) -> str:
     """Render a ``datetime`` as a canonical ISO-8601 UTC string.
 
     The wire envelope ARM consumes must use UTC with a trailing
-    ``Z`` per ``design.md`` § *Internal RPCs*; naïve datetimes are
-    rejected upstream by
-    :class:`ScheduleActivityRequest.__post_init__`'s indirect
-    re-use of :class:`IdempotencyTriple`, but
-    ``deadline`` itself is not validated for tzinfo there, so we
-    enforce + normalise here to keep the wire format deterministic.
+    ``Z`` per ``design.md`` § *Internal RPCs*. Neither
+    :class:`ScheduleActivityRequest.__post_init__` nor
+    :class:`IdempotencyTriple` validate the ``deadline`` field's
+    ``tzinfo``, so this helper is the enforcement point that
+    keeps the wire format deterministic — a naïve datetime
+    surfaces as a ``ValueError`` here rather than producing an
+    ambiguous timestamp on the wire.
     """
     if value.tzinfo is None:
-        # Treat naïve as UTC rather than throwing — the Step
-        # Coordinator builds the deadline from
-        # ``workflow_context.current_utc_datetime`` (already
+        # Reject naïve datetimes rather than silently treating
+        # them as UTC: the Step Coordinator builds ``deadline``
+        # from ``workflow_context.current_utc_datetime`` (already
         # tz-aware), so a naïve value almost always means a unit
-        # test built one without ``tzinfo``. Normalising silently
-        # would mask that; surface it instead so the adapter never
-        # ships an ambiguous wire timestamp.
+        # test or caller built one without ``tzinfo`` by mistake.
+        # Failing fast surfaces the bug instead of corrupting the
+        # wire timestamp.
         raise ValueError(
             "DaprActivityRuntimeClient requires deadline to be timezone-aware "
             "(use datetime.UTC for absolute deadlines)."
