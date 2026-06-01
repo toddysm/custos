@@ -43,6 +43,8 @@ from datetime import datetime
 from types import MappingProxyType
 from typing import Protocol, runtime_checkable
 
+from custos_workflow.clients._errors import OutboundRpcError
+
 __all__ = [
     "BindForStepRequest",
     "BindForStepResponse",
@@ -292,3 +294,37 @@ class FakeConnectorClient:
                 f"(called for step_key={request.step_key!r})."
             )
         return self.responses.pop(0)
+
+
+# ---------------------------------------------------------------------------
+# Client-layer error surface
+# ---------------------------------------------------------------------------
+
+
+# ``ConnectorBindError`` at the client layer is the structured error
+# the future production :class:`ConnectorClient` adapter
+# (WF-IMPL-078) raises when its outbound RPC fails. It extends
+# :class:`~custos_workflow.clients._errors.OutboundRpcError` so the
+# locked taxonomy applies — concrete failure modes are surfaced via
+# the four concrete ``OutboundRpcError`` subclasses, which the
+# adapter raises directly; the handler layer
+# (:class:`custos_workflow.steps.errors.ConnectorBindError`,
+# a distinct ``StepCoordinatorError``) is what wraps those into
+# step-result envelopes. Deliberately omitted from ``__all__`` so
+# this module's public surface doesn't gain a new name (the
+# adapter wires it via a fully-qualified import).
+class ConnectorBindError(OutboundRpcError):
+    """Marker subclass for connector-bind transport failures.
+
+    Concrete adapter code raises one of the four concrete
+    :class:`OutboundRpcError` subclasses
+    (:class:`OutboundRpcTransportError`,
+    :class:`OutboundRpcStatusError`,
+    :class:`OutboundRpcDecodeError`,
+    :class:`OutboundRpcCancelledError`); this marker is reserved
+    for cases where the adapter needs to wrap an already-classified
+    structured error with bind-call context without inventing a
+    fifth bucket. Inherits the locked ``kind`` enforcement from
+    :class:`OutboundRpcError.__init_subclass__`, so a concrete
+    bind-error subclass cannot ship with an unknown ``kind``.
+    """
