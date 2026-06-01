@@ -80,9 +80,10 @@ import custos_cel
 from custos_cel.errors import CelError
 from custos_cel.scope import BindingScope, RunInfo, StepBinding, WorkflowInfo
 
+from custos_workflow.document import WorkflowStep
 from custos_workflow.graph.model import CallSiteKind, ExecutionGraph, ExecutionNode
 from custos_workflow.graph.serialize import to_json
-from custos_workflow.runs import StepExecutionContext
+from custos_workflow.runs import WORKFLOW_NAME, RunInput, StepExecutionContext
 from custos_workflow.steps.errors import (
     LoopExpansionError,
     SubOrchestrationSpawnError,
@@ -95,12 +96,18 @@ from custos_workflow.steps.sub_orchestration.child import (
     ChildStepResult,
 )
 from custos_workflow.steps.sub_orchestration.ids import (
+    WORKFLOW_ITERATION_KEY,
     ChildInstanceIdError,
     child_instance_id,
     iteration_key,
 )
+from custos_workflow.steps.with_inputs import WithInputResolver
 
 __all__ = ["SubOrchestrationManager"]
+
+#: Stateless ``with:`` evaluator shared across sub-workflow invocations
+#: (the resolver holds no per-call state — see :class:`WithInputResolver`).
+_WITH_RESOLVER: WithInputResolver = WithInputResolver()
 
 #: Wire-name (and ``call_sites`` key) of the ``forEach`` slot. The
 #: call-site collector keys typed call sites by ``CallSite.path``,
@@ -116,11 +123,11 @@ _WHERE_SLOT: str = "where"
 class SubOrchestrationManager:
     """Parent-side driver for child-workflow fan-out (ADR-007).
 
-    Stateless for the loop path — instances are interchangeable and
-    may be reused across runs. WF-IMPL-091 / WF-IMPL-092 extend this
-    class with the ``workflow:`` invocation and ``approval:`` gate
-    operations; for now it exposes the single :meth:`run_loop`
-    generator.
+    Stateless — instances are interchangeable and may be reused across
+    runs. Exposes :meth:`run_loop` for the ``forEach`` fan-out path and
+    :meth:`run_sub_workflow` for the ``workflow:`` single-child
+    invocation path. WF-IMPL-092 extends this class with the
+    ``approval:`` gate operation.
     """
 
     def run_loop(
@@ -211,6 +218,91 @@ class SubOrchestrationManager:
 
         raw_results = yield from self._await_children(ctx, step_id, run_id, spawned)
         return self._merge(step_id, run_id, spawned, raw_results)
+
+    def run_sub_workflow(
+        self,
+        ctx: StepExecutionContext,
+        graph: ExecutionGraph,
+        step_id: str,
+        child_graph: ExecutionGraph,
+    ) -> Generator[Any, Any, dict[str, dict[str, Any]]]:
+        """Invoke a ``workflow:`` sub-workflow as one child run and merge it.
+
+        Spawns a single child Run of the compiled sub-workflow
+        ``child_graph`` (resolved at compile time per REQ-025 from the
+        step's fully-qualified ``workflow`` reference), passes the
+        evaluated ``with:`` block through as the child's ``inputs.*``
+        namespace, awaits the single child, and returns the child run's
+        per-step output bag for the parent to bind under
+        ``steps.<stepId>.outputs``.
+
+        :param ctx: Per-dispatch context bundle. :attr:`ctx.inputs` /
+            :attr:`ctx.outputs` build the CEL scope the ``with:`` block
+            is evaluated against, :attr:`ctx.run_id` seeds the
+            deterministic child instance id, and
+            :attr:`ctx.workflow_context` spawns and awaits the child.
+        :param graph: The compiled parent graph. ``step_id`` selects the
+            ``workflow:`` node whose ``with:`` block is evaluated.
+        :param step_id: The id of the ``workflow:`` node.
+        :param child_graph: The compiled sub-workflow graph the child
+            Run executes. The caller (orchestrator dispatch / wiring)
+            resolves it from the node's fully-qualified reference.
+
+        :returns: The child run's per-step output bag
+            (``{childStepId: {outputs}}``). Delivered as the generator's
+            ``StopIteration.value``.
+
+        :raises SubOrchestrationSpawnError: ``step_id`` is not a
+            ``workflow:`` node, or a deterministic child instance id
+            could not be derived.
+        :raises SubWorkflowFailedError: The child run did not succeed.
+        :raises WithInputResolutionError: The ``with:`` block failed to
+            evaluate.
+        :raises KeyError: ``step_id`` is not present in ``graph``.
+        """
+        node = _resolve_node(graph, step_id)
+        run_id = str(ctx.run_id)
+        if not isinstance(node.step_source, WorkflowStep):
+            # Defensive: the dispatcher only routes ``workflow:`` nodes
+            # here, so a non-``WorkflowStep`` source is a programmer error.
+            raise SubOrchestrationSpawnError(
+                f"step {step_id!r} is not a workflow: invocation",
+                run_id=run_id,
+                step_id=step_id,
+            )
+
+        scope = self._build_scope(ctx, graph, run_id)
+        child_inputs = _WITH_RESOLVER.resolve(node, scope, ctx.clock, run_id=run_id)
+
+        try:
+            instance_id = child_instance_id(run_id, step_id, WORKFLOW_ITERATION_KEY)
+        except ChildInstanceIdError as exc:
+            raise SubOrchestrationSpawnError(
+                f"failed to derive a child instance id for the sub-workflow "
+                f"invocation of step {step_id!r}: {exc}",
+                run_id=run_id,
+                step_id=step_id,
+                iteration_key=WORKFLOW_ITERATION_KEY,
+                cause=repr(exc),
+            ) from exc
+
+        run_input = RunInput(
+            workspace_id=ctx.workspace_id,
+            workflow_version_id=node.step_source.workflow,
+            compiled_graph_json=to_json(child_graph),
+            inputs=child_inputs,
+        )
+        task = ctx.workflow_context.call_child_workflow(
+            WORKFLOW_NAME,
+            input=run_input.to_dict(),
+            instance_id=instance_id,
+        )
+        # Reuse the loop fan-in path with a single-element spawn list so
+        # an abnormal child failure surfaces as ``step.sub_workflow_failed``
+        # exactly as it does for a loop child.
+        spawned = [(WORKFLOW_ITERATION_KEY, instance_id, task)]
+        raw_results = yield from self._await_children(ctx, step_id, run_id, spawned)
+        return self._merge_sub_workflow(step_id, run_id, instance_id, raw_results[0])
 
     # ------------------------------------------------------------------
     # Internals
@@ -421,6 +513,38 @@ class SubOrchestrationManager:
                 )
             merged.append(dict(child_result.outputs))
         return merged
+
+    def _merge_sub_workflow(
+        self,
+        step_id: str,
+        run_id: str,
+        instance_id: str,
+        raw_result: Any,
+    ) -> dict[str, dict[str, Any]]:
+        """Normalise the child run output, failing on a non-success status.
+
+        A sub-workflow child returns a :class:`RunOutput` envelope
+        (rendered via ``RunOutput.to_dict``). Any status other than
+        ``"succeeded"`` (a terminal failure, or the transitional
+        ``"waiting"`` sentinel) propagates to the parent step as
+        ``step.sub_workflow_failed``; on success the child run's
+        per-step output bag is returned for the parent to bind under
+        ``steps.<stepId>.outputs``.
+        """
+        envelope: Mapping[str, Any] = raw_result
+        if envelope.get("status") != "succeeded":
+            failure = envelope.get("failure_envelope") or {}
+            raise SubWorkflowFailedError(
+                f"sub-workflow child {instance_id!r} of step {step_id!r} "
+                f"returned status {envelope.get('status')!r}",
+                run_id=run_id,
+                step_id=step_id,
+                child_instance_id=instance_id,
+                iteration_key=WORKFLOW_ITERATION_KEY,
+                child_kind=_envelope_kind(failure),
+            )
+        outputs: Mapping[str, Mapping[str, Any]] = envelope.get("outputs") or {}
+        return {sid: dict(out) for sid, out in outputs.items()}
 
 
 # ---------------------------------------------------------------------------
