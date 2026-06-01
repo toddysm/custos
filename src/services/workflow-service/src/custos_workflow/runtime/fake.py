@@ -38,7 +38,7 @@ from collections import deque
 from collections.abc import Callable, Generator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 from uuid import uuid4
 
 from custos_workflow.runtime._common import (
@@ -52,10 +52,18 @@ from custos_workflow.runtime._common import (
     TerminateRunRequest,
 )
 from custos_workflow.runtime.dapr_activities import (
+    BIND_FOR_STEP_ACTIVITY_NAME,
+    SCHEDULE_ACTIVITY_ACTIVITY_NAME,
     BindForStepCallToken,
     FakeDaprActivityDispatcher,
     ScheduleActivityCallToken,
+    build_arm_schedule_activity,
+    build_connector_bind_for_step_activity,
 )
+
+if TYPE_CHECKING:
+    from custos_workflow.clients.activity_runtime import ActivityRuntimeClient
+    from custos_workflow.clients.connector import ConnectorClient
 
 __all__ = [
     "FakeActivityContext",
@@ -284,9 +292,12 @@ class FakeWorkflowRuntime:
         *,
         now: datetime | None = None,
         activity_dispatcher: FakeDaprActivityDispatcher | None = None,
+        activity_runtime_client: ActivityRuntimeClient | None = None,
+        connector_client: ConnectorClient | None = None,
     ) -> None:
         self._workflows: dict[str, FakeWorkflowFn] = {}
         self._activities: dict[str, FakeActivityFn] = {}
+        self._registered_activity_order: list[str] = []
         self._instances: dict[str, _InstanceState] = {}
         self._started = False
         # Mirrors :attr:`custos_workflow.runtime.WorkflowRuntime._worker_ready`
@@ -306,6 +317,16 @@ class FakeWorkflowRuntime:
         # fails the instance loudly via the unknown-task-type arm in
         # :meth:`_drive`.
         self._activity_dispatcher: FakeDaprActivityDispatcher | None = activity_dispatcher
+        # WF-IMPL-079: outbound clients the production
+        # :class:`~custos_workflow.runtime.WorkflowRuntime` injects
+        # the two bridge activities against. The fake mirrors the
+        # registration so a test driving the Run Controller
+        # orchestrator through ``ctx.call_activity(name, ...)``
+        # exercises the same activity surface against in-process
+        # fakes — keeping orchestrator code production-shape
+        # without spinning a Dapr sidecar.
+        self._activity_runtime_client = activity_runtime_client
+        self._connector_client = connector_client
 
     # --- registration ----------------------------------------------------
 
@@ -319,14 +340,55 @@ class FakeWorkflowRuntime:
         """Register an activity callable under ``name`` (defaults to ``fn.__name__``)."""
 
         key = name or fn.__name__
+        if key not in self._activities:
+            self._registered_activity_order.append(key)
         self._activities[key] = fn
+
+    @property
+    def registered_activities(self) -> tuple[str, ...]:
+        """Names of activities registered on this runtime, in registration order.
+
+        Mirrors
+        :attr:`custos_workflow.runtime.WorkflowRuntime.registered_activities`
+        so tests asserting against either surface look identical.
+        """
+
+        return tuple(self._registered_activity_order)
 
     # --- lifecycle -------------------------------------------------------
 
     async def start(self) -> None:
-        """Mark the runtime started. No background threads are spawned."""
+        """Mark the runtime started. No background threads are spawned.
 
+        On the first call, if both ``activity_runtime_client`` and
+        ``connector_client`` were supplied to the constructor, the
+        two WF-IMPL-079 bridge activities are registered so test
+        code driving the orchestrator via ``ctx.call_activity(name,
+        ...)`` resolves through the same surface as production.
+        """
+
+        if not self._started:
+            self._register_outbound_bridge_activities()
         self._started = True
+
+    def _register_outbound_bridge_activities(self) -> None:
+        already_registered = set(self._registered_activity_order)
+        if (
+            self._activity_runtime_client is not None
+            and SCHEDULE_ACTIVITY_ACTIVITY_NAME not in already_registered
+        ):
+            self.register_activity(
+                build_arm_schedule_activity(self._activity_runtime_client),
+                name=SCHEDULE_ACTIVITY_ACTIVITY_NAME,
+            )
+        if (
+            self._connector_client is not None
+            and BIND_FOR_STEP_ACTIVITY_NAME not in already_registered
+        ):
+            self.register_activity(
+                build_connector_bind_for_step_activity(self._connector_client),
+                name=BIND_FOR_STEP_ACTIVITY_NAME,
+            )
 
     async def shutdown(self) -> None:
         """Mark the runtime stopped. Existing instance state is retained."""

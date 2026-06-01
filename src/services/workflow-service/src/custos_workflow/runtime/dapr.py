@@ -57,9 +57,18 @@ from custos_workflow.runtime._common import (
     ScheduleWorkflowRequest,
     TerminateRunRequest,
 )
+from custos_workflow.runtime.dapr_activities import (
+    BIND_FOR_STEP_ACTIVITY_NAME,
+    SCHEDULE_ACTIVITY_ACTIVITY_NAME,
+    build_arm_schedule_activity,
+    build_connector_bind_for_step_activity,
+)
 
 if TYPE_CHECKING:
     from dapr.ext.workflow.workflow_state import WorkflowState
+
+    from custos_workflow.clients.activity_runtime import ActivityRuntimeClient
+    from custos_workflow.clients.connector import ConnectorClient
 
 __all__ = [
     "ActivityFn",
@@ -161,7 +170,13 @@ class WorkflowRuntime:
     The underlying SDK calls are sync.
     """
 
-    def __init__(self, *, runtime: _DaprWorkflowRuntime | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        runtime: _DaprWorkflowRuntime | None = None,
+        activity_runtime_client: ActivityRuntimeClient | None = None,
+        connector_client: ConnectorClient | None = None,
+    ) -> None:
         # ``runtime`` is constructor-injectable for tests; production
         # callers should pass nothing and let the lazy constructor
         # build the real runtime on first registration.
@@ -174,6 +189,24 @@ class WorkflowRuntime:
         # "worker started but not yet pulling work" window without a
         # race on the SDK's internal threads.
         self._worker_ready = False
+        # WF-IMPL-079: injected outbound clients the Run Controller
+        # orchestrator (WF-IMPL-080) yields against via
+        # ``ctx.call_activity(SCHEDULE_ACTIVITY_ACTIVITY_NAME, ...)``
+        # / ``ctx.call_activity(BIND_FOR_STEP_ACTIVITY_NAME, ...)``.
+        # When both clients are supplied, :meth:`start` registers
+        # the two bridge activities on the underlying Dapr runtime
+        # so the worker can resolve those yields. When either is
+        # ``None`` (e.g. early-boot tests that don't exercise the
+        # outbound RPC path), registration is skipped — callers
+        # that need the bridges then either supply both clients or
+        # register the activities themselves via
+        # :meth:`register_activity`.
+        self._activity_runtime_client = activity_runtime_client
+        self._connector_client = connector_client
+        # Track registered activity names so callers (and tests)
+        # can introspect which activity bridges the worker exposes
+        # without round-tripping through the Dapr SDK's internals.
+        self._registered_activities: list[str] = []
 
     def _ensure_runtime(self) -> _DaprWorkflowRuntime:
         if self._runtime is None:
@@ -189,15 +222,71 @@ class WorkflowRuntime:
         """Register an activity callable with the Dapr runtime."""
 
         self._ensure_runtime().register_activity(fn, name=name)
+        # Track the effective registered name so
+        # :attr:`registered_activities` reflects the worker surface
+        # without re-querying the SDK.
+        effective_name = name or getattr(fn, "__name__", "")
+        if effective_name:
+            self._registered_activities.append(effective_name)
+
+    @property
+    def registered_activities(self) -> tuple[str, ...]:
+        """Names of activities registered on this runtime, in registration order.
+
+        Used by the FastAPI lifespan (WF-IMPL-043) and tests to
+        verify the WF-IMPL-079 ARM + Connector bridge activities
+        appear on the worker once :meth:`start` has run.
+        """
+
+        return tuple(self._registered_activities)
 
     async def start(self) -> None:
-        """Start the worker. Idempotent — subsequent calls are no-ops."""
+        """Start the worker. Idempotent — subsequent calls are no-ops.
+
+        On the first call, if both ``activity_runtime_client`` and
+        ``connector_client`` were supplied to the constructor, the
+        two WF-IMPL-079 bridge activities
+        (:data:`SCHEDULE_ACTIVITY_ACTIVITY_NAME`,
+        :data:`BIND_FOR_STEP_ACTIVITY_NAME`) are registered on the
+        underlying Dapr runtime before the worker thread is
+        kicked off.
+        """
 
         if self._started:
             return
+        self._register_outbound_bridge_activities()
         runtime = self._ensure_runtime()
         await asyncio.to_thread(runtime.start)
         self._started = True
+
+    def _register_outbound_bridge_activities(self) -> None:
+        """Register the WF-IMPL-079 ARM + Connector bridge activities.
+
+        Idempotent on the runtime side (registering the same
+        activity name twice would raise from the Dapr SDK), so we
+        gate on whether the names are already present in
+        :attr:`registered_activities`. This lets callers register
+        the activities manually for tests without :meth:`start`
+        double-registering them.
+        """
+
+        already_registered = set(self._registered_activities)
+        if (
+            self._activity_runtime_client is not None
+            and SCHEDULE_ACTIVITY_ACTIVITY_NAME not in already_registered
+        ):
+            self.register_activity(
+                build_arm_schedule_activity(self._activity_runtime_client),
+                name=SCHEDULE_ACTIVITY_ACTIVITY_NAME,
+            )
+        if (
+            self._connector_client is not None
+            and BIND_FOR_STEP_ACTIVITY_NAME not in already_registered
+        ):
+            self.register_activity(
+                build_connector_bind_for_step_activity(self._connector_client),
+                name=BIND_FOR_STEP_ACTIVITY_NAME,
+            )
 
     async def shutdown(self) -> None:
         """Stop the worker. Idempotent — safe to call before :meth:`start`."""
