@@ -35,7 +35,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import deque
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
@@ -66,6 +66,7 @@ if TYPE_CHECKING:
     from custos_workflow.clients.connector import ConnectorClient
 
 __all__ = [
+    "ChildWorkflowError",
     "FakeActivityContext",
     "FakeActivityFn",
     "FakeWorkflowClient",
@@ -94,26 +95,88 @@ FakeActivityFn = Callable[["FakeActivityContext", Any], Any]
 # :class:`FakeWorkflowRuntime` inspects them by ``isinstance``).
 
 
-@dataclass(frozen=True)
-class _ActivityTask:
+class _ComposableTask:
+    """Mixin giving a yield-token a ``durabletask``-style result slot.
+
+    The fan-in combinators (:meth:`FakeWorkflowContext.when_all` /
+    :meth:`FakeWorkflowContext.when_any`) resolve the tokens they
+    contain and stamp the outcome onto each token. :meth:`get_result`
+    then mirrors ``durabletask.task.Task.get_result`` so Run Controller
+    code can read a fan-in winner's value (and re-raise a child
+    failure) identically under the fake and the real Dapr runtime.
+
+    The slots default at the class level and are overwritten per
+    instance once the driver resolves the task; tokens are never
+    resolved twice within one instance run.
+    """
+
+    _complete: bool = False
+    _value: Any = None
+    _failure: BaseException | None = None
+
+    def get_result(self) -> Any:
+        """Return the resolved value, or re-raise the captured failure.
+
+        Raises:
+            RuntimeError: if the task has not been resolved yet.
+        """
+
+        if not self._complete:
+            raise RuntimeError("fake task has not completed")
+        if self._failure is not None:
+            raise self._failure
+        return self._value
+
+
+@dataclass(eq=False)
+class _ActivityTask(_ComposableTask):
     """Token yielded by :meth:`FakeWorkflowContext.call_activity`."""
 
     activity_name: str
     input: Any
 
 
-@dataclass(frozen=True)
-class _ExternalEventTask:
+@dataclass(eq=False)
+class _ExternalEventTask(_ComposableTask):
     """Token yielded by :meth:`FakeWorkflowContext.wait_for_external_event`."""
 
     event_name: str
 
 
-@dataclass(frozen=True)
-class _TimerTask:
+@dataclass(eq=False)
+class _TimerTask(_ComposableTask):
     """Token yielded by :meth:`FakeWorkflowContext.create_timer`."""
 
     fire_at: datetime
+
+
+@dataclass(eq=False)
+class _ChildWorkflowTask(_ComposableTask):
+    """Token yielded by :meth:`FakeWorkflowContext.call_child_workflow`.
+
+    ``requested_instance_id`` is the caller-supplied child instance id
+    (``None`` lets the runtime derive a deterministic one);
+    ``child_instance_id`` is populated with the id actually spawned.
+    """
+
+    workflow_name: str
+    input: Any
+    requested_instance_id: str | None = None
+    child_instance_id: str | None = None
+
+
+@dataclass(eq=False)
+class _WhenAllTask:
+    """Token yielded by :meth:`FakeWorkflowContext.when_all`."""
+
+    tasks: tuple[Any, ...]
+
+
+@dataclass(eq=False)
+class _WhenAnyTask:
+    """Token yielded by :meth:`FakeWorkflowContext.when_any`."""
+
+    tasks: tuple[Any, ...]
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +229,9 @@ class FakeWorkflowContext:
 
     Surfaces the methods the Run Controller orchestrator (WF-IMPL-035)
     will use: :meth:`call_activity`, :meth:`wait_for_external_event`,
-    :meth:`create_timer`, :meth:`set_custom_status`, plus the
+    :meth:`create_timer`, :meth:`set_custom_status`, the
+    Sub-Orchestration primitives :meth:`call_child_workflow`,
+    :meth:`when_all`, and :meth:`when_any` (WF-IMPL-084), plus the
     :attr:`instance_id` and :attr:`current_utc_datetime` properties.
     """
 
@@ -223,6 +288,53 @@ class FakeWorkflowContext:
         absolute = self._now + fire_at if isinstance(fire_at, timedelta) else fire_at
         return _TimerTask(fire_at=absolute)
 
+    def call_child_workflow(
+        self,
+        workflow: Callable[..., Any] | str,
+        *,
+        input: Any = None,
+        instance_id: str | None = None,
+    ) -> _ChildWorkflowTask:
+        """Yield-target for spawning and awaiting a child workflow.
+
+        ``workflow`` may be the registered workflow name or the
+        callable itself (its ``__name__`` is used). ``instance_id``
+        optionally pins the child instance id; when ``None`` the
+        runtime derives a deterministic one from the parent.
+        """
+
+        name = workflow if isinstance(workflow, str) else getattr(workflow, "__name__", "")
+        if not name:
+            raise ValueError("call_child_workflow requires a non-empty workflow name")
+        return _ChildWorkflowTask(
+            workflow_name=name,
+            input=input,
+            requested_instance_id=instance_id,
+        )
+
+    def when_all(self, tasks: Sequence[Any]) -> _WhenAllTask:
+        """Fan-in yield-target: resolve once every task has completed.
+
+        Returns a list of the child results in the order ``tasks`` were
+        supplied (spawn order), mirroring ``durabletask`` semantics.
+        """
+
+        return _WhenAllTask(tasks=tuple(tasks))
+
+    def when_any(self, tasks: Sequence[Any]) -> _WhenAnyTask:
+        """Fan-in yield-target: resolve as soon as any task completes.
+
+        Returns the first-listed *ready* task token (the winner); the
+        caller reads its value via :meth:`_ComposableTask.get_result`
+        and may identity-compare it against the original task tokens to
+        learn which branch won.
+        """
+
+        items = tuple(tasks)
+        if not items:
+            raise ValueError("when_any requires at least one task")
+        return _WhenAnyTask(tasks=items)
+
 
 # ---------------------------------------------------------------------------
 # Internal instance state
@@ -256,6 +368,11 @@ class _InstanceState:
     pending_exception: BaseException | None = None
     waiting_for_event: str | None = None
     pending_events: dict[str, deque[Any]] = field(default_factory=dict)
+    # Sub-Orchestration (WF-IMPL-084): monotonic counter used to
+    # derive deterministic child instance ids, plus the ordered log
+    # of child instance ids this instance has spawned.
+    child_seq: int = 0
+    spawned_children: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +389,27 @@ _TERMINAL_STATUSES: Final[frozenset[RunStatus]] = frozenset(
 
 class UnknownInstanceError(LookupError):
     """Raised when a request references an instance the fake has never seen."""
+
+
+class ChildWorkflowError(RuntimeError):
+    """Raised into a parent generator when a spawned child workflow fails.
+
+    Mirrors the failure-propagation shape Run Controller code observes
+    from the real Dapr runtime when ``ctx.call_child_workflow`` yields a
+    task whose child instance ends in :attr:`RunStatus.FAILED`: the
+    exception surfaces inside the parent generator at the ``yield`` site
+    so workflow code can ``try/except`` around child invocations.
+
+    Attributes:
+        instance_id: The failed child instance id.
+        error_type: The child's recorded failure type name (``None`` if
+            the child never recorded one).
+    """
+
+    def __init__(self, instance_id: str, error_type: str | None, message: str) -> None:
+        super().__init__(message)
+        self.instance_id = instance_id
+        self.error_type = error_type
 
 
 class FakeWorkflowRuntime:
@@ -573,6 +711,48 @@ class FakeWorkflowRuntime:
                 )
                 continue
 
+            if isinstance(task, _ChildWorkflowTask):
+                self._commit_task(state, task)
+                if task._failure is not None:
+                    state.pending_exception = task._failure
+                else:
+                    state.next_result = task._value
+                continue
+
+            if isinstance(task, _WhenAllTask):
+                not_ready = [t for t in task.tasks if not self._task_ready(state, t)]
+                if not_ready:
+                    self._fail_instance(
+                        state,
+                        "when_all cannot resolve tasks that are not immediately "
+                        "ready under the fake runtime (un-queued external events "
+                        "are unsupported)",
+                        "UnsupportedWhenAllError",
+                    )
+                    return
+                for child in task.tasks:
+                    self._commit_task(state, child)
+                failure = next((t._failure for t in task.tasks if t._failure is not None), None)
+                if failure is not None:
+                    state.pending_exception = failure
+                else:
+                    state.next_result = [t.get_result() for t in task.tasks]
+                continue
+
+            if isinstance(task, _WhenAnyTask):
+                winner = next((t for t in task.tasks if self._task_ready(state, t)), None)
+                if winner is None:
+                    self._fail_instance(
+                        state,
+                        "when_any has no ready task; the fake runtime cannot block "
+                        "on a multi-task race (include an always-ready timer)",
+                        "UnsupportedWhenAnyError",
+                    )
+                    return
+                self._commit_task(state, winner)
+                state.next_result = winner
+                continue
+
             if isinstance(task, BindForStepCallToken | ScheduleActivityCallToken):
                 # WF-IMPL-074 yield protocol. The Run Controller
                 # orchestrator yielded a deferred bind / schedule
@@ -638,22 +818,186 @@ class FakeWorkflowRuntime:
                 continue
 
             # Unknown task type — fail the instance loudly.
-            state.status = RunStatus.FAILED
-            state.failure_message = (
-                f"orchestrator yielded unsupported task type: {type(task).__name__}"
+            self._fail_instance(
+                state,
+                f"orchestrator yielded unsupported task type: {type(task).__name__}",
+                "UnsupportedTaskTypeError",
             )
-            state.failure_type = "UnsupportedTaskTypeError"
-            state.last_updated_at = self.now
+            return
+
+    def _fail_instance(self, state: _InstanceState, message: str, error_type: str) -> None:
+        """Mark ``state`` failed with ``message`` and append a ``failed`` event."""
+
+        if state.ctx is not None:
+            state.custom_status = state.ctx.custom_status
+        state.status = RunStatus.FAILED
+        state.failure_message = message
+        state.failure_type = error_type
+        state.last_updated_at = self.now
+        state.history.append(
+            HistoryEvent(
+                kind="failed",
+                detail={"message": message, "error_type": error_type},
+            )
+        )
+
+    def _next_child_id(self, state: _InstanceState) -> str:
+        """Derive a deterministic child instance id for ``state``."""
+
+        state.child_seq += 1
+        return f"{state.instance_id}:child:{state.child_seq}"
+
+    def _task_ready(self, state: _InstanceState, token: Any) -> bool:
+        """Whether a composed fan-in task can be resolved without blocking.
+
+        Activities, child workflows, and timers are always ready (the
+        fake resolves them synchronously). An external-event task is
+        ready only when a matching event is already queued — the queue
+        is *peeked*, never consumed, so a non-winning branch leaves no
+        side effect.
+        """
+
+        if isinstance(token, _ExternalEventTask):
+            return bool(state.pending_events.get(token.event_name))
+        if isinstance(token, _ActivityTask | _ChildWorkflowTask | _TimerTask):
+            return True
+        raise TypeError(  # pragma: no cover - defensive; combinators only see known tokens
+            f"unsupported task type in fan-in combinator: {type(token).__name__}"
+        )
+
+    def _commit_task(self, state: _InstanceState, token: Any) -> None:
+        """Resolve a single composed fan-in task, stamping its result slot.
+
+        Side effects (running an activity, spawning a child, consuming a
+        queued event, firing a timer) happen here — so callers commit
+        only the tasks that actually participate in the fan-in result.
+        """
+
+        if isinstance(token, _ActivityTask):
+            self._commit_activity_task(state, token)
+            return
+        if isinstance(token, _ChildWorkflowTask):
+            self._commit_child_workflow_task(state, token)
+            return
+        if isinstance(token, _ExternalEventTask):
+            queue = state.pending_events[token.event_name]
+            payload = queue.popleft()
+            if not queue:
+                del state.pending_events[token.event_name]
             state.history.append(
                 HistoryEvent(
-                    kind="failed",
+                    kind="external_event",
+                    detail={"name": token.event_name, "data": payload},
+                )
+            )
+            token._value = payload
+            token._complete = True
+            return
+        if isinstance(token, _TimerTask):
+            state.history.append(
+                HistoryEvent(kind="timer_fired", detail={"fire_at": token.fire_at})
+            )
+            token._value = None
+            token._complete = True
+            return
+        raise TypeError(  # pragma: no cover - defensive; _task_ready gates the types
+            f"unsupported task type in fan-in combinator: {type(token).__name__}"
+        )
+
+    def _commit_activity_task(self, state: _InstanceState, token: _ActivityTask) -> None:
+        activity = self._activities.get(token.activity_name)
+        if activity is None:
+            exc: BaseException = LookupError(f"activity {token.activity_name!r} is not registered")
+            state.history.append(
+                HistoryEvent(
+                    kind="activity_failed",
                     detail={
-                        "message": state.failure_message,
-                        "error_type": state.failure_type,
+                        "activity": token.activity_name,
+                        "message": str(exc),
+                        "error_type": "UnknownActivityError",
                     },
                 )
             )
+            token._failure = exc
+            token._complete = True
             return
+        activity_ctx = FakeActivityContext(workflow_id=state.instance_id, task_id=str(uuid4()))
+        try:
+            result = activity(activity_ctx, token.input)
+        except Exception as exc:
+            state.history.append(
+                HistoryEvent(
+                    kind="activity_failed",
+                    detail={
+                        "activity": token.activity_name,
+                        "message": str(exc),
+                        "error_type": type(exc).__name__,
+                    },
+                )
+            )
+            token._failure = exc
+            token._complete = True
+            return
+        state.history.append(
+            HistoryEvent(
+                kind="activity_completed",
+                detail={
+                    "activity": token.activity_name,
+                    "input": token.input,
+                    "output": result,
+                },
+            )
+        )
+        token._value = result
+        token._complete = True
+
+    def _commit_child_workflow_task(self, state: _InstanceState, token: _ChildWorkflowTask) -> None:
+        child_id = token.requested_instance_id or self._next_child_id(state)
+        token.child_instance_id = child_id
+        state.spawned_children.append(child_id)
+        state.history.append(
+            HistoryEvent(
+                kind="child_workflow_started",
+                detail={
+                    "instance_id": child_id,
+                    "name": token.workflow_name,
+                    "input": token.input,
+                },
+            )
+        )
+        self._schedule(
+            ScheduleWorkflowRequest(
+                workflow=token.workflow_name,
+                input=token.input,
+                instance_id=child_id,
+            )
+        )
+        child = self.instance(child_id)
+        if child.status == RunStatus.COMPLETED:
+            state.history.append(
+                HistoryEvent(
+                    kind="child_workflow_completed",
+                    detail={"instance_id": child_id, "output": child.output},
+                )
+            )
+            token._value = child.output
+            token._complete = True
+            return
+        message = child.failure_message or (
+            f"child workflow {child_id!r} did not complete (status={child.status.value})"
+        )
+        state.history.append(
+            HistoryEvent(
+                kind="child_workflow_failed",
+                detail={
+                    "instance_id": child_id,
+                    "message": message,
+                    "error_type": child.failure_type,
+                },
+            )
+        )
+        token._failure = ChildWorkflowError(child_id, child.failure_type, message)
+        token._complete = True
 
     def _dispatch_activity(self, state: _InstanceState, task: _ActivityTask) -> None:
         """Run an activity; on failure, prime the generator to receive the exception."""

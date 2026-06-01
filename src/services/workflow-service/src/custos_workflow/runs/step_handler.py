@@ -64,7 +64,7 @@ Acceptance criteria (mirrored from #386):
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final, Protocol, runtime_checkable
@@ -104,7 +104,9 @@ class WorkflowContext(Protocol):
        ``current_utc_datetime``, ``is_replaying``, plus the
        :meth:`set_custom_status` mutator.
     2. **Durable I/O yield-targets** — :meth:`call_activity`,
-       :meth:`wait_for_external_event`, :meth:`create_timer`.
+       :meth:`wait_for_external_event`, :meth:`create_timer`,
+       plus the Sub-Orchestration primitives :meth:`call_child_workflow`,
+       :meth:`when_all`, and :meth:`when_any` (WF-IMPL-084).
        Step Coordinator handlers (WF-IMPL-035+) drive these to
        request external work; the orchestrator yields the returned
        opaque task token back to the Dapr runtime, which suspends
@@ -142,6 +144,18 @@ class WorkflowContext(Protocol):
     def wait_for_external_event(self, name: str) -> Any: ...
 
     def create_timer(self, fire_at: datetime | timedelta) -> Any: ...
+
+    def call_child_workflow(
+        self,
+        workflow: Callable[..., Any] | str,
+        *,
+        input: Any = None,
+        instance_id: str | None = None,
+    ) -> Any: ...
+
+    def when_all(self, tasks: Sequence[Any]) -> Any: ...
+
+    def when_any(self, tasks: Sequence[Any]) -> Any: ...
 
 
 # ---------------------------------------------------------------------------

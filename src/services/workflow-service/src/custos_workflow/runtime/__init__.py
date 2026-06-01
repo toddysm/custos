@@ -45,8 +45,13 @@ from custos_workflow.runtime._common import (
     ScheduleWorkflowRequest,
     TerminateRunRequest,
 )
-from custos_workflow.runtime.dapr import WorkflowClient, WorkflowRuntime
+from custos_workflow.runtime.dapr import (
+    DaprWorkflowContextAdapter,
+    WorkflowClient,
+    WorkflowRuntime,
+)
 from custos_workflow.runtime.fake import (
+    ChildWorkflowError,
     FakeActivityContext,
     FakeWorkflowClient,
     FakeWorkflowContext,
@@ -54,6 +59,8 @@ from custos_workflow.runtime.fake import (
 )
 
 __all__ = [
+    "ChildWorkflowError",
+    "DaprWorkflowContextAdapter",
     "FakeActivityContext",
     "FakeWorkflowClient",
     "FakeWorkflowContext",
