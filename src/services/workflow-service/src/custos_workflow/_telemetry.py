@@ -55,9 +55,10 @@ Metric / span names follow the issue scope verbatim:
 
 from __future__ import annotations
 
+import asyncio
 import time
-from collections.abc import Iterator, Mapping
-from contextlib import AbstractContextManager, contextmanager
+from collections.abc import AsyncIterator, Iterator, Mapping
+from contextlib import AbstractContextManager, asynccontextmanager, contextmanager
 from typing import Final
 
 from opentelemetry import metrics, trace
@@ -1108,12 +1109,352 @@ def record_idempotency_outcome(outcome: str) -> None:
     IDEMPOTENCY_OUTCOMES_TOTAL.add(1, {"wf.idempotency.outcome": outcome})
 
 
+# ---------------------------------------------------------------------------
+# WF-IMPL-081: Outbound RPC observability hooks
+# ---------------------------------------------------------------------------
+#
+# Spans, histograms, and counters that make every outbound Dapr
+# Service-Invocation call from :mod:`custos_workflow.clients`
+# observable end-to-end. Wired through both
+# :class:`~custos_workflow.clients.activity_runtime.DaprActivityRuntimeClient`
+# (``ScheduleActivity`` / ``CancelActivity``) and
+# :class:`~custos_workflow.clients.connector.DaprConnectorClient`
+# (``BindForStep``) via the single
+# :func:`observe_outbound_rpc` async context manager so the three
+# call sites share one instrument set and one span name.
+#
+# Three instruments:
+#
+# * :data:`OUTBOUND_RPC_DURATION_MS` — histogram, labels
+#   ``wf.client`` (``"arm"`` | ``"connector"``), ``wf.method``,
+#   and ``http.status_code`` (string; ``"0"`` when no response
+#   was observed — transport failure). One sample per outbound
+#   call, recorded on every exit (success or exception) so the
+#   histogram total stays consistent with the call count.
+# * :data:`OUTBOUND_RPC_TOTAL` — counter, labels ``wf.client``,
+#   ``wf.method``, and ``wf.outcome`` ∈
+#   :data:`LOCKED_OUTBOUND_RPC_OUTCOMES`. Bumped exactly once
+#   per outbound call.
+# * :data:`OUTBOUND_RPC_ERRORS_TOTAL` — counter, label
+#   ``wf.error.kind`` ∈
+#   :data:`~custos_workflow.clients._errors.LOCKED_OUTBOUND_RPC_KINDS`.
+#   Bumped exactly once per failed outbound call, by the
+#   :class:`OutboundRpcError` recogniser inside
+#   :func:`observe_outbound_rpc` — Cancel's HTTP-404 / HTTP-409
+#   idempotent no-op branches return normally and therefore never
+#   reach this counter (asserted in the unit-test suite).
+#
+# Span
+# ----
+# ``custos_workflow.outbound_rpc.call`` — one span per call,
+# attributes pinned to
+# :data:`LOCKED_OUTBOUND_RPC_SPAN_ATTRIBUTES` so any drift fails
+# the exhaustiveness guard in
+# ``tests/test_outbound_rpc_telemetry.py``.
+
+OUTBOUND_RPC_DURATION_MS: Final[Histogram] = _meter.create_histogram(
+    name="custos_workflow_outbound_rpc_duration_ms",
+    unit="ms",
+    description=(
+        "Wall-clock time spent in one outbound Dapr Service-Invocation "
+        "call from the workflow-service (ARM ScheduleActivity / "
+        "CancelActivity, Connector BindForStep), labelled by wf.client, "
+        "wf.method, and http.status_code (string; '0' when no response "
+        "was observed). One sample per call."
+    ),
+)
+
+OUTBOUND_RPC_TOTAL: Final[Counter] = _meter.create_counter(
+    name="custos_workflow_outbound_rpc_total",
+    description=(
+        "Count of outbound Dapr Service-Invocation calls from the "
+        "workflow-service, labelled by wf.client, wf.method, and "
+        "wf.outcome ∈ LOCKED_OUTBOUND_RPC_OUTCOMES. Bumped exactly "
+        "once per call."
+    ),
+)
+
+OUTBOUND_RPC_ERRORS_TOTAL: Final[Counter] = _meter.create_counter(
+    name="custos_workflow_outbound_rpc_errors_total",
+    description=(
+        "Count of outbound Dapr Service-Invocation calls that raised "
+        "an OutboundRpcError, labelled by wf.error.kind ∈ "
+        "LOCKED_OUTBOUND_RPC_KINDS (workflow.client.transport / "
+        "workflow.client.status / workflow.client.decode / "
+        "workflow.client.cancelled). Bumped exactly once per failed "
+        "call. Cancel's HTTP-404 / HTTP-409 idempotent no-op branches "
+        "return normally and never reach this counter."
+    ),
+)
+
+
+#: Locked outcome label set. Pinned so a new outcome cannot ship
+#: without an explicit edit here (and a matching test update).
+#: ``success`` → 2xx with no observed envelope-level error.
+#: ``transport`` → no HTTP response observed (DNS / connect / TLS
+#: / read / write / timeout — i.e. :class:`OutboundRpcTransportError`).
+#: ``retryable`` → :class:`OutboundRpcStatusError` with status in
+#: 408 / 429 / 5xx (matches the WF-IMPL-075 envelope mapper).
+#: ``permanent`` → :class:`OutboundRpcStatusError` with status in
+#: 4xx \ {408, 429} OR :class:`OutboundRpcDecodeError`. Also the
+#: catch-all bucket for any unexpected non-``OutboundRpc`` exception
+#: that escapes the wrapped block (the error counter is *not* bumped
+#: for these — they carry no locked ``wf.error.kind``).
+#: ``cancelled`` → :class:`OutboundRpcCancelledError` (HTTP 499 or
+#: explicit upstream cancel) OR an :class:`asyncio.CancelledError`
+#: propagating through the wrapped call.
+LOCKED_OUTBOUND_RPC_OUTCOMES: Final[frozenset[str]] = frozenset(
+    {"success", "transport", "retryable", "permanent", "cancelled"}
+)
+
+
+#: Locked span-attribute key set for the
+#: ``custos_workflow.outbound_rpc.call`` span. Asserted exhaustively
+#: in ``tests/test_outbound_rpc_telemetry.py`` so a new attribute
+#: cannot be added without landing here.
+#:
+#: ``wf.run.id``, ``wf.step.id``, and ``wf.attempt`` are emitted
+#: only when supplied (Cancel has no ``wf.attempt``).
+LOCKED_OUTBOUND_RPC_SPAN_ATTRIBUTES: Final[frozenset[str]] = frozenset(
+    {
+        "wf.client",
+        "wf.method",
+        "wf.run.id",
+        "wf.step.id",
+        "wf.attempt",
+        "http.method",
+        "http.url",
+        "http.status_code",
+        "wf.outcome",
+        "wf.error.kind",
+    }
+)
+
+
+#: HTTP status codes that the WF-IMPL-075 envelope mapper classifies
+#: as ``retryable`` even though they fall in the 4xx range. Kept
+#: in lockstep with ``custos_workflow.clients._errors._RETRYABLE_4XX``
+#: so the histogram outcome label tracks the envelope class.
+_OUTBOUND_RETRYABLE_4XX: Final[frozenset[int]] = frozenset({408, 429})
+
+
+def _classify_status_outcome(status_code: int) -> str:
+    """Map an HTTP status code to its :data:`LOCKED_OUTBOUND_RPC_OUTCOMES` bucket.
+
+    Mirrors :func:`custos_workflow.clients._errors._classify_status`
+    one-for-one so the histogram outcome and the envelope class
+    can never disagree.
+    """
+    if status_code in _OUTBOUND_RETRYABLE_4XX:
+        return "retryable"
+    if 400 <= status_code < 500:
+        return "permanent"
+    if 500 <= status_code < 600:
+        return "retryable"
+    return "permanent"
+
+
+class _OutboundRpcCallContext:
+    """Per-call mutable scratchpad shared between caller and ctx manager.
+
+    The async context manager :func:`observe_outbound_rpc` yields
+    one of these; the caller is expected to set
+    :attr:`status_code` as soon as it receives an HTTP response so
+    the ctx manager can label the duration histogram and the span
+    consistently on the exception path too. Left unset (``None``)
+    on transport-layer failure (no response observed) — the ctx
+    manager labels these as ``http.status_code="0"``.
+    """
+
+    __slots__ = ("status_code",)
+
+    def __init__(self) -> None:
+        self.status_code: int | None = None
+
+    def set_status_code(self, status_code: int) -> None:
+        """Record the HTTP status code observed on the wire."""
+        self.status_code = status_code
+
+
+def _set_optional_attr(span: Span, key: str, value: object) -> None:
+    """Set ``key`` on ``span`` only when ``value`` is not ``None``.
+
+    Keeps the locked-attribute set honest: optional attributes
+    (``wf.run.id``, ``wf.step.id``, ``wf.attempt``) are emitted
+    only when the caller supplied them, so the exhaustiveness
+    guard can compare against the full set.
+    """
+    if value is None:
+        return
+    if isinstance(value, (str, bool, int, float)):
+        span.set_attribute(key, value)
+    else:
+        span.set_attribute(key, str(value))
+
+
+@asynccontextmanager
+async def observe_outbound_rpc(
+    *,
+    client: str,
+    method: str,
+    run_id: str | None = None,
+    step_id: str | None = None,
+    attempt: int | None = None,
+) -> AsyncIterator[_OutboundRpcCallContext]:
+    """Wrap one outbound Dapr Service-Invocation call.
+
+    Emits a single ``custos_workflow.outbound_rpc.call`` span and
+    records one sample into each of
+    :data:`OUTBOUND_RPC_DURATION_MS` and :data:`OUTBOUND_RPC_TOTAL`
+    per call. On any :class:`OutboundRpcError` subclass the
+    matching ``wf.error.kind`` is bumped on
+    :data:`OUTBOUND_RPC_ERRORS_TOTAL`; non-``OutboundRpc`` exits
+    (Cancel's HTTP-404 / HTTP-409 idempotent no-ops, normal
+    returns) never touch the error counter, matching the
+    acceptance criteria pinned in WF-IMPL-081.
+
+    The yielded :class:`_OutboundRpcCallContext` lets the caller
+    record the HTTP status code as soon as the response is
+    received — used both to label the duration histogram and to
+    classify :class:`OutboundRpcStatusError` outcomes into
+    ``retryable`` / ``permanent`` consistently with the WF-IMPL-075
+    envelope mapper.
+
+    :param client: Either ``"arm"`` or ``"connector"``. Pinned to
+        the two adapters wired in WF-IMPL-079 / WF-IMPL-080;
+        anything else raises :class:`ValueError` so a typo at a
+        call site fails loudly instead of leaking a bad label.
+    :param method: Dapr method name. ``"ScheduleActivity"`` /
+        ``"CancelActivity"`` for ARM, ``"BindForStep"`` for the
+        Connector adapter.
+    :param run_id: Workflow run id (when known). Emitted as the
+        ``wf.run.id`` span attribute when supplied.
+    :param step_id: Workflow step id (when known). Emitted as the
+        ``wf.step.id`` span attribute when supplied. Cancel passes
+        the step id even though it omits ``attempt``.
+    :param attempt: Per-step attempt counter (when applicable).
+        Emitted as the ``wf.attempt`` span attribute when supplied.
+        ``cancel_activity`` deliberately omits this — cancellation
+        is not attempt-scoped.
+    """
+    if client not in {"arm", "connector"}:
+        raise ValueError(
+            f"observe_outbound_rpc.client must be one of {{'arm', 'connector'}}; got {client!r}"
+        )
+
+    # Import lazily to break the ``clients/_errors -> _telemetry ->
+    # clients/_errors`` cycle (the LOCKED set is already importable
+    # at module load — only the subclass tree needs lazy access so
+    # ``clients._errors`` can finish initialising first).
+    from custos_workflow.clients._errors import (
+        OutboundRpcCancelledError,
+        OutboundRpcDecodeError,
+        OutboundRpcError,
+        OutboundRpcStatusError,
+        OutboundRpcTransportError,
+    )
+
+    ctx = _OutboundRpcCallContext()
+    sanitized_url = f"…/method/{method}"
+    start = time.perf_counter()
+    with _tracer.start_as_current_span("custos_workflow.outbound_rpc.call") as span:
+        span.set_attribute("wf.client", client)
+        span.set_attribute("wf.method", method)
+        span.set_attribute("http.method", "POST")
+        span.set_attribute("http.url", sanitized_url)
+        _set_optional_attr(span, "wf.run.id", run_id)
+        _set_optional_attr(span, "wf.step.id", step_id)
+        _set_optional_attr(span, "wf.attempt", attempt)
+
+        # Default outcome assumes a clean exit; the except branches
+        # below downgrade it. ``error_kind`` stays ``None`` for the
+        # success path *and* for unexpected non-``OutboundRpc``
+        # failures (the error counter is locked to
+        # ``LOCKED_OUTBOUND_RPC_KINDS``, which only covers the
+        # outbound-RPC taxonomy). The shared ``finally`` records the
+        # duration histogram + total counter exactly once on *every*
+        # exit path — success, ``OutboundRpcError``, asyncio
+        # cancellation, or any other escaping exception — so the
+        # "one sample per call" invariant holds even when an
+        # unexpected exception propagates through the wrapped block.
+        outcome = "success"
+        error_kind: str | None = None
+        try:
+            yield ctx
+        except OutboundRpcError as exc:
+            if isinstance(exc, OutboundRpcTransportError):
+                outcome = "transport"
+            elif isinstance(exc, OutboundRpcCancelledError):
+                outcome = "cancelled"
+            elif isinstance(exc, OutboundRpcStatusError):
+                outcome = _classify_status_outcome(exc.status_code)
+                # ``OutboundRpcStatusError`` always carries the real
+                # status; surface it on the context so the
+                # histogram label below picks it up even when the
+                # call site never reached ``ctx.set_status_code``.
+                ctx.status_code = exc.status_code
+            elif isinstance(exc, OutboundRpcDecodeError):
+                outcome = "permanent"
+            else:  # pragma: no cover - defensive; closed taxonomy
+                outcome = "permanent"
+            error_kind = exc.kind
+            span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
+            span.record_exception(exc)
+            raise
+        except BaseException as exc:
+            # Unexpected non-``OutboundRpc`` failure escaping the
+            # wrapped block (asyncio cancellation, an unforeseen
+            # parsing/validation error, etc.). Classify cancellation
+            # as ``cancelled`` and everything else as ``permanent``
+            # so the total counter still records one sample, then
+            # re-raise untouched. The error counter is *not* bumped:
+            # these exceptions carry no ``wf.error.kind`` in the
+            # locked outbound-RPC taxonomy.
+            outcome = "cancelled" if isinstance(exc, asyncio.CancelledError) else "permanent"
+            span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
+            span.record_exception(exc)
+            raise
+        finally:
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            status_code_label = str(ctx.status_code) if ctx.status_code is not None else "0"
+            OUTBOUND_RPC_DURATION_MS.record(
+                elapsed_ms,
+                {
+                    "wf.client": client,
+                    "wf.method": method,
+                    "http.status_code": status_code_label,
+                },
+            )
+            OUTBOUND_RPC_TOTAL.add(
+                1,
+                {"wf.client": client, "wf.method": method, "wf.outcome": outcome},
+            )
+            if error_kind is not None:
+                OUTBOUND_RPC_ERRORS_TOTAL.add(1, {"wf.error.kind": error_kind})
+            span.set_attribute("wf.outcome", outcome)
+            if error_kind is not None:
+                span.set_attribute("wf.error.kind", error_kind)
+            if ctx.status_code is not None:
+                span.set_attribute("http.status_code", str(ctx.status_code))
+
+
+# Build-time exhaustiveness guard: every :class:`OutboundRpcError`
+# subclass must map to an outcome in :data:`LOCKED_OUTBOUND_RPC_OUTCOMES`.
+# We assert the relationship in tests rather than at import time
+# to keep the production import side-effect-free.
+
+
 __all__ = [
     "ACTIVITY_SCHEDULE_DURATION_MS",
     "API_ERRORS_TOTAL",
     "ERRORS_TOTAL",
     "HTTP_SERVER_DURATION_MS",
     "IDEMPOTENCY_OUTCOMES_TOTAL",
+    "LOCKED_OUTBOUND_RPC_OUTCOMES",
+    "LOCKED_OUTBOUND_RPC_SPAN_ATTRIBUTES",
+    "OUTBOUND_RPC_DURATION_MS",
+    "OUTBOUND_RPC_ERRORS_TOTAL",
+    "OUTBOUND_RPC_TOTAL",
     "PARSE_DURATION_MS",
     "RETRY_POLICY_DURATION_MS",
     "RUN_LIFECYCLE_DURATION_MS",
@@ -1132,6 +1473,7 @@ __all__ = [
     "observe_compile_total",
     "observe_compile_type_check",
     "observe_http_request",
+    "observe_outbound_rpc",
     "observe_run_cancel",
     "observe_run_get",
     "observe_run_list",

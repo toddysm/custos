@@ -567,6 +567,7 @@ class DaprConnectorClient:
         # Lazy import to break the top-level cycle: ``_errors``
         # imports ``ActivityResultClass`` / ``ActivityResultEnvelope``
         # which keeps the dependency arrow pointing one way.
+        from custos_workflow._telemetry import observe_outbound_rpc
         from custos_workflow.clients._errors import (
             OutboundRpcCancelledError,
             OutboundRpcDecodeError,
@@ -577,39 +578,53 @@ class DaprConnectorClient:
         url = build_invoke_url(self.endpoint, BIND_FOR_STEP_DAPR_METHOD)
         wire = _request_to_wire(request)
 
-        try:
-            response = await self.http_client.post(
-                url,
-                json=wire,
-                timeout=self.timeout,
-                headers={"Content-Type": "application/json"},
-            )
-        except httpx.HTTPError as exc:
-            # No response observed — transport-layer failure.
-            # Original ``httpx`` exception preserved on
-            # ``__cause__`` so the envelope mapper renders it
-            # into the ``cause`` chain.
-            raise OutboundRpcTransportError(f"Dapr BindForStep transport failure: {exc!r}") from exc
+        # ``BindForStepRequest`` carries ``step_key`` + ``slots`` only;
+        # the workflow-level run / step-instance / attempt identifiers
+        # live one layer up (the orchestrator), so we surface
+        # ``step_key`` as ``wf.step.id`` (it's the most precise
+        # step-identifying token the adapter sees) and omit
+        # ``wf.run.id`` / ``wf.attempt`` rather than fabricate values.
+        async with observe_outbound_rpc(
+            client="connector",
+            method=BIND_FOR_STEP_DAPR_METHOD,
+            step_id=request.step_key,
+        ) as obs_ctx:
+            try:
+                response = await self.http_client.post(
+                    url,
+                    json=wire,
+                    timeout=self.timeout,
+                    headers={"Content-Type": "application/json"},
+                )
+            except httpx.HTTPError as exc:
+                # No response observed — transport-layer failure.
+                # Original ``httpx`` exception preserved on
+                # ``__cause__`` so the envelope mapper renders it
+                # into the ``cause`` chain.
+                raise OutboundRpcTransportError(
+                    f"Dapr BindForStep transport failure: {exc!r}"
+                ) from exc
 
-        status_code = response.status_code
-        if status_code == _CLIENT_CLOSED_REQUEST_STATUS:
-            raise OutboundRpcCancelledError(
-                f"Dapr BindForStep cancelled upstream (HTTP {status_code})"
-            )
-        if status_code // 100 != 2:
-            body_preview = response.text[:200] if response.text else ""
-            raise OutboundRpcStatusError(
-                f"Dapr BindForStep returned HTTP {status_code}: {body_preview!r}",
-                status_code=status_code,
-            )
+            status_code = response.status_code
+            obs_ctx.set_status_code(status_code)
+            if status_code == _CLIENT_CLOSED_REQUEST_STATUS:
+                raise OutboundRpcCancelledError(
+                    f"Dapr BindForStep cancelled upstream (HTTP {status_code})"
+                )
+            if status_code // 100 != 2:
+                body_preview = response.text[:200] if response.text else ""
+                raise OutboundRpcStatusError(
+                    f"Dapr BindForStep returned HTTP {status_code}: {body_preview!r}",
+                    status_code=status_code,
+                )
 
-        try:
-            body = response.json()
-        except ValueError as exc:
-            # Covers ``json.JSONDecodeError`` and any
-            # httpx-internal decoding failure.
-            raise OutboundRpcDecodeError(
-                f"Dapr BindForStep response is not valid JSON: {exc!r}"
-            ) from exc
+            try:
+                body = response.json()
+            except ValueError as exc:
+                # Covers ``json.JSONDecodeError`` and any
+                # httpx-internal decoding failure.
+                raise OutboundRpcDecodeError(
+                    f"Dapr BindForStep response is not valid JSON: {exc!r}"
+                ) from exc
 
-        return _response_from_wire(body)
+            return _response_from_wire(body)
