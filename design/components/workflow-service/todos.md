@@ -1,6 +1,6 @@
 # TODOs: Workflow Service
 
-Last Updated: 2026-06-03 (WF-IMPL-070 merged via PR #478; WF-IMPL-071..072 outstanding under tracker #459)
+Last Updated: 2026-06-04 (WF-IMPL-071 merged via PR #480; WF-IMPL-072 outstanding under tracker #459)
 
 ## Open
 
@@ -45,7 +45,7 @@ Fifth sub-module: **API Adapter + Validator**, packaged inside the service host 
 
 ### Phase E — Verification + documentation
 
-- [F] WF-IMPL-071 (#457): Unit + integration test suite (≥ 90 % coverage gate) (depends on #456).
+- [x] WF-IMPL-071 (#457): Unit + integration test suite (≥ 90 % coverage gate) (depends on #456). Merged: PR #480.
 - [F] WF-IMPL-072 (#458): Developer documentation — `docs/developers/workflow-api.md` (depends on #457).
 
 Tracker: #459 — `WF-IMPL-000-API-ADAPTER`.
