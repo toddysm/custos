@@ -28,6 +28,7 @@ Acceptance criteria (mirrored from #420):
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -44,6 +45,7 @@ from custos_workflow.steps.idempotency import IdempotencyTriple
 
 __all__ = [
     "ACTIVITY_RESULT_CLASSES",
+    "CANCEL_ACTIVITY_DAPR_METHOD",
     "SCHEDULE_ACTIVITY_DAPR_METHOD",
     "ActivityResultClass",
     "ActivityResultEnvelope",
@@ -53,6 +55,8 @@ __all__ = [
     "NoopActivityRuntimeClient",
     "ScheduleActivityRequest",
 ]
+
+_LOGGER = logging.getLogger(__name__)
 
 
 #: HTTP header name carrying the canonical
@@ -73,6 +77,14 @@ _CLIENT_CLOSED_REQUEST_STATUS: Final[int] = 499
 #: ``ScheduleActivity`` RPC. Pinned here so the adapter and any
 #: smoke-test fixture key off the same constant.
 SCHEDULE_ACTIVITY_DAPR_METHOD: Final[str] = "ScheduleActivity"
+
+#: Dapr Service-Invocation ``method`` name for ARM's
+#: ``CancelActivity`` RPC. Cancellation is idempotent end-to-end:
+#: ARM responds 404 when the step is unknown and 409 when the
+#: step has already terminated, both of which the adapter
+#: collapses into a no-op (see
+#: :meth:`DaprActivityRuntimeClient.cancel_activity`).
+CANCEL_ACTIVITY_DAPR_METHOD: Final[str] = "CancelActivity"
 
 
 # ---------------------------------------------------------------------------
@@ -495,14 +507,12 @@ class DaprActivityRuntimeClient:
     Method exposure
     ---------------
 
-    :meth:`schedule_activity` is exposed as ``async`` because the
-    underlying transport is async; the orchestrator-side bridge
-    that registers this client as a Dapr Workflow activity
-    (deferred WF-IMPL-079) is the layer that adapts to the
-    sync :class:`ActivityRuntimeClient` Protocol.
-    :meth:`cancel_activity` is a placeholder that raises
-    :class:`NotImplementedError` until WF-IMPL-077 lands the
-    cancellation surface.
+    Both :meth:`schedule_activity` and :meth:`cancel_activity`
+    are exposed as ``async`` because the underlying transport is
+    async; the orchestrator-side bridge that registers this
+    client as a Dapr Workflow activity (deferred WF-IMPL-079) is
+    the layer that adapts to the sync
+    :class:`ActivityRuntimeClient` Protocol.
 
     :param http_client: Lifespan-owned async HTTP client.
     :param endpoint: Resolved Dapr Service-Invocation endpoint for
@@ -593,12 +603,77 @@ class DaprActivityRuntimeClient:
         except OutboundRpcError as exc:
             return map_to_activity_envelope(exc, attempt=request.attempt)
 
-    def cancel_activity(self, run_id: str, step_id: str) -> None:
-        """Placeholder pending WF-IMPL-077.
+    async def cancel_activity(self, run_id: str, step_id: str) -> None:
+        """Post one ``CancelActivity`` call through the Dapr sidecar.
 
-        Raises :class:`NotImplementedError` so calls fail loudly
-        until the cancellation adapter lands.
+        Cancellation is idempotent end-to-end: the Workflow
+        Service may issue the same cancel multiple times (e.g.
+        retried during a shutdown drain), and ARM may have
+        already terminated the step on its own. To keep callers'
+        retry loops simple, this method silently absorbs the two
+        "already-gone" outcomes:
+
+        * ``200`` / ``204`` — ARM accepted the cancel; return.
+        * ``404`` — ARM has no record of ``step_id`` (already
+          purged or never started); logged at ``INFO`` and
+          returned as a no-op.
+        * ``409`` — ARM reports the step has already terminated;
+          logged at ``INFO`` and returned as a no-op.
+        * Any other ``4xx`` or ``5xx`` — raised as
+          :class:`~custos_workflow.clients._errors.OutboundRpcStatusError`
+          so the run-cancel path can surface it through
+          :class:`~custos_workflow.runs.errors.RunControllerError`.
+        * :class:`httpx.HTTPError` — raised as
+          :class:`~custos_workflow.clients._errors.OutboundRpcTransportError`.
+
+        Unlike :meth:`schedule_activity`, ``cancel_activity``
+        does not return an :class:`ActivityResultEnvelope`; its
+        Protocol surface is ``None`` and the caller distinguishes
+        "cancel succeeded" from "cancel failed" by whether an
+        exception escapes.
         """
-        raise NotImplementedError(
-            "DaprActivityRuntimeClient.cancel_activity: not implemented yet (WF-IMPL-077)."
+        # Lazy import — see ``schedule_activity`` for rationale.
+        from custos_workflow.clients._errors import (
+            OutboundRpcStatusError,
+            OutboundRpcTransportError,
+        )
+
+        url = build_invoke_url(self.endpoint, CANCEL_ACTIVITY_DAPR_METHOD)
+        wire = {"runId": run_id, "stepId": step_id}
+
+        try:
+            response = await self.http_client.post(
+                url,
+                json=wire,
+                timeout=self.timeout,
+                headers={"Content-Type": "application/json"},
+            )
+        except httpx.HTTPError as exc:
+            raise OutboundRpcTransportError(
+                f"Dapr CancelActivity transport failure: {exc!r}"
+            ) from exc
+
+        status_code = response.status_code
+        if status_code in (200, 204):
+            return
+        if status_code == 404:
+            _LOGGER.info(
+                "CancelActivity: ARM has no record of step (HTTP 404, treated as no-op)",
+                extra={"run_id": run_id, "step_id": step_id},
+            )
+            return
+        if status_code == 409:
+            _LOGGER.info(
+                "CancelActivity: ARM reports step already terminated (HTTP 409, treated as no-op)",
+                extra={"run_id": run_id, "step_id": step_id},
+            )
+            return
+
+        # Any other 2xx is unexpected (the contract is 200/204);
+        # surface it as a status error so the bug is visible
+        # rather than silently swallowed.
+        body_preview = response.text[:200] if response.text else ""
+        raise OutboundRpcStatusError(
+            f"Dapr CancelActivity returned HTTP {status_code}: {body_preview!r}",
+            status_code=status_code,
         )

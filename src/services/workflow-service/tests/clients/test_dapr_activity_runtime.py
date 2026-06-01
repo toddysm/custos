@@ -1,24 +1,32 @@
-"""Tests for ``DaprActivityRuntimeClient`` (WF-IMPL-076).
+"""Tests for ``DaprActivityRuntimeClient`` (WF-IMPL-076 + WF-IMPL-077).
 
 The adapter is the first production hop the Step Coordinator's
 yielded :class:`ScheduleActivityCallToken` actually traverses, so
 these tests cover the full transport-error → envelope-class matrix
 locked in WF-IMPL-075 plus the wire-shape contract pinned in the
-ARM design § *Internal RPCs*.
+ARM design § *Internal RPCs*. The ``cancel_activity`` section
+(WF-IMPL-077) exercises the idempotent-cancel surface separately
+because it has no envelope mapping and a different status-code
+taxonomy.
 
 Coverage emphasis:
 
 * Success envelopes pass through unchanged.
 * Every locked :class:`~custos_workflow.clients._errors.OutboundRpcError`
   bucket maps to the right :class:`ActivityResultClass`.
-* The ``Idempotency-Key`` header is always present and built from
-  the canonical :class:`IdempotencyTriple` wire form.
+* The ``Idempotency-Key`` header is always present on
+  ``ScheduleActivity`` and built from the canonical
+  :class:`IdempotencyTriple` wire form.
 * The outbound request body uses the camelCase wire shape ARM
   expects.
+* ``CancelActivity`` collapses 200 / 204 / 404 / 409 to a no-op
+  and raises :class:`OutboundRpcStatusError` /
+  :class:`OutboundRpcTransportError` for every other failure mode.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -31,7 +39,12 @@ from custos_workflow.clients._dapr_invoke import (
     DaprInvokeEndpoint,
     build_invoke_url,
 )
+from custos_workflow.clients._errors import (
+    OutboundRpcStatusError,
+    OutboundRpcTransportError,
+)
 from custos_workflow.clients.activity_runtime import (
+    CANCEL_ACTIVITY_DAPR_METHOD,
     IDEMPOTENCY_HEADER,
     SCHEDULE_ACTIVITY_DAPR_METHOD,
     ActivityResultEnvelope,
@@ -547,21 +560,213 @@ async def test_outbound_url_targets_arm_app_id(
 
 
 # ---------------------------------------------------------------------------
-# cancel_activity placeholder
+# cancel_activity adapter (WF-IMPL-077)
 # ---------------------------------------------------------------------------
 
 
-async def test_cancel_activity_raises_not_implemented(endpoint: DaprInvokeEndpoint) -> None:
-    transport = httpx.MockTransport(
-        lambda req: httpx.Response(
-            200,
-            json={"class": "success", "outputs": {}, "attempt": 1, "error": None},
-        )
-    )
-    async with httpx.AsyncClient(transport=transport) as http:
-        client = DaprActivityRuntimeClient(http_client=http, endpoint=endpoint)
-        with pytest.raises(NotImplementedError, match="WF-IMPL-077"):
-            client.cancel_activity("r", "s")
+@pytest.fixture
+def cancel_url(endpoint: DaprInvokeEndpoint) -> str:
+    return build_invoke_url(endpoint, CANCEL_ACTIVITY_DAPR_METHOD)
+
+
+def _cancel_handler(
+    status: int, *, body: bytes | None = None
+) -> Callable[[httpx.Request], httpx.Response]:
+    def handler(req: httpx.Request) -> httpx.Response:
+        if body is None:
+            return httpx.Response(status)
+        return httpx.Response(status, content=body)
+
+    return handler
+
+
+async def _run_cancel(
+    endpoint: DaprInvokeEndpoint,
+    handler: Callable[[httpx.Request], httpx.Response],
+    *,
+    timeout: float = DEFAULT_OUTBOUND_RPC_TIMEOUT_SECONDS,
+    run_id: str = "run-1",
+    step_id: str = "step-a",
+) -> None:
+    client = _make_client(endpoint, handler, timeout=timeout)
+    try:
+        await client.cancel_activity(run_id, step_id)
+    finally:
+        await client.http_client.aclose()
+
+
+@pytest.mark.parametrize("status", [200, 204])
+async def test_cancel_activity_success_returns_none(
+    endpoint: DaprInvokeEndpoint, status: int
+) -> None:
+    # 200 and 204 are both contractual successes per the issue's
+    # acceptance criteria; neither must raise.
+    await _run_cancel(endpoint, _cancel_handler(status))
+
+
+async def test_cancel_activity_404_is_idempotent_noop(
+    endpoint: DaprInvokeEndpoint, caplog: pytest.LogCaptureFixture
+) -> None:
+    # ARM has no record of the step \u2014 e.g. already purged or never
+    # actually scheduled. Cancellation must succeed silently and
+    # emit an INFO-level breadcrumb so operators can trace the
+    # spurious cancel attempt without it looking like an error.
+    caplog.set_level(logging.INFO, logger="custos_workflow.clients.activity_runtime")
+    await _run_cancel(endpoint, _cancel_handler(404))
+
+    matching = [
+        rec
+        for rec in caplog.records
+        if rec.levelno == logging.INFO and "no record" in rec.getMessage()
+    ]
+    assert matching, "expected an INFO-level breadcrumb on the 404 path"
+    record = matching[0]
+    assert getattr(record, "run_id", None) == "run-1"
+    assert getattr(record, "step_id", None) == "step-a"
+
+
+async def test_cancel_activity_409_is_idempotent_noop(
+    endpoint: DaprInvokeEndpoint, caplog: pytest.LogCaptureFixture
+) -> None:
+    # ARM reports the step has already terminated \u2014 success/failure
+    # raced the cancel. Must collapse to a no-op with an INFO
+    # breadcrumb, mirroring the 404 path.
+    caplog.set_level(logging.INFO, logger="custos_workflow.clients.activity_runtime")
+    await _run_cancel(endpoint, _cancel_handler(409))
+
+    matching = [
+        rec
+        for rec in caplog.records
+        if rec.levelno == logging.INFO and "already terminated" in rec.getMessage()
+    ]
+    assert matching, "expected an INFO-level breadcrumb on the 409 path"
+    record = matching[0]
+    assert getattr(record, "run_id", None) == "run-1"
+    assert getattr(record, "step_id", None) == "step-a"
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 422])
+async def test_cancel_activity_other_4xx_raises_status_error(
+    endpoint: DaprInvokeEndpoint, status: int
+) -> None:
+    # Anything in the 4xx range besides 404 / 409 is a contract
+    # violation the caller must see (e.g. malformed body, auth
+    # failure). Surface as OutboundRpcStatusError with the exact
+    # status_code so RunController can decide whether to retry.
+    with pytest.raises(OutboundRpcStatusError) as exc_info:
+        await _run_cancel(endpoint, _cancel_handler(status, body=b"detail body"))
+    assert exc_info.value.status_code == status
+    # Body preview is included so the failure is debuggable.
+    assert "detail body" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("status", [500, 502, 503, 504])
+async def test_cancel_activity_5xx_raises_status_error(
+    endpoint: DaprInvokeEndpoint, status: int
+) -> None:
+    # 5xx is always a status error \u2014 the run-cancel path turns it
+    # into a RunControllerError. Specifically NOT a transport
+    # error: a response *was* observed.
+    with pytest.raises(OutboundRpcStatusError) as exc_info:
+        await _run_cancel(endpoint, _cancel_handler(status))
+    assert exc_info.value.status_code == status
+
+
+async def test_cancel_activity_transport_timeout_raises_transport_error(
+    endpoint: DaprInvokeEndpoint,
+) -> None:
+    def handler(req: httpx.Request) -> httpx.Response:
+        # ``httpx.MockTransport`` happily raises whatever the
+        # handler does; ConnectTimeout is the canonical
+        # transport-class failure.
+        raise httpx.ConnectTimeout("simulated connect timeout")
+
+    with pytest.raises(OutboundRpcTransportError) as exc_info:
+        await _run_cancel(endpoint, handler)
+    # The original httpx exception is preserved on __cause__ so
+    # debuggers can drill into the root cause.
+    assert isinstance(exc_info.value.__cause__, httpx.ConnectTimeout)
+
+
+async def test_cancel_activity_connect_error_raises_transport_error(
+    endpoint: DaprInvokeEndpoint,
+) -> None:
+    def handler(req: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    with pytest.raises(OutboundRpcTransportError) as exc_info:
+        await _run_cancel(endpoint, handler)
+    assert isinstance(exc_info.value.__cause__, httpx.ConnectError)
+
+
+async def test_cancel_activity_targets_arm_cancel_url(
+    endpoint: DaprInvokeEndpoint, cancel_url: str
+) -> None:
+    captured: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(str(req.url))
+        return httpx.Response(204)
+
+    await _run_cancel(endpoint, handler)
+
+    assert captured == [cancel_url]
+    # Sanity check: the URL targets the configured ARM app id and
+    # the CancelActivity method, not ScheduleActivity.
+    assert "/v1.0/invoke/activity-runtime-manager/method/CancelActivity" in captured[0]
+
+
+async def test_cancel_activity_posts_camelcase_body(endpoint: DaprInvokeEndpoint) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        # Pull the JSON body off the wire so we can assert the
+        # exact field-name casing ARM expects.
+        import json as _json
+
+        captured.append(_json.loads(req.content.decode("utf-8")))
+        return httpx.Response(204)
+
+    await _run_cancel(endpoint, handler, run_id="run-42", step_id="step-zeta")
+
+    assert captured == [{"runId": "run-42", "stepId": "step-zeta"}]
+
+
+async def test_cancel_activity_omits_idempotency_key_header(
+    endpoint: DaprInvokeEndpoint,
+) -> None:
+    # Cancel is itself idempotent on ARM (404 / 409 are no-ops)
+    # so the adapter doesn't need to (and per the design must
+    # not) attach an Idempotency-Key header \u2014 retried cancels are
+    # functionally identical to the first.
+    captured_headers: list[httpx.Headers] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured_headers.append(req.headers)
+        return httpx.Response(204)
+
+    await _run_cancel(endpoint, handler)
+
+    assert captured_headers
+    assert IDEMPOTENCY_HEADER.lower() not in {k.lower() for k in captured_headers[0]}
+    assert captured_headers[0].get("content-type") == "application/json"
+
+
+async def test_cancel_activity_timeout_propagated_to_post(
+    endpoint: DaprInvokeEndpoint,
+) -> None:
+    captured: list[Any] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(req.extensions.get("timeout"))
+        return httpx.Response(204)
+
+    await _run_cancel(endpoint, handler, timeout=3.25)
+
+    assert captured
+    extension = captured[0]
+    assert isinstance(extension, dict)
+    assert all(value == 3.25 for value in extension.values())
 
 
 # ---------------------------------------------------------------------------
