@@ -1,6 +1,6 @@
 # TODOs: Workflow Service
 
-Last Updated: 2026-06-01 (WF-IMPL-067 merged via PR #472; WF-IMPL-068..072 outstanding under tracker #459)
+Last Updated: 2026-06-01 (WF-IMPL-068 merged via PR #474; WF-IMPL-069..072 outstanding under tracker #459)
 
 ## Open
 
@@ -36,7 +36,7 @@ Fifth sub-module: **API Adapter + Validator**, packaged inside the service host 
 ### Phase C — Internal RPC inbound surface
 
 - [x] WF-IMPL-067 (#453): Internal RPC routes — `StartRun` / `CancelRun` (depends on #451). Merged: PR #472.
-- [F] WF-IMPL-068 (#454): `RaiseExternalEvent` bridge (depends on #453).
+- [x] WF-IMPL-068 (#454): `RaiseExternalEvent` bridge (depends on #453). Merged: PR #474.
 
 ### Phase D — App wiring + observability
 
