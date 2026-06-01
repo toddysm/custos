@@ -18,16 +18,20 @@ Step kinds covered (v1 wire schema):
   timer (design.md § Workflow Schema: Step Kinds Handled — Wait /
   sleep → Run Controller → Durable timer); no Step Coordinator
   handler is involved.
+- :class:`ApprovalStep` — ``approval: {…}`` human-in-the-loop gate
+  (ADR-007, REQ-012). The Sub-Orchestration Manager spawns a child
+  workflow that awaits an external approval signal with a durable
+  timeout timer.
 
 Step *modifiers* (`if` / `when` / `unless` / `forEach` / `where` /
 `retry` / `on_error`) are shared properties on every kind, not
 separate kinds — they correspond to the "Step forms" table in
 ``design/architecture/overview.md`` rather than the "Step Kinds
 Handled" table in the Workflow Service design. The latter table
-also mentions ``parallel:`` / ``approval:`` / ``waitFor:`` which
-are not yet in the v1 wire schema (Catalog rejects them) and
-therefore not modelled here; they will land alongside the
-corresponding Catalog schema extension.
+also mentions ``parallel:`` / ``waitFor:`` which are not yet in the
+v1 wire schema (Catalog rejects them) and therefore not modelled
+here; they will land alongside the corresponding Catalog schema
+extension.
 """
 
 from __future__ import annotations
@@ -457,6 +461,91 @@ class WaitStep(_StepCommon):
         return self
 
 
+#: Default approval-gate timeout when ``approval.timeout`` is omitted.
+#: Mirrors design.md § Approval-gate timeout (``PT24H``).
+_DEFAULT_APPROVAL_TIMEOUT: Final[str] = "PT24H"
+
+
+class ApprovalSpec(_StrictModel):
+    """The ``approval:`` block of an :class:`ApprovalStep`.
+
+    Carries who may approve the gate and how long it stays open:
+
+    - ``approvers`` — a static list of approver identities (principal
+      refs). Optional.
+    - ``selector`` — a CEL expression that resolves the approver set
+      dynamically at run time (e.g. from inputs or earlier step
+      outputs). Optional, but must be a ``${{ ... }}`` CEL token.
+    - ``timeout`` — ISO-8601 duration the gate stays open before it
+      times out (design.md § Approval-gate timeout). Defaults to
+      :data:`_DEFAULT_APPROVAL_TIMEOUT` (``PT24H``).
+
+    At least one of ``approvers`` / ``selector`` MUST be present — a
+    gate with no resolvable approver can never be satisfied.
+    """
+
+    approvers: list[Annotated[str, Field(min_length=1)]] | None = Field(
+        default=None,
+        min_length=1,
+    )
+    selector: CelSource | None = None
+    timeout: str = _DEFAULT_APPROVAL_TIMEOUT
+
+    @model_validator(mode="after")
+    def _approver_source_present(self) -> ApprovalSpec:
+        if self.approvers is None and self.selector is None:
+            raise ValueError("approval block must specify at least one of: approvers, selector")
+        return self
+
+    @model_validator(mode="after")
+    def _selector_is_cel_token(self) -> ApprovalSpec:
+        if self.selector is not None and not _CEL_TOKEN_PATTERN.match(self.selector):
+            raise ValueError(
+                "approval 'selector' must be a CEL expression token of the form '${{ ... }}'"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _timeout_duration_shape(self) -> ApprovalSpec:
+        if _CEL_TOKEN_PATTERN.match(self.timeout):
+            raise ValueError(
+                "approval 'timeout' must be a constant ISO-8601 duration "
+                "string, not a CEL expression — the durable timer payload "
+                "is resolved at compile time"
+            )
+        match = _ISO8601_DURATION_PATTERN.match(self.timeout)
+        if match is None:
+            raise ValueError(
+                f"approval 'timeout' {self.timeout!r} is not a valid "
+                "ISO-8601 duration (expected 'P[nD][T[nH][nM][nS]]' or 'PnW')"
+            )
+        weeks = int(match.group("weeks") or 0)
+        days = int(match.group("days") or 0)
+        hours = int(match.group("hours") or 0)
+        minutes = int(match.group("minutes") or 0)
+        seconds = float(match.group("seconds") or 0.0)
+        if weeks == 0 and days == 0 and hours == 0 and minutes == 0 and seconds == 0.0:
+            raise ValueError(
+                f"approval 'timeout' {self.timeout!r} must specify a "
+                "positive duration (at least one non-zero component)"
+            )
+        return self
+
+
+class ApprovalStep(_StepCommon):
+    """Human-in-the-loop approval gate (ADR-007, REQ-012).
+
+    The Sub-Orchestration Manager spawns one child workflow instance
+    per gate (instance id ``<parentRunId>/<stepId>/approval``); the
+    child awaits the approval signal via ``wait_for_external_event``
+    with a durable timeout timer (design.md § Operation:
+    Sub-Orchestration). The gate body lives in the :class:`ApprovalSpec`
+    carried on :attr:`approval`.
+    """
+
+    approval: ApprovalSpec
+
+
 def _step_discriminator(v: Any) -> str | None:
     """Pick the step kind by keyword presence (no ``kind:`` field).
 
@@ -467,7 +556,7 @@ def _step_discriminator(v: Any) -> str | None:
     the error-taxonomy work in WF-IMPL-024.
     """
     if isinstance(v, dict):
-        present = [k for k in ("activity", "let", "workflow", "wait") if k in v]
+        present = [k for k in ("activity", "let", "workflow", "wait", "approval") if k in v]
         if len(present) == 1:
             return present[0]
         return None
@@ -480,10 +569,12 @@ def _step_discriminator(v: Any) -> str | None:
         return "workflow"
     if isinstance(v, WaitStep):
         return "wait"
+    if isinstance(v, ApprovalStep):
+        return "approval"
     return None
 
 
-#: Discriminated union over the four step kinds. The Catalog schema
+#: Discriminated union over the five step kinds. The Catalog schema
 #: enforces the same ``oneOf`` shape; we mirror it so a mistyped
 #: workflow document fails at parse time with a precise error
 #: pointing at the offending branch.
@@ -491,7 +582,8 @@ Step = Annotated[
     Annotated[ActivityStep, Tag("activity")]
     | Annotated[LetStep, Tag("let")]
     | Annotated[WorkflowStep, Tag("workflow")]
-    | Annotated[WaitStep, Tag("wait")],
+    | Annotated[WaitStep, Tag("wait")]
+    | Annotated[ApprovalStep, Tag("approval")],
     Discriminator(_step_discriminator),
 ]
 

@@ -83,6 +83,7 @@ from custos_workflow.callsites import (
 )
 from custos_workflow.document import (
     ActivityStep,
+    ApprovalStep,
     LetStep,
     Step,
     WaitStep,
@@ -587,6 +588,7 @@ _STEP_DISPATCH: dict[type[Step], tuple[StepKind, PrimitiveHandler]] = {
     LetStep: (StepKind.LET, PrimitiveHandler.EXPRESSION_INLINE),
     WorkflowStep: (StepKind.WORKFLOW, PrimitiveHandler.SUB_ORCHESTRATION),
     WaitStep: (StepKind.WAIT, PrimitiveHandler.RUN_CONTROLLER_TIMER),
+    ApprovalStep: (StepKind.APPROVAL, PrimitiveHandler.SUB_ORCHESTRATION),
 }
 
 
@@ -609,8 +611,19 @@ def _build_node(
     by :func:`compile_on_error` if it carries a ``retry:`` or
     ``on_error:`` block (design.md § Retry Policy → § Where
     ``retry:`` may appear).
+
+    A ``forEach``-bearing step is loop-expanded by the
+    Sub-Orchestration Manager (one child workflow per iteration —
+    design.md § Operation: Sub-Orchestration), so its
+    ``primitive_handler`` is overridden to
+    :attr:`PrimitiveHandler.SUB_ORCHESTRATION` regardless of the
+    inner step kind. The :attr:`~ExecutionNode.kind` stays the inner
+    kind so the loop body still type-checks and dispatches against
+    the right per-kind handler once expanded.
     """
     step_kind, handler = _STEP_DISPATCH[type(step)]
+    if step.for_each is not None:
+        handler = PrimitiveHandler.SUB_ORCHESTRATION
     retry_policy: ResolvedRetryPolicy | None
     if isinstance(step, ActivityStep):
         retry_policy = resolve_step_retry(step.retry, spec_defaults)

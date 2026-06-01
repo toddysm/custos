@@ -50,6 +50,7 @@ from custos_workflow.bindings.registry import (
 )
 from custos_workflow.document import (
     ActivityStep,
+    ApprovalStep,
     LetStep,
     WaitStep,
     WorkflowDocument,
@@ -168,8 +169,32 @@ def _sub_workflow_outputs_schema(step: WorkflowStep, logger: logging.Logger) -> 
     return _PERMISSIVE_OUTPUTS
 
 
+def _approval_outputs_schema(step: ApprovalStep, logger: logging.Logger) -> Mapping[str, Any]:
+    """Permissive stub for approval-gate outputs.
+
+    The approval decision payload (approver identity, decision,
+    decided-at timestamp) is delivered via the external approval
+    signal and is not locked in the wire schema yet — the full
+    approval-execution path lands in a later Sub-Orchestration
+    Manager task. For this milestone we emit a structured warning
+    and return an open object so any ``steps.<id>.outputs`` reference
+    type-checks without a false negative.
+    """
+    logger.warning(
+        "binding.unresolved_approval",
+        extra={
+            "step_id": step.id,
+            "note": (
+                "approval-gate outputs schema unresolved; using permissive "
+                "stub until the approval-execution follow-up lands"
+            ),
+        },
+    )
+    return _PERMISSIVE_OUTPUTS
+
+
 def _step_outputs_schema(
-    step: ActivityStep | LetStep | WorkflowStep | WaitStep,
+    step: ActivityStep | LetStep | WorkflowStep | WaitStep | ApprovalStep,
     registry: ActivityTypeRegistry,
     logger: logging.Logger,
 ) -> Mapping[str, Any]:
@@ -183,6 +208,8 @@ def _step_outputs_schema(
         # ``steps.<id>.outputs`` to an empty map without any
         # field-level lookups (which would all be unbound names).
         return {"type": "object", "properties": {}}
+    if isinstance(step, ApprovalStep):
+        return _approval_outputs_schema(step, logger)
     # WorkflowStep — narrowed by exhaustion.
     return _sub_workflow_outputs_schema(step, logger)
 

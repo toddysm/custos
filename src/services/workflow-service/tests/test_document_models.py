@@ -7,6 +7,8 @@ from pydantic import ValidationError
 
 from custos_workflow.document import (
     ActivityStep,
+    ApprovalSpec,
+    ApprovalStep,
     BackoffPolicy,
     BackoffStrategy,
     Defaults,
@@ -315,6 +317,74 @@ class TestWorkflowStep:
             WorkflowStep.model_validate({"id": "child", "workflow": "${{ placeholders.next }}"})
 
 
+class TestApprovalStep:
+    def test_static_approvers(self) -> None:
+        step = ApprovalStep.model_validate(
+            {"id": "gate", "approval": {"approvers": ["alice", "bob"]}}
+        )
+        assert step.approval.approvers == ["alice", "bob"]
+        assert step.approval.selector is None
+        # Timeout defaults to PT24H (design.md § Approval-gate timeout).
+        assert step.approval.timeout == "PT24H"
+
+    def test_selector_only(self) -> None:
+        step = ApprovalStep.model_validate(
+            {"id": "gate", "approval": {"selector": "${{ inputs.reviewers }}"}}
+        )
+        assert step.approval.selector == "${{ inputs.reviewers }}"
+        assert step.approval.approvers is None
+
+    def test_explicit_timeout(self) -> None:
+        step = ApprovalStep.model_validate(
+            {"id": "gate", "approval": {"approvers": ["alice"], "timeout": "PT2H"}}
+        )
+        assert step.approval.timeout == "PT2H"
+
+    def test_no_approver_source_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            ApprovalStep.model_validate({"id": "gate", "approval": {"timeout": "PT2H"}})
+
+    def test_selector_must_be_cel_token(self) -> None:
+        with pytest.raises(ValidationError):
+            ApprovalStep.model_validate(
+                {"id": "gate", "approval": {"selector": "inputs.reviewers"}}
+            )
+
+    def test_empty_approvers_list_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            ApprovalStep.model_validate({"id": "gate", "approval": {"approvers": []}})
+
+    def test_cel_token_timeout_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            ApprovalStep.model_validate(
+                {"id": "gate", "approval": {"approvers": ["alice"], "timeout": "${{ x }}"}}
+            )
+
+    def test_malformed_timeout_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            ApprovalStep.model_validate(
+                {"id": "gate", "approval": {"approvers": ["alice"], "timeout": "2 hours"}}
+            )
+
+    def test_zero_timeout_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            ApprovalStep.model_validate(
+                {"id": "gate", "approval": {"approvers": ["alice"], "timeout": "PT0S"}}
+            )
+
+    def test_approval_spec_directly(self) -> None:
+        spec = ApprovalSpec.model_validate({"approvers": ["alice"]})
+        assert spec.timeout == "PT24H"
+
+    def test_modifiers_inherited(self) -> None:
+        # ``_StepCommon`` modifiers (if/forEach/...) apply to approval
+        # gates too — exercise one to lock the inheritance.
+        step = ApprovalStep.model_validate(
+            {"id": "gate", "if": "${{ inputs.go }}", "approval": {"approvers": ["alice"]}}
+        )
+        assert step.if_ == "${{ inputs.go }}"
+
+
 # ---------------------------------------------------------------------------
 # Step discriminator
 # ---------------------------------------------------------------------------
@@ -337,6 +407,10 @@ class TestStepDiscriminator:
         spec = _spec_with_step({"id": "x", "workflow": "11111111-2222-3333-4444-555555555555"})
         assert isinstance(spec.steps[0], WorkflowStep)
 
+    def test_approval_kind(self) -> None:
+        spec = _spec_with_step({"id": "x", "approval": {"approvers": ["alice"]}})
+        assert isinstance(spec.steps[0], ApprovalStep)
+
     def test_no_kind_keyword_rejected(self) -> None:
         with pytest.raises(ValidationError):
             _spec_with_step({"id": "x"})
@@ -358,6 +432,11 @@ class TestStepDiscriminator:
         assert isinstance(spec.steps[0], ActivityStep)
         assert isinstance(spec.steps[1], LetStep)
         assert isinstance(spec.steps[2], WorkflowStep)
+
+    def test_constructed_approval_round_trip(self) -> None:
+        approval = ApprovalStep.model_validate({"id": "gate", "approval": {"approvers": ["alice"]}})
+        spec = WorkflowSpec.model_validate({"steps": [approval]})
+        assert isinstance(spec.steps[0], ApprovalStep)
 
     def test_non_dict_non_step_value_rejected(self) -> None:
         # Scalars / lists are not valid step values.

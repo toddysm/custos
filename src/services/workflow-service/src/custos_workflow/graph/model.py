@@ -37,22 +37,30 @@ class StepKind(StrEnum):
     """The structural step kind, mirroring the YAML keyword.
 
     Today's :class:`~custos_workflow.document.Step` discriminated
-    union covers exactly these four kinds. The design lists more
-    primitives (``parallel`` / ``approval`` / ``waitFor``)
-    that the wire schema does not yet expose; they will land as
-    additional members here without disturbing the JSON envelope
-    because :class:`StrEnum` values are forward-compatible.
+    union covers exactly these five kinds. The design lists more
+    primitives (``parallel`` / ``waitFor``) that the wire schema
+    does not yet expose; they will land as additional members here
+    without disturbing the JSON envelope because :class:`StrEnum`
+    values are forward-compatible.
 
     :attr:`WAIT` is the one kind the Run Controller orchestrator
     handles inline (no Step Coordinator dispatch): it issues a
     Dapr durable timer for the ISO-8601 duration carried on
     :attr:`~custos_workflow.document.WaitStep.wait`.
+
+    :attr:`APPROVAL` is a human-in-the-loop gate (ADR-007). The
+    Sub-Orchestration Manager spawns one child workflow instance
+    that awaits an approval signal via ``wait_for_external_event``
+    with a durable timeout timer — so it maps to
+    :attr:`PrimitiveHandler.SUB_ORCHESTRATION`, the same handler as
+    :attr:`WORKFLOW` and any ``forEach``-bearing loop step.
     """
 
     ACTIVITY = "activity"
     LET = "let"
     WORKFLOW = "workflow"
     WAIT = "wait"
+    APPROVAL = "approval"
 
 
 class PrimitiveHandler(StrEnum):
