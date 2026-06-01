@@ -27,6 +27,7 @@ Custos is a pluggable workflow orchestrator. Developers extend the platform by w
 | [Workflow Run Controller](workflow-run-controller.md) | Run lifecycle state machine, `RunController` public API, `StepHandler` Protocol, Dapr Workflow primitive mapping, replay determinism contract, `run.*` error taxonomy, worked examples |
 | [Workflow Step Coordinator](workflow-step-coordinator.md) | Step dispatch by primitive kind, activity step lifecycle, retry policy application, idempotency triple, `step.*` event taxonomy, locked `step.*` error taxonomy, worked examples |
 | [Workflow Service Public API](workflow-api.md) | REST and Internal RPC surface, `StartRunValidator` semantics, idempotency model (header vs body precedence, replay vs conflict), locked RFC 7807 error taxonomy, observability metrics + spans, `curl` + `httpx` worked examples |
+| [Workflow Service Outbound RPC](workflow-outbound-rpc.md) | ARM (`ScheduleActivity` / `CancelActivity`) and Connector (`BindForStep`) outbound Dapr Service-Invocation contract: canonical JSON envelopes, locked outbound-RPC error taxonomy, `ActivityResultEnvelope` mapping, Configuration knobs, OTel instruments + span |
 | [Examples](examples/) | Reference connector manifests for the supported target and authentication combinations |
 
 ## Quick Start for Connection Developers
