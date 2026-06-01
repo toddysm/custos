@@ -118,7 +118,7 @@ from __future__ import annotations
 import hashlib
 import random
 import time
-from collections.abc import Mapping
+from collections.abc import Generator, Mapping
 from datetime import timedelta
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Final
@@ -132,6 +132,7 @@ from custos_workflow.clients.activity_runtime import (
 )
 from custos_workflow.clients.connector import (
     BindForStepRequest,
+    BindForStepResponse,
     ConnectorClient,
     SlotSpec,
 )
@@ -143,6 +144,12 @@ from custos_workflow.runs.step_handler import (
     StepResult,
     StepSkipped,
     StepSucceeded,
+)
+from custos_workflow.runtime.dapr_activities import (
+    ActivityCallToken,
+    BindForStepCallToken,
+    ScheduleActivityCallToken,
+    drive_activity_generator,
 )
 from custos_workflow.steps import retry_driver
 from custos_workflow.steps.errors import (
@@ -239,6 +246,21 @@ class ActivityStepHandler:
     ) -> StepResult:
         """Drive the activity step's full lifecycle to a :class:`StepResult`.
 
+        Synchronous adapter over :meth:`iter_calls` — drives the
+        generator against ``self._connector_client`` and
+        ``self._activity_client`` via
+        :func:`~custos_workflow.runtime.dapr_activities.drive_activity_generator`,
+        so :class:`~custos_workflow.runs.StepHandler` consumers
+        (notably :class:`~custos_workflow.steps.coordinator.StepCoordinator`)
+        keep observing the original ``StepResult``-returning
+        contract. The Run Controller orchestrator (WF-IMPL-035)
+        bypasses this adapter for ``StepKind.ACTIVITY`` nodes when
+        an ``activity_handler`` is wired into
+        :func:`~custos_workflow.runs.orchestrator.make_run_orchestrator`,
+        delegating to :meth:`iter_calls` via ``yield from`` so each
+        bind / schedule call becomes a durable Dapr activity (the
+        production resolver lands in WF-IMPL-079).
+
         :param ctx: Per-dispatch context bundle. The handler reads
             :attr:`ctx.outputs` to seed ``steps.<id>.outputs``
             references in the ``with:`` scope,
@@ -257,20 +279,77 @@ class ActivityStepHandler:
         :raises KeyError: If ``step_id`` is not in ``graph.nodes``.
         :raises NotImplementedError: If the resolved node is not a
             :class:`~custos_workflow.graph.model.StepKind.ACTIVITY`
-            step. Defensive guard — the dispatcher
-            (WF-IMPL-055) is responsible for routing each kind to
-            its dedicated handler.
+            step.
+        """
+        return drive_activity_generator(
+            self.iter_calls(ctx, graph, step_id),
+            self._activity_client,
+            self._connector_client,
+        )
+
+    # ------------------------------------------------------------------
+    # Generator-based yield protocol (WF-IMPL-074)
+    # ------------------------------------------------------------------
+
+    def iter_calls(
+        self,
+        ctx: StepExecutionContext,
+        graph: ExecutionGraph,
+        step_id: str,
+    ) -> Generator[ActivityCallToken, object, StepResult]:
+        """Yield-protocol equivalent of :meth:`execute`.
+
+        Produces the same dispatch sequence ``execute`` would, but
+        replaces every inline outbound RPC with a yielded
+        :class:`~custos_workflow.runtime.dapr_activities.ActivityCallToken`
+        value object. The driver (a production Dapr worker,
+        :class:`~custos_workflow.runtime.FakeWorkflowRuntime`, or
+        the in-process
+        :class:`~custos_workflow.runtime.dapr_activities.FakeDaprActivityDispatcher`)
+        resolves each yielded token and feeds the response back
+        in via ``gen.send(response)`` so the handler's retry loop,
+        envelope dispatch, and observability instrumentation
+        observe the same values they would have observed when the
+        calls were inline.
+
+        Yield contract (per attempt of the retry loop, in order):
+
+        1. :class:`BindForStepCallToken` carrying the per-attempt
+           :class:`BindForStepRequest`. Driver MUST send back the
+           resolved :class:`BindForStepResponse`.
+        2. :class:`ScheduleActivityCallToken` carrying the
+           per-attempt :class:`ScheduleActivityRequest` (built
+           from the inputs resolved once before the loop + the
+           contexts the driver just resolved). Driver MUST send
+           back the resolved :class:`ActivityResultEnvelope`.
+
+        Exceptions raised by the driver during token resolution
+        are propagated back into this generator via
+        :meth:`Generator.throw` so the handler's existing
+        ``try`` / ``except`` blocks observe the same exception
+        types they observed under the inline call path
+        (notably :class:`ConnectorBindError` and
+        :class:`ActivityScheduleError`). Replay-determinism is
+        preserved: the inputs are still resolved exactly once
+        before the loop, and the per-attempt RNG is still seeded
+        off ``(run_id, step_id, attempt)``.
+
+        :returns: The same :class:`StepResult` variant
+            :meth:`execute` would return.
+
+        :raises KeyError: See :meth:`execute`.
+        :raises NotImplementedError: See :meth:`execute`.
         """
         node = _resolve_node(graph, step_id)
         if node.kind is not StepKind.ACTIVITY:
             raise NotImplementedError(
-                f"ActivityStepHandler.execute received {node.kind.value!r} step "
+                f"ActivityStepHandler.iter_calls received {node.kind.value!r} step "
                 f"{step_id!r}; only StepKind.ACTIVITY is supported",
             )
         activity_step = node.step_source
         if not isinstance(activity_step, ActivityStep):  # pragma: no cover - defensive
             raise NotImplementedError(
-                f"ActivityStepHandler.execute: node {step_id!r} has step_source "
+                f"ActivityStepHandler.iter_calls: node {step_id!r} has step_source "
                 f"of type {type(activity_step).__name__}, expected ActivityStep",
             )
 
@@ -317,11 +396,13 @@ class ActivityStepHandler:
             # a stale slot handle. Surface bind failures as a
             # ``step.connector_bind_error`` envelope and stop the
             # loop (no automatic retry on infrastructure errors).
+            bind_request = BindForStepRequest(
+                step_key=triple.to_str(),
+                slots=slot_specs,
+            )
             try:
                 with observe_step_bind_connectors(step_kind_label):
-                    bind_response = self._connector_client.bind_for_step(
-                        BindForStepRequest(step_key=triple.to_str(), slots=slot_specs),
-                    )
+                    bind_response = yield BindForStepCallToken(request=bind_request)
             except ConnectorBindError as exc:
                 # Bind failure short-circuits the attempt loop
                 # without scheduling, so the attempt counter
@@ -340,21 +421,34 @@ class ActivityStepHandler:
                 record_step_attempt(step_kind_label, "internal_error")
                 return StepFailed(envelope=MappingProxyType(wrapped.to_dict()))
 
+            # The driver MUST send back a BindForStepResponse for
+            # the yielded BindForStepCallToken. A typed guard here
+            # catches a driver that ships back the wrong shape
+            # (e.g. forwards an ``ActivityResultEnvelope`` by
+            # mistake) instead of mis-feeding the schedule
+            # request and producing a confusing downstream
+            # failure.
+            if not isinstance(bind_response, BindForStepResponse):
+                raise TypeError(
+                    "ActivityStepHandler.iter_calls received a non-"
+                    "BindForStepResponse value back from the driver for the "
+                    f"yielded BindForStepCallToken: got {type(bind_response).__name__}",
+                )
+
             deadline = ctx.workflow_context.current_utc_datetime + self._default_activity_deadline
             schedule_start = time.perf_counter()
+            schedule_request = ScheduleActivityRequest(
+                run_id=triple.run_id,
+                step_id=triple.step_id,
+                attempt=triple.attempt,
+                activity_ref=activity_step.activity,
+                inputs=inputs,
+                connector_contexts=bind_response.contexts,
+                deadline=deadline,
+            )
             try:
                 with observe_step_schedule_activity(step_kind_label):
-                    envelope = self._activity_client.schedule_activity(
-                        ScheduleActivityRequest(
-                            run_id=triple.run_id,
-                            step_id=triple.step_id,
-                            attempt=triple.attempt,
-                            activity_ref=activity_step.activity,
-                            inputs=inputs,
-                            connector_contexts=bind_response.contexts,
-                            deadline=deadline,
-                        ),
-                    )
+                    envelope = yield ScheduleActivityCallToken(request=schedule_request)
             except ActivityScheduleError as exc:
                 record_step_attempt(step_kind_label, "internal_error")
                 return StepFailed(envelope=MappingProxyType(exc.to_dict()))
@@ -369,6 +463,14 @@ class ActivityStepHandler:
                 )
                 record_step_attempt(step_kind_label, "internal_error")
                 return StepFailed(envelope=MappingProxyType(wrapped_schedule.to_dict()))
+
+            if not isinstance(envelope, ActivityResultEnvelope):
+                raise TypeError(
+                    "ActivityStepHandler.iter_calls received a non-"
+                    "ActivityResultEnvelope value back from the driver for "
+                    "the yielded ScheduleActivityCallToken: got "
+                    f"{type(envelope).__name__}",
+                )
 
             # WF-IMPL-058: schedule succeeded — record the
             # envelope class on the duration histogram and bump
