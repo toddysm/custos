@@ -48,14 +48,21 @@ the WF-IMPL-093 dispatch path can map it uniformly to a
   surfaced a terminal failure; the first such child (in spawn order)
   short-circuits the whole loop.
 
-An empty iterable is handled here: it spawns no children and returns an
-empty list (without yielding a ``when_all`` over zero tasks).
+An empty iterable — or a ``forEach`` list that the optional ``where:``
+pre-filter empties — is handled here: it spawns no children and returns
+an empty list (without yielding a ``when_all`` over zero tasks).
+
+The optional ``where:`` predicate is evaluated once per item with the
+item overlaid into the CEL ``let`` scope under the loop variable
+(:data:`DEFAULT_LOOP_VAR`); items the predicate rejects spawn no child.
+A ``forEach`` list that derives two equal iteration keys is rejected
+with ``step.loop_expansion_error`` (the deterministic child instance id
+must be unique per iteration).
 
 Out of scope (later tasks)
 --------------------------
 
-The ``where:`` pre-filter and duplicate iteration-key collision
-detection land in WF-IMPL-090; the orchestrator dispatch that routes
+The orchestrator dispatch that routes
 ``PrimitiveHandler.SUB_ORCHESTRATION`` nodes through this manager (and
 stores the returned list under ``steps.<stepId>.outputs``) lands in
 WF-IMPL-093.
@@ -99,6 +106,10 @@ __all__ = ["SubOrchestrationManager"]
 #: ``custos_workflow.callsites.collect._COMMON_SLOTS``).
 _FOR_EACH_SLOT: str = "forEach"
 
+#: Wire-name (and ``call_sites`` key) of the ``where`` slot — the
+#: optional per-item predicate applied to the ``forEach`` list.
+_WHERE_SLOT: str = "where"
+
 
 class SubOrchestrationManager:
     """Parent-side driver for child-workflow fan-out (ADR-007).
@@ -132,8 +143,10 @@ class SubOrchestrationManager:
             (one entry per item, in input list order). Delivered as the
             generator's ``StopIteration.value``.
 
-        :raises LoopExpansionError: The ``forEach`` expression failed to
-            evaluate, or did not yield a list.
+        :raises LoopExpansionError: The ``forEach`` (or ``where:``)
+            expression failed to evaluate, ``forEach`` did not yield a
+            list, ``where:`` did not yield a bool, or two items derived
+            the same iteration key.
         :raises SubOrchestrationSpawnError: A deterministic child
             instance id could not be derived for an item.
         :raises SubWorkflowFailedError: A single awaited child ran and
@@ -144,6 +157,7 @@ class SubOrchestrationManager:
         run_id = str(ctx.run_id)
 
         items = self._expand_for_each(ctx, graph, node, step_id, run_id)
+        items = self._apply_where(ctx, graph, node, step_id, run_id, items)
 
         # The loop body each child runs is a byte-stable single-node
         # graph carrying this node; identical for every item (only the
@@ -151,9 +165,13 @@ class SubOrchestrationManager:
         # reproducible under replay.
         child_graph_json = to_json(_child_graph(graph, node))
 
+        # Derive every iteration key up front so a duplicate is rejected
+        # *before* any child is spawned (a partial fan-out would leave
+        # dangling durable child instances behind).
+        keyed = self._key_items(step_id, run_id, items)
+
         spawned: list[tuple[str, str, Any]] = []
-        for index, item in enumerate(items):
-            key = iteration_key(item, index)
+        for key, item in keyed:
             try:
                 instance_id = child_instance_id(run_id, step_id, key)
             except ChildInstanceIdError as exc:
@@ -182,10 +200,10 @@ class SubOrchestrationManager:
             )
             spawned.append((key, instance_id, task))
 
-        # An empty iterable spawns no children and produces an empty
-        # output list; this early return keeps the zero-child path from
-        # yielding a ``when_all`` over no tasks. (The ``where:`` pre-filter
-        # and duplicate-key collision detection are added in WF-IMPL-090.)
+        # An empty iterable — or a ``where:`` filter that removed every
+        # item — spawns no children and produces an empty output list;
+        # this early return keeps the zero-child path from yielding a
+        # ``when_all`` over no tasks.
         if not spawned:
             return []
 
@@ -217,18 +235,7 @@ class SubOrchestrationManager:
                 step_id=step_id,
             )
 
-        scope = BindingScope(
-            run=RunInfo(id=run_id, workspace=ctx.workspace_id),
-            workflow=WorkflowInfo(
-                name=graph.metadata.workflow_name,
-                version=ctx.workflow_version_id,
-            ),
-            now=ctx.clock.now,
-            inputs=ctx.inputs,
-            steps=MappingProxyType(
-                {sid: StepBinding(out, sealed=True) for sid, out in ctx.outputs.items()}
-            ),
-        )
+        scope = self._build_scope(ctx, graph, run_id)
         try:
             raw = custos_cel.evaluate(call_site.typed_ast, scope, ctx.clock)
         except CelError as exc:
@@ -248,6 +255,117 @@ class SubOrchestrationManager:
                 source=call_site.source,
             )
         return raw
+
+    def _apply_where(
+        self,
+        ctx: StepExecutionContext,
+        graph: ExecutionGraph,
+        node: ExecutionNode,
+        step_id: str,
+        run_id: str,
+        items: list[Any],
+    ) -> list[Any]:
+        """Apply the optional ``where:`` pre-filter to ``items``.
+
+        When the node carries a ``where`` call site, the predicate is
+        evaluated once per item with the item overlaid into the CEL
+        ``let`` scope under :data:`DEFAULT_LOOP_VAR` (so a predicate can
+        read e.g. ``let.item.enabled``). Items the predicate rejects are
+        dropped and spawn no child. When the node has no ``where`` slot
+        the list is returned unchanged.
+        """
+        call_site = node.call_sites.get(_WHERE_SLOT)
+        if call_site is None:
+            return items
+        if call_site.kind is not CallSiteKind.WHERE:
+            # Defensive: the collector keys ``where`` call sites under the
+            # ``"where"`` slot with ``CallSiteKind.WHERE``; a mismatch is a
+            # programmer error rather than a workflow-author error.
+            raise LoopExpansionError(
+                f"step {step_id!r} has a non-where call site in the where slot",
+                run_id=run_id,
+                step_id=step_id,
+            )
+
+        base_scope = self._build_scope(ctx, graph, run_id)
+        kept: list[Any] = []
+        for item in items:
+            scope = base_scope.with_let(**{DEFAULT_LOOP_VAR: item})
+            try:
+                verdict = custos_cel.evaluate(call_site.typed_ast, scope, ctx.clock)
+            except CelError as exc:
+                raise LoopExpansionError(
+                    f"failed to evaluate where on step {step_id!r}: {exc}",
+                    run_id=run_id,
+                    step_id=step_id,
+                    cause_kind=exc.kind,
+                    source=call_site.source,
+                ) from exc
+            if not isinstance(verdict, bool):
+                raise LoopExpansionError(
+                    f"where on step {step_id!r} evaluated to a "
+                    f"{type(verdict).__name__}, expected a bool",
+                    run_id=run_id,
+                    step_id=step_id,
+                    source=call_site.source,
+                )
+            if verdict:
+                kept.append(item)
+        return kept
+
+    def _key_items(
+        self,
+        step_id: str,
+        run_id: str,
+        items: list[Any],
+    ) -> list[tuple[str, Any]]:
+        """Pair each item with its deterministic iteration key.
+
+        Two items deriving the same iteration key would collide on the
+        deterministic child instance id ``<runId>/<stepId>/<key>``, so
+        the whole loop is rejected rather than silently dropping or
+        overwriting a child.
+        """
+        keyed: list[tuple[str, Any]] = []
+        seen_keys: set[str] = set()
+        for index, item in enumerate(items):
+            key = iteration_key(item, index)
+            if key in seen_keys:
+                raise LoopExpansionError(
+                    f"forEach on step {step_id!r} produced a duplicate "
+                    f"iteration key {key!r}; loop iteration keys must be unique",
+                    run_id=run_id,
+                    step_id=step_id,
+                    colliding_key=key,
+                )
+            seen_keys.add(key)
+            keyed.append((key, item))
+        return keyed
+
+    def _build_scope(
+        self,
+        ctx: StepExecutionContext,
+        graph: ExecutionGraph,
+        run_id: str,
+    ) -> BindingScope:
+        """Build the CEL scope for loop ``forEach`` / ``where:`` evaluation.
+
+        Exposes the same ``inputs`` / ``steps`` / ``run`` / ``workflow``
+        / ``now`` roots the top-level orchestrator's gate evaluator uses,
+        so a loop expression sees exactly the parent's expression scope.
+        """
+        return BindingScope(
+            run=RunInfo(id=run_id, workspace=ctx.workspace_id),
+            workflow=WorkflowInfo(
+                name=graph.metadata.workflow_name,
+                version=ctx.workflow_version_id,
+            ),
+            now=ctx.clock.now,
+            inputs=ctx.inputs,
+            steps=MappingProxyType(
+                {sid: StepBinding(out, sealed=True) for sid, out in ctx.outputs.items()}
+            ),
+        )
 
     def _await_children(
         self,

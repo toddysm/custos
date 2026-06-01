@@ -8,9 +8,12 @@ from typing import Any, cast
 
 import pytest
 from custos_cel import (
+    BoolType,
     DaprWorkflowClock,
     FixedClock,
+    MapType,
     SchemaBindings,
+    StringType,
     parse,
     type_check,
 )
@@ -61,6 +64,23 @@ def _for_each_call_site(cel: str, *, inputs_schema: dict[str, Any]) -> TypedCall
         typed_ast=type_check(ast, SchemaBindings(inputs=inputs_schema)),
         kind=CallSiteKind.FOR_EACH,
         document_path="spec.steps[0].forEach",
+    )
+
+
+def _where_call_site(cel: str, *, inputs_schema: dict[str, Any]) -> TypedCallSite:
+    # The ``where:`` predicate sees the per-iteration item overlaid into
+    # ``let`` under the loop variable (``item``); typed here as a
+    # ``map<string, bool>`` so ``let.item.<flag>`` type-checks to a bool.
+    ast = parse(cel)
+    bindings = SchemaBindings(
+        inputs=inputs_schema,
+        let={"item": MapType(key=StringType(), value=BoolType())},
+    )
+    return TypedCallSite(
+        source=f"${{{{ {cel} }}}}",
+        typed_ast=type_check(ast, bindings),
+        kind=CallSiteKind.WHERE,
+        document_path="spec.steps[0].where",
     )
 
 
@@ -242,6 +262,186 @@ def test_empty_iterable_returns_empty_list_without_yielding() -> None:
     assert si.value.value == []
     assert ctx.calls == []
     assert ctx.when_all_tasks is None
+
+
+# ---------------------------------------------------------------------------
+# where: pre-filter
+# ---------------------------------------------------------------------------
+
+
+def _loop_graph_with_where(
+    *,
+    for_each_cel: str,
+    where_cel: str,
+    for_each_schema: dict[str, Any],
+    where_schema: dict[str, Any] | None = None,
+) -> ExecutionGraph:
+    return _loop_graph(
+        for_each_cel=for_each_cel,
+        inputs_schema=for_each_schema,
+        call_sites={
+            "where": _where_call_site(where_cel, inputs_schema=where_schema or for_each_schema)
+        },
+    )
+
+
+def test_where_filters_out_rejected_items() -> None:
+    ctx = _StubContext()
+    graph = _loop_graph_with_where(
+        for_each_cel="inputs.items",
+        where_cel='let.item["keep"]',
+        for_each_schema=_ARRAY_OF_OBJECTS,
+    )
+    step_ctx = _ctx(
+        inputs={
+            "items": [
+                {"id": "a", "keep": True},
+                {"id": "b", "keep": False},
+                {"id": "c", "keep": True},
+            ]
+        },
+        workflow_context=ctx,
+    )
+
+    gen = SubOrchestrationManager().run_loop(step_ctx, graph, _STEP_ID)
+    _drive_to_when_all(gen)
+
+    # Only the kept items spawn children, preserving input order.
+    assert [c["instance_id"] for c in ctx.calls] == ["parent-1/scan/a", "parent-1/scan/c"]
+    decoded = [ChildStepInput.from_dict(c["input"]) for c in ctx.calls]
+    assert [d.item for d in decoded] == [
+        {"id": "a", "keep": True},
+        {"id": "c", "keep": True},
+    ]
+
+
+def test_where_filtering_all_out_returns_empty_without_yielding() -> None:
+    ctx = _StubContext()
+    graph = _loop_graph_with_where(
+        for_each_cel="inputs.items",
+        where_cel='let.item["keep"]',
+        for_each_schema=_ARRAY_OF_OBJECTS,
+    )
+    step_ctx = _ctx(
+        inputs={"items": [{"id": "a", "keep": False}, {"id": "b", "keep": False}]},
+        workflow_context=ctx,
+    )
+
+    gen = SubOrchestrationManager().run_loop(step_ctx, graph, _STEP_ID)
+    with pytest.raises(StopIteration) as si:
+        next(gen)
+    assert si.value.value == []
+    assert ctx.calls == []
+    assert ctx.when_all_tasks is None
+
+
+def test_where_single_item_kept_spawns_one_child() -> None:
+    ctx = _StubContext()
+    graph = _loop_graph_with_where(
+        for_each_cel="inputs.items",
+        where_cel='let.item["keep"]',
+        for_each_schema=_ARRAY_OF_OBJECTS,
+    )
+    step_ctx = _ctx(
+        inputs={"items": [{"id": "solo", "keep": True}]},
+        workflow_context=ctx,
+    )
+
+    gen = SubOrchestrationManager().run_loop(step_ctx, graph, _STEP_ID)
+    _drive_to_when_all(gen)
+
+    assert [c["instance_id"] for c in ctx.calls] == ["parent-1/scan/solo"]
+
+
+def test_where_non_bool_raises_loop_expansion_error() -> None:
+    ctx = _StubContext()
+    graph = _loop_graph_with_where(
+        for_each_cel="inputs.items",
+        where_cel='let.item["keep"]',
+        for_each_schema=_ARRAY_OF_OBJECTS,
+    )
+    # The predicate type-checks to bool, but the runtime value under
+    # ``keep`` is a string, so the verdict is not a bool.
+    step_ctx = _ctx(
+        inputs={"items": [{"id": "a", "keep": "yes"}]},
+        workflow_context=ctx,
+    )
+
+    gen = SubOrchestrationManager().run_loop(step_ctx, graph, _STEP_ID)
+    with pytest.raises(LoopExpansionError) as exc:
+        next(gen)
+    assert exc.value.kind == "step.loop_expansion_error"
+    assert exc.value.source == '${{ let.item["keep"] }}'
+    assert ctx.calls == []
+
+
+def test_where_eval_error_raises_loop_expansion_error() -> None:
+    ctx = _StubContext()
+    where_schema = {
+        "type": "object",
+        "properties": {
+            "items": {"type": "array", "items": {"type": "object"}},
+            "flag": {"type": "boolean"},
+        },
+        "required": ["items"],
+    }
+    graph = _loop_graph_with_where(
+        for_each_cel="inputs.items",
+        where_cel="inputs.flag",
+        for_each_schema=_ARRAY_OF_OBJECTS,
+        where_schema=where_schema,
+    )
+    # ``inputs.flag`` is optional in the schema but absent at runtime, so
+    # the CEL evaluator raises an unbound-name error mid-filter.
+    step_ctx = _ctx(inputs={"items": [{"id": "a"}]}, workflow_context=ctx)
+
+    gen = SubOrchestrationManager().run_loop(step_ctx, graph, _STEP_ID)
+    with pytest.raises(LoopExpansionError) as exc:
+        next(gen)
+    assert exc.value.kind == "step.loop_expansion_error"
+    assert exc.value.cause_kind is not None
+    assert exc.value.source == "${{ inputs.flag }}"
+    assert ctx.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Duplicate iteration-key collision → step.loop_expansion_error
+# ---------------------------------------------------------------------------
+
+
+def test_duplicate_iteration_keys_raise_loop_expansion_error() -> None:
+    ctx = _StubContext()
+    graph = _loop_graph(for_each_cel="inputs.items", inputs_schema=_ARRAY_OF_OBJECTS)
+    step_ctx = _ctx(
+        inputs={"items": [{"id": "dup"}, {"id": "dup"}]},
+        workflow_context=ctx,
+    )
+
+    gen = SubOrchestrationManager().run_loop(step_ctx, graph, _STEP_ID)
+    with pytest.raises(LoopExpansionError) as exc:
+        next(gen)
+    assert exc.value.kind == "step.loop_expansion_error"
+    assert exc.value.colliding_key == "dup"
+    # Collision is detected before any child is spawned.
+    assert ctx.calls == []
+
+
+def test_where_slot_with_wrong_kind_raises_loop_expansion_error() -> None:
+    ctx = _StubContext()
+    # Defensive guard: a non-WHERE call site occupying the ``where`` slot
+    # is a programmer error, not a workflow-author error.
+    graph = _loop_graph(
+        for_each_cel="inputs.items",
+        inputs_schema=_ARRAY_OF_OBJECTS,
+        call_sites={"where": _for_each_call_site("inputs.items", inputs_schema=_ARRAY_OF_OBJECTS)},
+    )
+    step_ctx = _ctx(inputs={"items": [{"id": "a"}]}, workflow_context=ctx)
+
+    gen = SubOrchestrationManager().run_loop(step_ctx, graph, _STEP_ID)
+    with pytest.raises(LoopExpansionError) as exc:
+        next(gen)
+    assert exc.value.kind == "step.loop_expansion_error"
+    assert ctx.calls == []
 
 
 # ---------------------------------------------------------------------------
