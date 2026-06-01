@@ -55,6 +55,7 @@ Metric / span names follow the issue scope verbatim:
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import AsyncIterator, Iterator, Mapping
 from contextlib import AbstractContextManager, asynccontextmanager, contextmanager
@@ -1195,9 +1196,13 @@ OUTBOUND_RPC_ERRORS_TOTAL: Final[Counter] = _meter.create_counter(
 #: ``retryable`` → :class:`OutboundRpcStatusError` with status in
 #: 408 / 429 / 5xx (matches the WF-IMPL-075 envelope mapper).
 #: ``permanent`` → :class:`OutboundRpcStatusError` with status in
-#: 4xx \ {408, 429} OR :class:`OutboundRpcDecodeError`.
+#: 4xx \ {408, 429} OR :class:`OutboundRpcDecodeError`. Also the
+#: catch-all bucket for any unexpected non-``OutboundRpc`` exception
+#: that escapes the wrapped block (the error counter is *not* bumped
+#: for these — they carry no locked ``wf.error.kind``).
 #: ``cancelled`` → :class:`OutboundRpcCancelledError` (HTTP 499 or
-#: explicit upstream cancel).
+#: explicit upstream cancel) OR an :class:`asyncio.CancelledError`
+#: propagating through the wrapped call.
 LOCKED_OUTBOUND_RPC_OUTCOMES: Final[frozenset[str]] = frozenset(
     {"success", "transport", "retryable", "permanent", "cancelled"}
 )
@@ -1360,10 +1365,23 @@ async def observe_outbound_rpc(
         _set_optional_attr(span, "wf.run.id", run_id)
         _set_optional_attr(span, "wf.step.id", step_id)
         _set_optional_attr(span, "wf.attempt", attempt)
+
+        # Default outcome assumes a clean exit; the except branches
+        # below downgrade it. ``error_kind`` stays ``None`` for the
+        # success path *and* for unexpected non-``OutboundRpc``
+        # failures (the error counter is locked to
+        # ``LOCKED_OUTBOUND_RPC_KINDS``, which only covers the
+        # outbound-RPC taxonomy). The shared ``finally`` records the
+        # duration histogram + total counter exactly once on *every*
+        # exit path — success, ``OutboundRpcError``, asyncio
+        # cancellation, or any other escaping exception — so the
+        # "one sample per call" invariant holds even when an
+        # unexpected exception propagates through the wrapped block.
+        outcome = "success"
+        error_kind: str | None = None
         try:
             yield ctx
         except OutboundRpcError as exc:
-            elapsed_ms = (time.perf_counter() - start) * 1000.0
             if isinstance(exc, OutboundRpcTransportError):
                 outcome = "transport"
             elif isinstance(exc, OutboundRpcCancelledError):
@@ -1379,6 +1397,25 @@ async def observe_outbound_rpc(
                 outcome = "permanent"
             else:  # pragma: no cover - defensive; closed taxonomy
                 outcome = "permanent"
+            error_kind = exc.kind
+            span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
+            span.record_exception(exc)
+            raise
+        except BaseException as exc:
+            # Unexpected non-``OutboundRpc`` failure escaping the
+            # wrapped block (asyncio cancellation, an unforeseen
+            # parsing/validation error, etc.). Classify cancellation
+            # as ``cancelled`` and everything else as ``permanent``
+            # so the total counter still records one sample, then
+            # re-raise untouched. The error counter is *not* bumped:
+            # these exceptions carry no ``wf.error.kind`` in the
+            # locked outbound-RPC taxonomy.
+            outcome = "cancelled" if isinstance(exc, asyncio.CancelledError) else "permanent"
+            span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
+            span.record_exception(exc)
+            raise
+        finally:
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
             status_code_label = str(ctx.status_code) if ctx.status_code is not None else "0"
             OUTBOUND_RPC_DURATION_MS.record(
                 elapsed_ms,
@@ -1392,30 +1429,11 @@ async def observe_outbound_rpc(
                 1,
                 {"wf.client": client, "wf.method": method, "wf.outcome": outcome},
             )
-            OUTBOUND_RPC_ERRORS_TOTAL.add(1, {"wf.error.kind": exc.kind})
+            if error_kind is not None:
+                OUTBOUND_RPC_ERRORS_TOTAL.add(1, {"wf.error.kind": error_kind})
             span.set_attribute("wf.outcome", outcome)
-            span.set_attribute("wf.error.kind", exc.kind)
-            if ctx.status_code is not None:
-                span.set_attribute("http.status_code", str(ctx.status_code))
-            span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
-            span.record_exception(exc)
-            raise
-        else:
-            elapsed_ms = (time.perf_counter() - start) * 1000.0
-            status_code_label = str(ctx.status_code) if ctx.status_code is not None else "0"
-            OUTBOUND_RPC_DURATION_MS.record(
-                elapsed_ms,
-                {
-                    "wf.client": client,
-                    "wf.method": method,
-                    "http.status_code": status_code_label,
-                },
-            )
-            OUTBOUND_RPC_TOTAL.add(
-                1,
-                {"wf.client": client, "wf.method": method, "wf.outcome": "success"},
-            )
-            span.set_attribute("wf.outcome", "success")
+            if error_kind is not None:
+                span.set_attribute("wf.error.kind", error_kind)
             if ctx.status_code is not None:
                 span.set_attribute("http.status_code", str(ctx.status_code))
 

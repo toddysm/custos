@@ -25,6 +25,7 @@ production imports the API-only no-op providers).
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
@@ -50,6 +51,7 @@ from custos_workflow.clients._errors import (
     LOCKED_OUTBOUND_RPC_KINDS,
     OutboundRpcCancelledError,
     OutboundRpcDecodeError,
+    OutboundRpcError,
     OutboundRpcStatusError,
     OutboundRpcTransportError,
 )
@@ -243,20 +245,99 @@ def test_locked_span_attributes_exhaustiveness() -> None:
 
 def test_every_outbound_rpc_subclass_maps_to_a_locked_outcome() -> None:
     """Every concrete ``OutboundRpcError`` subclass must map into LOCKED_OUTBOUND_RPC_OUTCOMES."""
-    # Walk every concrete subclass and assert the recogniser inside
-    # ``observe_outbound_rpc`` produces a locked outcome label —
-    # mirrors the build-time guard described in the module docstring.
-    concrete = [
-        OutboundRpcTransportError,
-        OutboundRpcCancelledError,
-        OutboundRpcDecodeError,
+    # Drive one instance of each concrete subclass through
+    # ``observe_outbound_rpc`` and assert the recorded ``wf.outcome``
+    # lands in the locked outcome set (the real mapping under test),
+    # *and* that each subclass's ``.kind`` is a locked error kind
+    # (the value the error counter is labelled with). Mirrors the
+    # build-time guard described in the ``_telemetry`` module
+    # docstring.
+    cases: list[OutboundRpcError] = [
+        OutboundRpcTransportError("transport boom"),
+        OutboundRpcCancelledError("cancelled upstream"),
+        OutboundRpcDecodeError("bad json"),
+        # ``OutboundRpcStatusError`` is parameterised by status code;
+        # spot-check the two boundary buckets here (retryable 5xx +
+        # permanent 4xx), leaving the full table to the per-status
+        # tests below.
+        OutboundRpcStatusError("upstream 503", status_code=503),
+        OutboundRpcStatusError("upstream 400", status_code=400),
     ]
-    # OutboundRpcStatusError is parameterised by status code; spot-check
-    # the two boundary buckets here, leaving the full table to the
-    # per-status tests below.
-    for cls in concrete:
-        assert cls.kind in LOCKED_OUTBOUND_RPC_KINDS
-    assert OutboundRpcStatusError.kind in LOCKED_OUTBOUND_RPC_KINDS
+
+    async def _run(exc: OutboundRpcError) -> str:
+        with pytest.raises(OutboundRpcError):
+            async with _telemetry.observe_outbound_rpc(client="arm", method="ScheduleActivity"):
+                raise exc
+        totals = _by_name(_collect_points(), "custos_workflow_outbound_rpc_total")
+        assert len(totals) == 1
+        attrs, _value = totals[0]
+        return attrs["wf.outcome"]
+
+    for case in cases:
+        outcome = asyncio.run(_run(case))
+        assert outcome in _telemetry.LOCKED_OUTBOUND_RPC_OUTCOMES
+        assert case.kind in LOCKED_OUTBOUND_RPC_KINDS
+
+
+@pytest.mark.asyncio
+async def test_unexpected_exception_records_permanent_with_no_error_counter() -> None:
+    """An unexpected non-OutboundRpc exception still records one duration + total sample.
+
+    The total counter must land in the ``permanent`` bucket and the
+    error counter must NOT be bumped (the unexpected exception carries
+    no locked ``wf.error.kind``), so the "one sample per call"
+    invariant holds even on the unforeseen-failure path.
+    """
+    with pytest.raises(ValueError, match="boom"):
+        async with _telemetry.observe_outbound_rpc(client="arm", method="ScheduleActivity"):
+            raise ValueError("boom")
+
+    points = _collect_points()
+    totals = _by_name(points, "custos_workflow_outbound_rpc_total")
+    assert len(totals) == 1
+    attrs, value = totals[0]
+    assert attrs["wf.outcome"] == "permanent"
+    assert value == 1
+
+    # No error counter — unexpected exceptions have no locked kind.
+    assert _by_name(points, "custos_workflow_outbound_rpc_errors_total") == []
+
+    # Still exactly one duration sample, labelled with the no-response
+    # sentinel status code.
+    durations = _by_name(points, "custos_workflow_outbound_rpc_duration_ms")
+    assert len(durations) == 1
+    assert durations[0][0]["http.status_code"] == "0"
+
+    spans = _outbound_spans()
+    assert len(spans) == 1
+    assert spans[0].attributes is not None
+    assert spans[0].attributes["wf.outcome"] == "permanent"
+    assert "wf.error.kind" not in spans[0].attributes
+    assert spans[0].status.status_code == StatusCode.ERROR
+
+
+@pytest.mark.asyncio
+async def test_cancelled_error_records_cancelled_with_no_error_counter() -> None:
+    """An ``asyncio.CancelledError`` propagates untouched and records the ``cancelled`` outcome."""
+    with pytest.raises(asyncio.CancelledError):
+        async with _telemetry.observe_outbound_rpc(client="connector", method="BindForStep"):
+            raise asyncio.CancelledError
+
+    points = _collect_points()
+    totals = _by_name(points, "custos_workflow_outbound_rpc_total")
+    assert len(totals) == 1
+    attrs, value = totals[0]
+    assert attrs["wf.outcome"] == "cancelled"
+    assert value == 1
+
+    # No error counter — cancellation carries no locked kind.
+    assert _by_name(points, "custos_workflow_outbound_rpc_errors_total") == []
+
+    spans = _outbound_spans()
+    assert len(spans) == 1
+    assert spans[0].attributes is not None
+    assert spans[0].attributes["wf.outcome"] == "cancelled"
+    assert "wf.error.kind" not in spans[0].attributes
 
 
 # ---------------------------------------------------------------------------
