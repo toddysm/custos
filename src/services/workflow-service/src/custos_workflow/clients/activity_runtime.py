@@ -539,6 +539,7 @@ class DaprActivityRuntimeClient:
         # Lazy import to break the top-level cycle: ``_errors``
         # imports ``ActivityResultClass`` / ``ActivityResultEnvelope``
         # from this module.
+        from custos_workflow._telemetry import observe_outbound_rpc
         from custos_workflow.clients._errors import (
             OutboundRpcCancelledError,
             OutboundRpcError,
@@ -556,50 +557,58 @@ class DaprActivityRuntimeClient:
         wire = _request_to_wire(request)
 
         try:
-            try:
-                response = await self.http_client.post(
-                    url,
-                    json=wire,
-                    timeout=self.timeout,
-                    headers={
-                        "Content-Type": "application/json",
-                        IDEMPOTENCY_HEADER: idempotency_key,
-                    },
-                )
-            except httpx.HTTPError as exc:
-                # No response observed — transport-layer failure.
-                # Preserved on ``__cause__`` so the envelope mapper
-                # renders the original ``httpx`` exception class +
-                # message into the ``cause`` chain.
-                raise OutboundRpcTransportError(
-                    f"Dapr ScheduleActivity transport failure: {exc!r}"
-                ) from exc
+            async with observe_outbound_rpc(
+                client="arm",
+                method=SCHEDULE_ACTIVITY_DAPR_METHOD,
+                run_id=request.run_id,
+                step_id=request.step_id,
+                attempt=request.attempt,
+            ) as obs_ctx:
+                try:
+                    response = await self.http_client.post(
+                        url,
+                        json=wire,
+                        timeout=self.timeout,
+                        headers={
+                            "Content-Type": "application/json",
+                            IDEMPOTENCY_HEADER: idempotency_key,
+                        },
+                    )
+                except httpx.HTTPError as exc:
+                    # No response observed — transport-layer failure.
+                    # Preserved on ``__cause__`` so the envelope mapper
+                    # renders the original ``httpx`` exception class +
+                    # message into the ``cause`` chain.
+                    raise OutboundRpcTransportError(
+                        f"Dapr ScheduleActivity transport failure: {exc!r}"
+                    ) from exc
 
-            status_code = response.status_code
-            if status_code == _CLIENT_CLOSED_REQUEST_STATUS:
-                raise OutboundRpcCancelledError(
-                    f"Dapr ScheduleActivity cancelled upstream (HTTP {status_code})"
-                )
-            if status_code // 100 != 2:
-                body_preview = response.text[:200] if response.text else ""
-                raise OutboundRpcStatusError(
-                    f"Dapr ScheduleActivity returned HTTP {status_code}: {body_preview!r}",
-                    status_code=status_code,
-                )
+                status_code = response.status_code
+                obs_ctx.set_status_code(status_code)
+                if status_code == _CLIENT_CLOSED_REQUEST_STATUS:
+                    raise OutboundRpcCancelledError(
+                        f"Dapr ScheduleActivity cancelled upstream (HTTP {status_code})"
+                    )
+                if status_code // 100 != 2:
+                    body_preview = response.text[:200] if response.text else ""
+                    raise OutboundRpcStatusError(
+                        f"Dapr ScheduleActivity returned HTTP {status_code}: {body_preview!r}",
+                        status_code=status_code,
+                    )
 
-            try:
-                body = response.json()
-            except ValueError as exc:
-                # ``ValueError`` covers both
-                # :class:`json.JSONDecodeError` and any
-                # httpx-internal decoding failure.
-                from custos_workflow.clients._errors import OutboundRpcDecodeError
+                try:
+                    body = response.json()
+                except ValueError as exc:
+                    # ``ValueError`` covers both
+                    # :class:`json.JSONDecodeError` and any
+                    # httpx-internal decoding failure.
+                    from custos_workflow.clients._errors import OutboundRpcDecodeError
 
-                raise OutboundRpcDecodeError(
-                    f"Dapr ScheduleActivity response is not valid JSON: {exc!r}"
-                ) from exc
+                    raise OutboundRpcDecodeError(
+                        f"Dapr ScheduleActivity response is not valid JSON: {exc!r}"
+                    ) from exc
 
-            return _envelope_from_wire(body, expected_attempt=request.attempt)
+                return _envelope_from_wire(body, expected_attempt=request.attempt)
         except OutboundRpcError as exc:
             return map_to_activity_envelope(exc, attempt=request.attempt)
 
@@ -633,6 +642,7 @@ class DaprActivityRuntimeClient:
         exception escapes.
         """
         # Lazy import — see ``schedule_activity`` for rationale.
+        from custos_workflow._telemetry import observe_outbound_rpc
         from custos_workflow.clients._errors import (
             OutboundRpcStatusError,
             OutboundRpcTransportError,
@@ -641,42 +651,59 @@ class DaprActivityRuntimeClient:
         url = build_invoke_url(self.endpoint, CANCEL_ACTIVITY_DAPR_METHOD)
         wire = {"runId": run_id, "stepId": step_id}
 
-        try:
-            response = await self.http_client.post(
-                url,
-                json=wire,
-                timeout=self.timeout,
-                headers={"Content-Type": "application/json"},
-            )
-        except httpx.HTTPError as exc:
-            raise OutboundRpcTransportError(
-                f"Dapr CancelActivity transport failure: {exc!r}"
-            ) from exc
+        # ``attempt`` is deliberately omitted from the observability
+        # context: cancellation is not attempt-scoped (the Workflow
+        # Service may issue multiple cancels for the same step across
+        # different attempt boundaries), so the ``wf.attempt`` span
+        # attribute would be a lie. The 404/409 idempotent no-op
+        # branches return normally and therefore record outcome
+        # ``success`` with the real HTTP status on the histogram,
+        # leaving ``OUTBOUND_RPC_ERRORS_TOTAL`` untouched (pinned by
+        # the WF-IMPL-081 acceptance criteria).
+        async with observe_outbound_rpc(
+            client="arm",
+            method=CANCEL_ACTIVITY_DAPR_METHOD,
+            run_id=run_id,
+            step_id=step_id,
+        ) as obs_ctx:
+            try:
+                response = await self.http_client.post(
+                    url,
+                    json=wire,
+                    timeout=self.timeout,
+                    headers={"Content-Type": "application/json"},
+                )
+            except httpx.HTTPError as exc:
+                raise OutboundRpcTransportError(
+                    f"Dapr CancelActivity transport failure: {exc!r}"
+                ) from exc
 
-        status_code = response.status_code
-        if status_code in (200, 204):
-            return
-        if status_code == 404:
-            _LOGGER.info(
-                "CancelActivity: ARM has no record of step (HTTP 404, treated as no-op)",
-                extra={"run_id": run_id, "step_id": step_id},
-            )
-            return
-        if status_code == 409:
-            _LOGGER.info(
-                "CancelActivity: ARM reports step already terminated (HTTP 409, treated as no-op)",
-                extra={"run_id": run_id, "step_id": step_id},
-            )
-            return
+            status_code = response.status_code
+            obs_ctx.set_status_code(status_code)
+            if status_code in (200, 204):
+                return
+            if status_code == 404:
+                _LOGGER.info(
+                    "CancelActivity: ARM has no record of step (HTTP 404, treated as no-op)",
+                    extra={"run_id": run_id, "step_id": step_id},
+                )
+                return
+            if status_code == 409:
+                _LOGGER.info(
+                    "CancelActivity: ARM reports step already terminated "
+                    "(HTTP 409, treated as no-op)",
+                    extra={"run_id": run_id, "step_id": step_id},
+                )
+                return
 
-        # Fallthrough: every status outside the contracted set
-        # (200/204 success, 404/409 idempotent no-op) is an
-        # unexpected response — 4xx, 5xx, redirects, and any
-        # non-200/204 2xx alike — and is surfaced as a status
-        # error so the bug is visible rather than silently
-        # swallowed.
-        body_preview = response.text[:200] if response.text else ""
-        raise OutboundRpcStatusError(
-            f"Dapr CancelActivity returned HTTP {status_code}: {body_preview!r}",
-            status_code=status_code,
-        )
+            # Fallthrough: every status outside the contracted set
+            # (200/204 success, 404/409 idempotent no-op) is an
+            # unexpected response — 4xx, 5xx, redirects, and any
+            # non-200/204 2xx alike — and is surfaced as a status
+            # error so the bug is visible rather than silently
+            # swallowed.
+            body_preview = response.text[:200] if response.text else ""
+            raise OutboundRpcStatusError(
+                f"Dapr CancelActivity returned HTTP {status_code}: {body_preview!r}",
+                status_code=status_code,
+            )
