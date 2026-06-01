@@ -177,7 +177,7 @@ def drive_activity_generator(
         :data:`ActivityCallToken` instance.
     """
     sent: object = None
-    pending_exc: BaseException | None = None
+    pending_exc: Exception | None = None
     while True:
         try:
             if pending_exc is not None:
@@ -195,12 +195,12 @@ def drive_activity_generator(
         if isinstance(token, BindForStepCallToken):
             try:
                 sent = connector_client.bind_for_step(token.request)
-            except BaseException as exc:
+            except Exception as exc:
                 pending_exc = exc
         elif isinstance(token, ScheduleActivityCallToken):
             try:
                 sent = activity_client.schedule_activity(token.request)
-            except BaseException as exc:
+            except Exception as exc:
                 pending_exc = exc
         else:
             raise TypeError(
