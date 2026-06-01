@@ -48,14 +48,17 @@ the WF-IMPL-093 dispatch path can map it uniformly to a
   surfaced a terminal failure; the first such child (in spawn order)
   short-circuits the whole loop.
 
+An empty iterable is handled here: it spawns no children and returns an
+empty list (without yielding a ``when_all`` over zero tasks).
+
 Out of scope (later tasks)
 --------------------------
 
-The ``where:`` pre-filter, the empty/single-item edge cases, and
-duplicate iteration-key collision detection land in WF-IMPL-090; the
-orchestrator dispatch that routes ``PrimitiveHandler.SUB_ORCHESTRATION``
-nodes through this manager (and stores the returned list under
-``steps.<stepId>.outputs``) lands in WF-IMPL-093.
+The ``where:`` pre-filter and duplicate iteration-key collision
+detection land in WF-IMPL-090; the orchestrator dispatch that routes
+``PrimitiveHandler.SUB_ORCHESTRATION`` nodes through this manager (and
+stores the returned list under ``steps.<stepId>.outputs``) lands in
+WF-IMPL-093.
 """
 
 from __future__ import annotations
@@ -180,10 +183,9 @@ class SubOrchestrationManager:
             spawned.append((key, instance_id, task))
 
         # An empty iterable spawns no children and produces an empty
-        # output list. (The empty-list / single-item / ``where:`` /
-        # duplicate-key edge cases are formalised in WF-IMPL-090; this
-        # early return keeps the zero-child path from yielding a
-        # ``when_all`` over no tasks.)
+        # output list; this early return keeps the zero-child path from
+        # yielding a ``when_all`` over no tasks. (The ``where:`` pre-filter
+        # and duplicate-key collision detection are added in WF-IMPL-090.)
         if not spawned:
             return []
 
