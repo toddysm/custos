@@ -217,6 +217,31 @@ def create_app(
         require_call_context=effective_require,
     )
     app.include_router(health_router)
+
+    # WF-IMPL-069: mount the public REST + Internal RPC surface.
+    # ``register_exception_handlers`` installs the WF-IMPL-061
+    # ``application/problem+json`` envelope for every
+    # :class:`~custos_workflow.runs.errors.RunControllerError` /
+    # :class:`~custos_workflow.validator.errors.ValidatorError`
+    # subclass so handlers never have to construct envelopes by
+    # hand. ``all_routers`` is the single tuple
+    # (:mod:`custos_workflow.api.routes`) that holds the
+    # ``runs`` / ``steps`` / ``internal-rpc`` routers — adding a
+    # new resource module only requires appending to that
+    # registry; it never has to touch this bootstrap.
+    #
+    # Imported lazily inside the factory because the API package
+    # transitively imports :class:`RunController`, which closes a
+    # ``runs.controller -> _telemetry -> steps.events ->
+    # runs.controller`` cycle when pulled in before the
+    # ``from custos_workflow.steps import StepCoordinator`` line
+    # above runs to completion.
+    from custos_workflow.api import all_routers, register_exception_handlers
+
+    register_exception_handlers(app)
+    for router in all_routers:
+        app.include_router(router)
+
     return app
 
 
