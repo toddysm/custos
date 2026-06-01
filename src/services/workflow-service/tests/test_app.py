@@ -568,34 +568,76 @@ def test_unknown_path_returns_problem_json(fake_run_components: RunComponents) -
 def test_exception_handlers_translate_validator_errors(
     fake_run_components: RunComponents,
 ) -> None:
-    """WF-IMPL-069: routed handlers raising domain errors emit Problem+JSON.
+    """WF-IMPL-069: routed handlers raising domain ``ValidatorError``
+    subclasses emit the locked ``application/problem+json`` envelope.
 
-    Hits the public ``POST /v1/workspaces/{ws}/runs`` route with a
-    malformed body. Whatever path the request takes (Pydantic body
-    validation, the
-    :func:`~custos_workflow.api.dependencies.get_validator` dep
-    not finding ``app.state.start_run_validator``, or the
-    controller dep refusing the request), the WF-IMPL-061
-    handlers must wrap the failure into the
-    ``application/problem+json`` envelope rather than letting the
-    framework default through.
+    Drives a real
+    :class:`~custos_workflow.validator.StartRunValidator` (wired by
+    :func:`~custos_workflow.providers.load_run_components` onto
+    ``app.state.start_run_validator``) whose Catalog stub raises
+    ``LookupError`` — the validator translates that into
+    :class:`~custos_workflow.validator.WorkflowVersionNotFoundError`,
+    and the WF-IMPL-061 handler chain wraps it into the locked
+    ``workflow.validator.workflow_version_not_found`` envelope at
+    HTTP 404. A minimally valid ``StartRunRequest`` body is sent
+    so Pydantic's wire-validation path is not exercised — the
+    failure must come from the mounted validator dep, proving
+    the end-to-end wiring.
     """
-    app = create_app(require_call_context=False, run_components=fake_run_components)
+    from custos_workflow.providers import load_run_components
+    from custos_workflow.runtime import FakeWorkflowRuntime
+
+    class _NotFoundCatalog:
+        """Catalog Protocol fake — every lookup misses."""
+
+        async def get_workflow_version(self, workspace_id: str, workflow_version_id: str) -> object:
+            raise LookupError(workflow_version_id)
+
+    runtime = FakeWorkflowRuntime()
+    components = load_run_components(
+        env={},
+        workflow_runtime=runtime,
+        catalog=_NotFoundCatalog(),  # type: ignore[arg-type]
+    )
+    app = create_app(require_call_context=False, run_components=components)
     with TestClient(app) as client:
         response = client.post(
             "/v1/workspaces/ws-test/runs",
-            json={},
+            json={"workflowVersionId": "wfv-missing"},
             headers={
                 "X-Workspace-Id": "ws-test",
                 "X-Caller-Id": "u-1",
                 "X-Request-Id": "req-1",
             },
         )
-    # The route is mounted: we got an error envelope, not a 404.
-    assert response.status_code != 404
+    assert response.status_code == 404, response.text
     assert response.headers["content-type"].startswith("application/problem+json")
     body = response.json()
-    assert body["status"] == response.status_code
-    assert "code" in body
-    assert "title" in body
+    assert body["status"] == 404
+    assert body["code"] == "workflow.validator.workflow_version_not_found"
     assert "type" in body
+    assert "title" in body
+
+
+def test_lifespan_binds_start_run_validator_on_app_state(
+    fake_run_components: RunComponents,
+) -> None:
+    """WF-IMPL-069: the lifespan wires the validator onto ``app.state``.
+
+    The :func:`~custos_workflow.api.dependencies.get_validator`
+    Depends factory reads ``app.state.start_run_validator``; if
+    the lifespan does not populate it, every mounted ``StartRun``
+    route silently returns 503 even when the rest of the bundle
+    is healthy. This test asserts the validator is bound in the
+    happy-path branch.
+    """
+    from custos_workflow.validator import StartRunValidator
+
+    app = create_app(require_call_context=False, run_components=fake_run_components)
+    with TestClient(app) as client:
+        assert client.get("/healthz").status_code == 200
+        # Lifespan startup has run by the time the first request
+        # returns; ``app.state.start_run_validator`` must hold the
+        # same instance the bundle carries.
+        assert app.state.start_run_validator is fake_run_components.start_run_validator
+        assert isinstance(app.state.start_run_validator, StartRunValidator)

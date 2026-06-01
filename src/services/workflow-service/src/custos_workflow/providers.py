@@ -71,6 +71,11 @@ from custos_workflow.runs.events import (
 from custos_workflow.runs.replay import NoopReplayReconciler, ReplayReconciler
 from custos_workflow.runs.store import InProcessRunStore, RunStore
 from custos_workflow.runtime import FakeWorkflowRuntime, WorkflowClient, WorkflowRuntime
+from custos_workflow.validator import (
+    IdempotencyLedger,
+    InMemoryIdempotencyLedger,
+    StartRunValidator,
+)
 
 __all__ = [
     "DEFAULT_DAPR_PUBLISH_TOPIC",
@@ -329,6 +334,7 @@ class RunComponents:
     run_controller: RunController
     activity_client: ActivityRuntimeClient
     connector_client: ConnectorClient
+    start_run_validator: StartRunValidator
     dapr_http_client: httpx.AsyncClient | None = field(default=None)
 
 
@@ -396,6 +402,7 @@ def load_run_components(
     activity_registry: ActivityTypeRegistry | None = None,
     activity_client: ActivityRuntimeClient | None = None,
     connector_client: ConnectorClient | None = None,
+    idempotency_ledger: IdempotencyLedger | None = None,
 ) -> RunComponents:
     """Build the default :class:`RunComponents` from ``env``.
 
@@ -430,6 +437,15 @@ def load_run_components(
             — the production Dapr-backed adapter is owned by the
             deferred *Real Connector Client* sub-module. Tests
             inject :class:`~custos_workflow.clients.FakeConnectorClient`.
+        idempotency_ledger: Pre-built
+            :class:`~custos_workflow.validator.IdempotencyLedger`
+            override that backs the WF-IMPL-063
+            :class:`~custos_workflow.validator.StartRunValidator`.
+            Defaults to a process-local
+            :class:`~custos_workflow.validator.InMemoryIdempotencyLedger`;
+            the production Postgres-backed adapter is owned by
+            the deferred *Durable Idempotency Ledger* sub-module
+            and lands under WF-IMPL-070+.
 
     Returns:
         A fully-wired :class:`RunComponents` bundle. The caller is
@@ -474,6 +490,17 @@ def load_run_components(
         clock=_SystemClock(),
         replay_reconciler=reconciler,
     )
+    # WF-IMPL-069: bind a :class:`StartRunValidator` so the
+    # ``api.dependencies.get_validator`` Depends can resolve it
+    # off ``app.state.start_run_validator``. The validator is
+    # constructed last so it shares the same Catalog client the
+    # Run Controller drives (no second Catalog connection per
+    # request) and falls back to a process-local in-memory ledger
+    # until the durable-ledger sub-module lands.
+    ledger: IdempotencyLedger = (
+        idempotency_ledger if idempotency_ledger is not None else InMemoryIdempotencyLedger()
+    )
+    validator = StartRunValidator(catalog=catalog_client, ledger=ledger)
     return RunComponents(
         workflow_runtime=runtime,
         workflow_client=workflow_client,
@@ -483,5 +510,6 @@ def load_run_components(
         run_controller=controller,
         activity_client=activity,
         connector_client=connector,
+        start_run_validator=validator,
         dapr_http_client=dapr_http_client,
     )

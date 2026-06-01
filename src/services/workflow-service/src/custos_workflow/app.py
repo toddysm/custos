@@ -175,6 +175,12 @@ def create_app(
             logger.exception("workflow runtime failed to start; /readyz will remain 503")
             app.state.ready_detail = "workflow runtime failed to start"
             app.state.run_components = components
+            # WF-IMPL-069: bind the validator alongside the bundle
+            # so the ``api.dependencies.get_validator`` Depends can
+            # resolve it even on the failed-startup path; the
+            # health probes stay 503 via ``app.state.ready``
+            # already.
+            app.state.start_run_validator = components.start_run_validator
             try:
                 yield
             finally:
@@ -202,6 +208,15 @@ def create_app(
             )
 
         app.state.run_components = components
+        # WF-IMPL-069: also bind the WF-IMPL-063
+        # :class:`~custos_workflow.validator.StartRunValidator`
+        # so the ``Depends(get_validator)`` factory on every
+        # ``StartRun`` route can resolve it off ``app.state``.
+        # The validator is built by
+        # :func:`~custos_workflow.providers.load_run_components`
+        # so it shares the same Catalog client the Run Controller
+        # drives.
+        app.state.start_run_validator = components.start_run_validator
         try:
             yield
         finally:
