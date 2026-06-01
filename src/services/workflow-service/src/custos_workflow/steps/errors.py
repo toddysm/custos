@@ -65,10 +65,14 @@ from typing import Any, ClassVar, Final
 __all__ = [
     "LOCKED_STEP_KINDS",
     "ActivityScheduleError",
+    "ApprovalTimeoutError",
     "ConnectorBindError",
+    "LoopExpansionError",
     "RetryBudgetExhaustedError",
     "StepCoordinatorError",
     "StepKindNotImplementedError",
+    "SubOrchestrationSpawnError",
+    "SubWorkflowFailedError",
     "WithInputResolutionError",
 ]
 
@@ -119,7 +123,9 @@ class StepCoordinatorError(RuntimeError):
                 "StepCoordinatorError is abstract; instantiate a concrete "
                 "subclass (StepKindNotImplementedError, "
                 "WithInputResolutionError, ConnectorBindError, "
-                "ActivityScheduleError, RetryBudgetExhaustedError) "
+                "ActivityScheduleError, RetryBudgetExhaustedError, "
+                "LoopExpansionError, SubOrchestrationSpawnError, "
+                "SubWorkflowFailedError, ApprovalTimeoutError) "
                 "instead.",
             )
         super().__init__(message)
@@ -441,6 +447,196 @@ class RetryBudgetExhaustedError(StepCoordinatorError):
 
 
 # ---------------------------------------------------------------------------
+# Sub-Orchestration Manager subclasses (WF-IMPL-086)
+# ---------------------------------------------------------------------------
+
+
+class LoopExpansionError(StepCoordinatorError, ValueError):
+    """A dynamic-loop (``forEach`` / ``where:``) expansion failed.
+
+    Raised by the WF-IMPL-089 / WF-IMPL-090 loop fan-out path when the
+    ``forEach`` (or ``where:``) CEL expression fails to evaluate, when
+    the expression yields a non-iterable, or when two expanded items
+    derive the *same* deterministic iteration key (a collision that
+    would alias their child instance ids).
+
+    The originating ``custos_cel.CelError`` ``kind`` is preserved on
+    :attr:`cause_kind` (when the failure was an evaluation error) so
+    audit consumers can dispatch on the underlying cause. For a
+    duplicate-key collision :attr:`colliding_key` carries the offending
+    iteration key.
+
+    Also subclasses :class:`ValueError` so callers using
+    ``except ValueError:`` still catch it.
+
+    Attributes:
+        cause_kind: The underlying ``custos_cel.CelError`` ``kind``
+            (e.g. ``"cel.evaluation_error"``), when the failure was a
+            CEL evaluation error. ``None`` for structural failures.
+        source: The ``forEach`` / ``where:`` CEL source string that
+            failed, when small enough to record. ``None`` when omitted.
+        colliding_key: The duplicate iteration key when the failure was
+            a key collision. ``None`` otherwise.
+    """
+
+    KIND: Final[str] = "step.loop_expansion_error"  # type: ignore[misc]
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        run_id: str | None = None,
+        step_id: str | None = None,
+        attempt: int | None = None,
+        cause_kind: str | None = None,
+        source: str | None = None,
+        colliding_key: str | None = None,
+    ) -> None:
+        super().__init__(message, run_id=run_id, step_id=step_id, attempt=attempt)
+        self.cause_kind: str | None = cause_kind
+        self.source: str | None = source
+        self.colliding_key: str | None = colliding_key
+
+    def _extra_fields(self) -> dict[str, Any]:
+        return {
+            "cause_kind": self.cause_kind,
+            "source": self.source,
+            "colliding_key": self.colliding_key,
+        }
+
+
+class SubOrchestrationSpawnError(StepCoordinatorError):
+    """Spawning a child workflow instance failed structurally.
+
+    Raised by the WF-IMPL-088 / WF-IMPL-091 sub-orchestration path when
+    the ``start_child_workflow`` call itself could not be issued (the
+    Dapr workflow runtime rejected the request, the deterministic child
+    instance id was malformed, or the transport is unavailable). This
+    is distinct from a child that *ran* and returned a failure
+    envelope — that path surfaces :class:`SubWorkflowFailedError`.
+
+    Attributes:
+        child_instance_id: The deterministic child instance id the
+            spawn targeted, when known.
+        iteration_key: The iteration key for the child, when the spawn
+            was part of a dynamic loop. ``None`` for single
+            sub-workflow invocations.
+        cause: A short ``str`` summary of the underlying failure
+            (typically ``repr(exc)``), when known.
+    """
+
+    KIND: Final[str] = "step.sub_orchestration_spawn_error"  # type: ignore[misc]
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        run_id: str | None = None,
+        step_id: str | None = None,
+        attempt: int | None = None,
+        child_instance_id: str | None = None,
+        iteration_key: str | None = None,
+        cause: str | None = None,
+    ) -> None:
+        super().__init__(message, run_id=run_id, step_id=step_id, attempt=attempt)
+        self.child_instance_id: str | None = child_instance_id
+        self.iteration_key: str | None = iteration_key
+        self.cause: str | None = cause
+
+    def _extra_fields(self) -> dict[str, Any]:
+        return {
+            "child_instance_id": self.child_instance_id,
+            "iteration_key": self.iteration_key,
+            "cause": self.cause,
+        }
+
+
+class SubWorkflowFailedError(StepCoordinatorError):
+    """A child sub-workflow ran and surfaced a terminal failure.
+
+    Raised by the WF-IMPL-089 / WF-IMPL-091 merge path when an awaited
+    child instance completes with a failure envelope. A single child
+    failure short-circuits the parent loop / invocation. The child's
+    underlying failure ``kind`` is preserved on :attr:`child_kind` so
+    the audit pipeline can correlate the parent failure back to the
+    proximate child cause.
+
+    Attributes:
+        child_instance_id: The deterministic child instance id that
+            failed, when known.
+        iteration_key: The iteration key for the failed child, when the
+            failure was inside a dynamic loop. ``None`` for single
+            sub-workflow invocations.
+        child_kind: The child's underlying failure ``kind`` (e.g. a
+            ``"step.*"`` taxonomy string), when known.
+    """
+
+    KIND: Final[str] = "step.sub_workflow_failed"  # type: ignore[misc]
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        run_id: str | None = None,
+        step_id: str | None = None,
+        attempt: int | None = None,
+        child_instance_id: str | None = None,
+        iteration_key: str | None = None,
+        child_kind: str | None = None,
+    ) -> None:
+        super().__init__(message, run_id=run_id, step_id=step_id, attempt=attempt)
+        self.child_instance_id: str | None = child_instance_id
+        self.iteration_key: str | None = iteration_key
+        self.child_kind: str | None = child_kind
+
+    def _extra_fields(self) -> dict[str, Any]:
+        return {
+            "child_instance_id": self.child_instance_id,
+            "iteration_key": self.iteration_key,
+            "child_kind": self.child_kind,
+        }
+
+
+class ApprovalTimeoutError(StepCoordinatorError):
+    """An ``approval:`` gate timed out before a signal arrived.
+
+    Raised by the WF-IMPL-092 approval gate when the durable timer in
+    the ``when_any([childInstance, durableTimer])`` race fires before
+    the approval ``RaiseExternalEvent`` signal is delivered. The
+    configured ``timeout:`` (ISO-8601 duration) is preserved on
+    :attr:`timeout` for audit correlation.
+
+    Attributes:
+        child_instance_id: The deterministic approval child instance id
+            (``<runId>/<stepId>/approval``), when known.
+        timeout: The configured ISO-8601 ``timeout:`` duration that
+            elapsed, when known.
+    """
+
+    KIND: Final[str] = "step.approval_timeout"  # type: ignore[misc]
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        run_id: str | None = None,
+        step_id: str | None = None,
+        attempt: int | None = None,
+        child_instance_id: str | None = None,
+        timeout: str | None = None,
+    ) -> None:
+        super().__init__(message, run_id=run_id, step_id=step_id, attempt=attempt)
+        self.child_instance_id: str | None = child_instance_id
+        self.timeout: str | None = timeout
+
+    def _extra_fields(self) -> dict[str, Any]:
+        return {
+            "child_instance_id": self.child_instance_id,
+            "timeout": self.timeout,
+        }
+
+
+# ---------------------------------------------------------------------------
 # Locked kind set
 # ---------------------------------------------------------------------------
 
@@ -457,5 +653,9 @@ LOCKED_STEP_KINDS: Final[frozenset[str]] = frozenset(
         ConnectorBindError.KIND,
         ActivityScheduleError.KIND,
         RetryBudgetExhaustedError.KIND,
+        LoopExpansionError.KIND,
+        SubOrchestrationSpawnError.KIND,
+        SubWorkflowFailedError.KIND,
+        ApprovalTimeoutError.KIND,
     }
 )

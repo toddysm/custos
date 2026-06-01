@@ -365,6 +365,10 @@ _DOCUMENTED_STEP_KINDS: Final[frozenset[str]] = frozenset(
         "step.connector_bind_error",
         "step.activity_schedule_error",
         "step.retry_budget_exhausted",
+        "step.loop_expansion_error",
+        "step.sub_orchestration_spawn_error",
+        "step.sub_workflow_failed",
+        "step.approval_timeout",
     }
 )
 

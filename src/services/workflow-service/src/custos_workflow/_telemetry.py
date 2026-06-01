@@ -666,6 +666,10 @@ _STEP_EXECUTE_OUTCOMES: Final[Mapping[str, str]] = {
     "step.connector_bind_error": "connector_bind_error",
     "step.activity_schedule_error": "activity_schedule_error",
     "step.retry_budget_exhausted": "retry_budget_exhausted",
+    "step.loop_expansion_error": "loop_expansion_error",
+    "step.sub_orchestration_spawn_error": "sub_orchestration_spawn_error",
+    "step.sub_workflow_failed": "sub_workflow_failed",
+    "step.approval_timeout": "approval_timeout",
 }
 
 # Build-time check: the outcome map keys MUST equal the locked

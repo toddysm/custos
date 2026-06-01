@@ -427,7 +427,7 @@ and reflected in
 [`custos_workflow._telemetry`](../../src/services/workflow-service/src/custos_workflow/_telemetry.py)
 as the locked `kind` label set on
 `custos_workflow_step_errors_total`. A build-time assertion
-fails CI if a sixth `StepCoordinatorError` subclass slips in
+fails CI if another `StepCoordinatorError` subclass slips in
 without extending the locked set.
 
 | `kind` | Python class | Trigger | Surfaces as |
@@ -437,11 +437,20 @@ without extending the locked set.
 | `step.connector_bind_error` | `ConnectorBindError` | `ConnectorClient.bind_for_step(...)` raised, or returned a malformed `BindForStepResponse`. | `StepFailed` envelope; retry driver is not consulted. |
 | `step.activity_schedule_error` | `ActivityScheduleError` | `ActivityRuntimeClient.schedule_activity(...)` raised before producing an envelope. | `StepFailed` envelope; retry driver is not consulted. |
 | `step.retry_budget_exhausted` | `RetryBudgetExhaustedError` | Retry driver matched a `do: retry` arm with `attempt + 1 > max_attempts`. | `StepFailed` envelope built by the driver; the carried `cause` is the last envelope-class error. |
+| `step.loop_expansion_error` | `LoopExpansionError` | Sub-Orchestration Manager could not expand a dynamic loop: the `forEach` / `where:` CEL expression failed or yielded a non-iterable, or two items derived the same iteration key (`colliding_key`). | `StepFailed` envelope; retry driver is not consulted (structural failure). |
+| `step.sub_orchestration_spawn_error` | `SubOrchestrationSpawnError` | `start_child_workflow(...)` itself could not be issued for a deterministic child instance id. | `StepFailed` envelope; retry driver is not consulted. |
+| `step.sub_workflow_failed` | `SubWorkflowFailedError` | An awaited child sub-workflow completed with a failure envelope; a single child failure short-circuits the parent loop / invocation. Carries the child's `child_kind`. | `StepFailed` envelope; retry driver is not consulted. |
+| `step.approval_timeout` | `ApprovalTimeoutError` | An `approval:` gate's durable timer fired before the approval `RaiseExternalEvent` signal arrived. Carries the configured ISO-8601 `timeout`. | `StepFailed` envelope; retry driver is not consulted. |
 
-Every entry inflates a stable `to_dict()` envelope keyed on
-`{kind, message, run_id?, step_id?, attempt?, activity_ref?, cause?}`
-— the API surface for the API Adapter + Observability/Audit
-client when it consumes the `StepFailed` envelope downstream.
+Every entry inflates a stable `to_dict()` envelope keyed on the
+common base — `{kind, message, run_id?, step_id?, attempt?}` —
+plus that error's own structured extras (e.g. `cause` /
+`activity_ref` for the schedule/bind errors, `colliding_key` /
+`cause_kind` for `step.loop_expansion_error`, `child_instance_id`
+/ `child_kind` for the sub-workflow errors, `timeout` for
+`step.approval_timeout`). This is the API surface for the API
+Adapter + Observability/Audit client when it consumes the
+`StepFailed` envelope downstream.
 
 ## Observability surface
 
