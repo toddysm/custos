@@ -1,6 +1,6 @@
 # TODOs: Workflow Service
 
-Last Updated: 2026-06-04 (WF-IMPL-072 merged via PR #482; API Adapter + Validator sub-module complete; tracker #459 closed)
+Last Updated: 2026-05-31 (Real ARM Client + Connector Client adapters sub-module started under tracker [#495](https://github.com/toddysm/custos/issues/495); WF-IMPL-073..083 filed)
 
 ## Open
 
@@ -12,14 +12,43 @@ Sub-modules of the workflow-service host whose design is already locked in [`des
 
 - [ ] **Resume Subscription Manager** — `waitFor:` step kind + `TriggerServiceClient` Protocol + `RegisterResumeSubscription` / `CancelResumeSubscription` RPC + `ResumeSubscriptionMirror` persistence (`MetadataStoreProvider`) + replay re-registration through the WF-IMPL-042 reconciler hook. Design refs: § Operation: Step Resume on External Event, § Resume Subscription Replay Protocol. Step Coordinator (WF-IMPL-055) currently returns `StepFailed(step.kind_not_implemented)` for `waitFor:`.
 - [ ] **Sub-Orchestration Manager** — `for:` (dynamic loop) + `approval:` (gate + timeout) + `workflow:` (sub-workflow call); spawns child Dapr Workflow instances with deterministic `<parentRunId>/<stepId>/<iterationKey>` ids; awaits via `when_all` / `when_any`; merges outputs. Design refs: § Operation: Sub-Orchestration, § Sub-Orchestration Manager (ADR-007). Step Coordinator currently returns `StepFailed(step.kind_not_implemented)` for all three.
-- [x] **API Adapter + Validator** — _complete_ as the fifth sub-module under tracker [#459](https://github.com/toddysm/custos/issues/459) (closed 2026-06-04); tasks WF-IMPL-061..072 merged across PRs #463–#480 and #482. See the dedicated section below + [`implementation-plan.md`](implementation-plan.md).
-- [ ] **Real ARM Client + Connector Client adapters** — production `ActivityRuntimeClient` / `ConnectorClient` Dapr Service Invocation bridges behind the Protocols that ship with the Step Coordinator (WF-IMPL-049 / WF-IMPL-050). Design refs: § Internal RPC (outbound).
+- [x] **API Adapter + Validator** — _complete_ as the fifth sub-module under tracker [#459](https://github.com/toddysm/custos/issues/459) (closed 2026-06-04); tasks WF-IMPL-061..072 merged across PRs #463–#480 and #482. See the dedicated section below + [`implementation-plan-api-adapter-validator.md`](implementation-plan-api-adapter-validator.md).
+- [~] **Real ARM Client + Connector Client adapters** — _in progress_ as the sixth sub-module under tracker [#495](https://github.com/toddysm/custos/issues/495); tasks WF-IMPL-073..083 filed. See the dedicated section below + [`implementation-plan.md`](implementation-plan.md). Production `ActivityRuntimeClient` / `ConnectorClient` Dapr Service Invocation bridges behind the Protocols that ship with the Step Coordinator (WF-IMPL-049 / WF-IMPL-050). Design refs: § Internal RPC (outbound).
 - [ ] **Full Observability Client integration** — Audit-event sink wiring + cross-component event taxonomy unification (TS-TODO-001 / ARM TODO-009 under INCON-013) + log-stream delegation for `GET …/steps/{stepId}/logs`. Design refs: § Observability Client. `workflow.*` / `step.*` event publication already lands via the existing `LifecycleEventPublisher`.
 - [ ] **Durable `IdempotencyLedger`** — `MetadataStoreProvider`-backed adapter for the `(workspaceId, idempotencyKey)` ledger introduced in WF-IMPL-063; in-memory adapter ships with the API Adapter sub-module. Filed as a separate follow-up issue once the in-memory adapter merges. (added 2026-05-31 during the API Adapter plan derivation.)
 
+## Implementation — Real ARM Client + Connector Client adapters
+
+Sixth sub-module: **Real ARM Client + Connector Client adapters**, packaged inside the service host `src/services/workflow-service/` under the existing `custos_workflow.clients` package (extending the WF-IMPL-049 / WF-IMPL-050 surfaces) plus a new `custos_workflow.runtime.dapr_activities` module for the orchestrator-side yield-protocol dispatcher + Dapr activity-worker registration. Replaces the `Noop*` stubs with production HTTP adapters that call ARM (COMP-006) and Connector Service (COMP-005) via the local Dapr sidecar's Service Invocation HTTP API, following the same raw-`httpx` precedent established by `DaprPubSubLifecyclePublisher`. Plan: [`implementation-plan.md`](implementation-plan.md).
+
+### Phase A — Foundations (transport + handler refactor + error taxonomy)
+
+- [x] WF-IMPL-073 (#484): Dapr Service-Invocation HTTP transport primitives.
+- [F] WF-IMPL-074 (#485): Refactor activity handler + orchestrator for activity-task bridging (depends on #484).
+- [F] WF-IMPL-075 (#486): Outbound RPC error taxonomy + `ActivityResultEnvelope` mapping (depends on #484).
+
+### Phase B — Adapter implementations
+
+- [F] WF-IMPL-076 (#487): `DaprActivityRuntimeClient` — `ScheduleActivity` (depends on #485, #486).
+- [F] WF-IMPL-077 (#488): `DaprActivityRuntimeClient` — `CancelActivity` (depends on #484, #486).
+- [F] WF-IMPL-078 (#489): `DaprConnectorClient` — `BindForStep` (depends on #485, #486).
+
+### Phase C — Integration & wiring
+
+- [F] WF-IMPL-079 (#490): Dapr activity registration + worker wiring (depends on #487, #489).
+- [F] WF-IMPL-080 (#491): `providers.py` wiring + Configuration knobs (depends on #490).
+- [F] WF-IMPL-081 (#492): OTel outbound RPC observability (depends on #491).
+
+### Phase D — Verification & documentation
+
+- [F] WF-IMPL-082 (#493): End-to-end integration suite + macOS-friendly fixtures (depends on #491, #492).
+- [F] WF-IMPL-083 (#494): Developer documentation — `docs/developers/workflow-outbound-rpc.md` (depends on #493).
+
+Tracker: #495 — `WF-IMPL-000-ARM-CONNECTOR-ADAPTERS`.
+
 ## Implementation — API Adapter + Validator
 
-Fifth sub-module: **API Adapter + Validator**, packaged inside the service host `src/services/workflow-service/` under the new `custos_workflow.api` + `custos_workflow.validator` packages. Owns the inbound REST and Internal RPC surface, plus the pre-execution checks that gate every `StartRun` (workflow-version existence, inputs schema match, workspace authorization, `(workspaceId, idempotencyKey)` dedup). After this sub-module lands, the workflow-service stops being reachable only in-process. Plan: [`implementation-plan.md`](implementation-plan.md).
+Fifth sub-module: **API Adapter + Validator**, packaged inside the service host `src/services/workflow-service/` under the new `custos_workflow.api` + `custos_workflow.validator` packages. Owns the inbound REST and Internal RPC surface, plus the pre-execution checks that gate every `StartRun` (workflow-version existence, inputs schema match, workspace authorization, `(workspaceId, idempotencyKey)` dedup). After this sub-module lands, the workflow-service stops being reachable only in-process. Plan: [`implementation-plan-api-adapter-validator.md`](implementation-plan-api-adapter-validator.md).
 
 ### Phase A — Foundations (errors, models, validator)
 
