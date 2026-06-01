@@ -252,8 +252,19 @@ def create_app(
     # ``from custos_workflow.steps import StepCoordinator`` line
     # above runs to completion.
     from custos_workflow.api import all_routers, register_exception_handlers
+    from custos_workflow.api.observability import register_http_observability
 
     register_exception_handlers(app)
+    # WF-IMPL-070: install the OTel HTTP-server middleware after
+    # the routers are mounted. Starlette stacks middlewares LIFO,
+    # so adding the observability middleware after
+    # ``CallContextMiddleware`` keeps the call-context envelope
+    # outside the observability span (the span is scoped to
+    # routed-request handling, not to the auth layer that fronts
+    # it). ``register_http_observability`` is idempotent so
+    # repeated ``create_app`` calls in the test fixtures don't
+    # stack duplicate middlewares.
+    register_http_observability(app)
     for router in all_routers:
         app.include_router(router)
 
