@@ -471,3 +471,173 @@ def test_lifespan_swallows_workflow_client_close_errors(
     with TestClient(app) as client:
         assert client.get("/healthz").status_code == 200
     assert any("workflow client aclose failed" in r.getMessage() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# WF-IMPL-069: mount API routers + RFC 7807 exception handlers
+# ---------------------------------------------------------------------------
+
+
+def _route_paths(app: FastAPI) -> set[str]:
+    """Return the set of HTTP route ``path`` templates on ``app``."""
+    return {route.path for route in app.routes if hasattr(route, "path")}
+
+
+def test_create_app_mounts_public_run_routes(fake_run_components: RunComponents) -> None:
+    """WF-IMPL-069: public Run REST routes (WF-IMPL-065) are mounted."""
+    app = create_app(require_call_context=False, run_components=fake_run_components)
+    paths = _route_paths(app)
+    assert "/v1/workspaces/{ws}/runs" in paths
+    assert "/v1/workspaces/{ws}/runs/{run_id}" in paths
+    assert "/v1/workspaces/{ws}/runs/{run_id}:cancel" in paths
+
+
+def test_create_app_mounts_public_step_routes(fake_run_components: RunComponents) -> None:
+    """WF-IMPL-069: public Step REST routes (WF-IMPL-066) are mounted."""
+    app = create_app(require_call_context=False, run_components=fake_run_components)
+    paths = _route_paths(app)
+    assert "/v1/workspaces/{ws}/runs/{run_id}/steps/{step_id}" in paths
+    assert "/v1/workspaces/{ws}/runs/{run_id}/steps/{step_id}/logs" in paths
+
+
+def test_create_app_mounts_internal_rpc_routes(fake_run_components: RunComponents) -> None:
+    """WF-IMPL-069: Internal-RPC routes (WF-IMPL-067 / -068) are mounted."""
+    app = create_app(require_call_context=False, run_components=fake_run_components)
+    paths = _route_paths(app)
+    assert "/internal/runs:start" in paths
+    assert "/internal/runs/{run_id}:cancel" in paths
+    assert "/internal/runs/{run_id}/steps/{step_id}:raiseEvent" in paths
+
+
+def test_openapi_tags_partition_public_vs_internal_surface(
+    fake_run_components: RunComponents,
+) -> None:
+    """WF-IMPL-069: OpenAPI tags partition the public vs internal surface.
+
+    The runs/steps routers ship ``tags=["runs"]`` / ``tags=["steps"]``
+    so the public surface lands grouped under those names, and the
+    Internal-RPC router ships ``tags=["internal-rpc"]`` so the internal
+    surface is one click away from being hidden in any client-side
+    OpenAPI viewer (catalog-service uses the same partition).
+    """
+    app = create_app(require_call_context=False, run_components=fake_run_components)
+    spec = app.openapi()
+    tags_by_path: dict[str, set[str]] = {}
+    for path, methods in spec["paths"].items():
+        for op in methods.values():
+            if not isinstance(op, dict):
+                continue
+            tags_by_path.setdefault(path, set()).update(op.get("tags", []))
+    assert tags_by_path["/v1/workspaces/{ws}/runs"] == {"runs"}
+    assert tags_by_path["/v1/workspaces/{ws}/runs/{run_id}/steps/{step_id}"] == {"steps"}
+    assert tags_by_path["/internal/runs:start"] == {"internal-rpc"}
+    # No public path leaks into the internal tag (and vice versa).
+    for path, tags in tags_by_path.items():
+        if path.startswith("/internal/"):
+            assert tags == {"internal-rpc"}, (
+                f"internal path {path} carries non-internal tags {tags}"
+            )
+        elif path.startswith("/v1/"):
+            assert "internal-rpc" not in tags, (
+                f"public path {path} leaks the internal-rpc tag: {tags}"
+            )
+
+
+def test_unknown_path_returns_problem_json(fake_run_components: RunComponents) -> None:
+    """WF-IMPL-069: the RFC 7807 envelope covers FastAPI's default 404.
+
+    ``register_exception_handlers`` registers a
+    :class:`fastapi.exceptions.HTTPException` handler so even
+    framework-emitted 404s (no route matched) carry the
+    ``application/problem+json`` content-type and the
+    :class:`~custos_workflow.api.errors.ProblemDetail` envelope
+    (``type`` / ``title`` / ``status`` / ``code``).
+    """
+    app = create_app(require_call_context=False, run_components=fake_run_components)
+    with TestClient(app) as client:
+        response = client.get("/does-not-exist")
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith("application/problem+json")
+    body = response.json()
+    assert body["status"] == 404
+    assert "type" in body
+    assert "title" in body
+    assert "code" in body
+
+
+def test_exception_handlers_translate_validator_errors(
+    fake_run_components: RunComponents,
+) -> None:
+    """WF-IMPL-069: routed handlers raising domain ``ValidatorError``
+    subclasses emit the locked ``application/problem+json`` envelope.
+
+    Drives a real
+    :class:`~custos_workflow.validator.StartRunValidator` (wired by
+    :func:`~custos_workflow.providers.load_run_components` onto
+    ``app.state.start_run_validator``) whose Catalog stub raises
+    ``LookupError`` — the validator translates that into
+    :class:`~custos_workflow.validator.WorkflowVersionNotFoundError`,
+    and the WF-IMPL-061 handler chain wraps it into the locked
+    ``workflow.validator.workflow_version_not_found`` envelope at
+    HTTP 404. A minimally valid ``StartRunRequest`` body is sent
+    so Pydantic's wire-validation path is not exercised — the
+    failure must come from the mounted validator dep, proving
+    the end-to-end wiring.
+    """
+    from custos_workflow.providers import load_run_components
+    from custos_workflow.runtime import FakeWorkflowRuntime
+
+    class _NotFoundCatalog:
+        """Catalog Protocol fake — every lookup misses."""
+
+        async def get_workflow_version(self, workspace_id: str, workflow_version_id: str) -> object:
+            raise LookupError(workflow_version_id)
+
+    runtime = FakeWorkflowRuntime()
+    components = load_run_components(
+        env={},
+        workflow_runtime=runtime,
+        catalog=_NotFoundCatalog(),  # type: ignore[arg-type]
+    )
+    app = create_app(require_call_context=False, run_components=components)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/workspaces/ws-test/runs",
+            json={"workflowVersionId": "wfv-missing"},
+            headers={
+                "X-Workspace-Id": "ws-test",
+                "X-Caller-Id": "u-1",
+                "X-Request-Id": "req-1",
+            },
+        )
+    assert response.status_code == 404, response.text
+    assert response.headers["content-type"].startswith("application/problem+json")
+    body = response.json()
+    assert body["status"] == 404
+    assert body["code"] == "workflow.validator.workflow_version_not_found"
+    assert "type" in body
+    assert "title" in body
+
+
+def test_lifespan_binds_start_run_validator_on_app_state(
+    fake_run_components: RunComponents,
+) -> None:
+    """WF-IMPL-069: the lifespan wires the validator onto ``app.state``.
+
+    The :func:`~custos_workflow.api.dependencies.get_validator`
+    Depends factory reads ``app.state.start_run_validator``; if
+    the lifespan does not populate it, every mounted ``StartRun``
+    route silently returns 503 even when the rest of the bundle
+    is healthy. This test asserts the validator is bound in the
+    happy-path branch.
+    """
+    from custos_workflow.validator import StartRunValidator
+
+    app = create_app(require_call_context=False, run_components=fake_run_components)
+    with TestClient(app) as client:
+        assert client.get("/healthz").status_code == 200
+        # Lifespan startup has run by the time the first request
+        # returns; ``app.state.start_run_validator`` must hold the
+        # same instance the bundle carries.
+        assert app.state.start_run_validator is fake_run_components.start_run_validator
+        assert isinstance(app.state.start_run_validator, StartRunValidator)

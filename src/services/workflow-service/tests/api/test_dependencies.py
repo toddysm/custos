@@ -69,6 +69,7 @@ def _fake_run_components() -> RunComponents:
         run_controller=controller,
         activity_client=AsyncMock(),
         connector_client=AsyncMock(),
+        start_run_validator=_fake_validator(),
     )
 
 
