@@ -955,8 +955,12 @@ def record_step_error(kind: str) -> None:
 #   exception handler on conflict).
 # * ``wf.error.kind`` — populated from
 #   ``request.state.wf_error_kind`` (set by the API exception
-#   handlers when they emit a Problem+JSON envelope). Drives the
-#   span's :class:`StatusCode.ERROR` flag too.
+#   handlers when they emit a Problem+JSON envelope). Set as an
+#   attribute only; the span's :class:`StatusCode.ERROR` flag is
+#   driven exclusively by :func:`observe_http_request` on
+#   unhandled exceptions — Problem+JSON responses are HTTP-level
+#   errors, not span-level errors, so the span status stays at
+#   the SDK default (UNSET) on those paths.
 
 HTTP_SERVER_DURATION_MS: Final[Histogram] = _meter.create_histogram(
     name="custos_workflow_http_server_duration_ms",

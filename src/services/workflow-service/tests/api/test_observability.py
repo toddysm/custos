@@ -328,6 +328,35 @@ class TestDurationHistogram:
         for attrs, _ in samples:
             assert set(attrs) == {"http.route", "http.method", "http.status_code"}
 
+    async def test_unmatched_request_uses_bounded_route_sentinel(
+        self, client: httpx.AsyncClient
+    ) -> None:
+        """The histogram label MUST collapse all unmatched URLs
+        onto a single ``<unmatched>`` bucket; using the raw URL
+        would let probe / hostile traffic mint an unbounded metric
+        series per unique URL (metrics-cardinality DoS).
+
+        The span's ``http.route`` attribute keeps the raw URL for
+        human debugging \u2014 only the metric label is collapsed.
+        """
+        for path in ("/does-not-exist", "/another-unknown-path", "/v1/garbage"):
+            await client.get(path)
+
+        points = _collect_points()
+        samples = _by_name(points, "custos_workflow_http_server_duration_ms")
+        # Histogram is DELTA-aggregated, so three requests sharing
+        # the same label set collapse into ONE data point — that's
+        # exactly the cardinality guarantee we want.
+        assert len(samples) == 1
+        routes = {attrs["http.route"] for attrs, _ in samples}
+        assert routes == {"<unmatched>"}
+
+        # The spans still carry the raw URL under ``http.route``
+        # for human debugging \u2014 the sentinel is metric-only.
+        spans = _http_request_spans()
+        span_routes = sorted(dict(s.attributes or {})["http.route"] for s in spans)
+        assert span_routes == ["/another-unknown-path", "/does-not-exist", "/v1/garbage"]
+
 
 # ---------------------------------------------------------------------------
 # Idempotency outcome counter — fresh / replay / conflict

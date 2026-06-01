@@ -67,6 +67,14 @@ _PATH_PARAM_TO_ATTR: Final[dict[str, str]] = {
     "step_id": "wf.step.id",
 }
 
+#: Sentinel ``http.route`` label used on the duration histogram
+#: when no route template matched the inbound request (404, 405,
+#: 422-pre-routing). The span keeps the raw URL path under
+#: ``http.route`` for human debugging, but the histogram MUST use
+#: a bounded label — otherwise hostile or probe traffic can mint
+#: an unbounded series per unique URL (metrics-cardinality DoS).
+_UNMATCHED_ROUTE_LABEL: Final[str] = "<unmatched>"
+
 #: Request-state attribute names the middleware mirrors onto the
 #: span after ``call_next`` returns. The mapping value is the span
 #: attribute name. The route handler (or an exception handler)
@@ -79,15 +87,22 @@ _STATE_ATTR_TO_SPAN: Final[dict[str, str]] = {
 }
 
 
-def _resolve_route_template(request: Request) -> str:
+def _resolve_route_template(request: Request) -> tuple[str, bool]:
     """Return the FastAPI template path for the matched route.
 
-    Falls back to the live URL path when no route matched (404,
-    422 before routing, etc.) so the histogram label is still
-    bounded — Starlette's 404 path is well-defined and matches at
-    most one bucket per unknown URL prefix, which is a deliberate
-    trade-off (unknown URLs flood the meter via cardinality
-    rather than silently dropping the sample).
+    Returns ``(label, matched)``. ``matched=True`` means the
+    inbound request was matched to a concrete FastAPI route and
+    ``label`` is its template path (e.g.
+    ``/v1/workspaces/{ws}/runs``); ``matched=False`` means no
+    route matched and ``label`` is the raw URL path.
+
+    Callers should use ``label`` directly when tagging
+    span attributes (the raw URL is useful for human debugging)
+    but MUST substitute :data:`_UNMATCHED_ROUTE_LABEL` for any
+    metric label when ``matched`` is ``False`` — using the raw
+    URL as a histogram label value is unbounded and can be
+    weaponised by probe / hostile traffic to mint a fresh metric
+    series per unique URL (metrics-cardinality DoS).
     """
     route = request.scope.get("route")
     # Starlette ``Route`` exposes ``path``; ``Mount`` exposes
@@ -95,8 +110,8 @@ def _resolve_route_template(request: Request) -> str:
     # falls back cleanly.
     template = getattr(route, "path", None)
     if isinstance(template, str) and template:
-        return template
-    return request.url.path
+        return template, True
+    return request.url.path, False
 
 
 class OTelHttpServerMiddleware(BaseHTTPMiddleware):
@@ -156,19 +171,20 @@ class OTelHttpServerMiddleware(BaseHTTPMiddleware):
         # ``call_next`` runs because Starlette only populates
         # ``request.scope["route"]`` during route matching, which
         # happens inside ``call_next``. We start the span with a
-        # provisional route value and re-resolve below — keeping
-        # the histogram label aligned with the actual matched
-        # route template (or the live URL for genuine 404s).
-        route = request.url.path
+        # provisional route value and re-resolve below.
+        route_label = request.url.path
+        matched = False
         method = request.method
         start = time.perf_counter()
         status_code = 500
         try:
-            with observe_http_request(method, route) as span:
+            with observe_http_request(method, route_label) as span:
                 response = await call_next(request)
                 status_code = response.status_code
-                route = _resolve_route_template(request)
-                span.set_attribute("http.route", route)
+                route_label, matched = _resolve_route_template(request)
+                # Span keeps the raw URL on unmatched (it's a
+                # human debugging aid, not a metric label).
+                span.set_attribute("http.route", route_label)
 
                 # Path-param attributes — best-effort; reading
                 # ``request.path_params`` after ``call_next``
@@ -193,9 +209,14 @@ class OTelHttpServerMiddleware(BaseHTTPMiddleware):
                 return response
         finally:
             duration_ms = (time.perf_counter() - start) * 1000.0
+            # Metric label MUST be bounded: substitute a sentinel
+            # when no route matched so probe / hostile traffic
+            # can't mint an unbounded metric series per unique
+            # URL (metrics-cardinality DoS).
+            metric_route = route_label if matched else _UNMATCHED_ROUTE_LABEL
             record_http_server_duration(
                 method=method,
-                route=route,
+                route=metric_route,
                 status_code=status_code,
                 duration_ms=duration_ms,
             )
