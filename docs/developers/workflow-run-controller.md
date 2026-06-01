@@ -141,7 +141,7 @@ regress `pausing` back to `running` because Dapr only flips to
 
 ## Public API
 
-All six methods are `async`, kw-only, and live on
+All seven methods are `async`, kw-only, and live on
 [`custos_workflow.runs.RunController`](../../src/services/workflow-service/src/custos_workflow/runs/controller.py).
 Every method emits at most one lifecycle event on its successful
 active path, and never more than two persisted-row mutations on
@@ -157,6 +157,7 @@ Every method rolls up the error taxonomy below.
 | `cancel_run` | `workspace_id`, `run_id`, `reason?` | `RunRef` | `{queued, running, pausing, paused} → cancelling → cancelled` | `workflow.cancelled` (active path only; `reason` on `.extra`) | Idempotent on `cancelled`; no re-publish on `cancelling`. |
 | `pause_run` | `workspace_id`, `run_id` | `RunRef` | `running → pausing → paused` | `workflow.paused` (active path only) | Idempotent on `pausing` / `paused`. |
 | `resume_run` | `workspace_id`, `run_id` | `RunRef` | `paused → running` | `workflow.resumed` (active path only) | Idempotent on `running`; refuses non-`paused` sources before touching Dapr. |
+| `raise_external_event` | `workspace_id`, `run_id`, `step_id`, `event_name`, `payload?`, `idempotency_key?` | `None` | none (the workflow's `wait_for_external_event` step resumes inside Dapr) | none | Forwards a Trigger-Service `RaiseExternalEvent` into `WorkflowClient.raise_workflow_event`. In-process TTL dedup keyed on `(workspace_id, run_id, step_id, event_name, idempotency_key)`; replays inside the `WF_IDEMPOTENCY_KEY_TTL` window are no-ops. Refuses terminal-state runs (`succeeded` / `failed` / `cancelled`) with `RunStateConflictError`. |
 | `get_run` | `workspace_id`, `run_id` | `RunRecord` | none | none | Overlays the runtime status snapshot on in-flight rows; terminal & persisted-only transitional rows skip the runtime call. |
 | `list_runs` | `workspace_id`, `cursor?`, `limit?` | `Page[RunRef]` | none | none | Persisted-only; never consults the runtime. |
 

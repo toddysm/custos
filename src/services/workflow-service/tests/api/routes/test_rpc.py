@@ -492,6 +492,190 @@ class TestInternalCancelRun:
 
 
 # ---------------------------------------------------------------------------
+# /internal/runs/{run_id}/steps/{step_id}:raiseEvent
+# ---------------------------------------------------------------------------
+
+
+STEP_ID = "approve"
+EVENT_NAME = "approval.received"
+
+
+class TestInternalRaiseExternalEvent:
+    """End-to-end coverage of the WF-IMPL-068 ``RaiseExternalEvent`` route."""
+
+    async def test_happy_path_dispatches_and_returns_202_with_empty_body(
+        self, client: httpx.AsyncClient, harness: _Harness
+    ) -> None:
+        """Raise-event forwards all body fields and returns 202 + no body."""
+        harness.controller.raise_external_event.return_value = None
+
+        response = await client.post(
+            f"/internal/runs/{RUN_ID}/steps/{STEP_ID}:raiseEvent",
+            json={
+                "workspaceId": WORKSPACE,
+                "eventName": EVENT_NAME,
+                "payload": {"approved": True},
+                "idempotencyKey": "client-key",
+            },
+        )
+
+        assert response.status_code == 202
+        assert response.content == b""
+        call_kwargs = harness.controller.raise_external_event.await_args.kwargs
+        assert call_kwargs["workspace_id"] == WORKSPACE
+        assert str(call_kwargs["run_id"]) == RUN_ID
+        assert call_kwargs["step_id"] == STEP_ID
+        assert call_kwargs["event_name"] == EVENT_NAME
+        assert call_kwargs["payload"] == {"approved": True}
+        assert call_kwargs["idempotency_key"] == "client-key"
+
+    async def test_payload_defaults_to_empty_dict_when_omitted(
+        self, client: httpx.AsyncClient, harness: _Harness
+    ) -> None:
+        harness.controller.raise_external_event.return_value = None
+
+        response = await client.post(
+            f"/internal/runs/{RUN_ID}/steps/{STEP_ID}:raiseEvent",
+            json={"workspaceId": WORKSPACE, "eventName": EVENT_NAME},
+        )
+
+        assert response.status_code == 202
+        call_kwargs = harness.controller.raise_external_event.await_args.kwargs
+        assert call_kwargs["payload"] == {}
+        assert call_kwargs["idempotency_key"] is None
+
+    async def test_missing_workspace_id_returns_400(
+        self, client: httpx.AsyncClient, harness: _Harness
+    ) -> None:
+        response = await client.post(
+            f"/internal/runs/{RUN_ID}/steps/{STEP_ID}:raiseEvent",
+            json={"eventName": EVENT_NAME, "payload": {}},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["code"] == "workflow.api.bad_request"
+        harness.controller.raise_external_event.assert_not_called()
+
+    async def test_malformed_workspace_id_returns_400(
+        self, client: httpx.AsyncClient, harness: _Harness
+    ) -> None:
+        """The body's ``workspaceId`` must match the canonical grammar."""
+        response = await client.post(
+            f"/internal/runs/{RUN_ID}/steps/{STEP_ID}:raiseEvent",
+            json={
+                "workspaceId": "NOT-VALID-CAPS",
+                "eventName": EVENT_NAME,
+                "payload": {},
+            },
+        )
+
+        assert response.status_code == 400
+        assert response.json()["code"] == "workflow.api.bad_request"
+        harness.controller.raise_external_event.assert_not_called()
+
+    async def test_missing_event_name_returns_400(
+        self, client: httpx.AsyncClient, harness: _Harness
+    ) -> None:
+        response = await client.post(
+            f"/internal/runs/{RUN_ID}/steps/{STEP_ID}:raiseEvent",
+            json={"workspaceId": WORKSPACE, "payload": {}},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["code"] == "workflow.api.bad_request"
+        harness.controller.raise_external_event.assert_not_called()
+
+    async def test_empty_event_name_returns_400(
+        self, client: httpx.AsyncClient, harness: _Harness
+    ) -> None:
+        response = await client.post(
+            f"/internal/runs/{RUN_ID}/steps/{STEP_ID}:raiseEvent",
+            json={"workspaceId": WORKSPACE, "eventName": "", "payload": {}},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["code"] == "workflow.api.bad_request"
+        harness.controller.raise_external_event.assert_not_called()
+
+    async def test_extra_body_field_is_rejected(
+        self, client: httpx.AsyncClient, harness: _Harness
+    ) -> None:
+        response = await client.post(
+            f"/internal/runs/{RUN_ID}/steps/{STEP_ID}:raiseEvent",
+            json={
+                "workspaceId": WORKSPACE,
+                "eventName": EVENT_NAME,
+                "payload": {},
+                "extraField": "nope",
+            },
+        )
+
+        assert response.status_code == 400
+        assert response.json()["code"] == "workflow.api.bad_request"
+        harness.controller.raise_external_event.assert_not_called()
+
+    async def test_unknown_run_returns_404_envelope(
+        self, client: httpx.AsyncClient, harness: _Harness
+    ) -> None:
+        harness.controller.raise_external_event.side_effect = RunNotFoundError(
+            f"run {RUN_ID!r} not found",
+            run_id=RUN_ID,
+        )
+
+        response = await client.post(
+            f"/internal/runs/{RUN_ID}/steps/{STEP_ID}:raiseEvent",
+            json={"workspaceId": WORKSPACE, "eventName": EVENT_NAME, "payload": {}},
+        )
+
+        assert response.status_code == 404
+        body = response.json()
+        assert body["code"] == "workflow.run_not_found"
+        assert body["runId"] == RUN_ID
+
+    async def test_terminal_state_returns_409_envelope(
+        self, client: httpx.AsyncClient, harness: _Harness
+    ) -> None:
+        harness.controller.raise_external_event.side_effect = RunStateConflictError(
+            f"run {RUN_ID!r} terminal",
+            run_id=RUN_ID,
+            current_status=RunStatus.SUCCEEDED.value,
+            attempted_status="raise_event",
+        )
+
+        response = await client.post(
+            f"/internal/runs/{RUN_ID}/steps/{STEP_ID}:raiseEvent",
+            json={"workspaceId": WORKSPACE, "eventName": EVENT_NAME, "payload": {}},
+        )
+
+        assert response.status_code == 409
+        body = response.json()
+        assert body["code"] == "workflow.run_state_conflict"
+        assert body["runId"] == RUN_ID
+
+    async def test_empty_string_idempotency_key_passes_through(
+        self, client: httpx.AsyncClient, harness: _Harness
+    ) -> None:
+        """An empty string is a valid opt-out signal on this surface."""
+        harness.controller.raise_external_event.return_value = None
+
+        response = await client.post(
+            f"/internal/runs/{RUN_ID}/steps/{STEP_ID}:raiseEvent",
+            json={
+                "workspaceId": WORKSPACE,
+                "eventName": EVENT_NAME,
+                "payload": {},
+                "idempotencyKey": "",
+            },
+        )
+
+        assert response.status_code == 202
+        call_kwargs = harness.controller.raise_external_event.await_args.kwargs
+        # The model preserves the empty string verbatim; the
+        # controller normalises it to ``None`` for dedup purposes.
+        assert call_kwargs["idempotency_key"] == ""
+
+
+# ---------------------------------------------------------------------------
 # Module-level router-registration smoke tests
 # ---------------------------------------------------------------------------
 
@@ -503,13 +687,17 @@ def test_all_routers_includes_rpc_router() -> None:
 
 
 def test_rpc_router_exposes_expected_paths() -> None:
-    """The router carries both the start + cancel RPC paths."""
+    """The router carries the start + cancel + raiseEvent RPC paths."""
     paths = {
         (route.path, frozenset(route.methods))  # type: ignore[attr-defined]
         for route in rpc_router.routes
     }
     assert ("/internal/runs:start", frozenset({"POST"})) in paths
     assert ("/internal/runs/{run_id}:cancel", frozenset({"POST"})) in paths
+    assert (
+        "/internal/runs/{run_id}/steps/{step_id}:raiseEvent",
+        frozenset({"POST"}),
+    ) in paths
 
 
 def test_internal_workspace_id_pattern_matches_dependencies_pattern() -> None:

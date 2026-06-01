@@ -133,6 +133,9 @@ class _RecordingWorkflowClient:
     async def resume_workflow(self, request: Any) -> None:  # pragma: no cover
         raise NotImplementedError("get_run / list_runs never call resume_workflow")
 
+    async def raise_workflow_event(self, request: Any) -> None:  # pragma: no cover
+        raise NotImplementedError("test double does not implement raise_workflow_event")
+
     async def get_workflow_state(self, request: GetRunStateRequest) -> RuntimeRunState | None:
         self.state_requests.append(request)
         if self.get_state_raise is not None:
@@ -165,6 +168,9 @@ class _ExplodingGetStateClient:
 
     async def resume_workflow(self, request: Any) -> None:  # pragma: no cover
         raise NotImplementedError
+
+    async def raise_workflow_event(self, request: Any) -> None:  # pragma: no cover
+        raise NotImplementedError("test double does not implement raise_workflow_event")
 
     async def get_workflow_state(self, request: GetRunStateRequest) -> RuntimeRunState | None:
         raise AssertionError("get_workflow_state must not be called for a terminal-status run")

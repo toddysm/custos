@@ -360,11 +360,13 @@ class TestCancelRunRequest:
 class TestRaiseExternalEventRequest:
     def test_camel_case_round_trip(self) -> None:
         wire = {
+            "workspaceId": "ws-a",
             "eventName": "approval.granted",
             "payload": {"by": "alice"},
             "idempotencyKey": "evt-1",
         }
         req = RaiseExternalEventRequest.model_validate(wire)
+        assert req.workspace_id == "ws-a"
         assert req.event_name == "approval.granted"
         assert req.payload == {"by": "alice"}
         assert req.idempotency_key == "evt-1"
@@ -372,20 +374,33 @@ class TestRaiseExternalEventRequest:
 
     def test_event_name_required(self) -> None:
         with pytest.raises(ValidationError):
-            RaiseExternalEventRequest.model_validate({"payload": {}})
+            RaiseExternalEventRequest.model_validate({"workspaceId": "ws-a", "payload": {}})
 
     def test_event_name_non_empty(self) -> None:
         with pytest.raises(ValidationError):
-            RaiseExternalEventRequest.model_validate({"eventName": ""})
+            RaiseExternalEventRequest.model_validate({"workspaceId": "ws-a", "eventName": ""})
+
+    def test_workspace_id_required(self) -> None:
+        with pytest.raises(ValidationError):
+            RaiseExternalEventRequest.model_validate({"eventName": "x"})
+
+    def test_workspace_id_grammar_enforced(self) -> None:
+        with pytest.raises(ValidationError):
+            RaiseExternalEventRequest.model_validate(
+                {"workspaceId": "NOT-VALID-CAPS", "eventName": "x"}
+            )
 
     def test_payload_defaults_to_empty(self) -> None:
-        req = RaiseExternalEventRequest.model_validate({"eventName": "x"})
+        req = RaiseExternalEventRequest.model_validate({"workspaceId": "ws-a", "eventName": "x"})
+        assert req.workspace_id == "ws-a"
         assert req.payload == {}
         assert req.idempotency_key is None
 
     def test_unknown_field_rejected(self) -> None:
         with pytest.raises(ValidationError):
-            RaiseExternalEventRequest.model_validate({"eventName": "x", "extra": "no"})
+            RaiseExternalEventRequest.model_validate(
+                {"workspaceId": "ws-a", "eventName": "x", "extra": "no"}
+            )
 
 
 # ---------------------------------------------------------------------------

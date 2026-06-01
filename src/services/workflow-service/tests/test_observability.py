@@ -919,6 +919,9 @@ class _ObsWorkflowClient:
         if self.resume_raise is not None:
             raise self.resume_raise
 
+    async def raise_workflow_event(self, request: Any) -> None:  # pragma: no cover
+        raise NotImplementedError("test double does not implement raise_workflow_event")
+
     async def get_workflow_state(self, request: _GetRunStateRequest) -> _RuntimeRunState | None:
         self.state_calls.append(request)
         if self.get_state_raise is not None:

@@ -73,7 +73,7 @@ import json
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final, Protocol, runtime_checkable
 
 from custos_spl.pagination import Cursor, Page
@@ -106,12 +106,16 @@ from custos_workflow.runtime._common import (
 from custos_workflow.runtime._common import (
     GetRunStateRequest,
     PauseRunRequest,
+    RaiseRunEventRequest,
     ResumeRunRequest,
     ScheduleWorkflowRequest,
     TerminateRunRequest,
 )
 from custos_workflow.runtime._common import RunState as RuntimeRunState
 from custos_workflow.runtime._common import RunStatus as RuntimeRunStatus
+from custos_workflow.validator.idempotency_ledger import (
+    DEFAULT_IDEMPOTENCY_KEY_TTL,
+)
 
 if TYPE_CHECKING:
     from custos_cel.clock import Clock
@@ -532,6 +536,17 @@ class _WorkflowClient(Protocol):
         """Resume the Dapr Workflow instance identified by ``request.instance_id``."""
         ...
 
+    async def raise_workflow_event(self, request: RaiseRunEventRequest) -> None:
+        """Deliver an external event into the Dapr Workflow instance.
+
+        Structural addition for WF-IMPL-068: the Trigger Service
+        bridge calls this through
+        :meth:`RunController.raise_external_event` to forward a
+        ``RaiseExternalEvent`` RPC into Dapr Workflow's
+        ``raise_event`` primitive.
+        """
+        ...
+
 
 # ---------------------------------------------------------------------------
 # RunController
@@ -610,6 +625,7 @@ class RunController:
         replay_reconciler: ReplayReconciler | None = None,
         terminate_poll_attempts: int = DEFAULT_TERMINATE_POLL_ATTEMPTS,
         terminate_poll_interval_seconds: float = DEFAULT_TERMINATE_POLL_INTERVAL_S,
+        event_dispatch_ttl: timedelta | None = None,
         sleep: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         if terminate_poll_attempts < 1:
@@ -639,6 +655,26 @@ class RunController:
         # ``(workspace_id, run_id)`` pair; value is the SHA-256 of
         # the canonical-JSON ``(workflow_version_id, inputs)`` pair.
         self._input_fingerprints: dict[tuple[str, RunId], str] = {}
+        # In-process event-dispatch ledger (WF-IMPL-068). Keyed by
+        # ``(workspace_id, run_id, step_id, event_name, idempotency_key)``;
+        # value is the timezone-aware UTC instant the dispatch was
+        # first recorded. Lazily purged on every
+        # :meth:`raise_external_event` call once the entry's age
+        # exceeds :attr:`_event_dispatch_ttl`. The same
+        # ``WF_IDEMPOTENCY_KEY_TTL`` window the Validator uses for
+        # StartRun dedup applies here; the ledger is intentionally
+        # process-local for the WF-IMPL-068 acceptance criteria
+        # (single-process tests + dev runs). A persisted adapter
+        # behind the same dedup key shape lands with the Postgres
+        # idempotency-ledger work that also replaces the in-process
+        # StartRun ledger.
+        self._event_dispatch_ttl: timedelta = (
+            event_dispatch_ttl if event_dispatch_ttl is not None else DEFAULT_IDEMPOTENCY_KEY_TTL
+        )
+        if self._event_dispatch_ttl <= timedelta(0):
+            raise ValueError("event_dispatch_ttl must be positive")
+        self._event_dispatch_dedup: dict[tuple[str, str, str, str, str], datetime] = {}
+        self._event_dispatch_lock: asyncio.Lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # start_run
@@ -966,6 +1002,157 @@ class RunController:
             workflow_version_id=record.workflow_version,
             status=finalised.status,
         )
+
+    # ------------------------------------------------------------------
+    # raise_external_event
+    # ------------------------------------------------------------------
+
+    async def raise_external_event(
+        self,
+        *,
+        workspace_id: str,
+        run_id: RunId,
+        step_id: str,
+        event_name: str,
+        payload: Any = None,
+        idempotency_key: str | None = None,
+    ) -> None:
+        """Forward a Trigger-Service ``RaiseExternalEvent`` into Dapr.
+
+        Implements design.md \u00a7 Internal RPC (inbound) row
+        ``RaiseExternalEvent``. The Trigger Service is the primary
+        caller; the bridge keeps the resume signal inside the same
+        dedup / audit / idempotency machinery as every other
+        external event (design.md \u00a7 Operation: Step Resume +
+        \u00a7 Approval Gates).
+
+        Sequence:
+
+        1. Load the :class:`RunRecord` via
+           :meth:`RunStore.get_run`. A missing row raises
+           :class:`RunNotFoundError`.
+        2. Refuse terminal-state runs. ``succeeded`` / ``failed`` /
+           ``cancelled`` rows raise :class:`RunStateConflictError`
+           — the Dapr ``raise_event`` primitive cannot deliver to
+           an instance that has already finished.
+        3. Dedup on ``(workspace_id, run_id, step_id, event_name,
+           idempotency_key)``. Within the
+           ``WF_IDEMPOTENCY_KEY_TTL`` window a duplicate call is a
+           no-op (no Dapr round-trip; no second event delivery).
+           Empty / ``None`` ``idempotency_key`` opts out of the
+           dedup record entirely — every such call dispatches.
+        4. Call
+           :meth:`WorkflowClient.raise_workflow_event` with
+           ``instance_id=str(run_id)``. Runtime failures surface as
+           :class:`WorkflowRuntimeUnavailableError`; the dedup
+           entry is rolled back so a retry can land.
+
+        The method is intentionally safe to call when no
+        ``waitFor:`` step is currently buffering the event — Dapr
+        Workflows store unconsumed events on the instance until a
+        matching ``wait_for_external_event`` runs (see design.md
+        § Operation: Step Resume).
+
+        Args:
+            workspace_id: The owning workspace; must be non-empty.
+            run_id: The run to deliver into.
+            step_id: The wait-for step the event is paired with.
+                Required for dedup but not consumed by Dapr (the
+                runtime keys events by ``event_name`` alone).
+            event_name: Wire-stable event name the workflow's
+                ``waitFor:`` step subscribed to.
+            payload: Optional event payload delivered into the
+                ``raise_event`` call's ``data`` argument.
+            idempotency_key: Caller-supplied dedup token. ``None``
+                or empty opts out of dedup.
+
+        Raises:
+            RunNotFoundError: No row exists at
+                ``(workspace_id, run_id)``.
+            RunStateConflictError: The run is in a terminal status
+                (``succeeded`` / ``failed`` / ``cancelled``).
+            WorkflowRuntimeUnavailableError: The Dapr runtime
+                refused the ``raise_event`` call.
+        """
+        if not workspace_id:
+            raise ValueError("workspace_id must be non-empty")
+        if not event_name:
+            raise ValueError("event_name must be non-empty")
+        if not step_id:
+            raise ValueError("step_id must be non-empty")
+
+        record = await self._store.get_run(workspace_id, run_id)
+        if record is None:
+            raise RunNotFoundError(
+                f"run {run_id} not found in workspace {workspace_id!r}",
+                run_id=str(run_id),
+            )
+        if record.status in TERMINAL_STATUSES:
+            raise RunStateConflictError(
+                (
+                    f"cannot raise_external_event on run {run_id!r}: "
+                    f"current status {record.status.value!r} is terminal"
+                ),
+                run_id=str(run_id),
+                current_status=record.status.value,
+                attempted_status="raise_event",
+            )
+
+        effective_key = (idempotency_key or "").strip() or None
+        dedup_key: tuple[str, str, str, str, str] | None = None
+        if effective_key is not None:
+            dedup_key = (
+                workspace_id,
+                str(run_id),
+                step_id,
+                event_name,
+                effective_key,
+            )
+            now = self._clock.now()
+            async with self._event_dispatch_lock:
+                self._purge_expired_event_dispatch(now)
+                if dedup_key in self._event_dispatch_dedup:
+                    # Replay inside the TTL window — no Dapr call,
+                    # no second delivery.
+                    return
+                # Reserve the slot before dispatching so a
+                # concurrent caller within the same process can
+                # see the in-flight reservation.
+                self._event_dispatch_dedup[dedup_key] = now
+
+        try:
+            await self._workflow_client.raise_workflow_event(
+                RaiseRunEventRequest(
+                    instance_id=str(run_id),
+                    event_name=event_name,
+                    data=payload,
+                )
+            )
+        except Exception as exc:
+            # Roll back the reservation so a retry can succeed.
+            if dedup_key is not None:
+                async with self._event_dispatch_lock:
+                    self._event_dispatch_dedup.pop(dedup_key, None)
+            raise WorkflowRuntimeUnavailableError(
+                (f"failed to raise event {event_name!r} on run {run_id} on the workflow runtime"),
+                run_id=str(run_id),
+                cause=str(exc),
+            ) from exc
+
+    def _purge_expired_event_dispatch(self, now: datetime) -> None:
+        """Drop event-dispatch dedup rows whose age exceeds the TTL.
+
+        Called under :attr:`_event_dispatch_lock`. Builds a small
+        ``stale`` list so the dict mutation does not collide with
+        the iteration. Mirrors
+        :meth:`InMemoryIdempotencyLedger._purge_expired`.
+        """
+        cutoff = now - self._event_dispatch_ttl
+        stale: list[tuple[str, str, str, str, str]] = [
+            key for key, recorded_at in self._event_dispatch_dedup.items() if recorded_at <= cutoff
+        ]
+        for key in stale:
+            del self._event_dispatch_dedup[key]
 
     # ------------------------------------------------------------------
     # pause_run

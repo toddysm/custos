@@ -184,6 +184,7 @@ _DOCUMENTED_PUBLIC_METHODS: Final[frozenset[str]] = frozenset(
         "cancel_run",
         "pause_run",
         "resume_run",
+        "raise_external_event",
         "get_run",
         "list_runs",
     }

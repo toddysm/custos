@@ -428,6 +428,9 @@ class _StubWorkflowClient:
     async def resume_workflow(self, request: Any) -> None:  # pragma: no cover
         return None
 
+    async def raise_workflow_event(self, request: Any) -> None:  # pragma: no cover
+        raise NotImplementedError("test double does not implement raise_workflow_event")
+
 
 @dataclass
 class _StubCatalog:

@@ -1,6 +1,6 @@
-"""Internal RPC routes for the ``Run`` resource (WF-IMPL-067, #453).
+"""Internal RPC routes for the ``Run`` resource (WF-IMPL-067 + WF-IMPL-068).
 
-Per ``design.md`` \u00a7 Internal RPC, internal callers (today the
+Per ``design.md`` § Internal RPC, internal callers (today the
 Trigger Service; tomorrow any in-cluster sibling) reach the Run
 Controller through a flat ``/internal/`` URL prefix rather than
 the public ``/v1/workspaces/{ws}/`` shape. The prefix is the seam
@@ -8,21 +8,28 @@ the Helm chart / mesh uses to pin mTLS-only access; the actual
 mTLS gate lands with the API Gateway integration (see
 ``design/components/workflow-service/todos.md``).
 
-Two RPC verbs land in this task:
+Three RPC verbs land in this module:
 
-* ``POST /internal/runs:start`` \u2014 ``StartRun`` RPC. Body shape is
+* ``POST /internal/runs:start`` — ``StartRun`` RPC. Body shape is
   :class:`~custos_workflow.api.models.InternalStartRunRequest`
   which extends the public
   :class:`~custos_workflow.api.models.StartRunRequest` with an
   explicit ``workspaceId`` body field (the path carries no
   ``{ws}`` segment).
-* ``POST /internal/runs/{runId}:cancel`` \u2014 ``CancelRun`` RPC. Body
+* ``POST /internal/runs/{runId}:cancel`` — ``CancelRun`` RPC. Body
   shape is
   :class:`~custos_workflow.api.models.InternalCancelRunRequest`
   which extends :class:`~custos_workflow.api.models.CancelRunRequest`
   the same way.
+* ``POST /internal/runs/{runId}/steps/{stepId}:raiseEvent`` —
+  ``RaiseExternalEvent`` RPC (WF-IMPL-068). Body shape is
+  :class:`~custos_workflow.api.models.RaiseExternalEventRequest`
+  which carries ``workspaceId`` + ``eventName`` + ``payload`` +
+  ``idempotencyKey``. The route returns ``202 Accepted`` with an
+  empty body — the workflow's ``wait_for_external_event`` step
+  resumes asynchronously inside Dapr.
 
-Both routes share the WF-IMPL-064 dependency factories
+All three routes share the WF-IMPL-064 dependency factories
 (:class:`StartRunValidator`, :class:`RunController`, the
 ``CallContext``) with the public REST routes; the only difference
 is how the workspace travels.
@@ -39,29 +46,45 @@ for the dedup decision; replaying a request with the same key
 returns the original ``runId`` without scheduling a second
 workflow instance, matching the public surface exactly.
 
+``POST /internal/runs/{runId}/steps/{stepId}:raiseEvent`` keys its
+in-process dedup ledger on
+``(workspaceId, runId, stepId, eventName, idempotencyKey)`` for a
+``WF_IDEMPOTENCY_KEY_TTL`` window. A duplicate body inside the
+window is a no-op (still 202) — no second event lands on the
+workflow. Omitting ``idempotencyKey`` opts out of dedup entirely;
+every such call dispatches.
+
 Error envelopes
 ---------------
 
 The error taxonomy is identical to the public surface: every
 :class:`RunControllerError` / :class:`ValidatorError` is mapped
 through the WF-IMPL-061 handler chain to the locked RFC 7807
-envelope. ``CancelRun`` of an unknown run id returns the
-``workflow.run_not_found`` (404) envelope. ``CancelRun`` of a
-run that is already in a terminal *non-cancel* status
-(``succeeded`` / ``failed``) returns the
-``workflow.run_state_conflict`` (409) envelope; calling
-``CancelRun`` on a run that is already ``cancelling`` /
-``cancelled`` is an idempotent no-op that returns 202 with the
-current :class:`RunRef` (the controller short-circuits without
-re-issuing the terminate). The Internal RPC routes do NOT
-introduce any new ``code`` values.
+envelope.
+
+* ``CancelRun`` and ``RaiseExternalEvent`` of an unknown run id
+  return the ``workflow.run_not_found`` (404) envelope.
+* ``CancelRun`` of a run that is already in a terminal
+  *non-cancel* status (``succeeded`` / ``failed``) returns the
+  ``workflow.run_state_conflict`` (409) envelope; calling
+  ``CancelRun`` on a run that is already ``cancelling`` /
+  ``cancelled`` is an idempotent no-op that returns 202 with the
+  current :class:`RunRef` (the controller short-circuits without
+  re-issuing the terminate).
+* ``RaiseExternalEvent`` against a run in ANY terminal status
+  (``succeeded`` / ``failed`` / ``cancelled``) returns the
+  ``workflow.run_state_conflict`` (409) envelope — the Dapr
+  ``raise_event`` primitive cannot deliver to a finished
+  instance.
+
+The Internal RPC routes do NOT introduce any new ``code`` values.
 """
 
 from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends, Header, Path
+from fastapi import APIRouter, Body, Depends, Header, Path, Response
 
 from custos_workflow.api.dependencies import (
     get_call_context,
@@ -71,6 +94,7 @@ from custos_workflow.api.dependencies import (
 from custos_workflow.api.models import (
     InternalCancelRunRequest,
     InternalStartRunRequest,
+    RaiseExternalEventRequest,
     RunRefResponse,
 )
 from custos_workflow.api.routes.runs import (
@@ -186,3 +210,73 @@ async def cancel_run(
         reason=body.reason,
     )
     return ref_response_from_ref(ref)
+
+
+# ---------------------------------------------------------------------------
+# POST /internal/runs/{run_id}/steps/{step_id}:raiseEvent — RaiseExternalEvent
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/internal/runs/{run_id}/steps/{step_id}:raiseEvent",
+    status_code=202,
+    summary="Internal RPC: deliver an external event into a running workflow.",
+)
+async def raise_external_event(
+    body: Annotated[RaiseExternalEventRequest, Body(...)],
+    controller: Annotated[RunController, Depends(get_run_controller)],
+    _ctx: Annotated[CallContext, Depends(get_call_context)],
+    run_id: Annotated[
+        str,
+        Path(
+            min_length=1,
+            description="The opaque run identifier returned by `StartRun`.",
+        ),
+    ],
+    step_id: Annotated[
+        str,
+        Path(
+            min_length=1,
+            description=(
+                "Stable identifier of the `waitFor:` step the event "
+                "is paired with. Used for dedup; the runtime keys "
+                "delivery by `eventName` alone."
+            ),
+        ),
+    ],
+) -> Response:
+    """Forward a Trigger-Service ``RaiseExternalEvent`` into Dapr.
+
+    Mirrors design.md § Internal RPC (inbound) row
+    ``RaiseExternalEvent``. The body carries the authoritative
+    ``workspaceId`` (the ``/internal/`` URL surface drops the
+    ``{ws}`` path segment). The route returns ``202 Accepted``
+    with an empty body: the workflow's
+    ``wait_for_external_event`` step resumes asynchronously
+    inside Dapr.
+
+    Idempotency on this surface is keyed by
+    ``(workspaceId, runId, stepId, eventName, idempotencyKey)``
+    inside the controller's in-process event-dispatch ledger
+    (WF-IMPL-068). A duplicate body within the
+    ``WF_IDEMPOTENCY_KEY_TTL`` window is a no-op (still returns
+    202) — no second event lands on the workflow. Omitting
+    ``idempotencyKey`` opts out of dedup entirely; every such
+    call dispatches.
+
+    Error envelopes:
+
+    * Unknown ``runId`` → ``workflow.run_not_found`` (404).
+    * Terminal-state run (``succeeded`` / ``failed`` /
+      ``cancelled``) → ``workflow.run_state_conflict`` (409).
+    * Runtime failure → ``workflow.runtime_unavailable`` (503).
+    """
+    await controller.raise_external_event(
+        workspace_id=body.workspace_id,
+        run_id=RunId(run_id),
+        step_id=step_id,
+        event_name=body.event_name,
+        payload=body.payload,
+        idempotency_key=body.idempotency_key,
+    )
+    return Response(status_code=202)
