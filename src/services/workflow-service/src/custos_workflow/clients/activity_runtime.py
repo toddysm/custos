@@ -669,9 +669,12 @@ class DaprActivityRuntimeClient:
             )
             return
 
-        # Any other 2xx is unexpected (the contract is 200/204);
-        # surface it as a status error so the bug is visible
-        # rather than silently swallowed.
+        # Fallthrough: every status outside the contracted set
+        # (200/204 success, 404/409 idempotent no-op) is an
+        # unexpected response — 4xx, 5xx, redirects, and any
+        # non-200/204 2xx alike — and is surfaced as a status
+        # error so the bug is visible rather than silently
+        # swallowed.
         body_preview = response.text[:200] if response.text else ""
         raise OutboundRpcStatusError(
             f"Dapr CancelActivity returned HTTP {status_code}: {body_preview!r}",
