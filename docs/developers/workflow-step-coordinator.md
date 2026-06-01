@@ -442,10 +442,15 @@ without extending the locked set.
 | `step.sub_workflow_failed` | `SubWorkflowFailedError` | An awaited child sub-workflow completed with a failure envelope; a single child failure short-circuits the parent loop / invocation. Carries the child's `child_kind`. | `StepFailed` envelope; retry driver is not consulted. |
 | `step.approval_timeout` | `ApprovalTimeoutError` | An `approval:` gate's durable timer fired before the approval `RaiseExternalEvent` signal arrived. Carries the configured ISO-8601 `timeout`. | `StepFailed` envelope; retry driver is not consulted. |
 
-Every entry inflates a stable `to_dict()` envelope keyed on
-`{kind, message, run_id?, step_id?, attempt?, activity_ref?, cause?}`
-— the API surface for the API Adapter + Observability/Audit
-client when it consumes the `StepFailed` envelope downstream.
+Every entry inflates a stable `to_dict()` envelope keyed on the
+common base — `{kind, message, run_id?, step_id?, attempt?}` —
+plus that error's own structured extras (e.g. `cause` /
+`activity_ref` for the schedule/bind errors, `colliding_key` /
+`cause_kind` for `step.loop_expansion_error`, `child_instance_id`
+/ `child_kind` for the sub-workflow errors, `timeout` for
+`step.approval_timeout`). This is the API surface for the API
+Adapter + Observability/Audit client when it consumes the
+`StepFailed` envelope downstream.
 
 ## Observability surface
 
