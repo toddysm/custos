@@ -360,11 +360,15 @@ class FakeWorkflowRuntime:
     async def start(self) -> None:
         """Mark the runtime started. No background threads are spawned.
 
-        On the first call, if both ``activity_runtime_client`` and
-        ``connector_client`` were supplied to the constructor, the
-        two WF-IMPL-079 bridge activities are registered so test
-        code driving the orchestrator via ``ctx.call_activity(name,
-        ...)`` resolves through the same surface as production.
+        On the first call, each WF-IMPL-079 bridge activity is
+        registered independently when its corresponding client
+        was supplied to the constructor (ARM
+        ``schedule_activity`` bridge when
+        ``activity_runtime_client`` is non-``None``, Connector
+        ``bind_for_step`` bridge when ``connector_client`` is
+        non-``None``), so test code driving the orchestrator via
+        ``ctx.call_activity(name, ...)`` resolves through the
+        same surface as production.
         """
 
         if not self._started:

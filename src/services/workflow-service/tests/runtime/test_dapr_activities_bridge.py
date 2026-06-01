@@ -335,6 +335,18 @@ class TestConnectorContextWire:
         parsed = _parse_iso_utc("2026-05-17T08:00:00-04:00")
         assert parsed.tzinfo is not None
 
+    def test_format_iso_utc_normalises_non_utc_offset(self) -> None:
+        # Regression for Copilot review on PR #502: ``_format_iso_utc`` must
+        # mirror the production ``_iso_utc`` helper and normalise non-UTC
+        # offsets to UTC before stringifying so the wire never leaks an
+        # offset like ``-04:00``.
+        from datetime import timedelta, timezone
+
+        from custos_workflow.runtime.dapr_activities import _format_iso_utc
+
+        non_utc = datetime(2026, 5, 17, 8, 0, tzinfo=timezone(timedelta(hours=-4)))
+        assert _format_iso_utc(non_utc) == "2026-05-17T12:00:00Z"
+
 
 # ---------------------------------------------------------------------------
 # ScheduleActivity request / ActivityResultEnvelope wire shape

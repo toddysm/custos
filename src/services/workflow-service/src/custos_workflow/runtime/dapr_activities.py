@@ -43,7 +43,7 @@ import asyncio
 import inspect
 from collections.abc import Awaitable, Callable, Generator, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Final, NoReturn, cast
 
@@ -388,7 +388,11 @@ def _format_iso_utc(value: datetime) -> str:
         raise ValueError(
             "datetime must be timezone-aware to serialize to the Dapr activity-task wire envelope"
         )
-    return value.isoformat().replace("+00:00", "Z")
+    # Mirror the production ``_iso_utc`` helper
+    # (clients/activity_runtime.py) by normalising any offset to
+    # UTC before stringifying — keeps the wire format identical
+    # whether the caller hands us ``UTC`` or e.g. ``-04:00``.
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _parse_iso_utc(value: object) -> datetime:
@@ -424,7 +428,7 @@ def _unwrap_mapping(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
 def _unwrap_value(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {k: _unwrap_value(v) for k, v in value.items()}
-    if isinstance(value, list | tuple):
+    if isinstance(value, (list, tuple)):
         return [_unwrap_value(v) for v in value]
     return value
 
@@ -480,7 +484,7 @@ def _deserialize_slot_spec(payload: Mapping[str, Any]) -> SlotSpec:
     if missing:
         raise ValueError(f"SlotSpec wire payload missing required field(s): {sorted(missing)!r}")
     capabilities_raw = payload["capabilities"]
-    if not isinstance(capabilities_raw, list | tuple):
+    if not isinstance(capabilities_raw, (list, tuple)):
         raise ValueError(
             f"SlotSpec.capabilities must be a JSON array, got {type(capabilities_raw).__name__}"
         )
@@ -529,7 +533,7 @@ def _deserialize_bind_for_step_request(payload: Mapping[str, Any]) -> BindForSte
             f"BindForStepRequest wire payload missing required field(s): {sorted(missing)!r}"
         )
     slots_raw = payload["slots"]
-    if not isinstance(slots_raw, list | tuple):
+    if not isinstance(slots_raw, (list, tuple)):
         raise ValueError(
             f"BindForStepRequest.slots must be a JSON array, got {type(slots_raw).__name__}"
         )

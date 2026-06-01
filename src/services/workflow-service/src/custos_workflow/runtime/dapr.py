@@ -193,13 +193,13 @@ class WorkflowRuntime:
         # orchestrator (WF-IMPL-080) yields against via
         # ``ctx.call_activity(SCHEDULE_ACTIVITY_ACTIVITY_NAME, ...)``
         # / ``ctx.call_activity(BIND_FOR_STEP_ACTIVITY_NAME, ...)``.
-        # When both clients are supplied, :meth:`start` registers
-        # the two bridge activities on the underlying Dapr runtime
-        # so the worker can resolve those yields. When either is
-        # ``None`` (e.g. early-boot tests that don't exercise the
-        # outbound RPC path), registration is skipped — callers
-        # that need the bridges then either supply both clients or
-        # register the activities themselves via
+        # :meth:`start` registers each bridge activity
+        # independently when its corresponding client is non-
+        # ``None`` (so a worker may expose only the ARM bridge,
+        # only the Connector bridge, both, or neither). Early-boot
+        # tests that don't exercise either RPC path may leave both
+        # ``None``; callers that need a bridge whose client they
+        # don't have can register the activity themselves via
         # :meth:`register_activity`.
         self._activity_runtime_client = activity_runtime_client
         self._connector_client = connector_client
@@ -243,13 +243,16 @@ class WorkflowRuntime:
     async def start(self) -> None:
         """Start the worker. Idempotent — subsequent calls are no-ops.
 
-        On the first call, if both ``activity_runtime_client`` and
-        ``connector_client`` were supplied to the constructor, the
-        two WF-IMPL-079 bridge activities
-        (:data:`SCHEDULE_ACTIVITY_ACTIVITY_NAME`,
-        :data:`BIND_FOR_STEP_ACTIVITY_NAME`) are registered on the
-        underlying Dapr runtime before the worker thread is
-        kicked off.
+        On the first call, each WF-IMPL-079 bridge activity is
+        registered independently when its corresponding client
+        was supplied to the constructor:
+        :data:`SCHEDULE_ACTIVITY_ACTIVITY_NAME` when
+        ``activity_runtime_client`` is non-``None``, and
+        :data:`BIND_FOR_STEP_ACTIVITY_NAME` when
+        ``connector_client`` is non-``None``. Registration is
+        skipped (per bridge) when its client is ``None`` or when
+        an activity with the same name was already registered
+        via :meth:`register_activity`.
         """
 
         if self._started:
