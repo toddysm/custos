@@ -30,7 +30,7 @@ Seventh sub-module: **Sub-Orchestration Manager**, packaged inside the service h
 
 ### Phase B — Child workflow + dynamic loop
 
-- [F] WF-IMPL-088 (#511): Child sub-workflow orchestrator function (depends on #507, #508).
+- [x] WF-IMPL-088 (#511): Child sub-workflow orchestrator function (depends on #507, #508).
 - [F] WF-IMPL-089 (#512): Loop fan-out — `forEach` spawn + `when_all` + merge (depends on #507, #508, #509, #511).
 - [F] WF-IMPL-090 (#513): `where:` pre-filter + loop edge cases (depends on #512).
 

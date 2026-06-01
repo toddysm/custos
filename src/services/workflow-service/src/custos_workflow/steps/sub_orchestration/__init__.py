@@ -10,14 +10,26 @@ Dapr Workflow instances for dynamic loops (``for:``), approval gates
   :func:`child_instance_id` and the :func:`iteration_key` derivation
   rule — that makes the child set reproducible under Dapr replay and
   child outputs addressable from ``steps.<stepId>.outputs``.
+* WF-IMPL-088 lands the child orchestrator function —
+  :func:`make_child_step_orchestrator` plus its
+  :class:`ChildStepInput` / :class:`ChildStepResult` envelopes — that
+  runs a single inner ``activity:`` / ``let:`` step body against an
+  item-scoped context and returns its outputs to the parent.
 
-Later tasks (WF-IMPL-086 …) extend this package with the
-sub-orchestration error taxonomy, the child orchestrator function,
-and the per-kind expansion + invocation paths.
+Later tasks (WF-IMPL-089 …) extend this package with the per-kind
+loop expansion + sub-workflow invocation paths that spawn and await
+these children.
 """
 
 from __future__ import annotations
 
+from custos_workflow.steps.sub_orchestration.child import (
+    CHILD_STEP_WORKFLOW_NAME,
+    DEFAULT_LOOP_VAR,
+    ChildStepInput,
+    ChildStepResult,
+    make_child_step_orchestrator,
+)
 from custos_workflow.steps.sub_orchestration.ids import (
     APPROVAL_ITERATION_KEY,
     CHILD_INSTANCE_ID_SEPARATOR,
@@ -30,8 +42,13 @@ from custos_workflow.steps.sub_orchestration.ids import (
 __all__ = [
     "APPROVAL_ITERATION_KEY",
     "CHILD_INSTANCE_ID_SEPARATOR",
+    "CHILD_STEP_WORKFLOW_NAME",
+    "DEFAULT_LOOP_VAR",
     "WORKFLOW_ITERATION_KEY",
     "ChildInstanceIdError",
+    "ChildStepInput",
+    "ChildStepResult",
     "child_instance_id",
     "iteration_key",
+    "make_child_step_orchestrator",
 ]
