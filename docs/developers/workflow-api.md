@@ -126,17 +126,17 @@ sequenceDiagram
 
 All public routes live under `/v1/workspaces/{ws}/...`. The `{ws}`
 path segment must match the canonical DNS-1123-like workspace
-grammar (`^[a-z][a-z0-9-]{0,62}$`); a violation surfaces as a 422
+grammar (`^[a-z][a-z0-9-]{0,62}$`); a violation surfaces as a 400
 `workflow.api.bad_request` envelope before any handler runs.
 
 | Method | Path | Body | Success | Description |
 |---|---|---|---|---|
 | `POST` | `/v1/workspaces/{ws}/runs` | `StartRunRequest` | 202 `RunRefResponse` | Start a workflow run. Honors `Idempotency-Key` header per RFC; body field `idempotencyKey` wins when both are present. |
 | `GET` | `/v1/workspaces/{ws}/runs` | — | 200 `RunListResponse` | List runs in workspace; supports `status`, `workflowVersionId`, `cursor`, `limit ≤ 200` query parameters. |
-| `GET` | `/v1/workspaces/{ws}/runs/{runId}` | — | 200 `RunResponse` | Fetch a single run plus its step timeline. |
-| `POST` | `/v1/workspaces/{ws}/runs/{runId}:cancel` | `CancelRunRequest` | 202 `RunRefResponse` | Request cancellation; idempotent against terminal-cancel states. |
-| `GET` | `/v1/workspaces/{ws}/runs/{runId}/steps/{stepId}` | — | 200 `StepResponse` | Fetch a single step's compiled-graph projection. |
-| `GET` | `/v1/workspaces/{ws}/runs/{runId}/steps/{stepId}/logs` | — | 501 `application/problem+json` | Documented stub — delegates to Observability Service (COMP-009) when the *Full Observability Client integration* sub-module lands. |
+| `GET` | `/v1/workspaces/{ws}/runs/{run_id}` | — | 200 `RunResponse` | Fetch a single run plus its step timeline. |
+| `POST` | `/v1/workspaces/{ws}/runs/{run_id}:cancel` | `CancelRunRequest` | 202 `RunRefResponse` | Request cancellation; idempotent against terminal-cancel states. |
+| `GET` | `/v1/workspaces/{ws}/runs/{run_id}/steps/{step_id}` | — | 200 `StepResponse` | Fetch a single step's compiled-graph projection. |
+| `GET` | `/v1/workspaces/{ws}/runs/{run_id}/steps/{step_id}/logs` | — | 501 `application/problem+json` | Documented stub — delegates to Observability Service (COMP-009) when the *Full Observability Client integration* sub-module lands. |
 
 ### Request envelope: `StartRunRequest`
 
@@ -185,7 +185,7 @@ freshly-queued row before the runtime stamps a start time.
 
 ### Response envelope: `RunResponse`
 
-`GET /v1/workspaces/{ws}/runs/{runId}` returns the full run
+`GET /v1/workspaces/{ws}/runs/{run_id}` returns the full run
 record plus the step timeline so a single read serves the typical
 UI / SDK workflow-detail screen without an N+1 follow-up.
 
@@ -251,7 +251,7 @@ An empty `items` list with a non-`null` `nextCursor` is a legal
 
 ### Step envelope: `StepResponse`
 
-`GET /v1/workspaces/{ws}/runs/{runId}/steps/{stepId}` projects
+`GET /v1/workspaces/{ws}/runs/{run_id}/steps/{step_id}` projects
 the persisted run's compiled `ExecutionGraph` into a per-step
 wire shape.
 
@@ -282,7 +282,7 @@ uniform).
 
 ### Step log stream stub
 
-`GET /v1/workspaces/{ws}/runs/{runId}/steps/{stepId}/logs` ships
+`GET /v1/workspaces/{ws}/runs/{run_id}/steps/{step_id}/logs` ships
 as a documented 501 stub until the *Full Observability Client
 integration* sub-module lands the real handler. The envelope is
 locked so SDK clients can branch deterministically on `code`:
@@ -313,8 +313,8 @@ is no longer carried in the URL, every Internal RPC body promotes
 | Method | Path | Body | Success | Description |
 |---|---|---|---|---|
 | `POST` | `/internal/runs:start` | `InternalStartRunRequest` | 202 `RunRefResponse` | Internal RPC: start a workflow run. Same idempotency contract as the public REST surface. |
-| `POST` | `/internal/runs/{runId}:cancel` | `InternalCancelRunRequest` | 202 `RunRefResponse` | Internal RPC: request cancellation. |
-| `POST` | `/internal/runs/{runId}/steps/{stepId}:raiseEvent` | `RaiseExternalEventRequest` | 202 (empty body) | Internal RPC: deliver an external event into a running workflow's `wait_for_external_event` step. |
+| `POST` | `/internal/runs/{run_id}:cancel` | `InternalCancelRunRequest` | 202 `RunRefResponse` | Internal RPC: request cancellation. |
+| `POST` | `/internal/runs/{run_id}/steps/{step_id}:raiseEvent` | `RaiseExternalEventRequest` | 202 (empty body) | Internal RPC: deliver an external event into a running workflow's `wait_for_external_event` step. |
 
 ### `InternalStartRunRequest`
 
@@ -516,7 +516,7 @@ which route handles the request.
 | `custos_workflow_idempotency_outcomes_total` | Counter | `wf.idempotency.outcome ∈ {fresh, replay, conflict}` | Bumped exactly once per `StartRun` that supplied an idempotency key; requests without a key produce no sample. |
 
 Label cardinality is explicitly bounded: `http.route` is the
-FastAPI template path (`/v1/workspaces/{ws}/runs/{runId}`), so a
+FastAPI template path (`/v1/workspaces/{ws}/runs/{run_id}`), so a
 pathological client cannot mint a fresh metric series per unique
 URL.
 
@@ -557,7 +557,7 @@ documented stub:
   same `CatalogClient` Protocol the Run Controller is built with;
   swapping the in-memory test fake for the production Dapr-backed
   client requires no validator change.
-- **Step log streaming** — `GET .../steps/{stepId}/logs` ships
+- **Step log streaming** — `GET .../steps/{step_id}/logs` ships
   as a 501 stub. The *Full Observability Client integration*
   sub-module will replace the stub with a real streaming
   handler; the route signature is contract-stable.

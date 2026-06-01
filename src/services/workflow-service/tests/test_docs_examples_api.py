@@ -50,7 +50,11 @@ from custos_workflow.api import (
     StartRunRequest,
     StepResponse,
 )
-from custos_workflow.api.errors import LOCKED_API_KINDS, ProblemDetail
+from custos_workflow.api.errors import (
+    LOCKED_API_KIND_TO_STATUS,
+    LOCKED_API_KINDS,
+    ProblemDetail,
+)
 from custos_workflow.api.models import (
     InternalCancelRunRequest,
     InternalStartRunRequest,
@@ -174,29 +178,43 @@ def test_documented_endpoint_set_is_exhaustive() -> None:
 # ---------------------------------------------------------------------------
 
 
-#: Mirror of the doc's "## Locked error taxonomy" table. Every
-#: entry MUST be a member of :data:`LOCKED_API_KINDS`; the
-#: exhaustiveness guard below fails the build on any drift.
-_DOCUMENTED_API_KINDS: Final[frozenset[str]] = frozenset(
-    {
-        "workflow.run_not_found",
-        "workflow.run_state_conflict",
-        "workflow.workflow_runtime_unavailable",
-        "workflow.validator.workflow_version_not_found",
-        "workflow.validator.inputs_schema_error",
-        "workflow.validator.idempotency_conflict",
-        "workflow.validator.workspace_unauthorized",
-        "workflow.step_not_found",
-        "workflow.api.not_implemented",
-        "workflow.api.bad_request",
-    }
-)
+#: Mirror of the doc's "## Locked error taxonomy" table.
+#: Each entry pairs the documented ``code`` with the documented
+#: HTTP status. Asserted to equal
+#: :data:`LOCKED_API_KIND_TO_STATUS` exactly (drift fails the
+#: build) AND every documented kind is asserted to be a member
+#: of :data:`LOCKED_API_KINDS`.
+_DOCUMENTED_API_KIND_TO_STATUS: Final[dict[str, int]] = {
+    "workflow.run_not_found": 404,
+    "workflow.run_state_conflict": 409,
+    "workflow.workflow_runtime_unavailable": 503,
+    "workflow.validator.workflow_version_not_found": 404,
+    "workflow.validator.inputs_schema_error": 422,
+    "workflow.validator.idempotency_conflict": 409,
+    "workflow.validator.workspace_unauthorized": 403,
+    "workflow.step_not_found": 404,
+    "workflow.api.not_implemented": 501,
+    "workflow.api.bad_request": 400,
+}
+
+_DOCUMENTED_API_KINDS: Final[frozenset[str]] = frozenset(_DOCUMENTED_API_KIND_TO_STATUS)
 
 
 @pytest.mark.parametrize("kind", sorted(_DOCUMENTED_API_KINDS))
 def test_documented_api_kind_is_locked(kind: str) -> None:
     assert kind in LOCKED_API_KINDS, (
         f"documented error kind {kind!r} is not a member of LOCKED_API_KINDS"
+    )
+
+
+def test_documented_api_kind_status_matches_locked_table() -> None:
+    """Doc's error-taxonomy status column MUST equal LOCKED_API_KIND_TO_STATUS."""
+
+    assert _DOCUMENTED_API_KIND_TO_STATUS == LOCKED_API_KIND_TO_STATUS, (
+        "LOCKED_API_KIND_TO_STATUS drifted from "
+        "docs/developers/workflow-api.md § Locked error taxonomy: "
+        f"locked={LOCKED_API_KIND_TO_STATUS} "
+        f"documented={_DOCUMENTED_API_KIND_TO_STATUS}"
     )
 
 
@@ -216,31 +234,64 @@ def test_documented_api_kind_set_is_exhaustive() -> None:
 # ---------------------------------------------------------------------------
 
 
-#: Mirror of the doc's REST + Internal RPC tables. Each entry is
-#: an importable public name on :mod:`custos_workflow.api` (the
-#: ``__all__`` surface). The exhaustiveness guard below asserts
-#: every documented model is importable; the surface itself owns
-#: the actual model class.
-_DOCUMENTED_MODELS: Final[dict[str, type[BaseModel]]] = {
-    "StartRunRequest": StartRunRequest,
-    "RunRefResponse": RunRefResponse,
-    "RunResponse": RunResponse,
-    "RunListResponse": RunListResponse,
-    "CancelRunRequest": CancelRunRequest,
-    "StepResponse": StepResponse,
-    "InternalStartRunRequest": InternalStartRunRequest,
-    "InternalCancelRunRequest": InternalCancelRunRequest,
-    "RaiseExternalEventRequest": RaiseExternalEventRequest,
+#: Mirror of the doc's REST + Internal RPC tables. Each entry
+#: pairs the documented model name with the module that
+#: re-exports it: the **public REST** models live on
+#: ``custos_workflow.api.__all__`` (the wire surface external
+#: callers import from); the **Internal RPC** models live one
+#: module deeper on ``custos_workflow.api.models`` because they
+#: are not part of the cluster-external public surface. The
+#: ``test_documented_model_is_a_live_import`` test reflects
+#: ``__all__`` membership against the documented source-of-truth
+#: module so a model silently moving (e.g. a public model
+#: dropped from the top-level re-exports) fails the build.
+_DOCUMENTED_MODELS: Final[dict[str, tuple[type[BaseModel], str]]] = {
+    "StartRunRequest": (StartRunRequest, "custos_workflow.api"),
+    "RunRefResponse": (RunRefResponse, "custos_workflow.api"),
+    "RunResponse": (RunResponse, "custos_workflow.api"),
+    "RunListResponse": (RunListResponse, "custos_workflow.api"),
+    "CancelRunRequest": (CancelRunRequest, "custos_workflow.api"),
+    "StepResponse": (StepResponse, "custos_workflow.api"),
+    "RaiseExternalEventRequest": (
+        RaiseExternalEventRequest,
+        "custos_workflow.api",
+    ),
+    "InternalStartRunRequest": (
+        InternalStartRunRequest,
+        "custos_workflow.api.models",
+    ),
+    "InternalCancelRunRequest": (
+        InternalCancelRunRequest,
+        "custos_workflow.api.models",
+    ),
 }
 
 
 @pytest.mark.parametrize("name", sorted(_DOCUMENTED_MODELS))
 def test_documented_model_is_a_live_import(name: str) -> None:
-    """Every documented model MUST be importable from the public surface."""
+    """Every documented model MUST be live at its documented source-of-truth.
 
-    # The model object was bound at module import time; failure
-    # would have surfaced as an ImportError before this point.
-    assert _DOCUMENTED_MODELS[name].__name__ == name
+    "Live" means: the documented module re-exports the name on
+    its ``__all__`` AND the imported object is the same class
+    object the json-block validation tests bind against. Drift
+    catches both "model deleted" and "model silently moved out
+    of the documented source-of-truth module" failure modes.
+    """
+
+    import importlib
+
+    expected, module_name = _DOCUMENTED_MODELS[name]
+    module = importlib.import_module(module_name)
+    assert name in getattr(module, "__all__", []), (
+        f"documented model {name!r} is not a member of {module_name}.__all__"
+    )
+    live = getattr(module, name, None)
+    assert live is not None, f"documented model {name!r} is not importable from {module_name}"
+    assert live is expected, (
+        f"documented model {name!r} re-exported from {module_name} is not "
+        f"the same class object as the one this test validates json blocks "
+        f"against"
+    )
 
 
 # ---------------------------------------------------------------------------
