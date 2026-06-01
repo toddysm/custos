@@ -13,13 +13,19 @@ from custos_cel import (
     type_check,
 )
 
-from custos_workflow.document import LetStep
+from custos_workflow.document import ActivityStep, LetStep
 from custos_workflow.graph import (
+    BackoffStrategyTag,
     CallSiteKind,
     ExecutionGraph,
     ExecutionNode,
     GraphMetadata,
+    JitterStrategyTag,
+    OnErrorActionTag,
+    OnErrorRoute,
     PrimitiveHandler,
+    ResolvedBackoffPolicy,
+    ResolvedRetryPolicy,
     StepKind,
     TypedCallSite,
 )
@@ -38,6 +44,7 @@ from custos_workflow.runtime import (
     ScheduleWorkflowRequest,
 )
 from custos_workflow.steps import LetStepHandler
+from custos_workflow.steps.activity_step import ActivityStepHandler
 from custos_workflow.steps.sub_orchestration import (
     CHILD_STEP_WORKFLOW_NAME,
     DEFAULT_LOOP_VAR,
@@ -453,6 +460,140 @@ def _drain(gen: Generator[Any, Any, dict[str, Any]]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Activity body — driven via the WF-IMPL-074 yield protocol
+# ---------------------------------------------------------------------------
+
+
+_ACTIVITY_TOKEN = object()
+
+
+class _ExplodingHandler:
+    """Stub :class:`StepHandler` that must never be dispatched."""
+
+    def execute(self, ctx: StepExecutionContext, graph: ExecutionGraph, step_id: str) -> StepResult:
+        raise AssertionError("handler.execute must not run for an ACTIVITY body")
+
+
+class _YieldingActivityHandler(ActivityStepHandler):
+    """Stub activity handler that drives one durable yield then returns."""
+
+    def __init__(self) -> None:  # bypass the real (activity, connector) wiring
+        self.calls: list[str] = []
+
+    def iter_calls(
+        self, ctx: StepExecutionContext, graph: ExecutionGraph, step_id: str
+    ) -> Generator[Any, Any, StepResult]:
+        self.calls.append(step_id)
+        response = yield _ACTIVITY_TOKEN
+        return StepSucceeded(outputs={"echoed": response})
+
+
+def _activity_graph(*, step_id: str = "scan") -> ExecutionGraph:
+    policy = ResolvedRetryPolicy(
+        max_attempts=1,
+        backoff=ResolvedBackoffPolicy(
+            strategy=BackoffStrategyTag.EXPONENTIAL,
+            initial_delay_ms=1_000,
+            max_delay_ms=60_000,
+            multiplier=2.0,
+        ),
+        jitter=JitterStrategyTag.NONE,
+        respect_retry_after=True,
+    )
+    node = ExecutionNode(
+        step_id=step_id,
+        kind=StepKind.ACTIVITY,
+        primitive_handler=PrimitiveHandler.ACTIVITY_RUNTIME,
+        retry_policy=policy,
+        on_error_routes=(OnErrorRoute(action=OnErrorActionTag.FAIL, cls="permanent"),),
+        call_sites={},
+        step_source=ActivityStep.model_validate(
+            {"id": step_id, "activity": "scanners/trivy@1", "connector": "primary"}
+        ),
+    )
+    return ExecutionGraph(
+        nodes=(node,),
+        edges=(),
+        topological_order=(step_id,),
+        metadata=GraphMetadata(
+            workflow_name="pipeline",
+            workflow_workspace="ws",
+            document_api_version="custos.dev/v1",
+        ),
+    )
+
+
+def test_child_drives_activity_body_via_yield_protocol() -> None:
+    """An ``activity:`` body flows through ``activity_handler.iter_calls``.
+
+    The child re-yields the activity handler's durable token (so the
+    runtime resolves it as a Dapr activity) and never falls back to the
+    non-durable synchronous ``handler.execute`` adapter.
+    """
+
+    activity_handler = _YieldingActivityHandler()
+    fn = make_child_step_orchestrator(_ExplodingHandler(), activity_handler=activity_handler)
+    graph = _activity_graph()
+    child_input = ChildStepInput(
+        workspace_id="ws-1",
+        workflow_version_id="wf-v1",
+        compiled_graph_json=to_json(graph),
+        step_id="scan",
+        loop_var="",
+    )
+    ctx = FakeWorkflowContext(instance_id="run-1/scan/iter-0", now=_NOW)
+
+    gen = fn(ctx, child_input.to_dict())
+    yielded: list[Any] = []
+    sent: Any = None
+    try:
+        while True:
+            yielded.append(gen.send(sent))
+            sent = "activity-response"
+    except StopIteration as stop:
+        output = stop.value
+
+    assert yielded == [_ACTIVITY_TOKEN]
+    assert activity_handler.calls == ["scan"]
+    assert output == {
+        "status": "succeeded",
+        "outputs": {"echoed": "activity-response"},
+        "failure_envelope": None,
+    }
+
+
+def test_child_activity_body_without_handler_uses_sync_adapter() -> None:
+    """With no ``activity_handler`` an ACTIVITY body uses ``handler.execute``."""
+
+    class _SyncHandler:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def execute(
+            self, ctx: StepExecutionContext, graph: ExecutionGraph, step_id: str
+        ) -> StepResult:
+            self.calls.append(step_id)
+            return StepSucceeded(outputs={"sync": True})
+
+    handler = _SyncHandler()
+    fn = make_child_step_orchestrator(handler)
+    graph = _activity_graph()
+    child_input = ChildStepInput(
+        workspace_id="ws-1",
+        workflow_version_id="wf-v1",
+        compiled_graph_json=to_json(graph),
+        step_id="scan",
+        loop_var="",
+    )
+    ctx = FakeWorkflowContext(instance_id="run-1/scan/iter-0", now=_NOW)
+
+    output = _drain(fn(ctx, child_input.to_dict()))
+
+    assert handler.calls == ["scan"]
+    assert output == {"status": "succeeded", "outputs": {"sync": True}, "failure_envelope": None}
+
+
+# ---------------------------------------------------------------------------
 # Envelope serialization round-trips
 # ---------------------------------------------------------------------------
 
@@ -488,6 +629,38 @@ def test_child_step_input_defaults_apply() -> None:
     assert restored.parent_outputs == {}
     assert restored.loop_var == DEFAULT_LOOP_VAR
     assert restored.item is None
+
+
+def test_child_step_input_null_loop_var_falls_back_to_default() -> None:
+    """An explicit JSON ``null`` loop_var is treated as missing."""
+
+    restored = ChildStepInput.from_dict(
+        {
+            "workspace_id": "ws",
+            "workflow_version_id": "v",
+            "compiled_graph_json": "{}",
+            "step_id": "body",
+            "loop_var": None,
+        }
+    )
+
+    assert restored.loop_var == DEFAULT_LOOP_VAR
+
+
+def test_child_step_input_empty_loop_var_preserved() -> None:
+    """An explicit empty string is kept as the no-injection signal."""
+
+    restored = ChildStepInput.from_dict(
+        {
+            "workspace_id": "ws",
+            "workflow_version_id": "v",
+            "compiled_graph_json": "{}",
+            "step_id": "body",
+            "loop_var": "",
+        }
+    )
+
+    assert restored.loop_var == ""
 
 
 def test_child_step_result_succeeded_round_trips() -> None:

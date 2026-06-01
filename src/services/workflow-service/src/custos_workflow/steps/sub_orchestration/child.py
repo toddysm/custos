@@ -67,6 +67,7 @@ from typing import Any, Final, cast
 
 from custos_cel import DaprWorkflowClock
 
+from custos_workflow.graph.model import StepKind
 from custos_workflow.graph.serialize import from_json
 from custos_workflow.runs import (
     RunId,
@@ -78,6 +79,7 @@ from custos_workflow.runs import (
     StepSucceeded,
     WorkflowContext,
 )
+from custos_workflow.steps.activity_step import ActivityStepHandler
 
 __all__ = [
     "CHILD_STEP_WORKFLOW_NAME",
@@ -99,6 +101,20 @@ CHILD_STEP_WORKFLOW_NAME: Final[str] = "custos.workflow.child_step"
 #: Default name the per-iteration loop item is surfaced under inside
 #: the inner step's ``inputs`` namespace (``inputs.item.*``).
 DEFAULT_LOOP_VAR: Final[str] = "item"
+
+
+def _decode_loop_var(raw: Any) -> str:
+    """Normalise a decoded ``loop_var`` field to a stable string.
+
+    An explicit JSON ``null`` is treated the same as a missing key —
+    it falls back to :data:`DEFAULT_LOOP_VAR` rather than coercing to
+    the literal ``"None"`` (which would inject the item under the
+    nonsensical ``inputs.None`` key). An empty string is preserved as
+    the intentional "no item injection" signal (sub-workflow
+    invocation, WF-IMPL-091).
+    """
+
+    return DEFAULT_LOOP_VAR if raw is None else str(raw)
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,7 +182,7 @@ class ChildStepInput:
             parent_outputs={
                 str(sid): dict(out) for sid, out in (payload.get("parent_outputs") or {}).items()
             },
-            loop_var=str(payload.get("loop_var", DEFAULT_LOOP_VAR)),
+            loop_var=_decode_loop_var(payload.get("loop_var", DEFAULT_LOOP_VAR)),
             item=payload.get("item"),
         )
 
@@ -227,6 +243,8 @@ class ChildStepResult:
 
 def make_child_step_orchestrator(
     handler: StepHandler,
+    *,
+    activity_handler: ActivityStepHandler | None = None,
 ) -> Callable[[WorkflowContext, Any], Generator[Any, Any, dict[str, Any]]]:
     """Build the child workflow function bound to a concrete handler.
 
@@ -241,8 +259,22 @@ def make_child_step_orchestrator(
 
     Args:
         handler: The :class:`~custos_workflow.runs.StepHandler` the
-            inner ``activity:`` / ``let:`` step is dispatched through
-            — the same handler the top-level orchestrator binds.
+            inner ``let:`` step is dispatched through — the same
+            handler the top-level orchestrator binds. Also drives an
+            ``activity:`` body when ``activity_handler`` is ``None``,
+            via the synchronous adapter (fine for tests, not durable
+            enough for production).
+        activity_handler: Optional
+            :class:`~custos_workflow.steps.activity_step.ActivityStepHandler`.
+            When supplied, an ``activity:`` inner body is dispatched
+            via ``yield from activity_handler.iter_calls(...)`` (the
+            WF-IMPL-074 yield protocol) so every ``bind_for_step`` /
+            ``schedule_activity`` call surfaces as a separately-yielded
+            durable Dapr activity token the runtime resolves —
+            mirroring :func:`~custos_workflow.runs.make_run_orchestrator`
+            so the child is replay-safe for activity bodies under real
+            Dapr orchestration semantics. Production wiring
+            (WF-IMPL-094) supplies it.
 
     Returns:
         The child workflow function. Its ``__name__`` is
@@ -252,22 +284,26 @@ def make_child_step_orchestrator(
     """
 
     def run_child_step(ctx: WorkflowContext, raw: Any) -> Generator[Any, Any, dict[str, Any]]:
-        # The child body is a single ``activity:`` / ``let:`` step
-        # whose handler resolves synchronously, so this generator
-        # never opens a durable yield. The unreachable ``yield``
-        # keeps Python treating the function as a generator (the
-        # shape the runtime drives), matching the convention the
-        # Sub-Orchestration runtime primitives use for childless
-        # workflow bodies.
-        if False:  # pragma: no cover - generator shape, never executed
-            yield None
-
         child_input = raw if isinstance(raw, ChildStepInput) else ChildStepInput.from_dict(raw)
         graph = from_json(child_input.compiled_graph_json)
         clock = DaprWorkflowClock(ctx)
         step_ctx = _child_step_ctx(ctx, child_input, clock)
 
-        result = handler.execute(step_ctx, graph, child_input.step_id)
+        node = next(n for n in graph.nodes if n.step_id == child_input.step_id)
+        if node.kind is StepKind.ACTIVITY and activity_handler is not None:
+            # WF-IMPL-074 yield protocol: drive the activity handler's
+            # generator via ``yield from`` so each bind / schedule call
+            # is a separately-yielded durable Dapr activity token the
+            # runtime resolves — replay-safe under Dapr, exactly as the
+            # top-level orchestrator drives ACTIVITY nodes.
+            result = yield from activity_handler.iter_calls(step_ctx, graph, child_input.step_id)
+        else:
+            # ``let:`` bodies (and the test-only synchronous activity
+            # adapter) resolve inline. ``yield from`` above makes this
+            # function a generator unconditionally, so the runtime
+            # always drives it as one even on this non-yielding path.
+            result = handler.execute(step_ctx, graph, child_input.step_id)
+
         return _normalise(result).to_dict()
 
     run_child_step.__name__ = CHILD_STEP_WORKFLOW_NAME
