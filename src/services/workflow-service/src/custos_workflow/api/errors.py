@@ -72,6 +72,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import JSONResponse
 
+from custos_workflow._telemetry import record_api_error
 from custos_workflow.runs.errors import (
     RunControllerError,
     RunNotFoundError,
@@ -279,6 +280,7 @@ class ProblemDetail(BaseModel):
 
 
 def _problem_response(
+    request: Request,
     *,
     kind: str,
     detail: str,
@@ -291,9 +293,24 @@ def _problem_response(
     the RFC 7807 contract. ``model_dump(exclude_none=True)`` keeps
     the wire envelope minimal — extension fields that were not
     populated never appear.
+
+    Bumps :data:`~custos_workflow._telemetry.API_ERRORS_TOTAL`
+    exactly once per call (the WF-IMPL-070 counter is the
+    authoritative count of Problem+JSON-emitting requests) and
+    stashes ``kind`` onto ``request.state.wf_error_kind`` so the
+    :class:`~custos_workflow.api.observability.OTelHttpServerMiddleware`
+    can mirror it onto the active span without re-parsing the
+    response body.
     """
     status = LOCKED_API_KIND_TO_STATUS[kind]
     problem = ProblemDetail.from_kind(kind, detail=detail, instance=instance, extras=extras)
+    # WF-IMPL-070: record the API error counter + stash the kind
+    # for the middleware. Both happen *before* the response is
+    # returned so the middleware sees the kind on the way out
+    # regardless of whether the handler was reached via a
+    # registered exception class or invoked directly from a route.
+    record_api_error(kind)
+    request.state.wf_error_kind = kind
     return JSONResponse(
         status_code=status,
         media_type=PROBLEM_MEDIA_TYPE,
@@ -337,6 +354,7 @@ async def handle_run_not_found(request: Request, exc: Exception) -> JSONResponse
     """
     assert isinstance(exc, RunNotFoundError)
     return _problem_response(
+        request,
         kind="workflow.run_not_found",
         detail=exc.message,
         instance=_instance_for(request),
@@ -348,6 +366,7 @@ async def handle_run_state_conflict(request: Request, exc: Exception) -> JSONRes
     """Translate :class:`RunStateConflictError` → ``workflow.run_state_conflict`` (409)."""
     assert isinstance(exc, RunStateConflictError)
     return _problem_response(
+        request,
         kind="workflow.run_state_conflict",
         detail=exc.message,
         instance=_instance_for(request),
@@ -363,6 +382,7 @@ async def handle_workflow_runtime_unavailable(request: Request, exc: Exception) 
     """Translate :class:`WorkflowRuntimeUnavailableError` → 503."""
     assert isinstance(exc, WorkflowRuntimeUnavailableError)
     return _problem_response(
+        request,
         kind="workflow.workflow_runtime_unavailable",
         detail=exc.message,
         instance=_instance_for(request),
@@ -384,6 +404,7 @@ async def handle_run_controller_error(request: Request, exc: Exception) -> JSONR
     """
     assert isinstance(exc, RunControllerError)
     return _problem_response(
+        request,
         kind="workflow.api.bad_request",
         detail=exc.message,
         instance=_instance_for(request),
@@ -395,6 +416,7 @@ async def handle_workflow_version_not_found(request: Request, exc: Exception) ->
     """Translate :class:`WorkflowVersionNotFoundError` → 404."""
     assert isinstance(exc, WorkflowVersionNotFoundError)
     return _problem_response(
+        request,
         kind=exc.kind,
         detail=exc.message,
         instance=_instance_for(request),
@@ -410,6 +432,7 @@ async def handle_inputs_schema_error(request: Request, exc: Exception) -> JSONRe
     """Translate :class:`InputsSchemaError` → 422 with the ``validation`` extension."""
     assert isinstance(exc, InputsSchemaError)
     return _problem_response(
+        request,
         kind=exc.kind,
         detail=exc.message,
         instance=_instance_for(request),
@@ -423,7 +446,14 @@ async def handle_inputs_schema_error(request: Request, exc: Exception) -> JSONRe
 async def handle_idempotency_conflict(request: Request, exc: Exception) -> JSONResponse:
     """Translate :class:`IdempotencyConflictError` → 409."""
     assert isinstance(exc, IdempotencyConflictError)
+    # WF-IMPL-070: stash ``conflict`` on ``request.state`` so the
+    # ``OTelHttpServerMiddleware`` mirrors it onto the span as
+    # ``wf.idempotency.outcome=conflict``. The conflict counter
+    # is already bumped inside the validator before the exception
+    # propagates, so we don't re-bump here.
+    request.state.wf_idempotency_outcome = "conflict"
     return _problem_response(
+        request,
         kind=exc.kind,
         detail=exc.message,
         instance=_instance_for(request),
@@ -438,6 +468,7 @@ async def handle_workspace_unauthorized(request: Request, exc: Exception) -> JSO
     """Translate :class:`WorkspaceUnauthorizedError` → 403."""
     assert isinstance(exc, WorkspaceUnauthorizedError)
     return _problem_response(
+        request,
         kind=exc.kind,
         detail=exc.message,
         instance=_instance_for(request),
@@ -460,6 +491,7 @@ async def handle_validator_error(request: Request, exc: Exception) -> JSONRespon
     """
     assert isinstance(exc, ValidatorError)
     return _problem_response(
+        request,
         kind="workflow.api.bad_request",
         detail=exc.message,
         instance=_instance_for(request),
@@ -488,6 +520,7 @@ async def handle_request_validation_error(request: Request, exc: Exception) -> J
             },
         )
     return _problem_response(
+        request,
         kind="workflow.api.bad_request",
         detail="request body or parameters failed validation",
         instance=_instance_for(request),
@@ -529,6 +562,15 @@ async def handle_http_exception(request: Request, exc: Exception) -> JSONRespons
             "code": "workflow.api.bad_request",
         },
     )
+    # WF-IMPL-070: even though this branch bypasses
+    # :func:`_problem_response` for the status-code reason
+    # documented above, it still emits an
+    # ``application/problem+json`` envelope under a kind in
+    # :data:`LOCKED_API_KINDS`, so the API-errors counter and the
+    # span-side ``wf.error.kind`` hint MUST tick exactly as they
+    # would for any other handled error.
+    record_api_error("workflow.api.bad_request")
+    request.state.wf_error_kind = "workflow.api.bad_request"
     return JSONResponse(
         status_code=status,
         media_type=PROBLEM_MEDIA_TYPE,

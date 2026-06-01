@@ -139,6 +139,7 @@ def _step_not_found_response(
     run / workspace without re-parsing the URL.
     """
     return problem_response(
+        request,
         kind="workflow.step_not_found",
         detail=(
             f"No step {step_id!r} is reachable in run {run_id!r} for "
@@ -246,6 +247,7 @@ async def stream_step_logs(
     reproduce it verbatim.
     """
     return problem_response(
+        request,
         kind="workflow.api.not_implemented",
         detail=LOG_STREAM_NOT_IMPLEMENTED_DETAIL,
         instance=request.url.path,

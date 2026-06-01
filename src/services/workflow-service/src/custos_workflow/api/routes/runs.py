@@ -64,7 +64,7 @@ from __future__ import annotations
 from typing import Annotated
 
 from custos_spl.pagination import Cursor
-from fastapi import APIRouter, Body, Depends, Header, Path, Query
+from fastapi import APIRouter, Body, Depends, Header, Path, Query, Request
 
 from custos_workflow.api.dependencies import (
     get_call_context,
@@ -182,6 +182,7 @@ async def start_run(
     validator: Annotated[StartRunValidator, Depends(get_validator)],
     controller: Annotated[RunController, Depends(get_run_controller)],
     ctx: Annotated[CallContext, Depends(get_call_context)],
+    request: Request,
     idempotency_key_header: Annotated[
         str | None,
         Header(
@@ -212,12 +213,23 @@ async def start_run(
         idempotency_key=effective_key,
         call_context=ctx,
     )
+    # WF-IMPL-070: stash the validated workflow-version id and
+    # the idempotency outcome on ``request.state`` so the
+    # OTelHttpServerMiddleware mirrors them onto the active span.
+    # ``conflict`` is set by the IdempotencyConflictError path
+    # inside the validator before this point is reached, so the
+    # only outcomes we ever stash here are ``replay`` / ``fresh``;
+    # requests without an idempotency key produce no outcome.
+    request.state.wf_workflow_version_id = validated.workflow_version_id
+    if validated.idempotency_key is not None:
+        request.state.wf_idempotency_outcome = "replay" if validated.replayed else "fresh"
     ref = await controller.start_run(
         workspace_id=ws,
         workflow_version_id=validated.workflow_version_id,
         inputs=validated.inputs,
         idempotency_key=validated.idempotency_key,
     )
+    request.state.wf_run_id = ref.run_id
     return ref_response_from_ref(ref)
 
 

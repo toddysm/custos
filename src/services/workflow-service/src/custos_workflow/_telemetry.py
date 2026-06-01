@@ -898,9 +898,222 @@ def record_step_error(kind: str) -> None:
     STEP_ERRORS_TOTAL.add(1, {"kind": kind})
 
 
+# ---------------------------------------------------------------------------
+# WF-IMPL-070: API Adapter HTTP-server observability hooks
+# ---------------------------------------------------------------------------
+#
+# Spans, histograms, and counters that make every inbound REST /
+# Internal RPC request observable end-to-end. Mirrors the
+# WF-IMPL-044 / WF-IMPL-058 patterns above.
+#
+# Three instruments:
+#
+# * :data:`HTTP_SERVER_DURATION_MS` — per-request latency
+#   histogram, labelled by ``http.route`` (the FastAPI template
+#   path, **not** the live URL — keeps cardinality bounded),
+#   ``http.method``, and ``http.status_code``. One sample per
+#   request.
+# * :data:`API_ERRORS_TOTAL` — counter, labelled by the locked
+#   :data:`~custos_workflow.api.errors.LOCKED_API_KINDS` taxonomy
+#   value (``wf.error.kind``). Bumped exactly once per failed
+#   request, by the matching exception handler in
+#   :mod:`custos_workflow.api.errors`. The build-time assertion
+#   below pins the contract — adding a kind to ``LOCKED_API_KINDS``
+#   without extending the recogniser here fails at import time.
+# * :data:`IDEMPOTENCY_OUTCOMES_TOTAL` — counter, labelled by
+#   ``wf.idempotency.outcome ∈ {fresh, replay, conflict}``. Bumped
+#   exactly once per StartRun that supplied an idempotency key:
+#   ``fresh`` and ``replay`` from the Validator's
+#   ``record_or_replay`` happy path, ``conflict`` from the same
+#   call's :class:`IdempotencyConflictError` branch. Requests
+#   without a key produce no sample (otherwise the
+#   ``fresh``/``replay``/``conflict`` split is meaningless).
+#
+# Spans
+# -----
+# A single ``custos_workflow.http.request`` span wraps every
+# inbound request (mounted by the
+# :class:`OTelHttpServerMiddleware` ASGI middleware in
+# :mod:`custos_workflow.api.observability`). Span attributes:
+#
+# * ``http.method``, ``http.route``, ``http.status_code`` —
+#   standard OTel HTTP-server semconv values.
+# * ``wf.workspace.id`` — populated from the ``ws`` path parameter
+#   when present (every public ``/v1/workspaces/{ws}/...`` route).
+# * ``wf.run.id`` — populated from the ``run_id`` path parameter
+#   when present (``GET ../runs/{runId}`` and ``...:cancel``)
+#   **or** from ``request.state.wf_run_id`` (set by the StartRun
+#   route after the controller mints a fresh run id).
+# * ``wf.workflow_version.id`` — populated from
+#   ``request.state.wf_workflow_version_id`` (set by the StartRun
+#   route after the Validator confirms the workflow version
+#   exists; the Validator's normalised id is what the controller
+#   sees, so the span carries the same value).
+# * ``wf.idempotency.outcome`` — populated from
+#   ``request.state.wf_idempotency_outcome`` (set by the StartRun
+#   route on a successful validation, by the Validator's
+#   exception handler on conflict).
+# * ``wf.error.kind`` — populated from
+#   ``request.state.wf_error_kind`` (set by the API exception
+#   handlers when they emit a Problem+JSON envelope). Set as an
+#   attribute only; the span's :class:`StatusCode.ERROR` flag is
+#   driven exclusively by :func:`observe_http_request` on
+#   unhandled exceptions — Problem+JSON responses are HTTP-level
+#   errors, not span-level errors, so the span status stays at
+#   the SDK default (UNSET) on those paths.
+
+HTTP_SERVER_DURATION_MS: Final[Histogram] = _meter.create_histogram(
+    name="custos_workflow_http_server_duration_ms",
+    unit="ms",
+    description=(
+        "Wall-clock time spent in inbound HTTP request handling by "
+        "the workflow-service API Adapter, labelled by http.route "
+        "(the FastAPI template path, NOT the live URL), http.method, "
+        "and http.status_code. One sample per request."
+    ),
+)
+
+API_ERRORS_TOTAL: Final[Counter] = _meter.create_counter(
+    name="custos_workflow_api_errors_total",
+    description=(
+        "Count of inbound HTTP requests that emitted an "
+        "application/problem+json envelope, labelled by the locked "
+        "WF-IMPL-061 API kind (custos_workflow.api.errors.LOCKED_API_KINDS). "
+        "Bumped exactly once per failed request, by the matching "
+        "exception handler."
+    ),
+)
+
+IDEMPOTENCY_OUTCOMES_TOTAL: Final[Counter] = _meter.create_counter(
+    name="custos_workflow_idempotency_outcomes_total",
+    description=(
+        "Count of StartRun requests that consulted the Validator's "
+        "(workspaceId, idempotencyKey) ledger, labelled by "
+        "wf.idempotency.outcome ∈ {fresh, replay, conflict}. Requests "
+        "that omit the idempotency key produce no sample."
+    ),
+)
+
+#: Closed set of valid ``wf.idempotency.outcome`` label values.
+#: Pinned so a typo at a call site fails loudly via
+#: :func:`record_idempotency_outcome` instead of leaking a bad
+#: label into the meter.
+_IDEMPOTENCY_OUTCOMES: Final[frozenset[str]] = frozenset({"fresh", "replay", "conflict"})
+
+
+@contextmanager
+def observe_http_request(method: str, route: str) -> Iterator[Span]:
+    """Wrap one inbound HTTP request in a span.
+
+    Used by :class:`~custos_workflow.api.observability.OTelHttpServerMiddleware`
+    around every request that traverses the FastAPI router stack.
+    The yielded span carries the standard HTTP-server semconv
+    attributes (``http.method``, ``http.route``) plus any
+    workflow-service-specific ``wf.*`` attributes the middleware
+    chooses to set after ``call_next`` returns (``wf.workspace.id``,
+    ``wf.run.id``, ``wf.workflow_version.id``,
+    ``wf.idempotency.outcome``, ``wf.error.kind``).
+
+    Duration sampling is owned by the middleware
+    (:func:`record_http_server_duration`) because only the
+    middleware has the final ``http.status_code`` value — exception
+    handlers may convert raised errors into 4xx / 5xx responses
+    with arbitrary status codes, and the histogram label needs to
+    reflect what actually went out on the wire.
+
+    On a raised exception the span is marked
+    :attr:`StatusCode.ERROR` and the exception is recorded, then
+    re-raised — the middleware never swallows route exceptions
+    (the WF-IMPL-061 handler chain is responsible for translating
+    them into Problem+JSON responses).
+    """
+    with _tracer.start_as_current_span("custos_workflow.http.request") as span:
+        span.set_attribute("http.method", method)
+        span.set_attribute("http.route", route)
+        try:
+            yield span
+        except Exception as exc:
+            span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
+            span.record_exception(exc)
+            raise
+
+
+def record_http_server_duration(
+    *, method: str, route: str, status_code: int, duration_ms: float
+) -> None:
+    """Record one sample into :data:`HTTP_SERVER_DURATION_MS`.
+
+    Called by the
+    :class:`~custos_workflow.api.observability.OTelHttpServerMiddleware`
+    on every exit (success or exception) so the histogram total
+    stays consistent with the request count. The
+    ``http.status_code`` label is stringified to keep the label
+    cardinality consistent across OTel SDK versions (some
+    aggregators stringify on emit, others don't; pinning the
+    label type here removes the discrepancy).
+    """
+    HTTP_SERVER_DURATION_MS.record(
+        duration_ms,
+        {
+            "http.route": route,
+            "http.method": method,
+            "http.status_code": str(status_code),
+        },
+    )
+
+
+def record_api_error(kind: str) -> None:
+    """Bump :data:`API_ERRORS_TOTAL` for a Problem+JSON-emitting request.
+
+    Called by each exception handler in
+    :mod:`custos_workflow.api.errors` immediately before returning
+    the envelope, so the counter ticks exactly once per failed
+    request regardless of which class in the locked taxonomy was
+    raised. The ``kind`` MUST be one of
+    :data:`~custos_workflow.api.errors.LOCKED_API_KINDS`; unknown
+    kinds raise :class:`ValueError` so a typo or unregistered
+    handler fails loudly instead of silently dropping the sample
+    (mirrors :func:`record_workflow_event_emitted` /
+    :func:`record_step_error`).
+    """
+    # Imported lazily to dodge the import cycle
+    # custos_workflow.api.errors -> _telemetry -> custos_workflow.api.errors.
+    from custos_workflow.api.errors import LOCKED_API_KINDS
+
+    if kind not in LOCKED_API_KINDS:
+        raise ValueError(
+            f"unknown API error kind {kind!r}; expected one of {sorted(LOCKED_API_KINDS)}"
+        )
+    API_ERRORS_TOTAL.add(1, {"wf.error.kind": kind})
+
+
+def record_idempotency_outcome(outcome: str) -> None:
+    """Bump :data:`IDEMPOTENCY_OUTCOMES_TOTAL` for one StartRun.
+
+    Called by :class:`~custos_workflow.validator.StartRunValidator`
+    immediately after :meth:`IdempotencyLedger.record_or_replay`
+    returns (``fresh`` / ``replay``) or raises
+    :class:`IdempotencyConflictError` (``conflict``). Bumped at
+    most once per request: StartRun calls that omit the
+    idempotency key skip the ledger entirely and therefore never
+    reach this function. Unknown outcomes raise :class:`ValueError`
+    so a typo at a call site fails loudly instead of leaking a
+    bad label into the meter.
+    """
+    if outcome not in _IDEMPOTENCY_OUTCOMES:
+        raise ValueError(
+            f"unknown idempotency outcome {outcome!r}; "
+            f"expected one of {sorted(_IDEMPOTENCY_OUTCOMES)}"
+        )
+    IDEMPOTENCY_OUTCOMES_TOTAL.add(1, {"wf.idempotency.outcome": outcome})
+
+
 __all__ = [
     "ACTIVITY_SCHEDULE_DURATION_MS",
+    "API_ERRORS_TOTAL",
     "ERRORS_TOTAL",
+    "HTTP_SERVER_DURATION_MS",
+    "IDEMPOTENCY_OUTCOMES_TOTAL",
     "PARSE_DURATION_MS",
     "RETRY_POLICY_DURATION_MS",
     "RUN_LIFECYCLE_DURATION_MS",
@@ -918,6 +1131,7 @@ __all__ = [
     "observe_compile_topology",
     "observe_compile_total",
     "observe_compile_type_check",
+    "observe_http_request",
     "observe_run_cancel",
     "observe_run_get",
     "observe_run_list",
@@ -931,6 +1145,9 @@ __all__ = [
     "observe_step_retry_decision",
     "observe_step_schedule_activity",
     "record_activity_schedule_sample",
+    "record_api_error",
+    "record_http_server_duration",
+    "record_idempotency_outcome",
     "record_run_status_transition",
     "record_step_attempt",
     "record_step_error",

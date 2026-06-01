@@ -60,7 +60,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from custos_workflow._telemetry import record_idempotency_outcome
 from custos_workflow.validator.errors import (
+    IdempotencyConflictError,
     WorkflowVersionNotFoundError,
     WorkspaceUnauthorizedError,
 )
@@ -257,12 +259,26 @@ class StartRunValidator:
         fingerprint = compute_request_fingerprint(workflow_version_id, normalised_inputs)
         replayed = False
         if normalised_key is not None:
-            entry = await self._ledger.record_or_replay(
-                workspace_id=workspace_id,
-                idempotency_key=normalised_key,
-                request_fingerprint=fingerprint,
-            )
+            # WF-IMPL-070: bump the idempotency-outcome counter
+            # exactly once per StartRun that consulted the ledger.
+            # ``conflict`` is recorded *before* the
+            # :class:`IdempotencyConflictError` is re-raised so
+            # the exception handler sees the sample even when it
+            # unwinds the request; ``fresh`` / ``replay`` is
+            # recorded on the happy path so a request that
+            # supplies a key always produces exactly one sample
+            # regardless of branch.
+            try:
+                entry = await self._ledger.record_or_replay(
+                    workspace_id=workspace_id,
+                    idempotency_key=normalised_key,
+                    request_fingerprint=fingerprint,
+                )
+            except IdempotencyConflictError:
+                record_idempotency_outcome("conflict")
+                raise
             replayed = entry.replayed
+            record_idempotency_outcome("replay" if replayed else "fresh")
 
         return ValidatedStartRun(
             workspace_id=workspace_id,
