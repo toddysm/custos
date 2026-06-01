@@ -37,7 +37,7 @@ Seventh sub-module: **Sub-Orchestration Manager**, packaged inside the service h
 ### Phase C — Sub-workflow invocation + approval gate
 
 - [x] WF-IMPL-091 (#514): `workflow:` sub-workflow invocation path (depends on #507, #508, #509, #511).
-- [F] WF-IMPL-092 (#515): `approval:` gate — `when_any([event, timer])` + timeout (depends on #507, #509, #510).
+- [x] WF-IMPL-092 (#515): `approval:` gate — `when_any([event, timer])` + timeout (depends on #507, #509, #510).
 
 ### Phase D — Dispatch integration & wiring
 

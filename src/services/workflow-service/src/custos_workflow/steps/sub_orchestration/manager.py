@@ -80,11 +80,13 @@ import custos_cel
 from custos_cel.errors import CelError
 from custos_cel.scope import BindingScope, RunInfo, StepBinding, WorkflowInfo
 
-from custos_workflow.document import WorkflowStep
+from custos_workflow.document import ApprovalStep, WorkflowStep
 from custos_workflow.graph.model import CallSiteKind, ExecutionGraph, ExecutionNode
 from custos_workflow.graph.serialize import to_json
 from custos_workflow.runs import WORKFLOW_NAME, RunInput, StepExecutionContext
+from custos_workflow.runs.wait import parse_wait_duration
 from custos_workflow.steps.errors import (
+    ApprovalTimeoutError,
     LoopExpansionError,
     SubOrchestrationSpawnError,
     SubWorkflowFailedError,
@@ -96,6 +98,7 @@ from custos_workflow.steps.sub_orchestration.child import (
     ChildStepResult,
 )
 from custos_workflow.steps.sub_orchestration.ids import (
+    APPROVAL_ITERATION_KEY,
     WORKFLOW_ITERATION_KEY,
     ChildInstanceIdError,
     child_instance_id,
@@ -124,10 +127,10 @@ class SubOrchestrationManager:
     """Parent-side driver for child-workflow fan-out (ADR-007).
 
     Stateless — instances are interchangeable and may be reused across
-    runs. Exposes :meth:`run_loop` for the ``forEach`` fan-out path and
+    runs. Exposes :meth:`run_loop` for the ``forEach`` fan-out path,
     :meth:`run_sub_workflow` for the ``workflow:`` single-child
-    invocation path. WF-IMPL-092 extends this class with the
-    ``approval:`` gate operation.
+    invocation path, and :meth:`run_approval` for the ``approval:``
+    human-in-the-loop gate.
     """
 
     def run_loop(
@@ -303,6 +306,90 @@ class SubOrchestrationManager:
         spawned = [(WORKFLOW_ITERATION_KEY, instance_id, task)]
         raw_results = yield from self._await_children(ctx, step_id, run_id, spawned)
         return self._merge_sub_workflow(step_id, run_id, instance_id, raw_results[0])
+
+    def run_approval(
+        self,
+        ctx: StepExecutionContext,
+        graph: ExecutionGraph,
+        step_id: str,
+    ) -> Generator[Any, Any, dict[str, Any]]:
+        """Drive an ``approval:`` human-in-the-loop gate to a decision.
+
+        Opens a durable timer for the gate's ISO-8601 ``timeout:`` and
+        a ``wait_for_external_event`` subscription for the approval
+        signal, then races them with ``when_any``: whichever fires
+        first resolves the gate. A delivered signal (approve **or**
+        reject) binds its payload to the step's outputs; the timer
+        winning raises ``step.approval_timeout``.
+
+        The approval signal is delivered through the Trigger Service via
+        ``RaiseExternalEvent`` (design.md § Sub-Orchestration) keyed on
+        the deterministic gate address ``<parentRunId>/<stepId>/approval``,
+        so it is subject to the same dedup / audit / idempotency
+        machinery as every other external event. (Registering the
+        resume subscription is the deferred Resume Subscription
+        Manager's job, out of scope here.)
+
+        :param ctx: Per-dispatch context bundle. :attr:`ctx.run_id`
+            seeds the deterministic gate address and
+            :attr:`ctx.workflow_context` opens the timer / event / race.
+        :param graph: The compiled parent graph. ``step_id`` selects the
+            ``approval:`` node.
+        :param step_id: The id of the ``approval:`` node.
+
+        :returns: The approval decision payload as the step's outputs
+            mapping (an empty mapping when the signal carried no body).
+            Delivered as the generator's ``StopIteration.value``.
+
+        :raises SubOrchestrationSpawnError: ``step_id`` is not an
+            ``approval:`` node, or the deterministic gate address could
+            not be derived.
+        :raises ApprovalTimeoutError: The durable timer fired before an
+            approval signal arrived.
+        :raises KeyError: ``step_id`` is not present in ``graph``.
+        """
+        node = _resolve_node(graph, step_id)
+        run_id = str(ctx.run_id)
+        if not isinstance(node.step_source, ApprovalStep):
+            # Defensive: the dispatcher only routes ``approval:`` nodes
+            # here, so a non-``ApprovalStep`` source is a programmer error.
+            raise SubOrchestrationSpawnError(
+                f"step {step_id!r} is not an approval: gate",
+                run_id=run_id,
+                step_id=step_id,
+            )
+
+        spec = node.step_source.approval
+        try:
+            gate_id = child_instance_id(run_id, step_id, APPROVAL_ITERATION_KEY)
+        except ChildInstanceIdError as exc:
+            raise SubOrchestrationSpawnError(
+                f"failed to derive a gate address for the approval gate of step {step_id!r}: {exc}",
+                run_id=run_id,
+                step_id=step_id,
+                iteration_key=APPROVAL_ITERATION_KEY,
+                cause=repr(exc),
+            ) from exc
+
+        # The timeout is validated to a positive ISO-8601 duration at
+        # document-parse time; re-parsing here is defence in depth and
+        # keeps the durable timer payload byte-stable across replay.
+        timeout = parse_wait_duration(step_id, spec.timeout)
+        wf = ctx.workflow_context
+        event = wf.wait_for_external_event(gate_id)
+        timer = wf.create_timer(timeout)
+        winner = yield wf.when_any([event, timer])
+        if winner is timer:
+            raise ApprovalTimeoutError(
+                f"approval gate {step_id!r} timed out after {spec.timeout!r} "
+                "without an approval signal",
+                run_id=run_id,
+                step_id=step_id,
+                child_instance_id=gate_id,
+                timeout=spec.timeout,
+            )
+        payload = event.get_result()
+        return dict(payload) if isinstance(payload, Mapping) else {}
 
     # ------------------------------------------------------------------
     # Internals
