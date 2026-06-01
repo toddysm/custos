@@ -70,7 +70,7 @@ import copy
 from collections.abc import Callable, Generator, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Final, cast, get_args
+from typing import TYPE_CHECKING, Any, Final, cast, get_args
 
 import custos_cel
 from custos_cel import (
@@ -99,6 +99,18 @@ from custos_workflow.runs.step_handler import (
     WorkflowContext,
 )
 from custos_workflow.runs.wait import WaitStepHandler
+
+if TYPE_CHECKING:
+    # ``ActivityStepHandler`` lives under ``custos_workflow.steps``,
+    # which itself transitively imports ``runs.orchestrator`` via
+    # ``runs.controller`` during package initialisation. Defer the
+    # import to ``TYPE_CHECKING`` so the runtime hint resolves
+    # without closing the cycle; the orchestrator never instantiates
+    # an :class:`ActivityStepHandler` itself — callers inject a
+    # constructed instance via the ``activity_handler`` kwarg — so
+    # the runtime only ever duck-types ``iter_calls`` on the
+    # supplied object.
+    from custos_workflow.steps.activity_step import ActivityStepHandler
 
 __all__ = [
     "WORKFLOW_NAME",
@@ -279,6 +291,7 @@ def make_run_orchestrator(
     on_replay: ReplayHook | None = None,
     expression_timeout_ms: int | None = None,
     wait_handler: WaitStepHandler | None = None,
+    activity_handler: ActivityStepHandler | None = None,
 ) -> Callable[[WorkflowContext, Any], Generator[Any, Any, RunOutput]]:
     """Build the workflow function bound to a concrete :class:`StepHandler`.
 
@@ -315,6 +328,24 @@ def make_run_orchestrator(
             Tests inject a stub to assert dispatch routing; the
             default is a stateless module-level instance that opens
             a Dapr durable timer per :attr:`WaitStep.wait`.
+        activity_handler: Optional
+            :class:`~custos_workflow.steps.activity_step.ActivityStepHandler`
+            override. When supplied, every
+            :attr:`~custos_workflow.graph.model.StepKind.ACTIVITY`
+            node is dispatched via ``yield from
+            activity_handler.iter_calls(...)`` (the WF-IMPL-074
+            yield protocol), bypassing the generic ``handler``
+            (typically :class:`StepCoordinator`) for that kind so
+            each ``bind_for_step`` /
+            ``schedule_activity`` call is a separately-yielded
+            :data:`~custos_workflow.runtime.dapr_activities.ActivityCallToken`
+            the runtime resolves as a durable Dapr activity (the
+            production resolver lands in WF-IMPL-079). When
+            ``None`` (the default), ACTIVITY nodes flow through
+            the legacy synchronous ``handler.execute`` adapter
+            and bind / schedule happen inline within the
+            orchestrator generator — fine for tests but not
+            durable enough for production.
 
     Returns:
         The workflow function. Its ``__name__`` is :data:`WORKFLOW_NAME`,
@@ -390,11 +421,31 @@ def make_run_orchestrator(
                 output_bag[step_id] = copy.deepcopy(dict(wait_result.outputs))
                 continue
 
-            result = handler.execute(
-                _step_ctx(ctx, run_input, output_bag, clock),
-                graph,
-                step_id,
-            )
+            if node.kind is StepKind.ACTIVITY and activity_handler is not None:
+                # WF-IMPL-074 yield protocol: drive the activity
+                # handler's generator via ``yield from`` so every
+                # ``bind_for_step`` / ``schedule_activity`` call
+                # surfaces as its own yielded
+                # :data:`~custos_workflow.runtime.dapr_activities.ActivityCallToken`,
+                # which the runtime resolves as a durable Dapr
+                # activity (production resolver: WF-IMPL-079;
+                # test resolver:
+                # :class:`~custos_workflow.runtime.dapr_activities.FakeDaprActivityDispatcher`
+                # wired into :class:`FakeWorkflowRuntime`). The
+                # generator's terminal ``return StepResult`` lands
+                # as ``result`` here, so the existing exhaustive
+                # dispatch arms below cover it without change.
+                result = yield from activity_handler.iter_calls(
+                    _step_ctx(ctx, run_input, output_bag, clock),
+                    graph,
+                    step_id,
+                )
+            else:
+                result = handler.execute(
+                    _step_ctx(ctx, run_input, output_bag, clock),
+                    graph,
+                    step_id,
+                )
 
             # Exhaustive dispatch over StepResult. The module-level
             # ``get_args(StepResult) == _STEP_RESULT_VARIANTS``

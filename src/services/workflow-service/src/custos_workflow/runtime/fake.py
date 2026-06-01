@@ -51,6 +51,11 @@ from custos_workflow.runtime._common import (
     ScheduleWorkflowRequest,
     TerminateRunRequest,
 )
+from custos_workflow.runtime.dapr_activities import (
+    BindForStepCallToken,
+    FakeDaprActivityDispatcher,
+    ScheduleActivityCallToken,
+)
 
 __all__ = [
     "FakeActivityContext",
@@ -274,7 +279,12 @@ class FakeWorkflowRuntime:
     in test history events are predictable.
     """
 
-    def __init__(self, *, now: datetime | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        now: datetime | None = None,
+        activity_dispatcher: FakeDaprActivityDispatcher | None = None,
+    ) -> None:
         self._workflows: dict[str, FakeWorkflowFn] = {}
         self._activities: dict[str, FakeActivityFn] = {}
         self._instances: dict[str, _InstanceState] = {}
@@ -284,6 +294,18 @@ class FakeWorkflowRuntime:
         # for the real runtime without touching readiness wiring.
         self._worker_ready = False
         self.now: datetime = now if now is not None else _DEFAULT_EPOCH
+        # WF-IMPL-074: optional resolver for the activity-task
+        # yield-protocol tokens (BindForStepCallToken /
+        # ScheduleActivityCallToken) the Run Controller orchestrator
+        # may yield via ``yield from activity_handler.iter_calls(...)``.
+        # Tests that exercise that path inject a dispatcher wired to
+        # in-process FakeActivityRuntimeClient / FakeConnectorClient
+        # so the yielded tokens resolve against the same fakes the
+        # test fixtures construct for direct handler exercise. When
+        # ``None`` (the default), encountering one of these tokens
+        # fails the instance loudly via the unknown-task-type arm in
+        # :meth:`_drive`.
+        self._activity_dispatcher: FakeDaprActivityDispatcher | None = activity_dispatcher
 
     # --- registration ----------------------------------------------------
 
@@ -483,6 +505,70 @@ class FakeWorkflowRuntime:
                 state.history.append(
                     HistoryEvent(kind="timer_fired", detail={"fire_at": task.fire_at})
                 )
+                continue
+
+            if isinstance(task, BindForStepCallToken | ScheduleActivityCallToken):
+                # WF-IMPL-074 yield protocol. The Run Controller
+                # orchestrator yielded a deferred bind / schedule
+                # call from
+                # :meth:`ActivityStepHandler.iter_calls`; resolve it
+                # against the injected
+                # :class:`FakeDaprActivityDispatcher` and feed the
+                # response back via ``next_result`` so the handler's
+                # generator advances to the next yield (or returns
+                # its :class:`StepResult`). Each resolution appends a
+                # ``activity_call_resolved`` history event so tests
+                # can assert the ordered token sequence the
+                # orchestrator yielded.
+                if self._activity_dispatcher is None:
+                    state.status = RunStatus.FAILED
+                    state.failure_message = (
+                        "orchestrator yielded an activity-call token "
+                        f"({type(task).__name__}) but no "
+                        "FakeDaprActivityDispatcher is wired on this runtime; "
+                        "pass activity_dispatcher=... when constructing "
+                        "FakeWorkflowRuntime to enable the WF-IMPL-074 yield "
+                        "protocol"
+                    )
+                    state.failure_type = "MissingActivityDispatcherError"
+                    state.last_updated_at = self.now
+                    state.history.append(
+                        HistoryEvent(
+                            kind="failed",
+                            detail={
+                                "message": state.failure_message,
+                                "error_type": state.failure_type,
+                            },
+                        )
+                    )
+                    return
+                token_kind = (
+                    "bind_for_step"
+                    if isinstance(task, BindForStepCallToken)
+                    else "schedule_activity"
+                )
+                try:
+                    response = self._activity_dispatcher.resolve(task)
+                except Exception as exc:
+                    state.history.append(
+                        HistoryEvent(
+                            kind="activity_call_failed",
+                            detail={
+                                "token": token_kind,
+                                "message": str(exc),
+                                "error_type": type(exc).__name__,
+                            },
+                        )
+                    )
+                    state.pending_exception = exc
+                    continue
+                state.history.append(
+                    HistoryEvent(
+                        kind="activity_call_resolved",
+                        detail={"token": token_kind},
+                    )
+                )
+                state.next_result = response
                 continue
 
             # Unknown task type — fail the instance loudly.
