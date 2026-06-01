@@ -285,6 +285,18 @@ class TestResponseFromWire:
         with pytest.raises(OutboundRpcDecodeError, match="ConnectorContext invariants"):
             _response_from_wire(body)
 
+    @pytest.mark.parametrize("field_name", ["slotName", "handle", "connectorKind"])
+    def test_context_non_string_field_rejected(self, field_name: str) -> None:
+        # ``ConnectorContext.__post_init__`` only checks
+        # truthiness, so a non-empty non-string value would
+        # otherwise slip through. The adapter must surface this
+        # as a decode error (always permanent) so invalid types
+        # never leak into downstream scheduling.
+        body = _ok_body()
+        body["contexts"]["registry"][field_name] = 12345
+        with pytest.raises(OutboundRpcDecodeError, match=f"{field_name} must be a string"):
+            _response_from_wire(body)
+
 
 # ---------------------------------------------------------------------------
 # bind_for_step — happy path

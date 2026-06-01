@@ -457,6 +457,20 @@ def _response_from_wire(body: Any) -> BindForStepResponse:
                 f"Connector BindForStep response contexts[{slot_name!r}] "
                 f"is missing required field(s): {sorted(missing)!r}"
             )
+        # ``ConnectorContext.__post_init__`` only checks
+        # truthiness, so a non-empty non-string value (e.g. an
+        # int) would slip through and leak invalid types into
+        # downstream scheduling. Enforce string typing here so
+        # the contract violation surfaces as a decode error
+        # (always permanent) instead.
+        for field_name in ("slotName", "handle", "connectorKind"):
+            field_value = raw_ctx[field_name]
+            if not isinstance(field_value, str):
+                raise OutboundRpcDecodeError(
+                    f"Connector BindForStep response contexts[{slot_name!r}]."
+                    f"{field_name} must be a string, "
+                    f"got {type(field_value).__name__}"
+                )
         try:
             expires_at = _parse_iso_utc(raw_ctx["expiresAt"])
         except ValueError as exc:
