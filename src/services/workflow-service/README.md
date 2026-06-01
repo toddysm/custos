@@ -524,6 +524,26 @@ follow-up (filed as a separate post-tracker issue) ships the
 Tracker: [#459](https://github.com/toddysm/custos/issues/459).
 
 
+**WF-IMPL-000-ARM-CONNECTOR-ADAPTERS** ships the production
+outbound-RPC boundary: the real `DaprActivityRuntimeClient`
+(`ScheduleActivity` / `CancelActivity`) and `DaprConnectorClient`
+(`BindForStep`) adapters over Dapr Service Invocation, their
+`providers.py` lifespan wiring (one shared `httpx.AsyncClient`,
+`WF_OUTBOUND_RPC_TIMEOUT_MS` knob), the OTel observability surface
+(`custos_workflow.outbound_rpc.call` span + three
+`custos_workflow_outbound_rpc_*` instruments), an end-to-end suite
+(`tests/integration/test_real_clients_end_to_end.py`) that drives
+`create_app()` through the real adapters over `httpx.MockTransport`
+without Docker / Dapr, and the developer documentation
+([`docs/developers/workflow-outbound-rpc.md`](../../../docs/developers/workflow-outbound-rpc.md))
+pinned to the running code by
+`tests/test_docs_examples_outbound_rpc.py` (fenced ```json``` blocks
+validated against the in-code envelope dataclasses; error-taxonomy,
+outcome, span-attribute, and endpoint-path tables reflected against
+their locked source-of-truth sets with exhaustiveness guards).
+Tracker: [#495](https://github.com/toddysm/custos/issues/495).
+
+
 The Expression Evaluator (the first sub-module) is already in
 [`src/libs/custos-cel/`](../../libs/custos-cel) and shipped via
 WF-IMPL-001 through WF-IMPL-012 (#176–#187).

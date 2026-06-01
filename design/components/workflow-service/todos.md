@@ -42,7 +42,7 @@ Sixth sub-module: **Real ARM Client + Connector Client adapters**, packaged insi
 ### Phase D — Verification & documentation
 
 - [F] WF-IMPL-082 (#493): End-to-end integration suite + macOS-friendly fixtures (depends on #491, #492).
-- [F] WF-IMPL-083 (#494): Developer documentation — `docs/developers/workflow-outbound-rpc.md` (depends on #493).
+- [x] WF-IMPL-083 (#494): Developer documentation — `docs/developers/workflow-outbound-rpc.md` (depends on #493).
 
 Tracker: #495 — `WF-IMPL-000-ARM-CONNECTOR-ADAPTERS`.
 
