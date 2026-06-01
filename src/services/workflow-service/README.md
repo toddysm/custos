@@ -468,6 +468,62 @@ gate remains ≥ 90 % service-wide (currently 98.82 % across the
 Tracker: [#432](https://github.com/toddysm/custos/issues/432).
 
 
+**WF-IMPL-000-API-ADAPTER** is now in progress. WF-IMPL-061
+([#447](https://github.com/toddysm/custos/issues/447)) through
+WF-IMPL-072 ([#458](https://github.com/toddysm/custos/issues/458))
+build the fifth sub-module — the **API Adapter + Validator** —
+mounted as the FastAPI app produced by
+`custos_workflow.create_app`. The sub-module owns the inbound
+REST surface (`POST /v1/workspaces/{ws}/runs` and four
+companion routes), the Internal RPC surface (`POST
+/internal/runs:start` and two companion routes), the
+pre-execution validator that gates every `StartRun`
+(workspace authorization → Catalog lookup → inputs JSON-Schema
+match → `(workspaceId, idempotencyKey)` ledger), and the RFC
+7807 `application/problem+json` envelope every error travels
+in. The 10-entry locked error taxonomy
+(`custos_workflow.api.errors.LOCKED_API_KINDS`) covers every
+`RunControllerError` / `ValidatorError` subclass plus three
+route-local kinds (`workflow.step_not_found`,
+`workflow.api.not_implemented`,
+`workflow.api.bad_request`); the table is the single source of
+truth the wire envelope, the exception-handler chain, the
+observability counter (`custos_workflow_api_errors_total`), and
+the developer documentation
+([`docs/developers/workflow-api.md`](../../../docs/developers/workflow-api.md))
+all read from. The `OTelHttpServerMiddleware` (WF-IMPL-070)
+adds one `custos_workflow.http.request` span per request +
+three workflow-service-prefixed instruments
+(`custos_workflow_http_server_duration_ms`,
+`custos_workflow_api_errors_total`,
+`custos_workflow_idempotency_outcomes_total`); span attributes
+include `wf.workspace.id`, `wf.run.id`,
+`wf.workflow_version.id`, `wf.idempotency.outcome`, and
+`wf.error.kind`. The WF-IMPL-071 end-to-end integration suite
+(`tests/integration/test_api_end_to_end.py`) drives the
+assembled app via `httpx.AsyncClient` over `httpx.ASGITransport`
+through the full FastAPI lifespan (every handler, middleware,
+and dependency factory), pinning the visible contract for the
+happy paths, idempotency precedence, validator rejection
+envelopes, and run-controller failure envelopes. The WF-IMPL-072
+developer documentation
+([`docs/developers/workflow-api.md`](../../../docs/developers/workflow-api.md))
+is pinned to the running code by
+`tests/test_docs_examples_api.py`, which (a) parses every
+fenced ```json``` block and validates it against the matching
+live Pydantic model (Problem+JSON blocks validate against
+`ProblemDetail` *and* assert `code ∈ LOCKED_API_KINDS`); (b)
+reflects the doc's REST + Internal RPC tables against the
+assembled FastAPI app's live route-set with an exhaustiveness
+guard that fails on any drift; (c) reflects the doc's error
+taxonomy table against `LOCKED_API_KINDS` with the same
+exhaustiveness guard. The deferred *Durable `IdempotencyLedger`*
+follow-up (filed as a separate post-tracker issue) ships the
+`MetadataStoreProvider`-backed adapter that the in-memory
+`InMemoryIdempotencyLedger` is the test-and-dev stand-in for.
+Tracker: [#459](https://github.com/toddysm/custos/issues/459).
+
+
 The Expression Evaluator (the first sub-module) is already in
 [`src/libs/custos-cel/`](../../libs/custos-cel) and shipped via
 WF-IMPL-001 through WF-IMPL-012 (#176–#187).
