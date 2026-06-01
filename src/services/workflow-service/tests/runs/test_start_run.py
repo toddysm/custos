@@ -151,6 +151,9 @@ class _RecordingWorkflowClient:
     async def resume_workflow(self, request: Any) -> None:  # pragma: no cover
         raise NotImplementedError("start_run never calls resume_workflow")
 
+    async def raise_workflow_event(self, request: Any) -> None:  # pragma: no cover
+        raise NotImplementedError("test double does not implement raise_workflow_event")
+
 
 def _store() -> InProcessRunStore:
     provider = FakeMetadataStoreProvider()

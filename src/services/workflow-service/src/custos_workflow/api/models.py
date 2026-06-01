@@ -379,13 +379,34 @@ class RaiseExternalEventRequest(_CamelModel):
     Mirrors the design.md § Internal RPC table:
     ``RaiseExternalEvent(runId, stepId, eventName, payload, idempotencyKey)``.
     ``runId`` and ``stepId`` are path-bound (not body-bound) so the
-    body carries only the event payload + dedup key. Idempotency
-    on this surface is keyed by
-    ``(runId, stepId, eventName, idempotencyKey)`` per design.md
-    — the Validator (WF-IMPL-063) owns the ledger lookup; this
-    model is a plain envelope.
+    body carries only the workspace + event payload + dedup key.
+    Idempotency on this surface is keyed by
+    ``(workspaceId, runId, stepId, eventName, idempotencyKey)`` —
+    the controller's in-process event-dispatch ledger
+    (WF-IMPL-068) owns the dedup decision and includes
+    ``workspaceId`` in the tuple alongside the design.md
+    ``(runId, stepId, eventName, idempotencyKey)`` shape so two
+    workspaces that pick identical run / step / event / key
+    quadruples cannot collide. This model is a plain envelope.
+
+    ``workspaceId`` rides in the body for the same reason the
+    Internal Start / Cancel bodies (WF-IMPL-067) carry it: the
+    ``/internal/`` URL surface deliberately drops the
+    ``{ws}`` path segment so the Helm chart / mesh can pin
+    mTLS-only access to a single path stem.
     """
 
+    workspace_id: str = Field(
+        min_length=1,
+        max_length=63,
+        pattern=_WORKSPACE_ID_PATTERN,
+        description=(
+            "Owning workspace for the run. Required on the Internal "
+            "RPC surface (the path carries no `{ws}` segment). Must "
+            "match the canonical DNS-1123-like workspace grammar the "
+            "public surface enforces on its `{ws}` path segment."
+        ),
+    )
     event_name: str = Field(
         min_length=1,
         description="Wire-stable event name the workflow's `waitFor:` step subscribed to.",
@@ -398,7 +419,7 @@ class RaiseExternalEventRequest(_CamelModel):
         default=None,
         description=(
             "Optional client-supplied dedup key for the "
-            "(runId, stepId, eventName, idempotencyKey) ledger."
+            "(workspaceId, runId, stepId, eventName, idempotencyKey) ledger."
         ),
     )
 

@@ -827,6 +827,9 @@ from custos_workflow.runtime._common import (  # noqa: E402
     PauseRunRequest as _PauseRunRequest,
 )
 from custos_workflow.runtime._common import (  # noqa: E402
+    RaiseRunEventRequest as _RaiseRunEventRequest,
+)
+from custos_workflow.runtime._common import (  # noqa: E402
     ResumeRunRequest as _ResumeRunRequest,
 )
 from custos_workflow.runtime._common import (  # noqa: E402
@@ -889,6 +892,7 @@ class _ObsWorkflowClient:
     terminate_raise: Exception | None = None
     pause_raise: Exception | None = None
     resume_raise: Exception | None = None
+    raise_event_raise: Exception | None = None
     get_state_raise: Exception | None = None
     state_sequence: list[_RuntimeRunState | None] = _field(default_factory=list)
 
@@ -896,6 +900,7 @@ class _ObsWorkflowClient:
     terminate_calls: list[_TerminateRequest] = _field(default_factory=list)
     pause_calls: list[_PauseRunRequest] = _field(default_factory=list)
     resume_calls: list[_ResumeRunRequest] = _field(default_factory=list)
+    raise_event_calls: list[_RaiseRunEventRequest] = _field(default_factory=list)
     state_calls: list[_GetRunStateRequest] = _field(default_factory=list)
 
     async def schedule_new_workflow(self, request: _ScheduleRequest) -> str:
@@ -918,6 +923,11 @@ class _ObsWorkflowClient:
         self.resume_calls.append(request)
         if self.resume_raise is not None:
             raise self.resume_raise
+
+    async def raise_workflow_event(self, request: _RaiseRunEventRequest) -> None:
+        self.raise_event_calls.append(request)
+        if self.raise_event_raise is not None:
+            raise self.raise_event_raise
 
     async def get_workflow_state(self, request: _GetRunStateRequest) -> _RuntimeRunState | None:
         self.state_calls.append(request)
@@ -1330,6 +1340,11 @@ class TestRunLifecycleSpans:
                 "list",
                 "custos_workflow.run.list",
             ),
+            (
+                "raise_external_event",
+                "raise_external_event",
+                "custos_workflow.run.raise_external_event",
+            ),
         ],
     )
     @pytest.mark.asyncio
@@ -1365,6 +1380,14 @@ class TestRunLifecycleSpans:
             await fx.controller.get_run(workspace_id=_WS, run_id=_RUN_ID)
         elif call == "list":
             await fx.controller.list_runs(workspace_id=_WS)
+        elif call == "raise_external_event":
+            await _seed_obs_run(fx.store, status=_RunStatus.RUNNING)
+            await fx.controller.raise_external_event(
+                workspace_id=_WS,
+                run_id=_RUN_ID,
+                step_id="wait-approval",
+                event_name="approval.granted",
+            )
         else:  # pragma: no cover
             pytest.fail(f"unhandled call {call!r}")
 

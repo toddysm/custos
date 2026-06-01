@@ -154,6 +154,9 @@ class _OrchestratorBridgeClient:
         self.resume_requests.append(request)
         await self.inner.resume_workflow(request)
 
+    async def raise_workflow_event(self, request: Any) -> None:  # pragma: no cover
+        raise NotImplementedError("test double does not implement raise_workflow_event")
+
     async def get_workflow_state(self, request: Any) -> Any:
         self.state_requests.append(request)
         return await self.inner.get_workflow_state(request)
