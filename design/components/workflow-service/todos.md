@@ -1,6 +1,6 @@
 # TODOs: Workflow Service
 
-Last Updated: 2026-05-31 (Real ARM Client + Connector Client adapters sub-module started under tracker [#495](https://github.com/toddysm/custos/issues/495); WF-IMPL-073..083 filed)
+Last Updated: 2026-06-01 (Sub-Orchestration Manager sub-module planned + filed under tracker [#522](https://github.com/toddysm/custos/issues/522); WF-IMPL-084..098 filed)
 
 ## Open
 
@@ -11,11 +11,47 @@ Last Updated: 2026-05-31 (Real ARM Client + Connector Client adapters sub-module
 Sub-modules of the workflow-service host whose design is already locked in [`design.md`](design.md) § Internal Structure but whose implementation plan has not yet been derived. Each will get its own `implement-component` plan, tracker, and task issue set when prioritised. (added 2026-05-29 during the Step Coordinator plan derivation.)
 
 - [ ] **Resume Subscription Manager** — `waitFor:` step kind + `TriggerServiceClient` Protocol + `RegisterResumeSubscription` / `CancelResumeSubscription` RPC + `ResumeSubscriptionMirror` persistence (`MetadataStoreProvider`) + replay re-registration through the WF-IMPL-042 reconciler hook. Design refs: § Operation: Step Resume on External Event, § Resume Subscription Replay Protocol. Step Coordinator (WF-IMPL-055) currently returns `StepFailed(step.kind_not_implemented)` for `waitFor:`.
-- [ ] **Sub-Orchestration Manager** — `for:` (dynamic loop) + `approval:` (gate + timeout) + `workflow:` (sub-workflow call); spawns child Dapr Workflow instances with deterministic `<parentRunId>/<stepId>/<iterationKey>` ids; awaits via `when_all` / `when_any`; merges outputs. Design refs: § Operation: Sub-Orchestration, § Sub-Orchestration Manager (ADR-007). Step Coordinator currently returns `StepFailed(step.kind_not_implemented)` for all three.
+- [~] **Sub-Orchestration Manager** — _filed_ as the seventh sub-module under tracker [#522](https://github.com/toddysm/custos/issues/522); tasks WF-IMPL-084..098 filed. See the dedicated section below + [`implementation-plan-sub-orchestration-manager.md`](implementation-plan-sub-orchestration-manager.md). `for:` (dynamic loop) + `approval:` (gate + timeout) + `workflow:` (sub-workflow call); spawns child Dapr Workflow instances with deterministic `<parentRunId>/<stepId>/<iterationKey>` ids; awaits via `when_all` / `when_any`; merges outputs. Design refs: § Operation: Sub-Orchestration, § Sub-Orchestration Manager (ADR-007). Step Coordinator currently returns `StepFailed(step.kind_not_implemented)` for all three.
 - [x] **API Adapter + Validator** — _complete_ as the fifth sub-module under tracker [#459](https://github.com/toddysm/custos/issues/459) (closed 2026-06-04); tasks WF-IMPL-061..072 merged across PRs #463–#480 and #482. See the dedicated section below + [`implementation-plan-api-adapter-validator.md`](implementation-plan-api-adapter-validator.md).
 - [~] **Real ARM Client + Connector Client adapters** — _in progress_ as the sixth sub-module under tracker [#495](https://github.com/toddysm/custos/issues/495); tasks WF-IMPL-073..083 filed. See the dedicated section below + [`implementation-plan.md`](implementation-plan.md). Production `ActivityRuntimeClient` / `ConnectorClient` Dapr Service Invocation bridges behind the Protocols that ship with the Step Coordinator (WF-IMPL-049 / WF-IMPL-050). Design refs: § Internal RPC (outbound).
 - [ ] **Full Observability Client integration** — Audit-event sink wiring + cross-component event taxonomy unification (TS-TODO-001 / ARM TODO-009 under INCON-013) + log-stream delegation for `GET …/steps/{stepId}/logs`. Design refs: § Observability Client. `workflow.*` / `step.*` event publication already lands via the existing `LifecycleEventPublisher`.
 - [ ] **Durable `IdempotencyLedger`** — `MetadataStoreProvider`-backed adapter for the `(workspaceId, idempotencyKey)` ledger introduced in WF-IMPL-063; in-memory adapter ships with the API Adapter sub-module. Filed as a separate follow-up issue once the in-memory adapter merges. (added 2026-05-31 during the API Adapter plan derivation.)
+
+## Implementation — Sub-Orchestration Manager
+
+Seventh sub-module: **Sub-Orchestration Manager**, packaged inside the service host `src/services/workflow-service/` under a new `custos_workflow.steps.sub_orchestration` package plus runtime-context extensions in `custos_workflow.runtime`. Unblocks the three step kinds that spawn child Dapr Workflow instances — dynamic loops (`forEach:`), sub-workflow invocation (`workflow:`), and approval gates (`approval:`) — with deterministic `<parentRunId>/<stepId>/<iterationKey>` child ids, `when_all` (loop) / `when_any` (approval) awaits, and output merging into `steps.<stepId>.outputs`. Replaces the `step.kind_not_implemented` stub the Step Coordinator returns for `PrimitiveHandler.SUB_ORCHESTRATION`. Plan: [`implementation-plan-sub-orchestration-manager.md`](implementation-plan-sub-orchestration-manager.md).
+
+### Phase A — Foundations (runtime primitives, ids, errors, models)
+
+- [x] WF-IMPL-084 (#507): Child-workflow + `when_all`/`when_any` runtime primitives. _merged_.
+- [F] WF-IMPL-085 (#508): Deterministic child-instance-id + iteration-key derivation.
+- [F] WF-IMPL-086 (#509): Sub-orchestration error taxonomy additions.
+- [F] WF-IMPL-087 (#510): `approval:` step kind + model + compiler primitive tagging.
+
+### Phase B — Child workflow + dynamic loop
+
+- [F] WF-IMPL-088 (#511): Child sub-workflow orchestrator function (depends on #507, #508).
+- [F] WF-IMPL-089 (#512): Loop fan-out — `forEach` spawn + `when_all` + merge (depends on #507, #508, #509, #511).
+- [F] WF-IMPL-090 (#513): `where:` pre-filter + loop edge cases (depends on #512).
+
+### Phase C — Sub-workflow invocation + approval gate
+
+- [F] WF-IMPL-091 (#514): `workflow:` sub-workflow invocation path (depends on #507, #508, #509, #511).
+- [F] WF-IMPL-092 (#515): `approval:` gate — `when_any([event, timer])` + timeout (depends on #507, #509, #510).
+
+### Phase D — Dispatch integration & wiring
+
+- [F] WF-IMPL-093 (#516): Orchestrator inline dispatch of `SUB_ORCHESTRATION` (depends on #512, #513, #514, #515).
+- [F] WF-IMPL-094 (#517): `providers.py` wiring + Configuration knobs + child registration (depends on #516).
+- [F] WF-IMPL-095 (#518): Replay determinism — idempotent re-spawn + reconciliation (depends on #516).
+
+### Phase E — Observability, verification, docs
+
+- [F] WF-IMPL-096 (#519): OTel observability hooks for sub-orchestration (depends on #516, #517).
+- [F] WF-IMPL-097 (#520): Unit + integration test suite (≥ 90 % coverage gate) (depends on #519).
+- [F] WF-IMPL-098 (#521): Developer documentation — `docs/developers/workflow-sub-orchestration.md` (depends on #520).
+
+Tracker: #522 — `WF-IMPL-000-SUB-ORCHESTRATION`.
 
 ## Implementation — Real ARM Client + Connector Client adapters
 

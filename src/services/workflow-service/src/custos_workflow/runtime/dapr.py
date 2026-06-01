@@ -46,6 +46,12 @@ from dapr.ext.workflow import (
 from dapr.ext.workflow import (
     WorkflowRuntime as _DaprWorkflowRuntime,
 )
+from dapr.ext.workflow import (
+    when_all as _dapr_when_all,
+)
+from dapr.ext.workflow import (
+    when_any as _dapr_when_any,
+)
 
 from custos_workflow.runtime._common import (
     GetRunStateRequest,
@@ -65,6 +71,9 @@ from custos_workflow.runtime.dapr_activities import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from datetime import datetime, timedelta
+
     from dapr.ext.workflow.workflow_state import WorkflowState
 
     from custos_workflow.clients.activity_runtime import ActivityRuntimeClient
@@ -72,6 +81,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ActivityFn",
+    "DaprWorkflowContextAdapter",
     "WorkflowClient",
     "WorkflowFn",
     "WorkflowRuntime",
@@ -117,6 +127,93 @@ def dapr_status_to_run_status(status: WorkflowStatus) -> RunStatus:
     """
 
     return _DAPR_TO_RUN.get(status, RunStatus.UNKNOWN)
+
+
+# ---------------------------------------------------------------------------
+# Workflow-context adapter
+# ---------------------------------------------------------------------------
+
+
+class DaprWorkflowContextAdapter:
+    """Thin wrapper that adds the Sub-Orchestration primitives to a real ctx.
+
+    The real :class:`dapr.ext.workflow.DaprWorkflowContext` natively
+    exposes :meth:`call_activity`, :meth:`wait_for_external_event`,
+    :meth:`create_timer`, and :meth:`call_child_workflow`, but the
+    ``when_all`` / ``when_any`` fan-in combinators are *module-level*
+    functions in ``dapr.ext.workflow`` rather than context methods.
+    Run Controller code targets a single
+    :class:`~custos_workflow.runs.step_handler.WorkflowContext`
+    Protocol so the in-memory
+    :class:`~custos_workflow.runtime.FakeWorkflowContext` can be
+    dropped in interchangeably; this adapter closes the gap by
+    re-exposing the two combinators as methods (WF-IMPL-084) while
+    delegating every other call straight through to the wrapped
+    context with **zero behaviour change**.
+
+    Construction is cheap and side-effect-free; wrap the context the
+    Dapr runtime hands the orchestrator entrypoint and pass the
+    adapter down the step walk.
+    """
+
+    __slots__ = ("_ctx",)
+
+    def __init__(self, ctx: DaprWorkflowContext) -> None:
+        self._ctx = ctx
+
+    @property
+    def unwrap(self) -> DaprWorkflowContext:
+        """Return the wrapped :class:`DaprWorkflowContext`."""
+
+        return self._ctx
+
+    @property
+    def instance_id(self) -> str:
+        return self._ctx.instance_id
+
+    @property
+    def current_utc_datetime(self) -> datetime:
+        return self._ctx.current_utc_datetime
+
+    @property
+    def is_replaying(self) -> bool:
+        return self._ctx.is_replaying
+
+    def set_custom_status(self, custom_status: str) -> None:
+        self._ctx.set_custom_status(custom_status)
+
+    def call_activity(
+        self,
+        activity: Callable[..., Any] | str,
+        *,
+        input: Any = None,
+    ) -> Any:
+        return self._ctx.call_activity(activity, input=input)
+
+    def wait_for_external_event(self, name: str) -> Any:
+        return self._ctx.wait_for_external_event(name)
+
+    def create_timer(self, fire_at: datetime | timedelta) -> Any:
+        return self._ctx.create_timer(fire_at)
+
+    def call_child_workflow(
+        self,
+        workflow: Callable[..., Any] | str,
+        *,
+        input: Any = None,
+        instance_id: str | None = None,
+    ) -> Any:
+        return self._ctx.call_child_workflow(workflow, input=input, instance_id=instance_id)
+
+    def when_all(self, tasks: Sequence[Any]) -> Any:
+        """Fan-in: resolve once every task in ``tasks`` has completed."""
+
+        return _dapr_when_all(list(tasks))
+
+    def when_any(self, tasks: Sequence[Any]) -> Any:
+        """Fan-in: resolve as soon as any task in ``tasks`` completes."""
+
+        return _dapr_when_any(list(tasks))
 
 
 def _run_state_from_dapr(state: WorkflowState) -> RunState:
