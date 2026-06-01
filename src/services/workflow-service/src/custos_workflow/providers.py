@@ -346,29 +346,57 @@ class RunComponents:
             :class:`~custos_workflow.clients.ActivityRuntimeClient`
             stub that the
             :class:`~custos_workflow.steps.activity_step.ActivityStepHandler`
-            schedules attempts through. WF-IMPL-057 defaulted this
-            to :class:`~custos_workflow.clients.NoopActivityRuntimeClient`;
-            WF-IMPL-080 promotes the default to the production
-            :class:`~custos_workflow.clients.DaprActivityRuntimeClient`
-            when :data:`ENV_ARM_APP_ID` is set (and falls back to
-            the Noop adapter otherwise).
+            schedules attempts through on the *legacy* in-process
+            :meth:`~custos_workflow.steps.activity_step.ActivityStepHandler.execute`
+            path. WF-IMPL-080 deliberately keeps this slot a
+            :class:`~custos_workflow.clients.NoopActivityRuntimeClient`
+            even when the production env vars are set: the
+            production orchestrator uses the
+            :meth:`~custos_workflow.steps.activity_step.ActivityStepHandler.iter_calls`
+            yield-protocol (WF-IMPL-074), which routes through
+            the WF-IMPL-079 outbound-activity bridges instead and
+            never touches this field. The Dapr async client lives
+            on :attr:`outbound_activity_client` so the sync
+            Protocol contract the Step Coordinator depends on is
+            never violated.
         connector_client: WF-IMPL-050's
             :class:`~custos_workflow.clients.ConnectorClient` stub
             that the
             :class:`~custos_workflow.steps.activity_step.ActivityStepHandler`
-            leases connector contexts through. WF-IMPL-057
-            defaulted this to
-            :class:`~custos_workflow.clients.NoopConnectorClient`;
-            WF-IMPL-080 promotes the default to the production
-            :class:`~custos_workflow.clients.DaprConnectorClient`
-            when :data:`ENV_CONNECTOR_APP_ID` is set (and falls
-            back to the Noop adapter otherwise).
+            leases connector contexts through on the *legacy*
+            in-process path. WF-IMPL-080 deliberately keeps this
+            slot a :class:`~custos_workflow.clients.NoopConnectorClient`
+            in production for the same reason as
+            :attr:`activity_client`. The Dapr async client lives
+            on :attr:`outbound_connector_client`.
+        outbound_activity_client: WF-IMPL-080's outbound
+            :class:`~custos_workflow.clients.DaprActivityRuntimeClient`
+            (when :data:`ENV_ARM_APP_ID` is set) or
+            :class:`~custos_workflow.clients.NoopActivityRuntimeClient`
+            (otherwise). Threaded into
+            :class:`~custos_workflow.runtime.WorkflowRuntime` so
+            the WF-IMPL-079
+            ``custos.workflow.arm.schedule_activity`` bridge
+            registers against it at ``runtime.start()``. The
+            bridge body adapts the sync / async surface via
+            :func:`asyncio.run` (see ``_call_sync_or_async`` in
+            :mod:`custos_workflow.runtime.dapr_activities`), so
+            both flavours are safe here even though the field is
+            typed as the *sync* Protocol — the bridge is the only
+            consumer of this field, and it is the one place that
+            owns the adaptation.
+        outbound_connector_client: Mirrors
+            :attr:`outbound_activity_client` for the Connector
+            Service path; threaded into
+            :class:`~custos_workflow.runtime.WorkflowRuntime`
+            for the ``custos.workflow.connector.bind_for_step``
+            bridge registration.
         dapr_http_client: HTTP client lifespan-owned and shared by
             the Dapr Pub/Sub publisher (when active) and the
-            WF-IMPL-080 ARM / Connector adapters (when their env
-            vars are set). ``None`` when none of the production
-            paths are active. The lifespan ``aclose()`` it on
-            shutdown.
+            WF-IMPL-080 outbound ARM / Connector adapters (when
+            their env vars are set). ``None`` when none of the
+            production paths are active. The lifespan ``aclose()``
+            it on shutdown.
     """
 
     workflow_runtime: WorkflowRuntimeProtocol
@@ -380,6 +408,12 @@ class RunComponents:
     activity_client: ActivityRuntimeClient
     connector_client: ConnectorClient
     start_run_validator: StartRunValidator
+    outbound_activity_client: ActivityRuntimeClient = field(
+        default_factory=lambda: NoopActivityRuntimeClient()
+    )
+    outbound_connector_client: ConnectorClient = field(
+        default_factory=lambda: NoopConnectorClient()
+    )
     dapr_http_client: httpx.AsyncClient | None = field(default=None)
 
 
@@ -661,7 +695,36 @@ def load_run_components(
     else:
         dapr_http_client = None
 
-    activity: ActivityRuntimeClient = (
+    # WF-IMPL-080 reconciles two distinct slots for the ARM /
+    # Connector clients:
+    #
+    # * ``outbound_*_client`` (this pair) holds the **outbound**
+    #   client the WF-IMPL-079 bridge activities register
+    #   against in :class:`WorkflowRuntime`. In production this
+    #   is the async
+    #   :class:`DaprActivityRuntimeClient` /
+    #   :class:`DaprConnectorClient`; the bridge body adapts the
+    #   sync/async surface via :func:`asyncio.run` (see
+    #   ``_call_sync_or_async`` in
+    #   :mod:`custos_workflow.runtime.dapr_activities`), so the
+    #   sync :class:`ActivityRuntimeClient` /
+    #   :class:`ConnectorClient` type annotations remain accurate
+    #   from the bridge's perspective. The factories cast the
+    #   Dapr clients at the boundary because the bridge is the
+    #   *only* consumer that ever touches them.
+    # * ``activity_client`` / ``connector_client`` (assigned
+    #   below) feed the *legacy* synchronous
+    #   :meth:`ActivityStepHandler.execute` Step Coordinator
+    #   path. The production orchestrator never reaches that path
+    #   (it uses the WF-IMPL-074 ``iter_calls`` yield protocol
+    #   which routes through the bridges above), so this slot
+    #   stays a sync :class:`NoopActivityRuntimeClient` /
+    #   :class:`NoopConnectorClient` even when the production env
+    #   vars are set — guaranteeing the sync Protocol contract is
+    #   not violated and no async coroutine leaks into the legacy
+    #   driver if a future caller invokes ``handler.execute()``
+    #   directly with the production env in place.
+    outbound_activity: ActivityRuntimeClient = (
         activity_client
         if activity_client is not None
         else _build_activity_client(
@@ -670,7 +733,7 @@ def load_run_components(
             timeout_seconds=timeout_seconds,
         )
     )
-    connector: ConnectorClient = (
+    outbound_connector: ConnectorClient = (
         connector_client
         if connector_client is not None
         else _build_connector_client(
@@ -679,25 +742,35 @@ def load_run_components(
             timeout_seconds=timeout_seconds,
         )
     )
+    # The legacy sync slots are *always* the in-process Noop
+    # adapters in this default builder. Tests that need a Fake
+    # in the sync slot pass it via the ``activity_client`` /
+    # ``connector_client`` kwarg, which also feeds the outbound
+    # slot above so the override semantics stay symmetric (the
+    # sync Fake satisfies both surfaces).
+    legacy_activity: ActivityRuntimeClient = (
+        activity_client if activity_client is not None else NoopActivityRuntimeClient()
+    )
+    legacy_connector: ConnectorClient = (
+        connector_client if connector_client is not None else NoopConnectorClient()
+    )
 
     # WorkflowRuntime is constructed *after* the outbound clients
     # so the WF-IMPL-079 bridge activities (``schedule_activity``
     # and ``bind_for_step``) can be registered against them on
-    # ``runtime.start()``. The runtime kwargs gate on
-    # ``not None``: when the env vars are unset the factories
-    # above hand us the Noop adapters, which the bridge will
-    # surface as ``OutboundRpcError`` envelopes if invoked — the
-    # explicit Noop wiring keeps the dev path sidecar-free
-    # without leaving the bridge un-registered (a missing bridge
-    # would surface as an opaque ``ActivityNotFound`` from the
-    # Dapr SDK at workflow time, which is much harder to
-    # diagnose than the Noop's own ``NotImplementedError``).
+    # ``runtime.start()``. The bridges accept the Noop fallback;
+    # when invoked under Noop they raise ``NotImplementedError``,
+    # which the bridge body lets bubble (only ``OutboundRpcError``
+    # subclasses are enveloped) — the failure is intentionally
+    # loud so a misconfigured worker (e.g. ARM env unset but the
+    # orchestrator still calling ``schedule_activity``) fails
+    # cleanly rather than silently returning a malformed envelope.
     runtime: WorkflowRuntimeProtocol = (
         workflow_runtime
         if workflow_runtime is not None
         else WorkflowRuntime(
-            activity_runtime_client=activity,
-            connector_client=connector,
+            activity_runtime_client=outbound_activity,
+            connector_client=outbound_connector,
         )
     )
     workflow_client = _build_workflow_client(runtime)
@@ -745,8 +818,10 @@ def load_run_components(
         lifecycle_publisher=publisher,
         replay_reconciler=reconciler,
         run_controller=controller,
-        activity_client=activity,
-        connector_client=connector,
+        activity_client=legacy_activity,
+        connector_client=legacy_connector,
         start_run_validator=validator,
+        outbound_activity_client=outbound_activity,
+        outbound_connector_client=outbound_connector,
         dapr_http_client=dapr_http_client,
     )

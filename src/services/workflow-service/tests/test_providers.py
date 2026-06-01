@@ -106,6 +106,10 @@ def test_load_run_components_noop_when_endpoints_unset() -> None:
     """
     components = load_run_components(env={}, workflow_runtime=FakeWorkflowRuntime())
 
+    assert isinstance(components.outbound_activity_client, NoopActivityRuntimeClient)
+    assert isinstance(components.outbound_connector_client, NoopConnectorClient)
+    # The legacy sync slots also stay Noop in production by design
+    # (see ``RunComponents.activity_client`` docstring).
     assert isinstance(components.activity_client, NoopActivityRuntimeClient)
     assert isinstance(components.connector_client, NoopConnectorClient)
     assert components.dapr_http_client is None
@@ -123,11 +127,17 @@ def test_load_run_components_dapr_arm_only_shares_http_client() -> None:
     )
 
     try:
-        assert isinstance(components.activity_client, DaprActivityRuntimeClient)
-        assert isinstance(components.connector_client, NoopConnectorClient)
+        assert isinstance(components.outbound_activity_client, DaprActivityRuntimeClient)
+        assert isinstance(components.outbound_connector_client, NoopConnectorClient)
+        # The sync slot the legacy Step Coordinator path consumes
+        # must NEVER hold the async Dapr client — that would leak
+        # un-awaited coroutines into ``handler.execute()`` if a
+        # future caller invoked it with the production env in
+        # place. See ``RunComponents.activity_client`` docstring.
+        assert isinstance(components.activity_client, NoopActivityRuntimeClient)
         assert components.dapr_http_client is not None
         # Same instance — no second client, no second pool.
-        assert components.activity_client.http_client is components.dapr_http_client
+        assert components.outbound_activity_client.http_client is components.dapr_http_client
     finally:
         # Lifespan owns the client; the test must aclose() it
         # itself because no FastAPI lifespan ran here.
@@ -144,10 +154,11 @@ def test_load_run_components_dapr_connector_only_shares_http_client() -> None:
     )
 
     try:
-        assert isinstance(components.activity_client, NoopActivityRuntimeClient)
-        assert isinstance(components.connector_client, DaprConnectorClient)
+        assert isinstance(components.outbound_activity_client, NoopActivityRuntimeClient)
+        assert isinstance(components.outbound_connector_client, DaprConnectorClient)
+        assert isinstance(components.connector_client, NoopConnectorClient)
         assert components.dapr_http_client is not None
-        assert components.connector_client.http_client is components.dapr_http_client
+        assert components.outbound_connector_client.http_client is components.dapr_http_client
     finally:
         if components.dapr_http_client is not None:
             import asyncio
@@ -169,13 +180,17 @@ def test_load_run_components_dapr_both_share_single_http_client() -> None:
     )
 
     try:
-        assert isinstance(components.activity_client, DaprActivityRuntimeClient)
-        assert isinstance(components.connector_client, DaprConnectorClient)
+        assert isinstance(components.outbound_activity_client, DaprActivityRuntimeClient)
+        assert isinstance(components.outbound_connector_client, DaprConnectorClient)
+        # Legacy sync slots stay Noop — see the per-test rationale
+        # in ``test_load_run_components_dapr_arm_only_shares_http_client``.
+        assert isinstance(components.activity_client, NoopActivityRuntimeClient)
+        assert isinstance(components.connector_client, NoopConnectorClient)
         assert components.dapr_http_client is not None
         # The same instance reaches *both* adapters.
         assert (
-            components.activity_client.http_client
-            is components.connector_client.http_client
+            components.outbound_activity_client.http_client
+            is components.outbound_connector_client.http_client
             is components.dapr_http_client
         )
     finally:
@@ -205,6 +220,15 @@ def test_load_run_components_honours_explicit_overrides() -> None:
 
     assert components.activity_client is fake_arm
     assert components.connector_client is fake_connector
+    # Overrides feed both the legacy sync slot *and* the outbound
+    # slot symmetrically: the caller-supplied Fake satisfies both
+    # surfaces (the sync Protocol is what
+    # :class:`FakeActivityRuntimeClient` /
+    # :class:`FakeConnectorClient` implement), so tests need only
+    # pass one object to drive both the Step Coordinator and the
+    # bridges.
+    assert components.outbound_activity_client is fake_arm
+    assert components.outbound_connector_client is fake_connector
     # Overrides short-circuit the ``need_http_for_*`` predicates so
     # no socket pool is opened (the publisher env is unset here).
     assert components.dapr_http_client is None
@@ -256,8 +280,8 @@ def test_resolve_outbound_rpc_timeout_threaded_into_dapr_adapter() -> None:
     )
 
     try:
-        assert isinstance(components.activity_client, DaprActivityRuntimeClient)
-        assert components.activity_client.timeout == 2.5
+        assert isinstance(components.outbound_activity_client, DaprActivityRuntimeClient)
+        assert components.outbound_activity_client.timeout == 2.5
     finally:
         if components.dapr_http_client is not None:
             import asyncio
