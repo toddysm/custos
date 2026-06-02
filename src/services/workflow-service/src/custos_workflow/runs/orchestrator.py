@@ -694,12 +694,31 @@ def _dispatch_resume_subscription(
     # Derive a log-safe waiting reason from the resolved event key when
     # the first effect carries it (it always does today — the pending
     # mirror persist — but the ``isinstance`` keeps the reason robust to
-    # a future re-ordering of the handler's effect sequence).
+    # a future re-ordering of the handler's effect sequence). The event
+    # key can be derived from user inputs / CEL, so sanitise control
+    # characters and cap the length before interpolating it into the
+    # reason to avoid log injection / noisy telemetry downstream.
     if isinstance(first_effect, PersistMirrorCall):
-        reason = f"waitFor:{first_effect.mirror.event_key}"
+        reason = f"waitFor:{_sanitize_reason_token(first_effect.mirror.event_key)}"
     else:  # pragma: no cover - defensive: iter_resume persists first
         reason = f"waitFor:{step_id}"
     return StepWaiting(reason=reason)
+
+
+_MAX_REASON_TOKEN_LEN: Final = 200
+
+
+def _sanitize_reason_token(token: str) -> str:
+    """Make a user-derived token safe to embed in a log-able reason.
+
+    Replaces control characters (newlines, tabs, etc.) with ``?`` and
+    caps the length, so a hostile or oversized event key cannot inject
+    log lines or balloon telemetry when the waiting reason is emitted.
+    """
+    sanitized = "".join(ch if ch.isprintable() else "?" for ch in token)
+    if len(sanitized) > _MAX_REASON_TOKEN_LEN:
+        sanitized = sanitized[:_MAX_REASON_TOKEN_LEN] + "…"
+    return sanitized
 
 
 def _dispatch_sub_orchestration(

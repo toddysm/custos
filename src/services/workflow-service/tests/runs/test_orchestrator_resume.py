@@ -229,6 +229,33 @@ def test_wait_for_node_parks_run_waiting(
     assert output.waiting_reason == "waitFor:order-approved"
 
 
+def test_wait_for_reason_sanitizes_control_characters(
+    runtime: FakeWorkflowRuntime, client: FakeWorkflowClient
+) -> None:
+    # The event key is user-derived; control characters must not leak
+    # into the (log-able) waiting reason — they are replaced with ``?``.
+    run_input = _run_input(_graph(_wait_for_node()), inputs={"key": "order\napproved\t!"})
+
+    output = _run(runtime, client, run_input, resume_handler=_resume_handler())
+
+    assert output.status == "waiting"
+    assert output.waiting_reason == "waitFor:order?approved?!"
+
+
+def test_wait_for_reason_caps_oversized_event_key(
+    runtime: FakeWorkflowRuntime, client: FakeWorkflowClient
+) -> None:
+    # An oversized event key is truncated so a hostile / huge key cannot
+    # balloon telemetry when the waiting reason is emitted.
+    key = "k" * 500
+    run_input = _run_input(_graph(_wait_for_node()), inputs={"key": key})
+
+    output = _run(runtime, client, run_input, resume_handler=_resume_handler())
+
+    assert output.status == "waiting"
+    assert output.waiting_reason == "waitFor:" + "k" * 200 + "…"
+
+
 def test_wait_for_does_not_run_downstream_steps(
     runtime: FakeWorkflowRuntime, client: FakeWorkflowClient
 ) -> None:
