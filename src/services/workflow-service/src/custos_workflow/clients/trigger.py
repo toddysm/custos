@@ -40,13 +40,23 @@ Design references:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Final, Protocol, runtime_checkable
+from typing import Any, Final, Protocol, runtime_checkable
+
+import httpx
+
+from custos_workflow.clients._dapr_invoke import (
+    DEFAULT_OUTBOUND_RPC_TIMEOUT_SECONDS,
+    DaprInvokeEndpoint,
+    build_invoke_url,
+)
 
 __all__ = [
     "CANCEL_RESUME_SUBSCRIPTION_DAPR_METHOD",
     "REGISTER_RESUME_SUBSCRIPTION_DAPR_METHOD",
     "CancelResumeSubscriptionRequest",
+    "DaprTriggerServiceClient",
     "FakeTriggerServiceClient",
     "NoopTriggerServiceClient",
     "RegisterResumeSubscriptionRequest",
@@ -63,6 +73,21 @@ REGISTER_RESUME_SUBSCRIPTION_DAPR_METHOD: Final[str] = "RegisterResumeSubscripti
 #: Dapr Service-Invocation ``method`` name for the Trigger
 #: Service's ``CancelResumeSubscription`` RPC.
 CANCEL_RESUME_SUBSCRIPTION_DAPR_METHOD: Final[str] = "CancelResumeSubscription"
+
+#: HTTP status the Dapr sidecar surfaces when an upstream cancelled
+#: the request (nginx-style ``client-closed-request``). Mapped to
+#: :class:`OutboundRpcCancelledError` so the caller short-circuits
+#: instead of retrying a request that no longer matters. Mirrors
+#: :data:`custos_workflow.clients.connector._CLIENT_CLOSED_REQUEST_STATUS`.
+_CLIENT_CLOSED_REQUEST_STATUS: Final[int] = 499
+
+#: HTTP statuses the Trigger Service returns when a
+#: ``CancelResumeSubscription`` targets a key it no longer holds
+#: (already-expired / never-registered). The cancel RPC is
+#: idempotent (``design.md`` § *Resume Subscription Replay
+#: Protocol*, cancellation rule), so the adapter treats both as a
+#: clean no-op rather than an error.
+_CANCEL_NOOP_STATUSES: Final[frozenset[int]] = frozenset({404, 409})
 
 
 # ---------------------------------------------------------------------------
@@ -298,3 +323,255 @@ class FakeTriggerServiceClient:
         # Idempotent: cancelling an unknown / already-cancelled key
         # is a no-op, matching the Trigger Service contract.
         self.subscriptions.pop(request.idempotency_key, None)
+
+
+# ---------------------------------------------------------------------------
+# Production adapter: Dapr Service-Invocation HTTP transport
+# ---------------------------------------------------------------------------
+
+
+def _register_request_to_wire(request: RegisterResumeSubscriptionRequest) -> Mapping[str, Any]:
+    """Render a register request to its camelCase wire form.
+
+    The envelope matches ``design.md`` § *Operation: Step Resume on
+    External Event* — ``selector`` is emitted as JSON ``null`` when
+    the request carries no selector so the Trigger Service can tell
+    *match on event key alone* apart from an empty narrowing
+    predicate.
+    """
+    return {
+        "runId": request.run_id,
+        "stepId": request.step_id,
+        "eventKey": request.event_key,
+        "selector": request.selector,
+        "ttl": request.ttl,
+    }
+
+
+def _cancel_request_to_wire(request: CancelResumeSubscriptionRequest) -> Mapping[str, Any]:
+    """Render a cancel request to its camelCase wire form."""
+    return {
+        "runId": request.run_id,
+        "stepId": request.step_id,
+        "eventKey": request.event_key,
+    }
+
+
+def _parse_register_response(body: Any) -> RegisterResumeSubscriptionResponse:
+    """Reconstruct a :class:`RegisterResumeSubscriptionResponse` from a wire body.
+
+    The Trigger Service returns ``{"subscriptionId": "..."}`` (per
+    ``design.md`` § *Operation: Step Resume on External Event*).
+    Any contract violation — non-object body, missing / non-string /
+    empty ``subscriptionId`` — surfaces as
+    :class:`OutboundRpcDecodeError` so the retry driver routes the
+    failure as ``permanent`` (a malformed response is a contract
+    violation, not a transient).
+    """
+    from custos_workflow.clients._errors import OutboundRpcDecodeError
+
+    if not isinstance(body, Mapping):
+        raise OutboundRpcDecodeError(
+            "Trigger RegisterResumeSubscription response body must be a JSON object, "
+            f"got {type(body).__name__}"
+        )
+    subscription_id = body.get("subscriptionId")
+    if subscription_id is None:
+        raise OutboundRpcDecodeError(
+            "Trigger RegisterResumeSubscription response is missing the required "
+            "'subscriptionId' field"
+        )
+    if not isinstance(subscription_id, str):
+        raise OutboundRpcDecodeError(
+            "Trigger RegisterResumeSubscription response 'subscriptionId' must be a string, "
+            f"got {type(subscription_id).__name__}"
+        )
+    try:
+        return RegisterResumeSubscriptionResponse(ts_subscription_id=subscription_id)
+    except ValueError as exc:
+        # Empty ``subscriptionId`` rejected by the envelope invariant.
+        raise OutboundRpcDecodeError(
+            "Trigger RegisterResumeSubscription response failed "
+            f"RegisterResumeSubscriptionResponse invariants: {exc}"
+        ) from exc
+
+
+@dataclass(slots=True)
+class DaprTriggerServiceClient:
+    """Production :class:`TriggerServiceClient` adapter over Dapr Service Invocation.
+
+    Posts each RPC as ``Content-Type: application/json`` to
+    ``…/v1.0/invoke/<trigger-app-id>/method/<Method>`` against the
+    local Dapr sidecar. Failure modes are normalised through the
+    WF-IMPL-075
+    :class:`~custos_workflow.clients._errors.OutboundRpcError`
+    taxonomy so the retry-decision driver classifies resume-
+    subscription failures the same way it classifies activity-
+    scheduling failures.
+
+    The adapter does **not** own the :class:`httpx.AsyncClient` —
+    the FastAPI lifespan hook is responsible for building and
+    ``aclose``-ing the client, mirroring
+    :class:`~custos_workflow.clients.connector.DaprConnectorClient`.
+
+    Method exposure
+    ---------------
+
+    Both methods are exposed as ``async`` because the underlying
+    transport is async; the Resume Subscription Manager adapts the
+    async boundary to the sync :class:`TriggerServiceClient`
+    Protocol, exactly as the Step Coordinator does for
+    :class:`DaprConnectorClient`.
+
+    :param http_client: Lifespan-owned async HTTP client.
+    :param endpoint: Resolved Dapr Service-Invocation endpoint for
+        the Trigger Service app-id (built by
+        :func:`~custos_workflow.clients._dapr_invoke.read_dapr_env`).
+    :param timeout: Per-request timeout in seconds. Defaults to
+        :data:`~custos_workflow.clients._dapr_invoke.DEFAULT_OUTBOUND_RPC_TIMEOUT_SECONDS`.
+    """
+
+    http_client: httpx.AsyncClient
+    endpoint: DaprInvokeEndpoint
+    timeout: float = DEFAULT_OUTBOUND_RPC_TIMEOUT_SECONDS
+
+    async def register_resume_subscription(
+        self, request: RegisterResumeSubscriptionRequest
+    ) -> RegisterResumeSubscriptionResponse:
+        """Post one ``RegisterResumeSubscription`` call through the Dapr sidecar.
+
+        Returns the :class:`RegisterResumeSubscriptionResponse`
+        carrying the Trigger Service's ``subscriptionId`` on
+        success. Every transport-layer failure mode is raised as
+        the appropriate
+        :class:`~custos_workflow.clients._errors.OutboundRpcError`
+        subclass:
+
+        * Transport failure (no response observed) →
+          :class:`OutboundRpcTransportError`.
+        * HTTP 499 (upstream cancelled) →
+          :class:`OutboundRpcCancelledError`.
+        * Any other non-2xx →
+          :class:`OutboundRpcStatusError` carrying the observed
+          ``status_code``.
+        * Response body that isn't valid JSON or violates the
+          envelope contract → :class:`OutboundRpcDecodeError`.
+        """
+        from custos_workflow._telemetry import observe_outbound_rpc
+        from custos_workflow.clients._errors import (
+            OutboundRpcCancelledError,
+            OutboundRpcDecodeError,
+            OutboundRpcStatusError,
+            OutboundRpcTransportError,
+        )
+
+        url = build_invoke_url(self.endpoint, REGISTER_RESUME_SUBSCRIPTION_DAPR_METHOD)
+        wire = _register_request_to_wire(request)
+
+        async with observe_outbound_rpc(
+            client="trigger",
+            method=REGISTER_RESUME_SUBSCRIPTION_DAPR_METHOD,
+            run_id=request.run_id,
+            step_id=request.step_id,
+        ) as obs_ctx:
+            try:
+                response = await self.http_client.post(
+                    url,
+                    json=wire,
+                    timeout=self.timeout,
+                    headers={"Content-Type": "application/json"},
+                )
+            except httpx.HTTPError as exc:
+                raise OutboundRpcTransportError(
+                    f"Dapr RegisterResumeSubscription transport failure: {exc!r}"
+                ) from exc
+
+            status_code = response.status_code
+            obs_ctx.set_status_code(status_code)
+            if status_code == _CLIENT_CLOSED_REQUEST_STATUS:
+                raise OutboundRpcCancelledError(
+                    f"Dapr RegisterResumeSubscription cancelled upstream (HTTP {status_code})"
+                )
+            if status_code // 100 != 2:
+                body_preview = response.text[:200] if response.text else ""
+                raise OutboundRpcStatusError(
+                    f"Dapr RegisterResumeSubscription returned HTTP {status_code}: "
+                    f"{body_preview!r}",
+                    status_code=status_code,
+                )
+
+            try:
+                body = response.json()
+            except ValueError as exc:
+                raise OutboundRpcDecodeError(
+                    f"Dapr RegisterResumeSubscription response is not valid JSON: {exc!r}"
+                ) from exc
+
+            return _parse_register_response(body)
+
+    async def cancel_resume_subscription(self, request: CancelResumeSubscriptionRequest) -> None:
+        """Post one ``CancelResumeSubscription`` call through the Dapr sidecar.
+
+        Returns ``None`` on success. The RPC is idempotent: HTTP
+        404 / 409 (the key is already-expired or was never
+        registered) are treated as a clean no-op rather than an
+        error, matching the Trigger Service cancellation contract.
+        Every other transport-layer failure mode is raised as the
+        appropriate
+        :class:`~custos_workflow.clients._errors.OutboundRpcError`
+        subclass:
+
+        * Transport failure (no response observed) →
+          :class:`OutboundRpcTransportError`.
+        * HTTP 499 (upstream cancelled) →
+          :class:`OutboundRpcCancelledError`.
+        * Any other non-2xx (excluding the idempotent 404 / 409) →
+          :class:`OutboundRpcStatusError` carrying the observed
+          ``status_code``.
+        """
+        from custos_workflow._telemetry import observe_outbound_rpc
+        from custos_workflow.clients._errors import (
+            OutboundRpcCancelledError,
+            OutboundRpcStatusError,
+            OutboundRpcTransportError,
+        )
+
+        url = build_invoke_url(self.endpoint, CANCEL_RESUME_SUBSCRIPTION_DAPR_METHOD)
+        wire = _cancel_request_to_wire(request)
+
+        async with observe_outbound_rpc(
+            client="trigger",
+            method=CANCEL_RESUME_SUBSCRIPTION_DAPR_METHOD,
+            run_id=request.run_id,
+            step_id=request.step_id,
+        ) as obs_ctx:
+            try:
+                response = await self.http_client.post(
+                    url,
+                    json=wire,
+                    timeout=self.timeout,
+                    headers={"Content-Type": "application/json"},
+                )
+            except httpx.HTTPError as exc:
+                raise OutboundRpcTransportError(
+                    f"Dapr CancelResumeSubscription transport failure: {exc!r}"
+                ) from exc
+
+            status_code = response.status_code
+            obs_ctx.set_status_code(status_code)
+            if status_code == _CLIENT_CLOSED_REQUEST_STATUS:
+                raise OutboundRpcCancelledError(
+                    f"Dapr CancelResumeSubscription cancelled upstream (HTTP {status_code})"
+                )
+            if status_code in _CANCEL_NOOP_STATUSES:
+                # Idempotent no-op: the key is already gone. Record
+                # the status on the telemetry context so the
+                # histogram label reflects reality, then return
+                # cleanly without touching the error counter.
+                return
+            if status_code // 100 != 2:
+                body_preview = response.text[:200] if response.text else ""
+                raise OutboundRpcStatusError(
+                    f"Dapr CancelResumeSubscription returned HTTP {status_code}: {body_preview!r}",
+                    status_code=status_code,
+                )
