@@ -29,7 +29,7 @@ Eighth sub-module: **Resume Subscription Manager**, packaged inside the service 
 
 ### Phase B — Persistence + client adapter
 
-- [x] WF-IMPL-102 (#541): `ResumeSubscriptionMirror` model + `MetadataStoreProvider`-backed repository.
+- [x] WF-IMPL-102 (#541): `ResumeSubscriptionMirror` model + repository Protocol + in-memory adapter (`MetadataStoreProvider`-backed adapter: follow-up).
 - [F] WF-IMPL-103 (#542): `DaprTriggerServiceClient` — Dapr Service-Invocation adapter (depends on #540).
 
 ### Phase C — WaitFor step handler + replay + cancellation

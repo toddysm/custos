@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -154,6 +154,46 @@ def test_to_json_is_byte_stable() -> None:
 def test_from_json_round_trip_is_exact() -> None:
     mirror = _mirror(selector="$.id")
     assert ResumeSubscriptionMirror.from_json(mirror.to_json()) == mirror
+
+
+def test_to_dict_canonicalizes_datetimes_to_utc() -> None:
+    # An instant expressed in a non-UTC offset serializes to the
+    # equivalent UTC instant, not the literal offset.
+    plus_five = timezone(timedelta(hours=5))
+    mirror = _mirror(
+        registered_at=datetime(2025, 1, 1, 17, 0, 0, tzinfo=plus_five),
+        expires_at=datetime(2025, 1, 2, 17, 0, 0, tzinfo=plus_five),
+    )
+    data = mirror.to_dict()
+    assert data["registeredAt"] == "2025-01-01T12:00:00+00:00"
+    assert data["expiresAt"] == "2025-01-02T12:00:00+00:00"
+
+
+def test_to_json_is_byte_stable_across_equal_offsets() -> None:
+    # Two instant-equal mirrors built with different tz offsets are
+    # `==` (aware datetime equality is by instant) and MUST serialize
+    # byte-identically per the canonical-serialization contract.
+    plus_five = timezone(timedelta(hours=5))
+    utc_mirror = _mirror(
+        registered_at=datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC),
+        expires_at=datetime(2025, 1, 2, 12, 0, 0, tzinfo=UTC),
+    )
+    offset_mirror = _mirror(
+        registered_at=datetime(2025, 1, 1, 17, 0, 0, tzinfo=plus_five),
+        expires_at=datetime(2025, 1, 2, 17, 0, 0, tzinfo=plus_five),
+    )
+    assert utc_mirror == offset_mirror
+    assert utc_mirror.to_json() == offset_mirror.to_json()
+
+
+def test_from_dict_accepts_zulu_suffix() -> None:
+    # Rows minted by other services may carry a trailing `Z`.
+    data = _mirror().to_dict()
+    data["registeredAt"] = "2025-01-01T12:00:00Z"
+    data["expiresAt"] = "2025-01-02T12:00:00Z"
+    restored = ResumeSubscriptionMirror.from_dict(data)
+    assert restored == _mirror()
+    assert restored.registered_at == datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)
 
 
 def test_from_dict_missing_field_raises_key_error() -> None:

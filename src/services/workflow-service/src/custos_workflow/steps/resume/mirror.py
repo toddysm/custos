@@ -53,7 +53,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
@@ -64,6 +64,20 @@ __all__ = [
     "ResumeSubscriptionMirror",
     "ResumeSubscriptionMirrorRepository",
 ]
+
+
+def _parse_iso8601_utc(value: str) -> datetime:
+    """Parse an ISO-8601 timestamp, tolerating a trailing ``Z``.
+
+    :meth:`datetime.fromisoformat` historically rejected the
+    ``Z`` (Zulu/UTC) suffix, and a future
+    ``MetadataStoreProvider``-backed adapter may read rows minted
+    by other services that emit ``...Z``. Normalizing ``Z`` to
+    ``+00:00`` keeps mirror decoding robust across those sources.
+    """
+    if value.endswith("Z"):
+        value = f"{value[:-1]}+00:00"
+    return datetime.fromisoformat(value)
 
 
 # ---------------------------------------------------------------------------
@@ -137,11 +151,14 @@ class ResumeSubscriptionMirror:
     def to_dict(self) -> dict[str, Any]:
         """Render the mirror to its camelCase, JSON-safe wire form.
 
-        Datetimes are emitted via :meth:`datetime.isoformat` so the
-        round-trip through :meth:`from_dict` is exact. The key set
-        and casing match the ``design.md`` § *Data Models* column
-        names so a future ``MetadataStoreProvider`` adapter can
-        persist the dict unchanged.
+        Datetimes are canonicalized to UTC and emitted via
+        :meth:`datetime.isoformat`, so two instant-equal mirrors
+        that were constructed with different tz-aware offsets still
+        serialize **byte-identically** — the guarantee the
+        acceptance criteria pin. The key set and casing match the
+        ``design.md`` § *Data Models* column names so a future
+        ``MetadataStoreProvider`` adapter can persist the dict
+        unchanged.
         """
         return {
             "mirrorId": self.mirror_id,
@@ -150,8 +167,8 @@ class ResumeSubscriptionMirror:
             "eventKey": self.event_key,
             "selector": self.selector,
             "tsSubscriptionId": self.ts_subscription_id,
-            "registeredAt": self.registered_at.isoformat(),
-            "expiresAt": self.expires_at.isoformat(),
+            "registeredAt": self.registered_at.astimezone(UTC).isoformat(),
+            "expiresAt": self.expires_at.astimezone(UTC).isoformat(),
         }
 
     def to_json(self) -> str:
@@ -167,6 +184,10 @@ class ResumeSubscriptionMirror:
     def from_dict(cls, data: Mapping[str, Any]) -> ResumeSubscriptionMirror:
         """Reconstruct a mirror from its :meth:`to_dict` wire form.
 
+        Datetime fields are parsed with :func:`_parse_iso8601_utc`,
+        which tolerates a trailing ``Z`` so rows minted by other
+        services decode cleanly.
+
         :raises KeyError: If a required field is missing.
         :raises ValueError: If a datetime field is not a valid
             ISO-8601 string, or any invariant from
@@ -178,8 +199,8 @@ class ResumeSubscriptionMirror:
             step_id=data["stepId"],
             event_key=data["eventKey"],
             ts_subscription_id=data["tsSubscriptionId"],
-            registered_at=datetime.fromisoformat(data["registeredAt"]),
-            expires_at=datetime.fromisoformat(data["expiresAt"]),
+            registered_at=_parse_iso8601_utc(data["registeredAt"]),
+            expires_at=_parse_iso8601_utc(data["expiresAt"]),
             selector=data.get("selector"),
         )
 
