@@ -640,6 +640,32 @@ once the Trigger Service (COMP-004) exists.
 Tracker: [#552](https://github.com/toddysm/custos/issues/552).
 
 
+WF-IMPL-107 ([#546](https://github.com/toddysm/custos/issues/546))
+wires the `waitFor:` step kind into the Run Controller orchestrator.
+`make_run_orchestrator` gains an optional `resume_handler`
+(`WaitForStepHandler`) injection — mirroring the existing
+`activity_handler` / `sub_orchestration_manager` injections — and a
+new inline dispatch arm: a `PrimitiveHandler.RESUME_SUBSCRIPTION`
+(`waitFor:`) node is now driven through that handler instead of the
+generic Step Coordinator dispatcher, so it no longer raises
+`step.kind_not_implemented`. The orchestrator drives the handler's
+`iter_resume` generator just far enough to learn its decision: if the
+`eventKey` / `selector` / TTL resolution fails the handler returns
+`StepFailed` before its first effect (surfaced as a
+`status="failed"` run); otherwise the handler signals it is ready to
+register the subscription and suspend on the resume event, and the
+orchestrator parks the run as `status="waiting"` (a `StepWaiting`
+carrying a log-safe `waitFor:<eventKey>` reason), closing the
+generator without running the deferred effects. Steps ordered after
+the wait do not execute. Driving the register + durable
+`wait_for_external_event` suspend / resume lifecycle, plus the
+production `trigger_client` / mirror-repository wiring, lands in
+WF-IMPL-108; until a `resume_handler` is wired a `waitFor:` node
+still falls through to the dispatcher's `step.kind_not_implemented`
+raise.
+Tracker: [#552](https://github.com/toddysm/custos/issues/552).
+
+
 WF-IMPL-106 ([#545](https://github.com/toddysm/custos/issues/545))
 adds the `ResumeSubscriptionCanceller`
 (`custos_workflow.steps.resume.canceller`) — the terminal-transition

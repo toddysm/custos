@@ -117,6 +117,7 @@ if TYPE_CHECKING:
     # the runtime only ever duck-types ``iter_calls`` on the
     # supplied object.
     from custos_workflow.steps.activity_step import ActivityStepHandler
+    from custos_workflow.steps.resume import WaitForStepHandler
     from custos_workflow.steps.sub_orchestration import SubOrchestrationManager
 
 __all__ = [
@@ -314,6 +315,7 @@ def make_run_orchestrator(
     activity_handler: ActivityStepHandler | None = None,
     sub_orchestration_manager: SubOrchestrationManager | None = None,
     child_graph_resolver: ChildGraphResolver | None = None,
+    resume_handler: WaitForStepHandler | None = None,
 ) -> Callable[[WorkflowContext, Any], Generator[Any, Any, RunOutput]]:
     """Build the workflow function bound to a concrete :class:`StepHandler`.
 
@@ -386,6 +388,20 @@ def make_run_orchestrator(
             WF-IMPL-094. When ``None`` and a ``workflow:`` node is
             reached, that step fails with a structured
             ``step.sub_orchestration_spawn_error``.
+        resume_handler: Optional
+            :class:`~custos_workflow.steps.resume.WaitForStepHandler`
+            override (WF-IMPL-107). When supplied, every
+            :attr:`~custos_workflow.graph.model.PrimitiveHandler.RESUME_SUBSCRIPTION`
+            node (``waitFor:``) is dispatched inline through this
+            handler instead of the generic ``handler`` dispatcher: the
+            handler resolves the ``eventKey`` / ``selector`` / TTL and
+            the orchestrator parks the run as ``status="waiting"`` via a
+            :class:`StepWaiting`. The handler's full register / suspend /
+            resume lifecycle and the production ``trigger_client`` /
+            mirror-repository wiring land in WF-IMPL-108; until then a
+            ``waitFor:`` node with no ``resume_handler`` wired flows
+            through the generic dispatcher, which raises
+            ``step.kind_not_implemented``.
 
     Returns:
         The workflow function. Its ``__name__`` is :data:`WORKFLOW_NAME`,
@@ -508,7 +524,31 @@ def make_run_orchestrator(
                 output_bag[step_id] = copy.deepcopy(sub_outputs)
                 continue
 
-            if node.kind is StepKind.ACTIVITY and activity_handler is not None:
+            if (
+                node.primitive_handler is PrimitiveHandler.RESUME_SUBSCRIPTION
+                and resume_handler is not None
+            ):
+                # WF-IMPL-107: Resume Subscription Manager owns
+                # ``waitFor:`` inline, mirroring the ``wait:`` /
+                # sub-orchestration paths above. The handler resolves
+                # the eventKey / selector / TTL and signals its intent
+                # to register a Trigger Service subscription and suspend
+                # on the resume event; the orchestrator then parks the
+                # run as ``status="waiting"`` through the
+                # :class:`StepWaiting` arm below. Driving the register +
+                # durable ``wait_for_external_event`` suspend / resume
+                # lifecycle, plus the production ``trigger_client`` /
+                # mirror-repository wiring, lands in WF-IMPL-108. A
+                # ``waitFor:`` node reached without a ``resume_handler``
+                # wired falls through to the generic dispatcher, which
+                # raises ``step.kind_not_implemented``.
+                result = _dispatch_resume_subscription(
+                    resume_handler,
+                    _step_ctx(ctx, run_input, output_bag, clock),
+                    graph,
+                    step_id,
+                )
+            elif node.kind is StepKind.ACTIVITY and activity_handler is not None:
                 # WF-IMPL-074 yield protocol: drive the activity
                 # handler's generator via ``yield from`` so every
                 # ``bind_for_step`` / ``schedule_activity`` call
@@ -595,6 +635,90 @@ def make_run_orchestrator(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _dispatch_resume_subscription(
+    resume_handler: WaitForStepHandler,
+    step_ctx: StepExecutionContext,
+    graph: ExecutionGraph,
+    step_id: str,
+) -> StepResult:
+    """Dispatch one ``RESUME_SUBSCRIPTION`` (``waitFor:``) node inline.
+
+    Drives the :class:`WaitForStepHandler` generator
+    (:meth:`~custos_workflow.steps.resume.WaitForStepHandler.iter_resume`)
+    just far enough to learn the handler's decision, then maps it to a
+    :class:`StepResult` for the orchestrator's dispatch arms:
+
+    * The handler resolves the ``eventKey`` / ``selector`` / TTL before
+      it yields its first effect. If that resolution fails the generator
+      returns a :class:`StepFailed` *without yielding*, which surfaces
+      here as the generator's ``StopIteration.value`` — we return it
+      unchanged so the orchestrator short-circuits the run into
+      ``status="failed"`` exactly like every other step failure.
+    * Otherwise the handler yields its first effect (the pending-mirror
+      persist), signalling it is ready to register the Trigger Service
+      subscription and suspend on the resume event. We close the
+      generator and park the run with a :class:`StepWaiting`. Driving
+      the register + durable ``wait_for_external_event`` suspend /
+      resume lifecycle (and the production ``trigger_client`` /
+      mirror-repository wiring) lands in WF-IMPL-108; closing the
+      generator here discards the deferred effects without running them.
+
+    :returns: :class:`StepFailed` when the handler's resolution failed
+        before any effect, otherwise :class:`StepWaiting`.
+    """
+    # Function-scope import — ``custos_workflow.steps.resume`` imports
+    # this module transitively during package initialisation, so a
+    # module-level import would close the cycle (see the
+    # ``SubOrchestrationManager`` factory-scope import above).
+    from custos_workflow.steps.resume import PersistMirrorCall
+
+    gen = resume_handler.iter_resume(step_ctx, graph, step_id)
+    try:
+        first_effect = next(gen)
+    except StopIteration as stop:
+        # Resolution failed before the first effect — the generator
+        # returned a StepFailed (or, defensively, some other terminal
+        # StepResult). Surface it unchanged.
+        return cast(StepResult, stop.value)
+
+    # The handler resolved the wait parameters and is ready to register
+    # + suspend. ``gen.close()`` raises ``GeneratorExit`` at the
+    # suspended ``yield``; the handler's effect ``try`` / ``except
+    # Exception`` blocks do not catch it (``GeneratorExit`` is a
+    # ``BaseException``), so the generator unwinds cleanly without
+    # resolving the deferred effects.
+    gen.close()
+
+    # Derive a log-safe waiting reason from the resolved event key when
+    # the first effect carries it (it always does today — the pending
+    # mirror persist — but the ``isinstance`` keeps the reason robust to
+    # a future re-ordering of the handler's effect sequence). The event
+    # key can be derived from user inputs / CEL, so sanitise control
+    # characters and cap the length before interpolating it into the
+    # reason to avoid log injection / noisy telemetry downstream.
+    if isinstance(first_effect, PersistMirrorCall):
+        reason = f"waitFor:{_sanitize_reason_token(first_effect.mirror.event_key)}"
+    else:  # pragma: no cover - defensive: iter_resume persists first
+        reason = f"waitFor:{step_id}"
+    return StepWaiting(reason=reason)
+
+
+_MAX_REASON_TOKEN_LEN: Final = 200
+
+
+def _sanitize_reason_token(token: str) -> str:
+    """Make a user-derived token safe to embed in a log-able reason.
+
+    Replaces control characters (newlines, tabs, etc.) with ``?`` and
+    caps the length, so a hostile or oversized event key cannot inject
+    log lines or balloon telemetry when the waiting reason is emitted.
+    """
+    sanitized = "".join(ch if ch.isprintable() else "?" for ch in token)
+    if len(sanitized) > _MAX_REASON_TOKEN_LEN:
+        sanitized = sanitized[:_MAX_REASON_TOKEN_LEN] + "…"
+    return sanitized
 
 
 def _dispatch_sub_orchestration(
