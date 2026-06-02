@@ -217,16 +217,29 @@ def test_lifespan_registers_orchestrator_and_starts_runtime(
 ) -> None:
     """Lifespan registers ``run_orchestrator`` and starts the worker."""
     from custos_workflow.runs.orchestrator import WORKFLOW_NAME
+    from custos_workflow.steps.sub_orchestration import CHILD_STEP_WORKFLOW_NAME
 
     runtime = _RecordingFakeRuntime()
     components = _components_with(runtime)
     app = create_app(require_call_context=False, run_components=components)
     with TestClient(app) as client:
         assert client.get("/readyz").status_code == 200
-    # Lifecycle ordering: register → start → wait → shutdown
-    assert runtime.calls == ["register_workflow", "start", "wait_for_worker_ready", "shutdown"]
+    # Lifecycle ordering: register (child + orchestrator) → start →
+    # wait → shutdown. WF-IMPL-094 adds the child-step workflow
+    # registration ahead of the top-level orchestrator.
+    assert runtime.calls == [
+        "register_workflow",
+        "register_workflow",
+        "start",
+        "wait_for_worker_ready",
+        "shutdown",
+    ]
+    registered_names = {name for name, _fn in runtime.registered}
     # The orchestrator is registered under the canonical workflow name.
-    assert any(name == WORKFLOW_NAME for name, _fn in runtime.registered)
+    assert WORKFLOW_NAME in registered_names
+    # WF-IMPL-094: the child-step workflow boots alongside it so
+    # ``forEach`` fan-out can spawn it.
+    assert CHILD_STEP_WORKFLOW_NAME in registered_names
 
 
 def test_lifespan_binds_step_coordinator_not_noop_handler(
