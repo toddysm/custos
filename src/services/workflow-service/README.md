@@ -544,6 +544,26 @@ their locked source-of-truth sets with exhaustiveness guards).
 Tracker: [#495](https://github.com/toddysm/custos/issues/495).
 
 
+**WF-IMPL-000-RESUME-SUBSCRIPTION** is now in progress: the
+Resume Subscription Manager sub-module (REQ-081) adds the
+`waitFor:` step kind, which parks a run on an external Trigger
+Service event until a match arrives or the TTL expires. WF-IMPL-099
+([#538](https://github.com/toddysm/custos/issues/538)) lands the
+foundation — the `waitFor:` document model (`WaitForStep` /
+`WaitForSpec` with CEL-token `eventKey` + optional `selector` and
+ISO-8601 `ttl`), the new `StepKind.WAIT_FOR` /
+`PrimitiveHandler.RESUME_SUBSCRIPTION` enum members and
+`CallSiteKind.WAIT_FOR_EVENT_KEY` / `WAIT_FOR_SELECTOR` call-site
+tags, the Definition Compiler dispatch entry that pins
+`waitFor:` nodes to `RESUME_SUBSCRIPTION`, call-site collection
+for the `eventKey` / `selector` expressions, a permissive output
+binding schema (the event payload contract is not yet locked),
+and a defensive coordinator dispatch arm that **raises**
+`StepKindNotImplementedError` because the Run Controller
+orchestrator owns the inline `wait_for_external_event` park.
+Tracker: [#552](https://github.com/toddysm/custos/issues/552).
+
+
 The Expression Evaluator (the first sub-module) is already in
 [`src/libs/custos-cel/`](../../libs/custos-cel) and shipped via
 WF-IMPL-001 through WF-IMPL-012 (#176–#187).

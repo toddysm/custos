@@ -33,6 +33,14 @@ Dispatch table (mirrors implementation-plan.md § WF-IMPL-055):
 |                                              | the dispatcher should never |
 |                                              | see one.                    |
 +----------------------------------------------+-----------------------------+
+| ``RESUME_SUBSCRIPTION`` (``waitFor:``)       | Defensive raise — the      |
+|                                              | Resume Subscription Manager |
+|                                              | dispatches these inline via |
+|                                              | the Run Controller          |
+|                                              | orchestrator (REQ-081); the |
+|                                              | dispatcher should never see |
+|                                              | one.                        |
++----------------------------------------------+-----------------------------+
 
 Exhaustiveness guard
 ====================
@@ -107,6 +115,7 @@ _EXPECTED_PRIMITIVE_HANDLERS: Final[frozenset[PrimitiveHandler]] = frozenset(
         PrimitiveHandler.ACTIVITY_RUNTIME,
         PrimitiveHandler.SUB_ORCHESTRATION,
         PrimitiveHandler.RUN_CONTROLLER_TIMER,
+        PrimitiveHandler.RESUME_SUBSCRIPTION,
     }
 )
 assert set(PrimitiveHandler) == _EXPECTED_PRIMITIVE_HANDLERS, (
@@ -228,6 +237,33 @@ class StepCoordinator:
                         f"primitive_handler={primitive.value!r} is handled "
                         "inline by the Run Controller orchestrator via the "
                         "Sub-Orchestration Manager, not by the Step "
+                        "Coordinator dispatcher",
+                        run_id=str(ctx.run_id),
+                        step_id=step_id,
+                        step_kind=node.kind.value,
+                        primitive_handler=primitive.value,
+                    )
+                elif primitive is PrimitiveHandler.RESUME_SUBSCRIPTION:
+                    # RESUME_SUBSCRIPTION nodes (``waitFor:``) are
+                    # dispatched inline by the Run Controller
+                    # orchestrator via the Resume Subscription Manager
+                    # (REQ-081): the manager registers a Trigger
+                    # Service subscription and the orchestrator parks
+                    # the run on ``wait_for_external_event`` until the
+                    # matching event (or TTL expiry) wakes it — exactly
+                    # like ``wait:`` and the sub-orchestration kinds.
+                    # The dispatcher should never see one; if it does
+                    # there's a compile-time routing bug, so we raise
+                    # loudly. Raising propagates through
+                    # ``observe_step_execute`` (histogram
+                    # ``outcome=kind_not_implemented``) and bumps
+                    # ``custos_workflow_step_errors_total`` via the
+                    # ``except StepCoordinatorError`` arm below.
+                    raise StepKindNotImplementedError(
+                        f"step {step_id!r} kind={node.kind.value!r} "
+                        f"primitive_handler={primitive.value!r} is handled "
+                        "inline by the Run Controller orchestrator via the "
+                        "Resume Subscription Manager, not by the Step "
                         "Coordinator dispatcher",
                         run_id=str(ctx.run_id),
                         step_id=step_id,

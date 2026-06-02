@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 from custos_cel import FixedClock
 
-from custos_workflow.document import ActivityStep, LetStep, WaitStep, WorkflowStep
+from custos_workflow.document import ActivityStep, LetStep, WaitForStep, WaitStep, WorkflowStep
 from custos_workflow.graph import (
     ExecutionGraph,
     ExecutionNode,
@@ -93,6 +93,20 @@ def _wait_node(step_id: str = "pause") -> ExecutionNode:
         on_error_routes=(),
         call_sites={},
         step_source=WaitStep.model_validate({"id": step_id, "wait": "PT5M"}),
+    )
+
+
+def _resume_node(step_id: str = "await-event") -> ExecutionNode:
+    return ExecutionNode(
+        step_id=step_id,
+        kind=StepKind.WAIT_FOR,
+        primitive_handler=PrimitiveHandler.RESUME_SUBSCRIPTION,
+        retry_policy=None,
+        on_error_routes=(),
+        call_sites={},
+        step_source=WaitForStep.model_validate(
+            {"id": step_id, "waitFor": {"eventKey": "${{ inputs.key }}"}},
+        ),
     )
 
 
@@ -304,6 +318,35 @@ class TestDispatchRunControllerTimer:
         assert isinstance(err, NotImplementedError)
 
 
+class TestDispatchResumeSubscription:
+    def test_wait_for_step_raises_step_kind_not_implemented_error(self) -> None:
+        """``waitFor:`` is dispatched inline by the Run Controller.
+
+        The Resume Subscription Manager drives RESUME_SUBSCRIPTION
+        nodes through the Run Controller orchestrator (REQ-081), so
+        reaching the Step Coordinator dispatcher with one is a
+        compile-time routing bug. The dispatcher raises (instead of
+        returning a :class:`StepFailed` envelope) to surface it
+        loudly, mirroring the ``run_controller_timer`` arm. The
+        exception subclasses :class:`NotImplementedError`.
+        """
+        coord = StepCoordinator(_RecordingActivityHandler())
+        graph = _graph(_resume_node("await-event"))
+
+        with pytest.raises(StepKindNotImplementedError) as excinfo:
+            coord.execute(_ctx("run-C"), graph, "await-event")
+
+        err = excinfo.value
+        assert err.KIND == "step.kind_not_implemented"
+        assert err.step_id == "await-event"
+        assert err.run_id == "run-C"
+        assert err.step_kind == "wait_for"
+        assert err.primitive_handler == "resume_subscription"
+        assert "Resume Subscription Manager" in err.message
+        # Subclass of NotImplementedError (taxonomy guarantee).
+        assert isinstance(err, NotImplementedError)
+
+
 # ---------------------------------------------------------------------------
 # Defensive guards
 # ---------------------------------------------------------------------------
@@ -371,7 +414,7 @@ class TestExhaustivenessGuard:
         assert set(PrimitiveHandler) == _EXPECTED_PRIMITIVE_HANDLERS
 
     def test_every_primitive_handler_member_is_dispatched(self) -> None:
-        """Sanity: the four PrimitiveHandler members are all the ones
+        """Sanity: the five PrimitiveHandler members are all the ones
         the dispatcher's table handles.
 
         If a new member is added (e.g. ``PARALLEL_FAN_OUT``), this
@@ -385,4 +428,5 @@ class TestExhaustivenessGuard:
             "expression_inline",
             "sub_orchestration",
             "run_controller_timer",
+            "resume_subscription",
         }

@@ -546,6 +546,95 @@ class ApprovalStep(_StepCommon):
     approval: ApprovalSpec
 
 
+class WaitForSpec(_StrictModel):
+    """The ``waitFor:`` block of a :class:`WaitForStep` (REQ-081).
+
+    Declares a resume-on-external-event subscription. The Resume
+    Subscription Manager registers it with the Trigger Service and
+    the Run Controller orchestrator parks the run on
+    ``wait_for_external_event`` until the matching event (or TTL
+    expiry) wakes it (design.md § Operation: Step Resume on External
+    Event).
+
+    - ``eventKey`` — a CEL expression that resolves the resume event
+      key at run time (e.g. from inputs or earlier step outputs).
+      Required, and must be a ``${{ ... }}`` CEL token.
+    - ``selector`` — an optional CEL expression that narrows which
+      external events match the subscription. Must be a
+      ``${{ ... }}`` CEL token when present; when omitted the
+      subscription matches on ``eventKey`` alone.
+    - ``ttl`` — optional ISO-8601 duration the subscription stays
+      open before it expires. When omitted the Resume Subscription
+      Manager applies the configured default
+      (``WF_RESUME_SUB_DEFAULT_TTL``, ``PT24H``). Like ``wait:`` and
+      approval ``timeout:``, this is a constant string resolved at
+      compile time, not a CEL expression.
+    """
+
+    event_key: CelSource = Field(alias="eventKey")
+    selector: CelSource | None = None
+    ttl: str | None = None
+
+    @model_validator(mode="after")
+    def _event_key_is_cel_token(self) -> WaitForSpec:
+        if not _CEL_TOKEN_PATTERN.match(self.event_key):
+            raise ValueError(
+                "waitFor 'eventKey' must be a CEL expression token of the form '${{ ... }}'"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _selector_is_cel_token(self) -> WaitForSpec:
+        if self.selector is not None and not _CEL_TOKEN_PATTERN.match(self.selector):
+            raise ValueError(
+                "waitFor 'selector' must be a CEL expression token of the form '${{ ... }}'"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _ttl_duration_shape(self) -> WaitForSpec:
+        if self.ttl is None:
+            return self
+        if _CEL_TOKEN_PATTERN.match(self.ttl):
+            raise ValueError(
+                "waitFor 'ttl' must be a constant ISO-8601 duration "
+                "string, not a CEL expression \u2014 the subscription expiry "
+                "is resolved at compile time"
+            )
+        match = _ISO8601_DURATION_PATTERN.match(self.ttl)
+        if match is None:
+            raise ValueError(
+                f"waitFor 'ttl' {self.ttl!r} is not a valid ISO-8601 "
+                "duration (expected 'P[nD][T[nH][nM][nS]]' or 'PnW')"
+            )
+        weeks = int(match.group("weeks") or 0)
+        days = int(match.group("days") or 0)
+        hours = int(match.group("hours") or 0)
+        minutes = int(match.group("minutes") or 0)
+        seconds = float(match.group("seconds") or 0.0)
+        if weeks == 0 and days == 0 and hours == 0 and minutes == 0 and seconds == 0.0:
+            raise ValueError(
+                f"waitFor 'ttl' {self.ttl!r} must specify a positive "
+                "duration (at least one non-zero component)"
+            )
+        return self
+
+
+class WaitForStep(_StepCommon):
+    """Resume-on-external-event step (``waitFor:``, REQ-081).
+
+    The Resume Subscription Manager registers the subscription
+    described by :attr:`wait_for` with the Trigger Service and the
+    Run Controller orchestrator parks the run on
+    ``wait_for_external_event`` until the matching event (or TTL
+    expiry) wakes it (design.md § Operation: Step Resume on External
+    Event). The subscription body lives in the :class:`WaitForSpec`
+    carried on :attr:`wait_for`.
+    """
+
+    wait_for: WaitForSpec = Field(alias="waitFor")
+
+
 def _step_discriminator(v: Any) -> str | None:
     """Pick the step kind by keyword presence (no ``kind:`` field).
 
@@ -556,7 +645,9 @@ def _step_discriminator(v: Any) -> str | None:
     the error-taxonomy work in WF-IMPL-024.
     """
     if isinstance(v, dict):
-        present = [k for k in ("activity", "let", "workflow", "wait", "approval") if k in v]
+        present = [
+            k for k in ("activity", "let", "workflow", "wait", "approval", "waitFor") if k in v
+        ]
         if len(present) == 1:
             return present[0]
         return None
@@ -571,10 +662,12 @@ def _step_discriminator(v: Any) -> str | None:
         return "wait"
     if isinstance(v, ApprovalStep):
         return "approval"
+    if isinstance(v, WaitForStep):
+        return "waitFor"
     return None
 
 
-#: Discriminated union over the five step kinds. The Catalog schema
+#: Discriminated union over the six step kinds. The Catalog schema
 #: enforces the same ``oneOf`` shape; we mirror it so a mistyped
 #: workflow document fails at parse time with a precise error
 #: pointing at the offending branch.
@@ -583,7 +676,8 @@ Step = Annotated[
     | Annotated[LetStep, Tag("let")]
     | Annotated[WorkflowStep, Tag("workflow")]
     | Annotated[WaitStep, Tag("wait")]
-    | Annotated[ApprovalStep, Tag("approval")],
+    | Annotated[ApprovalStep, Tag("approval")]
+    | Annotated[WaitForStep, Tag("waitFor")],
     Discriminator(_step_discriminator),
 ]
 

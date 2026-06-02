@@ -37,11 +37,11 @@ class StepKind(StrEnum):
     """The structural step kind, mirroring the YAML keyword.
 
     Today's :class:`~custos_workflow.document.Step` discriminated
-    union covers exactly these five kinds. The design lists more
-    primitives (``parallel`` / ``waitFor``) that the wire schema
-    does not yet expose; they will land as additional members here
-    without disturbing the JSON envelope because :class:`StrEnum`
-    values are forward-compatible.
+    union covers exactly these six kinds. The design lists one more
+    primitive (``parallel``) that the wire schema does not yet
+    expose; it will land as an additional member here without
+    disturbing the JSON envelope because :class:`StrEnum` values are
+    forward-compatible.
 
     :attr:`WAIT` is the one kind the Run Controller orchestrator
     handles inline (no Step Coordinator dispatch): it issues a
@@ -54,6 +54,13 @@ class StepKind(StrEnum):
     with a durable timeout timer — so it maps to
     :attr:`PrimitiveHandler.SUB_ORCHESTRATION`, the same handler as
     :attr:`WORKFLOW` and any ``forEach``-bearing loop step.
+
+    :attr:`WAIT_FOR` is the ``waitFor:`` resume-on-external-event
+    step kind (REQ-081). The Resume Subscription Manager registers
+    a subscription with the Trigger Service and the Run Controller
+    orchestrator parks the run on ``wait_for_external_event`` until
+    the matching event (or TTL expiry) wakes it — so it maps to
+    :attr:`PrimitiveHandler.RESUME_SUBSCRIPTION`.
     """
 
     ACTIVITY = "activity"
@@ -61,6 +68,7 @@ class StepKind(StrEnum):
     WORKFLOW = "workflow"
     WAIT = "wait"
     APPROVAL = "approval"
+    WAIT_FOR = "wait_for"
 
 
 class PrimitiveHandler(StrEnum):
@@ -81,6 +89,7 @@ class PrimitiveHandler(StrEnum):
     EXPRESSION_INLINE = "expression_inline"
     SUB_ORCHESTRATION = "sub_orchestration"
     RUN_CONTROLLER_TIMER = "run_controller_timer"
+    RESUME_SUBSCRIPTION = "resume_subscription"
 
 
 class EdgeKind(StrEnum):
@@ -115,6 +124,12 @@ class CallSiteKind(StrEnum):
     FOR_EACH = "for"
     WHERE = "where"
     LET = "let"
+    #: ``waitFor.eventKey`` — the resume event key CEL expression
+    #: on a ``waitFor:`` step (REQ-081).
+    WAIT_FOR_EVENT_KEY = "waitFor.eventKey"
+    #: ``waitFor.selector`` — the optional event-matching selector
+    #: CEL expression on a ``waitFor:`` step (REQ-081).
+    WAIT_FOR_SELECTOR = "waitFor.selector"
     #: Reserved for compiler-internal use (e.g. a synthetic placeholder
     #: used while wiring partial graphs in tests). Not emitted by the
     #: real call-site collector.

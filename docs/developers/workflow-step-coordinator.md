@@ -116,8 +116,8 @@ The Step Coordinator owns:
 
 ### Boundary with the deferred sub-modules
 
-The dispatcher recognises four `PrimitiveHandler` tags. Two ship
-today (`ACTIVITY_RUNTIME`, `EXPRESSION_INLINE`); two are reserved
+The dispatcher recognises five `PrimitiveHandler` tags. Two ship
+today (`ACTIVITY_RUNTIME`, `EXPRESSION_INLINE`); three are reserved
 for the deferred sub-modules in
 [`todos.md`](../../design/components/workflow-service/todos.md#deferred-sub-modules):
 
@@ -130,6 +130,12 @@ for the deferred sub-modules in
   `StepKindNotImplementedError` (bumping
   `custos_workflow_step_errors_total{kind="step.kind_not_implemented"}`)
   rather than swallowing it as a `StepFailed`.
+- `RESUME_SUBSCRIPTION` — the Resume Subscription Manager owns
+  `waitFor:`; the Run Controller orchestrator parks the run on
+  `wait_for_external_event` until the matching Trigger Service
+  event (or TTL expiry) wakes it, so reaching the coordinator
+  dispatcher with this primitive is likewise a compile-time bug
+  and the coordinator **raises** `StepKindNotImplementedError`.
 
 `step.kind_not_implemented` is also the envelope kind a
 `SUB_ORCHESTRATION` node produces today (the dispatcher returns
@@ -152,6 +158,7 @@ Definition Compiler pins at compile time. The mapping is:
 | `ACTIVITY_RUNTIME` | `activity:` | `ActivityStepHandler` (WF-IMPL-054) | Full *resolve → bind → schedule → dispatch → retry* loop; the only handler that talks to the Activity Runtime Manager or Connector Service. |
 | `SUB_ORCHESTRATION` | `for:` / `approval:` / `workflow:` | (deferred) | Dispatcher returns `StepFailed(step.kind_not_implemented)` carrying the offending `primitive_handler` tag. |
 | `RUN_CONTROLLER_TIMER` | `wait:` | n/a — owned by the Run Controller orchestrator's built-in `WaitStepHandler` | Reaching the dispatcher with this tag is a compile-time bug; coordinator **raises** `StepKindNotImplementedError`. |
+| `RESUME_SUBSCRIPTION` | `waitFor:` | n/a — owned by the Run Controller orchestrator via the Resume Subscription Manager (`wait_for_external_event`) | Reaching the dispatcher with this tag is a compile-time bug; coordinator **raises** `StepKindNotImplementedError`. |
 
 The dispatcher is **synchronous** (it runs on the Dapr Workflow
 orchestrator's replay-safe thread); any I/O the activity handler
@@ -432,7 +439,7 @@ without extending the locked set.
 
 | `kind` | Python class | Trigger | Surfaces as |
 |---|---|---|---|
-| `step.kind_not_implemented` | `StepKindNotImplementedError` | Dispatcher saw a deferred `primitive_handler` (`SUB_ORCHESTRATION`) **or** the bug sentinel `RUN_CONTROLLER_TIMER`. | `StepFailed` envelope for deferred kinds; **raised** for the bug sentinel. |
+| `step.kind_not_implemented` | `StepKindNotImplementedError` | Dispatcher saw a deferred `primitive_handler` (`SUB_ORCHESTRATION`) **or** a bug sentinel (`RUN_CONTROLLER_TIMER` / `RESUME_SUBSCRIPTION`). | `StepFailed` envelope for deferred kinds; **raised** for the bug sentinels. |
 | `step.with_input_resolution_error` | `WithInputResolutionError` | `WithInputResolver.resolve(...)` failed (CEL parse / type / evaluation error inside a `with:` slot). | `StepFailed` envelope; retry driver is not consulted (structural failure). |
 | `step.connector_bind_error` | `ConnectorBindError` | `ConnectorClient.bind_for_step(...)` raised, or returned a malformed `BindForStepResponse`. | `StepFailed` envelope; retry driver is not consulted. |
 | `step.activity_schedule_error` | `ActivityScheduleError` | `ActivityRuntimeClient.schedule_activity(...)` raised before producing an envelope. | `StepFailed` envelope; retry driver is not consulted. |
@@ -527,13 +534,17 @@ slot in without modifying the shipped code:
   `StepCoordinator.__init__(...)` (paralleling `activity_handler`
   and `let_handler`) and the dispatcher arm flips to delegate to
   it.
-- **Resume Subscription Manager** — `waitFor:` is a new step
-  kind that the Definition Compiler will surface as a fifth
-  `PrimitiveHandler` tag; the dispatcher gains a fourth handler
-  argument and a fourth arm. The `step.waiting` lifecycle event
-  slot already lands today (it is part of
-  `LOCKED_STEP_EVENT_KINDS`) so the sub-module just emits into
-  it.
+- **Resume Subscription Manager** — `waitFor:` is a step kind
+  the Definition Compiler now surfaces as the `RESUME_SUBSCRIPTION`
+  `PrimitiveHandler` tag (WF-IMPL-099). The coordinator's
+  `RESUME_SUBSCRIPTION` arm currently **raises**
+  `StepKindNotImplementedError` because the Run Controller
+  orchestrator owns the inline `wait_for_external_event` park;
+  the Resume Subscription Manager wires the registration /
+  cancellation path against the Trigger Service. The
+  `step.waiting` lifecycle event slot already lands today (it is
+  part of `LOCKED_STEP_EVENT_KINDS`) so the sub-module just emits
+  into it.
 
 The five-element handler set the dispatcher accepts as a
 constructor argument is the long-term shape; today only
