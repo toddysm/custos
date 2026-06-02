@@ -76,7 +76,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Mapping
-from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from types import MappingProxyType
@@ -491,9 +490,20 @@ class ResumeSubscriptionReplayReconciler:
             original_selector=mirror.selector,
             replay_selector=replay_selector,
         )
-        with suppress(Exception):
+        try:
             await self._audit_publisher.emit_resume_subscription_divergent(
                 workspace_id=ctx.workspace_id,
                 occurred_at=occurred_at,
                 envelope=MappingProxyType(error.to_dict()),
+            )
+        except Exception:
+            # Best-effort: the divergence is already handled (original
+            # kept) and a flaky audit sink must not fail the reconcile,
+            # but the failure is logged so a transport outage is visible.
+            _LOGGER.exception(
+                "failed to emit resume_subscription_divergent audit event for "
+                "mirror %s (run %s, step %s)",
+                mirror.mirror_id,
+                mirror.run_id,
+                mirror.step_id,
             )
