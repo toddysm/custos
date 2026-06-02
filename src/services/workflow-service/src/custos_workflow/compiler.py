@@ -86,6 +86,7 @@ from custos_workflow.document import (
     ApprovalStep,
     LetStep,
     Step,
+    WaitForStep,
     WaitStep,
     WorkflowDocument,
     WorkflowStep,
@@ -589,6 +590,7 @@ _STEP_DISPATCH: dict[type[Step], tuple[StepKind, PrimitiveHandler]] = {
     WorkflowStep: (StepKind.WORKFLOW, PrimitiveHandler.SUB_ORCHESTRATION),
     WaitStep: (StepKind.WAIT, PrimitiveHandler.RUN_CONTROLLER_TIMER),
     ApprovalStep: (StepKind.APPROVAL, PrimitiveHandler.SUB_ORCHESTRATION),
+    WaitForStep: (StepKind.WAIT_FOR, PrimitiveHandler.RESUME_SUBSCRIPTION),
 }
 
 

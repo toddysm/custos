@@ -18,6 +18,8 @@ from custos_workflow.document import (
     OnErrorArm,
     OnErrorMatch,
     RetryPolicy,
+    WaitForSpec,
+    WaitForStep,
     WorkflowDocument,
     WorkflowSpec,
     WorkflowStep,
@@ -385,6 +387,89 @@ class TestApprovalStep:
         assert step.if_ == "${{ inputs.go }}"
 
 
+class TestWaitForStep:
+    def test_event_key_only(self) -> None:
+        step = WaitForStep.model_validate(
+            {"id": "await-event", "waitFor": {"eventKey": "${{ inputs.key }}"}}
+        )
+        assert step.wait_for.event_key == "${{ inputs.key }}"
+        assert step.wait_for.selector is None
+        assert step.wait_for.ttl is None
+
+    def test_event_key_selector_and_ttl(self) -> None:
+        step = WaitForStep.model_validate(
+            {
+                "id": "await-event",
+                "waitFor": {
+                    "eventKey": "${{ inputs.key }}",
+                    "selector": "${{ event.type == 'approved' }}",
+                    "ttl": "PT2H",
+                },
+            }
+        )
+        assert step.wait_for.selector == "${{ event.type == 'approved' }}"
+        assert step.wait_for.ttl == "PT2H"
+
+    def test_event_key_required(self) -> None:
+        with pytest.raises(ValidationError):
+            WaitForStep.model_validate({"id": "await-event", "waitFor": {}})
+
+    def test_event_key_must_be_cel_token(self) -> None:
+        with pytest.raises(ValidationError):
+            WaitForStep.model_validate({"id": "await-event", "waitFor": {"eventKey": "inputs.key"}})
+
+    def test_selector_must_be_cel_token(self) -> None:
+        with pytest.raises(ValidationError):
+            WaitForStep.model_validate(
+                {
+                    "id": "await-event",
+                    "waitFor": {"eventKey": "${{ inputs.key }}", "selector": "event.ok"},
+                }
+            )
+
+    def test_cel_token_ttl_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            WaitForStep.model_validate(
+                {
+                    "id": "await-event",
+                    "waitFor": {"eventKey": "${{ inputs.key }}", "ttl": "${{ x }}"},
+                }
+            )
+
+    def test_malformed_ttl_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            WaitForStep.model_validate(
+                {
+                    "id": "await-event",
+                    "waitFor": {"eventKey": "${{ inputs.key }}", "ttl": "2 hours"},
+                }
+            )
+
+    def test_zero_ttl_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            WaitForStep.model_validate(
+                {
+                    "id": "await-event",
+                    "waitFor": {"eventKey": "${{ inputs.key }}", "ttl": "PT0S"},
+                }
+            )
+
+    def test_wait_for_spec_directly(self) -> None:
+        spec = WaitForSpec.model_validate({"eventKey": "${{ inputs.key }}"})
+        assert spec.ttl is None
+        assert spec.selector is None
+
+    def test_modifiers_inherited(self) -> None:
+        step = WaitForStep.model_validate(
+            {
+                "id": "await-event",
+                "if": "${{ inputs.go }}",
+                "waitFor": {"eventKey": "${{ inputs.key }}"},
+            }
+        )
+        assert step.if_ == "${{ inputs.go }}"
+
+
 # ---------------------------------------------------------------------------
 # Step discriminator
 # ---------------------------------------------------------------------------
@@ -410,6 +495,10 @@ class TestStepDiscriminator:
     def test_approval_kind(self) -> None:
         spec = _spec_with_step({"id": "x", "approval": {"approvers": ["alice"]}})
         assert isinstance(spec.steps[0], ApprovalStep)
+
+    def test_wait_for_kind(self) -> None:
+        spec = _spec_with_step({"id": "x", "waitFor": {"eventKey": "${{ inputs.key }}"}})
+        assert isinstance(spec.steps[0], WaitForStep)
 
     def test_no_kind_keyword_rejected(self) -> None:
         with pytest.raises(ValidationError):
@@ -437,6 +526,13 @@ class TestStepDiscriminator:
         approval = ApprovalStep.model_validate({"id": "gate", "approval": {"approvers": ["alice"]}})
         spec = WorkflowSpec.model_validate({"steps": [approval]})
         assert isinstance(spec.steps[0], ApprovalStep)
+
+    def test_constructed_wait_for_round_trip(self) -> None:
+        wait_for = WaitForStep.model_validate(
+            {"id": "await-event", "waitFor": {"eventKey": "${{ inputs.key }}"}}
+        )
+        spec = WorkflowSpec.model_validate({"steps": [wait_for]})
+        assert isinstance(spec.steps[0], WaitForStep)
 
     def test_non_dict_non_step_value_rejected(self) -> None:
         # Scalars / lists are not valid step values.

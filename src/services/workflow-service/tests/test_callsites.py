@@ -222,6 +222,62 @@ class TestCollectCommonSlots:
 
 
 # ===========================================================================
+# collect_call_sites — waitFor slots
+# ===========================================================================
+
+
+class TestCollectWaitFor:
+    def test_event_key_only(self) -> None:
+        doc = _doc(
+            [{"id": "await-event", "waitFor": {"eventKey": "${{ inputs.key }}"}}],
+        )
+        sites = collect_call_sites(doc)["await-event"]
+        assert len(sites) == 1
+        site = sites[0]
+        assert site.kind is CallSiteKind.WAIT_FOR_EVENT_KEY
+        assert site.path == "waitFor.eventKey"
+        assert site.source == "${{ inputs.key }}"
+        assert site.position.document_path == "spec.steps[0].waitFor.eventKey"
+        assert site.position.text_offset == 0
+
+    def test_event_key_and_selector(self) -> None:
+        doc = _doc(
+            [
+                {
+                    "id": "await-event",
+                    "waitFor": {
+                        "eventKey": "${{ inputs.key }}",
+                        "selector": "${{ event.ok }}",
+                    },
+                }
+            ],
+        )
+        sites = collect_call_sites(doc)["await-event"]
+        by_kind = {s.kind: s for s in sites}
+        assert set(by_kind) == {
+            CallSiteKind.WAIT_FOR_EVENT_KEY,
+            CallSiteKind.WAIT_FOR_SELECTOR,
+        }
+        assert by_kind[CallSiteKind.WAIT_FOR_SELECTOR].path == "waitFor.selector"
+        assert (
+            by_kind[CallSiteKind.WAIT_FOR_SELECTOR].position.document_path
+            == "spec.steps[0].waitFor.selector"
+        )
+
+    def test_ttl_is_not_a_call_site(self) -> None:
+        doc = _doc(
+            [
+                {
+                    "id": "await-event",
+                    "waitFor": {"eventKey": "${{ inputs.key }}", "ttl": "PT2H"},
+                }
+            ],
+        )
+        sites = collect_call_sites(doc)["await-event"]
+        assert [s.kind for s in sites] == [CallSiteKind.WAIT_FOR_EVENT_KEY]
+
+
+# ===========================================================================
 # collect_call_sites — let bindings
 # ===========================================================================
 

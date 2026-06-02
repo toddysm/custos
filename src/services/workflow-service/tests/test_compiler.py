@@ -217,6 +217,34 @@ spec:
         assert gate.kind is StepKind.APPROVAL
         assert gate.primitive_handler is PrimitiveHandler.SUB_ORCHESTRATION
 
+    def test_wait_for_step_maps_to_resume_subscription(self) -> None:
+        doc = parse_document(
+            """
+apiVersion: custos.dev/v1
+kind: Workflow
+metadata:
+  name: pipeline
+  workspace: security
+spec:
+  inputs:
+    key:
+      type: string
+      default: ""
+  steps:
+    - id: await-event
+      waitFor:
+        eventKey: ${{ inputs.key }}
+        selector: ${{ inputs.key }}
+        ttl: PT2H
+"""
+        )
+        graph = compile_workflow(doc, _run_meta(), _registry())
+        node = graph.nodes[0]
+        assert node.kind is StepKind.WAIT_FOR
+        assert node.primitive_handler is PrimitiveHandler.RESUME_SUBSCRIPTION
+        # The eventKey/selector CEL slots are collected + type-checked.
+        assert set(node.call_sites) == {"waitFor.eventKey", "waitFor.selector"}
+
     def test_for_each_step_is_tagged_sub_orchestration(self) -> None:
         # A ``forEach``-bearing step is loop-expanded by the
         # Sub-Orchestration Manager, so its handler is overridden to

@@ -1,6 +1,6 @@
 # TODOs: Workflow Service
 
-Last Updated: 2026-06-01 (Sub-Orchestration Manager sub-module planned + filed under tracker [#522](https://github.com/toddysm/custos/issues/522); WF-IMPL-084..098 filed)
+Last Updated: 2026-06-01 (Resume Subscription Manager sub-module planned + filed under tracker [#552](https://github.com/toddysm/custos/issues/552); WF-IMPL-099..112 filed)
 
 ## Open
 
@@ -10,12 +10,47 @@ Last Updated: 2026-06-01 (Sub-Orchestration Manager sub-module planned + filed u
 
 Sub-modules of the workflow-service host whose design is already locked in [`design.md`](design.md) § Internal Structure but whose implementation plan has not yet been derived. Each will get its own `implement-component` plan, tracker, and task issue set when prioritised. (added 2026-05-29 during the Step Coordinator plan derivation.)
 
-- [ ] **Resume Subscription Manager** — `waitFor:` step kind + `TriggerServiceClient` Protocol + `RegisterResumeSubscription` / `CancelResumeSubscription` RPC + `ResumeSubscriptionMirror` persistence (`MetadataStoreProvider`) + replay re-registration through the WF-IMPL-042 reconciler hook. Design refs: § Operation: Step Resume on External Event, § Resume Subscription Replay Protocol. Step Coordinator (WF-IMPL-055) currently returns `StepFailed(step.kind_not_implemented)` for `waitFor:`.
+- [~] **Resume Subscription Manager** — _filed_ as the eighth sub-module under tracker [#552](https://github.com/toddysm/custos/issues/552); tasks WF-IMPL-099..112 filed. See the dedicated section below + [`implementation-plan-resume-subscription-manager.md`](implementation-plan-resume-subscription-manager.md). `waitFor:` step kind + `TriggerServiceClient` Protocol + `RegisterResumeSubscription` / `CancelResumeSubscription` RPC + `ResumeSubscriptionMirror` persistence (`MetadataStoreProvider`) + replay re-registration through the WF-IMPL-042 reconciler hook. Design refs: § Operation: Step Resume on External Event, § Resume Subscription Replay Protocol. Step Coordinator (WF-IMPL-055) currently returns `StepFailed(step.kind_not_implemented)` for `waitFor:`.
 - [~] **Sub-Orchestration Manager** — _filed_ as the seventh sub-module under tracker [#522](https://github.com/toddysm/custos/issues/522); tasks WF-IMPL-084..098 filed. See the dedicated section below + [`implementation-plan-sub-orchestration-manager.md`](implementation-plan-sub-orchestration-manager.md). `for:` (dynamic loop) + `approval:` (gate + timeout) + `workflow:` (sub-workflow call); spawns child Dapr Workflow instances with deterministic `<parentRunId>/<stepId>/<iterationKey>` ids; awaits via `when_all` / `when_any`; merges outputs. Design refs: § Operation: Sub-Orchestration, § Sub-Orchestration Manager (ADR-007). Step Coordinator currently returns `StepFailed(step.kind_not_implemented)` for all three.
 - [x] **API Adapter + Validator** — _complete_ as the fifth sub-module under tracker [#459](https://github.com/toddysm/custos/issues/459) (closed 2026-06-04); tasks WF-IMPL-061..072 merged across PRs #463–#480 and #482. See the dedicated section below + [`implementation-plan-api-adapter-validator.md`](implementation-plan-api-adapter-validator.md).
 - [~] **Real ARM Client + Connector Client adapters** — _in progress_ as the sixth sub-module under tracker [#495](https://github.com/toddysm/custos/issues/495); tasks WF-IMPL-073..083 filed. See the dedicated section below + [`implementation-plan.md`](implementation-plan.md). Production `ActivityRuntimeClient` / `ConnectorClient` Dapr Service Invocation bridges behind the Protocols that ship with the Step Coordinator (WF-IMPL-049 / WF-IMPL-050). Design refs: § Internal RPC (outbound).
 - [ ] **Full Observability Client integration** — Audit-event sink wiring + cross-component event taxonomy unification (TS-TODO-001 / ARM TODO-009 under INCON-013) + log-stream delegation for `GET …/steps/{stepId}/logs`. Design refs: § Observability Client. `workflow.*` / `step.*` event publication already lands via the existing `LifecycleEventPublisher`.
 - [ ] **Durable `IdempotencyLedger`** — `MetadataStoreProvider`-backed adapter for the `(workspaceId, idempotencyKey)` ledger introduced in WF-IMPL-063; in-memory adapter ships with the API Adapter sub-module. Filed as a separate follow-up issue once the in-memory adapter merges. (added 2026-05-31 during the API Adapter plan derivation.)
+
+## Implementation — Resume Subscription Manager
+
+Eighth sub-module: **Resume Subscription Manager**, packaged inside the service host `src/services/workflow-service/` under a new `custos_workflow.steps.resume` package plus a `TriggerServiceClient` in `custos_workflow.clients.trigger`. Implements the `waitFor:` step kind (REQ-081): registers a one-shot resume subscription with the Trigger Service, persists a `ResumeSubscriptionMirror` (via `MetadataStoreProvider`) before the TS call, suspends the run on `wait_for_external_event`, idempotently re-registers open mirrors on Dapr replay through the WF-IMPL-042 `ReplayReconciler` hook, and cancels + deletes mirrors on terminal. Replaces the `step.kind_not_implemented` stub for `waitFor:`. Ships behind a Protocol + fake because the Trigger Service (COMP-004) is not yet implemented. Plan: [`implementation-plan-resume-subscription-manager.md`](implementation-plan-resume-subscription-manager.md).
+
+### Phase A — Foundations (model, errors, client contract)
+
+- [x] WF-IMPL-099 (#538): `waitFor:` document model + `StepKind.WAIT_FOR` + `PrimitiveHandler.RESUME_SUBSCRIPTION` + compiler tagging.
+- [F] WF-IMPL-100 (#539): Resume subscription error taxonomy additions.
+- [F] WF-IMPL-101 (#540): `TriggerServiceClient` Protocol + request/response models + test doubles.
+
+### Phase B — Persistence + client adapter
+
+- [F] WF-IMPL-102 (#541): `ResumeSubscriptionMirror` model + `MetadataStoreProvider`-backed repository.
+- [F] WF-IMPL-103 (#542): `DaprTriggerServiceClient` — Dapr Service-Invocation adapter (depends on #540).
+
+### Phase C — WaitFor step handler + replay + cancellation
+
+- [F] WF-IMPL-104 (#543): `WaitForStepHandler` — register / wait / resume lifecycle (depends on #538, #539, #540, #541).
+- [F] WF-IMPL-105 (#544): Replay reconciler — idempotent re-registration of open mirrors (depends on #541, #542, #543).
+- [F] WF-IMPL-106 (#545): Cancel-run + terminal cancellation of open subscriptions (depends on #543).
+
+### Phase D — Dispatch integration & wiring
+
+- [F] WF-IMPL-107 (#546): Step Coordinator dispatch of `RESUME_SUBSCRIPTION` + orchestrator wiring (depends on #543).
+- [F] WF-IMPL-108 (#547): `providers.py` wiring + Configuration knobs + registration (depends on #544, #545, #546).
+- [F] WF-IMPL-109 (#548): TTL-expiry periodic mirror sweep (depends on #541, #547).
+
+### Phase E — Observability, verification, docs
+
+- [F] WF-IMPL-110 (#549): OTel observability hooks (depends on #546, #547).
+- [F] WF-IMPL-111 (#550): Unit + integration test suite (≥ 90 % coverage gate) (depends on #549).
+- [F] WF-IMPL-112 (#551): Developer documentation — `docs/developers/workflow-resume-subscriptions.md` (depends on #550).
+
+Tracker: #552 — `WF-IMPL-000-RESUME-SUBSCRIPTION`.
 
 ## Implementation — Sub-Orchestration Manager
 

@@ -145,6 +145,10 @@ _STEP_KIND_DOCS: dict[StepKind, dict[str, Any]] = {
         "id": "gate",
         "approval": {"approvers": ["alice"]},
     },
+    StepKind.WAIT_FOR: {
+        "id": "await-event",
+        "waitFor": {"eventKey": "${{ inputs.target }}"},
+    },
 }
 
 #: Documented step-kind → handler dispatch, mirroring
@@ -155,6 +159,7 @@ _STEP_KIND_TO_HANDLER: dict[StepKind, PrimitiveHandler] = {
     StepKind.WORKFLOW: PrimitiveHandler.SUB_ORCHESTRATION,
     StepKind.WAIT: PrimitiveHandler.RUN_CONTROLLER_TIMER,
     StepKind.APPROVAL: PrimitiveHandler.SUB_ORCHESTRATION,
+    StepKind.WAIT_FOR: PrimitiveHandler.RESUME_SUBSCRIPTION,
 }
 
 
@@ -186,7 +191,7 @@ class TestStepKindGrid:
 #: ``PLACEHOLDER`` is reserved for compiler-internal synthetics and
 #: is never emitted by the real call-site collector (see the
 #: :class:`CallSiteKind.PLACEHOLDER` docstring). The grid below
-#: enumerates the remaining seven author-facing slots.
+#: enumerates the remaining author-facing slots.
 _USER_CALLSITE_KINDS: frozenset[CallSiteKind] = frozenset(
     set(CallSiteKind) - {CallSiteKind.PLACEHOLDER}
 )
@@ -234,6 +239,17 @@ _CALLSITE_DOCS: dict[CallSiteKind, dict[str, Any]] = {
     CallSiteKind.LET: {
         "id": "compute",
         "let": {"verdict": "${{ inputs.go }}"},
+    },
+    CallSiteKind.WAIT_FOR_EVENT_KEY: {
+        "id": "await-event",
+        "waitFor": {"eventKey": "${{ inputs.target }}"},
+    },
+    CallSiteKind.WAIT_FOR_SELECTOR: {
+        "id": "await-event",
+        "waitFor": {
+            "eventKey": "${{ inputs.target }}",
+            "selector": "${{ inputs.go }}",
+        },
     },
 }
 

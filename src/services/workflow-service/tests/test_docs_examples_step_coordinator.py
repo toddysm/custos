@@ -447,6 +447,7 @@ _DOCUMENTED_PRIMITIVE_HANDLERS: Final[frozenset[str]] = frozenset(
         "ACTIVITY_RUNTIME",
         "SUB_ORCHESTRATION",
         "RUN_CONTROLLER_TIMER",
+        "RESUME_SUBSCRIPTION",
     }
 )
 

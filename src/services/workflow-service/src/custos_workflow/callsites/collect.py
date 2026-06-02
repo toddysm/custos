@@ -18,6 +18,12 @@ Direct CEL slots (one site per field):
   one is a complete ``${{ ... }}`` token (enforced by the document
   model). Emits one :class:`CallSite` per non-``None`` slot with
   :attr:`SourcePosition.text_offset` set to ``0``.
+- ``waitFor.eventKey`` / ``waitFor.selector`` (:class:`WaitForStep`
+  only) — each present value is a complete ``${{ ... }}`` token
+  (enforced by the document model). Emits one ``WAIT_FOR_EVENT_KEY``
+  / ``WAIT_FOR_SELECTOR`` :class:`CallSite` with ``text_offset = 0``.
+  The companion ``waitFor.ttl`` is a constant ISO-8601 duration,
+  not a CEL slot, so it is never collected.
 - ``let.<name>`` (:class:`LetStep` only) — only string values that
   are complete ``${{ ... }}`` tokens are treated as CEL bindings.
   Non-string values (literals, nested objects) and string values
@@ -54,7 +60,7 @@ from custos_workflow.callsites.placeholders import (
     PlaceholderSegment,
     extract_placeholders,
 )
-from custos_workflow.document import ActivityStep, LetStep, WorkflowStep
+from custos_workflow.document import ActivityStep, LetStep, WaitForStep, WorkflowStep
 from custos_workflow.graph.model import CallSiteKind
 
 if TYPE_CHECKING:
@@ -116,6 +122,8 @@ def collect_call_sites(doc: WorkflowDocument) -> dict[str, list[CallSite]]:
             sites.extend(_collect_let_bindings(step, base_path))
         elif isinstance(step, ActivityStep | WorkflowStep):
             sites.extend(_collect_with_block(step, base_path))
+        elif isinstance(step, WaitForStep):
+            sites.extend(_collect_wait_for(step, base_path))
         out[step.id] = sites
     return out
 
@@ -223,6 +231,43 @@ def _collect_let_bindings(step: LetStep, base_path: str) -> Iterator[CallSite]:
             "let bindings must be either a literal value or a single "
             "'${{ ... }}' expression; mixed-content strings are not "
             "supported under let:",
+        )
+
+
+def _collect_wait_for(step: WaitForStep, base_path: str) -> Iterator[CallSite]:
+    """Emit one :class:`CallSite` per CEL slot on a ``waitFor:`` block.
+
+    A ``waitFor:`` step carries up to two CEL expressions on its
+    :class:`~custos_workflow.document.WaitForSpec`:
+
+    - ``eventKey`` (required) → :attr:`CallSiteKind.WAIT_FOR_EVENT_KEY`
+    - ``selector`` (optional) → :attr:`CallSiteKind.WAIT_FOR_SELECTOR`
+
+    The document model has already enforced that each present value
+    is a complete ``${{ ... }}`` token, so we strip the wrapper and
+    parse the inner source directly with ``text_offset = 0`` (the
+    entire field IS the call site, like the common slots). The
+    ``ttl`` field is a constant ISO-8601 duration, not a CEL
+    expression, so it is never collected.
+    """
+    spec = step.wait_for
+    slots: tuple[tuple[CallSiteKind, str, str, str | None], ...] = (
+        (CallSiteKind.WAIT_FOR_EVENT_KEY, "waitFor.eventKey", "waitFor.eventKey", spec.event_key),
+        (CallSiteKind.WAIT_FOR_SELECTOR, "waitFor.selector", "waitFor.selector", spec.selector),
+    )
+    for kind, path, wire_name, value in slots:
+        if value is None:
+            continue
+        document_path = f"{base_path}.{wire_name}"
+        inner = _strip_wrapper(value)
+        ast = _parse_or_raise(step.id, path, value, inner)
+        yield CallSite(
+            step_id=step.id,
+            kind=kind,
+            path=path,
+            source=value,
+            position=SourcePosition(document_path=document_path, text_offset=0),
+            parsed_ast=ast,
         )
 
 

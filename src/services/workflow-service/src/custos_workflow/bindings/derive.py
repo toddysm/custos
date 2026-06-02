@@ -52,6 +52,7 @@ from custos_workflow.document import (
     ActivityStep,
     ApprovalStep,
     LetStep,
+    WaitForStep,
     WaitStep,
     WorkflowDocument,
     WorkflowStep,
@@ -193,8 +194,33 @@ def _approval_outputs_schema(step: ApprovalStep, logger: logging.Logger) -> Mapp
     return _PERMISSIVE_OUTPUTS
 
 
+def _wait_for_outputs_schema(step: WaitForStep, logger: logging.Logger) -> Mapping[str, Any]:
+    """Permissive stub for ``waitFor:`` resume outputs (REQ-081).
+
+    When the run resumes, the external event payload delivered by the
+    Trigger Service becomes the step's outputs. That payload schema
+    is event-specific and is not locked in the wire schema yet — the
+    full Resume Subscription Manager execution path lands in a later
+    task. For this milestone we emit a structured warning and return
+    an open object so any ``steps.<id>.outputs`` reference type-checks
+    without a false negative.
+    """
+    logger.warning(
+        "binding.unresolved_wait_for",
+        extra={
+            "step_id": step.id,
+            "note": (
+                "waitFor resume outputs schema unresolved; using permissive "
+                "stub until the Resume Subscription Manager execution "
+                "follow-up lands"
+            ),
+        },
+    )
+    return _PERMISSIVE_OUTPUTS
+
+
 def _step_outputs_schema(
-    step: ActivityStep | LetStep | WorkflowStep | WaitStep | ApprovalStep,
+    step: ActivityStep | LetStep | WorkflowStep | WaitStep | ApprovalStep | WaitForStep,
     registry: ActivityTypeRegistry,
     logger: logging.Logger,
 ) -> Mapping[str, Any]:
@@ -210,6 +236,8 @@ def _step_outputs_schema(
         return {"type": "object", "properties": {}}
     if isinstance(step, ApprovalStep):
         return _approval_outputs_schema(step, logger)
+    if isinstance(step, WaitForStep):
+        return _wait_for_outputs_schema(step, logger)
     # WorkflowStep — narrowed by exhaustion.
     return _sub_workflow_outputs_schema(step, logger)
 
