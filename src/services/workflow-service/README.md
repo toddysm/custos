@@ -589,10 +589,12 @@ Protocol with `register_resume_subscription(...)` /
 method-name constants, and the `NoopTriggerServiceClient` /
 `FakeTriggerServiceClient` test doubles. The fake mirrors the
 Trigger Service replay contract — it returns the **same**
-`tsSubscriptionId` for a repeated `(runId, stepId, eventKey)` and
-treats cancellation as an idempotent no-op — so the rest of the
-sub-module can be tested before the Trigger Service (COMP-004) or
-its production Dapr adapter (WF-IMPL-103) exist.
+`tsSubscriptionId` for a repeated `(runId, stepId, eventKey)`, and
+cancellation removes a known key (so a later re-registration mints
+a fresh id) while being a no-op for an unknown or already-cancelled
+key — so the rest of the sub-module can be tested before the
+Trigger Service (COMP-004) or its production Dapr adapter
+(WF-IMPL-103) exist.
 Tracker: [#552](https://github.com/toddysm/custos/issues/552).
 
 
