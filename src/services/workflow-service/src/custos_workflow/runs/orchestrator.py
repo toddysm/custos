@@ -83,7 +83,13 @@ from custos_cel import (
 from custos_cel.clock import Clock
 
 from custos_workflow._telemetry import observe_run_replay
-from custos_workflow.graph.model import ExecutionGraph, ExecutionNode, StepKind
+from custos_workflow.document import ApprovalStep, WorkflowStep
+from custos_workflow.graph.model import (
+    ExecutionGraph,
+    ExecutionNode,
+    PrimitiveHandler,
+    StepKind,
+)
 from custos_workflow.graph.serialize import from_json
 from custos_workflow.runs.ids import RunId
 from custos_workflow.runs.model import RunStatus
@@ -111,9 +117,11 @@ if TYPE_CHECKING:
     # the runtime only ever duck-types ``iter_calls`` on the
     # supplied object.
     from custos_workflow.steps.activity_step import ActivityStepHandler
+    from custos_workflow.steps.sub_orchestration import SubOrchestrationManager
 
 __all__ = [
     "WORKFLOW_NAME",
+    "ChildGraphResolver",
     "ReplayHook",
     "RunInput",
     "RunOutput",
@@ -263,6 +271,18 @@ class RunOutput:
 #: ``None`` (the default) skips the hook entirely.
 ReplayHook = Callable[[StepExecutionContext, ExecutionGraph], None]
 
+#: Resolves a ``workflow:`` step's fully-qualified sub-workflow
+#: reference (``WorkflowStep.workflow``) to the compiled child
+#: :class:`~custos_workflow.graph.model.ExecutionGraph` the child Run
+#: executes. WF-IMPL-093 threads this resolver through the
+#: orchestrator so the ``workflow:`` inline-dispatch path can spawn a
+#: child Run; the production resolver (Catalog Service lookup) is
+#: wired in WF-IMPL-094. ``None`` (the default) leaves the
+#: ``workflow:`` path unwired — a ``workflow:`` node then fails with a
+#: structured ``step.sub_orchestration_spawn_error`` rather than
+#: silently producing no child.
+ChildGraphResolver = Callable[[str], ExecutionGraph]
+
 
 # ---------------------------------------------------------------------------
 # Gate kinds
@@ -292,6 +312,8 @@ def make_run_orchestrator(
     expression_timeout_ms: int | None = None,
     wait_handler: WaitStepHandler | None = None,
     activity_handler: ActivityStepHandler | None = None,
+    sub_orchestration_manager: SubOrchestrationManager | None = None,
+    child_graph_resolver: ChildGraphResolver | None = None,
 ) -> Callable[[WorkflowContext, Any], Generator[Any, Any, RunOutput]]:
     """Build the workflow function bound to a concrete :class:`StepHandler`.
 
@@ -346,6 +368,24 @@ def make_run_orchestrator(
             and bind / schedule happen inline within the
             orchestrator generator — fine for tests but not
             durable enough for production.
+        sub_orchestration_manager: Optional
+            :class:`~custos_workflow.steps.sub_orchestration.SubOrchestrationManager`
+            override. Every
+            :attr:`~custos_workflow.graph.model.PrimitiveHandler.SUB_ORCHESTRATION`
+            node (``forEach`` loop, ``workflow:`` invocation,
+            ``approval:`` gate) is driven inline through this
+            manager via ``yield from`` (WF-IMPL-093), mirroring the
+            ``wait:`` inline path. The manager is stateless, so the
+            default is a fresh module-local instance.
+        child_graph_resolver: Optional
+            :data:`ChildGraphResolver` that maps a ``workflow:``
+            step's fully-qualified reference to the compiled child
+            :class:`~custos_workflow.graph.model.ExecutionGraph`.
+            Required only for graphs that contain a ``workflow:``
+            node; the production Catalog-backed resolver is wired in
+            WF-IMPL-094. When ``None`` and a ``workflow:`` node is
+            reached, that step fails with a structured
+            ``step.sub_orchestration_spawn_error``.
 
     Returns:
         The workflow function. Its ``__name__`` is :data:`WORKFLOW_NAME`,
@@ -354,6 +394,20 @@ def make_run_orchestrator(
     """
     wait_dispatcher: WaitStepHandler = (
         wait_handler if wait_handler is not None else WaitStepHandler()
+    )
+    # Function-scope import — ``SubOrchestrationManager`` lives under
+    # ``custos_workflow.steps``, which transitively imports this module
+    # during package initialisation (see the ``ActivityStepHandler``
+    # TYPE_CHECKING note above). Importing inside the factory defers the
+    # resolution until after package init, so the runtime import never
+    # closes the cycle.
+    from custos_workflow.steps.errors import StepCoordinatorError
+    from custos_workflow.steps.sub_orchestration import SubOrchestrationManager
+
+    sub_dispatcher: SubOrchestrationManager = (
+        sub_orchestration_manager
+        if sub_orchestration_manager is not None
+        else SubOrchestrationManager()
     )
 
     def run_orchestrator(ctx: WorkflowContext, raw: Any) -> Generator[Any, Any, RunOutput]:
@@ -419,6 +473,39 @@ def make_run_orchestrator(
                 # instance until the timer fires.
                 wait_result = yield from wait_dispatcher.execute(ctx, node)
                 output_bag[step_id] = copy.deepcopy(dict(wait_result.outputs))
+                continue
+
+            if node.primitive_handler is PrimitiveHandler.SUB_ORCHESTRATION:
+                # Sub-Orchestration Manager owns ``forEach`` / ``workflow:``
+                # / ``approval:`` inline (WF-IMPL-093), mirroring the
+                # ``wait:`` path above: each manager method is a generator
+                # that yields Dapr child-workflow / external-event / timer
+                # tokens, so we re-drive it via ``yield from`` to suspend
+                # the parent instance until those durable operations
+                # resolve. The manager raises a
+                # :class:`StepCoordinatorError` on a terminal step
+                # failure; we translate that into the same
+                # ``status="failed"`` short-circuit the
+                # :class:`StepFailed` arm below produces, keeping the
+                # failure envelope shape identical across both dispatch
+                # surfaces.
+                try:
+                    sub_outputs = yield from _dispatch_sub_orchestration(
+                        sub_dispatcher,
+                        _step_ctx(ctx, run_input, output_bag, clock),
+                        graph,
+                        node,
+                        step_id,
+                        child_graph_resolver,
+                    )
+                except StepCoordinatorError as exc:
+                    return RunOutput(
+                        status=RunStatus.FAILED.value,
+                        outputs=_frozen_output_bag(output_bag),
+                        failed_step=step_id,
+                        failure_envelope=MappingProxyType(dict(exc.to_dict())),
+                    )
+                output_bag[step_id] = copy.deepcopy(sub_outputs)
                 continue
 
             if node.kind is StepKind.ACTIVITY and activity_handler is not None:
@@ -508,6 +595,80 @@ def make_run_orchestrator(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _dispatch_sub_orchestration(
+    manager: SubOrchestrationManager,
+    step_ctx: StepExecutionContext,
+    graph: ExecutionGraph,
+    node: ExecutionNode,
+    step_id: str,
+    child_graph_resolver: ChildGraphResolver | None,
+) -> Generator[Any, Any, dict[str, Any]]:
+    """Drive one ``SUB_ORCHESTRATION`` node through the manager inline.
+
+    Discriminates the three sub-orchestration shapes that share the
+    :attr:`PrimitiveHandler.SUB_ORCHESTRATION` tag and re-drives the
+    selected manager generator via ``yield from`` so its child /
+    event / timer yields suspend the parent instance:
+
+    * ``forEach`` (``node.step_source.for_each`` set or a ``forEach``
+      call site present, any inner kind)
+      → :meth:`SubOrchestrationManager.run_loop`. The ordered
+      per-child output list is bound under a single ``results`` key so
+      the step's outputs stay a mapping (``steps.<id>.outputs.results``
+      is the list).
+    * ``workflow:`` (:class:`WorkflowStep`) →
+      :meth:`SubOrchestrationManager.run_sub_workflow`. The child
+      graph is resolved through ``child_graph_resolver`` (Catalog
+      wiring: WF-IMPL-094); the child run's per-step output bag binds
+      directly.
+    * ``approval:`` (:class:`ApprovalStep`) →
+      :meth:`SubOrchestrationManager.run_approval`. The approval
+      decision payload binds directly.
+
+    :returns: The step's outputs mapping. Delivered as the generator's
+        ``StopIteration.value``.
+
+    :raises StepCoordinatorError: Any terminal sub-orchestration
+        failure (loop expansion, spawn, child failure, approval
+        timeout) — surfaced unchanged for the orchestrator to convert
+        into a ``status="failed"`` :class:`RunOutput`.
+    """
+    if node.step_source.for_each is not None or "forEach" in node.call_sites:
+        loop_result = yield from manager.run_loop(step_ctx, graph, step_id)
+        return {"results": loop_result}
+    if isinstance(node.step_source, ApprovalStep):
+        decision = yield from manager.run_approval(step_ctx, graph, step_id)
+        return dict(decision)
+    if isinstance(node.step_source, WorkflowStep):
+        if child_graph_resolver is None:
+            # The orchestrator was built without a child-graph resolver
+            # (WF-IMPL-094 wires the Catalog-backed one). Fail the step
+            # with the locked spawn-error kind rather than silently
+            # producing no child.
+            from custos_workflow.steps.errors import SubOrchestrationSpawnError
+
+            raise SubOrchestrationSpawnError(
+                f"workflow: step {step_id!r} cannot spawn a sub-workflow: "
+                "no child-graph resolver is wired into the orchestrator",
+                run_id=str(step_ctx.run_id),
+                step_id=step_id,
+            )
+        child_graph = child_graph_resolver(node.step_source.workflow)
+        child_bag = yield from manager.run_sub_workflow(step_ctx, graph, step_id, child_graph)
+        return dict(child_bag)
+    # Defensive: the compiler only tags forEach / workflow: / approval:
+    # nodes SUB_ORCHESTRATION, so any other source is a compile-time bug.
+    from custos_workflow.steps.errors import SubOrchestrationSpawnError
+
+    raise SubOrchestrationSpawnError(  # pragma: no cover
+        f"step {step_id!r} is tagged sub_orchestration but its source "
+        f"{type(node.step_source).__name__} is not a forEach loop, "
+        "workflow: invocation, or approval: gate",
+        run_id=str(step_ctx.run_id),
+        step_id=step_id,
+    )
 
 
 def _step_ctx(

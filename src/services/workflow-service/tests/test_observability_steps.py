@@ -455,29 +455,29 @@ class TestStepExecuteSpanAndHistogram:
 
 
 # ---------------------------------------------------------------------------
-# Sub-orchestration stub — returns StepFailed → outcome label + error counter
+# Sub-orchestration node — dispatched inline by the orchestrator, so the
+# coordinator defensively raises StepKindNotImplementedError (WF-IMPL-093)
 # ---------------------------------------------------------------------------
 
 
-class TestSubOrchestrationStubFailure:
-    def test_returns_step_failed_with_kind_not_implemented(self) -> None:
+class TestSubOrchestrationDefensiveRaise:
+    def test_raises_kind_not_implemented(self) -> None:
         coord = StepCoordinator(
             _RecordingActivityHandler(),
             let_handler=_RecordingLetHandler(),
         )
 
-        result = coord.execute(_ctx(), _graph(_workflow_node()), "child")
+        with pytest.raises(StepKindNotImplementedError):
+            coord.execute(_ctx(), _graph(_workflow_node()), "child")
 
-        assert isinstance(result, StepFailed)
-        assert result.envelope["kind"] == "step.kind_not_implemented"
-
-    def test_sub_orchestration_failure_records_error_counter_once(self) -> None:
+    def test_sub_orchestration_records_error_counter_once(self) -> None:
         coord = StepCoordinator(
             _RecordingActivityHandler(),
             let_handler=_RecordingLetHandler(),
         )
 
-        coord.execute(_ctx(), _graph(_workflow_node()), "child")
+        with pytest.raises(StepKindNotImplementedError):
+            coord.execute(_ctx(), _graph(_workflow_node()), "child")
 
         errors = _by_name(_collect_points(), "custos_workflow_step_errors_total")
         assert len(errors) == 1
@@ -485,25 +485,25 @@ class TestSubOrchestrationStubFailure:
         assert attrs == {"kind": "step.kind_not_implemented"}
         assert value == 1
 
-    def test_sub_orchestration_failure_records_histogram_with_ok_outcome(self) -> None:
-        # The StepFailed envelope is *returned*, not raised, so the
-        # ``observe_step_execute`` wrapper still sees the dispatch
-        # as nominal completion (outcome=ok). The error counter
-        # carries the failure signal. This is the documented
-        # contract — both signals together let dashboards
-        # distinguish "step kind not implemented" from raised
-        # exceptions.
+    def test_sub_orchestration_records_histogram_with_kind_not_implemented(self) -> None:
+        # The defensive arm now *raises* rather than returning a
+        # StepFailed envelope, so the ``observe_step_execute`` wrapper
+        # records the dispatch with ``outcome=kind_not_implemented``
+        # (the bare suffix of the raised error's kind), mirroring the
+        # wait / run_controller_timer nodes the orchestrator also
+        # dispatches inline.
         coord = StepCoordinator(
             _RecordingActivityHandler(),
             let_handler=_RecordingLetHandler(),
         )
 
-        coord.execute(_ctx(), _graph(_workflow_node()), "child")
+        with pytest.raises(StepKindNotImplementedError):
+            coord.execute(_ctx(), _graph(_workflow_node()), "child")
 
         samples = _by_name(_collect_points(), "custos_workflow_step_execute_duration_ms")
         assert len(samples) == 1
         attrs, _value = samples[0]
-        assert attrs == {"step_kind": "workflow", "outcome": "ok"}
+        assert attrs == {"step_kind": "workflow", "outcome": "kind_not_implemented"}
 
 
 # ---------------------------------------------------------------------------
