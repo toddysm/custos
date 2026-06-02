@@ -12,6 +12,9 @@ from custos_workflow.steps import (
     ApprovalTimeoutError,
     ConnectorBindError,
     LoopExpansionError,
+    ResumeMirrorPersistError,
+    ResumeRegistrationFailedError,
+    ResumeSubscriptionDivergentError,
     RetryBudgetExhaustedError,
     StepCoordinatorError,
     StepKindNotImplementedError,
@@ -47,6 +50,9 @@ def test_locked_step_kinds_pins_published_strings() -> None:
                 "step.sub_orchestration_spawn_error",
                 "step.sub_workflow_failed",
                 "step.approval_timeout",
+                "step.resume_registration_failed",
+                "step.resume_subscription_divergent",
+                "step.resume_mirror_persist_error",
             }
         )
         == LOCKED_STEP_KINDS
@@ -515,12 +521,93 @@ def test_approval_timeout_error_kind_builtin_and_to_dict() -> None:
     }
 
 
+# ---------------------------------------------------------------------------
+# Resume Subscription Manager subclasses (WF-IMPL-100)
+# ---------------------------------------------------------------------------
+
+
+def test_resume_registration_failed_error_kind_builtin_and_to_dict() -> None:
+    err = ResumeRegistrationFailedError(
+        "trigger service unreachable",
+        run_id="r-1",
+        step_id="await-event",
+        attempt=1,
+        event_key="order.shipped",
+        max_retries=5,
+        cause="ConnectionRefusedError(...)",
+    )
+    assert err.kind == ResumeRegistrationFailedError.KIND == "step.resume_registration_failed"
+    assert isinstance(err, StepCoordinatorError)
+    assert isinstance(err, RuntimeError)
+    assert err.to_dict() == {
+        "kind": "step.resume_registration_failed",
+        "message": "trigger service unreachable",
+        "run_id": "r-1",
+        "step_id": "await-event",
+        "attempt": 1,
+        "event_key": "order.shipped",
+        "max_retries": 5,
+        "cause": "ConnectionRefusedError(...)",
+    }
+
+
+def test_resume_subscription_divergent_error_kind_builtin_and_to_dict() -> None:
+    err = ResumeSubscriptionDivergentError(
+        "selector diverged on replay",
+        run_id="r-1",
+        step_id="await-event",
+        attempt=1,
+        event_key="order.shipped",
+        original_selector="order.id == '123'",
+        replay_selector="order.id == '456'",
+    )
+    assert err.kind == ResumeSubscriptionDivergentError.KIND == "step.resume_subscription_divergent"
+    assert isinstance(err, StepCoordinatorError)
+    assert isinstance(err, RuntimeError)
+    assert err.to_dict() == {
+        "kind": "step.resume_subscription_divergent",
+        "message": "selector diverged on replay",
+        "run_id": "r-1",
+        "step_id": "await-event",
+        "attempt": 1,
+        "event_key": "order.shipped",
+        "original_selector": "order.id == '123'",
+        "replay_selector": "order.id == '456'",
+    }
+
+
+def test_resume_mirror_persist_error_kind_builtin_and_to_dict() -> None:
+    err = ResumeMirrorPersistError(
+        "metadata store write failed",
+        run_id="r-1",
+        step_id="await-event",
+        attempt=1,
+        event_key="order.shipped",
+        cause="TimeoutError(...)",
+    )
+    assert err.kind == ResumeMirrorPersistError.KIND == "step.resume_mirror_persist_error"
+    assert isinstance(err, StepCoordinatorError)
+    assert isinstance(err, RuntimeError)
+    assert err.to_dict() == {
+        "kind": "step.resume_mirror_persist_error",
+        "message": "metadata store write failed",
+        "run_id": "r-1",
+        "step_id": "await-event",
+        "attempt": 1,
+        "event_key": "order.shipped",
+        "cause": "TimeoutError(...)",
+    }
+
+
 def test_sub_orchestration_errors_optional_fields_default_to_none() -> None:
     for err in (
         LoopExpansionError("x"),
         SubOrchestrationSpawnError("x"),
         SubWorkflowFailedError("x"),
         ApprovalTimeoutError("x"),
+        ResumeRegistrationFailedError("x"),
+        ResumeSubscriptionDivergentError("x"),
+        ResumeMirrorPersistError("x"),
     ):
         payload = err.to_dict()
         assert payload["run_id"] is None

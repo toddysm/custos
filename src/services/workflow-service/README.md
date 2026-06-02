@@ -563,6 +563,21 @@ and a defensive coordinator dispatch arm that **raises**
 orchestrator owns the inline `wait_for_external_event` park.
 Tracker: [#552](https://github.com/toddysm/custos/issues/552).
 
+WF-IMPL-100 ([#539](https://github.com/toddysm/custos/issues/539))
+extends the locked Step Coordinator error taxonomy
+(`custos_workflow.steps.errors`) with three Resume Subscription
+Manager `kind` strings — `step.resume_registration_failed`
+(`RegisterResumeSubscription` stayed unreachable after
+`WF_REGISTER_SUB_MAX_RETRIES`, mapped to `class: retryable`),
+`step.resume_subscription_divergent` (a `waitFor.selector`
+diverged on Dapr replay; the original wins), and
+`step.resume_mirror_persist_error` (the `ResumeSubscriptionMirror`
+write could not be issued). All three subclass
+`StepCoordinatorError`, carry JSON-safe `to_dict()` payloads, and
+join `LOCKED_STEP_KINDS` so the WF-IMPL-058 OTel counter and the
+`_telemetry` outcome map stay exhaustive.
+Tracker: [#552](https://github.com/toddysm/custos/issues/552).
+
 
 The Expression Evaluator (the first sub-module) is already in
 [`src/libs/custos-cel/`](../../libs/custos-cel) and shipped via

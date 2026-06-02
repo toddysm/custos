@@ -44,6 +44,15 @@ The hierarchy:
   ``attempt + 1 > maxAttempts`` (``step.retry_budget_exhausted``).
   Carries the last underlying ``code`` / ``codePrefix`` / ``class``
   for audit correlation.
+* :class:`ResumeRegistrationFailedError` — ``RegisterResumeSubscription``
+  stayed unreachable after ``WF_REGISTER_SUB_MAX_RETRIES``
+  (``step.resume_registration_failed``).
+* :class:`ResumeSubscriptionDivergentError` — a resume subscription's
+  ``selector`` diverged on Dapr replay; the original wins
+  (``step.resume_subscription_divergent``).
+* :class:`ResumeMirrorPersistError` — persisting the
+  ``ResumeSubscriptionMirror`` failed structurally
+  (``step.resume_mirror_persist_error``).
 
 The :attr:`KIND` string is a class-level :data:`typing.Final`
 constant so ``cls.KIND`` and ``instance.kind`` are always identical
@@ -68,6 +77,9 @@ __all__ = [
     "ApprovalTimeoutError",
     "ConnectorBindError",
     "LoopExpansionError",
+    "ResumeMirrorPersistError",
+    "ResumeRegistrationFailedError",
+    "ResumeSubscriptionDivergentError",
     "RetryBudgetExhaustedError",
     "StepCoordinatorError",
     "StepKindNotImplementedError",
@@ -125,7 +137,10 @@ class StepCoordinatorError(RuntimeError):
                 "WithInputResolutionError, ConnectorBindError, "
                 "ActivityScheduleError, RetryBudgetExhaustedError, "
                 "LoopExpansionError, SubOrchestrationSpawnError, "
-                "SubWorkflowFailedError, ApprovalTimeoutError) "
+                "SubWorkflowFailedError, ApprovalTimeoutError, "
+                "ResumeRegistrationFailedError, "
+                "ResumeSubscriptionDivergentError, "
+                "ResumeMirrorPersistError) "
                 "instead.",
             )
         super().__init__(message)
@@ -636,6 +651,142 @@ class ApprovalTimeoutError(StepCoordinatorError):
         }
 
 
+class ResumeRegistrationFailedError(StepCoordinatorError):
+    """Registering a resume subscription with the Trigger Service failed.
+
+    Raised by the WF-IMPL-104 ``waitFor:`` handler when the
+    ``RegisterResumeSubscription`` RPC stays unreachable after the
+    bounded retry loop (``WF_REGISTER_SUB_MAX_RETRIES``, default 5).
+    Per ``design.md`` § *Operation: Step Resume on External Event*,
+    exhaustion fails the wait step with ``class: retryable`` so the
+    workflow-level retry policy decides whether to give up — this
+    prevents a wait step from silently never resuming when the resume
+    registration itself never landed.
+
+    Attributes:
+        event_key: The resolved ``waitFor.eventKey`` whose
+            registration failed, when known.
+        max_retries: The configured ``WF_REGISTER_SUB_MAX_RETRIES``
+            ceiling that was exhausted, when known.
+        cause: A short ``str`` summary of the last underlying transport
+            failure (typically ``repr(exc)``), when known.
+    """
+
+    KIND: Final[str] = "step.resume_registration_failed"  # type: ignore[misc]
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        run_id: str | None = None,
+        step_id: str | None = None,
+        attempt: int | None = None,
+        event_key: str | None = None,
+        max_retries: int | None = None,
+        cause: str | None = None,
+    ) -> None:
+        super().__init__(message, run_id=run_id, step_id=step_id, attempt=attempt)
+        self.event_key: str | None = event_key
+        self.max_retries: int | None = max_retries
+        self.cause: str | None = cause
+
+    def _extra_fields(self) -> dict[str, Any]:
+        return {
+            "event_key": self.event_key,
+            "max_retries": self.max_retries,
+            "cause": self.cause,
+        }
+
+
+class ResumeSubscriptionDivergentError(StepCoordinatorError):
+    """A resume subscription's selector diverged on Dapr replay.
+
+    Raised by the WF-IMPL-104 replay re-registration path when the
+    ``selector`` evaluated on replay differs from the value persisted in
+    the original ``ResumeSubscriptionMirror``. Per ``design.md``
+    § *Divergence policy*, the **original wins** — Dapr Workflow replay
+    must be deterministic, so a divergent selector signals a bug in the
+    workflow definition or evaluator. The mirror keeps the original
+    registration and this error surfaces the divergence so it is
+    observable (mirroring the Trigger Service
+    ``resume.subscription.divergent`` audit event).
+
+    Attributes:
+        event_key: The ``waitFor.eventKey`` whose subscription diverged,
+            when known.
+        original_selector: The selector persisted in the original
+            mirror, which is kept, when known.
+        replay_selector: The divergent selector produced on replay,
+            which is discarded, when known.
+    """
+
+    KIND: Final[str] = "step.resume_subscription_divergent"  # type: ignore[misc]
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        run_id: str | None = None,
+        step_id: str | None = None,
+        attempt: int | None = None,
+        event_key: str | None = None,
+        original_selector: str | None = None,
+        replay_selector: str | None = None,
+    ) -> None:
+        super().__init__(message, run_id=run_id, step_id=step_id, attempt=attempt)
+        self.event_key: str | None = event_key
+        self.original_selector: str | None = original_selector
+        self.replay_selector: str | None = replay_selector
+
+    def _extra_fields(self) -> dict[str, Any]:
+        return {
+            "event_key": self.event_key,
+            "original_selector": self.original_selector,
+            "replay_selector": self.replay_selector,
+        }
+
+
+class ResumeMirrorPersistError(StepCoordinatorError):
+    """Persisting the ``ResumeSubscriptionMirror`` failed structurally.
+
+    Raised by the WF-IMPL-104 ``waitFor:`` handler when the
+    ``MetadataStoreProvider`` write that mirrors a resume subscription
+    cannot be issued. Per ``design.md`` the mirror is persisted *before*
+    the ``RegisterResumeSubscription`` call so replay re-registration is
+    possible; if that write fails the subscription must not be
+    registered, and the wait step fails loudly rather than risk a
+    subscription with no recoverable mirror.
+
+    Attributes:
+        event_key: The ``waitFor.eventKey`` whose mirror failed to
+            persist, when known.
+        cause: A short ``str`` summary of the underlying store failure
+            (typically ``repr(exc)``), when known.
+    """
+
+    KIND: Final[str] = "step.resume_mirror_persist_error"  # type: ignore[misc]
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        run_id: str | None = None,
+        step_id: str | None = None,
+        attempt: int | None = None,
+        event_key: str | None = None,
+        cause: str | None = None,
+    ) -> None:
+        super().__init__(message, run_id=run_id, step_id=step_id, attempt=attempt)
+        self.event_key: str | None = event_key
+        self.cause: str | None = cause
+
+    def _extra_fields(self) -> dict[str, Any]:
+        return {
+            "event_key": self.event_key,
+            "cause": self.cause,
+        }
+
+
 # ---------------------------------------------------------------------------
 # Locked kind set
 # ---------------------------------------------------------------------------
@@ -657,5 +808,8 @@ LOCKED_STEP_KINDS: Final[frozenset[str]] = frozenset(
         SubOrchestrationSpawnError.KIND,
         SubWorkflowFailedError.KIND,
         ApprovalTimeoutError.KIND,
+        ResumeRegistrationFailedError.KIND,
+        ResumeSubscriptionDivergentError.KIND,
+        ResumeMirrorPersistError.KIND,
     }
 )
