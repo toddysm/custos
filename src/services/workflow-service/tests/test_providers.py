@@ -44,6 +44,7 @@ from custos_workflow.providers import (
     ENV_OUTBOUND_RPC_TIMEOUT_MS,
     ENV_REGISTER_SUB_MAX_RETRIES,
     ENV_RESUME_SUB_DEFAULT_TTL,
+    ENV_RESUME_SUB_SWEEP_INTERVAL,
     ENV_TS_ENDPOINT,
     _build_trigger_client,
     _InProcessMetadataStoreProvider,
@@ -52,11 +53,13 @@ from custos_workflow.providers import (
     _resolve_outbound_rpc_timeout_seconds,
     _resolve_register_sub_max_retries,
     _resolve_resume_sub_default_ttl,
+    _resolve_resume_sub_sweep_interval,
     load_run_components,
 )
 from custos_workflow.runs.replay import NoopReplayReconciler
 from custos_workflow.runtime import FakeWorkflowRuntime
 from custos_workflow.steps.resume import (
+    DEFAULT_RESUME_SUB_SWEEP_INTERVAL_SECONDS,
     ResumeSubscriptionReplayReconciler,
     WaitForStepHandler,
 )
@@ -441,6 +444,22 @@ def test_resolve_register_sub_max_retries_rejects_bad_values(bad: str) -> None:
         _resolve_register_sub_max_retries({ENV_REGISTER_SUB_MAX_RETRIES: bad})
 
 
+def test_resolve_resume_sub_sweep_interval_default_when_unset() -> None:
+    """Unset ``WF_RESUME_SUB_SWEEP_INTERVAL`` → the 300s default."""
+    assert _resolve_resume_sub_sweep_interval({}) == DEFAULT_RESUME_SUB_SWEEP_INTERVAL_SECONDS
+
+
+def test_resolve_resume_sub_sweep_interval_parses_positive_number() -> None:
+    assert _resolve_resume_sub_sweep_interval({ENV_RESUME_SUB_SWEEP_INTERVAL: "45"}) == 45.0
+    assert _resolve_resume_sub_sweep_interval({ENV_RESUME_SUB_SWEEP_INTERVAL: "2.5"}) == 2.5
+
+
+@pytest.mark.parametrize("bad", ["abc", "0", "-1", "-0.5", "nan", "inf"])
+def test_resolve_resume_sub_sweep_interval_rejects_bad_values(bad: str) -> None:
+    with pytest.raises(ValueError):
+        _resolve_resume_sub_sweep_interval({ENV_RESUME_SUB_SWEEP_INTERVAL: bad})
+
+
 def test_build_trigger_client_noop_when_endpoint_unset() -> None:
     """No ``WF_TS_ENDPOINT`` → the in-process Noop client (no socket pool)."""
     client = _build_trigger_client(env={}, http_client=None, timeout_seconds=10.0)
@@ -526,6 +545,26 @@ def test_resume_knobs_thread_into_handler() -> None:
 
     assert components.resume_handler._default_ttl == "PT12H"
     assert components.resume_handler._max_register_retries == 7
+
+
+def test_resume_sweep_interval_defaults_onto_components() -> None:
+    """Unset sweep-interval env → the 300s default lands on the bundle."""
+    components = load_run_components(
+        env={},
+        workflow_runtime=FakeWorkflowRuntime(),
+    )
+
+    assert components.resume_sweep_interval_seconds == DEFAULT_RESUME_SUB_SWEEP_INTERVAL_SECONDS
+
+
+def test_resume_sweep_interval_threads_onto_components() -> None:
+    """The resolved sweep interval is threaded onto the RunComponents bundle."""
+    components = load_run_components(
+        env={ENV_RESUME_SUB_SWEEP_INTERVAL: "30"},
+        workflow_runtime=FakeWorkflowRuntime(),
+    )
+
+    assert components.resume_sweep_interval_seconds == 30.0
 
 
 def test_resume_default_ttl_threads_into_production_reconciler() -> None:

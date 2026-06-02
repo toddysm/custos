@@ -53,6 +53,7 @@ from custos_workflow.providers import (
 from custos_workflow.runs.orchestrator import WORKFLOW_NAME, make_run_orchestrator
 from custos_workflow.steps import StepCoordinator
 from custos_workflow.steps.activity_step import ActivityStepHandler
+from custos_workflow.steps.resume import ResumeSubscriptionTtlSweeper
 from custos_workflow.steps.sub_orchestration import (
     CHILD_STEP_WORKFLOW_NAME,
     SubOrchestrationManager,
@@ -244,9 +245,17 @@ def create_app(
         # so it shares the same Catalog client the Run Controller
         # drives.
         app.state.start_run_validator = components.start_run_validator
+        # WF-IMPL-109: launch the background TTL-expiry sweep that
+        # garbage-collects expired resume-subscription mirror rows on a
+        # wall-clock interval, independent of the WF mirror writes the
+        # ``waitFor:`` handler performs. The task is cancelled (and
+        # awaited) on lifespan exit so it never outlives the worker.
+        sweep_task = _start_resume_sweep(components)
+        app.state.resume_sweep_task = sweep_task
         try:
             yield
         finally:
+            await _cancel_resume_sweep(sweep_task)
             await _shutdown_components(components, worker_shutdown_timeout_s)
 
     app = FastAPI(
@@ -337,6 +346,42 @@ def _resolve_run_components(injected: RunComponents | None) -> RunComponents:
             "and reconcile waitFor: subscriptions."
         )
     return load_run_components()
+
+
+def _start_resume_sweep(components: RunComponents) -> asyncio.Task[None]:
+    """Launch the WF-IMPL-109 TTL-expiry mirror sweep as a background task.
+
+    The sweeper garbage-collects expired
+    :class:`~custos_workflow.steps.resume.ResumeSubscriptionMirror`
+    rows over the *same* mirror repository the ``waitFor:`` handler
+    (and, when active, the replay reconciler) is built on, so the table
+    does not grow without bound for runs that parked on a ``waitFor:``
+    step and were never resumed before TTL. The interval is the
+    env-resolved :attr:`RunComponents.resume_sweep_interval_seconds`.
+    """
+    sweeper = ResumeSubscriptionTtlSweeper(components.resume_handler.mirror_repo)
+    return asyncio.create_task(
+        sweeper.run_forever(components.resume_sweep_interval_seconds),
+        name="resume-subscription-ttl-sweep",
+    )
+
+
+async def _cancel_resume_sweep(task: asyncio.Task[None]) -> None:
+    """Cancel and await the TTL-expiry sweep task on lifespan exit.
+
+    Never raises — the lifespan teardown must not crash on the sweep
+    task. The expected outcome is :class:`asyncio.CancelledError` (the
+    sweep loop runs until cancelled); any other exception means a sweep
+    raised outside its own swallow-and-continue guard and is logged
+    rather than propagated.
+    """
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        logger.exception("resume subscription TTL sweep task raised during shutdown")
 
 
 async def _shutdown_components(components: RunComponents, worker_shutdown_timeout_s: float) -> None:

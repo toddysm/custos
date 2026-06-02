@@ -27,6 +27,7 @@ Design references:
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from collections.abc import Mapping
@@ -82,6 +83,7 @@ from custos_workflow.runs.replay import NoopReplayReconciler, ReplayReconciler
 from custos_workflow.runs.store import InProcessRunStore, RunStore
 from custos_workflow.runtime import FakeWorkflowRuntime, WorkflowClient, WorkflowRuntime
 from custos_workflow.steps.resume import (
+    DEFAULT_RESUME_SUB_SWEEP_INTERVAL_SECONDS,
     InMemoryResumeSubscriptionMirrorRepository,
     ResumeSubscriptionMirrorRepository,
     ResumeSubscriptionReplayReconciler,
@@ -117,6 +119,7 @@ __all__ = [
     "ENV_PUBLISH_TOPIC",
     "ENV_REGISTER_SUB_MAX_RETRIES",
     "ENV_RESUME_SUB_DEFAULT_TTL",
+    "ENV_RESUME_SUB_SWEEP_INTERVAL",
     "ENV_TS_ENDPOINT",
     "RunComponents",
     "WorkflowRuntimeProtocol",
@@ -239,6 +242,17 @@ ENV_RESUME_SUB_DEFAULT_TTL = "WF_RESUME_SUB_DEFAULT_TTL"
 #: :data:`~custos_workflow.steps.resume.DEFAULT_REGISTER_SUB_MAX_RETRIES`
 #: (``5``).
 ENV_REGISTER_SUB_MAX_RETRIES = "WF_REGISTER_SUB_MAX_RETRIES"
+
+#: Optional. Wall-clock interval (in seconds) between TTL-expiry
+#: garbage-collection sweeps of the resume-subscription mirror table
+#: (WF-IMPL-109; design.md § Data Models — *TTL-expired mirrors are
+#: garbage-collected on a periodic sweep*). Parsed once at lifespan
+#: startup as a positive number and threaded into the background
+#: :class:`~custos_workflow.steps.resume.ResumeSubscriptionTtlSweeper`
+#: task the FastAPI lifespan runs. Defaults to
+#: :data:`~custos_workflow.steps.resume.DEFAULT_RESUME_SUB_SWEEP_INTERVAL_SECONDS`
+#: (``300`` — five minutes).
+ENV_RESUME_SUB_SWEEP_INTERVAL = "WF_RESUME_SUB_SWEEP_INTERVAL"
 
 #: Strict ISO-8601 duration grammar used to parse
 #: :data:`ENV_APPROVAL_DEFAULT_TIMEOUT`. Mirrors
@@ -520,6 +534,13 @@ class RunComponents:
             :data:`ENV_TS_ENDPOINT` is set. The Postgres-backed mirror
             adapter is a follow-up infrastructure task (same staging as
             the idempotency ledger).
+        resume_sweep_interval_seconds: WF-IMPL-109 wall-clock interval
+            (:data:`ENV_RESUME_SUB_SWEEP_INTERVAL`, default ``300``)
+            between TTL-expiry garbage-collection sweeps. The FastAPI
+            lifespan threads it into the background
+            :class:`~custos_workflow.steps.resume.ResumeSubscriptionTtlSweeper`
+            it runs over the same mirror repository
+            :attr:`resume_handler` is built on.
     """
 
     workflow_runtime: WorkflowRuntimeProtocol
@@ -543,6 +564,7 @@ class RunComponents:
     resume_handler: WaitForStepHandler = field(
         default_factory=lambda: WaitForStepHandler(InMemoryResumeSubscriptionMirrorRepository())
     )
+    resume_sweep_interval_seconds: float = DEFAULT_RESUME_SUB_SWEEP_INTERVAL_SECONDS
 
 
 # ---------------------------------------------------------------------------
@@ -775,6 +797,36 @@ def _resolve_register_sub_max_retries(env: Mapping[str, str]) -> int:
     if retries < 1:
         raise ValueError(f"{ENV_REGISTER_SUB_MAX_RETRIES} must be a positive integer, got {raw!r}")
     return retries
+
+
+def _resolve_resume_sub_sweep_interval(env: Mapping[str, str]) -> float:
+    """Parse :data:`ENV_RESUME_SUB_SWEEP_INTERVAL` once at startup.
+
+    An unset or blank value falls back to
+    :data:`~custos_workflow.steps.resume.DEFAULT_RESUME_SUB_SWEEP_INTERVAL_SECONDS`
+    (``300`` seconds). The value is the wall-clock interval the
+    background
+    :class:`~custos_workflow.steps.resume.ResumeSubscriptionTtlSweeper`
+    waits between TTL-expiry sweeps.
+
+    :raises ValueError: When the value is set but is not a positive,
+        finite number. The message names the env var so the operator can
+        find it without grepping.
+    """
+    raw = env.get(ENV_RESUME_SUB_SWEEP_INTERVAL, "").strip()
+    if not raw:
+        return DEFAULT_RESUME_SUB_SWEEP_INTERVAL_SECONDS
+    try:
+        interval = float(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"{ENV_RESUME_SUB_SWEEP_INTERVAL} must be a positive number of seconds, got {raw!r}"
+        ) from exc
+    if not math.isfinite(interval) or interval <= 0:
+        raise ValueError(
+            f"{ENV_RESUME_SUB_SWEEP_INTERVAL} must be a positive number of seconds, got {raw!r}"
+        )
+    return interval
 
 
 def _build_activity_client(
@@ -1183,4 +1235,5 @@ def load_run_components(
         max_fanout_width=_resolve_max_fanout_width(resolved_env),
         approval_default_timeout=_resolve_approval_default_timeout(resolved_env),
         resume_handler=resume_handler,
+        resume_sweep_interval_seconds=_resolve_resume_sub_sweep_interval(resolved_env),
     )

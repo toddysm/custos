@@ -640,6 +640,27 @@ once the Trigger Service (COMP-004) exists.
 Tracker: [#552](https://github.com/toddysm/custos/issues/552).
 
 
+WF-IMPL-109 ([#548](https://github.com/toddysm/custos/issues/548))
+adds the TTL-expiry periodic mirror sweep
+(`custos_workflow.steps.resume.sweeper`) — a
+`ResumeSubscriptionTtlSweeper` whose `sweep_once()` calls
+`list_expired(now)` on the shared mirror repository and
+idempotently `delete`s each TTL-expired row (rule 3 of the design's
+*Resume Subscription Replay Protocol*), isolating per-row delete
+failures so one wedged row never stalls the pass. `create_app`
+launches the sweeper's `run_forever(interval)` loop as a background
+`asyncio.Task` on the lifespan ready path — sharing the **same**
+`InMemoryResumeSubscriptionMirrorRepository` the `WaitForStepHandler`
+and reconciler use — and cancels + awaits it on shutdown so it never
+outlives the worker. The loop is restart-safe (it derives expiry from
+the persisted `expires_at`, not in-memory timers) and resilient: any
+exception a sweep raises is logged and swallowed so the task survives
+to the next pass, exiting only on cancellation. The cadence is a new
+`WF_RESUME_SUB_SWEEP_INTERVAL` knob (`300` seconds default, validated
+as a positive finite float) threaded onto `RunComponents`.
+Tracker: [#552](https://github.com/toddysm/custos/issues/552).
+
+
 WF-IMPL-108 ([#547](https://github.com/toddysm/custos/issues/547))
 wires the Resume Subscription Manager into the running worker. The
 `load_run_components` factory now builds a single in-process
@@ -799,6 +820,7 @@ Per [`design/components/workflow-service/design.md`](../../../design/components/
 | `WF_RUN_HISTORY_RETENTION` | No | `90d` | How long to keep terminal-run metadata before archival. |
 | `WF_RESUME_SUB_DEFAULT_TTL` | No | `PT24H` | Default TTL for `RegisterResumeSubscription` when caller does not specify. |
 | `WF_REGISTER_SUB_MAX_RETRIES` | No | `5` | Max retries when registering a resume subscription with TS before failing the wait step. |
+| `WF_RESUME_SUB_SWEEP_INTERVAL` | No | `300` | Seconds between background sweeps that reap TTL-expired resume-subscription mirror rows. |
 | `WF_EXPR_TIMEOUT_MS` | No | `100` | Per-expression evaluation timeout. |
 | `WF_IDEMPOTENCY_KEY_TTL` | No | `PT24H` | Window for `(workspaceId, StartRun idempotencyKey)` dedup. |
 
