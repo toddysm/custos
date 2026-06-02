@@ -384,9 +384,7 @@ class TestReconcileAsyncTriggerClient:
 
         node = _wait_for_node(selector_cel="inputs.sel")
         ctx = _ctx(inputs={"key": "order-approved", "sel": "region == 'eu'"})
-        reconciler = ResumeSubscriptionReplayReconciler(
-            repo, cast(TriggerServiceClient, trigger)
-        )
+        reconciler = ResumeSubscriptionReplayReconciler(repo, cast(TriggerServiceClient, trigger))
 
         report = await reconciler.reconcile(ctx, _graph(node))
 
