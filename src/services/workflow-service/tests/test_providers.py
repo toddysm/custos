@@ -329,10 +329,10 @@ def test_resolve_approval_default_timeout_parses_iso8601() -> None:
     )
 
 
-@pytest.mark.parametrize("bad", ["24h", "PT0S", "P1Y", "", "P"])
+@pytest.mark.parametrize("bad", ["24h", "PT0S", "P1Y", "", "P", "PT0.5S", "PT1H30.5S"])
 def test_resolve_approval_default_timeout_rejects_bad_values(bad: str) -> None:
     # ``""`` falls back to the default, so only the genuinely malformed
-    # / non-positive / calendar values raise.
+    # / non-positive / calendar / sub-second values raise.
     if bad == "":
         assert _resolve_approval_default_timeout({ENV_APPROVAL_DEFAULT_TIMEOUT: bad}) == (
             DEFAULT_APPROVAL_TIMEOUT

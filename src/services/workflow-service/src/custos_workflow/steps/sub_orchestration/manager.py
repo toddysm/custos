@@ -723,12 +723,16 @@ class SubOrchestrationManager:
 def _format_iso8601_duration(delta: timedelta) -> str:
     """Render a :class:`~datetime.timedelta` as an ISO-8601 duration.
 
-    Produces the ``P[nD][T[nH][nM][nS]]`` form (e.g. ``timedelta(hours=24)``
-    → ``"PT24H"``) used for the audit-facing ``timeout`` field of an
+    Produces the canonical ``P[nD][T[nH][nM][nS]]`` form, normalising
+    whole-day spans into the date component (e.g. ``timedelta(hours=24)``
+    → ``"P1D"``, ``timedelta(hours=23)`` → ``"PT23H"``). Used for the
+    audit-facing ``timeout`` field of an
     :class:`~custos_workflow.steps.errors.ApprovalTimeoutError` when the
     gate timeout came from the platform-configured default rather than a
     document literal. Sub-second precision is dropped (the configured
-    default is always whole seconds).
+    default is always whole seconds; see
+    :func:`custos_workflow.providers._resolve_approval_default_timeout`,
+    which rejects fractional values at the env boundary).
     """
     total_seconds = int(delta.total_seconds())
     days, rem = divmod(total_seconds, 86400)

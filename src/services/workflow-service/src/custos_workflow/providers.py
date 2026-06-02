@@ -620,6 +620,16 @@ def _resolve_approval_default_timeout(env: Mapping[str, str]) -> timedelta:
     seconds = float(match.group("seconds") or 0.0)
     if weeks == 0 and days == 0 and hours == 0 and minutes == 0 and seconds == 0.0:
         raise ValueError(f"{ENV_APPROVAL_DEFAULT_TIMEOUT}: {raw!r} must be greater than zero")
+    if seconds != int(seconds):
+        # The configured default is rendered back to a whole-second
+        # ISO-8601 label for the approval-timeout audit envelope
+        # (``_format_iso8601_duration`` drops sub-second precision), so
+        # accepting a fractional value here would silently mis-report
+        # the effective timeout. Reject it at the boundary instead.
+        raise ValueError(
+            f"{ENV_APPROVAL_DEFAULT_TIMEOUT}: {raw!r} must be a whole number of seconds "
+            "(sub-second precision is not supported)"
+        )
     return timedelta(weeks=weeks, days=days, hours=hours, minutes=minutes, seconds=seconds)
 
 
