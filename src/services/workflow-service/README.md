@@ -640,6 +640,37 @@ once the Trigger Service (COMP-004) exists.
 Tracker: [#552](https://github.com/toddysm/custos/issues/552).
 
 
+WF-IMPL-105 ([#544](https://github.com/toddysm/custos/issues/544))
+adds the production `ResumeSubscriptionReplayReconciler`
+(`custos_workflow.steps.resume.reconciler`) — the
+`ReplayReconciler` bound to the orchestrator's replay hook that
+idempotently re-registers a run's open resume subscriptions on
+every orchestrator entry (the wiring into `providers.py` lands in
+WF-IMPL-108). It implements the design's *Resume Subscription
+Replay Protocol*: it `list_open(runId)`s the run's mirrors and
+re-registers each through the `TriggerServiceClient` (idempotent on
+`(runId, stepId, eventKey)` — an identical key returns the existing
+`tsSubscriptionId`, no duplicate); applies the **divergence policy**
+(rule 2) by re-evaluating each step's `waitFor.selector` against the
+replayed scope and, when it differs from the persisted selector,
+keeping the original registration and emitting a
+`step.resume_subscription_divergent` audit event; and applies the
+**TTL-expiry** rule (rule 3 / rule 4) by updating the mirror row when
+the Trigger Service returns a fresh `tsSubscriptionId`. Because the
+orchestrator's replay hook is **synchronous and MUST NOT raise**
+while the mirror repository and audit publisher are `async`, the
+reconciler splits into an `async reconcile()` core (returning a
+`ReplayReconcileReport`) and a sync `on_replay()` bridge that drives
+it via `asyncio.run` and swallows + logs every failure. The
+divergence audit ships through a dedicated
+`ResumeSubscriptionAuditPublisher` (default
+`NoopResumeSubscriptionAuditPublisher`) rather than the locked
+`StepLifecyclePublisher` taxonomy, since divergence is a
+reconcile-time audit signal; the production wire transport lands in
+WF-IMPL-108.
+Tracker: [#552](https://github.com/toddysm/custos/issues/552).
+
+
 WF-IMPL-104 ([#543](https://github.com/toddysm/custos/issues/543))
 adds the `WaitForStepHandler`
 (`custos_workflow.steps.resume.handler`) — the Resume Subscription
