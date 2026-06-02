@@ -61,6 +61,25 @@ A ``forEach`` list that derives two equal iteration keys is rejected
 with ``step.loop_expansion_error`` (the deterministic child instance id
 must be unique per iteration).
 
+Replay determinism (WF-IMPL-095)
+--------------------------------
+
+Every child instance id this manager spawns is a pure function of the
+parent's durable state — ``<parentRunId>/<stepId>/<iterationKey>``,
+where ``iterationKey`` is derived from the ``forEach`` items (themselves
+the output of the deterministic CEL evaluator) for loops, or a reserved
+constant for ``workflow:`` / ``approval:`` children. Re-entering
+``run_loop`` / ``run_sub_workflow`` / ``run_approval`` on a Dapr
+Workflow **replay** therefore re-derives a *byte-equal* child id set, so
+``call_child_workflow`` matches the recorded history and Dapr returns
+the already-completed child's result instead of re-spawning it (no
+duplicated side effects). The manager holds no mutable per-run state of
+its own — it carries only its immutable fan-out / approval configuration
+— which keeps that re-derivation independent of how many times the
+orchestrator has been replayed. The property test
+``tests/steps/test_sub_orchestration_determinism.py`` locks this
+invariant under fuzzing.
+
 Out of scope (later tasks)
 --------------------------
 
