@@ -221,7 +221,7 @@ def _drive_to_yield(gen: Generator[Any, Any, Any]) -> Any:
     return next(gen)
 
 
-def _drive_example_1() -> None:
+def _drive_example_1() -> str:
     """Worked example 1 — ``forEach:`` loop fans out one child per item."""
 
     graph = _compile(_DOC_BLOCK_BODIES[1])
@@ -251,9 +251,10 @@ def _drive_example_1() -> None:
             ]
         )
     assert si.value.value == [{"n": 1}, {"n": 2}]
+    return "loop-fans-out"
 
 
-def _drive_example_2() -> None:
+def _drive_example_2() -> str:
     """Worked example 2 — ``approval:`` gate binds the decision payload."""
 
     graph = _compile(_DOC_BLOCK_BODIES[2])
@@ -272,9 +273,10 @@ def _drive_example_2() -> None:
     with pytest.raises(StopIteration) as si:
         gen.send(ctx.event)
     assert si.value.value == decision
+    return "approval-decision-binds"
 
 
-def _drive_example_3() -> None:
+def _drive_example_3() -> str:
     """Worked example 3 — ``workflow:`` step merges the child outputs."""
 
     graph = _compile(_DOC_BLOCK_BODIES[3])
@@ -301,6 +303,7 @@ def _drive_example_3() -> None:
     with pytest.raises(StopIteration) as si:
         gen.send([child_output])
     assert si.value.value == {"greet": {"msg": "hi ada"}}
+    return "sub-workflow-merges"
 
 
 _EXAMPLE_DRIVERS: Final[dict[int, Any]] = {
@@ -318,8 +321,10 @@ def test_doc_example_yaml_runs_through_the_manager(block_idx: int, outcome_tag: 
     assert block_idx in _DOC_BLOCK_BODIES, (
         f"doc block #{block_idx} missing from docs/developers/workflow-sub-orchestration.md"
     )
-    _EXAMPLE_DRIVERS[block_idx]()
-    assert outcome_tag in set(_EXAMPLE_OUTCOMES.values())
+    # The driver runs the example through the manager and returns the
+    # outcome tag it actually exercised; pinning that to the table entry
+    # catches a driver wired to the wrong block or outcome.
+    assert _EXAMPLE_DRIVERS[block_idx]() == outcome_tag
 
 
 def test_every_doc_yaml_block_has_an_asserted_outcome() -> None:
