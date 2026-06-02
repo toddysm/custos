@@ -171,10 +171,11 @@ class ResumeSubscriptionCanceller:
                 # later sweep / reconcile retries the idempotent cancel.
                 _LOGGER.exception(
                     "failed to cancel resume subscription for mirror %s "
-                    "(run %s, step %s); leaving the mirror row in place",
+                    "(run %s, step %s, event %s); leaving the mirror row in place",
                     mirror.mirror_id,
                     mirror.run_id,
                     mirror.step_id,
+                    mirror.event_key,
                 )
                 failed.append(mirror.mirror_id)
                 continue
@@ -182,14 +183,23 @@ class ResumeSubscriptionCanceller:
             try:
                 await self._mirror_repo.delete(mirror.mirror_id)
             except Exception:
-                # The subscription is already cancelled (idempotent); the
-                # stale row is harmless and a later sweep deletes it.
+                # The subscription is already cancelled, but the stale row
+                # is NOT harmless: the replay reconciler re-registers every
+                # mirror returned by ``list_open`` on the next orchestrator
+                # entry, so a row that never deletes will resurrect the
+                # just-cancelled subscription with the Trigger Service
+                # (churn / resource leak). It is recorded as ``failed`` so a
+                # later sweep retries the delete; the cancel itself stays
+                # idempotent.
                 _LOGGER.exception(
                     "cancelled resume subscription for mirror %s (run %s, "
-                    "step %s) but failed to delete the mirror row",
+                    "step %s, event %s) but failed to delete the mirror row; "
+                    "the replay reconciler may re-register it until the row "
+                    "is removed",
                     mirror.mirror_id,
                     mirror.run_id,
                     mirror.step_id,
+                    mirror.event_key,
                 )
                 failed.append(mirror.mirror_id)
                 continue
