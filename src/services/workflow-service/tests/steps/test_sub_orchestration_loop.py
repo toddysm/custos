@@ -470,6 +470,51 @@ def test_non_list_for_each_raises_loop_expansion_error() -> None:
     assert ctx.calls == []
 
 
+# ---------------------------------------------------------------------------
+# Fan-out width cap (WF-IMPL-094) → step.sub_orchestration_spawn_error
+# ---------------------------------------------------------------------------
+
+
+def test_fanout_width_cap_rejects_oversized_loop_before_spawning() -> None:
+    ctx = _StubContext()
+    graph = _loop_graph(for_each_cel="inputs.items", inputs_schema=_ARRAY_OF_OBJECTS)
+    step_ctx = _ctx(
+        inputs={"items": [{"id": "a"}, {"id": "b"}, {"id": "c"}]},
+        workflow_context=ctx,
+    )
+
+    manager = SubOrchestrationManager(max_fanout_width=2)
+    gen = manager.run_loop(step_ctx, graph, _STEP_ID)
+    with pytest.raises(SubOrchestrationSpawnError) as exc:
+        next(gen)
+    assert exc.value.kind == "step.sub_orchestration_spawn_error"
+    assert exc.value.step_id == _STEP_ID
+    assert "maximum fan-out width of 2" in str(exc.value)
+    # The cap is enforced before any child is spawned.
+    assert ctx.calls == []
+    assert ctx.when_all_tasks is None
+
+
+def test_fanout_width_cap_allows_loop_at_the_limit() -> None:
+    ctx = _StubContext()
+    graph = _loop_graph(for_each_cel="inputs.items", inputs_schema=_ARRAY_OF_OBJECTS)
+    step_ctx = _ctx(
+        inputs={"items": [{"id": "a"}, {"id": "b"}]},
+        workflow_context=ctx,
+    )
+
+    manager = SubOrchestrationManager(max_fanout_width=2)
+    gen = manager.run_loop(step_ctx, graph, _STEP_ID)
+    _drive_to_when_all(gen)
+
+    assert [c["instance_id"] for c in ctx.calls] == ["parent-1/scan/a", "parent-1/scan/b"]
+
+
+def test_non_positive_max_fanout_width_is_rejected_at_construction() -> None:
+    with pytest.raises(ValueError, match="max_fanout_width must be a positive integer"):
+        SubOrchestrationManager(max_fanout_width=0)
+
+
 def test_for_each_eval_error_raises_loop_expansion_error() -> None:
     ctx = _StubContext()
     # ``inputs.maybe`` is declared optional but absent at runtime, so the

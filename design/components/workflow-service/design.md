@@ -665,6 +665,8 @@ Delivery semantics: **at-least-once**. Producer-side dedup on `(runId, eventKind
 | `WF_REGISTER_SUB_MAX_RETRIES` | No | `5` | Max retries when registering a resume subscription with TS before failing the wait step. |
 | `WF_EXPR_TIMEOUT_MS` | No | `100` | Per-expression evaluation timeout. |
 | `WF_IDEMPOTENCY_KEY_TTL` | No | `PT24H` | Window for `(workspaceId, StartRun idempotencyKey)` dedup. |
+| `WF_MAX_FANOUT_WIDTH` | No | `1000` | Maximum number of children a single `forEach` loop may spawn; an over-cap loop fails with `step.sub_orchestration_spawn_error` before any child is spawned. |
+| `WF_APPROVAL_DEFAULT_TIMEOUT` | No | `PT24H` | Default `approval:` gate timeout applied when a document leaves `approval.timeout` at the model default; an explicit per-document timeout always wins. |
 
 ## Dependencies
 

@@ -33,14 +33,22 @@ from custos_workflow.clients import (
 )
 from custos_workflow.providers import (
     DEFAULT_OUTBOUND_RPC_TIMEOUT_MS,
+    ENV_APPROVAL_DEFAULT_TIMEOUT,
     ENV_ARM_APP_ID,
     ENV_CONNECTOR_APP_ID,
+    ENV_MAX_FANOUT_WIDTH,
     ENV_OUTBOUND_RPC_TIMEOUT_MS,
     _InProcessMetadataStoreProvider,
+    _resolve_approval_default_timeout,
+    _resolve_max_fanout_width,
     _resolve_outbound_rpc_timeout_seconds,
     load_run_components,
 )
 from custos_workflow.runtime import FakeWorkflowRuntime
+from custos_workflow.steps.sub_orchestration import (
+    DEFAULT_APPROVAL_TIMEOUT,
+    DEFAULT_MAX_FANOUT_WIDTH,
+)
 
 
 @pytest.mark.asyncio
@@ -287,3 +295,73 @@ def test_resolve_outbound_rpc_timeout_threaded_into_dapr_adapter() -> None:
             import asyncio
 
             asyncio.run(components.dapr_http_client.aclose())
+
+
+# ---------------------------------------------------------------------------
+# WF-IMPL-094 — Sub-orchestration knobs (fan-out width + approval timeout)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_max_fanout_width_default_when_unset() -> None:
+    assert _resolve_max_fanout_width({}) == DEFAULT_MAX_FANOUT_WIDTH
+
+
+def test_resolve_max_fanout_width_parses_positive_int() -> None:
+    assert _resolve_max_fanout_width({ENV_MAX_FANOUT_WIDTH: "32"}) == 32
+
+
+@pytest.mark.parametrize("bad", ["abc", "1.5", "0", "-1"])
+def test_resolve_max_fanout_width_rejects_bad_values(bad: str) -> None:
+    with pytest.raises(ValueError):
+        _resolve_max_fanout_width({ENV_MAX_FANOUT_WIDTH: bad})
+
+
+def test_resolve_approval_default_timeout_default_when_unset() -> None:
+    assert _resolve_approval_default_timeout({}) == DEFAULT_APPROVAL_TIMEOUT
+
+
+def test_resolve_approval_default_timeout_parses_iso8601() -> None:
+    assert _resolve_approval_default_timeout({ENV_APPROVAL_DEFAULT_TIMEOUT: "PT48H"}) == timedelta(
+        hours=48
+    )
+    assert _resolve_approval_default_timeout({ENV_APPROVAL_DEFAULT_TIMEOUT: "P2W"}) == timedelta(
+        weeks=2
+    )
+
+
+@pytest.mark.parametrize("bad", ["24h", "PT0S", "P1Y", "", "P"])
+def test_resolve_approval_default_timeout_rejects_bad_values(bad: str) -> None:
+    # ``""`` falls back to the default, so only the genuinely malformed
+    # / non-positive / calendar values raise.
+    if bad == "":
+        assert _resolve_approval_default_timeout({ENV_APPROVAL_DEFAULT_TIMEOUT: bad}) == (
+            DEFAULT_APPROVAL_TIMEOUT
+        )
+        return
+    with pytest.raises(ValueError):
+        _resolve_approval_default_timeout({ENV_APPROVAL_DEFAULT_TIMEOUT: bad})
+
+
+def test_suborchestration_knobs_thread_onto_run_components() -> None:
+    components = load_run_components(
+        env={ENV_MAX_FANOUT_WIDTH: "7", ENV_APPROVAL_DEFAULT_TIMEOUT: "PT12H"},
+        workflow_runtime=FakeWorkflowRuntime(),
+    )
+
+    assert components.max_fanout_width == 7
+    assert components.approval_default_timeout == timedelta(hours=12)
+
+
+def test_suborchestration_knobs_default_onto_run_components() -> None:
+    components = load_run_components(env={}, workflow_runtime=FakeWorkflowRuntime())
+
+    assert components.max_fanout_width == DEFAULT_MAX_FANOUT_WIDTH
+    assert components.approval_default_timeout == DEFAULT_APPROVAL_TIMEOUT
+
+
+def test_provider_iso8601_pattern_matches_wait_module() -> None:
+    """The provider's self-contained ISO grammar must track the run-time one."""
+    from custos_workflow.providers import _ISO8601_DURATION_PATTERN as provider_pattern
+    from custos_workflow.runs.wait import _ISO8601_DURATION_PATTERN as wait_pattern
+
+    assert provider_pattern.pattern == wait_pattern.pattern

@@ -28,10 +28,11 @@ Design references:
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from typing import Any, Protocol, cast, runtime_checkable
+from datetime import UTC, datetime, timedelta
+from typing import Any, Final, Protocol, cast, runtime_checkable
 
 import httpx
 from custos_spl.errors import ImmutableViolation
@@ -75,6 +76,10 @@ from custos_workflow.runs.events import (
 from custos_workflow.runs.replay import NoopReplayReconciler, ReplayReconciler
 from custos_workflow.runs.store import InProcessRunStore, RunStore
 from custos_workflow.runtime import FakeWorkflowRuntime, WorkflowClient, WorkflowRuntime
+from custos_workflow.steps.sub_orchestration import (
+    DEFAULT_APPROVAL_TIMEOUT,
+    DEFAULT_MAX_FANOUT_WIDTH,
+)
 from custos_workflow.validator import (
     IdempotencyLedger,
     InMemoryIdempotencyLedger,
@@ -82,12 +87,16 @@ from custos_workflow.validator import (
 )
 
 __all__ = [
+    "DEFAULT_APPROVAL_TIMEOUT",
     "DEFAULT_DAPR_PUBLISH_TOPIC",
+    "DEFAULT_MAX_FANOUT_WIDTH",
     "DEFAULT_OUTBOUND_RPC_TIMEOUT_MS",
+    "ENV_APPROVAL_DEFAULT_TIMEOUT",
     "ENV_ARM_APP_ID",
     "ENV_CONNECTOR_APP_ID",
     "ENV_DAPR_ENDPOINT",
     "ENV_DAPR_WORKFLOW_COMPONENT",
+    "ENV_MAX_FANOUT_WIDTH",
     "ENV_OUTBOUND_RPC_TIMEOUT_MS",
     "ENV_PUBLISH_PUBSUB",
     "ENV_PUBLISH_TOPIC",
@@ -156,6 +165,39 @@ ENV_OUTBOUND_RPC_TIMEOUT_MS = "WF_OUTBOUND_RPC_TIMEOUT_MS"
 #: the env var sees the same behaviour as the adapter's own
 #: dataclass default).
 DEFAULT_OUTBOUND_RPC_TIMEOUT_MS: int = 10_000
+
+#: Optional. Upper bound on the number of children a single ``forEach``
+#: fan-out may spawn (design.md § Configuration). Parsed once at
+#: lifespan startup and threaded into the
+#: :class:`~custos_workflow.steps.sub_orchestration.SubOrchestrationManager`.
+#: Defaults to
+#: :data:`~custos_workflow.steps.sub_orchestration.DEFAULT_MAX_FANOUT_WIDTH`.
+ENV_MAX_FANOUT_WIDTH = "WF_MAX_FANOUT_WIDTH"
+
+#: Optional. ISO-8601 duration applied as the approval-gate timeout
+#: when a document leaves ``approval.timeout`` at the model default
+#: (design.md § Configuration). Parsed once at lifespan startup and
+#: threaded into the
+#: :class:`~custos_workflow.steps.sub_orchestration.SubOrchestrationManager`.
+#: Defaults to
+#: :data:`~custos_workflow.steps.sub_orchestration.DEFAULT_APPROVAL_TIMEOUT`
+#: (``PT24H``).
+ENV_APPROVAL_DEFAULT_TIMEOUT = "WF_APPROVAL_DEFAULT_TIMEOUT"
+
+#: Strict ISO-8601 duration grammar used to parse
+#: :data:`ENV_APPROVAL_DEFAULT_TIMEOUT`. Mirrors
+#: :data:`custos_workflow.runs.wait._ISO8601_DURATION_PATTERN` so the
+#: provider has a self-contained parser and never imports a run-time
+#: module from a startup-config concern; parity is asserted in the
+#: unit tests.
+_ISO8601_DURATION_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^P(?:"
+    r"(?P<weeks>\d+)W"
+    r"|"
+    r"(?:(?P<days>\d+)D)?"
+    r"(?:T(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+(?:\.\d+)?)S)?)?"
+    r")$"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -397,6 +439,14 @@ class RunComponents:
             their env vars are set). ``None`` when none of the
             production paths are active. The lifespan ``aclose()``
             it on shutdown.
+        max_fanout_width: WF-IMPL-094 fan-out width cap
+            (:data:`ENV_MAX_FANOUT_WIDTH`) threaded into the
+            :class:`~custos_workflow.steps.sub_orchestration.SubOrchestrationManager`
+            the lifespan builds.
+        approval_default_timeout: WF-IMPL-094 default approval-gate
+            timeout (:data:`ENV_APPROVAL_DEFAULT_TIMEOUT`) threaded
+            into the same manager; applied when a document leaves
+            ``approval.timeout`` at the model default.
     """
 
     workflow_runtime: WorkflowRuntimeProtocol
@@ -415,6 +465,8 @@ class RunComponents:
         default_factory=lambda: NoopConnectorClient()
     )
     dapr_http_client: httpx.AsyncClient | None = field(default=None)
+    max_fanout_width: int = DEFAULT_MAX_FANOUT_WIDTH
+    approval_default_timeout: timedelta = DEFAULT_APPROVAL_TIMEOUT
 
 
 # ---------------------------------------------------------------------------
@@ -516,6 +568,59 @@ def _resolve_outbound_rpc_timeout_seconds(env: Mapping[str, str]) -> float:
             f"{ENV_OUTBOUND_RPC_TIMEOUT_MS} must be a positive integer (milliseconds), got {raw!r}"
         )
     return ms / 1000.0
+
+
+def _resolve_max_fanout_width(env: Mapping[str, str]) -> int:
+    """Parse :data:`ENV_MAX_FANOUT_WIDTH` once at startup.
+
+    An unset or blank value falls back to
+    :data:`~custos_workflow.steps.sub_orchestration.DEFAULT_MAX_FANOUT_WIDTH`.
+
+    :raises ValueError: When the value is set but is not a positive
+        integer. The message names the env var so the operator can
+        find it without grepping.
+    """
+    raw = env.get(ENV_MAX_FANOUT_WIDTH, "").strip()
+    if not raw:
+        return DEFAULT_MAX_FANOUT_WIDTH
+    try:
+        width = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{ENV_MAX_FANOUT_WIDTH} must be a positive integer, got {raw!r}") from exc
+    if width <= 0:
+        raise ValueError(f"{ENV_MAX_FANOUT_WIDTH} must be a positive integer, got {raw!r}")
+    return width
+
+
+def _resolve_approval_default_timeout(env: Mapping[str, str]) -> timedelta:
+    """Parse :data:`ENV_APPROVAL_DEFAULT_TIMEOUT` once at startup.
+
+    Accepts the same ISO-8601 duration grammar
+    :func:`custos_workflow.runs.wait.parse_wait_duration` accepts
+    (``PnW`` weeks form OR ``P[nD][T[nH][nM][nS]]`` with at least one
+    positive component; months / years are rejected). An unset or blank
+    value falls back to
+    :data:`~custos_workflow.steps.sub_orchestration.DEFAULT_APPROVAL_TIMEOUT`.
+
+    :raises ValueError: When the value is set but does not parse as a
+        positive ISO-8601 duration. The message names the env var.
+    """
+    raw = env.get(ENV_APPROVAL_DEFAULT_TIMEOUT, "").strip()
+    if not raw:
+        return DEFAULT_APPROVAL_TIMEOUT
+    match = _ISO8601_DURATION_PATTERN.match(raw)
+    if match is None:
+        raise ValueError(
+            f"{ENV_APPROVAL_DEFAULT_TIMEOUT}: {raw!r} is not a recognised ISO-8601 duration"
+        )
+    weeks = int(match.group("weeks") or 0)
+    days = int(match.group("days") or 0)
+    hours = int(match.group("hours") or 0)
+    minutes = int(match.group("minutes") or 0)
+    seconds = float(match.group("seconds") or 0.0)
+    if weeks == 0 and days == 0 and hours == 0 and minutes == 0 and seconds == 0.0:
+        raise ValueError(f"{ENV_APPROVAL_DEFAULT_TIMEOUT}: {raw!r} must be greater than zero")
+    return timedelta(weeks=weeks, days=days, hours=hours, minutes=minutes, seconds=seconds)
 
 
 def _build_activity_client(
@@ -824,4 +929,6 @@ def load_run_components(
         outbound_activity_client=outbound_activity,
         outbound_connector_client=outbound_connector,
         dapr_http_client=dapr_http_client,
+        max_fanout_width=_resolve_max_fanout_width(resolved_env),
+        approval_default_timeout=_resolve_approval_default_timeout(resolved_env),
     )

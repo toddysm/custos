@@ -52,6 +52,11 @@ from custos_workflow.providers import (
 from custos_workflow.runs.orchestrator import WORKFLOW_NAME, make_run_orchestrator
 from custos_workflow.steps import StepCoordinator
 from custos_workflow.steps.activity_step import ActivityStepHandler
+from custos_workflow.steps.sub_orchestration import (
+    CHILD_STEP_WORKFLOW_NAME,
+    SubOrchestrationManager,
+    make_child_step_orchestrator,
+)
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -163,9 +168,29 @@ def create_app(
             connector_client=components.connector_client,
         )
         step_coordinator = StepCoordinator(activity_handler=activity_handler)
+        # WF-IMPL-094: build the Sub-Orchestration Manager from the
+        # env-resolved knobs (``WF_MAX_FANOUT_WIDTH`` /
+        # ``WF_APPROVAL_DEFAULT_TIMEOUT``) the provider parsed onto the
+        # bundle, register the WF-IMPL-088 child-step workflow under
+        # :data:`CHILD_STEP_WORKFLOW_NAME` so ``forEach`` fan-out can
+        # spawn it, and thread the manager into the top-level
+        # orchestrator so ``PrimitiveHandler.SUB_ORCHESTRATION`` nodes
+        # dispatch through it. The child orchestrator shares the same
+        # :class:`ActivityStepHandler` so an ``activity:`` loop body is
+        # driven through the WF-IMPL-074 yield protocol exactly as the
+        # top-level orchestrator drives ACTIVITY nodes.
+        sub_orchestration_manager = SubOrchestrationManager(
+            max_fanout_width=components.max_fanout_width,
+            approval_default_timeout=components.approval_default_timeout,
+        )
+        runtime.register_workflow(
+            make_child_step_orchestrator(step_coordinator, activity_handler=activity_handler),
+            name=CHILD_STEP_WORKFLOW_NAME,
+        )
         orchestrator_fn = make_run_orchestrator(
             step_coordinator,
             on_replay=components.replay_reconciler.on_replay,
+            sub_orchestration_manager=sub_orchestration_manager,
         )
         runtime.register_workflow(orchestrator_fn, name=WORKFLOW_NAME)
 

@@ -197,6 +197,80 @@ def test_default_timeout_is_pt24h() -> None:
     assert ctx.timer_delta == timedelta(hours=24)
 
 
+def test_configured_default_timeout_overrides_model_default() -> None:
+    ctx = _StubContext()
+    # The document leaves ``approval.timeout`` at the model default
+    # (PT24H), so the platform-configured default applies instead.
+    graph = _approval_graph(timeout=None)
+    step_ctx = _ctx(workflow_context=ctx)
+
+    manager = SubOrchestrationManager(approval_default_timeout=timedelta(hours=48))
+    gen = manager.run_approval(step_ctx, graph, _STEP_ID)
+    _drive_to_when_any(gen)
+
+    assert ctx.timer_delta == timedelta(hours=48)
+
+
+def test_configured_default_timeout_surfaces_iso_label_on_timeout() -> None:
+    ctx = _StubContext()
+    graph = _approval_graph(timeout=None)
+    step_ctx = _ctx(workflow_context=ctx)
+
+    manager = SubOrchestrationManager(approval_default_timeout=timedelta(hours=48))
+    gen = manager.run_approval(step_ctx, graph, _STEP_ID)
+    _drive_to_when_any(gen)
+
+    with pytest.raises(ApprovalTimeoutError) as exc:
+        gen.send(ctx.timer)
+    # The audit envelope reflects the configured default rendered back
+    # to a normalised ISO-8601 duration (48h → ``P2D``), not the
+    # model-default literal.
+    assert exc.value.timeout == "P2D"
+
+
+@pytest.mark.parametrize(
+    ("delta", "expected"),
+    [
+        (timedelta(hours=24), "P1D"),
+        (timedelta(hours=23), "PT23H"),
+        (timedelta(days=2), "P2D"),
+        (timedelta(days=1, hours=2, minutes=3, seconds=4), "P1DT2H3M4S"),
+        (timedelta(minutes=90), "PT1H30M"),
+        (timedelta(seconds=45), "PT45S"),
+        (timedelta(0), "PT0S"),
+    ],
+)
+def test_format_iso8601_duration(delta: timedelta, expected: str) -> None:
+    from custos_workflow.steps.sub_orchestration.manager import _format_iso8601_duration
+
+    assert _format_iso8601_duration(delta) == expected
+
+
+def test_explicit_document_timeout_wins_over_configured_default() -> None:
+    ctx = _StubContext()
+    graph = _approval_graph(timeout="PT2H")  # explicit override
+    step_ctx = _ctx(workflow_context=ctx)
+
+    manager = SubOrchestrationManager(approval_default_timeout=timedelta(hours=48))
+    gen = manager.run_approval(step_ctx, graph, _STEP_ID)
+    _drive_to_when_any(gen)
+
+    # An explicit per-document timeout is honoured verbatim.
+    assert ctx.timer_delta == timedelta(hours=2)
+
+
+def test_model_default_iso_constant_matches_document_model() -> None:
+    from custos_workflow.document.models import _DEFAULT_APPROVAL_TIMEOUT
+    from custos_workflow.steps.sub_orchestration.manager import (
+        _MODEL_DEFAULT_APPROVAL_TIMEOUT_ISO,
+    )
+
+    # The manager's substitution-trigger constant must track the
+    # document model default, or the configured-default override would
+    # silently stop firing.
+    assert _MODEL_DEFAULT_APPROVAL_TIMEOUT_ISO == _DEFAULT_APPROVAL_TIMEOUT
+
+
 # ---------------------------------------------------------------------------
 # Timeout-before-signal → step.approval_timeout
 # ---------------------------------------------------------------------------

@@ -38,13 +38,19 @@ from custos_workflow.steps.sub_orchestration.ids import (
     child_instance_id,
     iteration_key,
 )
-from custos_workflow.steps.sub_orchestration.manager import SubOrchestrationManager
+from custos_workflow.steps.sub_orchestration.manager import (
+    DEFAULT_APPROVAL_TIMEOUT,
+    DEFAULT_MAX_FANOUT_WIDTH,
+    SubOrchestrationManager,
+)
 
 __all__ = [
     "APPROVAL_ITERATION_KEY",
     "CHILD_INSTANCE_ID_SEPARATOR",
     "CHILD_STEP_WORKFLOW_NAME",
+    "DEFAULT_APPROVAL_TIMEOUT",
     "DEFAULT_LOOP_VAR",
+    "DEFAULT_MAX_FANOUT_WIDTH",
     "WORKFLOW_ITERATION_KEY",
     "ChildInstanceIdError",
     "ChildStepInput",

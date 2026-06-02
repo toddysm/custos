@@ -73,8 +73,9 @@ WF-IMPL-093.
 from __future__ import annotations
 
 from collections.abc import Generator, Mapping
+from datetime import timedelta
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Final
 
 import custos_cel
 from custos_cel.errors import CelError
@@ -106,11 +107,38 @@ from custos_workflow.steps.sub_orchestration.ids import (
 )
 from custos_workflow.steps.with_inputs import WithInputResolver
 
-__all__ = ["SubOrchestrationManager"]
+__all__ = [
+    "DEFAULT_APPROVAL_TIMEOUT",
+    "DEFAULT_MAX_FANOUT_WIDTH",
+    "SubOrchestrationManager",
+]
 
 #: Stateless ``with:`` evaluator shared across sub-workflow invocations
 #: (the resolver holds no per-call state — see :class:`WithInputResolver`).
 _WITH_RESOLVER: WithInputResolver = WithInputResolver()
+
+#: Default upper bound on the number of children a single ``forEach``
+#: fan-out may spawn (design.md § Configuration, ``WF_MAX_FANOUT_WIDTH``).
+#: :func:`custos_workflow.providers.load_run_components` reads the env
+#: override and threads it into the manager; a loop that would exceed
+#: the cap is rejected with ``step.sub_orchestration_spawn_error``
+#: *before* any child is spawned.
+DEFAULT_MAX_FANOUT_WIDTH: Final[int] = 1000
+
+#: Default approval-gate timeout applied when a node leaves
+#: ``approval.timeout`` at the model default (design.md § Configuration,
+#: ``WF_APPROVAL_DEFAULT_TIMEOUT``). An explicit per-document timeout
+#: always wins.
+DEFAULT_APPROVAL_TIMEOUT: Final[timedelta] = timedelta(hours=24)
+
+#: The :class:`~custos_workflow.document.ApprovalStep` model default for
+#: ``approval.timeout`` (``PT24H``). When a node carries exactly this
+#: value the document did not override the platform default, so the
+#: manager substitutes its configured
+#: :attr:`~SubOrchestrationManager._approval_default_timeout`. Kept in
+#: lock-step with ``document.models._DEFAULT_APPROVAL_TIMEOUT`` (parity
+#: is asserted in the unit tests).
+_MODEL_DEFAULT_APPROVAL_TIMEOUT_ISO: Final[str] = "PT24H"
 
 #: Wire-name (and ``call_sites`` key) of the ``forEach`` slot. The
 #: call-site collector keys typed call sites by ``CallSite.path``,
@@ -126,12 +154,42 @@ _WHERE_SLOT: str = "where"
 class SubOrchestrationManager:
     """Parent-side driver for child-workflow fan-out (ADR-007).
 
-    Stateless — instances are interchangeable and may be reused across
+    Effectively immutable — an instance carries only its fan-out /
+    approval configuration (:meth:`__init__`) and holds no per-run
+    state, so instances are interchangeable and may be reused across
     runs. Exposes :meth:`run_loop` for the ``forEach`` fan-out path,
     :meth:`run_sub_workflow` for the ``workflow:`` single-child
     invocation path, and :meth:`run_approval` for the ``approval:``
     human-in-the-loop gate.
     """
+
+    def __init__(
+        self,
+        *,
+        max_fanout_width: int = DEFAULT_MAX_FANOUT_WIDTH,
+        approval_default_timeout: timedelta = DEFAULT_APPROVAL_TIMEOUT,
+    ) -> None:
+        """Bind the manager to its fan-out / approval configuration.
+
+        :param max_fanout_width: Upper bound on the number of children
+            a single ``forEach`` may spawn (design.md § Configuration,
+            ``WF_MAX_FANOUT_WIDTH``). A loop that would exceed the cap
+            is rejected with ``step.sub_orchestration_spawn_error``
+            *before* any child is spawned. Must be a positive integer.
+        :param approval_default_timeout: The gate timeout used when a
+            node leaves ``approval.timeout`` at the model default
+            (``PT24H``); an explicit per-document timeout always wins
+            (design.md § Configuration, ``WF_APPROVAL_DEFAULT_TIMEOUT``).
+
+        :raises ValueError: ``max_fanout_width`` is not a positive
+            integer.
+        """
+        if max_fanout_width < 1:
+            raise ValueError(
+                f"max_fanout_width must be a positive integer, got {max_fanout_width!r}"
+            )
+        self._max_fanout_width: int = max_fanout_width
+        self._approval_default_timeout: timedelta = approval_default_timeout
 
     def run_loop(
         self,
@@ -160,7 +218,9 @@ class SubOrchestrationManager:
             list, ``where:`` did not yield a bool, or two items derived
             the same iteration key.
         :raises SubOrchestrationSpawnError: A deterministic child
-            instance id could not be derived for an item.
+            instance id could not be derived for an item, or the loop
+            would spawn more children than the configured maximum
+            fan-out width.
         :raises SubWorkflowFailedError: A single awaited child ran and
             surfaced a terminal failure (first failure short-circuits).
         :raises KeyError: ``step_id`` is not present in ``graph``.
@@ -181,6 +241,19 @@ class SubOrchestrationManager:
         # *before* any child is spawned (a partial fan-out would leave
         # dangling durable child instances behind).
         keyed = self._key_items(step_id, run_id, items)
+
+        # Enforce the configured fan-out width cap before spawning any
+        # child, for the same reason: a loop that exceeds the cap must
+        # fail cleanly rather than leave a partial set of durable child
+        # instances behind (design.md § Configuration,
+        # ``WF_MAX_FANOUT_WIDTH``).
+        if len(keyed) > self._max_fanout_width:
+            raise SubOrchestrationSpawnError(
+                f"forEach loop on step {step_id!r} would spawn {len(keyed)} children, "
+                f"exceeding the configured maximum fan-out width of {self._max_fanout_width}",
+                run_id=run_id,
+                step_id=step_id,
+            )
 
         spawned: list[tuple[str, str, Any]] = []
         for key, item in keyed:
@@ -374,19 +447,27 @@ class SubOrchestrationManager:
         # The timeout is validated to a positive ISO-8601 duration at
         # document-parse time; re-parsing here is defence in depth and
         # keeps the durable timer payload byte-stable across replay.
-        timeout = parse_wait_duration(step_id, spec.timeout)
+        # When the node left ``approval.timeout`` at the model default
+        # (``PT24H``) the platform-configured default applies instead;
+        # any explicit per-document timeout (a different value) wins.
+        if spec.timeout == _MODEL_DEFAULT_APPROVAL_TIMEOUT_ISO:
+            timeout = self._approval_default_timeout
+            timeout_label = _format_iso8601_duration(timeout)
+        else:
+            timeout = parse_wait_duration(step_id, spec.timeout)
+            timeout_label = spec.timeout
         wf = ctx.workflow_context
         event = wf.wait_for_external_event(gate_id)
         timer = wf.create_timer(timeout)
         winner = yield wf.when_any([event, timer])
         if winner is timer:
             raise ApprovalTimeoutError(
-                f"approval gate {step_id!r} timed out after {spec.timeout!r} "
+                f"approval gate {step_id!r} timed out after {timeout_label!r} "
                 "without an approval signal",
                 run_id=run_id,
                 step_id=step_id,
                 child_instance_id=gate_id,
-                timeout=spec.timeout,
+                timeout=timeout_label,
             )
         payload = event.get_result()
         return dict(payload) if isinstance(payload, Mapping) else {}
@@ -637,6 +718,34 @@ class SubOrchestrationManager:
 # ---------------------------------------------------------------------------
 # Module-private helpers
 # ---------------------------------------------------------------------------
+
+
+def _format_iso8601_duration(delta: timedelta) -> str:
+    """Render a :class:`~datetime.timedelta` as an ISO-8601 duration.
+
+    Produces the ``P[nD][T[nH][nM][nS]]`` form (e.g. ``timedelta(hours=24)``
+    → ``"PT24H"``) used for the audit-facing ``timeout`` field of an
+    :class:`~custos_workflow.steps.errors.ApprovalTimeoutError` when the
+    gate timeout came from the platform-configured default rather than a
+    document literal. Sub-second precision is dropped (the configured
+    default is always whole seconds).
+    """
+    total_seconds = int(delta.total_seconds())
+    days, rem = divmod(total_seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, seconds = divmod(rem, 60)
+    date_part = f"{days}D" if days else ""
+    time_part = ""
+    if hours:
+        time_part += f"{hours}H"
+    if minutes:
+        time_part += f"{minutes}M"
+    if seconds:
+        time_part += f"{seconds}S"
+    if time_part:
+        time_part = "T" + time_part
+    body = date_part + time_part
+    return f"P{body}" if body else "PT0S"
 
 
 def _resolve_node(graph: ExecutionGraph, step_id: str) -> ExecutionNode:
