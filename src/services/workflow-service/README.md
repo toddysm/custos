@@ -640,6 +640,32 @@ once the Trigger Service (COMP-004) exists.
 Tracker: [#552](https://github.com/toddysm/custos/issues/552).
 
 
+WF-IMPL-108 ([#547](https://github.com/toddysm/custos/issues/547))
+wires the Resume Subscription Manager into the running worker. The
+`load_run_components` factory now builds a single in-process
+`InMemoryResumeSubscriptionMirrorRepository` and shares it between a
+`WaitForStepHandler` (threaded into the top-level orchestrator's new
+`resume_handler` slot so `waitFor:` nodes park the run as
+`status="waiting"` per WF-IMPL-107) and — when `WF_TS_ENDPOINT` is
+set — a production `ResumeSubscriptionReplayReconciler` bound to the
+orchestrator's replay hook. The reconciler's `DaprTriggerServiceClient`
+reuses the lifespan-owned shared `httpx.AsyncClient` (one socket pool
+across the ARM / Connector / Trigger upstreams). Three config knobs
+land on `RunComponents`: `WF_TS_ENDPOINT` (the Trigger Service Dapr
+app-id), `WF_RESUME_SUB_DEFAULT_TTL` (`PT24H` default, parsed once as
+ISO-8601 and threaded into both the handler and the reconciler), and
+`WF_REGISTER_SUB_MAX_RETRIES` (`5` default). Unlike the ARM /
+Connector app-ids (which fall back to in-process Noop adapters for the
+sidecar-free dev path), `WF_TS_ENDPOINT` is **required** on the
+production path: `_resolve_run_components` fails fast with a
+`RuntimeError` naming the variable when it is unset, mirroring the
+existing `WF_DAPR_WORKFLOW_COMPONENT` check — tests that inject a
+`RunComponents` bundle bypass the check and keep wiring the Noop
+trigger client. The Postgres-backed mirror adapter and the
+`RunController.cancel_run` canceller wiring remain follow-up tasks.
+Tracker: [#552](https://github.com/toddysm/custos/issues/552).
+
+
 WF-IMPL-107 ([#546](https://github.com/toddysm/custos/issues/546))
 wires the `waitFor:` step kind into the Run Controller orchestrator.
 `make_run_orchestrator` gains an optional `resume_handler`

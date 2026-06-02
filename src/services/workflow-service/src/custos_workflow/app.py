@@ -46,6 +46,7 @@ from custos_workflow.call_context import CallContextMiddleware
 from custos_workflow.healthz import router as health_router
 from custos_workflow.providers import (
     ENV_DAPR_WORKFLOW_COMPONENT,
+    ENV_TS_ENDPOINT,
     RunComponents,
     load_run_components,
 )
@@ -191,6 +192,7 @@ def create_app(
             step_coordinator,
             on_replay=components.replay_reconciler.on_replay,
             sub_orchestration_manager=sub_orchestration_manager,
+            resume_handler=components.resume_handler,
         )
         runtime.register_workflow(orchestrator_fn, name=WORKFLOW_NAME)
 
@@ -309,6 +311,14 @@ def _resolve_run_components(injected: RunComponents | None) -> RunComponents:
     configuration as :class:`RuntimeError` at lifespan startup
     instead of letting the Dapr SDK raise a less actionable error
     once the worker tries to register against an unknown component.
+    ``WF_TS_ENDPOINT`` (the Trigger Service app-id) is likewise
+    required on the production path (WF-IMPL-108): the resume
+    subscription manager re-registers surviving ``waitFor:``
+    subscriptions against the Trigger Service on replay, so a worker
+    started without it would silently drop resume registrations. The
+    check fires only here on the env-driven path — tests that inject a
+    :class:`RunComponents` bundle bypass it and keep wiring the
+    in-process Noop trigger client.
     """
     if injected is not None:
         return injected
@@ -318,6 +328,13 @@ def _resolve_run_components(injected: RunComponents | None) -> RunComponents:
             f"{ENV_DAPR_WORKFLOW_COMPONENT} environment variable is required to "
             "start the workflow worker (design.md § Configuration). Set it to "
             "the name of the Dapr Workflow component registered with the sidecar."
+        )
+    if not os.environ.get(ENV_TS_ENDPOINT, "").strip():
+        raise RuntimeError(
+            f"{ENV_TS_ENDPOINT} environment variable is required to start the "
+            "workflow worker (design.md § Configuration). Set it to the Trigger "
+            "Service Dapr app-id so the resume subscription manager can register "
+            "and reconcile waitFor: subscriptions."
         )
     return load_run_components()
 

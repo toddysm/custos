@@ -62,6 +62,11 @@ from custos_workflow.clients import (
 from custos_workflow.clients._dapr_invoke import (
     read_dapr_env,
 )
+from custos_workflow.clients.trigger import (
+    DaprTriggerServiceClient,
+    NoopTriggerServiceClient,
+    TriggerServiceClient,
+)
 from custos_workflow.runs.controller import (
     CatalogClient,
     InMemoryLifecycleEventPublisher,
@@ -76,6 +81,16 @@ from custos_workflow.runs.events import (
 from custos_workflow.runs.replay import NoopReplayReconciler, ReplayReconciler
 from custos_workflow.runs.store import InProcessRunStore, RunStore
 from custos_workflow.runtime import FakeWorkflowRuntime, WorkflowClient, WorkflowRuntime
+from custos_workflow.steps.resume import (
+    InMemoryResumeSubscriptionMirrorRepository,
+    ResumeSubscriptionMirrorRepository,
+    ResumeSubscriptionReplayReconciler,
+    WaitForStepHandler,
+)
+from custos_workflow.steps.resume.handler import (
+    DEFAULT_REGISTER_SUB_MAX_RETRIES,
+    DEFAULT_RESUME_SUB_TTL,
+)
 from custos_workflow.steps.sub_orchestration import (
     DEFAULT_APPROVAL_TIMEOUT,
     DEFAULT_MAX_FANOUT_WIDTH,
@@ -100,6 +115,9 @@ __all__ = [
     "ENV_OUTBOUND_RPC_TIMEOUT_MS",
     "ENV_PUBLISH_PUBSUB",
     "ENV_PUBLISH_TOPIC",
+    "ENV_REGISTER_SUB_MAX_RETRIES",
+    "ENV_RESUME_SUB_DEFAULT_TTL",
+    "ENV_TS_ENDPOINT",
     "RunComponents",
     "WorkflowRuntimeProtocol",
     "load_run_components",
@@ -183,6 +201,44 @@ ENV_MAX_FANOUT_WIDTH = "WF_MAX_FANOUT_WIDTH"
 #: :data:`~custos_workflow.steps.sub_orchestration.DEFAULT_APPROVAL_TIMEOUT`
 #: (``PT24H``).
 ENV_APPROVAL_DEFAULT_TIMEOUT = "WF_APPROVAL_DEFAULT_TIMEOUT"
+
+#: Required at lifespan startup to activate the production resume
+#: path. Value is the Trigger Service (COMP-004) Dapr app-id, used
+#: by :func:`~custos_workflow.clients._dapr_invoke.read_dapr_env`
+#: to build the canonical ``…/v1.0/invoke/<app-id>/method/…`` URL
+#: the :class:`~custos_workflow.clients.trigger.DaprTriggerServiceClient`
+#: posts ``RegisterResumeSubscription`` / ``CancelResumeSubscription``
+#: to. Unlike the ARM / Connector app-ids (which fall back to Noop
+#: in-process adapters for the sidecar-free dev path), the resume
+#: path is **required** in production: :func:`_resolve_run_components`
+#: fails fast with :class:`RuntimeError` when it is unset (design.md
+#: § Configuration marks it ``Required: Yes``). When unset in a
+#: curated test ``env`` mapping, :func:`load_run_components` still
+#: wires the in-process :class:`~custos_workflow.clients.trigger.NoopTriggerServiceClient`
+#: so unit tests stay sidecar-free.
+ENV_TS_ENDPOINT = "WF_TS_ENDPOINT"
+
+#: Optional. Default TTL applied to a ``RegisterResumeSubscription``
+#: when a ``waitFor:`` step pins no explicit ``waitFor.ttl``
+#: (design.md § Configuration). Parsed once at lifespan startup as
+#: an ISO-8601 duration and threaded into both the
+#: :class:`~custos_workflow.steps.resume.WaitForStepHandler` and the
+#: production
+#: :class:`~custos_workflow.steps.resume.ResumeSubscriptionReplayReconciler`.
+#: Defaults to
+#: :data:`~custos_workflow.steps.resume.DEFAULT_RESUME_SUB_TTL`
+#: (``PT24H``).
+ENV_RESUME_SUB_DEFAULT_TTL = "WF_RESUME_SUB_DEFAULT_TTL"
+
+#: Optional. Upper bound on the bounded-backoff retry loop the
+#: :class:`~custos_workflow.steps.resume.WaitForStepHandler` runs
+#: when ``RegisterResumeSubscription`` keeps failing before it gives
+#: up and fails the wait step ``class: retryable`` (design.md §
+#: Configuration). Parsed once at lifespan startup as a positive
+#: integer. Defaults to
+#: :data:`~custos_workflow.steps.resume.DEFAULT_REGISTER_SUB_MAX_RETRIES`
+#: (``5``).
+ENV_REGISTER_SUB_MAX_RETRIES = "WF_REGISTER_SUB_MAX_RETRIES"
 
 #: Strict ISO-8601 duration grammar used to parse
 #: :data:`ENV_APPROVAL_DEFAULT_TIMEOUT`. Mirrors
@@ -447,6 +503,23 @@ class RunComponents:
             timeout (:data:`ENV_APPROVAL_DEFAULT_TIMEOUT`) threaded
             into the same manager; applied when a document leaves
             ``approval.timeout`` at the model default.
+        resume_handler: WF-IMPL-108
+            :class:`~custos_workflow.steps.resume.WaitForStepHandler`
+            the lifespan threads into the top-level orchestrator's
+            ``resume_handler`` slot so ``PrimitiveHandler.RESUME_SUBSCRIPTION``
+            (``waitFor:``) nodes park the run as ``status="waiting"``
+            instead of raising ``step.kind_not_implemented`` (WF-IMPL-107).
+            Built over an in-process
+            :class:`~custos_workflow.steps.resume.InMemoryResumeSubscriptionMirrorRepository`
+            with the env-resolved
+            :data:`ENV_RESUME_SUB_DEFAULT_TTL` /
+            :data:`ENV_REGISTER_SUB_MAX_RETRIES` knobs; the same mirror
+            repository backs the production
+            :class:`~custos_workflow.steps.resume.ResumeSubscriptionReplayReconciler`
+            wired onto :attr:`replay_reconciler` when
+            :data:`ENV_TS_ENDPOINT` is set. The Postgres-backed mirror
+            adapter is a follow-up infrastructure task (same staging as
+            the idempotency ledger).
     """
 
     workflow_runtime: WorkflowRuntimeProtocol
@@ -467,6 +540,9 @@ class RunComponents:
     dapr_http_client: httpx.AsyncClient | None = field(default=None)
     max_fanout_width: int = DEFAULT_MAX_FANOUT_WIDTH
     approval_default_timeout: timedelta = DEFAULT_APPROVAL_TIMEOUT
+    resume_handler: WaitForStepHandler = field(
+        default_factory=lambda: WaitForStepHandler(InMemoryResumeSubscriptionMirrorRepository())
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -633,6 +709,64 @@ def _resolve_approval_default_timeout(env: Mapping[str, str]) -> timedelta:
     return timedelta(weeks=weeks, days=days, hours=hours, minutes=minutes, seconds=seconds)
 
 
+def _resolve_resume_sub_default_ttl(env: Mapping[str, str]) -> str:
+    """Parse :data:`ENV_RESUME_SUB_DEFAULT_TTL` once at startup.
+
+    Accepts the same ISO-8601 duration grammar
+    :func:`_resolve_approval_default_timeout` accepts and returns the
+    validated *string* (the
+    :class:`~custos_workflow.steps.resume.WaitForStepHandler` takes a
+    string ``default_ttl`` and re-validates it via
+    :func:`~custos_workflow.runs.wait.parse_wait_duration`). An unset or
+    blank value falls back to
+    :data:`~custos_workflow.steps.resume.DEFAULT_RESUME_SUB_TTL`
+    (``PT24H``).
+
+    :raises ValueError: When the value is set but does not parse as a
+        positive ISO-8601 duration. The message names the env var.
+    """
+    raw = env.get(ENV_RESUME_SUB_DEFAULT_TTL, "").strip()
+    if not raw:
+        return DEFAULT_RESUME_SUB_TTL
+    match = _ISO8601_DURATION_PATTERN.match(raw)
+    if match is None:
+        raise ValueError(
+            f"{ENV_RESUME_SUB_DEFAULT_TTL}: {raw!r} is not a recognised ISO-8601 duration"
+        )
+    weeks = int(match.group("weeks") or 0)
+    days = int(match.group("days") or 0)
+    hours = int(match.group("hours") or 0)
+    minutes = int(match.group("minutes") or 0)
+    seconds = float(match.group("seconds") or 0.0)
+    if weeks == 0 and days == 0 and hours == 0 and minutes == 0 and seconds == 0.0:
+        raise ValueError(f"{ENV_RESUME_SUB_DEFAULT_TTL}: {raw!r} must be greater than zero")
+    return raw
+
+
+def _resolve_register_sub_max_retries(env: Mapping[str, str]) -> int:
+    """Parse :data:`ENV_REGISTER_SUB_MAX_RETRIES` once at startup.
+
+    An unset or blank value falls back to
+    :data:`~custos_workflow.steps.resume.DEFAULT_REGISTER_SUB_MAX_RETRIES`
+    (``5``). Mirrors :func:`_resolve_max_fanout_width`.
+
+    :raises ValueError: When the value is set but is not a positive
+        integer. The message names the env var.
+    """
+    raw = env.get(ENV_REGISTER_SUB_MAX_RETRIES, "").strip()
+    if not raw:
+        return DEFAULT_REGISTER_SUB_MAX_RETRIES
+    try:
+        retries = int(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"{ENV_REGISTER_SUB_MAX_RETRIES} must be a positive integer, got {raw!r}"
+        ) from exc
+    if retries < 1:
+        raise ValueError(f"{ENV_REGISTER_SUB_MAX_RETRIES} must be a positive integer, got {raw!r}")
+    return retries
+
+
 def _build_activity_client(
     *,
     env: Mapping[str, str],
@@ -708,6 +842,46 @@ def _build_connector_client(
     return cast(
         ConnectorClient,
         DaprConnectorClient(
+            http_client=http_client,
+            endpoint=endpoint,
+            timeout=timeout_seconds,
+        ),
+    )
+
+
+def _build_trigger_client(
+    *,
+    env: Mapping[str, str],
+    http_client: httpx.AsyncClient | None,
+    timeout_seconds: float,
+) -> TriggerServiceClient:
+    """Return the production or Noop Trigger Service client per the env flags.
+
+    Mirrors :func:`_build_activity_client` / :func:`_build_connector_client`:
+    the production
+    :class:`~custos_workflow.clients.trigger.DaprTriggerServiceClient`
+    activates only when :data:`ENV_TS_ENDPOINT` is set, reusing the
+    lifespan-owned shared :class:`httpx.AsyncClient` so a worker that
+    also talks to the ARM / Connector upstreams keeps a single socket
+    pool. When the endpoint is unset the in-process
+    :class:`~custos_workflow.clients.trigger.NoopTriggerServiceClient`
+    keeps the dev / test path sidecar-free (production callers never
+    reach this branch — :func:`_resolve_run_components` fails fast on a
+    missing :data:`ENV_TS_ENDPOINT` before :func:`load_run_components`
+    is invoked).
+    """
+    if not env.get(ENV_TS_ENDPOINT, "").strip():
+        return NoopTriggerServiceClient()
+    if http_client is None:  # pragma: no cover - defensive
+        raise RuntimeError(
+            "_build_trigger_client: production path requires a "
+            "lifespan-owned httpx.AsyncClient; load_run_components "
+            "must build the shared client before invoking this helper."
+        )
+    endpoint = read_dapr_env(env, ENV_TS_ENDPOINT)
+    return cast(
+        TriggerServiceClient,
+        DaprTriggerServiceClient(
             http_client=http_client,
             endpoint=endpoint,
             timeout=timeout_seconds,
@@ -799,8 +973,21 @@ def load_run_components(
     need_http_for_connector = connector_client is None and bool(
         resolved_env.get(ENV_CONNECTOR_APP_ID, "").strip()
     )
+    # WF-IMPL-108: the production DaprTriggerServiceClient shares the
+    # same lifespan-owned client; only spin one up when the Trigger
+    # Service endpoint is set and the caller did not inject a
+    # pre-built reconciler (the override path supplies its own
+    # trigger client / fake, so no socket pool is needed).
+    need_http_for_trigger = replay_reconciler is None and bool(
+        resolved_env.get(ENV_TS_ENDPOINT, "").strip()
+    )
     dapr_http_client: httpx.AsyncClient | None
-    if need_http_for_publisher or need_http_for_arm or need_http_for_connector:
+    if (
+        need_http_for_publisher
+        or need_http_for_arm
+        or need_http_for_connector
+        or need_http_for_trigger
+    ):
         # The per-request ``timeout=`` arg every adapter passes
         # overrides the client-default; we still set a sane
         # default here so an adapter added later without a
@@ -894,9 +1081,53 @@ def load_run_components(
         publisher = _build_lifecycle_publisher(env=resolved_env, http_client=dapr_http_client)
     else:
         publisher = lifecycle_publisher
-    reconciler: ReplayReconciler = (
-        replay_reconciler if replay_reconciler is not None else NoopReplayReconciler()
+
+    # WF-IMPL-108: wire the Resume Subscription Manager into the
+    # running app. A *single* in-process mirror repository backs both
+    # the WaitForStepHandler (which the lifespan threads into the
+    # top-level orchestrator so ``waitFor:`` nodes park the run as
+    # ``status="waiting"`` per WF-IMPL-107) and — when the production
+    # Trigger Service endpoint is configured — the
+    # ResumeSubscriptionReplayReconciler (which re-registers
+    # surviving subscriptions on replay). Sharing the repository is
+    # essential: a mirror persisted by the handler must be visible to
+    # the reconciler. The Postgres-backed adapter is a follow-up
+    # infra task, same staging as the idempotency ledger.
+    resume_mirror_repo: ResumeSubscriptionMirrorRepository = (
+        InMemoryResumeSubscriptionMirrorRepository()
     )
+    resume_default_ttl = _resolve_resume_sub_default_ttl(resolved_env)
+    resume_handler = WaitForStepHandler(
+        resume_mirror_repo,
+        default_ttl=resume_default_ttl,
+        max_register_retries=_resolve_register_sub_max_retries(resolved_env),
+    )
+
+    # Reconciler precedence: an explicit ``replay_reconciler`` override
+    # always wins (tests inject Fakes / spies). Otherwise the
+    # production ResumeSubscriptionReplayReconciler activates only when
+    # the Trigger Service endpoint is set (``need_http_for_trigger``
+    # implies the shared client exists); the sidecar-free dev / test
+    # path falls back to the inert NoopReplayReconciler so nothing
+    # reaches a Noop trigger client (whose methods raise
+    # NotImplementedError). The Dapr trigger client is built only on
+    # the production branch so the override path never trips the
+    # defensive "endpoint set but no shared client" guard.
+    reconciler: ReplayReconciler
+    if replay_reconciler is not None:
+        reconciler = replay_reconciler
+    elif need_http_for_trigger:
+        reconciler = ResumeSubscriptionReplayReconciler(
+            resume_mirror_repo,
+            _build_trigger_client(
+                env=resolved_env,
+                http_client=dapr_http_client,
+                timeout_seconds=timeout_seconds,
+            ),
+            default_ttl=resume_default_ttl,
+        )
+    else:
+        reconciler = NoopReplayReconciler()
     catalog_client: CatalogClient = (
         catalog if catalog is not None else _NotConfiguredCatalogClient()
     )
@@ -941,4 +1172,5 @@ def load_run_components(
         dapr_http_client=dapr_http_client,
         max_fanout_width=_resolve_max_fanout_width(resolved_env),
         approval_default_timeout=_resolve_approval_default_timeout(resolved_env),
+        resume_handler=resume_handler,
     )

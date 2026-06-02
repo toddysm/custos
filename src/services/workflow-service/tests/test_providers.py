@@ -31,6 +31,10 @@ from custos_workflow.clients import (
     NoopActivityRuntimeClient,
     NoopConnectorClient,
 )
+from custos_workflow.clients.trigger import (
+    DaprTriggerServiceClient,
+    NoopTriggerServiceClient,
+)
 from custos_workflow.providers import (
     DEFAULT_OUTBOUND_RPC_TIMEOUT_MS,
     ENV_APPROVAL_DEFAULT_TIMEOUT,
@@ -38,13 +42,28 @@ from custos_workflow.providers import (
     ENV_CONNECTOR_APP_ID,
     ENV_MAX_FANOUT_WIDTH,
     ENV_OUTBOUND_RPC_TIMEOUT_MS,
+    ENV_REGISTER_SUB_MAX_RETRIES,
+    ENV_RESUME_SUB_DEFAULT_TTL,
+    ENV_TS_ENDPOINT,
+    _build_trigger_client,
     _InProcessMetadataStoreProvider,
     _resolve_approval_default_timeout,
     _resolve_max_fanout_width,
     _resolve_outbound_rpc_timeout_seconds,
+    _resolve_register_sub_max_retries,
+    _resolve_resume_sub_default_ttl,
     load_run_components,
 )
+from custos_workflow.runs.replay import NoopReplayReconciler
 from custos_workflow.runtime import FakeWorkflowRuntime
+from custos_workflow.steps.resume import (
+    ResumeSubscriptionReplayReconciler,
+    WaitForStepHandler,
+)
+from custos_workflow.steps.resume.handler import (
+    DEFAULT_REGISTER_SUB_MAX_RETRIES,
+    DEFAULT_RESUME_SUB_TTL,
+)
 from custos_workflow.steps.sub_orchestration import (
     DEFAULT_APPROVAL_TIMEOUT,
     DEFAULT_MAX_FANOUT_WIDTH,
@@ -365,3 +384,161 @@ def test_provider_iso8601_pattern_matches_wait_module() -> None:
     from custos_workflow.runs.wait import _ISO8601_DURATION_PATTERN as wait_pattern
 
     assert provider_pattern.pattern == wait_pattern.pattern
+
+
+# ---------------------------------------------------------------------------
+# WF-IMPL-108 — Resume Subscription Manager wiring (Trigger Service client,
+# mirror repository, production ReplayReconciler, config knobs)
+# ---------------------------------------------------------------------------
+
+
+def _trigger_endpoint_env() -> dict[str, str]:
+    """Env map activating the Dapr Trigger Service client only."""
+    return {ENV_TS_ENDPOINT: "trigger-app"}
+
+
+def test_resolve_resume_sub_default_ttl_default_when_unset() -> None:
+    """Unset ``WF_RESUME_SUB_DEFAULT_TTL`` → the ``PT24H`` default string."""
+    assert _resolve_resume_sub_default_ttl({}) == DEFAULT_RESUME_SUB_TTL
+
+
+def test_resolve_resume_sub_default_ttl_parses_iso8601() -> None:
+    """A valid ISO-8601 duration is returned verbatim (handler takes a str)."""
+    assert _resolve_resume_sub_default_ttl({ENV_RESUME_SUB_DEFAULT_TTL: "PT12H"}) == "PT12H"
+    assert _resolve_resume_sub_default_ttl({ENV_RESUME_SUB_DEFAULT_TTL: "P2W"}) == "P2W"
+
+
+@pytest.mark.parametrize("bad", ["24h", "PT0S", "P1Y", "P", ""])
+def test_resolve_resume_sub_default_ttl_rejects_bad_values(bad: str) -> None:
+    """Malformed / non-positive / calendar durations crash at startup.
+
+    ``""`` falls back to the default; everything else raises so a
+    misconfigured TTL fails the worker before /readyz flips to 200.
+    """
+    if bad == "":
+        assert _resolve_resume_sub_default_ttl({ENV_RESUME_SUB_DEFAULT_TTL: bad}) == (
+            DEFAULT_RESUME_SUB_TTL
+        )
+        return
+    with pytest.raises(ValueError):
+        _resolve_resume_sub_default_ttl({ENV_RESUME_SUB_DEFAULT_TTL: bad})
+
+
+def test_resolve_register_sub_max_retries_default_when_unset() -> None:
+    """Unset ``WF_REGISTER_SUB_MAX_RETRIES`` → the ``5`` default."""
+    assert _resolve_register_sub_max_retries({}) == DEFAULT_REGISTER_SUB_MAX_RETRIES
+
+
+def test_resolve_register_sub_max_retries_parses_positive_int() -> None:
+    assert _resolve_register_sub_max_retries({ENV_REGISTER_SUB_MAX_RETRIES: "8"}) == 8
+
+
+@pytest.mark.parametrize("bad", ["abc", "1.5", "0", "-1"])
+def test_resolve_register_sub_max_retries_rejects_bad_values(bad: str) -> None:
+    with pytest.raises(ValueError):
+        _resolve_register_sub_max_retries({ENV_REGISTER_SUB_MAX_RETRIES: bad})
+
+
+def test_build_trigger_client_noop_when_endpoint_unset() -> None:
+    """No ``WF_TS_ENDPOINT`` → the in-process Noop client (no socket pool)."""
+    client = _build_trigger_client(env={}, http_client=None, timeout_seconds=10.0)
+
+    assert isinstance(client, NoopTriggerServiceClient)
+
+
+def test_load_run_components_noop_trigger_when_endpoint_unset() -> None:
+    """Sidecar-free path: Noop trigger ⇒ inert ``NoopReplayReconciler``.
+
+    The resume handler is still wired (the orchestrator always needs
+    one to park ``waitFor:`` nodes per WF-IMPL-107), but with no
+    Trigger Service endpoint the reconciler must stay Noop so nothing
+    reaches the Noop trigger client (whose methods raise
+    ``NotImplementedError``).
+    """
+    components = load_run_components(env={}, workflow_runtime=FakeWorkflowRuntime())
+
+    assert isinstance(components.resume_handler, WaitForStepHandler)
+    assert isinstance(components.replay_reconciler, NoopReplayReconciler)
+    assert components.dapr_http_client is None
+
+
+def test_load_run_components_dapr_trigger_wires_reconciler_and_shares_http_client() -> None:
+    """``WF_TS_ENDPOINT`` set → production reconciler + shared HTTP client.
+
+    The headline WF-IMPL-108 invariant: the
+    :class:`ResumeSubscriptionReplayReconciler` activates, holds the
+    lifespan-owned :class:`httpx.AsyncClient` via its Dapr trigger
+    client, and shares the *same* mirror repository as the
+    :class:`WaitForStepHandler` so a mirror persisted by the handler
+    is visible to the reconciler on replay.
+    """
+    components = load_run_components(
+        env=_trigger_endpoint_env(), workflow_runtime=FakeWorkflowRuntime()
+    )
+
+    try:
+        assert isinstance(components.replay_reconciler, ResumeSubscriptionReplayReconciler)
+        assert components.dapr_http_client is not None
+        trigger = components.replay_reconciler._trigger_client
+        assert isinstance(trigger, DaprTriggerServiceClient)
+        assert trigger.http_client is components.dapr_http_client
+        # Handler + reconciler MUST share one mirror repository.
+        assert components.replay_reconciler.mirror_repo is components.resume_handler.mirror_repo
+    finally:
+        if components.dapr_http_client is not None:
+            import asyncio
+
+            asyncio.run(components.dapr_http_client.aclose())
+
+
+def test_load_run_components_explicit_reconciler_override_wins() -> None:
+    """An injected ``replay_reconciler`` wins even when the trigger env is set.
+
+    The override path supplies its own reconciler (tests inject Fakes
+    / spies), so the factory must neither build the production
+    reconciler nor open a socket pool just for the trigger client.
+    """
+    sentinel = NoopReplayReconciler()
+    components = load_run_components(
+        env=_trigger_endpoint_env(),
+        workflow_runtime=FakeWorkflowRuntime(),
+        replay_reconciler=sentinel,
+    )
+
+    assert components.replay_reconciler is sentinel
+    # No trigger socket pool opened because the override short-circuits
+    # ``need_http_for_trigger`` (the publisher / ARM / connector env
+    # are unset here).
+    assert components.dapr_http_client is None
+
+
+def test_resume_knobs_thread_into_handler() -> None:
+    """TTL + retry knobs flow end-to-end into the WaitForStepHandler."""
+    components = load_run_components(
+        env={
+            ENV_RESUME_SUB_DEFAULT_TTL: "PT12H",
+            ENV_REGISTER_SUB_MAX_RETRIES: "7",
+        },
+        workflow_runtime=FakeWorkflowRuntime(),
+    )
+
+    assert components.resume_handler._default_ttl == "PT12H"
+    assert components.resume_handler._max_register_retries == 7
+
+
+def test_resume_default_ttl_threads_into_production_reconciler() -> None:
+    """The resolved default TTL also reaches the production reconciler."""
+    components = load_run_components(
+        env={**_trigger_endpoint_env(), ENV_RESUME_SUB_DEFAULT_TTL: "PT6H"},
+        workflow_runtime=FakeWorkflowRuntime(),
+    )
+
+    try:
+        assert isinstance(components.replay_reconciler, ResumeSubscriptionReplayReconciler)
+        assert components.replay_reconciler._default_ttl == "PT6H"
+        assert components.resume_handler._default_ttl == "PT6H"
+    finally:
+        if components.dapr_http_client is not None:
+            import asyncio
+
+            asyncio.run(components.dapr_http_client.aclose())
