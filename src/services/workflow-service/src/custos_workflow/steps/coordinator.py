@@ -26,8 +26,8 @@ Dispatch table (mirrors implementation-plan.md § WF-IMPL-055):
 |                                              | one.                        |
 +----------------------------------------------+-----------------------------+
 | ``SUB_ORCHESTRATION``                        | Defensive raise — the Sub- |
-| (``for:`` / ``approval:`` / ``workflow:``)   | Orchestration Manager       |
-|                                              | dispatches these inline via |
+| (``forEach:`` / ``approval:`` /              | Orchestration Manager       |
+| ``workflow:``)                               | dispatches these inline via |
 |                                              | the Run Controller          |
 |                                              | orchestrator (WF-IMPL-093); |
 |                                              | the dispatcher should never |
