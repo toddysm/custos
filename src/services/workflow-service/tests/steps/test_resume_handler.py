@@ -574,6 +574,107 @@ async def test_missing_event_key_call_site_fails_step() -> None:
     assert "missing the TypedAST" in result.envelope["message"]
 
 
+async def test_call_site_kind_mismatch_fails_step() -> None:
+    # A malformed graph: the eventKey slot label carries a call site
+    # tagged as the selector kind. The kind guard must reject it.
+    repo = InMemoryResumeSubscriptionMirrorRepository()
+    trigger = FakeTriggerServiceClient()
+    handler = WaitForStepHandler(repo)
+    bad_node = ExecutionNode(
+        step_id="await-event",
+        kind=StepKind.WAIT_FOR,
+        primitive_handler=PrimitiveHandler.RESUME_SUBSCRIPTION,
+        retry_policy=None,
+        on_error_routes=(),
+        call_sites={
+            "waitFor.eventKey": _call_site(
+                "inputs.key",
+                CallSiteKind.WAIT_FOR_SELECTOR,  # wrong kind
+                "spec.steps[0].waitFor.eventKey",
+                _STRING_KEY_SCHEMA,
+            )
+        },
+        step_source=WaitForStep.model_validate(
+            {"id": "await-event", "waitFor": {"eventKey": "${{ inputs.key }}"}}
+        ),
+    )
+    ctx = _ctx(inputs={"key": "evt-x"})
+
+    result = await drive_resume_generator(
+        handler.iter_resume(ctx, _graph(bad_node), "await-event"),
+        trigger,
+        repo,
+        resume_payload={},
+    )
+
+    assert isinstance(result, StepFailed)
+    assert result.envelope["kind"] == "step.with_input_resolution_error"
+    assert "slot-label collision" in result.envelope["message"]
+    assert trigger.register_calls == []
+
+
+async def test_post_registration_mirror_update_failure_fails_step() -> None:
+    # The pre-register persist succeeds; the re-stamp (second put)
+    # fails → structured StepFailed, not an uncaught exception.
+    class _FailSecondPutRepo(InMemoryResumeSubscriptionMirrorRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self._puts = 0
+
+        async def put(self, mirror: ResumeSubscriptionMirror) -> ResumeSubscriptionMirror:
+            self._puts += 1
+            if self._puts == 2:
+                raise RuntimeError("store down mid-registration")
+            return await super().put(mirror)
+
+    repo = _FailSecondPutRepo()
+    trigger = FakeTriggerServiceClient()
+    handler = WaitForStepHandler(repo)
+    graph = _graph(_wait_for_node())
+    ctx = _ctx(inputs={"key": "evt-x"})
+
+    result = await drive_resume_generator(
+        handler.iter_resume(ctx, graph, "await-event"),
+        trigger,
+        repo,
+        resume_payload={},
+    )
+
+    assert isinstance(result, StepFailed)
+    assert result.envelope["kind"] == "step.resume_mirror_persist_error"
+    # Registration did happen before the failing re-stamp.
+    assert len(trigger.register_calls) == 1
+
+
+async def test_cleanup_failures_are_best_effort_step_still_succeeds() -> None:
+    # Cancel + delete both fail AFTER the payload is received; the
+    # step must still succeed (cleanup is best-effort so the workflow
+    # cannot wedge on an un-redeliverable event).
+    class _FailCleanupTrigger(FakeTriggerServiceClient):
+        def cancel_resume_subscription(self, request: CancelResumeSubscriptionRequest) -> None:
+            raise RuntimeError("cancel unreachable")
+
+    class _FailDeleteRepo(InMemoryResumeSubscriptionMirrorRepository):
+        async def delete(self, mirror_id: str) -> None:
+            raise RuntimeError("delete unreachable")
+
+    repo = _FailDeleteRepo()
+    trigger = _FailCleanupTrigger()
+    handler = WaitForStepHandler(repo)
+    graph = _graph(_wait_for_node())
+    ctx = _ctx(inputs={"key": "evt-x"})
+
+    result = await drive_resume_generator(
+        handler.iter_resume(ctx, graph, "await-event"),
+        trigger,
+        repo,
+        resume_payload={"approved": True},
+    )
+
+    assert isinstance(result, StepSucceeded)
+    assert dict(result.outputs) == {"approved": True}
+
+
 # ---------------------------------------------------------------------------
 # Dispatch guards
 # ---------------------------------------------------------------------------

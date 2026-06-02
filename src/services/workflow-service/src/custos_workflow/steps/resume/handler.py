@@ -80,6 +80,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Generator, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import timedelta
 from types import MappingProxyType
@@ -363,6 +364,7 @@ class WaitForStepHandler:
                 scope,
                 ctx.clock,
                 run_id_str,
+                expected_kind=CallSiteKind.WAIT_FOR_EVENT_KEY,
                 required=True,
             )
             selector = _resolve_cel_string(
@@ -372,6 +374,7 @@ class WaitForStepHandler:
                 scope,
                 ctx.clock,
                 run_id_str,
+                expected_kind=CallSiteKind.WAIT_FOR_SELECTOR,
                 required=False,
             )
         except WithInputResolutionError as exc:
@@ -465,20 +468,38 @@ class WaitForStepHandler:
             expires_at=expires_at,
             selector=selector,
         )
-        yield PersistMirrorCall(mirror=registered_mirror)
+        try:
+            yield PersistMirrorCall(mirror=registered_mirror)
+        except Exception as exc:
+            persist_error = ResumeMirrorPersistError(
+                f"failed to update resume mirror for step {step_id!r} with the "
+                f"registered subscription id: {exc!r}",
+                run_id=run_id_str,
+                step_id=step_id,
+                event_key=event_key,
+                cause=repr(exc),
+            )
+            return StepFailed(envelope=MappingProxyType(persist_error.to_dict()))
 
         # 5. Suspend on the resume event.
         resume_payload = yield WaitForExternalEventCall(event_key=event_key)
 
         # 6. Cancel the subscription (idempotent) and delete the mirror.
-        yield CancelResumeSubscriptionCall(
-            request=CancelResumeSubscriptionRequest(
-                run_id=run_id_str,
-                step_id=step_id,
-                event_key=event_key,
+        #    Cleanup runs AFTER the resume payload has been received, so a
+        #    failure here must not abort the step — that would wedge the
+        #    workflow (the event can never be re-delivered on retry). Both
+        #    are best-effort: the TTL sweep / replay reconciler reclaim a
+        #    leaked subscription or mirror.
+        with suppress(Exception):
+            yield CancelResumeSubscriptionCall(
+                request=CancelResumeSubscriptionRequest(
+                    run_id=run_id_str,
+                    step_id=step_id,
+                    event_key=event_key,
+                )
             )
-        )
-        yield DeleteMirrorCall(mirror_id=mirror_id)
+        with suppress(Exception):
+            yield DeleteMirrorCall(mirror_id=mirror_id)
 
         # 7. Bind the event payload as the step output.
         if isinstance(resume_payload, Mapping):
@@ -504,10 +525,13 @@ async def drive_resume_generator(
 
     Pumps ``gen`` forward, resolving each yielded :data:`ResumeCall`
     against the injected collaborators and sending the result back.
-    A :class:`PersistMirrorCall` / :class:`RegisterResumeSubscriptionCall`
-    failure is re-injected via :meth:`Generator.throw` so the
-    handler's own ``try`` / ``except`` observes it; a
-    :class:`WaitForExternalEventCall` resolves immediately to
+    Any effect failure — a :class:`PersistMirrorCall`,
+    :class:`RegisterResumeSubscriptionCall`,
+    :class:`CancelResumeSubscriptionCall`, or :class:`DeleteMirrorCall`
+    — is re-injected via :meth:`Generator.throw` so the handler's own
+    ``try`` / ``except`` observes it (registration failures fail the
+    step; post-resume cleanup failures are swallowed best-effort);
+    a :class:`WaitForExternalEventCall` resolves immediately to
     ``resume_payload`` (the in-process driver does not block).
 
     :returns: The :class:`StepResult` the generator returns.
@@ -539,9 +563,15 @@ async def drive_resume_generator(
         elif isinstance(token, WaitForExternalEventCall):
             sent = resume_payload
         elif isinstance(token, CancelResumeSubscriptionCall):
-            trigger_client.cancel_resume_subscription(token.request)
+            try:
+                trigger_client.cancel_resume_subscription(token.request)
+            except Exception as exc:
+                pending_exc = exc
         elif isinstance(token, DeleteMirrorCall):
-            await mirror_repo.delete(token.mirror_id)
+            try:
+                await mirror_repo.delete(token.mirror_id)
+            except Exception as exc:
+                pending_exc = exc
         else:
             raise TypeError(
                 "WaitForStepHandler.iter_resume yielded an unsupported token "
@@ -650,6 +680,7 @@ def _resolve_cel_string(
     clock: Clock,
     run_id: str,
     *,
+    expected_kind: CallSiteKind,
     required: bool,
 ) -> str | None:
     """Evaluate a ``waitFor`` CEL slot and validate it as a string.
@@ -659,8 +690,14 @@ def _resolve_cel_string(
     ``waitFor.selector`` only when declared). An optional slot that
     is absent — or evaluates to ``None`` — returns ``None``.
 
+    The stored :attr:`TypedCallSite.kind` is asserted to match
+    ``expected_kind`` so a malformed graph (slot-label collision)
+    fails loudly instead of silently evaluating the wrong AST —
+    the same guard the ``let:`` / ``with:`` resolvers apply.
+
     :raises WithInputResolutionError: If a required slot is missing /
-        evaluates to a non-string or empty value, or the underlying
+        evaluates to a non-string or empty value, the stored call-site
+        kind does not match ``expected_kind``, or the underlying
         CEL evaluation raises.
     """
     call_site = node.call_sites.get(slot_label)
@@ -675,6 +712,16 @@ def _resolve_cel_string(
                 binding_name=field_name,
             )
         return None
+
+    if call_site.kind is not expected_kind:
+        raise WithInputResolutionError(
+            f"waitFor {field_name!r} on step {node.step_id!r} resolved a call site "
+            f"tagged {call_site.kind.value!r}, expected {expected_kind.value!r}; "
+            "this indicates a malformed graph with a slot-label collision",
+            run_id=run_id,
+            step_id=node.step_id,
+            binding_name=field_name,
+        )
 
     try:
         value = evaluate(call_site.typed_ast, scope, clock)
