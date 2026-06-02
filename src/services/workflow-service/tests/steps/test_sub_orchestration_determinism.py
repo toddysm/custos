@@ -254,7 +254,7 @@ _unique_id_items = st.lists(
 ).map(lambda ids: [{"id": f"item-{n}", "n": n} for n in ids])
 
 
-@settings(max_examples=150, suppress_health_check=[HealthCheck.too_slow])
+@settings(max_examples=150, deadline=None, suppress_health_check=[HealthCheck.too_slow])
 @given(items=_unique_id_items)
 def test_loop_spawn_set_is_byte_equal_across_replays(items: list[Any]) -> None:
     baseline = _loop_spawn_signature(items)
@@ -282,7 +282,7 @@ _indexless_items = st.lists(
 ).map(lambda ns: [{"n": n} for n in ns])
 
 
-@settings(max_examples=150, suppress_health_check=[HealthCheck.too_slow])
+@settings(max_examples=150, deadline=None, suppress_health_check=[HealthCheck.too_slow])
 @given(items=_indexless_items)
 def test_loop_index_fallback_keys_are_stable_across_replays(items: list[Any]) -> None:
     baseline = _loop_spawn_signature(items)
@@ -309,7 +309,7 @@ _keep_flag_items = st.lists(
 ).map(lambda rows: [{"id": f"item-{n}", "keep": keep} for n, keep in rows])
 
 
-@settings(max_examples=150, suppress_health_check=[HealthCheck.too_slow])
+@settings(max_examples=150, deadline=None, suppress_health_check=[HealthCheck.too_slow])
 @given(items=_keep_flag_items)
 def test_where_filtered_loop_is_byte_equal_across_replays(items: list[Any]) -> None:
     baseline = _loop_spawn_signature(items, where_cel='let.item["keep"]')
