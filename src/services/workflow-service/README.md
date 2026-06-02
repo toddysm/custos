@@ -640,6 +640,37 @@ once the Trigger Service (COMP-004) exists.
 Tracker: [#552](https://github.com/toddysm/custos/issues/552).
 
 
+WF-IMPL-104 ([#543](https://github.com/toddysm/custos/issues/543))
+adds the `WaitForStepHandler`
+(`custos_workflow.steps.resume.handler`) — the Resume Subscription
+Manager's lifecycle driver for a `waitFor:` step. It resolves the
+step's `waitFor.eventKey` (required) and `waitFor.selector`
+(optional) CEL slots and TTL (`waitFor.ttl` or the configured
+`WF_RESUME_SUB_DEFAULT_TTL` default), then drives the full
+register → wait → resume → cancel → delete-mirror sequence the
+design's *Resume Subscription Replay Protocol* pins: it persists a
+mirror **before** the Trigger Service call (rule 4 — first with a
+`pending` `tsSubscriptionId` sentinel, then re-stamped with the id
+the TS returns), registers with bounded exponential-backoff retry
+(capped at `WF_REGISTER_SUB_MAX_RETRIES`, failing the step with a
+retryable `ResumeRegistrationFailedError` envelope on exhaustion),
+suspends on the external event, and on delivery cancels the
+subscription (idempotently) and deletes the mirror before binding
+the event payload as the step output. Like the Activity / Sub-
+Orchestration handlers it is a **pure generator** that `yield`s
+*effect tokens* (`PersistMirrorCall` / `RegisterResumeSubscriptionCall`
+/ `WaitForExternalEventCall` / `CancelResumeSubscriptionCall` /
+`DeleteMirrorCall`) resolved by an in-process driver
+(`drive_resume_generator`), so the same `(runId, stepId, eventKey)`
+always derives the same deterministic mirror id and a Dapr replay
+re-registration is a safe idempotent no-op (the TS returns the same
+`tsSubscriptionId`, the mirror upsert keeps a single row). The
+handler emits no lifecycle events itself; the durable Dapr-Workflow
+token translation and `step.*` event emission land in the
+orchestrator-wrapper task (WF-IMPL-108).
+Tracker: [#552](https://github.com/toddysm/custos/issues/552).
+
+
 The Expression Evaluator (the first sub-module) is already in
 [`src/libs/custos-cel/`](../../libs/custos-cel) and shipped via
 WF-IMPL-001 through WF-IMPL-012 (#176–#187).
