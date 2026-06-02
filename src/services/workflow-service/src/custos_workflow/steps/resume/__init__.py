@@ -13,7 +13,10 @@ in-memory :class:`InMemoryResumeSubscriptionMirrorRepository`
 adapter. WF-IMPL-104 lands the :class:`WaitForStepHandler` — the
 register / wait / resume / cancel / delete-mirror lifecycle driver
 for a ``waitFor:`` step — plus its in-process drivers and effect
-tokens.
+tokens. WF-IMPL-105 lands the
+:class:`ResumeSubscriptionReplayReconciler` — the production replay
+hook that idempotently re-registers a run's open mirrors on every
+orchestrator entry.
 """
 
 from __future__ import annotations
@@ -34,16 +37,26 @@ from custos_workflow.steps.resume.mirror import (
     ResumeSubscriptionMirror,
     ResumeSubscriptionMirrorRepository,
 )
+from custos_workflow.steps.resume.reconciler import (
+    NoopResumeSubscriptionAuditPublisher,
+    ReplayReconcileReport,
+    ResumeSubscriptionAuditPublisher,
+    ResumeSubscriptionReplayReconciler,
+)
 
 __all__ = [
     "CancelResumeSubscriptionCall",
     "DeleteMirrorCall",
     "InMemoryResumeSubscriptionMirrorRepository",
+    "NoopResumeSubscriptionAuditPublisher",
     "PersistMirrorCall",
     "RegisterResumeSubscriptionCall",
+    "ReplayReconcileReport",
     "ResumeCall",
+    "ResumeSubscriptionAuditPublisher",
     "ResumeSubscriptionMirror",
     "ResumeSubscriptionMirrorRepository",
+    "ResumeSubscriptionReplayReconciler",
     "WaitForExternalEventCall",
     "WaitForStepHandler",
     "drive_resume_generator",

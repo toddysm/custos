@@ -35,7 +35,7 @@ Eighth sub-module: **Resume Subscription Manager**, packaged inside the service 
 ### Phase C — WaitFor step handler + replay + cancellation
 
 - [x] WF-IMPL-104 (#543): `WaitForStepHandler` — register / wait / resume lifecycle (depends on #538, #539, #540, #541).
-- [F] WF-IMPL-105 (#544): Replay reconciler — idempotent re-registration of open mirrors (depends on #541, #542, #543).
+- [x] WF-IMPL-105 (#544): Replay reconciler — idempotent re-registration of open mirrors (depends on #541, #542, #543).
 - [F] WF-IMPL-106 (#545): Cancel-run + terminal cancellation of open subscriptions (depends on #543).
 
 ### Phase D — Dispatch integration & wiring
