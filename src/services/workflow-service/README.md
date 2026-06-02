@@ -595,6 +595,26 @@ a fresh id) while being a no-op for an unknown or already-cancelled
 key — so the rest of the sub-module can be tested before the
 Trigger Service (COMP-004) or its production Dapr adapter
 (WF-IMPL-103) exist.
+
+WF-IMPL-102 ([#541](https://github.com/toddysm/custos/issues/541))
+lands the persistence foundation that makes the Workflow Service
+the **source of truth** for resume subscriptions
+(`custos_workflow.steps.resume.mirror`) — the frozen
+`ResumeSubscriptionMirror` value object (`mirrorId` / `runId` /
+`stepId` / `eventKey` / `selector` / `tsSubscriptionId` /
+`registeredAt` / `expiresAt`) with byte-stable `to_dict` /
+`to_json` serialization and exact `from_dict` / `from_json`
+round-trip, the `runtime_checkable`
+`ResumeSubscriptionMirrorRepository` Protocol (`put` /
+`list_open` / `list_open_for_step` / `delete` / `list_expired`),
+and the in-memory `InMemoryResumeSubscriptionMirrorRepository`
+adapter. The coordinator persists a mirror **before** it calls the
+Trigger Service so a crash between the mirror write and the TS call
+leaves an open mirror to replay; `put` upserts on `mirrorId` so a
+replay re-registration can update the stored `tsSubscriptionId`;
+and `list_expired` drives the periodic TTL garbage-collection
+sweep. The `MetadataStoreProvider`-backed adapter (REQ-048) is a
+separate follow-up — same staging as the idempotency ledger.
 Tracker: [#552](https://github.com/toddysm/custos/issues/552).
 
 
