@@ -640,6 +640,32 @@ once the Trigger Service (COMP-004) exists.
 Tracker: [#552](https://github.com/toddysm/custos/issues/552).
 
 
+WF-IMPL-106 ([#545](https://github.com/toddysm/custos/issues/545))
+adds the `ResumeSubscriptionCanceller`
+(`custos_workflow.steps.resume.canceller`) — the terminal-transition
+sweep that tears down a run's (or a single step's) open resume
+subscriptions, implementing the design's *Resume Subscription Replay
+Protocol* cancellation rule (rule 5) and § *Operation: Cancel Run*.
+`cancel_run(runId)` lists the run's open mirrors
+(`list_open(runId)`) and, for each, issues one idempotent
+`CancelResumeSubscription(runId, stepId, eventKey)` through the
+`TriggerServiceClient` and then deletes the mirror row; `cancel_step`
+is the step-scoped counterpart keyed on `list_open_for_step`. Each
+mirror is cancelled **before** its row is deleted, so a crash between
+the two leaves an open mirror a later sweep (or the replay reconciler)
+re-processes — never a deleted row pointing at a still-live Trigger
+Service subscription. The sweep is best-effort and isolating: a failure
+cancelling or deleting one mirror is logged and recorded on the returned
+`CancelSweepReport` (`cancelled` / `deleted` / `failed` tuples of mirror
+ids) but never aborts the rest, so a run terminal transition cannot
+wedge on one flaky key — only a failure *listing* the open mirrors
+propagates to the caller. Cancelling an unknown or already-expired key
+is a clean no-op, matching the Trigger Service contract. The production
+`RunController.cancel_run` wiring lands with the rest of the resume path
+in WF-IMPL-108.
+Tracker: [#552](https://github.com/toddysm/custos/issues/552).
+
+
 WF-IMPL-105 ([#544](https://github.com/toddysm/custos/issues/544))
 adds the production `ResumeSubscriptionReplayReconciler`
 (`custos_workflow.steps.resume.reconciler`) — the
