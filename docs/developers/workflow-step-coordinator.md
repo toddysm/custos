@@ -448,6 +448,9 @@ without extending the locked set.
 | `step.sub_orchestration_spawn_error` | `SubOrchestrationSpawnError` | `start_child_workflow(...)` itself could not be issued for a deterministic child instance id. | `StepFailed` envelope; retry driver is not consulted. |
 | `step.sub_workflow_failed` | `SubWorkflowFailedError` | An awaited child sub-workflow completed with a failure envelope; a single child failure short-circuits the parent loop / invocation. Carries the child's `child_kind`. | `StepFailed` envelope; retry driver is not consulted. |
 | `step.approval_timeout` | `ApprovalTimeoutError` | An `approval:` gate's durable timer fired before the approval `RaiseExternalEvent` signal arrived. Carries the configured ISO-8601 `timeout`. | `StepFailed` envelope; retry driver is not consulted. |
+| `step.resume_registration_failed` | `ResumeRegistrationFailedError` | The Resume Subscription Manager's `RegisterResumeSubscription` RPC stayed unreachable after `WF_REGISTER_SUB_MAX_RETRIES` (default 5). Carries the `event_key`, `max_retries`, and last `cause`. | `StepFailed` envelope mapped to `class: retryable` so the workflow-level policy decides. |
+| `step.resume_subscription_divergent` | `ResumeSubscriptionDivergentError` | On Dapr replay the `waitFor.selector` diverged from the value persisted in the original `ResumeSubscriptionMirror`; the original wins. Carries the `event_key`, `original_selector`, and `replay_selector`. | `StepFailed` envelope; retry driver is not consulted (deterministic-replay bug). |
+| `step.resume_mirror_persist_error` | `ResumeMirrorPersistError` | The `MetadataStoreProvider` write that mirrors a resume subscription (persisted before the TS call) could not be issued. Carries the `event_key` and `cause`. | `StepFailed` envelope; retry driver is not consulted (structural failure). |
 
 Every entry inflates a stable `to_dict()` envelope keyed on the
 common base — `{kind, message, run_id?, step_id?, attempt?}` —

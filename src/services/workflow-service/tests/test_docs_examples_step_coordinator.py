@@ -369,6 +369,9 @@ _DOCUMENTED_STEP_KINDS: Final[frozenset[str]] = frozenset(
         "step.sub_orchestration_spawn_error",
         "step.sub_workflow_failed",
         "step.approval_timeout",
+        "step.resume_registration_failed",
+        "step.resume_subscription_divergent",
+        "step.resume_mirror_persist_error",
     }
 )
 

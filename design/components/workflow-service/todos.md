@@ -24,7 +24,7 @@ Eighth sub-module: **Resume Subscription Manager**, packaged inside the service 
 ### Phase A — Foundations (model, errors, client contract)
 
 - [x] WF-IMPL-099 (#538): `waitFor:` document model + `StepKind.WAIT_FOR` + `PrimitiveHandler.RESUME_SUBSCRIPTION` + compiler tagging.
-- [F] WF-IMPL-100 (#539): Resume subscription error taxonomy additions.
+- [x] WF-IMPL-100 (#539): Resume subscription error taxonomy additions.
 - [F] WF-IMPL-101 (#540): `TriggerServiceClient` Protocol + request/response models + test doubles.
 
 ### Phase B — Persistence + client adapter

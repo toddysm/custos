@@ -670,6 +670,9 @@ _STEP_EXECUTE_OUTCOMES: Final[Mapping[str, str]] = {
     "step.sub_orchestration_spawn_error": "sub_orchestration_spawn_error",
     "step.sub_workflow_failed": "sub_workflow_failed",
     "step.approval_timeout": "approval_timeout",
+    "step.resume_registration_failed": "resume_registration_failed",
+    "step.resume_subscription_divergent": "resume_subscription_divergent",
+    "step.resume_mirror_persist_error": "resume_mirror_persist_error",
 }
 
 # Build-time check: the outcome map keys MUST equal the locked
