@@ -25,13 +25,13 @@ Dispatch table (mirrors implementation-plan.md § WF-IMPL-055):
 |                                              | dispatcher should never see |
 |                                              | one.                        |
 +----------------------------------------------+-----------------------------+
-| ``SUB_ORCHESTRATION``                        | :class:`StepFailed` carrying|
-| (``for:`` / ``approval:`` / ``workflow:``)   | a                           |
-|                                              | ``step.kind_not_implemented``|
-|                                              | envelope. The Sub-          |
-|                                              | Orchestration Manager sub-  |
-|                                              | module owns the real        |
-|                                              | implementation.             |
+| ``SUB_ORCHESTRATION``                        | Defensive raise — the Sub- |
+| (``for:`` / ``approval:`` / ``workflow:``)   | Orchestration Manager       |
+|                                              | dispatches these inline via |
+|                                              | the Run Controller          |
+|                                              | orchestrator (WF-IMPL-093); |
+|                                              | the dispatcher should never |
+|                                              | see one.                    |
 +----------------------------------------------+-----------------------------+
 
 Exhaustiveness guard
@@ -58,7 +58,6 @@ re-opening the dispatch table.
 
 from __future__ import annotations
 
-from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
 from custos_workflow.graph.model import PrimitiveHandler
@@ -211,16 +210,30 @@ class StepCoordinator:
                 elif primitive is PrimitiveHandler.ACTIVITY_RUNTIME:
                     result = self._activity_handler.execute(ctx, graph, step_id)
                 elif primitive is PrimitiveHandler.SUB_ORCHESTRATION:
-                    err = StepKindNotImplementedError(
+                    # SUB_ORCHESTRATION nodes (``forEach`` loop,
+                    # ``workflow:`` invocation, ``approval:`` gate) are
+                    # dispatched inline by the Run Controller
+                    # orchestrator through the Sub-Orchestration Manager
+                    # (WF-IMPL-093), exactly like ``wait:`` nodes. The
+                    # dispatcher should never see one; if it does there's
+                    # a compile-time routing bug, so we raise loudly
+                    # rather than emit a deferred-implementation
+                    # ``StepFailed`` envelope. Raising propagates through
+                    # ``observe_step_execute`` (histogram
+                    # ``outcome=kind_not_implemented``) and bumps
+                    # ``custos_workflow_step_errors_total`` via the
+                    # ``except StepCoordinatorError`` arm below.
+                    raise StepKindNotImplementedError(
                         f"step {step_id!r} kind={node.kind.value!r} "
-                        f"primitive_handler={primitive.value!r} is deferred "
-                        "to the Sub-Orchestration Manager sub-module",
+                        f"primitive_handler={primitive.value!r} is handled "
+                        "inline by the Run Controller orchestrator via the "
+                        "Sub-Orchestration Manager, not by the Step "
+                        "Coordinator dispatcher",
                         run_id=str(ctx.run_id),
                         step_id=step_id,
                         step_kind=node.kind.value,
                         primitive_handler=primitive.value,
                     )
-                    result = StepFailed(envelope=MappingProxyType(err.to_dict()))
                 else:
                     # PrimitiveHandler.RUN_CONTROLLER_TIMER — wait: nodes are
                     # dispatched inline by the Run Controller orchestrator via

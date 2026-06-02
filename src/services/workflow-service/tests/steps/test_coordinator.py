@@ -248,23 +248,34 @@ class TestDispatchActivityRuntime:
 
 
 class TestDispatchSubOrchestration:
-    def test_workflow_step_returns_step_failed_with_not_implemented_envelope(
+    def test_sub_orchestration_step_raises_step_kind_not_implemented_error(
         self,
     ) -> None:
+        """``forEach`` / ``workflow:`` / ``approval:`` are dispatched inline.
+
+        The Run Controller orchestrator drives SUB_ORCHESTRATION nodes
+        through the Sub-Orchestration Manager (WF-IMPL-093), so reaching
+        the Step Coordinator dispatcher with one is a compile-time
+        routing bug. The dispatcher raises (instead of returning a
+        :class:`StepFailed` envelope) to surface it loudly, mirroring the
+        ``run_controller_timer`` arm. The exception subclasses
+        :class:`NotImplementedError`.
+        """
         coord = StepCoordinator(_RecordingActivityHandler())
         graph = _graph(_workflow_node("child"))
 
-        result = coord.execute(_ctx("run-A"), graph, "child")
+        with pytest.raises(StepKindNotImplementedError) as excinfo:
+            coord.execute(_ctx("run-A"), graph, "child")
 
-        assert isinstance(result, StepFailed)
-        envelope = dict(result.envelope)
-        # Envelope shape mirrors StepKindNotImplementedError.to_dict().
-        assert envelope["kind"] == "step.kind_not_implemented"
-        assert envelope["run_id"] == "run-A"
-        assert envelope["step_id"] == "child"
-        assert envelope["step_kind"] == "workflow"
-        assert envelope["primitive_handler"] == "sub_orchestration"
-        assert "Sub-Orchestration Manager" in envelope["message"]
+        err = excinfo.value
+        assert err.KIND == "step.kind_not_implemented"
+        assert err.step_id == "child"
+        assert err.run_id == "run-A"
+        assert err.step_kind == "workflow"
+        assert err.primitive_handler == "sub_orchestration"
+        assert "Sub-Orchestration Manager" in err.message
+        # Subclass of NotImplementedError (taxonomy guarantee).
+        assert isinstance(err, NotImplementedError)
 
 
 class TestDispatchRunControllerTimer:
