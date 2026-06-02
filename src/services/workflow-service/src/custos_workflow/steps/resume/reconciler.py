@@ -74,6 +74,7 @@ Acceptance criteria (mirrored from #544):
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -389,7 +390,17 @@ class ResumeSubscriptionReplayReconciler:
             ttl=ttl,
             selector=mirror.selector,
         )
-        response = self._trigger_client.register_resume_subscription(request)
+        # Bridge the sync ``TriggerServiceClient`` Protocol surface and
+        # the production ``DaprTriggerServiceClient`` (whose
+        # ``register_resume_subscription`` is ``async``): in-process
+        # fakes return the response directly, while the Dapr adapter
+        # returns a coroutine this async core must await. Mirrors the
+        # ``_call_sync_or_async`` bridge the activity / connector path
+        # uses for the same sync-Protocol / async-Dapr split. WF-IMPL-108
+        # wires the async Dapr client here, so without this the RPC would
+        # be dropped as an un-awaited coroutine.
+        result = self._trigger_client.register_resume_subscription(request)
+        response = await result if inspect.isawaitable(result) else result
 
         was_updated = False
         if response.ts_subscription_id != mirror.ts_subscription_id:

@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from custos_cel import FixedClock, SchemaBindings, parse, type_check
@@ -29,6 +29,7 @@ from custos_workflow.clients.trigger import (
     FakeTriggerServiceClient,
     RegisterResumeSubscriptionRequest,
     RegisterResumeSubscriptionResponse,
+    TriggerServiceClient,
 )
 from custos_workflow.document import LetStep, WaitForStep
 from custos_workflow.graph import (
@@ -338,6 +339,64 @@ class TestReconcileIdempotent:
         # Mirror row is untouched.
         stored = await repo.list_open(mirror.run_id)
         assert stored == (mirror,)
+
+
+class _AsyncTrigger:
+    """Trigger double whose ``register_resume_subscription`` is ``async``.
+
+    Mirrors the production ``DaprTriggerServiceClient`` (whose register
+    method is a coroutine) so the WF-IMPL-108 wiring path — where the
+    async core must ``await`` the call rather than drop an un-awaited
+    coroutine — is exercised end-to-end.
+    """
+
+    def __init__(self) -> None:
+        self._fake = FakeTriggerServiceClient()
+        self.register_calls: list[RegisterResumeSubscriptionRequest] = []
+
+    async def register_resume_subscription(
+        self, request: RegisterResumeSubscriptionRequest
+    ) -> RegisterResumeSubscriptionResponse:
+        self.register_calls.append(request)
+        return self._fake.register_resume_subscription(request)
+
+    async def cancel_resume_subscription(self, request: Any) -> None:  # pragma: no cover
+        self._fake.cancel_resume_subscription(request)
+
+
+class TestReconcileAsyncTriggerClient:
+    async def test_awaits_async_register_and_updates_mirror(self) -> None:
+        """An async trigger client is awaited; the minted id reaches the row.
+
+        With the production async ``DaprTriggerServiceClient`` the
+        register call returns a coroutine. The reconciler must await it
+        so the freshly-minted ``tsSubscriptionId`` is read off the
+        resolved response and written back to the mirror — without the
+        bridge the coroutine would be dropped and the run silently
+        un-reconciled.
+        """
+        repo = InMemoryResumeSubscriptionMirrorRepository()
+        # Pre-seed with the "pending" sentinel so the minted id differs
+        # and the mirror-update branch fires off the awaited response.
+        mirror = _mirror(ts_subscription_id="pending", selector="region == 'eu'")
+        await _seed(repo, mirror)
+        trigger = _AsyncTrigger()
+
+        node = _wait_for_node(selector_cel="inputs.sel")
+        ctx = _ctx(inputs={"key": "order-approved", "sel": "region == 'eu'"})
+        reconciler = ResumeSubscriptionReplayReconciler(
+            repo, cast(TriggerServiceClient, trigger)
+        )
+
+        report = await reconciler.reconcile(ctx, _graph(node))
+
+        assert report.reregistered == (mirror.mirror_id,)
+        assert report.mirror_updated == (mirror.mirror_id,)
+        assert len(trigger.register_calls) == 1
+        # The awaited response's minted id was persisted to the row.
+        stored = await repo.list_open(mirror.run_id)
+        assert len(stored) == 1
+        assert stored[0].ts_subscription_id != "pending"
 
 
 class TestReconcileDivergence:

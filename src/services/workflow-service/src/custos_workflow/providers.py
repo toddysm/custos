@@ -713,8 +713,9 @@ def _resolve_resume_sub_default_ttl(env: Mapping[str, str]) -> str:
     """Parse :data:`ENV_RESUME_SUB_DEFAULT_TTL` once at startup.
 
     Accepts the same ISO-8601 duration grammar
-    :func:`_resolve_approval_default_timeout` accepts and returns the
-    validated *string* (the
+    :func:`_resolve_approval_default_timeout` accepts — including its
+    whole-seconds restriction (sub-second precision is rejected) — and
+    returns the validated *string* (the
     :class:`~custos_workflow.steps.resume.WaitForStepHandler` takes a
     string ``default_ttl`` and re-validates it via
     :func:`~custos_workflow.runs.wait.parse_wait_duration`). An unset or
@@ -740,6 +741,15 @@ def _resolve_resume_sub_default_ttl(env: Mapping[str, str]) -> str:
     seconds = float(match.group("seconds") or 0.0)
     if weeks == 0 and days == 0 and hours == 0 and minutes == 0 and seconds == 0.0:
         raise ValueError(f"{ENV_RESUME_SUB_DEFAULT_TTL}: {raw!r} must be greater than zero")
+    if seconds != int(seconds):
+        # Match _resolve_approval_default_timeout: a subscription TTL is
+        # coarse (hours / days), so reject sub-second precision at the
+        # boundary rather than silently carrying a fractional value into
+        # the handler / Trigger Service register call.
+        raise ValueError(
+            f"{ENV_RESUME_SUB_DEFAULT_TTL}: {raw!r} must be a whole number of seconds "
+            "(sub-second precision is not supported)"
+        )
     return raw
 
 

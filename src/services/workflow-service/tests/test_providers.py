@@ -408,12 +408,14 @@ def test_resolve_resume_sub_default_ttl_parses_iso8601() -> None:
     assert _resolve_resume_sub_default_ttl({ENV_RESUME_SUB_DEFAULT_TTL: "P2W"}) == "P2W"
 
 
-@pytest.mark.parametrize("bad", ["24h", "PT0S", "P1Y", "P", ""])
+@pytest.mark.parametrize("bad", ["24h", "PT0S", "P1Y", "P", "PT0.5S", "PT1H30.5S", ""])
 def test_resolve_resume_sub_default_ttl_rejects_bad_values(bad: str) -> None:
-    """Malformed / non-positive / calendar durations crash at startup.
+    """Malformed / non-positive / calendar / sub-second durations crash at startup.
 
     ``""`` falls back to the default; everything else raises so a
     misconfigured TTL fails the worker before /readyz flips to 200.
+    Sub-second precision is rejected for parity with
+    :func:`_resolve_approval_default_timeout`.
     """
     if bad == "":
         assert _resolve_resume_sub_default_ttl({ENV_RESUME_SUB_DEFAULT_TTL: bad}) == (
