@@ -19,7 +19,10 @@ hook that idempotently re-registers a run's open mirrors on every
 orchestrator entry. WF-IMPL-106 lands the
 :class:`ResumeSubscriptionCanceller` — the terminal-transition sweep
 that cancels a run's (or a single step's) open subscriptions with the
-Trigger Service and deletes their mirror rows.
+Trigger Service and deletes their mirror rows. WF-IMPL-109 lands the
+:class:`ResumeSubscriptionTtlSweeper` — the periodic, time-driven sweep
+that garbage-collects TTL-expired mirror rows independently of the WF
+mirror writes.
 """
 
 from __future__ import annotations
@@ -50,8 +53,14 @@ from custos_workflow.steps.resume.reconciler import (
     ResumeSubscriptionAuditPublisher,
     ResumeSubscriptionReplayReconciler,
 )
+from custos_workflow.steps.resume.sweeper import (
+    DEFAULT_RESUME_SUB_SWEEP_INTERVAL_SECONDS,
+    ResumeSubscriptionTtlSweeper,
+    TtlSweepReport,
+)
 
 __all__ = [
+    "DEFAULT_RESUME_SUB_SWEEP_INTERVAL_SECONDS",
     "CancelResumeSubscriptionCall",
     "CancelSweepReport",
     "DeleteMirrorCall",
@@ -66,6 +75,8 @@ __all__ = [
     "ResumeSubscriptionMirror",
     "ResumeSubscriptionMirrorRepository",
     "ResumeSubscriptionReplayReconciler",
+    "ResumeSubscriptionTtlSweeper",
+    "TtlSweepReport",
     "WaitForExternalEventCall",
     "WaitForStepHandler",
     "drive_resume_generator",

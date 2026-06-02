@@ -7,6 +7,7 @@ in ``test_healthz.py`` and ``test_call_context.py``).
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import Iterator
 from typing import Any
@@ -50,6 +51,28 @@ def test_lifespan_flips_ready_to_true(fake_run_components: RunComponents) -> Non
         assert response.json() == {"status": "ready"}
         assert app.state.ready is True
         assert app.state.ready_detail is None
+
+
+def test_lifespan_starts_and_cancels_resume_sweep_task(
+    fake_run_components: RunComponents,
+) -> None:
+    """The TTL-expiry sweep runs as a background task for the lifespan.
+
+    WF-IMPL-109: ``create_app`` launches the
+    :class:`ResumeSubscriptionTtlSweeper` as a background task on the
+    ready path and cancels + awaits it on shutdown so it never outlives
+    the worker.
+    """
+    app = create_app(require_call_context=False, run_components=fake_run_components)
+    with TestClient(app):
+        sweep_task = app.state.resume_sweep_task
+        assert isinstance(sweep_task, asyncio.Task)
+        # The default 300s interval keeps the task parked on its sleep
+        # after the first (instant, empty) sweep — i.e. still running.
+        assert not sweep_task.done()
+
+    # Lifespan exit cancelled + awaited the task.
+    assert sweep_task.done()
 
 
 @pytest.fixture
