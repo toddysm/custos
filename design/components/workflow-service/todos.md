@@ -48,7 +48,7 @@ Seventh sub-module: **Sub-Orchestration Manager**, packaged inside the service h
 
 - [x] WF-IMPL-096 (#519): OTel observability hooks for sub-orchestration (depends on #516, #517).
 - [x] WF-IMPL-097 (#520): Unit + integration test suite (≥ 90 % coverage gate) (depends on #519).
-- [F] WF-IMPL-098 (#521): Developer documentation — `docs/developers/workflow-sub-orchestration.md` (depends on #520).
+- [x] WF-IMPL-098 (#521): Developer documentation — `docs/developers/workflow-sub-orchestration.md` (depends on #520).
 
 Tracker: #522 — `WF-IMPL-000-SUB-ORCHESTRATION`.
 
