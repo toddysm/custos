@@ -578,6 +578,25 @@ join `LOCKED_STEP_KINDS` so the WF-IMPL-058 OTel counter and the
 `_telemetry` outcome map stay exhaustive.
 Tracker: [#552](https://github.com/toddysm/custos/issues/552).
 
+WF-IMPL-101 ([#540](https://github.com/toddysm/custos/issues/540))
+adds the outbound `TriggerServiceClient` contract surface
+(`custos_workflow.clients.trigger`) — a `runtime_checkable`
+Protocol with `register_resume_subscription(...)` /
+`cancel_resume_subscription(...)`, the frozen
+`RegisterResumeSubscriptionRequest` /
+`RegisterResumeSubscriptionResponse` (carrying `tsSubscriptionId`)
+/ `CancelResumeSubscriptionRequest` envelopes, pinned Dapr
+method-name constants, and the `NoopTriggerServiceClient` /
+`FakeTriggerServiceClient` test doubles. The fake mirrors the
+Trigger Service replay contract — it returns the **same**
+`tsSubscriptionId` for a repeated `(runId, stepId, eventKey)`, and
+cancellation removes a known key (so a later re-registration mints
+a fresh id) while being a no-op for an unknown or already-cancelled
+key — so the rest of the sub-module can be tested before the
+Trigger Service (COMP-004) or its production Dapr adapter
+(WF-IMPL-103) exist.
+Tracker: [#552](https://github.com/toddysm/custos/issues/552).
+
 
 The Expression Evaluator (the first sub-module) is already in
 [`src/libs/custos-cel/`](../../libs/custos-cel) and shipped via

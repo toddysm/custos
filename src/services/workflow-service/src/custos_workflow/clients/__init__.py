@@ -28,6 +28,15 @@ plug in behind the same Protocols.
   :class:`BindForStepResponse` / :class:`ConnectorContext` frozen
   dataclasses and the :class:`NoopConnectorClient` /
   :class:`FakeConnectorClient` test doubles.
+* WF-IMPL-101 lands :class:`TriggerServiceClient` — the outbound
+  boundary to the Trigger Service
+  (``RegisterResumeSubscription`` / ``CancelResumeSubscription``)
+  — together with the
+  :class:`RegisterResumeSubscriptionRequest` /
+  :class:`RegisterResumeSubscriptionResponse` /
+  :class:`CancelResumeSubscriptionRequest` frozen dataclasses and
+  the :class:`NoopTriggerServiceClient` /
+  :class:`FakeTriggerServiceClient` test doubles.
 """
 
 from __future__ import annotations
@@ -52,6 +61,14 @@ from custos_workflow.clients.connector import (
     NoopConnectorClient,
     SlotSpec,
 )
+from custos_workflow.clients.trigger import (
+    CancelResumeSubscriptionRequest,
+    FakeTriggerServiceClient,
+    NoopTriggerServiceClient,
+    RegisterResumeSubscriptionRequest,
+    RegisterResumeSubscriptionResponse,
+    TriggerServiceClient,
+)
 
 __all__ = [
     "ACTIVITY_RESULT_CLASSES",
@@ -60,14 +77,20 @@ __all__ = [
     "ActivityRuntimeClient",
     "BindForStepRequest",
     "BindForStepResponse",
+    "CancelResumeSubscriptionRequest",
     "ConnectorClient",
     "ConnectorContext",
     "DaprActivityRuntimeClient",
     "DaprConnectorClient",
     "FakeActivityRuntimeClient",
     "FakeConnectorClient",
+    "FakeTriggerServiceClient",
     "NoopActivityRuntimeClient",
     "NoopConnectorClient",
+    "NoopTriggerServiceClient",
+    "RegisterResumeSubscriptionRequest",
+    "RegisterResumeSubscriptionResponse",
     "ScheduleActivityRequest",
     "SlotSpec",
+    "TriggerServiceClient",
 ]
