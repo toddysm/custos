@@ -82,7 +82,7 @@ from custos_cel import (
 )
 from custos_cel.clock import Clock
 
-from custos_workflow._telemetry import observe_run_replay
+from custos_workflow._telemetry import observe_run_replay, observe_sub_orchestration
 from custos_workflow.document import ApprovalStep, WorkflowStep
 from custos_workflow.graph.model import (
     ExecutionGraph,
@@ -636,10 +636,13 @@ def _dispatch_sub_orchestration(
         into a ``status="failed"`` :class:`RunOutput`.
     """
     if node.step_source.for_each is not None or "forEach" in node.call_sites:
-        loop_result = yield from manager.run_loop(step_ctx, graph, step_id)
+        with observe_sub_orchestration("loop") as observation:
+            loop_result = yield from manager.run_loop(step_ctx, graph, step_id)
+            observation.children = len(loop_result)
         return {"results": loop_result}
     if isinstance(node.step_source, ApprovalStep):
-        decision = yield from manager.run_approval(step_ctx, graph, step_id)
+        with observe_sub_orchestration("approval"):
+            decision = yield from manager.run_approval(step_ctx, graph, step_id)
         return dict(decision)
     if isinstance(node.step_source, WorkflowStep):
         if child_graph_resolver is None:
@@ -656,7 +659,9 @@ def _dispatch_sub_orchestration(
                 step_id=step_id,
             )
         child_graph = child_graph_resolver(node.step_source.workflow)
-        child_bag = yield from manager.run_sub_workflow(step_ctx, graph, step_id, child_graph)
+        with observe_sub_orchestration("sub_workflow") as observation:
+            child_bag = yield from manager.run_sub_workflow(step_ctx, graph, step_id, child_graph)
+            observation.children = 1
         return dict(child_bag)
     # Defensive: the compiler only tags forEach / workflow: / approval:
     # nodes SUB_ORCHESTRATION, so any other source is a compile-time bug.
