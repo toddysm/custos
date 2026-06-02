@@ -43,8 +43,7 @@ Seventh sub-module: **Sub-Orchestration Manager**, packaged inside the service h
 
 - [x] WF-IMPL-093 (#516): Orchestrator inline dispatch of `SUB_ORCHESTRATION` (depends on #512, #513, #514, #515).
 - [x] WF-IMPL-094 (#517): `providers.py` wiring + Configuration knobs + child registration (depends on #516).
-- [F] WF-IMPL-095 (#518): Replay determinism — idempotent re-spawn + reconciliation (depends on #516).
-
+- [x] WF-IMPL-095 (#518): Replay determinism — idempotent re-spawn + reconciliation (depends on #516).
 ### Phase E — Observability, verification, docs
 
 - [F] WF-IMPL-096 (#519): OTel observability hooks for sub-orchestration (depends on #516, #517).
