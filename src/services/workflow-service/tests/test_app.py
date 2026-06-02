@@ -212,6 +212,25 @@ def test_lifespan_raises_when_workflow_component_env_missing(_clean_env: None) -
         pass  # pragma: no cover - lifespan startup must raise above
 
 
+def test_lifespan_raises_when_trigger_endpoint_env_missing(_clean_env: None) -> None:
+    """WF-IMPL-108: missing ``WF_TS_ENDPOINT`` fails the lifespan.
+
+    The resume subscription manager re-registers surviving
+    ``waitFor:`` subscriptions against the Trigger Service on
+    replay, so the production path must fail fast (design.md §
+    Configuration marks ``WF_TS_ENDPOINT`` Required) rather than
+    silently dropping registrations. The check fires only on the
+    env-driven path — the workflow-component var is present here so
+    the failure is unambiguously about the trigger endpoint.
+    """
+    with mock.patch.dict(os.environ, {}, clear=False):
+        os.environ["WF_DAPR_WORKFLOW_COMPONENT"] = "wf-component"
+        os.environ.pop("WF_TS_ENDPOINT", None)
+        app = create_app(require_call_context=False)
+        with pytest.raises(RuntimeError, match="WF_TS_ENDPOINT"), TestClient(app):
+            pass  # pragma: no cover - lifespan startup must raise above
+
+
 def test_lifespan_registers_orchestrator_and_starts_runtime(
     fake_run_components: RunComponents,
 ) -> None:

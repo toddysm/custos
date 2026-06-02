@@ -41,7 +41,7 @@ Eighth sub-module: **Resume Subscription Manager**, packaged inside the service 
 ### Phase D — Dispatch integration & wiring
 
 - [x] WF-IMPL-107 (#546): Step Coordinator dispatch of `RESUME_SUBSCRIPTION` + orchestrator wiring (depends on #543).
-- [F] WF-IMPL-108 (#547): `providers.py` wiring + Configuration knobs + registration (depends on #544, #545, #546).
+- [x] WF-IMPL-108 (#547): `providers.py` wiring + Configuration knobs + registration (depends on #544, #545, #546).
 - [F] WF-IMPL-109 (#548): TTL-expiry periodic mirror sweep (depends on #541, #547).
 
 ### Phase E — Observability, verification, docs
