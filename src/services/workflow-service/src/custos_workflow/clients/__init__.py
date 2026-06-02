@@ -63,6 +63,7 @@ from custos_workflow.clients.connector import (
 )
 from custos_workflow.clients.trigger import (
     CancelResumeSubscriptionRequest,
+    DaprTriggerServiceClient,
     FakeTriggerServiceClient,
     NoopTriggerServiceClient,
     RegisterResumeSubscriptionRequest,
@@ -82,6 +83,7 @@ __all__ = [
     "ConnectorContext",
     "DaprActivityRuntimeClient",
     "DaprConnectorClient",
+    "DaprTriggerServiceClient",
     "FakeActivityRuntimeClient",
     "FakeConnectorClient",
     "FakeTriggerServiceClient",

@@ -618,6 +618,28 @@ separate follow-up — same staging as the idempotency ledger.
 Tracker: [#552](https://github.com/toddysm/custos/issues/552).
 
 
+WF-IMPL-103 ([#542](https://github.com/toddysm/custos/issues/542))
+adds the production `DaprTriggerServiceClient`
+(`custos_workflow.clients.trigger`) — the `TriggerServiceClient`
+adapter that talks to the Trigger Service over Dapr
+Service-Invocation. It posts `RegisterResumeSubscription`
+(`{runId, stepId, eventKey, selector, ttl}` → parses
+`subscriptionId` into `tsSubscriptionId`) and
+`CancelResumeSubscription` (`{runId, stepId, eventKey}`, no body)
+to `…/v1.0/invoke/<trigger-app-id>/method/<Method>`, normalising
+every failure through the WF-IMPL-075 `OutboundRpcError` taxonomy
+(transport → `OutboundRpcTransportError`, HTTP 499 →
+`OutboundRpcCancelledError`, other non-2xx →
+`OutboundRpcStatusError` carrying the status code, malformed
+register body → `OutboundRpcDecodeError`). Cancellation is
+idempotent over the wire — HTTP 404 / 409 for an already-gone key
+are treated as a clean no-op. Outbound RPCs are observed through
+`observe_outbound_rpc(client="trigger", …)`. The adapter ships
+behind the Protocol; true cross-service resume is exercisable only
+once the Trigger Service (COMP-004) exists.
+Tracker: [#552](https://github.com/toddysm/custos/issues/552).
+
+
 The Expression Evaluator (the first sub-module) is already in
 [`src/libs/custos-cel/`](../../libs/custos-cel) and shipped via
 WF-IMPL-001 through WF-IMPL-012 (#176–#187).

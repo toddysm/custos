@@ -1475,13 +1475,15 @@ async def observe_outbound_rpc(
     ``retryable`` / ``permanent`` consistently with the WF-IMPL-075
     envelope mapper.
 
-    :param client: Either ``"arm"`` or ``"connector"``. Pinned to
-        the two adapters wired in WF-IMPL-079 / WF-IMPL-080;
-        anything else raises :class:`ValueError` so a typo at a
-        call site fails loudly instead of leaking a bad label.
+    :param client: Either ``"arm"``, ``"connector"``, or
+        ``"trigger"``. Pinned to the adapters wired in
+        WF-IMPL-079 / WF-IMPL-080 / WF-IMPL-103; anything else
+        raises :class:`ValueError` so a typo at a call site fails
+        loudly instead of leaking a bad label.
     :param method: Dapr method name. ``"ScheduleActivity"`` /
         ``"CancelActivity"`` for ARM, ``"BindForStep"`` for the
-        Connector adapter.
+        Connector adapter, ``"RegisterResumeSubscription"`` /
+        ``"CancelResumeSubscription"`` for the Trigger adapter.
     :param run_id: Workflow run id (when known). Emitted as the
         ``wf.run.id`` span attribute when supplied.
     :param step_id: Workflow step id (when known). Emitted as the
@@ -1492,9 +1494,10 @@ async def observe_outbound_rpc(
         ``cancel_activity`` deliberately omits this — cancellation
         is not attempt-scoped.
     """
-    if client not in {"arm", "connector"}:
+    if client not in {"arm", "connector", "trigger"}:
         raise ValueError(
-            f"observe_outbound_rpc.client must be one of {{'arm', 'connector'}}; got {client!r}"
+            f"observe_outbound_rpc.client must be one of "
+            f"{{'arm', 'connector', 'trigger'}}; got {client!r}"
         )
 
     # Import lazily to break the ``clients/_errors -> _telemetry ->
