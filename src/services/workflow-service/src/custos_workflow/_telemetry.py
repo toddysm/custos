@@ -904,6 +904,154 @@ def record_step_error(kind: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# WF-IMPL-096: Sub-Orchestration Manager observability hooks
+# ---------------------------------------------------------------------------
+#
+# Spans + counters that make every Sub-Orchestration Manager primitive
+# (``forEach`` loop, ``workflow:`` sub-workflow, ``approval:`` gate)
+# observable. The manager runs inline in the run orchestrator
+# (WF-IMPL-093), so — like the ``wait:`` path — each primitive is a
+# generator that yields Dapr child-workflow / external-event / timer
+# tokens. The instrumentation context managers wrap the
+# ``yield from`` drive so the span stays open across the durable
+# suspends and closes when the primitive resolves.
+#
+# Label sets
+# ----------
+# * ``primitive`` — ``loop`` / ``sub_workflow`` / ``approval``, the
+#   three shapes that share the
+#   :attr:`PrimitiveHandler.SUB_ORCHESTRATION` tag.
+# * ``outcome`` — ``ok`` on success, or one of the four
+#   sub-orchestration suffixes of the locked
+#   :data:`~custos_workflow.steps.errors.LOCKED_STEP_KINDS` taxonomy
+#   (``step.`` prefix stripped, mirroring the WF-IMPL-058 convention)
+#   when the primitive raises a :class:`StepCoordinatorError`, or
+#   ``internal_error`` for any other escaping exception.
+#
+# Two counters:
+#
+# * :data:`SUB_ORCHESTRATION_CHILDREN_SPAWNED_TOTAL` — number of child
+#   workflow instances spawned by the ``loop`` / ``sub_workflow``
+#   primitives, labelled by ``primitive`` and ``outcome``. A loop
+#   that expands to N items contributes N on success; a sub-workflow
+#   contributes 1. A primitive that fails before (or without)
+#   spawning contributes a 0-valued sample under its failure outcome
+#   so the (``primitive``, ``outcome``) series still appears.
+# * :data:`SUB_ORCHESTRATION_APPROVALS_TIMED_OUT_TOTAL` — number of
+#   ``approval`` gates that resolved by timing out, labelled by
+#   ``outcome``. A gate that is approved (or that fails to arm)
+#   contributes a 0-valued sample so the series appears for every
+#   outcome the gate reaches.
+
+#: ``outcome`` label map for the sub-orchestration primitives — the
+#: sub-orchestration subset of the locked
+#: :data:`~custos_workflow.steps.errors.LOCKED_STEP_KINDS` taxonomy
+#: with the ``step.`` prefix stripped.
+_SUB_ORCHESTRATION_OUTCOMES: Final[Mapping[str, str]] = {
+    "step.loop_expansion_error": "loop_expansion_error",
+    "step.sub_orchestration_spawn_error": "sub_orchestration_spawn_error",
+    "step.sub_workflow_failed": "sub_workflow_failed",
+    "step.approval_timeout": "approval_timeout",
+}
+
+#: Closed set of ``primitive`` label values.
+_SUB_ORCHESTRATION_PRIMITIVES: Final[frozenset[str]] = frozenset(
+    {"loop", "sub_workflow", "approval"}
+)
+
+#: ``outcome`` label for a gate that timed out (drives the
+#: approvals-timed-out counter increment).
+_APPROVAL_TIMEOUT_OUTCOME: Final[str] = "approval_timeout"
+
+SUB_ORCHESTRATION_CHILDREN_SPAWNED_TOTAL: Final[Counter] = _meter.create_counter(
+    name="custos_workflow_sub_orchestration_children_spawned_total",
+    description=(
+        "Count of child workflow instances spawned by the "
+        "Sub-Orchestration Manager loop / sub-workflow primitives, "
+        "labelled by ``primitive`` (``loop`` or ``sub_workflow``) and "
+        "``outcome``. A loop contributes one per expanded item, a "
+        "sub-workflow contributes one; a primitive that fails before "
+        "spawning contributes a 0-valued sample under its failure "
+        "outcome."
+    ),
+)
+
+SUB_ORCHESTRATION_APPROVALS_TIMED_OUT_TOTAL: Final[Counter] = _meter.create_counter(
+    name="custos_workflow_sub_orchestration_approvals_timed_out_total",
+    description=(
+        "Count of Sub-Orchestration Manager approval gates that "
+        "resolved by timing out, labelled by ``outcome``. An approved "
+        "gate (or one that fails to arm) contributes a 0-valued "
+        "sample so every reached outcome appears."
+    ),
+)
+
+
+class _SubOrchestrationObservation:
+    """Mutable handle yielded by :func:`observe_sub_orchestration`.
+
+    The caller sets :attr:`children` to the number of child instances
+    the primitive spawned (``loop``: the expanded item count;
+    ``sub_workflow``: 1) on the success path. The context manager
+    reads it when it records the children-spawned counter. On the
+    failure path the count stays 0 — the failure outcome series is
+    still emitted with a 0-valued sample.
+    """
+
+    __slots__ = ("children",)
+
+    def __init__(self) -> None:
+        self.children: int = 0
+
+
+def _record_sub_orchestration_counters(primitive: str, outcome: str, children: int) -> None:
+    """Bump the sub-orchestration counters for one resolved primitive."""
+    if primitive in ("loop", "sub_workflow"):
+        SUB_ORCHESTRATION_CHILDREN_SPAWNED_TOTAL.add(
+            children,
+            {"primitive": primitive, "outcome": outcome},
+        )
+    else:  # approval
+        timed_out = 1 if outcome == _APPROVAL_TIMEOUT_OUTCOME else 0
+        SUB_ORCHESTRATION_APPROVALS_TIMED_OUT_TOTAL.add(timed_out, {"outcome": outcome})
+
+
+@contextmanager
+def observe_sub_orchestration(primitive: str) -> Iterator[_SubOrchestrationObservation]:
+    """Span + counter wrapper for one Sub-Orchestration Manager primitive.
+
+    Emits the ``custos_workflow.sub_orchestration.{primitive}`` span
+    (with ``primitive`` and ``outcome`` attributes) and records the
+    matching counter sample exactly once per dispatch: the
+    children-spawned counter for ``loop`` / ``sub_workflow``, the
+    approvals-timed-out counter for ``approval``. The yielded
+    observation handle lets the caller report the spawned-child count
+    on the success path; failures record a 0-valued sample under the
+    locked failure outcome and re-raise.
+    """
+    if primitive not in _SUB_ORCHESTRATION_PRIMITIVES:
+        raise ValueError(
+            f"unknown sub-orchestration primitive {primitive!r}; "
+            f"expected one of {sorted(_SUB_ORCHESTRATION_PRIMITIVES)}"
+        )
+    with _tracer.start_as_current_span(f"custos_workflow.sub_orchestration.{primitive}") as span:
+        span.set_attribute("primitive", primitive)
+        observation = _SubOrchestrationObservation()
+        try:
+            yield observation
+        except Exception as exc:
+            outcome = _outcome_for(exc, _SUB_ORCHESTRATION_OUTCOMES)
+            span.set_attribute("outcome", outcome)
+            span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
+            span.record_exception(exc)
+            _record_sub_orchestration_counters(primitive, outcome, 0)
+            raise
+        else:
+            span.set_attribute("outcome", _RUN_OK)
+            _record_sub_orchestration_counters(primitive, _RUN_OK, observation.children)
+
+
+# ---------------------------------------------------------------------------
 # WF-IMPL-070: API Adapter HTTP-server observability hooks
 # ---------------------------------------------------------------------------
 #

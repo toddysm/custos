@@ -152,6 +152,21 @@ _telemetry.WORKFLOW_EVENTS_EMITTED_TOTAL = _telemetry._meter.create_counter(  # 
     ),
 )
 
+# WF-IMPL-096: Sub-Orchestration Manager observability instruments.
+# Same rebinding pattern so the in-memory exporter captures the
+# spans + counter samples the manager primitives emit.
+_telemetry.SUB_ORCHESTRATION_CHILDREN_SPAWNED_TOTAL = _telemetry._meter.create_counter(  # type: ignore[misc]
+    name="custos_workflow_sub_orchestration_children_spawned_total",
+    description=(
+        "Count of child workflow instances spawned by the "
+        "Sub-Orchestration Manager loop / sub-workflow primitives."
+    ),
+)
+_telemetry.SUB_ORCHESTRATION_APPROVALS_TIMED_OUT_TOTAL = _telemetry._meter.create_counter(  # type: ignore[misc]
+    name="custos_workflow_sub_orchestration_approvals_timed_out_total",
+    description=("Count of Sub-Orchestration Manager approval gates that resolved by timing out."),
+)
+
 
 # ---------------------------------------------------------------------------
 # Fixtures

@@ -46,7 +46,7 @@ Seventh sub-module: **Sub-Orchestration Manager**, packaged inside the service h
 - [x] WF-IMPL-095 (#518): Replay determinism — idempotent re-spawn + reconciliation (depends on #516).
 ### Phase E — Observability, verification, docs
 
-- [F] WF-IMPL-096 (#519): OTel observability hooks for sub-orchestration (depends on #516, #517).
+- [x] WF-IMPL-096 (#519): OTel observability hooks for sub-orchestration (depends on #516, #517).
 - [F] WF-IMPL-097 (#520): Unit + integration test suite (≥ 90 % coverage gate) (depends on #519).
 - [F] WF-IMPL-098 (#521): Developer documentation — `docs/developers/workflow-sub-orchestration.md` (depends on #520).
 
