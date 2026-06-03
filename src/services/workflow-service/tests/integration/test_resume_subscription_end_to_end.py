@@ -249,10 +249,13 @@ class TestRegisterParkResume:
 
         assert isinstance(result, StepSucceeded)
         assert dict(result.outputs) == {"approved": True, "by": "alice"}
-        # Idempotent re-register on replay reused the same subscription id:
-        # the fake only ever minted ONE id across the park + the replay
-        # re-registration (``_next_id`` advances once, from 1 to 2).
-        assert trigger._next_id == 2
+        # Replay re-registered against the SAME idempotency key, so the
+        # Trigger Service returned the original subscription id rather
+        # than minting a duplicate: two register calls, one unique key.
+        assert len(trigger.register_calls) == 2
+        assert {r.idempotency_key for r in trigger.register_calls} == {
+            ("run-1", "await-event", "resume-evt")
+        }
         assert registered_id == "ts-sub-1"
         # The subscription was cancelled and the mirror row deleted.
         assert len(trigger.cancel_calls) == 1
@@ -291,8 +294,12 @@ class TestReplayReconciliation:
         assert len(report.reregistered) == 1
         assert report.divergent == ()
         assert audit.events == []
-        # No new subscription was minted on replay (id reused).
-        assert trigger._next_id == 2
+        # Replay re-registered against the same idempotency key (the park
+        # call plus the reconcile call), so no new subscription was minted.
+        assert len(trigger.register_calls) == 2
+        assert {r.idempotency_key for r in trigger.register_calls} == {
+            ("run-1", "await-event", "evt-x")
+        }
         after = await repo.list_open("run-1")
         assert len(after) == 1
         assert after[0].ts_subscription_id == original_id
