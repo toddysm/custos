@@ -10,26 +10,34 @@ listen / pull streams that feed the Trigger Service.
 
 ## Status
 
-CONN-IMPL-001 ([#284](https://github.com/toddysm/custos/issues/284), Phase A)
-— scaffold. The package skeleton, the `create_app()` factory exposing
-`/healthz` + `/readyz` so the IMPL-002 Helm chart can pass its liveness /
-readiness gates, the `python -m custos_connector` entry point, and the CI
-gate (`.github/workflows/python-services.yml`) are real. Everything else —
-providers, middleware, REST surface, sidecar — is incremental work tracked
-under [#318](https://github.com/toddysm/custos/issues/318) (CONN-IMPL-000).
+**Implemented** — the CONN-IMPL-000 milestone ([#318](https://github.com/toddysm/custos/issues/318))
+is complete; all 34 child tasks (CONN-IMPL-001 … CONN-IMPL-034) are merged and
+the tracking issue is closed. The service implements the full design: the
+ConnectorManifest v1 validator + normalizer + OCI Referrers discovery, the
+Plugin Loader / connector-type registry, the ConnectorInstance lifecycle +
+config validator + activation/health, per-category identity resolvers, the
+Context Binder (`BindForStep`) + Lease Manager (TTL precedence, concurrent-lease
+cap), the secret-bridge sidecar (UDS token API + mTLS control channel +
+container image), the pull cursor + pull-loop scheduler + Listen Manager + Event
+Normalizer, the operator revoke flows, the FastAPI REST surface + Internal RPCs
+(`BindForStep`, `ValidateConnector`, `SubscribeEvents`, `RefreshLease`), SPL
+provider wiring, call-context middleware + permission enforcement, and
+observability + audit emission. Backed by a unit + integration suite at the
+≥90 % coverage gate (CONN-IMPL-030/031), sample reference plugins
+(CONN-IMPL-032), and developer docs
+([`docs/developers/connector-plugin-author.md`](../../../docs/developers/connector-plugin-author.md),
+CONN-IMPL-033).
 
 Tracking issue: [#318](https://github.com/toddysm/custos/issues/318) (CONN-IMPL-000).
 
 Design reference:
 [`design/components/connector-service/design.md`](../../../design/components/connector-service/design.md).
 
-## Configuration (planned, materialized incrementally)
+## Configuration
 
 Per the design (§ Internal Structure, § Identity and Credential Model,
-§ Operator Admin Surface, § Pull Cursor Model), the runtime will read the
-following `CONN_*` environment variables. The CI scaffold does not consume
-any of them yet — they land alongside the providers (Phase B), the sidecar
-(Phase H), and the listen / pull manager (Phase I).
+§ Operator Admin Surface, § Pull Cursor Model), the runtime reads the
+following `CONN_*` environment variables.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
@@ -63,10 +71,8 @@ mypy src tests
 pytest -q
 ```
 
-`python -m custos_connector` starts a FastAPI app exposing only
-`/healthz` and `/readyz` (both returning `{"status": "ok"}` with HTTP 200).
-Providers, middleware, and the REST surface are wired across CONN-IMPL-003 /
-CONN-IMPL-004 / CONN-IMPL-026.
+`python -m custos_connector` starts the FastAPI app with the full REST +
+Internal RPC surface plus the `/healthz` and `/readyz` probes.
 
 ## Layout
 
@@ -74,12 +80,28 @@ CONN-IMPL-004 / CONN-IMPL-026.
 src/services/connector-service/
 ├── README.md
 ├── pyproject.toml
+├── openapi.json
 ├── src/
 │   └── custos_connector/
-│       ├── __init__.py        # create_app() factory (healthz/readyz probes only)
+│       ├── __init__.py        # create_app() factory (full app wiring)
 │       ├── __main__.py        # uvicorn entry point
+│       ├── api/               # FastAPI REST surface + Internal RPC routers
+│       ├── manifest/          # ConnectorManifest validator + normalizer
+│       ├── loader/            # Plugin Loader + connector-type registry
+│       ├── instances/         # ConnectorInstance lifecycle + config validator
+│       ├── identity/          # per-category identity resolvers
+│       ├── binding/           # Context Binder (BindForStep)
+│       ├── lease/             # Lease Manager + audit emission
+│       ├── sidecar_admin/     # secret-bridge sidecar control surface
+│       ├── cursor/            # pull cursor lifecycle + admin
+│       ├── scheduler/         # pull-loop scheduler
+│       ├── listen/            # Listen Manager + Event Normalizer
+│       ├── validate/          # shared validation helpers
+│       ├── middleware/        # call-context middleware + permissions
+│       ├── providers.py       # SPL provider wiring + schema-revision gate
+│       ├── runtime.py         # plugin runtime adapter
+│       ├── _telemetry.py      # OpenTelemetry hooks
+│       ├── audit.py           # audit event emission
 │       └── py.typed
 └── tests/
-    ├── __init__.py
-    └── test_smoke.py
 ```

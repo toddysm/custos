@@ -7,13 +7,20 @@ digest pinning).
 
 Design: [`design/components/catalog-service/design.md`](../../../design/components/catalog-service/design.md).
 
-## Status
-
-**Scaffold only** — CS-IMPL-001 ([#202](https://github.com/toddysm/custos/issues/202)).
-The package skeleton, the `create_app()` factory placeholder, the `python -m custos_catalog`
-entry point, and the CI gate (`.github/workflows/python-services.yml`) are real.
-Everything else is incremental work tracked under [#226](https://github.com/toddysm/custos/issues/226)
-(CS-IMPL-000).
+**Implemented** — the CS-IMPL-000 milestone ([#226](https://github.com/toddysm/custos/issues/226))
+is complete; all 24 child tasks (CS-IMPL-001 … CS-IMPL-024) are merged and the
+tracking issue is closed. The service exposes its full REST + Internal RPC
+surface: workflow / template publish, normalization, schema + publish-time CEL
+syntactic / name-binding validation, reference resolution, versioning +
+immutability enforcement, the template engine (`:materialize`), the activity-type
+and connector-type read-side registries, `GetWorkflowVersion` /
+`ResolveConnectorTypeRef` Internal RPC, SPL provider wiring, the call-context
+middleware (real Auth Service integration, CS-IMPL-024), the live Connector
+Service client (CS-IMPL-023 / CONN-IMPL-034), observability + audit emission,
+and the `/healthz` + `/readyz` probes. Backed by a unit + integration suite at
+the ≥90 % coverage gate (CS-IMPL-020/021) and developer docs at
+[`docs/developers/catalog-api.md`](../../../docs/developers/catalog-api.md)
+(CS-IMPL-022).
 
 ## Configuration
 
@@ -51,9 +58,8 @@ mypy src tests
 pytest -q
 ```
 
-`python -m custos_catalog` will currently raise `NotImplementedError` from
-`create_app()` — that is the documented scaffold behaviour. The factory is
-wired in CS-IMPL-017 ([#218](https://github.com/toddysm/custos/issues/218)).
+`python -m custos_catalog` starts the FastAPI app with the full REST +
+Internal RPC surface plus the `/healthz` and `/readyz` probes.
 
 ## Layout
 
@@ -61,11 +67,24 @@ wired in CS-IMPL-017 ([#218](https://github.com/toddysm/custos/issues/218)).
 src/services/catalog-service/
 ├── README.md
 ├── pyproject.toml
+├── openapi.json
 ├── src/
 │   └── custos_catalog/
-│       ├── __init__.py        # create_app() factory (scaffold stub)
+│       ├── __init__.py        # create_app() factory (full app wiring)
 │       ├── __main__.py        # uvicorn entry point
+│       ├── api/               # FastAPI REST surface + Internal RPC routers
+│       ├── managers/          # definition, versioning, template, registries
+│       ├── clients/           # Connector Service client
+│       ├── middleware/        # call-context middleware (+ dev shim)
+│       ├── schema/            # workflow + template JSON Schema validators
+│       ├── cel_validate.py    # publish-time CEL syntactic + name-binding gate
+│       ├── normalize.py       # canonical document normalizer + hashing
+│       ├── resolve.py         # reference resolver
+│       ├── versioning.py      # versioning + immutability enforcement
+│       ├── template_engine.py # :materialize
+│       ├── providers.py       # SPL provider wiring + schema-revision gate
+│       ├── _telemetry.py      # OpenTelemetry hooks
+│       ├── audit.py           # audit event emission
 │       └── py.typed
 └── tests/
-    └── test_smoke.py
 ```
