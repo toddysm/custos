@@ -18,6 +18,7 @@ failure propagation.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 import pytest
 
@@ -26,6 +27,7 @@ from custos_workflow.clients.trigger import (
     FakeTriggerServiceClient,
     RegisterResumeSubscriptionRequest,
     RegisterResumeSubscriptionResponse,
+    TriggerServiceClient,
 )
 from custos_workflow.steps.resume import (
     CancelSweepReport,
@@ -280,3 +282,42 @@ class TestCancelStep:
 
         assert report == CancelSweepReport()
         assert trigger.cancel_calls == []
+
+
+class _AsyncCancelTrigger:
+    """Trigger client whose ``cancel_resume_subscription`` is ``async``.
+
+    Mirrors the production ``DaprTriggerServiceClient`` sync/async split:
+    the canceller must await the returned coroutine rather than dropping
+    it as an un-awaited call (WF-IMPL-110 review fix).
+    """
+
+    def __init__(self) -> None:
+        self.cancel_calls: list[CancelResumeSubscriptionRequest] = []
+
+    def register_resume_subscription(
+        self, request: RegisterResumeSubscriptionRequest
+    ) -> RegisterResumeSubscriptionResponse:  # pragma: no cover - unused here
+        raise NotImplementedError
+
+    async def cancel_resume_subscription(self, request: CancelResumeSubscriptionRequest) -> None:
+        self.cancel_calls.append(request)
+
+
+class TestAsyncTriggerClient:
+    async def test_awaits_async_cancel_coroutine(self) -> None:
+        repo = InMemoryResumeSubscriptionMirrorRepository()
+        trigger = _AsyncCancelTrigger()
+        await _seed(
+            repo,
+            _mirror(step_id="wait-a", event_key="ev-a", mirror_id="rsm-a"),
+        )
+        canceller = ResumeSubscriptionCanceller(repo, cast(TriggerServiceClient, trigger))
+
+        report = await canceller.cancel_run("run-1")
+
+        assert report.cancelled == ("rsm-a",)
+        assert report.deleted == ("rsm-a",)
+        assert report.failed == ()
+        assert [c.step_id for c in trigger.cancel_calls] == ["wait-a"]
+        assert await repo.list_open("run-1") == ()

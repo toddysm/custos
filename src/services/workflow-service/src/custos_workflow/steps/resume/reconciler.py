@@ -405,8 +405,8 @@ class ResumeSubscriptionReplayReconciler:
         # uses for the same sync-Protocol / async-Dapr split. WF-IMPL-108
         # wires the async Dapr client here, so without this the RPC would
         # be dropped as an un-awaited coroutine.
-        result = self._trigger_client.register_resume_subscription(request)
         with observe_resume_registration():
+            result = self._trigger_client.register_resume_subscription(request)
             response = await result if inspect.isawaitable(result) else result
 
         was_updated = False

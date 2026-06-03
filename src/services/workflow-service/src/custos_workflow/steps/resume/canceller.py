@@ -46,9 +46,11 @@ WF-IMPL-108.
 
 from __future__ import annotations
 
+import inspect
 import logging
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
+from typing import cast
 
 from custos_workflow._telemetry import observe_resume_cancellation
 from custos_workflow.clients.trigger import (
@@ -161,13 +163,35 @@ class ResumeSubscriptionCanceller:
         for mirror in mirrors:
             try:
                 with observe_resume_cancellation():
-                    self._trigger_client.cancel_resume_subscription(
+                    # Bridge the sync ``TriggerServiceClient`` Protocol surface
+                    # and the production ``DaprTriggerServiceClient`` (whose
+                    # ``cancel_resume_subscription`` is ``async``): in-process
+                    # fakes return ``None`` directly, while the Dapr adapter
+                    # returns a coroutine this async sweep must await. Mirrors
+                    # the same bridge the replay reconciler uses for
+                    # ``register_resume_subscription``; without it a real
+                    # cancellation would be dropped as an un-awaited coroutine
+                    # while the span/counter still recorded ``success``.
+                    # The Protocol types ``cancel_resume_subscription`` as
+                    # returning ``None``; the production Dapr adapter returns a
+                    # coroutine. ``cast`` the bound method to a sync/async union
+                    # so the await bridge type-checks against both surfaces —
+                    # without it a real cancellation would be dropped as an
+                    # un-awaited coroutine while the span/counter still recorded
+                    # ``success``.
+                    cancel = cast(
+                        "Callable[[CancelResumeSubscriptionRequest], None | Awaitable[None]]",
+                        self._trigger_client.cancel_resume_subscription,
+                    )
+                    result = cancel(
                         CancelResumeSubscriptionRequest(
                             run_id=mirror.run_id,
                             step_id=mirror.step_id,
                             event_key=mirror.event_key,
                         )
                     )
+                    if inspect.isawaitable(result):
+                        await result
             except Exception:
                 # Isolate one mirror's cancel failure; keep its row so a
                 # later sweep / reconcile retries the idempotent cancel.
