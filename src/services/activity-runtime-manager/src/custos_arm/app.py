@@ -14,7 +14,9 @@ The exposed surface is:
 - Every other request passes through
   :class:`~custos_arm.middleware.CallContextMiddleware`, which trusts the
   ``x-custos-callctx`` dev-shim header when ``ARM_AUTHZ_ENDPOINT`` is empty
-  and refuses to start when ``ENVIRONMENT=production``.
+  and refuses to start when ``ENVIRONMENT=production``. The two probes are
+  deliberately bypassed by the middleware so liveness/readiness checks need
+  no call-context header.
 
 The lifespan currently flips ``app.state.ready`` to ``True`` with no
 dependencies; ARM-IMPL-003+ replace the trivial startup with the runtime
@@ -55,16 +57,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             touching the real environment.
 
     Returns:
-        A configured :class:`fastapi.FastAPI` instance exposing the
-        ``/healthz`` and ``/readyz`` probes behind the call-context
-        middleware.
+        A configured :class:`fastapi.FastAPI` instance. The ``/healthz`` and
+        ``/readyz`` probes are intentionally bypassed by the call-context
+        middleware; every other request passes through it.
 
     Raises:
         custos_arm.config.SettingsError: A required variable is missing or
-            malformed.
+            malformed (raised here when ``settings`` is ``None``).
         custos_arm.middleware.DevShimDisabledInProductionError: The
             call-context dev shim is active (empty ``ARM_AUTHZ_ENDPOINT``)
-            while ``ENVIRONMENT=production``.
+            while ``ENVIRONMENT=production``. Starlette builds the
+            middleware stack lazily, so this surfaces when the application
+            starts up (or serves its first request), not from
+            ``create_app`` itself.
     """
     resolved = settings if settings is not None else load_settings()
 
