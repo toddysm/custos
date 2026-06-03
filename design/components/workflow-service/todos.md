@@ -47,7 +47,7 @@ Eighth sub-module: **Resume Subscription Manager**, packaged inside the service 
 ### Phase E — Observability, verification, docs
 
 - [x] WF-IMPL-110 (#549): OTel observability hooks (depends on #546, #547).
-- [F] WF-IMPL-111 (#550): Unit + integration test suite (≥ 90 % coverage gate) (depends on #549).
+- [x] WF-IMPL-111 (#550): Unit + integration test suite (≥ 90 % coverage gate) (depends on #549).
 - [F] WF-IMPL-112 (#551): Developer documentation — `docs/developers/workflow-resume-subscriptions.md` (depends on #550).
 
 Tracker: #552 — `WF-IMPL-000-RESUME-SUBSCRIPTION`.

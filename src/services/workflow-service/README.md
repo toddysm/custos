@@ -640,6 +640,30 @@ once the Trigger Service (COMP-004) exists.
 Tracker: [#552](https://github.com/toddysm/custos/issues/552).
 
 
+WF-IMPL-111 ([#550](https://github.com/toddysm/custos/issues/550))
+adds the Resume Subscription Manager's end-to-end integration suite,
+`tests/integration/test_resume_subscription_end_to_end.py`. Where the
+per-component unit suites each drive one collaborator against its own
+fakes, this suite wires the real `WaitForStepHandler`,
+`ResumeSubscriptionReplayReconciler`, `ResumeSubscriptionCanceller`,
+and `ResumeSubscriptionTtlSweeper` around **one shared**
+`InMemoryResumeSubscriptionMirrorRepository` and **one shared**
+`FakeTriggerServiceClient` — the same way the worker shares them —
+and pins the cross-component contracts: register → park → resume
+(mirror persisted with the real `ts_subscription_id`, Trigger Service
+registered once, then a replay drives a fresh generator to completion
+with the delivered payload, cancels, and deletes the row); idempotent
+replay re-registration (the existing subscription id is reused, no
+duplicate mint); replay selector divergence (original kept + audit
+emitted, Replay Protocol rule 2); register-budget exhaustion (step
+fails retryably, leaving only the pending mirror row for the sweeper
+to reap); cancel-run cleanup (every open subscription cancelled +
+deleted); and TTL sweep (an expired orphaned row reaped while a fresh
+row survives). The package coverage floor (`--cov-fail-under=90`)
+holds at 99.17%.
+Tracker: [#552](https://github.com/toddysm/custos/issues/552).
+
+
 WF-IMPL-110 ([#549](https://github.com/toddysm/custos/issues/549))
 adds OpenTelemetry observability hooks for the Resume Subscription
 Manager. The `custos_workflow._telemetry` module gains four counters
