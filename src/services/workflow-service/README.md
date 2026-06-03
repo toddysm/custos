@@ -640,6 +640,25 @@ once the Trigger Service (COMP-004) exists.
 Tracker: [#552](https://github.com/toddysm/custos/issues/552).
 
 
+WF-IMPL-112 ([#551](https://github.com/toddysm/custos/issues/551))
+adds the developer documentation for the Resume Subscription Manager,
+`docs/developers/workflow-resume-subscriptions.md`. The page covers the
+`waitFor:` schema (`eventKey` / `selector` / `ttl`), the
+register / replay / cancel / sweep sequence (Mermaid), the
+`ResumeSubscriptionMirror` fields + repository Protocol, the locked
+Resume Subscription Replay Protocol rules, the resume error taxonomy
+(`step.resume_registration_failed`, `step.resume_subscription_divergent`,
+`step.resume_mirror_persist_error`), the configuration knobs
+(`WF_TS_ENDPOINT`, `WF_RESUME_SUB_DEFAULT_TTL`,
+`WF_REGISTER_SUB_MAX_RETRIES`, `WF_RESUME_SUB_SWEEP_INTERVAL`), and the
+WF-IMPL-110 observability surface. Its three worked YAML examples are
+pinned to the compiler by `tests/test_docs_resume_examples.py`, the
+same doc-example discipline used for the workflow-compilation page, so
+the doc cannot silently drift from the running schema. The package
+coverage floor (`--cov-fail-under=90`) holds at 99.17%.
+Tracker: [#552](https://github.com/toddysm/custos/issues/552).
+
+
 WF-IMPL-111 ([#550](https://github.com/toddysm/custos/issues/550))
 adds the Resume Subscription Manager's end-to-end integration suite,
 `tests/integration/test_resume_subscription_end_to_end.py`. Where the
