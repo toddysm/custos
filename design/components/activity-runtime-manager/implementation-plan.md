@@ -1,6 +1,6 @@
 # Activity Runtime Manager Implementation Plan
 
-> Derived from [design/components/activity-runtime-manager/design.md](../../architecture/../components/activity-runtime-manager/design.md) (v6) on 2026-06-02.
+> Derived from [design.md](design.md) (v6) on 2026-06-02.
 > Source of truth: the design doc and `design/architecture/`.
 > This plan is owned by the `implement-component` skill; regenerate fresh whenever the design changes.
 
