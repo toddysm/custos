@@ -10,7 +10,7 @@ Tracker: ARM-IMPL-000 (#591). Plan: [implementation-plan.md](implementation-plan
 - [x] ARM-IMPL-002 (#570): Configuration & AuthZ dev-shim
 - [x] ARM-IMPL-003 (#571): Activity Contract v1 types
 - [x] ARM-IMPL-004 (#572): Activity Manifest v1 model + parser
-- [F] ARM-IMPL-005 (#573): ActivityExecution store
+- [x] ARM-IMPL-005 (#573): ActivityExecution store
 - [F] ARM-IMPL-006 (#574): ArtifactRecord + Artifact Store Client
 - [F] ARM-IMPL-007 (#575): Activity Resolver (real Dapr Catalog adapter)
 - [F] ARM-IMPL-008 (#576): Resource Limiter
