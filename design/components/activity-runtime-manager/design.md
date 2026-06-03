@@ -1,11 +1,11 @@
 # Component Design: Activity Runtime Manager
 
 Slug: `activity-runtime-manager`
-Last Updated: 2026-05-21
-Version: 5
+Last Updated: 2026-06-02
+Version: 6
 Status: Draft
 
-> This document captures the design decisions locked in so far. Sections marked **(pending)** will be filled out in subsequent design iterations.
+> This document captures the design decisions locked in so far. The Internal Structure, Sandbox and Isolation Model, Key Operations, Data Models, Public Interface, Configuration, and Failure Modes sections were filled in the 2026-06-02 iteration (closing TODO-006/007/008).
 
 ## Responsibility
 
@@ -621,30 +621,265 @@ The OCI registry is the source of truth; the Catalog is a derived, query-friendl
 - **`runtime.kind: http | wasm`**: `http` deferred to M3 (REQ-014); `wasm` deferred to M4+ (REQ-015).
 - **Short-form (non-fully-qualified) activity references**: deferred to a later milestone.
 
-## Internal Structure (pending)
+## Internal Structure
 
-The sub-module breakdown (Scheduler, Runtime Driver dispatcher, OCI Container Driver, I/O Broker, Artifact Store Client, Log Streamer, Result Mapper, Resource Limiter, Secret Injector — per components.md COMP-006) will be filled out in the next iteration.
+ARM is a stateless control-plane service that turns a `ScheduleActivity` RPC into a sandboxed Kubernetes workload and a typed result envelope. The sub-modules below match the COMP-006 breakdown in `design/architecture/components.md`; everything above the Runtime Driver layer is runtime-kind-agnostic so that future HTTP (M3) and WASM (M4+) drivers reuse the same I/O, secret, artifact, and result machinery.
 
-## Key Operations (pending)
+```mermaid
+graph TD
+    RPC[RPC Adapter<br/>ScheduleActivity / CancelActivity] --> Sched[Activity Scheduler]
+    Sched --> Resolver[Activity Resolver<br/>to Catalog]
+    Sched --> ResLim[Resource Limiter]
+    Sched --> IOB[I/O Broker]
+    Sched --> SecInj[Secret Injector]
+    Sched --> Driver{Runtime Driver<br/>Dispatcher}
+    Sched --> Result[Result Mapper]
+    Sched --> Exec[(Execution Store<br/>MetadataStoreProvider)]
 
-To be filled out:
-- Execute activity (happy path).
-- Cancel running activity (run cancelled, timeout exceeded).
-- Activity failure (retryable vs permanent).
-- Artifact upload and `ArtifactRef` materialization on downstream activity.
+    Driver -->|kind oci-container| OCIDrv[OCI Container Driver]
+    Driver -.->|kind http M3| HTTPDrv[HTTP Driver]
+    Driver -.->|kind wasm M4+| WASMDrv[WASM Driver]
+    OCIDrv --> K8s[(Kubernetes Jobs/Pods)]
 
-## Data Models (pending)
+    IOB --> ArtClient[Artifact Store Client]
+    ArtClient --> ArtStore[(ArtifactStoreProvider)]
+    SecInj --> CSlease[Connector RefreshLease<br/>to Connector Service]
+    OCIDrv --> LogStream[Log Streamer]
+    LogStream --> Obs[(Observability/Audit)]
+    Result --> Exec
+```
 
-To be filled out: activity execution record, attempt record, artifact record relationships.
+### Sub-module responsibilities
 
-## Public Interface (pending)
+| Sub-module | Responsibility | Talks to |
+|---|---|---|
+| **RPC Adapter** | Terminates the Dapr Service-Invocation `ScheduleActivity` / `CancelActivity` methods, verifies the call-context, enforces the `Idempotency-Key` header, and serializes the `ActivityResultEnvelope` reply. | Workflow Service (inbound) |
+| **Activity Scheduler** | Orchestrates one attempt end-to-end: resolve → limit → materialize inputs → inject secrets → run via driver → finalize outputs → map result → persist. Owns the execution state machine and idempotent replay. | all other sub-modules |
+| **Activity Resolver** | Resolves a fully-qualified `activityRef` (`namespace/type@version`) to an `ActivityTypeVersion` (pinned image digest, input/output schemas, connectors, resources, isolation floor) from Catalog. Caches immutable resolutions. | Catalog Service |
+| **Resource Limiter** | Computes the effective resource envelope and the concrete `RuntimeClass` from the manifest → step-override → platform-default → cluster-ceiling hierarchy, and selects the isolation tier (see § Sandbox and Isolation Model). | — (config + manifest) |
+| **I/O Broker** | Materializes `/custos/in/inputs.json` + `/custos/in/ctx.json`, validates `inputs.json` against the input schema, and after exit reads `/custos/out/outputs.json`, drives two-phase finalization, and validates the finalized envelope against the output schema. | Artifact Store Client |
+| **Secret Injector** | Materializes connector credentials at `/custos/in/secrets/<connector-name>/<key>` (tmpfs) from the pre-resolved `ConnectorContexts`, mints the `/custos/in/sidecar-token`, and injects the connector sidecar. Calls `RefreshLease` for long-running steps. | Connector Service |
+| **Runtime Driver Dispatcher** | Selects a concrete `RuntimeDriver` by `manifest.spec.runtime.kind`. v1 registers only the OCI Container Driver. | drivers |
+| **OCI Container Driver** | Translates an attempt into a Kubernetes `Job` (sandbox Pod + sidecar + tmpfs mounts + `RuntimeClass` + `SecurityContext`), monitors it, enforces the deadline, cancels, and reaps. | Kubernetes API |
+| **Artifact Store Client** | Uploads files from `/custos/out/artifacts/<name>` via `ArtifactStoreProvider`, returns store-assigned `id`/`digest`/`mediaType`/`size`. | Storage Provider Layer |
+| **Log Streamer** | Streams sandbox stdout/stderr and forwards `/custos/out/audit.jsonl` lines to Observability/Audit. | Observability/Audit |
+| **Result Mapper** | Applies the § Error Envelope & Exit Codes resolution rules to `(exitCode, finalizedOutputs)` → `ActivityResultEnvelope{class_, outputs|error, attempt}`. | — |
+| **Execution Store** | Persists the per-attempt execution record (idempotency dedup, replay, audit) via `MetadataStoreProvider`. | Storage Provider Layer |
 
-Internal RPC surface (Workflow Service ⇄ ARM):
-- `ScheduleActivity(runId, stepId, attempt, activityRef, inputs, connectorContexts, deadline)` — ARM consumes the pre-resolved named `ConnectorContexts` produced by the Workflow Service's `BindForStep` call; it does not call Connector Service for the initial bind. ARM mints and writes the sidecar bootstrap token (`/custos/in/sidecar-token`) at sidecar start per § Secret and Token Flow to Activities in the Connector Service design — the bootstrap token is not part of `ScheduleActivity` inputs.
-- `CancelActivity(runId, stepId)`
-- Activity completion: native Dapr activity-task return path (the orchestrator invokes ARM through Dapr Workflow's activity-task primitive; ARM's return value is the typed result envelope). No `custos.activity.events` topic in v1. See `design/components/workflow-service/design.md` § Operation: Execute Step for the authoritative completion path.
+### Runtime Driver dispatcher contract
 
-## Configuration (pending)
+Every runtime kind implements one `RuntimeDriver` Protocol. The Scheduler holds the cross-cutting concerns (I/O, secrets, artifacts, result mapping); the driver owns only the runtime-specific lifecycle. Adding a runtime kind = adding a driver; nothing above the dispatcher changes.
+
+```python
+class RuntimeDriver(Protocol):
+    kind: str  # matches manifest.spec.runtime.kind, e.g. "oci-container"
+
+    def prepare(self, plan: SandboxPlan) -> SandboxHandle:
+        """Create the sandbox and the in/out volumes WITHOUT starting the
+        activity process. The I/O Broker and Secret Injector populate the
+        input tree against the returned handle before start()."""
+
+    def start(self, handle: SandboxHandle) -> None:
+        """Start the activity process. Non-blocking."""
+
+    def await_terminal(self, handle: SandboxHandle, deadline: datetime) -> SandboxOutcome:
+        """Block until the process exits, the deadline elapses, or a cancel
+        is observed. Returns the raw exit signal (exit code / OOM / killed)."""
+
+    def cancel(self, handle: SandboxHandle, reason: CancelReason) -> None:
+        """Idempotently terminate the sandbox. Safe to call after exit."""
+
+    def collect(self, handle: SandboxHandle) -> OutputBundle:
+        """Expose the output tree (/custos/out) to the I/O Broker after exit."""
+
+    def cleanup(self, handle: SandboxHandle) -> None:
+        """Reap all sandbox resources (Job, Pod, volumes, tmpfs)."""
+```
+
+| Type | Meaning |
+|---|---|
+| `SandboxPlan` | Resolved image+digest, effective resources, `RuntimeClass`, isolation tier, tmpfs mounts, sidecar spec, deadline. |
+| `SandboxHandle` | Opaque driver-owned reference (for the OCI driver: the `Job` name + namespace) plus the host-side paths the broker uses to write `/custos/in` and read `/custos/out`. |
+| `SandboxOutcome` | `exitCode: int`, `signal: oom \| killed \| deadline \| cancelled \| none`. The Result Mapper, not the driver, classifies this. |
+| `OutputBundle` | Read-only view over the materialized `/custos/out` tree. |
+
+The driver never interprets `outputs.json`, never classifies errors, and never touches the artifact store — those belong to the I/O Broker, Result Mapper, and Artifact Store Client respectively. This keeps the OCI/HTTP/WASM drivers thin and the contract semantics identical across runtimes.
+
+## Sandbox and Isolation Model
+
+REQ-039 requires that activities run isolated from the host and from the orchestrator (no escape, no access to orchestrator memory or filesystem). The manifest's `runtime.isolation.minTier` (`process` | `vm` | `microvm`) and `preferred` hint are already locked. This section pins the concrete realization for M1.
+
+### Tier → RuntimeClass mapping is operator-configured
+
+The three abstract tiers map to concrete Kubernetes `RuntimeClass` objects through Helm configuration, **not** hard-coded names. The reference deployment targets arbitrary clusters (eval = single node, HA = multi-node, plus air-gapped) where stronger-than-runc runtimes cannot be assumed present.
+
+| Tier | Isolation boundary | M1 status | Default mapping (operator-overridable) |
+|---|---|---|---|
+| `process` | Shared-kernel container: hardened `SecurityContext` + seccomp + dropped capabilities. | **Guaranteed.** Always available. | runc (cluster default `RuntimeClass`; empty `runtimeClassName`). |
+| `vm` | Dedicated guest kernel via a shared hypervisor. | **Operator opt-in.** Unset unless the cluster provides it. | Kata Containers with CLH/MSHV (`ARM_RUNTIME_CLASS_VM`). |
+| `microvm` | Dedicated guest kernel on a minimal microVM monitor. | **Operator opt-in.** Unset unless the cluster provides it. | Kata Containers with Firecracker (`ARM_RUNTIME_CLASS_MICROVM`). |
+
+gVisor is intentionally **not** part of the v1 ladder; only runc (`process`) and Kata (`vm` / `microvm`) are named. Operators may still point a tier's `RuntimeClass` at any class that meets the boundary, but the design commits to no other runtime.
+
+### Guaranteed process-tier hardening
+
+Every activity sandbox — regardless of tier — runs with the hardened baseline below. The `process` tier *is* this baseline on runc; higher tiers add a kernel boundary on top.
+
+- `runAsNonRoot: true`, no `allowPrivilegeEscalation`, `privileged: false`.
+- All Linux capabilities dropped (`drop: ["ALL"]`).
+- `seccompProfile: RuntimeDefault`.
+- Read-only root filesystem; the only writable mounts are the contract tmpfs volumes (`/custos/in/*`, `/custos/out`).
+- No host network, no host PID/IPC, no `hostPath` mounts, automount of the service-account token disabled.
+- Secrets and the sidecar token live on `tmpfs` (`medium: Memory`), never on a PV, and are wiped on Pod teardown.
+
+### No silent downgrade
+
+The Resource Limiter selects the **lowest** tier that satisfies `max(manifest.isolation.minTier, step.isolation.minTier)`. If that tier has no configured `RuntimeClass` on the cluster, ARM **fails the attempt** with `system.runtime_unavailable` (class `permanent`) before any sandbox is created. Isolation is never downgraded automatically — running a `microvm`-required activity under runc would silently violate REQ-039. A workflow may *upgrade* a step's tier above the manifest floor but may never downgrade below it.
+
+## Key Operations
+
+### Execute activity (happy path)
+
+```mermaid
+sequenceDiagram
+    participant WF as Workflow Service
+    participant RPC as RPC Adapter
+    participant Sched as Scheduler
+    participant Cat as Catalog
+    participant Lim as Resource Limiter
+    participant IO as I/O Broker
+    participant Sec as Secret Injector
+    participant Drv as OCI Driver
+    participant K8s as Kubernetes
+    participant Art as Artifact Store Client
+    participant Res as Result Mapper
+
+    WF->>RPC: ScheduleActivity (Idempotency-Key: runId|stepId|attempt)
+    RPC->>Sched: dispatch (after callctx verify)
+    Sched->>Sched: dedup on key (Execution Store)
+    Sched->>Cat: resolve activityRef → ActivityTypeVersion (digest, schemas)
+    Sched->>Lim: effective resources + tier + RuntimeClass
+    Sched->>Drv: prepare(SandboxPlan)
+    Drv->>K8s: create Job (Pod paused: no start yet)
+    Sched->>IO: write inputs.json + ctx.json; validate inputs schema
+    Sched->>Sec: mount /custos/in/secrets/*, mint /custos/in/sidecar-token, inject sidecar
+    Sched->>Drv: start()
+    Drv->>K8s: run activity container (+ connector sidecar)
+    Sched->>Drv: await_terminal(deadline) → exit 0
+    Sched->>IO: read outputs.json → two-phase finalize
+    IO->>Art: upload /custos/out/artifacts/* → ids/digests
+    IO->>IO: rewrite ArtifactRefs + synth produced[]; validate output schema
+    Sched->>Res: map(exit=0, finalized) → class=success
+    Sched->>Drv: cleanup()
+    RPC-->>WF: ActivityResultEnvelope{success, outputs, attempt}
+```
+
+### Cancel running activity (run cancelled / timeout)
+
+- **Run cancelled** — Workflow Service calls `CancelActivity(runId, stepId)`. The RPC Adapter looks up the live attempt and asks the driver to `cancel(reason=cancelled)`. The Scheduler synthesizes `activity.cancelled` (class `cancelled`). Cancellation is idempotent end-to-end: an unknown step returns 404 and an already-terminated step returns 409, both of which the Workflow adapter collapses into a no-op.
+- **Deadline exceeded** — `await_terminal` observes the `deadline` (derived from `manifest.spec.resources.timeout`, clamped by `ARM_MAX_TIMEOUT` and the step deadline) and drives `cancel(reason=deadline)`. The Scheduler synthesizes `activity.timeout` (class `cancelled`). No retry; the Workflow Service owns retry policy.
+
+### Activity failure (retryable vs permanent)
+
+The Result Mapper applies the locked § Error Envelope & Exit Codes resolution rules. In short: a valid `outputs.json` with `status: failure` wins and its `error.class` is authoritative; otherwise the 4-state exit code is the fallback (`1`→retryable, `2`→permanent, `3`→cancelled, anything else→retryable). A clean exit `0` with no parseable envelope is a `activity.contract_violation` (permanent). ARM persists the attempt + envelope and returns; it never retries.
+
+### Idempotent replay
+
+`ScheduleActivity` is at-least-once. The `(runId, stepId, attempt)` triple — carried in the `Idempotency-Key` header — is the dedup key. If the Execution Store already holds a **terminal** record for the triple, ARM returns the cached `ActivityResultEnvelope` without launching a second sandbox. If a record exists in a non-terminal state (a crashed ARM mid-attempt), the Scheduler reconciles against the live Kubernetes `Job` before deciding to resume monitoring or relaunch.
+
+### Artifact upload and downstream `ArtifactRef` materialization
+
+ARM uploads producer artifacts during two-phase finalization and rewrites each `ArtifactRef` with its store-assigned `id`/`digest`/`mediaType`/`size`. When a **downstream** activity consumes an `ArtifactRef` input, the I/O Broker fetches the artifact by `id` from the `ArtifactStoreProvider` and materializes it onto the consumer's sandbox filesystem (`/custos/in/...`) before `start()`, so the consuming activity reads a local file, never a store handle.
+
+## Data Models
+
+ARM is control-plane-stateless per request but persists a per-attempt execution record (for idempotent replay, crash reconciliation, and audit) and an artifact record per uploaded file, both via the `MetadataStoreProvider` / `ArtifactStoreProvider` abstractions.
+
+```mermaid
+erDiagram
+    ActivityExecution ||--o{ ArtifactRecord : produces
+    ActivityExecution {
+        string runId
+        string stepId
+        int    attempt
+        string activityRef
+        string resolvedDigest
+        string isolationTier
+        string runtimeClass
+        string state
+        string resultClass
+        string errorCode
+        string sandboxRef
+        datetime deadline
+        datetime startedAt
+        datetime finishedAt
+    }
+    ArtifactRecord {
+        string id
+        string name
+        string mediaType
+        string digest
+        int    size
+        string producedByRunId
+        string producedByStepId
+        int    producedByAttempt
+    }
+```
+
+### Core entities
+
+- **ActivityExecution** — one row per attempt, primary key `(runId, stepId, attempt)` (the idempotency triple). `state` ∈ `pending` → `resolving` → `materializing` → `running` → `finalizing` → terminal (`succeeded` | `failed` | `cancelled`). `resultClass` mirrors the four `ActivityResultEnvelope` classes. `sandboxRef` is the driver handle (OCI driver: `Job` name). Retained for `ARM_IDEMPOTENCY_TTL` after reaching a terminal state.
+- **ArtifactRecord** — one row per uploaded artifact, keyed by store-assigned `id`, linked to the producing attempt. Mirrors the `produced[]` entries surfaced in the finalized `outputs.json`. Content-schema validation of the artifact body is deferred to M2 (TODO-003).
+
+## Public Interface
+
+ARM exposes one inbound RPC surface (Workflow Service ⇄ ARM over Dapr Service-Invocation) plus `/healthz` and `/readyz` probes. It owns no public REST surface; activity-type registration is Catalog's, not ARM's (§ Publishing flow).
+
+### Internal RPC (inbound)
+
+| Method | Dapr method name | Semantics |
+|---|---|---|
+| `ScheduleActivity` | `ScheduleActivity` | Synchronous. Inputs: `runId`, `stepId`, `attempt`, `activityRef`, `inputs`, `connectorContexts` (pre-resolved named slots from the Workflow Service's `BindForStep`), `deadline`. The `Idempotency-Key` header carries `runId\|stepId\|attempt` and is the dedup key. Returns the `ActivityResultEnvelope`. ARM does **not** call Connector Service for the initial bind; it mints the `/custos/in/sidecar-token` at sidecar start per the Connector Service § Secret and Token Flow to Activities contract (the token is not a `ScheduleActivity` parameter). |
+| `CancelActivity` | `CancelActivity` | Idempotent. Inputs: `runId`, `stepId`. Cancels the live attempt; `404` when the step is unknown and `409` when it has already terminated — both no-ops on the caller side. |
+
+### Activity result envelope
+
+The return value of `ScheduleActivity` mirrors the Workflow Service's `ActivityResultEnvelope`: `class_ ∈ {success, retryable, permanent, cancelled}`, with `outputs` populated on `success` and `error` (§ Error envelope schema) populated otherwise, plus the `attempt` counter. Completion is the **native Dapr activity-task return path** — the orchestrator invokes ARM through Dapr Workflow's activity-task primitive and ARM's return value is the typed envelope. There is no `custos.activity.events` topic in v1. See `design/components/workflow-service/design.md` § Operation: Execute Step for the authoritative completion path.
+
+### Internal RPC (outbound)
+
+- **Catalog Service** — resolve `activityRef` → `ActivityTypeVersion` (pinned digest, input/output schemas, connectors, resources, isolation floor).
+- **Connector Service** — `RefreshLease` for long-running steps only (never the initial bind).
+- **Storage Provider Layer** — `ArtifactStoreProvider` (artifact upload/fetch) and `MetadataStoreProvider` (execution + artifact records).
+- **Observability/Audit** — log streaming and activity-lifecycle audit events (taxonomy unified with Trigger Service per TODO-009).
+
+## Configuration
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `ARM_ARTIFACT_STORE` | Yes | — | `ArtifactStoreProvider` binding for activity artifact upload/fetch. |
+| `ARM_METADATA_STORE` | Yes | — | `MetadataStoreProvider` binding for execution + artifact records. |
+| `ARM_CATALOG_ENDPOINT` | Yes | — | Catalog Service endpoint for `activityRef` resolution. |
+| `ARM_CONNECTOR_ENDPOINT` | Yes | — | Connector Service endpoint for `RefreshLease` on long-running steps. |
+| `ARM_AUTHZ_ENDPOINT` | Yes (prod) | — | AuthN/AuthZ endpoint for the call-context middleware. Empty switches to a dev-shim that trusts `x-custos-callctx`, logs a WARNING per request, and refuses to start when `ENVIRONMENT=production`. |
+| `ARM_SANDBOX_NAMESPACE` | Yes | — | Kubernetes namespace in which activity `Job`s are created. |
+| `ARM_DEFAULT_TIER` | No | `process` | Cluster-default isolation tier when a manifest omits `isolation.minTier`. |
+| `ARM_RUNTIME_CLASS_PROCESS` | No | _(empty)_ | `RuntimeClass` for the `process` tier. Empty = cluster default runtime (runc). |
+| `ARM_RUNTIME_CLASS_VM` | No | _(empty)_ | `RuntimeClass` for the `vm` tier (e.g. Kata-CLH/MSHV). Empty = `vm` tier unavailable → `system.runtime_unavailable`. |
+| `ARM_RUNTIME_CLASS_MICROVM` | No | _(empty)_ | `RuntimeClass` for the `microvm` tier (e.g. Kata-Firecracker). Empty = `microvm` tier unavailable → `system.runtime_unavailable`. |
+| `ARM_DEFAULT_CPU_REQUEST` / `ARM_DEFAULT_CPU_LIMIT` | No | `250m` / `1` | Platform-default CPU applied when the manifest is silent. |
+| `ARM_DEFAULT_MEMORY_REQUEST` / `ARM_DEFAULT_MEMORY_LIMIT` | No | `256Mi` / `1Gi` | Platform-default memory applied when the manifest is silent. |
+| `ARM_DEFAULT_EPHEMERAL_STORAGE_LIMIT` | No | `2Gi` | Platform-default ephemeral storage limit. |
+| `ARM_MAX_TIMEOUT` | No | `PT1H` | Absolute ceiling clamping `manifest.spec.resources.timeout` and the step deadline. |
+| `ARM_OUTPUT_MAX_BYTES` | No | `1048576` | Maximum `outputs.json` size; larger → `output.too_large` (permanent). |
+| `ARM_ARTIFACT_MAX_BYTES` | No | `5368709120` | Per-artifact upload ceiling. |
+| `ARM_IDEMPOTENCY_TTL` | No | `PT24H` | Retention of terminal execution records for replay dedup. |
+| `ARM_SIDECAR_IMAGE` | Yes | — | Connector sidecar image injected into every activity Pod. |
+| `ENVIRONMENT` | No | `development` | Operational env tag. The dev-shim refuses to start when this is `production`. |
+| `HOST` | No | `0.0.0.0` | Address the service binds to. |
+| `PORT` | No | `8080` | Port the service listens on. |
+
+The resource hierarchy (cluster `LimitRange`/`ResourceQuota` → platform defaults → manifest `spec.resources` → workflow step override → Pod) is enforced by the Resource Limiter; each layer may only tighten within the layer above.
 
 ## Dependencies
 
@@ -652,12 +887,31 @@ Internal RPC surface (Workflow Service ⇄ ARM):
 |---|---|---|
 | Workflow Service | Runtime | Scheduling source and completion sink. |
 | Connector Service | Runtime | ARM consumes pre-resolved named `ConnectorContexts` (opaque slot handles) produced by the Workflow Service's `BindForStep` call — ARM does not call CS for the initial bind. ARM mints the sidecar bootstrap token at sidecar start per the Connector Service § Secret and Token Flow to Activities contract. ARM calls Connector Service directly only for `RefreshLease` on long-running steps. |
-| Storage Provider Layer | Runtime | Artifact upload via `ArtifactStoreProvider`; step output persistence via `MetadataStoreProvider`. |
+| Storage Provider Layer | Runtime | Artifact upload via `ArtifactStoreProvider`; execution + artifact records via `MetadataStoreProvider`. |
 | Observability/Audit | Runtime | Log streaming and audit event emission. |
 | Catalog Service | Runtime | Activity type/version resolution and schema retrieval. |
-| Kubernetes API | Runtime | Sandbox lifecycle (Jobs/Pods) for OCI Container Driver. |
+| Kubernetes API | Runtime | Sandbox lifecycle (`Job`/`Pod`) for the OCI Container Driver, including `RuntimeClass` selection per the Sandbox and Isolation Model. |
 
-## Failure Modes (pending)
+## Failure Modes
+
+| Failure | Detection | ARM behavior | Error code / class |
+|---|---|---|---|
+| `activityRef` not found in Catalog | Resolver 404 | Fail attempt before any sandbox | `activity.unresolved` / permanent |
+| Input fails schema validation | I/O Broker, pre-start | Fail attempt before start | `input.schema_violation` / permanent |
+| Required connector slot unbound | Secret Injector | Fail attempt before start | `input.missing_connector` / permanent |
+| Required secret unavailable | Secret Injector | Fail attempt before start | `input.missing_secret` / permanent |
+| Required isolation tier has no `RuntimeClass` | Resource Limiter | Fail attempt before start (no downgrade) | `system.runtime_unavailable` / permanent |
+| Image pull failure | Driver / Pod status | Fail attempt | `activity.image_pull_failed` / retryable |
+| Deadline exceeded | `await_terminal` vs `deadline` | Cancel sandbox | `activity.timeout` / cancelled |
+| Run cancelled | `CancelActivity` | Cancel sandbox | `activity.cancelled` / cancelled |
+| OOM / SIGKILL / uncategorized crash | `SandboxOutcome.signal` | Synthesize envelope | `activity.oom_killed` / `activity.sandbox_failure` / retryable |
+| Exit 0 but no/invalid `outputs.json` | I/O Broker parse | Fail attempt | `activity.contract_violation` / permanent |
+| `outputs.json` exceeds size cap | I/O Broker | Fail attempt | `output.too_large` / permanent |
+| Finalized output fails schema / bad `ArtifactRef` | I/O Broker post-finalize | Discard claimed outputs | `output.schema_violation` / `output.invalid_artifact_ref` / permanent |
+| Artifact store upload failure | Artifact Store Client | Fail attempt | `system.sandbox_failure` / retryable |
+| ARM crash mid-attempt | Replay reconciler on restart | Reconcile against live `Job`; resume or relaunch | — (no client-visible class) |
+
+ARM never decides retries — it classifies. The Workflow Service consumes `class_` and applies the locked retry policy (`design/components/workflow-service/design.md` § Retry Policy).
 
 ## Open TODOs
 
@@ -665,9 +919,9 @@ Internal RPC surface (Workflow Service ⇄ ARM):
 - [ ] TODO-003: Per-artifact content schema validation (e.g. CycloneDX schema URL) — deferred to M2 (added 2026-05-16).
 - [ ] TODO-004: `spec.secrets[]` for standalone secret slots — deferred to M2 alongside REQ-019 attestation creation (added 2026-05-16).
 - [ ] TODO-005: Short-form (non-fully-qualified) activity references — deferred to a later milestone (added 2026-05-16).
-- [ ] TODO-006: Decide sandbox technology per REQ-039 / TODO-002 in requirements (gVisor, Kata-CLH, Kata-MSHV, Kata-FC, runc+seccomp, or Kubernetes Jobs only) — manifest surface (`isolation.minTier`, `isolation.preferred`) is locked; concrete RuntimeClass set and cluster-default tier still pending (added 2026-05-16).
-- [ ] TODO-007: Specify Runtime Driver dispatcher contract; OCI Container Driver for v1, HTTP and WASM later (added 2026-05-16).
-- [ ] TODO-008: Sub-module deep dive (Scheduler, I/O Broker, Artifact Store Client, Log Streamer, Result Mapper, Resource Limiter, Secret Injector) (added 2026-05-16).
+- [x] TODO-006: Sandbox technology decided per REQ-039 / TODO-002 — abstract tier ladder (`process`/`vm`/`microvm`) maps to operator-configured `RuntimeClass`es; `process` (runc + hardened SecurityContext) guaranteed in M1, `vm` (Kata-CLH/MSHV) and `microvm` (Kata-Firecracker) operator opt-in, gVisor omitted, no silent downgrade (hard-fail `system.runtime_unavailable`). See § Sandbox and Isolation Model (closed 2026-06-02).
+- [x] TODO-007: Runtime Driver dispatcher contract specified (`RuntimeDriver` Protocol selected by `runtime.kind`; OCI Container Driver for v1, HTTP/WASM later). See § Internal Structure › Runtime Driver dispatcher contract (closed 2026-06-02).
+- [x] TODO-008: Sub-module deep dive completed (Scheduler, Runtime Driver, OCI Container Driver, I/O Broker, Artifact Store Client, Log Streamer, Result Mapper, Resource Limiter, Secret Injector). See § Internal Structure (closed 2026-06-02).
 - [ ] TODO-009: Finalize platform event taxonomy mapping for activity lifecycle events with Observability. **Coordinated with Trigger Service TODO-001 (#18)** — the trigger `kind` namespace and the ARM-emitted activity lifecycle audit event namespace MUST share one taxonomy so cross-cutting events like `workflow.completed`, `step.completed`, `activity.failed` carry one canonical name from emission through trigger matching, audit storage, and consumer dashboards. See INCON-013 (#38). (added 2026-05-16, scope expanded 2026-05-17).
 - [ ] TODO-010: Lock the canonical built-in `policy-eval@1` activity manifest (filter/gate modes) as the reference for the Layer-3 filter pattern (added 2026-05-16).
 
@@ -686,3 +940,4 @@ Internal RPC surface (Workflow Service ⇄ ARM):
 | 2026-05-21 | REQ-010 / TODO-002 cross-link: clarified that ARM is the sole classifier and the Workflow Service is the sole retry decision-maker; added pointer to Workflow Service design § Retry Policy for the locked `retry:` schema (`maxAttempts`, `backoff` curves, `jitter` strategies, `respectRetryAfter`) and the `effectiveDelay = max(jitteredBackoff, retryAfter)` formula. No behavior change on the ARM side | #52 |
 | 2026-05-18 | INCON-018 + INCON-021: `ScheduleActivity` signature now takes pre-resolved named `connectorContexts` (produced by Workflow Service's `BindForStep`); ARM no longer calls Connector Service for the initial bind (only `RefreshLease` for long-running steps). ARM continues to mint the sidecar bootstrap token at sidecar start per the locked sidecar auth contract — it is not a `ScheduleActivity` parameter. Completion documented as native Dapr activity-task return path with cross-link to Workflow Service design | #98, #101 |
 | 2026-05-18 | INCON-023: Publishing flow updated to reflect that the Author CLI writes activity manifests directly to Catalog through the API Gateway (`POST /v1/workspaces/{ws}/activity-types`); the diagram is reproduced for context only — ARM is runtime-only and does not write to or proxy Catalog for activity-type registration | #105 |
+| 2026-06-02 | Closed TODO-006/007/008: filled Internal Structure (9 sub-module deep dive + `RuntimeDriver` dispatcher Protocol selected by `runtime.kind`, OCI Container Driver for v1), the Sandbox and Isolation Model (operator-configured tier→`RuntimeClass` mapping; `process`/runc guaranteed, `vm`/`microvm` Kata opt-in, gVisor omitted, hardened baseline `SecurityContext`, no silent downgrade → hard-fail `system.runtime_unavailable`), Key Operations (happy path, cancel/timeout, failure classification, idempotent replay, downstream `ArtifactRef` materialization), Data Models (`ActivityExecution` idempotency record + `ArtifactRecord`), Public Interface (`ScheduleActivity`/`CancelActivity` Dapr surface + result envelope + outbound RPCs), Configuration (`ARM_*` env vars), and Failure Modes. Version 5 → 6 | pending |
