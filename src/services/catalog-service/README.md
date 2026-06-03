@@ -7,6 +7,8 @@ digest pinning).
 
 Design: [`design/components/catalog-service/design.md`](../../../design/components/catalog-service/design.md).
 
+## Status
+
 **Implemented** — the CS-IMPL-000 milestone ([#226](https://github.com/toddysm/custos/issues/226))
 is complete; all 24 child tasks (CS-IMPL-001 … CS-IMPL-024) are merged and the
 tracking issue is closed. The service exposes its full REST + Internal RPC
@@ -67,7 +69,6 @@ Internal RPC surface plus the `/healthz` and `/readyz` probes.
 src/services/catalog-service/
 ├── README.md
 ├── pyproject.toml
-├── openapi.json
 ├── src/
 │   └── custos_catalog/
 │       ├── __init__.py        # create_app() factory (full app wiring)
