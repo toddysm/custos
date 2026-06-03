@@ -22,6 +22,7 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 import httpx
+from pydantic import ValidationError
 
 from custos_arm.manifest import ManifestError, parse_manifest
 from custos_arm.resolve.errors import (
@@ -115,7 +116,13 @@ class CatalogActivityResolver:
                 f"catalog returned unexpected status {response.status_code} for {ref}",
             )
 
-        return self._parse(ref=ref, payload=response.json())
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise CatalogUnavailableError(
+                str(ref), f"catalog response for {ref} is not valid JSON: {exc}"
+            ) from exc
+        return self._parse(ref=ref, payload=payload)
 
     def _parse(self, *, ref: ActivityRef, payload: object) -> ActivityTypeVersion:
         if not isinstance(payload, dict):
@@ -129,6 +136,10 @@ class CatalogActivityResolver:
             raise CatalogUnavailableError(
                 str(ref), f"catalog response for {ref} is missing required field {exc}"
             ) from exc
+        if not isinstance(digest, str) or not digest:
+            raise CatalogUnavailableError(
+                str(ref), f"catalog response for {ref} has a missing or invalid digest"
+            )
         try:
             manifest = parse_manifest(raw_manifest)
         except ManifestError as exc:
@@ -136,12 +147,21 @@ class CatalogActivityResolver:
                 str(ref), f"catalog returned an invalid manifest for {ref}: {exc}"
             ) from exc
 
-        return ActivityTypeVersion(
-            namespace=str(payload.get("namespace", ref.namespace)),
-            type=str(payload.get("type", ref.type)),
-            version=str(payload.get("version", ref.version)),
-            digest=str(digest),
-            manifest=manifest,
-            parent_deprecated=bool(payload.get("parentDeprecated", False)),
-            published_at=payload.get("publishedAt"),
-        )
+        # Take the resolved identity from the validated manifest metadata rather
+        # than the (untrusted, optionally-absent) top-level payload fields, so a
+        # major ref resolves to the exact pinned triple the manifest declares.
+        meta = manifest.metadata
+        try:
+            return ActivityTypeVersion(
+                namespace=meta.namespace,
+                type=meta.type,
+                version=meta.version,
+                digest=digest,
+                manifest=manifest,
+                parent_deprecated=bool(payload.get("parentDeprecated", False)),
+                published_at=payload.get("publishedAt"),
+            )
+        except ValidationError as exc:
+            raise CatalogUnavailableError(
+                str(ref), f"catalog returned an invalid type version for {ref}: {exc}"
+            ) from exc

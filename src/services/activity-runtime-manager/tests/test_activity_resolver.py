@@ -262,6 +262,30 @@ async def test_missing_field_raises_unavailable() -> None:
         await resolver.resolve(workspace_id="security", activity_ref="security/scan-image@2.1.0")
 
 
+async def test_invalid_json_body_raises_unavailable() -> None:
+    resolver = _resolver(lambda _r: httpx.Response(200, text="not-json{"))
+    with pytest.raises(CatalogUnavailableError):
+        await resolver.resolve(workspace_id="security", activity_ref="security/scan-image@2.1.0")
+
+
+async def test_empty_digest_raises_unavailable() -> None:
+    bad = _body()
+    bad["digest"] = ""
+
+    resolver = _resolver(lambda _r: httpx.Response(200, json=bad))
+    with pytest.raises(CatalogUnavailableError):
+        await resolver.resolve(workspace_id="security", activity_ref="security/scan-image@2.1.0")
+
+
+async def test_invalid_type_version_raises_unavailable() -> None:
+    bad = _body()
+    bad["publishedAt"] = "not-a-timestamp"
+
+    resolver = _resolver(lambda _r: httpx.Response(200, json=bad))
+    with pytest.raises(CatalogUnavailableError):
+        await resolver.resolve(workspace_id="security", activity_ref="security/scan-image@2.1.0")
+
+
 async def test_non_object_payload_raises_unavailable() -> None:
     resolver = _resolver(lambda _r: httpx.Response(200, json=["not", "an", "object"]))
     with pytest.raises(CatalogUnavailableError):
