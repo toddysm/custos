@@ -209,7 +209,7 @@ Environment variables resolved at lifespan startup in
 
 | Env var | Default | Type | Notes |
 |---|---|---|---|
-| `WF_TS_ENDPOINT` | _unset_ | `str` | Dapr Service-Invocation endpoint for the Trigger Service. Required to wire the production replay reconciler; absent it the manager runs with the in-memory fake (tests) and replay re-registration is a no-op. |
+| `WF_TS_ENDPOINT` | _unset_ | `str` | Trigger Service Dapr app-id. **Required for production startup**: the env-driven lifespan path fails fast with a `RuntimeError` when it is unset or blank ([`app.py` `_resolve_run_components`](../../src/services/workflow-service/src/custos_workflow/app.py)), since the replay reconciler re-registers surviving `waitFor:` subscriptions against the Trigger Service. Only tests/dev that inject a `RunComponents` bundle bypass the check and wire the in-process Noop trigger client. |
 | `WF_RESUME_SUB_DEFAULT_TTL` | `PT24H` | ISO-8601 duration | Applied when a `waitFor:` step omits `ttl:`. Validated as a positive ISO-8601 duration (fractional seconds rejected). |
 | `WF_REGISTER_SUB_MAX_RETRIES` | `5` | `int` | Upper bound on the exponential-backoff retry loop for `RegisterResumeSubscription`; on exhaustion the step fails with `step.resume_registration_failed` (`class: retryable`). |
 | `WF_RESUME_SUB_SWEEP_INTERVAL` | `300.0` | `float` (seconds) | Wall-clock interval between TTL garbage-collection sweeps run by the background `ResumeSubscriptionTtlSweeper`. Must be a positive, finite float. |
