@@ -1602,6 +1602,154 @@ async def observe_outbound_rpc(
 # to keep the production import side-effect-free.
 
 
+# ---------------------------------------------------------------------------
+# WF-IMPL-110: Resume Subscription Manager observability hooks
+# ---------------------------------------------------------------------------
+#
+# Spans + counters for the register / cancel / replay paths of the
+# Resume Subscription Manager (REQ-081, ``waitFor:``). Like every
+# section above this module imports ``opentelemetry-api`` only, so a
+# deployment without an OTel SDK installed gets silent no-op spans and
+# counters.
+#
+# Four counters (issue scope verbatim):
+#
+# * ``custos_workflow_resume_subscriptions_registered_total`` — labelled
+#   by ``outcome`` (``success`` | ``error``). Bumped once per
+#   ``RegisterResumeSubscription`` call the manager resolves — both the
+#   first-time registration the ``waitFor:`` handler drives and every
+#   replay re-registration the reconciler performs.
+# * ``custos_workflow_resume_subscriptions_cancelled_total`` — labelled
+#   by ``outcome``. Bumped once per ``CancelResumeSubscription`` call —
+#   post-resume cleanup and RunController-driven cancellation sweeps.
+# * ``custos_workflow_resumes_total`` — bumped once each time a parked
+#   ``waitFor:`` step is resumed by a delivered external event.
+# * ``custos_workflow_resume_subscription_divergent_total`` — bumped
+#   once each time the replay reconciler detects a divergent selector
+#   (Resume Subscription Replay Protocol rule 2).
+#
+# Three spans:
+#
+# * ``custos_workflow.resume.register`` — wraps one registration call.
+# * ``custos_workflow.resume.cancel`` — wraps one cancellation call.
+# * ``custos_workflow.resume.replay`` — wraps the reconciler's per-run
+#   replay reconciliation pass.
+
+
+#: ``outcome`` label for a resume operation that completed cleanly.
+_RESUME_OK: Final[str] = "success"
+
+#: ``outcome`` label for a resume operation that raised.
+_RESUME_ERROR: Final[str] = "error"
+
+
+RESUME_SUBSCRIPTIONS_REGISTERED_TOTAL: Final[Counter] = _meter.create_counter(
+    name="custos_workflow_resume_subscriptions_registered_total",
+    description=(
+        "Count of RegisterResumeSubscription calls the Resume "
+        "Subscription Manager resolved, labelled by outcome (success "
+        "or error). Covers both first-time registration and every "
+        "replay re-registration."
+    ),
+)
+
+RESUME_SUBSCRIPTIONS_CANCELLED_TOTAL: Final[Counter] = _meter.create_counter(
+    name="custos_workflow_resume_subscriptions_cancelled_total",
+    description=(
+        "Count of CancelResumeSubscription calls the Resume "
+        "Subscription Manager resolved, labelled by outcome (success "
+        "or error). Covers post-resume cleanup and RunController-driven "
+        "cancellation sweeps."
+    ),
+)
+
+RESUMES_TOTAL: Final[Counter] = _meter.create_counter(
+    name="custos_workflow_resumes_total",
+    description=("Count of parked waitFor: steps resumed by a delivered external event."),
+)
+
+RESUME_SUBSCRIPTION_DIVERGENT_TOTAL: Final[Counter] = _meter.create_counter(
+    name="custos_workflow_resume_subscription_divergent_total",
+    description=(
+        "Count of divergent resume-subscription selectors the replay "
+        "reconciler detected (Replay Protocol rule 2 — the original "
+        "registration wins and an audit event is emitted)."
+    ),
+)
+
+
+@contextmanager
+def _observe_resume(span_name: str, counter: Counter) -> Iterator[Span]:
+    """Span + outcome-counter wrapper for one resume-manager RPC.
+
+    Emits ``span_name`` and records exactly one sample on ``counter``
+    with an ``outcome`` label (``success`` on a clean exit, ``error``
+    when the wrapped block raises). The exception is re-raised so the
+    caller's own isolation / retry handling still runs.
+    """
+    with _tracer.start_as_current_span(span_name) as span:
+        try:
+            yield span
+        except Exception as exc:
+            span.set_attribute("outcome", _RESUME_ERROR)
+            span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
+            span.record_exception(exc)
+            counter.add(1, {"outcome": _RESUME_ERROR})
+            raise
+        else:
+            span.set_attribute("outcome", _RESUME_OK)
+            counter.add(1, {"outcome": _RESUME_OK})
+
+
+def observe_resume_registration() -> AbstractContextManager[Span]:
+    """Span + counter wrapping one ``RegisterResumeSubscription`` call."""
+    return _observe_resume(
+        "custos_workflow.resume.register",
+        RESUME_SUBSCRIPTIONS_REGISTERED_TOTAL,
+    )
+
+
+def observe_resume_cancellation() -> AbstractContextManager[Span]:
+    """Span + counter wrapping one ``CancelResumeSubscription`` call."""
+    return _observe_resume(
+        "custos_workflow.resume.cancel",
+        RESUME_SUBSCRIPTIONS_CANCELLED_TOTAL,
+    )
+
+
+@contextmanager
+def observe_resume_replay() -> Iterator[Span]:
+    """Span wrapping the reconciler's per-run replay reconciliation pass.
+
+    Unlike :func:`observe_resume_registration` / :func:`observe_resume_cancellation`
+    the replay span owns no counter of its own — each re-registration it
+    drives bumps :data:`RESUME_SUBSCRIPTIONS_REGISTERED_TOTAL` and each
+    divergence bumps :data:`RESUME_SUBSCRIPTION_DIVERGENT_TOTAL`, so a
+    replay-level counter would double-count. The span carries an
+    ``outcome`` attribute (``success`` / ``error``) for trace filtering.
+    """
+    with _tracer.start_as_current_span("custos_workflow.resume.replay") as span:
+        try:
+            yield span
+        except Exception as exc:
+            span.set_attribute("outcome", _RESUME_ERROR)
+            span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
+            span.record_exception(exc)
+            raise
+        else:
+            span.set_attribute("outcome", _RESUME_OK)
+
+
+def record_resume() -> None:
+    """Bump :data:`RESUMES_TOTAL` once for a delivered resume event."""
+    RESUMES_TOTAL.add(1)
+
+
+def record_resume_subscription_divergent() -> None:
+    """Bump :data:`RESUME_SUBSCRIPTION_DIVERGENT_TOTAL` for a divergent replay."""
+    RESUME_SUBSCRIPTION_DIVERGENT_TOTAL.add(1)
+
+
 __all__ = [
     "ACTIVITY_SCHEDULE_DURATION_MS",
     "API_ERRORS_TOTAL",
@@ -1614,6 +1762,10 @@ __all__ = [
     "OUTBOUND_RPC_ERRORS_TOTAL",
     "OUTBOUND_RPC_TOTAL",
     "PARSE_DURATION_MS",
+    "RESUMES_TOTAL",
+    "RESUME_SUBSCRIPTIONS_CANCELLED_TOTAL",
+    "RESUME_SUBSCRIPTIONS_REGISTERED_TOTAL",
+    "RESUME_SUBSCRIPTION_DIVERGENT_TOTAL",
     "RETRY_POLICY_DURATION_MS",
     "RUN_LIFECYCLE_DURATION_MS",
     "RUN_STATUS_TRANSITIONS_TOTAL",
@@ -1632,6 +1784,9 @@ __all__ = [
     "observe_compile_type_check",
     "observe_http_request",
     "observe_outbound_rpc",
+    "observe_resume_cancellation",
+    "observe_resume_registration",
+    "observe_resume_replay",
     "observe_run_cancel",
     "observe_run_get",
     "observe_run_list",
@@ -1648,6 +1803,8 @@ __all__ = [
     "record_api_error",
     "record_http_server_duration",
     "record_idempotency_outcome",
+    "record_resume",
+    "record_resume_subscription_divergent",
     "record_run_status_transition",
     "record_step_attempt",
     "record_step_error",

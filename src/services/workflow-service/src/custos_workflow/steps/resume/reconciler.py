@@ -84,6 +84,11 @@ from typing import Any, Protocol, runtime_checkable
 
 from custos_cel.scope import BindingScope
 
+from custos_workflow._telemetry import (
+    observe_resume_registration,
+    observe_resume_replay,
+    record_resume_subscription_divergent,
+)
 from custos_workflow.clients.trigger import (
     RegisterResumeSubscriptionRequest,
     TriggerServiceClient,
@@ -317,47 +322,48 @@ class ResumeSubscriptionReplayReconciler:
             surfaces infrastructure failures to it for swallowing.
         """
         run_id = str(ctx.run_id)
-        mirrors = await self._mirror_repo.list_open(run_id)
-        if not mirrors:
-            return ReplayReconcileReport()
+        with observe_resume_replay():
+            mirrors = await self._mirror_repo.list_open(run_id)
+            if not mirrors:
+                return ReplayReconcileReport()
 
-        scope = _build_scope(ctx, graph)
-        nodes_by_id = {node.step_id: node for node in graph.nodes}
-        occurred_at = ctx.workflow_context.current_utc_datetime
+            scope = _build_scope(ctx, graph)
+            nodes_by_id = {node.step_id: node for node in graph.nodes}
+            occurred_at = ctx.workflow_context.current_utc_datetime
 
-        reregistered: list[str] = []
-        divergent: list[str] = []
-        mirror_updated: list[str] = []
-        failed: list[str] = []
+            reregistered: list[str] = []
+            divergent: list[str] = []
+            mirror_updated: list[str] = []
+            failed: list[str] = []
 
-        for mirror in mirrors:
-            node = nodes_by_id.get(mirror.step_id)
-            try:
-                was_divergent, was_updated = await self._reconcile_one(
-                    ctx, scope, node, mirror, occurred_at
-                )
-            except Exception:
-                # Isolate one mirror's failure so the rest still reconcile.
-                _LOGGER.exception(
-                    "resume replay reconcile failed for mirror %s (run %s, step %s)",
-                    mirror.mirror_id,
-                    mirror.run_id,
-                    mirror.step_id,
-                )
-                failed.append(mirror.mirror_id)
-                continue
-            reregistered.append(mirror.mirror_id)
-            if was_divergent:
-                divergent.append(mirror.mirror_id)
-            if was_updated:
-                mirror_updated.append(mirror.mirror_id)
+            for mirror in mirrors:
+                node = nodes_by_id.get(mirror.step_id)
+                try:
+                    was_divergent, was_updated = await self._reconcile_one(
+                        ctx, scope, node, mirror, occurred_at
+                    )
+                except Exception:
+                    # Isolate one mirror's failure so the rest still reconcile.
+                    _LOGGER.exception(
+                        "resume replay reconcile failed for mirror %s (run %s, step %s)",
+                        mirror.mirror_id,
+                        mirror.run_id,
+                        mirror.step_id,
+                    )
+                    failed.append(mirror.mirror_id)
+                    continue
+                reregistered.append(mirror.mirror_id)
+                if was_divergent:
+                    divergent.append(mirror.mirror_id)
+                if was_updated:
+                    mirror_updated.append(mirror.mirror_id)
 
-        return ReplayReconcileReport(
-            reregistered=tuple(reregistered),
-            divergent=tuple(divergent),
-            mirror_updated=tuple(mirror_updated),
-            failed=tuple(failed),
-        )
+            return ReplayReconcileReport(
+                reregistered=tuple(reregistered),
+                divergent=tuple(divergent),
+                mirror_updated=tuple(mirror_updated),
+                failed=tuple(failed),
+            )
 
     # ------------------------------------------------------------------
     # Per-mirror reconciliation
@@ -399,8 +405,9 @@ class ResumeSubscriptionReplayReconciler:
         # uses for the same sync-Protocol / async-Dapr split. WF-IMPL-108
         # wires the async Dapr client here, so without this the RPC would
         # be dropped as an un-awaited coroutine.
-        result = self._trigger_client.register_resume_subscription(request)
-        response = await result if inspect.isawaitable(result) else result
+        with observe_resume_registration():
+            result = self._trigger_client.register_resume_subscription(request)
+            response = await result if inspect.isawaitable(result) else result
 
         was_updated = False
         if response.ts_subscription_id != mirror.ts_subscription_id:
@@ -492,6 +499,7 @@ class ResumeSubscriptionReplayReconciler:
         already handled (original kept) and a flaky audit sink must not
         fail the reconcile.
         """
+        record_resume_subscription_divergent()
         error = ResumeSubscriptionDivergentError(
             f"resume subscription selector for step {mirror.step_id!r} diverged on "
             "replay; the original registration wins",
