@@ -243,6 +243,49 @@ jobs:
         # ``.github/workflows/workflow-service-nightly.yml``.
         run: pytest -q --cov=custos_workflow --cov-report=term-missing --cov-fail-under=90 --hypothesis-seed=0
 
+  activity-runtime-manager:
+    name: activity-runtime-manager (lint + types + tests)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    defaults:
+      run:
+        working-directory: src/services/activity-runtime-manager
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install custos-callctx library from path
+        working-directory: ${{ github.workspace }}
+        run: |
+          pip install -e src/libs/custos-callctx[dev]
+
+      - name: Install custos-spl library from path
+        working-directory: ${{ github.workspace }}
+        run: |
+          pip install -e src/libs/storage-provider-layer[dev]
+
+      - name: Install package and dev dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Ruff lint
+        run: ruff check .
+
+      - name: Ruff format check
+        run: ruff format --check .
+
+      - name: Mypy (strict)
+        run: mypy src tests
+
+      - name: Pytest (with 90% coverage gate)
+        run: pytest -q --cov=custos_arm --cov-report=term-missing --cov-fail-under=90
+
   connector-service:
     name: connector-service (lint + types + tests)
     runs-on: ubuntu-latest

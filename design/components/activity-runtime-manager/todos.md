@@ -6,7 +6,7 @@ Last Updated: 2026-06-03
 
 Tracker: ARM-IMPL-000 (#591). Plan: [implementation-plan.md](implementation-plan.md).
 
-- [F] ARM-IMPL-001 (#569): Scaffold the service package
+- [x] ARM-IMPL-001 (#569): Scaffold the service package
 - [F] ARM-IMPL-002 (#570): Configuration & AuthZ dev-shim
 - [F] ARM-IMPL-003 (#571): Activity Contract v1 types
 - [F] ARM-IMPL-004 (#572): Activity Manifest v1 model + parser
