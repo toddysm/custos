@@ -1,6 +1,33 @@
 # TODOs: Activity Runtime Manager
 
-Last Updated: 2026-06-02
+Last Updated: 2026-06-03
+
+## Implementation tasks (filed)
+
+Tracker: ARM-IMPL-000 (#591). Plan: [implementation-plan.md](implementation-plan.md).
+
+- [F] ARM-IMPL-001 (#569): Scaffold the service package
+- [F] ARM-IMPL-002 (#570): Configuration & AuthZ dev-shim
+- [F] ARM-IMPL-003 (#571): Activity Contract v1 types
+- [F] ARM-IMPL-004 (#572): Activity Manifest v1 model + parser
+- [F] ARM-IMPL-005 (#573): ActivityExecution store
+- [F] ARM-IMPL-006 (#574): ArtifactRecord + Artifact Store Client
+- [F] ARM-IMPL-007 (#575): Activity Resolver (real Dapr Catalog adapter)
+- [F] ARM-IMPL-008 (#576): Resource Limiter
+- [F] ARM-IMPL-009 (#577): I/O Broker (two-phase finalization)
+- [F] ARM-IMPL-010 (#578): Secret Injector (real Connector RefreshLease adapter)
+- [F] ARM-IMPL-011 (#579): Result Mapper
+- [F] ARM-IMPL-012 (#580): Log Streamer
+- [F] ARM-IMPL-013 (#581): RuntimeDriver Protocol + dispatcher
+- [F] ARM-IMPL-014 (#582): Sandbox & isolation model
+- [F] ARM-IMPL-015 (#583): OCI Container Driver — Job builder
+- [F] ARM-IMPL-016 (#584): OCI Container Driver — lifecycle monitor (kind/k8s integration)
+- [F] ARM-IMPL-017 (#585): Activity Scheduler
+- [F] ARM-IMPL-018 (#586): RPC Adapter (real Dapr ScheduleActivity/CancelActivity)
+- [F] ARM-IMPL-019 (#587): Cancel + deadline/timeout
+- [F] ARM-IMPL-020 (#588): Observability
+- [F] ARM-IMPL-021 (#589): Integration suite (kind/k8s)
+- [F] ARM-IMPL-022 (#590): Developer docs + README
 
 ## Open
 
