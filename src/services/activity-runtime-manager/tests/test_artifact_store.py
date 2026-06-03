@@ -32,12 +32,15 @@ class _FakeArtifactStore:
         data = b""
         async for chunk in content:
             data += chunk
-        digest = "sha256:" + hashlib.sha256(data).hexdigest()
+        # Mirror the SPL adapter contract: ``digest`` is the raw hexdigest and
+        # ``artifact_id`` embeds the workspace as ``{workspace_id}:{digest}``.
+        digest = hashlib.sha256(data).hexdigest()
+        artifact_id = f"{workspace_id}:{digest}"
         # Only commit the blob once the whole stream is consumed.
-        self.blobs[digest] = data
+        self.blobs[artifact_id] = data
         return ArtifactDescriptor(
             workspace_id=workspace_id,
-            artifact_id=ArtifactId(digest),
+            artifact_id=ArtifactId(artifact_id),
             digest=digest,
             media_type=media_type,
             size=len(data),
@@ -82,8 +85,10 @@ async def test_upload_returns_store_assigned_metadata() -> None:
         media_type="application/json",
     )
     assert isinstance(record, ArtifactRecord)
-    assert record.id == "sha256:" + hashlib.sha256(payload).hexdigest()
-    assert record.digest == record.id
+    expected_digest = hashlib.sha256(payload).hexdigest()
+    assert record.id == f"ws-1:{expected_digest}"
+    assert record.digest == expected_digest
+    assert record.id != record.digest
     assert record.media_type == "application/json"
     assert record.size == len(payload)
     assert record.name == "sbom.json"
@@ -141,13 +146,13 @@ async def test_fetch_materializes_bytes() -> None:
 async def test_fetch_unknown_artifact_raises() -> None:
     client = _client()
     with pytest.raises(ArtifactNotFound):
-        await client.fetch("ws-1", "sha256:deadbeef")
+        await client.fetch("ws-1", f"ws-1:{hashlib.sha256(b'missing').hexdigest()}")
 
 
 async def test_fetch_over_cap_raises() -> None:
     store = _FakeArtifactStore()
-    digest = "sha256:" + hashlib.sha256(b"y" * 64).hexdigest()
-    store.blobs[digest] = b"y" * 64
+    artifact_id = f"ws-1:{hashlib.sha256(b'y' * 64).hexdigest()}"
+    store.blobs[artifact_id] = b"y" * 64
     client = ArtifactStoreClient(store, max_bytes=8)  # type: ignore[arg-type]
     with pytest.raises(ArtifactTooLargeError):
-        await client.fetch("ws-1", digest)
+        await client.fetch("ws-1", artifact_id)
