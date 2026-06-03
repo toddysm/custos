@@ -67,6 +67,12 @@ _TERMINATING: Final[frozenset[ExecutionState]] = frozenset(
     {ExecutionState.FAILED, ExecutionState.CANCELLED}
 )
 
+#: Fields that identify an execution (or are owned by the state machine) and so
+#: may never be rewritten by :meth:`ActivityExecution.transition`.
+_IMMUTABLE_FIELDS: Final[frozenset[str]] = frozenset(
+    {"workspace_id", "run_id", "step_id", "attempt", "state"}
+)
+
 
 def allowed_transitions(state: ExecutionState) -> frozenset[ExecutionState]:
     """Return the states reachable in one step from ``state``."""
@@ -125,12 +131,24 @@ class ActivityExecution(BaseModel):
     def transition(self, to_state: ExecutionState, **changes: Any) -> ActivityExecution:
         """Return a copy advanced to ``to_state``, applying ``changes``.
 
+        ``changes`` may set only mutable, known fields — identity fields
+        (``workspace_id``/``run_id``/``step_id``/``attempt``) and ``state`` are
+        rejected so the copy's :attr:`key` and lifecycle stay consistent.
+
         Raises :class:`IllegalTransitionError` when ``to_state`` is not reachable
-        from the current state.
+        from the current state, and :class:`ExecutionStoreError` when ``changes``
+        names an unknown or immutable field.
         """
         if to_state not in allowed_transitions(self.state):
             raise IllegalTransitionError(
                 f"illegal transition {self.state.value} -> {to_state.value} "
+                f"for {self.run_id}/{self.step_id}/{self.attempt}"
+            )
+        mutable = frozenset(ActivityExecution.model_fields) - _IMMUTABLE_FIELDS
+        invalid = set(changes) - mutable
+        if invalid:
+            raise ExecutionStoreError(
+                f"transition may not set {sorted(invalid)} "
                 f"for {self.run_id}/{self.step_id}/{self.attempt}"
             )
         return self.model_copy(update={"state": to_state, **changes})
@@ -178,24 +196,33 @@ class ExecutionRepository:
         key = execution.key
         if key in self._live:
             raise DuplicateExecutionError(f"execution {key} already exists")
-        if await self._terminal_record(*key) is not None:
+        if await self._has_terminal_record(*key):
             raise DuplicateExecutionError(f"terminal execution record already exists for {key}")
-        self._live[key] = execution
+        # Persist before registering so a failed write never pollutes ``_live``.
         if execution.is_terminal:
             await self._persist_terminal(execution)
+        self._live[key] = execution
         return execution
 
     async def transition(
         self, execution: ActivityExecution, to_state: ExecutionState, **changes: Any
     ) -> ActivityExecution:
-        """Advance ``execution`` to ``to_state`` and persist if it becomes terminal."""
+        """Advance the live record keyed by ``execution`` and persist if terminal.
+
+        The transition is computed from the repository's current live record —
+        not from the (possibly stale) ``execution`` argument, which is used only
+        to locate the idempotency triple.
+        """
         key = execution.key
-        if key not in self._live:
+        current = self._live.get(key)
+        if current is None:
             raise UnknownExecutionError(f"no live execution for {key}")
-        updated = execution.transition(to_state, **changes)
-        self._live[key] = updated
+        updated = current.transition(to_state, **changes)
+        # Persist before mutating ``_live`` so a rejected terminal write leaves
+        # the live record at its prior state.
         if updated.is_terminal:
             await self._persist_terminal(updated)
+        self._live[key] = updated
         return updated
 
     async def get(
@@ -236,6 +263,14 @@ class ExecutionRepository:
             raise DuplicateExecutionError(
                 f"terminal execution record already exists for {execution.key}"
             ) from exc
+
+    async def _has_terminal_record(
+        self, workspace_id: str, run_id: str, step_id: str, attempt: int
+    ) -> bool:
+        attempts = await self._store.get_step_attempts(
+            WorkspaceId(workspace_id), RunId(run_id), StepId(step_id)
+        )
+        return any(stored.attempt == attempt for stored in attempts)
 
     async def _terminal_record(
         self, workspace_id: str, run_id: str, step_id: str, attempt: int

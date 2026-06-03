@@ -129,6 +129,18 @@ def test_model_transition_rejects_illegal_jump() -> None:
         execution.transition(ExecutionState.RUNNING)
 
 
+def test_model_transition_rejects_identity_field_mutation() -> None:
+    execution = _execution()
+    with pytest.raises(ExecutionStoreError, match="run_id"):
+        execution.transition(ExecutionState.RESOLVING, run_id="run-2")
+
+
+def test_model_transition_rejects_unknown_field() -> None:
+    execution = _execution()
+    with pytest.raises(ExecutionStoreError, match="bogus"):
+        execution.transition(ExecutionState.RESOLVING, bogus="x")
+
+
 def test_is_terminal_and_key() -> None:
     execution = _execution()
     assert execution.is_terminal is False
@@ -262,6 +274,49 @@ async def test_transition_rejects_illegal_state() -> None:
         await repo.transition(execution, ExecutionState.SUCCEEDED)
 
 
+async def test_transition_uses_live_record_not_passed_instance() -> None:
+    repo = _repo()
+    stale = await repo.insert(_execution())  # pending
+    await repo.transition(stale, ExecutionState.RESOLVING)
+    # Re-using the stale (pending) handle still advances from the live
+    # (resolving) record, so resolving -> materializing succeeds.
+    advanced = await repo.transition(stale, ExecutionState.MATERIALIZING)
+    assert advanced.state is ExecutionState.MATERIALIZING
+
+
+async def test_failed_terminal_persist_leaves_live_record_intact() -> None:
+    store = _store()
+    repo = _repo(store)
+    live = await repo.insert(_execution())
+    running = await repo.transition(
+        (await repo.transition(live, ExecutionState.RESOLVING)),
+        ExecutionState.MATERIALIZING,
+    )
+    running = await repo.transition(running, ExecutionState.RUNNING)
+    # Force the terminal append to collide with an existing immutable row.
+    await store.append_step_attempt(
+        WorkspaceId("ws-1"),
+        RunId("run-1"),
+        StepId("step-1"),
+        StepAttempt(
+            workspace_id=WorkspaceId("ws-1"),
+            run_id=RunId("run-1"),
+            step_id=StepId("step-1"),
+            attempt=1,
+            status="succeeded",
+            started_at=_NOW,
+            finished_at=_NOW,
+            error={"sentinel": True},
+        ),
+    )
+    with pytest.raises(DuplicateExecutionError):
+        await repo.transition(running, ExecutionState.FAILED)
+    # The live record must remain at its pre-transition (running) state.
+    current = await repo.get("ws-1", "run-1", "step-1", 1)
+    assert current is not None
+    assert current.state is ExecutionState.RUNNING
+
+
 async def test_purge_expired_drops_only_stale_terminal_records() -> None:
     store = _store()
     repo = _repo(store)
@@ -308,3 +363,25 @@ async def test_get_raises_when_snapshot_missing() -> None:
     )
     with pytest.raises(ExecutionStoreError, match="missing its ARM execution snapshot"):
         await _repo(store).get("ws-1", "run-1", "step-1", 1)
+
+
+async def test_insert_rejects_duplicate_even_without_snapshot() -> None:
+    store = _store()
+    await store.append_step_attempt(
+        WorkspaceId("ws-1"),
+        RunId("run-1"),
+        StepId("step-1"),
+        StepAttempt(
+            workspace_id=WorkspaceId("ws-1"),
+            run_id=RunId("run-1"),
+            step_id=StepId("step-1"),
+            attempt=1,
+            status="succeeded",
+            started_at=_NOW,
+            finished_at=_NOW,
+            error=None,
+        ),
+    )
+    # The duplicate guard keys off attempt existence, not snapshot validity.
+    with pytest.raises(DuplicateExecutionError):
+        await _repo(store).insert(_execution())
