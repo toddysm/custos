@@ -21,13 +21,11 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING
+
+from fastapi import FastAPI
 
 from custos_arm._version import __version__
 from custos_arm.healthz import router as health_router
-
-if TYPE_CHECKING:
-    from fastapi import FastAPI
 
 __all__ = ["create_app"]
 
@@ -46,10 +44,6 @@ def create_app() -> FastAPI:
         A configured :class:`fastapi.FastAPI` instance exposing the
         ``/healthz`` and ``/readyz`` probes.
     """
-    # Imported here (not at module top) so the package ``__init__`` can
-    # re-export ``create_app`` without importing FastAPI at package-import
-    # time for non-runtime tooling.
-    from fastapi import FastAPI
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -62,7 +56,12 @@ def create_app() -> FastAPI:
         try:
             yield
         finally:
+            # Close the gate on shutdown and keep ``ready_detail`` aligned
+            # with the closed state so ``/readyz`` does not report 503 with
+            # a stale "ready" detail while the process drains in-flight
+            # requests.
             app.state.ready = False
+            app.state.ready_detail = "activity-runtime-manager is shutting down"
 
     app = FastAPI(
         title="Custos Activity Runtime Manager",
