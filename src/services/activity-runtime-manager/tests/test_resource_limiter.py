@@ -121,6 +121,12 @@ def test_quantity_is_hashable() -> None:
     assert len({Quantity.parse("250m"), Quantity.parse("0.25")}) == 1
 
 
+def test_quantity_is_immutable() -> None:
+    q = Quantity.parse("1Gi")
+    with pytest.raises(AttributeError):
+        q._value = q._value  # type: ignore[misc]
+
+
 def test_quantity_eq_with_non_quantity_is_not_implemented() -> None:
     assert Quantity.parse("1") != "1"
 
@@ -238,6 +244,43 @@ def test_malformed_manifest_quantity_is_rejected() -> None:
 
     with pytest.raises(ResourceLimitError):
         limiter.limit(resources=resources, isolation_floor=floor)
+
+
+def test_resource_limit_error_uses_reserved_namespace() -> None:
+    resources, floor = _manifest_resources(memory={"limit": "1Gi"})
+    limiter = ResourceLimiter(_settings_with())
+
+    with pytest.raises(ResourceLimitError) as excinfo:
+        limiter.limit(
+            resources=resources,
+            isolation_floor=floor,
+            override=ResourceOverride(memory_limit="2Gi"),
+        )
+
+    assert excinfo.value.code == "system.resource_limit_violation"
+
+
+def test_whitespace_padded_quantity_is_normalized() -> None:
+    resources, floor = _manifest_resources(memory={"limit": " 512Mi "})
+    limiter = ResourceLimiter(_settings_with())
+
+    eff = limiter.limit(resources=resources, isolation_floor=floor)
+
+    assert eff.memory_limit == "512Mi"
+
+
+def test_request_above_limit_is_rejected() -> None:
+    # Manifest leaves cpu.request at the 250m default but the step tightens
+    # cpu.limit below it → request > limit, which Kubernetes would reject.
+    resources, floor = _manifest_resources()
+    limiter = ResourceLimiter(_settings_with())
+
+    with pytest.raises(ResourceLimitError):
+        limiter.limit(
+            resources=resources,
+            isolation_floor=floor,
+            override=ResourceOverride(cpu_limit="100m"),
+        )
 
 
 # ---------------------------------------------------------------------------

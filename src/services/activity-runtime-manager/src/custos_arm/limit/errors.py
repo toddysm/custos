@@ -39,7 +39,7 @@ class ResourceLimitError(LimitError):
     identically on retry.
     """
 
-    code: str = "resource.limit_violation"
+    code: str = "system.resource_limit_violation"
     error_class: ErrorClass = ErrorClass.PERMANENT
 
     def __init__(self, message: str) -> None:

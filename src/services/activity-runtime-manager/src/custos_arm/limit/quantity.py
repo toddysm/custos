@@ -20,6 +20,7 @@ manifest error rather than silently coerced.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from fractions import Fraction
 from typing import Final
 
@@ -67,6 +68,7 @@ def _multiplier(suffix: str) -> Fraction:
     )
 
 
+@dataclass(frozen=True, slots=True, eq=False)
 class Quantity:
     """An exact, comparable Kubernetes resource quantity in base units.
 
@@ -76,16 +78,14 @@ class Quantity:
     ``Quantity.parse("0.25")`` and ``Quantity.parse("1Gi")`` is strictly
     greater than ``Quantity.parse("1000Mi")``.
 
-    Instances are immutable, hashable, and totally ordered; ``str(q)`` returns
-    the original source text so a clamped value round-trips back to the same
-    suffix the operator wrote.
+    Instances are immutable (a frozen dataclass — assignment raises at
+    runtime), hashable, and totally ordered; ``str(q)`` returns the original
+    source text so a clamped value round-trips back to the same suffix the
+    operator wrote.
     """
 
-    __slots__ = ("_source", "_value")
-
-    def __init__(self, value: Fraction, source: str) -> None:
-        self._value = value
-        self._source = source
+    _value: Fraction
+    _source: str
 
     @classmethod
     def parse(cls, raw: str) -> Quantity:

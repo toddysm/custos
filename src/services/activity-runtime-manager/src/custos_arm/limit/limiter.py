@@ -97,7 +97,9 @@ class ResourceLimiter:
                 raise ResourceLimitError(
                     f"resolved {field} ({resolved!r}) exceeds the cluster ceiling {ceiling!r}"
                 )
-        return resolved
+        # Return the parser's normalized source so a whitespace-padded input
+        # never leaks an invalid Kubernetes quantity into the envelope.
+        return str(resolved_q)
 
     @staticmethod
     def _parse(field: str, raw: str) -> Quantity:
@@ -118,7 +120,7 @@ class ResourceLimiter:
         cpu = resources.cpu
         memory = resources.memory
         storage = resources.ephemeral_storage
-        return {
+        envelope = {
             "cpu_request": self._resolve_value(
                 field="cpu.request",
                 default=s.default_cpu_request,
@@ -155,6 +157,18 @@ class ResourceLimiter:
                 ceiling=cap.ephemeral_storage_limit,
             ),
         }
+        self._check_request_not_above_limit("cpu", envelope["cpu_request"], envelope["cpu_limit"])
+        self._check_request_not_above_limit(
+            "memory", envelope["memory_request"], envelope["memory_limit"]
+        )
+        return envelope
+
+    def _check_request_not_above_limit(self, field: str, request: str, limit: str) -> None:
+        """Reject an envelope where ``request`` exceeds ``limit`` (Kubernetes would too)."""
+        if self._parse(f"{field}.request", request) > self._parse(f"{field}.limit", limit):
+            raise ResourceLimitError(
+                f"resolved {field}.request ({request!r}) exceeds {field}.limit ({limit!r})"
+            )
 
     # -- timeout -------------------------------------------------------------
 
