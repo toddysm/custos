@@ -214,9 +214,9 @@ def test_canonical_json_is_deterministic_and_round_trips() -> None:
     canonical = to_canonical_json(manifest)
     # Stable: re-serializing the re-parsed manifest yields identical bytes.
     assert to_canonical_json(parse_manifest(canonical)) == canonical
-    # Sorted keys + compact separators.
+    # Canonical: sorted keys + compact separators (re-dump matches byte-for-byte).
+    assert canonical == json.dumps(json.loads(canonical), sort_keys=True, separators=(",", ":"))
     assert '"apiVersion":"custos.dev/v1"' in canonical
-    assert ", " not in canonical
 
 
 def test_parse_semver_components() -> None:
@@ -224,7 +224,9 @@ def test_parse_semver_components() -> None:
     assert (version.major, version.minor, version.patch) == (3, 4, 5)
 
 
-@pytest.mark.parametrize("bad", ["1", "1.2", "1.2.3.4", "v1.2.3", "1.2.x"])
+@pytest.mark.parametrize(
+    "bad", ["1", "1.2", "1.2.3.4", "v1.2.3", "1.2.x", "01.2.3", "1.02.3", "1.2.03"]
+)
 def test_parse_semver_rejects_non_triples(bad: str) -> None:
     with pytest.raises(ValueError, match="semver"):
         parse_semver(bad)

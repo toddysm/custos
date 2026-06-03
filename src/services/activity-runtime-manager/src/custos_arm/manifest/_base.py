@@ -14,9 +14,11 @@ from typing import Final, NamedTuple
 from pydantic import BaseModel, ConfigDict
 
 #: A full ``MAJOR.MINOR.PATCH`` semver triple (no pre-release / build metadata
-#: in v1 — the manifest version is always a concrete release).
+#: in v1 — the manifest version is always a concrete release). Components are
+#: strict: leading zeros are rejected, matching the repo-wide semver rules
+#: enforced at publish/resolve time.
 _SEMVER_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)$"
+    r"^(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)$"
 )
 
 #: Reserved namespace prefixes only the platform may publish into. A manifest

@@ -40,9 +40,10 @@ def parse_manifest(data: str | bytes | dict[str, Any]) -> ActivityManifest:
 def to_canonical_json(manifest: ActivityManifest) -> str:
     """Serialize a manifest to its canonical JSON form.
 
-    Canonical form uses the wire aliases, omits unset optional fields, sorts
-    object keys, and uses compact separators so two semantically-equal
-    manifests produce byte-identical output (suitable for hashing).
+    Canonical form uses the wire aliases, omits fields whose value is
+    ``None``, sorts object keys, and uses compact separators so two
+    semantically-equal manifests produce byte-identical output (suitable for
+    hashing).
     """
     payload = manifest.model_dump(by_alias=True, exclude_none=True)
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
