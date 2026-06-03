@@ -50,6 +50,7 @@ import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
+from custos_workflow._telemetry import observe_resume_cancellation
 from custos_workflow.clients.trigger import (
     CancelResumeSubscriptionRequest,
     TriggerServiceClient,
@@ -159,13 +160,14 @@ class ResumeSubscriptionCanceller:
         failed: list[str] = []
         for mirror in mirrors:
             try:
-                self._trigger_client.cancel_resume_subscription(
-                    CancelResumeSubscriptionRequest(
-                        run_id=mirror.run_id,
-                        step_id=mirror.step_id,
-                        event_key=mirror.event_key,
+                with observe_resume_cancellation():
+                    self._trigger_client.cancel_resume_subscription(
+                        CancelResumeSubscriptionRequest(
+                            run_id=mirror.run_id,
+                            step_id=mirror.step_id,
+                            event_key=mirror.event_key,
+                        )
                     )
-                )
             except Exception:
                 # Isolate one mirror's cancel failure; keep its row so a
                 # later sweep / reconcile retries the idempotent cancel.

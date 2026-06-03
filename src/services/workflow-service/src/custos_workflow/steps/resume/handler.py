@@ -89,6 +89,11 @@ from typing import TYPE_CHECKING, Any, Final
 from custos_cel import CelError, evaluate
 from custos_cel.scope import BindingScope, RunInfo, StepBinding, WorkflowInfo
 
+from custos_workflow._telemetry import (
+    observe_resume_cancellation,
+    observe_resume_registration,
+    record_resume,
+)
 from custos_workflow.clients.trigger import (
     CancelResumeSubscriptionRequest,
     RegisterResumeSubscriptionRequest,
@@ -557,14 +562,17 @@ async def drive_resume_generator(
                 pending_exc = exc
         elif isinstance(token, RegisterResumeSubscriptionCall):
             try:
-                sent = trigger_client.register_resume_subscription(token.request)
+                with observe_resume_registration():
+                    sent = trigger_client.register_resume_subscription(token.request)
             except Exception as exc:
                 pending_exc = exc
         elif isinstance(token, WaitForExternalEventCall):
+            record_resume()
             sent = resume_payload
         elif isinstance(token, CancelResumeSubscriptionCall):
             try:
-                trigger_client.cancel_resume_subscription(token.request)
+                with observe_resume_cancellation():
+                    trigger_client.cancel_resume_subscription(token.request)
             except Exception as exc:
                 pending_exc = exc
         elif isinstance(token, DeleteMirrorCall):
@@ -624,7 +632,8 @@ async def drive_resume_registration_to_wait(
                 pending_exc = exc
         elif isinstance(token, RegisterResumeSubscriptionCall):
             try:
-                sent = trigger_client.register_resume_subscription(token.request)
+                with observe_resume_registration():
+                    sent = trigger_client.register_resume_subscription(token.request)
             except Exception as exc:
                 pending_exc = exc
         else:  # pragma: no cover - cancel/delete never precede the wait yield

@@ -640,6 +640,33 @@ once the Trigger Service (COMP-004) exists.
 Tracker: [#552](https://github.com/toddysm/custos/issues/552).
 
 
+WF-IMPL-110 ([#549](https://github.com/toddysm/custos/issues/549))
+adds OpenTelemetry observability hooks for the Resume Subscription
+Manager. The `custos_workflow._telemetry` module gains four counters
+— `custos_workflow_resume_subscriptions_registered_total` and
+`custos_workflow_resume_subscriptions_cancelled_total` (each labelled
+by `outcome` = `success` | `error`), `custos_workflow_resumes_total`,
+and `custos_workflow_resume_subscription_divergent_total` — plus
+three spans (`custos_workflow.resume.register`,
+`custos_workflow.resume.cancel`, `custos_workflow.resume.replay`)
+surfaced through the `observe_resume_registration()`,
+`observe_resume_cancellation()`, `observe_resume_replay()`,
+`record_resume()`, and `record_resume_subscription_divergent()`
+helpers. The register / cancel observers wrap the
+`WaitForStepHandler` drivers, the replay reconciler, and the
+cancellation sweeper, recording an `outcome` sample on both the
+success and error paths and re-raising so each call site's existing
+failure-isolation / retry handling still runs; `record_resume()`
+fires once per delivered external event and
+`record_resume_subscription_divergent()` once per replay-detected
+selector divergence (Replay Protocol rule 2). Like the rest of the
+module the instrumentation imports `opentelemetry-api` only, so a
+deployment without an OTel SDK installed gets silent no-ops. The
+locked step-lifecycle taxonomy is unchanged — full Dapr Pub/Sub
+`step.resumed` lifecycle wiring is deferred to a later task.
+Tracker: [#552](https://github.com/toddysm/custos/issues/552).
+
+
 WF-IMPL-109 ([#548](https://github.com/toddysm/custos/issues/548))
 adds the TTL-expiry periodic mirror sweep
 (`custos_workflow.steps.resume.sweeper`) — a
