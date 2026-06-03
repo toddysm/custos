@@ -85,7 +85,7 @@ def is_reserved_namespace(code: str) -> bool:
 def _check_details_size(details: dict[str, Any] | None) -> dict[str, Any] | None:
     if details is None:
         return None
-    size = len(json.dumps(details, separators=(",", ":")).encode("utf-8"))
+    size = len(json.dumps(details, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
     if size > DETAILS_MAX_BYTES:
         raise ValueError(
             f"error.details exceeds the {DETAILS_MAX_BYTES}-byte cap ({size} bytes); "
@@ -105,7 +105,9 @@ class ErrorCause(ContractModel):
 
     Mirrors :class:`ErrorEnvelope` but ``class`` is optional, matching the
     design's lean cause shape (``{"code": ..., "message": ...}``). The
-    chain is depth-capped at :data:`CAUSE_MAX_DEPTH`.
+    chain's depth cap (:data:`CAUSE_MAX_DEPTH`) is enforced at the envelope
+    boundary by :meth:`ErrorEnvelope._check_depth`, not on ``ErrorCause``
+    itself.
     """
 
     code: str = Field(..., min_length=1)
