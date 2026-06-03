@@ -12,7 +12,7 @@ Tracker: ARM-IMPL-000 (#591). Plan: [implementation-plan.md](implementation-plan
 - [x] ARM-IMPL-004 (#572): Activity Manifest v1 model + parser
 - [x] ARM-IMPL-005 (#573): ActivityExecution store
 - [x] ARM-IMPL-006 (#574): ArtifactRecord + Artifact Store Client
-- [F] ARM-IMPL-007 (#575): Activity Resolver (real Dapr Catalog adapter)
+- [x] ARM-IMPL-007 (#575): Activity Resolver (real Dapr Catalog adapter)
 - [F] ARM-IMPL-008 (#576): Resource Limiter
 - [F] ARM-IMPL-009 (#577): I/O Broker (two-phase finalization)
 - [F] ARM-IMPL-010 (#578): Secret Injector (real Connector RefreshLease adapter)
