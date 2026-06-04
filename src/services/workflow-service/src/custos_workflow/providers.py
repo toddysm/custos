@@ -27,6 +27,7 @@ Design references:
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 import re
@@ -104,6 +105,8 @@ from custos_workflow.validator import (
     StartRunValidator,
 )
 
+logger = logging.getLogger("custos_workflow")
+
 __all__ = [
     "DEFAULT_APPROVAL_TIMEOUT",
     "DEFAULT_DAPR_PUBLISH_TOPIC",
@@ -117,6 +120,7 @@ __all__ = [
     "ENV_DAPR_WORKFLOW_COMPONENT",
     "ENV_ENVIRONMENT",
     "ENV_MAX_FANOUT_WIDTH",
+    "ENV_METADATA_STORE",
     "ENV_OUTBOUND_RPC_TIMEOUT_MS",
     "ENV_PUBLISH_PUBSUB",
     "ENV_PUBLISH_TOPIC",
@@ -124,9 +128,11 @@ __all__ = [
     "ENV_RESUME_SUB_DEFAULT_TTL",
     "ENV_RESUME_SUB_SWEEP_INTERVAL",
     "ENV_TS_ENDPOINT",
+    "MetadataStorePool",
     "RunComponents",
     "WorkflowRuntimeProtocol",
     "load_run_components",
+    "open_metadata_store",
 ]
 
 
@@ -202,6 +208,24 @@ ENV_ENVIRONMENT = "ENVIRONMENT"
 #: Value of :data:`ENV_ENVIRONMENT` that marks a production
 #: deployment (compared case-insensitively).
 _PRODUCTION_ENVIRONMENT: Final[str] = "production"
+
+
+#: Optional. libpq-style DSN that resolves the durable
+#: :class:`~custos_spl.interfaces.metadata_store.MetadataStoreProvider`
+#: adapter (``custos_pg``). Mirrors the catalog-service
+#: ``CAT_DEFINITION_STORE`` / ``CAT_CATALOG_STORE`` precedent. When set
+#: the lifespan constructs one pooled
+#: :class:`~custos_pg.PgMetadataAdapter` (eagerly opening the
+#: connection pool so a bad DSN / unreachable database surfaces at
+#: startup and keeps ``/readyz`` at 503) and shares it across
+#: collaborators. When unset the behaviour depends on
+#: :data:`ENV_ENVIRONMENT`: a ``production`` deployment fails fast
+#: (:func:`_resolve_metadata_store_dsn` raises :class:`RuntimeError`)
+#: so a worker never silently persists runs to the process-local
+#: in-memory store; any other environment keeps the in-memory
+#: :class:`_InProcessMetadataStoreProvider` so the sidecar-free dev /
+#: test path stays composable.
+ENV_METADATA_STORE = "WF_METADATA_STORE"
 
 
 #: Optional. Per-request timeout shared by both the ARM and
@@ -459,6 +483,22 @@ class _InProcessMetadataStoreProvider:
         return Page(items=window, next_cursor=next_cursor)
 
 
+def _in_memory_metadata_store() -> MetadataStoreProvider:
+    """Return a fresh process-local :class:`MetadataStoreProvider`.
+
+    Wraps the :class:`_InProcessMetadataStoreProvider` in the
+    boundary ``cast`` the rest of the module uses: the in-process
+    stub implements only the Run-row subset of the Protocol, so the
+    static type is asserted here rather than structurally — a future
+    caller that reaches an unimplemented method gets a loud
+    :class:`NotImplementedError` at runtime. Used as the default both
+    for :attr:`RunComponents.metadata_store` (so a test-injected
+    bundle carries a real provider) and for the dev / test fallback
+    inside :func:`open_metadata_store`.
+    """
+    return cast(MetadataStoreProvider, _InProcessMetadataStoreProvider())
+
+
 # ---------------------------------------------------------------------------
 # RunComponents bundle
 # ---------------------------------------------------------------------------
@@ -541,6 +581,19 @@ class RunComponents:
             their env vars are set). ``None`` when none of the
             production paths are active. The lifespan ``aclose()``
             it on shutdown.
+        metadata_store: WF-IMPL-115
+            :class:`~custos_spl.interfaces.metadata_store.MetadataStoreProvider`
+            the durable Run / idempotency persistence sub-modules
+            (WF-IMPL-116 / WF-IMPL-117) key off. The default is a
+            process-local :class:`_InProcessMetadataStoreProvider`
+            so a test-injected bundle and the sidecar-free dev path
+            stay composable; the lifespan replaces it with a pooled
+            :class:`~custos_pg.PgMetadataAdapter` (via
+            :func:`open_metadata_store`) when
+            :data:`ENV_METADATA_STORE` is set. WF-IMPL-115 only wires
+            *construction, lifecycle, and readiness* — the
+            ``InProcessRunStore`` seam keeps its own in-process
+            provider until WF-IMPL-116 threads this field behind it.
         max_fanout_width: WF-IMPL-094 fan-out width cap
             (:data:`ENV_MAX_FANOUT_WIDTH`) threaded into the
             :class:`~custos_workflow.steps.sub_orchestration.SubOrchestrationManager`
@@ -591,6 +644,7 @@ class RunComponents:
         default_factory=lambda: NoopConnectorClient()
     )
     dapr_http_client: httpx.AsyncClient | None = field(default=None)
+    metadata_store: MetadataStoreProvider = field(default_factory=_in_memory_metadata_store)
     max_fanout_width: int = DEFAULT_MAX_FANOUT_WIDTH
     approval_default_timeout: timedelta = DEFAULT_APPROVAL_TIMEOUT
     resume_handler: WaitForStepHandler = field(
@@ -983,6 +1037,147 @@ def _build_trigger_client(
     )
 
 
+# ---------------------------------------------------------------------------
+# Durable metadata store (WF-IMPL-115)
+# ---------------------------------------------------------------------------
+
+
+# Matches the ``user[:password]@`` userinfo segment of a libpq / SQLAlchemy
+# URL (``postgresql://user:secret@host:5432/db``). asyncpg echoes the DSN
+# back in some connection errors, so the readiness detail surfaced on
+# ``/readyz`` could otherwise leak the database password to anyone who can
+# reach the probe. We strip the whole userinfo segment (user *and*
+# password) — operators get the full, unredacted exception in the logs.
+_DSN_USERINFO_RE = re.compile(r"//[^/@\s]+@")
+
+
+def _redact_dsn_credentials(text: str) -> str:
+    """Strip ``//user:password@`` userinfo from any DSN embedded in ``text``.
+
+    Used to scrub the operator-facing readiness detail (which is returned
+    in the ``/readyz`` HTTP body) without losing the diagnostic shape of
+    the message. The full exception is still logged server-side.
+    """
+    return _DSN_USERINFO_RE.sub("//<redacted>@", text)
+
+
+def _resolve_metadata_store_dsn(env: Mapping[str, str]) -> str | None:
+    """Return the trimmed :data:`ENV_METADATA_STORE` DSN or ``None``.
+
+    When the DSN is unset the behaviour depends on
+    :data:`ENV_ENVIRONMENT`: a ``production`` deployment fails fast
+    with a clear :class:`RuntimeError` so a worker never silently
+    persists runs / idempotency records to the process-local in-memory
+    store (which would lose them on restart); any other environment
+    returns ``None`` so :func:`open_metadata_store` keeps the in-memory
+    :class:`_InProcessMetadataStoreProvider` for the sidecar-free dev /
+    test path.
+    """
+    dsn = env.get(ENV_METADATA_STORE, "").strip()
+    if dsn:
+        return dsn
+    if env.get(ENV_ENVIRONMENT, "").strip().lower() == _PRODUCTION_ENVIRONMENT:
+        raise RuntimeError(
+            f"{ENV_METADATA_STORE} environment variable is required to start "
+            f"the workflow worker when {ENV_ENVIRONMENT}={_PRODUCTION_ENVIRONMENT} "
+            "(design.md § Configuration). Set it to a libpq DSN such as "
+            "'postgresql://user:pw@host:5432/custos' so Run and idempotency "
+            "state survive a restart."
+        )
+    return None
+
+
+@dataclass(slots=True)
+class MetadataStorePool:
+    """Lifespan-owned handle around a pooled ``custos_pg`` metadata adapter.
+
+    Unlike the other workflow-service adapters (which share the single
+    lifespan-owned :class:`httpx.AsyncClient`), the durable metadata
+    provider owns an :class:`asyncpg.Pool`. The pool is created
+    **eagerly** in :meth:`open` — rather than via the ``custos_pg``
+    ``LazyPool`` (whose pool is built on first query) — so a bad DSN or
+    an unreachable database surfaces at startup and keeps ``/readyz`` at
+    503, satisfying the WF-IMPL-115 acceptance criterion. The handle
+    owns the pool's lifecycle: :meth:`aclose` releases every connection
+    on shutdown.
+
+    ``custos_pg`` (asyncpg) is imported lazily inside :meth:`open` so
+    this module stays importable by unit tests that never construct the
+    durable backend — mirroring the catalog-service ``load_providers``
+    lazy-import precedent.
+    """
+
+    dsn: str
+    _pool: Any | None = field(default=None, init=False, repr=False)
+
+    async def open(self) -> MetadataStoreProvider:
+        """Eagerly create the asyncpg pool and return the bound adapter.
+
+        Raises whatever :func:`asyncpg.create_pool` raises when the DSN
+        is malformed or the database is unreachable; the caller
+        (:func:`open_metadata_store`) catches it and degrades to the
+        in-memory provider with an operator-actionable readiness detail.
+        """
+        import asyncpg
+        from custos_pg import PgMetadataAdapter
+
+        pool = await asyncpg.create_pool(dsn=self.dsn)
+        self._pool = pool
+        return cast(MetadataStoreProvider, PgMetadataAdapter(pool=pool))
+
+    async def aclose(self) -> None:
+        """Release the pool's connections. Idempotent; never raises."""
+        pool = self._pool
+        if pool is None:
+            return
+        self._pool = None
+        try:
+            await pool.close()
+        except Exception:  # pragma: no cover - defensive shutdown guard
+            logger.exception("metadata store pool close failed during shutdown")
+
+
+async def open_metadata_store(
+    env: Mapping[str, str],
+) -> tuple[MetadataStoreProvider, MetadataStorePool | None, str | None]:
+    """Resolve the durable-or-in-memory metadata provider for the lifespan.
+
+    Returns a ``(provider, pool, ready_detail)`` triple:
+
+    * When :data:`ENV_METADATA_STORE` is unset (and the environment is
+      not ``production``) the in-memory
+      :class:`_InProcessMetadataStoreProvider` is returned with
+      ``pool=None`` and ``ready_detail=None`` — the dev / test path.
+    * When the DSN is set the pooled :class:`~custos_pg.PgMetadataAdapter`
+      is opened eagerly. On success the adapter + its owning
+      :class:`MetadataStorePool` are returned with ``ready_detail=None``.
+      On connection failure the in-memory provider is returned with the
+      pool closed and a ``ready_detail`` string so the lifespan keeps
+      ``/readyz`` at 503 with an operator-actionable message (the worker
+      stays up — a transient database outage must not crash the pod).
+
+    A missing DSN on a ``production`` deployment raises
+    :class:`RuntimeError` via :func:`_resolve_metadata_store_dsn` before
+    any pool is opened (fail fast, do not boot on the in-memory store).
+    """
+    dsn = _resolve_metadata_store_dsn(env)
+    if dsn is None:
+        return _in_memory_metadata_store(), None, None
+    pool = MetadataStorePool(dsn=dsn)
+    try:
+        provider = await pool.open()
+    except Exception as exc:
+        await pool.aclose()
+        # The detail is echoed in the ``/readyz`` body, so scrub any DSN
+        # credentials asyncpg may have folded into the exception text.
+        # Operators still get the full exception server-side via the log.
+        detail = f"metadata store unavailable: {_redact_dsn_credentials(str(exc))}"
+        logger.error("metadata store pool failed to open; /readyz will remain 503: %s", exc)
+        return _in_memory_metadata_store(), None, detail
+    logger.info("durable metadata store connected (%s)", ENV_METADATA_STORE)
+    return provider, pool, None
+
+
 def _build_catalog_client(
     *,
     env: Mapping[str, str],
@@ -1040,6 +1235,7 @@ def load_run_components(
     activity_client: ActivityRuntimeClient | None = None,
     connector_client: ConnectorClient | None = None,
     idempotency_ledger: IdempotencyLedger | None = None,
+    metadata_store: MetadataStoreProvider | None = None,
 ) -> RunComponents:
     """Build the default :class:`RunComponents` from ``env``.
 
@@ -1091,6 +1287,15 @@ def load_run_components(
             the production Postgres-backed adapter is owned by
             the deferred *Durable Idempotency Ledger* sub-module
             and lands under WF-IMPL-070+.
+        metadata_store: Pre-built
+            :class:`~custos_spl.interfaces.metadata_store.MetadataStoreProvider`
+            override for :attr:`RunComponents.metadata_store`
+            (WF-IMPL-115). When ``None`` the default is a fresh
+            process-local :class:`_InProcessMetadataStoreProvider`;
+            the FastAPI lifespan injects the pooled durable adapter
+            it opened via :func:`open_metadata_store` so the same
+            provider is shared across collaborators. Tests inject an
+            in-memory fake.
 
     Returns:
         A fully-wired :class:`RunComponents` bundle. The caller is
@@ -1318,6 +1523,17 @@ def load_run_components(
         idempotency_ledger if idempotency_ledger is not None else InMemoryIdempotencyLedger()
     )
     validator = StartRunValidator(catalog=catalog_client, ledger=ledger)
+    # WF-IMPL-115: carry the metadata store provider on the bundle so
+    # the durable Run / idempotency sub-modules (WF-IMPL-116 /
+    # WF-IMPL-117) can key off a single shared provider. The lifespan
+    # injects the pooled durable adapter it opened via
+    # :func:`open_metadata_store`; absent an override (or a lifespan
+    # injection) the default is the process-local in-memory provider.
+    # The ``InProcessRunStore`` seam above keeps its own in-process
+    # provider until WF-IMPL-116 threads this field behind it.
+    metadata_store_provider: MetadataStoreProvider = (
+        metadata_store if metadata_store is not None else _in_memory_metadata_store()
+    )
     return RunComponents(
         workflow_runtime=runtime,
         workflow_client=workflow_client,
@@ -1331,6 +1547,7 @@ def load_run_components(
         outbound_activity_client=outbound_activity,
         outbound_connector_client=outbound_connector,
         dapr_http_client=dapr_http_client,
+        metadata_store=metadata_store_provider,
         max_fanout_width=_resolve_max_fanout_width(resolved_env),
         approval_default_timeout=_resolve_approval_default_timeout(resolved_env),
         resume_handler=resume_handler,

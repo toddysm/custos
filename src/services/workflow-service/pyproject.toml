@@ -35,6 +35,12 @@ classifiers = [
 dependencies = [
     "custos-cel",
     "custos-spl",
+    # custos-postgres provides the asyncpg-backed MetadataStoreProvider
+    # adapter (custos_pg.PgMetadataAdapter) the WF-IMPL-115 durable
+    # metadata store wires from WF_METADATA_STORE. The import is confined
+    # to custos_workflow.providers.MetadataStorePool.open (lazy) so the
+    # in-memory dev / test path never pulls in asyncpg.
+    "custos-postgres",
     "fastapi>=0.110,<1",
     "uvicorn[standard]>=0.27,<1",
     "pydantic>=2.6,<3",
@@ -79,6 +85,10 @@ dev = [
     "opentelemetry-sdk>=1.20,<2",
     # Property-based determinism tests (WF-IMPL-026) use Hypothesis.
     "hypothesis>=6.100",
+    # asyncpg is pulled in transitively by custos-postgres for the
+    # WF-IMPL-115 durable metadata store; pin it in dev so the lazy
+    # MetadataStorePool import resolves in unit tests that patch it.
+    "asyncpg>=0.29",
 ]
 
 [project.urls]
@@ -132,11 +142,16 @@ no_implicit_optional = true
 check_untyped_defs = true
 namespace_packages = true
 explicit_package_bases = true
-mypy_path = "src:../../libs/custos-cel/src:../../libs/storage-provider-layer/src"
+mypy_path = "src:../../libs/custos-cel/src:../../libs/storage-provider-layer/src:../../libs/custos-postgres/src"
 
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+# asyncpg ships no PEP 561 marker; treat as untyped at the boundary.
+module = ["asyncpg", "asyncpg.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 minversion = "8.0"

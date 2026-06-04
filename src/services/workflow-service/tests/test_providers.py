@@ -18,12 +18,14 @@ sidecar-free dev / test path that WF-IMPL-043 established.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 import httpx
 import pytest
 from custos_spl.ids import RunId as SplRunId
 from custos_spl.ids import WorkflowId as SplWorkflowId
 from custos_spl.ids import WorkspaceId as SplWorkspaceId
+from custos_spl.interfaces.metadata_store import MetadataStoreProvider
 from custos_spl.interfaces.metadata_store import Run as SplRun
 
 from custos_workflow.clients import (
@@ -48,22 +50,28 @@ from custos_workflow.providers import (
     ENV_CONNECTOR_APP_ID,
     ENV_ENVIRONMENT,
     ENV_MAX_FANOUT_WIDTH,
+    ENV_METADATA_STORE,
     ENV_OUTBOUND_RPC_TIMEOUT_MS,
     ENV_REGISTER_SUB_MAX_RETRIES,
     ENV_RESUME_SUB_DEFAULT_TTL,
     ENV_RESUME_SUB_SWEEP_INTERVAL,
     ENV_TS_ENDPOINT,
+    MetadataStorePool,
     _build_catalog_client,
     _build_trigger_client,
+    _in_memory_metadata_store,
     _InProcessMetadataStoreProvider,
     _NotConfiguredCatalogClient,
+    _redact_dsn_credentials,
     _resolve_approval_default_timeout,
     _resolve_max_fanout_width,
+    _resolve_metadata_store_dsn,
     _resolve_outbound_rpc_timeout_seconds,
     _resolve_register_sub_max_retries,
     _resolve_resume_sub_default_ttl,
     _resolve_resume_sub_sweep_interval,
     load_run_components,
+    open_metadata_store,
 )
 from custos_workflow.runs.replay import NoopReplayReconciler
 from custos_workflow.runtime import FakeWorkflowRuntime
@@ -716,3 +724,240 @@ def test_load_run_components_catalog_override_wins() -> None:
     # ``need_http_for_catalog`` (the publisher / ARM / connector /
     # trigger env are unset here).
     assert components.dapr_http_client is None
+
+
+# ---------------------------------------------------------------------------
+# WF-IMPL-115 — Durable metadata store (WF_METADATA_STORE config + lifespan
+# pool + readiness). The asyncpg pool is never opened for real here: the
+# ``MetadataStorePool.open`` / ``aclose`` boundary is patched so the tests
+# stay sidecar-free, matching the in-memory-default invariant.
+# ---------------------------------------------------------------------------
+
+
+class _FakeMetadataProvider:
+    """A stand-in :class:`MetadataStoreProvider` returned by a patched pool."""
+
+
+def test_resolve_metadata_store_dsn_none_when_unset() -> None:
+    """No DSN + non-production env → ``None`` (the in-memory fallback)."""
+    assert _resolve_metadata_store_dsn({}) is None
+
+
+def test_resolve_metadata_store_dsn_returns_trimmed_dsn() -> None:
+    """A set DSN is returned with surrounding whitespace stripped."""
+    dsn = "postgresql://user:pw@db:5432/custos"
+    assert _resolve_metadata_store_dsn({ENV_METADATA_STORE: f"  {dsn}  "}) == dsn
+
+
+def test_resolve_metadata_store_dsn_production_requires_dsn() -> None:
+    """Production + unset DSN fails fast so a worker never boots in-memory."""
+    with pytest.raises(RuntimeError, match=ENV_METADATA_STORE):
+        _resolve_metadata_store_dsn({ENV_ENVIRONMENT: "production"})
+
+
+@pytest.mark.parametrize("env_value", ["Production", "PRODUCTION", "production"])
+def test_resolve_metadata_store_dsn_production_match_case_insensitive(env_value: str) -> None:
+    """The production fail-fast check is case-insensitive."""
+    with pytest.raises(RuntimeError, match=ENV_METADATA_STORE):
+        _resolve_metadata_store_dsn({ENV_ENVIRONMENT: env_value})
+
+
+def test_resolve_metadata_store_dsn_non_production_keeps_fallback() -> None:
+    """A non-production env with no DSN keeps the in-memory fallback."""
+    assert _resolve_metadata_store_dsn({ENV_ENVIRONMENT: "staging"}) is None
+
+
+def test_in_memory_metadata_store_is_in_process_provider() -> None:
+    """The in-memory default wraps the process-local provider."""
+    provider = _in_memory_metadata_store()
+    assert isinstance(provider, _InProcessMetadataStoreProvider)
+
+
+@pytest.mark.asyncio
+async def test_open_metadata_store_in_memory_when_dsn_unset() -> None:
+    """Unset DSN → in-memory provider, no pool, no readiness detail."""
+    provider, pool, detail = await open_metadata_store({})
+    assert isinstance(provider, _InProcessMetadataStoreProvider)
+    assert pool is None
+    assert detail is None
+
+
+@pytest.mark.asyncio
+async def test_open_metadata_store_production_requires_dsn() -> None:
+    """Production + unset DSN propagates the fail-fast ``RuntimeError``."""
+    with pytest.raises(RuntimeError, match=ENV_METADATA_STORE):
+        await open_metadata_store({ENV_ENVIRONMENT: "production"})
+
+
+@pytest.mark.asyncio
+async def test_open_metadata_store_opens_pool_when_dsn_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A set DSN opens the pool and returns the durable adapter + handle."""
+    fake_provider = cast(MetadataStoreProvider, _FakeMetadataProvider())
+    opened: list[str] = []
+
+    async def fake_open(self: MetadataStorePool) -> object:
+        opened.append(self.dsn)
+        return fake_provider
+
+    monkeypatch.setattr(MetadataStorePool, "open", fake_open)
+
+    dsn = "postgresql://user:pw@db:5432/custos"
+    provider, pool, detail = await open_metadata_store({ENV_METADATA_STORE: dsn})
+
+    assert provider is fake_provider
+    assert isinstance(pool, MetadataStorePool)
+    assert pool.dsn == dsn
+    assert detail is None
+    assert opened == [dsn]
+
+
+@pytest.mark.asyncio
+async def test_open_metadata_store_degrades_on_connect_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pool open failure degrades to in-memory + a readiness detail.
+
+    The worker must not crash on a transient database outage: the pod
+    stays up while ``/readyz`` reports 503 (via the returned detail) so
+    traffic is not routed while persistence is unavailable. The pool is
+    closed on the failure path so a half-open handle never leaks.
+    """
+    closed: list[bool] = []
+
+    async def fake_open(self: MetadataStorePool) -> object:
+        raise ConnectionError("boom: cannot reach database")
+
+    async def fake_aclose(self: MetadataStorePool) -> None:
+        closed.append(True)
+
+    monkeypatch.setattr(MetadataStorePool, "open", fake_open)
+    monkeypatch.setattr(MetadataStorePool, "aclose", fake_aclose)
+
+    provider, pool, detail = await open_metadata_store(
+        {ENV_METADATA_STORE: "postgresql://user:pw@db:5432/custos"}
+    )
+
+    assert isinstance(provider, _InProcessMetadataStoreProvider)
+    assert pool is None
+    assert detail is not None
+    assert "metadata store unavailable" in detail
+    assert "boom: cannot reach database" in detail
+    # The half-open pool was closed on the failure path.
+    assert closed == [True]
+
+
+@pytest.mark.asyncio
+async def test_open_metadata_store_redacts_dsn_credentials_in_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A DSN echoed in the connect error is scrubbed from the readiness detail.
+
+    asyncpg folds the DSN into some connection errors; since the detail
+    is returned in the ``/readyz`` body, the embedded password must not
+    leak to anyone who can reach the probe. The userinfo segment is
+    replaced wholesale while the rest of the message survives.
+    """
+
+    async def fake_open(self: MetadataStorePool) -> object:
+        raise ConnectionError("could not connect to postgresql://admin:s3cret@db:5432/custos")
+
+    async def fake_aclose(self: MetadataStorePool) -> None:
+        return None
+
+    monkeypatch.setattr(MetadataStorePool, "open", fake_open)
+    monkeypatch.setattr(MetadataStorePool, "aclose", fake_aclose)
+
+    _provider, _pool, detail = await open_metadata_store(
+        {ENV_METADATA_STORE: "postgresql://admin:s3cret@db:5432/custos"}
+    )
+
+    assert detail is not None
+    assert "s3cret" not in detail
+    assert "admin" not in detail
+    assert "//<redacted>@db:5432/custos" in detail
+
+
+def test_redact_dsn_credentials_strips_userinfo() -> None:
+    """The userinfo (user + password) segment is replaced; rest is kept."""
+    redacted = _redact_dsn_credentials("boom postgresql://admin:s3cret@db:5432/custos tail")
+    assert redacted == "boom postgresql://<redacted>@db:5432/custos tail"
+
+
+def test_redact_dsn_credentials_noop_without_userinfo() -> None:
+    """Text with no ``user@`` userinfo is returned unchanged."""
+    msg = "connection timed out after 5s (no dsn here)"
+    assert _redact_dsn_credentials(msg) == msg
+
+
+@pytest.mark.asyncio
+async def test_metadata_store_pool_aclose_noop_when_unopened() -> None:
+    """``aclose`` on a never-opened pool is a no-op (no pool to close)."""
+    pool = MetadataStorePool(dsn="postgresql://user:pw@db:5432/custos")
+    await pool.aclose()  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_metadata_store_pool_open_and_aclose_roundtrip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``open`` creates the asyncpg pool; ``aclose`` releases it once.
+
+    Both the ``asyncpg.create_pool`` call and the
+    ``custos_pg.PgMetadataAdapter`` construction are patched so the test
+    never touches a real database, while still exercising the real
+    :meth:`MetadataStorePool.open` / :meth:`aclose` bodies (pool
+    ownership + idempotent close).
+    """
+    import asyncpg
+    import custos_pg
+
+    pool_closed: list[bool] = []
+
+    class _FakePool:
+        async def close(self) -> None:
+            pool_closed.append(True)
+
+    fake_pool = _FakePool()
+    created_with: dict[str, object] = {}
+
+    async def fake_create_pool(*, dsn: str) -> _FakePool:
+        created_with["dsn"] = dsn
+        return fake_pool
+
+    def fake_adapter(*, pool: object) -> _FakeMetadataProvider:
+        created_with["pool"] = pool
+        return _FakeMetadataProvider()
+
+    monkeypatch.setattr(asyncpg, "create_pool", fake_create_pool)
+    monkeypatch.setattr(custos_pg, "PgMetadataAdapter", fake_adapter)
+
+    dsn = "postgresql://user:pw@db:5432/custos"
+    pool = MetadataStorePool(dsn=dsn)
+    provider = await pool.open()
+
+    assert isinstance(provider, _FakeMetadataProvider)
+    assert created_with == {"dsn": dsn, "pool": fake_pool}
+
+    # First close releases the asyncpg pool; second is an idempotent no-op.
+    await pool.aclose()
+    await pool.aclose()
+    assert pool_closed == [True]
+
+
+def test_load_run_components_defaults_in_memory_metadata_store() -> None:
+    """With no override the bundle carries the in-memory provider."""
+    components = load_run_components(env={}, workflow_runtime=FakeWorkflowRuntime())
+    assert isinstance(components.metadata_store, _InProcessMetadataStoreProvider)
+
+
+def test_load_run_components_metadata_store_override_wins() -> None:
+    """An injected ``metadata_store`` is threaded onto the bundle verbatim."""
+    fake = cast(MetadataStoreProvider, _FakeMetadataProvider())
+    components = load_run_components(
+        env={},
+        workflow_runtime=FakeWorkflowRuntime(),
+        metadata_store=fake,
+    )
+    assert components.metadata_store is fake

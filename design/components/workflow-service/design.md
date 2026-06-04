@@ -660,6 +660,7 @@ Delivery semantics: **at-least-once**. Producer-side dedup on `(runId, eventKind
 | `WF_TS_ENDPOINT` | Yes | — | Trigger Service service endpoint. |
 | `WF_CONNECTOR_ENDPOINT` | Yes | — | Connector Service endpoint. |
 | `WF_CATALOG_ENDPOINT` | Yes | — | Catalog Service endpoint (read-only access to `WorkflowVersion`). |
+| `WF_METADATA_STORE` | No | — | libpq DSN for the durable `MetadataStoreProvider` (`custos_pg`) backing `Run` / idempotency persistence. When unset the in-memory provider is used (dev/test); required when `ENVIRONMENT=production`. The pool is opened eagerly at startup, so a bad DSN or unreachable database keeps `/readyz` at 503. |
 | `WF_RUN_HISTORY_RETENTION` | No | `90d` | How long to keep terminal-run metadata before archival. |
 | `WF_RESUME_SUB_DEFAULT_TTL` | No | `PT24H` | Default TTL for `RegisterResumeSubscription` when caller does not specify. |
 | `WF_REGISTER_SUB_MAX_RETRIES` | No | `5` | Max retries when registering a resume subscription with TS before failing the wait step. |
