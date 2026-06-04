@@ -13,11 +13,20 @@ Service consumes.
 
 ## Status
 
-**In progress** — the `ARM-IMPL-000-ACTIVITY-RUNTIME-MANAGER` milestone
-([#591](https://github.com/toddysm/custos/issues/591)) is under active
-implementation. This package currently provides the ARM-IMPL-001 scaffold:
-the FastAPI application factory and the `/healthz` / `/readyz` probes, wired to
-the ruff + mypy (strict) + pytest (≥90 % coverage) quality-gate toolchain.
+**Feature-complete (M1)** — the `ARM-IMPL-000-ACTIVITY-RUNTIME-MANAGER`
+milestone ([#591](https://github.com/toddysm/custos/issues/591)) has landed:
+the attempt state machine (resolve → limit → materialize → inject → run →
+finalize → map → persist), the OCI Container Driver (Job builder +
+kind/k8s lifecycle monitor), the Activity Contract and Manifest v1 models, the
+Resource Limiter and sandbox/isolation model, the I/O Broker (two-phase
+artifact finalization), the Secret Injector, the Result Mapper, the Dapr RPC
+adapter (`ScheduleActivity` / `CancelActivity`), cancel + deadline/timeout,
+OpenTelemetry spans + metrics, and a kind/k8s integration suite — all under the
+ruff + mypy (strict) + pytest (≥90 % coverage) quality-gate toolchain.
+
+Deferred (tracked separately): the ARM↔pod I/O bridge for full output
+round-trips on `kind` ([#613](https://github.com/toddysm/custos/issues/613)),
+and the `http` / `wasm` runtime drivers (later milestones).
 
 Tracking issue: [#591](https://github.com/toddysm/custos/issues/591)
 (ARM-IMPL-000).
@@ -26,6 +35,8 @@ Design reference:
 [`design/components/activity-runtime-manager/design.md`](../../../design/components/activity-runtime-manager/design.md).
 Implementation plan:
 [`design/components/activity-runtime-manager/implementation-plan.md`](../../../design/components/activity-runtime-manager/implementation-plan.md).
+Activity author guide:
+[`docs/developers/activity-author.md`](../../../docs/developers/activity-author.md).
 
 ## Layout
 
@@ -36,13 +47,28 @@ src/custos_arm/
   __main__.py     # uvicorn entry point (HOST/PORT)
   config.py       # typed Settings over the ARM_* env table
   healthz.py      # /healthz + /readyz routes
-  middleware/     # call-context middleware + AuthZ dev-shim
   _version.py     # package version string
+  middleware/     # call-context middleware + AuthZ dev-shim
+  contract/       # Activity Contract v1 envelopes, platform types, errors
+  manifest/       # Activity Manifest v1 models + parser + semver
+  store/          # ActivityExecution state machine + ArtifactRecord clients
+  resolve/        # Activity Resolver (Catalog adapter) + ActivityTypeVersion
+  limit/          # Resource Limiter + EffectiveResources + Quantity
+  io/             # I/O Broker (two-phase output finalization)
+  secrets/        # Secret Injector + sidecar token minter + lease client
+  result/         # Result Mapper (exit code + outputs → ActivityResultEnvelope)
+  logs/           # Log Streamer + audit sink
+  runtime/        # RuntimeDriver Protocol + dispatcher + sandbox/isolation
+    oci/          #   OCI Container Driver — Job builder + lifecycle monitor
+  scheduler/      # Activity Scheduler (the attempt state machine) + fsio
+  rpc/            # Dapr RPC adapter (ScheduleActivity / CancelActivity)
+  observe/        # OpenTelemetry spans + metrics
 tests/
-  test_healthz.py # probe behaviour
-  test_smoke.py   # import + factory smoke
-  test_config.py  # Settings loader + ISO-8601 durations
-  test_callctx.py # call-context dev-shim middleware
+  test_*.py             # unit suites for every package above
+  integration/          # kind/k8s end-to-end (integration-marked)
+    test_oci_lifecycle_integration.py
+    test_scheduler_integration.py
+  test_docs_examples.py # pins this README + the activity-author guide
 ```
 
 ## Configuration
