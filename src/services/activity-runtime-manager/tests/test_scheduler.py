@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -22,6 +24,7 @@ from custos_arm.resolve.errors import ActivityUnresolvedError, CatalogUnavailabl
 from custos_arm.result import ResultClass, ResultMapper
 from custos_arm.runtime import (
     OCI_CONTAINER_KIND,
+    CancelReason,
     OutputBundle,
     RuntimeDriverDispatcher,
     SandboxHandle,
@@ -109,6 +112,7 @@ class _FakeDriver:
         self.awaited = 0
         self.collected = 0
         self.cleaned = 0
+        self.cancellations: list[CancelReason] = []
         self.handle: SandboxHandle | None = None
 
     def prepare(self, plan: SandboxPlan) -> SandboxHandle:
@@ -131,8 +135,8 @@ class _FakeDriver:
             (handle.output_root / "outputs.json").write_bytes(self._outputs)
         return self._outcome
 
-    def cancel(self, handle: SandboxHandle, reason: Any) -> None:  # pragma: no cover - unused
-        pass
+    def cancel(self, handle: SandboxHandle, reason: CancelReason) -> None:
+        self.cancellations.append(reason)
 
     def collect(self, handle: SandboxHandle) -> OutputBundle:
         self.collected += 1
@@ -627,6 +631,8 @@ async def test_cancel_accepts_live_attempt(tmp_path: Path) -> None:
     outcome = await scheduler.cancel(workspace_id="ws-1", run_id="run-1", step_id="step-1")
 
     assert outcome is CancelOutcome.ACCEPTED
+    # The live attempt is driven to cancellation through its runtime driver.
+    assert driver.cancellations == [CancelReason.CANCELLED]
 
 
 async def test_cancel_reports_terminated_after_completion(tmp_path: Path) -> None:
@@ -671,3 +677,98 @@ async def test_cancel_reports_unknown_for_unseen_step(tmp_path: Path) -> None:
     outcome = await scheduler.cancel(workspace_id="ws-1", run_id="nope", step_id="nope")
 
     assert outcome is CancelOutcome.UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# End-to-end cancel + deadline (ARM-IMPL-019)
+# ---------------------------------------------------------------------------
+
+
+class _CancellableDriver(_FakeDriver):
+    """A driver whose ``await_terminal`` blocks until cancelled.
+
+    Mirrors the OCI driver contract: ``cancel`` records the reason and
+    unblocks the in-flight ``await_terminal``, which then reports the matching
+    :class:`SandboxSignal` so the Scheduler synthesizes the cancelled result.
+    """
+
+    def __init__(self, root: Path) -> None:
+        super().__init__(root, outputs=None)
+        self._cancelled = threading.Event()
+
+    def await_terminal(self, handle: SandboxHandle, deadline: datetime) -> SandboxOutcome:
+        self.awaited += 1
+        if not self._cancelled.wait(timeout=5):  # pragma: no cover - safety timeout
+            raise AssertionError("await_terminal was never cancelled")
+        return SandboxOutcome(exit_code=137, signal=SandboxSignal.CANCELLED)
+
+    def cancel(self, handle: SandboxHandle, reason: CancelReason) -> None:
+        self.cancellations.append(reason)
+        self._cancelled.set()
+
+
+async def _wait_for_live_attempt(scheduler: ActivityScheduler) -> None:
+    for _ in range(500):
+        if scheduler._context:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("attempt never became live")  # pragma: no cover - safety
+
+
+async def test_run_cancel_terminates_live_attempt_as_cancelled(tmp_path: Path) -> None:
+    driver = _CancellableDriver(tmp_path)
+    repo = _repo()
+    scheduler = _scheduler(driver, repo=repo)
+
+    run = asyncio.create_task(scheduler.schedule(_request()))
+    await _wait_for_live_attempt(scheduler)
+
+    outcome = await scheduler.cancel(workspace_id="ws-1", run_id="run-1", step_id="step-1")
+    result = await run
+
+    assert outcome is CancelOutcome.ACCEPTED
+    assert driver.cancellations == [CancelReason.CANCELLED]
+    assert result.class_ is ResultClass.CANCELLED
+    assert result.error is not None
+    assert result.error.code == "activity.cancelled"
+    record = await repo.get("ws-1", "run-1", "step-1", 1)
+    assert record is not None
+    assert record.state is ExecutionState.CANCELLED
+
+
+async def test_run_cancel_is_idempotent(tmp_path: Path) -> None:
+    driver = _CancellableDriver(tmp_path)
+    scheduler = _scheduler(driver)
+
+    run = asyncio.create_task(scheduler.schedule(_request()))
+    await _wait_for_live_attempt(scheduler)
+
+    first = await scheduler.cancel(workspace_id="ws-1", run_id="run-1", step_id="step-1")
+    result = await run
+    # A second cancel after the attempt has terminated is a no-op (409).
+    second = await scheduler.cancel(workspace_id="ws-1", run_id="run-1", step_id="step-1")
+
+    assert first is CancelOutcome.ACCEPTED
+    assert second is CancelOutcome.TERMINATED
+    assert result.class_ is ResultClass.CANCELLED
+
+
+async def test_deadline_clamped_by_step_deadline_yields_timeout(tmp_path: Path) -> None:
+    # The OCI driver self-cancels on the deadline; here the fake driver reports
+    # the DEADLINE signal directly to assert the Scheduler synthesizes timeout.
+    outcome = SandboxOutcome(124, SandboxSignal.DEADLINE)
+    driver = _FakeDriver(tmp_path, outputs=None, outcome=outcome)
+    repo = _repo()
+    scheduler = _scheduler(driver, repo=repo)
+    step_deadline = _NOW + timedelta(minutes=1)
+
+    result = await scheduler.schedule(_request(step_deadline=step_deadline))
+
+    assert result.class_ is ResultClass.CANCELLED
+    assert result.error is not None
+    assert result.error.code == "activity.timeout"
+    record = await repo.get("ws-1", "run-1", "step-1", 1)
+    assert record is not None
+    # The persisted deadline is clamped to the (earlier) step deadline.
+    assert record.deadline == step_deadline
+    assert record.state is ExecutionState.CANCELLED
