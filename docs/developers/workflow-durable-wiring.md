@@ -1,5 +1,7 @@
 # Workflow Service — Durable Wiring & Catalog Configuration
 
+Last Updated: 2026-06-05
+
 > Audience: operators and contributors deploying or running the
 > workflow-service. This guide explains how the service switches between
 > the in-memory dev/test adapters and the durable production adapters,
