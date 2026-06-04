@@ -125,6 +125,11 @@ def test_connector_context_valid() -> None:
         {"connector_instance_id": ""},
         {"secrets": {"": "v"}},
         {"lease_id": ""},
+        {"slot_name": "../escape"},
+        {"slot_name": "a/b"},
+        {"slot_name": ".."},
+        {"secrets": {"../escape": "v"}},
+        {"secrets": {"a/b": "v"}},
     ],
 )
 def test_connector_context_rejects_bad_fields(kwargs: dict[str, object]) -> None:
@@ -189,7 +194,11 @@ def test_minter_distinct_tokens_per_attempt() -> None:
     minter = SidecarTokenMinter()
     first = minter.mint(step=_step(attempt=1))
     second = minter.mint(step=_step(attempt=2))
-    assert first.value != second.value
+    # Deterministic property: each attempt gets its own scope-bound token.
+    assert first is not second
+    assert first.scope != second.scope
+    assert minter.is_active(first) is True
+    assert minter.is_active(second) is True
 
 
 def test_minter_revoke_deactivates_token() -> None:
@@ -341,6 +350,23 @@ async def test_inject_duplicate_slot_raises_value_error() -> None:
         )
 
 
+async def test_inject_undeclared_slot_raises_value_error() -> None:
+    injector = SecretInjector(token_minter=SidecarTokenMinter())
+    rogue = ConnectorContext(
+        slot_name="rogue",
+        connector_type="oci-registry",
+        connector_instance_id="ci-1",
+        secrets={"password": "p"},
+    )
+    with pytest.raises(ValueError, match="not declared in the manifest"):
+        await injector.inject(
+            sink=_FakeSink(),
+            step=_step(),
+            connectors=[_connector("registry")],
+            contexts=[rogue],
+        )
+
+
 async def test_inject_replay_reuses_token() -> None:
     minter = SidecarTokenMinter()
     injector = SecretInjector(token_minter=minter)
@@ -472,6 +498,36 @@ async def test_refresh_lease_4xx_is_permanent() -> None:
     assert excinfo.value.code == "system.lease_refresh_rejected"
     assert excinfo.value.error_class is ErrorClass.PERMANENT
     assert excinfo.value.lease_id == "lease-1"
+
+
+async def test_refresh_lease_429_is_transient() -> None:
+    client = _lease_client(lambda _r: httpx.Response(429))
+    with pytest.raises(ConnectorUnavailableError):
+        await client.refresh_lease(lease_id="lease-1")
+
+
+async def test_refresh_lease_normalises_rfc3339_z_suffix() -> None:
+    client = _lease_client(
+        lambda _r: httpx.Response(200, json=_lease_envelope(expiresAt="2026-05-17T12:00:00Z"))
+    )
+    lease = await client.refresh_lease(lease_id="lease-1")
+    assert lease.expires_at == datetime(2026, 5, 17, 12, 0, tzinfo=UTC)
+
+
+async def test_refresh_lease_naive_expiry_is_transient() -> None:
+    client = _lease_client(
+        lambda _r: httpx.Response(200, json=_lease_envelope(expiresAt="2026-05-17T12:00:00"))
+    )
+    with pytest.raises(ConnectorUnavailableError, match="naive"):
+        await client.refresh_lease(lease_id="lease-1")
+
+
+async def test_refresh_lease_mismatched_lease_id_is_transient() -> None:
+    client = _lease_client(
+        lambda _r: httpx.Response(200, json=_lease_envelope(leaseId="other-lease"))
+    )
+    with pytest.raises(ConnectorUnavailableError, match="different lease id"):
+        await client.refresh_lease(lease_id="lease-1")
 
 
 @pytest.mark.parametrize("status", [201, 503])

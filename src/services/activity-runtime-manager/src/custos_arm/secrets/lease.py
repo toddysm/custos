@@ -160,6 +160,11 @@ class DaprConnectorLeaseClient:
                 lease_id, f"lease refresh for {lease_id} failed: {exc}"
             ) from exc
 
+        if response.status_code == httpx.codes.TOO_MANY_REQUESTS:
+            raise ConnectorUnavailableError(
+                lease_id,
+                f"connector is throttling lease refresh for {lease_id} (429); retry with backoff",
+            )
         if 400 <= response.status_code < 500:
             raise LeaseRefreshRejectedError(
                 lease_id,
@@ -205,15 +210,30 @@ class DaprConnectorLeaseClient:
                 lease_id, f"lease refresh response for {lease_id} has a non-string 'expiresAt'"
             )
         try:
-            expires_at = datetime.fromisoformat(expires_at_raw)
+            # Normalise an RFC3339 trailing 'Z' (UTC) which datetime.fromisoformat
+            # does not accept on all supported runtimes.
+            expires_at = datetime.fromisoformat(expires_at_raw.replace("Z", "+00:00"))
         except ValueError as exc:
             raise ConnectorUnavailableError(
                 lease_id,
                 f"lease refresh response for {lease_id} has an unparseable 'expiresAt': {exc}",
             ) from exc
+        if expires_at.tzinfo is None:
+            raise ConnectorUnavailableError(
+                lease_id,
+                f"lease refresh response for {lease_id} has a naive (non-UTC) 'expiresAt'",
+            )
+
+        returned_id_str = str(returned_id)
+        if returned_id_str != lease_id:
+            raise ConnectorUnavailableError(
+                lease_id,
+                f"lease refresh response returned a different lease id {returned_id_str!r} "
+                f"than requested {lease_id!r}",
+            )
 
         return Lease(
-            lease_id=str(returned_id),
+            lease_id=returned_id_str,
             expires_at=expires_at,
             slot=str(slot),
             connector_instance_id=str(connector_instance_id),

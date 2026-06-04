@@ -38,6 +38,18 @@ SIDECAR_TOKEN_FILENAME: Final[str] = "sidecar-token"
 SECRET_FILE_MODE: Final[int] = 0o400
 
 
+def _reject_path_traversal(label: str, value: str) -> None:
+    """Reject a path component that could escape ``secrets/<slot>/``.
+
+    Slot names and secret keys are interpolated directly into on-disk paths, so
+    a component containing a path separator or a ``.``/``..`` segment could
+    escape its namespace and overwrite a sibling input file (e.g. the bootstrap
+    token). Keep them to plain, single-segment names.
+    """
+    if "/" in value or "\\" in value or value in {".", ".."}:
+        raise ValueError(f"{label} must be a single path segment, got {value!r}")
+
+
 @dataclass(frozen=True, slots=True)
 class ConnectorContext:
     """A pre-resolved connector slot ARM materializes inside the sandbox.
@@ -68,6 +80,7 @@ class ConnectorContext:
     def __post_init__(self) -> None:
         if not self.slot_name:
             raise ValueError("ConnectorContext.slot_name must be a non-empty string")
+        _reject_path_traversal("ConnectorContext.slot_name", self.slot_name)
         if not self.connector_type:
             raise ValueError("ConnectorContext.connector_type must be a non-empty string")
         if not self.connector_instance_id:
@@ -77,6 +90,7 @@ class ConnectorContext:
                 raise ValueError(
                     f"ConnectorContext.secrets for slot {self.slot_name!r} has an empty key"
                 )
+            _reject_path_traversal(f"ConnectorContext.secrets key for slot {self.slot_name!r}", key)
         if self.lease_id is not None and not self.lease_id:
             raise ValueError("ConnectorContext.lease_id, when set, must be a non-empty string")
 

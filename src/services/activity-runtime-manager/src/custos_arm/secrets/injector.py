@@ -72,6 +72,7 @@ class SecretInjector:
         :raises ValueError: two contexts claim the same slot (malformed bind).
         """
         by_slot = self._index_contexts(contexts)
+        self._reject_undeclared_contexts(connectors, by_slot)
         self._require_bound_connectors(connectors, by_slot)
         self._reject_empty_secrets(contexts)
 
@@ -144,6 +145,19 @@ class SecretInjector:
                 raise ValueError(f"duplicate connector context for slot {context.slot_name!r}")
             by_slot[context.slot_name] = context
         return by_slot
+
+    @staticmethod
+    def _reject_undeclared_contexts(
+        connectors: Sequence[ConnectorSpec],
+        by_slot: dict[str, ConnectorContext],
+    ) -> None:
+        declared = {spec.name for spec in connectors}
+        undeclared = sorted(slot for slot in by_slot if slot not in declared)
+        if undeclared:
+            raise ValueError(
+                f"connector context(s) for slot(s) not declared in the manifest: "
+                f"{', '.join(undeclared)}"
+            )
 
     @staticmethod
     def _require_bound_connectors(
