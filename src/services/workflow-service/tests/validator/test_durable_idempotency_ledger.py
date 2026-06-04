@@ -163,6 +163,21 @@ def test_ttl_must_be_positive(bad: timedelta) -> None:
         DurableIdempotencyLedger(cast(MetadataStoreProvider, _provider()), ttl=bad)
 
 
+@pytest.mark.asyncio
+async def test_fractional_ttl_rounds_up_to_whole_seconds() -> None:
+    """A sub-second-fractional TTL is rounded *up* so the window never shrinks."""
+    provider = _provider()
+    ledger = _ledger(provider, ttl=timedelta(seconds=1.5))
+    await ledger.record_or_replay(
+        workspace_id="ws-1",
+        idempotency_key="key-1",
+        request_fingerprint="fp-1",
+    )
+    # The provider records the ttl_seconds it was reserved with.
+    (*_head, ttl_seconds) = provider.reserve_calls[0]
+    assert ttl_seconds == 2
+
+
 # ---------------------------------------------------------------------------
 # record_or_replay: argument validation
 # ---------------------------------------------------------------------------

@@ -43,6 +43,7 @@ See the issue: https://github.com/toddysm/custos/issues/620
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final, cast
 
@@ -167,7 +168,7 @@ class DurableIdempotencyLedger:
         if not request_fingerprint:
             raise ValueError("request_fingerprint must be non-empty")
 
-        ttl_seconds = max(1, int(self._ttl.total_seconds()))
+        ttl_seconds = max(1, math.ceil(self._ttl.total_seconds()))
         result = await self._provider.reserve_idempotency_record(
             cast(WorkspaceId, workspace_id),
             cast(PrincipalId, LEDGER_PRINCIPAL),

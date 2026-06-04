@@ -680,15 +680,23 @@ class RunComponents:
         idempotency_ledger: WF-IMPL-117
             :class:`~custos_workflow.validator.IdempotencyLedger` the
             :attr:`start_run_validator` dedups ``StartRun`` against.
-            The default builds a
+            When the bundle is built via :func:`load_run_components`
+            (the production / lifespan path) this is a
             :class:`~custos_workflow.validator.DurableIdempotencyLedger`
-            over the shared :attr:`metadata_store` provider, so a
-            re-submitted ``(workspaceId, idempotencyKey)`` is replayed
-            against the durable ``custos_state.idempotency_record`` row
-            in production (and survives restarts / HA failover); the
-            sidecar-free dev / test path stays in memory behind the same
-            adapter. The TTL window is the env-resolved
-            ``WF_IDEMPOTENCY_KEY_TTL`` (default ``PT24H``).
+            wired over the *same* shared :attr:`metadata_store`
+            provider, so a re-submitted ``(workspaceId, idempotencyKey)``
+            is replayed against the durable
+            ``custos_state.idempotency_record`` row in production (and
+            survives restarts / HA failover); the sidecar-free dev /
+            test path stays in memory behind the same adapter. The TTL
+            window is the env-resolved ``WF_IDEMPOTENCY_KEY_TTL``
+            (default ``PT24H``). The dataclass *field default* (used
+            only when a bundle is hand-constructed without
+            :func:`load_run_components`) is a durable ledger over a
+            fresh stand-alone in-memory provider — distinct from
+            :attr:`metadata_store`; rely on :func:`load_run_components`
+            (or pass an explicit ledger) to guarantee the shared-provider
+            wiring.
         idempotency_sweep_interval_seconds: WF-IMPL-117 wall-clock
             interval between TTL-expiry sweeps of abandoned
             idempotency reservations. The FastAPI lifespan threads it
