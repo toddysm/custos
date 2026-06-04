@@ -20,9 +20,10 @@ The Scheduler is the single instrumentation site. It opens one
 ``custos_arm.attempt.<stage>`` span per lifecycle stage
 (``resolve`` / ``materialize`` / ``run`` / ``finalize``), and records
 the terminal :class:`~custos_arm.result.ActivityResultEnvelope` into
-:data:`ATTEMPTS_TOTAL` (labelled by ``class_`` and the synthesized
-error ``code``) so every failure mode in the design's terminal-state
-table maps to its documented code/class on the metric.
+:data:`ATTEMPTS_TOTAL` (labelled by the ``class`` metric label — the
+envelope's ``class_`` value — and the synthesized error ``code``) so
+every failure mode in the design's terminal-state table maps to its
+documented code/class on the metric.
 
 Metric / span names
 -------------------
@@ -170,10 +171,11 @@ def observe_stage(stage: str) -> Iterator[Span]:
 def record_result(envelope: ActivityResultEnvelope) -> None:
     """Record a terminal attempt result into metrics + the lifecycle audit.
 
-    Bumps :data:`ATTEMPTS_TOTAL` once, labelled by the envelope's
-    ``class_`` and synthesized error ``code`` (``none`` on success), so
-    every failure mode in the design's terminal-state table is grouped
-    by its documented code/class. Also emits the ``activity.terminal``
+    Bumps :data:`ATTEMPTS_TOTAL` once, labelled by the ``class`` metric
+    label (the envelope's ``class_`` value) and the synthesized error
+    ``code`` (``none`` on success), so every failure mode in the
+    design's terminal-state table is grouped by its documented
+    code/class. Also emits the ``activity.terminal``
     audit event on the current attempt span; when no attempt span is
     active (a replay/reconcile path outside :func:`observe_attempt`) the
     event is a no-op on the API's non-recording span while the counter
