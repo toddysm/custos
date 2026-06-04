@@ -696,3 +696,141 @@ def test_lifespan_binds_start_run_validator_on_app_state(
         # same instance the bundle carries.
         assert app.state.start_run_validator is fake_run_components.start_run_validator
         assert isinstance(app.state.start_run_validator, StartRunValidator)
+
+
+# ---------------------------------------------------------------------------
+# WF-IMPL-115 — durable metadata store lifespan wiring (readiness gate +
+# pool shutdown). The durable backend is never opened for real: the
+# ``_resolve_run_components`` boundary is patched so a fake bundle + fake
+# pool drive the lifespan branches under a sidecar-free FakeWorkflowRuntime.
+# ---------------------------------------------------------------------------
+
+
+def test_injected_bundle_carries_in_memory_metadata_store(
+    fake_run_components: RunComponents,
+) -> None:
+    """An injected bundle keeps the in-memory provider (no pool opened)."""
+    from custos_workflow.providers import _InProcessMetadataStoreProvider
+
+    app = create_app(require_call_context=False, run_components=fake_run_components)
+    with TestClient(app):
+        assert isinstance(app.state.run_components.metadata_store, _InProcessMetadataStoreProvider)
+
+
+class _FakeMetadataPool:
+    """A stand-in :class:`MetadataStorePool` recording ``aclose`` calls."""
+
+    def __init__(self) -> None:
+        self.closed = 0
+
+    async def aclose(self) -> None:
+        self.closed += 1
+
+
+def test_lifespan_closes_metadata_pool_on_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The durable metadata pool is released exactly once on shutdown."""
+    import custos_workflow.app as app_module
+
+    runtime = _RecordingFakeRuntime()
+    components = _components_with(runtime)
+    pool = _FakeMetadataPool()
+
+    async def fake_resolve(injected: Any) -> Any:
+        return components, pool, None
+
+    monkeypatch.setattr(app_module, "_resolve_run_components", fake_resolve)
+
+    app = create_app(require_call_context=False)
+    with TestClient(app) as client:
+        assert client.get("/readyz").status_code == 200
+        assert app.state.ready is True
+        # Pool is still open while the lifespan is active.
+        assert pool.closed == 0
+    # Lifespan exit released the pool exactly once.
+    assert pool.closed == 1
+
+
+def test_lifespan_stays_503_when_metadata_store_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A metadata-store connect failure keeps ``/readyz`` at 503.
+
+    WF-IMPL-115: the worker may have started cleanly, but a non-``None``
+    readiness detail (DSN set, pool could not connect) overrides the
+    ready flag so the pod is not routed traffic while persistence is
+    unavailable. The bundle degraded to the in-memory provider, so no
+    pool is owned and the detail surfaces in the probe body.
+    """
+    import custos_workflow.app as app_module
+
+    runtime = _RecordingFakeRuntime()
+    components = _components_with(runtime)
+    detail = "metadata store unavailable: boom"
+
+    async def fake_resolve(injected: Any) -> Any:
+        return components, None, detail
+
+    monkeypatch.setattr(app_module, "_resolve_run_components", fake_resolve)
+
+    app = create_app(require_call_context=False)
+    with TestClient(app) as client:
+        resp = client.get("/readyz")
+        assert resp.status_code == 503
+        body = resp.json()
+        assert body["status"] == "not_ready"
+        assert body["detail"] == detail
+        assert app.state.ready is False
+
+
+@pytest.mark.asyncio
+async def test_resolve_run_components_injected_bypasses_env(
+    fake_run_components: RunComponents,
+) -> None:
+    """An injected bundle returns ``(bundle, None, None)`` with no env reads."""
+    import custos_workflow.app as app_module
+
+    result = await app_module._resolve_run_components(fake_run_components)
+    assert result == (fake_run_components, None, None)
+
+
+@pytest.mark.asyncio
+async def test_resolve_run_components_opens_metadata_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The env-driven path threads the opened metadata store onto the bundle.
+
+    ``open_metadata_store`` and ``load_run_components`` are patched so the
+    test exercises the wiring (provider threaded onto the bundle, pool +
+    detail propagated) without building a real Dapr runtime or asyncpg
+    pool.
+    """
+    import custos_workflow.app as app_module
+    from custos_workflow.providers import MetadataStorePool
+
+    runtime = _RecordingFakeRuntime()
+    captured: dict[str, Any] = {}
+    sentinel_provider = object()
+    sentinel_pool = MetadataStorePool(dsn="postgresql://user:pw@db:5432/custos")
+
+    async def fake_open(env: Any) -> Any:
+        return sentinel_provider, sentinel_pool, None
+
+    def fake_load(*, metadata_store: Any) -> RunComponents:
+        captured["metadata_store"] = metadata_store
+        from custos_workflow.providers import load_run_components
+
+        return load_run_components(env={}, workflow_runtime=runtime)
+
+    monkeypatch.setattr(app_module, "open_metadata_store", fake_open)
+    monkeypatch.setattr(app_module, "load_run_components", fake_load)
+    monkeypatch.setenv("WF_DAPR_WORKFLOW_COMPONENT", "wf-component")
+    monkeypatch.setenv("WF_TS_ENDPOINT", "trigger-app")
+
+    components, pool, detail = await app_module._resolve_run_components(None)
+
+    assert captured["metadata_store"] is sentinel_provider
+    assert pool is sentinel_pool
+    assert detail is None
+    assert components.workflow_runtime is runtime

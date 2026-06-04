@@ -47,8 +47,10 @@ from custos_workflow.healthz import router as health_router
 from custos_workflow.providers import (
     ENV_DAPR_WORKFLOW_COMPONENT,
     ENV_TS_ENDPOINT,
+    MetadataStorePool,
     RunComponents,
     load_run_components,
+    open_metadata_store,
 )
 from custos_workflow.runs.orchestrator import WORKFLOW_NAME, make_run_orchestrator
 from custos_workflow.steps import StepCoordinator
@@ -144,7 +146,7 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.ready = False
         app.state.ready_detail = "workflow-service has not finished startup"
-        components = _resolve_run_components(run_components)
+        components, metadata_pool, metadata_detail = await _resolve_run_components(run_components)
         runtime = components.workflow_runtime
 
         # Register the WF-IMPL-035 ``run_orchestrator`` under the
@@ -212,11 +214,24 @@ def create_app(
             try:
                 yield
             finally:
-                await _shutdown_components(components, worker_shutdown_timeout_s)
+                await _shutdown_components(components, metadata_pool, worker_shutdown_timeout_s)
             return
 
         worker_ready = await runtime.wait_for_worker_ready(timeout=worker_ready_timeout_s)
-        if worker_ready and runtime.is_ready:
+        if metadata_detail is not None:
+            # WF-IMPL-115: the durable metadata store DSN was set but the
+            # pool could not connect; degrade to the in-memory provider
+            # already wired onto the bundle and keep ``/readyz`` at 503
+            # with an operator-actionable detail so the pod is not
+            # routed traffic while persistence is unavailable. The worker
+            # itself may have started cleanly, so this check follows the
+            # worker-ready wait and overrides the ready flag.
+            app.state.ready_detail = metadata_detail
+            logger.error(
+                "metadata store unavailable; /readyz will remain 503: %s",
+                metadata_detail,
+            )
+        elif worker_ready and runtime.is_ready:
             app.state.ready = True
             app.state.ready_detail = None
             logger.info(
@@ -256,7 +271,7 @@ def create_app(
             yield
         finally:
             await _cancel_resume_sweep(sweep_task)
-            await _shutdown_components(components, worker_shutdown_timeout_s)
+            await _shutdown_components(components, metadata_pool, worker_shutdown_timeout_s)
 
     app = FastAPI(
         title="Custos Workflow Service",
@@ -312,8 +327,23 @@ def create_app(
     return app
 
 
-def _resolve_run_components(injected: RunComponents | None) -> RunComponents:
+async def _resolve_run_components(
+    injected: RunComponents | None,
+) -> tuple[RunComponents, MetadataStorePool | None, str | None]:
     """Return the caller-injected bundle or build the env-driven default.
+
+    Returns a ``(components, metadata_pool, metadata_detail)`` triple:
+
+    * ``metadata_pool`` is the lifespan-owned
+      :class:`~custos_workflow.providers.MetadataStorePool` when the
+      durable backend was opened (``None`` for the in-memory path); the
+      lifespan ``aclose()``-es it on shutdown.
+    * ``metadata_detail`` is a non-``None`` readiness string when
+      ``WF_METADATA_STORE`` was set but the pool could not connect, so
+      the lifespan keeps ``/readyz`` at 503.
+
+    An injected bundle bypasses every env check and carries its own
+    in-memory metadata store, so the pool / detail are ``None``.
 
     When no override is supplied, ``WF_DAPR_WORKFLOW_COMPONENT`` is
     required: the design's fail-fast convention surfaces missing
@@ -328,9 +358,14 @@ def _resolve_run_components(injected: RunComponents | None) -> RunComponents:
     check fires only here on the env-driven path — tests that inject a
     :class:`RunComponents` bundle bypass it and keep wiring the
     in-process Noop trigger client.
+
+    WF-IMPL-115 additionally opens the durable
+    :class:`~custos_spl.interfaces.metadata_store.MetadataStoreProvider`
+    here (env-driven path only) and threads it onto the bundle so the
+    durable Run / idempotency sub-modules share one provider.
     """
     if injected is not None:
-        return injected
+        return injected, None, None
     component = os.environ.get(ENV_DAPR_WORKFLOW_COMPONENT, "")
     if not component:
         raise RuntimeError(
@@ -345,7 +380,14 @@ def _resolve_run_components(injected: RunComponents | None) -> RunComponents:
             "Service Dapr app-id so the resume subscription manager can register "
             "and reconcile waitFor: subscriptions."
         )
-    return load_run_components()
+    # WF-IMPL-115: open the durable metadata store (or fall back to the
+    # in-memory provider) before building the bundle so the same shared
+    # provider is threaded into every collaborator. A missing DSN on a
+    # ``production`` deployment fails fast inside ``open_metadata_store``
+    # (it never returns the in-memory provider in production).
+    metadata_store, metadata_pool, metadata_detail = await open_metadata_store(os.environ)
+    components = load_run_components(metadata_store=metadata_store)
+    return components, metadata_pool, metadata_detail
 
 
 def _start_resume_sweep(components: RunComponents) -> asyncio.Task[None]:
@@ -384,7 +426,11 @@ async def _cancel_resume_sweep(task: asyncio.Task[None]) -> None:
         logger.exception("resume subscription TTL sweep task raised during shutdown")
 
 
-async def _shutdown_components(components: RunComponents, worker_shutdown_timeout_s: float) -> None:
+async def _shutdown_components(
+    components: RunComponents,
+    metadata_pool: MetadataStorePool | None,
+    worker_shutdown_timeout_s: float,
+) -> None:
     """Stop the worker (with a grace period) and release owned resources.
 
     Never raises — the lifespan exit must not crash on a slow Dapr
@@ -424,3 +470,10 @@ async def _shutdown_components(components: RunComponents, worker_shutdown_timeou
             await dapr_http_client.aclose()
         except Exception:
             logger.exception("dapr publisher http client aclose failed during shutdown")
+
+    # WF-IMPL-115: release the durable metadata store's asyncpg pool.
+    # ``MetadataStorePool.aclose`` is itself a never-raise guard, but the
+    # call is wrapped here too so a future change to its contract cannot
+    # crash the lifespan teardown. ``None`` on the in-memory path.
+    if metadata_pool is not None:
+        await metadata_pool.aclose()
