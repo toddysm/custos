@@ -52,6 +52,7 @@ from custos_arm.limit import EffectiveResources, ResourceLimiter
 from custos_arm.resolve import ActivityResolver, ActivityTypeVersion
 from custos_arm.result import ActivityResultEnvelope, ResultClass, ResultMapper
 from custos_arm.runtime import (
+    CancelReason,
     RuntimeDriver,
     RuntimeDriverDispatcher,
     SandboxHandle,
@@ -197,36 +198,48 @@ class ActivityScheduler:
         return await self._drive(key, request)
 
     async def cancel(self, *, workspace_id: str, run_id: str, step_id: str) -> CancelOutcome:
-        """Resolve a ``CancelActivity`` request to its idempotent outcome.
+        """Cancel the live attempt for a step, idempotently.
 
         ``CancelActivity`` carries only ``(runId, stepId)`` on the wire; the
         workspace comes from the verified call context. The Scheduler inspects
         the attempts it is tracking for the step and classifies the request:
 
-        * a live (non-terminal) attempt yields :attr:`CancelOutcome.ACCEPTED`;
+        * a live (non-terminal) attempt is driven to ``cancelled`` through its
+          runtime driver (``cancel(reason=cancelled)``) and yields
+          :attr:`CancelOutcome.ACCEPTED`. The in-flight ``await_terminal``
+          observes the recorded cancellation and returns a ``cancelled``
+          outcome, so the original ``schedule`` call finalizes the attempt with
+          class ``cancelled`` (``activity.cancelled``);
         * an already-terminal attempt yields :attr:`CancelOutcome.TERMINATED`;
         * an unknown step yields :attr:`CancelOutcome.UNKNOWN`.
+
+        Cancellation is idempotent: :meth:`RuntimeDriver.cancel` records the
+        reason and tolerates a missing sandbox, so repeated requests (or a
+        request racing the natural termination) converge on the same outcome.
 
         The lookup is scoped to the attempts this replica is tracking
         in-memory. ``CancelActivity`` is idempotent and the caller collapses
         both ``404`` and ``409`` to a no-op, so a request that lands on a
         replica which never saw the matching ``ScheduleActivity`` (Dapr
-        load-balancing, or a restart) is safely reported ``UNKNOWN`` — the
-        durable cross-replica lookup against the Execution Store is wired with
-        the real cancel path in ARM-IMPL-019.
+        load-balancing, or a restart) is safely reported ``UNKNOWN``.
 
-        Driving the live attempt to ``cancelled`` through the runtime driver
-        (and the deadline/timeout path) is wired in ARM-IMPL-019; this method
-        owns the lookup and the idempotent status semantics the RPC adapter
-        renders as ``200``/``404``/``409``.
+        The deadline path is enforced separately: ``schedule`` clamps the
+        attempt deadline by ``ARM_MAX_TIMEOUT`` and the step deadline, and the
+        driver's ``await_terminal`` self-cancels with ``reason=deadline`` when
+        it elapses, synthesizing ``activity.timeout``.
         """
         prefix = (workspace_id, run_id, step_id)
         keys = {key for key in chain(self._context, self._cache) if key[:3] == prefix}
         for key in keys:
-            if key in self._context:
-                record = await self._repo.get(*key)
-                if record is not None and not record.is_terminal:
-                    return CancelOutcome.ACCEPTED
+            context = self._context.get(key)
+            if context is None:
+                continue
+            record = await self._repo.get(*key)
+            if record is not None and not record.is_terminal:
+                await asyncio.to_thread(
+                    context.driver.cancel, context.handle, CancelReason.CANCELLED
+                )
+                return CancelOutcome.ACCEPTED
         for key in keys:
             if key in self._cache:
                 return CancelOutcome.TERMINATED
