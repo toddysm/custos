@@ -300,3 +300,64 @@ async def test_list_runs_cursor_at_end_returns_empty(
     page = await store.list_runs(WORKSPACE, cursor=Cursor(token="1"))
     assert page.items == ()
     assert page.next_cursor is None
+
+
+# ---------------------------------------------------------------------------
+# WF-IMPL-116 — durable Run store survives a process restart
+# ---------------------------------------------------------------------------
+#
+# ``InProcessRunStore`` is a thin adapter that delegates every persistent
+# field to its injected ``MetadataStoreProvider``. In production the provider
+# is the lifespan-owned ``custos_pg`` adapter (``custos_state.run`` in
+# Postgres); here the ``FakeMetadataStoreProvider`` plays the role of the
+# durable backing store. Sharing one provider across two store instances
+# therefore simulates a process restart / HA failover over the same DSN:
+# a fresh store must see every run + status the previous one persisted.
+
+
+@pytest.mark.asyncio
+async def test_run_survives_simulated_process_restart() -> None:
+    """A new store over the same provider sees the persisted run + status."""
+    backing = FakeMetadataStoreProvider()
+    provider = cast(MetadataStoreProvider, backing)
+
+    # First "process": create the store, persist a run, advance its status.
+    store_before = InProcessRunStore(provider)
+    run_id = derive_run_id(WORKSPACE, "restart-key")
+    await store_before.put_run(_record(run_id=run_id, status=RunStatus.QUEUED))
+    await store_before.update_run_status(WORKSPACE, run_id, RunStatus.RUNNING)
+
+    # Restart: a brand-new store instance over the SAME durable provider.
+    store_after = InProcessRunStore(provider)
+    recovered = await store_after.get_run(WORKSPACE, run_id)
+
+    assert recovered is not None
+    assert recovered.run_id == run_id
+    assert recovered.status is RunStatus.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_list_runs_pagination_survives_restart() -> None:
+    """``list_runs`` cursor pagination is identical after a restart.
+
+    The cursor contract must not depend on any in-process state held by the
+    store instance that wrote the rows — a fresh store over the same provider
+    walks the same pages in the same order.
+    """
+    backing = FakeMetadataStoreProvider()
+    provider = cast(MetadataStoreProvider, backing)
+
+    store_before = InProcessRunStore(provider)
+    records = [_record(run_id=derive_run_id(WORKSPACE, f"r{i}")) for i in range(5)]
+    for rec in records:
+        await store_before.put_run(rec)
+
+    store_after = InProcessRunStore(provider)
+    first = await store_after.list_runs(WORKSPACE, limit=2)
+    second = await store_after.list_runs(WORKSPACE, cursor=first.next_cursor, limit=2)
+    third = await store_after.list_runs(WORKSPACE, cursor=second.next_cursor, limit=2)
+
+    assert [len(p.items) for p in (first, second, third)] == [2, 2, 1]
+    assert third.next_cursor is None
+    seen = [r.run_id for r in (*first.items, *second.items, *third.items)]
+    assert seen == [r.run_id for r in records]
