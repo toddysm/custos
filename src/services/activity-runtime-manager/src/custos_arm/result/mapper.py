@@ -9,7 +9,7 @@ only the fallback. The mapper encodes the locked resolution rules (design
 
 #. Exit ``0`` + valid envelope ``status: "success"`` → **success**.
 #. Exit non-zero + valid envelope ``status: "failure"`` → use ``error.class``;
-   the exit code is logged but not interpreted.
+   the exit code is ignored for classification.
 #. Exit non-zero with **no** valid envelope → fall back to the exit-code
    mapping; synthesize ``activity.no_output`` with the derived class.
 #. Exit ``0`` but the envelope is missing/invalid → **permanent**
@@ -90,7 +90,8 @@ class ResultMapper:
         self, *, exit_code: int, outputs: OutputsEnvelope, attempt: int
     ) -> ActivityResultEnvelope:
         if outputs.status == "failure":
-            # Rules 2 & 5: the envelope is authoritative regardless of exit code.
+            # Rules 2 & 5: the envelope is authoritative; the exit code is
+            # ignored for classification.
             assert outputs.error is not None  # guaranteed by OutputsEnvelope validation
             return self._failure(
                 ResultClass.from_error_class(outputs.error.error_class),
