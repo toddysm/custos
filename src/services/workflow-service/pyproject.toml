@@ -89,6 +89,10 @@ dev = [
     # WF-IMPL-115 durable metadata store; pin it in dev so the lazy
     # MetadataStorePool import resolves in unit tests that patch it.
     "asyncpg>=0.29",
+    # WF-IMPL-118 Postgres-backed StartRun integration suite spins up a
+    # throwaway Postgres via testcontainers when CUSTOS_PG_DSN is unset;
+    # the suite skips cleanly when neither is available.
+    "testcontainers[postgres]>=4.0",
 ]
 
 [project.urls]
@@ -150,7 +154,8 @@ disallow_untyped_defs = false
 
 [[tool.mypy.overrides]]
 # asyncpg ships no PEP 561 marker; treat as untyped at the boundary.
-module = ["asyncpg", "asyncpg.*"]
+# testcontainers (WF-IMPL-118 integration suite) is likewise untyped.
+module = ["asyncpg", "asyncpg.*", "testcontainers", "testcontainers.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -163,8 +168,13 @@ addopts = [
     "--cov=custos_workflow",
     "--cov-report=term-missing",
     "--cov-fail-under=90",
+    "-m",
+    "not integration",
 ]
 asyncio_mode = "auto"
+markers = [
+    "integration: requires a live Postgres backend (testcontainers / CI service)",
+]
 
 [tool.coverage.run]
 branch = false
