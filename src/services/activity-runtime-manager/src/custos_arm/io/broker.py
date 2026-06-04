@@ -46,12 +46,17 @@ from custos_arm.store.artifact import ArtifactRecord, ArtifactStoreClient
 
 
 def _pointer(error: SchemaValidationError) -> str:
-    """Render a JSON-Pointer-style path (RFC 6901) to the offending element."""
+    """Render an RFC 6901 JSON Pointer to the offending element.
+
+    Each reference token is prefixed with ``/`` (escaping ``~``/``/`` per
+    RFC 6901), so a nested path renders as ``/a/b`` and the document root as
+    the empty string.
+    """
     parts: list[str] = []
     for segment in error.absolute_path:
         seg = str(segment).replace("~", "~0").replace("/", "~1")
-        parts.append(seg)
-    return "/".join(parts)
+        parts.append(f"/{seg}")
+    return "".join(parts)
 
 
 def _schema_issues(schema: dict[str, Any], document: Any) -> list[str]:
