@@ -1042,6 +1042,25 @@ def _build_trigger_client(
 # ---------------------------------------------------------------------------
 
 
+# Matches the ``user[:password]@`` userinfo segment of a libpq / SQLAlchemy
+# URL (``postgresql://user:secret@host:5432/db``). asyncpg echoes the DSN
+# back in some connection errors, so the readiness detail surfaced on
+# ``/readyz`` could otherwise leak the database password to anyone who can
+# reach the probe. We strip the whole userinfo segment (user *and*
+# password) — operators get the full, unredacted exception in the logs.
+_DSN_USERINFO_RE = re.compile(r"//[^/@\s]+@")
+
+
+def _redact_dsn_credentials(text: str) -> str:
+    """Strip ``//user:password@`` userinfo from any DSN embedded in ``text``.
+
+    Used to scrub the operator-facing readiness detail (which is returned
+    in the ``/readyz`` HTTP body) without losing the diagnostic shape of
+    the message. The full exception is still logged server-side.
+    """
+    return _DSN_USERINFO_RE.sub("//<redacted>@", text)
+
+
 def _resolve_metadata_store_dsn(env: Mapping[str, str]) -> str | None:
     """Return the trimmed :data:`ENV_METADATA_STORE` DSN or ``None``.
 
@@ -1149,7 +1168,10 @@ async def open_metadata_store(
         provider = await pool.open()
     except Exception as exc:
         await pool.aclose()
-        detail = f"metadata store unavailable: {exc}"
+        # The detail is echoed in the ``/readyz`` body, so scrub any DSN
+        # credentials asyncpg may have folded into the exception text.
+        # Operators still get the full exception server-side via the log.
+        detail = f"metadata store unavailable: {_redact_dsn_credentials(str(exc))}"
         logger.error("metadata store pool failed to open; /readyz will remain 503: %s", exc)
         return _in_memory_metadata_store(), None, detail
     logger.info("durable metadata store connected (%s)", ENV_METADATA_STORE)

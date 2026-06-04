@@ -62,6 +62,7 @@ from custos_workflow.providers import (
     _in_memory_metadata_store,
     _InProcessMetadataStoreProvider,
     _NotConfiguredCatalogClient,
+    _redact_dsn_credentials,
     _resolve_approval_default_timeout,
     _resolve_max_fanout_width,
     _resolve_metadata_store_dsn,
@@ -845,6 +846,49 @@ async def test_open_metadata_store_degrades_on_connect_failure(
     assert "boom: cannot reach database" in detail
     # The half-open pool was closed on the failure path.
     assert closed == [True]
+
+
+@pytest.mark.asyncio
+async def test_open_metadata_store_redacts_dsn_credentials_in_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A DSN echoed in the connect error is scrubbed from the readiness detail.
+
+    asyncpg folds the DSN into some connection errors; since the detail
+    is returned in the ``/readyz`` body, the embedded password must not
+    leak to anyone who can reach the probe. The userinfo segment is
+    replaced wholesale while the rest of the message survives.
+    """
+
+    async def fake_open(self: MetadataStorePool) -> object:
+        raise ConnectionError("could not connect to postgresql://admin:s3cret@db:5432/custos")
+
+    async def fake_aclose(self: MetadataStorePool) -> None:
+        return None
+
+    monkeypatch.setattr(MetadataStorePool, "open", fake_open)
+    monkeypatch.setattr(MetadataStorePool, "aclose", fake_aclose)
+
+    _provider, _pool, detail = await open_metadata_store(
+        {ENV_METADATA_STORE: "postgresql://admin:s3cret@db:5432/custos"}
+    )
+
+    assert detail is not None
+    assert "s3cret" not in detail
+    assert "admin" not in detail
+    assert "//<redacted>@db:5432/custos" in detail
+
+
+def test_redact_dsn_credentials_strips_userinfo() -> None:
+    """The userinfo (user + password) segment is replaced; rest is kept."""
+    redacted = _redact_dsn_credentials("boom postgresql://admin:s3cret@db:5432/custos tail")
+    assert redacted == "boom postgresql://<redacted>@db:5432/custos tail"
+
+
+def test_redact_dsn_credentials_noop_without_userinfo() -> None:
+    """Text with no ``user@`` userinfo is returned unchanged."""
+    msg = "connection timed out after 5s (no dsn here)"
+    assert _redact_dsn_credentials(msg) == msg
 
 
 @pytest.mark.asyncio

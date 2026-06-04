@@ -476,4 +476,7 @@ async def _shutdown_components(
     # call is wrapped here too so a future change to its contract cannot
     # crash the lifespan teardown. ``None`` on the in-memory path.
     if metadata_pool is not None:
-        await metadata_pool.aclose()
+        try:
+            await metadata_pool.aclose()
+        except Exception:
+            logger.exception("metadata store pool aclose failed during shutdown")

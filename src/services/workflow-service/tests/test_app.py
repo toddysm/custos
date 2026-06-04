@@ -752,6 +752,37 @@ def test_lifespan_closes_metadata_pool_on_shutdown(
     assert pool.closed == 1
 
 
+def test_lifespan_swallows_metadata_pool_close_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising ``metadata_pool.aclose`` must not crash lifespan teardown.
+
+    WF-IMPL-115: ``_shutdown_components`` honours a "never raises"
+    contract. ``MetadataStorePool.aclose`` is itself guarded, but the
+    lifespan wraps the call too so a future contract change cannot take
+    the pod down on shutdown. A pool whose ``aclose`` raises must be
+    swallowed (logged) and the context manager must exit cleanly.
+    """
+    import custos_workflow.app as app_module
+
+    runtime = _RecordingFakeRuntime()
+    components = _components_with(runtime)
+
+    class _RaisingPool:
+        async def aclose(self) -> None:
+            raise RuntimeError("pool close exploded")
+
+    async def fake_resolve(injected: Any) -> Any:
+        return components, _RaisingPool(), None
+
+    monkeypatch.setattr(app_module, "_resolve_run_components", fake_resolve)
+
+    app = create_app(require_call_context=False)
+    # Exiting the context manager runs shutdown; it must not raise.
+    with TestClient(app) as client:
+        assert client.get("/readyz").status_code == 200
+
+
 def test_lifespan_stays_503_when_metadata_store_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
