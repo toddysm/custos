@@ -99,8 +99,10 @@ class IsolationProfile:
     """The resolved isolation posture for one sandbox.
 
     ``runtime_class`` is the empty string when the tier maps to the
-    cluster-default runtime (``process`` under runc); otherwise it is the
-    operator-configured class for the tier.
+    cluster-default runtime (the common case for ``process``, which runs on
+    runc unless ``ARM_RUNTIME_CLASS_PROCESS`` overrides it); otherwise it is
+    the operator-configured class for the tier. A hard tier (``vm`` /
+    ``microvm``) is never empty once it has resolved successfully.
     """
 
     tier: IsolationTier
@@ -111,7 +113,9 @@ class IsolationProfile:
 def is_tier_available(settings: Settings, tier: IsolationTier) -> bool:
     """Whether ``tier`` can run on this cluster.
 
-    ``process`` is always available (runc, the cluster default). ``vm`` and
+    ``process`` is always available — it needs no dedicated ``RuntimeClass``
+    and runs on the cluster-default runtime (runc) unless
+    ``ARM_RUNTIME_CLASS_PROCESS`` pins it to a specific class. ``vm`` and
     ``microvm`` are available only when their ``RuntimeClass`` is configured.
     """
     if tier is IsolationTier.PROCESS:
@@ -122,8 +126,9 @@ def is_tier_available(settings: Settings, tier: IsolationTier) -> bool:
 def resolve_runtime_class(settings: Settings, tier: IsolationTier) -> str:
     """Resolve ``tier`` to its cluster ``RuntimeClass``, enforcing no downgrade.
 
-    Returns the empty string for ``process`` (cluster-default runc) or the
-    configured class for a harder tier.
+    Returns the empty string when the tier maps to the cluster-default
+    runtime — typically ``process`` (runc) unless ``ARM_RUNTIME_CLASS_PROCESS``
+    pins it to an explicit class — or the configured class otherwise.
 
     Raises:
         RuntimeUnavailableError: ``tier`` is ``vm`` / ``microvm`` and has no
