@@ -11,7 +11,7 @@ Custos is a pluggable workflow orchestrator. Developers extend the platform by w
 | Type | Purpose | API Reference |
 |---|---|---|
 | Connection | Bind workflows and activities to an external system (registry, storage, KMS, identity provider). Provides credentials, capabilities, and event streams. | [connections-api.md](connections-api.md) |
-| Activity | Unit of work executed during a workflow step (vuln-scan, SBOM, image-promote, etc.). | _coming soon_ |
+| Activity | Unit of work executed during a workflow step (vuln-scan, SBOM, image-promote, etc.). | [activity-author.md](activity-author.md) |
 | Plugin | Broader extension category covering non-connector, non-activity extensions. | _coming soon_ |
 
 ## Sections
@@ -20,6 +20,7 @@ Custos is a pluggable workflow orchestrator. Developers extend the platform by w
 |---|---|
 | [Connections API](connections-api.md) | Connector manifest schema, field reference, and examples |
 | [Connector Plugin Author Guide](connector-plugin-author.md) | End-to-end guide for writing, packaging, and publishing a connector plugin (manifest, hook contract, error taxonomy, OCI publication) |
+| [Activity Author Guide](activity-author.md) | Writing activities: the file-based activity contract (`/custos/in` + `/custos/out`), inputs/outputs envelopes, two-phase artifact finalization, Activity Manifest v1, sandbox & isolation tiers, exit-code semantics, and the `ARM_*` configuration |
 | [Catalog API](catalog-api.md) | REST surface for workflows, templates, activity- and connector-types; validation taxonomy, immutability and deprecation contracts, placeholder reference |
 | [Auth API](auth-api.md) | REST and RPC surface for tenants, workspaces, service accounts, tokens, role bindings, and call-context signing; error taxonomy, permission registry, built-in roles |
 | [CEL Expressions](cel-expressions.md) | Reference for workflow expressions: bindings, operators, sandbox guarantees, failure modes, worked examples |
