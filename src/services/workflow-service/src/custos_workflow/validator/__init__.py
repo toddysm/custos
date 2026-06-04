@@ -17,6 +17,9 @@ envelope.
 
 from __future__ import annotations
 
+from custos_workflow.validator.durable_idempotency_ledger import (
+    DurableIdempotencyLedger,
+)
 from custos_workflow.validator.errors import (
     LOCKED_VALIDATOR_KINDS,
     IdempotencyConflictError,
@@ -47,6 +50,7 @@ __all__ = [
     "DEFAULT_IDEMPOTENCY_KEY_TTL",
     "IDEMPOTENCY_TTL_ENV_VAR",
     "LOCKED_VALIDATOR_KINDS",
+    "DurableIdempotencyLedger",
     "IdempotencyConflictError",
     "IdempotencyLedger",
     "InMemoryIdempotencyLedger",

@@ -24,6 +24,7 @@ def test_package_exports_full_validator_surface() -> None:
         "DEFAULT_IDEMPOTENCY_KEY_TTL",
         "IDEMPOTENCY_TTL_ENV_VAR",
         "LOCKED_VALIDATOR_KINDS",
+        "DurableIdempotencyLedger",
         "IdempotencyConflictError",
         "IdempotencyLedger",
         "InMemoryIdempotencyLedger",

@@ -31,17 +31,24 @@ import logging
 import math
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Protocol, cast, runtime_checkable
 
 import httpx
 from custos_spl.errors import ImmutableViolation
+from custos_spl.ids import PrincipalId as SplPrincipalId
 from custos_spl.ids import RunId as SplRunId
 from custos_spl.ids import WorkspaceId as SplWorkspaceId
 from custos_spl.interfaces.metadata_store import (
+    ExistingCompleted,
+    ExistingInFlight,
+    IdempotencyRecord,
+    IdemReserved,
+    KeyReuse,
     MetadataStoreProvider,
+    ReserveIdempotencyResult,
     RunFilter,
 )
 from custos_spl.interfaces.metadata_store import (
@@ -100,9 +107,11 @@ from custos_workflow.steps.sub_orchestration import (
     DEFAULT_MAX_FANOUT_WIDTH,
 )
 from custos_workflow.validator import (
+    DEFAULT_IDEMPOTENCY_KEY_TTL,
+    DurableIdempotencyLedger,
     IdempotencyLedger,
-    InMemoryIdempotencyLedger,
     StartRunValidator,
+    idempotency_ttl_from_env,
 )
 
 logger = logging.getLogger("custos_workflow")
@@ -403,24 +412,42 @@ class _NotConfiguredCatalogClient:
         )
 
 
+def _utcnow() -> datetime:
+    """Return the current timezone-aware UTC instant.
+
+    The default clock for :class:`_InProcessMetadataStoreProvider`'s
+    in-memory idempotency rows (WF-IMPL-117); tests inject a controllable
+    clock to pin TTL boundaries deterministically.
+    """
+    return datetime.now(UTC)
+
+
 class _InProcessMetadataStoreProvider:
     """In-memory subset of :class:`MetadataStoreProvider` for dev / tests.
 
-    Implements only the four Run-row methods
-    :class:`~custos_workflow.runs.store.InProcessRunStore`
-    actually invokes. All other Protocol methods raise
-    :class:`NotImplementedError` so a future caller that wires the
-    same provider into a different surface (Step, Trigger, …) fails
-    loudly instead of silently returning empty results.
+    Implements the four Run-row methods
+    :class:`~custos_workflow.runs.store.InProcessRunStore` invokes
+    (WF-IMPL-116) plus the gateway idempotency subset
+    (``reserve_idempotency_record`` / ``delete_expired_idempotency_records``)
+    the WF-IMPL-117
+    :class:`~custos_workflow.validator.DurableIdempotencyLedger` drives.
+    All other Protocol methods raise :class:`NotImplementedError` (or
+    are simply absent) so a future caller that wires the same provider
+    into a different surface (Step, Trigger, …) fails loudly instead of
+    silently returning empty results.
 
     Postgres-backed wiring lands in a follow-up infrastructure task;
     until then this stub keeps the Run Controller composable from
     pure Python.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, now: Callable[[], datetime] | None = None) -> None:
         # Key: ``(workspace_id, run_id)``. Value: persisted Run row.
         self._runs: dict[tuple[str, str], SplRun] = {}
+        # Key: ``(workspace_id, principal_id, route, idempotency_key)``.
+        # Value: the gateway idempotency row (WF-IMPL-117).
+        self._idem: dict[tuple[str, str, str, str], IdempotencyRecord] = {}
+        self._now: Callable[[], datetime] = now if now is not None else _utcnow
 
     async def put_run(self, workspace_id: SplWorkspaceId, run: SplRun) -> SplRun:
         key = (str(workspace_id), str(run.run_id))
@@ -481,6 +508,62 @@ class _InProcessMetadataStoreProvider:
             next_offset = offset + len(window)
             next_cursor = Cursor(token=str(next_offset)) if next_offset < len(all_rows) else None
         return Page(items=window, next_cursor=next_cursor)
+
+    # ----- Gateway short-lived state: idempotency records (WF-IMPL-117) -----
+
+    async def reserve_idempotency_record(
+        self,
+        workspace_id: SplWorkspaceId,
+        principal_id: SplPrincipalId,
+        route: str,
+        idempotency_key: str,
+        request_hash: str,
+        ttl_seconds: int,
+    ) -> ReserveIdempotencyResult:
+        """In-memory mirror of the SPL reserve-or-read CAS.
+
+        Mints a fresh ``in_progress`` reservation when the key is absent
+        or its prior reservation has lapsed (``expires_at <= now``),
+        otherwise classifies the live row exactly as the Postgres
+        adapter does: :class:`KeyReuse` on a differing ``request_hash``,
+        :class:`ExistingInFlight` while in progress, :class:`ExistingCompleted`
+        once completed.
+        """
+        now = self._now()
+        key = (str(workspace_id), str(principal_id), route, idempotency_key)
+        existing = self._idem.get(key)
+        if existing is None or existing.expires_at <= now:
+            record = IdempotencyRecord(
+                workspace_id=workspace_id,
+                principal_id=principal_id,
+                route=route,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+                status="in_progress",
+                response_snapshot=None,
+                reserved_at=now,
+                expires_at=now + timedelta(seconds=ttl_seconds),
+            )
+            self._idem[key] = record
+            return IdemReserved(record=record)
+        if existing.request_hash != request_hash:
+            return KeyReuse(record=existing)
+        if existing.status == "in_progress":
+            return ExistingInFlight(record=existing)
+        # status == "completed" — never reached in-process (this stub
+        # never completes a reservation) but mirrors the SPL contract.
+        snapshot = existing.response_snapshot or {}
+        return ExistingCompleted(  # pragma: no cover - unreachable in-process
+            record=existing,
+            response_snapshot=snapshot,
+        )
+
+    async def delete_expired_idempotency_records(self, before: datetime) -> int:
+        """Reap every idempotency row whose ``expires_at`` is at or before ``before``."""
+        stale = [k for k, rec in self._idem.items() if rec.expires_at <= before]
+        for k in stale:
+            del self._idem[k]
+        return len(stale)
 
 
 def _in_memory_metadata_store() -> MetadataStoreProvider:
@@ -594,6 +677,25 @@ class RunComponents:
             *construction, lifecycle, and readiness* — the
             ``InProcessRunStore`` seam keeps its own in-process
             provider until WF-IMPL-116 threads this field behind it.
+        idempotency_ledger: WF-IMPL-117
+            :class:`~custos_workflow.validator.IdempotencyLedger` the
+            :attr:`start_run_validator` dedups ``StartRun`` against.
+            The default builds a
+            :class:`~custos_workflow.validator.DurableIdempotencyLedger`
+            over the shared :attr:`metadata_store` provider, so a
+            re-submitted ``(workspaceId, idempotencyKey)`` is replayed
+            against the durable ``custos_state.idempotency_record`` row
+            in production (and survives restarts / HA failover); the
+            sidecar-free dev / test path stays in memory behind the same
+            adapter. The TTL window is the env-resolved
+            ``WF_IDEMPOTENCY_KEY_TTL`` (default ``PT24H``).
+        idempotency_sweep_interval_seconds: WF-IMPL-117 wall-clock
+            interval between TTL-expiry sweeps of abandoned
+            idempotency reservations. The FastAPI lifespan threads it
+            into the background sweep it runs over
+            :attr:`idempotency_ledger` (only when that ledger is a
+            durable :class:`~custos_workflow.validator.DurableIdempotencyLedger`);
+            it is aligned to the ``WF_IDEMPOTENCY_KEY_TTL`` window.
         max_fanout_width: WF-IMPL-094 fan-out width cap
             (:data:`ENV_MAX_FANOUT_WIDTH`) threaded into the
             :class:`~custos_workflow.steps.sub_orchestration.SubOrchestrationManager`
@@ -645,6 +747,10 @@ class RunComponents:
     )
     dapr_http_client: httpx.AsyncClient | None = field(default=None)
     metadata_store: MetadataStoreProvider = field(default_factory=_in_memory_metadata_store)
+    idempotency_ledger: IdempotencyLedger = field(
+        default_factory=lambda: DurableIdempotencyLedger(_in_memory_metadata_store())
+    )
+    idempotency_sweep_interval_seconds: float = DEFAULT_IDEMPOTENCY_KEY_TTL.total_seconds()
     max_fanout_width: int = DEFAULT_MAX_FANOUT_WIDTH
     approval_default_timeout: timedelta = DEFAULT_APPROVAL_TIMEOUT
     resume_handler: WaitForStepHandler = field(
@@ -1282,11 +1388,14 @@ def load_run_components(
             :class:`~custos_workflow.validator.IdempotencyLedger`
             override that backs the WF-IMPL-063
             :class:`~custos_workflow.validator.StartRunValidator`.
-            Defaults to a process-local
-            :class:`~custos_workflow.validator.InMemoryIdempotencyLedger`;
-            the production Postgres-backed adapter is owned by
-            the deferred *Durable Idempotency Ledger* sub-module
-            and lands under WF-IMPL-070+.
+            Defaults (WF-IMPL-117) to a
+            :class:`~custos_workflow.validator.DurableIdempotencyLedger`
+            over the shared ``metadata_store`` provider, so
+            ``StartRun`` dedup survives process restarts / HA
+            failover; the TTL window is the env-resolved
+            ``WF_IDEMPOTENCY_KEY_TTL`` (default ``PT24H``). Tests
+            inject the process-local
+            :class:`~custos_workflow.validator.InMemoryIdempotencyLedger`.
         metadata_store: Pre-built
             :class:`~custos_spl.interfaces.metadata_store.MetadataStoreProvider`
             override for :attr:`RunComponents.metadata_store`
@@ -1524,15 +1633,23 @@ def load_run_components(
         clock=_SystemClock(),
         replay_reconciler=reconciler,
     )
-    # WF-IMPL-069: bind a :class:`StartRunValidator` so the
+    # WF-IMPL-069/117: bind a :class:`StartRunValidator` so the
     # ``api.dependencies.get_validator`` Depends can resolve it
     # off ``app.state.start_run_validator``. The validator is
     # constructed last so it shares the same Catalog client the
     # Run Controller drives (no second Catalog connection per
-    # request) and falls back to a process-local in-memory ledger
-    # until the durable-ledger sub-module lands.
+    # request). WF-IMPL-117 backs the ``(workspaceId, idempotencyKey)``
+    # dedup ledger with the *same* shared ``metadata_store_provider`` the
+    # Run store uses, so ``StartRun`` dedup survives process restarts /
+    # HA failover (durable ``custos_pg`` row in production; in-memory row
+    # in the sidecar-free dev / test path). The TTL window is the
+    # env-resolved ``WF_IDEMPOTENCY_KEY_TTL`` (default ``PT24H``); the
+    # lifespan reaps abandoned reservations on a sweep aligned to it.
+    idempotency_ttl = idempotency_ttl_from_env(resolved_env)
     ledger: IdempotencyLedger = (
-        idempotency_ledger if idempotency_ledger is not None else InMemoryIdempotencyLedger()
+        idempotency_ledger
+        if idempotency_ledger is not None
+        else DurableIdempotencyLedger(metadata_store_provider, ttl=idempotency_ttl)
     )
     validator = StartRunValidator(catalog=catalog_client, ledger=ledger)
     return RunComponents(
@@ -1549,6 +1666,8 @@ def load_run_components(
         outbound_connector_client=outbound_connector,
         dapr_http_client=dapr_http_client,
         metadata_store=metadata_store_provider,
+        idempotency_ledger=ledger,
+        idempotency_sweep_interval_seconds=idempotency_ttl.total_seconds(),
         max_fanout_width=_resolve_max_fanout_width(resolved_env),
         approval_default_timeout=_resolve_approval_default_timeout(resolved_env),
         resume_handler=resume_handler,

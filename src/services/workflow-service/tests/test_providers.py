@@ -22,10 +22,16 @@ from typing import cast
 
 import httpx
 import pytest
+from custos_spl.ids import PrincipalId as SplPrincipalId
 from custos_spl.ids import RunId as SplRunId
 from custos_spl.ids import WorkflowId as SplWorkflowId
 from custos_spl.ids import WorkspaceId as SplWorkspaceId
-from custos_spl.interfaces.metadata_store import MetadataStoreProvider
+from custos_spl.interfaces.metadata_store import (
+    ExistingInFlight,
+    IdemReserved,
+    KeyReuse,
+    MetadataStoreProvider,
+)
 from custos_spl.interfaces.metadata_store import Run as SplRun
 
 from custos_workflow.clients import (
@@ -89,6 +95,12 @@ from custos_workflow.steps.sub_orchestration import (
     DEFAULT_APPROVAL_TIMEOUT,
     DEFAULT_MAX_FANOUT_WIDTH,
 )
+from custos_workflow.validator import (
+    DEFAULT_IDEMPOTENCY_KEY_TTL,
+    DurableIdempotencyLedger,
+    InMemoryIdempotencyLedger,
+)
+from custos_workflow.validator.idempotency_ledger import IDEMPOTENCY_TTL_ENV_VAR
 
 
 @pytest.mark.asyncio
@@ -988,3 +1000,148 @@ def test_load_run_components_default_run_store_shares_in_memory_provider() -> No
     components = load_run_components(env={}, workflow_runtime=FakeWorkflowRuntime())
     assert isinstance(components.run_store, InProcessRunStore)
     assert components.run_store._provider is components.metadata_store
+
+
+# ---------------------------------------------------------------------------
+# WF-IMPL-117: in-process provider idempotency CAS
+# ---------------------------------------------------------------------------
+
+
+def _idem_provider(now: datetime) -> _InProcessMetadataStoreProvider:
+    return _InProcessMetadataStoreProvider(now=lambda: now)
+
+
+@pytest.mark.asyncio
+async def test_in_process_reserve_fresh_returns_idem_reserved() -> None:
+    now = datetime(2025, 1, 1, tzinfo=UTC)
+    provider = _idem_provider(now)
+    result = await provider.reserve_idempotency_record(
+        cast(SplWorkspaceId, "ws-1"),
+        cast(SplPrincipalId, "wf-start-run"),
+        "StartRun",
+        "key-1",
+        "fp-1",
+        60,
+    )
+    assert isinstance(result, IdemReserved)
+    assert result.record.status == "in_progress"
+    assert result.record.reserved_at == now
+    assert result.record.expires_at == now + timedelta(seconds=60)
+
+
+@pytest.mark.asyncio
+async def test_in_process_reserve_same_hash_returns_in_flight() -> None:
+    now = datetime(2025, 1, 1, tzinfo=UTC)
+    provider = _idem_provider(now)
+    args = (
+        cast(SplWorkspaceId, "ws-1"),
+        cast(SplPrincipalId, "wf-start-run"),
+        "StartRun",
+        "key-1",
+        "fp-1",
+        60,
+    )
+    await provider.reserve_idempotency_record(*args)
+    result = await provider.reserve_idempotency_record(*args)
+    assert isinstance(result, ExistingInFlight)
+
+
+@pytest.mark.asyncio
+async def test_in_process_reserve_different_hash_returns_key_reuse() -> None:
+    now = datetime(2025, 1, 1, tzinfo=UTC)
+    provider = _idem_provider(now)
+    await provider.reserve_idempotency_record(
+        cast(SplWorkspaceId, "ws-1"),
+        cast(SplPrincipalId, "wf-start-run"),
+        "StartRun",
+        "key-1",
+        "fp-1",
+        60,
+    )
+    result = await provider.reserve_idempotency_record(
+        cast(SplWorkspaceId, "ws-1"),
+        cast(SplPrincipalId, "wf-start-run"),
+        "StartRun",
+        "key-1",
+        "fp-2",
+        60,
+    )
+    assert isinstance(result, KeyReuse)
+
+
+@pytest.mark.asyncio
+async def test_in_process_reserve_after_expiry_reclaims_in_place() -> None:
+    """An expired row is reclaimed (fresh ``IdemReserved``) on reserve."""
+    clock = {"now": datetime(2025, 1, 1, tzinfo=UTC)}
+    provider = _InProcessMetadataStoreProvider(now=lambda: clock["now"])
+    args = (
+        cast(SplWorkspaceId, "ws-1"),
+        cast(SplPrincipalId, "wf-start-run"),
+        "StartRun",
+        "key-1",
+        "fp-1",
+        60,
+    )
+    first = await provider.reserve_idempotency_record(*args)
+    assert isinstance(first, IdemReserved)
+    clock["now"] = clock["now"] + timedelta(seconds=61)
+    second = await provider.reserve_idempotency_record(*args)
+    assert isinstance(second, IdemReserved)
+
+
+@pytest.mark.asyncio
+async def test_in_process_delete_expired_reaps_lapsed_rows() -> None:
+    clock = {"now": datetime(2025, 1, 1, tzinfo=UTC)}
+    provider = _InProcessMetadataStoreProvider(now=lambda: clock["now"])
+    await provider.reserve_idempotency_record(
+        cast(SplWorkspaceId, "ws-1"),
+        cast(SplPrincipalId, "wf-start-run"),
+        "StartRun",
+        "key-1",
+        "fp-1",
+        60,
+    )
+    assert await provider.delete_expired_idempotency_records(clock["now"]) == 0
+    clock["now"] = clock["now"] + timedelta(seconds=61)
+    assert await provider.delete_expired_idempotency_records(clock["now"]) == 1
+    assert await provider.delete_expired_idempotency_records(clock["now"]) == 0
+
+
+# ---------------------------------------------------------------------------
+# WF-IMPL-117: default ledger wiring
+# ---------------------------------------------------------------------------
+
+
+def test_load_run_components_default_ledger_is_durable_over_shared_provider() -> None:
+    """The default StartRun ledger is durable and shares the metadata provider."""
+    components = load_run_components(env={}, workflow_runtime=FakeWorkflowRuntime())
+    ledger = components.idempotency_ledger
+    assert isinstance(ledger, DurableIdempotencyLedger)
+    assert ledger._provider is components.metadata_store
+    assert ledger.ttl == DEFAULT_IDEMPOTENCY_KEY_TTL
+    assert (
+        components.idempotency_sweep_interval_seconds == DEFAULT_IDEMPOTENCY_KEY_TTL.total_seconds()
+    )
+
+
+def test_load_run_components_ledger_ttl_from_env() -> None:
+    """The ledger TTL window honours ``WF_IDEMPOTENCY_KEY_TTL``."""
+    components = load_run_components(
+        env={IDEMPOTENCY_TTL_ENV_VAR: "PT1H"},
+        workflow_runtime=FakeWorkflowRuntime(),
+    )
+    ledger = components.idempotency_ledger
+    assert isinstance(ledger, DurableIdempotencyLedger)
+    assert ledger.ttl == timedelta(hours=1)
+    assert components.idempotency_sweep_interval_seconds == timedelta(hours=1).total_seconds()
+
+
+def test_load_run_components_honours_idempotency_ledger_override() -> None:
+    """An explicit ledger override wins over the durable default."""
+    override = InMemoryIdempotencyLedger()
+    components = load_run_components(
+        env={},
+        workflow_runtime=FakeWorkflowRuntime(),
+        idempotency_ledger=override,
+    )
+    assert components.idempotency_ledger is override
