@@ -37,6 +37,14 @@ plug in behind the same Protocols.
   :class:`CancelResumeSubscriptionRequest` frozen dataclasses and
   the :class:`NoopTriggerServiceClient` /
   :class:`FakeTriggerServiceClient` test doubles.
+* WF-IMPL-113 lands :class:`DaprCatalogClient` — the read-only
+  outbound boundary to the Catalog Service (``GetWorkflowVersion``)
+  — together with the :class:`CatalogWorkflowVersionNotFound`
+  not-found error and the :class:`NoopCatalogClient` /
+  :class:`FakeCatalogClient` test doubles. The
+  :class:`~custos_workflow.runs.controller.CatalogClient` Protocol
+  and :class:`~custos_workflow.runs.controller.WorkflowVersion`
+  envelope it satisfies live in ``runs.controller``.
 """
 
 from __future__ import annotations
@@ -50,6 +58,12 @@ from custos_workflow.clients.activity_runtime import (
     FakeActivityRuntimeClient,
     NoopActivityRuntimeClient,
     ScheduleActivityRequest,
+)
+from custos_workflow.clients.catalog import (
+    CatalogWorkflowVersionNotFound,
+    DaprCatalogClient,
+    FakeCatalogClient,
+    NoopCatalogClient,
 )
 from custos_workflow.clients.connector import (
     BindForStepRequest,
@@ -79,15 +93,19 @@ __all__ = [
     "BindForStepRequest",
     "BindForStepResponse",
     "CancelResumeSubscriptionRequest",
+    "CatalogWorkflowVersionNotFound",
     "ConnectorClient",
     "ConnectorContext",
     "DaprActivityRuntimeClient",
+    "DaprCatalogClient",
     "DaprConnectorClient",
     "DaprTriggerServiceClient",
     "FakeActivityRuntimeClient",
+    "FakeCatalogClient",
     "FakeConnectorClient",
     "FakeTriggerServiceClient",
     "NoopActivityRuntimeClient",
+    "NoopCatalogClient",
     "NoopConnectorClient",
     "NoopTriggerServiceClient",
     "RegisterResumeSubscriptionRequest",
