@@ -12,9 +12,11 @@ order and the only place domain errors become an
 :class:`~custos_arm.result.ActivityResultEnvelope`.
 
 **Idempotent replay.** ``ScheduleActivity`` is at-least-once; the
-``(runId, stepId, attempt)`` triple is the dedup key. When the Execution Store
-already holds a terminal record for the triple, the Scheduler returns the
-cached result envelope without launching a second sandbox.
+``(workspaceId, runId, stepId, attempt)`` quadruple is the dedup key. When the
+Execution Store already holds a terminal record for the key, the Scheduler
+returns the cached result envelope without launching a second sandbox. A
+per-key :class:`asyncio.Lock` serializes concurrent calls for the same key so
+the get/insert/drive sequence cannot race two sandboxes into existence.
 
 **Crash reconciliation.** When a record exists in a non-terminal state, the
 Scheduler reconciles against the live sandbox: if it still holds the in-flight
@@ -72,7 +74,6 @@ from .request import ScheduleRequest
 
 #: The idempotency key — ``(workspaceId, runId, stepId, attempt)``.
 ExecutionKey = tuple[str, str, str, int]
-
 #: Contract mount paths realized as ``tmpfs`` in the sandbox.
 CUSTOS_IN: Final[str] = "/custos/in"
 CUSTOS_OUT: Final[str] = "/custos/out"
@@ -138,10 +139,23 @@ class ActivityScheduler:
         self._now = now or (lambda: datetime.now(UTC))
         self._context: dict[ExecutionKey, _AttemptContext] = {}
         self._cache: dict[ExecutionKey, ActivityResultEnvelope] = {}
+        self._locks: dict[ExecutionKey, asyncio.Lock] = {}
 
     async def schedule(self, request: ScheduleRequest) -> ActivityResultEnvelope:
-        """Run (or replay / reconcile) one attempt and return its result."""
+        """Run (or replay / reconcile) one attempt and return its result.
+
+        A per-key lock serializes concurrent calls for the same execution key
+        so the get/insert/drive sequence cannot race two sandboxes into
+        existence and the idempotent-replay guarantee holds under at-least-once
+        delivery.
+        """
         key = self._key(request)
+        async with self._locks.setdefault(key, asyncio.Lock()):
+            return await self._schedule(key, request)
+
+    async def _schedule(
+        self, key: ExecutionKey, request: ScheduleRequest
+    ) -> ActivityResultEnvelope:
         existing = await self._repo.get(*key)
         if existing is not None:
             if existing.is_terminal:
@@ -216,7 +230,7 @@ class ActivityScheduler:
     ) -> ActivityResultEnvelope:
         await self._ensure(key, ExecutionState.FINALIZING)
         bundle = await asyncio.to_thread(driver.collect, handle)
-        raw = read_outputs(bundle.root)
+        raw = read_outputs(bundle.root, max_bytes=self._settings.output_max_bytes)
         finalized: OutputsEnvelope | None = None
         if raw is not None:
             finalized = await self._broker.finalize_outputs(

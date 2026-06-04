@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import pytest
 from custos_spl.errors import ImmutableViolation
 from custos_spl.ids import RunId, StepId, WorkspaceId
 from custos_spl.interfaces.metadata_store import MetadataStoreProvider, StepAttempt
@@ -543,9 +544,42 @@ async def test_filesystem_artifact_reader_streams(tmp_path: Path) -> None:
 
 
 def test_read_outputs_returns_none_when_absent(tmp_path: Path) -> None:
-    assert read_outputs(tmp_path) is None
+    assert read_outputs(tmp_path, max_bytes=1024) is None
     (tmp_path / "outputs.json").write_bytes(b"{}")
-    assert read_outputs(tmp_path) == b"{}"
+    assert read_outputs(tmp_path, max_bytes=1024) == b"{}"
+
+
+def test_read_outputs_rejects_oversized_blob(tmp_path: Path) -> None:
+    from custos_arm.io.errors import OutputTooLargeError
+
+    (tmp_path / "outputs.json").write_bytes(b"x" * 64)
+    with pytest.raises(OutputTooLargeError):
+        read_outputs(tmp_path, max_bytes=8)
+
+
+async def test_oversized_outputs_maps_permanent(tmp_path: Path) -> None:
+    # The cap is enforced before the blob is read, surfacing as a permanent
+    # ``output.too_large`` failure synthesized by the Scheduler.
+    big = _success_outputs({"blob": "x" * 4096})
+    driver = _FakeDriver(tmp_path, outputs=big)
+    settings = _settings(ARM_OUTPUT_MAX_BYTES="8")
+    scheduler = ActivityScheduler(
+        resolver=_FakeResolver(_resolved()),
+        limiter=ResourceLimiter(settings),
+        broker=IOBroker(_StubArtifactStore(), output_max_bytes=8),  # type: ignore[arg-type]
+        injector=SecretInjector(token_minter=SidecarTokenMinter()),
+        mapper=ResultMapper(),
+        dispatcher=RuntimeDriverDispatcher((driver,)),
+        repository=_repo(),
+        settings=settings,
+        now=lambda: _NOW,
+    )
+
+    result = await scheduler.schedule(_request())
+
+    assert result.class_ is ResultClass.PERMANENT
+    assert result.error is not None
+    assert result.error.code == "output.too_large"
 
 
 # ---------------------------------------------------------------------------

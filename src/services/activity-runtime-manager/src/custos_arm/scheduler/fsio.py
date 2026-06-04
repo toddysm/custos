@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Final
 
 from custos_arm.contract import CtxEnvelope, InputsEnvelope
+from custos_arm.io.errors import OutputTooLargeError
 
 #: Contract filenames under ``/custos/in`` and ``/custos/out``.
 INPUTS_FILENAME: Final[str] = "inputs.json"
@@ -40,11 +41,22 @@ def write_ctx(input_root: Path, envelope: CtxEnvelope) -> None:
     _write_json(input_root / CTX_FILENAME, envelope.model_dump_json(by_alias=True))
 
 
-def read_outputs(output_root: Path) -> bytes | None:
-    """Return the raw ``outputs.json`` bytes, or ``None`` when none was written."""
+def read_outputs(output_root: Path, *, max_bytes: int) -> bytes | None:
+    """Return the raw ``outputs.json`` bytes, or ``None`` when none was written.
+
+    The file size is checked against ``max_bytes`` *before* it is read into
+    memory, so an oversized ``outputs.json`` is rejected with
+    :class:`~custos_arm.io.errors.OutputTooLargeError` without first buffering
+    the whole (potentially adversarial) blob.
+    """
     path = output_root / OUTPUTS_FILENAME
     if not path.is_file():
         return None
+    size = path.stat().st_size
+    if size > max_bytes:
+        raise OutputTooLargeError(
+            f"outputs.json is {size} bytes, exceeding the {max_bytes}-byte ceiling"
+        )
     return path.read_bytes()
 
 
