@@ -250,10 +250,14 @@ def test_prepare_creates_suspended_job_and_staging_dirs(tmp_path: Path) -> None:
 def test_prepare_wraps_client_failure(tmp_path: Path) -> None:
     batch = MagicMock()
     batch.create_namespaced_job.side_effect = _ApiError(500)
+    plan = _plan()
     driver = _driver(batch=batch, staging_root=tmp_path)
 
     with pytest.raises(SandboxFailureError):
-        driver.prepare(_plan())
+        driver.prepare(plan)
+
+    # The staging tree must not leak when the Job never lands.
+    assert not (tmp_path / job_name(plan.step)).exists()
 
 
 # --------------------------------------------------------------------------- #
@@ -391,6 +395,40 @@ def test_await_terminal_handles_container_without_state(tmp_path: Path) -> None:
     outcome = driver.await_terminal(_handle(_plan(), tmp_path), _DEADLINE)
 
     assert outcome.signal is SandboxSignal.DEADLINE
+
+
+def test_await_terminal_handles_pod_without_status(tmp_path: Path) -> None:
+    pod = SimpleNamespace(status=None)
+    core = MagicMock()
+    core.list_namespaced_pod.return_value = SimpleNamespace(items=[pod])
+    driver = _driver(core=core, staging_root=tmp_path, now=_DEADLINE + timedelta(seconds=1))
+
+    outcome = driver.await_terminal(_handle(_plan(), tmp_path), _DEADLINE)
+
+    assert outcome.signal is SandboxSignal.DEADLINE
+
+
+def test_await_terminal_observes_scheduler_cancel(tmp_path: Path) -> None:
+    core = MagicMock()
+    core.list_namespaced_pod.return_value = _pod_list([_running_status()])
+    driver = _driver(staging_root=tmp_path, core=core)
+    handle = _handle(_plan(), tmp_path)
+
+    # A concurrent cancel must short-circuit the wait with the matching signal,
+    # not block to the deadline or report a raw SIGKILL.
+    driver.cancel(handle, CancelReason.CANCELLED)
+    outcome = driver.await_terminal(handle, _DEADLINE)
+
+    assert outcome.signal is SandboxSignal.CANCELLED
+
+
+def test_await_terminal_wraps_pod_list_failure(tmp_path: Path) -> None:
+    core = MagicMock()
+    core.list_namespaced_pod.side_effect = _ApiError(503)
+    driver = _driver(core=core, staging_root=tmp_path)
+
+    with pytest.raises(SandboxFailureError):
+        driver.await_terminal(_handle(_plan(), tmp_path), _DEADLINE)
 
 
 # --------------------------------------------------------------------------- #

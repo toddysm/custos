@@ -161,6 +161,10 @@ class OciContainerDriver:
         self._poll_interval = poll_interval
         self._sleep = sleep
         self._now = now or (lambda: datetime.now(UTC))
+        # Records a scheduler-driven cancel keyed by handle reference so the
+        # blocking ``await_terminal`` loop (running on another thread) observes
+        # it and reports the right signal instead of blocking to the deadline.
+        self._cancellations: dict[str, CancelReason] = {}
 
     # -- lifecycle ---------------------------------------------------------- #
 
@@ -183,6 +187,8 @@ class OciContainerDriver:
         try:
             self._batch.create_namespaced_job(namespace=plan.namespace, body=manifest)
         except Exception as exc:
+            # Don't leak the staging tree we just created if the Job never lands.
+            shutil.rmtree(self._staging_root / name, ignore_errors=True)
             raise SandboxFailureError(f"failed to create sandbox Job {name!r}: {exc}") from exc
 
         return SandboxHandle(
@@ -207,11 +213,24 @@ class OciContainerDriver:
     def await_terminal(self, handle: SandboxHandle, deadline: datetime) -> SandboxOutcome:
         """Block until the activity container terminates or the deadline passes.
 
+        A scheduler-driven :meth:`cancel` (observed via the recorded reason) or
+        the elapsed ``deadline`` short-circuits the wait so the caller is not
+        blocked past a requested cancellation.
+
         Raises:
             ImagePullError: the image could not be pulled (no exit code).
         """
         namespace, name = _split_reference(handle.reference)
         while True:
+            cancel_reason = self._cancellations.get(handle.reference)
+            if cancel_reason is not None:
+                signal = classify_signal(
+                    exit_code=SIGKILL_EXIT_CODE,
+                    terminated_reason=None,
+                    cancel_reason=cancel_reason,
+                )
+                return SandboxOutcome(exit_code=SIGKILL_EXIT_CODE, signal=signal)
+
             pod = self._activity_pod(namespace, name)
             container = _activity_container_status(pod) if pod is not None else None
 
@@ -238,8 +257,14 @@ class OciContainerDriver:
             self._sleep(self._poll_interval)
 
     def cancel(self, handle: SandboxHandle, reason: CancelReason) -> None:
-        """Idempotently delete the Job (and its Pod). A missing Job is a no-op."""
+        """Idempotently delete the Job (and its Pod). A missing Job is a no-op.
+
+        The ``reason`` is recorded so a concurrent :meth:`await_terminal` reports
+        the matching signal (deadline / cancelled) rather than the raw kernel
+        SIGKILL that deleting the Job induces.
+        """
         namespace, name = _split_reference(handle.reference)
+        self._cancellations[handle.reference] = reason
         self._delete_job(namespace, name)
 
     def collect(self, handle: SandboxHandle) -> OutputBundle:
@@ -251,6 +276,7 @@ class OciContainerDriver:
         namespace, name = _split_reference(handle.reference)
         self._delete_job(namespace, name)
         shutil.rmtree(self._staging_root / name, ignore_errors=True)
+        self._cancellations.pop(handle.reference, None)
 
     # -- internals ---------------------------------------------------------- #
 
@@ -267,10 +293,15 @@ class OciContainerDriver:
             raise SandboxFailureError(f"failed to delete sandbox Job {name!r}: {exc}") from exc
 
     def _activity_pod(self, namespace: str, name: str) -> Any | None:
-        pods = self._core.list_namespaced_pod(
-            namespace=namespace,
-            label_selector=f"{_JOB_NAME_LABEL}={name}",
-        )
+        try:
+            pods = self._core.list_namespaced_pod(
+                namespace=namespace,
+                label_selector=f"{_JOB_NAME_LABEL}={name}",
+            )
+        except Exception as exc:
+            raise SandboxFailureError(
+                f"failed to list sandbox Pods for Job {name!r}: {exc}"
+            ) from exc
         items = list(pods.items)
         return items[0] if items else None
 
@@ -281,10 +312,13 @@ def _split_reference(reference: str) -> tuple[str, str]:
 
 
 def _activity_container_status(pod: Any) -> Any | None:
-    statuses = getattr(pod.status, "container_statuses", None) or []
-    for status in statuses:
-        if status.name == ACTIVITY_CONTAINER_NAME:
-            return status
+    status = getattr(pod, "status", None)
+    if status is None:
+        return None
+    statuses = getattr(status, "container_statuses", None) or []
+    for container_status in statuses:
+        if container_status.name == ACTIVITY_CONTAINER_NAME:
+            return container_status
     return None
 
 
