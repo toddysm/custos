@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import pytest
 from custos_spl.ids import RunId as SplRunId
 from custos_spl.ids import WorkflowId as SplWorkflowId
@@ -31,6 +32,10 @@ from custos_workflow.clients import (
     NoopActivityRuntimeClient,
     NoopConnectorClient,
 )
+from custos_workflow.clients.catalog import (
+    DaprCatalogClient,
+    FakeCatalogClient,
+)
 from custos_workflow.clients.trigger import (
     DaprTriggerServiceClient,
     NoopTriggerServiceClient,
@@ -39,15 +44,19 @@ from custos_workflow.providers import (
     DEFAULT_OUTBOUND_RPC_TIMEOUT_MS,
     ENV_APPROVAL_DEFAULT_TIMEOUT,
     ENV_ARM_APP_ID,
+    ENV_CATALOG_APP_ID,
     ENV_CONNECTOR_APP_ID,
+    ENV_ENVIRONMENT,
     ENV_MAX_FANOUT_WIDTH,
     ENV_OUTBOUND_RPC_TIMEOUT_MS,
     ENV_REGISTER_SUB_MAX_RETRIES,
     ENV_RESUME_SUB_DEFAULT_TTL,
     ENV_RESUME_SUB_SWEEP_INTERVAL,
     ENV_TS_ENDPOINT,
+    _build_catalog_client,
     _build_trigger_client,
     _InProcessMetadataStoreProvider,
+    _NotConfiguredCatalogClient,
     _resolve_approval_default_timeout,
     _resolve_max_fanout_width,
     _resolve_outbound_rpc_timeout_seconds,
@@ -583,3 +592,127 @@ def test_resume_default_ttl_threads_into_production_reconciler() -> None:
             import asyncio
 
             asyncio.run(components.dapr_http_client.aclose())
+
+
+# ---------------------------------------------------------------------------
+# WF-IMPL-114 — Catalog client wiring (DaprCatalogClient, production fail-fast,
+# shared HTTP client, single shared client across controller + validator)
+# ---------------------------------------------------------------------------
+
+
+def _catalog_endpoint_env() -> dict[str, str]:
+    """Env map activating the Dapr Catalog client only."""
+    return {ENV_CATALOG_APP_ID: "catalog-app"}
+
+
+def test_build_catalog_client_not_configured_when_endpoint_unset() -> None:
+    """No ``WF_CATALOG_ENDPOINT`` (non-prod) → the not-configured stub."""
+    client = _build_catalog_client(env={}, http_client=None, timeout_seconds=10.0)
+
+    assert isinstance(client, _NotConfiguredCatalogClient)
+
+
+def test_build_catalog_client_production_requires_endpoint() -> None:
+    """``ENVIRONMENT=production`` + no ``WF_CATALOG_ENDPOINT`` → fail fast."""
+    with pytest.raises(RuntimeError, match=ENV_CATALOG_APP_ID):
+        _build_catalog_client(
+            env={ENV_ENVIRONMENT: "production"},
+            http_client=None,
+            timeout_seconds=10.0,
+        )
+
+
+@pytest.mark.parametrize("env_value", ["Production", "PRODUCTION", "production"])
+def test_build_catalog_client_production_match_is_case_insensitive(env_value: str) -> None:
+    """The production fail-fast matches ``ENVIRONMENT`` case-insensitively."""
+    with pytest.raises(RuntimeError):
+        _build_catalog_client(
+            env={ENV_ENVIRONMENT: env_value},
+            http_client=None,
+            timeout_seconds=10.0,
+        )
+
+
+def test_build_catalog_client_non_production_keeps_stub() -> None:
+    """A non-production ``ENVIRONMENT`` keeps the not-configured fallback."""
+    client = _build_catalog_client(
+        env={ENV_ENVIRONMENT: "staging"},
+        http_client=None,
+        timeout_seconds=10.0,
+    )
+
+    assert isinstance(client, _NotConfiguredCatalogClient)
+
+
+def test_build_catalog_client_dapr_when_endpoint_set() -> None:
+    """``WF_CATALOG_ENDPOINT`` set → the production Dapr client over the shared pool."""
+    http_client = httpx.AsyncClient()
+    try:
+        client = _build_catalog_client(
+            env=_catalog_endpoint_env(),
+            http_client=http_client,
+            timeout_seconds=10.0,
+        )
+        assert isinstance(client, DaprCatalogClient)
+        assert client.http_client is http_client
+    finally:
+        import asyncio
+
+        asyncio.run(http_client.aclose())
+
+
+def test_load_run_components_not_configured_catalog_when_endpoint_unset() -> None:
+    """Sidecar-free path: the controller + validator share the stub, no socket pool."""
+    components = load_run_components(env={}, workflow_runtime=FakeWorkflowRuntime())
+
+    catalog = components.run_controller._catalog
+    assert isinstance(catalog, _NotConfiguredCatalogClient)
+    assert components.start_run_validator._catalog is catalog
+    assert components.dapr_http_client is None
+
+
+def test_load_run_components_dapr_catalog_wires_and_shares_http_client() -> None:
+    """``WF_CATALOG_ENDPOINT`` set → DaprCatalogClient shared across both consumers.
+
+    The headline WF-IMPL-114 invariant: a *single* Catalog client
+    (holding the lifespan-owned :class:`httpx.AsyncClient`) backs both
+    the :class:`RunController` and the :class:`StartRunValidator` — no
+    second Catalog connection per request.
+    """
+    components = load_run_components(
+        env=_catalog_endpoint_env(), workflow_runtime=FakeWorkflowRuntime()
+    )
+
+    try:
+        catalog = components.run_controller._catalog
+        assert isinstance(catalog, DaprCatalogClient)
+        assert catalog.http_client is components.dapr_http_client
+        # Controller + validator MUST share the one Catalog client.
+        assert components.start_run_validator._catalog is catalog
+    finally:
+        if components.dapr_http_client is not None:
+            import asyncio
+
+            asyncio.run(components.dapr_http_client.aclose())
+
+
+def test_load_run_components_catalog_override_wins() -> None:
+    """An injected ``catalog`` wins even when the Catalog env is set.
+
+    The override path supplies its own client (tests inject Fakes), so
+    the factory must neither build the Dapr client nor open a socket
+    pool just for the Catalog client.
+    """
+    fake = FakeCatalogClient()
+    components = load_run_components(
+        env=_catalog_endpoint_env(),
+        workflow_runtime=FakeWorkflowRuntime(),
+        catalog=fake,
+    )
+
+    assert components.run_controller._catalog is fake
+    assert components.start_run_validator._catalog is fake
+    # No Catalog socket pool opened because the override short-circuits
+    # ``need_http_for_catalog`` (the publisher / ARM / connector /
+    # trigger env are unset here).
+    assert components.dapr_http_client is None

@@ -56,6 +56,7 @@ from custos_workflow.clients import (
     ActivityRuntimeClient,
     ConnectorClient,
     DaprActivityRuntimeClient,
+    DaprCatalogClient,
     DaprConnectorClient,
     NoopActivityRuntimeClient,
     NoopConnectorClient,
@@ -110,9 +111,11 @@ __all__ = [
     "DEFAULT_OUTBOUND_RPC_TIMEOUT_MS",
     "ENV_APPROVAL_DEFAULT_TIMEOUT",
     "ENV_ARM_APP_ID",
+    "ENV_CATALOG_APP_ID",
     "ENV_CONNECTOR_APP_ID",
     "ENV_DAPR_ENDPOINT",
     "ENV_DAPR_WORKFLOW_COMPONENT",
+    "ENV_ENVIRONMENT",
     "ENV_MAX_FANOUT_WIDTH",
     "ENV_OUTBOUND_RPC_TIMEOUT_MS",
     "ENV_PUBLISH_PUBSUB",
@@ -171,6 +174,35 @@ ENV_ARM_APP_ID = "WF_ARM_ENDPOINT"
 #: lifespan falls back to
 #: :class:`~custos_workflow.clients.NoopConnectorClient`.
 ENV_CONNECTOR_APP_ID = "WF_CONNECTOR_ENDPOINT"
+
+#: Required on the production path to activate the
+#: :class:`~custos_workflow.clients.DaprCatalogClient`. Value is the
+#: Catalog Service Dapr app-id, used by
+#: :func:`~custos_workflow.clients._dapr_invoke.read_dapr_env` to
+#: build the canonical ``…/v1.0/invoke/<app-id>/method/…`` URL the
+#: client issues ``GetWorkflowVersion`` against. When unset, the
+#: behaviour depends on :data:`ENV_ENVIRONMENT`: a ``production``
+#: deployment fails fast (:func:`_build_catalog_client` raises
+#: :class:`RuntimeError`) so a worker never silently serves
+#: ``StartRun`` off the not-configured stub; any other environment
+#: keeps the in-process :class:`_NotConfiguredCatalogClient`
+#: fallback so the sidecar-free dev / test path stays composable
+#: (the existing-run dedup branch of ``RunController.start_run``
+#: never touches the Catalog client).
+ENV_CATALOG_APP_ID = "WF_CATALOG_ENDPOINT"
+
+#: Optional. Deployment environment label (e.g. ``production``,
+#: ``staging``, ``development``). Consulted only to decide whether a
+#: missing :data:`ENV_CATALOG_APP_ID` is a fatal misconfiguration:
+#: when it equals :data:`_PRODUCTION_ENVIRONMENT` (case-insensitive)
+#: the lifespan refuses to start without a Catalog endpoint. Unset /
+#: any other value preserves the not-configured fallback.
+ENV_ENVIRONMENT = "ENVIRONMENT"
+
+#: Value of :data:`ENV_ENVIRONMENT` that marks a production
+#: deployment (compared case-insensitively).
+_PRODUCTION_ENVIRONMENT: Final[str] = "production"
+
 
 #: Optional. Per-request timeout shared by both the ARM and
 #: Connector outbound adapters, expressed in milliseconds.
@@ -951,6 +983,52 @@ def _build_trigger_client(
     )
 
 
+def _build_catalog_client(
+    *,
+    env: Mapping[str, str],
+    http_client: httpx.AsyncClient | None,
+    timeout_seconds: float,
+) -> CatalogClient:
+    """Return the production or not-configured Catalog client per the env flags.
+
+    Production activates only when :data:`ENV_CATALOG_APP_ID` is set,
+    reusing the lifespan-owned shared :class:`httpx.AsyncClient` so a
+    worker that also talks to the ARM / Connector / Trigger upstreams
+    keeps a single socket pool (the
+    :class:`~custos_workflow.clients.DaprCatalogClient` satisfies the
+    async :class:`CatalogClient` Protocol directly — unlike the ARM /
+    Connector clients it needs no sync/async cast).
+
+    When the endpoint is unset the behaviour depends on
+    :data:`ENV_ENVIRONMENT`: a ``production`` deployment fails fast
+    with a clear :class:`RuntimeError` so a worker never silently
+    serves ``StartRun`` off the :class:`_NotConfiguredCatalogClient`
+    stub; any other environment keeps that stub so the sidecar-free
+    dev / test path stays composable.
+    """
+    if not env.get(ENV_CATALOG_APP_ID, "").strip():
+        if env.get(ENV_ENVIRONMENT, "").strip().lower() == _PRODUCTION_ENVIRONMENT:
+            raise RuntimeError(
+                f"{ENV_CATALOG_APP_ID} environment variable is required to start "
+                f"the workflow worker when {ENV_ENVIRONMENT}={_PRODUCTION_ENVIRONMENT} "
+                "(design.md § Configuration). Set it to the Catalog Service Dapr "
+                "app-id so StartRun can fetch and compile workflow versions."
+            )
+        return _NotConfiguredCatalogClient()
+    if http_client is None:  # pragma: no cover - defensive
+        raise RuntimeError(
+            "_build_catalog_client: production path requires a "
+            "lifespan-owned httpx.AsyncClient; load_run_components "
+            "must build the shared client before invoking this helper."
+        )
+    endpoint = read_dapr_env(env, ENV_CATALOG_APP_ID)
+    return DaprCatalogClient(
+        http_client=http_client,
+        endpoint=endpoint,
+        timeout=timeout_seconds,
+    )
+
+
 def load_run_components(
     *,
     env: Mapping[str, str] | None = None,
@@ -978,8 +1056,14 @@ def load_run_components(
             Dapr Pub/Sub.
         replay_reconciler: Pre-built reconciler override. Defaults
             to :class:`NoopReplayReconciler`.
-        catalog: Pre-built Catalog client override. Defaults to
-            :class:`_NotConfiguredCatalogClient`.
+        catalog: Pre-built Catalog client override. When unset, the
+            default is selected per the env:
+            :class:`~custos_workflow.clients.DaprCatalogClient` when
+            :data:`ENV_CATALOG_APP_ID` is set, otherwise the
+            in-process :class:`_NotConfiguredCatalogClient`
+            (or a fail-fast :class:`RuntimeError` when
+            :data:`ENV_ENVIRONMENT` is ``production``). Tests inject
+            :class:`~custos_workflow.clients.FakeCatalogClient`.
         activity_registry: Pre-built registry override. Defaults to
             an empty :class:`InMemoryActivityTypeRegistry`.
         activity_client: Pre-built
@@ -1043,12 +1127,21 @@ def load_run_components(
     need_http_for_trigger = replay_reconciler is None and bool(
         resolved_env.get(ENV_TS_ENDPOINT, "").strip()
     )
+    # WF-IMPL-114: the production DaprCatalogClient shares the same
+    # lifespan-owned client; only spin one up when the Catalog
+    # Service endpoint is set and the caller did not inject a
+    # pre-built Catalog client (the override path supplies its own
+    # client / fake, so no socket pool is needed).
+    need_http_for_catalog = catalog is None and bool(
+        resolved_env.get(ENV_CATALOG_APP_ID, "").strip()
+    )
     dapr_http_client: httpx.AsyncClient | None
     if (
         need_http_for_publisher
         or need_http_for_arm
         or need_http_for_connector
         or need_http_for_trigger
+        or need_http_for_catalog
     ):
         # The per-request ``timeout=`` arg every adapter passes
         # overrides the client-default; we still set a sane
@@ -1191,7 +1284,13 @@ def load_run_components(
     else:
         reconciler = NoopReplayReconciler()
     catalog_client: CatalogClient = (
-        catalog if catalog is not None else _NotConfiguredCatalogClient()
+        catalog
+        if catalog is not None
+        else _build_catalog_client(
+            env=resolved_env,
+            http_client=dapr_http_client,
+            timeout_seconds=timeout_seconds,
+        )
     )
     registry: ActivityTypeRegistry = (
         activity_registry if activity_registry is not None else InMemoryActivityTypeRegistry({})
