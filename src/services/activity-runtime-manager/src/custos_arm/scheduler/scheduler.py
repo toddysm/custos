@@ -36,6 +36,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from itertools import chain
 from typing import Final
 
 from custos_arm.config import Settings
@@ -206,13 +207,21 @@ class ActivityScheduler:
         * an already-terminal attempt yields :attr:`CancelOutcome.TERMINATED`;
         * an unknown step yields :attr:`CancelOutcome.UNKNOWN`.
 
+        The lookup is scoped to the attempts this replica is tracking
+        in-memory. ``CancelActivity`` is idempotent and the caller collapses
+        both ``404`` and ``409`` to a no-op, so a request that lands on a
+        replica which never saw the matching ``ScheduleActivity`` (Dapr
+        load-balancing, or a restart) is safely reported ``UNKNOWN`` — the
+        durable cross-replica lookup against the Execution Store is wired with
+        the real cancel path in ARM-IMPL-019.
+
         Driving the live attempt to ``cancelled`` through the runtime driver
         (and the deadline/timeout path) is wired in ARM-IMPL-019; this method
         owns the lookup and the idempotent status semantics the RPC adapter
         renders as ``200``/``404``/``409``.
         """
         prefix = (workspace_id, run_id, step_id)
-        keys = {key for key in (*self._context, *self._cache) if key[:3] == prefix}
+        keys = {key for key in chain(self._context, self._cache) if key[:3] == prefix}
         for key in keys:
             if key in self._context:
                 record = await self._repo.get(*key)

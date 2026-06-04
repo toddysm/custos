@@ -45,12 +45,11 @@ def get_scheduler(request: Request) -> ActivityScheduler:
     retry rather than observe a 500.
     """
     scheduler = getattr(request.app.state, "scheduler", None)
-    if scheduler is None:
+    if not isinstance(scheduler, ActivityScheduler):
         raise HTTPException(
             status_code=503,
             detail="activity scheduler is not ready",
         )
-    assert isinstance(scheduler, ActivityScheduler)
     return scheduler
 
 
