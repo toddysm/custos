@@ -18,7 +18,7 @@ Tracker: ARM-IMPL-000 (#591). Plan: [implementation-plan.md](implementation-plan
 - [x] ARM-IMPL-010 (#578): Secret Injector (real Connector RefreshLease adapter)
 - [x] ARM-IMPL-011 (#579): Result Mapper
 - [x] ARM-IMPL-012 (#580): Log Streamer
-- [F] ARM-IMPL-013 (#581): RuntimeDriver Protocol + dispatcher
+- [x] ARM-IMPL-013 (#581): RuntimeDriver Protocol + dispatcher
 - [F] ARM-IMPL-014 (#582): Sandbox & isolation model
 - [F] ARM-IMPL-015 (#583): OCI Container Driver — Job builder
 - [F] ARM-IMPL-016 (#584): OCI Container Driver — lifecycle monitor (kind/k8s integration)
