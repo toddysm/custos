@@ -75,6 +75,75 @@ def test_lifespan_starts_and_cancels_resume_sweep_task(
     assert sweep_task.done()
 
 
+def test_lifespan_starts_and_cancels_idempotency_sweep_task(
+    fake_run_components: RunComponents,
+) -> None:
+    """WF-IMPL-117: the durable ledger drives a background TTL sweep.
+
+    ``create_app`` launches the idempotency TTL-expiry sweep as a
+    background task on the ready path (the default ledger is the durable
+    adapter) and cancels + awaits it on shutdown.
+    """
+    app = create_app(require_call_context=False, run_components=fake_run_components)
+    with TestClient(app):
+        sweep_task = app.state.idempotency_sweep_task
+        assert isinstance(sweep_task, asyncio.Task)
+        # The default 24h interval keeps the task parked on its sleep
+        # after the first (instant, empty) sweep — i.e. still running.
+        assert not sweep_task.done()
+
+    # Lifespan exit cancelled + awaited the task.
+    assert sweep_task.done()
+
+
+def test_lifespan_skips_idempotency_sweep_for_in_memory_ledger() -> None:
+    """A non-durable ledger override starts no idempotency sweep task."""
+    from custos_workflow.providers import load_run_components
+    from custos_workflow.runtime import FakeWorkflowRuntime
+    from custos_workflow.validator import InMemoryIdempotencyLedger
+
+    components = load_run_components(
+        env={},
+        workflow_runtime=FakeWorkflowRuntime(),
+        idempotency_ledger=InMemoryIdempotencyLedger(),
+    )
+    app = create_app(require_call_context=False, run_components=components)
+    with TestClient(app):
+        assert app.state.idempotency_sweep_task is None
+
+
+@pytest.mark.asyncio
+async def test_idempotency_sweep_swallows_errors_and_continues(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A purge failure is logged and the sweep loop keeps running."""
+    from datetime import datetime, timedelta
+    from typing import cast
+
+    from custos_spl.interfaces.metadata_store import MetadataStoreProvider
+
+    from custos_workflow.app import _run_idempotency_sweep_forever
+    from custos_workflow.validator import DurableIdempotencyLedger
+
+    hit = asyncio.Event()
+
+    class _BoomProvider:
+        async def delete_expired_idempotency_records(self, before: datetime) -> int:
+            hit.set()
+            raise RuntimeError("boom")
+
+    ledger = DurableIdempotencyLedger(
+        cast(MetadataStoreProvider, _BoomProvider()),
+        ttl=timedelta(hours=1),
+    )
+    task = asyncio.create_task(_run_idempotency_sweep_forever(ledger, 0.01))
+    await asyncio.wait_for(hit.wait(), timeout=1.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert "idempotency TTL sweep raised" in caplog.text
+
+
 @pytest.fixture
 def _clean_env() -> Iterator[None]:
     """Snapshot + restore ``WF_REQUIRE_CALL_CONTEXT`` around env-driven tests."""

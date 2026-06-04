@@ -61,6 +61,7 @@ from custos_workflow.steps.sub_orchestration import (
     SubOrchestrationManager,
     make_child_step_orchestrator,
 )
+from custos_workflow.validator import DurableIdempotencyLedger
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -267,9 +268,18 @@ def create_app(
         # awaited) on lifespan exit so it never outlives the worker.
         sweep_task = _start_resume_sweep(components)
         app.state.resume_sweep_task = sweep_task
+        # WF-IMPL-117: launch the background TTL-expiry sweep that reaps
+        # abandoned idempotency reservations whose ``expires_at`` has
+        # lapsed, on a wall-clock interval aligned to
+        # ``WF_IDEMPOTENCY_KEY_TTL``. Only started when the ledger is the
+        # durable adapter — the in-memory unit-test ledger has no rows to
+        # reap. ``None`` otherwise; cancellation tolerates that.
+        idempotency_sweep_task = _start_idempotency_sweep(components)
+        app.state.idempotency_sweep_task = idempotency_sweep_task
         try:
             yield
         finally:
+            await _cancel_idempotency_sweep(idempotency_sweep_task)
             await _cancel_resume_sweep(sweep_task)
             await _shutdown_components(components, metadata_pool, worker_shutdown_timeout_s)
 
@@ -424,6 +434,76 @@ async def _cancel_resume_sweep(task: asyncio.Task[None]) -> None:
         pass
     except Exception:
         logger.exception("resume subscription TTL sweep task raised during shutdown")
+
+
+def _start_idempotency_sweep(components: RunComponents) -> asyncio.Task[None] | None:
+    """Launch the WF-IMPL-117 idempotency TTL-expiry sweep as a background task.
+
+    The sweep reaps abandoned ``StartRun`` idempotency reservations whose
+    ``expires_at`` has lapsed over the *same*
+    :class:`~custos_workflow.validator.DurableIdempotencyLedger` the
+    :class:`~custos_workflow.validator.StartRunValidator` dedups against,
+    so the ``custos_state.idempotency_record`` table does not grow without
+    bound for keys that reserved a slot but never completed (e.g. a crash
+    between reserve and run start). The interval is the env-resolved
+    :attr:`RunComponents.idempotency_sweep_interval_seconds`.
+
+    Returns ``None`` when the ledger is *not* the durable adapter (the
+    in-memory unit-test ledger exposes no ``purge_expired`` sweep and has
+    no rows to reap); the lifespan teardown tolerates a ``None`` task.
+    """
+    ledger = components.idempotency_ledger
+    if not isinstance(ledger, DurableIdempotencyLedger):
+        return None
+    return asyncio.create_task(
+        _run_idempotency_sweep_forever(
+            ledger,
+            components.idempotency_sweep_interval_seconds,
+        ),
+        name="idempotency-ttl-sweep",
+    )
+
+
+async def _run_idempotency_sweep_forever(
+    ledger: DurableIdempotencyLedger,
+    interval_seconds: float,
+) -> None:
+    """Reap expired idempotency reservations every ``interval_seconds``.
+
+    Mirrors the resilience contract of
+    :meth:`~custos_workflow.steps.resume.ResumeSubscriptionTtlSweeper.run_forever`:
+    :class:`asyncio.CancelledError` propagates so the lifespan can stop the
+    loop on shutdown; any other sweep error is logged and swallowed so a
+    transient store outage never tears the task down.
+    """
+    while True:
+        try:
+            await ledger.purge_expired()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("idempotency TTL sweep raised; continuing")
+        await asyncio.sleep(interval_seconds)
+
+
+async def _cancel_idempotency_sweep(task: asyncio.Task[None] | None) -> None:
+    """Cancel and await the idempotency TTL-expiry sweep task on lifespan exit.
+
+    Never raises and tolerates a ``None`` task (the durable ledger was not
+    active, so no sweep was started). The expected outcome is
+    :class:`asyncio.CancelledError`; any other exception means a sweep
+    raised outside its own swallow-and-continue guard and is logged rather
+    than propagated.
+    """
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        logger.exception("idempotency TTL sweep task raised during shutdown")
 
 
 async def _shutdown_components(
