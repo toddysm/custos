@@ -16,7 +16,7 @@ Tracker: ARM-IMPL-000 (#591). Plan: [implementation-plan.md](implementation-plan
 - [x] ARM-IMPL-008 (#576): Resource Limiter
 - [x] ARM-IMPL-009 (#577): I/O Broker (two-phase finalization)
 - [x] ARM-IMPL-010 (#578): Secret Injector (real Connector RefreshLease adapter)
-- [F] ARM-IMPL-011 (#579): Result Mapper
+- [x] ARM-IMPL-011 (#579): Result Mapper
 - [F] ARM-IMPL-012 (#580): Log Streamer
 - [F] ARM-IMPL-013 (#581): RuntimeDriver Protocol + dispatcher
 - [F] ARM-IMPL-014 (#582): Sandbox & isolation model
