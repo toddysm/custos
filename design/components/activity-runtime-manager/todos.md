@@ -26,7 +26,7 @@ Tracker: ARM-IMPL-000 (#591). Plan: [implementation-plan.md](implementation-plan
 - [x] ARM-IMPL-018 (#586): RPC Adapter (real Dapr ScheduleActivity/CancelActivity)
 - [x] ARM-IMPL-019 (#587): Cancel + deadline/timeout
 - [x] ARM-IMPL-020 (#588): Observability
-- [F] ARM-IMPL-021 (#589): Integration suite (kind/k8s)
+- [x] ARM-IMPL-021 (#589): Integration suite (kind/k8s)
 - [F] ARM-IMPL-022 (#590): Developer docs + README
 
 ## Open
