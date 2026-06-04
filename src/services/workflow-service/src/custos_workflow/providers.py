@@ -1500,9 +1500,21 @@ def load_run_components(
     registry: ActivityTypeRegistry = (
         activity_registry if activity_registry is not None else InMemoryActivityTypeRegistry({})
     )
-    store: RunStore = InProcessRunStore(
-        cast(MetadataStoreProvider, _InProcessMetadataStoreProvider())
+    # WF-IMPL-115/116: resolve the metadata store provider once and share it
+    # across every collaborator. The lifespan injects the pooled durable
+    # ``custos_pg`` adapter it opened via :func:`open_metadata_store`; absent an
+    # override (or a lifespan injection) the default is a process-local
+    # in-memory provider for the sidecar-free dev / test path. WF-IMPL-116
+    # threads this same provider behind the ``InProcessRunStore`` seam so
+    # ``Run`` rows persist to ``custos_state.run`` in production and survive
+    # process restarts / HA failover. (The compiled-graph side-map inside
+    # ``InProcessRunStore`` remains process-local until a future SPL revision
+    # exposes a durable compiled-graph column — that is the deferred WF-IMPL-033
+    # concern, not this task.)
+    metadata_store_provider: MetadataStoreProvider = (
+        metadata_store if metadata_store is not None else _in_memory_metadata_store()
     )
+    store: RunStore = InProcessRunStore(metadata_store_provider)
     controller = RunController(
         catalog=catalog_client,
         store=store,
@@ -1523,17 +1535,6 @@ def load_run_components(
         idempotency_ledger if idempotency_ledger is not None else InMemoryIdempotencyLedger()
     )
     validator = StartRunValidator(catalog=catalog_client, ledger=ledger)
-    # WF-IMPL-115: carry the metadata store provider on the bundle so
-    # the durable Run / idempotency sub-modules (WF-IMPL-116 /
-    # WF-IMPL-117) can key off a single shared provider. The lifespan
-    # injects the pooled durable adapter it opened via
-    # :func:`open_metadata_store`; absent an override (or a lifespan
-    # injection) the default is the process-local in-memory provider.
-    # The ``InProcessRunStore`` seam above keeps its own in-process
-    # provider until WF-IMPL-116 threads this field behind it.
-    metadata_store_provider: MetadataStoreProvider = (
-        metadata_store if metadata_store is not None else _in_memory_metadata_store()
-    )
     return RunComponents(
         workflow_runtime=runtime,
         workflow_client=workflow_client,

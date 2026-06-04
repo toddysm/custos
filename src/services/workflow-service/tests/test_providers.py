@@ -74,6 +74,7 @@ from custos_workflow.providers import (
     open_metadata_store,
 )
 from custos_workflow.runs.replay import NoopReplayReconciler
+from custos_workflow.runs.store import InProcessRunStore
 from custos_workflow.runtime import FakeWorkflowRuntime
 from custos_workflow.steps.resume import (
     DEFAULT_RESUME_SUB_SWEEP_INTERVAL_SECONDS,
@@ -961,3 +962,29 @@ def test_load_run_components_metadata_store_override_wins() -> None:
         metadata_store=fake,
     )
     assert components.metadata_store is fake
+
+
+def test_load_run_components_backs_run_store_with_metadata_store() -> None:
+    """WF-IMPL-116: the Run store delegates to the shared metadata provider.
+
+    The same provider that lands on ``RunComponents.metadata_store`` must back
+    the ``InProcessRunStore`` so ``Run`` rows persist to the durable store
+    (Postgres in production) instead of a second, private in-memory provider.
+    """
+    fake = cast(MetadataStoreProvider, _FakeMetadataProvider())
+    components = load_run_components(
+        env={},
+        workflow_runtime=FakeWorkflowRuntime(),
+        metadata_store=fake,
+    )
+    assert isinstance(components.run_store, InProcessRunStore)
+    # The store holds the exact provider instance carried on the bundle.
+    assert components.run_store._provider is fake
+    assert components.run_store._provider is components.metadata_store
+
+
+def test_load_run_components_default_run_store_shares_in_memory_provider() -> None:
+    """With no override the Run store shares the bundle's in-memory provider."""
+    components = load_run_components(env={}, workflow_runtime=FakeWorkflowRuntime())
+    assert isinstance(components.run_store, InProcessRunStore)
+    assert components.run_store._provider is components.metadata_store
