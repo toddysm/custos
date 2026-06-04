@@ -57,6 +57,11 @@ dev = [
     "mypy>=1.10",
     "types-PyYAML>=6.0",
     "types-jsonschema>=4.21",
+    # The official Kubernetes client is a *test-only* dependency for ARM-IMPL-015:
+    # the Job builder emits a plain dict body, and the tests round-trip it through
+    # `V1Job` to assert the spec conforms to the Kubernetes API schema without a
+    # cluster. ARM-IMPL-016 (lifecycle monitor) promotes it to a runtime dep.
+    "kubernetes>=29,<32",
     # OTel SDK is dev-only so tests can install in-memory exporters when
     # observability (ARM-IMPL-020) lands. The library only depends on the API.
     "opentelemetry-sdk>=1.20,<2",
@@ -117,6 +122,12 @@ mypy_path = "src:../../libs/storage-provider-layer/src:../../libs/custos-callctx
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+# The official Kubernetes client ships no type information; it is only imported
+# by the ARM-IMPL-015 tests to validate the generated Job spec.
+module = "kubernetes.*"
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 minversion = "8.0"
