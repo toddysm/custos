@@ -49,6 +49,15 @@ from custos_arm.contract import (
 )
 from custos_arm.io import IOBroker
 from custos_arm.limit import EffectiveResources, ResourceLimiter
+from custos_arm.observe import (
+    STAGE_FINALIZE,
+    STAGE_MATERIALIZE,
+    STAGE_RESOLVE,
+    STAGE_RUN,
+    observe_attempt,
+    observe_stage,
+    record_result,
+)
 from custos_arm.resolve import ActivityResolver, ActivityTypeVersion
 from custos_arm.result import ActivityResultEnvelope, ResultClass, ResultMapper
 from custos_arm.runtime import (
@@ -253,43 +262,49 @@ class ActivityScheduler:
     async def _drive(self, key: ExecutionKey, request: ScheduleRequest) -> ActivityResultEnvelope:
         driver: RuntimeDriver | None = None
         handle: SandboxHandle | None = None
-        try:
-            await self._ensure(key, ExecutionState.RESOLVING)
-            resolved = await self._resolver.resolve(
-                workspace_id=request.workspace_id, activity_ref=request.activity_ref
-            )
-            effective = self._limiter.limit(
-                resources=resolved.resources,
-                isolation_floor=resolved.isolation_floor,
-                override=request.override,
-                cluster_ceiling=request.cluster_ceiling,
-            )
-            current = await self._require(key)
-            deadline = self._clamp(current.started_at + effective.timeout, request.step_deadline)
-            driver = self._dispatcher.select(resolved.runtime.kind)
-            plan = self._build_plan(request, resolved, effective, deadline)
-            handle = await asyncio.to_thread(driver.prepare, plan)
-            await self._ensure(
-                key,
-                ExecutionState.MATERIALIZING,
-                resolved_digest=resolved.digest,
-                isolation_tier=effective.tier.value,
-                runtime_class=effective.runtime_class or None,
-                deadline=deadline,
-                sandbox_ref=handle.reference,
-            )
-            self._context[key] = _AttemptContext(
-                handle=handle, resolved=resolved, driver=driver, deadline=deadline
-            )
-            self._materialize(request, resolved, handle, deadline)
-            await self._inject(request, resolved, handle)
-            await self._ensure(key, ExecutionState.RUNNING)
-            await asyncio.to_thread(driver.start, handle)
-            outcome = await asyncio.to_thread(driver.await_terminal, handle, deadline)
-            return await self._finalize(key, request, resolved, driver, handle, outcome)
-        except Exception as exc:
-            envelope = synthesize_failure(exc, attempt=request.step.attempt)
-            return await self._complete(key, envelope, driver, handle)
+        with observe_attempt(request):
+            try:
+                with observe_stage(STAGE_RESOLVE):
+                    await self._ensure(key, ExecutionState.RESOLVING)
+                    resolved = await self._resolver.resolve(
+                        workspace_id=request.workspace_id, activity_ref=request.activity_ref
+                    )
+                    effective = self._limiter.limit(
+                        resources=resolved.resources,
+                        isolation_floor=resolved.isolation_floor,
+                        override=request.override,
+                        cluster_ceiling=request.cluster_ceiling,
+                    )
+                    current = await self._require(key)
+                    deadline = self._clamp(
+                        current.started_at + effective.timeout, request.step_deadline
+                    )
+                    driver = self._dispatcher.select(resolved.runtime.kind)
+                    plan = self._build_plan(request, resolved, effective, deadline)
+                with observe_stage(STAGE_MATERIALIZE):
+                    handle = await asyncio.to_thread(driver.prepare, plan)
+                    await self._ensure(
+                        key,
+                        ExecutionState.MATERIALIZING,
+                        resolved_digest=resolved.digest,
+                        isolation_tier=effective.tier.value,
+                        runtime_class=effective.runtime_class or None,
+                        deadline=deadline,
+                        sandbox_ref=handle.reference,
+                    )
+                    self._context[key] = _AttemptContext(
+                        handle=handle, resolved=resolved, driver=driver, deadline=deadline
+                    )
+                    self._materialize(request, resolved, handle, deadline)
+                    await self._inject(request, resolved, handle)
+                with observe_stage(STAGE_RUN):
+                    await self._ensure(key, ExecutionState.RUNNING)
+                    await asyncio.to_thread(driver.start, handle)
+                    outcome = await asyncio.to_thread(driver.await_terminal, handle, deadline)
+                return await self._finalize(key, request, resolved, driver, handle, outcome)
+            except Exception as exc:
+                envelope = synthesize_failure(exc, attempt=request.step.attempt)
+                return await self._complete(key, envelope, driver, handle)
 
     async def _finalize(
         self,
@@ -300,19 +315,20 @@ class ActivityScheduler:
         handle: SandboxHandle,
         outcome: SandboxOutcome,
     ) -> ActivityResultEnvelope:
-        await self._ensure(key, ExecutionState.FINALIZING)
-        bundle = await asyncio.to_thread(driver.collect, handle)
-        raw = read_outputs(bundle.root, max_bytes=self._settings.output_max_bytes)
-        finalized: OutputsEnvelope | None = None
-        if raw is not None:
-            finalized = await self._broker.finalize_outputs(
-                raw_outputs=raw,
-                manifest=resolved.manifest,
-                step=request.step,
-                workspace_id=request.workspace_id,
-                artifacts=FilesystemArtifactReader(bundle.root),
-            )
-        envelope = self._resolve_result(outcome, finalized, request.step.attempt)
+        with observe_stage(STAGE_FINALIZE):
+            await self._ensure(key, ExecutionState.FINALIZING)
+            bundle = await asyncio.to_thread(driver.collect, handle)
+            raw = read_outputs(bundle.root, max_bytes=self._settings.output_max_bytes)
+            finalized: OutputsEnvelope | None = None
+            if raw is not None:
+                finalized = await self._broker.finalize_outputs(
+                    raw_outputs=raw,
+                    manifest=resolved.manifest,
+                    step=request.step,
+                    workspace_id=request.workspace_id,
+                    artifacts=FilesystemArtifactReader(bundle.root),
+                )
+            envelope = self._resolve_result(outcome, finalized, request.step.attempt)
         return await self._complete(key, envelope, driver, handle)
 
     # -- Replay & reconciliation -----------------------------------------
@@ -394,6 +410,7 @@ class ActivityScheduler:
         )
         self._cache[key] = envelope
         self._context.pop(key, None)
+        record_result(envelope)
         if driver is not None and handle is not None:
             await self._safe_cleanup(driver, handle)
         return envelope
