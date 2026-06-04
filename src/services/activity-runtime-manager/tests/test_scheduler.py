@@ -31,6 +31,7 @@ from custos_arm.runtime import (
 )
 from custos_arm.scheduler import (
     ActivityScheduler,
+    CancelOutcome,
     FilesystemArtifactReader,
     FilesystemSecretSink,
     ScheduleRequest,
@@ -607,3 +608,66 @@ def test_error_envelope_for_io_error_uses_to_envelope() -> None:
     envelope = error_envelope_for(OutputTooLargeError("too big"))
     assert envelope.error_class is ErrorClass.PERMANENT
     assert envelope.code == "output.too_large"
+
+
+# ---------------------------------------------------------------------------
+# Cancellation (status reporting — ARM-IMPL-018)
+# ---------------------------------------------------------------------------
+
+
+async def test_cancel_accepts_live_attempt(tmp_path: Path) -> None:
+    repo = _repo()
+    await _insert_running(repo)
+    driver = _FakeDriver(tmp_path, outputs=None)
+    scheduler = _scheduler(driver, repo=repo)
+    scheduler._context[("ws-1", "run-1", "step-1", 1)] = _seed_context(
+        _handle(tmp_path / "in", tmp_path / "out"), driver
+    )
+
+    outcome = await scheduler.cancel(workspace_id="ws-1", run_id="run-1", step_id="step-1")
+
+    assert outcome is CancelOutcome.ACCEPTED
+
+
+async def test_cancel_reports_terminated_after_completion(tmp_path: Path) -> None:
+    driver = _FakeDriver(tmp_path, outputs=_success_outputs())
+    scheduler = _scheduler(driver)
+    await scheduler.schedule(_request())
+
+    outcome = await scheduler.cancel(workspace_id="ws-1", run_id="run-1", step_id="step-1")
+
+    assert outcome is CancelOutcome.TERMINATED
+
+
+async def test_cancel_reports_terminated_from_terminal_record(tmp_path: Path) -> None:
+    repo = _repo()
+    terminal = ActivityExecution(
+        workspace_id="ws-1",
+        run_id="run-1",
+        step_id="step-1",
+        attempt=1,
+        activity_ref="acme/echo@1.0.0",
+        deadline=_NOW + timedelta(minutes=10),
+        started_at=_NOW,
+        state=ExecutionState.SUCCEEDED,
+    )
+    await repo.insert(terminal)
+    driver = _FakeDriver(tmp_path, outputs=None)
+    scheduler = _scheduler(driver, repo=repo)
+    # A live context entry whose record has already terminated (a transient
+    # state between completion and context eviction) reports TERMINATED.
+    scheduler._context[("ws-1", "run-1", "step-1", 1)] = _seed_context(
+        _handle(tmp_path / "in", tmp_path / "out"), driver
+    )
+
+    outcome = await scheduler.cancel(workspace_id="ws-1", run_id="run-1", step_id="step-1")
+
+    assert outcome is CancelOutcome.TERMINATED
+
+
+async def test_cancel_reports_unknown_for_unseen_step(tmp_path: Path) -> None:
+    scheduler = _scheduler(_FakeDriver(tmp_path, outputs=None))
+
+    outcome = await scheduler.cancel(workspace_id="ws-1", run_id="nope", step_id="nope")
+
+    assert outcome is CancelOutcome.UNKNOWN

@@ -39,6 +39,7 @@ from custos_arm.middleware import (
     CallContextMiddleware,
     call_context_error_handler,
 )
+from custos_arm.rpc import router as rpc_router
 
 __all__ = ["create_app"]
 
@@ -104,6 +105,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.ready = False
     app.state.settings = resolved
+    # The Activity Scheduler is attached by the composition root during
+    # startup; until then the RPC surface (rpc_router) reports 503.
+    app.state.scheduler = None
     app.add_middleware(
         CallContextMiddleware,
         authz_endpoint=resolved.authz_endpoint,
@@ -111,4 +115,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.add_exception_handler(CallContextError, call_context_error_handler)
     app.include_router(health_router)
+    app.include_router(rpc_router)
     return app

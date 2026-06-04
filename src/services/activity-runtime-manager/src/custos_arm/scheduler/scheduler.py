@@ -35,6 +35,7 @@ import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Final
 
 from custos_arm.config import Settings
@@ -77,7 +78,6 @@ ExecutionKey = tuple[str, str, str, int]
 #: Contract mount paths realized as ``tmpfs`` in the sandbox.
 CUSTOS_IN: Final[str] = "/custos/in"
 CUSTOS_OUT: Final[str] = "/custos/out"
-
 #: The forward (happy-path) progression of live states.
 _NEXT: Final[dict[ExecutionState, ExecutionState]] = {
     ExecutionState.PENDING: ExecutionState.RESOLVING,
@@ -100,6 +100,25 @@ _TERMINAL_BY_CLASS: Final[dict[ResultClass, ExecutionState]] = {
     ResultClass.PERMANENT: ExecutionState.FAILED,
     ResultClass.CANCELLED: ExecutionState.CANCELLED,
 }
+
+
+class CancelOutcome(StrEnum):
+    """The idempotent result of a ``CancelActivity`` lookup.
+
+    Mirrors the design's § Internal RPC cancel semantics so the RPC adapter
+    can render the documented status codes without leaking Scheduler
+    internals:
+
+    * :attr:`ACCEPTED` — a live (non-terminal) attempt exists; the cancel is
+      accepted (``200``/``204``).
+    * :attr:`TERMINATED` — the attempt already reached a terminal state; the
+      cancel is a no-op (``409``).
+    * :attr:`UNKNOWN` — the step is unknown to this Scheduler (``404``).
+    """
+
+    ACCEPTED = "accepted"
+    TERMINATED = "terminated"
+    UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +194,37 @@ class ActivityScheduler:
         )
         await self._repo.insert(execution)
         return await self._drive(key, request)
+
+    async def cancel(self, *, workspace_id: str, run_id: str, step_id: str) -> CancelOutcome:
+        """Resolve a ``CancelActivity`` request to its idempotent outcome.
+
+        ``CancelActivity`` carries only ``(runId, stepId)`` on the wire; the
+        workspace comes from the verified call context. The Scheduler inspects
+        the attempts it is tracking for the step and classifies the request:
+
+        * a live (non-terminal) attempt yields :attr:`CancelOutcome.ACCEPTED`;
+        * an already-terminal attempt yields :attr:`CancelOutcome.TERMINATED`;
+        * an unknown step yields :attr:`CancelOutcome.UNKNOWN`.
+
+        Driving the live attempt to ``cancelled`` through the runtime driver
+        (and the deadline/timeout path) is wired in ARM-IMPL-019; this method
+        owns the lookup and the idempotent status semantics the RPC adapter
+        renders as ``200``/``404``/``409``.
+        """
+        prefix = (workspace_id, run_id, step_id)
+        keys = {key for key in (*self._context, *self._cache) if key[:3] == prefix}
+        for key in keys:
+            if key in self._context:
+                record = await self._repo.get(*key)
+                if record is not None and not record.is_terminal:
+                    return CancelOutcome.ACCEPTED
+        for key in keys:
+            if key in self._cache:
+                return CancelOutcome.TERMINATED
+            record = await self._repo.get(*key)
+            if record is not None and record.is_terminal:
+                return CancelOutcome.TERMINATED
+        return CancelOutcome.UNKNOWN
 
     # -- Pipeline ---------------------------------------------------------
 
@@ -454,4 +504,4 @@ class ActivityScheduler:
         )
 
 
-__all__ = ["ActivityScheduler", "ExecutionKey"]
+__all__ = ["ActivityScheduler", "CancelOutcome", "ExecutionKey"]

@@ -18,10 +18,11 @@ from .fsio import (
     write_inputs,
 )
 from .request import ScheduleRequest
-from .scheduler import ActivityScheduler, ExecutionKey
+from .scheduler import ActivityScheduler, CancelOutcome, ExecutionKey
 
 __all__ = [
     "ActivityScheduler",
+    "CancelOutcome",
     "ExecutionKey",
     "FilesystemArtifactReader",
     "FilesystemSecretSink",
