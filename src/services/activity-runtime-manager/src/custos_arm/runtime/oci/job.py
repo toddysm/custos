@@ -46,9 +46,24 @@ __all__ = [
     "JOB_NAME_PREFIX",
     "MANAGED_BY",
     "SIDECAR_CONTAINER_NAME",
+    "DuplicateMountError",
     "build_activity_job",
     "job_name",
 ]
+
+
+class DuplicateMountError(ValueError):
+    """Two contract mounts sanitize to the same Kubernetes volume name.
+
+    The Scheduler is expected to hand the builder distinct mount paths; this
+    fail-fast guard turns an otherwise schema-valid-but-cluster-rejected
+    manifest (duplicate ``volumes[].name``) into a clear build-time error.
+    """
+
+    def __init__(self, volume_name: str) -> None:
+        super().__init__(f"duplicate sandbox volume name: {volume_name!r}")
+        self.volume_name = volume_name
+
 
 #: The container that runs the activity image.
 ACTIVITY_CONTAINER_NAME: Final[str] = "activity"
@@ -111,8 +126,7 @@ def build_activity_job(
     """
     name = job_name(plan.step)
     labels = _labels(plan.step)
-    volumes, mounts = _volumes_and_mounts(plan.tmpfs_mounts)
-    pod_security_context = _security_context(security_context)
+    named_mounts = _named_mounts(plan.tmpfs_mounts)
     deadline_seconds = max(1, int(plan.resources.timeout.total_seconds()))
 
     pod_spec: dict[str, Any] = {
@@ -123,10 +137,10 @@ def build_activity_job(
         "hostPID": False,
         "hostIPC": False,
         "containers": [
-            _activity_container(plan.image, plan.resources, pod_security_context, mounts),
-            _sidecar_container(plan.sidecar, pod_security_context, mounts),
+            _activity_container(plan.image, plan.resources, security_context, named_mounts),
+            _sidecar_container(plan.sidecar, security_context, named_mounts),
         ],
-        "volumes": volumes,
+        "volumes": _volumes(named_mounts),
     }
     runtime_class = plan.resources.runtime_class
     if runtime_class:
@@ -167,25 +181,41 @@ def _label_value(value: str) -> str:
     return sanitized.strip("_.-")
 
 
-def _volumes_and_mounts(
+def _named_mounts(
     tmpfs_mounts: tuple[TmpfsMount, ...],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    volumes: list[dict[str, Any]] = []
-    mounts: list[dict[str, Any]] = []
+) -> tuple[tuple[str, TmpfsMount], ...]:
+    """Pair each contract mount with its Kubernetes volume name, fail-fast on
+    collisions so the manifest is always API-valid."""
+    named: list[tuple[str, TmpfsMount]] = []
+    seen: set[str] = set()
     for mount in tmpfs_mounts:
         volume_name = _volume_name(mount.mount_path)
+        if volume_name in seen:
+            raise DuplicateMountError(volume_name)
+        seen.add(volume_name)
+        named.append((volume_name, mount))
+    return tuple(named)
+
+
+def _volumes(named_mounts: tuple[tuple[str, TmpfsMount], ...]) -> list[dict[str, Any]]:
+    volumes: list[dict[str, Any]] = []
+    for volume_name, mount in named_mounts:
         empty_dir: dict[str, Any] = {"medium": _TMPFS_MEDIUM}
         if mount.size_limit is not None:
             empty_dir["sizeLimit"] = mount.size_limit
         volumes.append({"name": volume_name, "emptyDir": empty_dir})
-        volume_mount: dict[str, Any] = {
-            "name": volume_name,
-            "mountPath": mount.mount_path,
-        }
+    return volumes
+
+
+def _volume_mounts(named_mounts: tuple[tuple[str, TmpfsMount], ...]) -> list[dict[str, Any]]:
+    """Build a fresh list of volume-mount dicts (independent per container)."""
+    mounts: list[dict[str, Any]] = []
+    for volume_name, mount in named_mounts:
+        volume_mount: dict[str, Any] = {"name": volume_name, "mountPath": mount.mount_path}
         if mount.read_only:
             volume_mount["readOnly"] = True
         mounts.append(volume_mount)
-    return volumes, mounts
+    return mounts
 
 
 def _volume_name(mount_path: str) -> str:
@@ -210,31 +240,31 @@ def _security_context(security_context: SecurityContext) -> dict[str, Any]:
 def _activity_container(
     image: ImageRef,
     resources: EffectiveResources,
-    security_context: dict[str, Any],
-    mounts: list[dict[str, Any]],
+    security_context: SecurityContext,
+    named_mounts: tuple[tuple[str, TmpfsMount], ...],
 ) -> dict[str, Any]:
     return {
         "name": ACTIVITY_CONTAINER_NAME,
         "image": _image_reference(image),
         "imagePullPolicy": "IfNotPresent",
-        "securityContext": security_context,
+        "securityContext": _security_context(security_context),
         "resources": _resources(resources),
-        "volumeMounts": mounts,
+        "volumeMounts": _volume_mounts(named_mounts),
     }
 
 
 def _sidecar_container(
     sidecar: SidecarSpec,
-    security_context: dict[str, Any],
-    mounts: list[dict[str, Any]],
+    security_context: SecurityContext,
+    named_mounts: tuple[tuple[str, TmpfsMount], ...],
 ) -> dict[str, Any]:
     return {
         "name": SIDECAR_CONTAINER_NAME,
         "image": sidecar.image,
         "imagePullPolicy": "IfNotPresent",
-        "securityContext": security_context,
+        "securityContext": _security_context(security_context),
         "env": [{"name": CONNECTOR_ENDPOINT_ENV, "value": sidecar.endpoint}],
-        "volumeMounts": mounts,
+        "volumeMounts": _volume_mounts(named_mounts),
     }
 
 

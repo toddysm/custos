@@ -22,6 +22,7 @@ from custos_arm.runtime.oci import (
     ACTIVITY_CONTAINER_NAME,
     CONNECTOR_ENDPOINT_ENV,
     SIDECAR_CONTAINER_NAME,
+    DuplicateMountError,
     build_activity_job,
     job_name,
 )
@@ -180,6 +181,34 @@ def test_only_contract_paths_are_mounted() -> None:
     activity = _containers(manifest)[ACTIVITY_CONTAINER_NAME]
     paths = {m["mountPath"] for m in activity["volumeMounts"]}
     assert paths == {"/custos/in", "/custos/out"}
+
+
+def test_colliding_mount_names_fail_fast() -> None:
+    # Two distinct paths that sanitize to the same volume name.
+    mounts = (
+        TmpfsMount(mount_path="/custos/in"),
+        TmpfsMount(mount_path="/custos:in"),
+    )
+    with pytest.raises(DuplicateMountError) as excinfo:
+        build_activity_job(_plan(tmpfs_mounts=mounts))
+    assert excinfo.value.volume_name == "custos-in"
+
+
+def test_per_container_objects_are_independent() -> None:
+    manifest = build_activity_job(_plan())
+    containers = _containers(manifest)
+    activity = containers[ACTIVITY_CONTAINER_NAME]
+    sidecar = containers[SIDECAR_CONTAINER_NAME]
+    # Equal in value but not shared references, so post-processing one
+    # container never mutates the other.
+    assert activity["securityContext"] is not sidecar["securityContext"]
+    activity_caps = activity["securityContext"]["capabilities"]
+    assert activity_caps is not sidecar["securityContext"]["capabilities"]
+    assert activity["volumeMounts"] is not sidecar["volumeMounts"]
+    activity["securityContext"]["privileged"] = True
+    activity["volumeMounts"].append({"name": "x", "mountPath": "/x"})
+    assert sidecar["securityContext"]["privileged"] is False
+    assert len(sidecar["volumeMounts"]) == 2
 
 
 # --------------------------------------------------------------------------- #

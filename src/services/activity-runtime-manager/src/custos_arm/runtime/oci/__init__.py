@@ -18,6 +18,7 @@ from custos_arm.runtime.oci.job import (
     JOB_NAME_PREFIX,
     MANAGED_BY,
     SIDECAR_CONTAINER_NAME,
+    DuplicateMountError,
     build_activity_job,
     job_name,
 )
@@ -28,6 +29,7 @@ __all__ = [
     "JOB_NAME_PREFIX",
     "MANAGED_BY",
     "SIDECAR_CONTAINER_NAME",
+    "DuplicateMountError",
     "build_activity_job",
     "job_name",
 ]
