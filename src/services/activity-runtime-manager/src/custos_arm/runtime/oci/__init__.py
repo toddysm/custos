@@ -12,6 +12,17 @@ Kubernetes ``Job``. This subpackage is split per the design § OCI driver split:
 
 from __future__ import annotations
 
+from custos_arm.runtime.oci.errors import (
+    ACTIVITY_CANCELLED,
+    ACTIVITY_IMAGE_PULL_FAILED,
+    ACTIVITY_OOM_KILLED,
+    ACTIVITY_SANDBOX_FAILURE,
+    ACTIVITY_TIMEOUT,
+    SYSTEM_SANDBOX_FAILURE,
+    ImagePullError,
+    OciDriverError,
+    SandboxFailureError,
+)
 from custos_arm.runtime.oci.job import (
     ACTIVITY_CONTAINER_NAME,
     CONNECTOR_ENDPOINT_ENV,
@@ -22,14 +33,33 @@ from custos_arm.runtime.oci.job import (
     build_activity_job,
     job_name,
 )
+from custos_arm.runtime.oci.lifecycle import (
+    OciContainerDriver,
+    classify_signal,
+    is_image_pull_waiting_reason,
+    signal_error_code,
+)
 
 __all__ = [
+    "ACTIVITY_CANCELLED",
     "ACTIVITY_CONTAINER_NAME",
+    "ACTIVITY_IMAGE_PULL_FAILED",
+    "ACTIVITY_OOM_KILLED",
+    "ACTIVITY_SANDBOX_FAILURE",
+    "ACTIVITY_TIMEOUT",
     "CONNECTOR_ENDPOINT_ENV",
     "JOB_NAME_PREFIX",
     "MANAGED_BY",
     "SIDECAR_CONTAINER_NAME",
+    "SYSTEM_SANDBOX_FAILURE",
     "DuplicateMountError",
+    "ImagePullError",
+    "OciContainerDriver",
+    "OciDriverError",
+    "SandboxFailureError",
     "build_activity_job",
+    "classify_signal",
+    "is_image_pull_waiting_reason",
     "job_name",
+    "signal_error_code",
 ]

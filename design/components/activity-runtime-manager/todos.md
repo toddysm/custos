@@ -21,7 +21,7 @@ Tracker: ARM-IMPL-000 (#591). Plan: [implementation-plan.md](implementation-plan
 - [x] ARM-IMPL-013 (#581): RuntimeDriver Protocol + dispatcher
 - [x] ARM-IMPL-014 (#582): Sandbox & isolation model
 - [x] ARM-IMPL-015 (#583): OCI Container Driver — Job builder
-- [F] ARM-IMPL-016 (#584): OCI Container Driver — lifecycle monitor (kind/k8s integration)
+- [x] ARM-IMPL-016 (#584): OCI Container Driver — lifecycle monitor (kind/k8s integration)
 - [F] ARM-IMPL-017 (#585): Activity Scheduler
 - [F] ARM-IMPL-018 (#586): RPC Adapter (real Dapr ScheduleActivity/CancelActivity)
 - [F] ARM-IMPL-019 (#587): Cancel + deadline/timeout

@@ -45,6 +45,10 @@ dependencies = [
     "httpx>=0.27,<1",
     "jsonschema>=4.21,<5",
     "opentelemetry-api>=1.20,<2",
+    # The official Kubernetes client backs the OCI Container Driver lifecycle
+    # monitor (ARM-IMPL-016): the Job builder emits a plain dict body and the
+    # driver creates / watches / reaps the `Job` against a real cluster.
+    "kubernetes>=29,<32",
 ]
 
 [project.optional-dependencies]
@@ -57,11 +61,6 @@ dev = [
     "mypy>=1.10",
     "types-PyYAML>=6.0",
     "types-jsonschema>=4.21",
-    # The official Kubernetes client is a *test-only* dependency for ARM-IMPL-015:
-    # the Job builder emits a plain dict body, and the tests round-trip it through
-    # `V1Job` to assert the spec conforms to the Kubernetes API schema without a
-    # cluster. ARM-IMPL-016 (lifecycle monitor) promotes it to a runtime dep.
-    "kubernetes>=29,<32",
     # OTel SDK is dev-only so tests can install in-memory exporters when
     # observability (ARM-IMPL-020) lands. The library only depends on the API.
     "opentelemetry-sdk>=1.20,<2",
@@ -124,8 +123,8 @@ module = "tests.*"
 disallow_untyped_defs = false
 
 [[tool.mypy.overrides]]
-# The official Kubernetes client ships no type information; it is only imported
-# by the ARM-IMPL-015 tests to validate the generated Job spec.
+# The official Kubernetes client ships no type information; it backs the OCI
+# Job builder tests (ARM-IMPL-015) and the lifecycle monitor (ARM-IMPL-016).
 module = "kubernetes.*"
 ignore_missing_imports = true
 
@@ -139,6 +138,10 @@ addopts = [
     "--cov=custos_arm",
     "--cov-report=term-missing",
     "--cov-fail-under=90",
+    # Integration tests need a real kind/k8s cluster; they run only in the
+    # dedicated `activity-runtime-manager-integration` CI job (ARM-IMPL-016).
+    "-m",
+    "not integration",
 ]
 asyncio_mode = "auto"
 markers = [
