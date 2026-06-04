@@ -294,6 +294,15 @@ async def test_fake_catalog_client_unknown_id_raises_not_found() -> None:
     assert fake.calls == [(WORKSPACE_ID, "ws-1/missing@1")]
 
 
+async def test_fake_catalog_client_cross_workspace_raises_not_found() -> None:
+    version = _parse(_workflow_version_body())
+    fake = FakeCatalogClient(versions={WORKFLOW_VERSION_ID: version})
+
+    with pytest.raises(CatalogWorkflowVersionNotFound):
+        await fake.get_workflow_version("ws-other", WORKFLOW_VERSION_ID)
+    assert fake.calls == [("ws-other", WORKFLOW_VERSION_ID)]
+
+
 # ---------------------------------------------------------------------------
 # Protocol conformance
 # ---------------------------------------------------------------------------

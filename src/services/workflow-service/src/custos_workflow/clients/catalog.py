@@ -272,6 +272,13 @@ class FakeCatalogClient:
     both the happy path and the missing-version path without
     standing up Dapr.
 
+    The fake also mirrors the production adapter's cross-workspace
+    guard: a stored version whose workspace (the segment before the
+    ``/`` in :attr:`WorkflowVersion.workflow_id`) does not match the
+    requested ``workspace_id`` is treated as *not found* for the
+    calling workspace, so a test can never accidentally read another
+    workspace's version through the fake.
+
     Every call is recorded on :attr:`calls` so tests can assert
     call patterns without monkey-patching.
     """
@@ -284,9 +291,15 @@ class FakeCatalogClient:
     ) -> WorkflowVersion:
         self.calls.append((workspace_id, workflow_version_id))
         try:
-            return self.versions[workflow_version_id]
+            version = self.versions[workflow_version_id]
         except KeyError:
             raise CatalogWorkflowVersionNotFound(workspace_id, workflow_version_id) from None
+        # Mirror DaprCatalogClient's cross-workspace guard: the
+        # stored ``workflow_id`` is ``<workspaceId>/<workflowName>``.
+        stored_workspace_id = version.workflow_id.split("/", 1)[0]
+        if stored_workspace_id != workspace_id:
+            raise CatalogWorkflowVersionNotFound(workspace_id, workflow_version_id)
+        return version
 
 
 # ---------------------------------------------------------------------------
