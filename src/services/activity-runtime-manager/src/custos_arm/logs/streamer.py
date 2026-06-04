@@ -97,7 +97,7 @@ class LogStreamer:
             payload: dict[str, object] | None
             try:
                 parsed = json.loads(line)
-            except ValueError:
+            except json.JSONDecodeError:
                 payload, malformed = None, True
             else:
                 if isinstance(parsed, dict):
@@ -140,27 +140,30 @@ class LogStreamer:
     async def _iter_lines(self, source: AsyncIterator[bytes]) -> AsyncIterator[str]:
         """Yield decoded lines from a stream of raw byte chunks.
 
-        Only the current partial line is buffered. When the buffer reaches
-        ``max_line_bytes`` without a newline it is flushed as a bounded
-        segment, keeping memory use independent of total run length.
+        Complete lines are yielded directly out of the incoming chunk;
+        only the trailing partial line (the bytes after the last newline)
+        is carried over to the next chunk. That partial is itself bounded
+        to ``max_line_bytes`` by flushing fixed-size segments, so memory
+        stays tied to the current line rather than the chunk or run length.
         """
-        buffer = bytearray()
+        partial = bytearray()
         async for chunk in source:
-            buffer.extend(chunk)
-            while True:
-                newline = buffer.find(b"\n")
-                if newline == -1:
-                    if len(buffer) >= self._max_line_bytes:
-                        segment = bytes(buffer[: self._max_line_bytes])
-                        del buffer[: self._max_line_bytes]
-                        yield self._decode(segment)
-                        continue
-                    break
-                line = bytes(buffer[:newline])
-                del buffer[: newline + 1]
-                yield self._decode(line)
-        if buffer:
-            yield self._decode(bytes(buffer))
+            if partial:
+                data: bytes = bytes(partial) + chunk
+                partial.clear()
+            else:
+                data = chunk
+            start = 0
+            while (newline := data.find(b"\n", start)) != -1:
+                yield self._decode(data[start:newline])
+                start = newline + 1
+            remainder = data[start:]
+            while len(remainder) >= self._max_line_bytes:
+                yield self._decode(remainder[: self._max_line_bytes])
+                remainder = remainder[self._max_line_bytes :]
+            partial.extend(remainder)
+        if partial:
+            yield self._decode(bytes(partial))
 
     @staticmethod
     def _decode(raw: bytes) -> str:
