@@ -1,8 +1,7 @@
 """Trigger Service ASGI entry point.
 
 Thin wrapper that launches :func:`custos_trigger.create_app` under uvicorn.
-The application factory is a scaffold stub until TS-IMPL-003 lands; this
-module exists so the package is launchable as ``python -m custos_trigger``
+This module exists so the package is launchable as ``python -m custos_trigger``
 or via the ``custos-trigger-service`` console script declared in
 ``pyproject.toml``.
 """
@@ -18,8 +17,7 @@ def main() -> None:
     Honours ``HOST`` / ``PORT`` env vars (defaults ``0.0.0.0`` / ``8080``)
     so the deployment manifests can override without code changes. The
     actual FastAPI application is constructed by
-    :func:`custos_trigger.create_app`, which currently raises
-    :class:`NotImplementedError` — that is intentional for the scaffold.
+    :func:`custos_trigger.create_app`.
     """
     # Imported lazily so ``python -m custos_trigger --help``-style probes
     # do not require uvicorn to be installed for non-runtime tooling.
