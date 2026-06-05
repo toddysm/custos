@@ -60,9 +60,11 @@ from custos_trigger.pipeline.match_start import StartMatch
 from custos_trigger.settings import DEFAULT_DISPATCH_MAX_RETRIES, DEFAULT_FANOUT_MAX_DEPTH
 
 __all__ = [
+    "AUDIT_DEDUPED",
     "AUDIT_DISPATCHED",
     "AUDIT_DISPATCH_FAILED",
     "AUDIT_LOOP_DETECTED",
+    "AUDIT_MATCHED",
     "AUDIT_RESUME_DELIVERED",
     "DEFAULT_BACKOFF_BASE_SECONDS",
     "AuditSink",
@@ -73,6 +75,8 @@ __all__ = [
 ]
 
 #: Audit event names (design ``§ Dependencies`` / ``§ Failure Modes``).
+AUDIT_MATCHED: str = "trigger.matched"
+AUDIT_DEDUPED: str = "trigger.deduped"
 AUDIT_DISPATCHED: str = "trigger.dispatched"
 AUDIT_RESUME_DELIVERED: str = "resume.delivered"
 AUDIT_DISPATCH_FAILED: str = "trigger.dispatch.failed"
@@ -86,9 +90,12 @@ DEFAULT_BACKOFF_BASE_SECONDS: float = 0.5
 class AuditSink(Protocol):
     """The audit surface the dispatcher emits to.
 
-    The real OTel/audit pipeline lands in TS-IMPL-019; until then the app wires
-    :class:`NoopAuditSink`. ``attributes`` is a JSON-safe mapping of event
-    context (subscription / run / step ids, depth, error reason).
+    TS-IMPL-019 wires :class:`~custos_trigger._telemetry.TelemetryAuditSink` as
+    the default, which records OTel pipeline counters/spans for every event and
+    forwards to an inner sink (a :class:`NoopAuditSink` until a durable
+    Observability/Audit forwarder is wired). ``attributes`` is a JSON-safe
+    mapping of event context (subscription / run / step ids, depth, error
+    reason).
     """
 
     async def emit(
@@ -175,6 +182,15 @@ class Dispatcher:
     ) -> DispatchOutcome:
         """Dispatch a start match as a Workflow Service ``StartRun``."""
         sub = match.subscription
+        await self._audit.emit(
+            AUDIT_MATCHED,
+            workspace_id=sub.workspace_id,
+            attributes={
+                "subscriptionId": sub.subscription_id,
+                "eventId": event.event_id,
+                "kind": "start",
+            },
+        )
         version = sub.target_workflow_version_id
         if not version:
             # A start subscription with no resolved target version cannot start
@@ -236,6 +252,15 @@ class Dispatcher:
         workspace of its own, so the tenant context comes from the receiver.
         """
         reg = match.registration
+        await self._audit.emit(
+            AUDIT_MATCHED,
+            workspace_id=workspace_id,
+            attributes={
+                "resumeId": match.resume_id,
+                "eventId": event.event_id,
+                "kind": "resume",
+            },
+        )
         idempotency_key = compute_dedup_key(match.resume_id, event.event_id)
         request = RaiseExternalEventRequest(
             workspace_id=workspace_id,
@@ -306,6 +331,9 @@ class Dispatcher:
             return DispatchOutcome(status=DispatchStatus.DEAD_LETTERED, error=exc)
 
         if duplicate:
+            await self._audit.emit(
+                AUDIT_DEDUPED, workspace_id=workspace_id, attributes=audit_attributes
+            )
             return DispatchOutcome(status=DispatchStatus.DUPLICATE)
 
         await self._audit.emit(
