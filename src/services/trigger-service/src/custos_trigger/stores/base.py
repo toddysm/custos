@@ -35,7 +35,7 @@ from custos_spl.interfaces.metadata_store import (
     SubscriptionSelector as SplSubscriptionSelector,
 )
 
-__all__ = ["TriggerMetadataStore"]
+__all__ = ["SubscriptionReadable", "TriggerMetadataStore"]
 
 
 @runtime_checkable
@@ -88,3 +88,32 @@ class TriggerMetadataStore(Protocol):
         schedule_id: str,
         next_fire_at: datetime,
     ) -> SplSchedule: ...
+
+
+@runtime_checkable
+class SubscriptionReadable(Protocol):
+    """Optional read-back capability for subscription rows + selector blobs.
+
+    The locked SPL ``MetadataStoreProvider`` is a *write* surface — it exposes
+    no subscription read or list method (design ``§ Data Models``). The REST
+    surface (TS-IMPL-015) nonetheless needs to read a single subscription back
+    by id for ``GET`` / ``PATCH`` / ``DELETE`` / ``:fire``, so this narrow
+    capability Protocol is probed structurally (``runtime_checkable``) by
+    :meth:`custos_trigger.stores.SubscriptionStore.get`.
+
+    The in-process backend satisfies it via its dev/test read accessors; the
+    Postgres adapter gains its own query surface in a later task, at which
+    point it satisfies this Protocol too. Until then a backend that does not
+    implement it surfaces a clear ``SubscriptionReadUnsupportedError`` rather
+    than a silent miss.
+
+    The accessors are synchronous to match the in-process backend's existing
+    read helpers; a future async query surface can widen this without breaking
+    the consumer, which already awaits the wrapping ``SubscriptionStore.get``.
+    """
+
+    def subscription(self, workspace_id: str, subscription_id: str) -> SplSubscription | None: ...
+
+    def subscription_selectors(
+        self, workspace_id: str, subscription_id: str
+    ) -> tuple[SplSubscriptionSelector, ...]: ...

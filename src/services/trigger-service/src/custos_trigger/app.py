@@ -26,11 +26,13 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 from custos_trigger._version import __version__
+from custos_trigger.api import register_exception_handlers
+from custos_trigger.api.routes import subscriptions_router
 from custos_trigger.health import router as health_router
 from custos_trigger.middleware import (
     CallContextError,
@@ -38,7 +40,14 @@ from custos_trigger.middleware import (
     call_context_error_handler,
 )
 from custos_trigger.providers import Providers, load_providers
-from custos_trigger.settings import ENV_METADATA_STORE
+from custos_trigger.settings import (
+    DEFAULT_DISPATCH_MAX_RETRIES,
+    DEFAULT_FANOUT_MAX_DEPTH,
+    ENV_DISPATCH_MAX_RETRIES,
+    ENV_FANOUT_MAX_DEPTH,
+    ENV_METADATA_STORE,
+    ENV_WORKFLOW_ENDPOINT,
+)
 from custos_trigger.stores import (
     ResumeSubscriptionStore,
     ScheduleStore,
@@ -46,9 +55,28 @@ from custos_trigger.stores import (
 )
 
 if TYPE_CHECKING:
+    import httpx
     from fastapi import FastAPI
 
+    from custos_trigger.pipeline.dispatch import Dispatcher
+
 logger = logging.getLogger("custos_trigger")
+
+#: Dapr app-id used to reach the Workflow Service when ``TRIGGER_WF_ENDPOINT``
+#: is unset (the chart always sets it; this keeps dev/test bootable).
+_DEFAULT_WORKFLOW_APP_ID: str = "workflow-service"
+
+
+def _env_int(env: Mapping[str, str], name: str, default: int) -> int:
+    """Parse a non-negative int env knob, falling back to ``default``."""
+    raw = env.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value >= 0 else default
 
 
 def create_app(
@@ -56,6 +84,7 @@ def create_app(
     authz_endpoint: str | None = None,
     environment: str | None = None,
     providers: Providers | None = None,
+    dispatcher: Dispatcher | None = None,
 ) -> FastAPI:
     """Build and return the Trigger Service FastAPI application.
 
@@ -72,6 +101,11 @@ def create_app(
             ``TRIGGER_METADATA_STORE`` env knob — empty/unset selects the
             in-process backend (see :func:`custos_trigger.providers.load_providers`).
             Tests inject an in-memory bundle here to avoid a database.
+        dispatcher: Pre-built matching/dispatch
+            :class:`~custos_trigger.pipeline.dispatch.Dispatcher`. When ``None``
+            (the default) the lifespan builds one over an owned
+            :class:`httpx.AsyncClient` reaching the Workflow Service through
+            Dapr. Tests inject a dispatcher wrapping a fake Workflow client.
 
     The factory is import-safe: no DSN lookups, no socket connections. All
     side-effecting work happens inside the FastAPI lifespan context.
@@ -103,9 +137,54 @@ def create_app(
         app.state.subscription_store = SubscriptionStore(metadata_store)
         app.state.resume_subscription_store = ResumeSubscriptionStore(metadata_store)
         app.state.schedule_store = ScheduleStore(metadata_store)
+
+        # Shared CEL selector evaluator (in-process compile cache) the REST
+        # surface validates selectors with on create/patch and matches with on
+        # :fire.
+        from custos_trigger.selector import SelectorEvaluator
+
+        app.state.selector_evaluator = SelectorEvaluator()
+
+        # The dispatch path needs a Workflow Service client. When a dispatcher
+        # is injected (tests) we use it as-is and own no transport; otherwise we
+        # build one over an httpx client reaching the Workflow Service through
+        # Dapr and close it at shutdown.
+        owned_http_client: httpx.AsyncClient | None = None
+        if dispatcher is not None:
+            app.state.dispatcher = dispatcher
+        else:
+            import httpx
+
+            from custos_trigger.clients import (
+                DaprWorkflowServiceClient,
+                read_dapr_endpoint,
+            )
+            from custos_trigger.dedup import Deduplicator
+            from custos_trigger.pipeline.dispatch import Dispatcher as _Dispatcher
+
+            owned_http_client = httpx.AsyncClient()
+            endpoint = read_dapr_endpoint(
+                os.environ,
+                app_id=os.environ.get(ENV_WORKFLOW_ENDPOINT, _DEFAULT_WORKFLOW_APP_ID),
+            )
+            app.state.dispatcher = _Dispatcher(
+                DaprWorkflowServiceClient(owned_http_client, endpoint),
+                Deduplicator(metadata_store),
+                max_retries=_env_int(
+                    os.environ, ENV_DISPATCH_MAX_RETRIES, DEFAULT_DISPATCH_MAX_RETRIES
+                ),
+                max_fanout_depth=_env_int(
+                    os.environ, ENV_FANOUT_MAX_DEPTH, DEFAULT_FANOUT_MAX_DEPTH
+                ),
+            )
+
         app.state.ready = True
         logger.info("trigger-service is ready")
-        yield
+        try:
+            yield
+        finally:
+            if owned_http_client is not None:
+                await owned_http_client.aclose()
 
     app = FastAPI(
         title="Custos Trigger Service",
@@ -129,7 +208,12 @@ def create_app(
     # `{"error": {"code", "detail"}}` envelope as the middleware itself.
     app.add_exception_handler(CallContextError, call_context_error_handler)
 
+    # Route-level failures (domain TriggerError + request validation) surface
+    # through the RFC 7807 Problem+JSON envelope.
+    register_exception_handlers(app)
+
     app.include_router(health_router)
+    app.include_router(subscriptions_router)
     return app
 
 

@@ -126,6 +126,22 @@ class SubscriptionPatch(WireModel):
     target_workflow_version_id: str | None = None
 
 
+class ManualFireRequest(WireModel):
+    """Request body for ``POST /v1/workspaces/{ws}/triggers/{id}:fire``.
+
+    ``inputs`` is the optional payload handed to the started run; it becomes
+    the normalized event ``data`` (and feeds the deterministic dedup key).
+    """
+
+    inputs: dict[str, Any] = Field(default_factory=dict)
+
+
+class ManualFireResult(WireModel):
+    """Response body for a successful manual ``:fire`` \u2014 the started run id."""
+
+    run_id: str = Field(..., min_length=1)
+
+
 class Subscription(WireModel):
     """The full subscription domain/response model.
 
@@ -300,6 +316,8 @@ def to_spl_schedule(
 
 
 __all__ = [
+    "ManualFireRequest",
+    "ManualFireResult",
     "ResumeRegistration",
     "SelectorMatchType",
     "SourceType",
