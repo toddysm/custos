@@ -168,9 +168,20 @@ class CallContextMiddleware(BaseHTTPMiddleware):
                     401, "callctx_missing", f"{CALLCTX_HEADER} header is required"
                 )
             try:
-                ctx = self._parse_dev_shim_header(raw_header)
-            except (ValueError, json.JSONDecodeError) as exc:
-                return _render_envelope(400, "callctx_malformed", str(exc))
+                payload = json.loads(raw_header)
+            except json.JSONDecodeError:
+                # Transport-level failure: the header is not JSON at all. Keep
+                # the response generic — never echo the parser's raw exception.
+                return _render_envelope(
+                    400, "callctx_malformed", f"{CALLCTX_HEADER} header is not valid JSON"
+                )
+            try:
+                ctx = self._build_dev_shim_context(payload)
+            except ValueError as exc:
+                # Semantic failure: valid JSON that does not describe a usable
+                # call context. Mirrors the verifier path's callctx_invalid so
+                # callers see the same code for "JSON ok, context unusable".
+                return _render_envelope(401, "callctx_invalid", str(exc))
             logger.warning(
                 "call-context dev shim active for %s %s (workspace=%s principal=%s) — "
                 "configure the Auth Service JWKS URL to disable",
@@ -184,8 +195,7 @@ class CallContextMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
     @staticmethod
-    def _parse_dev_shim_header(raw: str) -> CallContext:
-        payload: Any = json.loads(raw)
+    def _build_dev_shim_context(payload: Any) -> CallContext:
         if not isinstance(payload, dict):
             raise ValueError("dev-shim header must decode to a JSON object")
         principal = payload.get("acting_principal_id") or payload.get("actingPrincipalId")

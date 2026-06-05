@@ -120,7 +120,7 @@ class AuditEventModel(BaseModel):
     event_id: str = Field(alias="eventId")
     event_type: str = Field(alias="eventType")
     actor: str
-    subject: dict[str, str] = Field(default_factory=dict)
+    subject: dict[str, object] = Field(default_factory=dict)
     payload: dict[str, object] = Field(default_factory=dict)
     occurred_at: datetime = Field(alias="occurredAt")
 

@@ -127,37 +127,43 @@ def test_dev_shim_non_json_header_is_400() -> None:
     resp = client.get("/whoami", headers={CALLCTX_HEADER: "not-json{"})
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "callctx_malformed"
+    # The raw parser exception text must not leak to callers.
+    assert resp.json()["error"]["detail"] == f"{CALLCTX_HEADER} header is not valid JSON"
 
 
-def test_dev_shim_non_object_payload_is_400() -> None:
+def test_dev_shim_non_object_payload_is_invalid() -> None:
     client = TestClient(_build_app(None))
     resp = client.get("/whoami", headers={CALLCTX_HEADER: json.dumps(["a", "b"])})
-    assert resp.status_code == 400
+    assert resp.status_code == 401
+    assert resp.json()["error"]["code"] == "callctx_invalid"
     assert "JSON object" in resp.json()["error"]["detail"]
 
 
-def test_dev_shim_missing_principal_is_400() -> None:
+def test_dev_shim_missing_principal_is_invalid() -> None:
     client = TestClient(_build_app(None))
     resp = client.get("/whoami", headers=_dev_header({"permissions": [_PERM]}))
-    assert resp.status_code == 400
+    assert resp.status_code == 401
+    assert resp.json()["error"]["code"] == "callctx_invalid"
     assert "acting_principal_id" in resp.json()["error"]["detail"]
 
 
-def test_dev_shim_non_string_workspace_is_400() -> None:
+def test_dev_shim_non_string_workspace_is_invalid() -> None:
     client = TestClient(_build_app(None))
     resp = client.get(
         "/whoami", headers=_dev_header({"acting_principal_id": "x", "workspace_id": 7})
     )
-    assert resp.status_code == 400
+    assert resp.status_code == 401
+    assert resp.json()["error"]["code"] == "callctx_invalid"
     assert "workspace_id" in resp.json()["error"]["detail"]
 
 
-def test_dev_shim_non_list_permissions_is_400() -> None:
+def test_dev_shim_non_list_permissions_is_invalid() -> None:
     client = TestClient(_build_app(None))
     resp = client.get(
         "/whoami", headers=_dev_header({"acting_principal_id": "x", "permissions": "logs:read"})
     )
-    assert resp.status_code == 400
+    assert resp.status_code == 401
+    assert resp.json()["error"]["code"] == "callctx_invalid"
     assert "permissions" in resp.json()["error"]["detail"]
 
 

@@ -154,3 +154,20 @@ def test_audit_event_page_from_domain_empty() -> None:
     model = AuditEventPageModel.from_domain(page)
     assert model.items == []
     assert model.next_cursor is None
+
+
+def test_audit_event_preserves_non_string_subject_and_payload_values() -> None:
+    # SPL types subject/payload as Mapping[str, Any]: nested + non-string values
+    # must pass through the wire model unchanged rather than being coerced.
+    event = AuditEvent(
+        workspace_id=WorkspaceId("ws-1"),
+        event_id="evt-1",
+        event_type="workflow.run.completed",
+        actor="user-1",
+        subject={"runId": "run-1", "attempt": 3, "nested": {"k": "v"}},
+        payload={"counts": [1, 2, 3], "ok": True},
+        occurred_at=_TS,
+    )
+    dumped = AuditEventModel.from_domain(event).model_dump(by_alias=True)
+    assert dumped["subject"] == {"runId": "run-1", "attempt": 3, "nested": {"k": "v"}}
+    assert dumped["payload"] == {"counts": [1, 2, 3], "ok": True}
