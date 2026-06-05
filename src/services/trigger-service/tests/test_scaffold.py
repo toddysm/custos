@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import importlib
 
-import pytest
-
 
 def test_package_imports_and_exposes_version() -> None:
     module = importlib.import_module("custos_trigger")
@@ -18,16 +16,16 @@ def test_package_imports_and_exposes_version() -> None:
     assert module.__all__ == ["__version__", "create_app"]
 
 
-def test_create_app_factory_target_exists_and_is_stubbed() -> None:
+def test_create_app_factory_target_builds_a_fastapi_app() -> None:
     # The ``python -m custos_trigger`` / console-script entry point asks
     # uvicorn to import ``custos_trigger:create_app`` (``factory=True``).
-    # Assert that target resolves so the entry-point wiring cannot silently
-    # break; it is a scaffold stub raising ``NotImplementedError`` until the
-    # FastAPI skeleton lands in TS-IMPL-003.
+    # Assert that target resolves and constructs a FastAPI app so the
+    # entry-point wiring cannot silently break (TS-IMPL-003).
     module = importlib.import_module("custos_trigger")
     assert callable(module.create_app)
-    with pytest.raises(NotImplementedError):
-        module.create_app()
+    from fastapi import FastAPI
+
+    assert isinstance(module.create_app(), FastAPI)
 
 
 def test_main_entry_point_is_callable() -> None:
