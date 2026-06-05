@@ -18,8 +18,7 @@ the subsequent TS-IMPL phases.
 
 from __future__ import annotations
 
+from custos_trigger._version import __version__
 from custos_trigger.app import create_app
 
 __all__ = ["__version__", "create_app"]
-
-__version__ = "0.1.0"

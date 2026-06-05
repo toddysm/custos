@@ -31,6 +31,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
+from custos_trigger._version import __version__
 from custos_trigger.health import router as health_router
 from custos_trigger.middleware import (
     CallContextError,
@@ -40,8 +41,6 @@ from custos_trigger.middleware import (
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
-
-__version__ = "0.1.0"
 
 logger = logging.getLogger("custos_trigger")
 
@@ -91,11 +90,12 @@ def create_app(
         lifespan=lifespan,
     )
 
-    # CallContextMiddleware is instantiated lazily on the first request, so a
-    # DevShimDisabledInProductionError surfaces during startup (visible to the
-    # operator the same way any startup exception is) rather than at
-    # create_app() time. This keeps the factory side-effect free and trivially
-    # testable.
+    # CallContextMiddleware is instantiated lazily by Starlette when the
+    # middleware stack is first built, so a DevShimDisabledInProductionError
+    # surfaces either at startup or on the first request (whichever builds the
+    # stack first) — visible to the operator the same way any startup
+    # exception is, rather than at create_app() time. This keeps the factory
+    # side-effect free and trivially testable.
     app.add_middleware(
         CallContextMiddleware,
         authz_endpoint=effective_authz,
