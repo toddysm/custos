@@ -1,14 +1,22 @@
-"""The linear matching pipeline (Classify → Match) — TS-IMPL-012.
+"""The linear matching pipeline (Classify → Match → Dispatch).
 
 The :func:`classify` step routes a :class:`~custos_trigger.events.NormalizedEvent`
 to the start and/or resume arms; :class:`StartMatcher` and :class:`ResumeMatcher`
-then select the subscriptions an event actually fires. Dedup and dispatch
-(``TS-IMPL-009`` / ``TS-IMPL-014``) consume the matches this package produces.
+then select the subscriptions an event actually fires; the :class:`Dispatcher`
+(``TS-IMPL-014``) drives those matches to the Workflow Service with retry,
+dedup, and fan-out loop protection.
 """
 
 from __future__ import annotations
 
 from custos_trigger.pipeline.classify import Classification, classify
+from custos_trigger.pipeline.dispatch import (
+    AuditSink,
+    Dispatcher,
+    DispatchOutcome,
+    DispatchStatus,
+    NoopAuditSink,
+)
 from custos_trigger.pipeline.match_resume import (
     ResumeCandidate,
     ResumeKey,
@@ -19,7 +27,12 @@ from custos_trigger.pipeline.match_resume import (
 from custos_trigger.pipeline.match_start import StartMatch, StartMatcher
 
 __all__ = [
+    "AuditSink",
     "Classification",
+    "DispatchOutcome",
+    "DispatchStatus",
+    "Dispatcher",
+    "NoopAuditSink",
     "ResumeCandidate",
     "ResumeKey",
     "ResumeMatch",

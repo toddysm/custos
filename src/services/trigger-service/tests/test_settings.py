@@ -8,6 +8,7 @@ from custos_trigger.settings import (
     DEFAULT_DEDUP_TTL_SECONDS,
     DEFAULT_DISPATCH_MAX_RETRIES,
     DEFAULT_ENVIRONMENT,
+    DEFAULT_FANOUT_MAX_DEPTH,
     DEFAULT_NORMALIZED_TOPIC,
     DEFAULT_POLLER_DEFAULT_INTERVAL_SECONDS,
     DEFAULT_PUBSUB_COMPONENT,
@@ -41,6 +42,7 @@ def test_defaults_applied_when_only_required_set() -> None:
     assert settings.poller_default_interval_seconds == DEFAULT_POLLER_DEFAULT_INTERVAL_SECONDS
     assert settings.resume_default_ttl_seconds == DEFAULT_RESUME_DEFAULT_TTL_SECONDS
     assert settings.dispatch_max_retries == DEFAULT_DISPATCH_MAX_RETRIES
+    assert settings.fanout_max_depth == DEFAULT_FANOUT_MAX_DEPTH
     assert settings.scheduler_leader_lease_seconds == DEFAULT_SCHEDULER_LEADER_LEASE_SECONDS
     assert settings.pubsub_component == DEFAULT_PUBSUB_COMPONENT
     assert settings.normalized_topic == DEFAULT_NORMALIZED_TOPIC
@@ -58,6 +60,7 @@ def test_defaults_applied_when_only_required_set() -> None:
         ("TRIGGER_POLLER_DEFAULT_INTERVAL_SECONDS", "15", "poller_default_interval_seconds", 15),
         ("TRIGGER_RESUME_DEFAULT_TTL_SECONDS", "3600", "resume_default_ttl_seconds", 3600),
         ("TRIGGER_DISPATCH_MAX_RETRIES", "9", "dispatch_max_retries", 9),
+        ("TRIGGER_FANOUT_MAX_DEPTH", "4", "fanout_max_depth", 4),
         ("TRIGGER_SCHEDULER_LEADER_LEASE_SECONDS", "45", "scheduler_leader_lease_seconds", 45),
         ("TRIGGER_PUBSUB_COMPONENT", "my-pubsub", "pubsub_component", "my-pubsub"),
         ("TRIGGER_NORMALIZED_TOPIC", "custom.normalized", "normalized_topic", "custom.normalized"),

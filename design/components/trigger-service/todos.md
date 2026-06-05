@@ -27,7 +27,7 @@ First implementation milestone: the MVP vertical slice that unblocks the Workflo
 - [x] TS-IMPL-011 (#641): CEL selector evaluator (resolves TODO-002).
 - [x] TS-IMPL-012 (#642): Classifier + Start Matcher + Resume Matcher.
 - [x] TS-IMPL-013 (#643): `WorkflowServiceClient` — Dapr Service-Invocation adapter.
-- [F] TS-IMPL-014 (#644): Dispatcher.
+- [x] TS-IMPL-014 (#644): Dispatcher.
 
 ### Phase D — Receivers & RPC surface (WF-unblockers)
 
