@@ -133,7 +133,7 @@ def _require(name: str, env: dict[str, str]) -> str:
     return value
 
 
-def _opt_positive_int(name: str, env: dict[str, str], default: int) -> int:
+def _opt_non_negative_int(name: str, env: dict[str, str], default: int) -> int:
     raw = env.get(name)
     if raw is None or raw.strip() == "":
         return default
@@ -157,17 +157,19 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
     src: dict[str, str] = dict(os.environ if env is None else env)
     return Settings(
         webhook_base_url=_require(ENV_WEBHOOK_BASE_URL, src),
-        dedup_ttl_seconds=_opt_positive_int(ENV_DEDUP_TTL_SECONDS, src, DEFAULT_DEDUP_TTL_SECONDS),
-        poller_default_interval_seconds=_opt_positive_int(
+        dedup_ttl_seconds=_opt_non_negative_int(
+            ENV_DEDUP_TTL_SECONDS, src, DEFAULT_DEDUP_TTL_SECONDS
+        ),
+        poller_default_interval_seconds=_opt_non_negative_int(
             ENV_POLLER_DEFAULT_INTERVAL_SECONDS, src, DEFAULT_POLLER_DEFAULT_INTERVAL_SECONDS
         ),
-        resume_default_ttl_seconds=_opt_positive_int(
+        resume_default_ttl_seconds=_opt_non_negative_int(
             ENV_RESUME_DEFAULT_TTL_SECONDS, src, DEFAULT_RESUME_DEFAULT_TTL_SECONDS
         ),
-        dispatch_max_retries=_opt_positive_int(
+        dispatch_max_retries=_opt_non_negative_int(
             ENV_DISPATCH_MAX_RETRIES, src, DEFAULT_DISPATCH_MAX_RETRIES
         ),
-        scheduler_leader_lease_seconds=_opt_positive_int(
+        scheduler_leader_lease_seconds=_opt_non_negative_int(
             ENV_SCHEDULER_LEADER_LEASE_SECONDS, src, DEFAULT_SCHEDULER_LEADER_LEASE_SECONDS
         ),
         pubsub_component=src.get(ENV_PUBSUB_COMPONENT, "").strip() or DEFAULT_PUBSUB_COMPONENT,
