@@ -17,7 +17,7 @@ First implementation milestone: the MVP vertical slice that unblocks the Workflo
 
 ### Phase B — Domain models & persistence
 
-- [F] TS-IMPL-007 (#637): `NormalizedEvent` envelope + API wire + domain models.
+- [x] TS-IMPL-007 (#637): `NormalizedEvent` envelope + API wire + domain models.
 - [F] TS-IMPL-008 (#638): Store adapters over `MetadataStoreProvider` + `providers.py`.
 - [F] TS-IMPL-009 (#639): Dedup / idempotency.
 
