@@ -6,3 +6,20 @@ metadata:
     {{- include "svc.labels" . | nindent 4 }}
 data:
   CUSTOS_SERVICE_NAME: {{ .Chart.Name | quote }}
+  # Non-secret TRIGGER_* env vars. The numeric / TTL knobs come from
+  # design.md § Configuration; the Pub/Sub component + topic refs from
+  # § Dapr Pub/Sub subscriptions; the sibling-service endpoints from
+  # § Dependencies.
+  TRIGGER_WEBHOOK_BASE_URL: {{ .Values.config.webhookBaseUrl | quote }}
+  TRIGGER_DEDUP_TTL_SECONDS: {{ .Values.config.dedupTtlSeconds | quote }}
+  TRIGGER_POLLER_DEFAULT_INTERVAL_SECONDS: {{ .Values.config.pollerDefaultIntervalSeconds | quote }}
+  TRIGGER_RESUME_DEFAULT_TTL_SECONDS: {{ .Values.config.resumeDefaultTtlSeconds | quote }}
+  TRIGGER_DISPATCH_MAX_RETRIES: {{ .Values.config.dispatchMaxRetries | quote }}
+  TRIGGER_SCHEDULER_LEADER_LEASE_SECONDS: {{ .Values.config.schedulerLeaderLeaseSeconds | quote }}
+  # Dapr Pub/Sub component + topic refs (design.md § Dapr Pub/Sub subscriptions).
+  TRIGGER_PUBSUB_COMPONENT: {{ .Values.config.pubsubComponent | quote }}
+  TRIGGER_NORMALIZED_TOPIC: {{ .Values.config.normalizedTopic | quote }}
+  TRIGGER_WORKFLOW_EVENTS_TOPIC: {{ .Values.config.workflowEventsTopic | quote }}
+  # Sibling-service endpoints (design.md § Dependencies).
+  TRIGGER_WF_ENDPOINT: {{ .Values.workflow.endpoint | quote }}
+  TRIGGER_CONNECTOR_ENDPOINT: {{ .Values.connector.endpoint | quote }}

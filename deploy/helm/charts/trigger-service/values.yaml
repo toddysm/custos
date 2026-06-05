@@ -1,12 +1,26 @@
 # trigger-service — leave image.repository/tag/pullPolicy and replicaCount/resources
 # empty to inherit umbrella global.* values. Set them here only to override
 # the umbrella for this one subchart.
+#
+# Configuration variables come from design/components/trigger-service/design.md.
+# The numeric / TTL knobs are from § Configuration; the Dapr Pub/Sub
+# component + topic refs are from § Dapr Pub/Sub subscriptions; the
+# sibling-service endpoints are from § Dependencies. Non-secret vars are
+# projected through the ConfigMap (`config:` / `workflow:` / `connector:`
+# blocks below); the single secret var (the metadata-store Postgres DSN) is
+# projected through the ExternalSecret (`externalSecret:` block below) and
+# becomes container env via envFrom.
 
 enabled: true
 
 replicaCount: ""
 
 image:
+  # Leave repository empty so templates/_helpers.tpl `svc.image` composes
+  # `<global.imageRegistry>/<chart name>`. This keeps airgapped profiles
+  # honouring `global.imageRegistry: registry.internal/custos` and falls
+  # back to the umbrella GHCR default in connected profiles. Override
+  # only when a profile genuinely needs a different per-subchart repo.
   repository: ""
   tag: ""
   pullPolicy: ""
@@ -17,6 +31,8 @@ service:
 
 resources: {}
 
+# Per-pod env overrides. Most config flows through envFrom (ConfigMap +
+# optional ExternalSecret); this list is for ad-hoc overrides only.
 env: []
 
 dapr:
@@ -28,10 +44,66 @@ dapr:
 serviceMonitor:
   enabled: false
 
+# Non-secret TRIGGER_* env vars projected into the ConfigMap.
+#
+# TRIGGER_METADATA_STORE intentionally NOT listed here — it carries a
+# Postgres DSN and flows through `externalSecret` below.
+config:
+  # design.md § Configuration defaults. The Scheduler / Generic Webhook /
+  # Pull receivers are deferred to M2 (see implementation-plan.md), so the
+  # webhook base URL + poller / leader-lease knobs ship with their
+  # documented defaults but are not exercised until those receivers land.
+  #
+  # NOTE: design.md § Configuration marks TRIGGER_WEBHOOK_BASE_URL as
+  # Required with no default — once the Generic Webhook receiver ships,
+  # operators must supply the externally-reachable ingress URL. Until then
+  # this in-cluster Service address is a chart-provided placeholder so the
+  # shipped profiles render without an operator-supplied value; it is NOT a
+  # design-sanctioned default.
+  webhookBaseUrl: http://trigger-service:8080
+  dedupTtlSeconds: 86400
+  pollerDefaultIntervalSeconds: 60
+  resumeDefaultTtlSeconds: 604800
+  dispatchMaxRetries: 5
+  schedulerLeaderLeaseSeconds: 30
+  # Dapr Pub/Sub wiring. The Internal Event Receiver subscribes to
+  # `custos.workflow.events`; receivers publish normalized events onto
+  # `custos.triggers.normalized`. Both topics ride the shared platform
+  # pub/sub component; operators provisioning Dapr Pub/Sub must include
+  # these topics (design.md § Dapr Pub/Sub subscriptions).
+  pubsubComponent: custos-pubsub
+  normalizedTopic: custos.triggers.normalized
+  workflowEventsTopic: custos.workflow.events
+
+# Sibling-service endpoints. Defaults match the in-cluster Service names
+# emitted by the corresponding subcharts; override per-profile when those
+# services are reached through a different address (e.g. via a sidecar /
+# out-of-cluster proxy).
+workflow:
+  # Dispatch target for StartRun / RaiseExternalEvent (design § Dependencies).
+  endpoint: http://workflow-service:8080
+connector:
+  # listen(push) / listen(pull) streams per connector instance (M2; ADR-013).
+  endpoint: http://connector-service:8080
+
+# ExternalSecret carrying the Postgres DSN the service reads at startup
+# (TRIGGER_METADATA_STORE — Subscription / Schedule / DedupKey /
+# ResumeSubscription persistence via MetadataStoreProvider). Disabled by
+# default (eval profiles can synthesise the DSN from the CNPG app secret);
+# HA / connected profiles enable this and project the key from the
+# configured secret store path.
 externalSecret:
   enabled: false
   refreshInterval: 1h
   secretStoreRef:
     name: custos-secret-store
     kind: ClusterSecretStore
-  data: []
+  # Maps the TRIGGER_METADATA_STORE env var (secretKey) to a key in the
+  # upstream secret store. Defaults expect the SPL-conventional path
+  # `custos/storage-provider-layer/metadata-store` populated by ops;
+  # override per deployment as needed.
+  data:
+    - secretKey: TRIGGER_METADATA_STORE
+      remoteRef:
+        key: custos/storage-provider-layer/metadata-store
+        property: dsn
