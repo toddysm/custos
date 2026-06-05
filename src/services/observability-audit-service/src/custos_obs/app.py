@@ -16,6 +16,7 @@ place atop this factory without changing its import-safety contract.
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
@@ -31,10 +32,24 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("custos_obs")
 
+#: Env var holding the Auth Service JWKS URL used to verify call-context JWTs.
+#: When empty the call-context middleware falls back to the unsigned dev shim
+#: (forbidden in ``production``; see :mod:`custos_obs.middleware.callctx`).
+ENV_AUTHZ_JWKS_URL = "CUSTOS_OBS_AUTHZ_JWKS_URL"
+
+#: Env var naming the deployment environment; gates the dev shim.
+ENV_ENVIRONMENT = "ENVIRONMENT"
+
+#: Default environment when ``ENVIRONMENT`` is unset.
+DEFAULT_ENVIRONMENT = "development"
+
 
 def create_app(
     settings: Settings | None = None,
     providers: Providers | None = None,
+    *,
+    authz_jwks_url: str | None = None,
+    environment: str | None = None,
 ) -> FastAPI:
     """Build and return the Observability and Audit Service FastAPI app.
 
@@ -51,11 +66,24 @@ def create_app(
         providers: Pre-built :class:`Providers` (used by tests to inject fakes).
             When ``None`` the lifespan constructs the real SPL adapters from the
             settings via :func:`custos_obs.providers.load_providers`.
+        authz_jwks_url: Auth Service JWKS endpoint used to verify call-context
+            JWTs. When ``None`` it is read from ``CUSTOS_OBS_AUTHZ_JWKS_URL``; an
+            empty value activates the unsigned dev shim (forbidden in
+            production). Resolved at construction because the call-context
+            middleware is added before the lifespan runs.
+        environment: Deployment environment gating the dev shim. When ``None``
+            it is read from ``ENVIRONMENT`` (default ``"development"``).
 
     The factory is import-safe: no DSN lookups, no socket connections. All
     side-effecting work happens inside the FastAPI lifespan context.
     """
     from fastapi import FastAPI
+
+    from custos_obs.middleware import (
+        CallContextError,
+        CallContextMiddleware,
+        call_context_error_handler,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -92,6 +120,45 @@ def create_app(
         version=__version__,
         lifespan=lifespan,
     )
+
+    # Resolve the call-context trust mode now: the middleware is added before
+    # the lifespan runs, so it cannot read the lifespan-loaded Settings. An
+    # explicit JWKS URL builds the real EdDSA verifier; an empty value falls
+    # back to the unsigned dev shim, which refuses to start in production.
+    effective_jwks_url = (
+        authz_jwks_url if authz_jwks_url is not None else os.environ.get(ENV_AUTHZ_JWKS_URL, "")
+    ).strip()
+    effective_env = (
+        environment
+        if environment is not None
+        else os.environ.get(ENV_ENVIRONMENT, DEFAULT_ENVIRONMENT)
+    )
+    verifier = None
+    if effective_jwks_url:
+        from custos_callctx import CallContextVerifier
+
+        verifier = CallContextVerifier(jwks_url=effective_jwks_url)
+    else:
+        # Fail fast at construction (Starlette instantiates middleware lazily,
+        # so the middleware's own guard would otherwise not fire until the first
+        # request). Mirrors CallContextMiddleware's production check.
+        from custos_obs.middleware import DevShimDisabledInProductionError
+
+        if effective_env.lower() == "production":
+            raise DevShimDisabledInProductionError(
+                "no call-context verifier configured but ENVIRONMENT=production; "
+                "set CUSTOS_OBS_AUTHZ_JWKS_URL to the Auth Service JWKS URL."
+            )
+    app.add_middleware(
+        CallContextMiddleware,
+        verifier=verifier,
+        environment=effective_env,
+    )
+    # Pair the middleware with its handler so the dependency-side 4xx responses
+    # (get_call_context / require_permission) emit the same error envelope as
+    # the middleware itself.
+    app.add_exception_handler(CallContextError, call_context_error_handler)
+
     app.include_router(health_router)
     return app
 

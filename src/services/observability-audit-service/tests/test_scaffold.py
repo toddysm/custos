@@ -84,3 +84,22 @@ def test_readyz_resets_after_lifespan_shutdown() -> None:
     client = TestClient(app)
     resp = client.get("/readyz")
     assert resp.status_code == 503
+
+
+def test_create_app_builds_verifier_when_jwks_url_configured() -> None:
+    # A configured JWKS URL switches the call-context middleware into the real
+    # EdDSA-verifier mode (no unsigned dev shim). Construction stays import-safe:
+    # the verifier defers its JWKS fetch to the first request.
+    app = create_app(authz_jwks_url="https://auth.example.com/.well-known/jwks.json")
+    assert app.title == "Custos Observability and Audit Service"
+
+
+def test_create_app_dev_shim_forbidden_in_production() -> None:
+    import pytest
+
+    from custos_obs.middleware import DevShimDisabledInProductionError
+
+    # No JWKS URL + production environment must refuse to construct rather than
+    # silently accept unsigned call-context headers.
+    with pytest.raises(DevShimDisabledInProductionError):
+        create_app(authz_jwks_url="", environment="production")
