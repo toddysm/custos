@@ -11,7 +11,7 @@ First implementation milestone: the MVP vertical slice that unblocks the Workflo
 - [x] TS-IMPL-001 (#631): Scaffold `custos-trigger-service` + CI gate.
 - [x] TS-IMPL-002 (#632): Wire trigger-service Helm subchart.
 - [x] TS-IMPL-003 (#633): FastAPI skeleton + health probes + call-context shim.
-- [F] TS-IMPL-004 (#634): Settings + locked `trigger.*` error taxonomy.
+- [x] TS-IMPL-004 (#634): Settings + locked `trigger.*` error taxonomy.
 - [F] TS-IMPL-005 (#635): `custos-cel` `event` binding root (ADR-011 extension).
 - [F] TS-IMPL-006 (#636): Canonical event taxonomy registry (resolves TODO-001).
 
