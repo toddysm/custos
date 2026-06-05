@@ -41,7 +41,7 @@ from custos_trigger.dependencies import (
     get_subscription_store,
 )
 from custos_trigger.errors import TriggerError, TriggerErrorKind
-from custos_trigger.middleware import CallContext, require_permission
+from custos_trigger.middleware import CallContext, CallContextError, require_permission
 from custos_trigger.models import (
     ManualFireRequest,
     ManualFireResult,
@@ -100,6 +100,23 @@ def _not_found(subscription_id: str) -> TriggerError:
     )
 
 
+def _ensure_workspace(ctx: CallContext, workspace_id: str) -> None:
+    """Reject a request whose path workspace differs from the call context's.
+
+    The path ``{workspace_id}`` is authoritative for persistence while the call
+    context governs RBAC; if they disagree the caller is reaching across
+    workspace boundaries. This is defense-in-depth against a mismatched path
+    (and, with the dev shim's unsigned header, the only thing stopping a caller
+    from naming an arbitrary workspace).
+    """
+    if ctx.workspace_id != workspace_id:
+        raise CallContextError(
+            status_code=403,
+            code="workspace_mismatch",
+            detail="call context workspace does not match the request path workspace",
+        )
+
+
 @router.post(
     "",
     status_code=status.HTTP_201_CREATED,
@@ -111,9 +128,10 @@ async def create_subscription(
     body: SubscriptionCreate,
     store: StoreDep,
     evaluator: EvaluatorDep,
-    _ctx: Annotated[CallContext, Depends(require_permission(PERM_WRITE))],
+    ctx: Annotated[CallContext, Depends(require_permission(PERM_WRITE))],
 ) -> Subscription:
     """Create a manual/start subscription and return the persisted row."""
+    _ensure_workspace(ctx, workspace_id)
     subscription_id = uuid.uuid4().hex
     _validate_selector(evaluator, body.selector, subscription_id=subscription_id)
     now = _now()
@@ -142,9 +160,10 @@ async def get_subscription(
     workspace_id: _WorkspacePath,
     subscription_id: _SubscriptionPath,
     store: StoreDep,
-    _ctx: Annotated[CallContext, Depends(require_permission(PERM_READ))],
+    ctx: Annotated[CallContext, Depends(require_permission(PERM_READ))],
 ) -> Subscription:
     """Read one subscription back by id (404 when unknown)."""
+    _ensure_workspace(ctx, workspace_id)
     subscription = await store.get(workspace_id, subscription_id)
     if subscription is None:
         raise _not_found(subscription_id)
@@ -162,26 +181,34 @@ async def patch_subscription(
     body: SubscriptionPatch,
     store: StoreDep,
     evaluator: EvaluatorDep,
-    _ctx: Annotated[CallContext, Depends(require_permission(PERM_WRITE))],
+    ctx: Annotated[CallContext, Depends(require_permission(PERM_WRITE))],
 ) -> Subscription:
     """Amend a subscription's selector / input mapping / target / state."""
+    _ensure_workspace(ctx, workspace_id)
     existing = await store.get(workspace_id, subscription_id)
     if existing is None:
         raise _not_found(subscription_id)
 
-    if body.selector is not None:
+    # ``model_fields_set`` distinguishes a field sent as ``null`` (an explicit
+    # clear) from a field omitted entirely. ``selector`` and
+    # ``target_workflow_version_id`` are optional on the entity and so may be
+    # cleared; ``input_mapping`` is non-optional, so a value is applied only
+    # when present.
+    fields_set = body.model_fields_set
+
+    if "selector" in fields_set and body.selector is not None:
         _validate_selector(evaluator, body.selector, subscription_id=subscription_id)
 
     # Fields carried in the selector revision blob (selector / mapping /
     # target) versus the base-row state column are persisted via distinct SPL
     # writes, so split the patch accordingly.
     blob_updates: dict[str, object] = {}
-    if body.selector is not None:
+    if "selector" in fields_set:
         blob_updates["selector"] = body.selector
-    if body.input_mapping is not None:
-        blob_updates["input_mapping"] = body.input_mapping
-    if body.target_workflow_version_id is not None:
+    if "target_workflow_version_id" in fields_set:
         blob_updates["target_workflow_version_id"] = body.target_workflow_version_id
+    if "input_mapping" in fields_set and body.input_mapping is not None:
+        blob_updates["input_mapping"] = body.input_mapping
 
     next_state = body.state if body.state is not None else existing.state
     merged = existing.model_copy(update={**blob_updates, "state": next_state, "updated_at": _now()})
@@ -202,13 +229,14 @@ async def delete_subscription(
     workspace_id: _WorkspacePath,
     subscription_id: _SubscriptionPath,
     store: StoreDep,
-    _ctx: Annotated[CallContext, Depends(require_permission(PERM_DELETE))],
+    ctx: Annotated[CallContext, Depends(require_permission(PERM_DELETE))],
 ) -> Response:
     """Soft-delete a subscription by transitioning it to ``expired``.
 
     The locked SPL surface has no row-delete; ``expired`` is the terminal
     lifecycle state and stops the subscription from matching any future event.
     """
+    _ensure_workspace(ctx, workspace_id)
     existing = await store.get(workspace_id, subscription_id)
     if existing is None:
         raise _not_found(subscription_id)
@@ -229,9 +257,10 @@ async def fire_subscription(
     store: StoreDep,
     evaluator: EvaluatorDep,
     dispatcher: DispatcherDep,
-    _ctx: Annotated[CallContext, Depends(require_permission(PERM_FIRE))],
+    ctx: Annotated[CallContext, Depends(require_permission(PERM_FIRE))],
 ) -> ManualFireResult | JSONResponse:
     """Fire a subscription now: normalize -> match -> dispatch -> ``{runId}``."""
+    _ensure_workspace(ctx, workspace_id)
     subscription = await store.get(workspace_id, subscription_id)
     if subscription is None:
         raise _not_found(subscription_id)

@@ -121,6 +121,30 @@ def test_patch_state_only(client: TestClient) -> None:
     assert patched.json()["state"] == "paused"
 
 
+def test_patch_can_clear_selector_with_null(client: TestClient) -> None:
+    created = _create(client, selector="event.data.region == 'emea'")
+    subscription_id = created["subscriptionId"]
+    patched = client.patch(
+        f"{_TRIGGERS}/{subscription_id}",
+        json={"selector": None},
+        headers=_ctx_header(_ALL_PERMS),
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json().get("selector") is None
+
+
+def test_patch_can_clear_target_version_with_null(client: TestClient) -> None:
+    created = _create(client)
+    subscription_id = created["subscriptionId"]
+    patched = client.patch(
+        f"{_TRIGGERS}/{subscription_id}",
+        json={"targetWorkflowVersionId": None},
+        headers=_ctx_header(_ALL_PERMS),
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json().get("targetWorkflowVersionId") is None
+
+
 def test_fire_returns_run_id(client: TestClient, fake_workflow: FakeWorkflowServiceClient) -> None:
     created = _create(client, selector="event.data.region == 'emea'")
     subscription_id = created["subscriptionId"]
@@ -270,6 +294,21 @@ def test_missing_call_context_unauthorized(client: TestClient) -> None:
     assert response.status_code == 401
 
 
+def test_workspace_mismatch_forbidden(client: TestClient) -> None:
+    # The call context names ws_demo but the path targets ws_other.
+    response = client.post(
+        "/v1/workspaces/ws_other/triggers",
+        json={
+            "sourceType": "manual",
+            "workflowId": "wf_orders",
+            "targetWorkflowVersionId": "wfv_1",
+        },
+        headers=_ctx_header(_ALL_PERMS),
+    )
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "workspace_mismatch"
+
+
 def test_malformed_body_is_bad_request(client: TestClient) -> None:
     response = client.post(_TRIGGERS, json={"workflowId": ""}, headers=_ctx_header(_ALL_PERMS))
     assert response.status_code in (400, 422)
@@ -283,3 +322,23 @@ def test_subscription_store_get_requires_readable_backend() -> None:
         import asyncio
 
         asyncio.run(store.get("ws_demo", "sub_1"))
+
+
+def test_read_unsupported_renders_problem_501() -> None:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient as _TestClient
+
+    from custos_trigger.api import register_exception_handlers
+
+    app = FastAPI()
+    register_exception_handlers(app)
+
+    @app.get("/boom")
+    async def _boom() -> dict[str, str]:
+        raise SubscriptionReadUnsupportedError("backend has no read surface")
+
+    with _TestClient(app) as test_client:
+        response = test_client.get("/boom")
+    assert response.status_code == 501
+    assert response.headers["content-type"].startswith(PROBLEM_MEDIA_TYPE)
+    assert response.json()["code"] == "trigger.api.subscription_read_unsupported"
