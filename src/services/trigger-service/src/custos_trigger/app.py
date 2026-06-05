@@ -40,15 +40,20 @@ from custos_trigger.middleware import (
     call_context_error_handler,
 )
 from custos_trigger.providers import Providers, load_providers
+from custos_trigger.receivers import build_internal_event_router
 from custos_trigger.settings import (
     DEFAULT_DISPATCH_MAX_RETRIES,
     DEFAULT_FANOUT_MAX_DEPTH,
+    DEFAULT_PUBSUB_COMPONENT,
     DEFAULT_RESUME_DEFAULT_TTL_SECONDS,
+    DEFAULT_WORKFLOW_EVENTS_TOPIC,
     ENV_DISPATCH_MAX_RETRIES,
     ENV_FANOUT_MAX_DEPTH,
     ENV_METADATA_STORE,
+    ENV_PUBSUB_COMPONENT,
     ENV_RESUME_DEFAULT_TTL_SECONDS,
     ENV_WORKFLOW_ENDPOINT,
+    ENV_WORKFLOW_EVENTS_TOPIC,
 )
 from custos_trigger.stores import (
     ResumeSubscriptionStore,
@@ -237,6 +242,21 @@ def create_app(
     app.include_router(health_router)
     app.include_router(subscriptions_router)
     app.include_router(resume_rpc_router)
+    # The internal-event receiver subscribes to the Workflow Service's lifecycle
+    # topic via Dapr's programmatic subscription route (``GET /dapr/subscribe``).
+    # Both the pub/sub component and topic are config-driven so air-gapped /
+    # alternate broker deployments can retarget them without a code change.
+    app.include_router(
+        build_internal_event_router(
+            pubsub_component=(
+                os.environ.get(ENV_PUBSUB_COMPONENT, "").strip() or DEFAULT_PUBSUB_COMPONENT
+            ),
+            workflow_events_topic=(
+                os.environ.get(ENV_WORKFLOW_EVENTS_TOPIC, "").strip()
+                or DEFAULT_WORKFLOW_EVENTS_TOPIC
+            ),
+        )
+    )
     return app
 
 

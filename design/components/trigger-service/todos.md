@@ -34,7 +34,7 @@ First implementation milestone: the MVP vertical slice that unblocks the Workflo
 - [x] TS-IMPL-015 (#645): Manual Receiver + REST CRUD (REQ-004).
 - [x] TS-IMPL-016 (#646): Resume RPCs `RegisterResumeSubscription` / `CancelResumeSubscription` (REQ-081).
 - [x] TS-IMPL-017 (#647): Internal Event Receiver (REQ-080 + REQ-081 delivery).
-- [F] TS-IMPL-018 (#648): App wiring — mount routers + Dapr subscription + lifespan.
+- [x] TS-IMPL-018 (#648): App wiring — mount routers + Dapr subscription + lifespan.
 
 ### Phase E — Observability, verification, docs
 
