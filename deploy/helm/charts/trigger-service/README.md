@@ -31,6 +31,7 @@ sibling-service endpoints from § Dependencies:
 | `TRIGGER_POLLER_DEFAULT_INTERVAL_SECONDS` | `60` | `config.pollerDefaultIntervalSeconds` |
 | `TRIGGER_RESUME_DEFAULT_TTL_SECONDS` | `604800` | `config.resumeDefaultTtlSeconds` |
 | `TRIGGER_DISPATCH_MAX_RETRIES` | `5` | `config.dispatchMaxRetries` |
+| `TRIGGER_FANOUT_MAX_DEPTH` | `16` | `config.fanoutMaxDepth` |
 | `TRIGGER_SCHEDULER_LEADER_LEASE_SECONDS` | `30` | `config.schedulerLeaderLeaseSeconds` |
 | `TRIGGER_PUBSUB_COMPONENT` | `custos-pubsub` | `config.pubsubComponent` |
 | `TRIGGER_NORMALIZED_TOPIC` | `custos.triggers.normalized` | `config.normalizedTopic` |

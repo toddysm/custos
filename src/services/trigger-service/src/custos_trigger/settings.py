@@ -37,6 +37,12 @@ ENV_RESUME_DEFAULT_TTL_SECONDS: Final[str] = "TRIGGER_RESUME_DEFAULT_TTL_SECONDS
 #: Optional. Max retries dispatching to the Workflow Service. Default ``5``.
 ENV_DISPATCH_MAX_RETRIES: Final[str] = "TRIGGER_DISPATCH_MAX_RETRIES"
 
+#: Optional. Per-tenant fan-out depth limit — the dispatcher rejects (and audits
+#: ``trigger.loop.detected``) any dispatch whose inbound event chain depth
+#: exceeds this, breaking internal-event loops (workflow A starts B starts A).
+#: Default ``16``.
+ENV_FANOUT_MAX_DEPTH: Final[str] = "TRIGGER_FANOUT_MAX_DEPTH"
+
 #: Optional. Scheduler leader lock TTL (seconds) — the single-fire guarantee
 #: across replicas. Default ``30``.
 ENV_SCHEDULER_LEADER_LEASE_SECONDS: Final[str] = "TRIGGER_SCHEDULER_LEADER_LEASE_SECONDS"
@@ -83,6 +89,7 @@ DEFAULT_DEDUP_TTL_SECONDS: Final[int] = 86_400
 DEFAULT_POLLER_DEFAULT_INTERVAL_SECONDS: Final[int] = 60
 DEFAULT_RESUME_DEFAULT_TTL_SECONDS: Final[int] = 604_800
 DEFAULT_DISPATCH_MAX_RETRIES: Final[int] = 5
+DEFAULT_FANOUT_MAX_DEPTH: Final[int] = 16
 DEFAULT_SCHEDULER_LEADER_LEASE_SECONDS: Final[int] = 30
 DEFAULT_PUBSUB_COMPONENT: Final[str] = "custos-pubsub"
 DEFAULT_NORMALIZED_TOPIC: Final[str] = "custos.triggers.normalized"
@@ -103,6 +110,7 @@ class Settings:
     poller_default_interval_seconds: int
     resume_default_ttl_seconds: int
     dispatch_max_retries: int
+    fanout_max_depth: int
     scheduler_leader_lease_seconds: int
     pubsub_component: str
     normalized_topic: str
@@ -169,6 +177,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         dispatch_max_retries=_opt_non_negative_int(
             ENV_DISPATCH_MAX_RETRIES, src, DEFAULT_DISPATCH_MAX_RETRIES
         ),
+        fanout_max_depth=_opt_non_negative_int(ENV_FANOUT_MAX_DEPTH, src, DEFAULT_FANOUT_MAX_DEPTH),
         scheduler_leader_lease_seconds=_opt_non_negative_int(
             ENV_SCHEDULER_LEADER_LEASE_SECONDS, src, DEFAULT_SCHEDULER_LEADER_LEASE_SECONDS
         ),
@@ -189,6 +198,7 @@ __all__ = [
     "DEFAULT_DEDUP_TTL_SECONDS",
     "DEFAULT_DISPATCH_MAX_RETRIES",
     "DEFAULT_ENVIRONMENT",
+    "DEFAULT_FANOUT_MAX_DEPTH",
     "DEFAULT_NORMALIZED_TOPIC",
     "DEFAULT_POLLER_DEFAULT_INTERVAL_SECONDS",
     "DEFAULT_PUBSUB_COMPONENT",
@@ -200,6 +210,7 @@ __all__ = [
     "ENV_DEDUP_TTL_SECONDS",
     "ENV_DISPATCH_MAX_RETRIES",
     "ENV_ENVIRONMENT",
+    "ENV_FANOUT_MAX_DEPTH",
     "ENV_METADATA_STORE",
     "ENV_NORMALIZED_TOPIC",
     "ENV_POLLER_DEFAULT_INTERVAL_SECONDS",
