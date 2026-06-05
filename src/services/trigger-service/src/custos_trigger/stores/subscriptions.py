@@ -20,9 +20,17 @@ from custos_trigger.models import (
     to_spl_subscription,
     to_spl_subscription_selector,
 )
-from custos_trigger.stores.base import SubscriptionReadable, TriggerMetadataStore
+from custos_trigger.stores.base import (
+    SubscriptionListable,
+    SubscriptionReadable,
+    TriggerMetadataStore,
+)
 
-__all__ = ["SubscriptionReadUnsupportedError", "SubscriptionStore"]
+__all__ = [
+    "SubscriptionListUnsupportedError",
+    "SubscriptionReadUnsupportedError",
+    "SubscriptionStore",
+]
 
 
 def _utcnow() -> datetime:
@@ -37,6 +45,17 @@ class SubscriptionReadUnsupportedError(RuntimeError):
     :class:`~custos_trigger.stores.base.SubscriptionReadable` can serve
     :meth:`SubscriptionStore.get`. The in-process backend does; the Postgres
     adapter gains the capability in a later task.
+    """
+
+
+class SubscriptionListUnsupportedError(RuntimeError):
+    """Raised when the bound backend exposes no subscription list surface.
+
+    The internal event receiver (TS-IMPL-017) enumerates a workspace's start
+    subscriptions as match candidates; only a backend that also satisfies
+    :class:`~custos_trigger.stores.base.SubscriptionListable` can serve
+    :meth:`SubscriptionStore.list_in_workspace`. The in-process backend does;
+    the Postgres adapter gains the capability in a later task.
     """
 
 
@@ -95,6 +114,31 @@ class SubscriptionStore:
         selectors = store.subscription_selectors(workspace_id, subscription_id)
         latest = selectors[-1] if selectors else None
         return subscription_from_spl(row, latest)
+
+    async def list_in_workspace(self, workspace_id: str) -> list[Subscription]:
+        """Return every subscription in *workspace_id* as match candidates.
+
+        Each row is rehydrated with its latest selector revision (the rich
+        metadata blob the matcher's CEL selector reads). Filtering to ``START``
+        kind / ``ACTIVE`` state is the matcher's job, so the full set is
+        returned here. Raises :class:`SubscriptionListUnsupportedError` when the
+        bound backend has no
+        :class:`~custos_trigger.stores.base.SubscriptionListable` surface.
+        """
+        store = self._store
+        if not isinstance(store, SubscriptionListable):
+            raise SubscriptionListUnsupportedError(
+                "the bound metadata store exposes no subscription list surface"
+            )
+        readable = store if isinstance(store, SubscriptionReadable) else None
+        candidates: list[Subscription] = []
+        for row in store.list_subscriptions(workspace_id):
+            latest = None
+            if readable is not None:
+                selectors = readable.subscription_selectors(workspace_id, str(row.subscription_id))
+                latest = selectors[-1] if selectors else None
+            candidates.append(subscription_from_spl(row, latest))
+        return candidates
 
     async def reauthor_selector(self, subscription: Subscription) -> None:
         """Append a fresh selector revision built from *subscription*."""
