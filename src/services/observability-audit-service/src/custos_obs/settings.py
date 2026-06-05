@@ -61,6 +61,9 @@ ENV_OTEL_EXPORTERS_CONFIGMAP: Final[str] = "CUSTOS_OTEL_EXPORTERS_CONFIGMAP"
 #: Optional. Audit retention window in days. Configurable upward without bound.
 ENV_AUDIT_RETENTION_DAYS: Final[str] = "CUSTOS_AUDIT_RETENTION_DAYS"
 
+#: Optional. Interval (seconds) between retention worker sweeps (OBS-IMPL-007).
+ENV_AUDIT_RETENTION_SWEEP_INTERVAL_S: Final[str] = "CUSTOS_AUDIT_RETENTION_SWEEP_INTERVAL_S"
+
 #: Optional. ``listen`` (LISTEN/NOTIFY) or ``poll`` (interval). Adapters
 #: without LISTEN support fall back to ``poll`` automatically (OBS-IMPL-005).
 ENV_AUDIT_OUTBOX_DRAIN_MODE: Final[str] = "CUSTOS_AUDIT_OUTBOX_DRAIN_MODE"
@@ -105,6 +108,7 @@ DEFAULT_METRICS_QUERY_PROVIDER: Final[str] = "prometheus"
 DEFAULT_OTEL_COLLECTOR_CONFIGMAP: Final[str] = "custos-otel-collector-config"
 DEFAULT_OTEL_EXPORTERS_CONFIGMAP: Final[str] = "custos-otel-exporters"
 DEFAULT_AUDIT_RETENTION_DAYS: Final[int] = 90
+DEFAULT_AUDIT_RETENTION_SWEEP_INTERVAL_S: Final[int] = 3_600  # 1h
 DEFAULT_AUDIT_OUTBOX_DRAIN_MODE: Final[str] = "listen"
 DEFAULT_AUDIT_OUTBOX_POLL_INTERVAL_S: Final[int] = 5
 DEFAULT_AUDIT_OUTBOX_RETENTION_MARGIN_S: Final[int] = 86_400  # 24h
@@ -138,6 +142,7 @@ class Settings:
     otel_collector_configmap: str
     otel_exporters_configmap: str
     audit_retention_days: int
+    audit_retention_sweep_interval_s: int
     audit_outbox_drain_mode: str
     audit_outbox_poll_interval_s: int
     audit_outbox_retention_margin_s: int
@@ -278,6 +283,9 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         audit_retention_days=_opt_positive_int(
             ENV_AUDIT_RETENTION_DAYS, src, DEFAULT_AUDIT_RETENTION_DAYS
         ),
+        audit_retention_sweep_interval_s=_opt_positive_int(
+            ENV_AUDIT_RETENTION_SWEEP_INTERVAL_S, src, DEFAULT_AUDIT_RETENTION_SWEEP_INTERVAL_S
+        ),
         audit_outbox_drain_mode=drain_mode,
         audit_outbox_poll_interval_s=_opt_positive_int(
             ENV_AUDIT_OUTBOX_POLL_INTERVAL_S, src, DEFAULT_AUDIT_OUTBOX_POLL_INTERVAL_S
@@ -309,6 +317,7 @@ __all__ = [
     "DEFAULT_AUDIT_OUTBOX_POLL_INTERVAL_S",
     "DEFAULT_AUDIT_OUTBOX_RETENTION_MARGIN_S",
     "DEFAULT_AUDIT_RETENTION_DAYS",
+    "DEFAULT_AUDIT_RETENTION_SWEEP_INTERVAL_S",
     "DEFAULT_ENVIRONMENT",
     "DEFAULT_LOG_QUERY_PROVIDER",
     "DEFAULT_METRICS_QUERY_PROVIDER",
@@ -322,6 +331,7 @@ __all__ = [
     "ENV_AUDIT_OUTBOX_POLL_INTERVAL_S",
     "ENV_AUDIT_OUTBOX_RETENTION_MARGIN",
     "ENV_AUDIT_RETENTION_DAYS",
+    "ENV_AUDIT_RETENTION_SWEEP_INTERVAL_S",
     "ENV_ENVIRONMENT",
     "ENV_LOGS_EXTERNAL_URL",
     "ENV_LOG_QUERY_PROVIDER",
