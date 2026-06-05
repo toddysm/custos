@@ -110,24 +110,30 @@ def workflow_kind_from_status(status: str, *, domain: str = WORKFLOW_EVENT_DOMAI
 def normalize_manual_fire(
     *,
     occurred_at: str,
-    subscription_id: str | None = None,
+    subscription_id: str,
     inputs: Mapping[str, Any] | None = None,
     event_id: str | None = None,
 ) -> NormalizedEvent:
     """Normalize a manual ``:fire`` request into a ``NormalizedEvent``.
 
     The fire's ``inputs`` become the event ``data``; ``kind`` is the canonical
-    ``manual.fire``. When ``event_id`` is omitted it is derived deterministically
-    from the subscription, fire time, and inputs, so a redelivered fire collapses
-    in dedup.
+    ``manual.fire``. A manual fire is subscription-scoped
+    (``POST …/triggers/{id}:fire``), so ``subscription_id`` is required and
+    non-empty — it is the event subject and part of the deterministic
+    ``event_id``, which keeps dedup keys from colliding across subscriptions.
+    When ``event_id`` is omitted it is derived deterministically from the
+    subscription, fire time, and inputs, so a redelivered fire collapses in
+    dedup.
     """
     if not occurred_at:
         raise EventNormalizationError("manual fire requires a non-empty occurred_at")
+    if not subscription_id:
+        raise EventNormalizationError("manual fire requires a non-empty subscription_id")
 
     data: dict[str, Any] = dict(inputs) if inputs else {}
     resolved_event_id = event_id or generate_event_id(
         "manual",
-        subscription_id or "",
+        subscription_id,
         occurred_at,
         json.dumps(data, sort_keys=True, default=str),
     )
@@ -139,7 +145,7 @@ def normalize_manual_fire(
             occurred_at=occurred_at,
         ),
         kind=validate_kind(MANUAL_FIRE_KIND),
-        subject=subscription_id or "",
+        subject=subscription_id,
         data=data,
         raw=EventRaw(body=json.dumps(data, sort_keys=True, default=str)),
     )
@@ -154,13 +160,14 @@ def normalize_workflow_event(
     """Normalize a ``custos.workflow.events`` envelope into a ``NormalizedEvent``.
 
     The envelope is the wire shape the Workflow Service publishes
-    (``{ kind?, workflowVersionId, runId, workspace?, status?, outputs?, occurredAt }``).
+    (``{ kind?, workflowVersionId, runId, workspace?, status?, outputs?, stepId?, occurredAt }``).
     ``kind`` is taken from an explicit, taxonomy-valid envelope ``kind`` when
     present; otherwise it is derived from ``status`` via
     :func:`workflow_kind_from_status`. The ``runId`` becomes the event subject,
     and ``eventId`` (omitted by the producer) is derived deterministically from
-    ``(runId, kind, occurredAt)`` — the same triple the producer dedups on — so
-    Dapr's at-least-once redelivery collapses in the dedup store.
+    the producer's ``(runId, kind, occurredAt)`` dedup triple — ``kind`` already
+    embeds the domain — so Dapr's at-least-once redelivery collapses in the
+    dedup store.
 
     Raises:
         EventNormalizationError: If a required field is missing, or neither
@@ -196,7 +203,7 @@ def normalize_workflow_event(
     if step_id is not None:
         data["stepId"] = step_id
 
-    resolved_event_id = event_id or generate_event_id(domain, run_id, kind, occurred_at)
+    resolved_event_id = event_id or generate_event_id(run_id, kind, occurred_at)
     return NormalizedEvent(
         event_id=resolved_event_id,
         source=EventSource(

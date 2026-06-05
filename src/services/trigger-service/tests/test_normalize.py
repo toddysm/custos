@@ -71,7 +71,7 @@ def test_workflow_kind_from_status_unknown_raises_taxonomy_error() -> None:
 
 
 def test_normalize_manual_fire_minimal() -> None:
-    event = normalize_manual_fire(occurred_at=_OCCURRED_AT)
+    event = normalize_manual_fire(occurred_at=_OCCURRED_AT, subscription_id="sub-1")
 
     assert event.kind == MANUAL_FIRE_KIND
     assert event.source.type is SourceType.MANUAL
@@ -104,13 +104,20 @@ def test_normalize_manual_fire_deterministic_event_id() -> None:
 
 
 def test_normalize_manual_fire_honors_explicit_event_id() -> None:
-    event = normalize_manual_fire(occurred_at=_OCCURRED_AT, event_id="evt-supplied")
+    event = normalize_manual_fire(
+        occurred_at=_OCCURRED_AT, subscription_id="sub-1", event_id="evt-supplied"
+    )
     assert event.event_id == "evt-supplied"
 
 
 def test_normalize_manual_fire_empty_occurred_at_raises() -> None:
     with pytest.raises(EventNormalizationError):
-        normalize_manual_fire(occurred_at="")
+        normalize_manual_fire(occurred_at="", subscription_id="sub-1")
+
+
+def test_normalize_manual_fire_empty_subscription_id_raises() -> None:
+    with pytest.raises(EventNormalizationError):
+        normalize_manual_fire(occurred_at=_OCCURRED_AT, subscription_id="")
 
 
 # --- normalize_workflow_event ------------------------------------------------
