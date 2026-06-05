@@ -80,7 +80,7 @@ def create_app(
     from fastapi import FastAPI
 
     from custos_obs.api.errors import obs_error_handler
-    from custos_obs.api.routes import logs_router
+    from custos_obs.api.routes import audit_router, logs_router, metrics_router
     from custos_obs.errors import ObsError
     from custos_obs.middleware import (
         CallContextError,
@@ -168,6 +168,8 @@ def create_app(
 
     app.include_router(health_router)
     app.include_router(logs_router)
+    app.include_router(metrics_router)
+    app.include_router(audit_router)
     return app
 
 

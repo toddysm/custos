@@ -26,19 +26,25 @@ be wrong). Inbound resume works as soon as an adapter accepts its own cursors.
 from __future__ import annotations
 
 import json
-from datetime import datetime
 from typing import TYPE_CHECKING, Annotated
 
 from custos_spl import Cursor, RunId, StepId, WorkspaceId
 from custos_spl.errors import BackendUnavailable, QueryUnsupported, WorkspaceMismatch
 from custos_spl.interfaces.log_query import LogFilter, LogQueryProvider, Severity
-from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query
+from fastapi import APIRouter, Depends, Header, Query
 from starlette.responses import StreamingResponse
 
 from custos_obs.api.dependencies import get_log_query_provider, get_settings
 from custos_obs.api.models import LogPageModel, LogRecordModel
+from custos_obs.api.routes._common import (
+    RunPath,
+    WorkspacePath,
+    ensure_workspace,
+    parse_iso_datetime,
+    run_not_found,
+)
 from custos_obs.errors import LogQueryUnavailable
-from custos_obs.middleware import CallContext, CallContextError, require_permission
+from custos_obs.middleware import CallContext, require_permission
 from custos_obs.settings import Settings
 
 if TYPE_CHECKING:
@@ -53,28 +59,9 @@ router = APIRouter(prefix="/v1/workspaces/{workspace_id}/runs/{run_id}", tags=["
 #: Permission scope the call-context middleware enforces for log read-back.
 PERM_READ = "logs:read"
 
-_WorkspacePath = Annotated[str, Path(min_length=1, description="Owning workspace id.")]
-_RunPath = Annotated[str, Path(min_length=1, description="Run id.")]
-
 LogProviderDep = Annotated[LogQueryProvider, Depends(get_log_query_provider)]
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 CtxDep = Annotated[CallContext, Depends(require_permission(PERM_READ))]
-
-
-def _ensure_workspace(ctx: CallContext, workspace_id: str) -> None:
-    """Reject a request whose path workspace differs from the call context's.
-
-    The path ``{workspace_id}`` is authoritative for the query while the call
-    context governs RBAC; if they disagree the caller is reaching across
-    workspace boundaries. Defense-in-depth — with the dev-shim's unsigned header
-    this is the only check stopping a caller from naming an arbitrary workspace.
-    """
-    if ctx.workspace_id != workspace_id:
-        raise CallContextError(
-            403,
-            "workspace_mismatch",
-            "call context workspace does not match the request path workspace",
-        )
 
 
 def _log_unavailable(settings: Settings) -> LogQueryUnavailable:
@@ -88,11 +75,6 @@ def _log_unavailable(settings: Settings) -> LogQueryUnavailable:
         "the log query backend is not available; use the external log system",
         extensions=extensions,
     )
-
-
-def _run_not_found(run_id: str) -> HTTPException:
-    """A run that resolves to a different workspace surfaces as ``404``."""
-    return HTTPException(status_code=404, detail=f"run not found: {run_id}")
 
 
 def _data_frame(record: LogRecord) -> str:
@@ -149,7 +131,7 @@ async def _open_tail(
     except (QueryUnsupported, BackendUnavailable) as exc:
         raise _log_unavailable(settings) from exc
     except WorkspaceMismatch as exc:
-        raise _run_not_found(run_id) from exc
+        raise run_not_found(run_id) from exc
     try:
         first: LogRecord | None = await iterator.__anext__()
     except StopAsyncIteration:
@@ -157,14 +139,14 @@ async def _open_tail(
     except (QueryUnsupported, BackendUnavailable) as exc:
         raise _log_unavailable(settings) from exc
     except WorkspaceMismatch as exc:
-        raise _run_not_found(run_id) from exc
+        raise run_not_found(run_id) from exc
     return iterator, first
 
 
 @router.get("/logs/tail")
 async def tail_run_logs(
-    workspace_id: _WorkspacePath,
-    run_id: _RunPath,
+    workspace_id: WorkspacePath,
+    run_id: RunPath,
     provider: LogProviderDep,
     settings: SettingsDep,
     ctx: CtxDep,
@@ -177,7 +159,7 @@ async def tail_run_logs(
     the resume position. A ``noop``/unreachable backend returns ``503`` before
     the stream opens (see :func:`_open_tail`).
     """
-    _ensure_workspace(ctx, workspace_id)
+    ensure_workspace(ctx, workspace_id)
     resume = last_event_id or cursor
     from_cursor = Cursor(token=resume) if resume else None
     iterator, first = await _open_tail(provider, workspace_id, run_id, from_cursor, settings)
@@ -190,8 +172,8 @@ async def tail_run_logs(
 
 @router.get("/logs")
 async def query_run_logs(
-    workspace_id: _WorkspacePath,
-    run_id: _RunPath,
+    workspace_id: WorkspacePath,
+    run_id: RunPath,
     provider: LogProviderDep,
     settings: SettingsDep,
     ctx: CtxDep,
@@ -206,11 +188,11 @@ async def query_run_logs(
     All filters AND-combine. ``stepId`` routes to ``query_step_logs``; otherwise
     the whole run is queried. A ``noop``/unreachable backend returns ``503``.
     """
-    _ensure_workspace(ctx, workspace_id)
+    ensure_workspace(ctx, workspace_id)
     log_filter = LogFilter(
         step_id=StepId(step_id) if step_id is not None else None,
-        start=_parse_dt(from_),
-        end=_parse_dt(to),
+        start=parse_iso_datetime(from_),
+        end=parse_iso_datetime(to),
         severity_at_least=severity,
     )
     page_cursor = Cursor(token=cursor) if cursor is not None else None
@@ -226,30 +208,5 @@ async def query_run_logs(
     except (QueryUnsupported, BackendUnavailable) as exc:
         raise _log_unavailable(settings) from exc
     except WorkspaceMismatch as exc:
-        raise _run_not_found(run_id) from exc
+        raise run_not_found(run_id) from exc
     return LogPageModel.from_domain(page)
-
-
-def _parse_dt(value: str | None) -> datetime | None:
-    """Parse an ISO-8601 query param into a timezone-aware ``datetime``.
-
-    A trailing ``Z`` (UTC designator) is normalised to ``+00:00`` since
-    :meth:`datetime.fromisoformat` only accepts it on newer interpreters. A
-    *timezone-naive* value is rejected with ``400`` rather than silently assumed
-    to be local time: the backend adapters convert to epoch seconds, so an
-    ambiguous offset would produce wrong filter windows. A malformed value is
-    likewise a client error (``400``).
-    """
-    if value is None:
-        return None
-    normalized = f"{value[:-1]}+00:00" if value.endswith("Z") else value
-    try:
-        parsed = datetime.fromisoformat(normalized)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=f"invalid datetime: {value!r}") from exc
-    if parsed.tzinfo is None:
-        raise HTTPException(
-            status_code=400,
-            detail=f"datetime must include a timezone offset: {value!r}",
-        )
-    return parsed

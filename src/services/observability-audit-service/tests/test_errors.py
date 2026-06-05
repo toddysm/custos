@@ -10,6 +10,7 @@ from custos_obs.errors import (
     PROBLEM_TYPE_PREFIX,
     AlertSinkUnavailable,
     AuditDrainLagging,
+    AuditQueryUnavailable,
     ExporterConfigInvalid,
     LogQueryUnavailable,
     MetricsQueryUnavailable,
@@ -21,6 +22,7 @@ from custos_obs.errors import (
 _ERROR_CLASSES: list[tuple[type[ObsError], ObsErrorKind, int]] = [
     (LogQueryUnavailable, ObsErrorKind.LOG_QUERY_UNAVAILABLE, 503),
     (MetricsQueryUnavailable, ObsErrorKind.METRICS_QUERY_UNAVAILABLE, 503),
+    (AuditQueryUnavailable, ObsErrorKind.AUDIT_QUERY_UNAVAILABLE, 503),
     (AuditDrainLagging, ObsErrorKind.AUDIT_DRAIN_LAGGING, 500),
     (AlertSinkUnavailable, ObsErrorKind.ALERT_SINK_UNAVAILABLE, 502),
     (ExporterConfigInvalid, ObsErrorKind.EXPORTER_CONFIG_INVALID, 422),
@@ -35,6 +37,7 @@ def test_locked_kind_set_is_exactly_the_design_failure_modes() -> None:
     assert {
         "LogQueryUnavailable",
         "MetricsQueryUnavailable",
+        "AuditQueryUnavailable",
         "AuditDrainLagging",
         "AlertSinkUnavailable",
         "ExporterConfigInvalid",
@@ -44,6 +47,7 @@ def test_locked_kind_set_is_exactly_the_design_failure_modes() -> None:
 def test_kind_string_values_are_pascal_case_names() -> None:
     assert ObsErrorKind.LOG_QUERY_UNAVAILABLE.value == "LogQueryUnavailable"
     assert ObsErrorKind.METRICS_QUERY_UNAVAILABLE.value == "MetricsQueryUnavailable"
+    assert ObsErrorKind.AUDIT_QUERY_UNAVAILABLE.value == "AuditQueryUnavailable"
     assert ObsErrorKind.AUDIT_DRAIN_LAGGING.value == "AuditDrainLagging"
     assert ObsErrorKind.ALERT_SINK_UNAVAILABLE.value == "AlertSinkUnavailable"
     assert ObsErrorKind.EXPORTER_CONFIG_INVALID.value == "ExporterConfigInvalid"

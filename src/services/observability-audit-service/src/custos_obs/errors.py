@@ -13,6 +13,9 @@ The kinds mirror design ``§ Failure Modes``:
   unreachable. The UI shows the configured ``CUSTOS_LOGS_EXTERNAL_URL`` pointer.
 * ``MetricsQueryUnavailable`` (503) — ``MetricsQueryProvider=noop`` or the metrics
   backend is unreachable. Same external-URL pattern.
+* ``AuditQueryUnavailable`` (503) — the metadata store backing the audit
+  read-back (``MetadataStoreProvider.query_audit``) is unreachable or declines
+  the query. Surfaced by the audit search + single-event lookup routes.
 * ``AuditDrainLagging`` (500) — the outbox drainer fell behind and the outbox row
   count crossed a configurable threshold. Does not block writes; emits an audit
   alert and a Prometheus metric.
@@ -44,6 +47,7 @@ class ObsErrorKind(StrEnum):
 
     LOG_QUERY_UNAVAILABLE = "LogQueryUnavailable"
     METRICS_QUERY_UNAVAILABLE = "MetricsQueryUnavailable"
+    AUDIT_QUERY_UNAVAILABLE = "AuditQueryUnavailable"
     AUDIT_DRAIN_LAGGING = "AuditDrainLagging"
     ALERT_SINK_UNAVAILABLE = "AlertSinkUnavailable"
     EXPORTER_CONFIG_INVALID = "ExporterConfigInvalid"
@@ -133,6 +137,14 @@ class MetricsQueryUnavailable(ObsError):
     status = 503
 
 
+class AuditQueryUnavailable(ObsError):
+    """The audit metadata store is unreachable or declines the read-back query."""
+
+    kind = ObsErrorKind.AUDIT_QUERY_UNAVAILABLE
+    title = "Audit query backend unavailable"
+    status = 503
+
+
 class AuditDrainLagging(ObsError):
     """The audit outbox drainer fell behind a configurable lag threshold."""
 
@@ -163,6 +175,7 @@ __all__ = [
     "PROBLEM_TYPE_PREFIX",
     "AlertSinkUnavailable",
     "AuditDrainLagging",
+    "AuditQueryUnavailable",
     "ExporterConfigInvalid",
     "LogQueryUnavailable",
     "MetricsQueryUnavailable",
