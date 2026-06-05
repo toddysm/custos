@@ -208,6 +208,30 @@ async def test_instrument_emit_observes_then_forwards() -> None:
     assert 'custos_obs_audit_outbox_lag_rows{pipeline_id="audit-1"} 9' in _render(metrics)
 
 
+async def test_instrument_emit_forwards_even_when_observe_raises() -> None:
+    metrics = ServiceMetrics()
+    seen: list[AuditEvent] = []
+
+    async def inner(event: AuditEvent) -> None:
+        seen.append(event)
+
+    # A malformed outbox-lagging payload (missing lag_rows) makes observe_event raise.
+    broken = AuditEvent(
+        workspace_id=WorkspaceId("ws"),
+        event_id="e1",
+        event_type="obs.outbox.lagging",
+        actor="system:observability-audit-service",
+        subject={"component": "observability-audit-service"},
+        payload={"pipeline_id": "audit-1"},
+        occurred_at=_AT,
+    )
+    wrapped = instrument_emit(inner, metrics)
+    await wrapped(broken)
+
+    # The durable write still ran despite the metrics failure.
+    assert seen == [broken]
+
+
 # ----- /metrics router -----
 
 
@@ -233,6 +257,18 @@ def test_create_app_exposes_metrics_without_callctx() -> None:
     resp = client.get("/metrics")
     assert resp.status_code == 200
     assert "custos_obs_alert_dispatch_total" in resp.text
+
+
+def test_metrics_trailing_slash_redirect_bypasses_callctx() -> None:
+    from custos_obs import create_app
+
+    app = create_app()
+    client = TestClient(app)
+    # The redirect-to-canonical on /metrics/ must not be blocked by the
+    # call-context middleware even with no header present.
+    resp = client.get("/metrics/", follow_redirects=False)
+    assert resp.status_code in (307, 308)
+    assert resp.headers["location"].endswith("/metrics")
 
 
 # ----- OTel SDK mirror (in-memory, no global provider mutation) -----

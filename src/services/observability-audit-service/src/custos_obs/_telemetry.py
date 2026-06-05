@@ -28,6 +28,7 @@ before forwarding — no worker internals change.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable, Iterable, Iterator
 from contextlib import contextmanager
 from threading import Lock
@@ -45,6 +46,8 @@ if TYPE_CHECKING:
     from fastapi import APIRouter
     from opentelemetry.metrics import Meter
     from opentelemetry.trace import Span, Tracer
+
+logger = logging.getLogger("custos_obs.telemetry")
 
 #: Instrumentation scope name for the service's tracer + meter.
 INSTRUMENTATION_NAME = "custos_obs"
@@ -90,8 +93,11 @@ def get_meter() -> Meter:
 def span(name: str, **attributes: str | bool | int | float) -> Iterator[Span]:
     """Open a ``custos_obs`` span around a drain / dispatch / merge / query path.
 
-    Records any raised exception on the span and marks it ``ERROR`` before
-    re-raising. A transparent pass-through when no ``TracerProvider`` is set.
+    Records any raised :class:`Exception` on the span and marks it ``ERROR``
+    before re-raising. ``BaseException`` subclasses that signal control flow
+    rather than failure — notably :class:`asyncio.CancelledError` during
+    shutdown/timeouts — propagate untouched and are never recorded as errors.
+    A transparent pass-through when no ``TracerProvider`` is set.
     """
     tracer = get_tracer()
     with tracer.start_as_current_span(name) as current:
@@ -343,13 +349,22 @@ class ServiceMetrics:
 def instrument_emit(emit: EmitCallback, metrics: ServiceMetrics) -> EmitCallback:
     """Wrap an ``emit`` callback so each event also updates :class:`ServiceMetrics`.
 
-    The metric update happens before forwarding; the inner ``emit`` still owns
-    persistence (the SPL audit outbox), so a metric update never blocks or
-    replaces the durable write.
+    The metric update happens before forwarding, but the durable write stays
+    authoritative: a failure inside :meth:`ServiceMetrics.observe_event` (e.g. a
+    malformed payload) is logged and swallowed so ``emit`` — which owns
+    persistence to the SPL audit outbox — always runs.
     """
 
     async def _emit(event: AuditEvent) -> None:
-        metrics.observe_event(event)
+        try:
+            metrics.observe_event(event)
+        except Exception:
+            logger.exception(
+                "failed to record metrics for audit event %s (type=%s); "
+                "forwarding to the durable write regardless",
+                event.event_id,
+                event.event_type,
+            )
         await emit(event)
 
     return _emit
