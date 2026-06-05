@@ -49,17 +49,17 @@ _EXPIRES = datetime(2026, 5, 16, 13, 0, 0, tzinfo=UTC)
 
 def _subscription() -> Subscription:
     return Subscription(
-        workspaceId="ws-1",
-        subscriptionId="sub-1",
+        workspace_id="ws-1",
+        subscription_id="sub-1",
         kind=SubscriptionKind.START,
-        sourceType=SourceType.VENDOR_PUSH,
-        workflowId="wf-1",
-        targetWorkflowVersionId="wf-1@7",
+        source_type=SourceType.VENDOR_PUSH,
+        workflow_id="wf-1",
+        target_workflow_version_id="wf-1@7",
         selector='event.kind == "registry.push"',
-        inputMapping={"image": "${{ event.subject }}"},
+        input_mapping={"image": "${{ event.subject }}"},
         state=SubscriptionState.ACTIVE,
-        createdAt=_CREATED,
-        updatedAt=_UPDATED,
+        created_at=_CREATED,
+        updated_at=_UPDATED,
     )
 
 
@@ -105,17 +105,17 @@ def test_selector_match_type_values() -> None:
 
 def test_subscription_create_round_trips() -> None:
     create = SubscriptionCreate(
-        sourceType=SourceType.MANUAL,
-        workflowId="wf-1",
+        source_type=SourceType.MANUAL,
+        workflow_id="wf-1",
         selector='event.kind == "manual.fire"',
-        inputMapping={"k": "v"},
+        input_mapping={"k": "v"},
     )
     restored = SubscriptionCreate.model_validate_json(create.model_dump_json(by_alias=True))
     assert restored == create
 
 
 def test_subscription_create_camel_case_aliases() -> None:
-    dumped = SubscriptionCreate(sourceType=SourceType.MANUAL, workflowId="wf-1").model_dump(
+    dumped = SubscriptionCreate(source_type=SourceType.MANUAL, workflow_id="wf-1").model_dump(
         by_alias=True
     )
     assert "sourceType" in dumped
@@ -139,9 +139,9 @@ def test_subscription_round_trips() -> None:
 
 def test_resume_registration_round_trips() -> None:
     reg = ResumeRegistration(
-        runId="run-1",
-        stepId="step-1",
-        eventKey="approval",
+        run_id="run-1",
+        step_id="step-1",
+        event_key="approval",
         selector='event.kind == "manual.fire"',
     )
     restored = ResumeRegistration.model_validate_json(reg.model_dump_json(by_alias=True))
@@ -155,17 +155,17 @@ def test_resume_registration_round_trips() -> None:
 
 def test_invalid_source_type_rejected() -> None:
     with pytest.raises(ValidationError):
-        SubscriptionCreate(sourceType="bogus", workflowId="wf-1")  # type: ignore[arg-type]
+        SubscriptionCreate(source_type="bogus", workflow_id="wf-1")  # type: ignore[arg-type]
 
 
 def test_empty_workflow_id_rejected() -> None:
     with pytest.raises(ValidationError):
-        SubscriptionCreate(sourceType=SourceType.MANUAL, workflowId="")
+        SubscriptionCreate(source_type=SourceType.MANUAL, workflow_id="")
 
 
 def test_extra_field_forbidden() -> None:
     with pytest.raises(ValidationError):
-        SubscriptionCreate(sourceType=SourceType.MANUAL, workflowId="wf-1", surprise=1)  # type: ignore[call-arg]
+        SubscriptionCreate(source_type=SourceType.MANUAL, workflow_id="wf-1", surprise=1)  # type: ignore[call-arg]
 
 
 # --------------------------------------------------------------------------
@@ -236,7 +236,7 @@ def test_subscription_from_spl_without_selector_uses_defaults() -> None:
 
 def test_to_spl_resume_subscription_payload() -> None:
     reg = ResumeRegistration(
-        runId="run-1", stepId="step-1", eventKey="approval", selector="event.subject == 'x'"
+        run_id="run-1", step_id="step-1", event_key="approval", selector="event.subject == 'x'"
     )
     spl = to_spl_resume_subscription(
         reg, workspace_id="ws-1", resume_id="res-1", expires_at=_EXPIRES
@@ -249,7 +249,7 @@ def test_to_spl_resume_subscription_payload() -> None:
 
 
 def test_resume_registration_spl_round_trips() -> None:
-    reg = ResumeRegistration(runId="run-2", stepId="step-2", eventKey="k", selector=None)
+    reg = ResumeRegistration(run_id="run-2", step_id="step-2", event_key="k", selector=None)
     spl = to_spl_resume_subscription(
         reg, workspace_id="ws-1", resume_id="res-2", expires_at=_EXPIRES
     )

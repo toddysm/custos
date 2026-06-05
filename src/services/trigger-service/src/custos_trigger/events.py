@@ -34,10 +34,10 @@ class EventSource(WireModel):
     """
 
     type: SourceType
-    connector_instance_id: str | None = Field(default=None, alias="connectorInstanceId")
-    subscription_id: str | None = Field(default=None, alias="subscriptionId")
+    connector_instance_id: str | None = None
+    subscription_id: str | None = None
     vendor: str | None = None
-    occurred_at: str = Field(..., alias="occurredAt", min_length=1)
+    occurred_at: str = Field(..., min_length=1)
 
 
 class EventRaw(WireModel):
@@ -61,8 +61,8 @@ class NormalizedEvent(WireModel):
     construction time, rejecting malformed or platform-colliding kinds.
     """
 
-    schema_version: Literal["1"] = Field(default="1", alias="schemaVersion")
-    event_id: str = Field(..., alias="eventId", min_length=1)
+    schema_version: Literal["1"] = "1"
+    event_id: str = Field(..., min_length=1)
     source: EventSource
     kind: str = Field(..., min_length=1)
     subject: str = ""

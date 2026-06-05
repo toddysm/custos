@@ -105,11 +105,11 @@ class SubscriptionCreate(WireModel):
     ``${{ … }}`` placeholder map handed to the started run.
     """
 
-    source_type: SourceType = Field(..., alias="sourceType")
-    workflow_id: str = Field(..., alias="workflowId", min_length=1)
-    target_workflow_version_id: str | None = Field(default=None, alias="targetWorkflowVersionId")
+    source_type: SourceType
+    workflow_id: str = Field(..., min_length=1)
+    target_workflow_version_id: str | None = None
     selector: str | None = None
-    input_mapping: dict[str, Any] = Field(default_factory=dict, alias="inputMapping")
+    input_mapping: dict[str, Any] = Field(default_factory=dict)
 
 
 class SubscriptionPatch(WireModel):
@@ -122,8 +122,8 @@ class SubscriptionPatch(WireModel):
 
     state: SubscriptionState | None = None
     selector: str | None = None
-    input_mapping: dict[str, Any] | None = Field(default=None, alias="inputMapping")
-    target_workflow_version_id: str | None = Field(default=None, alias="targetWorkflowVersionId")
+    input_mapping: dict[str, Any] | None = None
+    target_workflow_version_id: str | None = None
 
 
 class Subscription(WireModel):
@@ -134,17 +134,17 @@ class Subscription(WireModel):
     :func:`subscription_from_spl` for reads.
     """
 
-    workspace_id: str = Field(..., alias="workspaceId", min_length=1)
-    subscription_id: str = Field(..., alias="subscriptionId", min_length=1)
+    workspace_id: str = Field(..., min_length=1)
+    subscription_id: str = Field(..., min_length=1)
     kind: SubscriptionKind = SubscriptionKind.START
-    source_type: SourceType = Field(..., alias="sourceType")
-    workflow_id: str = Field(..., alias="workflowId", min_length=1)
-    target_workflow_version_id: str | None = Field(default=None, alias="targetWorkflowVersionId")
+    source_type: SourceType
+    workflow_id: str = Field(..., min_length=1)
+    target_workflow_version_id: str | None = None
     selector: str | None = None
-    input_mapping: dict[str, Any] = Field(default_factory=dict, alias="inputMapping")
+    input_mapping: dict[str, Any] = Field(default_factory=dict)
     state: SubscriptionState = SubscriptionState.ACTIVE
-    created_at: datetime = Field(..., alias="createdAt")
-    updated_at: datetime = Field(..., alias="updatedAt")
+    created_at: datetime
+    updated_at: datetime
 
 
 class ResumeRegistration(WireModel):
@@ -156,9 +156,9 @@ class ResumeRegistration(WireModel):
     :func:`to_spl_resume_subscription` / :func:`resume_registration_from_spl`.
     """
 
-    run_id: str = Field(..., alias="runId", min_length=1)
-    step_id: str = Field(..., alias="stepId", min_length=1)
-    event_key: str = Field(..., alias="eventKey", min_length=1)
+    run_id: str = Field(..., min_length=1)
+    step_id: str = Field(..., min_length=1)
+    event_key: str = Field(..., min_length=1)
     selector: str | None = None
 
 
@@ -220,17 +220,17 @@ def subscription_from_spl(
     """
     blob: dict[str, Any] = dict(selector.selector) if selector is not None else {}
     return Subscription(
-        workspaceId=str(row.workspace_id),
-        subscriptionId=str(row.subscription_id),
+        workspace_id=str(row.workspace_id),
+        subscription_id=str(row.subscription_id),
         kind=SubscriptionKind(blob.get(_BLOB_KIND, SubscriptionKind.START.value)),
-        sourceType=SourceType(blob.get(_BLOB_SOURCE_TYPE, SourceType.MANUAL.value)),
-        workflowId=str(row.workflow_id),
-        targetWorkflowVersionId=blob.get(_BLOB_TARGET_VERSION),
+        source_type=SourceType(blob.get(_BLOB_SOURCE_TYPE, SourceType.MANUAL.value)),
+        workflow_id=str(row.workflow_id),
+        target_workflow_version_id=blob.get(_BLOB_TARGET_VERSION),
         selector=(blob.get(_BLOB_VALUE) or None),
-        inputMapping=dict(blob.get(_BLOB_INPUT_MAPPING) or {}),
+        input_mapping=dict(blob.get(_BLOB_INPUT_MAPPING) or {}),
         state=SubscriptionState(row.state),
-        createdAt=row.created_at,
-        updatedAt=row.updated_at,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
     )
 
 
@@ -263,9 +263,9 @@ def resume_registration_from_spl(row: SplResumeSubscription) -> ResumeRegistrati
     """Rebuild a :class:`ResumeRegistration` from its SPL row."""
     payload: dict[str, Any] = dict(row.payload)
     return ResumeRegistration(
-        runId=str(row.run_id),
-        stepId=str(row.step_id),
-        eventKey=str(payload.get(_PAYLOAD_EVENT_KEY, "")),
+        run_id=str(row.run_id),
+        step_id=str(row.step_id),
+        event_key=str(payload.get(_PAYLOAD_EVENT_KEY, "")),
         selector=payload.get(_PAYLOAD_SELECTOR),
     )
 
