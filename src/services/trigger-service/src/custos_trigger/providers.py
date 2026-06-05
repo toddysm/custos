@@ -169,6 +169,18 @@ class InMemoryTriggerMetadataStore:
         self._dedup[dedup_key] = reserved
         return DedupReserved(key=reserved)
 
+    async def release_dedup_key(self, workspace_id: WorkspaceId, key: str) -> None:
+        """Drop a reserved dedup key (best-effort, idempotent).
+
+        Outside the SPL ``MetadataStoreProvider`` Protocol — it backs the
+        :class:`custos_trigger.dedup.Deduplicator` reserve-before-dispatch
+        rollback so a failed dispatch doesn't poison the dedup window. The
+        Postgres adapter has no equivalent in v1 (design ``§ TODO-007`` defers
+        the selective dedup-clear admin API), so production rollback falls
+        back to TTL expiry there.
+        """
+        self._dedup.pop((str(workspace_id), key), None)
+
     # ----- Schedules -----
 
     async def put_schedule(self, workspace_id: WorkspaceId, schedule: SplSchedule) -> SplSchedule:
