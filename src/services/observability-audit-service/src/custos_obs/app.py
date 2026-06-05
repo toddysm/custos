@@ -79,6 +79,7 @@ def create_app(
     """
     from fastapi import FastAPI
 
+    from custos_obs._telemetry import ServiceMetrics, build_metrics_router
     from custos_obs.api.errors import obs_error_handler
     from custos_obs.api.routes import audit_router, logs_router, metrics_router
     from custos_obs.errors import ObsError
@@ -96,6 +97,9 @@ def create_app(
         app.state.ready = False
         effective_settings = settings if settings is not None else load_settings()
         app.state.settings = effective_settings
+        # ``app.state.metrics`` is wired at construction (below) so the operational
+        # self-instrumentation registry exists before the lifespan runs; later
+        # phases hand it to the workers via ``instrument_emit``.
         logger.info("observability-audit-service starting (v%s)", __version__)
 
         local_providers: Providers | None = None
@@ -123,6 +127,13 @@ def create_app(
         version=__version__,
         lifespan=lifespan,
     )
+
+    # The operational self-instrumentation registry (drainer lag, retention
+    # last-run, exporter status, alert outcomes). Created once and stashed on
+    # ``app.state`` so workers can ``instrument_emit`` against it; always served
+    # on ``GET /metrics`` independently of any OTel SDK.
+    service_metrics = ServiceMetrics()
+    app.state.metrics = service_metrics
 
     # Resolve the call-context trust mode now: the middleware is added before
     # the lifespan runs, so it cannot read the lifespan-loaded Settings. An
@@ -167,6 +178,7 @@ def create_app(
     app.add_exception_handler(ObsError, obs_error_handler)
 
     app.include_router(health_router)
+    app.include_router(build_metrics_router(service_metrics))
     app.include_router(logs_router)
     app.include_router(metrics_router)
     app.include_router(audit_router)
