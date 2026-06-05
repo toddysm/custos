@@ -142,6 +142,46 @@ class ManualFireResult(WireModel):
     run_id: str = Field(..., min_length=1)
 
 
+class RegisterResumeRequest(WireModel):
+    """Body of the ``RegisterResumeSubscription`` internal RPC (TS-IMPL-016).
+
+    Mirrors the wire shape the Workflow Service ``DaprTriggerServiceClient``
+    sends: the ``(run_id, step_id, event_key)`` triple is the idempotency key,
+    ``selector`` is the optional CEL narrowing predicate (``None`` = match on
+    event key alone), and ``ttl`` is the resolved ISO-8601 duration the wait
+    stays live (e.g. ``PT24H``). An absent/unparseable ``ttl`` falls back to
+    ``TRIGGER_RESUME_DEFAULT_TTL_SECONDS``.
+    """
+
+    run_id: str = Field(..., min_length=1)
+    step_id: str = Field(..., min_length=1)
+    event_key: str = Field(..., min_length=1)
+    selector: str | None = None
+    ttl: str | None = None
+
+
+class RegisterResumeResponse(WireModel):
+    """Response body for ``RegisterResumeSubscription`` \u2014 the Trigger handle.
+
+    ``subscription_id`` serializes to ``subscriptionId``, the exact field the
+    Workflow Service ``_parse_register_response`` requires (non-empty string).
+    """
+
+    subscription_id: str = Field(..., min_length=1)
+
+
+class CancelResumeRequest(WireModel):
+    """Body of the ``CancelResumeSubscription`` internal RPC (TS-IMPL-016).
+
+    Carries the same idempotency triple as registration; cancelling an unknown
+    or already-expired key is a clean no-op.
+    """
+
+    run_id: str = Field(..., min_length=1)
+    step_id: str = Field(..., min_length=1)
+    event_key: str = Field(..., min_length=1)
+
+
 class Subscription(WireModel):
     """The full subscription domain/response model.
 
@@ -316,8 +356,11 @@ def to_spl_schedule(
 
 
 __all__ = [
+    "CancelResumeRequest",
     "ManualFireRequest",
     "ManualFireResult",
+    "RegisterResumeRequest",
+    "RegisterResumeResponse",
     "ResumeRegistration",
     "SelectorMatchType",
     "SourceType",

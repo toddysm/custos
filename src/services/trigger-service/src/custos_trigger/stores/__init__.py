@@ -20,8 +20,16 @@ the adapters.
 
 from __future__ import annotations
 
-from custos_trigger.stores.base import SubscriptionReadable, TriggerMetadataStore
-from custos_trigger.stores.resume import ResumeSubscriptionStore
+from custos_trigger.stores.base import (
+    ResumeReadable,
+    SubscriptionReadable,
+    TriggerMetadataStore,
+)
+from custos_trigger.stores.resume import (
+    ResumeReadUnsupportedError,
+    ResumeSubscriptionStore,
+    StoredResumeRegistration,
+)
 from custos_trigger.stores.schedules import ScheduleStore
 from custos_trigger.stores.subscriptions import (
     SubscriptionReadUnsupportedError,
@@ -29,8 +37,11 @@ from custos_trigger.stores.subscriptions import (
 )
 
 __all__ = [
+    "ResumeReadUnsupportedError",
+    "ResumeReadable",
     "ResumeSubscriptionStore",
     "ScheduleStore",
+    "StoredResumeRegistration",
     "SubscriptionReadUnsupportedError",
     "SubscriptionReadable",
     "SubscriptionStore",
