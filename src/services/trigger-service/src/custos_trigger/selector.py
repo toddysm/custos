@@ -163,13 +163,38 @@ def _cel_string_literal(value: str) -> str:
     return json.dumps(value)
 
 
-def _increment_last_char(value: str) -> str:
-    """Return ``value`` with its final code point incremented by one.
+def _increment_code_point(code_point: int) -> int | None:
+    """Return the next valid Unicode scalar value after ``code_point``.
 
-    Used to build the exclusive upper bound of a prefix range: every string
-    starting with ``value`` sorts ``>= value`` and ``< _increment_last_char(value)``.
+    Skips the UTF-16 surrogate range (``U+D800`` to ``U+DFFF``, not valid scalar
+    values) and returns ``None`` when ``code_point`` is already the maximum
+    (``U+10FFFF``) and so has no successor.
     """
-    return value[:-1] + chr(ord(value[-1]) + 1)
+    if code_point >= 0x10FFFF:
+        return None
+    nxt = code_point + 1
+    if 0xD800 <= nxt <= 0xDFFF:
+        return 0xE000
+    return nxt
+
+
+def _prefix_upper_bound(value: str) -> str:
+    """Return the exclusive upper bound of the prefix range for ``value``.
+
+    The smallest string that sorts strictly after every string beginning with
+    ``value``: increment the final code point, carrying left past any code
+    points already at the maximum. Raises :class:`SelectorInvalidError` when no
+    successor exists (every code point is ``U+10FFFF``), which cannot bound a
+    prefix range.
+    """
+    for index in range(len(value) - 1, -1, -1):
+        nxt = _increment_code_point(ord(value[index]))
+        if nxt is not None:
+            return value[:index] + chr(nxt)
+    raise SelectorInvalidError(
+        "prefix value has no lexicographic successor and cannot bound a range",
+        details={"value": value},
+    )
 
 
 def _legacy_field_to_cel_path(field: str) -> str:
@@ -210,7 +235,7 @@ def desugar_legacy_selector(*, field: str, match_type: SelectorMatchType, value:
             # An empty prefix matches any string-valued field.
             return f'{path} >= ""'
         lower = _cel_string_literal(value)
-        upper = _cel_string_literal(_increment_last_char(value))
+        upper = _cel_string_literal(_prefix_upper_bound(value))
         return f"{path} >= {lower} && {path} < {upper}"
 
     if match_type in (SelectorMatchType.REGEX, SelectorMatchType.JSONPATH):

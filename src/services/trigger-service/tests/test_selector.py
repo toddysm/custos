@@ -217,6 +217,38 @@ def test_desugar_prefix_empty_value_matches_any_string() -> None:
     assert evaluator.evaluate(compiled, _event(data={"repository": "anything"})) is True
 
 
+def test_desugar_prefix_carries_past_max_code_point() -> None:
+    # Final code point at U+10FFFF has no successor, so the bound carries to the
+    # previous code point.
+    expr = desugar_legacy_selector(
+        field="repository", match_type=SelectorMatchType.PREFIX, value="a\U0010ffff"
+    )
+    evaluator = SelectorEvaluator()
+    compiled = evaluator.compile(expr, subscription_id="sub-1")
+    assert evaluator.evaluate(compiled, _event(data={"repository": "a\U0010ffffz"})) is True
+    assert evaluator.evaluate(compiled, _event(data={"repository": "b"})) is False
+
+
+def test_desugar_prefix_skips_surrogate_range() -> None:
+    # Incrementing U+D7FF must skip the surrogate block and land on U+E000.
+    expr = desugar_legacy_selector(
+        field="repository", match_type=SelectorMatchType.PREFIX, value="\ud7ff"
+    )
+    evaluator = SelectorEvaluator()
+    compiled = evaluator.compile(expr, subscription_id="sub-1")
+    assert evaluator.evaluate(compiled, _event(data={"repository": "\ud7ffx"})) is True
+
+
+def test_desugar_prefix_without_successor_is_rejected() -> None:
+    # A value that is entirely U+10FFFF has no lexicographic successor.
+    with pytest.raises(SelectorInvalidError):
+        desugar_legacy_selector(
+            field="repository",
+            match_type=SelectorMatchType.PREFIX,
+            value="\U0010ffff\U0010ffff",
+        )
+
+
 def test_desugar_dotted_field() -> None:
     expr = desugar_legacy_selector(
         field="outputs.image", match_type=SelectorMatchType.EQ, value="x"
