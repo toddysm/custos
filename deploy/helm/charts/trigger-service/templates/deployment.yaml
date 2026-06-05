@@ -32,6 +32,15 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "svc.fullname" . }}
+            {{- if .Values.externalSecret.enabled }}
+            # ExternalSecret materializes a Secret under the same name carrying
+            # TRIGGER_METADATA_STORE. Order matters: ConfigMap first so env vars
+            # common to all profiles are set; Secret last so the secret-store-
+            # backed DSN wins on overlap (none today, but keep the precedence
+            # explicit).
+            - secretRef:
+                name: {{ include "svc.fullname" . }}
+            {{- end }}
           {{- with .Values.env }}
           env:
             {{- toYaml . | nindent 12 }}
