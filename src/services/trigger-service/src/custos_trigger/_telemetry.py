@@ -99,4 +99,7 @@ class TelemetryAuditSink:
             span.set_attribute("trigger.stage", stage)
             span.set_attribute("trigger.outcome", outcome)
             span.set_attribute("trigger.workspace_id", workspace_id)
-        await self._inner.emit(event_name, workspace_id=workspace_id, attributes=attributes)
+            # Forward inside the span so the inner sink's work (and any child
+            # spans it emits) is parented to this stage span and the span
+            # duration captures the audit-forwarding latency.
+            await self._inner.emit(event_name, workspace_id=workspace_id, attributes=attributes)

@@ -210,7 +210,7 @@ async def test_telemetry_sink_forwards_to_inner_sink() -> None:
     assert (telemetry.STAGE_OTHER, "custom.unmapped") in points
 
 
-def test_default_inner_sink_is_noop() -> None:
+async def test_default_inner_sink_is_noop() -> None:
     from custos_trigger.pipeline.dispatch import NoopAuditSink
 
     sink = telemetry.TelemetryAuditSink()
