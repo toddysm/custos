@@ -26,13 +26,13 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
 from custos_spl.ids import WorkspaceId
-from custos_spl.interfaces.metadata_store import DedupReserved
+from custos_spl.interfaces.metadata_store import DedupDuplicate, DedupReserved
 
 from custos_trigger.settings import DEFAULT_DEDUP_TTL_SECONDS
 from custos_trigger.stores.base import TriggerMetadataStore
@@ -136,9 +136,15 @@ class Deduplicator:
         key = compute_dedup_key(subscription_id, event_id)
         ttl = self._default_ttl_seconds if ttl_seconds is None else ttl_seconds
         result = await self._store.put_dedup_key(WorkspaceId(workspace_id), key, ttl)
-        decision = (
-            DedupDecision.UNSEEN if isinstance(result, DedupReserved) else DedupDecision.DUPLICATE
-        )
+        if isinstance(result, DedupReserved):
+            decision = DedupDecision.UNSEEN
+        elif isinstance(result, DedupDuplicate):
+            decision = DedupDecision.DUPLICATE
+        else:  # pragma: no cover - defensive guard against store contract drift
+            raise TypeError(
+                f"put_dedup_key returned unexpected type {type(result).__name__!r}; "
+                "expected DedupReserved or DedupDuplicate"
+            )
         return DedupReservation(key=key, decision=decision)
 
     async def release(self, *, workspace_id: str, key: str) -> None:
@@ -177,5 +183,8 @@ class Deduplicator:
         try:
             yield reservation
         except Exception:
-            await self.release(workspace_id=workspace_id, key=reservation.key)
+            # Best-effort rollback: never let a release failure mask the real
+            # dispatch exception the caller is propagating.
+            with suppress(Exception):
+                await self.release(workspace_id=workspace_id, key=reservation.key)
             raise
