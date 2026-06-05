@@ -229,6 +229,18 @@ def test_register_invalid_selector_is_rejected(client: TestClient) -> None:
     assert response.json()["type"].endswith("selector_invalid")
 
 
+def test_register_invalid_selector_rejected_even_on_replay(client: TestClient) -> None:
+    # An already-live wait must not let a malformed replay selector through:
+    # the selector is compiled up front on every path.
+    _register(client, selector=_SELECTOR_A)
+    response = client.post(
+        _REGISTER,
+        json={**_TRIPLE, "selector": "event.data.region ==", "ttl": "PT24H"},
+    )
+    assert response.status_code == 422
+    assert response.json()["type"].endswith("selector_invalid")
+
+
 def test_register_missing_field_is_a_bad_request(client: TestClient) -> None:
     response = client.post(_REGISTER, json={"stepId": "step-1", "eventKey": "pr.merged"})
     assert response.status_code == 400
@@ -342,3 +354,24 @@ def test_resume_store_get_requires_readable_backend() -> None:
     store = ResumeSubscriptionStore(write_only)
     with pytest.raises(ResumeReadUnsupportedError):
         asyncio.run(store.get("ws", "res_1"))
+
+
+def test_resume_read_unsupported_renders_problem_501() -> None:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient as _TestClient
+
+    from custos_trigger.api import register_exception_handlers
+    from custos_trigger.stores import ResumeReadUnsupportedError
+
+    app = FastAPI()
+    register_exception_handlers(app)
+
+    @app.get("/boom")
+    async def _boom() -> dict[str, str]:
+        raise ResumeReadUnsupportedError("backend has no resume read surface")
+
+    with _TestClient(app) as test_client:
+        response = test_client.get("/boom")
+    assert response.status_code == 501
+    assert response.headers["content-type"].startswith(PROBLEM_MEDIA_TYPE)
+    assert response.json()["code"] == "trigger.api.resume_read_unsupported"

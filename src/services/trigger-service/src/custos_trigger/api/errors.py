@@ -28,7 +28,10 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from custos_trigger.errors import TriggerError
-from custos_trigger.stores import SubscriptionReadUnsupportedError
+from custos_trigger.stores import (
+    ResumeReadUnsupportedError,
+    SubscriptionReadUnsupportedError,
+)
 
 __all__ = [
     "LOCKED_API_KINDS",
@@ -55,6 +58,7 @@ PROBLEM_TYPE_PREFIX: Final[str] = "https://errors.custos.dev/"
 API_BAD_REQUEST: Final[str] = "trigger.api.bad_request"
 API_SUBSCRIPTION_NOT_FIREABLE: Final[str] = "trigger.api.subscription_not_fireable"
 API_SUBSCRIPTION_READ_UNSUPPORTED: Final[str] = "trigger.api.subscription_read_unsupported"
+API_RESUME_READ_UNSUPPORTED: Final[str] = "trigger.api.resume_read_unsupported"
 
 #: Kind-string → HTTP status. The keys form the closed set the envelope may
 #: emit; a kind absent from this table can never reach the wire (``from_kind``
@@ -72,6 +76,7 @@ LOCKED_API_KIND_TO_STATUS: Final[dict[str, int]] = {
     API_BAD_REQUEST: 400,
     API_SUBSCRIPTION_NOT_FIREABLE: 409,
     API_SUBSCRIPTION_READ_UNSUPPORTED: 501,
+    API_RESUME_READ_UNSUPPORTED: 501,
 }
 
 #: Frozen view for fast membership tests.
@@ -88,6 +93,7 @@ _TITLE_FOR_KIND: Final[dict[str, str]] = {
     API_BAD_REQUEST: "Bad request",
     API_SUBSCRIPTION_NOT_FIREABLE: "Subscription is not fireable",
     API_SUBSCRIPTION_READ_UNSUPPORTED: "Subscription read is not supported by this backend",
+    API_RESUME_READ_UNSUPPORTED: "Resume read is not supported by this backend",
 }
 
 
@@ -206,15 +212,33 @@ async def _read_unsupported_handler(request: Request, exc: Exception) -> JSONRes
     )
 
 
+async def _resume_read_unsupported_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Render :class:`ResumeReadUnsupportedError` as a stable 501.
+
+    A backend with no resume read surface (the locked SPL write surface until
+    the Postgres read query lands) returns a controlled
+    ``trigger.api.resume_read_unsupported`` Problem+JSON rather than an opaque
+    500, so a misconfigured ``RegisterResumeSubscription`` fails explicitly.
+    """
+    assert isinstance(exc, ResumeReadUnsupportedError)
+    return problem_response(
+        request,
+        kind=API_RESUME_READ_UNSUPPORTED,
+        detail=str(exc) or "the configured metadata store does not support resume reads",
+    )
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     """Register the Problem+JSON handlers on ``app``.
 
     Wires :class:`TriggerError` (the locked domain taxonomy), FastAPI's
-    :class:`RequestValidationError` (malformed bodies / params), and
-    :class:`SubscriptionReadUnsupportedError` (a backend with no read surface)
-    onto the uniform envelope. Call-context 4xx failures keep their own
-    envelope via :func:`custos_trigger.middleware.call_context_error_handler`.
+    :class:`RequestValidationError` (malformed bodies / params), and the
+    read-unsupported guards (:class:`SubscriptionReadUnsupportedError` /
+    :class:`ResumeReadUnsupportedError` — a backend with no read surface) onto
+    the uniform envelope. Call-context 4xx failures keep their own envelope via
+    :func:`custos_trigger.middleware.call_context_error_handler`.
     """
     app.add_exception_handler(TriggerError, _trigger_error_handler)
     app.add_exception_handler(RequestValidationError, _validation_error_handler)
     app.add_exception_handler(SubscriptionReadUnsupportedError, _read_unsupported_handler)
+    app.add_exception_handler(ResumeReadUnsupportedError, _resume_read_unsupported_handler)

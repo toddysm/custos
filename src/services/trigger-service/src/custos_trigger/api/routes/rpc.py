@@ -171,9 +171,16 @@ async def register_resume_subscription(
     the original registration and emits a ``resume.subscription.divergent``
     audit. A registration whose prior row has lapsed past its TTL is treated as
     a fresh registration (the stale row is dropped first so the immutable store
-    accepts the re-put). The CEL ``selector`` is compiled at register time so a
-    malformed expression is rejected (422) rather than silently never matching.
+    accepts the re-put). The CEL ``selector`` is compiled up front on every
+    path (including an idempotent replay) so a malformed expression is rejected
+    (422) rather than silently never matching.
     """
+    if body.selector:
+        # Compiled before the idempotency lookup so a malformed selector is
+        # rejected on every path, replay included. Raises SelectorInvalidError
+        # (TriggerError, kind selector_invalid) -> 422 Problem+JSON.
+        evaluator.compile(body.selector, subscription_id="resume-register")
+
     resume_id = compute_resume_id(body.run_id, body.step_id, body.event_key)
     existing = await store.get(RESUME_WORKSPACE, resume_id)
     now = _now()
@@ -198,11 +205,6 @@ async def register_resume_subscription(
     if existing is not None:
         # Prior row lapsed past its TTL — drop it so the re-put is accepted.
         await store.cancel(RESUME_WORKSPACE, resume_id)
-
-    if body.selector:
-        # Raises SelectorInvalidError (TriggerError, kind selector_invalid) ->
-        # rendered as a 422 Problem+JSON by the registered exception handler.
-        evaluator.compile(body.selector, subscription_id=resume_id)
 
     ttl_seconds = _resolve_ttl_seconds(body.ttl, default_ttl_seconds)
     expires_at = now + timedelta(seconds=ttl_seconds)
