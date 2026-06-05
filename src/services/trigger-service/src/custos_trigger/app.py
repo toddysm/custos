@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING
 
 from custos_trigger._version import __version__
 from custos_trigger.api import register_exception_handlers
-from custos_trigger.api.routes import subscriptions_router
+from custos_trigger.api.routes import resume_rpc_router, subscriptions_router
 from custos_trigger.health import router as health_router
 from custos_trigger.middleware import (
     CallContextError,
@@ -43,9 +43,11 @@ from custos_trigger.providers import Providers, load_providers
 from custos_trigger.settings import (
     DEFAULT_DISPATCH_MAX_RETRIES,
     DEFAULT_FANOUT_MAX_DEPTH,
+    DEFAULT_RESUME_DEFAULT_TTL_SECONDS,
     ENV_DISPATCH_MAX_RETRIES,
     ENV_FANOUT_MAX_DEPTH,
     ENV_METADATA_STORE,
+    ENV_RESUME_DEFAULT_TTL_SECONDS,
     ENV_WORKFLOW_ENDPOINT,
 )
 from custos_trigger.stores import (
@@ -58,7 +60,7 @@ if TYPE_CHECKING:
     import httpx
     from fastapi import FastAPI
 
-    from custos_trigger.pipeline.dispatch import Dispatcher
+    from custos_trigger.pipeline.dispatch import AuditSink, Dispatcher
 
 logger = logging.getLogger("custos_trigger")
 
@@ -85,6 +87,7 @@ def create_app(
     environment: str | None = None,
     providers: Providers | None = None,
     dispatcher: Dispatcher | None = None,
+    audit_sink: AuditSink | None = None,
 ) -> FastAPI:
     """Build and return the Trigger Service FastAPI application.
 
@@ -106,6 +109,11 @@ def create_app(
             (the default) the lifespan builds one over an owned
             :class:`httpx.AsyncClient` reaching the Workflow Service through
             Dapr. Tests inject a dispatcher wrapping a fake Workflow client.
+        audit_sink: Audit surface the resume RPCs (and the internally-built
+            dispatcher) emit to. When ``None`` (the default) the lifespan wires
+            a :class:`~custos_trigger.pipeline.dispatch.NoopAuditSink`; the real
+            OTel/audit pipeline lands in TS-IMPL-019. Tests inject a recording
+            sink to assert ``resume.subscription.divergent`` emission.
 
     The factory is import-safe: no DSN lookups, no socket connections. All
     side-effecting work happens inside the FastAPI lifespan context.
@@ -145,6 +153,19 @@ def create_app(
 
         app.state.selector_evaluator = SelectorEvaluator()
 
+        # Audit surface the resume RPCs + dispatcher emit to. Real OTel/audit
+        # wiring lands in TS-IMPL-019; until then a Noop sink drops events.
+        from custos_trigger.pipeline.dispatch import NoopAuditSink
+
+        effective_audit: AuditSink = audit_sink if audit_sink is not None else NoopAuditSink()
+        app.state.audit_sink = effective_audit
+
+        # Default resume-subscription TTL applied when a RegisterResumeSubscription
+        # request carries no (or an unparseable) ttl.
+        app.state.resume_default_ttl_seconds = _env_int(
+            os.environ, ENV_RESUME_DEFAULT_TTL_SECONDS, DEFAULT_RESUME_DEFAULT_TTL_SECONDS
+        )
+
         # The dispatch path needs a Workflow Service client. When a dispatcher
         # is injected (tests) we use it as-is and own no transport; otherwise we
         # build one over an httpx client reaching the Workflow Service through
@@ -176,6 +197,7 @@ def create_app(
                 max_fanout_depth=_env_int(
                     os.environ, ENV_FANOUT_MAX_DEPTH, DEFAULT_FANOUT_MAX_DEPTH
                 ),
+                audit=effective_audit,
             )
 
         app.state.ready = True
@@ -214,6 +236,7 @@ def create_app(
 
     app.include_router(health_router)
     app.include_router(subscriptions_router)
+    app.include_router(resume_rpc_router)
     return app
 
 

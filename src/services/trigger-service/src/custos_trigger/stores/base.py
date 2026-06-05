@@ -35,7 +35,7 @@ from custos_spl.interfaces.metadata_store import (
     SubscriptionSelector as SplSubscriptionSelector,
 )
 
-__all__ = ["SubscriptionReadable", "TriggerMetadataStore"]
+__all__ = ["ResumeReadable", "SubscriptionReadable", "TriggerMetadataStore"]
 
 
 @runtime_checkable
@@ -117,3 +117,26 @@ class SubscriptionReadable(Protocol):
     def subscription_selectors(
         self, workspace_id: str, subscription_id: str
     ) -> tuple[SplSubscriptionSelector, ...]: ...
+
+
+@runtime_checkable
+class ResumeReadable(Protocol):
+    """Optional read-back capability for resume rows (idempotent re-register).
+
+    The locked SPL ``MetadataStoreProvider`` writes resume tokens but exposes
+    no read method. The ``RegisterResumeSubscription`` RPC (TS-IMPL-016) must
+    read a single resume row back by id to honor its idempotency contract
+    (re-registration returns the existing handle), so this narrow capability
+    Protocol is probed structurally by
+    :meth:`custos_trigger.stores.ResumeSubscriptionStore.get`.
+
+    The in-process backend satisfies it via its dev/test read accessor; the
+    Postgres adapter gains the capability in a later task. A backend that does
+    not implement it surfaces a clear ``ResumeReadUnsupportedError`` rather
+    than a silent miss. The accessor is synchronous to match the in-process
+    backend's existing read helpers.
+    """
+
+    def resume_subscription(
+        self, workspace_id: str, resume_id: str
+    ) -> SplResumeSubscription | None: ...

@@ -12,16 +12,19 @@ from typing import Annotated, cast
 
 from fastapi import Depends, Request
 
-from custos_trigger.pipeline.dispatch import Dispatcher
+from custos_trigger.pipeline.dispatch import AuditSink, Dispatcher
 from custos_trigger.providers import Providers
 from custos_trigger.selector import SelectorEvaluator
-from custos_trigger.stores import SubscriptionStore
+from custos_trigger.stores import ResumeSubscriptionStore, SubscriptionStore
 from custos_trigger.stores.base import TriggerMetadataStore
 
 __all__ = [
+    "get_audit_sink",
     "get_dispatcher",
     "get_metadata_store",
     "get_providers",
+    "get_resume_default_ttl_seconds",
+    "get_resume_subscription_store",
     "get_selector_evaluator",
     "get_subscription_store",
 ]
@@ -64,3 +67,31 @@ def get_selector_evaluator(request: Request) -> SelectorEvaluator:
     if evaluator is None:
         raise RuntimeError("SelectorEvaluator is not attached to app.state; did the lifespan run?")
     return cast(SelectorEvaluator, evaluator)
+
+
+def get_resume_subscription_store(request: Request) -> ResumeSubscriptionStore:
+    """Return the :class:`ResumeSubscriptionStore` attached during startup."""
+    store = getattr(request.app.state, "resume_subscription_store", None)
+    if store is None:
+        raise RuntimeError(
+            "ResumeSubscriptionStore is not attached to app.state; did the lifespan run?"
+        )
+    return cast(ResumeSubscriptionStore, store)
+
+
+def get_audit_sink(request: Request) -> AuditSink:
+    """Return the :class:`AuditSink` attached during startup."""
+    audit = getattr(request.app.state, "audit_sink", None)
+    if audit is None:
+        raise RuntimeError("AuditSink is not attached to app.state; did the lifespan run?")
+    return cast(AuditSink, audit)
+
+
+def get_resume_default_ttl_seconds(request: Request) -> int:
+    """Return the default resume TTL (seconds) parsed during startup."""
+    ttl = getattr(request.app.state, "resume_default_ttl_seconds", None)
+    if ttl is None:
+        raise RuntimeError(
+            "resume_default_ttl_seconds is not attached to app.state; did the lifespan run?"
+        )
+    return cast(int, ttl)

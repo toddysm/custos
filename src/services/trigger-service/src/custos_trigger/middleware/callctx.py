@@ -43,8 +43,23 @@ if TYPE_CHECKING:
 #: API Gateway design (COMP-001) pins the canonical lowercase form.
 CALLCTX_HEADER: str = "x-custos-callctx"
 
-#: Paths the middleware deliberately bypasses (no auth on probes).
-_BYPASS_PATHS: frozenset[str] = frozenset({"/healthz", "/readyz"})
+#: Paths the middleware deliberately bypasses.
+#:
+#: ``/healthz`` + ``/readyz`` are unauthenticated probes. The two resume RPC
+#: method paths are internal Dapr service-invocation routes the Workflow
+#: Service calls (TS-IMPL-016); they are authenticated at the Dapr mesh layer
+#: (mTLS + app-id allow-list), not via the call-context envelope — the caller
+#: propagates no ``x-custos-callctx`` header — so they bypass here. Keep these
+#: in sync with ``custos_trigger.api.routes.rpc.REGISTER_RESUME_PATH`` /
+#: ``CANCEL_RESUME_PATH``.
+_BYPASS_PATHS: frozenset[str] = frozenset(
+    {
+        "/healthz",
+        "/readyz",
+        "/RegisterResumeSubscription",
+        "/CancelResumeSubscription",
+    }
+)
 
 logger = logging.getLogger(__name__)
 
