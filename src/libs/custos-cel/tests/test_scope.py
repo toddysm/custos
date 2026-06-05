@@ -44,6 +44,7 @@ def _scope(
     inputs: dict[str, Any] | None = None,
     steps: dict[str, StepBinding] | None = None,
     let: dict[str, Any] | None = None,
+    event: dict[str, Any] | None = None,
 ) -> BindingScope:
     return BindingScope(
         run=RunInfo(id="run-123", workspace="ws-abc"),
@@ -52,7 +53,23 @@ def _scope(
         inputs=inputs or {},
         steps=steps or {},
         let=let or {},
+        event=event or {},
     )
+
+
+def _event() -> dict[str, Any]:
+    """A representative NormalizedEvent envelope for event-root tests."""
+    return {
+        "kind": "workflow.completed",
+        "subject": "run/abc",
+        "source": {
+            "type": "workflow",
+            "connectorInstanceId": "",
+            "vendor": "custos",
+        },
+        "data": {"status": "succeeded", "repository": "ghcr.io/acme/app"},
+        "raw": {"headers": {"x-id": "1"}, "body": "{}"},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +115,64 @@ def test_resolve_let_overlay() -> None:
     # Parent scope is unchanged.
     with pytest.raises(UnboundNameError):
         base.resolve(["let", "threshold"])
+
+
+# ---------------------------------------------------------------------------
+# event root (TS-IMPL-005)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_event_scalars() -> None:
+    s = _scope(event=_event())
+    assert s.resolve(["event", "kind"]) == "workflow.completed"
+    assert s.resolve(["event", "subject"]) == "run/abc"
+
+
+def test_resolve_event_nested_subtrees() -> None:
+    s = _scope(event=_event())
+    assert s.resolve(["event", "source", "vendor"]) == "custos"
+    assert s.resolve(["event", "data", "status"]) == "succeeded"
+    assert s.resolve(["event", "data", "repository"]) == "ghcr.io/acme/app"
+    assert s.resolve(["event", "raw", "body"]) == "{}"
+    assert s.resolve(["event", "raw", "headers", "x-id"]) == "1"
+
+
+def test_resolve_event_root_alone_rejected() -> None:
+    s = _scope(event=_event())
+    with pytest.raises(UnboundNameError, match="pick a member"):
+        s.resolve(["event"])
+
+
+def test_resolve_event_missing_key_rejected() -> None:
+    s = _scope(event=_event())
+    with pytest.raises(UnboundNameError):
+        s.resolve(["event", "nonexistent"])
+
+
+def test_resolve_event_descent_into_scalar_rejected() -> None:
+    s = _scope(event=_event())
+    with pytest.raises(UnboundNameError, match="is not a mapping"):
+        s.resolve(["event", "kind", "length"])
+
+
+def test_scope_event_view_is_immutable() -> None:
+    s = _scope(event=_event())
+    assert isinstance(s.event, MappingProxyType)
+    with pytest.raises(TypeError):
+        s.event["kind"] = "other"  # type: ignore[index]
+
+
+def test_scope_event_defaults_to_empty() -> None:
+    s = _scope()
+    assert isinstance(s.event, MappingProxyType)
+    with pytest.raises(UnboundNameError):
+        s.resolve(["event", "kind"])
+
+
+def test_with_let_preserves_event_binding() -> None:
+    s = _scope(event=_event()).with_let(x=1)
+    assert s.resolve(["event", "kind"]) == "workflow.completed"
+    assert s.resolve(["let", "x"]) == 1
 
 
 def test_resolve_steps_outputs() -> None:

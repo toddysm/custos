@@ -215,6 +215,81 @@ def test_inputs_additional_properties_drill() -> None:
     assert n.cel_type == StringType()
 
 
+# ---------------------------------------------------------------------------
+# event root (TS-IMPL-005)
+# ---------------------------------------------------------------------------
+
+
+def test_event_scalar_properties() -> None:
+    assert _typed("event.kind").cel_type == StringType()
+    assert _typed("event.subject").cel_type == StringType()
+
+
+def test_event_subtree_member_access() -> None:
+    # source / data / raw are string-valued objects (additionalProperties),
+    # so dotted access into them types as string.
+    assert _typed("event.source.vendor").cel_type == StringType()
+    assert _typed("event.data.status").cel_type == StringType()
+    assert _typed("event.raw.body").cel_type == StringType()
+
+
+def test_event_source_documented_fields_type_as_string() -> None:
+    for field in ("type", "connectorInstanceId", "subscriptionId", "vendor", "occurredAt"):
+        assert _typed(f"event.source.{field}").cel_type == StringType()
+
+
+def test_event_raw_headers_is_object_indexable_by_string() -> None:
+    # raw.headers is a map<string, string>, so bracket access by a literal
+    # string key type-checks as string (the documented envelope shape).
+    assert _typed('event.raw.headers["x-id"]').cel_type == StringType()
+
+
+def test_event_subtree_bracket_access() -> None:
+    assert _typed('event.data["status"]').cel_type == StringType()
+
+
+def test_event_root_placeholder_is_map() -> None:
+    n = _typed("event.kind")
+    assert isinstance(n, Member)
+    assert isinstance(n.target, Ident)
+    assert isinstance(n.target.cel_type, MapType)
+
+
+def test_event_canonical_selector_type_checks() -> None:
+    # design.md § Selector Language canonical example.
+    n = _typed('event.kind == "workflow.completed" && event.data.status == "succeeded"')
+    assert isinstance(n, Binary)
+    assert n.cel_type == BoolType()
+
+
+def test_event_desugared_prefix_selector_type_checks() -> None:
+    # String-typed event.data members participate in membership tests.
+    n = _typed('event.data.status in ["succeeded", "failed"]')
+    assert n.cel_type == BoolType()
+
+
+def test_event_unknown_top_level_field_is_unbound() -> None:
+    with pytest.raises(UnboundNameError, match="no such field"):
+        _typed("event.nope")
+
+
+def test_event_default_schema_present_and_immutable() -> None:
+    sb = SchemaBindings()
+    assert sb.event["type"] == "object"
+    assert "kind" in sb.event["properties"]
+    with pytest.raises(TypeError):
+        sb.event["x"] = "y"  # type: ignore[index]
+
+
+def test_event_custom_schema_override() -> None:
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": {"data": {"type": "object", "properties": {"n": {"type": "integer"}}}},
+    }
+    n = _typed("event.data.n", _bindings(event=schema))
+    assert n.cel_type == IntType()
+
+
 def test_let_declared_type() -> None:
     n = _typed("let.totalCritical")
     assert n.cel_type == IntType()

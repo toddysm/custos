@@ -84,6 +84,49 @@ _DEFAULT_WORKFLOW_TYPES: Final[Mapping[str, CelType]] = MappingProxyType(
     {"name": StringType(), "version": StringType()}
 )
 
+# Default JSON Schema for the ``event`` binding root (TS-IMPL-005). Mirrors
+# the Trigger Service ``NormalizedEvent`` envelope as enumerated in the
+# design's § Selector Language: two string scalars (``kind`` / ``subject``),
+# a ``source`` object with the documented fields, a free-form string-valued
+# ``data`` subtree, and ``raw`` carrying an object-valued ``headers`` map plus
+# a string ``body``. Dotted / bracket member access into these subtrees
+# type-checks as a string — the common selector shape (equality and
+# membership comparisons). ``source`` keeps ``additionalProperties: string``
+# for forward-compatible vendor fields. Callers that know a richer event
+# schema can pass their own ``SchemaBindings(event=…)`` to tighten the
+# contract.
+_DEFAULT_EVENT_SCHEMA: Final[Mapping[str, Any]] = MappingProxyType(
+    {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string"},
+            "subject": {"type": "string"},
+            "source": {
+                "type": "object",
+                "properties": {
+                    "type": {"type": "string"},
+                    "connectorInstanceId": {"type": "string"},
+                    "subscriptionId": {"type": "string"},
+                    "vendor": {"type": "string"},
+                    "occurredAt": {"type": "string"},
+                },
+                "additionalProperties": {"type": "string"},
+            },
+            "data": {"type": "object", "additionalProperties": {"type": "string"}},
+            "raw": {
+                "type": "object",
+                "properties": {
+                    "headers": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                    },
+                    "body": {"type": "string"},
+                },
+            },
+        },
+    }
+)
+
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class SchemaBindings:
@@ -110,6 +153,10 @@ class SchemaBindings:
             ``{"id": StringType, "workspace": StringType}``.
         workflow: Static types of ``workflow.*`` members. Defaults to
             ``{"name": StringType, "version": StringType}``.
+        event: JSON Schema describing the ``event.*`` binding root
+            (TS-IMPL-005). Defaults to the ``NormalizedEvent`` skeleton
+            (``kind`` / ``subject`` string scalars + string-valued
+            ``source`` / ``data`` / ``raw`` subtrees).
         now: Static return type of the ``now()`` call. Defaults to
             :class:`TimestampType`.
     """
@@ -122,9 +169,8 @@ class SchemaBindings:
     # though it is read-only in practice. Use ``default_factory`` to
     # hand the same shared read-only proxy to every instance.
     run: Mapping[str, CelType] = field(default_factory=lambda: _DEFAULT_RUN_TYPES)
-    workflow: Mapping[str, CelType] = field(
-        default_factory=lambda: _DEFAULT_WORKFLOW_TYPES
-    )
+    workflow: Mapping[str, CelType] = field(default_factory=lambda: _DEFAULT_WORKFLOW_TYPES)
+    event: Mapping[str, Any] = field(default_factory=lambda: _DEFAULT_EVENT_SCHEMA)
     now: CelType = field(default_factory=TimestampType)
 
     def __post_init__(self) -> None:
@@ -142,6 +188,8 @@ class SchemaBindings:
             object.__setattr__(self, "run", MappingProxyType(dict(self.run)))
         if not isinstance(self.workflow, MappingProxyType):
             object.__setattr__(self, "workflow", MappingProxyType(dict(self.workflow)))
+        if not isinstance(self.event, MappingProxyType):
+            object.__setattr__(self, "event", MappingProxyType(dict(self.event)))
 
     def step_outputs_schema(self, step_id: str) -> Mapping[str, Any] | None:
         """Return the JSON Schema for ``step_id``'s outputs, or ``None``."""
@@ -404,6 +452,8 @@ def _resolve_root(
         return _placeholder_root_type(), _Drill(
             kind="name_types", types_map=bindings.workflow, label="workflow"
         )
+    if name == "event":
+        return _placeholder_root_type(), _Drill(kind="schema", schema=bindings.event, label="event")
     if name == "now":
         # ``now`` is a function name, not a value-typed identifier; a
         # bare reference is a usage error. The Call path handles

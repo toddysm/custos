@@ -107,7 +107,7 @@ DEFAULT_TIMEOUT_MS: Final[int] = 100
 # sync with the scope's own allow-list — duplicated here so the
 # chain-collapse logic does not have to import the scope's private set.
 _BINDING_ROOTS: Final[frozenset[str]] = frozenset(
-    {"inputs", "steps", "run", "workflow", "let", "now"}
+    {"inputs", "steps", "run", "workflow", "let", "now", "event"}
 )
 
 
@@ -605,6 +605,8 @@ def _resolve_has_target(node: Node, scope: BindingScope, clock: Clock) -> Any:
             return scope.run
         if node.name == "workflow":
             return scope.workflow
+        if node.name == "event":
+            return scope.event
         # ``has(now)`` — ``now`` is a callable, not a record. Fall
         # through to the normal evaluator so the scope's error shape
         # (rejecting bare ``now``) is what surfaces.

@@ -46,6 +46,7 @@ def _scope(
     inputs: dict[str, Any] | None = None,
     steps: dict[str, StepBinding] | None = None,
     let: dict[str, Any] | None = None,
+    event: dict[str, Any] | None = None,
     run_id: str = "run-123",
     workspace: str = "ws-1",
     workflow_name: str = "wf",
@@ -58,6 +59,7 @@ def _scope(
         inputs=inputs or {},
         steps=steps or {},
         let=let or {},
+        event=event or {},
     )
 
 
@@ -225,6 +227,56 @@ def test_run_and_workflow_fields() -> None:
     assert _eval("run.workspace", scope=scope) == "ws-x"
     assert _eval("workflow.name", scope=scope) == "my-wf"
     assert _eval("workflow.version", scope=scope) == "v9"
+
+
+# ---------------------------------------------------------------------------
+# event root (TS-IMPL-005)
+# ---------------------------------------------------------------------------
+
+
+def _event_scope() -> BindingScope:
+    return _scope(
+        event={
+            "kind": "workflow.completed",
+            "subject": "run/abc",
+            "source": {"type": "workflow", "vendor": "custos"},
+            "data": {"status": "succeeded", "repository": "ghcr.io/acme/app"},
+            "raw": {"headers": {"x-id": "1"}, "body": "{}"},
+        }
+    )
+
+
+def test_event_scalar_and_subtree_eval() -> None:
+    scope = _event_scope()
+    assert _eval("event.kind", scope=scope) == "workflow.completed"
+    assert _eval("event.subject", scope=scope) == "run/abc"
+    assert _eval("event.source.vendor", scope=scope) == "custos"
+    assert _eval("event.data.status", scope=scope) == "succeeded"
+    assert _eval("event.raw.body", scope=scope) == "{}"
+
+
+def test_event_canonical_selector_eval_true() -> None:
+    scope = _event_scope()
+    expr = 'event.kind == "workflow.completed" && event.data.status == "succeeded"'
+    assert _eval(expr, scope=scope) is True
+
+
+def test_event_canonical_selector_eval_false() -> None:
+    scope = _scope(event={"kind": "workflow.completed", "data": {"status": "failed"}})
+    expr = 'event.kind == "workflow.completed" && event.data.status == "succeeded"'
+    assert _eval(expr, scope=scope) is False
+
+
+def test_event_desugared_prefix_selector_eval() -> None:
+    scope = _event_scope()
+    expr = 'event.data.status in ["succeeded", "failed"]'
+    assert _eval(expr, scope=scope) is True
+
+
+def test_event_has_macro_on_subtree() -> None:
+    scope = _event_scope()
+    assert _eval("has(event.data.status)", scope=scope) is True
+    assert _eval("has(event.data.missing)", scope=scope) is False
 
 
 def test_let_binding_resolves_through_scope() -> None:

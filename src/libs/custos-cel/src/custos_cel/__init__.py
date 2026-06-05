@@ -162,7 +162,7 @@ __all__ = [
     "type_check",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 # Public type aliases.
 #
