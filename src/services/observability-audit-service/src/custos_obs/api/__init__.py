@@ -12,7 +12,9 @@ from custos_obs.api.dependencies import (
     get_metadata_store,
     get_metrics_query_provider,
     get_providers,
+    get_settings,
 )
+from custos_obs.api.errors import obs_error_handler
 from custos_obs.api.models import (
     AuditEventModel,
     AuditEventPageModel,
@@ -33,4 +35,6 @@ __all__ = [
     "get_metadata_store",
     "get_metrics_query_provider",
     "get_providers",
+    "get_settings",
+    "obs_error_handler",
 ]

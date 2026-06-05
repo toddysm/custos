@@ -79,6 +79,9 @@ def create_app(
     """
     from fastapi import FastAPI
 
+    from custos_obs.api.errors import obs_error_handler
+    from custos_obs.api.routes import logs_router
+    from custos_obs.errors import ObsError
     from custos_obs.middleware import (
         CallContextError,
         CallContextMiddleware,
@@ -158,8 +161,13 @@ def create_app(
     # (get_call_context / require_permission) emit the same error envelope as
     # the middleware itself.
     app.add_exception_handler(CallContextError, call_context_error_handler)
+    # Read-back routes raise the typed ObsError taxonomy; render it as RFC 7807
+    # application/problem+json (e.g. 503 LogQueryUnavailable with the external
+    # log-system pointer).
+    app.add_exception_handler(ObsError, obs_error_handler)
 
     app.include_router(health_router)
+    app.include_router(logs_router)
     return app
 
 
