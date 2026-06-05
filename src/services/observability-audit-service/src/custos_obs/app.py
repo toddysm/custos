@@ -67,18 +67,23 @@ def create_app(
         app.state.settings = effective_settings
         logger.info("observability-audit-service starting (v%s)", __version__)
 
-        local_providers = providers if providers is not None else load_providers(effective_settings)
-        app.state.providers = local_providers
-        # Background workers (drainer, retention, alerting) attach here in later phases.
-        app.state.ready = True
-        logger.info("observability-audit-service ready")
+        local_providers: Providers | None = None
         try:
+            local_providers = (
+                providers if providers is not None else load_providers(effective_settings)
+            )
+            app.state.providers = local_providers
+            # Background workers (drainer, retention, alerting) attach here in later phases.
+            app.state.ready = True
+            logger.info("observability-audit-service ready")
             yield
         finally:
             app.state.ready = False
-            if providers is None:
-                # Only close providers this lifespan owns; injected fakes are
-                # the caller's responsibility.
+            # Only close providers this lifespan owns; injected fakes are the
+            # caller's responsibility. ``local_providers`` stays None if
+            # construction raised before assignment, so the guard avoids an
+            # UnboundLocalError masking the real startup failure.
+            if providers is None and local_providers is not None:
                 await aclose_providers(local_providers)
             logger.info("observability-audit-service stopped")
 
