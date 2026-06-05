@@ -32,6 +32,7 @@ Custos is a pluggable workflow orchestrator. Developers extend the platform by w
 | [Workflow Service Public API](workflow-api.md) | REST and Internal RPC surface, `StartRunValidator` semantics, idempotency model (header vs body precedence, replay vs conflict), locked RFC 7807 error taxonomy, observability metrics + spans, `curl` + `httpx` worked examples |
 | [Workflow Service Durable Wiring](workflow-durable-wiring.md) | Durable-vs-in-memory adapter switch for the Catalog client (`WF_CATALOG_ENDPOINT`) and metadata store (`WF_METADATA_STORE`), idempotency TTL (`WF_IDEMPOTENCY_KEY_TTL`), and the `ENVIRONMENT=production` fail-fast refusal semantics |
 | [Workflow Service Outbound RPC](workflow-outbound-rpc.md) | ARM (`ScheduleActivity` / `CancelActivity`) and Connector (`BindForStep`) outbound Dapr Service-Invocation contract: canonical JSON envelopes, locked outbound-RPC error taxonomy, `ActivityResultEnvelope` mapping, Configuration knobs, OTel instruments + span |
+| [Trigger Service Public API](trigger-api.md) | REST surface for trigger subscriptions, internal resume RPC contract, `NormalizedEvent` envelope, canonical event taxonomy, CEL selector guide (incl. legacy desugar), dispatch/dedup/resume semantics, RFC 7807 error taxonomy, Configuration knobs, deferred-M2 surfaces |
 | [Examples](examples/) | Reference connector manifests for the supported target and authentication combinations |
 
 ## Quick Start for Connection Developers
