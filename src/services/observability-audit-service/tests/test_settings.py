@@ -12,6 +12,7 @@ import pytest
 from custos_obs.settings import (
     DEFAULT_ALERT_RULES_CONFIGMAP,
     DEFAULT_AUDIT_OUTBOX_DRAIN_MODE,
+    DEFAULT_AUDIT_OUTBOX_LAG_THRESHOLD,
     DEFAULT_AUDIT_OUTBOX_POLL_INTERVAL_S,
     DEFAULT_AUDIT_OUTBOX_RETENTION_MARGIN_S,
     DEFAULT_AUDIT_RETENTION_DAYS,
@@ -55,6 +56,7 @@ def test_defaults_match_design_table() -> None:
         == DEFAULT_AUDIT_OUTBOX_RETENTION_MARGIN_S
         == 86_400
     )
+    assert settings.audit_outbox_lag_threshold == DEFAULT_AUDIT_OUTBOX_LAG_THRESHOLD == 1_000
     assert settings.otel_collector_configmap == DEFAULT_OTEL_COLLECTOR_CONFIGMAP
     assert settings.otel_collector_configmap == "custos-otel-collector-config"
     assert settings.otel_exporters_configmap == DEFAULT_OTEL_EXPORTERS_CONFIGMAP
@@ -198,6 +200,19 @@ def test_poll_interval_and_retention_margin_override() -> None:
     )
     assert settings.audit_outbox_poll_interval_s == 15
     assert settings.audit_outbox_retention_margin_s == 3600
+
+
+def test_outbox_lag_threshold_override() -> None:
+    settings = load_settings(_base_env(CUSTOS_AUDIT_OUTBOX_LAG_THRESHOLD="250"))
+    assert settings.audit_outbox_lag_threshold == 250
+
+
+@pytest.mark.parametrize("bad", ["0", "-5", "abc", "1.5"])
+def test_outbox_lag_threshold_rejects_non_positive_or_garbage(bad: str) -> None:
+    with pytest.raises(
+        SettingsError, match="CUSTOS_AUDIT_OUTBOX_LAG_THRESHOLD must be a positive integer"
+    ):
+        load_settings(_base_env(CUSTOS_AUDIT_OUTBOX_LAG_THRESHOLD=bad))
 
 
 # --- ConfigMap / webhook / SMTP knobs ----------------------------------------
