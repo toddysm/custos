@@ -23,7 +23,8 @@ Two modes, steered by whether a verifier is supplied:
   call-context middleware.
 
 The two probe paths (``/healthz`` + ``/readyz``) bypass the middleware — they are
-unauthenticated liveness/readiness checks.
+unauthenticated liveness/readiness checks. The operational ``/metrics`` scrape
+endpoint bypasses it too (it exposes only the service's own self-metrics).
 """
 
 from __future__ import annotations
@@ -49,8 +50,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("custos_obs.middleware.callctx")
 
-#: Paths the middleware deliberately bypasses — the unauthenticated probes.
-_BYPASS_PATHS: frozenset[str] = frozenset({"/healthz", "/readyz"})
+#: Paths the middleware deliberately bypasses — the unauthenticated probes plus
+#: the operational ``/metrics`` scrape endpoint (it exposes only the service's
+#: own self-instrumentation, never tenant data).
+_BYPASS_PATHS: frozenset[str] = frozenset({"/healthz", "/readyz", "/metrics"})
 
 #: Dev-shim placeholders for the JWT-bookkeeping claims the unsigned header does
 #: not carry. They are never trusted in production (the shim is forbidden there).
