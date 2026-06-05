@@ -1,0 +1,21 @@
+"""Scaffold smoke tests for the Trigger Service package (TS-IMPL-001).
+
+These assert the package is importable and the entry-point wiring is in
+place. They are replaced/expanded by real unit suites as the
+``TS-IMPL-*`` phases land their runtime surfaces.
+"""
+
+from __future__ import annotations
+
+import importlib
+
+
+def test_package_imports_and_exposes_version() -> None:
+    module = importlib.import_module("custos_trigger")
+    assert module.__version__ == "0.1.0"
+    assert module.__all__ == ["__version__"]
+
+
+def test_main_entry_point_is_callable() -> None:
+    main_module = importlib.import_module("custos_trigger.__main__")
+    assert callable(main_module.main)
