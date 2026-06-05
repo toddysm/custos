@@ -192,6 +192,11 @@ def test_search_store_unavailable_returns_503() -> None:
     with _client(store) as client:
         resp = client.get(_SEARCH_URL, headers=_auth())
     assert resp.status_code == 503
+    assert resp.headers["content-type"].startswith("application/problem+json")
+    body = resp.json()
+    assert body["title"] == "Audit query backend unavailable"
+    assert body["status"] == 503
+    assert "externalUrl" not in body
 
 
 def test_search_query_unsupported_returns_503() -> None:
@@ -199,6 +204,7 @@ def test_search_query_unsupported_returns_503() -> None:
     with _client(store) as client:
         resp = client.get(_SEARCH_URL, headers=_auth())
     assert resp.status_code == 503
+    assert resp.headers["content-type"].startswith("application/problem+json")
 
 
 def test_search_requires_audit_read_permission() -> None:
@@ -265,6 +271,8 @@ def test_lookup_store_unavailable_returns_503() -> None:
     with _client(store) as client:
         resp = client.get(f"{_SEARCH_URL}/e1", headers=_auth())
     assert resp.status_code == 503
+    assert resp.headers["content-type"].startswith("application/problem+json")
+    assert resp.json()["title"] == "Audit query backend unavailable"
 
 
 def test_lookup_requires_audit_read_permission() -> None:

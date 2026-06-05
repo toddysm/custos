@@ -33,6 +33,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from custos_obs.api.dependencies import get_metadata_store
 from custos_obs.api.models import AuditEventModel, AuditEventPageModel
 from custos_obs.api.routes._common import WorkspacePath, ensure_workspace, parse_iso_datetime
+from custos_obs.errors import AuditQueryUnavailable
 from custos_obs.middleware import CallContext, require_permission
 
 if TYPE_CHECKING:
@@ -51,9 +52,14 @@ CtxDep = Annotated[CallContext, Depends(require_permission(PERM_READ))]
 _EventIdPath = Annotated[str, Path(min_length=1, description="Audit event id.")]
 
 
-def _audit_unavailable() -> HTTPException:
-    """The metadata store is unreachable — surface as ``503``."""
-    return HTTPException(status_code=503, detail="audit store is not available")
+def _audit_unavailable() -> AuditQueryUnavailable:
+    """The metadata store is unreachable — surface as ``503`` problem+json.
+
+    Mirrors the log / metrics 503 envelope (RFC 7807) so all read-back backend
+    failures share one content-type and shape. The audit store has no external
+    pointer URL, so no ``externalUrl`` extension is attached.
+    """
+    return AuditQueryUnavailable("the audit metadata store is not available")
 
 
 def _subject_matches(event: AuditEvent, subject_id: str) -> bool:
