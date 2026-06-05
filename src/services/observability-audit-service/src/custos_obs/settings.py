@@ -32,6 +32,12 @@ ENV_LOG_QUERY_PROVIDER: Final[str] = "CUSTOS_LOG_QUERY_PROVIDER"
 #: (default) or ``noop``.
 ENV_METRICS_QUERY_PROVIDER: Final[str] = "CUSTOS_METRICS_QUERY_PROVIDER"
 
+#: Required. libpq DSN resolving the ``MetadataStoreProvider`` adapter
+#: (``custos-postgres``) that owns the audit-event writer + outbox drain. The
+#: service cannot drain the audit outbox without it, so it is required at
+#: startup (mirrors auth-/catalog-service's ``*_METADATA_STORE_DSN``).
+ENV_METADATA_STORE_DSN: Final[str] = "CUSTOS_OBS_METADATA_STORE_DSN"
+
 #: Conditional. Required when ``LogQueryProvider=loki``.
 ENV_LOKI_URL: Final[str] = "CUSTOS_LOKI_URL"
 
@@ -119,6 +125,7 @@ class Settings:
 
     log_query_provider: str
     metrics_query_provider: str
+    metadata_store_dsn: str
     loki_url: str | None
     prometheus_url: str | None
     logs_external_url: str | None
@@ -242,9 +249,16 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         tuple(u.strip() for u in raw_webhooks.split(",") if u.strip()) if raw_webhooks else ()
     )
 
+    metadata_store_dsn = _require_for(
+        ENV_METADATA_STORE_DSN,
+        src,
+        because="to wire the audit MetadataStoreProvider (custos-postgres)",
+    )
+
     return Settings(
         log_query_provider=log_provider,
         metrics_query_provider=metrics_provider,
+        metadata_store_dsn=metadata_store_dsn,
         loki_url=loki_url,
         prometheus_url=prometheus_url,
         logs_external_url=logs_external_url,
@@ -301,6 +315,7 @@ __all__ = [
     "ENV_LOGS_EXTERNAL_URL",
     "ENV_LOG_QUERY_PROVIDER",
     "ENV_LOKI_URL",
+    "ENV_METADATA_STORE_DSN",
     "ENV_METRICS_EXTERNAL_URL",
     "ENV_METRICS_QUERY_PROVIDER",
     "ENV_OTEL_COLLECTOR_CONFIGMAP",

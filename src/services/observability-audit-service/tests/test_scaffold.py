@@ -11,6 +11,24 @@ from fastapi.testclient import TestClient
 
 import custos_obs
 from custos_obs import __version__, create_app
+from custos_obs.providers import Providers
+from custos_obs.settings import Settings, load_settings
+
+# A fully ``noop`` configuration whose providers wire without touching a
+# backend: the metadata pool is deferred (no socket until first query) and the
+# log/metrics providers are noop adapters. Lets the lifespan boot under
+# ``TestClient`` with no Postgres/Loki/Prometheus reachable.
+_NOOP_ENV = {
+    "CUSTOS_LOG_QUERY_PROVIDER": "noop",
+    "CUSTOS_LOGS_EXTERNAL_URL": "https://logs.example.com",
+    "CUSTOS_METRICS_QUERY_PROVIDER": "noop",
+    "CUSTOS_METRICS_EXTERNAL_URL": "https://metrics.example.com",
+    "CUSTOS_OBS_METADATA_STORE_DSN": "postgresql://noop/noop",
+}
+
+
+def _noop_settings() -> Settings:
+    return load_settings(_NOOP_ENV)
 
 
 def test_package_exports_create_app_and_version() -> None:
@@ -48,15 +66,18 @@ def test_readyz_is_not_ready_before_lifespan_runs() -> None:
 
 
 def test_readyz_becomes_ready_inside_lifespan() -> None:
-    app = create_app()
+    app = create_app(settings=_noop_settings())
     with TestClient(app) as client:  # context-manager runs the lifespan
         resp = client.get("/readyz")
         assert resp.status_code == 200
         assert resp.json() == {"status": "ready"}
+        # The lifespan stashes the resolved settings + provider bundle.
+        assert app.state.settings.log_query_provider == "noop"
+        assert isinstance(app.state.providers, Providers)
 
 
 def test_readyz_resets_after_lifespan_shutdown() -> None:
-    app = create_app()
+    app = create_app(settings=_noop_settings())
     with TestClient(app):
         pass
     # After shutdown the readiness flag is cleared again.

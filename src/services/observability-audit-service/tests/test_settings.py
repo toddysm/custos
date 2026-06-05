@@ -32,6 +32,7 @@ def _base_env(**overrides: str) -> dict[str, str]:
     env = {
         "CUSTOS_LOKI_URL": "http://loki:3100",
         "CUSTOS_PROMETHEUS_URL": "http://prometheus:9090",
+        "CUSTOS_OBS_METADATA_STORE_DSN": "postgresql://obs:obs@postgres:5432/obs",
     }
     env.update(overrides)
     return env
@@ -109,6 +110,21 @@ def test_noop_log_provider_with_external_url() -> None:
 def test_opensearch_log_provider_is_rejected_in_m1() -> None:
     with pytest.raises(SettingsError, match="CUSTOS_LOG_QUERY_PROVIDER must be one of"):
         load_settings(_base_env(CUSTOS_LOG_QUERY_PROVIDER="opensearch"))
+
+
+# --- Metadata store DSN ------------------------------------------------------
+
+
+def test_metadata_store_dsn_is_loaded() -> None:
+    settings = load_settings(_base_env())
+    assert settings.metadata_store_dsn == "postgresql://obs:obs@postgres:5432/obs"
+
+
+def test_metadata_store_dsn_is_required() -> None:
+    env = _base_env()
+    del env["CUSTOS_OBS_METADATA_STORE_DSN"]
+    with pytest.raises(SettingsError, match="CUSTOS_OBS_METADATA_STORE_DSN is required"):
+        load_settings(env)
 
 
 # --- Metrics provider conditional branches -----------------------------------
@@ -235,7 +251,9 @@ def test_load_settings_reads_os_environ_by_default(monkeypatch: pytest.MonkeyPat
     monkeypatch.setenv("CUSTOS_LOGS_EXTERNAL_URL", "https://logs.example.com")
     monkeypatch.setenv("CUSTOS_METRICS_QUERY_PROVIDER", "noop")
     monkeypatch.setenv("CUSTOS_METRICS_EXTERNAL_URL", "https://metrics.example.com")
+    monkeypatch.setenv("CUSTOS_OBS_METADATA_STORE_DSN", "postgresql://obs/obs")
     settings = load_settings()
     assert isinstance(settings, Settings)
     assert settings.log_query_provider == "noop"
     assert settings.metrics_query_provider == "noop"
+    assert settings.metadata_store_dsn == "postgresql://obs/obs"
