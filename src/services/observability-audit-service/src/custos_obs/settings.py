@@ -72,6 +72,10 @@ ENV_AUDIT_OUTBOX_POLL_INTERVAL_S: Final[str] = "CUSTOS_AUDIT_OUTBOX_POLL_INTERVA
 #: eligible for garbage collection (OBS-IMPL-007).
 ENV_AUDIT_OUTBOX_RETENTION_MARGIN: Final[str] = "CUSTOS_AUDIT_OUTBOX_RETENTION_MARGIN"
 
+#: Optional. Drain lag (rows behind the outbox head) at which a pipeline emits
+#: ``obs.outbox.lagging`` (OBS-IMPL-006).
+ENV_AUDIT_OUTBOX_LAG_THRESHOLD: Final[str] = "CUSTOS_AUDIT_OUTBOX_LAG_THRESHOLD"
+
 #: Optional. ConfigMap holding the alert-rule DSL (OBS-IMPL-008).
 ENV_ALERT_RULES_CONFIGMAP: Final[str] = "CUSTOS_ALERT_RULES_CONFIGMAP"
 
@@ -104,6 +108,7 @@ DEFAULT_AUDIT_RETENTION_DAYS: Final[int] = 90
 DEFAULT_AUDIT_OUTBOX_DRAIN_MODE: Final[str] = "listen"
 DEFAULT_AUDIT_OUTBOX_POLL_INTERVAL_S: Final[int] = 5
 DEFAULT_AUDIT_OUTBOX_RETENTION_MARGIN_S: Final[int] = 86_400  # 24h
+DEFAULT_AUDIT_OUTBOX_LAG_THRESHOLD: Final[int] = 1_000
 DEFAULT_ALERT_RULES_CONFIGMAP: Final[str] = "custos-alert-rules"
 DEFAULT_SMTP_PORT: Final[int] = 587
 DEFAULT_ENVIRONMENT: Final[str] = "development"
@@ -136,6 +141,7 @@ class Settings:
     audit_outbox_drain_mode: str
     audit_outbox_poll_interval_s: int
     audit_outbox_retention_margin_s: int
+    audit_outbox_lag_threshold: int
     alert_rules_configmap: str
     alert_webhook_urls: tuple[str, ...] = field(default=())
     smtp_host: str | None = None
@@ -279,6 +285,9 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         audit_outbox_retention_margin_s=_opt_positive_int(
             ENV_AUDIT_OUTBOX_RETENTION_MARGIN, src, DEFAULT_AUDIT_OUTBOX_RETENTION_MARGIN_S
         ),
+        audit_outbox_lag_threshold=_opt_positive_int(
+            ENV_AUDIT_OUTBOX_LAG_THRESHOLD, src, DEFAULT_AUDIT_OUTBOX_LAG_THRESHOLD
+        ),
         alert_rules_configmap=(
             src.get(ENV_ALERT_RULES_CONFIGMAP, "").strip() or DEFAULT_ALERT_RULES_CONFIGMAP
         ),
@@ -296,6 +305,7 @@ __all__ = [
     "AUDIT_OUTBOX_DRAIN_MODES",
     "DEFAULT_ALERT_RULES_CONFIGMAP",
     "DEFAULT_AUDIT_OUTBOX_DRAIN_MODE",
+    "DEFAULT_AUDIT_OUTBOX_LAG_THRESHOLD",
     "DEFAULT_AUDIT_OUTBOX_POLL_INTERVAL_S",
     "DEFAULT_AUDIT_OUTBOX_RETENTION_MARGIN_S",
     "DEFAULT_AUDIT_RETENTION_DAYS",
@@ -308,6 +318,7 @@ __all__ = [
     "ENV_ALERT_RULES_CONFIGMAP",
     "ENV_ALERT_WEBHOOK_URLS",
     "ENV_AUDIT_OUTBOX_DRAIN_MODE",
+    "ENV_AUDIT_OUTBOX_LAG_THRESHOLD",
     "ENV_AUDIT_OUTBOX_POLL_INTERVAL_S",
     "ENV_AUDIT_OUTBOX_RETENTION_MARGIN",
     "ENV_AUDIT_RETENTION_DAYS",
