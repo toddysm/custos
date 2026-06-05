@@ -15,8 +15,9 @@ the consumers that succeeded advance their cursor.
 
 Delivery is at-least-once (the drainer re-streams a batch whose handler raised).
 De-duplication is keyed on ``event_id``: the store consumer writes through an
-idempotent seam (the ``custos_audit.events`` ``event_id`` primary key), so a
-redelivered row is a no-op rather than a duplicate.
+idempotent seam (the ``custos_state.audit_event`` table, whose
+``(workspace_id, event_id)`` primary key enforces write-once), so a redelivered
+row is a no-op rather than a duplicate.
 
 Lag is observed per consumer as ``head_cursor - committed_cursor`` (rows behind
 the outbox head). When a consumer's lag crosses ``lag_threshold`` the pipeline
@@ -59,9 +60,10 @@ AUDIT_ALERT_PIPELINE_ID = "audit-alert"
 class AuditOutboxRowWriter(Protocol):
     """Idempotent single-row sink for the audit-store consumer.
 
-    Implementations must be idempotent on ``row.event_id`` (the durable
-    ``custos_audit.events`` primary key) so an at-least-once redelivery writes
-    no duplicate.
+    Implementations must be idempotent on ``row.event_id`` — the durable
+    ``custos_state.audit_event`` table's ``(workspace_id, event_id)`` primary
+    key enforces write-once — so an at-least-once redelivery writes no
+    duplicate.
     """
 
     async def __call__(self, row: AuditOutboxRow) -> None: ...
