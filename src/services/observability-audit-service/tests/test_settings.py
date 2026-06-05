@@ -10,10 +10,12 @@ from __future__ import annotations
 import pytest
 
 from custos_obs.settings import (
+    DEFAULT_ALERT_RULES_CONFIGMAP,
     DEFAULT_AUDIT_OUTBOX_DRAIN_MODE,
     DEFAULT_AUDIT_OUTBOX_POLL_INTERVAL_S,
     DEFAULT_AUDIT_OUTBOX_RETENTION_MARGIN_S,
     DEFAULT_AUDIT_RETENTION_DAYS,
+    DEFAULT_ENVIRONMENT,
     DEFAULT_LOG_QUERY_PROVIDER,
     DEFAULT_METRICS_QUERY_PROVIDER,
     DEFAULT_OTEL_COLLECTOR_CONFIGMAP,
@@ -40,17 +42,27 @@ def _base_env(**overrides: str) -> dict[str, str]:
 
 def test_defaults_match_design_table() -> None:
     settings = load_settings(_base_env())
+    # Pin both the loaded value and the literal design-table default so an
+    # accidental change to either the constant or the loader is caught.
     assert settings.log_query_provider == DEFAULT_LOG_QUERY_PROVIDER == "loki"
     assert settings.metrics_query_provider == DEFAULT_METRICS_QUERY_PROVIDER == "prometheus"
     assert settings.audit_retention_days == DEFAULT_AUDIT_RETENTION_DAYS == 90
     assert settings.audit_outbox_drain_mode == DEFAULT_AUDIT_OUTBOX_DRAIN_MODE == "listen"
     assert settings.audit_outbox_poll_interval_s == DEFAULT_AUDIT_OUTBOX_POLL_INTERVAL_S == 5
-    assert settings.audit_outbox_retention_margin_s == DEFAULT_AUDIT_OUTBOX_RETENTION_MARGIN_S
+    assert (
+        settings.audit_outbox_retention_margin_s
+        == DEFAULT_AUDIT_OUTBOX_RETENTION_MARGIN_S
+        == 86_400
+    )
     assert settings.otel_collector_configmap == DEFAULT_OTEL_COLLECTOR_CONFIGMAP
+    assert settings.otel_collector_configmap == "custos-otel-collector-config"
     assert settings.otel_exporters_configmap == DEFAULT_OTEL_EXPORTERS_CONFIGMAP
+    assert settings.otel_exporters_configmap == "custos-otel-exporters"
+    assert settings.alert_rules_configmap == DEFAULT_ALERT_RULES_CONFIGMAP == "custos-alert-rules"
     assert settings.alert_webhook_urls == ()
-    assert settings.smtp_port == DEFAULT_SMTP_PORT
+    assert settings.smtp_port == DEFAULT_SMTP_PORT == 587
     assert settings.smtp_configured is False
+    assert settings.environment == DEFAULT_ENVIRONMENT == "development"
     assert settings.is_production is False
 
 
