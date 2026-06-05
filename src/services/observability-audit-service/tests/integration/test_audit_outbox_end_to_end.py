@@ -95,6 +95,20 @@ def _rowcount(command_tag: str) -> int:
     return int(command_tag.split()[-1])
 
 
+async def _db_now(pool: Any) -> datetime:
+    """Read the Postgres transaction clock.
+
+    The retention worker's ``enqueued_before`` cutoff must be compared against
+    ``audit_outbox.enqueued_at`` (set by the database ``DEFAULT now()``), so the
+    worker's ``now`` is pinned to the database clock rather than the runner's to
+    keep the comparison self-consistent under clock skew.
+    """
+    async with pool.acquire() as conn:
+        value = await conn.fetchval("SELECT now()")
+    assert isinstance(value, datetime)
+    return value
+
+
 class _PoolAuditRetentionStore:
     """Pool-backed :class:`AuditRetentionStore` over the real audit tables.
 
@@ -245,6 +259,10 @@ async def test_retention_deletes_aged_audit_and_gcs_outbox(
     async def _record(event: AuditEvent) -> None:
         emitted.append(event)
 
+    # Pin the worker clock to the database clock (read after draining) so the
+    # outbox GC's enqueued_before cutoff is self-consistent with the
+    # database-stamped enqueued_at, regardless of runner/container clock skew.
+    pinned_now = await _db_now(pg_pool)
     worker = AuditRetentionWorker(
         store=_PoolAuditRetentionStore(pg_pool, metadata_store),
         retention_days=90,
@@ -252,6 +270,7 @@ async def test_retention_deletes_aged_audit_and_gcs_outbox(
         sweep_interval_s=3600,
         pipeline_ids=(AUDIT_STORE_PIPELINE_ID, AUDIT_ALERT_PIPELINE_ID),
         emit_event=_record,
+        now=lambda: pinned_now,
     )
     result = await worker.sweep_once()
 
