@@ -60,9 +60,23 @@ def client(
     providers: Providers,
     metadata_store: InMemoryTriggerMetadataStore,
     fake_workflow: FakeWorkflowServiceClient,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[TestClient]:
+    # Keep the suite hermetic: the factory reads the deployment environment and
+    # the pub/sub component / topic from the process env, so pin development and
+    # clear the pub/sub knobs to their built-in defaults regardless of the
+    # runner's shell (a production ENVIRONMENT with an empty authz endpoint
+    # would otherwise refuse to boot, and exported topic/component overrides
+    # would break the /dapr/subscribe assertion).
+    monkeypatch.delenv("TRIGGER_PUBSUB_COMPONENT", raising=False)
+    monkeypatch.delenv("TRIGGER_WORKFLOW_EVENTS_TOPIC", raising=False)
     dispatcher = Dispatcher(fake_workflow, Deduplicator(metadata_store))
-    app = create_app(authz_endpoint="", providers=providers, dispatcher=dispatcher)
+    app = create_app(
+        authz_endpoint="",
+        environment="development",
+        providers=providers,
+        dispatcher=dispatcher,
+    )
     with TestClient(app) as test_client:
         yield test_client
 
