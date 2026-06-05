@@ -76,6 +76,26 @@ def test_build_invoke_url_strips_leading_slash() -> None:
     )
 
 
+def test_build_invoke_url_rejects_empty_method() -> None:
+    with pytest.raises(ValueError, match="non-empty Dapr invoke method"):
+        build_invoke_url(_ENDPOINT, "///")
+
+
+def test_dapr_endpoint_rejects_empty_host() -> None:
+    with pytest.raises(ValueError, match="host must be a non-empty"):
+        DaprEndpoint(host="", http_port=3500, app_id="wf")
+
+
+def test_dapr_endpoint_rejects_empty_app_id() -> None:
+    with pytest.raises(ValueError, match="app_id must be a non-empty"):
+        DaprEndpoint(host="127.0.0.1", http_port=3500, app_id="")
+
+
+def test_dapr_endpoint_rejects_non_positive_port() -> None:
+    with pytest.raises(ValueError, match="http_port must be a positive"):
+        DaprEndpoint(host="127.0.0.1", http_port=0, app_id="wf")
+
+
 def test_raise_event_method() -> None:
     assert raise_event_method("run-1", "step-1") == ("internal/runs/run-1/steps/step-1:raiseEvent")
 

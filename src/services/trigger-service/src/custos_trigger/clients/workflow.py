@@ -160,12 +160,29 @@ class DaprEndpoint:
     http_port: int
     app_id: str
 
+    def __post_init__(self) -> None:
+        if not self.host:
+            raise ValueError("DaprEndpoint.host must be a non-empty string")
+        if not self.app_id:
+            raise ValueError("DaprEndpoint.app_id must be a non-empty string")
+        if self.http_port <= 0:
+            raise ValueError(
+                f"DaprEndpoint.http_port must be a positive integer (got {self.http_port})"
+            )
+
 
 def build_invoke_url(endpoint: DaprEndpoint, method: str) -> str:
-    """Build the Dapr service-invocation URL for ``method`` on ``endpoint``."""
+    """Build the Dapr service-invocation URL for ``method`` on ``endpoint``.
+
+    Raises:
+        ValueError: If ``method`` is empty or only slashes.
+    """
+    normalized = method.lstrip("/")
+    if not normalized:
+        raise ValueError("method must be a non-empty Dapr invoke method path")
     return (
         f"http://{endpoint.host}:{endpoint.http_port}"
-        f"/v1.0/invoke/{endpoint.app_id}/method/{method.lstrip('/')}"
+        f"/v1.0/invoke/{endpoint.app_id}/method/{normalized}"
     )
 
 
