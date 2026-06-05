@@ -1,8 +1,8 @@
 # Component Design: Trigger Service
 
 Slug: `trigger-service`
-Last Updated: 2026-05-18
-Version: 6
+Last Updated: 2026-06-04
+Version: 7
 Status: Draft
 
 ## Responsibility
@@ -275,6 +275,89 @@ erDiagram
 
 `kind` is the platform-level event taxonomy used by selectors. `data` is the normalized, vendor-agnostic payload. `raw` is retained for audit and to let connector-aware activities re-parse if needed.
 
+### Event Taxonomy (resolves TODO-001 / INCON-013)
+
+`kind` strings are **dot-namespaced** `<domain>.<event>` and validated against
+`^[a-z][a-z0-9]*(\.[a-z][a-z0-9_]*)+$` — lowercase, at least one dot, the first
+segment being the **domain**. Two tiers exist:
+
+**Platform-owned domains** form a *closed* registry whose kind lists are
+enumerated and validated exactly. This is the single source of truth for the
+unified namespace (INCON-013); ARM (TODO-009) emits the `activity.*` strings
+verbatim and Observability/Audit indexes events by the same `kind`.
+
+| Domain | Canonical kinds | Emitter |
+|---|---|---|
+| `manual` | `manual.fire` | Manual Receiver (REQ-004) |
+| `cron` | `cron.tick` | Scheduler Receiver (REQ-005, M2) |
+| `webhook` | `webhook.received` | Generic Webhook Receiver (M2) |
+| `workflow` | `workflow.started`, `workflow.completed`, `workflow.failed`, `workflow.cancelled` | Workflow Service (`custos.workflow.events`) |
+| `run` | `run.started`, `run.completed`, `run.failed`, `run.cancelled` | Workflow Service run lifecycle |
+| `step` | `step.started`, `step.succeeded`, `step.failed`, `step.retry_scheduled`, `step.waiting`, `step.resumed`, `step.timed_out` | Workflow Service step lifecycle |
+| `activity` | `activity.scheduled`, `activity.started`, `activity.succeeded`, `activity.failed`, `activity.timed_out`, `activity.cancelled` | Activity Runtime Manager (ARM TODO-009) |
+| `registry` | `registry.push`, `registry.tag`, `registry.delete` | Connector (OCI registry) |
+| `pr` | `pr.opened`, `pr.merged`, `pr.closed`, `pr.review_requested`, `pr.synchronized` | Connector (SCM) |
+| `scan` | `scan.started`, `scan.completed`, `scan.failed`, `scan.vulnerable` | Connector (security) |
+
+**Connector-authored (vendor) domains** let plugin authors emit kinds under a
+vendor-reserved domain declared in the connector manifest (e.g. `ghcr.*`,
+`github.*`, `acr.*`). These are validated for **shape only**, not membership; a
+vendor domain MUST NOT collide with a platform-owned domain.
+
+The Internal Event Receiver maps the `custos.workflow.events` envelope `status`
+field onto the `workflow.<status>` / `run.<status>` canonical kinds. The
+registry is implemented as `custos_trigger/taxonomy.py` (`CANONICAL_EVENT_KINDS`,
+`PLATFORM_DOMAINS`, `is_canonical_kind()`, `validate_kind()`) and may later be
+promoted to a shared library so ARM/WF/Observability import rather than mirror
+it (non-breaking, out of scope for M1). See change record
+[`changes/2026-06-04-007-event-taxonomy.md`](changes/2026-06-04-007-event-taxonomy.md).
+
+### Selector Language — CEL (resolves TODO-002)
+
+A subscription **selector is a CEL boolean expression** evaluated by the shared
+`custos-cel` sandboxed evaluator (ADR-011), giving full parity with the
+`inputMapping` placeholders (`${{ … }}`) already used on triggers — one
+expression language across the whole platform.
+
+Selectors evaluate against a new `event` binding root that mirrors the
+`NormalizedEvent` envelope: `event.kind`, `event.subject`,
+`event.source.{type,connectorInstanceId,subscriptionId,vendor,occurredAt}`,
+`event.data.*`, `event.raw.{headers,body}`. Enabling this requires an additive
+extension to `custos-cel`: `event` joins `_ALLOWED_ROOTS` with a matching
+`SchemaBindings.event` schema + `BindingScope.event` mapping. The same `event`
+root powers trigger `inputMapping`.
+
+Example:
+
+```text
+event.kind == "workflow.completed" && event.data.status == "succeeded"
+```
+
+Lifecycle:
+
+1. **Authoring.** The YAML `selector:` block accepts either a CEL string or the
+   legacy `field: matchType:value` sugar (`repository: prefix:ghcr.io/acme/`),
+   which **desugars** to equivalent CEL
+   (`event.data.repository.startsWith("ghcr.io/acme/")`). CEL is the canonical
+   persisted form; `eq|prefix|regex|jsonpath` remain accepted at the API and
+   lower to CEL before storage.
+2. **Persistence.** Stored as a single `SubscriptionSelector` row with
+   `matchType = "cel"`, `value = <cel expr>`, `fieldPath = ""` — the
+   contract-locked SPL v1 schema is preserved; `cel` joins the existing
+   match-type enum as the canonical value.
+3. **Create / patch (fail-fast).** `parse()` + `type_check()` against the
+   `event` bindings; invalid CEL → `trigger.selector_invalid` (HTTP 422) before
+   persistence. The typed AST is cached in-process by `(subscriptionId, exprHash)`.
+4. **Match (hot path).** `evaluate(typed_ast, BindingScope(event=…), clock)`
+   under the per-evaluation timeout budget; a non-bool result →
+   `trigger.selector_type_error` (no-match + audit); a timeout → no-match + audit.
+5. **Resume selectors.** `RegisterResumeSubscription(selector=…)` is likewise a
+   CEL expression (or `None` = match on event key alone); same
+   compile-at-register, evaluate-at-match path.
+
+See change record
+[`changes/2026-06-04-006-selector-cel-parity.md`](changes/2026-06-04-006-selector-cel-parity.md).
+
 ## Public Interface
 
 ### REST API (mounted under API Gateway)
@@ -322,11 +405,12 @@ spec:
       timezone: UTC
 
     # Push mode: registry emits webhooks to us.
+    # Selectors are CEL (§ Selector Language); the legacy `field: matchType:value`
+    # sugar below desugars to `event.data.repository.startsWith("ghcr.io/acme/")`.
     - type: registry.push
       connector: ghcr-prod
       mode: push
-      selector:
-        repository: prefix:ghcr.io/acme/
+      selector: event.data.repository.startsWith("ghcr.io/acme/")
 
     # Pull mode: registry has no reliable webhook; we poll it.
     # Same trigger type, same selector model — only `mode` and `pollInterval` differ.
@@ -334,23 +418,19 @@ spec:
       connector: acr-prod
       mode: pull
       pollInterval: 5m
-      selector:
-        repository: prefix:acme.azurecr.io/
+      selector: event.data.repository.startsWith("acme.azurecr.io/")
 
     # Pull mode against a non-registry source.
     - type: github.pr
       connector: github-acme
       mode: pull
       pollInterval: 1m
-      selector:
-        repo: acme/app
-        state: closed
-        merged: true
+      selector: event.data.repo == "acme/app" && event.kind == "pr.merged"
 
     # Internal: another workflow's completion drives this one.
     - type: workflow.completed
       workflow: build-and-sign
-      onStatus: [succeeded]
+      selector: event.kind == "workflow.completed" && event.data.status == "succeeded"
       inputMapping:
         image: ${{ event.data.outputs.image }}
 ```
@@ -392,8 +472,6 @@ spec:
 
 ## Open TODOs
 
-- [ ] TODO-001: Define the platform event taxonomy (canonical `kind` values for registry.*, pr.*, workflow.*, scan.* etc.) — required before connector authors can target events deterministically (added 2026-05-16).
-- [ ] TODO-002: Decide selector language (subset of JSONPath vs. CEL vs. simple field/match-type tuples) — currently sketched as tuples, may need CEL parity with ADR-011 (added 2026-05-16).
 - [ ] TODO-003: Specify scheduler leader-election mechanism (Dapr distributed lock vs. Postgres advisory lock vs. Kubernetes lease) — REQ-005 (added 2026-05-16).
 - [ ] TODO-005: Define dead-letter handling and replay UX for dispatch failures (added 2026-05-16).
 - [ ] TODO-006: Decide whether webhook signing/HMAC keys are owned by Trigger Service per subscription or come from Connector Service per instance (added 2026-05-16).
@@ -401,6 +479,8 @@ spec:
 
 ## Closed TODOs
 
+- [x] TODO-001: Define the platform event taxonomy. Resolved 2026-06-04 — § Event Taxonomy locks the closed platform-owned domain registry + the vendor-domain shape rule + the unified `kind` namespace (INCON-013). See [`changes/2026-06-04-007-event-taxonomy.md`](changes/2026-06-04-007-event-taxonomy.md), closes #18.
+- [x] TODO-002: Decide selector language. Resolved 2026-06-04 — selectors are CEL boolean expressions over an `event` binding root (ADR-011 parity with `inputMapping`); legacy field/match-type tuples desugar to CEL. See [`changes/2026-06-04-006-selector-cel-parity.md`](changes/2026-06-04-006-selector-cel-parity.md), closes #19.
 - [x] TODO-004: Specify resume-subscription registration as a Workflow Service responsibility in that component's design (cross-component) — REQ-081. Resolved 2026-05-17 by Workflow Service design (`design/components/workflow-service/design.md` § Step Resume on External Event and § Resume Subscription Replay Protocol). Idempotent re-registration semantics also documented on the TS Internal RPC table above.
 
 ## Change History
@@ -415,3 +495,5 @@ spec:
 | 2026-05-18 | INCON-024: ER diagram no longer draws `Run` as a participant in a Trigger-Service-owned relationship. `ResumeSubscription` now exposes `runId` / `stepId` as scalar opaque references to the Workflow Service-owned `Run` / `Step` entities, with a paragraph clarifying that cross-service references are by ID, not by FK | #86 |
 | 2026-05-18 | INCON-025: Public REST routes rewritten to gateway-mounted workspace-scoped form (`/v1/workspaces/{ws}/triggers/*`); manual-fire renamed `POST /triggers/manual/{id}/fire` → `POST /v1/workspaces/{ws}/triggers/{id}:fire`; subscription-scoped webhook route `POST /triggers/webhook/{id}` removed in favor of the gateway-owned connector-instance-scoped `POST /v1/webhooks/{connectorInstanceId}` with downstream subscription demux owned by the Generic Webhook Receiver | #99 |
 | 2026-05-18 | INCON-027: Added TODO-007 for a selective `DedupKey` clear admin API (deferred to M2+). Connector Service cursor rewind no longer documents a Trigger admin step that does not exist; until TODO-007 ships, re-firing after rewind is governed by Trigger's existing dedup TTL window | #103 |
+| 2026-06-04 | TODO-002 resolved: selector language is CEL (ADR-011) over a new `event` binding root, with legacy field/match-type tuples desugaring to CEL; added § Selector Language — CEL | #19 |
+| 2026-06-04 | TODO-001 / INCON-013 resolved: locked the platform event taxonomy — closed platform-owned domain registry (`manual`/`cron`/`webhook`/`workflow`/`run`/`step`/`activity`/`registry`/`pr`/`scan`) + vendor-domain shape rule; added § Event Taxonomy | #18 |
