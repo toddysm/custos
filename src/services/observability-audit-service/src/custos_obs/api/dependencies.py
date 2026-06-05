@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from custos_spl.interfaces.metrics_query import MetricsQueryProvider
 
     from custos_obs.providers import Providers
+    from custos_obs.settings import Settings
 
 
 def get_providers(request: Request) -> Providers:
@@ -59,9 +60,32 @@ def get_metadata_store(request: Request) -> MetadataStoreProvider:
     return get_providers(request).metadata_store
 
 
+def get_settings(request: Request) -> Settings:
+    """Return the resolved :class:`Settings` stashed by the app lifespan.
+
+    Routes read the ``*_external_url`` pointers from here to populate the
+    ``503`` Problem Details extension when a read-back provider is unavailable.
+
+    Raises:
+        RuntimeError: When ``app.state.settings`` is unset — the lifespan did
+            not run (a wiring bug), not a client-facing condition.
+    """
+    settings = getattr(request.app.state, "settings", None)
+    if settings is None:
+        raise RuntimeError(
+            "app.state.settings is not set; the application lifespan must run "
+            "before request handling (load settings in create_app)."
+        )
+    from custos_obs.settings import Settings
+
+    assert isinstance(settings, Settings)
+    return settings
+
+
 __all__ = [
     "get_log_query_provider",
     "get_metadata_store",
     "get_metrics_query_provider",
     "get_providers",
+    "get_settings",
 ]

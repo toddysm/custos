@@ -11,8 +11,10 @@ from custos_obs.api.dependencies import (
     get_metadata_store,
     get_metrics_query_provider,
     get_providers,
+    get_settings,
 )
 from custos_obs.providers import Providers
+from custos_obs.settings import load_settings
 
 
 class _FakeMetadataStore:
@@ -70,3 +72,30 @@ def test_provider_factories_return_singletons() -> None:
     assert get_log_query_provider(request) is bundle.log_query  # type: ignore[arg-type]
     assert get_metrics_query_provider(request) is bundle.metrics_query  # type: ignore[arg-type]
     assert get_metadata_store(request) is bundle.metadata_store  # type: ignore[arg-type]
+
+
+def _request_with_settings(settings: object | None) -> object:
+    state = SimpleNamespace()
+    if settings is not None:
+        state.settings = settings
+    return SimpleNamespace(app=SimpleNamespace(state=state))
+
+
+def test_get_settings_returns_bundle() -> None:
+    settings = load_settings(
+        {
+            "CUSTOS_LOG_QUERY_PROVIDER": "noop",
+            "CUSTOS_LOGS_EXTERNAL_URL": "https://logs.example.com",
+            "CUSTOS_METRICS_QUERY_PROVIDER": "noop",
+            "CUSTOS_METRICS_EXTERNAL_URL": "https://metrics.example.com",
+            "CUSTOS_OBS_METADATA_STORE_DSN": "postgresql://noop/noop",
+        }
+    )
+    request = _request_with_settings(settings)
+    assert get_settings(request) is settings  # type: ignore[arg-type]
+
+
+def test_get_settings_raises_when_unset() -> None:
+    request = _request_with_settings(None)
+    with pytest.raises(RuntimeError, match=r"app\.state\.settings is not set"):
+        get_settings(request)  # type: ignore[arg-type]
