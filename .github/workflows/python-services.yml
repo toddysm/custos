@@ -197,6 +197,48 @@ jobs:
           CUSTOS_PG_DSN: postgresql://testuser:testpass@localhost:5432/custos_test
         run: pytest tests/integration -v -m integration --tb=short --no-cov
 
+  observability-audit-service:
+    name: observability-audit-service (lint + types + tests)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    defaults:
+      run:
+        working-directory: src/services/observability-audit-service
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install SPL + Postgres/Loki/Prometheus adapters + call-context from path
+        working-directory: ${{ github.workspace }}
+        run: |
+          pip install -e src/libs/storage-provider-layer[dev]
+          pip install -e src/libs/custos-postgres[dev]
+          pip install -e src/libs/custos-loki[dev]
+          pip install -e src/libs/custos-prometheus[dev]
+          pip install -e src/libs/custos-callctx[dev]
+
+      - name: Install package and dev dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Ruff lint
+        run: ruff check .
+
+      - name: Ruff format check
+        run: ruff format --check .
+
+      - name: Mypy (strict)
+        run: mypy src tests
+
+      - name: Pytest (with 90% coverage gate)
+        run: pytest -q --cov=custos_obs --cov-report=term-missing --cov-fail-under=90
+
   auth-service:
     name: auth-service (lint + types + tests)
     runs-on: ubuntu-latest
