@@ -128,6 +128,27 @@ def test_payload_email_rendering() -> None:
     assert "ws-1" in body
 
 
+def test_payload_mappings_are_immutable() -> None:
+    source = {"decision": "deny"}
+    event = AuditEvent(
+        workspace_id=WorkspaceId("ws-1"),
+        event_id="evt-1",
+        event_type="authz.decision",
+        actor="user:alice",
+        subject={"component": "authz"},
+        payload=source,
+        occurred_at=FIXED_NOW,
+    )
+    payload = AlertPayload.build(event, rule_name="r", sink="webhook")
+    with pytest.raises(TypeError):
+        payload.payload["decision"] = "allow"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        payload.subject["component"] = "other"  # type: ignore[index]
+    # Mutating the source mapping does not leak into the frozen payload.
+    source["decision"] = "allow"
+    assert payload.payload["decision"] == "deny"
+
+
 # --------------------------------------------------------------------------- #
 # Sinks                                                                        #
 # --------------------------------------------------------------------------- #
@@ -160,6 +181,21 @@ async def test_webhook_sink_propagates_transport_error() -> None:
     sink = WebhookSink(urls=["https://a.example"], transport=transport)
     with pytest.raises(AlertSinkError, match="boom"):
         await sink.deliver(AlertPayload.build(_audit_event(), rule_name="r", sink="webhook"))
+
+
+async def test_webhook_sink_attempts_all_urls_then_aggregates() -> None:
+    attempted: list[str] = []
+
+    async def transport(url: str, body: Any) -> None:
+        attempted.append(url)
+        if url == "https://a.example":
+            raise AlertSinkError("a failed")
+
+    sink = WebhookSink(urls=["https://a.example", "https://b.example"], transport=transport)
+    with pytest.raises(AlertSinkError, match="a failed"):
+        await sink.deliver(AlertPayload.build(_audit_event(), rule_name="r", sink="webhook"))
+    # The second URL is still attempted despite the first failing.
+    assert attempted == ["https://a.example", "https://b.example"]
 
 
 async def test_smtp_sink_delivers_via_transport() -> None:
@@ -238,13 +274,16 @@ async def test_httpx_webhook_transport_wraps_status_error() -> None:
 class _FakeSMTP:
     last: _FakeSMTP | None = None
 
-    def __init__(self, host: str, port: int, *, fail: bool = False) -> None:
+    def __init__(
+        self, host: str, port: int, *, fail: bool = False, smtp_error: bool = False
+    ) -> None:
         self.host = host
         self.port = port
         self.started = False
         self.logged_in: tuple[str, str] | None = None
         self.sent: Any = None
         self._fail = fail
+        self._smtp_error = smtp_error
         _FakeSMTP.last = self
 
     def __enter__(self) -> _FakeSMTP:
@@ -260,6 +299,8 @@ class _FakeSMTP:
         self.logged_in = (username, password)
 
     def send_message(self, message: Any) -> None:
+        if self._smtp_error:
+            raise smtplib.SMTPServerDisconnected("connection lost")
         if self._fail:
             raise OSError("relay down")
         self.sent = message
@@ -309,6 +350,18 @@ async def test_smtp_transport_wraps_oserror(monkeypatch: pytest.MonkeyPatch) -> 
         await transport(subject="subj", body="body")
 
 
+async def test_smtp_transport_wraps_smtp_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _raising_smtp(host: str, port: int) -> _FakeSMTP:
+        return _FakeSMTP(host, port, smtp_error=True)
+
+    monkeypatch.setattr(smtplib, "SMTP", _raising_smtp)
+    transport = SmtpEmailTransport(
+        host="smtp.example", sender="alerts@example", recipients=["ops@example"]
+    )
+    with pytest.raises(AlertSinkError, match=r"SMTP send via smtp\.example failed"):
+        await transport(subject="subj", body="body")
+
+
 def test_smtp_transport_requires_recipients() -> None:
     with pytest.raises(ValueError, match="at least one recipient"):
         SmtpEmailTransport(host="smtp.example", sender="a@example", recipients=[])
@@ -322,7 +375,7 @@ def test_smtp_transport_requires_recipients() -> None:
 def _dispatcher(
     sinks: dict[str, Any],
     *,
-    dead_letter: _FakeDeadLetter,
+    dead_letter: Any,
     emit: Any,
     sleep: Any,
     max_attempts: int = 5,
@@ -519,5 +572,53 @@ async def test_dispatch_emit_cancellation_propagates() -> None:
         raise asyncio.CancelledError
 
     dispatcher = _dispatcher({"webhook": sink}, dead_letter=dlq, emit=emit, sleep=sleep)
+    with pytest.raises(asyncio.CancelledError):
+        await dispatcher.dispatch(_audit_event(), [_match()])
+
+
+async def test_dispatch_dead_letter_failure_is_best_effort() -> None:
+    bad = _RecordingSink("webhook", always_fail=True)
+    good = _RecordingSink("smtp")
+    emit, emitted = _emitter()
+    sleep, _ = _sleeper()
+
+    class _BrokenDeadLetter:
+        async def record(self, record: DeadLetterRecord) -> None:
+            raise RuntimeError("dlq down")
+
+    dispatcher = _dispatcher(
+        {"webhook": bad, "smtp": good},
+        dead_letter=_BrokenDeadLetter(),
+        emit=emit,
+        sleep=sleep,
+        max_attempts=1,
+    )
+
+    # The DLQ outage must not abort delivery to the healthy sink, and the
+    # obs.alert.failed event is still emitted for the failed sink.
+    await dispatcher.dispatch(_audit_event(), [_match(sinks=("webhook", "smtp"))])
+
+    assert good.calls == 1
+    kinds = {e.event_type for e in emitted}
+    assert kinds == {"obs.alert.dispatched", "obs.alert.failed"}
+
+
+async def test_dispatch_dead_letter_cancellation_propagates() -> None:
+    bad = _RecordingSink("webhook", always_fail=True)
+    emit, _ = _emitter()
+    sleep, _ = _sleeper()
+
+    class _CancellingDeadLetter:
+        async def record(self, record: DeadLetterRecord) -> None:
+            raise asyncio.CancelledError
+
+    dispatcher = _dispatcher(
+        {"webhook": bad},
+        dead_letter=_CancellingDeadLetter(),
+        emit=emit,
+        sleep=sleep,
+        max_attempts=1,
+    )
+
     with pytest.raises(asyncio.CancelledError):
         await dispatcher.dispatch(_audit_event(), [_match()])

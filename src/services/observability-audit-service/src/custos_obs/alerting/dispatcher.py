@@ -27,6 +27,7 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.message import EmailMessage
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Protocol
 
 from custos_obs.errors import AlertSinkUnavailable
@@ -68,6 +69,12 @@ class AlertPayload:
     occurred_at: datetime
     subject: Mapping[str, Any]
     payload: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        # Keep the frozen payload genuinely immutable: callers (and sinks) must
+        # not be able to mutate the shared subject/payload mappings in place.
+        object.__setattr__(self, "subject", MappingProxyType(dict(self.subject)))
+        object.__setattr__(self, "payload", MappingProxyType(dict(self.payload)))
 
     @classmethod
     def build(cls, audit_event: AuditEvent, *, rule_name: str, sink: str) -> AlertPayload:
@@ -172,8 +179,14 @@ class WebhookSink:
         if not self._urls:
             raise AlertSinkError("no webhook destinations configured")
         body = payload.to_body()
+        failures: list[str] = []
         for url in self._urls:
-            await self._transport(url, body)
+            try:
+                await self._transport(url, body)
+            except AlertSinkError as exc:
+                failures.append(str(exc))
+        if failures:
+            raise AlertSinkError("; ".join(failures))
 
 
 class SmtpSink:
@@ -243,9 +256,13 @@ class SmtpEmailTransport:
         self._use_starttls = use_starttls
 
     async def __call__(self, *, subject: str, body: str) -> None:
+        import smtplib
+
         try:
             await asyncio.to_thread(self._send_blocking, subject, body)
-        except OSError as exc:  # smtplib raises socket/SMTP errors as OSError subclasses
+        except (OSError, smtplib.SMTPException) as exc:
+            # smtplib surfaces transport failures as OSError subclasses and
+            # protocol failures as SMTPException; both are retryable.
             raise AlertSinkError(f"SMTP send via {self._host} failed: {exc}") from exc
 
     def _send_blocking(self, subject: str, body: str) -> None:
@@ -354,15 +371,21 @@ class AlertDispatcher:
             f"sink '{payload.sink}' unavailable for rule '{payload.rule_name}': {reason}"
         )
         logger.error("dead-lettering alert: %s", error.detail)
-        await self._dead_letter.record(
-            DeadLetterRecord(
-                rule_name=payload.rule_name,
-                sink=payload.sink,
-                event_id=payload.event_id,
-                reason=error.detail,
-                failed_at=self._now(),
+        try:
+            await self._dead_letter.record(
+                DeadLetterRecord(
+                    rule_name=payload.rule_name,
+                    sink=payload.sink,
+                    event_id=payload.event_id,
+                    reason=error.detail,
+                    failed_at=self._now(),
+                )
             )
-        )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Best-effort: a DLQ outage must not block delivery to other sinks.
+            logger.exception("failed to dead-letter alert for rule %r", payload.rule_name)
         await self._emit(
             AlertFailed(
                 rule_name=payload.rule_name,
