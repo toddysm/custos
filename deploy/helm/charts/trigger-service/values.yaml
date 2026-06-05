@@ -2,12 +2,14 @@
 # empty to inherit umbrella global.* values. Set them here only to override
 # the umbrella for this one subchart.
 #
-# Configuration variables come from
-# design/components/trigger-service/design.md § Configuration. Non-secret
-# vars are projected through the ConfigMap (`config:` block below); the
-# single secret var (the metadata-store Postgres DSN) is projected through
-# the ExternalSecret (`externalSecret:` block below) and becomes container
-# env via envFrom.
+# Configuration variables come from design/components/trigger-service/design.md.
+# The numeric / TTL knobs are from § Configuration; the Dapr Pub/Sub
+# component + topic refs are from § Dapr Pub/Sub subscriptions; the
+# sibling-service endpoints are from § Dependencies. Non-secret vars are
+# projected through the ConfigMap (`config:` / `workflow:` / `connector:`
+# blocks below); the single secret var (the metadata-store Postgres DSN) is
+# projected through the ExternalSecret (`externalSecret:` block below) and
+# becomes container env via envFrom.
 
 enabled: true
 
@@ -51,6 +53,13 @@ config:
   # Pull receivers are deferred to M2 (see implementation-plan.md), so the
   # webhook base URL + poller / leader-lease knobs ship with their
   # documented defaults but are not exercised until those receivers land.
+  #
+  # NOTE: design.md § Configuration marks TRIGGER_WEBHOOK_BASE_URL as
+  # Required with no default — once the Generic Webhook receiver ships,
+  # operators must supply the externally-reachable ingress URL. Until then
+  # this in-cluster Service address is a chart-provided placeholder so the
+  # shipped profiles render without an operator-supplied value; it is NOT a
+  # design-sanctioned default.
   webhookBaseUrl: http://trigger-service:8080
   dedupTtlSeconds: 86400
   pollerDefaultIntervalSeconds: 60

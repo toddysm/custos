@@ -6,7 +6,10 @@ metadata:
     {{- include "svc.labels" . | nindent 4 }}
 data:
   CUSTOS_SERVICE_NAME: {{ .Chart.Name | quote }}
-  # Non-secret TRIGGER_* env vars per design.md § Configuration.
+  # Non-secret TRIGGER_* env vars. The numeric / TTL knobs come from
+  # design.md § Configuration; the Pub/Sub component + topic refs from
+  # § Dapr Pub/Sub subscriptions; the sibling-service endpoints from
+  # § Dependencies.
   TRIGGER_WEBHOOK_BASE_URL: {{ .Values.config.webhookBaseUrl | quote }}
   TRIGGER_DEDUP_TTL_SECONDS: {{ .Values.config.dedupTtlSeconds | quote }}
   TRIGGER_POLLER_DEFAULT_INTERVAL_SECONDS: {{ .Values.config.pollerDefaultIntervalSeconds | quote }}

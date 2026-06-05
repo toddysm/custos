@@ -20,11 +20,13 @@ Design: [`design/components/trigger-service/design.md`](../../../../design/compo
 ## Configuration contract
 
 Non-secret env (ConfigMap, from `config:` / `workflow:` / `connector:` in
-`values.yaml`), per design.md § Configuration:
+`values.yaml`). The numeric / TTL knobs come from design.md § Configuration;
+the Pub/Sub component + topic refs from § Dapr Pub/Sub subscriptions; the
+sibling-service endpoints from § Dependencies:
 
 | Env var | Default | Source |
 |---|---|---|
-| `TRIGGER_WEBHOOK_BASE_URL` | `http://trigger-service:8080` | `config.webhookBaseUrl` |
+| `TRIGGER_WEBHOOK_BASE_URL` | `http://trigger-service:8080` (placeholder, see note) | `config.webhookBaseUrl` |
 | `TRIGGER_DEDUP_TTL_SECONDS` | `86400` | `config.dedupTtlSeconds` |
 | `TRIGGER_POLLER_DEFAULT_INTERVAL_SECONDS` | `60` | `config.pollerDefaultIntervalSeconds` |
 | `TRIGGER_RESUME_DEFAULT_TTL_SECONDS` | `604800` | `config.resumeDefaultTtlSeconds` |
@@ -46,6 +48,13 @@ The Scheduler / Generic Webhook / Pull receivers are deferred to M2 (see the
 [implementation plan](../../../../design/components/trigger-service/implementation-plan.md)),
 so the webhook base URL and poller / leader-lease knobs ship with their
 documented defaults but are not exercised until those receivers land.
+
+> **`TRIGGER_WEBHOOK_BASE_URL`** is marked Required with no default in
+> design.md § Configuration — once the Generic Webhook receiver ships,
+> operators must supply the externally-reachable ingress URL. The
+> in-cluster Service address shipped here is a chart-provided placeholder so
+> the profiles render without an operator-supplied value; it is not a
+> design-sanctioned default.
 
 ## Dapr Pub/Sub
 
