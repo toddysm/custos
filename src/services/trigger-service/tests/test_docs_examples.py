@@ -62,7 +62,7 @@ _MODELS: dict[str, type[BaseModel]] = {
     "NormalizedEvent": NormalizedEvent,
 }
 
-_FENCE = re.compile(r"```(?P<lang>\w+)\n(?P<body>.*?)\n```", re.DOTALL)
+_FENCE = re.compile(r"```(?P<lang>\w*)\n(?P<body>.*?)\n```", re.DOTALL)
 _DIRECTIVE = re.compile(r"[ \t]*<!--\s*doctest:\s*(?P<body>.+?)\s*-->[ \t]*")
 
 
@@ -129,7 +129,11 @@ def test_json_and_yaml_blocks_are_well_formed(fence: tuple[int, str, str, list[s
 def test_tagged_blocks_match_the_code(fence: tuple[int, str, str, list[str]]) -> None:
     line, lang, body, directives = fence
     if not directives:
-        pytest.skip(f"L{line}: untagged block")
+        # Untagged blocks (illustrative Problem docs, the auth envelope, the
+        # declarative-YAML and path-prefix examples) are only structurally
+        # checked by ``test_json_and_yaml_blocks_are_well_formed``; this
+        # directive-routed test simply ignores them.
+        return
 
     for directive in directives:
         if directive in _MODELS:
@@ -157,14 +161,31 @@ def test_tagged_blocks_match_the_code(fence: tuple[int, str, str, list[str]]) ->
 # Taxonomy completeness — the doc table cannot omit a canonical kind or domain.
 # ---------------------------------------------------------------------------
 
+_TABLE_MARKER = "The closed platform registry:"
+
+
+def _taxonomy_table_text() -> str:
+    """Return only the platform-registry table region of the guide.
+
+    Scoping the completeness checks to the table (rather than the whole
+    document) means a kind mentioned only in prose elsewhere cannot mask a
+    missing table row.
+    """
+    text = _doc_text()
+    start = text.index(_TABLE_MARKER)
+    rest = text[start:]
+    # The table ends at the first blank line following the last table row.
+    end = rest.index("\n\n", rest.index("|"))
+    return rest[:end]
+
 
 def test_taxonomy_table_lists_every_canonical_kind() -> None:
-    text = _doc_text()
-    missing = sorted(kind for kind in CANONICAL_EVENT_KINDS if f"`{kind}`" not in text)
+    table = _taxonomy_table_text()
+    missing = sorted(kind for kind in CANONICAL_EVENT_KINDS if f"`{kind}`" not in table)
     assert not missing, f"taxonomy table is missing canonical kinds: {missing}"
 
 
 def test_taxonomy_table_lists_every_platform_domain() -> None:
-    text = _doc_text()
-    missing = sorted(domain for domain in PLATFORM_DOMAINS if f"| `{domain}` |" not in text)
+    table = _taxonomy_table_text()
+    missing = sorted(domain for domain in PLATFORM_DOMAINS if f"| `{domain}` |" not in table)
     assert not missing, f"taxonomy table is missing platform domains: {missing}"

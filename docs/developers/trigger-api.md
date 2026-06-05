@@ -58,9 +58,27 @@ linear `Classify → Match → Dedup → Dispatch` pipeline.
 
 REST routes are tenant-scoped and require a signed Custos call context. The
 workspace in the path **must** match the workspace in the call context; a
-mismatch is rejected with `403 trigger.api.bad_request` (defense-in-depth).
-Permissions are checked per route: `read` for `GET`, `write` for `POST`/`PATCH`,
-`delete` for `DELETE`, and `fire` for the `:fire` action.
+mismatch is rejected with `403` and the call-context error code
+`workspace_mismatch` (defense-in-depth). Permissions are checked per route:
+`read` for `GET`, `write` for `POST`/`PATCH`, `delete` for `DELETE`, and `fire`
+for the `:fire` action.
+
+Call-context failures (missing or invalid context, permission denied, workspace
+mismatch) are **not** RFC 7807 documents — they use the shared call-context
+error envelope:
+
+```json
+{
+  "error": {
+    "code": "workspace_mismatch",
+    "detail": "call context workspace does not match the request path workspace"
+  }
+}
+```
+
+The call-context error codes are `callctx_missing` (`401`), `permission_denied`
+(`403`), and `workspace_mismatch` (`403`). Everything else — validation,
+dispatch, dedup — uses the [RFC 7807 taxonomy](#error-taxonomy-rfc-7807) below.
 
 The internal RPC routes (`/RegisterResumeSubscription`,
 `/CancelResumeSubscription`) and the event receiver routes (`/dapr/subscribe`,
@@ -212,9 +230,14 @@ Outcomes:
 
 ### Error taxonomy (RFC 7807)
 
-Errors are returned as `application/problem+json` with a stable `code`. The
-`type` URI is `https://errors.custos.dev/<code-with-slashes>` (e.g.
+Validation, dispatch, dedup, and resource errors are returned as
+`application/problem+json` with a stable `code`. The `type` URI is
+`https://errors.custos.dev/<code-with-slashes>` (e.g.
 `https://errors.custos.dev/trigger/selector_invalid`).
+
+> Call-context / auth failures (`401`/`403`) are the exception: they use the
+> [call-context error envelope](#authentication-and-call-context)
+> (`{"error": {"code": ..., "detail": ...}}`), not a Problem document.
 
 | `code` | HTTP | Meaning |
 |---|---|---|
