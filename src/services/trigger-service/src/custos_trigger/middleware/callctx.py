@@ -49,15 +49,21 @@ CALLCTX_HEADER: str = "x-custos-callctx"
 #: method paths are internal Dapr service-invocation routes the Workflow
 #: Service calls (TS-IMPL-016); they are authenticated at the Dapr mesh layer
 #: (mTLS + app-id allow-list), not via the call-context envelope — the caller
-#: propagates no ``x-custos-callctx`` header — so they bypass here. Keep these
-#: in sync with ``custos_trigger.api.routes.rpc.REGISTER_RESUME_PATH`` /
-#: ``CANCEL_RESUME_PATH``.
+#: propagates no ``x-custos-callctx`` header — so they bypass here. The internal
+#: receiver routes (TS-IMPL-017) are Dapr Pub/Sub control-plane surfaces — the
+#: sidecar's subscription probe and topic deliveries carry no call-context
+#: header either — so they bypass too. Keep these in sync with
+#: ``custos_trigger.api.routes.rpc.REGISTER_RESUME_PATH`` / ``CANCEL_RESUME_PATH``
+#: and ``custos_trigger.receivers.internal.DAPR_SUBSCRIBE_PATH`` /
+#: ``INTERNAL_EVENTS_PATH``.
 _BYPASS_PATHS: frozenset[str] = frozenset(
     {
         "/healthz",
         "/readyz",
         "/RegisterResumeSubscription",
         "/CancelResumeSubscription",
+        "/dapr/subscribe",
+        "/internal/events/workflow",
     }
 )
 

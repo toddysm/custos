@@ -219,6 +219,15 @@ class InMemoryTriggerMetadataStore:
         """Return the append-only selector revisions in write order."""
         return tuple(self._selectors.get((workspace_id, subscription_id), ()))
 
+    def list_subscriptions(self, workspace_id: str) -> tuple[SplSubscription, ...]:
+        """Return every subscription row stored under *workspace_id*.
+
+        Backs the internal event receiver's candidate enumeration
+        (:class:`~custos_trigger.stores.base.SubscriptionListable`); rows are
+        returned in insertion order.
+        """
+        return tuple(row for (ws, _sid), row in self._subscriptions.items() if ws == workspace_id)
+
     def resume_subscription(
         self, workspace_id: str, resume_id: str
     ) -> SplResumeSubscription | None:

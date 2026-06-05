@@ -35,7 +35,12 @@ from custos_spl.interfaces.metadata_store import (
     SubscriptionSelector as SplSubscriptionSelector,
 )
 
-__all__ = ["ResumeReadable", "SubscriptionReadable", "TriggerMetadataStore"]
+__all__ = [
+    "ResumeReadable",
+    "SubscriptionListable",
+    "SubscriptionReadable",
+    "TriggerMetadataStore",
+]
 
 
 @runtime_checkable
@@ -117,6 +122,33 @@ class SubscriptionReadable(Protocol):
     def subscription_selectors(
         self, workspace_id: str, subscription_id: str
     ) -> tuple[SplSubscriptionSelector, ...]: ...
+
+
+@runtime_checkable
+class SubscriptionListable(Protocol):
+    """Optional list capability for a workspace's subscription rows.
+
+    The locked SPL ``MetadataStoreProvider`` exposes no list surface, but the
+    internal event receiver (TS-IMPL-017) has to enumerate the *candidate*
+    start subscriptions a normalized event could fire — the start matcher is a
+    pure function over a caller-supplied candidate list and there is no
+    deterministic key to point-read a start subscription by (unlike resume
+    registrations, whose ``resume_id`` is derived from the event triple). This
+    narrow capability Protocol is probed structurally by
+    :meth:`custos_trigger.stores.SubscriptionStore.list_in_workspace`.
+
+    The in-process backend satisfies it by iterating its dev/test row map; the
+    Postgres adapter gains its own indexed query surface in a later task. A
+    backend that does not implement it surfaces a clear
+    ``SubscriptionListUnsupportedError`` rather than silently matching nothing.
+
+    The accessor is synchronous to match the in-process backend's existing
+    read helpers and returns full rows so the caller can rehydrate each
+    :class:`custos_trigger.models.Subscription` with its latest selector blob
+    via :class:`SubscriptionReadable`.
+    """
+
+    def list_subscriptions(self, workspace_id: str) -> tuple[SplSubscription, ...]: ...
 
 
 @runtime_checkable

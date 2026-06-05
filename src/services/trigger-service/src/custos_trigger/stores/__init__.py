@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from custos_trigger.stores.base import (
     ResumeReadable,
+    SubscriptionListable,
     SubscriptionReadable,
     TriggerMetadataStore,
 )
@@ -32,6 +33,7 @@ from custos_trigger.stores.resume import (
 )
 from custos_trigger.stores.schedules import ScheduleStore
 from custos_trigger.stores.subscriptions import (
+    SubscriptionListUnsupportedError,
     SubscriptionReadUnsupportedError,
     SubscriptionStore,
 )
@@ -42,6 +44,8 @@ __all__ = [
     "ResumeSubscriptionStore",
     "ScheduleStore",
     "StoredResumeRegistration",
+    "SubscriptionListUnsupportedError",
+    "SubscriptionListable",
     "SubscriptionReadUnsupportedError",
     "SubscriptionReadable",
     "SubscriptionStore",
