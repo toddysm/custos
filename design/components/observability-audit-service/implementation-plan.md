@@ -66,8 +66,8 @@ flowchart TD
 ### `OBS-IMPL-002`: `Settings` model + conditional-requirement validation
 
 - **Scope**:
-  - `src/.../custos_obs/settings.py` — typed settings for every `CUSTOS_*` env var in design § Configuration (`CUSTOS_LOG_QUERY_PROVIDER`, `CUSTOS_METRICS_QUERY_PROVIDER`, `CUSTOS_LOKI_URL`, `CUSTOS_OPENSEARCH_URL`, `CUSTOS_PROMETHEUS_URL`, `CUSTOS_LOGS_EXTERNAL_URL`, `CUSTOS_METRICS_EXTERNAL_URL`, `CUSTOS_OTEL_*_CONFIGMAP`, `CUSTOS_AUDIT_RETENTION_DAYS`, `CUSTOS_AUDIT_OUTBOX_DRAIN_MODE`, `CUSTOS_AUDIT_OUTBOX_POLL_INTERVAL_S`, `CUSTOS_AUDIT_OUTBOX_RETENTION_MARGIN`, `CUSTOS_ALERT_RULES_CONFIGMAP`, `CUSTOS_ALERT_WEBHOOK_URLS`, `CUSTOS_SMTP_*`).
-  - Conditional validation: `CUSTOS_LOKI_URL` required iff `LogQueryProvider=loki`; `CUSTOS_OPENSEARCH_URL` iff `opensearch`; `CUSTOS_PROMETHEUS_URL` iff `prometheus`; external-URL required iff the matching provider is `noop`.
+  - `src/.../custos_obs/settings.py` — typed settings for every `CUSTOS_*` env var in design § Configuration that is in scope for this milestone (`CUSTOS_LOG_QUERY_PROVIDER`, `CUSTOS_METRICS_QUERY_PROVIDER`, `CUSTOS_LOKI_URL`, `CUSTOS_PROMETHEUS_URL`, `CUSTOS_LOGS_EXTERNAL_URL`, `CUSTOS_METRICS_EXTERNAL_URL`, `CUSTOS_OTEL_*_CONFIGMAP`, `CUSTOS_AUDIT_RETENTION_DAYS`, `CUSTOS_AUDIT_OUTBOX_DRAIN_MODE`, `CUSTOS_AUDIT_OUTBOX_POLL_INTERVAL_S`, `CUSTOS_AUDIT_OUTBOX_RETENTION_MARGIN`, `CUSTOS_ALERT_RULES_CONFIGMAP`, `CUSTOS_ALERT_WEBHOOK_URLS`, `CUSTOS_SMTP_*`). The `opensearch` log provider (and its `CUSTOS_OPENSEARCH_URL`) is out of scope for M1 — see Out of scope — so it is intentionally excluded here; only `loki` and `noop` are accepted values for `CUSTOS_LOG_QUERY_PROVIDER`.
+  - Conditional validation: `CUSTOS_LOKI_URL` required iff `LogQueryProvider=loki`; `CUSTOS_PROMETHEUS_URL` required iff `MetricsQueryProvider=prometheus`; the matching external-URL required iff the provider is `noop`.
 - **Acceptance criteria**:
   - Invalid combinations raise a clear startup error naming the offending var.
   - Defaults match the design table (`loki`, `prometheus`, `90`, `listen`, `5`).
@@ -100,13 +100,14 @@ flowchart TD
 
 ## Phase B — Audit pipeline
 
-### `OBS-IMPL-005`: Audit Outbox Drainer — LISTEN/NOTIFY + polling fallback
+### `OBS-IMPL-005`: Audit Outbox Drainer — interval polling with optional LISTEN/NOTIFY
 
 - **Scope**:
-  - `src/.../custos_obs/audit/drainer.py` — background task that consumes `listen_audit_outbox()` in `listen` mode and falls back to interval polling (`CUSTOS_AUDIT_OUTBOX_POLL_INTERVAL_S`) when the adapter raises `QueryUnsupported` or `CUSTOS_AUDIT_OUTBOX_DRAIN_MODE=poll`.
+  - `src/.../custos_obs/audit/drainer.py` — background task whose baseline is interval polling (`CUSTOS_AUDIT_OUTBOX_POLL_INTERVAL_S`). LISTEN/NOTIFY is an _optional_ low-latency optimization: in `listen` mode the drainer attempts `listen_audit_outbox()` and, because the SPL contract allows that method to be unsupported (raising `QueryUnsupported`), it transparently falls back to interval polling. `CUSTOS_AUDIT_OUTBOX_DRAIN_MODE=poll` forces polling unconditionally.
   - Batched `stream_audit_outbox(cursor, batch_size=500)` read loop in `id`-ascending order; crash-before-commit re-streams the batch.
 - **Acceptance criteria**:
-  - `listen` mode drains on NOTIFY; `poll` mode drains on the interval; unsupported-listen auto-falls-back to poll.
+  - `poll` mode drains on the interval; `listen` mode drains on NOTIFY _when supported_ and otherwise auto-falls-back to polling without dropping events.
+  - Forward progress never depends on LISTEN/NOTIFY being available.
   - A crash mid-batch leaves the cursor unchanged and re-streams on restart (test with a fake adapter).
 - **Depends on**: `OBS-IMPL-004`.
 - **Complexity**: L.
