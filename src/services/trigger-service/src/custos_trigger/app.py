@@ -6,10 +6,9 @@ lifespan hook that marks the app ready once startup completes.
 
 The factory is import-safe — no socket connections, no env-dependent failures
 at construction time. All side-effecting work belongs in the FastAPI lifespan
-context. The SPL provider wiring + schema-revision gate land in TS-IMPL-008,
-the typed :class:`Settings` loader in TS-IMPL-004, and the REST/RPC surface
-across TS-IMPL-015..018; this module grows those in place without changing
-the factory's import-safety contract.
+context. The lifespan binds the SPL provider bundle + domain store adapters
+(TS-IMPL-008) onto ``app.state``; the REST/RPC surface across TS-IMPL-015..018
+grows in place atop them without changing the factory's import-safety contract.
 
 Configuration today is read directly from the process environment because the
 typed settings loader is a later phase (TS-IMPL-004). Two knobs steer the
@@ -38,6 +37,13 @@ from custos_trigger.middleware import (
     CallContextMiddleware,
     call_context_error_handler,
 )
+from custos_trigger.providers import Providers, load_providers
+from custos_trigger.settings import ENV_METADATA_STORE
+from custos_trigger.stores import (
+    ResumeSubscriptionStore,
+    ScheduleStore,
+    SubscriptionStore,
+)
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -49,6 +55,7 @@ def create_app(
     *,
     authz_endpoint: str | None = None,
     environment: str | None = None,
+    providers: Providers | None = None,
 ) -> FastAPI:
     """Build and return the Trigger Service FastAPI application.
 
@@ -60,6 +67,11 @@ def create_app(
         environment: Deployment environment. Defaults to the ``ENVIRONMENT``
             env var (``development`` when unset). ``production`` with an
             empty ``authz_endpoint`` refuses to boot.
+        providers: Pre-built SPL :class:`Providers` bundle. When ``None``
+            (the default) the lifespan builds one from the
+            ``TRIGGER_METADATA_STORE`` env knob — empty/unset selects the
+            in-process backend (see :func:`custos_trigger.providers.load_providers`).
+            Tests inject an in-memory bundle here to avoid a database.
 
     The factory is import-safe: no DSN lookups, no socket connections. All
     side-effecting work happens inside the FastAPI lifespan context.
@@ -77,9 +89,20 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        # No schema-revision gate yet — the SPL provider wiring lands in
-        # TS-IMPL-008, at which point this hook grows the readiness check.
-        # For now the app is ready as soon as the process has booted.
+        # Bind the SPL providers (in-memory by default, Postgres when
+        # TRIGGER_METADATA_STORE is a DSN) and the domain store adapters
+        # the REST/RPC surface (TS-IMPL-015..018) drives. The provider
+        # factory never opens a socket, so binding here is cheap.
+        effective_providers = (
+            providers
+            if providers is not None
+            else load_providers(os.environ.get(ENV_METADATA_STORE, ""))
+        )
+        metadata_store = effective_providers.metadata_store
+        app.state.providers = effective_providers
+        app.state.subscription_store = SubscriptionStore(metadata_store)
+        app.state.resume_subscription_store = ResumeSubscriptionStore(metadata_store)
+        app.state.schedule_store = ScheduleStore(metadata_store)
         app.state.ready = True
         logger.info("trigger-service is ready")
         yield
