@@ -48,6 +48,7 @@ def test_configmap_has_documented_defaults(
     assert data["TRIGGER_POLLER_DEFAULT_INTERVAL_SECONDS"] == "60"
     assert data["TRIGGER_RESUME_DEFAULT_TTL_SECONDS"] == "604800"
     assert data["TRIGGER_DISPATCH_MAX_RETRIES"] == "5"
+    assert data["TRIGGER_FANOUT_MAX_DEPTH"] == "16"
     assert data["TRIGGER_SCHEDULER_LEADER_LEASE_SECONDS"] == "30"
     # Dapr Pub/Sub component + topic refs.
     assert data["TRIGGER_PUBSUB_COMPONENT"] == "custos-pubsub"

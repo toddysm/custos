@@ -65,6 +65,7 @@ config:
   pollerDefaultIntervalSeconds: 60
   resumeDefaultTtlSeconds: 604800
   dispatchMaxRetries: 5
+  fanoutMaxDepth: 16
   schedulerLeaderLeaseSeconds: 30
   # Dapr Pub/Sub wiring. The Internal Event Receiver subscribes to
   # `custos.workflow.events`; receivers publish normalized events onto

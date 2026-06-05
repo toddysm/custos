@@ -446,6 +446,7 @@ spec:
 | `TRIGGER_POLLER_DEFAULT_INTERVAL_SECONDS` | No | `60` | Default pull interval when not specified per subscription. |
 | `TRIGGER_RESUME_DEFAULT_TTL_SECONDS` | No | `604800` | Default expiry for resume subscriptions (7 days). |
 | `TRIGGER_DISPATCH_MAX_RETRIES` | No | `5` | Max retries dispatching to Workflow Service. |
+| `TRIGGER_FANOUT_MAX_DEPTH` | No | `16` | Max per-tenant fan-out depth before a dispatch is rejected as a loop (`trigger.loop.detected`). |
 | `TRIGGER_SCHEDULER_LEADER_LEASE_SECONDS` | No | `30` | Scheduler leader lock TTL (single-fire guarantee across replicas). |
 
 ## Dependencies
@@ -468,7 +469,7 @@ spec:
 | Poller falls behind | `nextFireAt < now - threshold` metric | Subscription marked `degraded`; alert | Operator increases interval or scales pod |
 | Resume subscription expires before event arrives | TTL sweeper | Wait cancelled via `CancelResumeSubscription` callback | Workflow step takes its timeout branch (ADR-007) |
 | Scheduler split-brain across replicas | Leader lease | Only leader fires schedules; non-leaders wait | Lease auto-renews; on failover next replica acquires within `LEADER_LEASE_SECONDS` |
-| Internal event loop (workflow A starts B starts A) | Per-tenant fan-out depth counter | Reject dispatch when depth > limit | Audit `trigger.loop.detected`; operator inspects subscription graph |
+| Internal event loop (workflow A starts B starts A) | Per-tenant fan-out depth counter | Reject dispatch when depth > `TRIGGER_FANOUT_MAX_DEPTH` | Audit `trigger.loop.detected`; operator inspects subscription graph |
 
 ## Open TODOs
 
