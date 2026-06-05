@@ -100,7 +100,7 @@ form is reserved for backend-availability failures):
 {
   "error": {
     "code": "permission_denied",
-    "detail": "call context lacks required permission 'audit:read'"
+    "detail": "missing required permission: audit:read"
   }
 }
 ```
@@ -156,8 +156,10 @@ Returns a `LogPageModel`:
 ```
 
 When the log backend is `noop` or unreachable the route returns a `503`
-[`LogQueryUnavailable`](#error-taxonomy-rfc-7807) problem carrying an
-`externalUrl` pointer to the configured `CUSTOS_LOGS_EXTERNAL_URL`.
+[`LogQueryUnavailable`](#error-taxonomy-rfc-7807) problem. In `noop` mode the
+problem carries an `externalUrl` extension pointing at the configured
+`CUSTOS_LOGS_EXTERNAL_URL`; an unreachable Loki backend returns the same `503`
+without that pointer.
 
 ### Tail run logs (SSE)
 
@@ -178,7 +180,7 @@ the stream opens the route returns a `503` problem; if it fails *mid-stream*
 
 ```text
 event: error
-data: {"type":"urn:custos:obs:problem:LogQueryUnavailable","title":"Log query backend unavailable","status":503,"detail":"backend connection lost"}
+data: {"type":"urn:custos:obs:problem:LogQueryUnavailable","title":"Log query backend unavailable","status":503,"detail":"the log query backend is not available; use the external log system"}
 
 ```
 
@@ -211,8 +213,10 @@ Returns a `MetricSeriesModel`:
 ```
 
 An unavailable metrics backend yields a `503`
-[`MetricsQueryUnavailable`](#error-taxonomy-rfc-7807) with an `externalUrl`
-pointer to `CUSTOS_METRICS_EXTERNAL_URL`.
+[`MetricsQueryUnavailable`](#error-taxonomy-rfc-7807). As with logs, the
+`externalUrl` extension pointing at `CUSTOS_METRICS_EXTERNAL_URL` is attached
+only in `noop` mode; an unreachable Prometheus backend returns the same `503`
+without it.
 
 ### Audit search
 
@@ -311,7 +315,7 @@ extension member the UI uses as a deep-link:
   "type": "urn:custos:obs:problem:LogQueryUnavailable",
   "title": "Log query backend unavailable",
   "status": 503,
-  "detail": "log query provider is configured as 'noop'",
+  "detail": "the log query backend is not available; use the external log system",
   "externalUrl": "https://grafana.example/explore"
 }
 ```

@@ -69,7 +69,14 @@ def _fences() -> list[tuple[int, str, str, list[str]]]:
 
     ``directives`` are the contiguous ``<!-- doctest: ... -->`` comment lines
     immediately preceding the fence (blank lines allowed between them).
+
+    Returns an empty list when the doc is missing so that parametrizing over
+    this function never turns a renamed/absent guide into a *collection* error;
+    the dedicated :func:`test_observability_api_doc_exists` then reports that
+    clearly as an ordinary test failure.
     """
+    if not _DOC_PATH.is_file():
+        return []
     text = _doc_text()
     lines = text.splitlines()
     out: list[tuple[int, str, str, list[str]]] = []
