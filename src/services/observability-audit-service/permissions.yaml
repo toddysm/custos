@@ -1,0 +1,38 @@
+# Permissions registry shipped by the Observability and Audit Service (COMP-009).
+#
+# OBS-IMPL-012. The auth-service permission-registry loader
+# (``custos_auth.permission_registry``) ingests this file when
+# ``CUSTOS_AUTH_PERMISSIONS_PATHS`` points at it, upserting each row into the
+# SPL ``Permission`` table. These are the three read-back permissions the
+# Query API call-context middleware enforces:
+#
+# * ``logs:read``    — guards the run/step log tail + history routes.
+# * ``metrics:read`` — guards the run/workspace metrics routes.
+# * ``audit:read``   — guards the audit search + single-event lookup routes.
+#
+# Each entry carries:
+# * ``name``        — canonical permission identifier the call-context and
+#                     authorize engine consume.
+# * ``description`` — operator-facing human description.
+# * ``declaredBy``  — pipe-delimited list of components that ship the
+#                     permission. ``audit:read`` is multi-declarer: auth-service
+#                     owns the role-binding/principal audit projection while this
+#                     service owns the consolidated audit log, so both attribute
+#                     to the name. This must stay in sync with the platform-M1
+#                     fallback embedded in
+#                     ``src/services/auth-service/src/custos_auth/_data/permissions.yaml``.
+
+permissions:
+  - name: logs:read
+    description: |
+      Read run logs and connector logs streamed to the workspace
+      observability bucket.
+    declaredBy: observability-audit-service
+  - name: metrics:read
+    description: |
+      Read workspace-scoped metric series (run latency, run failure
+      rates, queue depth).
+    declaredBy: observability-audit-service
+  - name: audit:read
+    description: Read audit-trail events for a workspace, tenant, or platform scope.
+    declaredBy: auth-service|observability-audit-service
