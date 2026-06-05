@@ -119,15 +119,16 @@ class AuditOutboxDrainer:
         Falls back to polling if ``listen`` is requested but unsupported.
         """
         await self._drain_guarded()
-        if self._mode == "listen" and await self._run_listen():
-            return
+        if self._mode == "listen":
+            await self._run_listen()
         await self._poll_loop()
 
-    async def _run_listen(self) -> bool:
-        """Drain on notifications; return ``True`` if the listen stream ran.
+    async def _run_listen(self) -> None:
+        """Drain on notifications until the listen stream ends.
 
-        Returns ``False`` when the adapter does not support LISTEN/NOTIFY (so
-        the caller falls back to polling). Re-raises
+        Returns when the adapter does not support LISTEN/NOTIFY or the
+        notification stream ends, so the caller falls back to polling and
+        forward progress never depends on LISTEN/NOTIFY. Re-raises
         :class:`asyncio.CancelledError` for clean shutdown.
         """
         try:
@@ -140,11 +141,14 @@ class AuditOutboxDrainer:
                 "falling back to polling every %ss",
                 self._poll_interval_s,
             )
-            return False
+            return
         except asyncio.CancelledError:
             logger.info("audit outbox drainer stopping (listen)")
             raise
-        return True
+        logger.info(
+            "listen_audit_outbox stream ended; falling back to polling every %ss",
+            self._poll_interval_s,
+        )
 
     async def _poll_loop(self) -> None:
         """Drain on a fixed interval until cancelled."""

@@ -252,14 +252,18 @@ async def test_listen_unsupported_falls_back_to_polling() -> None:
 
 
 async def test_listen_stream_ending_falls_through_to_polling() -> None:
-    store = ListenOutboxStore([1])
+    store = ListenOutboxStore([])
     handler = RecordingHandler()
     drainer = _drainer(store, handler, mode="listen", poll_interval_s=0.01)
 
     drainer.start()
     try:
-        # End the listen generator immediately; the poll loop must then drain.
+        # Let the startup catch-up drain run against an empty outbox, then end
+        # the listen generator. A row that arrives only afterwards must still be
+        # drained by the poll loop -- forward progress cannot depend on LISTEN.
+        await asyncio.sleep(0)
         await store.notifications.put(None)
+        store.rows.append(_row(1))
         await asyncio.wait_for(handler.drained_event.wait(), timeout=2)
     finally:
         await drainer.stop()
