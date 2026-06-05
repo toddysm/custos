@@ -116,9 +116,11 @@ def create_app(
             Dapr. Tests inject a dispatcher wrapping a fake Workflow client.
         audit_sink: Audit surface the resume RPCs (and the internally-built
             dispatcher) emit to. When ``None`` (the default) the lifespan wires
-            a :class:`~custos_trigger.pipeline.dispatch.NoopAuditSink`; the real
-            OTel/audit pipeline lands in TS-IMPL-019. Tests inject a recording
-            sink to assert ``resume.subscription.divergent`` emission.
+            a :class:`~custos_trigger._telemetry.TelemetryAuditSink`, which
+            records OTel pipeline counters/spans and forwards to a
+            :class:`~custos_trigger.pipeline.dispatch.NoopAuditSink`. Tests
+            inject a recording sink to assert
+            ``resume.subscription.divergent`` emission.
 
     The factory is import-safe: no DSN lookups, no socket connections. All
     side-effecting work happens inside the FastAPI lifespan context.
@@ -158,11 +160,12 @@ def create_app(
 
         app.state.selector_evaluator = SelectorEvaluator()
 
-        # Audit surface the resume RPCs + dispatcher emit to. Real OTel/audit
-        # wiring lands in TS-IMPL-019; until then a Noop sink drops events.
-        from custos_trigger.pipeline.dispatch import NoopAuditSink
+        # Audit surface the resume RPCs + dispatcher emit to. The default
+        # TelemetryAuditSink (TS-IMPL-019) records OTel pipeline
+        # counters/spans for every event and forwards to a Noop inner sink.
+        from custos_trigger._telemetry import TelemetryAuditSink
 
-        effective_audit: AuditSink = audit_sink if audit_sink is not None else NoopAuditSink()
+        effective_audit: AuditSink = audit_sink if audit_sink is not None else TelemetryAuditSink()
         app.state.audit_sink = effective_audit
 
         # Default resume-subscription TTL applied when a RegisterResumeSubscription

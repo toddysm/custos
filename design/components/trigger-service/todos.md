@@ -38,7 +38,7 @@ First implementation milestone: the MVP vertical slice that unblocks the Workflo
 
 ### Phase E — Observability, verification, docs
 
-- [F] TS-IMPL-019 (#649): OTel observability + audit events.
+- [x] TS-IMPL-019 (#649): OTel observability + audit events.
 - [F] TS-IMPL-020 (#650): Unit + integration test suite (≥90% coverage gate).
 - [F] TS-IMPL-021 (#651): Developer documentation — `docs/developers/trigger-api.md`.
 

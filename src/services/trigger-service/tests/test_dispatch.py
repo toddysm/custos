@@ -29,6 +29,7 @@ from custos_trigger.pipeline.dispatch import (
     AUDIT_DISPATCH_FAILED,
     AUDIT_DISPATCHED,
     AUDIT_LOOP_DETECTED,
+    AUDIT_MATCHED,
     AUDIT_RESUME_DELIVERED,
     Dispatcher,
     DispatchStatus,
@@ -184,7 +185,7 @@ async def test_dispatch_start_success(dedup: Deduplicator) -> None:
     assert request.workflow_version_id == "wfv-1"
     assert request.inputs == {"a": 1}
     assert request.idempotency_key == compute_dedup_key("sub-1", "evt-1")
-    assert audit.names() == [AUDIT_DISPATCHED]
+    assert audit.names() == [AUDIT_MATCHED, AUDIT_DISPATCHED]
 
 
 async def test_dispatch_start_duplicate_skips_second_call(dedup: Deduplicator) -> None:
@@ -212,7 +213,7 @@ async def test_dispatch_start_missing_version_dead_letters(dedup: Deduplicator) 
     assert isinstance(outcome.error, TriggerError)
     assert outcome.error.kind is TriggerErrorKind.DISPATCH_FAILED
     assert client.start_calls == []
-    assert audit.names() == [AUDIT_DISPATCH_FAILED]
+    assert audit.names() == [AUDIT_MATCHED, AUDIT_DISPATCH_FAILED]
 
 
 async def test_dispatch_start_retries_then_succeeds(dedup: Deduplicator) -> None:
@@ -241,7 +242,7 @@ async def test_dispatch_start_exhausts_retries_then_dead_letters(dedup: Deduplic
     # 1 initial attempt + 3 retries = 4 calls; 3 backoff sleeps.
     assert len(client.start_calls) == 4
     assert len(sleep.delays) == 3
-    assert audit.names() == [AUDIT_DISPATCH_FAILED]
+    assert audit.names() == [AUDIT_MATCHED, AUDIT_DISPATCH_FAILED]
 
 
 async def test_dispatch_start_non_retryable_dead_letters_without_retry(
@@ -281,9 +282,9 @@ async def test_dispatch_start_loop_rejected_above_limit(dedup: Deduplicator) -> 
     assert outcome.status is DispatchStatus.LOOP_REJECTED
     assert outcome.is_loop_rejected is True
     assert client.start_calls == []
-    assert audit.names() == [AUDIT_LOOP_DETECTED]
-    assert audit.events[0][2]["depth"] == 3
-    assert audit.events[0][2]["limit"] == 2
+    assert audit.names() == [AUDIT_MATCHED, AUDIT_LOOP_DETECTED]
+    assert audit.events[-1][2]["depth"] == 3
+    assert audit.events[-1][2]["limit"] == 2
 
 
 async def test_dispatch_start_at_depth_limit_still_dispatches(dedup: Deduplicator) -> None:
@@ -317,7 +318,7 @@ async def test_dispatch_resume_success(dedup: Deduplicator) -> None:
     assert request.event_name == "workflow.completed"
     assert request.payload == {"x": "y"}
     assert request.idempotency_key == compute_dedup_key("res-1", "evt-1")
-    assert audit.names() == [AUDIT_RESUME_DELIVERED]
+    assert audit.names() == [AUDIT_MATCHED, AUDIT_RESUME_DELIVERED]
 
 
 async def test_dispatch_resume_dead_letters_on_persistent_failure(dedup: Deduplicator) -> None:
@@ -329,7 +330,7 @@ async def test_dispatch_resume_dead_letters_on_persistent_failure(dedup: Dedupli
 
     assert outcome.status is DispatchStatus.DEAD_LETTERED
     assert len(client.raise_calls) == 2  # 1 initial + 1 retry
-    assert audit.names() == [AUDIT_DISPATCH_FAILED]
+    assert audit.names() == [AUDIT_MATCHED, AUDIT_DISPATCH_FAILED]
 
 
 async def test_dispatch_resume_duplicate_skips_second_call(dedup: Deduplicator) -> None:
