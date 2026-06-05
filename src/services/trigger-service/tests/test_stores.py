@@ -73,15 +73,20 @@ async def test_create_subscription_is_immutable(
 
 
 async def test_create_subscription_defaults_clock_to_utcnow() -> None:
-    # Exercise the default ``now`` branch (no injected clock).
-    store = SubscriptionStore(InMemoryTriggerMetadataStore())
+    # Exercise the default ``now`` branch (no injected clock): the persisted
+    # selector revision's ``added_at`` must be stamped from the wall clock.
+    backend = InMemoryTriggerMetadataStore()
+    store = SubscriptionStore(backend)
     before = datetime.now(UTC)
 
     result = await store.create(_subscription(selector=None, input_mapping={}))
 
+    after = datetime.now(UTC)
     assert result.selector is None
     assert result.created_at == _CREATED
-    assert before <= datetime.now(UTC)
+    selectors = backend.subscription_selectors("ws-1", "sub-1")
+    assert len(selectors) == 1
+    assert before <= selectors[0].added_at <= after
 
 
 async def test_set_state_transitions(

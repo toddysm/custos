@@ -5,13 +5,23 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from custos_spl.ids import WorkflowId, WorkspaceId
+from custos_spl.errors import ImmutableViolation
+from custos_spl.ids import SubscriptionId, WorkflowId, WorkspaceId
 from custos_spl.interfaces.metadata_store import (
     DedupDuplicate,
     DedupReserved,
 )
 from custos_spl.interfaces.metadata_store import (
+    ResumeSubscription as SplResumeSubscription,
+)
+from custos_spl.interfaces.metadata_store import (
     Schedule as SplSchedule,
+)
+from custos_spl.interfaces.metadata_store import (
+    Subscription as SplSubscription,
+)
+from custos_spl.interfaces.metadata_store import (
+    SubscriptionSelector as SplSubscriptionSelector,
 )
 
 from custos_trigger.providers import (
@@ -137,9 +147,6 @@ async def test_update_schedule_next_fire_unknown_raises() -> None:
 async def test_in_memory_store_defaults_clock_to_utcnow() -> None:
     # The default (no injected clock) stamps ``updated_at`` from the wall
     # clock — exercise that branch via a real state transition.
-    from custos_spl.ids import SubscriptionId
-    from custos_spl.interfaces.metadata_store import Subscription as SplSubscription
-
     store = InMemoryTriggerMetadataStore()
     ws = WorkspaceId("ws-1")
     before = datetime.now(UTC)
@@ -159,3 +166,82 @@ async def test_in_memory_store_defaults_clock_to_utcnow() -> None:
 
     assert updated.state == "paused"
     assert updated.updated_at >= before
+
+
+def _spl_subscription(ws: WorkspaceId, sub_id: SubscriptionId) -> SplSubscription:
+    return SplSubscription(
+        workspace_id=ws,
+        subscription_id=sub_id,
+        workflow_id=WorkflowId("wf-1"),
+        state="active",
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+
+
+async def test_put_subscription_is_immutable() -> None:
+    store = InMemoryTriggerMetadataStore()
+    ws = WorkspaceId("ws-1")
+    sub_id = SubscriptionId("sub-1")
+    await store.put_subscription(ws, _spl_subscription(ws, sub_id))
+
+    with pytest.raises(ImmutableViolation, match="subscription already exists"):
+        await store.put_subscription(ws, _spl_subscription(ws, sub_id))
+
+
+async def test_update_subscription_state_unknown_raises() -> None:
+    store = InMemoryTriggerMetadataStore()
+    with pytest.raises(ValueError, match="unknown subscription"):
+        await store.update_subscription_state(
+            WorkspaceId("ws-1"), SubscriptionId("missing"), "paused"
+        )
+
+
+async def test_append_selector_for_unknown_subscription_raises() -> None:
+    # Mirrors the Postgres foreign key to ``custos_state.subscription``.
+    store = InMemoryTriggerMetadataStore()
+    ws = WorkspaceId("ws-1")
+    selector = SplSubscriptionSelector(
+        workspace_id=ws,
+        subscription_id=SubscriptionId("sub-1"),
+        selector={"matchType": "cel", "value": "true", "fieldPath": ""},
+        added_at=_NOW,
+    )
+    with pytest.raises(ValueError, match="unknown subscription"):
+        await store.append_subscription_selector(ws, SubscriptionId("sub-1"), selector)
+
+
+async def test_put_resume_subscription_is_immutable() -> None:
+    store = InMemoryTriggerMetadataStore()
+    ws = WorkspaceId("ws-1")
+    from custos_spl.ids import RunId, StepId
+
+    resume = SplResumeSubscription(
+        workspace_id=ws,
+        resume_id="resume-1",
+        run_id=RunId("run-1"),
+        step_id=StepId("step-1"),
+        expires_at=_NOW,
+        payload={"eventKey": "k", "selector": None},
+    )
+    await store.put_resume_subscription(ws, resume)
+
+    with pytest.raises(ImmutableViolation, match="resume subscription already exists"):
+        await store.put_resume_subscription(ws, resume)
+
+
+async def test_put_schedule_is_immutable() -> None:
+    store = InMemoryTriggerMetadataStore()
+    ws = WorkspaceId("ws-1")
+    schedule = SplSchedule(
+        workspace_id=ws,
+        schedule_id="sched-1",
+        workflow_id=WorkflowId("wf-1"),
+        cron="0 * * * *",
+        next_fire_at=_NOW,
+        enabled=True,
+    )
+    await store.put_schedule(ws, schedule)
+
+    with pytest.raises(ImmutableViolation, match="schedule already exists"):
+        await store.put_schedule(ws, schedule)

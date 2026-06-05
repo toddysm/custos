@@ -125,6 +125,12 @@ class InMemoryTriggerMetadataStore:
         selector: SplSubscriptionSelector,
     ) -> SplSubscriptionSelector:
         key = (str(workspace_id), str(subscription_id))
+        # The Postgres `subscription_selector` row carries a foreign key to
+        # `custos_state.subscription`; mirror that referential integrity so a
+        # selector appended for a never-created subscription fails fast here
+        # instead of masking a production-only error.
+        if key not in self._subscriptions:
+            raise ValueError(f"unknown subscription: {key[0]!r}/{key[1]!r}")
         self._selectors.setdefault(key, []).append(selector)
         return selector
 
@@ -133,7 +139,13 @@ class InMemoryTriggerMetadataStore:
     async def put_resume_subscription(
         self, workspace_id: WorkspaceId, resume: SplResumeSubscription
     ) -> SplResumeSubscription:
-        self._resume[(str(workspace_id), resume.resume_id)] = resume
+        key = (str(workspace_id), resume.resume_id)
+        # The Postgres adapter INSERTs on the `(workspace_id, resume_id)`
+        # primary key and maps the 23505 collision to `ImmutableViolation`;
+        # match that immutability so dev/test runs can't silently overwrite.
+        if key in self._resume:
+            raise ImmutableViolation(f"resume subscription already exists: {key[0]!r}/{key[1]!r}")
+        self._resume[key] = resume
         return resume
 
     async def delete_resume_subscription(self, workspace_id: WorkspaceId, resume_id: str) -> None:
@@ -160,7 +172,13 @@ class InMemoryTriggerMetadataStore:
     # ----- Schedules -----
 
     async def put_schedule(self, workspace_id: WorkspaceId, schedule: SplSchedule) -> SplSchedule:
-        self._schedules[(str(workspace_id), schedule.schedule_id)] = schedule
+        key = (str(workspace_id), schedule.schedule_id)
+        # The Postgres adapter INSERTs on the `(workspace_id, schedule_id)`
+        # primary key and maps the 23505 collision to `ImmutableViolation`;
+        # match that immutability to catch accidental double-creates.
+        if key in self._schedules:
+            raise ImmutableViolation(f"schedule already exists: {key[0]!r}/{key[1]!r}")
+        self._schedules[key] = schedule
         return schedule
 
     async def update_schedule_next_fire(
@@ -230,10 +248,12 @@ def load_providers(metadata_store_dsn: str) -> Providers:
     from custos_pg import PgMetadataAdapter
     from custos_pg.pool import LazyPool
 
-    # The adapter declares ``SCHEMA_REVISION`` as a bare class attr rather
-    # than a ``ClassVar[int]``, so mypy can't structurally see it as
-    # Protocol-conforming at this consumer boundary. custos-postgres has its
-    # own strict mypy job verifying conformance at the implementation site;
-    # the cast keeps the consumer view typed.
+    # ``PgMetadataAdapter`` implements the full ``MetadataStoreProvider`` but
+    # types its workspace-scoped args as plain ``str`` rather than the
+    # ``WorkspaceId`` / ``SubscriptionId`` NewTypes this Protocol declares, so
+    # mypy can't structurally see it as ``TriggerMetadataStore``-conforming at
+    # this consumer boundary. custos-postgres has its own strict mypy job
+    # verifying the adapter against the SPL Protocol at the implementation
+    # site; the cast keeps the consumer view typed.
     adapter = PgMetadataAdapter(lazy=LazyPool(metadata_store_dsn.strip()))
     return Providers(metadata_store=cast(TriggerMetadataStore, adapter))
