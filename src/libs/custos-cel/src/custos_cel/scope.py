@@ -15,6 +15,11 @@ exposes only the names listed in the design's bindings table:
   Coordinator (typically Dapr Workflow's ``current_utc_datetime``).
 * ``let.<name>`` — per-evaluation overlay; immutable within a single
   ``let`` block expansion.
+* ``event.*`` — the inbound event envelope for Trigger Service selectors
+  and trigger ``inputMapping`` (ADR-011 / TS-IMPL-005). A JSON-Schema-typed
+  mapping root mirroring the ``NormalizedEvent`` envelope
+  (``event.kind`` / ``event.subject`` / ``event.source.*`` / ``event.data.*``
+  / ``event.raw.*``); empty when no event is bound.
 
 Nothing else is resolvable. In particular, the host Python namespace is
 **not** exposed: names like ``os``, ``sys``, ``open``, ``__import__``,
@@ -153,7 +158,7 @@ class StepBinding:
 # The complete set of root identifiers a scope will resolve. Anything else
 # — every host Python name, every CEL keyword, every typo — is rejected.
 _ALLOWED_ROOTS: Final[frozenset[str]] = frozenset(
-    {"inputs", "steps", "run", "workflow", "let", "now"}
+    {"inputs", "steps", "run", "workflow", "let", "now", "event"}
 )
 
 # Allowed leaves under ``run`` and ``workflow``. Frozen here (rather than
@@ -188,6 +193,7 @@ class BindingScope:
     inputs: Mapping[str, Any] = field(default_factory=dict)
     steps: Mapping[str, StepBinding] = field(default_factory=dict)
     let: Mapping[str, Any] = field(default_factory=dict)
+    event: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         # Wrap mutable mappings as immutable views. Callers can pass plain
@@ -204,6 +210,8 @@ class BindingScope:
             object.__setattr__(self, "steps", MappingProxyType(dict(self.steps)))
         if not isinstance(self.let, MappingProxyType):
             object.__setattr__(self, "let", MappingProxyType(dict(self.let)))
+        if not isinstance(self.event, MappingProxyType):
+            object.__setattr__(self, "event", MappingProxyType(dict(self.event)))
 
     # ----- public API -------------------------------------------------------
 
@@ -228,6 +236,7 @@ class BindingScope:
             inputs=self.inputs,
             steps=self.steps,
             let=merged,
+            event=self.event,
         )
 
     def resolve(
@@ -242,7 +251,7 @@ class BindingScope:
         expression names — e.g. ``["inputs", "image"]`` for
         ``inputs.image``, or ``["steps", "scan", "outputs", "critical"]``
         for ``steps.scan.outputs.critical``. The chain must start with
-        one of the six allowed roots; anything else raises
+        one of the allowed roots; anything else raises
         :class:`UnboundNameError` *before* any attribute or item access
         is attempted, so the host Python namespace is structurally
         unreachable.
@@ -306,6 +315,8 @@ class BindingScope:
             return _resolve_mapping_root(self.inputs, tail, chain, pos, root_label="inputs")
         if head == "let":
             return _resolve_mapping_root(self.let, tail, chain, pos, root_label="let")
+        if head == "event":
+            return _resolve_mapping_root(self.event, tail, chain, pos, root_label="event")
         # head == "steps"
         return _resolve_steps(self.steps, tail, chain, pos)
 

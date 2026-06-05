@@ -444,3 +444,56 @@ def test_property_4_sandbox_containment(src: str) -> None:
         f"added={modules_after - modules_before!r}, "
         f"removed={modules_before - modules_after!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# event root (TS-IMPL-005): determinism + round-trip + sandbox containment
+# ---------------------------------------------------------------------------
+
+
+def _event_bindings() -> SchemaBindings:
+    # Uses the default event schema; only the selector roots change.
+    return SchemaBindings(inputs=_INPUTS_SCHEMA)
+
+
+def _event_scope() -> BindingScope:
+    return BindingScope(
+        run=RunInfo(id="run-prop", workspace="ws-prop"),
+        workflow=WorkflowInfo(name="wf-prop", version="v1"),
+        now=_clock().now,
+        inputs={},
+        event={
+            "kind": "workflow.completed",
+            "subject": "run/abc",
+            "source": {"vendor": "custos"},
+            "data": {"status": "succeeded"},
+            "raw": {"body": "{}"},
+        },
+    )
+
+
+_EVENT_EXPR = 'event.kind == "workflow.completed" && event.data.status == "succeeded"'
+
+
+def test_event_expression_is_replay_deterministic() -> None:
+    typed = type_check(parse(_EVENT_EXPR), _event_bindings())
+    scope = _event_scope()
+    first = evaluate(typed, scope, _clock())
+    assert first is True
+    for _ in range(99):
+        assert evaluate(typed, scope, _clock()) == first
+
+
+def test_event_expression_round_trips_and_is_sandboxed() -> None:
+    typed = type_check(parse(_EVENT_EXPR), _event_bindings())
+    restored = from_json(to_json(typed))
+    assert restored == typed
+
+    scope = _event_scope()
+    env_before = json.dumps(dict(os.environ), sort_keys=True)
+    modules_before = frozenset(sys.modules)
+
+    assert evaluate(restored, scope, _clock()) == evaluate(typed, scope, _clock())
+
+    assert json.dumps(dict(os.environ), sort_keys=True) == env_before
+    assert frozenset(sys.modules) == modules_before
