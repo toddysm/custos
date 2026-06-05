@@ -381,3 +381,52 @@ def test_engine_exposes_ruleset() -> None:
     ruleset = load_alert_rules({"rules": [{"name": "r", "eventName": "e", "sinks": ["w"]}]})
     engine = AlertEngine(ruleset)
     assert engine.ruleset is ruleset
+
+
+def test_throttle_state_is_evicted_after_window() -> None:
+    engine = _engine(throttle="5m", dedupKey=["principal"])
+    a = _event("e", payload={"principal": "alice"})
+    b = _event("e", payload={"principal": "bob"})
+
+    engine.evaluate(a, now=T0)
+    engine.evaluate(b, now=T0)
+    assert len(engine._throttled_until) == 2
+
+    # After both windows elapse, a later evaluation evicts the stale identities.
+    engine.evaluate(_event("other"), now=T0 + timedelta(minutes=10))
+    assert engine._throttled_until == {}
+
+
+def test_refire_after_eviction_rearms_window() -> None:
+    engine = _engine(throttle="5m")
+    evt = _event("e")
+    assert len(engine.evaluate(evt, now=T0)) == 1
+    # Past the window -> fires again and re-arms.
+    assert len(engine.evaluate(evt, now=T0 + timedelta(minutes=6))) == 1
+    # Inside the new window -> suppressed again.
+    assert engine.evaluate(evt, now=T0 + timedelta(minutes=7)) == []
+
+
+def test_rule_match_mapping_is_immutable() -> None:
+    rule = AlertRule(name="r", sinks=("w",), match={"k": "v"})
+    with pytest.raises(TypeError):
+        rule.match["k"] = "other"  # type: ignore[index]
+
+
+def test_matchable_event_mappings_are_immutable() -> None:
+    payload = {"k": "v"}
+    subject = {"s": "t"}
+    evt = MatchableEvent(
+        event_name="e",
+        severity=None,
+        component=None,
+        payload=payload,
+        subject=subject,
+    )
+    with pytest.raises(TypeError):
+        evt.payload["k"] = "x"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        evt.subject["s"] = "x"  # type: ignore[index]
+    # Mutating the source dict must not bleed into the frozen view.
+    payload["k"] = "mutated"
+    assert evt.payload["k"] == "v"

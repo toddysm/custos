@@ -29,6 +29,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import timedelta
+from heapq import heappop, heappush
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 import yaml
@@ -90,6 +92,11 @@ class AlertRule:
     throttle: timedelta | None = None
     dedup_key: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        # Make the declared immutability observable: a frozen rule must not be
+        # mutable through its ``match`` mapping.
+        object.__setattr__(self, "match", MappingProxyType(dict(self.match)))
+
     def matches(self, event: MatchableEvent) -> bool:
         """Return whether ``event`` satisfies every criterion of this rule."""
         if self.event_name is not None and event.event_name != self.event_name:
@@ -143,6 +150,12 @@ class MatchableEvent:
     payload: Mapping[str, Any] = field(default_factory=dict)
     subject: Mapping[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        # Protect the frozen view from external mutation of the source mappings
+        # (an ``AuditEvent`` may carry mutable dicts).
+        object.__setattr__(self, "payload", MappingProxyType(dict(self.payload)))
+        object.__setattr__(self, "subject", MappingProxyType(dict(self.subject)))
+
     @classmethod
     def from_audit_event(cls, event: AuditEvent) -> MatchableEvent:
         """Build a matchable view from an SPL :class:`~custos_spl.AuditEvent`."""
@@ -180,34 +193,53 @@ class AlertMatch:
 class AlertEngine:
     """Matches events against a rule set, suppressing throttled repeats.
 
-    The engine is stateful: it remembers the last fire time per ``(rule,
-    dedup-key)`` so a rule with a ``throttle`` window emits at most once per
-    window per distinct dedup identity. Callers pass an explicit ``now`` so the
-    engine stays deterministic and testable.
+    The engine is stateful: it remembers, per ``(rule, dedup-key)`` identity, the
+    instant its throttle window expires, so a rule with a ``throttle`` emits at
+    most once per window per distinct identity. Expired identities are evicted on
+    each evaluation (via an expiry heap), so memory stays bounded by the set of
+    *currently throttled* identities even with a high-cardinality ``dedupKey``.
+    Callers pass an explicit ``now`` so the engine stays deterministic.
     """
 
     def __init__(self, ruleset: AlertRuleSet) -> None:
         self._ruleset = ruleset
-        self._last_fired: dict[tuple[str, ...], datetime] = {}
+        # identity -> instant the throttle window ends.
+        self._throttled_until: dict[tuple[str, ...], datetime] = {}
+        # min-heap of (expiry, identity) used to evict stale identities.
+        self._expiry: list[tuple[datetime, tuple[str, ...]]] = []
 
     @property
     def ruleset(self) -> AlertRuleSet:
         return self._ruleset
 
+    def _evict_expired(self, now: datetime) -> None:
+        """Drop identities whose throttle window has elapsed by ``now``."""
+        heap = self._expiry
+        while heap and heap[0][0] <= now:
+            _, identity = heappop(heap)
+            current = self._throttled_until.get(identity)
+            # Only evict if this heap entry is the identity's live window and it
+            # has truly expired (a later firing may have re-armed it).
+            if current is not None and current <= now:
+                del self._throttled_until[identity]
+
     def evaluate(self, event: MatchableEvent, *, now: datetime) -> list[AlertMatch]:
         """Return the matches that should dispatch for ``event`` at ``now``.
 
         Rules without a ``throttle`` always fire; throttled rules fire only when
-        their dedup identity has not fired within the window.
+        their dedup identity is not inside an active window.
         """
+        self._evict_expired(now)
         matches: list[AlertMatch] = []
         for rule in self._ruleset.matching(event):
             identity = rule.dedup_identity(event)
             if rule.throttle is not None:
-                last = self._last_fired.get(identity)
-                if last is not None and now - last < rule.throttle:
+                until = self._throttled_until.get(identity)
+                if until is not None and now < until:
                     continue
-                self._last_fired[identity] = now
+                new_until = now + rule.throttle
+                self._throttled_until[identity] = new_until
+                heappush(self._expiry, (new_until, identity))
             matches.append(AlertMatch(rule=rule, event=event, dedup_identity=identity))
         return matches
 
