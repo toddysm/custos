@@ -20,13 +20,24 @@ from custos_trigger.models import (
     to_spl_subscription,
     to_spl_subscription_selector,
 )
-from custos_trigger.stores.base import TriggerMetadataStore
+from custos_trigger.stores.base import SubscriptionReadable, TriggerMetadataStore
 
-__all__ = ["SubscriptionStore"]
+__all__ = ["SubscriptionReadUnsupportedError", "SubscriptionStore"]
 
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+class SubscriptionReadUnsupportedError(RuntimeError):
+    """Raised when the bound backend exposes no subscription read surface.
+
+    The locked SPL write Protocol has no subscription read method; only a
+    backend that also satisfies
+    :class:`~custos_trigger.stores.base.SubscriptionReadable` can serve
+    :meth:`SubscriptionStore.get`. The in-process backend does; the Postgres
+    adapter gains the capability in a later task.
+    """
 
 
 class SubscriptionStore:
@@ -64,6 +75,26 @@ class SubscriptionStore:
             to_spl_subscription_selector(subscription, added_at=self._now()),
         )
         return subscription_from_spl(row, selector)
+
+    async def get(self, workspace_id: str, subscription_id: str) -> Subscription | None:
+        """Read one subscription back by id, or ``None`` when absent.
+
+        Rebuilds the full :class:`Subscription` from the base row plus its
+        latest selector revision (which carries the rich metadata blob). Raises
+        :class:`SubscriptionReadUnsupportedError` when the bound backend has no
+        :class:`~custos_trigger.stores.base.SubscriptionReadable` surface.
+        """
+        store = self._store
+        if not isinstance(store, SubscriptionReadable):
+            raise SubscriptionReadUnsupportedError(
+                "the bound metadata store exposes no subscription read surface"
+            )
+        row = store.subscription(workspace_id, subscription_id)
+        if row is None:
+            return None
+        selectors = store.subscription_selectors(workspace_id, subscription_id)
+        latest = selectors[-1] if selectors else None
+        return subscription_from_spl(row, latest)
 
     async def reauthor_selector(self, subscription: Subscription) -> None:
         """Append a fresh selector revision built from *subscription*."""
