@@ -20,15 +20,25 @@ from custos_obs.audit.pipeline import (
     AuditPipeline,
     AuditStoreConsumer,
 )
+from custos_obs.audit.retention import (
+    DEFAULT_RETENTION_PIPELINE_IDS,
+    AuditRetentionStore,
+    AuditRetentionWorker,
+    RetentionResult,
+)
 
 __all__ = [
     "AUDIT_ALERT_PIPELINE_ID",
     "AUDIT_STORE_PIPELINE_ID",
     "DEFAULT_AUDIT_OUTBOX_BATCH_SIZE",
+    "DEFAULT_RETENTION_PIPELINE_IDS",
     "AuditConsumer",
     "AuditOutboxBatchHandler",
     "AuditOutboxDrainer",
     "AuditOutboxRowWriter",
     "AuditPipeline",
+    "AuditRetentionStore",
+    "AuditRetentionWorker",
     "AuditStoreConsumer",
+    "RetentionResult",
 ]

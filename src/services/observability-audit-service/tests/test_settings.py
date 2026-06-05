@@ -16,6 +16,7 @@ from custos_obs.settings import (
     DEFAULT_AUDIT_OUTBOX_POLL_INTERVAL_S,
     DEFAULT_AUDIT_OUTBOX_RETENTION_MARGIN_S,
     DEFAULT_AUDIT_RETENTION_DAYS,
+    DEFAULT_AUDIT_RETENTION_SWEEP_INTERVAL_S,
     DEFAULT_ENVIRONMENT,
     DEFAULT_LOG_QUERY_PROVIDER,
     DEFAULT_METRICS_QUERY_PROVIDER,
@@ -49,6 +50,11 @@ def test_defaults_match_design_table() -> None:
     assert settings.log_query_provider == DEFAULT_LOG_QUERY_PROVIDER == "loki"
     assert settings.metrics_query_provider == DEFAULT_METRICS_QUERY_PROVIDER == "prometheus"
     assert settings.audit_retention_days == DEFAULT_AUDIT_RETENTION_DAYS == 90
+    assert (
+        settings.audit_retention_sweep_interval_s
+        == DEFAULT_AUDIT_RETENTION_SWEEP_INTERVAL_S
+        == 3_600
+    )
     assert settings.audit_outbox_drain_mode == DEFAULT_AUDIT_OUTBOX_DRAIN_MODE == "listen"
     assert settings.audit_outbox_poll_interval_s == DEFAULT_AUDIT_OUTBOX_POLL_INTERVAL_S == 5
     assert (
@@ -181,6 +187,20 @@ def test_invalid_drain_mode_rejected() -> None:
 def test_audit_retention_days_override() -> None:
     settings = load_settings(_base_env(CUSTOS_AUDIT_RETENTION_DAYS="365"))
     assert settings.audit_retention_days == 365
+
+
+def test_audit_retention_sweep_interval_override() -> None:
+    settings = load_settings(_base_env(CUSTOS_AUDIT_RETENTION_SWEEP_INTERVAL_S="900"))
+    assert settings.audit_retention_sweep_interval_s == 900
+
+
+@pytest.mark.parametrize("bad", ["0", "-5", "abc", "1.5"])
+def test_audit_retention_sweep_interval_rejects_non_positive_or_garbage(bad: str) -> None:
+    with pytest.raises(
+        SettingsError,
+        match="CUSTOS_AUDIT_RETENTION_SWEEP_INTERVAL_S must be a positive integer",
+    ):
+        load_settings(_base_env(CUSTOS_AUDIT_RETENTION_SWEEP_INTERVAL_S=bad))
 
 
 @pytest.mark.parametrize("bad", ["0", "-5", "abc", "1.5"])
