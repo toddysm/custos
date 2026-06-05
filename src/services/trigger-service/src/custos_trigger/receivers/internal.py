@@ -1,5 +1,5 @@
-"""Internal workflow-event receiver (TS-IMPL-017, REQ-006 / design ``§ Internal
-workflow-to-workflow trigger``).
+"""Internal workflow-event receiver (TS-IMPL-017, REQ-080 / REQ-081 / design
+``§ Internal workflow-to-workflow trigger``).
 
 The Workflow Service publishes lifecycle events to the ``custos.workflow.events``
 Dapr Pub/Sub topic (``DaprPubSubLifecyclePublisher``). This receiver subscribes
@@ -182,7 +182,16 @@ async def process_workflow_event(
     resume_outcomes: list[DispatchOutcome] = []
 
     if classification.to_start:
-        candidates = await subscription_store.list_in_workspace(workspace)
+        # Only start subscriptions whose declared source class matches the
+        # event's origin are eligible. Workflow lifecycle events are
+        # ``SourceType.INTERNAL``; a manual/webhook/cron start subscription must
+        # be fired by its own receiver, never by a lifecycle event whose
+        # selector happens to match (or is unconditional).
+        candidates = [
+            sub
+            for sub in await subscription_store.list_in_workspace(workspace)
+            if sub.source_type is event.source.type
+        ]
         for match in StartMatcher(evaluator).match(event, candidates):
             start_outcomes.append(
                 await dispatcher.dispatch_start(event, match, depth=_INBOUND_DEPTH)

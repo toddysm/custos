@@ -195,6 +195,20 @@ def test_list_in_workspace_requires_listable_backend() -> None:
         asyncio.run(store.list_in_workspace(_WORKSPACE))
 
 
+def test_list_in_workspace_requires_readable_backend() -> None:
+    import asyncio
+
+    class _ListOnly:
+        """Enumerable but with no read surface to rehydrate selectors."""
+
+        def list_subscriptions(self, workspace_id: str) -> tuple[Any, ...]:
+            return ()
+
+    store = SubscriptionStore(cast(TriggerMetadataStore, _ListOnly()))
+    with pytest.raises(SubscriptionListUnsupportedError):
+        asyncio.run(store.list_in_workspace(_WORKSPACE))
+
+
 # ---------------------------------------------------------------------------
 # process_workflow_event — start arm
 # ---------------------------------------------------------------------------
@@ -231,6 +245,29 @@ async def test_start_selector_miss_does_not_dispatch(
     fake_client: FakeWorkflowServiceClient,
 ) -> None:
     await subscription_store.create(_start_sub(selector='event.data.status == "failed"'))
+    event = normalize_workflow_event(_envelope())
+    outcome = await process_workflow_event(
+        event,
+        dispatcher=dispatcher,
+        evaluator=evaluator,
+        subscription_store=subscription_store,
+        resume_store=resume_store,
+    )
+    assert outcome.start == ()
+    assert fake_client.start_run_calls == []
+
+
+async def test_start_match_ignores_non_internal_source_type(
+    dispatcher: Dispatcher,
+    evaluator: SelectorEvaluator,
+    subscription_store: SubscriptionStore,
+    resume_store: ResumeSubscriptionStore,
+    fake_client: FakeWorkflowServiceClient,
+) -> None:
+    # A manual start subscription must not be fired by a workflow lifecycle
+    # (internal) event, even with an unconditional (empty) selector.
+    manual = _start_sub(selector=None).model_copy(update={"source_type": SourceType.MANUAL})
+    await subscription_store.create(manual)
     event = normalize_workflow_event(_envelope())
     outcome = await process_workflow_event(
         event,

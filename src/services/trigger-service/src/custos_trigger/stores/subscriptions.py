@@ -122,21 +122,28 @@ class SubscriptionStore:
         metadata blob the matcher's CEL selector reads). Filtering to ``START``
         kind / ``ACTIVE`` state is the matcher's job, so the full set is
         returned here. Raises :class:`SubscriptionListUnsupportedError` when the
-        bound backend has no
-        :class:`~custos_trigger.stores.base.SubscriptionListable` surface.
+        bound backend lacks either the
+        :class:`~custos_trigger.stores.base.SubscriptionListable` enumeration
+        surface or the
+        :class:`~custos_trigger.stores.base.SubscriptionReadable` surface needed
+        to rehydrate selectors — enumerating un-rehydrated rows would fall back
+        to defaults (``source_type=manual``, empty/unconditional selector) and
+        could fire the wrong workflows.
         """
         store = self._store
         if not isinstance(store, SubscriptionListable):
             raise SubscriptionListUnsupportedError(
                 "the bound metadata store exposes no subscription list surface"
             )
-        readable = store if isinstance(store, SubscriptionReadable) else None
+        if not isinstance(store, SubscriptionReadable):
+            raise SubscriptionListUnsupportedError(
+                "the bound metadata store can list subscriptions but exposes no "
+                "read surface to rehydrate their selectors"
+            )
         candidates: list[Subscription] = []
         for row in store.list_subscriptions(workspace_id):
-            latest = None
-            if readable is not None:
-                selectors = readable.subscription_selectors(workspace_id, str(row.subscription_id))
-                latest = selectors[-1] if selectors else None
+            selectors = store.subscription_selectors(workspace_id, str(row.subscription_id))
+            latest = selectors[-1] if selectors else None
             candidates.append(subscription_from_spl(row, latest))
         return candidates
 
