@@ -1,8 +1,10 @@
 """Canonical platform event taxonomy (resolves design TODO-001 / INCON-013).
 
-``kind`` strings are **dot-namespaced** ``<domain>.<event>`` values that
-selectors match on and that the Normalizer stamps onto every
-:class:`NormalizedEvent`. This module is the authoritative source for the
+``kind`` strings are **dot-namespaced** ``<domain>.<event>[.<subevent>...]``
+values that selectors match on and that the Normalizer stamps onto every
+:class:`NormalizedEvent`. The first segment is the **domain**; at least one
+further segment follows, and vendor namespaces may nest additional segments
+(e.g. ``ghcr.image.pushed``). This module is the authoritative source for the
 unified ``kind`` namespace shared by the Trigger Service, the Activity Runtime
 Manager (ARM TODO-009), and Observability/Audit (INCON-013) — those services
 consume the same strings rather than re-inventing them.
@@ -176,7 +178,7 @@ def validate_kind(kind: str) -> str:
         InvalidKindError: If ``kind`` is malformed or violates the
             platform-collision guard.
     """
-    if not _KIND_RE.match(kind):
+    if not _KIND_RE.fullmatch(kind):
         raise InvalidKindError(kind, f"does not match {KIND_PATTERN}")
 
     domain = kind_domain(kind)
