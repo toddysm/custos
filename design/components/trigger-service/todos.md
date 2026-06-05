@@ -13,7 +13,7 @@ First implementation milestone: the MVP vertical slice that unblocks the Workflo
 - [x] TS-IMPL-003 (#633): FastAPI skeleton + health probes + call-context shim.
 - [x] TS-IMPL-004 (#634): Settings + locked `trigger.*` error taxonomy.
 - [x] TS-IMPL-005 (#635): `custos-cel` `event` binding root (ADR-011 extension).
-- [F] TS-IMPL-006 (#636): Canonical event taxonomy registry (resolves TODO-001).
+- [x] TS-IMPL-006 (#636): Canonical event taxonomy registry (resolves TODO-001).
 
 ### Phase B — Domain models & persistence
 
