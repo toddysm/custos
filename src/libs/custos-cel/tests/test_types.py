@@ -233,6 +233,17 @@ def test_event_subtree_member_access() -> None:
     assert _typed("event.raw.body").cel_type == StringType()
 
 
+def test_event_source_documented_fields_type_as_string() -> None:
+    for field in ("type", "connectorInstanceId", "subscriptionId", "vendor", "occurredAt"):
+        assert _typed(f"event.source.{field}").cel_type == StringType()
+
+
+def test_event_raw_headers_is_object_indexable_by_string() -> None:
+    # raw.headers is a map<string, string>, so bracket access by a literal
+    # string key type-checks as string (the documented envelope shape).
+    assert _typed('event.raw.headers["x-id"]').cel_type == StringType()
+
+
 def test_event_subtree_bracket_access() -> None:
     assert _typed('event.data["status"]').cel_type == StringType()
 

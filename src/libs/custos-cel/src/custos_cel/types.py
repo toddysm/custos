@@ -85,23 +85,44 @@ _DEFAULT_WORKFLOW_TYPES: Final[Mapping[str, CelType]] = MappingProxyType(
 )
 
 # Default JSON Schema for the ``event`` binding root (TS-IMPL-005). Mirrors
-# the Trigger Service ``NormalizedEvent`` envelope: two string scalars
-# (``kind`` / ``subject``) plus three string-keyed, string-valued subtrees
-# (``source`` / ``data`` / ``raw``). The subtrees are declared as
-# ``additionalProperties: string`` so dotted member access
-# (``event.data.status``, ``event.source.vendor``, ``event.raw.body``)
+# the Trigger Service ``NormalizedEvent`` envelope as enumerated in the
+# design's § Selector Language: two string scalars (``kind`` / ``subject``),
+# a ``source`` object with the documented fields, a free-form string-valued
+# ``data`` subtree, and ``raw`` carrying an object-valued ``headers`` map plus
+# a string ``body``. Dotted / bracket member access into these subtrees
 # type-checks as a string — the common selector shape (equality and
-# membership comparisons). Callers that know a richer event schema can
-# pass their own ``SchemaBindings(event=…)`` to tighten the contract.
+# membership comparisons). ``source`` keeps ``additionalProperties: string``
+# for forward-compatible vendor fields. Callers that know a richer event
+# schema can pass their own ``SchemaBindings(event=…)`` to tighten the
+# contract.
 _DEFAULT_EVENT_SCHEMA: Final[Mapping[str, Any]] = MappingProxyType(
     {
         "type": "object",
         "properties": {
             "kind": {"type": "string"},
             "subject": {"type": "string"},
-            "source": {"type": "object", "additionalProperties": {"type": "string"}},
+            "source": {
+                "type": "object",
+                "properties": {
+                    "type": {"type": "string"},
+                    "connectorInstanceId": {"type": "string"},
+                    "subscriptionId": {"type": "string"},
+                    "vendor": {"type": "string"},
+                    "occurredAt": {"type": "string"},
+                },
+                "additionalProperties": {"type": "string"},
+            },
             "data": {"type": "object", "additionalProperties": {"type": "string"}},
-            "raw": {"type": "object", "additionalProperties": {"type": "string"}},
+            "raw": {
+                "type": "object",
+                "properties": {
+                    "headers": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                    },
+                    "body": {"type": "string"},
+                },
+            },
         },
     }
 )
