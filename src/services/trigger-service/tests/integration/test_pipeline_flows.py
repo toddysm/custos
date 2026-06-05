@@ -66,6 +66,17 @@ _WS = "ws_integration"
 _NOW = datetime(2026, 6, 4, 12, 0, 0, tzinfo=UTC)
 
 
+def _frozen_jsonb(value: Any) -> MappingProxyType[str, Any]:
+    """Freeze a JSONB column into a read-only mapping.
+
+    ``asyncpg`` returns JSONB as a raw string unless a codec is registered (our
+    loop-local pool registers none), but a future codec change could surface a
+    decoded mapping instead. Tolerate both so the read-back stays robust.
+    """
+    decoded = json.loads(value) if isinstance(value, str) else value
+    return MappingProxyType(dict(decoded))
+
+
 # ---------------------------------------------------------------------------
 # Raw-SQL read-back helpers (the Pg adapter has no trigger read surface)
 # ---------------------------------------------------------------------------
@@ -104,7 +115,7 @@ async def _rehydrate_subscription(
     spl_sel = SplSubscriptionSelector(
         workspace_id=sel["workspace_id"],
         subscription_id=sel["subscription_id"],
-        selector=MappingProxyType(dict(json.loads(sel["selector"]))),
+        selector=_frozen_jsonb(sel["selector"]),
         added_at=sel["added_at"],
     )
     return subscription_from_spl(spl_sub, spl_sel)
@@ -127,7 +138,7 @@ async def _rehydrate_resume(pool: Any, *, workspace_id: str, resume_id: str) -> 
         run_id=row["run_id"],
         step_id=row["step_id"],
         expires_at=row["expires_at"],
-        payload=MappingProxyType(dict(json.loads(row["payload"]))),
+        payload=_frozen_jsonb(row["payload"]),
     )
     return resume_registration_from_spl(spl_resume)
 

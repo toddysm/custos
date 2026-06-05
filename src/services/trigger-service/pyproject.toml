@@ -124,7 +124,7 @@ disallow_untyped_defs = false
 
 [[tool.mypy.overrides]]
 # asyncpg ships no PEP 561 marker; treat as untyped at the boundary.
-module = ["asyncpg", "asyncpg.*", "testcontainers.*"]
+module = ["asyncpg", "asyncpg.*", "testcontainers", "testcontainers.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
