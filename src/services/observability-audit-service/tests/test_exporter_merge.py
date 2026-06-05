@@ -7,6 +7,7 @@ last-good config is retained; and the merge is deterministic + idempotent.
 
 from __future__ import annotations
 
+from types import MappingProxyType
 from typing import Any
 
 import pytest
@@ -264,6 +265,62 @@ def test_base_pipeline_referencing_undefined_exporter_is_rejected() -> None:
     )
     with pytest.raises(CollectorConfigError, match="references undefined exporters"):
         merge_collector_config(base, None)
+
+
+def test_multiple_noncomparable_unknown_keys_are_rejected() -> None:
+    # Non-comparable mapping keys (int + str) must not crash ``sorted`` — the
+    # block is rejected with a CollectorConfigError, not a TypeError.
+    block: dict[Any, Any] = {1: {}, "bogus": {}}
+    with pytest.raises(CollectorConfigError, match="unsupported keys"):
+        merge_collector_config(BASE_CONFIG, block)
+
+
+def test_base_pipeline_with_non_string_exporter_entry_is_rejected() -> None:
+    base = (
+        "exporters:\n  logging: {}\nservice:\n  pipelines:\n"
+        "    logs:\n      exporters:\n        - foo: 1\n"
+    )
+    block = "exporters:\n  datadog: {}\npipelines:\n  logs: [datadog]\n"
+    with pytest.raises(CollectorConfigError, match="invalid exporter reference"):
+        merge_collector_config(base, block)
+
+
+def test_customer_attachment_with_non_string_entry_is_rejected() -> None:
+    block = "exporters:\n  loki/customer: {}\npipelines:\n  logs:\n    - foo: 1\n"
+    with pytest.raises(CollectorConfigError, match="invalid exporter reference"):
+        merge_collector_config(BASE_CONFIG, block)
+
+
+def test_unattached_pipeline_non_string_exporter_entry_is_rejected() -> None:
+    base = (
+        "exporters:\n  logging: {}\nservice:\n  pipelines:\n"
+        "    logs:\n      exporters: [logging]\n"
+        "    metrics:\n      exporters:\n        - foo: 1\n"
+    )
+    block = "exporters:\n  datadog: {}\npipelines:\n  logs: [datadog]\n"
+    with pytest.raises(CollectorConfigError, match="invalid exporter reference"):
+        merge_collector_config(base, block)
+
+
+def test_attachment_merges_when_base_uses_readonly_mappings() -> None:
+    # A base passed as read-only mappings (``MappingProxyType``) must still merge
+    # without raising ``AttributeError`` from in-place mutation.
+    base = MappingProxyType(
+        {
+            "exporters": MappingProxyType({"logging": {}}),
+            "service": MappingProxyType(
+                {
+                    "pipelines": MappingProxyType(
+                        {"logs": MappingProxyType({"exporters": ["logging"]})}
+                    )
+                }
+            ),
+        }
+    )
+    block = "exporters:\n  datadog: {}\npipelines:\n  logs: [datadog]\n"
+    result = merge_collector_config(base, block)
+    merged = _parse(result.effective_config)
+    assert merged["service"]["pipelines"]["logs"]["exporters"] == ["datadog", "logging"]
 
 
 # --------------------------------------------------------------------------- #

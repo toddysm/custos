@@ -41,7 +41,6 @@ config and exporters that are defined (base or customer).
 from __future__ import annotations
 
 from collections.abc import Mapping
-from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -96,6 +95,32 @@ def _validate_exporter_name(name: str, *, where: str) -> None:
         raise CollectorConfigError(f"{where} exporter name {name!r} must be 'type' or 'type/name'")
 
 
+def _require_exporter_ref(value: Any, *, where: str) -> str:
+    """Validate that a pipeline exporter reference is a non-empty string.
+
+    Pipeline ``exporters`` lists come from arbitrary YAML, so an entry may be a
+    non-string or unhashable value (e.g. a nested mapping). Reject those with a
+    :class:`CollectorConfigError` rather than letting set/membership operations
+    raise ``TypeError``.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise CollectorConfigError(f"{where} contains an invalid exporter reference: {value!r}")
+    return value
+
+
+def _deep_plain(value: Any) -> Any:
+    """Recursively copy ``value`` into plain ``dict``/``list`` containers.
+
+    Doubles as a deep copy that is robust to read-only inputs (e.g. nested
+    ``MappingProxyType``), which the stdlib :func:`copy.deepcopy` cannot pickle.
+    """
+    if isinstance(value, Mapping):
+        return {key: _deep_plain(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_deep_plain(item) for item in value]
+    return value
+
+
 def _base_pipelines(base: Mapping[str, Any]) -> dict[str, Any]:
     """Return the ``service.pipelines`` mapping from the base config."""
     service = base.get("service", {})
@@ -114,8 +139,14 @@ def _merge_pipeline_attachments(
     defined_exporters: set[str],
 ) -> None:
     """Attach customer exporters to the named base pipelines (in place)."""
-    service = merged.setdefault("service", {})
-    pipelines = service.setdefault("pipelines", {})
+    # ``merge_collector_config`` already validated that base ``service`` and
+    # ``service.pipelines`` are mappings; coerce them (and each touched pipeline)
+    # to plain dicts so in-place mutation is safe even when the base arrives as a
+    # read-only ``Mapping`` (e.g. ``MappingProxyType``).
+    service: dict[str, Any] = dict(merged.get("service", {}))
+    merged["service"] = service
+    pipelines: dict[str, Any] = dict(service.get("pipelines", {}))
+    service["pipelines"] = pipelines
     for pipeline_name, exporter_list in attachments.items():
         if pipeline_name not in ALLOWED_PIPELINES:
             raise CollectorConfigError(
@@ -131,18 +162,28 @@ def _merge_pipeline_attachments(
             raise CollectorConfigError(
                 f"customer pipelines.{pipeline_name} must be a list of exporter names"
             )
-        pipeline = pipelines[pipeline_name]
-        if not isinstance(pipeline, dict):
+        pipeline_raw = pipelines[pipeline_name]
+        if not isinstance(pipeline_raw, Mapping):
             raise CollectorConfigError(
                 f"base config 'service.pipelines.{pipeline_name}' must be a mapping"
             )
+        pipeline = dict(pipeline_raw)
+        pipelines[pipeline_name] = pipeline
         existing = pipeline.get("exporters", [])
         if not isinstance(existing, list):
             raise CollectorConfigError(
                 f"base config 'service.pipelines.{pipeline_name}.exporters' must be a list"
             )
-        names = set(existing)
+        names: set[str] = set()
+        for existing_name in existing:
+            names.add(
+                _require_exporter_ref(
+                    existing_name,
+                    where=f"base config 'service.pipelines.{pipeline_name}.exporters'",
+                )
+            )
         for exporter_name in exporter_list:
+            _require_exporter_ref(exporter_name, where=f"customer pipelines.{pipeline_name}")
             if exporter_name not in defined_exporters:
                 raise CollectorConfigError(
                     f"customer pipelines.{pipeline_name} references undefined "
@@ -165,6 +206,10 @@ def _validate_merged(merged: Mapping[str, Any]) -> None:
         if not isinstance(referenced, list):
             raise CollectorConfigError(
                 f"merged 'service.pipelines.{pipeline_name}.exporters' must be a list"
+            )
+        for name in referenced:
+            _require_exporter_ref(
+                name, where=f"merged 'service.pipelines.{pipeline_name}.exporters'"
             )
         missing = [name for name in referenced if name not in defined]
         if missing:
@@ -208,7 +253,7 @@ def merge_collector_config(
     unknown = set(customer_map) - _ALLOWED_CUSTOMER_KEYS
     if unknown:
         raise CollectorConfigError(
-            f"customer exporter block has unsupported keys: {sorted(unknown)} "
+            f"customer exporter block has unsupported keys: {sorted(map(repr, unknown))} "
             f"(allowed: {sorted(_ALLOWED_CUSTOMER_KEYS)})"
         )
 
@@ -221,7 +266,7 @@ def merge_collector_config(
             f"customer exporters may not redefine base exporters: {sorted(collisions)}"
         )
 
-    merged = deepcopy(base_map)
+    merged = _deep_plain(base_map)
     merged_exporters = dict(base_exporters)
     merged_exporters.update(customer_exporters)
     merged["exporters"] = merged_exporters
