@@ -246,6 +246,23 @@ def test_query_logs_invalid_datetime_is_400() -> None:
     assert "invalid datetime" in resp.json()["detail"]
 
 
+def test_query_logs_accepts_z_suffix_datetime() -> None:
+    provider = _FakeLogProvider(page=Page(items=(), next_cursor=None))
+    with _client(provider) as client:
+        resp = client.get(_LOGS_URL, headers=_auth(), params={"from": "2024-01-01T00:00:00Z"})
+    assert resp.status_code == 200
+    assert provider.last_filter is not None
+    assert provider.last_filter.start == datetime(2024, 1, 1, tzinfo=UTC)
+
+
+def test_query_logs_rejects_timezone_naive_datetime_400() -> None:
+    provider = _FakeLogProvider(page=Page(items=(), next_cursor=None))
+    with _client(provider) as client:
+        resp = client.get(_LOGS_URL, headers=_auth(), params={"from": "2024-01-01T00:00:00"})
+    assert resp.status_code == 400
+    assert "timezone offset" in resp.json()["detail"]
+
+
 def test_query_logs_noop_returns_503_with_pointer() -> None:
     provider = _FakeLogProvider(raise_on_call=QueryUnsupported("logs not configured"))
     with _client(provider) as client:
@@ -361,8 +378,34 @@ def test_tail_backend_unavailable_pre_stream_returns_503() -> None:
     assert resp.status_code == 503
 
 
+def test_tail_unreachable_at_stream_start_returns_503() -> None:
+    # Async-generator adapters raise on the first ``__anext__`` (not at
+    # construction). _open_tail pulls one record eagerly, so this still surfaces
+    # as a pre-stream 503 rather than a 200 with an error frame.
+    provider = _FakeLogProvider(tail_records=[], raise_in_stream=BackendUnavailable("loki down"))
+    with _client(provider) as client:
+        resp = client.get(_TAIL_URL, headers=_auth())
+    assert resp.status_code == 503
+    assert resp.json()["externalUrl"] == "https://logs.example.com"
+
+
+def test_tail_empty_stream_returns_200() -> None:
+    provider = _FakeLogProvider(tail_records=[])
+    with _client(provider) as client:
+        resp = client.get(_TAIL_URL, headers=_auth())
+    assert resp.status_code == 200
+    assert [f for f in resp.text.split("\n\n") if f] == []
+
+
 def test_tail_workspace_mismatch_returns_404() -> None:
     provider = _FakeLogProvider(raise_on_call=WorkspaceMismatch("other ws"))
+    with _client(provider) as client:
+        resp = client.get(_TAIL_URL, headers=_auth())
+    assert resp.status_code == 404
+
+
+def test_tail_workspace_mismatch_at_stream_start_returns_404() -> None:
+    provider = _FakeLogProvider(tail_records=[], raise_in_stream=WorkspaceMismatch("other ws"))
     with _client(provider) as client:
         resp = client.get(_TAIL_URL, headers=_auth())
     assert resp.status_code == 404

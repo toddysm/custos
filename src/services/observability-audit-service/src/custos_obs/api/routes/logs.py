@@ -103,21 +103,62 @@ def _data_frame(record: LogRecord) -> str:
 
 async def _sse_frames(
     iterator: AsyncIterator[LogRecord],
+    first: LogRecord | None,
     settings: Settings,
 ) -> AsyncIterator[str]:
     """Yield SSE frames from the provider's tail iterator.
 
-    A backend that becomes unavailable *after* the stream has opened (the
-    iterator raises on a later batch) can no longer change the HTTP status, so
-    the failure is surfaced as a terminal ``event: error`` frame carrying the
-    same Problem Details body the pre-stream path would have returned.
+    ``first`` is the record already pulled by :func:`_open_tail` to force a
+    pre-stream connectivity check; it is emitted before resuming iteration. A
+    backend that becomes unavailable *after* the stream has opened (the iterator
+    raises on a later batch) can no longer change the HTTP status, so the failure
+    is surfaced as a terminal ``event: error`` frame carrying the same Problem
+    Details body the pre-stream path would have returned.
     """
+    if first is not None:
+        yield _data_frame(first)
     try:
         async for record in iterator:
             yield _data_frame(record)
     except (QueryUnsupported, BackendUnavailable):
         problem = _log_unavailable(settings).to_dict()
         yield f"event: error\ndata: {json.dumps(problem)}\n\n"
+
+
+async def _open_tail(
+    provider: LogQueryProvider,
+    workspace_id: str,
+    run_id: str,
+    from_cursor: Cursor | None,
+    settings: Settings,
+) -> tuple[AsyncIterator[LogRecord], LogRecord | None]:
+    """Open the tail iterator and eagerly pull its first record.
+
+    Async-generator adapters (e.g. the Loki adapter) defer connectivity failures
+    to the first ``__anext__`` rather than raising when the iterator is
+    constructed. Advancing one record here lets a backend that is unreachable *at
+    stream start* surface as a pre-stream ``503`` Problem Details response
+    instead of a ``200 text/event-stream`` whose body is an ``event: error``
+    frame. Failures *after* the first record still degrade to a terminal error
+    frame, since the status line has already been sent.
+    """
+    try:
+        iterator = provider.tail_run_logs(
+            WorkspaceId(workspace_id), RunId(run_id), from_cursor
+        ).__aiter__()
+    except (QueryUnsupported, BackendUnavailable) as exc:
+        raise _log_unavailable(settings) from exc
+    except WorkspaceMismatch as exc:
+        raise _run_not_found(run_id) from exc
+    try:
+        first: LogRecord | None = await iterator.__anext__()
+    except StopAsyncIteration:
+        first = None
+    except (QueryUnsupported, BackendUnavailable) as exc:
+        raise _log_unavailable(settings) from exc
+    except WorkspaceMismatch as exc:
+        raise _run_not_found(run_id) from exc
+    return iterator, first
 
 
 @router.get("/logs/tail")
@@ -133,19 +174,15 @@ async def tail_run_logs(
     """Stream a run's logs as Server-Sent Events.
 
     Honours an inbound ``Last-Event-ID`` header (or ``cursor`` query param) as
-    the resume position. A ``noop``/unreachable backend returns ``503``.
+    the resume position. A ``noop``/unreachable backend returns ``503`` before
+    the stream opens (see :func:`_open_tail`).
     """
     _ensure_workspace(ctx, workspace_id)
     resume = last_event_id or cursor
     from_cursor = Cursor(token=resume) if resume else None
-    try:
-        iterator = provider.tail_run_logs(WorkspaceId(workspace_id), RunId(run_id), from_cursor)
-    except (QueryUnsupported, BackendUnavailable) as exc:
-        raise _log_unavailable(settings) from exc
-    except WorkspaceMismatch as exc:
-        raise _run_not_found(run_id) from exc
+    iterator, first = await _open_tail(provider, workspace_id, run_id, from_cursor, settings)
     return StreamingResponse(
-        _sse_frames(iterator, settings),
+        _sse_frames(iterator, first, settings),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -194,13 +231,25 @@ async def query_run_logs(
 
 
 def _parse_dt(value: str | None) -> datetime | None:
-    """Parse an ISO-8601 query param into a ``datetime`` (or ``None``).
+    """Parse an ISO-8601 query param into a timezone-aware ``datetime``.
 
-    A malformed value is a client error, surfaced as ``400``.
+    A trailing ``Z`` (UTC designator) is normalised to ``+00:00`` since
+    :meth:`datetime.fromisoformat` only accepts it on newer interpreters. A
+    *timezone-naive* value is rejected with ``400`` rather than silently assumed
+    to be local time: the backend adapters convert to epoch seconds, so an
+    ambiguous offset would produce wrong filter windows. A malformed value is
+    likewise a client error (``400``).
     """
     if value is None:
         return None
+    normalized = f"{value[:-1]}+00:00" if value.endswith("Z") else value
     try:
-        return datetime.fromisoformat(value)
+        parsed = datetime.fromisoformat(normalized)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"invalid datetime: {value!r}") from exc
+    if parsed.tzinfo is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"datetime must include a timezone offset: {value!r}",
+        )
+    return parsed
