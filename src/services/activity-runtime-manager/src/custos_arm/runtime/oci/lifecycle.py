@@ -26,7 +26,6 @@ with fakes; the real ``kind``-cluster path is exercised by the
 
 from __future__ import annotations
 
-import base64
 import io
 import shutil
 import tarfile
@@ -123,7 +122,7 @@ class PodExec(Protocol):
         pod: str,
         container: str,
         command: list[str],
-        stdin: str | None,
+        stdin: bytes | None,
     ) -> ExecResult: ...
 
 
@@ -278,13 +277,16 @@ class OciContainerDriver:
     def _stream_inputs(self, handle: SandboxHandle, namespace: str, name: str) -> None:
         """Stream the host ``in/`` tree into the input bridge and drop the gate."""
         pod_name = self._await_input_bridge(namespace, name)
-        archive = base64.b64encode(_tar_directory(handle.input_root)).decode("ascii")
+        archive = _tar_directory(handle.input_root)
 
+        # The raw tar is fed straight to ``tar -x``: the archive's end-of-archive
+        # marker lets ``tar`` finish and exit on its own, so we never have to
+        # half-close the exec stdin channel (which the client cannot do).
         extracted = self._exec(
             namespace=namespace,
             pod=pod_name,
             container=INPUT_BRIDGE_CONTAINER_NAME,
-            command=["sh", "-c", "base64 -d | tar -x -C /custos/in"],
+            command=["tar", "-x", "-C", "/custos/in"],
             stdin=archive,
         )
         if extracted.exit_code != 0:
@@ -432,7 +434,7 @@ class OciContainerDriver:
         pod: str,
         container: str,
         command: list[str],
-        stdin: str | None,
+        stdin: bytes | None,
     ) -> ExecResult:
         """Drive ``connect_get_namespaced_pod_exec`` over a websocket stream."""
         from kubernetes.stream import stream

@@ -8,7 +8,6 @@ cancel/cleanup) without a cluster. The real ``kind`` path lives in the
 
 from __future__ import annotations
 
-import base64
 import io
 import tarfile
 from datetime import UTC, datetime, timedelta
@@ -174,7 +173,7 @@ class _RecordingExec:
         pod: str,
         container: str,
         command: list[str],
-        stdin: str | None,
+        stdin: bytes | None,
     ) -> ExecResult:
         self.calls.append(
             {
@@ -372,11 +371,10 @@ def test_start_unsuspends_then_streams_inputs_and_writes_sentinel(tmp_path: Path
     assert stream_call["pod"] == "sandbox-pod-abc12"
     assert stream_call["namespace"] == plan.namespace
     assert stream_call["container"] == INPUT_BRIDGE_CONTAINER_NAME
-    assert stream_call["command"] == ["sh", "-c", "base64 -d | tar -x -C /custos/in"]
+    assert stream_call["command"] == ["tar", "-x", "-C", "/custos/in"]
 
-    # The streamed tar round-trips the host input tree.
-    archive = base64.b64decode(stream_call["stdin"])
-    with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+    # The streamed raw tar round-trips the host input tree.
+    with tarfile.open(fileobj=io.BytesIO(stream_call["stdin"])) as tar:
         assert sorted(tar.getnames()) == ["inputs.json", "nested", "nested/ctx.json"]
 
     # The sentinel that releases the input gate is written last.
