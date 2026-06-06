@@ -7,9 +7,22 @@ into the application by :func:`custos_gateway.app.create_app`.
 
 from __future__ import annotations
 
+from custos_gateway.middleware.auth import (
+    AuthorizedCaller,
+    get_auth_client,
+    is_auth_bypass_path,
+    require_permission,
+)
 from custos_gateway.middleware.correlation import (
     CorrelationIdMiddleware,
     new_correlation_id,
 )
 
-__all__ = ["CorrelationIdMiddleware", "new_correlation_id"]
+__all__ = [
+    "AuthorizedCaller",
+    "CorrelationIdMiddleware",
+    "get_auth_client",
+    "is_auth_bypass_path",
+    "new_correlation_id",
+    "require_permission",
+]
