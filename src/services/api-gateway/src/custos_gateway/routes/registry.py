@@ -50,7 +50,14 @@ from typing import TYPE_CHECKING, Final, cast
 
 from fastapi import APIRouter, Depends, Request, Response
 
+from custos_gateway._telemetry import (
+    instrument_downstream,
+    record_idempotency_replay,
+    record_rate_limit_denial,
+    request_telemetry,
+)
 from custos_gateway.clients.auth import AUTH_APP_ID
+from custos_gateway.errors import GatewayError
 from custos_gateway.middleware.auth import (
     AUTH_STATE_ATTR,
     AuthorizedCaller,
@@ -589,39 +596,61 @@ def _make_forwarder(spec: RouteSpec) -> Callable[[Request], Awaitable[Response]]
     """
 
     async def _forward(request: Request) -> Response:
-        body = await request.body()
-        enforce_body_size(len(body), spec.max_body_bytes)
-        enforce_content_type(
-            method=request.method,
-            content_type=request.headers.get("content-type"),
-            route_class=classify_route(request.url.path),
-        )
-        caller = cast("AuthorizedCaller", getattr(request.state, AUTH_STATE_ATTR))
-        allow = _apply_rate_limit(request, caller)
-
-        coordinator, key = _idempotency_context(request, spec, caller)
-        if coordinator is not None and key is not None:
-            outcome = await coordinator.reserve(key, _request_hash(request, spec, caller, body))
-            if isinstance(outcome, ReplayReservation):
-                return _with_rate_limit_headers(
-                    response_from_snapshot(outcome.response_snapshot), allow
+        with request_telemetry(method=spec.method, route=spec.path) as telemetry:
+            telemetry.set_correlation_id(getattr(request.state, "correlation_id", None))
+            # The authorize dependency chain (resolve_workspace → require_permission
+            # → mint_call_context) has already bound the caller to request.state, so
+            # stamp the span's caller ids first: a validation GatewayError below
+            # still produces an error span carrying the full attribute set.
+            caller = cast("AuthorizedCaller", getattr(request.state, AUTH_STATE_ATTR))
+            telemetry.set_caller(
+                workspace_id=caller.workspace_id,
+                principal_id=caller.principal_id,
+                decision_audit_event_id=caller.audit_event_id,
+            )
+            try:
+                body = await request.body()
+                enforce_body_size(len(body), spec.max_body_bytes)
+                enforce_content_type(
+                    method=request.method,
+                    content_type=request.headers.get("content-type"),
+                    route_class=classify_route(request.url.path),
                 )
+                allow = _apply_rate_limit(request, caller, spec)
 
-        reply = await _invoke_downstream(request, spec, body)
-        if coordinator is not None and key is not None:
-            await coordinator.complete(key, response_snapshot(reply))
-        return _with_rate_limit_headers(shaped_response(reply), allow)
+                coordinator, key = _idempotency_context(request, spec, caller)
+                if coordinator is not None and key is not None:
+                    outcome = await coordinator.reserve(
+                        key, _request_hash(request, spec, caller, body)
+                    )
+                    if isinstance(outcome, ReplayReservation):
+                        record_idempotency_replay(route=spec.path, method=spec.method)
+                        response = _with_rate_limit_headers(
+                            response_from_snapshot(outcome.response_snapshot), allow
+                        )
+                        telemetry.set_status(response.status_code)
+                        return response
+
+                reply = await _invoke_downstream(request, spec, body)
+                if coordinator is not None and key is not None:
+                    await coordinator.complete(key, response_snapshot(reply))
+                response = _with_rate_limit_headers(shaped_response(reply), allow)
+                telemetry.set_status(response.status_code)
+                return response
+            except GatewayError as exc:
+                telemetry.set_status(exc.status)
+                raise
 
     return _forward
 
 
-def _apply_rate_limit(request: Request, caller: AuthorizedCaller) -> Allow | None:
+def _apply_rate_limit(request: Request, caller: AuthorizedCaller, spec: RouteSpec) -> Allow | None:
     """Charge the principal/workspace token buckets, or skip when not applicable.
 
     Returns the :class:`Allow` decision (whose headers are surfaced on the
     response) for a rate-limited write when a limiter is bound, ``None`` when the
     method is exempt or no limiter is wired, and raises ``429 rate-limited`` on a
-    :class:`Deny`.
+    :class:`Deny` after recording the denial in the rate-limit counter.
     """
     if not is_rate_limited_method(request.method):
         return None
@@ -630,6 +659,7 @@ def _apply_rate_limit(request: Request, caller: AuthorizedCaller) -> Allow | Non
         return None
     decision = limiter.check(principal_id=caller.principal_id, workspace_id=caller.workspace_id)
     if isinstance(decision, Deny):
+        record_rate_limit_denial(route=spec.path, method=spec.method)
         raise rate_limit_denied_error(decision)
     return decision
 
@@ -689,15 +719,16 @@ async def _invoke_downstream(request: Request, spec: RouteSpec, body: bytes) -> 
     method_path = request.url.path.lstrip("/")
     if request.url.query:
         method_path = f"{method_path}?{request.url.query}"
-    return await downstream.invoke(
-        DownstreamCall(
-            app_id=spec.app_id,
-            http_method=request.method,
-            method_path=method_path,
-            headers=headers,
-            body=body or None,
+    with instrument_downstream(app_id=spec.app_id):
+        return await downstream.invoke(
+            DownstreamCall(
+                app_id=spec.app_id,
+                http_method=request.method,
+                method_path=method_path,
+                headers=headers,
+                body=body or None,
+            )
         )
-    )
 
 
 def _with_rate_limit_headers(response: Response, allow: Allow | None) -> Response:

@@ -20,7 +20,8 @@ validation (AGW-IMPL-008) + write-path idempotency (AGW-IMPL-009) + write-path
 rate limiting (AGW-IMPL-010) + request validation (AGW-IMPL-011) + downstream
 router (AGW-IMPL-012) + route registry (AGW-IMPL-013) + webhook pass-through
 (AGW-IMPL-014) + device-code session manager M1 503 stub (AGW-IMPL-015) + full
-application wiring (AGW-IMPL-016) + OpenAPI 3.1 emission (AGW-IMPL-017)** — the
+application wiring (AGW-IMPL-016) + OpenAPI 3.1 emission (AGW-IMPL-017) + OTel
+observability (AGW-IMPL-018)** — the
 `custos_gateway`
 package, its `pyproject.toml` (ruff + mypy strict + pytest with a
 `--cov-fail-under=90` floor), the `python -m custos_gateway` entry point, the
@@ -105,10 +106,17 @@ schemes referenced by the right routes, the `x-custos-required-permission` /
 `x-custos-idempotent` operation extensions sourced from the route registry on
 every operation, and the shared RFC 7807 `ProblemDetails` error schema as each
 operation's default response),
+the OpenTelemetry instrumentation (`_telemetry.py` AGW-IMPL-018 — every proxied
+request opens a `custos_gateway.request` span carrying `{http.method, http.route,
+workspaceId, principalId, correlationId, decisionAuditEventId}`, increments the
+`gateway_requests_total` / `gateway_rate_limit_denials_total` /
+`gateway_idempotency_replays_total` counters, and observes the
+`gateway_request_duration_seconds` / `gateway_downstream_duration_seconds`
+histograms; `opentelemetry-api`-only, inert until an SDK + exporter is wired),
 and the
 CI gate
 (`.github/workflows/python-services.yml`) are in place. Subsequent tasks layer
-in observability (Phase E) and Helm wiring + verification + docs (Phase F).
+in Helm wiring + verification + docs (Phase F).
 
 Tracker: [#732](https://github.com/toddysm/custos/issues/732) —
 `AGW-IMPL-000-API-GATEWAY`.
@@ -122,6 +130,7 @@ src/custos_gateway/
   _version.py      # standalone version string
   app.py           # create_app() factory: lifespan wiring + CORS + all routers
   openapi.py       # OpenAPI 3.1 doc at /openapi.json: schemes + x-custos-* + errors
+  _telemetry.py    # OTel per-request span + request/ratelimit/idempotency metrics
   settings.py      # Settings dataclass + load_settings() over CUSTOS_GATEWAY_*
   health.py        # /healthz (liveness) + /readyz (readiness) probes
   errors.py        # locked error taxonomy + RFC 7807 problem+json envelope
@@ -167,6 +176,7 @@ tests/
   test_devicecode.py # device-code auth-bootstrap routes + M1 503 stub + seam
   test_pipeline.py # end-to-end ingress pipeline through the wired create_app
   test_openapi.py # OpenAPI 3.1 doc: schemes + x-custos-* extensions + error schema
+  test_telemetry.py # OTel spans + request/ratelimit/idempotency counters + histograms
 ```
 
 ## Development
