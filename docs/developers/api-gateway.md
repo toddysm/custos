@@ -142,8 +142,11 @@ context.
 ## Idempotency
 
 Write requests (`POST`/`PUT`/`PATCH`/`DELETE`) on routes that require an
-idempotency key carry an `Idempotency-Key` header. The gateway reserves an
-idempotency record keyed by the
+idempotency key SHOULD supply an `Idempotency-Key` header so a retry can replay
+the original response. The header is optional: an absent or blank header yields a
+freshly generated key, so a retry the **gateway itself** performs is still
+deduplicated, but client-driven replay requires the client to resend the same
+key. The gateway reserves an idempotency record keyed by the
 `(workspace, principal, route, idempotency-key)` tuple and fingerprints the
 request (method, route, workspace, body, selected headers) so a key reused with a
 **different** payload is detected.
@@ -165,10 +168,11 @@ Read requests never engage idempotency. The record TTL is governed by
 ## Rate limiting
 
 Write requests are charged against two token buckets — one **per principal** and
-one **per workspace**. When either bucket is exhausted the request is rejected
-with `429 rate-limited`, carrying a `Retry-After` header and the `RateLimit-Limit`
-header. Successful writes also surface the rate-limit headers so clients can
-self-throttle.
+one **per workspace**. Every rate-limited write surfaces the full `RateLimit-*`
+header set — `RateLimit-Limit`, `RateLimit-Remaining`, and `RateLimit-Reset` —
+reflecting the most restrictive bucket, so clients can self-throttle. When either
+bucket is exhausted the request is rejected with `429 rate-limited`, carrying the
+same `RateLimit-*` headers plus a `Retry-After` header.
 
 Reads are not rate-limited. The bucket rates and bursts are configured by the
 `CUSTOS_GATEWAY_RATE_LIMIT_*` variables (defaults: per-principal 20 rps / 40

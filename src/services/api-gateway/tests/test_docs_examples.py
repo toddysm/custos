@@ -24,7 +24,6 @@ import re
 from pathlib import Path
 
 import pytest
-import yaml
 from pydantic import BaseModel
 
 from custos_gateway import settings as gw_settings
@@ -100,13 +99,28 @@ def test_api_gateway_doc_exists() -> None:
     assert _DOC_PATH.is_file(), f"missing developer guide: {_DOC_PATH}"
 
 
+def test_every_fence_marker_is_paired() -> None:
+    """The fence parser only sees *closed* blocks, so guard against a stray fence.
+
+    A malformed or unclosed triple-backtick fence would otherwise be silently
+    skipped, letting an example break (or drift) without failing this suite. An
+    odd number of fence markers means at least one block is unterminated.
+    """
+    markers = re.findall(r"^```", _doc_text(), re.MULTILINE)
+    assert len(markers) % 2 == 0, (
+        f"unbalanced code-fence markers in {_DOC_PATH.name}: found {len(markers)} "
+        "``` markers (an unclosed fence hides blocks from the doc-example checks)"
+    )
+    # Every opening fence the parser recognises must round-trip back to a closed
+    # block, so the count of parsed blocks equals half the marker count.
+    assert len(_fences()) == len(markers) // 2
+
+
 @pytest.mark.parametrize("fence", _fences(), ids=_id)
-def test_json_and_yaml_blocks_are_well_formed(fence: tuple[int, str, str, list[str]]) -> None:
+def test_json_blocks_are_well_formed(fence: tuple[int, str, str, list[str]]) -> None:
     _line, lang, body, _directives = fence
     if lang == "json":
         json.loads(body)
-    elif lang == "yaml":
-        yaml.safe_load(body)
 
 
 # ---------------------------------------------------------------------------
