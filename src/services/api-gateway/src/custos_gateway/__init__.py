@@ -8,10 +8,15 @@ coarse rate limits, normalizes errors into one RFC 7807 envelope, and routes
 each request to the owning downstream component via Dapr service invocation.
 
 Design: ``design/components/api-gateway/design.md``.
+
+The FastAPI application factory :func:`create_app` (AGW-IMPL-002) grows the
+settings, health probes, middleware stack, and downstream route registry across
+the subsequent AGW-IMPL phases.
 """
 
 from __future__ import annotations
 
-__all__ = ["__version__"]
+from custos_gateway._version import __version__
+from custos_gateway.app import create_app
 
-__version__ = "0.1.0"
+__all__ = ["__version__", "create_app"]

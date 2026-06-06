@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 
-from custos_gateway import __version__
+from custos_gateway._version import __version__
 
 
 def create_app() -> FastAPI:
