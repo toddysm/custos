@@ -20,7 +20,7 @@ validation (AGW-IMPL-008) + write-path idempotency (AGW-IMPL-009) + write-path
 rate limiting (AGW-IMPL-010) + request validation (AGW-IMPL-011) + downstream
 router (AGW-IMPL-012) + route registry (AGW-IMPL-013) + webhook pass-through
 (AGW-IMPL-014) + device-code session manager M1 503 stub (AGW-IMPL-015) + full
-application wiring (AGW-IMPL-016)** — the
+application wiring (AGW-IMPL-016) + OpenAPI 3.1 emission (AGW-IMPL-017)** — the
 `custos_gateway`
 package, its `pyproject.toml` (ruff + mypy strict + pytest with a
 `--cov-fail-under=90` floor), the `python -m custos_gateway` entry point, the
@@ -99,13 +99,16 @@ registry route runs the `resolve_workspace` →
 validates body size + content type, charges the rate limiter, reserves/replays/
 completes idempotency, forwards over Dapr, and shapes the reply — every stage
 skipped when it does not apply or its backing resource is unbound),
+the OpenAPI 3.1 document (`openapi.py` AGW-IMPL-017 — `/openapi.json` post-
+processed from FastAPI introspection: the `BearerAuth` + `WebhookNoAuth` security
+schemes referenced by the right routes, the `x-custos-required-permission` /
+`x-custos-idempotent` operation extensions sourced from the route registry on
+every operation, and the shared RFC 7807 `ProblemDetails` error schema as each
+operation's default response),
 and the
 CI gate
 (`.github/workflows/python-services.yml`) are in place. Subsequent tasks layer
-in the remaining cross-cutting
-write-path middleware (Phase C), the downstream router + route registry +
-webhook + device-code surfaces (Phase D), OpenAPI +
-observability (Phase E), and Helm wiring + verification + docs (Phase F).
+in observability (Phase E) and Helm wiring + verification + docs (Phase F).
 
 Tracker: [#732](https://github.com/toddysm/custos/issues/732) —
 `AGW-IMPL-000-API-GATEWAY`.
@@ -118,6 +121,7 @@ src/custos_gateway/
   __main__.py      # `python -m custos_gateway` CLI entry point
   _version.py      # standalone version string
   app.py           # create_app() factory: lifespan wiring + CORS + all routers
+  openapi.py       # OpenAPI 3.1 doc at /openapi.json: schemes + x-custos-* + errors
   settings.py      # Settings dataclass + load_settings() over CUSTOS_GATEWAY_*
   health.py        # /healthz (liveness) + /readyz (readiness) probes
   errors.py        # locked error taxonomy + RFC 7807 problem+json envelope
@@ -162,6 +166,7 @@ tests/
   test_webhook.py # anonymous webhook pass-through forwarding + body cap
   test_devicecode.py # device-code auth-bootstrap routes + M1 503 stub + seam
   test_pipeline.py # end-to-end ingress pipeline through the wired create_app
+  test_openapi.py # OpenAPI 3.1 doc: schemes + x-custos-* extensions + error schema
 ```
 
 ## Development
