@@ -57,6 +57,15 @@ def _disabled_settings() -> Settings:
     return settings
 
 
+def _enabled_settings() -> Settings:
+    """Settings with an OIDC issuer configured (device-code flow enabled)."""
+    env = minimal_gateway_env()
+    env["CUSTOS_GATEWAY_OIDC_DEFAULT_ISSUER"] = "github"
+    settings = load_settings(env)
+    assert settings.device_code_enabled
+    return settings
+
+
 def _app() -> FastAPI:
     app = FastAPI()
     register_exception_handlers(app)
@@ -80,6 +89,28 @@ def test_handlers_return_503_while_oidc_disabled(method: str, path: str) -> None
     body = response.json()
     assert body["code"] == "downstream-unavailable"
     assert "device-code" in body["detail"]
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("post", "/v1/auth/login/device"),
+        ("post", "/v1/auth/login/device/dev-123/poll"),
+        ("get", "/v1/auth/login/device/USER-CODE"),
+    ],
+)
+def test_handlers_return_503_when_enabled_but_store_unbound(method: str, path: str) -> None:
+    # Defence in depth: even if the issuer flag is flipped on before the store is
+    # wired (M3), the handlers must still surface 503 rather than a 500.
+    app = FastAPI()
+    register_exception_handlers(app)
+    app.include_router(build_device_code_router())
+    app.state.settings = _enabled_settings()
+    client = TestClient(app)
+    response = client.request(method, path)
+    assert response.status_code == 503
+    body = response.json()
+    assert body["code"] == "downstream-unavailable"
 
 
 # --- persistence seam --------------------------------------------------------

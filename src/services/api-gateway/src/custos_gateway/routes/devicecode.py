@@ -75,7 +75,7 @@ class DeviceCodeStore(Protocol):
     """The narrow SPL metadata-store surface the device-code flow depends on.
 
     The full :class:`custos_spl.MetadataStoreProvider` structurally satisfies
-    this protocol; depending on only the four device-code methods keeps the flow
+    this protocol; depending on only the five device-code methods keeps the flow
     decoupled from the rest of the store and trivially fakeable in M3. The seam
     exists in M1 so activation is a configuration + handler-body change rather
     than a routing change.
@@ -133,27 +133,37 @@ def device_code_flow_unavailable() -> GatewayError:
     )
 
 
-def _reject_when_disabled(request: Request) -> None:
-    """Raise ``503`` unless a default OIDC issuer is configured (M3+)."""
+def _require_active_flow(request: Request) -> DeviceCodeStore:
+    """Resolve the device-code backend or fail with ``503``.
+
+    The flow needs *both* a configured OIDC issuer
+    (:attr:`Settings.device_code_enabled`) *and* a bound
+    :class:`DeviceCodeStore`. M1 ships with neither, so every request gets the
+    locked ``503``. Gating on both — rather than the issuer flag alone — means a
+    half-configured deployment (e.g. ``device_code_enabled`` flipped on before
+    the store is wired in M3) still returns ``503`` instead of leaking the
+    not-yet-implemented handler body as a misleading ``500``.
+    """
     if not _device_code_settings(request).device_code_enabled:
         raise device_code_flow_unavailable()
+    return get_device_code_store(request)
 
 
 async def _start_device_code_session(request: Request) -> Response:
     """Start a device-code session (M3); M1 returns ``503`` (OIDC disabled)."""
-    _reject_when_disabled(request)
+    _require_active_flow(request)
     raise NotImplementedError  # pragma: no cover - M3 activation
 
 
 async def _poll_device_code_session(request: Request) -> Response:
     """Poll a device-code session (M3); M1 returns ``503`` (OIDC disabled)."""
-    _reject_when_disabled(request)
+    _require_active_flow(request)
     raise NotImplementedError  # pragma: no cover - M3 activation
 
 
 async def _device_code_landing(request: Request) -> Response:
     """Render the browser landing page (M3); M1 returns ``503`` (OIDC disabled)."""
-    _reject_when_disabled(request)
+    _require_active_flow(request)
     raise NotImplementedError  # pragma: no cover - M3 activation
 
 
