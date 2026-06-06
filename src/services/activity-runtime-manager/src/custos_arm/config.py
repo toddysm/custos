@@ -46,6 +46,11 @@ ENV_SANDBOX_NAMESPACE: Final[str] = "ARM_SANDBOX_NAMESPACE"
 #: Required. Connector sidecar image injected into every activity Pod.
 ENV_SIDECAR_IMAGE: Final[str] = "ARM_SIDECAR_IMAGE"
 
+#: Optional. Helper image for the io-bridge init container (input injector) and
+#: native sidecar (output collector). Must ship ``sh`` + ``tar``; pin by digest
+#: in production. Defaults to :data:`DEFAULT_IO_BRIDGE_IMAGE`.
+ENV_IO_BRIDGE_IMAGE: Final[str] = "ARM_IO_BRIDGE_IMAGE"
+
 #: Optional. Cluster-default isolation tier when a manifest omits
 #: ``isolation.minTier``.
 ENV_DEFAULT_TIER: Final[str] = "ARM_DEFAULT_TIER"
@@ -96,7 +101,6 @@ ENV_PORT: Final[str] = "PORT"
 # ---------------------------------------------------------------------------
 # Defaults (design § Configuration)
 # ---------------------------------------------------------------------------
-
 DEFAULT_TIER: Final[str] = "process"
 DEFAULT_CPU_REQUEST: Final[str] = "250m"
 DEFAULT_CPU_LIMIT: Final[str] = "1"
@@ -109,6 +113,13 @@ DEFAULT_ARTIFACT_MAX_BYTES: Final[int] = 5_368_709_120
 DEFAULT_IDEMPOTENCY_TTL: Final[str] = "PT24H"
 DEFAULT_HOST: Final[str] = "0.0.0.0"
 DEFAULT_PORT: Final[int] = 8080
+
+#: Default io-bridge helper image: upstream BusyBox (ships ``sh`` + ``tar``),
+#: pinned by its multi-arch index digest so the default is reproducible.
+#: Operators override ``ARM_IO_BRIDGE_IMAGE`` to point at an internal mirror.
+DEFAULT_IO_BRIDGE_IMAGE: Final[str] = (
+    "busybox:1.37.0@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+)
 
 #: Recognised isolation tiers (design § Sandbox and Isolation Model). The
 #: tier→``RuntimeClass`` mapping is exposed as
@@ -179,6 +190,7 @@ class Settings:
     authz_endpoint: str  # empty string means "dev shim active"
     sandbox_namespace: str
     sidecar_image: str
+    io_bridge_image: str
     default_tier: str
     runtime_class_process: str
     runtime_class_vm: str
@@ -294,6 +306,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         authz_endpoint=src.get(ENV_AUTHZ_ENDPOINT, "").strip(),
         sandbox_namespace=_require(ENV_SANDBOX_NAMESPACE, src),
         sidecar_image=_require(ENV_SIDECAR_IMAGE, src),
+        io_bridge_image=_opt_str(ENV_IO_BRIDGE_IMAGE, src, DEFAULT_IO_BRIDGE_IMAGE),
         default_tier=default_tier,
         runtime_class_process=_opt_str(ENV_RUNTIME_CLASS_PROCESS, src, ""),
         runtime_class_vm=_opt_str(ENV_RUNTIME_CLASS_VM, src, ""),
@@ -326,6 +339,7 @@ __all__ = [
     "DEFAULT_EPHEMERAL_STORAGE_LIMIT",
     "DEFAULT_HOST",
     "DEFAULT_IDEMPOTENCY_TTL",
+    "DEFAULT_IO_BRIDGE_IMAGE",
     "DEFAULT_MAX_TIMEOUT",
     "DEFAULT_MEMORY_LIMIT",
     "DEFAULT_MEMORY_REQUEST",
@@ -338,6 +352,7 @@ __all__ = [
     "ENV_CONNECTOR_ENDPOINT",
     "ENV_ENVIRONMENT",
     "ENV_IDEMPOTENCY_TTL",
+    "ENV_IO_BRIDGE_IMAGE",
     "ENV_MAX_TIMEOUT",
     "ENV_METADATA_STORE",
     "ENV_SANDBOX_NAMESPACE",

@@ -82,6 +82,7 @@ def _plan() -> SandboxPlan:
             TmpfsMount(mount_path="/custos/out"),
         ),
         sidecar=SidecarSpec(image="ghcr.io/custos/sidecar:1", endpoint="connector:9090"),
+        io_bridge_image="ghcr.io/custos/io-bridge:1",
         deadline=datetime(2026, 1, 1, tzinfo=UTC),
     )
 

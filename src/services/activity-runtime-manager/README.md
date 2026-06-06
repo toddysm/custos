@@ -87,6 +87,7 @@ are parsed and validated to positive `timedelta` values.
 | `ARM_AUTHZ_ENDPOINT` | prod | (empty) | Empty enables the dev-shim that trusts `x-custos-callctx`, warns per request, and refuses to start when `ENVIRONMENT=production`. |
 | `ARM_SANDBOX_NAMESPACE` | yes | — | Kubernetes namespace for activity `Job`s. |
 | `ARM_SIDECAR_IMAGE` | yes | — | Connector sidecar image injected into every activity Pod. |
+| `ARM_IO_BRIDGE_IMAGE` | no | `busybox:1.37.0@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028` | Image for the io-bridge input-injector init container and output-collector native sidecar; override to point at an internal mirror. |
 | `ARM_DEFAULT_TIER` | no | `process` | Cluster-default isolation tier (`process`/`vm`/`microvm`). |
 | `ARM_RUNTIME_CLASS_PROCESS` | no | (empty) | `RuntimeClass` for the `process` tier. |
 | `ARM_RUNTIME_CLASS_VM` | no | (empty) | `RuntimeClass` for the `vm` tier (empty = unavailable). |
@@ -101,6 +102,12 @@ are parsed and validated to positive `timedelta` values.
 | `ENVIRONMENT` | no | `development` | Dev-shim refuses to start when `production`. |
 | `HOST` | no | `0.0.0.0` | uvicorn bind host. |
 | `PORT` | no | `8080` | uvicorn bind port. |
+
+> **Cluster requirement:** the io-bridge output collector uses the Kubernetes
+> **native sidecar** pattern (an `initContainers` entry with
+> `restartPolicy: Always`), which requires **Kubernetes >= 1.28**. On older
+> clusters the activity Pod will be rejected by the API server (or stick in
+> `Init`), so deploy ARM only against a 1.28+ control plane.
 
 ## Development
 

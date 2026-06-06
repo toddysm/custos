@@ -1,6 +1,6 @@
 # TODOs: Workflow Service
 
-Last Updated: 2026-06-04 (Durable Wiring sub-module planned + filed under tracker [#623](https://github.com/toddysm/custos/issues/623); WF-IMPL-113..119 filed — real Catalog client + durable `MetadataStoreProvider` Run store + idempotency ledger)
+Last Updated: 2026-06-06 (Durable Wiring sub-module complete — tracker [#623](https://github.com/toddysm/custos/issues/623) closed, WF-IMPL-113..119 merged via PRs #624–#630; real Catalog client + durable `MetadataStoreProvider` Run store + idempotency ledger. All nine workflow-service sub-modules are now implemented and merged.)
 
 ## Open
 
@@ -15,11 +15,11 @@ Sub-modules of the workflow-service host whose design is already locked in [`des
 - [x] **API Adapter + Validator** — _complete_ as the fifth sub-module under tracker [#459](https://github.com/toddysm/custos/issues/459) (closed 2026-06-04); tasks WF-IMPL-061..072 merged across PRs #463–#480 and #482. See the dedicated section below + [`implementation-plan-api-adapter-validator.md`](implementation-plan-api-adapter-validator.md).
 - [~] **Real ARM Client + Connector Client adapters** — _in progress_ as the sixth sub-module under tracker [#495](https://github.com/toddysm/custos/issues/495); tasks WF-IMPL-073..083 filed. See the dedicated section below + [`implementation-plan.md`](implementation-plan.md). Production `ActivityRuntimeClient` / `ConnectorClient` Dapr Service Invocation bridges behind the Protocols that ship with the Step Coordinator (WF-IMPL-049 / WF-IMPL-050). Design refs: § Internal RPC (outbound).
 - [ ] **Full Observability Client integration** — Audit-event sink wiring + cross-component event taxonomy unification (TS-TODO-001 / ARM TODO-009 under INCON-013) + log-stream delegation for `GET …/steps/{stepId}/logs`. Design refs: § Observability Client. `workflow.*` / `step.*` event publication already lands via the existing `LifecycleEventPublisher`.
-- [~] **Durable Wiring (real Catalog client + durable `MetadataStoreProvider`)** — _filed_ as the ninth sub-module under tracker [#623](https://github.com/toddysm/custos/issues/623); tasks WF-IMPL-113..119 filed. See the dedicated section below + [`implementation-plan-durable-wiring.md`](implementation-plan-durable-wiring.md). Replaces the deployed-build stubs in `providers.py` (the raising `_NotConfiguredCatalogClient` + the in-memory Run store / idempotency ledger) with production adapters: a `DaprCatalogClient` for `GetWorkflowVersion`, a lifespan-owned `custos_pg` `MetadataStoreProvider` behind a new `WF_METADATA_STORE` knob, a durable Run store, and a durable `IdempotencyLedger`. Subsumes the former standalone *Durable `IdempotencyLedger`* item below (now WF-IMPL-117). Design refs: § Configuration, § Data Models, § Dependencies, § Failure Modes.
+- [x] **Durable Wiring (real Catalog client + durable `MetadataStoreProvider`)** — _complete_ as the ninth sub-module under tracker [#623](https://github.com/toddysm/custos/issues/623) (closed); tasks WF-IMPL-113..119 merged (PRs #624–#630). See the dedicated section below + [`implementation-plan-durable-wiring.md`](implementation-plan-durable-wiring.md). Replaces the deployed-build stubs in `providers.py` (the raising `_NotConfiguredCatalogClient` + the in-memory Run store / idempotency ledger) with production adapters: a `DaprCatalogClient` for `GetWorkflowVersion`, a lifespan-owned `custos_pg` `MetadataStoreProvider` behind a new `WF_METADATA_STORE` knob, a durable Run store, and a durable `IdempotencyLedger`. Subsumes the former standalone *Durable `IdempotencyLedger`* item below (now WF-IMPL-117). Design refs: § Configuration, § Data Models, § Dependencies, § Failure Modes.
 
 ## Implementation — Resume Subscription Manager
 
-Eighth sub-module: **Resume Subscription Manager**, packaged inside the service host `src/services/workflow-service/` under a new `custos_workflow.steps.resume` package plus a `TriggerServiceClient` in `custos_workflow.clients.trigger`. Implements the `waitFor:` step kind (REQ-081): registers a one-shot resume subscription with the Trigger Service, persists a `ResumeSubscriptionMirror` (via `MetadataStoreProvider`) before the TS call, suspends the run on `wait_for_external_event`, idempotently re-registers open mirrors on Dapr replay through the WF-IMPL-042 `ReplayReconciler` hook, and cancels + deletes mirrors on terminal. Replaces the `step.kind_not_implemented` stub for `waitFor:`. Ships behind a Protocol + fake because the Trigger Service (COMP-004) is not yet implemented. Plan: [`implementation-plan-resume-subscription-manager.md`](implementation-plan-resume-subscription-manager.md).
+Eighth sub-module: **Resume Subscription Manager**, packaged inside the service host `src/services/workflow-service/` under a new `custos_workflow.steps.resume` package plus a `TriggerServiceClient` in `custos_workflow.clients.trigger`. Implements the `waitFor:` step kind (REQ-081): registers a one-shot resume subscription with the Trigger Service, persists a `ResumeSubscriptionMirror` (via `MetadataStoreProvider`) before the TS call, suspends the run on `wait_for_external_event`, idempotently re-registers open mirrors on Dapr replay through the WF-IMPL-042 `ReplayReconciler` hook, and cancels + deletes mirrors on terminal. Replaces the `step.kind_not_implemented` stub for `waitFor:`. Ships behind a Protocol + fake; the production `DaprTriggerServiceClient` is wired now that the Trigger Service (COMP-004) is implemented. Plan: [`implementation-plan-resume-subscription-manager.md`](implementation-plan-resume-subscription-manager.md).
 
 ### Phase A — Foundations (model, errors, client contract)
 
@@ -58,27 +58,27 @@ Ninth sub-module: **Durable Wiring**, packaged inside the service host `src/serv
 
 ### Phase A — Catalog client
 
-- [F] WF-IMPL-113 (#616): `DaprCatalogClient` — `GetWorkflowVersion` over Dapr Service Invocation.
-- [F] WF-IMPL-114 (#617): Wire `DaprCatalogClient` into `providers.py` (depends on #616).
+- [x] WF-IMPL-113 (#616): `DaprCatalogClient` — `GetWorkflowVersion` over Dapr Service Invocation. _merged_.
+- [x] WF-IMPL-114 (#617): Wire `DaprCatalogClient` into `providers.py` (depends on #616). _merged_.
 
 ### Phase B — Durable metadata provider foundation
 
-- [F] WF-IMPL-115 (#618): `WF_METADATA_STORE` config + lifespan-owned `custos_pg` provider.
+- [x] WF-IMPL-115 (#618): `WF_METADATA_STORE` config + lifespan-owned `custos_pg` provider. _merged_.
 
 ### Phase C — Durable Run store
 
-- [F] WF-IMPL-116 (#619): Back the Run store with the `custos_pg` provider (depends on #618).
+- [x] WF-IMPL-116 (#619): Back the Run store with the `custos_pg` provider (depends on #618). _merged_.
 
 ### Phase D — Durable idempotency ledger
 
-- [F] WF-IMPL-117 (#620): `MetadataStoreProvider`-backed `IdempotencyLedger` adapter (depends on #618).
+- [x] WF-IMPL-117 (#620): `MetadataStoreProvider`-backed `IdempotencyLedger` adapter (depends on #618). _merged_.
 
 ### Phase E — Verification & documentation
 
-- [F] WF-IMPL-118 (#621): Postgres-backed `StartRun` integration suite (depends on #617, #619, #620).
-- [F] WF-IMPL-119 (#622): Developer documentation — durable wiring + Catalog config (depends on #621).
+- [x] WF-IMPL-118 (#621): Postgres-backed `StartRun` integration suite (depends on #617, #619, #620). _merged_.
+- [x] WF-IMPL-119 (#622): Developer documentation — durable wiring + Catalog config (depends on #621). _merged_.
 
-Tracker: #623 — `WF-IMPL-000-DURABLE-WIRING`.
+Tracker: #623 — `WF-IMPL-000-DURABLE-WIRING` (closed; all tasks merged).
 
 ## Implementation — Sub-Orchestration Manager
 

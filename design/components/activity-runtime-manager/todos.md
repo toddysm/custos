@@ -29,6 +29,21 @@ Tracker: ARM-IMPL-000 (#591). Plan: [implementation-plan.md](implementation-plan
 - [x] ARM-IMPL-021 (#589): Integration suite (kind/k8s)
 - [x] ARM-IMPL-022 (#590): Developer docs + README
 
+## I/O bridge implementation tasks (filed)
+
+Tracker: ARM-IMPL-000-IO-BRIDGE (#762). Plan: [implementation-plan-io-bridge.md](implementation-plan-io-bridge.md). Origin: #613.
+
+- [x] ARM-IMPL-023 (#754): Add io-bridge helper containers to the activity Job
+- [F] ARM-IMPL-024 (#755): Test/dev unpinned-image rendering path
+- [F] ARM-IMPL-025 (#756): Stream inputs into the pod (exec tar -x + sentinel)
+- [F] ARM-IMPL-026 (#757): Stream outputs out of the pod (exec tar -c from sidecar)
+- [F] ARM-IMPL-027 (#758): Richer e2e activity image + CI load
+- [F] ARM-IMPL-028 (#759): Happy-path output round-trip scenario
+- [F] ARM-IMPL-029 (#760): Downstream ArtifactRef materialization scenario
+- [F] ARM-IMPL-030 (#761): Developer docs, README, and design change records
+
+Backlog (not in tracker): ARM I/O bridge vm/microvm (Kata) tier validation (#763).
+
 ## Open
 
 - [ ] TODO-002: Manifest signing (cosign-signed Referrer with Catalog verification) — deferred to M2+

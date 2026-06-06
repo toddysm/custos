@@ -23,6 +23,24 @@ The generated manifest realizes the design § Sandbox and Isolation Model:
 * the connector ``sidecar`` is injected alongside the activity container and
   shares the contract mounts.
 
+Two **io-bridge helper containers** (ARM-IMPL-023) realize the pod-side plumbing
+the driver later streams the contract filesystem over (the design locks the file
+*layout* but is silent on the ARM↔pod *transport*):
+
+* an **input-injector init container** mounts ``/custos/in`` *writable* — the
+  endpoint the lifecycle monitor streams the input tree into. It completes
+  immediately in this milestone; ``ARM-IMPL-025`` turns it into a
+  block-until-ready staging gate once ``start()`` streams ``in/`` and drops a
+  readiness sentinel;
+* an **output-collector native sidecar** (an ``initContainers`` entry with
+  ``restartPolicy: Always``, requiring Kubernetes >= 1.28) mounts ``/custos/out``
+  and idles for the pod lifetime so the monitor can stream the outputs back out
+  after the activity terminates.
+
+Both helpers run with the same hardened :data:`HARDENED_SECURITY_CONTEXT` and use
+only the shared ``emptyDir`` contract volumes — no ``hostPath`` — so the activity
+container's spec is unchanged.
+
 The manifest is a plain ``dict`` (the JSON body the Kubernetes API accepts)
 rather than a typed client object, keeping this layer dependency-free; the
 spec's conformance to the Kubernetes API schema is asserted at unit level by
@@ -43,10 +61,13 @@ from custos_arm.runtime.models import SandboxPlan, SidecarSpec, TmpfsMount
 __all__ = [
     "ACTIVITY_CONTAINER_NAME",
     "CONNECTOR_ENDPOINT_ENV",
+    "INPUT_BRIDGE_CONTAINER_NAME",
     "JOB_NAME_PREFIX",
     "MANAGED_BY",
+    "OUTPUT_BRIDGE_CONTAINER_NAME",
     "SIDECAR_CONTAINER_NAME",
     "DuplicateMountError",
+    "MissingBridgeMountError",
     "build_activity_job",
     "job_name",
 ]
@@ -65,10 +86,28 @@ class DuplicateMountError(ValueError):
         self.volume_name = volume_name
 
 
+class MissingBridgeMountError(ValueError):
+    """An io-bridge helper has no matching contract volume to attach to.
+
+    The Scheduler always includes the ``/custos/in`` and ``/custos/out`` contract
+    mounts; this fail-fast guard surfaces a malformed plan (a bridge helper with
+    no backing ``emptyDir`` volume) as a clear build-time error rather than an
+    API-rejected manifest.
+    """
+
+    def __init__(self, mount_path: str) -> None:
+        super().__init__(f"no contract volume for io-bridge mount path: {mount_path!r}")
+        self.mount_path = mount_path
+
+
 #: The container that runs the activity image.
 ACTIVITY_CONTAINER_NAME: Final[str] = "activity"
 #: The connector sidecar injected alongside the activity.
 SIDECAR_CONTAINER_NAME: Final[str] = "connector-sidecar"
+#: Init container that receives the streamed input tree and gates the activity.
+INPUT_BRIDGE_CONTAINER_NAME: Final[str] = "io-bridge-input"
+#: Native sidecar that holds ``/custos/out`` open for output streaming.
+OUTPUT_BRIDGE_CONTAINER_NAME: Final[str] = "io-bridge-output"
 #: Value of the ``app.kubernetes.io/managed-by`` label on every Job.
 MANAGED_BY: Final[str] = "custos-activity-runtime-manager"
 #: DNS-1123 prefix for generated Job names.
@@ -88,6 +127,29 @@ _MAX_NAME_LEN: Final[int] = 63
 _NAME_HASH_LEN: Final[int] = 8
 _INVALID_NAME_CHARS = re.compile(r"[^a-z0-9]+")
 _INVALID_LABEL_CHARS = re.compile(r"[^A-Za-z0-9_.-]+")
+
+#: Contract paths the io-bridge helper containers attach to.
+_INPUT_MOUNT_PATH: Final[str] = "/custos/in"
+_OUTPUT_MOUNT_PATH: Final[str] = "/custos/out"
+
+#: ``restartPolicy: Always`` on an ``initContainers`` entry marks a native
+#: sidecar (Kubernetes >= 1.28): it starts before the activity container, stays
+#: running for the pod lifetime, and is terminated once the activity exits.
+_NATIVE_SIDECAR_RESTART_POLICY: Final[str] = "Always"
+
+#: The input injector exists to own the *writable* ``/custos/in`` mount the
+#: lifecycle monitor streams the input tree into. In this milestone it completes
+#: immediately (the contract volume is the plumbing the bridge needs);
+#: ``ARM-IMPL-025`` turns it into a block-until-sentinel input-staging gate when
+#: ``start()`` learns to stream ``in/`` in and drop the readiness sentinel.
+_INPUT_BRIDGE_COMMAND: Final[tuple[str, ...]] = ("sh", "-c", "true")
+#: The output collector idles for the pod lifetime so the monitor can stream the
+#: outputs back out after the activity terminates; it exits cleanly on SIGTERM.
+_OUTPUT_BRIDGE_COMMAND: Final[tuple[str, ...]] = (
+    "sh",
+    "-c",
+    'trap "exit 0" TERM; while true; do sleep 3600 & wait $!; done',
+)
 
 
 def job_name(step: StepRef) -> str:
@@ -136,6 +198,10 @@ def build_activity_job(
         "hostNetwork": False,
         "hostPID": False,
         "hostIPC": False,
+        "initContainers": [
+            _output_bridge_container(plan.io_bridge_image, security_context, named_mounts),
+            _input_bridge_container(plan.io_bridge_image, security_context, named_mounts),
+        ],
         "containers": [
             _activity_container(plan.image, plan.resources, security_context, named_mounts),
             _sidecar_container(plan.sidecar, security_context, named_mounts),
@@ -265,6 +331,56 @@ def _sidecar_container(
         "securityContext": _security_context(security_context),
         "env": [{"name": CONNECTOR_ENDPOINT_ENV, "value": sidecar.endpoint}],
         "volumeMounts": _volume_mounts(named_mounts),
+    }
+
+
+def _writable_mount(
+    named_mounts: tuple[tuple[str, TmpfsMount], ...],
+    mount_path: str,
+) -> dict[str, Any]:
+    """Mount the single contract volume at ``mount_path`` *writable*.
+
+    The io-bridge helpers attach to exactly one contract volume each and always
+    need write access (the injector receives the streamed input tree; the
+    collector is the live endpoint the outputs are streamed out of), so the
+    plan's ``read_only`` flag on the activity-side mount is deliberately ignored
+    here.
+    """
+    volume_name = _volume_name(mount_path)
+    for name, _mount in named_mounts:
+        if name == volume_name:
+            return {"name": volume_name, "mountPath": mount_path}
+    raise MissingBridgeMountError(mount_path)
+
+
+def _input_bridge_container(
+    io_bridge_image: str,
+    security_context: SecurityContext,
+    named_mounts: tuple[tuple[str, TmpfsMount], ...],
+) -> dict[str, Any]:
+    return {
+        "name": INPUT_BRIDGE_CONTAINER_NAME,
+        "image": io_bridge_image,
+        "imagePullPolicy": "IfNotPresent",
+        "command": list(_INPUT_BRIDGE_COMMAND),
+        "securityContext": _security_context(security_context),
+        "volumeMounts": [_writable_mount(named_mounts, _INPUT_MOUNT_PATH)],
+    }
+
+
+def _output_bridge_container(
+    io_bridge_image: str,
+    security_context: SecurityContext,
+    named_mounts: tuple[tuple[str, TmpfsMount], ...],
+) -> dict[str, Any]:
+    return {
+        "name": OUTPUT_BRIDGE_CONTAINER_NAME,
+        "image": io_bridge_image,
+        "imagePullPolicy": "IfNotPresent",
+        "restartPolicy": _NATIVE_SIDECAR_RESTART_POLICY,
+        "command": list(_OUTPUT_BRIDGE_COMMAND),
+        "securityContext": _security_context(security_context),
+        "volumeMounts": [_writable_mount(named_mounts, _OUTPUT_MOUNT_PATH)],
     }
 
 

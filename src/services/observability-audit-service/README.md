@@ -17,16 +17,23 @@ Implementation plan: [`design/components/observability-audit-service/implementat
 
 ## Status
 
-**Scaffolding (M1 in progress)** — the `OBS-IMPL-000-OBSERVABILITY-AUDIT-SERVICE`
-milestone ([#692](https://github.com/toddysm/custos/issues/692)) is underway.
-This task (`OBS-IMPL-001`) lands the package skeleton: the
-`custos-observability-audit-service` distribution, the `custos_obs` package +
-entry point, the `/healthz` + `/readyz` probes, the ruff / mypy (strict) /
-pytest (≥90 % coverage) quality-gate toolchain, and the CI job. The runtime
-surfaces — typed settings + error taxonomy, the SPL provider wiring, the audit
-outbox drainer + pipeline + retention worker, the alert-rule DSL + dispatcher,
-the External Exporter Loader, the read-back API surface, and observability —
-land across the subsequent `OBS-IMPL-*` phases.
+**Implemented** — the `OBS-IMPL-000-OBSERVABILITY-AUDIT-SERVICE` milestone
+([#692](https://github.com/toddysm/custos/issues/692)) is complete; all 17 child
+tasks (OBS-IMPL-001 … OBS-IMPL-017) are merged and the tracking issue is closed.
+The service implements the full design: typed settings + conditional-requirement
+validation, the `obs.*` error taxonomy + RFC 7807 envelope + audit events,
+`providers.py` SPL provider wiring, the Audit Outbox Drainer (LISTEN/NOTIFY +
+polling fallback), the Audit Pipeline (idempotent dispatch + per-pipeline
+cursors + lag signal), the retention worker (audit retention + outbox GC), the
+alert-rule DSL loader + matcher, the Alerting Dispatcher (webhook + SMTP sinks +
+dead-letter), the collector-config merge / validation + Exporter ConfigMap
+watcher + Collector reload / rollback (External Exporter Loader), the read-back
+Query API (log SSE tail + paged history, metrics + audit routes) with
+call-context middleware + permission enforcement, and OTel self-instrumentation.
+Backed by a unit + integration suite at the ≥90 % coverage gate (OBS-IMPL-016)
+and developer docs at
+[`docs/developers/observability-api.md`](../../../docs/developers/observability-api.md)
+(OBS-IMPL-017).
 
 Tracking issue: [#692](https://github.com/toddysm/custos/issues/692)
 (`OBS-IMPL-000`).

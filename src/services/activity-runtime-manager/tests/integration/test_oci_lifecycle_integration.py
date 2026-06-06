@@ -97,6 +97,7 @@ def _plan(*, image: str, run_id: str) -> SandboxPlan:
             TmpfsMount(mount_path="/custos/out", size_limit="16Mi"),
         ),
         sidecar=SidecarSpec(image=_E2E_IMAGE, endpoint="http://127.0.0.1:8080"),
+        io_bridge_image=_E2E_IMAGE,
         deadline=datetime.now(UTC) + timedelta(seconds=120),
     )
 

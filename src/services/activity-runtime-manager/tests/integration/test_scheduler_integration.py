@@ -170,6 +170,10 @@ def _settings() -> Settings:
             "ARM_CONNECTOR_ENDPOINT": "http://connector.svc:8080",
             "ARM_SANDBOX_NAMESPACE": _NAMESPACE,
             "ARM_SIDECAR_IMAGE": _E2E_IMAGE,
+            # Reuse the kind-loaded image for the io-bridge helpers so the
+            # init containers never trigger an external pull (the default is a
+            # Docker Hub busybox digest that is not loaded into the cluster).
+            "ARM_IO_BRIDGE_IMAGE": _E2E_IMAGE,
             "ENVIRONMENT": "development",
         }
     )

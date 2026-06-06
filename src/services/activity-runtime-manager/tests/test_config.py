@@ -10,6 +10,7 @@ from custos_arm.config import (
     DEFAULT_ARTIFACT_MAX_BYTES,
     DEFAULT_CPU_LIMIT,
     DEFAULT_CPU_REQUEST,
+    DEFAULT_IO_BRIDGE_IMAGE,
     DEFAULT_OUTPUT_MAX_BYTES,
     DEFAULT_TIER,
     Settings,
@@ -46,6 +47,9 @@ def test_load_settings_applies_documented_defaults() -> None:
     assert settings.host == "0.0.0.0"
     assert settings.port == 8080
     assert settings.environment == "development"
+    assert settings.io_bridge_image == DEFAULT_IO_BRIDGE_IMAGE
+    # The default io-bridge image must be digest-pinned for reproducibility.
+    assert "@sha256:" in settings.io_bridge_image
 
 
 def test_load_settings_reads_required_and_optional_values() -> None:
@@ -63,6 +67,11 @@ def test_load_settings_reads_required_and_optional_values() -> None:
     assert settings.runtime_class_for_tier("vm") == "kata"
     assert settings.output_max_bytes == 2048
     assert settings.port == 9090
+
+
+def test_io_bridge_image_override_is_honored() -> None:
+    settings = load_settings(_env(ARM_IO_BRIDGE_IMAGE="registry.internal/io-bridge@sha256:beef"))
+    assert settings.io_bridge_image == "registry.internal/io-bridge@sha256:beef"
 
 
 @pytest.mark.parametrize(
@@ -188,6 +197,7 @@ def test_settings_can_be_constructed_directly() -> None:
         authz_endpoint="",
         sandbox_namespace="ns",
         sidecar_image="img",
+        io_bridge_image="bridge",
         default_tier="process",
         runtime_class_process="",
         runtime_class_vm="",
