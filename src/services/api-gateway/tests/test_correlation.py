@@ -59,6 +59,15 @@ def test_blank_inbound_header_is_replaced_with_generated_id() -> None:
     assert uuid.UUID(header_id).version == 7
 
 
+def test_non_blank_inbound_header_is_echoed_verbatim() -> None:
+    # A non-blank inbound id is honoured *unchanged* — surrounding whitespace is
+    # not trimmed, per the "honour an inbound id unchanged" contract.
+    inbound = " trace-with-spaces "
+    with TestClient(_app()) as client:
+        response = client.get("/echo", headers={CORRELATION_ID_HEADER: inbound})
+    assert response.json()["correlationId"] == inbound
+
+
 def test_header_present_on_error_responses() -> None:
     with TestClient(_app(), raise_server_exceptions=False) as client:
         response = client.get("/fail", headers={CORRELATION_ID_HEADER: "err-trace-7"})

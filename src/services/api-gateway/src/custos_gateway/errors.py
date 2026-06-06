@@ -1,8 +1,9 @@
 """RFC 7807 ``application/problem+json`` envelope + the locked gateway error taxonomy.
 
-Every non-2xx response the API Gateway emits flows through a single uniform
-Problem Details body so SDK clients never see FastAPI's default error shape. The
-envelope mirrors RFC 7807 § 3.1 with three extensions documented in
+Every *gateway-originated* failure the API Gateway raises (a
+:class:`GatewayError`) flows through a single uniform Problem Details body so SDK
+clients never see FastAPI's default error shape. The envelope mirrors RFC 7807
+§ 3.1 with three extensions documented in
 ``design/components/api-gateway/design.md`` § Error Envelope:
 
 * ``code`` — the structured taxonomy string clients branch on (the ``type`` URI
@@ -237,8 +238,14 @@ def problem_response(
 
 
 async def _gateway_error_handler(request: Request, exc: Exception) -> JSONResponse:
-    """Render a :class:`GatewayError` through the Problem+JSON envelope."""
-    assert isinstance(exc, GatewayError)
+    """Render a :class:`GatewayError` through the Problem+JSON envelope.
+
+    The handler is registered only for :class:`GatewayError`, but the type guard
+    is an explicit runtime check (not an ``assert``, which ``python -O`` strips)
+    so a misrouted exception re-raises rather than rendering a malformed body.
+    """
+    if not isinstance(exc, GatewayError):  # pragma: no cover - defensive guard
+        raise exc
     return problem_response(
         request,
         code=exc.code,
@@ -251,8 +258,18 @@ async def _gateway_error_handler(request: Request, exc: Exception) -> JSONRespon
 def register_exception_handlers(app: FastAPI) -> None:
     """Register the Problem+JSON handler for :class:`GatewayError` on ``app``.
 
-    Every gateway-originated failure is a :class:`GatewayError`, so this single
-    handler renders the locked taxonomy onto the uniform envelope. Success
-    responses and the health probes are returned raw.
+    Every *gateway-originated* failure is raised as a :class:`GatewayError`, so
+    this single handler renders the locked taxonomy onto the uniform envelope.
+    Two response classes are deliberately outside this contract:
+
+    * the ``/healthz`` + ``/readyz`` probes, which return their fixed k8s probe
+      shape (``include_in_schema=False``) rather than a domain Problem; and
+    * generic framework errors (Starlette ``HTTPException``, FastAPI
+      ``RequestValidationError``) for routes that do not yet exist at this
+      phase — their normalization into the envelope is wired with the full
+      ``create_app`` route surface (AGW-IMPL-016), since the locked taxonomy has
+      no generic code to map them onto here.
+
+    Success responses are returned raw.
     """
     app.add_exception_handler(GatewayError, _gateway_error_handler)

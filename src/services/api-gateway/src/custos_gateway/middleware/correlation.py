@@ -58,15 +58,16 @@ def new_correlation_id() -> str:
 def _inbound_correlation_id(request: Request) -> str | None:
     """Return a usable inbound correlation id, or ``None`` to mint a fresh one.
 
-    A present-but-blank header is treated as absent. Starlette has already
-    rejected control characters at the HTTP parser, so a non-empty value is safe
-    to echo back verbatim.
+    A present-but-whitespace-only header is treated as absent; a non-blank value
+    is returned *verbatim* (never trimmed) so the "honour an inbound id
+    unchanged" contract holds even for ids that carry surrounding whitespace.
+    Starlette has already rejected control characters at the HTTP parser, so a
+    non-empty value is safe to echo back as-is.
     """
     raw = request.headers.get(CORRELATION_ID_HEADER)
-    if raw is None:
+    if raw is None or not raw.strip():
         return None
-    trimmed = raw.strip()
-    return trimmed or None
+    return raw
 
 
 class CorrelationIdMiddleware:
