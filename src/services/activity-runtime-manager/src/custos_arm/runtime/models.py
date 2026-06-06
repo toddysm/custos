@@ -97,10 +97,11 @@ class SidecarSpec:
 class SandboxPlan:
     """The fully-resolved request to stand up a single activity sandbox.
 
-    Everything a driver needs is pre-computed by the Scheduler: the pinned
-    activity ``image`` (with digest), the effective resource envelope plus
-    isolation tier / ``RuntimeClass`` (:class:`EffectiveResources`), the
-    ``tmpfs`` mounts realizing the contract filesystem, the connector
+    Everything a driver needs is pre-computed by the Scheduler: the activity
+    ``image`` (normally pinned with a digest, but its digest may be absent when
+    ``allow_unpinned_images`` is set — see that field), the effective resource
+    envelope plus isolation tier / ``RuntimeClass`` (:class:`EffectiveResources`),
+    the ``tmpfs`` mounts realizing the contract filesystem, the connector
     ``sidecar``, the ``io_bridge_image`` backing the input-injector init
     container and the output-collector native sidecar, the target
     ``namespace``, and the attempt ``deadline``.
