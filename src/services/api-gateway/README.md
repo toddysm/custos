@@ -119,10 +119,12 @@ the in-process conformance suite (AGW-IMPL-020 —
 `tests/integration/test_conformance.py` exercises authn/authz, workspace,
 idempotency (all four reserve outcomes), rate-limit, validation, routing,
 webhook, and the device-code 503 against a stub downstream + fake Auth +
-in-memory SPL store), and the
+in-memory SPL store), the developer documentation (AGW-IMPL-021 —
+[`docs/developers/api-gateway.md`](../../../docs/developers/api-gateway.md),
+pinned to the running code by `tests/test_docs_examples.py`), and the
 CI gate
-(`.github/workflows/python-services.yml`) are in place. The remaining task layers
-in developer docs (Phase F).
+(`.github/workflows/python-services.yml`) are in place. The component
+implementation is complete.
 
 Tracker: [#732](https://github.com/toddysm/custos/issues/732) —
 `AGW-IMPL-000-API-GATEWAY`.
@@ -183,6 +185,7 @@ tests/
   test_pipeline.py # end-to-end ingress pipeline through the wired create_app
   test_openapi.py # OpenAPI 3.1 doc: schemes + x-custos-* extensions + error schema
   test_telemetry.py # OTel spans + request/ratelimit/idempotency counters + histograms
+  test_docs_examples.py # pins docs/developers/api-gateway.md to the running code
   integration/
     harness.py # in-process conformance harness: stub downstream + fake Auth + SPL store
     test_conformance.py # cross-cutting pipeline conformance across every stage

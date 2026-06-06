@@ -51,7 +51,7 @@ Full M1 gateway implementation, packaged at `src/services/api-gateway/` (Python 
 
 - [x] AGW-IMPL-019 (#729): Helm subchart wiring.
 - [x] AGW-IMPL-020 (#730): Unit + integration + conformance suite.
-- [F] AGW-IMPL-021 (#731): Developer documentation.
+- [x] AGW-IMPL-021 (#731): Developer documentation.
 
 Tracker: #732 — `AGW-IMPL-000-API-GATEWAY`.
 
