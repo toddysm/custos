@@ -17,7 +17,7 @@ Full M1 gateway implementation, packaged at `src/services/api-gateway/` (Python 
 ### Phase A — Scaffold & foundations
 
 - [x] AGW-IMPL-001 (#711): Scaffold custos-gateway package + CI gate.
-- [F] AGW-IMPL-002 (#712): Settings + create_app skeleton + health probes.
+- [x] AGW-IMPL-002 (#712): Settings + create_app skeleton + health probes.
 - [F] AGW-IMPL-003 (#713): Error envelope + taxonomy + correlation-id middleware.
 
 ### Phase B — Auth delegation & call-context minting
