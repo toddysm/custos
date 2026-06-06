@@ -16,7 +16,7 @@ Design: [`design/components/api-gateway/design.md`](../../../design/components/a
 **Phase A scaffold (AGW-IMPL-001, AGW-IMPL-002, AGW-IMPL-003) + Auth
 delegation & enforcement (AGW-IMPL-004, AGW-IMPL-005) + workspace resolution
 (AGW-IMPL-006) + call-context minting (AGW-IMPL-007) + startup permission
-validation (AGW-IMPL-008)** — the `custos_gateway`
+validation (AGW-IMPL-008) + write-path idempotency (AGW-IMPL-009)** — the `custos_gateway`
 package, its `pyproject.toml` (ruff + mypy strict + pytest with a
 `--cov-fail-under=90` floor), the `python -m custos_gateway` entry point, the
 typed `Settings` + `load_settings()` loader over the design Configuration table,
@@ -35,10 +35,15 @@ URL-authoritative `resolve_workspace` dependency (path `{workspaceId}` binds
 request via `callctx.sign`, staged with `x-correlation-id` on the outbound Dapr
 metadata), the startup permission validator (`startup.py` cross-checks every
 route's declared `requiredPermission` against the Auth Service registry inside
-the lifespan and refuses to become ready on any undeclared permission), and the
+the lifespan and refuses to become ready on any undeclared permission), the
+write-path Idempotency Coordinator (`idempotency.py` derives the
+`(workspaceId, principalId, route, idempotencyKey)` key + SHA-256 request hash,
+reserves/completes records on the SPL `MetadataStoreProvider`, and maps the four
+reserve outcomes onto proceed / replay / `409 idempotency-in-flight` +
+`Retry-After` / `409 idempotency-key-reuse`), and the
 CI gate
 (`.github/workflows/python-services.yml`) are in place. Subsequent tasks layer
-in the cross-cutting
+in the remaining cross-cutting
 write-path middleware (Phase C), the downstream router + route registry +
 webhook + device-code surfaces (Phase D), full `create_app` wiring + OpenAPI +
 observability (Phase E), and Helm wiring + verification + docs (Phase F).
@@ -62,6 +67,7 @@ src/custos_gateway/
     auth.py        # require_permission dependency + bypass classifier
     callctx_mint.py # signed x-custos-callctx minting + outbound metadata
     correlation.py # x-correlation-id ingress + UUIDv7 generation
+    idempotency.py # write-path dedup coordinator (reserve/complete + hash)
     workspace.py   # URL-authoritative workspace resolver + mismatch guard
   startup.py       # startup route-permission validation against Auth registry
   clients/
@@ -79,6 +85,7 @@ tests/
   test_workspace_middleware.py # URL-authoritative workspace resolution
   test_callctx_mint_middleware.py # signed call-context minting + metadata
   test_startup.py # startup route-permission validation + lifespan wiring
+  test_idempotency_middleware.py # write-path dedup reserve/complete + hashing
 ```
 
 ## Development
