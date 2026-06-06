@@ -446,6 +446,7 @@ class ActivityScheduler:
                 image=self._settings.sidecar_image,
                 endpoint=self._settings.connector_endpoint,
             ),
+            io_bridge_image=self._settings.io_bridge_image,
             deadline=deadline,
         )
 

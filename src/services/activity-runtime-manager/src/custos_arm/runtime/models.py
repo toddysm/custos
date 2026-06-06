@@ -101,7 +101,9 @@ class SandboxPlan:
     activity ``image`` (with digest), the effective resource envelope plus
     isolation tier / ``RuntimeClass`` (:class:`EffectiveResources`), the
     ``tmpfs`` mounts realizing the contract filesystem, the connector
-    ``sidecar``, the target ``namespace``, and the attempt ``deadline``.
+    ``sidecar``, the ``io_bridge_image`` backing the input-injector init
+    container and the output-collector native sidecar, the target
+    ``namespace``, and the attempt ``deadline``.
     """
 
     step: StepRef
@@ -110,6 +112,7 @@ class SandboxPlan:
     resources: EffectiveResources
     tmpfs_mounts: tuple[TmpfsMount, ...]
     sidecar: SidecarSpec
+    io_bridge_image: str
     deadline: datetime
 
 

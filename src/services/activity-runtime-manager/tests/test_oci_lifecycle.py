@@ -74,6 +74,7 @@ def _plan(*, namespace: str = "custos-sandboxes") -> SandboxPlan:
             TmpfsMount(mount_path="/custos/out"),
         ),
         sidecar=SidecarSpec(image="registry.example/sidecar:1", endpoint="http://c:8080"),
+        io_bridge_image="registry.example/io-bridge:1",
         deadline=_DEADLINE,
     )
 

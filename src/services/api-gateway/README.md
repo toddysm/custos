@@ -13,15 +13,10 @@ Design: [`design/components/api-gateway/design.md`](../../../design/components/a
 
 ## Status
 
-**Phase A scaffold (AGW-IMPL-001, AGW-IMPL-002, AGW-IMPL-003) + Auth
-delegation & enforcement (AGW-IMPL-004, AGW-IMPL-005) + workspace resolution
-(AGW-IMPL-006) + call-context minting (AGW-IMPL-007) + startup permission
-validation (AGW-IMPL-008) + write-path idempotency (AGW-IMPL-009) + write-path
-rate limiting (AGW-IMPL-010) + request validation (AGW-IMPL-011) + downstream
-router (AGW-IMPL-012) + route registry (AGW-IMPL-013) + webhook pass-through
-(AGW-IMPL-014) + device-code session manager M1 503 stub (AGW-IMPL-015) + full
-application wiring (AGW-IMPL-016) + OpenAPI 3.1 emission (AGW-IMPL-017) + OTel
-observability (AGW-IMPL-018)** — the
+**Implemented** — the `AGW-IMPL-000-API-GATEWAY` milestone
+([#732](https://github.com/toddysm/custos/issues/732)) is complete; all 21 child
+tasks (AGW-IMPL-001 … AGW-IMPL-021) are merged and the tracking issue is closed.
+The
 `custos_gateway`
 package, its `pyproject.toml` (ruff + mypy strict + pytest with a
 `--cov-fail-under=90` floor), the `python -m custos_gateway` entry point, the

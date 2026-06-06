@@ -12,15 +12,23 @@ Implementation plan: [`design/components/trigger-service/implementation-plan.md`
 
 ## Status
 
-**Scaffolding (M1 in progress)** — the `TS-IMPL-000-TRIGGER-SERVICE` milestone
-([#652](https://github.com/toddysm/custos/issues/652)) is underway. This task
-(`TS-IMPL-001`) lands the package skeleton: the `custos-trigger-service`
-distribution, the `custos_trigger` package + entry point, the ruff / mypy
-(strict) / pytest (≥90 % coverage) quality-gate toolchain, and the CI job. The
-runtime surfaces — settings + error taxonomy, the canonical event taxonomy, the
-CEL selector evaluator, the normalize → classify → match → dedup → dispatch
-pipeline, the manual / resume-RPC / internal-event receivers, and observability
-— land across the subsequent `TS-IMPL-*` phases.
+**Implemented** — the `TS-IMPL-000-TRIGGER-SERVICE` milestone
+([#652](https://github.com/toddysm/custos/issues/652)) is complete; all 21 child
+tasks (TS-IMPL-001 … TS-IMPL-021) are merged and the tracking issue is closed.
+The service implements the full design: typed settings + the locked `trigger.*`
+error taxonomy, the `custos-cel` event-binding root + canonical event-taxonomy
+registry, the `NormalizedEvent` envelope + subscription/domain models, SPL store
+adapters over `MetadataStoreProvider` + `providers.py` wiring, reserve-before-
+dispatch dedup / idempotency, the Event Normalizer, the CEL selector evaluator,
+the Classifier + Start Matcher + Resume Matcher, the `WorkflowServiceClient`
+Dapr Service-Invocation adapter (`StartRun` / `RaiseExternalEvent`), the
+Dispatcher, the Manual Receiver + REST CRUD (REQ-004), the Register / Cancel
+ResumeSubscription RPCs (REQ-081), the Internal Event Receiver (REQ-080 /
+REQ-081) + Dapr subscription + app wiring, and OTel observability + audit
+events. Backed by a unit + integration suite at the ≥90 % coverage gate
+(TS-IMPL-020) and developer docs at
+[`docs/developers/trigger-api.md`](../../../docs/developers/trigger-api.md)
+(TS-IMPL-021).
 
 Tracking issue: [#652](https://github.com/toddysm/custos/issues/652)
 (`TS-IMPL-000`).

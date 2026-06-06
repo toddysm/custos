@@ -21,11 +21,14 @@ from custos_arm.runtime.models import SandboxPlan, SidecarSpec, TmpfsMount
 from custos_arm.runtime.oci import (
     ACTIVITY_CONTAINER_NAME,
     CONNECTOR_ENDPOINT_ENV,
+    INPUT_BRIDGE_CONTAINER_NAME,
+    OUTPUT_BRIDGE_CONTAINER_NAME,
     SIDECAR_CONTAINER_NAME,
     DuplicateMountError,
     build_activity_job,
     job_name,
 )
+from custos_arm.runtime.oci.job import MissingBridgeMountError
 
 _DIGEST = "sha256:" + "a" * 64
 
@@ -60,6 +63,7 @@ def _plan(
     resources: EffectiveResources | None = None,
     tmpfs_mounts: tuple[TmpfsMount, ...] | None = None,
     sidecar: SidecarSpec | None = None,
+    io_bridge_image: str = "registry.example/io-bridge:1",
 ) -> SandboxPlan:
     return SandboxPlan(
         step=step or _step(),
@@ -73,12 +77,18 @@ def _plan(
         ),
         sidecar=sidecar
         or SidecarSpec(image="registry.example/sidecar:1", endpoint="http://c:8080"),
+        io_bridge_image=io_bridge_image,
         deadline=datetime(2025, 1, 1, 0, 0, 0),
     )
 
 
 def _containers(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
     containers = manifest["spec"]["template"]["spec"]["containers"]
+    return {c["name"]: c for c in containers}
+
+
+def _init_containers(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    containers = manifest["spec"]["template"]["spec"]["initContainers"]
     return {c["name"]: c for c in containers}
 
 
@@ -343,3 +353,102 @@ def test_active_deadline_seconds_from_timeout() -> None:
 def test_active_deadline_seconds_floored_at_one() -> None:
     manifest = build_activity_job(_plan(resources=_resources(timeout=timedelta(0))))
     assert manifest["spec"]["activeDeadlineSeconds"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# io-bridge helper containers (ARM-IMPL-023)
+# --------------------------------------------------------------------------- #
+
+
+def test_both_bridge_helpers_are_init_containers() -> None:
+    manifest = build_activity_job(_plan())
+    init = _init_containers(manifest)
+    assert set(init) == {INPUT_BRIDGE_CONTAINER_NAME, OUTPUT_BRIDGE_CONTAINER_NAME}
+    # The activity + connector sidecar remain the only regular containers.
+    assert set(_containers(manifest)) == {ACTIVITY_CONTAINER_NAME, SIDECAR_CONTAINER_NAME}
+
+
+def test_bridge_helpers_use_the_io_bridge_image() -> None:
+    manifest = build_activity_job(_plan(io_bridge_image="registry.example/io-bridge@sha256:dead"))
+    init = _init_containers(manifest)
+    for name in (INPUT_BRIDGE_CONTAINER_NAME, OUTPUT_BRIDGE_CONTAINER_NAME):
+        assert init[name]["image"] == "registry.example/io-bridge@sha256:dead"
+        assert init[name]["imagePullPolicy"] == "IfNotPresent"
+        assert init[name]["command"][0] == "sh"
+
+
+def test_output_collector_is_a_native_sidecar() -> None:
+    manifest = build_activity_job(_plan())
+    collector = _init_containers(manifest)[OUTPUT_BRIDGE_CONTAINER_NAME]
+    # restartPolicy: Always on an initContainer is the native-sidecar marker.
+    assert collector["restartPolicy"] == "Always"
+
+
+def test_input_injector_is_not_a_native_sidecar() -> None:
+    manifest = build_activity_job(_plan())
+    injector = _init_containers(manifest)[INPUT_BRIDGE_CONTAINER_NAME]
+    # The injector runs to completion to gate the activity; it is not persistent.
+    assert "restartPolicy" not in injector
+
+
+def test_input_injector_mounts_only_in_writable() -> None:
+    manifest = build_activity_job(_plan())
+    injector = _init_containers(manifest)[INPUT_BRIDGE_CONTAINER_NAME]
+    mounts = injector["volumeMounts"]
+    assert [m["mountPath"] for m in mounts] == ["/custos/in"]
+    # Writable so the streamed input tree can land — readOnly must be absent.
+    assert "readOnly" not in mounts[0]
+
+
+def test_output_collector_mounts_only_out_writable() -> None:
+    manifest = build_activity_job(_plan())
+    collector = _init_containers(manifest)[OUTPUT_BRIDGE_CONTAINER_NAME]
+    mounts = collector["volumeMounts"]
+    assert [m["mountPath"] for m in mounts] == ["/custos/out"]
+    assert "readOnly" not in mounts[0]
+
+
+def test_bridge_helpers_share_the_activity_contract_volumes() -> None:
+    manifest = build_activity_job(_plan())
+    volume_names = {v["name"] for v in _pod_spec(manifest)["volumes"]}
+    init = _init_containers(manifest)
+    injector_volume = init[INPUT_BRIDGE_CONTAINER_NAME]["volumeMounts"][0]["name"]
+    collector_volume = init[OUTPUT_BRIDGE_CONTAINER_NAME]["volumeMounts"][0]["name"]
+    # Both attach to the same emptyDir volumes the activity uses — no new volume.
+    assert injector_volume in volume_names
+    assert collector_volume in volume_names
+    assert injector_volume != collector_volume
+
+
+def test_bridge_helpers_run_the_hardened_security_context() -> None:
+    manifest = build_activity_job(_plan())
+    activity_sc = _containers(manifest)[ACTIVITY_CONTAINER_NAME]["securityContext"]
+    for name, container in _init_containers(manifest).items():
+        assert container["securityContext"] == activity_sc, name
+
+
+def test_no_container_uses_host_path() -> None:
+    manifest = build_activity_job(_plan())
+    for volume in _pod_spec(manifest)["volumes"]:
+        assert "hostPath" not in volume
+        assert "emptyDir" in volume
+
+
+def test_activity_container_spec_is_unchanged_by_the_bridge() -> None:
+    # The bridge is additive: the activity container still mounts /custos/in
+    # read-only and is otherwise identical to the pre-bridge spec.
+    manifest = build_activity_job(_plan())
+    activity = _containers(manifest)[ACTIVITY_CONTAINER_NAME]
+    mounts = {m["mountPath"]: m for m in activity["volumeMounts"]}
+    assert mounts["/custos/in"]["readOnly"] is True
+    assert "readOnly" not in mounts["/custos/out"]
+    assert activity["image"] == f"registry.example/act@{_DIGEST}"
+
+
+def test_missing_contract_volume_fails_fast() -> None:
+    # A plan whose contract mounts omit /custos/out leaves the output collector
+    # with no volume to attach to — a malformed plan surfaced at build time.
+    mounts = (TmpfsMount(mount_path="/custos/in", read_only=True),)
+    with pytest.raises(MissingBridgeMountError) as excinfo:
+        build_activity_job(_plan(tmpfs_mounts=mounts))
+    assert excinfo.value.mount_path == "/custos/out"

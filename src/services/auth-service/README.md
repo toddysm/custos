@@ -10,24 +10,27 @@ other component verifies on inbound RPCs.
 
 ## Status
 
-AS-IMPL-001 (#236, Phase A) — scaffold only. The FastAPI app currently exposes
-`/healthz` and `/readyz` returning 200 unconditionally; no managers, no
-authorization, no persistence. Subsequent issues will land:
-
-- AS-IMPL-002 (#237) — Helm subchart.
-- AS-IMPL-003/004 (#238/#239) — SPL `AuthStoreProvider` + Postgres migrations
-  + schema-revision startup gate.
-- AS-IMPL-005..010 (#240–#245) — Tenancy + principal model + permission/role
-  registry + RoleBinding store.
-- AS-IMPL-011/012 (#246/#247) — `authorize()` decision engine + cache.
-- AS-IMPL-013..016 (#248–#251) — Service tokens (REQ-035).
-- AS-IMPL-017..019 (#252–#254) — Internal signed call-context (EdDSA JWT)
-  + JWKS endpoint + rotation + verifier helper library.
-- AS-IMPL-020..023 (#255–#258, **M3**) — OIDC verifier + GitHub preset +
-  Entra preset + provisioning policy.
-- AS-IMPL-024..026 (#259–#261) — Public REST/RPC surface + observability.
-- AS-IMPL-027..029 (#262–#264) — Verification + docs.
-- AS-IMPL-030/031 (#265/#266) — Cross-component follow-ups.
+**Implemented** — the `AS-IMPL-000` milestone
+([#267](https://github.com/toddysm/custos/issues/267)) is complete; all 31 child
+tasks (AS-IMPL-001 … AS-IMPL-031) are merged and the tracking issue is closed.
+The service implements the full design: the SPL `AuthStoreProvider` + Postgres
+migrations + schema-revision startup gate, the tenant / workspace + principal
+(User / ServiceAccount) + OidcIdentity models with management endpoints, the
+`permissions.yaml` loader + built-in v1 roles + RoleBinding store with
+scope-rule enforcement, the `authorize(principal, permission, workspace)`
+decision engine + 60 s decision cache with `custos.auth.binding-changed` pub/sub
+invalidation, service-account token mint / verify / revoke / expiry (REQ-035)
+with authn caching + immediate revocation eviction, the internal signed
+call-context contract (EdDSA JWT signer + Dapr Secrets key resolution + JWKS
+endpoint + 7-day rotation + the `callctx.verify` verifier helper shipped to
+every component), the OIDC verifier + GitHub + Entra ID presets + zero-binding
+provisioning policy, the FastAPI REST surface + Internal RPCs
+(`authn.verifyToken` / `authz.authorize` / `authz.verifyAndAuthorize` /
+`callctx.sign` / `callctx.verify`), and observability + audit emission. Backed
+by a unit + integration suite at the ≥90 % coverage gate (AS-IMPL-027/028) and
+developer docs at
+[`docs/developers/auth-api.md`](../../../docs/developers/auth-api.md)
+(AS-IMPL-029).
 
 Tracking issue: [#267](https://github.com/toddysm/custos/issues/267) (AS-IMPL-000).
 
