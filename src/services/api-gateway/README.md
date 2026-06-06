@@ -19,7 +19,8 @@ delegation & enforcement (AGW-IMPL-004, AGW-IMPL-005) + workspace resolution
 validation (AGW-IMPL-008) + write-path idempotency (AGW-IMPL-009) + write-path
 rate limiting (AGW-IMPL-010) + request validation (AGW-IMPL-011) + downstream
 router (AGW-IMPL-012) + route registry (AGW-IMPL-013) + webhook pass-through
-(AGW-IMPL-014)** — the `custos_gateway`
+(AGW-IMPL-014) + device-code session manager M1 503 stub (AGW-IMPL-015)** — the
+`custos_gateway`
 package, its `pyproject.toml` (ruff + mypy strict + pytest with a
 `--cov-fail-under=90` floor), the `python -m custos_gateway` entry point, the
 typed `Settings` + `load_settings()` loader over the design Configuration table,
@@ -75,7 +76,14 @@ hop-by-hop / framing headers), appending the caller's source IP to
 `X-Forwarded-For`, generating/propagating an `x-correlation-id`, and forwarding
 the untouched body to Trigger Service via the downstream router without minting a
 call context — an unknown `{connectorInstanceId}` surfaces the downstream
-`404 webhook-route-not-found` raw),
+`404 webhook-route-not-found` raw), the Device-Code Session Manager M1 stub
+(`routes/devicecode.py` mounts the three auth-bootstrap routes `POST
+/v1/auth/login/device`, `POST /v1/auth/login/device/{deviceCode}/poll`, and `GET
+/v1/auth/login/device/{userCode}` — anonymous, no `require_permission`, no call
+context, all under the auth-bootstrap bypass prefix — gated on a configured OIDC
+issuer (`Settings.device_code_enabled`); M1 ships OIDC disabled so every handler
+returns `503`, while the `DeviceCodeStore` persistence seam + `app.state` binding
++ `CUSTOS_GATEWAY_DEVICE_CODE_TTL` config are declared for M3 activation),
 and the
 CI gate
 (`.github/workflows/python-services.yml`) are in place. Subsequent tasks layer
@@ -104,6 +112,7 @@ src/custos_gateway/
     _forwarding.py # shared downstream-router lookup + response shaper
     registry.py    # declarative M1 RouteSpec table + registry router factory
     webhook.py     # anonymous POST /v1/webhooks/{connectorInstanceId} forward
+    devicecode.py  # auth-bootstrap /v1/auth/login/device* routes (M1 503 stub)
   middleware/
     __init__.py    # cross-cutting middleware package
     auth.py        # require_permission dependency + bypass classifier
@@ -136,6 +145,7 @@ tests/
   test_route_registry.py # M1 route registry contract + forwarding seam
   test_forwarding.py # shared downstream-router lookup + response shaper
   test_webhook.py # anonymous webhook pass-through forwarding + body cap
+  test_devicecode.py # device-code auth-bootstrap routes + M1 503 stub + seam
 ```
 
 ## Development
