@@ -38,7 +38,7 @@ Tracker: ARM-IMPL-000-IO-BRIDGE (#762). Plan: [implementation-plan-io-bridge.md]
 - [x] ARM-IMPL-025 (#756): Stream inputs into the pod (exec tar -x + sentinel)
 - [x] ARM-IMPL-026 (#757): Stream outputs out of the pod (exec tar -c from sidecar)
 - [x] ARM-IMPL-027 (#758): Richer e2e activity image + CI load
-- [F] ARM-IMPL-028 (#759): Happy-path output round-trip scenario
+- [x] ARM-IMPL-028 (#759): Happy-path output round-trip scenario
 - [F] ARM-IMPL-029 (#760): Downstream ArtifactRef materialization scenario
 - [F] ARM-IMPL-030 (#761): Developer docs, README, and design change records
 

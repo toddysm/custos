@@ -430,9 +430,18 @@ class ActivityScheduler:
         effective: EffectiveResources,
         deadline: datetime,
     ) -> SandboxPlan:
-        image = ImageRef.model_validate(
-            {"ref": resolved.runtime.image, "digest": resolved.runtime.digest}
-        )
+        # Production renders every activity as ``image@digest`` so the running
+        # bits are content-addressed. When the operator opts into unpinned
+        # images (``ARM_ALLOW_UNPINNED_IMAGES``, test/dev only) the activity may
+        # run from a locally loaded image (e.g. a ``kind load``ed tag) that no
+        # registry digest can satisfy, so we render the tag only. Provenance is
+        # unaffected — the resolved digest is still recorded from the manifest.
+        if self._settings.allow_unpinned_images:
+            image = ImageRef.model_validate({"ref": resolved.runtime.image})
+        else:
+            image = ImageRef.model_validate(
+                {"ref": resolved.runtime.image, "digest": resolved.runtime.digest}
+            )
         return SandboxPlan(
             step=request.step,
             namespace=self._settings.sandbox_namespace,

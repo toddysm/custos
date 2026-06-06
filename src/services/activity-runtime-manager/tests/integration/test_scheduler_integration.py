@@ -21,15 +21,18 @@ the current driver supports against a registry-less ``kind`` cluster:
 * idempotent replay — a second ``schedule`` for the same key returns the cached
   envelope and stands up no second sandbox;
 * deadline/timeout — the driver self-cancels the in-flight attempt and the
-  Scheduler classifies it ``cancelled`` / ``activity.timeout``.
+  Scheduler classifies it ``cancelled`` / ``activity.timeout``;
+* happy-path output round-trip — a contract-aware activity writes
+  ``/custos/out/outputs.json``, the I/O bridge streams it back, and the
+  Scheduler returns a ``success`` envelope carrying the activity's outputs. The
+  locally ``kind load``ed image is rendered tag-only via the test/dev
+  ``ARM_ALLOW_UNPINNED_IMAGES`` escape hatch (a registry-less image cannot
+  satisfy a digest pin).
 
-A genuine output round-trip (happy-path outputs and downstream ``ArtifactRef``
-materialization) needs two pieces of plumbing that do not exist yet: the
-ARM↔pod I/O bridge (the pod writes ``/custos/out`` into a per-pod ``emptyDir``
-that ARM's host-local staging tree never sees) and a way to pin a locally
-``kind load``ed image by digest (the Scheduler always digest-pins, which a
-registry-less image cannot satisfy). Those are tracked as a follow-up and are
-intentionally out of scope here.
+Downstream ``ArtifactRef`` materialization (the producer writes
+``/custos/out/artifacts/<name>``, ARM uploads it, and a consumer reads the
+rewritten ref) is the remaining follow-up and is intentionally out of scope
+here.
 """
 
 from __future__ import annotations
@@ -63,6 +66,7 @@ pytestmark = pytest.mark.integration
 
 _NAMESPACE = "custos-arm-e2e"
 _E2E_IMAGE = os.environ.get("CUSTOS_ARM_E2E_IMAGE", "custos-arm-e2e:test")
+_CONTRACT_IMAGE = os.environ.get("CUSTOS_ARM_E2E_CONTRACT_IMAGE", "custos-arm-e2e-contract:test")
 _INVALID_IMAGE = "registry.invalid.example/nope:absent"
 _DIGEST = "sha256:" + "ab" * 32
 
@@ -175,6 +179,9 @@ def _settings() -> Settings:
             # Docker Hub busybox digest that is not loaded into the cluster).
             "ARM_IO_BRIDGE_IMAGE": _E2E_IMAGE,
             "ENVIRONMENT": "development",
+            # A locally ``kind load``ed image has no registry digest to pin
+            # against, so render the activity tag-only (test/dev only).
+            "ARM_ALLOW_UNPINNED_IMAGES": "true",
         }
     )
 
@@ -319,3 +326,27 @@ async def test_deadline_exceeded_yields_timeout_cancelled(
     )
     assert record is not None
     assert record.state is ExecutionState.CANCELLED
+
+
+async def test_happy_path_output_round_trip(_apis: tuple[object, object], tmp_path: Path) -> None:
+    driver = _driver(_apis, tmp_path)
+    resolved = _resolved(image=_CONTRACT_IMAGE)
+    repo = ExecutionRepository(_FakeMetadataStore(), idempotency_ttl=timedelta(hours=24))  # type: ignore[arg-type]
+    scheduler = _scheduler(driver, resolved, repo=repo)
+    # The contract entrypoint reads ``name`` from ``/custos/in/inputs.json`` and
+    # echoes ``hello, <name>`` back as the ``greeting`` output.
+    request = _request(inputs={"name": "custos"})
+
+    result = await scheduler.schedule(request)
+
+    assert result.class_ is ResultClass.SUCCESS
+    assert result.error is None
+    assert result.outputs == {"greeting": "hello, custos"}
+
+    record = await repo.get(
+        request.workspace_id, request.step.run_id, request.step.step_id, request.step.attempt
+    )
+    assert record is not None
+    assert record.state is ExecutionState.SUCCEEDED
+    assert record.resolved_digest == _DIGEST  # provenance is still recorded
+    assert driver.prepared == 1

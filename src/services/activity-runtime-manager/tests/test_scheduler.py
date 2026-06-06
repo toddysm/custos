@@ -114,9 +114,11 @@ class _FakeDriver:
         self.cleaned = 0
         self.cancellations: list[CancelReason] = []
         self.handle: SandboxHandle | None = None
+        self.last_plan: SandboxPlan | None = None
 
     def prepare(self, plan: SandboxPlan) -> SandboxHandle:
         self.prepared += 1
+        self.last_plan = plan
         in_root = self._root / "in"
         out_root = self._root / "out"
         in_root.mkdir(parents=True, exist_ok=True)
@@ -240,8 +242,9 @@ def _scheduler(
     *,
     resolver: _FakeResolver | None = None,
     repo: ExecutionRepository | None = None,
+    settings: Settings | None = None,
 ) -> ActivityScheduler:
-    settings = _settings()
+    settings = settings or _settings()
     return ActivityScheduler(
         resolver=resolver or _FakeResolver(_resolved()),
         limiter=ResourceLimiter(settings),
@@ -295,6 +298,28 @@ async def test_happy_path_drives_all_submodules_and_persists(tmp_path: Path) -> 
     assert written["inputs"] == {"message": "hi"}
     assert (driver.handle.input_root / "ctx.json").is_file()
     assert (driver.handle.input_root / "sidecar-token").is_file()
+
+
+async def test_plan_digest_pins_the_image_by_default(tmp_path: Path) -> None:
+    driver = _FakeDriver(tmp_path, outputs=_success_outputs())
+    scheduler = _scheduler(driver)
+
+    await scheduler.schedule(_request())
+
+    assert driver.last_plan is not None
+    assert driver.last_plan.image.ref == "ghcr.io/acme/echo:1.0.0"
+    assert driver.last_plan.image.digest == _DIGEST
+
+
+async def test_plan_renders_tag_only_when_unpinned_images_allowed(tmp_path: Path) -> None:
+    driver = _FakeDriver(tmp_path, outputs=_success_outputs())
+    scheduler = _scheduler(driver, settings=_settings(ARM_ALLOW_UNPINNED_IMAGES="true"))
+
+    await scheduler.schedule(_request())
+
+    assert driver.last_plan is not None
+    assert driver.last_plan.image.ref == "ghcr.io/acme/echo:1.0.0"
+    assert driver.last_plan.image.digest is None
 
 
 async def test_ctx_carries_connector_handles(tmp_path: Path) -> None:
