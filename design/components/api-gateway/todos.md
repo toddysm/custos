@@ -45,7 +45,7 @@ Full M1 gateway implementation, packaged at `src/services/api-gateway/` (Python 
 
 - [x] AGW-IMPL-016 (#726): Full create_app wiring.
 - [x] AGW-IMPL-017 (#727): OpenAPI 3.1 emission.
-- [F] AGW-IMPL-018 (#728): OTel observability.
+- [x] AGW-IMPL-018 (#728): OTel observability.
 
 ### Phase F — Verification & docs
 
