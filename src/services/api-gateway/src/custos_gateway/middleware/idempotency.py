@@ -54,6 +54,7 @@ __all__ = [
     "DEFAULT_RETRY_AFTER_SECONDS",
     "HASHED_REQUEST_HEADERS",
     "IDEMPOTENCY_KEY_HEADER",
+    "METADATA_STORE_STATE_ATTR",
     "RETRY_AFTER_HEADER",
     "WRITE_METHODS",
     "IdempotencyCoordinator",
@@ -66,6 +67,12 @@ __all__ = [
     "is_idempotent_method",
     "resolve_idempotency_key",
 ]
+
+#: ``app.state`` attribute holding the lifespan-owned SPL metadata-store provider
+#: the idempotency coordinator reserves against. Bound by
+#: :func:`custos_gateway.app.create_app` (AGW-IMPL-016); ``None`` until the
+#: write-path persistence is configured, in which case the coordinator is skipped.
+METADATA_STORE_STATE_ATTR: Final[str] = "metadata_store"
 
 #: Request header carrying the client-supplied idempotency key (IETF draft
 #: "The Idempotency-Key HTTP Header Field").

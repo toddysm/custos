@@ -14,6 +14,7 @@ from custos_gateway.middleware.auth import (
     require_permission,
     route_required_permission,
 )
+from custos_gateway.routes.registry import registry_required_permissions
 from custos_gateway.settings import Settings
 from custos_gateway.startup import (
     GatewayStartupError,
@@ -141,7 +142,9 @@ async def test_validate_lists_missing_permissions_sorted() -> None:
 
 
 def test_lifespan_validates_and_binds_client(settings: Settings) -> None:
-    client = _client("things:write")
+    # create_app mounts the full M1 registry, so the injected client must declare
+    # every registry permission plus the extra protected route added below.
+    client = _client("things:write", *registry_required_permissions())
     app = create_app(settings=settings, auth_client=client)
     _add_protected_route(app, "/v1/workspaces/{workspaceId}/things", "things:write")
 
