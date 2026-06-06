@@ -17,7 +17,7 @@ Design: [`design/components/api-gateway/design.md`](../../../design/components/a
 delegation & enforcement (AGW-IMPL-004, AGW-IMPL-005) + workspace resolution
 (AGW-IMPL-006) + call-context minting (AGW-IMPL-007) + startup permission
 validation (AGW-IMPL-008) + write-path idempotency (AGW-IMPL-009) + write-path
-rate limiting (AGW-IMPL-010)** — the `custos_gateway`
+rate limiting (AGW-IMPL-010) + request validation (AGW-IMPL-011)** — the `custos_gateway`
 package, its `pyproject.toml` (ruff + mypy strict + pytest with a
 `--cov-fail-under=90` floor), the `python -m custos_gateway` entry point, the
 typed `Settings` + `load_settings()` loader over the design Configuration table,
@@ -47,7 +47,12 @@ a write is admitted only when both buckets can afford it, otherwise it is
 rejected `429 rate-limited` with `Retry-After` + the `RateLimit-*` headers; the
 `tryConsume(bucketKey, cost) -> Allow | Deny` interface keeps a Dapr/Redis-backed
 coordinated limiter a drop-in M2 replacement; the per-replica bucket map is
-bounded with LRU eviction to bound memory), and the
+bounded with LRU eviction to bound memory), the ingress Request Validator
+(`validate.py` enforces per-route body-size caps — 1 MB default, 5 MB for
+workflow/template publish — rejecting oversized bodies `413 body-too-large`,
+requires a JSON content type on standard write routes `415
+unsupported-media-type`, and classifies the webhook + auth-bootstrap raw-body
+families that bypass content-type enforcement), and the
 CI gate
 (`.github/workflows/python-services.yml`) are in place. Subsequent tasks layer
 in the remaining cross-cutting
@@ -76,6 +81,7 @@ src/custos_gateway/
     correlation.py # x-correlation-id ingress + UUIDv7 generation
     idempotency.py # write-path dedup coordinator (reserve/complete + hash)
     ratelimit.py   # per-principal + per-workspace token-bucket rate limiter
+    validate.py    # body-size caps + content-type enforcement + route classes
     workspace.py   # URL-authoritative workspace resolver + mismatch guard
   startup.py       # startup route-permission validation against Auth registry
   clients/
@@ -95,6 +101,7 @@ tests/
   test_startup.py # startup route-permission validation + lifespan wiring
   test_idempotency_middleware.py # write-path dedup reserve/complete + hashing
   test_ratelimit_middleware.py # token-bucket rate limiting + RateLimit headers
+  test_validate_middleware.py # body-size + content-type + route classification
 ```
 
 ## Development

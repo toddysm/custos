@@ -32,7 +32,7 @@ Full M1 gateway implementation, packaged at `src/services/api-gateway/` (Python 
 
 - [x] AGW-IMPL-009 (#719): Idempotency Coordinator.
 - [x] AGW-IMPL-010 (#720): Rate Limiter.
-- [F] AGW-IMPL-011 (#721): Request Validator.
+- [x] AGW-IMPL-011 (#721): Request Validator.
 
 ### Phase D — Routing, webhook & device-code
 

@@ -28,6 +28,7 @@ from typing import Final
 from fastapi import Request
 
 from custos_gateway.errors import GatewayError, GatewayErrorCode
+from custos_gateway.middleware.validate import is_json_media_type
 
 __all__ = [
     "WORKSPACE_ID_BODY_FIELD",
@@ -71,12 +72,11 @@ class ResolvedWorkspace:
 def _is_json_content_type(content_type: str) -> bool:
     """Return ``True`` when ``content_type`` denotes a JSON payload.
 
-    Matches ``application/json`` and any structured-syntax-suffix JSON media
-    type (RFC 6839 ``+json``), e.g. ``application/vnd.custos.thing+json`` or
-    ``application/problem+json``, ignoring parameters like ``; charset=utf-8``.
+    Thin alias over :func:`custos_gateway.middleware.validate.is_json_media_type`
+    so the gateway has a single JSON media-type rule (the Request Validator,
+    AGW-IMPL-011, owns it).
     """
-    media_type = content_type.split(";", 1)[0].strip().lower()
-    return media_type == "application/json" or media_type.endswith("+json")
+    return is_json_media_type(content_type)
 
 
 async def _body_workspace_id(request: Request) -> str | None:
