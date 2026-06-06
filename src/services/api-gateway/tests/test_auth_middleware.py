@@ -12,7 +12,11 @@ from custos_gateway.clients.auth import (
     FakeAuthServiceClient,
     VerifyAndAuthorizeResponse,
 )
-from custos_gateway.errors import register_exception_handlers
+from custos_gateway.errors import (
+    GatewayError,
+    GatewayErrorCode,
+    register_exception_handlers,
+)
 from custos_gateway.middleware.auth import (
     AUTH_CLIENT_STATE_ATTR,
     PLATFORM_WORKSPACE_ID,
@@ -80,6 +84,8 @@ def test_is_auth_bypass_path_true(path: str) -> None:
         "/v1/auth/logout",
         "/healthz",
         "/v1/webhook",  # singular, not the bypass prefix
+        "/v1/auth/login2/device",  # sibling segment, not the login family
+        "/v1/auth/loginX",
     ],
 )
 def test_is_auth_bypass_path_false(path: str) -> None:
@@ -96,8 +102,9 @@ def test_get_auth_client_raises_when_unset() -> None:
         def __init__(self, application: FastAPI) -> None:
             self.app = application
 
-    with pytest.raises(RuntimeError, match="Auth Service client is not attached"):
+    with pytest.raises(GatewayError) as exc_info:
         get_auth_client(_FakeRequest(app))  # type: ignore[arg-type]
+    assert exc_info.value.code is GatewayErrorCode.DOWNSTREAM_UNAVAILABLE
 
 
 def test_get_auth_client_returns_attached() -> None:
@@ -183,7 +190,7 @@ def test_missing_bearer_is_invalid_token() -> None:
 
 @pytest.mark.parametrize(
     "header",
-    ["Token abc", "Bearer", "Bearer    ", "bearer "],
+    ["Token abc", "Bearer", "Bearer    ", "bearer ", "Bearer tok extra"],
 )
 def test_malformed_bearer_is_invalid_token(header: str) -> None:
     fake = FakeAuthServiceClient()

@@ -95,22 +95,33 @@ def is_auth_bypass_path(path: str) -> bool:
 
     Two families bypass AuthN/AuthZ by design: webhook ingress
     (``/v1/webhooks/...``) and the auth-bootstrap login routes
-    (``/v1/auth/login...``). Everything else requires a verified bearer.
+    (``/v1/auth/login`` and ``/v1/auth/login/...``). Everything else requires a
+    verified bearer. The login check matches the exact segment or a deeper
+    sub-path so unrelated siblings (e.g. ``/v1/auth/login2``) are *not* bypassed.
     """
-    return path.startswith(WEBHOOK_BYPASS_PREFIX) or path.startswith(AUTH_BOOTSTRAP_BYPASS_PREFIX)
+    return (
+        path.startswith(WEBHOOK_BYPASS_PREFIX)
+        or path == AUTH_BOOTSTRAP_BYPASS_PREFIX
+        or path.startswith(AUTH_BOOTSTRAP_BYPASS_PREFIX + "/")
+    )
 
 
 def get_auth_client(request: Request) -> AuthServiceClient:
     """Return the Auth Service client the lifespan attached to ``app.state``.
 
+    A protected route can never authorize without it, so a missing client is a
+    wiring bug. Rather than leak a raw 500, surface it through the locked
+    taxonomy as ``downstream-unavailable`` (503) so the failure still renders as
+    a Problem+JSON envelope.
+
     Raises:
-        RuntimeError: When the client is absent — a wiring bug, since a
-            protected route can never authorize without it.
+        GatewayError: ``downstream-unavailable`` when the client is absent.
     """
     client = getattr(request.app.state, AUTH_CLIENT_STATE_ATTR, None)
     if client is None:
-        raise RuntimeError(
-            "Auth Service client is not attached to app.state; did the lifespan run?"
+        raise GatewayError(
+            GatewayErrorCode.DOWNSTREAM_UNAVAILABLE,
+            detail="Auth Service client is not attached to app.state; did the lifespan run?",
         )
     return cast(AuthServiceClient, client)
 
@@ -119,7 +130,9 @@ def _extract_bearer(request: Request) -> str:
     """Extract the bearer token, or raise ``invalid-token`` (401).
 
     Accepts the scheme case-insensitively but requires exactly
-    ``<scheme> <token>`` with a non-empty token.
+    ``<scheme> <token>`` — two whitespace-separated parts with a non-empty
+    token. Headers with trailing extra parts (``Bearer tok extra``) are
+    rejected before reaching Auth Service.
     """
     header = request.headers.get("authorization")
     if not header:
@@ -127,13 +140,13 @@ def _extract_bearer(request: Request) -> str:
             GatewayErrorCode.INVALID_TOKEN,
             detail="Missing Authorization header.",
         )
-    scheme, _, token = header.partition(" ")
-    if scheme.lower() != BEARER_SCHEME.lower() or not token.strip():
+    parts = header.split()
+    if len(parts) != 2 or parts[0].lower() != BEARER_SCHEME.lower():
         raise GatewayError(
             GatewayErrorCode.INVALID_TOKEN,
             detail="Authorization header must be a non-empty Bearer token.",
         )
-    return token.strip()
+    return parts[1]
 
 
 def _resolve_workspace_id(request: Request) -> str:
