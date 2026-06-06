@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from custos_gateway.clients.auth import (
     AUTH_APP_ID,
@@ -66,6 +67,13 @@ def test_endpoint_validates_fields() -> None:
         DaprEndpoint(host="h", http_port=3500, app_id="")
     with pytest.raises(ValueError):
         DaprEndpoint(host="h", http_port=0, app_id="x")
+
+
+def test_endpoint_rejects_bool_port() -> None:
+    # ``bool`` is an ``int`` subclass; ``True`` evaluates to 1 and would
+    # otherwise silently produce an invalid endpoint.
+    with pytest.raises(ValueError):
+        DaprEndpoint(host="h", http_port=True, app_id="x")
 
 
 def test_read_dapr_endpoint_defaults_and_overrides() -> None:
@@ -142,6 +150,15 @@ async def test_callctx_sign_posts_and_decodes() -> None:
     assert isinstance(result, CallctxSignResponse)
     assert result.token == "jwt"
     assert result.exp == 200
+
+
+def test_callctx_sign_request_rejects_empty_permission_entry() -> None:
+    # Mirrors the Auth Service contract: each permission entry must be a
+    # non-empty string of at most 128 characters.
+    with pytest.raises(ValidationError):
+        CallctxSignRequest(principal_id="sa", caller_component="c", permissions=[""])
+    with pytest.raises(ValidationError):
+        CallctxSignRequest(principal_id="sa", caller_component="c", permissions=["x" * 129])
 
 
 async def test_get_permissions_unwraps_envelope() -> None:

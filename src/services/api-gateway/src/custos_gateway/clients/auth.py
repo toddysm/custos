@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Final, Protocol, TypeVar, runtime_checkable
+from typing import Annotated, Final, Protocol, TypeVar, runtime_checkable
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
@@ -130,7 +130,9 @@ class CallctxSignRequest(BaseModel):
     caller_component: str = Field(..., min_length=1, max_length=64)
     workspace_id: str | None = Field(default=None, max_length=120)
     ttl_seconds: int | None = Field(default=None, ge=1, le=86_400)
-    permissions: list[str] = Field(default_factory=list, max_length=256)
+    permissions: list[Annotated[str, Field(min_length=1, max_length=128)]] = Field(
+        default_factory=list, max_length=256
+    )
     audience: str | None = Field(default=None, min_length=1, max_length=120)
 
 
@@ -231,9 +233,9 @@ class DaprEndpoint:
             raise ValueError("DaprEndpoint.host must be a non-empty string")
         if not self.app_id:
             raise ValueError("DaprEndpoint.app_id must be a non-empty string")
-        if self.http_port <= 0:
+        if isinstance(self.http_port, bool) or self.http_port <= 0:
             raise ValueError(
-                f"DaprEndpoint.http_port must be a positive integer (got {self.http_port})"
+                f"DaprEndpoint.http_port must be a positive integer (got {self.http_port!r})"
             )
 
 
