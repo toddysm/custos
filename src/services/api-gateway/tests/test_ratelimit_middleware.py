@@ -135,6 +135,47 @@ def test_try_consume_honours_cost() -> None:
     assert isinstance(limiter.try_consume("k", config, cost=3), Deny)
 
 
+@pytest.mark.parametrize("cost", [0, -1])
+def test_try_consume_rejects_non_positive_cost(cost: int) -> None:
+    limiter, _ = _limiter()
+    with pytest.raises(ValueError, match="cost must be at least 1"):
+        limiter.try_consume("k", BucketConfig(rps=10, burst=5), cost=cost)
+
+
+def test_try_consume_rejects_cost_above_burst() -> None:
+    limiter, _ = _limiter()
+    with pytest.raises(ValueError, match="exceeds the bucket burst"):
+        limiter.try_consume("k", BucketConfig(rps=10, burst=5), cost=6)
+
+
+# --- bucket-tracking cap (memory-DoS guard) ----------------------------------
+
+
+def test_limiter_rejects_non_positive_bucket_cap() -> None:
+    with pytest.raises(ValueError, match="max_tracked_buckets must be at least 1"):
+        RateLimiter(
+            principal_config=BucketConfig(rps=10, burst=5),
+            workspace_config=BucketConfig(rps=100, burst=50),
+            max_tracked_buckets=0,
+        )
+
+
+def test_limiter_evicts_least_recently_used_bucket() -> None:
+    clock = _Clock()
+    limiter = RateLimiter(
+        principal_config=BucketConfig(rps=1, burst=1),
+        workspace_config=BucketConfig(rps=1, burst=1),
+        time_source=clock,
+        # Cap of 2 buckets: one check() touches a principal + a workspace bucket.
+        max_tracked_buckets=2,
+    )
+    assert isinstance(limiter.check(principal_id="p1", workspace_id="w1"), Allow)
+    clock.advance(100)  # let buckets refill so eviction does not change outcomes
+    # A second principal/workspace pair overflows the cap and evicts the oldest.
+    assert isinstance(limiter.check(principal_id="p2", workspace_id="w2"), Allow)
+    assert len(limiter._buckets) == 2
+
+
 # --- check (combined principal + workspace) ----------------------------------
 
 
@@ -145,6 +186,22 @@ def test_check_admits_when_both_buckets_afford() -> None:
     # principal (burst 5) is the binding (smaller) bucket.
     assert decision.limit == 5
     assert decision.remaining == 4
+
+
+def test_check_rejects_cost_above_smaller_burst() -> None:
+    limiter, _ = _limiter(
+        principal=BucketConfig(rps=10, burst=3),
+        workspace=BucketConfig(rps=100, burst=50),
+    )
+    with pytest.raises(ValueError, match="exceeds the bucket burst"):
+        limiter.check(principal_id="p", workspace_id="w", cost=4)
+
+
+@pytest.mark.parametrize("cost", [0, -2])
+def test_check_rejects_non_positive_cost(cost: int) -> None:
+    limiter, _ = _limiter()
+    with pytest.raises(ValueError, match="cost must be at least 1"):
+        limiter.check(principal_id="p", workspace_id="w", cost=cost)
 
 
 def test_check_denied_by_principal_bucket() -> None:

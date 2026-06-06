@@ -11,14 +11,22 @@ limit exists to shield downstream components (Workflow Service, Connector
 Service) from runaway clients, not to bill or strictly enforce quotas. Switching
 to a
 Dapr-state-backed or Redis-backed coordinated limiter is a drop-in replacement:
-the :meth:`RateLimiter.try_consume` interface (``(bucketKey, cost) -> Allow |
-Deny``) stays the same (design.md § Rate Limiter, deferred to M2).
+the conceptual ``tryConsume(bucketKey, cost) -> Allow | Deny`` interface stays
+the same — here it is spelled :meth:`RateLimiter.try_consume(bucket_key, config,
+cost)`, with the bucket parameters passed alongside the key (design.md § Rate
+Limiter, deferred to M2).
 
 Each bucket is a classic token bucket: it holds up to ``burst`` tokens and
 refills at ``rps`` tokens per second. A request costs one token by default.
 On admission the limiter emits the IETF ``RateLimit-*`` headers; on rejection it
 raises ``429 rate-limited`` carrying ``Retry-After`` plus the ``RateLimit-*``
 headers (:func:`rate_limit_headers`).
+
+Bucket state is kept in a per-replica in-memory dict bounded to
+``max_tracked_buckets`` entries; when the cap is reached the least-recently-used
+bucket (oldest ``updated_at``, i.e. the most idle and thus already refilled) is
+evicted before a new one is admitted, so a flood of distinct principals or
+workspaces cannot grow memory without bound.
 """
 
 from __future__ import annotations
@@ -37,6 +45,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DEFAULT_COST",
+    "DEFAULT_MAX_TRACKED_BUCKETS",
     "RATE_LIMIT_LIMIT_HEADER",
     "RATE_LIMIT_REMAINING_HEADER",
     "RATE_LIMIT_RESET_HEADER",
@@ -71,10 +80,28 @@ WRITE_METHODS: Final[frozenset[str]] = frozenset({"POST", "PUT", "PATCH", "DELET
 #: Default token cost charged for a single request.
 DEFAULT_COST: Final[int] = 1
 
+#: Default cap on the number of distinct buckets tracked in memory per replica.
+#: When exceeded, the least-recently-used bucket is evicted (memory-DoS guard).
+DEFAULT_MAX_TRACKED_BUCKETS: Final[int] = 100_000
+
 
 def is_rate_limited_method(method: str) -> bool:
     """Return whether ``method`` is a write method subject to rate limiting."""
     return method.upper() in WRITE_METHODS
+
+
+def _validate_cost(cost: int, max_affordable: int) -> None:
+    """Reject a ``cost`` that cannot be honoured by a ``max_affordable`` bucket.
+
+    A non-positive cost would mint tokens; a cost above the bucket's ``burst``
+    can never be satisfied (refills cap at ``burst``) and would deny forever.
+    """
+    if cost < 1:
+        msg = f"cost must be at least 1, got {cost}"
+        raise ValueError(msg)
+    if cost > max_affordable:
+        msg = f"cost {cost} exceeds the bucket burst capacity {max_affordable}"
+        raise ValueError(msg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,13 +204,21 @@ class RateLimiter:
     """In-memory per-replica token-bucket limiter over principal + workspace buckets.
 
     ``time_source`` is injectable (defaults to :func:`time.monotonic`) so tests
-    can drive the clock deterministically.
+    can drive the clock deterministically. ``max_tracked_buckets`` bounds the
+    in-memory state so a flood of distinct principals/workspaces cannot grow
+    memory without bound; on overflow the least-recently-used bucket is evicted.
     """
 
     principal_config: BucketConfig
     workspace_config: BucketConfig
     time_source: Callable[[], float] = time.monotonic
+    max_tracked_buckets: int = DEFAULT_MAX_TRACKED_BUCKETS
     _buckets: dict[str, _BucketState] = field(default_factory=dict, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.max_tracked_buckets < 1:
+            msg = f"max_tracked_buckets must be at least 1, got {self.max_tracked_buckets}"
+            raise ValueError(msg)
 
     @classmethod
     def from_settings(
@@ -191,6 +226,7 @@ class RateLimiter:
         settings: Settings,
         *,
         time_source: Callable[[], float] = time.monotonic,
+        max_tracked_buckets: int = DEFAULT_MAX_TRACKED_BUCKETS,
     ) -> RateLimiter:
         """Build a limiter from the parsed ``CUSTOS_GATEWAY_RATE_LIMIT_*`` settings."""
         return cls(
@@ -203,6 +239,7 @@ class RateLimiter:
                 burst=settings.rate_limit_workspace_writes_burst,
             ),
             time_source=time_source,
+            max_tracked_buckets=max_tracked_buckets,
         )
 
     def try_consume(
@@ -216,7 +253,11 @@ class RateLimiter:
         A fresh bucket starts full (``config.burst`` tokens). The bucket is
         refilled for the elapsed time before the charge is attempted; an
         insufficient balance is left untouched (only refilled) and rejected.
+
+        Raises:
+            ValueError: when ``cost`` is below 1 or exceeds ``config.burst``.
         """
+        _validate_cost(cost, config.burst)
         now = self.time_source()
         state = self._bucket(bucket_key, config, now)
         tokens = self._refilled(state, config, now)
@@ -239,7 +280,12 @@ class RateLimiter:
         The request is admitted only when **both** buckets can afford ``cost``;
         tokens are consumed solely on admission. A rejection reports the most
         restrictive bucket (the longest ``Retry-After``) and consumes nothing.
+
+        Raises:
+            ValueError: when ``cost`` is below 1 or exceeds the smaller bucket's
+                ``burst`` (a cost neither bucket could ever satisfy).
         """
+        _validate_cost(cost, min(self.principal_config.burst, self.workspace_config.burst))
         now = self.time_source()
         p_state = self._bucket(_principal_key(principal_id), self.principal_config, now)
         w_state = self._bucket(_workspace_key(workspace_id), self.workspace_config, now)
@@ -273,9 +319,18 @@ class RateLimiter:
         return _allow_from(config, tokens)
 
     def _bucket(self, key: str, config: BucketConfig, now: float) -> _BucketState:
-        return self._buckets.setdefault(
-            key, _BucketState(tokens=float(config.burst), updated_at=now)
-        )
+        state = self._buckets.get(key)
+        if state is not None:
+            return state
+        if len(self._buckets) >= self.max_tracked_buckets:
+            self._evict_least_recently_used()
+        state = _BucketState(tokens=float(config.burst), updated_at=now)
+        self._buckets[key] = state
+        return state
+
+    def _evict_least_recently_used(self) -> None:
+        oldest_key = min(self._buckets, key=lambda k: self._buckets[k].updated_at)
+        del self._buckets[oldest_key]
 
     @staticmethod
     def _refilled(state: _BucketState, config: BucketConfig, now: float) -> float:

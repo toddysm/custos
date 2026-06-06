@@ -46,7 +46,8 @@ reserve outcomes onto proceed / replay / `409 idempotency-in-flight` +
 a write is admitted only when both buckets can afford it, otherwise it is
 rejected `429 rate-limited` with `Retry-After` + the `RateLimit-*` headers; the
 `tryConsume(bucketKey, cost) -> Allow | Deny` interface keeps a Dapr/Redis-backed
-coordinated limiter a drop-in M2 replacement), and the
+coordinated limiter a drop-in M2 replacement; the per-replica bucket map is
+bounded with LRU eviction to bound memory), and the
 CI gate
 (`.github/workflows/python-services.yml`) are in place. Subsequent tasks layer
 in the remaining cross-cutting
