@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
 
+from custos_callctx import CALLCTX_HEADER
 from fastapi import APIRouter, Request, Response
 
 from custos_gateway.errors import CORRELATION_ID_HEADER, correlation_id_of
@@ -66,11 +67,17 @@ WEBHOOK_BODY_MAX_BYTES: Final[int] = DEFAULT_BODY_MAX_BYTES_DEFAULT
 FORWARDED_FOR_HEADER: Final[str] = "x-forwarded-for"
 
 #: Inbound headers the gateway never forwards on the anonymous webhook hop.
-#: ``authorization`` is dropped because the request is anonymous at the boundary
-#: — any caller-supplied bearer is meaningless downstream and must not leak — and
-#: ``host`` plus the hop-by-hop / framing headers are re-derived by the Dapr
-#: client for the sidecar hop.
-STRIPPED_INBOUND_HEADERS: Final[frozenset[str]] = HOP_BY_HOP_HEADERS | {"authorization", "host"}
+#: ``authorization`` and any caller-supplied ``x-custos-callctx`` are dropped
+#: because the request is anonymous at the boundary — a caller-supplied bearer or
+#: call context is meaningless downstream and forwarding one would let a caller
+#: smuggle/replay an authenticated context onto a route the gateway intentionally
+#: leaves unauthenticated. ``host`` plus the hop-by-hop / framing headers are
+#: re-derived by the Dapr client for the sidecar hop.
+STRIPPED_INBOUND_HEADERS: Final[frozenset[str]] = HOP_BY_HOP_HEADERS | {
+    "authorization",
+    "host",
+    CALLCTX_HEADER.lower(),
+}
 
 
 def forward_headers(
@@ -137,7 +144,12 @@ def build_webhook_router() -> APIRouter:
     :data:`~custos_gateway.middleware.auth.WEBHOOK_BYPASS_PREFIX`, so the auth
     bypass classifier already excludes it from authentication.
     """
-    assert WEBHOOK_PATH.startswith(WEBHOOK_BYPASS_PREFIX)
+    if not WEBHOOK_PATH.startswith(WEBHOOK_BYPASS_PREFIX):  # pragma: no cover - invariant
+        msg = (
+            f"webhook path {WEBHOOK_PATH!r} must live under the auth-bypass prefix "
+            f"{WEBHOOK_BYPASS_PREFIX!r} or it would require authentication"
+        )
+        raise RuntimeError(msg)
     router = APIRouter()
     router.add_api_route(
         WEBHOOK_PATH,

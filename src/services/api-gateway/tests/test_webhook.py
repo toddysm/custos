@@ -49,6 +49,7 @@ def test_forward_headers_strips_authorization_and_host() -> None:
         [
             ("Authorization", "Bearer secret"),
             ("Host", "gateway.example.com"),
+            ("X-Custos-Callctx", "smuggled-context"),
             ("X-Hub-Signature-256", "sha256=abc"),
             ("Content-Type", "application/json"),
         ]
@@ -56,6 +57,9 @@ def test_forward_headers_strips_authorization_and_host() -> None:
     headers = forward_headers(request, correlation_id="cid-1", source_ip="9.9.9.9")
     assert "authorization" not in {name.lower() for name in headers}
     assert "host" not in {name.lower() for name in headers}
+    # A caller-supplied call context is never forwarded on this anonymous hop:
+    # forwarding one would let a caller smuggle/replay an authenticated context.
+    assert "x-custos-callctx" not in {name.lower() for name in headers}
     # The signature header (verified downstream) is forwarded untouched.
     assert headers["x-hub-signature-256"] == "sha256=abc"
     assert headers["content-type"] == "application/json"
@@ -76,7 +80,7 @@ def test_forward_headers_omits_forwarded_for_without_source_ip() -> None:
 
 
 def test_authorization_and_host_are_in_the_strip_set() -> None:
-    assert {"authorization", "host"} <= STRIPPED_INBOUND_HEADERS
+    assert {"authorization", "host", "x-custos-callctx"} <= STRIPPED_INBOUND_HEADERS
 
 
 # --- forwarding seam ---------------------------------------------------------
@@ -120,6 +124,7 @@ def test_webhook_forwards_body_and_headers_minus_authorization() -> None:
         headers={
             "content-type": "application/json",
             "authorization": "Bearer leaked",
+            "x-custos-callctx": "smuggled-context",
             "x-hub-signature-256": "sha256=abc",
         },
     )
@@ -129,7 +134,8 @@ def test_webhook_forwards_body_and_headers_minus_authorization() -> None:
     assert response.headers["x-downstream"] == "yes"
     assert captured["method"] == "POST"
     assert captured["body"] == b'{"event":"push"}'
-    # Anonymous hop: the caller's bearer is dropped, no call context is minted.
+    # Anonymous hop: the caller's bearer is dropped, no call context is minted
+    # and a caller-supplied call context is never forwarded.
     assert captured["authorization"] is None
     assert captured["callctx"] is None
     # Signature header (verified downstream) survives; correlation id propagated.
