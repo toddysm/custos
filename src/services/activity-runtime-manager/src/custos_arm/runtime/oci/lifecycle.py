@@ -26,6 +26,7 @@ with fakes; the real ``kind``-cluster path is exercised by the
 
 from __future__ import annotations
 
+import base64
 import io
 import shutil
 import tarfile
@@ -51,6 +52,7 @@ from custos_arm.runtime.oci.job import (
     ACTIVITY_CONTAINER_NAME,
     INPUT_BRIDGE_CONTAINER_NAME,
     INPUT_READY_SENTINEL,
+    OUTPUT_BRIDGE_CONTAINER_NAME,
     build_activity_job,
     job_name,
 )
@@ -91,19 +93,25 @@ _DEFAULT_POLL_INTERVAL: Final[float] = 1.0
 #: Default ceiling (seconds) for the input bridge to reach ``Running`` so the
 #: monitor can stream ``/custos/in`` in; exceeding it surfaces a sandbox failure.
 _DEFAULT_START_TIMEOUT: Final[float] = 120.0
+#: Default ceiling (bytes) on the ``/custos/out`` tree streamed back out of the
+#: pod; a larger archive surfaces a sandbox failure rather than being buffered
+#: into ARM's memory unbounded (default 256 MiB).
+_DEFAULT_MAX_OUTPUT_BYTES: Final[int] = 256 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
 class ExecResult:
     """The outcome of a single ``pods/exec`` invocation.
 
-    ``exit_code`` is the remote command's status (``0`` on success) and
-    ``stderr`` carries whatever the command wrote to standard error, surfaced in
-    the :class:`~custos_arm.runtime.oci.errors.SandboxFailureError` message when
-    the command fails.
+    ``exit_code`` is the remote command's status (``0`` on success), ``stdout``
+    carries whatever the command wrote to standard output (used to stream the
+    output tar back out), and ``stderr`` carries standard error, surfaced in the
+    :class:`~custos_arm.runtime.oci.errors.SandboxFailureError` message when the
+    command fails.
     """
 
     exit_code: int
+    stdout: bytes = b""
     stderr: str = ""
 
 
@@ -203,6 +211,7 @@ class OciContainerDriver:
         now: Callable[[], datetime] | None = None,
         pod_exec: PodExec | None = None,
         start_timeout: float = _DEFAULT_START_TIMEOUT,
+        max_output_bytes: int = _DEFAULT_MAX_OUTPUT_BYTES,
     ) -> None:
         self._batch = batch_api
         self._core = core_api
@@ -212,6 +221,7 @@ class OciContainerDriver:
         self._now = now or (lambda: datetime.now(UTC))
         self._exec = pod_exec or self._default_pod_exec
         self._start_timeout = start_timeout
+        self._max_output_bytes = max_output_bytes
         # Records a scheduler-driven cancel keyed by handle reference so the
         # blocking ``await_terminal`` loop (running on another thread) observes
         # it and reports the right signal instead of blocking to the deadline.
@@ -391,7 +401,48 @@ class OciContainerDriver:
         self._delete_job(namespace, name)
 
     def collect(self, handle: SandboxHandle) -> OutputBundle:
-        """Expose the ``/custos/out`` staging tree to the I/O Broker."""
+        """Stream the pod's ``/custos/out`` tree into ARM's host staging ``out/``.
+
+        After the activity container terminates the output collector init
+        container is still alive (it is a native sidecar), so the tree it shares
+        with the activity is ``tar``-streamed out over ``pods/exec`` and unpacked
+        into the host ``out/`` the I/O Broker reads from. The collector pipes the
+        archive through ``base64`` so the binary tar survives the (text-framed)
+        exec channel without corruption.
+
+        Raises:
+            SandboxFailureError: the collector Pod is gone, the exec failed, or
+                the streamed tree exceeds the configured size ceiling.
+        """
+        namespace, name = _split_reference(handle.reference)
+        pod = self._activity_pod(namespace, name)
+        if pod is None or getattr(pod, "metadata", None) is None:
+            raise SandboxFailureError(f"sandbox {name!r} Pod is gone; cannot collect outputs")
+
+        result = self._exec(
+            namespace=namespace,
+            pod=str(pod.metadata.name),
+            container=OUTPUT_BRIDGE_CONTAINER_NAME,
+            command=["sh", "-c", "tar -c -C /custos/out . | base64"],
+            stdin=None,
+        )
+        if result.exit_code != 0:
+            raise SandboxFailureError(
+                f"failed to collect outputs from sandbox {name!r} "
+                f"(exit {result.exit_code}): {result.stderr}"
+            )
+
+        archive = base64.b64decode(result.stdout)
+        if len(archive) > self._max_output_bytes:
+            raise SandboxFailureError(
+                f"sandbox {name!r} outputs ({len(archive)} bytes) exceed the "
+                f"{self._max_output_bytes}-byte limit"
+            )
+
+        if archive:
+            _extract_tar(archive, handle.output_root)
+        else:
+            handle.output_root.mkdir(parents=True, exist_ok=True)
         return OutputBundle(root=handle.output_root)
 
     def cleanup(self, handle: SandboxHandle) -> None:
@@ -453,13 +504,14 @@ class OciContainerDriver:
             _preload_content=False,
         )
         stderr_parts: list[str] = []
+        stdout_parts: list[str] = []
         try:
             if stdin is not None:
                 client.write_stdin(stdin)
             while client.is_open():
                 client.update(timeout=1)
                 if client.peek_stdout():
-                    client.read_stdout()
+                    stdout_parts.append(client.read_stdout())
                 if client.peek_stderr():
                     stderr_parts.append(client.read_stderr())
             returncode = client.returncode
@@ -467,6 +519,7 @@ class OciContainerDriver:
             client.close()
         return ExecResult(
             exit_code=returncode if returncode is not None else 0,
+            stdout="".join(stdout_parts).encode("ascii", "ignore"),
             stderr="".join(stderr_parts),
         )
 
@@ -487,6 +540,18 @@ def _tar_directory(root: Path) -> bytes:
         for path in sorted(root.rglob("*")):
             archive.add(path, arcname=str(path.relative_to(root)), recursive=False)
     return buffer.getvalue()
+
+
+def _extract_tar(archive: bytes, dest: Path) -> None:
+    """Safely unpack ``archive`` into ``dest`` (created if absent).
+
+    The ``data`` filter rejects members that would escape ``dest`` (absolute
+    paths, ``..`` traversal, links pointing outside the tree), so a hostile
+    activity cannot use the output stream to write outside its staging tree.
+    """
+    dest.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r") as archive_file:
+        archive_file.extractall(dest, filter="data")
 
 
 def _init_container_state(pod: Any, container_name: str) -> Any | None:
