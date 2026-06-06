@@ -31,7 +31,7 @@ Full M1 gateway implementation, packaged at `src/services/api-gateway/` (Python 
 ### Phase C — Cross-cutting write-path middleware
 
 - [x] AGW-IMPL-009 (#719): Idempotency Coordinator.
-- [F] AGW-IMPL-010 (#720): Rate Limiter.
+- [x] AGW-IMPL-010 (#720): Rate Limiter.
 - [F] AGW-IMPL-011 (#721): Request Validator.
 
 ### Phase D — Routing, webhook & device-code
