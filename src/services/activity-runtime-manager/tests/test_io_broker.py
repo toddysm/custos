@@ -303,13 +303,27 @@ async def test_materialize_input_artifacts_rejects_missing_name() -> None:
         await broker.materialize_input_artifacts(inputs=inputs, workspace_id="ws-1", writer=writer)
 
 
-@pytest.mark.parametrize("bad_name", ["../escape", "a/b", "..", "a\\b"])
+@pytest.mark.parametrize("bad_name", ["../escape", "a/b", "..", ".", "a\\b"])
 async def test_materialize_input_artifacts_rejects_unsafe_name(bad_name: str) -> None:
     broker, writer = _seeded_broker({"ws-1:abc": b"x"})
     inputs = {"artifact": {"kind": "ArtifactRef", "name": bad_name, "id": "ws-1:abc"}}
 
     with pytest.raises(InputInvalidArtifactRefError):
         await broker.materialize_input_artifacts(inputs=inputs, workspace_id="ws-1", writer=writer)
+
+
+async def test_materialize_input_artifacts_maps_missing_blob_to_permanent() -> None:
+    # ``id`` is well-formed but the store has no such blob — a permanent input
+    # problem, not a retryable system.sandbox_failure.
+    broker, writer = _seeded_broker({})
+    inputs = {"artifact": {"kind": "ArtifactRef", "name": "greeting.txt", "id": "ws-1:missing"}}
+
+    with pytest.raises(InputInvalidArtifactRefError) as exc:
+        await broker.materialize_input_artifacts(inputs=inputs, workspace_id="ws-1", writer=writer)
+
+    assert exc.value.code == "input.invalid_artifact_ref"
+    assert exc.value.error_class is ErrorClass.PERMANENT
+    assert writer.written == {}
 
 
 # ---------------------------------------------------------------------------

@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from custos_spl.errors import ArtifactNotFound, WorkspaceMismatch
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError as SchemaValidationError
 from pydantic import ValidationError
@@ -43,7 +44,7 @@ from custos_arm.io.errors import (
 )
 from custos_arm.io.models import InputArtifactWriter, OutputArtifactReader
 from custos_arm.manifest.models import ActivityManifest
-from custos_arm.store.artifact import ArtifactRecord, ArtifactStoreClient
+from custos_arm.store.artifact import ArtifactRecord, ArtifactStoreClient, ArtifactStoreError
 
 
 def _pointer(error: SchemaValidationError) -> str:
@@ -134,13 +135,22 @@ class IOBroker:
 
         Raises:
             InputInvalidArtifactRefError: a consumed ``ArtifactRef`` is missing
-                its ``name``/``id`` or names an unsafe (path-separator / ``..``)
-                artifact name.
+                its ``name``/``id``, names an unsafe (path-separator / ``.`` /
+                ``..``) artifact name, or references an artifact that cannot be
+                fetched (missing, workspace-mismatched, or oversized).
         """
         refs = self._collect_input_refs(inputs)
         materialized: list[str] = []
         for name, artifact_id in refs:
-            data = await self._store.fetch(workspace_id, artifact_id)
+            try:
+                data = await self._store.fetch(workspace_id, artifact_id)
+            except (ArtifactNotFound, WorkspaceMismatch, ArtifactStoreError) as exc:
+                # A missing/mismatched/oversized upstream artifact is a permanent
+                # input problem; surface it as a broker error so the scheduler
+                # fails the attempt instead of retrying a system.sandbox_failure.
+                raise InputInvalidArtifactRefError(
+                    f"input ArtifactRef {name!r} (id {artifact_id!r}) could not be fetched: {exc}"
+                ) from exc
             await writer.write(name, data)
             materialized.append(name)
         return tuple(materialized)
@@ -166,7 +176,7 @@ class IOBroker:
         name = node.get("name")
         if not isinstance(name, str) or not name:
             raise InputInvalidArtifactRefError("input ArtifactRef is missing a 'name'")
-        if "/" in name or "\\" in name or name == ".." or name.startswith(("../", "..\\")):
+        if "/" in name or "\\" in name or name in (".", "..") or name.startswith(("../", "..\\")):
             raise InputInvalidArtifactRefError(
                 f"input ArtifactRef name {name!r} is not a safe artifact name"
             )
