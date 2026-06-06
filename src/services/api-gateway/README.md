@@ -14,21 +14,23 @@ Design: [`design/components/api-gateway/design.md`](../../../design/components/a
 ## Status
 
 **Phase A scaffold (AGW-IMPL-001, AGW-IMPL-002, AGW-IMPL-003) + Auth
-delegation (AGW-IMPL-004)** — the `custos_gateway` package, its
-`pyproject.toml` (ruff + mypy strict + pytest with a `--cov-fail-under=90`
-floor), the `python -m custos_gateway` entry point, the typed `Settings` +
-`load_settings()` loader over the design Configuration table, the
-`create_app(*, settings=...)` factory with a lifespan readiness gate, the
+delegation & enforcement (AGW-IMPL-004, AGW-IMPL-005)** — the `custos_gateway`
+package, its `pyproject.toml` (ruff + mypy strict + pytest with a
+`--cov-fail-under=90` floor), the `python -m custos_gateway` entry point, the
+typed `Settings` + `load_settings()` loader over the design Configuration table,
+the `create_app(*, settings=...)` factory with a lifespan readiness gate, the
 `/healthz` + `/readyz` probes, the locked RFC 7807 error taxonomy +
 `application/problem+json` envelope, the correlation-id ingress middleware
 (`x-correlation-id` on every response), the `AuthServiceClient` over Dapr
 service invocation (`verify_and_authorize` / `callctx_sign` /
-`get_permissions` + Noop/Fake doubles), and the CI gate
+`get_permissions` + Noop/Fake doubles), the AuthN/AuthZ `require_permission`
+dependency (verify-and-authorize per route, `principal` + `auditEventId` on
+`request.state`, webhook + auth-bootstrap bypass classifier), and the CI gate
 (`.github/workflows/python-services.yml`) are in place. Subsequent tasks layer
-in call-context minting (Phase B), the cross-cutting write-path middleware
-(Phase C), the downstream router + route registry + webhook + device-code
-surfaces (Phase D), full `create_app` wiring + OpenAPI + observability
-(Phase E), and Helm wiring + verification + docs (Phase F).
+in the workspace resolver + call-context minting (Phase B), the cross-cutting
+write-path middleware (Phase C), the downstream router + route registry +
+webhook + device-code surfaces (Phase D), full `create_app` wiring + OpenAPI +
+observability (Phase E), and Helm wiring + verification + docs (Phase F).
 
 Tracker: [#732](https://github.com/toddysm/custos/issues/732) —
 `AGW-IMPL-000-API-GATEWAY`.
@@ -46,6 +48,7 @@ src/custos_gateway/
   errors.py        # locked error taxonomy + RFC 7807 problem+json envelope
   middleware/
     __init__.py    # cross-cutting middleware package
+    auth.py        # require_permission dependency + bypass classifier
     correlation.py # x-correlation-id ingress + UUIDv7 generation
   clients/
     __init__.py    # outbound delegation clients package
@@ -58,6 +61,7 @@ tests/
   test_errors.py     # error taxonomy grid + envelope rendering
   test_correlation.py # correlation-id ingress + propagation
   test_auth_client.py # Auth Service Dapr client + doubles
+  test_auth_middleware.py # require_permission enforcement + bypass
 ```
 
 ## Development
