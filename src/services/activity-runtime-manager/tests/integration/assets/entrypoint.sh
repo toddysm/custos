@@ -13,10 +13,14 @@ mkdir -p "$out/artifacts"
 
 # Echo a value back through the bridge so the test can assert a true round-trip.
 # inputs.json is optional and free-form; pull a "name" string if one is present,
-# tolerating either compact or spaced JSON, else fall back to a default.
+# tolerating either compact or spaced JSON, else fall back to a default. The
+# regex's [^"]* already excludes embedded quotes, and `head -n1` keeps only the
+# first match so a multi-line / multi-key payload can't inject a newline into
+# the JSON string value.
 name=world
 if [ -f /custos/in/inputs.json ]; then
-    parsed=$(sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /custos/in/inputs.json)
+    parsed=$(sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+        /custos/in/inputs.json | head -n1)
     if [ -n "$parsed" ]; then
         name=$parsed
     fi
