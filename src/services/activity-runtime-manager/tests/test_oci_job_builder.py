@@ -24,6 +24,7 @@ from custos_arm.runtime.oci import (
     INPUT_BRIDGE_CONTAINER_NAME,
     INPUT_READY_SENTINEL,
     OUTPUT_BRIDGE_CONTAINER_NAME,
+    OUTPUT_COLLECTED_SENTINEL,
     SIDECAR_CONTAINER_NAME,
     DuplicateMountError,
     build_activity_job,
@@ -404,6 +405,27 @@ def test_output_collector_is_a_native_sidecar() -> None:
     collector = _init_containers(manifest)[OUTPUT_BRIDGE_CONTAINER_NAME]
     # restartPolicy: Always on an initContainer is the native-sidecar marker.
     assert collector["restartPolicy"] == "Always"
+
+
+def test_output_collector_ignores_sigterm_and_drains_on_the_sentinel() -> None:
+    manifest = build_activity_job(_plan())
+    collector = _init_containers(manifest)[OUTPUT_BRIDGE_CONTAINER_NAME]
+    script = collector["command"][-1]
+    # It must ignore the SIGTERM the kubelet sends when the activity exits, or it
+    # would be gone before ARM can stream /custos/out out of it.
+    assert 'trap "" TERM' in script
+    # It idles until ARM drops the drain sentinel, then exits so the Pod can
+    # complete instead of idling out its termination grace window.
+    assert OUTPUT_COLLECTED_SENTINEL in script
+    assert "while" in script
+
+
+def test_pod_bounds_the_output_drain_with_a_termination_grace_period() -> None:
+    # The collector ignores SIGTERM, so a finite grace period is the backstop
+    # that force-completes the Pod if ARM never collects.
+    grace = _pod_spec(build_activity_job(_plan()))["terminationGracePeriodSeconds"]
+    assert isinstance(grace, int)
+    assert grace > 0
 
 
 def test_input_injector_is_not_a_native_sidecar() -> None:
