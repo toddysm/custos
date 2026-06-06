@@ -164,6 +164,18 @@ def _spans(name: str) -> Iterable[Any]:
     return [span for span in _SPAN_EXPORTER.get_finished_spans() if span.name == name]
 
 
+def _span_for_correlation(correlation_id: str) -> Any:
+    """Return the request span whose ``correlationId`` matches ``correlation_id``.
+
+    Selecting by the response's correlation id (rather than positionally) keeps
+    the assertion robust to other requests in the suite emitting request spans.
+    """
+    for span in _spans(telemetry.SPAN_NAME):
+        if span.attributes.get(telemetry.ATTR_CORRELATION_ID) == correlation_id:
+            return span
+    raise AssertionError(f"no custos_gateway.request span for correlation id {correlation_id!r}")
+
+
 def test_write_request_records_span_and_request_metrics(settings: Settings) -> None:
     auth = _auth_client()
     router, calls = _recording_router()
@@ -184,15 +196,15 @@ def test_write_request_records_span_and_request_metrics(settings: Settings) -> N
     assert response.status_code == 201
     assert len(calls) == 1
 
-    # A per-request span carries the full design attribute set.
-    spans = list(_spans(telemetry.SPAN_NAME))
-    assert spans, "expected a custos_gateway.request span"
-    attrs = spans[-1].attributes
+    # The per-request span — selected by this response's correlation id — carries
+    # the full design attribute set.
+    correlation_id = response.headers["x-correlation-id"]
+    attrs = _span_for_correlation(correlation_id).attributes
     assert attrs[telemetry.ATTR_HTTP_METHOD] == "POST"
     assert attrs[telemetry.ATTR_HTTP_ROUTE] == WRITE_ROUTE
     assert attrs[telemetry.ATTR_WORKSPACE_ID] == "ws-1"
     assert attrs[telemetry.ATTR_PRINCIPAL_ID]
-    assert attrs[telemetry.ATTR_CORRELATION_ID]
+    assert attrs[telemetry.ATTR_CORRELATION_ID] == correlation_id
     assert attrs[telemetry.ATTR_DECISION_AUDIT_EVENT_ID]
 
     # The request + downstream histograms and the request counter recorded.

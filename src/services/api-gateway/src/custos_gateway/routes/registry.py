@@ -598,6 +598,16 @@ def _make_forwarder(spec: RouteSpec) -> Callable[[Request], Awaitable[Response]]
     async def _forward(request: Request) -> Response:
         with request_telemetry(method=spec.method, route=spec.path) as telemetry:
             telemetry.set_correlation_id(getattr(request.state, "correlation_id", None))
+            # The authorize dependency chain (resolve_workspace → require_permission
+            # → mint_call_context) has already bound the caller to request.state, so
+            # stamp the span's caller ids first: a validation GatewayError below
+            # still produces an error span carrying the full attribute set.
+            caller = cast("AuthorizedCaller", getattr(request.state, AUTH_STATE_ATTR))
+            telemetry.set_caller(
+                workspace_id=caller.workspace_id,
+                principal_id=caller.principal_id,
+                decision_audit_event_id=caller.audit_event_id,
+            )
             try:
                 body = await request.body()
                 enforce_body_size(len(body), spec.max_body_bytes)
@@ -605,12 +615,6 @@ def _make_forwarder(spec: RouteSpec) -> Callable[[Request], Awaitable[Response]]
                     method=request.method,
                     content_type=request.headers.get("content-type"),
                     route_class=classify_route(request.url.path),
-                )
-                caller = cast("AuthorizedCaller", getattr(request.state, AUTH_STATE_ATTR))
-                telemetry.set_caller(
-                    workspace_id=caller.workspace_id,
-                    principal_id=caller.principal_id,
-                    decision_audit_event_id=caller.audit_event_id,
                 )
                 allow = _apply_rate_limit(request, caller, spec)
 
