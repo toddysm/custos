@@ -44,11 +44,13 @@ __all__ = [
     "AUTH_STATE_ATTR",
     "BEARER_SCHEME",
     "PLATFORM_WORKSPACE_ID",
+    "REQUIRED_PERMISSION_ATTR",
     "WEBHOOK_BYPASS_PREFIX",
     "AuthorizedCaller",
     "get_auth_client",
     "is_auth_bypass_path",
     "require_permission",
+    "route_required_permission",
 ]
 
 #: ``Authorization: Bearer <token>`` scheme label (case-insensitive on input).
@@ -73,6 +75,14 @@ AUTH_CLIENT_STATE_ATTR: Final[str] = "auth_client"
 
 #: ``request.state`` attribute the dependency binds the authorized caller to.
 AUTH_STATE_ATTR: Final[str] = "auth"
+
+#: Attribute stamped on the dependency callable returned by
+#: :func:`require_permission`, recording the permission name the route declares.
+#: The startup validator (AGW-IMPL-008) reads it off each route's dependency
+#: tree to cross-check the declared permissions against the Auth Service
+#: registry, so a route can never reference a permission the platform does not
+#: know about.
+REQUIRED_PERMISSION_ATTR: Final[str] = "__custos_required_permission__"
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,4 +240,15 @@ def require_permission(permission: str) -> Callable[[Request], Awaitable[Authori
         setattr(request.state, AUTH_STATE_ATTR, caller)
         return caller
 
+    setattr(_dependency, REQUIRED_PERMISSION_ATTR, permission)
     return _dependency
+
+
+def route_required_permission(dependency: object) -> str | None:
+    """Return the permission a :func:`require_permission` dependency declares.
+
+    Returns ``None`` for any other callable, so the startup validator can walk a
+    route's whole dependency tree and pick out only the permission-bearing ones.
+    """
+    permission = getattr(dependency, REQUIRED_PERMISSION_ATTR, None)
+    return permission if isinstance(permission, str) else None
