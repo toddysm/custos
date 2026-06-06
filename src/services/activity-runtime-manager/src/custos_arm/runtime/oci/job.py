@@ -68,6 +68,7 @@ __all__ = [
     "SIDECAR_CONTAINER_NAME",
     "DuplicateMountError",
     "MissingBridgeMountError",
+    "UnpinnedImageError",
     "build_activity_job",
     "job_name",
 ]
@@ -98,6 +99,22 @@ class MissingBridgeMountError(ValueError):
     def __init__(self, mount_path: str) -> None:
         super().__init__(f"no contract volume for io-bridge mount path: {mount_path!r}")
         self.mount_path = mount_path
+
+
+class UnpinnedImageError(ValueError):
+    """The activity image has no digest and unpinned images are not allowed.
+
+    Production renders every activity as ``image@digest`` so the running bits are
+    content-addressed. A digest-less image is only permitted when the operator
+    opts in via ``ARM_ALLOW_UNPINNED_IMAGES`` (test/dev); otherwise this
+    fail-fast guard rejects the plan at build time.
+    """
+
+    def __init__(self, ref: str) -> None:
+        super().__init__(
+            f"activity image {ref!r} has no digest and ARM_ALLOW_UNPINNED_IMAGES is off"
+        )
+        self.ref = ref
 
 
 #: The container that runs the activity image.
@@ -203,7 +220,13 @@ def build_activity_job(
             _input_bridge_container(plan.io_bridge_image, security_context, named_mounts),
         ],
         "containers": [
-            _activity_container(plan.image, plan.resources, security_context, named_mounts),
+            _activity_container(
+                plan.image,
+                plan.resources,
+                security_context,
+                named_mounts,
+                allow_unpinned=plan.allow_unpinned_images,
+            ),
             _sidecar_container(plan.sidecar, security_context, named_mounts),
         ],
         "volumes": _volumes(named_mounts),
@@ -308,10 +331,12 @@ def _activity_container(
     resources: EffectiveResources,
     security_context: SecurityContext,
     named_mounts: tuple[tuple[str, TmpfsMount], ...],
+    *,
+    allow_unpinned: bool,
 ) -> dict[str, Any]:
     return {
         "name": ACTIVITY_CONTAINER_NAME,
-        "image": _image_reference(image),
+        "image": _image_reference(image, allow_unpinned=allow_unpinned),
         "imagePullPolicy": "IfNotPresent",
         "securityContext": _security_context(security_context),
         "resources": _resources(resources),
@@ -398,7 +423,17 @@ def _resources(resources: EffectiveResources) -> dict[str, Any]:
     }
 
 
-def _image_reference(image: ImageRef) -> str:
+def _image_reference(image: ImageRef, *, allow_unpinned: bool) -> str:
+    """Render the activity image reference.
+
+    A digest pins the image to immutable content and always wins: the result is
+    ``ref@digest`` (unless ``ref`` already carries an ``@digest``). A digest-less
+    image is only rendered tag-only when ``allow_unpinned`` is set (the
+    ``ARM_ALLOW_UNPINNED_IMAGES`` test/dev escape hatch); otherwise it is
+    rejected so production never runs unpinned bits.
+    """
     if image.digest and "@" not in image.ref:
         return f"{image.ref}@{image.digest}"
-    return image.ref
+    if image.digest or allow_unpinned:
+        return image.ref
+    raise UnpinnedImageError(image.ref)

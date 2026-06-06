@@ -28,7 +28,7 @@ from custos_arm.runtime.oci import (
     build_activity_job,
     job_name,
 )
-from custos_arm.runtime.oci.job import MissingBridgeMountError
+from custos_arm.runtime.oci.job import MissingBridgeMountError, UnpinnedImageError
 
 _DIGEST = "sha256:" + "a" * 64
 
@@ -64,6 +64,7 @@ def _plan(
     tmpfs_mounts: tuple[TmpfsMount, ...] | None = None,
     sidecar: SidecarSpec | None = None,
     io_bridge_image: str = "registry.example/io-bridge:1",
+    allow_unpinned_images: bool = False,
 ) -> SandboxPlan:
     return SandboxPlan(
         step=step or _step(),
@@ -79,6 +80,7 @@ def _plan(
         or SidecarSpec(image="registry.example/sidecar:1", endpoint="http://c:8080"),
         io_bridge_image=io_bridge_image,
         deadline=datetime(2025, 1, 1, 0, 0, 0),
+        allow_unpinned_images=allow_unpinned_images,
     )
 
 
@@ -324,9 +326,28 @@ def test_image_left_unchanged_when_ref_already_pinned() -> None:
     assert image == f"registry.example/act@{_DIGEST}"
 
 
-def test_image_without_digest_uses_ref_verbatim() -> None:
-    manifest = build_activity_job(_plan(image=ImageRef(ref="registry.example/act:1")))
-    assert _containers(manifest)[ACTIVITY_CONTAINER_NAME]["image"] == "registry.example/act:1"
+def test_digestless_image_is_rejected_when_unpinned_disallowed() -> None:
+    with pytest.raises(UnpinnedImageError) as excinfo:
+        build_activity_job(_plan(image=ImageRef(ref="registry.example/act:1")))
+    assert excinfo.value.ref == "registry.example/act:1"
+
+
+def test_digestless_image_renders_tag_only_when_unpinned_allowed() -> None:
+    manifest = build_activity_job(
+        _plan(image=ImageRef(ref="registry.example/act:1"), allow_unpinned_images=True)
+    )
+    activity = _containers(manifest)[ACTIVITY_CONTAINER_NAME]
+    assert activity["image"] == "registry.example/act:1"
+    assert activity["imagePullPolicy"] == "IfNotPresent"
+
+
+@pytest.mark.parametrize("allow_unpinned", [False, True])
+def test_digest_pinned_image_renders_identically_regardless_of_flag(
+    *, allow_unpinned: bool
+) -> None:
+    manifest = build_activity_job(_plan(allow_unpinned_images=allow_unpinned))
+    image = _containers(manifest)[ACTIVITY_CONTAINER_NAME]["image"]
+    assert image == f"registry.example/act@{_DIGEST}"
 
 
 def test_sidecar_is_injected_with_endpoint_env() -> None:

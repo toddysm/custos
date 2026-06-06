@@ -33,6 +33,7 @@ from custos_arm.runtime.oci.job import (
     SIDECAR_CONTAINER_NAME,
     DuplicateMountError,
     MissingBridgeMountError,
+    UnpinnedImageError,
     build_activity_job,
     job_name,
 )
@@ -63,6 +64,7 @@ __all__ = [
     "OciContainerDriver",
     "OciDriverError",
     "SandboxFailureError",
+    "UnpinnedImageError",
     "build_activity_job",
     "classify_signal",
     "is_image_pull_waiting_reason",

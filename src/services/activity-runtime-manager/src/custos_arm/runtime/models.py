@@ -114,6 +114,9 @@ class SandboxPlan:
     sidecar: SidecarSpec
     io_bridge_image: str
     deadline: datetime
+    #: Test/dev escape hatch: render a digest-less image tag-only instead of
+    #: rejecting it. Production leaves this ``False`` (strict digest pinning).
+    allow_unpinned_images: bool = False
 
 
 @dataclass(frozen=True, slots=True)

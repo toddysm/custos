@@ -51,6 +51,11 @@ ENV_SIDECAR_IMAGE: Final[str] = "ARM_SIDECAR_IMAGE"
 #: in production. Defaults to :data:`DEFAULT_IO_BRIDGE_IMAGE`.
 ENV_IO_BRIDGE_IMAGE: Final[str] = "ARM_IO_BRIDGE_IMAGE"
 
+#: Optional. Test/dev escape hatch (default ``false``) relaxing strict digest
+#: pinning so a locally ``kind load``ed, registry-less image (which has no
+#: manifest digest) can run. Production stays strictly digest-pinned.
+ENV_ALLOW_UNPINNED_IMAGES: Final[str] = "ARM_ALLOW_UNPINNED_IMAGES"
+
 #: Optional. Cluster-default isolation tier when a manifest omits
 #: ``isolation.minTier``.
 ENV_DEFAULT_TIER: Final[str] = "ARM_DEFAULT_TIER"
@@ -113,6 +118,9 @@ DEFAULT_ARTIFACT_MAX_BYTES: Final[int] = 5_368_709_120
 DEFAULT_IDEMPOTENCY_TTL: Final[str] = "PT24H"
 DEFAULT_HOST: Final[str] = "0.0.0.0"
 DEFAULT_PORT: Final[int] = 8080
+
+#: Default for :data:`ENV_ALLOW_UNPINNED_IMAGES`: strict digest pinning on.
+DEFAULT_ALLOW_UNPINNED_IMAGES: Final[bool] = False
 
 #: Default io-bridge helper image: upstream BusyBox (ships ``sh`` + ``tar``),
 #: pinned by its multi-arch index digest so the default is reproducible.
@@ -207,6 +215,8 @@ class Settings:
     environment: str
     host: str
     port: int
+    #: Test/dev escape hatch relaxing strict image-digest pinning.
+    allow_unpinned_images: bool = field(default=DEFAULT_ALLOW_UNPINNED_IMAGES)
     #: Raw ISO-8601 sources retained for diagnostics / round-tripping.
     max_timeout_raw: str = field(default=DEFAULT_MAX_TIMEOUT)
     idempotency_ttl_raw: str = field(default=DEFAULT_IDEMPOTENCY_TTL)
@@ -273,6 +283,18 @@ def _opt_int(name: str, env: dict[str, str], default: int, *, minimum: int | Non
     return value
 
 
+def _opt_bool(name: str, env: dict[str, str], default: bool) -> bool:
+    raw = env.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "off"}:
+        return False
+    raise SettingsError(f"{name} must be a boolean (got {raw!r})")
+
+
 def load_settings(env: dict[str, str] | None = None) -> Settings:
     """Parse a :class:`Settings` from the supplied env mapping (default ``os.environ``).
 
@@ -327,12 +349,16 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         environment=_opt_str(ENV_ENVIRONMENT, src, "development"),
         host=_opt_str(ENV_HOST, src, DEFAULT_HOST),
         port=_opt_int(ENV_PORT, src, DEFAULT_PORT, minimum=1),
+        allow_unpinned_images=_opt_bool(
+            ENV_ALLOW_UNPINNED_IMAGES, src, DEFAULT_ALLOW_UNPINNED_IMAGES
+        ),
         max_timeout_raw=max_timeout_raw,
         idempotency_ttl_raw=idempotency_ttl_raw,
     )
 
 
 __all__ = [
+    "DEFAULT_ALLOW_UNPINNED_IMAGES",
     "DEFAULT_ARTIFACT_MAX_BYTES",
     "DEFAULT_CPU_LIMIT",
     "DEFAULT_CPU_REQUEST",
@@ -346,6 +372,7 @@ __all__ = [
     "DEFAULT_OUTPUT_MAX_BYTES",
     "DEFAULT_PORT",
     "DEFAULT_TIER",
+    "ENV_ALLOW_UNPINNED_IMAGES",
     "ENV_ARTIFACT_STORE",
     "ENV_AUTHZ_ENDPOINT",
     "ENV_CATALOG_ENDPOINT",

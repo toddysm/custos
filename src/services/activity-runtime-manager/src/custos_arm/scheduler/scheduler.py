@@ -448,6 +448,7 @@ class ActivityScheduler:
             ),
             io_bridge_image=self._settings.io_bridge_image,
             deadline=deadline,
+            allow_unpinned_images=self._settings.allow_unpinned_images,
         )
 
     def _materialize(
