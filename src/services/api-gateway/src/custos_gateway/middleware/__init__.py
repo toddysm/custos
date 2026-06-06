@@ -13,6 +13,10 @@ from custos_gateway.middleware.auth import (
     is_auth_bypass_path,
     require_permission,
 )
+from custos_gateway.middleware.callctx_mint import (
+    MintedCallContext,
+    mint_call_context,
+)
 from custos_gateway.middleware.correlation import (
     CorrelationIdMiddleware,
     new_correlation_id,
@@ -25,9 +29,11 @@ from custos_gateway.middleware.workspace import (
 __all__ = [
     "AuthorizedCaller",
     "CorrelationIdMiddleware",
+    "MintedCallContext",
     "ResolvedWorkspace",
     "get_auth_client",
     "is_auth_bypass_path",
+    "mint_call_context",
     "new_correlation_id",
     "require_permission",
     "resolve_workspace",

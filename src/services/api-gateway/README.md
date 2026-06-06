@@ -15,7 +15,7 @@ Design: [`design/components/api-gateway/design.md`](../../../design/components/a
 
 **Phase A scaffold (AGW-IMPL-001, AGW-IMPL-002, AGW-IMPL-003) + Auth
 delegation & enforcement (AGW-IMPL-004, AGW-IMPL-005) + workspace resolution
-(AGW-IMPL-006)** — the `custos_gateway`
+(AGW-IMPL-006) + call-context minting (AGW-IMPL-007)** — the `custos_gateway`
 package, its `pyproject.toml` (ruff + mypy strict + pytest with a
 `--cov-fail-under=90` floor), the `python -m custos_gateway` entry point, the
 typed `Settings` + `load_settings()` loader over the design Configuration table,
@@ -29,9 +29,12 @@ dependency (verify-and-authorize per route, `principal` + `auditEventId` on
 `request.state`, webhook + auth-bootstrap bypass classifier), the
 URL-authoritative `resolve_workspace` dependency (path `{workspaceId}` binds
 `request.state.workspace_id`; a body naming a different workspace is rejected
-`400 workspace-mismatch`; unscoped routes resolve cleanly), and the CI gate
+`400 workspace-mismatch`; unscoped routes resolve cleanly), the
+`mint_call_context` dependency (one signed `x-custos-callctx` per authenticated
+request via `callctx.sign`, staged with `x-correlation-id` on the outbound Dapr
+metadata), and the CI gate
 (`.github/workflows/python-services.yml`) are in place. Subsequent tasks layer
-in call-context minting (Phase B), the cross-cutting
+in the cross-cutting
 write-path middleware (Phase C), the downstream router + route registry +
 webhook + device-code surfaces (Phase D), full `create_app` wiring + OpenAPI +
 observability (Phase E), and Helm wiring + verification + docs (Phase F).
@@ -53,6 +56,7 @@ src/custos_gateway/
   middleware/
     __init__.py    # cross-cutting middleware package
     auth.py        # require_permission dependency + bypass classifier
+    callctx_mint.py # signed x-custos-callctx minting + outbound metadata
     correlation.py # x-correlation-id ingress + UUIDv7 generation
     workspace.py   # URL-authoritative workspace resolver + mismatch guard
   clients/
@@ -68,6 +72,7 @@ tests/
   test_auth_client.py # Auth Service Dapr client + doubles
   test_auth_middleware.py # require_permission enforcement + bypass
   test_workspace_middleware.py # URL-authoritative workspace resolution
+  test_callctx_mint_middleware.py # signed call-context minting + metadata
 ```
 
 ## Development
