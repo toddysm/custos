@@ -46,16 +46,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final
 
 from fastapi import APIRouter, Depends, Request, Response
 
 from custos_gateway.clients.auth import AUTH_APP_ID
-from custos_gateway.errors import GatewayError, GatewayErrorCode
 from custos_gateway.middleware.auth import require_permission
 from custos_gateway.middleware.callctx_mint import OUTBOUND_METADATA_STATE_ATTR
 from custos_gateway.middleware.validate import is_publish_route
-from custos_gateway.router import DownstreamCall, DownstreamRouter
+from custos_gateway.router import DownstreamCall
+from custos_gateway.routes._forwarding import (
+    DOWNSTREAM_ROUTER_STATE_ATTR,
+    get_downstream_router,
+    shaped_response,
+)
 from custos_gateway.settings import (
     DEFAULT_BODY_MAX_BYTES_DEFAULT,
     DEFAULT_BODY_MAX_BYTES_PUBLISH,
@@ -63,8 +67,6 @@ from custos_gateway.settings import (
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
-
-    from custos_gateway.router import DownstreamResponse
 
 __all__ = [
     "AUTH_APP_ID",
@@ -90,11 +92,6 @@ WORKFLOW_APP_ID: Final[str] = "workflow-service"
 TRIGGER_APP_ID: Final[str] = "trigger-service"
 CONNECTOR_APP_ID: Final[str] = "connector-service"
 OBSERVABILITY_APP_ID: Final[str] = "observability-audit-service"
-
-#: ``app.state`` attribute holding the lifespan-owned
-#: :class:`~custos_gateway.router.DownstreamRouter`. Bound by
-#: :func:`custos_gateway.app.create_app` (AGW-IMPL-016).
-DOWNSTREAM_ROUTER_STATE_ATTR: Final[str] = "downstream_router"
 
 #: Methods that mutate state: they default to requiring an idempotency key and
 #: to the ``write`` rate-limit class.
@@ -541,37 +538,6 @@ def registry_required_permissions() -> frozenset[str]:
     return frozenset(spec.required_permission for spec in M1_ROUTE_REGISTRY)
 
 
-def _downstream_router(request: Request) -> DownstreamRouter:
-    """Return the lifespan-owned downstream router, or fail with 503.
-
-    The router is bound to ``app.state`` by the application factory
-    (AGW-IMPL-016); its absence means the gateway is not ready to forward.
-    """
-    router = getattr(request.app.state, DOWNSTREAM_ROUTER_STATE_ATTR, None)
-    if router is None:
-        raise GatewayError(
-            GatewayErrorCode.DOWNSTREAM_UNAVAILABLE,
-            detail="The gateway is not ready to forward requests.",
-        )
-    return cast(DownstreamRouter, router)
-
-
-def _shaped_response(reply: DownstreamResponse) -> Response:
-    """Wrap a shaped downstream reply in a Starlette response.
-
-    The downstream headers are already hop-by-hop-stripped and preserve repeated
-    headers (e.g. ``Set-Cookie``); they are copied verbatim and ``content-length``
-    is recomputed from the forwarded body.
-    """
-    response = Response(content=reply.body, status_code=reply.status_code)
-    raw: list[tuple[bytes, bytes]] = [
-        (name.encode("latin-1"), value.encode("latin-1")) for name, value in reply.headers
-    ]
-    raw.append((b"content-length", str(len(reply.body)).encode("latin-1")))
-    response.raw_headers[:] = raw
-    return response
-
-
 def _make_forwarder(app_id: str) -> Callable[[Request], Awaitable[Response]]:
     """Build the pass-through endpoint that forwards a request to ``app_id``.
 
@@ -582,7 +548,7 @@ def _make_forwarder(app_id: str) -> Callable[[Request], Awaitable[Response]]:
     """
 
     async def _forward(request: Request) -> Response:
-        downstream = _downstream_router(request)
+        downstream = get_downstream_router(request)
         body = await request.body()
         headers: dict[str, str] = {}
         outbound = getattr(request.state, OUTBOUND_METADATA_STATE_ATTR, None)
@@ -603,7 +569,7 @@ def _make_forwarder(app_id: str) -> Callable[[Request], Awaitable[Response]]:
                 body=body or None,
             )
         )
-        return _shaped_response(reply)
+        return shaped_response(reply)
 
     return _forward
 
