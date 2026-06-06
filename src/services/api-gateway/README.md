@@ -13,17 +13,18 @@ Design: [`design/components/api-gateway/design.md`](../../../design/components/a
 
 ## Status
 
-**Phase A scaffold (AGW-IMPL-001, AGW-IMPL-002)** — the `custos_gateway`
-package, its `pyproject.toml` (ruff + mypy strict + pytest with a
-`--cov-fail-under=90` floor), the `python -m custos_gateway` entry point, the
+**Phase A scaffold (AGW-IMPL-001, AGW-IMPL-002, AGW-IMPL-003)** — the
+`custos_gateway` package, its `pyproject.toml` (ruff + mypy strict + pytest with
+a `--cov-fail-under=90` floor), the `python -m custos_gateway` entry point, the
 typed `Settings` + `load_settings()` loader over the design Configuration table,
 the `create_app(*, settings=...)` factory with a lifespan readiness gate, the
-`/healthz` + `/readyz` probes, and the CI gate
+`/healthz` + `/readyz` probes, the locked RFC 7807 error taxonomy +
+`application/problem+json` envelope, the correlation-id ingress middleware
+(`x-correlation-id` on every response), and the CI gate
 (`.github/workflows/python-services.yml`) are in place. Subsequent tasks layer
-in the error envelope + correlation-id middleware (AGW-IMPL-003), Auth Service
-delegation + call-context minting (Phase B), the cross-cutting write-path
-middleware (Phase C), the downstream router + route registry + webhook +
-device-code surfaces (Phase D), full `create_app` wiring + OpenAPI +
+in Auth Service delegation + call-context minting (Phase B), the cross-cutting
+write-path middleware (Phase C), the downstream router + route registry +
+webhook + device-code surfaces (Phase D), full `create_app` wiring + OpenAPI +
 observability (Phase E), and Helm wiring + verification + docs (Phase F).
 
 Tracker: [#732](https://github.com/toddysm/custos/issues/732) —
@@ -39,11 +40,17 @@ src/custos_gateway/
   app.py           # create_app() FastAPI factory + lifespan readiness gate
   settings.py      # Settings dataclass + load_settings() over CUSTOS_GATEWAY_*
   health.py        # /healthz (liveness) + /readyz (readiness) probes
+  errors.py        # locked error taxonomy + RFC 7807 problem+json envelope
+  middleware/
+    __init__.py    # cross-cutting middleware package
+    correlation.py # x-correlation-id ingress + UUIDv7 generation
 tests/
-  conftest.py      # gateway_env + settings fixtures
-  test_scaffold.py # package-import + factory + CLI smoke tests
-  test_settings.py # configuration parsing + validation
-  test_app.py      # app factory + health probe behavior
+  conftest.py        # gateway_env + settings fixtures
+  test_scaffold.py   # package-import + factory + CLI smoke tests
+  test_settings.py   # configuration parsing + validation
+  test_app.py        # app factory + health probe behavior
+  test_errors.py     # error taxonomy grid + envelope rendering
+  test_correlation.py # correlation-id ingress + propagation
 ```
 
 ## Development

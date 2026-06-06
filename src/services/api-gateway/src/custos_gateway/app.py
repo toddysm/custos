@@ -18,7 +18,9 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 from custos_gateway._version import __version__
+from custos_gateway.errors import register_exception_handlers
 from custos_gateway.health import router as health_router
+from custos_gateway.middleware import CorrelationIdMiddleware
 from custos_gateway.settings import Settings, load_settings
 
 if TYPE_CHECKING:
@@ -62,6 +64,11 @@ def create_app(*, settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = effective_settings
     app.state.ready = False
+
+    # The correlation middleware runs outermost so every response — success,
+    # health probe, or Problem+JSON error — carries the x-correlation-id header.
+    app.add_middleware(CorrelationIdMiddleware)
+    register_exception_handlers(app)
 
     app.include_router(health_router)
     return app
