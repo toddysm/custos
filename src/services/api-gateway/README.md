@@ -17,7 +17,8 @@ Design: [`design/components/api-gateway/design.md`](../../../design/components/a
 delegation & enforcement (AGW-IMPL-004, AGW-IMPL-005) + workspace resolution
 (AGW-IMPL-006) + call-context minting (AGW-IMPL-007) + startup permission
 validation (AGW-IMPL-008) + write-path idempotency (AGW-IMPL-009) + write-path
-rate limiting (AGW-IMPL-010) + request validation (AGW-IMPL-011)** — the `custos_gateway`
+rate limiting (AGW-IMPL-010) + request validation (AGW-IMPL-011) + downstream
+router (AGW-IMPL-012)** — the `custos_gateway`
 package, its `pyproject.toml` (ruff + mypy strict + pytest with a
 `--cov-fail-under=90` floor), the `python -m custos_gateway` entry point, the
 typed `Settings` + `load_settings()` loader over the design Configuration table,
@@ -52,7 +53,13 @@ bounded with LRU eviction to bound memory), the ingress Request Validator
 workflow/template publish — rejecting oversized bodies `413 body-too-large`,
 requires a JSON content type on standard write routes `415
 unsupported-media-type`, and classifies the webhook + auth-bootstrap raw-body
-families that bypass content-type enforcement), and the
+families that bypass content-type enforcement), the Downstream Router
+(`router.py` forwards each request to its owning component over Dapr service
+invocation using the lifespan-owned `httpx.AsyncClient` — carrying the signed
+`x-custos-callctx` + `x-correlation-id` headers — passes any non-server-error
+downstream response through raw, body + status + end-to-end headers, and masks a
+downstream `5xx` or sidecar transport error as `503 downstream-unavailable`),
+and the
 CI gate
 (`.github/workflows/python-services.yml`) are in place. Subsequent tasks layer
 in the remaining cross-cutting
@@ -74,6 +81,7 @@ src/custos_gateway/
   settings.py      # Settings dataclass + load_settings() over CUSTOS_GATEWAY_*
   health.py        # /healthz (liveness) + /readyz (readiness) probes
   errors.py        # locked error taxonomy + RFC 7807 problem+json envelope
+  router.py        # downstream Dapr router + response shaper (raw 2xx / 503)
   middleware/
     __init__.py    # cross-cutting middleware package
     auth.py        # require_permission dependency + bypass classifier
@@ -102,6 +110,7 @@ tests/
   test_idempotency_middleware.py # write-path dedup reserve/complete + hashing
   test_ratelimit_middleware.py # token-bucket rate limiting + RateLimit headers
   test_validate_middleware.py # body-size + content-type + route classification
+  test_router.py # downstream Dapr router pass-through + 503 mapping
 ```
 
 ## Development
