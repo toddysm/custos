@@ -88,6 +88,7 @@ are parsed and validated to positive `timedelta` values.
 | `ARM_SANDBOX_NAMESPACE` | yes | — | Kubernetes namespace for activity `Job`s. |
 | `ARM_SIDECAR_IMAGE` | yes | — | Connector sidecar image injected into every activity Pod. |
 | `ARM_IO_BRIDGE_IMAGE` | no | `busybox:1.37.0@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028` | Image for the io-bridge input-injector init container and output-collector native sidecar; override to point at an internal mirror. |
+| `ARM_ALLOW_UNPINNED_IMAGES` | no | `False` | Test/dev escape hatch: when `true`, a digest-less activity image renders tag-only with `imagePullPolicy: IfNotPresent` instead of being rejected. Leave `false` in production so every activity runs digest-pinned (content-addressed) bits. |
 | `ARM_DEFAULT_TIER` | no | `process` | Cluster-default isolation tier (`process`/`vm`/`microvm`). |
 | `ARM_RUNTIME_CLASS_PROCESS` | no | (empty) | `RuntimeClass` for the `process` tier. |
 | `ARM_RUNTIME_CLASS_VM` | no | (empty) | `RuntimeClass` for the `vm` tier (empty = unavailable). |

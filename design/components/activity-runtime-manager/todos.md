@@ -34,7 +34,7 @@ Tracker: ARM-IMPL-000 (#591). Plan: [implementation-plan.md](implementation-plan
 Tracker: ARM-IMPL-000-IO-BRIDGE (#762). Plan: [implementation-plan-io-bridge.md](implementation-plan-io-bridge.md). Origin: #613.
 
 - [x] ARM-IMPL-023 (#754): Add io-bridge helper containers to the activity Job
-- [F] ARM-IMPL-024 (#755): Test/dev unpinned-image rendering path
+- [x] ARM-IMPL-024 (#755): Test/dev unpinned-image rendering path
 - [F] ARM-IMPL-025 (#756): Stream inputs into the pod (exec tar -x + sentinel)
 - [F] ARM-IMPL-026 (#757): Stream outputs out of the pod (exec tar -c from sidecar)
 - [F] ARM-IMPL-027 (#758): Richer e2e activity image + CI load

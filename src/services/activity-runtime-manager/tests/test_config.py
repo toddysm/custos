@@ -7,6 +7,7 @@ from datetime import timedelta
 import pytest
 
 from custos_arm.config import (
+    DEFAULT_ALLOW_UNPINNED_IMAGES,
     DEFAULT_ARTIFACT_MAX_BYTES,
     DEFAULT_CPU_LIMIT,
     DEFAULT_CPU_REQUEST,
@@ -50,6 +51,9 @@ def test_load_settings_applies_documented_defaults() -> None:
     assert settings.io_bridge_image == DEFAULT_IO_BRIDGE_IMAGE
     # The default io-bridge image must be digest-pinned for reproducibility.
     assert "@sha256:" in settings.io_bridge_image
+    assert settings.allow_unpinned_images == DEFAULT_ALLOW_UNPINNED_IMAGES
+    # Production must reject unpinned images by default.
+    assert settings.allow_unpinned_images is False
 
 
 def test_load_settings_reads_required_and_optional_values() -> None:
@@ -72,6 +76,23 @@ def test_load_settings_reads_required_and_optional_values() -> None:
 def test_io_bridge_image_override_is_honored() -> None:
     settings = load_settings(_env(ARM_IO_BRIDGE_IMAGE="registry.internal/io-bridge@sha256:beef"))
     assert settings.io_bridge_image == "registry.internal/io-bridge@sha256:beef"
+
+
+@pytest.mark.parametrize("raw", ["true", "1", "yes", "on", "TRUE", "On"])
+def test_allow_unpinned_images_truthy_values(raw: str) -> None:
+    settings = load_settings(_env(ARM_ALLOW_UNPINNED_IMAGES=raw))
+    assert settings.allow_unpinned_images is True
+
+
+@pytest.mark.parametrize("raw", ["false", "0", "no", "off", "FALSE", "Off"])
+def test_allow_unpinned_images_falsy_values(raw: str) -> None:
+    settings = load_settings(_env(ARM_ALLOW_UNPINNED_IMAGES=raw))
+    assert settings.allow_unpinned_images is False
+
+
+def test_allow_unpinned_images_rejects_non_boolean() -> None:
+    with pytest.raises(SettingsError, match="ARM_ALLOW_UNPINNED_IMAGES must be a boolean"):
+        load_settings(_env(ARM_ALLOW_UNPINNED_IMAGES="maybe"))
 
 
 @pytest.mark.parametrize(
