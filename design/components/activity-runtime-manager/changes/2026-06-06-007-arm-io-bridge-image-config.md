@@ -29,7 +29,7 @@ Added one row to the §Configuration table:
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `ARM_IO_BRIDGE_IMAGE` | No | `busybox:1.37.0@sha256:9532d8c3…96b16028` | Image for the io-bridge input-injector init container and output-collector native sidecar; override to point at an internal mirror. Digest-pinned by default. |
+| `ARM_IO_BRIDGE_IMAGE` | No | `busybox:1.37.0@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028` | Image for the io-bridge input-injector init container and output-collector native sidecar; override to point at an internal mirror. Digest-pinned by default. |
 
 The default is digest-pinned (content-addressed) so the bridge containers run
 fixed bits; operators override it only to point at an internal mirror of the

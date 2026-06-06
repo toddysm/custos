@@ -90,7 +90,7 @@ are parsed and validated to positive `timedelta` values.
 | `ARM_SANDBOX_NAMESPACE` | yes | — | Kubernetes namespace for activity `Job`s. |
 | `ARM_SIDECAR_IMAGE` | yes | — | Connector sidecar image injected into every activity Pod. |
 | `ARM_IO_BRIDGE_IMAGE` | no | `busybox:1.37.0@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028` | Image for the io-bridge input-injector init container and output-collector native sidecar; override to point at an internal mirror. |
-| `ARM_ALLOW_UNPINNED_IMAGES` | no | `False` | Test/dev escape hatch: when `true`, a digest-less activity image renders tag-only with `imagePullPolicy: IfNotPresent` instead of being rejected. Leave `false` in production so every activity runs digest-pinned (content-addressed) bits. |
+| `ARM_ALLOW_UNPINNED_IMAGES` | no | `False` | Test/dev escape hatch: when `true`, ARM renders the activity image reference tag-only with `imagePullPolicy: IfNotPresent` — ignoring the manifest digest pin — so a locally `kind load`ed image can run. Leave `false` in production so every activity runs digest-pinned (content-addressed) bits. |
 | `ARM_DEFAULT_TIER` | no | `process` | Cluster-default isolation tier (`process`/`vm`/`microvm`). |
 | `ARM_RUNTIME_CLASS_PROCESS` | no | (empty) | `RuntimeClass` for the `process` tier. |
 | `ARM_RUNTIME_CLASS_VM` | no | (empty) | `RuntimeClass` for the `vm` tier (empty = unavailable). |
@@ -142,10 +142,11 @@ finalized `outputs` against the output JSON Schema. A downstream step's input
 so the consuming activity reads a plain local file.
 
 **Image pinning.** Production activities always run digest-pinned
-(content-addressed) bits — a manifest without a runtime digest is rejected. The
-`ARM_ALLOW_UNPINNED_IMAGES` escape hatch is a test/dev affordance only (for a
-locally `kind load`ed image that has no registry digest to pin against); leave it
-`false` in production.
+(content-addressed) bits — ARM renders the activity image `tag@digest` from the
+manifest. The `ARM_ALLOW_UNPINNED_IMAGES` escape hatch is a test/dev affordance
+only: when set, ARM renders the image reference tag-only (ignoring the manifest
+digest pin) so a locally `kind load`ed image, which has no registry digest to pin
+against, can run. Leave it `false` in production.
 
 ## Development
 

@@ -876,7 +876,7 @@ The return value of `ScheduleActivity` mirrors the Workflow Service's `ActivityR
 | `ARM_IDEMPOTENCY_TTL` | No | `PT24H` | Retention of terminal execution records for replay dedup. |
 | `ARM_SIDECAR_IMAGE` | Yes | — | Connector sidecar image injected into every activity Pod. |
 | `ARM_IO_BRIDGE_IMAGE` | No | `busybox:1.37.0@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028` | Image for the io-bridge input-injector init container and output-collector native sidecar; override to point at an internal mirror. Digest-pinned by default. |
-| `ARM_ALLOW_UNPINNED_IMAGES` | No | `false` | **Test/dev escape hatch.** When `true`, a digest-less activity image renders tag-only with `imagePullPolicy: IfNotPresent` instead of being rejected. Production stays strictly digest-pinned (content-addressed) — leave `false`. |
+| `ARM_ALLOW_UNPINNED_IMAGES` | No | `false` | **Test/dev escape hatch.** When `true`, ARM renders the activity image reference **tag-only** with `imagePullPolicy: IfNotPresent` — ignoring the manifest digest pin — so a locally `kind load`ed image (which has no registry digest to pin against) can run. Production stays strictly digest-pinned (content-addressed) — leave `false`. |
 | `ENVIRONMENT` | No | `development` | Operational env tag. The dev-shim refuses to start when this is `production`. |
 | `HOST` | No | `0.0.0.0` | Address the service binds to. |
 | `PORT` | No | `8080` | Port the service listens on. |

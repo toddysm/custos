@@ -11,21 +11,21 @@ Status: open
 
 Records the `ARM_ALLOW_UNPINNED_IMAGES` configuration variable added while
 implementing the ARM↔pod I/O bridge (#613, tracker #762). The knob is a
-**test/dev-only** escape hatch that lets a digest-less activity image render
-tag-only (with `imagePullPolicy: IfNotPresent`) instead of being rejected — it
-exists so a locally `kind load`ed image, which has no registry digest to pin
-against, can run in the integration suite. **Production remains strictly
-digest-pinned**: with the flag at its `false` default, a manifest without a
-runtime digest is rejected, so every production activity runs content-addressed
-bits. The design's §Configuration table is updated to stay authoritative.
-Version 6 → 7.
+**test/dev-only** escape hatch that makes ARM render the activity image
+reference **tag-only** (with `imagePullPolicy: IfNotPresent`) — ignoring the
+manifest digest pin — so a locally `kind load`ed image, which has no registry
+digest to pin against, can run in the integration suite. **Production remains
+strictly digest-pinned**: with the flag at its `false` default, ARM renders the
+image `tag@digest` from the manifest, so every production activity runs
+content-addressed bits. The design's §Configuration table is updated to stay
+authoritative. Version 6 → 7.
 
 ## Before
 
 The §Configuration table had no entry for an unpinned-image affordance. ARM
-always required a manifest runtime digest, which blocked the `kind`-based
-end-to-end output round-trip tests (#613) where the contract image is loaded
-locally and has no registry digest.
+always rendered the activity image `tag@digest` from the manifest, which blocked
+the `kind`-based end-to-end output round-trip tests (#613) where the contract
+image is loaded locally and has no registry digest to pin against.
 
 ## After
 
@@ -33,11 +33,11 @@ Added one row to the §Configuration table:
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `ARM_ALLOW_UNPINNED_IMAGES` | No | `false` | **Test/dev escape hatch.** When `true`, a digest-less activity image renders tag-only with `imagePullPolicy: IfNotPresent` instead of being rejected. Production stays strictly digest-pinned (content-addressed) — leave `false`. |
+| `ARM_ALLOW_UNPINNED_IMAGES` | No | `false` | **Test/dev escape hatch.** When `true`, ARM renders the activity image reference tag-only with `imagePullPolicy: IfNotPresent` — ignoring the manifest digest pin — so a locally `kind load`ed image can run. Production stays strictly digest-pinned (content-addressed) — leave `false`. |
 
-Production posture is unchanged: digest-pinning is mandatory by default. The
-escape hatch only relaxes pinning when an operator explicitly sets the flag, and
-provenance (the resolved digest recorded from the manifest) is unaffected.
+Production posture is unchanged: digest-pinning is the default. The escape hatch
+only relaxes pinning when an operator explicitly sets the flag, and provenance
+(the resolved digest recorded from the manifest) is unaffected.
 
 ## Impact
 
