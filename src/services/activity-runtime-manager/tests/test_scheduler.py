@@ -36,6 +36,7 @@ from custos_arm.scheduler import (
     ActivityScheduler,
     CancelOutcome,
     FilesystemArtifactReader,
+    FilesystemInputArtifactWriter,
     FilesystemSecretSink,
     ScheduleRequest,
     error_envelope_for,
@@ -83,6 +84,19 @@ class _FakeMetadataStore:
 
 class _StubArtifactStore:
     """An artifact store that must never be touched (no artifacts declared)."""
+
+    async def upload(self, **_kwargs: Any) -> Any:  # pragma: no cover - guard
+        raise AssertionError("artifact upload should not be called")
+
+
+class _FetchArtifactStore:
+    """An artifact-store client that serves seeded blobs for input materialization."""
+
+    def __init__(self, blobs: dict[str, bytes]) -> None:
+        self._blobs = blobs
+
+    async def fetch(self, workspace_id: str, artifact_id: str) -> bytes:
+        return self._blobs[artifact_id]
 
     async def upload(self, **_kwargs: Any) -> Any:  # pragma: no cover - guard
         raise AssertionError("artifact upload should not be called")
@@ -571,6 +585,41 @@ async def test_filesystem_artifact_reader_streams(tmp_path: Path) -> None:
     assert reader.has("missing") is False
     chunks = [chunk async for chunk in reader.open("report")]
     assert b"".join(chunks) == b"hello world"
+
+
+async def test_filesystem_input_artifact_writer_stages_under_artifacts(tmp_path: Path) -> None:
+    writer = FilesystemInputArtifactWriter(tmp_path)
+    await writer.write("greeting.txt", b"hello, custos\n")
+
+    path = tmp_path / "artifacts" / "greeting.txt"
+    assert path.read_bytes() == b"hello, custos\n"
+
+
+async def test_input_artifact_refs_are_staged_before_start(tmp_path: Path) -> None:
+    driver = _FakeDriver(tmp_path, outputs=_success_outputs())
+    settings = _settings()
+    store = _FetchArtifactStore({"ws-1:abc": b"hello, custos\n"})
+    scheduler = ActivityScheduler(
+        resolver=_FakeResolver(_resolved()),
+        limiter=ResourceLimiter(settings),
+        broker=IOBroker(store, output_max_bytes=1_000_000),  # type: ignore[arg-type]
+        injector=SecretInjector(token_minter=SidecarTokenMinter()),
+        mapper=ResultMapper(),
+        dispatcher=RuntimeDriverDispatcher((driver,)),
+        repository=_repo(),
+        settings=settings,
+        now=lambda: _NOW,
+    )
+    inputs = {
+        "consume": "greeting.txt",
+        "artifact": {"kind": "ArtifactRef", "name": "greeting.txt", "id": "ws-1:abc"},
+    }
+
+    await scheduler.schedule(_request(inputs=inputs))
+
+    assert driver.handle is not None
+    staged = driver.handle.input_root / "artifacts" / "greeting.txt"
+    assert staged.read_bytes() == b"hello, custos\n"
 
 
 def test_read_outputs_returns_none_when_absent(tmp_path: Path) -> None:

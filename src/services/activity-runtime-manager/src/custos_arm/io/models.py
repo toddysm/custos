@@ -31,4 +31,19 @@ class OutputArtifactReader(Protocol):
         ...
 
 
-__all__ = ["OutputArtifactReader"]
+@runtime_checkable
+class InputArtifactWriter(Protocol):
+    """Write-only sink for upstream artifacts materialized under ``/custos/in/artifacts/``.
+
+    The broker fetches each consumed ``ArtifactRef`` input from the
+    ``ArtifactStoreProvider`` and hands the bytes to this writer, keeping the
+    broker independent of the sandbox filesystem (the Scheduler owns that
+    boundary, just as it does for produced outputs).
+    """
+
+    async def write(self, name: str, data: bytes) -> None:
+        """Materialize ``data`` as the input artifact named ``name``."""
+        ...
+
+
+__all__ = ["InputArtifactWriter", "OutputArtifactReader"]

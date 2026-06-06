@@ -105,12 +105,31 @@ class FilesystemArtifactReader:
                 yield chunk
 
 
+class FilesystemInputArtifactWriter:
+    """An :class:`~custos_arm.io.InputArtifactWriter` over ``/custos/in/artifacts``.
+
+    The input bridge tars the whole ``input_root`` into the pod, so an artifact
+    staged here lands at ``/custos/in/artifacts/<name>`` for the consuming
+    activity to read as a local file.
+    """
+
+    def __init__(self, input_root: Path) -> None:
+        self._artifacts_root = input_root / ARTIFACTS_SUBDIR
+
+    async def write(self, name: str, data: bytes) -> None:
+        """Materialize ``data`` as the input artifact named ``name``."""
+        path = self._artifacts_root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+
+
 __all__ = [
     "ARTIFACTS_SUBDIR",
     "CTX_FILENAME",
     "INPUTS_FILENAME",
     "OUTPUTS_FILENAME",
     "FilesystemArtifactReader",
+    "FilesystemInputArtifactWriter",
     "FilesystemSecretSink",
     "read_outputs",
     "write_ctx",

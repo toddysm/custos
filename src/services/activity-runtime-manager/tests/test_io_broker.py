@@ -16,6 +16,7 @@ from custos_spl.interfaces.artifact_store import ArtifactDescriptor, ArtifactSto
 from custos_arm.contract.envelope import ActivitySpec, OutputsEnvelope, StepRef
 from custos_arm.contract.errors import ErrorClass
 from custos_arm.io import (
+    InputInvalidArtifactRefError,
     InputSchemaViolationError,
     IOBroker,
     OutputInvalidArtifactRefError,
@@ -138,7 +139,7 @@ class _FakeArtifactStore:
     def get(self, workspace_id: WorkspaceId, artifact_id: ArtifactId) -> AsyncIterator[bytes]:
         return self._stream(artifact_id)
 
-    async def _stream(self, artifact_id: str) -> AsyncIterator[bytes]:  # pragma: no cover - unused
+    async def _stream(self, artifact_id: str) -> AsyncIterator[bytes]:
         if artifact_id not in self.blobs:
             raise ArtifactNotFound(f"no such artifact {artifact_id}")
         yield self.blobs[artifact_id]
@@ -216,6 +217,113 @@ def test_materialize_inputs_rejects_invalid() -> None:
             inputs={"severity": "nope"},
             input_schema=_INPUT_SCHEMA,
         )
+
+
+# ---------------------------------------------------------------------------
+# Input side — downstream ArtifactRef materialization
+# ---------------------------------------------------------------------------
+
+
+class _FakeWriter:
+    """Records the input artifacts the broker stages under ``/custos/in``."""
+
+    def __init__(self) -> None:
+        self.written: dict[str, bytes] = {}
+
+    async def write(self, name: str, data: bytes) -> None:
+        self.written[name] = data
+
+
+def _seeded_broker(blobs: dict[str, bytes]) -> tuple[IOBroker, _FakeWriter]:
+    store = _FakeArtifactStore()
+    store.blobs.update(blobs)
+    client = ArtifactStoreClient(store, max_bytes=5_368_709_120)  # type: ignore[arg-type]
+    return IOBroker(client, output_max_bytes=1_048_576), _FakeWriter()
+
+
+async def test_materialize_input_artifacts_fetches_and_writes() -> None:
+    broker, writer = _seeded_broker({"ws-1:abc": b"hello, custos\n"})
+    inputs = {
+        "consume": "greeting.txt",
+        "artifact": {"kind": "ArtifactRef", "name": "greeting.txt", "id": "ws-1:abc"},
+    }
+
+    materialized = await broker.materialize_input_artifacts(
+        inputs=inputs, workspace_id="ws-1", writer=writer
+    )
+
+    assert materialized == ("greeting.txt",)
+    assert writer.written == {"greeting.txt": b"hello, custos\n"}
+
+
+async def test_materialize_input_artifacts_walks_nested_refs() -> None:
+    broker, writer = _seeded_broker({"ws-1:a": b"A", "ws-1:b": b"B"})
+    inputs = {
+        "items": [
+            {"ref": {"kind": "ArtifactRef", "name": "a", "id": "ws-1:a"}},
+            {"ref": {"kind": "ArtifactRef", "name": "b", "id": "ws-1:b"}},
+        ]
+    }
+
+    materialized = await broker.materialize_input_artifacts(
+        inputs=inputs, workspace_id="ws-1", writer=writer
+    )
+
+    assert set(materialized) == {"a", "b"}
+    assert writer.written == {"a": b"A", "b": b"B"}
+
+
+async def test_materialize_input_artifacts_noop_without_refs() -> None:
+    broker, writer = _seeded_broker({})
+
+    materialized = await broker.materialize_input_artifacts(
+        inputs={"message": "hi"}, workspace_id="ws-1", writer=writer
+    )
+
+    assert materialized == ()
+    assert writer.written == {}
+
+
+async def test_materialize_input_artifacts_rejects_missing_id() -> None:
+    broker, writer = _seeded_broker({})
+    inputs = {"artifact": {"kind": "ArtifactRef", "name": "greeting.txt"}}
+
+    with pytest.raises(InputInvalidArtifactRefError) as exc:
+        await broker.materialize_input_artifacts(inputs=inputs, workspace_id="ws-1", writer=writer)
+
+    assert exc.value.code == "input.invalid_artifact_ref"
+    assert exc.value.error_class is ErrorClass.PERMANENT
+
+
+async def test_materialize_input_artifacts_rejects_missing_name() -> None:
+    broker, writer = _seeded_broker({})
+    inputs = {"artifact": {"kind": "ArtifactRef", "id": "ws-1:abc"}}
+
+    with pytest.raises(InputInvalidArtifactRefError):
+        await broker.materialize_input_artifacts(inputs=inputs, workspace_id="ws-1", writer=writer)
+
+
+@pytest.mark.parametrize("bad_name", ["../escape", "a/b", "..", ".", "a\\b"])
+async def test_materialize_input_artifacts_rejects_unsafe_name(bad_name: str) -> None:
+    broker, writer = _seeded_broker({"ws-1:abc": b"x"})
+    inputs = {"artifact": {"kind": "ArtifactRef", "name": bad_name, "id": "ws-1:abc"}}
+
+    with pytest.raises(InputInvalidArtifactRefError):
+        await broker.materialize_input_artifacts(inputs=inputs, workspace_id="ws-1", writer=writer)
+
+
+async def test_materialize_input_artifacts_maps_missing_blob_to_permanent() -> None:
+    # ``id`` is well-formed but the store has no such blob — a permanent input
+    # problem, not a retryable system.sandbox_failure.
+    broker, writer = _seeded_broker({})
+    inputs = {"artifact": {"kind": "ArtifactRef", "name": "greeting.txt", "id": "ws-1:missing"}}
+
+    with pytest.raises(InputInvalidArtifactRefError) as exc:
+        await broker.materialize_input_artifacts(inputs=inputs, workspace_id="ws-1", writer=writer)
+
+    assert exc.value.code == "input.invalid_artifact_ref"
+    assert exc.value.error_class is ErrorClass.PERMANENT
+    assert writer.written == {}
 
 
 # ---------------------------------------------------------------------------

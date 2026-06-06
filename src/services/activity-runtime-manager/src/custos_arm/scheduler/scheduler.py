@@ -77,6 +77,7 @@ from custos_arm.store import ActivityExecution, ExecutionRepository, ExecutionSt
 from .errors import synthesize_failure
 from .fsio import (
     FilesystemArtifactReader,
+    FilesystemInputArtifactWriter,
     FilesystemSecretSink,
     read_outputs,
     write_ctx,
@@ -296,6 +297,7 @@ class ActivityScheduler:
                         handle=handle, resolved=resolved, driver=driver, deadline=deadline
                     )
                     self._materialize(request, resolved, handle, deadline)
+                    await self._materialize_input_artifacts(request, handle)
                     await self._inject(request, resolved, handle)
                 with observe_stage(STAGE_RUN):
                     await self._ensure(key, ExecutionState.RUNNING)
@@ -487,6 +489,20 @@ class ActivityScheduler:
             }
         )
         write_ctx(handle.input_root, ctx)
+
+    async def _materialize_input_artifacts(
+        self, request: ScheduleRequest, handle: SandboxHandle
+    ) -> None:
+        """Stage every consumed ``ArtifactRef`` input under ``/custos/in/artifacts``.
+
+        Runs before ``start()`` so the input bridge streams the materialized
+        files into the pod alongside ``inputs.json``.
+        """
+        await self._broker.materialize_input_artifacts(
+            inputs=dict(request.inputs),
+            workspace_id=request.workspace_id,
+            writer=FilesystemInputArtifactWriter(handle.input_root),
+        )
 
     async def _inject(
         self,

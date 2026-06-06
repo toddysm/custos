@@ -12,6 +12,7 @@ from __future__ import annotations
 from .errors import error_envelope_for, synthesize_failure
 from .fsio import (
     FilesystemArtifactReader,
+    FilesystemInputArtifactWriter,
     FilesystemSecretSink,
     read_outputs,
     write_ctx,
@@ -25,6 +26,7 @@ __all__ = [
     "CancelOutcome",
     "ExecutionKey",
     "FilesystemArtifactReader",
+    "FilesystemInputArtifactWriter",
     "FilesystemSecretSink",
     "ScheduleRequest",
     "error_envelope_for",
