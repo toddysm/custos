@@ -775,6 +775,29 @@ def test_collect_guards_oversize_output(tmp_path: Path) -> None:
         driver.collect(_handle(_plan(), tmp_path))
 
 
+def test_collect_wraps_undecodable_stream(tmp_path: Path) -> None:
+    core = MagicMock()
+    core.list_namespaced_pod.return_value = _pod_with_init([_init_running()])
+    # Not valid base64 — the raw decode error must surface as SandboxFailureError.
+    exec_ = _RecordingExec([ExecResult(exit_code=0, stdout=b"not base64!!")])
+    driver = _driver(core=core, staging_root=tmp_path, pod_exec=exec_)
+
+    with pytest.raises(SandboxFailureError):
+        driver.collect(_handle(_plan(), tmp_path))
+
+
+def test_collect_wraps_corrupt_tar_stream(tmp_path: Path) -> None:
+    core = MagicMock()
+    core.list_namespaced_pod.return_value = _pod_with_init([_init_running()])
+    # Valid base64 of bytes that are not a tar archive — extraction must fail
+    # as a SandboxFailureError rather than a raw tarfile.TarError.
+    exec_ = _RecordingExec([ExecResult(exit_code=0, stdout=base64.b64encode(b"x" * 2048))])
+    driver = _driver(core=core, staging_root=tmp_path, pod_exec=exec_)
+
+    with pytest.raises(SandboxFailureError):
+        driver.collect(_handle(_plan(), tmp_path))
+
+
 def test_cleanup_reaps_job_and_staging(tmp_path: Path) -> None:
     batch = MagicMock()
     plan = _plan()

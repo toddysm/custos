@@ -27,6 +27,7 @@ with fakes; the real ``kind``-cluster path is exercised by the
 from __future__ import annotations
 
 import base64
+import binascii
 import io
 import shutil
 import tarfile
@@ -404,15 +405,15 @@ class OciContainerDriver:
     def collect(self, handle: SandboxHandle) -> OutputBundle:
         """Stream the pod's ``/custos/out`` tree into ARM's host staging ``out/``.
 
-        After the activity container terminates the output collector init
-        container is still alive (it is a native sidecar that ignores the
-        kubelet's SIGTERM), so the tree it shares with the activity is
-        ``tar``-streamed out over ``pods/exec`` and unpacked into the host
-        ``out/`` the I/O Broker reads from. The collector pipes the archive
-        through ``base64`` so the binary tar survives the (text-framed) exec
-        channel without corruption. Once the tree is drained the monitor drops
-        :data:`OUTPUT_COLLECTED_SENTINEL` so the collector exits and the Pod
-        completes promptly.
+        After the activity container terminates the output collector is still
+        alive (it is a native sidecar — an ``initContainers`` entry with
+        ``restartPolicy: Always`` — that ignores the kubelet's SIGTERM), so the
+        tree it shares with the activity is ``tar``-streamed out over
+        ``pods/exec`` and unpacked into the host ``out/`` the I/O Broker reads
+        from. The collector pipes the archive through ``base64`` so the binary
+        tar survives the (text-framed) exec channel without corruption. Once the
+        tree is drained the monitor drops :data:`OUTPUT_COLLECTED_SENTINEL` so
+        the collector exits and the Pod completes promptly.
 
         Raises:
             SandboxFailureError: the collector Pod is gone, the exec failed, or
@@ -436,17 +437,27 @@ class OciContainerDriver:
                 f"(exit {result.exit_code}): {result.stderr}"
             )
 
-        archive = base64.b64decode(result.stdout)
+        try:
+            archive = base64.b64decode(result.stdout)
+        except (binascii.Error, ValueError) as exc:
+            raise SandboxFailureError(
+                f"failed to decode the output stream from sandbox {name!r}: {exc}"
+            ) from exc
         if len(archive) > self._max_output_bytes:
             raise SandboxFailureError(
                 f"sandbox {name!r} outputs ({len(archive)} bytes) exceed the "
                 f"{self._max_output_bytes}-byte limit"
             )
 
-        if archive:
-            _extract_tar(archive, handle.output_root)
-        else:
-            handle.output_root.mkdir(parents=True, exist_ok=True)
+        try:
+            if archive:
+                _extract_tar(archive, handle.output_root)
+            else:
+                handle.output_root.mkdir(parents=True, exist_ok=True)
+        except (tarfile.TarError, OSError) as exc:
+            raise SandboxFailureError(
+                f"failed to unpack the output tree from sandbox {name!r}: {exc}"
+            ) from exc
 
         # Release the collector so the Pod completes promptly instead of idling
         # out its termination grace window: it exits as soon as this appears.
@@ -533,7 +544,7 @@ class OciContainerDriver:
             client.close()
         return ExecResult(
             exit_code=returncode if returncode is not None else 0,
-            stdout="".join(stdout_parts).encode("ascii", "ignore"),
+            stdout="".join(stdout_parts).encode("utf-8"),
             stderr="".join(stderr_parts),
         )
 
