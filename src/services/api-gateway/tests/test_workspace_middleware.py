@@ -100,6 +100,26 @@ def test_body_referencing_other_workspace_is_mismatch() -> None:
 
 
 @pytest.mark.parametrize(
+    "content_type",
+    [
+        "application/json",
+        "application/json; charset=utf-8",
+        "application/vnd.custos.thing+json",
+        "application/problem+json",
+    ],
+)
+def test_mismatch_detected_for_all_json_media_types(content_type: str) -> None:
+    client = TestClient(_build_app())
+    resp = client.post(
+        "/v1/workspaces/ws_42/things",
+        content=b'{"workspaceId": "ws_99"}',
+        headers={"content-type": content_type},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "workspace-mismatch"
+
+
+@pytest.mark.parametrize(
     "payload",
     [
         {"name": "thing"},  # no workspaceId field

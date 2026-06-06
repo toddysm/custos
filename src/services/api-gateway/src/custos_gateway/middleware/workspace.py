@@ -68,6 +68,17 @@ class ResolvedWorkspace:
         return self.workspace_id is not None
 
 
+def _is_json_content_type(content_type: str) -> bool:
+    """Return ``True`` when ``content_type`` denotes a JSON payload.
+
+    Matches ``application/json`` and any structured-syntax-suffix JSON media
+    type (RFC 6839 ``+json``), e.g. ``application/vnd.custos.thing+json`` or
+    ``application/problem+json``, ignoring parameters like ``; charset=utf-8``.
+    """
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    return media_type == "application/json" or media_type.endswith("+json")
+
+
 async def _body_workspace_id(request: Request) -> str | None:
     """Return a workspace id named in the JSON body, or ``None``.
 
@@ -77,8 +88,7 @@ async def _body_workspace_id(request: Request) -> str | None:
     to reconcile against the URL. Reading the body caches it on the request, so
     the downstream router still sees it.
     """
-    content_type = request.headers.get("content-type", "")
-    if "application/json" not in content_type.lower():
+    if not _is_json_content_type(request.headers.get("content-type", "")):
         return None
     body = await request.body()
     if not body:
