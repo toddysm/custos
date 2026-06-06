@@ -169,7 +169,7 @@ _NATIVE_SIDECAR_RESTART_POLICY: Final[str] = "Always"
 _INPUT_BRIDGE_COMMAND: Final[tuple[str, ...]] = (
     "sh",
     "-c",
-    "while [ ! -e /custos/in/.ready ]; do sleep 0.1; done",
+    f"while [ ! -e {INPUT_READY_SENTINEL} ]; do sleep 0.1; done",
 )
 #: The output collector idles for the pod lifetime so the monitor can stream the
 #: outputs back out after the activity terminates; it exits cleanly on SIGTERM.
