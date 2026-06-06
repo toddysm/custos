@@ -43,6 +43,7 @@ from custos_arm.runtime.oci import (
     INPUT_BRIDGE_CONTAINER_NAME,
     INPUT_READY_SENTINEL,
     OUTPUT_BRIDGE_CONTAINER_NAME,
+    OUTPUT_COLLECTED_SENTINEL,
     ImagePullError,
     OciContainerDriver,
     SandboxFailureError,
@@ -701,12 +702,16 @@ def test_collect_streams_outputs_into_the_host_tree(tmp_path: Path) -> None:
     bundle = driver.collect(handle)
 
     assert bundle == OutputBundle(root=handle.output_root)
-    # The collector is tar'd out of the output sidecar of the discovered Pod.
-    (call,) = exec_.calls
-    assert call["pod"] == "sandbox-pod-abc12"
-    assert call["container"] == OUTPUT_BRIDGE_CONTAINER_NAME
-    assert call["command"] == ["sh", "-c", "tar -c -C /custos/out . | base64"]
-    assert call["stdin"] is None
+    # The collector is tar'd out of the output sidecar of the discovered Pod,
+    # then released with the drain sentinel so the Pod can complete.
+    tar_call, release_call = exec_.calls
+    assert tar_call["pod"] == "sandbox-pod-abc12"
+    assert tar_call["container"] == OUTPUT_BRIDGE_CONTAINER_NAME
+    assert tar_call["command"] == ["sh", "-c", "tar -c -C /custos/out . | base64"]
+    assert tar_call["stdin"] is None
+    assert release_call["container"] == OUTPUT_BRIDGE_CONTAINER_NAME
+    assert release_call["command"] == ["touch", OUTPUT_COLLECTED_SENTINEL]
+    assert release_call["stdin"] is None
     # The streamed tree lands on ARM's host filesystem.
     assert (handle.output_root / "outputs.json").read_bytes() == b'{"ok": true}'
     assert (handle.output_root / "nested" / "a.txt").read_bytes() == b"hi"

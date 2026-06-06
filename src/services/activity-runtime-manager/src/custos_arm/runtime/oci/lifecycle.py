@@ -53,6 +53,7 @@ from custos_arm.runtime.oci.job import (
     INPUT_BRIDGE_CONTAINER_NAME,
     INPUT_READY_SENTINEL,
     OUTPUT_BRIDGE_CONTAINER_NAME,
+    OUTPUT_COLLECTED_SENTINEL,
     build_activity_job,
     job_name,
 )
@@ -404,11 +405,14 @@ class OciContainerDriver:
         """Stream the pod's ``/custos/out`` tree into ARM's host staging ``out/``.
 
         After the activity container terminates the output collector init
-        container is still alive (it is a native sidecar), so the tree it shares
-        with the activity is ``tar``-streamed out over ``pods/exec`` and unpacked
-        into the host ``out/`` the I/O Broker reads from. The collector pipes the
-        archive through ``base64`` so the binary tar survives the (text-framed)
-        exec channel without corruption.
+        container is still alive (it is a native sidecar that ignores the
+        kubelet's SIGTERM), so the tree it shares with the activity is
+        ``tar``-streamed out over ``pods/exec`` and unpacked into the host
+        ``out/`` the I/O Broker reads from. The collector pipes the archive
+        through ``base64`` so the binary tar survives the (text-framed) exec
+        channel without corruption. Once the tree is drained the monitor drops
+        :data:`OUTPUT_COLLECTED_SENTINEL` so the collector exits and the Pod
+        completes promptly.
 
         Raises:
             SandboxFailureError: the collector Pod is gone, the exec failed, or
@@ -443,6 +447,16 @@ class OciContainerDriver:
             _extract_tar(archive, handle.output_root)
         else:
             handle.output_root.mkdir(parents=True, exist_ok=True)
+
+        # Release the collector so the Pod completes promptly instead of idling
+        # out its termination grace window: it exits as soon as this appears.
+        self._exec(
+            namespace=namespace,
+            pod=str(pod.metadata.name),
+            container=OUTPUT_BRIDGE_CONTAINER_NAME,
+            command=["touch", OUTPUT_COLLECTED_SENTINEL],
+            stdin=None,
+        )
         return OutputBundle(root=handle.output_root)
 
     def cleanup(self, handle: SandboxHandle) -> None:

@@ -35,7 +35,14 @@ the driver later streams the contract filesystem over (the design locks the file
 * an **output-collector native sidecar** (an ``initContainers`` entry with
   ``restartPolicy: Always``, requiring Kubernetes >= 1.28) mounts ``/custos/out``
   and idles for the pod lifetime so the monitor can stream the outputs back out
-  after the activity terminates.
+  after the activity terminates. Because the kubelet SIGTERMs the sidecar the
+  instant the activity (the only regular container) exits, the collector
+  *ignores* SIGTERM and stays alive until the monitor drops
+  :data:`OUTPUT_COLLECTED_SENTINEL` to signal it has drained ``/custos/out``;
+  it then exits cleanly (the kubelet does not restart a sidecar that exits
+  during Pod termination) so the Pod completes promptly. The Pod's
+  ``terminationGracePeriodSeconds`` bounds how long it may linger if the
+  monitor never collects.
 
 Both helpers run with the same hardened :data:`HARDENED_SECURITY_CONTEXT` and use
 only the shared ``emptyDir`` contract volumes — no ``hostPath`` — so the activity
@@ -66,6 +73,7 @@ __all__ = [
     "JOB_NAME_PREFIX",
     "MANAGED_BY",
     "OUTPUT_BRIDGE_CONTAINER_NAME",
+    "OUTPUT_COLLECTED_SENTINEL",
     "SIDECAR_CONTAINER_NAME",
     "DuplicateMountError",
     "MissingBridgeMountError",
@@ -161,6 +169,19 @@ INPUT_READY_SENTINEL: Final[str] = "/custos/in/.ready"
 #: running for the pod lifetime, and is terminated once the activity exits.
 _NATIVE_SIDECAR_RESTART_POLICY: Final[str] = "Always"
 
+#: The monitor drops this sentinel into ``/custos/out`` once it has finished
+#: streaming the output tree out of the collector sidecar. The collector idles
+#: (ignoring SIGTERM) until it appears, then exits cleanly — releasing the Pod to
+#: complete instead of idling out its termination grace window.
+OUTPUT_COLLECTED_SENTINEL: Final[str] = "/custos/out/.collected"
+
+#: Upper bound (seconds) on how long the output collector may keep the Pod alive
+#: after the activity exits. The collector ignores SIGTERM so the monitor has a
+#: deterministic window to stream ``/custos/out`` out; the kubelet SIGKILLs it
+#: (force-completing the Pod) once this elapses — a backstop for a monitor that
+#: never collects.
+_OUTPUT_DRAIN_GRACE_SECONDS: Final[int] = 120
+
 #: The input injector owns the *writable* ``/custos/in`` mount the lifecycle
 #: monitor streams the input tree into, then blocks until the monitor drops the
 #: readiness sentinel (:data:`INPUT_READY_SENTINEL`). Because a regular init
@@ -171,12 +192,15 @@ _INPUT_BRIDGE_COMMAND: Final[tuple[str, ...]] = (
     "-c",
     f"while [ ! -e {INPUT_READY_SENTINEL} ]; do sleep 0.1; done",
 )
-#: The output collector idles for the pod lifetime so the monitor can stream the
-#: outputs back out after the activity terminates; it exits cleanly on SIGTERM.
+#: The output collector idles so the monitor can stream the outputs back out
+#: after the activity terminates. It *ignores* SIGTERM (the kubelet sends one the
+#: moment the activity — the only regular container — exits) so it stays alive
+#: long enough to be ``exec``'d, then exits cleanly once the monitor drops
+#: :data:`OUTPUT_COLLECTED_SENTINEL` to signal it has drained the tree.
 _OUTPUT_BRIDGE_COMMAND: Final[tuple[str, ...]] = (
     "sh",
     "-c",
-    'trap "exit 0" TERM; while true; do sleep 3600 & wait $!; done',
+    f'trap "" TERM; while [ ! -e {OUTPUT_COLLECTED_SENTINEL} ]; do sleep 0.2; done',
 )
 
 
@@ -221,6 +245,7 @@ def build_activity_job(
 
     pod_spec: dict[str, Any] = {
         "restartPolicy": "Never",
+        "terminationGracePeriodSeconds": _OUTPUT_DRAIN_GRACE_SECONDS,
         "automountServiceAccountToken": False,
         "enableServiceLinks": False,
         "hostNetwork": False,
