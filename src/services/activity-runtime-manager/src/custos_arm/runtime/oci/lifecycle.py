@@ -279,14 +279,15 @@ class OciContainerDriver:
         pod_name = self._await_input_bridge(namespace, name)
         archive = _tar_directory(handle.input_root)
 
-        # The raw tar is fed straight to ``tar -x``: the archive's end-of-archive
-        # marker lets ``tar`` finish and exit on its own, so we never have to
-        # half-close the exec stdin channel (which the client cannot do).
+        # The exec stdin channel cannot be half-closed by the Kubernetes client,
+        # so ``tar`` would block forever waiting for EOF. ``head -c <len>`` reads
+        # exactly the archive's bytes and then closes its end of the pipe, which
+        # gives ``tar`` a clean EOF and lets it extract and exit on its own.
         extracted = self._exec(
             namespace=namespace,
             pod=pod_name,
             container=INPUT_BRIDGE_CONTAINER_NAME,
-            command=["tar", "-x", "-C", "/custos/in"],
+            command=["sh", "-c", f"head -c {len(archive)} | tar -x -C /custos/in"],
             stdin=archive,
         )
         if extracted.exit_code != 0:

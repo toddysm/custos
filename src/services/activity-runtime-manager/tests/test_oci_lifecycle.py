@@ -371,10 +371,12 @@ def test_start_unsuspends_then_streams_inputs_and_writes_sentinel(tmp_path: Path
     assert stream_call["pod"] == "sandbox-pod-abc12"
     assert stream_call["namespace"] == plan.namespace
     assert stream_call["container"] == INPUT_BRIDGE_CONTAINER_NAME
-    assert stream_call["command"] == ["tar", "-x", "-C", "/custos/in"]
+    # ``head -c <len>`` closes the pipe so ``tar`` gets a clean EOF.
+    archive = stream_call["stdin"]
+    assert stream_call["command"] == ["sh", "-c", f"head -c {len(archive)} | tar -x -C /custos/in"]
 
     # The streamed raw tar round-trips the host input tree.
-    with tarfile.open(fileobj=io.BytesIO(stream_call["stdin"])) as tar:
+    with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
         assert sorted(tar.getnames()) == ["inputs.json", "nested", "nested/ctx.json"]
 
     # The sentinel that releases the input gate is written last.
