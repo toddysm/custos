@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from custos_gateway.clients.auth import AUTH_APP_ID
 from custos_gateway.errors import register_exception_handlers
 from custos_gateway.middleware.callctx_mint import OUTBOUND_METADATA_STATE_ATTR
-from custos_gateway.router import DownstreamResponse, DownstreamRouter
+from custos_gateway.router import DownstreamRouter
 from custos_gateway.routes import registry
 from custos_gateway.routes.registry import (
     CATALOG_APP_ID,
@@ -343,26 +343,6 @@ def _router_with(handler: httpx.MockTransport) -> DownstreamRouter:
         host="127.0.0.1",
         http_port=3500,
     )
-
-
-def test_shaped_response_preserves_status_body_and_repeated_headers() -> None:
-    reply = DownstreamResponse(
-        status_code=207,
-        headers=[
-            ("set-cookie", "a=1"),
-            ("set-cookie", "b=2"),
-            ("content-type", "application/json"),
-        ],
-        body=b'{"ok":true}',
-    )
-    response = registry._shaped_response(reply)
-    assert response.status_code == 207
-    assert response.body == b'{"ok":true}'
-    cookies = [value for name, value in response.raw_headers if name == b"set-cookie"]
-    assert cookies == [b"a=1", b"b=2"]
-    # content-length is recomputed from the forwarded body.
-    lengths = [value for name, value in response.raw_headers if name == b"content-length"]
-    assert lengths == [str(len(reply.body)).encode("latin-1")]
 
 
 def test_forwarder_passes_request_through_to_downstream() -> None:

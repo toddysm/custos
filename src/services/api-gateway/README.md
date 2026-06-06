@@ -18,7 +18,8 @@ delegation & enforcement (AGW-IMPL-004, AGW-IMPL-005) + workspace resolution
 (AGW-IMPL-006) + call-context minting (AGW-IMPL-007) + startup permission
 validation (AGW-IMPL-008) + write-path idempotency (AGW-IMPL-009) + write-path
 rate limiting (AGW-IMPL-010) + request validation (AGW-IMPL-011) + downstream
-router (AGW-IMPL-012) + route registry (AGW-IMPL-013)** — the `custos_gateway`
+router (AGW-IMPL-012) + route registry (AGW-IMPL-013) + webhook pass-through
+(AGW-IMPL-014)** — the `custos_gateway`
 package, its `pyproject.toml` (ruff + mypy strict + pytest with a
 `--cov-fail-under=90` floor), the `python -m custos_gateway` entry point, the
 typed `Settings` + `load_settings()` loader over the design Configuration table,
@@ -66,7 +67,15 @@ each carrying its owning Dapr `app_id`, `requiredPermission`,
 `build_registry_router()` mounts each one with its `require_permission`
 dependency, so every declared permission participates in the startup registry
 cross-check, plus a thin pass-through endpoint that forwards to the owning
-component via the downstream router and shapes the reply),
+component via the downstream router and shapes the reply), the anonymous Webhook
+Pass-through (`routes/webhook.py` mounts `POST /v1/webhooks/{connectorInstanceId}`
+with no `require_permission` dependency — the gateway's single anonymous ingress —
+enforcing a 1 MB body cap `413 body-too-large`, stripping `Authorization` (and the
+hop-by-hop / framing headers), appending the caller's source IP to
+`X-Forwarded-For`, generating/propagating an `x-correlation-id`, and forwarding
+the untouched body to Trigger Service via the downstream router without minting a
+call context — an unknown `{connectorInstanceId}` surfaces the downstream
+`404 webhook-route-not-found` raw),
 and the
 CI gate
 (`.github/workflows/python-services.yml`) are in place. Subsequent tasks layer
@@ -92,7 +101,9 @@ src/custos_gateway/
   router.py        # downstream Dapr router + response shaper (raw 2xx / 503)
   routes/
     __init__.py    # route registry package re-exports
+    _forwarding.py # shared downstream-router lookup + response shaper
     registry.py    # declarative M1 RouteSpec table + registry router factory
+    webhook.py     # anonymous POST /v1/webhooks/{connectorInstanceId} forward
   middleware/
     __init__.py    # cross-cutting middleware package
     auth.py        # require_permission dependency + bypass classifier
@@ -123,6 +134,8 @@ tests/
   test_validate_middleware.py # body-size + content-type + route classification
   test_router.py # downstream Dapr router pass-through + 503 mapping
   test_route_registry.py # M1 route registry contract + forwarding seam
+  test_forwarding.py # shared downstream-router lookup + response shaper
+  test_webhook.py # anonymous webhook pass-through forwarding + body cap
 ```
 
 ## Development
