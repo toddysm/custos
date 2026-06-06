@@ -22,6 +22,7 @@ headers on the forwarded call.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final
 
@@ -47,6 +48,8 @@ __all__ = [
     "is_transient_status",
     "shape_response_headers",
 ]
+
+logger = logging.getLogger("custos_gateway.router")
 
 #: Headers that are connection-scoped (RFC 9110 § 7.6.1, plus ``content-length``
 #: which the ASGI server recomputes from the raw body). They describe the hop to
@@ -84,15 +87,20 @@ def is_transient_status(status_code: int) -> bool:
     return status_code >= _TRANSIENT_STATUS_FLOOR
 
 
-def shape_response_headers(headers: Mapping[str, str]) -> list[tuple[str, str]]:
+def shape_response_headers(headers: httpx.Headers) -> list[tuple[str, str]]:
     """Drop hop-by-hop headers, returning the end-to-end response headers.
 
     The body is forwarded verbatim, so end-to-end headers — notably
     ``content-type`` and ``content-encoding`` — are preserved while
     connection-scoped headers (see :data:`HOP_BY_HOP_HEADERS`) are removed.
+    ``multi_items()`` is used so repeated headers (e.g. several ``set-cookie``)
+    are preserved as distinct entries rather than coalesced into one
+    comma-joined value.
     """
     return [
-        (name, value) for name, value in headers.items() if name.lower() not in HOP_BY_HOP_HEADERS
+        (name, value)
+        for name, value in headers.multi_items()
+        if name.lower() not in HOP_BY_HOP_HEADERS
     ]
 
 
@@ -166,19 +174,22 @@ class DownstreamRouter:
                 timeout=self.timeout,
             )
         except httpx.HTTPError as exc:
+            logger.warning("downstream %r unreachable via Dapr sidecar: %r", call.app_id, exc)
             raise GatewayError(
                 GatewayErrorCode.DOWNSTREAM_UNAVAILABLE,
                 detail=(
-                    f"Downstream component {call.app_id!r} could not be reached "
-                    f"via the Dapr sidecar: {exc!r}"
+                    f"Downstream component {call.app_id!r} is temporarily "
+                    "unavailable. Please retry."
                 ),
             ) from exc
 
         if is_transient_status(response.status_code):
+            logger.warning("downstream %r returned HTTP %d", call.app_id, response.status_code)
             raise GatewayError(
                 GatewayErrorCode.DOWNSTREAM_UNAVAILABLE,
                 detail=(
-                    f"Downstream component {call.app_id!r} returned HTTP {response.status_code}."
+                    f"Downstream component {call.app_id!r} is temporarily "
+                    "unavailable. Please retry."
                 ),
             )
 

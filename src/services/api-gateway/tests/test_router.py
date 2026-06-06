@@ -63,6 +63,21 @@ def test_shape_preserves_content_encoding() -> None:
     assert ("content-encoding", "gzip") in shaped
 
 
+def test_shape_preserves_repeated_headers() -> None:
+    # Multiple set-cookie headers must stay distinct, not coalesce into one
+    # comma-joined value, for true raw end-to-end pass-through.
+    raw = httpx.Headers(
+        [
+            ("set-cookie", "a=1"),
+            ("set-cookie", "b=2"),
+            ("content-type", "application/json"),
+        ]
+    )
+    shaped = shape_response_headers(raw)
+    cookies = [value for name, value in shaped if name.lower() == "set-cookie"]
+    assert cookies == ["a=1", "b=2"]
+
+
 # --- invoke: raw pass-through ------------------------------------------------
 
 
