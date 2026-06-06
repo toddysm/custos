@@ -13,14 +13,15 @@ from fastapi import FastAPI
 import custos_gateway
 from custos_gateway.__main__ import main
 from custos_gateway.app import create_app
+from custos_gateway.settings import Settings
 
 
 def test_package_exposes_version() -> None:
     assert custos_gateway.__version__ == "0.1.0"
 
 
-def test_create_app_returns_fastapi_instance() -> None:
-    app = create_app()
+def test_create_app_returns_fastapi_instance(settings: Settings) -> None:
+    app = create_app(settings=settings)
     assert isinstance(app, FastAPI)
     assert app.title == "Custos API Gateway"
     assert app.version == "0.1.0"
