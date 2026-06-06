@@ -60,6 +60,10 @@ def test_non_json_media_types_rejected(content_type: str) -> None:
     assert is_json_media_type(content_type) is False
 
 
+def test_missing_content_type_is_not_json() -> None:
+    assert is_json_media_type(None) is False
+
+
 # --- is_publish_route / resolve_body_limit -----------------------------------
 
 
@@ -129,6 +133,12 @@ def test_enforce_content_type_requires_json_on_write(method: str) -> None:
     assert error.status == 415
 
 
+def test_enforce_content_type_rejects_missing_content_type_on_write() -> None:
+    with pytest.raises(GatewayError) as excinfo:
+        enforce_content_type(method="POST", content_type=None)
+    assert excinfo.value.code is GatewayErrorCode.UNSUPPORTED_MEDIA_TYPE
+
+
 @pytest.mark.parametrize("content_type", ["application/json", "application/vnd.x+json"])
 def test_enforce_content_type_admits_json_write(content_type: str) -> None:
     enforce_content_type(method="POST", content_type=content_type)
@@ -136,7 +146,8 @@ def test_enforce_content_type_admits_json_write(content_type: str) -> None:
 
 @pytest.mark.parametrize("method", ["GET", "HEAD", "DELETE", "OPTIONS"])
 def test_enforce_content_type_skips_non_write_methods(method: str) -> None:
-    # Read methods carry no body; a non-JSON (or absent) content type is fine.
+    # These methods don't carry a JSON request body the gateway validates, so a
+    # non-JSON (or absent) content type is fine (DELETE included).
     enforce_content_type(method=method, content_type="text/plain")
 
 

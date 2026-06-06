@@ -87,13 +87,16 @@ def classify_route(path: str) -> RouteClass:
     return RouteClass.STANDARD
 
 
-def is_json_media_type(content_type: str) -> bool:
+def is_json_media_type(content_type: str | None) -> bool:
     """Return ``True`` when ``content_type`` denotes a JSON payload.
 
     Matches ``application/json`` and any structured-syntax-suffix JSON media
     type (RFC 6839 ``+json``), e.g. ``application/vnd.custos.thing+json``,
-    ignoring parameters such as ``; charset=utf-8``.
+    ignoring parameters such as ``; charset=utf-8``. A missing header (``None``)
+    is treated as non-JSON.
     """
+    if content_type is None:
+        return False
     media_type = content_type.split(";", 1)[0].strip().lower()
     return media_type == "application/json" or media_type.endswith("+json")
 
@@ -133,14 +136,14 @@ def enforce_body_size(body_size: int, limit: int) -> None:
 def enforce_content_type(
     *,
     method: str,
-    content_type: str,
+    content_type: str | None,
     route_class: RouteClass = RouteClass.STANDARD,
 ) -> None:
     """Require a JSON body on standard write routes; bypass raw-body families.
 
     Webhook and auth-bootstrap requests carry opaque or form-encoded bodies and
     are exempt. A read method (no body) is exempt. A standard write request must
-    declare a JSON content type.
+    declare a JSON content type; a missing (``None``) content type is rejected.
 
     Raises:
         GatewayError: ``unsupported-media-type`` (415) when a standard write
