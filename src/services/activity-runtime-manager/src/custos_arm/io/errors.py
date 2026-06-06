@@ -48,6 +48,12 @@ class InputSchemaViolationError(IOBrokerError):
     code: ClassVar[str] = "input.schema_violation"
 
 
+class InputInvalidArtifactRefError(IOBrokerError):
+    """A consumed input ``ArtifactRef`` is missing its ``name``/``id`` or names an unsafe path."""
+
+    code: ClassVar[str] = "input.invalid_artifact_ref"
+
+
 class OutputTooLargeError(IOBrokerError):
     """``outputs.json`` exceeds the ``ARM_OUTPUT_MAX_BYTES`` ceiling."""
 
@@ -68,6 +74,7 @@ class OutputInvalidArtifactRefError(IOBrokerError):
 
 __all__ = [
     "IOBrokerError",
+    "InputInvalidArtifactRefError",
     "InputSchemaViolationError",
     "OutputInvalidArtifactRefError",
     "OutputSchemaViolationError",

@@ -11,17 +11,20 @@ from __future__ import annotations
 
 from custos_arm.io.broker import IOBroker
 from custos_arm.io.errors import (
+    InputInvalidArtifactRefError,
     InputSchemaViolationError,
     IOBrokerError,
     OutputInvalidArtifactRefError,
     OutputSchemaViolationError,
     OutputTooLargeError,
 )
-from custos_arm.io.models import OutputArtifactReader
+from custos_arm.io.models import InputArtifactWriter, OutputArtifactReader
 
 __all__ = [
     "IOBroker",
     "IOBrokerError",
+    "InputArtifactWriter",
+    "InputInvalidArtifactRefError",
     "InputSchemaViolationError",
     "OutputArtifactReader",
     "OutputInvalidArtifactRefError",

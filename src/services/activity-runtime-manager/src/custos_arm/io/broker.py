@@ -35,12 +35,13 @@ from custos_arm.contract.envelope import (
     StepRef,
 )
 from custos_arm.io.errors import (
+    InputInvalidArtifactRefError,
     InputSchemaViolationError,
     OutputInvalidArtifactRefError,
     OutputSchemaViolationError,
     OutputTooLargeError,
 )
-from custos_arm.io.models import OutputArtifactReader
+from custos_arm.io.models import InputArtifactWriter, OutputArtifactReader
 from custos_arm.manifest.models import ActivityManifest
 from custos_arm.store.artifact import ArtifactRecord, ArtifactStoreClient
 
@@ -112,6 +113,67 @@ class IOBroker:
         """
         self.validate_inputs(inputs=inputs, input_schema=input_schema)
         return InputsEnvelope(activity=activity, step=step, inputs=inputs)
+
+    async def materialize_input_artifacts(
+        self,
+        *,
+        inputs: dict[str, Any],
+        workspace_id: str,
+        writer: InputArtifactWriter,
+    ) -> tuple[str, ...]:
+        """Fetch every consumed ``ArtifactRef`` input and stage it under ``/custos/in``.
+
+        Walks ``inputs`` for ``{"kind": "ArtifactRef", ...}`` objects an upstream
+        attempt already populated (``id``/``name``), fetches each blob by ``id``
+        from the :class:`ArtifactStoreClient`, and writes it through ``writer`` so
+        the consuming activity reads a local file at
+        ``/custos/in/artifacts/<name>`` rather than a store handle.
+
+        Returns:
+            The materialized artifact names, in document order.
+
+        Raises:
+            InputInvalidArtifactRefError: a consumed ``ArtifactRef`` is missing
+                its ``name``/``id`` or names an unsafe (path-separator / ``..``)
+                artifact name.
+        """
+        refs = self._collect_input_refs(inputs)
+        materialized: list[str] = []
+        for name, artifact_id in refs:
+            data = await self._store.fetch(workspace_id, artifact_id)
+            await writer.write(name, data)
+            materialized.append(name)
+        return tuple(materialized)
+
+    def _collect_input_refs(self, node: Any) -> list[tuple[str, str]]:
+        found: list[tuple[str, str]] = []
+        self._walk_input_refs(node, found)
+        return found
+
+    def _walk_input_refs(self, node: Any, found: list[tuple[str, str]]) -> None:
+        if isinstance(node, dict):
+            if node.get("kind") == "ArtifactRef":
+                found.append(self._input_ref(node))
+                return
+            for value in node.values():
+                self._walk_input_refs(value, found)
+        elif isinstance(node, list):
+            for item in node:
+                self._walk_input_refs(item, found)
+
+    @staticmethod
+    def _input_ref(node: dict[str, Any]) -> tuple[str, str]:
+        name = node.get("name")
+        if not isinstance(name, str) or not name:
+            raise InputInvalidArtifactRefError("input ArtifactRef is missing a 'name'")
+        if "/" in name or "\\" in name or name == ".." or name.startswith(("../", "..\\")):
+            raise InputInvalidArtifactRefError(
+                f"input ArtifactRef name {name!r} is not a safe artifact name"
+            )
+        artifact_id = node.get("id")
+        if not isinstance(artifact_id, str) or not artifact_id:
+            raise InputInvalidArtifactRefError(f"input ArtifactRef {name!r} is missing an 'id'")
+        return name, artifact_id
 
     # -- Output side ------------------------------------------------------
 

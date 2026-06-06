@@ -28,18 +28,19 @@ the current driver supports against a registry-less ``kind`` cluster:
   locally ``kind load``ed image is rendered tag-only via the test/dev
   ``ARM_ALLOW_UNPINNED_IMAGES`` escape hatch (a registry-less image cannot
   satisfy a digest pin).
-
-Downstream ``ArtifactRef`` materialization (the producer writes
-``/custos/out/artifacts/<name>``, ARM uploads it, and a consumer reads the
-rewritten ref) is the remaining follow-up and is intentionally out of scope
-here.
+* downstream ``ArtifactRef`` materialization — a producer attempt writes
+  ``/custos/out/artifacts/greeting.txt`` and emits an ``ArtifactRef``; ARM
+  uploads it and rewrites the ref with ``id``/``digest``/``size``/``mediaType``;
+  a consumer attempt receives that ref, ARM fetches the blob and stages it at
+  ``/custos/in/artifacts/greeting.txt``, and the consumer reads it back.
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
 import uuid
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -61,6 +62,7 @@ from custos_arm.runtime.oci import OciContainerDriver
 from custos_arm.scheduler import ActivityScheduler, ScheduleRequest
 from custos_arm.secrets import SecretInjector, SidecarTokenMinter
 from custos_arm.store import ExecutionRepository, ExecutionState
+from custos_arm.store.artifact import ArtifactRecord
 
 pytestmark = pytest.mark.integration
 
@@ -136,6 +138,48 @@ class _StubArtifactStore:
         raise AssertionError("artifact upload should not be called")
 
 
+class _InMemoryArtifactStore:
+    """A content-addressed in-memory ``ArtifactStoreClient`` stand-in.
+
+    Implements the subset the I/O Broker exercises end-to-end: ``upload`` (used
+    by the producer attempt's ``finalize_outputs``) and ``fetch`` (used by the
+    consumer attempt's ``materialize_input_artifacts``). One instance is shared
+    across both attempts so the consumer resolves the producer's blob by id.
+    """
+
+    def __init__(self) -> None:
+        self.blobs: dict[str, bytes] = {}
+
+    async def upload(
+        self,
+        *,
+        workspace_id: str,
+        name: str,
+        content: AsyncIterator[bytes],
+        produced_by_run_id: str,
+        produced_by_step_id: str,
+        produced_by_attempt: int,
+        media_type: str | None = None,
+    ) -> ArtifactRecord:
+        data = b"".join([chunk async for chunk in content])
+        digest = "sha256:" + hashlib.sha256(data).hexdigest()
+        artifact_id = f"{workspace_id}:{digest}"
+        self.blobs[artifact_id] = data
+        return ArtifactRecord(
+            id=artifact_id,
+            name=name,
+            media_type=media_type,
+            digest=digest,
+            size=len(data),
+            produced_by_run_id=produced_by_run_id,
+            produced_by_step_id=produced_by_step_id,
+            produced_by_attempt=produced_by_attempt,
+        )
+
+    async def fetch(self, workspace_id: str, artifact_id: str) -> bytes:
+        return self.blobs[artifact_id]
+
+
 class _FakeResolver:
     """Returns a pre-built type version (no Catalog on kind)."""
 
@@ -186,7 +230,15 @@ def _settings() -> Settings:
     )
 
 
-def _resolved(*, image: str, digest: str = _DIGEST) -> ActivityTypeVersion:
+def _resolved(
+    *,
+    image: str,
+    digest: str = _DIGEST,
+    artifacts: list[dict[str, Any]] | None = None,
+) -> ActivityTypeVersion:
+    outputs: dict[str, Any] = {"schema": {"type": "object"}}
+    if artifacts is not None:
+        outputs["artifacts"] = artifacts
     raw: dict[str, Any] = {
         "apiVersion": "custos.dev/v1",
         "kind": "ActivityManifest",
@@ -201,7 +253,7 @@ def _resolved(*, image: str, digest: str = _DIGEST) -> ActivityTypeVersion:
             "contractVersion": "1",
             "runtime": {"kind": "oci-container", "image": image, "digest": digest},
             "inputs": {"schema": {"type": "object"}},
-            "outputs": {"schema": {"type": "object"}},
+            "outputs": outputs,
             "resources": {
                 "cpu": {"request": "50m", "limit": "200m"},
                 "memory": {"request": "32Mi", "limit": "64Mi"},
@@ -224,12 +276,13 @@ def _scheduler(
     resolved: ActivityTypeVersion,
     *,
     repo: ExecutionRepository | None = None,
+    broker: IOBroker | None = None,
 ) -> ActivityScheduler:
     settings = _settings()
     return ActivityScheduler(
         resolver=_FakeResolver(resolved),
         limiter=ResourceLimiter(settings),
-        broker=IOBroker(_StubArtifactStore(), output_max_bytes=1_000_000),  # type: ignore[arg-type]
+        broker=broker or IOBroker(_StubArtifactStore(), output_max_bytes=1_000_000),  # type: ignore[arg-type]
         injector=SecretInjector(token_minter=SidecarTokenMinter()),
         mapper=ResultMapper(),
         dispatcher=RuntimeDriverDispatcher((driver,)),
@@ -350,3 +403,47 @@ async def test_happy_path_output_round_trip(_apis: tuple[object, object], tmp_pa
     assert record.state is ExecutionState.SUCCEEDED
     assert record.resolved_digest == _DIGEST  # provenance is still recorded
     assert driver.prepared == 1
+
+
+async def test_downstream_artifact_ref_materialization(
+    _apis: tuple[object, object], tmp_path: Path
+) -> None:
+    # One store shared across both attempts so the consumer resolves the
+    # producer's blob by the rewritten ref's ``id``.
+    store = _InMemoryArtifactStore()
+    broker = IOBroker(store, output_max_bytes=1_000_000)  # type: ignore[arg-type]
+
+    # Producer attempt: declares ``greeting.txt`` and emits an ``ArtifactRef``.
+    # ARM uploads the artifact and rewrites the ref with id/digest/size/mediaType.
+    producer_driver = _driver(_apis, tmp_path / "producer")
+    producer_resolved = _resolved(
+        image=_CONTRACT_IMAGE,
+        artifacts=[{"name": "greeting.txt", "mediaType": "text/plain", "required": True}],
+    )
+    producer = _scheduler(producer_driver, producer_resolved, broker=broker)
+    producer_result = await producer.schedule(
+        _request(inputs={"name": "custos", "emitArtifactRef": True})
+    )
+
+    assert producer_result.class_ is ResultClass.SUCCESS
+    assert producer_result.outputs is not None
+    ref = producer_result.outputs["greetingFile"]
+    assert ref["kind"] == "ArtifactRef"
+    assert ref["name"] == "greeting.txt"
+    assert isinstance(ref["id"], str) and ref["id"]
+    assert isinstance(ref["digest"], str) and ref["digest"]
+    assert isinstance(ref["size"], int) and ref["size"] > 0
+    assert ref["mediaType"] == "text/plain"
+
+    # Consumer attempt: ARM fetches the upstream artifact and stages it at
+    # ``/custos/in/artifacts/greeting.txt``; the consumer reads it back.
+    consumer_driver = _driver(_apis, tmp_path / "consumer")
+    consumer_resolved = _resolved(image=_CONTRACT_IMAGE)
+    consumer = _scheduler(consumer_driver, consumer_resolved, broker=broker)
+    consumer_result = await consumer.schedule(
+        _request(inputs={"consume": "greeting.txt", "artifact": ref})
+    )
+
+    assert consumer_result.class_ is ResultClass.SUCCESS
+    assert consumer_result.error is None
+    assert consumer_result.outputs == {"consumed": "hello, custos"}
