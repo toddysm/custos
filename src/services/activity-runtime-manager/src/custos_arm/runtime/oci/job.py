@@ -62,6 +62,7 @@ __all__ = [
     "ACTIVITY_CONTAINER_NAME",
     "CONNECTOR_ENDPOINT_ENV",
     "INPUT_BRIDGE_CONTAINER_NAME",
+    "INPUT_READY_SENTINEL",
     "JOB_NAME_PREFIX",
     "MANAGED_BY",
     "OUTPUT_BRIDGE_CONTAINER_NAME",
@@ -149,17 +150,27 @@ _INVALID_LABEL_CHARS = re.compile(r"[^A-Za-z0-9_.-]+")
 _INPUT_MOUNT_PATH: Final[str] = "/custos/in"
 _OUTPUT_MOUNT_PATH: Final[str] = "/custos/out"
 
+#: Readiness sentinel the lifecycle monitor drops into ``/custos/in`` once it has
+#: finished streaming the input tree in. The input injector blocks until this
+#: file appears, which gates the activity container behind a fully-staged
+#: ``/custos/in`` (the init container completing is what releases the activity).
+INPUT_READY_SENTINEL: Final[str] = "/custos/in/.ready"
+
 #: ``restartPolicy: Always`` on an ``initContainers`` entry marks a native
 #: sidecar (Kubernetes >= 1.28): it starts before the activity container, stays
 #: running for the pod lifetime, and is terminated once the activity exits.
 _NATIVE_SIDECAR_RESTART_POLICY: Final[str] = "Always"
 
-#: The input injector exists to own the *writable* ``/custos/in`` mount the
-#: lifecycle monitor streams the input tree into. In this milestone it completes
-#: immediately (the contract volume is the plumbing the bridge needs);
-#: ``ARM-IMPL-025`` turns it into a block-until-sentinel input-staging gate when
-#: ``start()`` learns to stream ``in/`` in and drop the readiness sentinel.
-_INPUT_BRIDGE_COMMAND: Final[tuple[str, ...]] = ("sh", "-c", "true")
+#: The input injector owns the *writable* ``/custos/in`` mount the lifecycle
+#: monitor streams the input tree into, then blocks until the monitor drops the
+#: readiness sentinel (:data:`INPUT_READY_SENTINEL`). Because a regular init
+#: container must complete before the activity container starts, this gate
+#: guarantees the activity only ever observes a fully-staged ``/custos/in``.
+_INPUT_BRIDGE_COMMAND: Final[tuple[str, ...]] = (
+    "sh",
+    "-c",
+    "while [ ! -e /custos/in/.ready ]; do sleep 0.1; done",
+)
 #: The output collector idles for the pod lifetime so the monitor can stream the
 #: outputs back out after the activity terminates; it exits cleanly on SIGTERM.
 _OUTPUT_BRIDGE_COMMAND: Final[tuple[str, ...]] = (

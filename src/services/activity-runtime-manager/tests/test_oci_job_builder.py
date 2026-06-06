@@ -22,6 +22,7 @@ from custos_arm.runtime.oci import (
     ACTIVITY_CONTAINER_NAME,
     CONNECTOR_ENDPOINT_ENV,
     INPUT_BRIDGE_CONTAINER_NAME,
+    INPUT_READY_SENTINEL,
     OUTPUT_BRIDGE_CONTAINER_NAME,
     SIDECAR_CONTAINER_NAME,
     DuplicateMountError,
@@ -410,6 +411,16 @@ def test_input_injector_is_not_a_native_sidecar() -> None:
     injector = _init_containers(manifest)[INPUT_BRIDGE_CONTAINER_NAME]
     # The injector runs to completion to gate the activity; it is not persistent.
     assert "restartPolicy" not in injector
+
+
+def test_input_injector_blocks_on_the_readiness_sentinel() -> None:
+    manifest = build_activity_job(_plan())
+    injector = _init_containers(manifest)[INPUT_BRIDGE_CONTAINER_NAME]
+    script = injector["command"][-1]
+    # The container must wait for ARM to stage inputs and drop the sentinel,
+    # otherwise the activity could start behind a half-populated /custos/in.
+    assert INPUT_READY_SENTINEL in script
+    assert "while" in script
 
 
 def test_input_injector_mounts_only_in_writable() -> None:
