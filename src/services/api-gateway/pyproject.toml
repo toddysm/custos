@@ -1,0 +1,149 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "custos-api-gateway"
+version = "0.1.0"
+description = "Custos API Gateway (COMP-001) — single uniform HTTPS entrypoint: TLS termination, request validation, Auth Service delegation, signed call-context minting, idempotency dedup, rate limiting, and Dapr-routed pass-through to downstream components."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Custos contributors" }]
+keywords = ["custos", "api-gateway", "fastapi", "dapr", "gateway"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
+]
+# Runtime surfaces are pulled in incrementally across the AGW-IMPL-* phases.
+# Path-installed locally and in CI from `src/libs/` via the same install
+# order in `.github/workflows/python-services.yml`:
+#
+#   pip install -e src/libs/storage-provider-layer[dev]
+#   pip install -e src/libs/custos-callctx[dev]
+#   pip install -e src/services/api-gateway[dev]
+#
+# `custos-spl` provides the `MetadataStoreProvider` Protocol plus the
+# `IdempotencyRecord` / `DeviceCodeSession` entities the gateway persists
+# against; `custos-callctx` provides the call-context JWT verifier shared
+# across components. The FastAPI REST surface + Dapr-routed pass-through is
+# exercised end-to-end once AGW-IMPL-012..016 land.
+dependencies = [
+    "custos-spl",
+    "custos-callctx",
+    "fastapi>=0.110,<1",
+    "uvicorn[standard]>=0.27,<1",
+    "pydantic>=2.6,<3",
+    "httpx>=0.27",
+    "opentelemetry-api>=1.20,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "ruff>=0.4",
+    "mypy>=1.10",
+    # OTel SDK is dev-only so tests can install in-memory exporters when
+    # AGW-IMPL-018 lands. The package itself only depends on the API.
+    "opentelemetry-sdk>=1.20,<2",
+]
+
+[project.urls]
+Repository = "https://github.com/toddysm/custos"
+Issues = "https://github.com/toddysm/custos/issues"
+Design = "https://github.com/toddysm/custos/blob/main/design/components/api-gateway/design.md"
+
+[project.scripts]
+custos-api-gateway = "custos_gateway.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/custos_gateway"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "SIM", # flake8-simplify
+    "RUF", # ruff-specific
+]
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+# Tests legitimately use `Depends(...)` in default arguments, which is the
+# documented FastAPI idiom; B008 fires on every such call. B011 covers
+# `assert ... is None` patterns used in fixture wiring.
+"tests/**" = ["B008", "B011"]
+# The API surface uses the documented FastAPI `Depends(...)` / `Body(...)` /
+# `Path(...)` / `Query(...)` idiom in argument defaults; B008 fires on every
+# such call. There is no clean way to express these without the call in the
+# default value, so we narrow the ignore to the api package.
+"src/custos_gateway/api/**" = ["B008"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_any_generics = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+check_untyped_defs = true
+namespace_packages = true
+explicit_package_bases = true
+mypy_path = "src:../../libs/storage-provider-layer/src:../../libs/custos-callctx/src"
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "-m",
+    "not integration",
+]
+asyncio_mode = "auto"
+markers = [
+    "integration: requires live downstream/Postgres collaborators (CI service)",
+]
+
+[tool.coverage.run]
+branch = false
+source = ["custos_gateway"]
+omit = [
+    "src/custos_gateway/__main__.py",
+]
+
+[tool.coverage.report]
+precision = 1
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "if typing.TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "\\.\\.\\.",
+    "if __name__ == .__main__.:",
+    "@overload",
+]
