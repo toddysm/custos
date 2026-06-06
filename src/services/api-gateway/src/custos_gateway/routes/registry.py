@@ -217,6 +217,10 @@ M1_ROUTE_REGISTRY: Final[tuple[RouteSpec, ...]] = (
         "admin:role-binding",
     ),
     # --- Catalog Service (catalog-service): authoring + registry reads.
+    # Concrete routes mirror the Catalog Service contract exactly — the only
+    # workflow/template/connector-type sub-resource writes are the explicit
+    # action suffixes (``:deprecate`` / ``:extractTemplate`` / ``:materialize``),
+    # not a catch-all ``POST /{ref}``.
     _route(
         "POST",
         "/v1/workspaces/{workspaceId}/workflows",
@@ -225,19 +229,27 @@ M1_ROUTE_REGISTRY: Final[tuple[RouteSpec, ...]] = (
     ),
     _route(
         "GET",
-        "/v1/workspaces/{workspaceId}/workflows",
+        "/v1/workspaces/{workspaceId}/workflows/{nameOrRef}",
         CATALOG_APP_ID,
         "catalog:workflows:read",
     ),
     _route(
         "POST",
-        "/v1/workspaces/{workspaceId}/workflows/{ref:path}",
+        "/v1/workspaces/{workspaceId}/workflows/{ref}:deprecate",
         CATALOG_APP_ID,
         "catalog:workflows:write",
     ),
     _route(
+        "POST",
+        "/v1/workspaces/{workspaceId}/workflows/{ref}:extractTemplate",
+        CATALOG_APP_ID,
+        "catalog:workflows:write",
+    ),
+    # Workspaceless get-by-id resolves a workflow version by its canonical
+    # triple-encoded id; authorized as a platform-scoped catalog read.
+    _route(
         "GET",
-        "/v1/workspaces/{workspaceId}/workflows/{ref:path}",
+        "/v1/workflows/{workflowVersionId:path}",
         CATALOG_APP_ID,
         "catalog:workflows:read",
     ),
@@ -248,19 +260,19 @@ M1_ROUTE_REGISTRY: Final[tuple[RouteSpec, ...]] = (
         "catalog:templates:write",
     ),
     _route(
-        "POST",
-        "/v1/workspaces/{workspaceId}/templates/{ref:path}",
-        CATALOG_APP_ID,
-        "catalog:templates:write",
-    ),
-    _route(
         "GET",
-        "/v1/workspaces/{workspaceId}/templates/{ref:path}",
+        "/v1/workspaces/{workspaceId}/templates/{ref}",
         CATALOG_APP_ID,
         "catalog:templates:read",
     ),
     _route(
         "POST",
+        "/v1/workspaces/{workspaceId}/templates/{ref}:materialize",
+        CATALOG_APP_ID,
+        "catalog:templates:write",
+    ),
+    _route(
+        "POST",
         "/v1/workspaces/{workspaceId}/activity-types",
         CATALOG_APP_ID,
         "catalog:activity-types:write",
@@ -268,20 +280,20 @@ M1_ROUTE_REGISTRY: Final[tuple[RouteSpec, ...]] = (
     _route(
         "GET",
         "/v1/workspaces/{workspaceId}/activity-types",
+        CATALOG_APP_ID,
+        "catalog:activity-types:read",
+    ),
+    _route(
+        "GET",
+        "/v1/workspaces/{workspaceId}/activity-types/{ref:path}",
         CATALOG_APP_ID,
         "catalog:activity-types:read",
     ),
     _route(
         "POST",
-        "/v1/workspaces/{workspaceId}/activity-types/{ref:path}",
+        "/v1/workspaces/{workspaceId}/activity-types/{ref:path}:deprecate",
         CATALOG_APP_ID,
         "catalog:activity-types:write",
-    ),
-    _route(
-        "GET",
-        "/v1/workspaces/{workspaceId}/activity-types/{ref:path}",
-        CATALOG_APP_ID,
-        "catalog:activity-types:read",
     ),
     _route(
         "POST",
@@ -296,16 +308,16 @@ M1_ROUTE_REGISTRY: Final[tuple[RouteSpec, ...]] = (
         "catalog:connector-types:read",
     ),
     _route(
-        "POST",
-        "/v1/catalog/connector-types/{ref:path}",
-        CATALOG_APP_ID,
-        "catalog:connector-types:write",
-    ),
-    _route(
         "GET",
-        "/v1/catalog/connector-types/{ref:path}",
+        "/v1/catalog/connector-types/{ref}",
         CATALOG_APP_ID,
         "catalog:connector-types:read",
+    ),
+    _route(
+        "POST",
+        "/v1/catalog/connector-types/{ref}:deprecate",
+        CATALOG_APP_ID,
+        "catalog:connector-types:write",
     ),
     # --- Workflow Service (workflow-service): run lifecycle.
     _route(
@@ -425,6 +437,30 @@ M1_ROUTE_REGISTRY: Final[tuple[RouteSpec, ...]] = (
         "/v1/workspaces/{workspaceId}/connectors/{connectorId}/leases",
         CONNECTOR_APP_ID,
         "connector:read",
+    ),
+    _route(
+        "GET",
+        "/v1/workspaces/{workspaceId}/connectors/{connectorId}/cursor",
+        CONNECTOR_APP_ID,
+        "connector:read",
+    ),
+    _route(
+        "POST",
+        "/v1/workspaces/{workspaceId}/connectors/{connectorId}/cursor:rewind",
+        CONNECTOR_APP_ID,
+        "admin:connector",
+    ),
+    _route(
+        "POST",
+        "/v1/workspaces/{workspaceId}/connectors/{connectorId}/pull-loop:pause",
+        CONNECTOR_APP_ID,
+        "admin:connector",
+    ),
+    _route(
+        "POST",
+        "/v1/workspaces/{workspaceId}/connectors/{connectorId}/pull-loop:resume",
+        CONNECTOR_APP_ID,
+        "admin:connector",
     ),
     _route(
         "POST",

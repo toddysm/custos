@@ -119,11 +119,35 @@ def test_method_path_pairs_are_unique() -> None:
         ),
         (
             "GET",
-            "/v1/workspaces/{workspaceId}/workflows",
+            "/v1/workspaces/{workspaceId}/workflows/{nameOrRef}",
             CATALOG_APP_ID,
             "catalog:workflows:read",
         ),
         ("POST", "/v1/catalog/connector-types", CATALOG_APP_ID, "catalog:connector-types:write"),
+        (
+            "POST",
+            "/v1/catalog/connector-types/{ref}:deprecate",
+            CATALOG_APP_ID,
+            "catalog:connector-types:write",
+        ),
+        (
+            "GET",
+            "/v1/workflows/{workflowVersionId:path}",
+            CATALOG_APP_ID,
+            "catalog:workflows:read",
+        ),
+        (
+            "POST",
+            "/v1/workspaces/{workspaceId}/workflows/{ref}:deprecate",
+            CATALOG_APP_ID,
+            "catalog:workflows:write",
+        ),
+        (
+            "POST",
+            "/v1/workspaces/{workspaceId}/templates/{ref}:materialize",
+            CATALOG_APP_ID,
+            "catalog:templates:write",
+        ),
         ("POST", "/v1/workspaces/{workspaceId}/runs", WORKFLOW_APP_ID, "workflow:execute"),
         (
             "POST",
@@ -154,6 +178,18 @@ def test_method_path_pairs_are_unique() -> None:
             "/v1/workspaces/{workspaceId}/runs/{runId}/leases",
             CONNECTOR_APP_ID,
             "connector:read",
+        ),
+        (
+            "POST",
+            "/v1/workspaces/{workspaceId}/connectors/{connectorId}/cursor:rewind",
+            CONNECTOR_APP_ID,
+            "admin:connector",
+        ),
+        (
+            "POST",
+            "/v1/workspaces/{workspaceId}/connectors/{connectorId}/pull-loop:pause",
+            CONNECTOR_APP_ID,
+            "admin:connector",
         ),
         (
             "GET",
@@ -214,7 +250,9 @@ def test_publish_routes_get_raised_body_cap() -> None:
 
 
 def test_non_publish_writes_use_default_body_cap() -> None:
-    spec = _spec("POST", "/v1/workspaces/{workspaceId}/workflows/{ref:path}")
+    # A sub-resource action write (``:deprecate``) is not a publish route, so it
+    # keeps the 1 MiB default cap.
+    spec = _spec("POST", "/v1/workspaces/{workspaceId}/workflows/{ref}:deprecate")
     assert spec.max_body_bytes == DEFAULT_BODY_MAX_BYTES_DEFAULT
 
 
@@ -284,6 +322,7 @@ def test_router_mounts_every_spec() -> None:
         (method, route.path)  # type: ignore[attr-defined]
         for route in router.routes
         for method in route.methods  # type: ignore[attr-defined]
+        if method != "HEAD"  # Starlette auto-adds HEAD for every GET route.
     }
     expected = {(spec.method, spec.path) for spec in M1_ROUTE_REGISTRY}
     assert mounted == expected
