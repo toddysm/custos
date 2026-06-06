@@ -50,10 +50,11 @@ Backlog (not in tracker): ARM I/O bridge vm/microvm (Kata) tier validation (#763
 - [ ] TODO-003: Per-artifact content schema validation (e.g. CycloneDX schema URL) — deferred to M2
 - [ ] TODO-004: `spec.secrets[]` for standalone secret slots — deferred to M2 alongside REQ-019 attestation creation
 - [ ] TODO-005: Short-form (non-fully-qualified) activity references — deferred to a later milestone
-- [ ] TODO-009: Finalize platform event taxonomy mapping for activity lifecycle events with Observability
 - [ ] TODO-010: Lock the canonical built-in `policy-eval@1` activity manifest (filter/gate modes) as the reference for the Layer-3 filter pattern
 
 ## Closed
+
+- [x] TODO-009: Finalize platform event taxonomy mapping for activity lifecycle events with Observability. Resolved 2026-06-04 by the unified platform event taxonomy (Trigger Service TODO-001, #18) — ARM emits the `activity.*` lifecycle strings verbatim from the shared closed registry. See trigger-service `changes/2026-06-04-007-event-taxonomy.md` (INCON-013, #38).
 
 - [x] TODO-006: Sandbox technology decided per REQ-039 — operator-configured tier→`RuntimeClass` mapping; `process`/runc guaranteed, `vm`/`microvm` Kata opt-in, gVisor omitted, no silent downgrade (closed 2026-06-02)
 - [x] TODO-007: Runtime Driver dispatcher contract specified (`RuntimeDriver` Protocol selected by `runtime.kind`; OCI Container Driver for v1) (closed 2026-06-02)

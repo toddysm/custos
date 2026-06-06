@@ -147,13 +147,14 @@ Custos is deployed as a set of containerized microservices on **Kubernetes**, wi
 
 ## Open TODOs
 
-- [ ] TODO-002: Decide action sandbox technology (gVisor, Kata, plain runc with seccomp/AppArmor, or Kubernetes Jobs only) — REQ-039 (added 2026-05-13, issue #4)
-- [ ] TODO-003: Decide trigger receiver design for REQ-006 — pull (poll) vs. push (webhook from registry) per registry vendor; not all registries push events uniformly (added 2026-05-13, issue #5)
-- [ ] TODO-004: Define minimal viable action contract schema (inputs, outputs, secrets injection, log streaming, exit codes) — REQ-023; this is the most load-bearing contract in the system (added 2026-05-13, issue #6)
+_(none)_
 
 ## Resolved TODOs
 
 - [x] TODO-001: Confirm Dapr Workflow's Python SDK feature parity with the .NET/Go SDKs (suspend/resume, sub-orchestrations, continue-as-new) before locking in REQ-046 — verified and closed on 2026-05-14 (issue #3)
+- [x] TODO-002: Decide action sandbox technology (gVisor, Kata, plain runc with seccomp/AppArmor, or Kubernetes Jobs only) — REQ-039. Resolved 2026-06-02 by ARM design § Sandbox and Isolation Model (ARM TODO-006): abstract tier ladder (`process`/`vm`/`microvm`) maps to operator-configured `RuntimeClass`es; `process` (runc + hardened SecurityContext) guaranteed in M1, `vm`/`microvm` (Kata) operator opt-in, gVisor omitted, no silent downgrade (issue #4)
+- [x] TODO-003: Decide trigger receiver design for REQ-006 — pull (poll) vs. push (webhook from registry) per registry vendor. Resolved 2026-05-17 by the Trigger Service component design: hybrid push/pull receivers (REQ-079) driven by connector `listen(push|pull)` per ADR-013, mode selectable per subscription (issue #5)
+- [x] TODO-004: Define minimal viable action contract schema (inputs, outputs, secrets injection, log streaming, exit codes) — REQ-023. Resolved 2026-05-17 by the Activity Runtime Manager design § Activity Contract v1 (issue #6)
 
 ## Change History
 
@@ -166,3 +167,4 @@ Custos is deployed as a set of containerized microservices on **Kubernetes**, wi
 | 2026-05-14 | Added hybrid push/pull trigger ingestion requirement (REQ-079) | pending |
 | 2026-05-16 | Added internal workflow-to-workflow trigger (REQ-080) and dual-purpose event delivery for workflow start vs. in-flight resume (REQ-081) | #15, #16 |
 | 2026-05-18 | Assigned REQ-080/REQ-081 to M2; added contract-vs-implementation framing; clarified M1 scope (OIDC contract-locked but API-tokens-only, traces deferred to M2, Web UI not deployed in M1) | #91, #96 |
+| 2026-06-06 | Moved TODO-002/003/004 to Resolved (sandbox tech via ARM § Sandbox and Isolation Model; trigger receiver design via Trigger Service design; action contract schema via ARM Activity Contract v1) | #4, #5, #6 |
