@@ -18,7 +18,7 @@ delegation & enforcement (AGW-IMPL-004, AGW-IMPL-005) + workspace resolution
 (AGW-IMPL-006) + call-context minting (AGW-IMPL-007) + startup permission
 validation (AGW-IMPL-008) + write-path idempotency (AGW-IMPL-009) + write-path
 rate limiting (AGW-IMPL-010) + request validation (AGW-IMPL-011) + downstream
-router (AGW-IMPL-012)** — the `custos_gateway`
+router (AGW-IMPL-012) + route registry (AGW-IMPL-013)** — the `custos_gateway`
 package, its `pyproject.toml` (ruff + mypy strict + pytest with a
 `--cov-fail-under=90` floor), the `python -m custos_gateway` entry point, the
 typed `Settings` + `load_settings()` loader over the design Configuration table,
@@ -59,6 +59,14 @@ invocation using the lifespan-owned `httpx.AsyncClient` — carrying the signed
 `x-custos-callctx` + `x-correlation-id` headers — passes any non-server-error
 downstream response through raw, body + status + end-to-end headers, and masks a
 downstream `5xx` or sidecar transport error as `503 downstream-unavailable`),
+the declarative M1 Route Registry (`routes/registry.py` enumerates every
+external route in the design's M1 contract set as a frozen `RouteSpec` table —
+each carrying its owning Dapr `app_id`, `requiredPermission`,
+`requiresIdempotencyKey`, `maxBodyBytes`, and `rateLimitClass` — and
+`build_registry_router()` mounts each one with its `require_permission`
+dependency, so every declared permission participates in the startup registry
+cross-check, plus a thin pass-through endpoint that forwards to the owning
+component via the downstream router and shapes the reply),
 and the
 CI gate
 (`.github/workflows/python-services.yml`) are in place. Subsequent tasks layer
@@ -82,6 +90,9 @@ src/custos_gateway/
   health.py        # /healthz (liveness) + /readyz (readiness) probes
   errors.py        # locked error taxonomy + RFC 7807 problem+json envelope
   router.py        # downstream Dapr router + response shaper (raw 2xx / 503)
+  routes/
+    __init__.py    # route registry package re-exports
+    registry.py    # declarative M1 RouteSpec table + registry router factory
   middleware/
     __init__.py    # cross-cutting middleware package
     auth.py        # require_permission dependency + bypass classifier
@@ -111,6 +122,7 @@ tests/
   test_ratelimit_middleware.py # token-bucket rate limiting + RateLimit headers
   test_validate_middleware.py # body-size + content-type + route classification
   test_router.py # downstream Dapr router pass-through + 503 mapping
+  test_route_registry.py # M1 route registry contract + forwarding seam
 ```
 
 ## Development
