@@ -36,7 +36,7 @@ Full M1 gateway implementation, packaged at `src/services/api-gateway/` (Python 
 
 ### Phase D — Routing, webhook & device-code
 
-- [F] AGW-IMPL-012 (#722): Downstream Router + Response Shaper.
+- [x] AGW-IMPL-012 (#722): Downstream Router + Response Shaper.
 - [F] AGW-IMPL-013 (#723): Route registry — full M1 contract set.
 - [F] AGW-IMPL-014 (#724): Webhook Pass-through.
 - [F] AGW-IMPL-015 (#725): Device-Code Session Manager (M1 503 stub).
