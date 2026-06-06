@@ -3,7 +3,8 @@
 Every *write* endpoint (`POST`/`PUT`/`PATCH`/`DELETE`) is deduplicated so a
 client (or a gateway-internal retry) can safely resend a request without
 double-applying it. The client SHOULD supply ``Idempotency-Key: <opaque>``
-(RFC 9110); when absent the gateway generates one so its own retries are safe.
+(IETF draft "The Idempotency-Key HTTP Header Field"); when absent the gateway
+generates one so its own retries are safe.
 
 The dedup key is ``(workspaceId, principalId, route, idempotencyKey)`` and the
 request fingerprint is ``SHA-256(method || route || workspaceId ||
@@ -66,7 +67,8 @@ __all__ = [
     "resolve_idempotency_key",
 ]
 
-#: Request header carrying the client-supplied idempotency key (RFC 9110).
+#: Request header carrying the client-supplied idempotency key (IETF draft
+#: "The Idempotency-Key HTTP Header Field").
 IDEMPOTENCY_KEY_HEADER: Final[str] = "idempotency-key"
 
 #: ``Retry-After`` response header set on a ``409 idempotency-in-flight``.
@@ -119,9 +121,13 @@ def compute_request_hash(
 
     The digest covers the method, the route template, the workspace, the
     :data:`HASHED_REQUEST_HEADERS` subset (sorted for determinism), and the raw
-    body. Two requests under the same key with differing fingerprints are a
-    ``KeyReuse`` violation; identical fingerprints are safe replays.
+    body. Header names are matched case-insensitively so a plain ``dict`` of
+    HTTP headers (e.g. ``{"Content-Type": ...}``) hashes identically to a
+    lowercased mapping. Two requests under the same key with differing
+    fingerprints are a ``KeyReuse`` violation; identical fingerprints are safe
+    replays.
     """
+    folded = {name.lower(): value for name, value in headers.items()}
     hasher = hashlib.sha256()
     hasher.update(method.upper().encode("utf-8"))
     hasher.update(_HASH_SEPARATOR)
@@ -130,7 +136,7 @@ def compute_request_hash(
     hasher.update(workspace_id.encode("utf-8"))
     hasher.update(_HASH_SEPARATOR)
     for name in sorted(HASHED_REQUEST_HEADERS):
-        value = headers.get(name)
+        value = folded.get(name)
         if value is not None:
             hasher.update(name.encode("utf-8"))
             hasher.update(b":")

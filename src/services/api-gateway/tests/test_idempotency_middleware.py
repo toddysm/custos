@@ -201,6 +201,13 @@ def test_request_hash_handles_missing_content_type() -> None:
     assert _hash(headers={}) != _hash()
 
 
+def test_request_hash_matches_header_names_case_insensitively() -> None:
+    # A plain dict built from HTTP headers (Title-Case) must hash identically to
+    # the lowercased subset the coordinator folds on.
+    assert _hash(headers={"Content-Type": "application/json"}) == _hash()
+    assert _hash(headers={"CONTENT-TYPE": "application/json"}) == _hash()
+
+
 # --- IdempotencyCoordinator.reserve ------------------------------------------
 
 
