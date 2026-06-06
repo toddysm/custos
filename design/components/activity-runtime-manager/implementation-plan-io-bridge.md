@@ -83,6 +83,14 @@ flowchart TD
     (`restartPolicy: Always` init container) mounting `/custos/out` that idles
     for the pod lifetime; both hardened (runAsNonRoot, all caps dropped,
     seccomp RuntimeDefault, read-only rootfs) from a new `ARM_IO_BRIDGE_IMAGE`.
+
+    > **Delivered scope (ARM-IMPL-023):** to keep every PR green, this task ships
+    > the manifest plumbing only — the input injector **completes immediately**
+    > (`sh -c true`) rather than blocking on the sentinel, and the output
+    > collector is a genuine idling native sidecar. The block-until-`.ready`
+    > gate and the `pods/exec` + `tar` streaming land atomically in ARM-IMPL-025
+    > so the existing kind integration suite never hangs behind a blocking init
+    > container.
   - [`config.py`](../../../src/services/activity-runtime-manager/src/custos_arm/config.py)
     — new `Settings.io_bridge_image` over `ARM_IO_BRIDGE_IMAGE` (digest-pinned
     busybox-with-tar default).

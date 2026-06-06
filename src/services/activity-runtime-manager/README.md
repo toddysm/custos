@@ -103,6 +103,12 @@ are parsed and validated to positive `timedelta` values.
 | `HOST` | no | `0.0.0.0` | uvicorn bind host. |
 | `PORT` | no | `8080` | uvicorn bind port. |
 
+> **Cluster requirement:** the io-bridge output collector uses the Kubernetes
+> **native sidecar** pattern (an `initContainers` entry with
+> `restartPolicy: Always`), which requires **Kubernetes >= 1.28**. On older
+> clusters the activity Pod will be rejected by the API server (or stick in
+> `Init`), so deploy ARM only against a 1.28+ control plane.
+
 ## Development
 
 Install the path dependencies and this package, then run the quality gates from
