@@ -1,11 +1,12 @@
-"""API Gateway FastAPI application factory (AGW-IMPL-002, AGW-IMPL-016).
+"""API Gateway FastAPI application factory (AGW-IMPL-002, AGW-IMPL-016, AGW-IMPL-017).
 
 :func:`create_app` builds the FastAPI application: the ``/healthz`` + ``/readyz``
 probes, the full ingress pipeline (declarative route registry, anonymous webhook
 pass-through, auth-bootstrap device-code routes), the cross-cutting CORS and
-correlation middleware, and a lifespan hook that wires the downstream router,
-rate limiter, idempotency metadata store and Auth Service client onto
-``app.state`` before flipping readiness.
+correlation middleware, the OpenAPI 3.1 document at ``/openapi.json``, and a
+lifespan hook that wires the downstream router, rate limiter, idempotency
+metadata store and Auth Service client onto ``app.state`` before flipping
+readiness.
 
 The factory is import-safe — no socket connections, no env-dependent failures at
 construction time beyond resolving :class:`Settings`. All side-effecting work
@@ -31,6 +32,7 @@ from custos_gateway.middleware import CorrelationIdMiddleware
 from custos_gateway.middleware.auth import AUTH_CLIENT_STATE_ATTR
 from custos_gateway.middleware.idempotency import METADATA_STORE_STATE_ATTR
 from custos_gateway.middleware.ratelimit import RATE_LIMITER_STATE_ATTR, RateLimiter
+from custos_gateway.openapi import install_openapi
 from custos_gateway.router import DownstreamRouter
 from custos_gateway.routes import (
     DEVICE_CODE_STORE_STATE_ATTR,
@@ -182,6 +184,7 @@ def create_app(
     app.include_router(build_registry_router())
     app.include_router(build_webhook_router())
     app.include_router(build_device_code_router())
+    install_openapi(app)
     return app
 
 
