@@ -32,6 +32,13 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "svc.fullname" . }}
+            {{- if .Values.externalSecret.enabled }}
+            # ExternalSecret materializes a Secret under the same name. Order
+            # matters: ConfigMap first so the common CUSTOS_GATEWAY_* env is set;
+            # Secret last so any secret-store-backed override wins on overlap.
+            - secretRef:
+                name: {{ include "svc.fullname" . }}
+            {{- end }}
           {{- with .Values.env }}
           env:
             {{- toYaml . | nindent 12 }}

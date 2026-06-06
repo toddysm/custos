@@ -1,12 +1,23 @@
 # api-gateway — leave image.repository/tag/pullPolicy and replicaCount/resources
 # empty to inherit umbrella global.* values. Set them here only to override
 # the umbrella for this one subchart.
+#
+# Configuration variables come from design/components/api-gateway/design.md
+# § Configuration. The non-secret CUSTOS_GATEWAY_* knobs (including the TLS
+# cert/key Dapr *secret references* — these are lookup keys, not the cert
+# material itself, which the gateway resolves at runtime through the Dapr
+# Secrets API) are projected through the ConfigMap (`config:` block below).
+# No CUSTOS_GATEWAY_* variable carries a secret value, so the ExternalSecret
+# block stays a disabled stub in every shipped profile.
 
 enabled: true
 
 replicaCount: ""
 
 image:
+  # Leave repository empty so templates/_helpers.tpl `svc.image` composes
+  # `<global.imageRegistry>/<chart name>`. Override only when a profile
+  # genuinely needs a different per-subchart repo.
   repository: ""
   tag: ""
   pullPolicy: ""
@@ -17,6 +28,8 @@ service:
 
 resources: {}
 
+# Per-pod env overrides. Most config flows through envFrom (the ConfigMap);
+# this list is for ad-hoc overrides only.
 env: []
 
 dapr:
@@ -28,6 +41,43 @@ dapr:
 serviceMonitor:
   enabled: false
 
+# Non-secret CUSTOS_GATEWAY_* env vars projected into the ConfigMap.
+# Values and defaults come from design.md § Configuration.
+config:
+  # Optional. TLS listen address (the gateway terminates TLS; the in-cluster
+  # HTTP listener the Dapr sidecar + probes use is service.port above).
+  listenAddr: ":8443"
+  # Required. Dapr secret references for the TLS cert/key — lookup keys the
+  # gateway resolves through the Dapr Secrets API, NOT the cert material.
+  # Operators must point these at the secret-store path holding their cert.
+  tlsCertRef: secretref://custos-gateway-tls/tls.crt
+  tlsKeyRef: secretref://custos-gateway-tls/tls.key
+  # Required. JSON list of allowed CORS origins for the UI. No wildcard.
+  # NOTE: this in-cluster placeholder lets the shipped profiles render; it is
+  # NOT a design-sanctioned default — operators must supply their UI origins.
+  corsAllowedOrigins:
+    - https://app.custos.example
+  # Optional body-size caps (bytes).
+  bodyMaxBytesDefault: 1048576
+  bodyMaxBytesPublish: 5242880
+  # Optional per-principal / per-workspace write rate limits.
+  rateLimitPrincipalWritesRps: 20
+  rateLimitPrincipalWritesBurst: 40
+  rateLimitWorkspaceWritesRps: 200
+  rateLimitWorkspaceWritesBurst: 400
+  # Optional TTL / interval knobs.
+  idempotencyTtl: 24h
+  deviceCodeTtl: 15m
+  deviceCodePollInterval: 5s
+  # Required only when the device-code flow is enabled: the issuer alias (from
+  # CUSTOS_AUTH_OIDC_ISSUERS) for the device-code landing page. Empty disables
+  # the device-code flow (M1 default — REQ-035 ships API tokens only).
+  oidcDefaultIssuer: ""
+
+# ExternalSecret stub. No CUSTOS_GATEWAY_* variable carries a secret value
+# (the TLS refs above are lookup keys, not cert material), so this stays
+# disabled in every shipped profile. Operators who need to project an
+# additional secret env var enable it and add `data` entries.
 externalSecret:
   enabled: false
   refreshInterval: 1h

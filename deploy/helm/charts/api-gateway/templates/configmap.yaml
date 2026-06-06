@@ -6,3 +6,21 @@ metadata:
     {{- include "svc.labels" . | nindent 4 }}
 data:
   CUSTOS_SERVICE_NAME: {{ .Chart.Name | quote }}
+  # Non-secret CUSTOS_GATEWAY_* env vars (design.md § Configuration). The TLS
+  # cert/key refs are Dapr secret *references* (lookup keys the gateway resolves
+  # through the Dapr Secrets API), not the cert material, so they are non-secret
+  # config and live here. CORS origins render as a JSON array.
+  CUSTOS_GATEWAY_LISTEN_ADDR: {{ .Values.config.listenAddr | quote }}
+  CUSTOS_GATEWAY_TLS_CERT_REF: {{ .Values.config.tlsCertRef | quote }}
+  CUSTOS_GATEWAY_TLS_KEY_REF: {{ .Values.config.tlsKeyRef | quote }}
+  CUSTOS_GATEWAY_CORS_ALLOWED_ORIGINS: {{ .Values.config.corsAllowedOrigins | toJson | quote }}
+  CUSTOS_GATEWAY_BODY_MAX_BYTES_DEFAULT: {{ .Values.config.bodyMaxBytesDefault | int64 | quote }}
+  CUSTOS_GATEWAY_BODY_MAX_BYTES_PUBLISH: {{ .Values.config.bodyMaxBytesPublish | int64 | quote }}
+  CUSTOS_GATEWAY_RATE_LIMIT_PRINCIPAL_WRITES_RPS: {{ .Values.config.rateLimitPrincipalWritesRps | int64 | quote }}
+  CUSTOS_GATEWAY_RATE_LIMIT_PRINCIPAL_WRITES_BURST: {{ .Values.config.rateLimitPrincipalWritesBurst | int64 | quote }}
+  CUSTOS_GATEWAY_RATE_LIMIT_WORKSPACE_WRITES_RPS: {{ .Values.config.rateLimitWorkspaceWritesRps | int64 | quote }}
+  CUSTOS_GATEWAY_RATE_LIMIT_WORKSPACE_WRITES_BURST: {{ .Values.config.rateLimitWorkspaceWritesBurst | int64 | quote }}
+  CUSTOS_GATEWAY_IDEMPOTENCY_TTL: {{ .Values.config.idempotencyTtl | quote }}
+  CUSTOS_GATEWAY_DEVICE_CODE_TTL: {{ .Values.config.deviceCodeTtl | quote }}
+  CUSTOS_GATEWAY_DEVICE_CODE_POLL_INTERVAL: {{ .Values.config.deviceCodePollInterval | quote }}
+  CUSTOS_GATEWAY_OIDC_DEFAULT_ISSUER: {{ .Values.config.oidcDefaultIssuer | quote }}
