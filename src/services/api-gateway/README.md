@@ -19,7 +19,8 @@ delegation & enforcement (AGW-IMPL-004, AGW-IMPL-005) + workspace resolution
 validation (AGW-IMPL-008) + write-path idempotency (AGW-IMPL-009) + write-path
 rate limiting (AGW-IMPL-010) + request validation (AGW-IMPL-011) + downstream
 router (AGW-IMPL-012) + route registry (AGW-IMPL-013) + webhook pass-through
-(AGW-IMPL-014) + device-code session manager M1 503 stub (AGW-IMPL-015)** — the
+(AGW-IMPL-014) + device-code session manager M1 503 stub (AGW-IMPL-015) + full
+application wiring (AGW-IMPL-016)** — the
 `custos_gateway`
 package, its `pyproject.toml` (ruff + mypy strict + pytest with a
 `--cov-fail-under=90` floor), the `python -m custos_gateway` entry point, the
@@ -84,12 +85,26 @@ context, all under the auth-bootstrap bypass prefix — gated on a configured OI
 issuer (`Settings.device_code_enabled`); M1 ships OIDC disabled so every handler
 returns `503`, while the `DeviceCodeStore` persistence seam + `app.state` binding
 + `CUSTOS_GATEWAY_DEVICE_CODE_TTL` config are declared for M3 activation),
+the fully wired application factory (`app.py` AGW-IMPL-016 — `create_app(*,
+settings=..., auth_client=..., downstream_router=..., metadata_store=...,
+device_code_store=..., rate_limiter=...)` mounts the registry, webhook, and
+device-code routers behind the CORS + correlation middleware stack; the lifespan
+builds an owned `httpx.AsyncClient` + `DownstreamRouter` (closed on shutdown)
+unless one is injected, builds a Dapr-backed `DaprAuthServiceClient` over that
+client unless an Auth client is injected, binds the `RateLimiter`, idempotency
+metadata store, and device-code store onto `app.state`, runs the startup
+permission cross-check against the bound Auth client, and flips readiness; each
+registry route runs the `resolve_workspace` →
+`require_permission` → `mint_call_context` dependency chain and a forwarder that
+validates body size + content type, charges the rate limiter, reserves/replays/
+completes idempotency, forwards over Dapr, and shapes the reply — every stage
+skipped when it does not apply or its backing resource is unbound),
 and the
 CI gate
 (`.github/workflows/python-services.yml`) are in place. Subsequent tasks layer
 in the remaining cross-cutting
 write-path middleware (Phase C), the downstream router + route registry +
-webhook + device-code surfaces (Phase D), full `create_app` wiring + OpenAPI +
+webhook + device-code surfaces (Phase D), OpenAPI +
 observability (Phase E), and Helm wiring + verification + docs (Phase F).
 
 Tracker: [#732](https://github.com/toddysm/custos/issues/732) —
@@ -102,7 +117,7 @@ src/custos_gateway/
   __init__.py      # package metadata + version, re-exports create_app
   __main__.py      # `python -m custos_gateway` CLI entry point
   _version.py      # standalone version string
-  app.py           # create_app() FastAPI factory + lifespan readiness gate
+  app.py           # create_app() factory: lifespan wiring + CORS + all routers
   settings.py      # Settings dataclass + load_settings() over CUSTOS_GATEWAY_*
   health.py        # /healthz (liveness) + /readyz (readiness) probes
   errors.py        # locked error taxonomy + RFC 7807 problem+json envelope
@@ -146,6 +161,7 @@ tests/
   test_forwarding.py # shared downstream-router lookup + response shaper
   test_webhook.py # anonymous webhook pass-through forwarding + body cap
   test_devicecode.py # device-code auth-bootstrap routes + M1 503 stub + seam
+  test_pipeline.py # end-to-end ingress pipeline through the wired create_app
 ```
 
 ## Development

@@ -14,6 +14,7 @@ from custos_gateway.middleware.auth import (
     require_permission,
     route_required_permission,
 )
+from custos_gateway.routes.registry import registry_required_permissions
 from custos_gateway.settings import Settings
 from custos_gateway.startup import (
     GatewayStartupError,
@@ -141,7 +142,9 @@ async def test_validate_lists_missing_permissions_sorted() -> None:
 
 
 def test_lifespan_validates_and_binds_client(settings: Settings) -> None:
-    client = _client("things:write")
+    # create_app mounts the full M1 registry, so the injected client must declare
+    # every registry permission plus the extra protected route added below.
+    client = _client("things:write", *registry_required_permissions())
     app = create_app(settings=settings, auth_client=client)
     _add_protected_route(app, "/v1/workspaces/{workspaceId}/things", "things:write")
 
@@ -164,8 +167,18 @@ def test_lifespan_refuses_to_start_on_undeclared_permission(settings: Settings) 
     assert app.state.ready is False
 
 
-def test_lifespan_without_auth_client_skips_validation(settings: Settings) -> None:
+def test_lifespan_builds_default_auth_client(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # With no auth_client injected the lifespan owns a Dapr-backed client and
+    # still runs the startup cross-check. Patch the client class so the cross-
+    # check consults a fake registry instead of opening a socket.
+    fake = _client(*registry_required_permissions())
+    monkeypatch.setattr("custos_gateway.app.DaprAuthServiceClient", lambda **_: fake)
     app = create_app(settings=settings)
+
     with TestClient(app) as http:
         assert http.get("/readyz").status_code == 200
-    assert not hasattr(app.state, AUTH_CLIENT_STATE_ATTR)
+
+    assert getattr(app.state, AUTH_CLIENT_STATE_ATTR) is fake
+    assert fake.get_permissions_calls == 1

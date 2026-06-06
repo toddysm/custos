@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 __all__ = [
     "DEFAULT_COST",
     "DEFAULT_MAX_TRACKED_BUCKETS",
+    "RATE_LIMITER_STATE_ATTR",
     "RATE_LIMIT_LIMIT_HEADER",
     "RATE_LIMIT_REMAINING_HEADER",
     "RATE_LIMIT_RESET_HEADER",
@@ -60,6 +61,11 @@ __all__ = [
     "rate_limit_denied_error",
     "rate_limit_headers",
 ]
+
+#: ``app.state`` attribute holding the lifespan-owned :class:`RateLimiter`. Bound
+#: by :func:`custos_gateway.app.create_app` (AGW-IMPL-016); the in-memory bucket
+#: state is shared across requests on a replica.
+RATE_LIMITER_STATE_ATTR: Final[str] = "rate_limiter"
 
 #: ``RateLimit-Limit`` — the bucket's quota (its burst capacity).
 RATE_LIMIT_LIMIT_HEADER: Final[str] = "ratelimit-limit"

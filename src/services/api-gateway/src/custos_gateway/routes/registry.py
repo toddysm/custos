@@ -46,27 +46,63 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 from fastapi import APIRouter, Depends, Request, Response
 
 from custos_gateway.clients.auth import AUTH_APP_ID
-from custos_gateway.middleware.auth import require_permission
-from custos_gateway.middleware.callctx_mint import OUTBOUND_METADATA_STATE_ATTR
-from custos_gateway.middleware.validate import is_publish_route
+from custos_gateway.middleware.auth import (
+    AUTH_STATE_ATTR,
+    AuthorizedCaller,
+    require_permission,
+)
+from custos_gateway.middleware.callctx_mint import (
+    OUTBOUND_METADATA_STATE_ATTR,
+    mint_call_context,
+)
+from custos_gateway.middleware.idempotency import (
+    IDEMPOTENCY_KEY_HEADER,
+    IdempotencyCoordinator,
+    IdempotencyKey,
+    ReplayReservation,
+    compute_request_hash,
+    is_idempotent_method,
+    resolve_idempotency_key,
+)
+from custos_gateway.middleware.ratelimit import (
+    Allow,
+    Deny,
+    is_rate_limited_method,
+    rate_limit_denied_error,
+    rate_limit_headers,
+)
+from custos_gateway.middleware.validate import (
+    classify_route,
+    enforce_body_size,
+    enforce_content_type,
+    is_publish_route,
+)
+from custos_gateway.middleware.workspace import resolve_workspace
 from custos_gateway.router import DownstreamCall
 from custos_gateway.routes._forwarding import (
     DOWNSTREAM_ROUTER_STATE_ATTR,
     get_downstream_router,
+    get_idempotency_store,
+    get_rate_limiter,
+    response_from_snapshot,
+    response_snapshot,
     shaped_response,
 )
 from custos_gateway.settings import (
     DEFAULT_BODY_MAX_BYTES_DEFAULT,
     DEFAULT_BODY_MAX_BYTES_PUBLISH,
+    Settings,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+
+    from custos_gateway.router import DownstreamResponse
 
 __all__ = [
     "AUTH_APP_ID",
@@ -538,56 +574,160 @@ def registry_required_permissions() -> frozenset[str]:
     return frozenset(spec.required_permission for spec in M1_ROUTE_REGISTRY)
 
 
-def _make_forwarder(app_id: str) -> Callable[[Request], Awaitable[Response]]:
-    """Build the pass-through endpoint that forwards a request to ``app_id``.
+def _make_forwarder(spec: RouteSpec) -> Callable[[Request], Awaitable[Response]]:
+    """Build the ingress endpoint that runs the write/read pipeline for ``spec``.
 
-    The forwarded headers carry the outbound metadata staged by the call-context
-    minter (when present) plus the inbound ``Content-Type``; the body is streamed
-    through unmodified. The downstream reply is returned raw (the router masks
-    server-side failures as ``503 downstream-unavailable``).
+    The pipeline mirrors the design's ingress order *after* the route-level
+    ``resolve_workspace`` → ``require_permission`` → ``mint_call_context``
+    dependencies have run: body-size and content-type validation, per-principal/
+    workspace rate limiting, write-path idempotency reserve/replay/complete, the
+    Dapr forward (carrying the call-context the mint dependency staged), and
+    response shaping. Each stage is skipped when it does not apply to the route
+    (reads bypass rate limiting/idempotency) or when its backing resource is
+    unbound (no limiter or metadata store wired), so the forwarder degrades to a
+    plain pass-through in those configurations.
     """
 
     async def _forward(request: Request) -> Response:
-        downstream = get_downstream_router(request)
         body = await request.body()
-        headers: dict[str, str] = {}
-        outbound = getattr(request.state, OUTBOUND_METADATA_STATE_ATTR, None)
-        if outbound:
-            headers.update(outbound)
-        content_type = request.headers.get("content-type")
-        if content_type is not None:
-            headers["content-type"] = content_type
-        method_path = request.url.path.lstrip("/")
-        if request.url.query:
-            method_path = f"{method_path}?{request.url.query}"
-        reply = await downstream.invoke(
-            DownstreamCall(
-                app_id=app_id,
-                http_method=request.method,
-                method_path=method_path,
-                headers=headers,
-                body=body or None,
-            )
+        enforce_body_size(len(body), spec.max_body_bytes)
+        enforce_content_type(
+            method=request.method,
+            content_type=request.headers.get("content-type"),
+            route_class=classify_route(request.url.path),
         )
-        return shaped_response(reply)
+        caller = cast("AuthorizedCaller", getattr(request.state, AUTH_STATE_ATTR))
+        allow = _apply_rate_limit(request, caller)
+
+        coordinator, key = _idempotency_context(request, spec, caller)
+        if coordinator is not None and key is not None:
+            outcome = await coordinator.reserve(key, _request_hash(request, spec, caller, body))
+            if isinstance(outcome, ReplayReservation):
+                return _with_rate_limit_headers(
+                    response_from_snapshot(outcome.response_snapshot), allow
+                )
+
+        reply = await _invoke_downstream(request, spec, body)
+        if coordinator is not None and key is not None:
+            await coordinator.complete(key, response_snapshot(reply))
+        return _with_rate_limit_headers(shaped_response(reply), allow)
 
     return _forward
+
+
+def _apply_rate_limit(request: Request, caller: AuthorizedCaller) -> Allow | None:
+    """Charge the principal/workspace token buckets, or skip when not applicable.
+
+    Returns the :class:`Allow` decision (whose headers are surfaced on the
+    response) for a rate-limited write when a limiter is bound, ``None`` when the
+    method is exempt or no limiter is wired, and raises ``429 rate-limited`` on a
+    :class:`Deny`.
+    """
+    if not is_rate_limited_method(request.method):
+        return None
+    limiter = get_rate_limiter(request)
+    if limiter is None:
+        return None
+    decision = limiter.check(principal_id=caller.principal_id, workspace_id=caller.workspace_id)
+    if isinstance(decision, Deny):
+        raise rate_limit_denied_error(decision)
+    return decision
+
+
+def _idempotency_context(
+    request: Request, spec: RouteSpec, caller: AuthorizedCaller
+) -> tuple[IdempotencyCoordinator | None, IdempotencyKey | None]:
+    """Build the coordinator/key pair for a write route, or ``(None, None)``.
+
+    Idempotency only engages on routes that require an idempotency key, for
+    idempotent (write) methods, and when a metadata store is bound; otherwise the
+    forwarder forwards without reserving.
+    """
+    if not (spec.requires_idempotency_key and is_idempotent_method(request.method)):
+        return None, None
+    store = get_idempotency_store(request)
+    if store is None:
+        return None, None
+    settings = cast("Settings", request.app.state.settings)
+    key = IdempotencyKey(
+        workspace_id=caller.workspace_id,
+        principal_id=caller.principal_id,
+        route=spec.path,
+        idempotency_key=resolve_idempotency_key(request.headers.get(IDEMPOTENCY_KEY_HEADER)),
+    )
+    coordinator = IdempotencyCoordinator(store=store, ttl_seconds=settings.idempotency_ttl_seconds)
+    return coordinator, key
+
+
+def _request_hash(request: Request, spec: RouteSpec, caller: AuthorizedCaller, body: bytes) -> str:
+    """Fingerprint the request for idempotency key-reuse detection."""
+    return compute_request_hash(
+        method=request.method,
+        route=spec.path,
+        workspace_id=caller.workspace_id,
+        headers=request.headers,
+        body=body,
+    )
+
+
+async def _invoke_downstream(request: Request, spec: RouteSpec, body: bytes) -> DownstreamResponse:
+    """Forward the minted request to ``spec.app_id`` over Dapr.
+
+    The forwarded headers carry the outbound metadata staged by the call-context
+    minter plus the inbound ``Content-Type``; the original path and query string
+    are preserved. The router masks server-side failures as
+    ``503 downstream-unavailable``.
+    """
+    downstream = get_downstream_router(request)
+    headers: dict[str, str] = {}
+    outbound = getattr(request.state, OUTBOUND_METADATA_STATE_ATTR, None)
+    if outbound:
+        headers.update(outbound)
+    content_type = request.headers.get("content-type")
+    if content_type is not None:
+        headers["content-type"] = content_type
+    method_path = request.url.path.lstrip("/")
+    if request.url.query:
+        method_path = f"{method_path}?{request.url.query}"
+    return await downstream.invoke(
+        DownstreamCall(
+            app_id=spec.app_id,
+            http_method=request.method,
+            method_path=method_path,
+            headers=headers,
+            body=body or None,
+        )
+    )
+
+
+def _with_rate_limit_headers(response: Response, allow: Allow | None) -> Response:
+    """Attach the rate-limit budget headers to ``response`` when one applies."""
+    if allow is not None:
+        for name, value in rate_limit_headers(allow).items():
+            response.headers[name] = value
+    return response
 
 
 def build_registry_router() -> APIRouter:
     """Materialize :data:`M1_ROUTE_REGISTRY` onto a FastAPI router.
 
-    Every route is mounted with its ``require_permission`` dependency — so its
-    declared permission participates in the startup registry check — and a thin
-    pass-through endpoint forwarding to the owning component.
+    Every route is mounted with its ``resolve_workspace`` → ``require_permission``
+    → ``mint_call_context`` dependency chain — so the workspace is resolved before
+    authorization, the declared permission participates in the startup registry
+    check, and a signed call-context is staged for the forward — plus the pipeline
+    endpoint that forwards to the owning component.
     """
     router = APIRouter()
     for spec in M1_ROUTE_REGISTRY:
         router.add_api_route(
             spec.path,
-            _make_forwarder(spec.app_id),
+            _make_forwarder(spec),
             methods=[spec.method],
-            dependencies=[Depends(require_permission(spec.required_permission))],
+            dependencies=[
+                Depends(resolve_workspace),
+                Depends(require_permission(spec.required_permission)),
+                Depends(mint_call_context),
+            ],
             name=f"{spec.method.lower()}:{spec.path}",
         )
     return router

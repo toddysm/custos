@@ -5,11 +5,12 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from custos_gateway.app import create_app
+from custos_gateway.clients.auth import FakeAuthServiceClient
 from custos_gateway.settings import Settings
 
 
-def test_healthz_always_ok(settings: Settings) -> None:
-    app = create_app(settings=settings)
+def test_healthz_always_ok(settings: Settings, auth_client: FakeAuthServiceClient) -> None:
+    app = create_app(settings=settings, auth_client=auth_client)
     # No lifespan entered: app.state.ready is False, but liveness is independent.
     with TestClient(app, raise_server_exceptions=True) as client:
         # Inside the context the lifespan has run, so probe liveness directly.
@@ -18,8 +19,10 @@ def test_healthz_always_ok(settings: Settings) -> None:
     assert response.json() == {"status": "ok"}
 
 
-def test_readyz_503_before_ready_then_200_after(settings: Settings) -> None:
-    app = create_app(settings=settings)
+def test_readyz_503_before_ready_then_200_after(
+    settings: Settings, auth_client: FakeAuthServiceClient
+) -> None:
+    app = create_app(settings=settings, auth_client=auth_client)
 
     # Before the lifespan runs the readiness gate is closed.
     assert app.state.ready is False

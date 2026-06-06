@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from custos_gateway.clients.auth import AUTH_APP_ID
 from custos_gateway.errors import register_exception_handlers
+from custos_gateway.middleware.auth import AUTH_STATE_ATTR, AuthorizedCaller
 from custos_gateway.middleware.callctx_mint import OUTBOUND_METADATA_STATE_ATTR
 from custos_gateway.router import DownstreamRouter
 from custos_gateway.routes import registry
@@ -345,6 +346,33 @@ def _router_with(handler: httpx.MockTransport) -> DownstreamRouter:
     )
 
 
+def _seam_spec(app_id: str, method: str, path: str) -> RouteSpec:
+    """Build a minimal :class:`RouteSpec` for exercising the forwarder seam."""
+    return RouteSpec(
+        method=method,
+        path=path,
+        app_id=app_id,
+        required_permission="things:write" if method != "GET" else "things:read",
+        requires_idempotency_key=False,
+        max_body_bytes=DEFAULT_BODY_MAX_BYTES_DEFAULT,
+        rate_limit_class=RateLimitClass.WRITE if method != "GET" else RateLimitClass.READ,
+    )
+
+
+async def _stamp_auth(request: Request) -> None:
+    """Bind a synthetic :class:`AuthorizedCaller` the way ``require_permission`` does."""
+    setattr(
+        request.state,
+        AUTH_STATE_ATTR,
+        AuthorizedCaller(
+            principal_id="principal-1",
+            audit_event_id="audit-1",
+            permission="things:write",
+            workspace_id="ws-1",
+        ),
+    )
+
+
 def test_forwarder_passes_request_through_to_downstream() -> None:
     captured: dict[str, object] = {}
 
@@ -364,9 +392,11 @@ def test_forwarder_passes_request_through_to_downstream() -> None:
 
     app.add_api_route(
         "/v1/workspaces/{workspaceId}/workflows",
-        registry._make_forwarder(CATALOG_APP_ID),
+        registry._make_forwarder(
+            _seam_spec(CATALOG_APP_ID, "POST", "/v1/workspaces/{workspaceId}/workflows")
+        ),
         methods=["POST"],
-        dependencies=[Depends(_stamp_metadata)],
+        dependencies=[Depends(_stamp_auth), Depends(_stamp_metadata)],
     )
     app.state.downstream_router = _router_with(httpx.MockTransport(handler))
 
@@ -400,8 +430,11 @@ def test_forwarder_carries_query_string() -> None:
     register_exception_handlers(app)
     app.add_api_route(
         "/v1/workspaces/{workspaceId}/runs",
-        registry._make_forwarder(WORKFLOW_APP_ID),
+        registry._make_forwarder(
+            _seam_spec(WORKFLOW_APP_ID, "GET", "/v1/workspaces/{workspaceId}/runs")
+        ),
         methods=["GET"],
+        dependencies=[Depends(_stamp_auth)],
     )
     app.state.downstream_router = _router_with(httpx.MockTransport(handler))
 
@@ -419,8 +452,11 @@ def test_forwarder_returns_503_when_router_unbound() -> None:
     register_exception_handlers(app)
     app.add_api_route(
         "/v1/workspaces/{workspaceId}/runs",
-        registry._make_forwarder(WORKFLOW_APP_ID),
+        registry._make_forwarder(
+            _seam_spec(WORKFLOW_APP_ID, "GET", "/v1/workspaces/{workspaceId}/runs")
+        ),
         methods=["GET"],
+        dependencies=[Depends(_stamp_auth)],
     )
 
     client = TestClient(app)
