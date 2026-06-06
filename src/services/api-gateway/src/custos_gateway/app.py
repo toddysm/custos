@@ -16,6 +16,7 @@ permission cross-check) happens inside the FastAPI lifespan context.
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
@@ -23,6 +24,7 @@ from typing import TYPE_CHECKING
 import httpx
 
 from custos_gateway._version import __version__
+from custos_gateway.clients.auth import DaprAuthServiceClient, read_dapr_endpoint
 from custos_gateway.errors import register_exception_handlers
 from custos_gateway.health import router as health_router
 from custos_gateway.middleware import CorrelationIdMiddleware
@@ -68,12 +70,13 @@ def create_app(
             :class:`~custos_gateway.settings.SettingsError` for missing required
             vars. Tests inject a settings instance to avoid touching the
             environment.
-        auth_client: Lifespan-owned Auth Service client. When provided it is
-            bound to ``app.state`` and the startup permission check
-            (AGW-IMPL-008) validates every route's declared permission against
-            the Auth Service registry before readiness flips, refusing to boot
-            on any undeclared permission. When ``None`` the gateway becomes ready
-            without the cross-check; tests inject a fake.
+        auth_client: Lifespan-owned Auth Service client (the test-injection
+            seam). When ``None`` (production) the lifespan builds a Dapr-backed
+            :class:`DaprAuthServiceClient` over the owned ``httpx`` client.
+            Either way the bound client drives the startup permission check
+            (AGW-IMPL-008): every route's declared permission is validated
+            against the Auth Service registry before readiness flips, refusing
+            to boot on any undeclared permission. Tests inject a fake.
         downstream_router: Lifespan-owned :class:`DownstreamRouter`. When ``None``
             (production) the factory builds an owned :class:`httpx.AsyncClient`
             and a Dapr-targeted router during startup and closes the client on
@@ -99,12 +102,21 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         owned_client: httpx.AsyncClient | None = None
+
+        def owned_http_client() -> httpx.AsyncClient:
+            # Lazily build a single httpx client shared by the downstream router
+            # and the Dapr-backed Auth client (both talk to the local sidecar),
+            # closed once on shutdown.
+            nonlocal owned_client
+            if owned_client is None:
+                owned_client = httpx.AsyncClient()
+            return owned_client
+
         if downstream_router is not None:
             router = downstream_router
         else:
-            owned_client = httpx.AsyncClient()
             router = DownstreamRouter(
-                http_client=owned_client,
+                http_client=owned_http_client(),
                 host=effective_settings.dapr_http_host,
                 http_port=effective_settings.dapr_http_port,
             )
@@ -119,12 +131,20 @@ def create_app(
         setattr(app.state, METADATA_STORE_STATE_ATTR, metadata_store)
         setattr(app.state, DEVICE_CODE_STORE_STATE_ATTR, device_code_store)
 
-        # When an Auth Service client is available, the gateway validates that
-        # every route declares a permission the Auth Service knows about and
-        # refuses to become ready otherwise.
-        if auth_client is not None:
-            setattr(app.state, AUTH_CLIENT_STATE_ATTR, auth_client)
-            await validate_route_permissions(app=app, client=auth_client)
+        # The lifespan owns the Auth Service client: tests inject a fake while
+        # production builds a Dapr-backed client over the owned httpx client. The
+        # startup cross-check then refuses to become ready unless every route's
+        # declared permission is known to the Auth Service.
+        effective_auth_client = (
+            auth_client
+            if auth_client is not None
+            else DaprAuthServiceClient(
+                http_client=owned_http_client(),
+                endpoint=read_dapr_endpoint(os.environ),
+            )
+        )
+        setattr(app.state, AUTH_CLIENT_STATE_ATTR, effective_auth_client)
+        await validate_route_permissions(app=app, client=effective_auth_client)
         app.state.ready = True
         logger.info("api-gateway is ready")
         try:
@@ -143,9 +163,11 @@ def create_app(
     app.state.ready = False
 
     # The correlation middleware is added first and the CORS middleware second so
-    # CORS sits outermost: every response — including Problem+JSON errors and the
-    # preflight short-circuit — carries both the CORS headers and the
-    # x-correlation-id stamped by the inner correlation middleware.
+    # CORS sits outermost: every response that reaches the app — normal replies
+    # and Problem+JSON errors alike — carries both the CORS headers and the
+    # x-correlation-id stamped by the inner correlation middleware. (CORS
+    # preflight ``OPTIONS`` requests are short-circuited by CORSMiddleware itself
+    # and never reach the correlation middleware.)
     app.add_middleware(CorrelationIdMiddleware)
     app.add_middleware(
         CORSMiddleware,

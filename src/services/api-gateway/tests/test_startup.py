@@ -167,8 +167,18 @@ def test_lifespan_refuses_to_start_on_undeclared_permission(settings: Settings) 
     assert app.state.ready is False
 
 
-def test_lifespan_without_auth_client_skips_validation(settings: Settings) -> None:
+def test_lifespan_builds_default_auth_client(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # With no auth_client injected the lifespan owns a Dapr-backed client and
+    # still runs the startup cross-check. Patch the client class so the cross-
+    # check consults a fake registry instead of opening a socket.
+    fake = _client(*registry_required_permissions())
+    monkeypatch.setattr("custos_gateway.app.DaprAuthServiceClient", lambda **_: fake)
     app = create_app(settings=settings)
+
     with TestClient(app) as http:
         assert http.get("/readyz").status_code == 200
-    assert not hasattr(app.state, AUTH_CLIENT_STATE_ATTR)
+
+    assert getattr(app.state, AUTH_CLIENT_STATE_ATTR) is fake
+    assert fake.get_permissions_calls == 1

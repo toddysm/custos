@@ -90,9 +90,11 @@ settings=..., auth_client=..., downstream_router=..., metadata_store=...,
 device_code_store=..., rate_limiter=...)` mounts the registry, webhook, and
 device-code routers behind the CORS + correlation middleware stack; the lifespan
 builds an owned `httpx.AsyncClient` + `DownstreamRouter` (closed on shutdown)
-unless one is injected, binds the `RateLimiter`, idempotency metadata store, and
-device-code store onto `app.state`, runs the startup permission cross-check, and
-flips readiness; each registry route runs the `resolve_workspace` →
+unless one is injected, builds a Dapr-backed `DaprAuthServiceClient` over that
+client unless an Auth client is injected, binds the `RateLimiter`, idempotency
+metadata store, and device-code store onto `app.state`, runs the startup
+permission cross-check against the bound Auth client, and flips readiness; each
+registry route runs the `resolve_workspace` →
 `require_permission` → `mint_call_context` dependency chain and a forwarder that
 validates body size + content type, charges the rate limiter, reserves/replays/
 completes idempotency, forwards over Dapr, and shapes the reply — every stage
