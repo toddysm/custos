@@ -21,15 +21,23 @@ from custos_gateway._version import __version__
 from custos_gateway.errors import register_exception_handlers
 from custos_gateway.health import router as health_router
 from custos_gateway.middleware import CorrelationIdMiddleware
+from custos_gateway.middleware.auth import AUTH_CLIENT_STATE_ATTR
 from custos_gateway.settings import Settings, load_settings
+from custos_gateway.startup import validate_route_permissions
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
 
+    from custos_gateway.clients.auth import AuthServiceClient
+
 logger = logging.getLogger("custos_gateway")
 
 
-def create_app(*, settings: Settings | None = None) -> FastAPI:
+def create_app(
+    *,
+    settings: Settings | None = None,
+    auth_client: AuthServiceClient | None = None,
+) -> FastAPI:
     """Build and return the API Gateway FastAPI application.
 
     Args:
@@ -39,6 +47,12 @@ def create_app(*, settings: Settings | None = None) -> FastAPI:
             :class:`~custos_gateway.settings.SettingsError` for missing required
             vars. Tests inject a settings instance to avoid touching the
             environment.
+        auth_client: Lifespan-owned Auth Service client. When provided it is
+            bound to ``app.state`` and the startup permission check
+            (AGW-IMPL-008) validates every route's declared permission against
+            the Auth Service registry before readiness flips, refusing to boot
+            on any undeclared permission. When ``None`` the real Dapr client is
+            wired by a later phase (AGW-IMPL-016); tests inject a fake.
 
     The factory is import-safe: no DSN lookups, no socket connections. All
     side-effecting work happens inside the FastAPI lifespan context.
@@ -49,9 +63,13 @@ def create_app(*, settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        # Later phases bind the Auth Service client, SPL provider bundle, and
-        # downstream router here. For now the readiness gate flips once the
-        # application has finished booting.
+        # Later phases bind the SPL provider bundle and downstream router here.
+        # When an Auth Service client is available, the gateway validates that
+        # every route declares a permission the Auth Service knows about and
+        # refuses to become ready otherwise.
+        if auth_client is not None:
+            setattr(app.state, AUTH_CLIENT_STATE_ATTR, auth_client)
+            await validate_route_permissions(app=app, client=auth_client)
         app.state.ready = True
         logger.info("api-gateway is ready")
         yield
