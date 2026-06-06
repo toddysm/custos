@@ -51,6 +51,9 @@ def test_security_schemes_present(settings: Settings, auth_client: FakeAuthServi
     assert schemes[BEARER_SCHEME_NAME]["type"] == "http"
     assert schemes[BEARER_SCHEME_NAME]["scheme"] == "bearer"
     assert WEBHOOK_SCHEME_NAME in schemes
+    # The anonymous webhook sentinel must not advertise the Authorization header,
+    # which would mislead client generators into sending bearer credentials.
+    assert schemes[WEBHOOK_SCHEME_NAME]["name"] != "Authorization"
 
 
 def test_problem_details_schema_registered(

@@ -106,13 +106,15 @@ _SECURITY_SCHEMES: Final[dict[str, dict[str, str]]] = {
     WEBHOOK_SCHEME_NAME: {
         "type": "apiKey",
         "in": "header",
-        "name": "Authorization",
+        "name": "X-Custos-Webhook-Signature",
         "description": (
-            "Sentinel scheme for the anonymous webhook ingress. The gateway does "
-            "not authenticate webhook callers and forwards the request verbatim; "
-            "signature/HMAC verification is performed downstream by Trigger "
-            "Service and the owning connector plugin. No gateway bearer is "
-            "required on this route."
+            "Sentinel scheme marking the webhook ingress as anonymous at the "
+            "gateway boundary. The gateway authenticates nothing on this route "
+            "and forwards the request verbatim — it does not read or verify any "
+            "header. The named header is a placeholder for the connector-defined "
+            "signature (e.g. an HMAC) that Trigger Service and the owning "
+            "connector plugin verify downstream; no gateway bearer or "
+            "``Authorization`` credential applies here."
         ),
     },
 }
