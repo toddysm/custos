@@ -21,6 +21,15 @@ from custos_gateway.middleware.correlation import (
     CorrelationIdMiddleware,
     new_correlation_id,
 )
+from custos_gateway.middleware.idempotency import (
+    IdempotencyCoordinator,
+    IdempotencyKey,
+    ProceedReservation,
+    ReplayReservation,
+    compute_request_hash,
+    is_idempotent_method,
+    resolve_idempotency_key,
+)
 from custos_gateway.middleware.workspace import (
     ResolvedWorkspace,
     resolve_workspace,
@@ -29,12 +38,19 @@ from custos_gateway.middleware.workspace import (
 __all__ = [
     "AuthorizedCaller",
     "CorrelationIdMiddleware",
+    "IdempotencyCoordinator",
+    "IdempotencyKey",
     "MintedCallContext",
+    "ProceedReservation",
+    "ReplayReservation",
     "ResolvedWorkspace",
+    "compute_request_hash",
     "get_auth_client",
     "is_auth_bypass_path",
+    "is_idempotent_method",
     "mint_call_context",
     "new_correlation_id",
     "require_permission",
+    "resolve_idempotency_key",
     "resolve_workspace",
 ]
