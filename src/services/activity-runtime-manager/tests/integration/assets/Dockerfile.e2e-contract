@@ -1,0 +1,19 @@
+# Contract-aware e2e activity image for the ARM I/O bridge integration suite.
+#
+# Unlike the trivial `busybox + /bin/true` image (which exits 0 and writes
+# nothing), this one runs a contract-aware entrypoint that reads the staged
+# /custos/in/inputs.json and writes /custos/out/outputs.json plus an artifact,
+# so the integration suite can exercise a true output round-trip through the
+# input/output bridges.
+#
+# It stays non-root (USER 65532) so the hardened security context
+# (runAsNonRoot, readOnlyRootFilesystem) is satisfied, and is loaded straight
+# into the kind node (imagePullPolicy: IfNotPresent — no registry pull).
+FROM busybox:1.36
+
+# 0555: world read+execute, owned by root — runnable by the unprivileged
+# 65532 uid the pod runs as, and untouched by the read-only root filesystem.
+COPY --chmod=0555 entrypoint.sh /usr/local/bin/entrypoint.sh
+
+USER 65532
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

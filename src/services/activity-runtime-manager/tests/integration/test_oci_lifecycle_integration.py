@@ -14,6 +14,7 @@ is satisfied without a registry pull.
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from collections.abc import Iterator
@@ -38,6 +39,10 @@ pytestmark = pytest.mark.integration
 
 _NAMESPACE = "custos-arm-e2e"
 _E2E_IMAGE = os.environ.get("CUSTOS_ARM_E2E_IMAGE", "custos-arm-e2e:test")
+#: A contract-aware activity image whose entrypoint reads ``/custos/in/inputs.json``
+#: and writes ``/custos/out/outputs.json`` plus an artifact (built + ``kind
+#: load``ed by the integration CI job from ``tests/integration/assets``).
+_CONTRACT_IMAGE = os.environ.get("CUSTOS_ARM_E2E_CONTRACT_IMAGE", "custos-arm-e2e-contract:test")
 
 
 @pytest.fixture(scope="module")
@@ -128,6 +133,41 @@ def test_lifecycle_happy_path(_apis: tuple[object, object], tmp_path: Path) -> N
             name=handle.reference.split("/", 1)[1], namespace=_NAMESPACE
         )
     assert excinfo.value.status == 404
+
+
+def test_contract_activity_output_round_trip(_apis: tuple[object, object], tmp_path: Path) -> None:
+    """The contract-aware activity's outputs come back through the bridge.
+
+    A true round-trip: ARM streams ``inputs.json`` *in* through the input bridge,
+    the activity writes ``outputs.json`` + an artifact to ``/custos/out``, and
+    ``collect()`` streams that tree back *out* of the sidecar onto ARM's host
+    staging ``out/``.
+    """
+    driver = _driver(_apis, tmp_path)
+    plan = _plan(image=_CONTRACT_IMAGE, run_id=f"out-{uuid.uuid4().hex[:8]}")
+
+    handle = driver.prepare(plan)
+    # Stage an input the activity echoes back, so the assertion proves the value
+    # actually traversed both bridges rather than a hard-coded default.
+    (handle.input_root / "inputs.json").write_text('{"name":"custos"}', encoding="utf-8")
+    try:
+        driver.start(handle)
+        outcome = driver.await_terminal(handle, plan.deadline)
+        assert outcome.exit_code == 0
+        assert outcome.signal is SandboxSignal.NONE
+
+        bundle = driver.collect(handle)
+
+        outputs_path = bundle.root / "outputs.json"
+        assert outputs_path.is_file()
+        envelope = json.loads(outputs_path.read_text(encoding="utf-8"))
+        assert envelope["status"] == "success"
+        assert envelope["outputs"]["greeting"] == "hello, custos"
+
+        artifact = bundle.root / "artifacts" / "greeting.txt"
+        assert artifact.read_text(encoding="utf-8").strip() == "hello, custos"
+    finally:
+        driver.cleanup(handle)
 
 
 def test_image_pull_failure_is_surfaced(_apis: tuple[object, object], tmp_path: Path) -> None:

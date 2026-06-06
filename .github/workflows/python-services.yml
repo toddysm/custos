@@ -600,7 +600,8 @@ jobs:
       # hardened security context (runAsNonRoot, readOnlyRootFilesystem) is
       # satisfied without writing to the root filesystem or pulling from a
       # registry. Loaded straight into the kind node (imagePullPolicy is
-      # IfNotPresent, so no pull is attempted).
+      # IfNotPresent, so no pull is attempted). Used by the lifecycle / cancel /
+      # image-pull scenarios that only need a container that exits 0.
       - name: Build and load the e2e activity image
         run: |
           cat > /tmp/Dockerfile.e2e <<'EOF'
@@ -610,6 +611,17 @@ jobs:
           EOF
           docker build -t custos-arm-e2e:test -f /tmp/Dockerfile.e2e /tmp
           kind load docker-image custos-arm-e2e:test --name custos-arm
+
+      # A contract-aware variant (same non-root baseline) whose entrypoint reads
+      # /custos/in/inputs.json and writes /custos/out/outputs.json plus an
+      # artifact, so the suite can exercise a true output round-trip through the
+      # I/O bridge.
+      - name: Build and load the contract-aware e2e activity image
+        run: |
+          docker build -t custos-arm-e2e-contract:test \
+            -f tests/integration/assets/Dockerfile.e2e-contract \
+            tests/integration/assets
+          kind load docker-image custos-arm-e2e-contract:test --name custos-arm
 
       - name: Install custos-callctx library from path
         working-directory: ${{ github.workspace }}
@@ -627,6 +639,7 @@ jobs:
       - name: Pytest (integration suite against kind)
         env:
           CUSTOS_ARM_E2E_IMAGE: custos-arm-e2e:test
+          CUSTOS_ARM_E2E_CONTRACT_IMAGE: custos-arm-e2e-contract:test
         run: pytest -q -m integration --no-cov
 
   connector-service:
