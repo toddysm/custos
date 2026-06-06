@@ -14,7 +14,8 @@ Design: [`design/components/api-gateway/design.md`](../../../design/components/a
 ## Status
 
 **Phase A scaffold (AGW-IMPL-001, AGW-IMPL-002, AGW-IMPL-003) + Auth
-delegation & enforcement (AGW-IMPL-004, AGW-IMPL-005)** — the `custos_gateway`
+delegation & enforcement (AGW-IMPL-004, AGW-IMPL-005) + workspace resolution
+(AGW-IMPL-006)** — the `custos_gateway`
 package, its `pyproject.toml` (ruff + mypy strict + pytest with a
 `--cov-fail-under=90` floor), the `python -m custos_gateway` entry point, the
 typed `Settings` + `load_settings()` loader over the design Configuration table,
@@ -25,9 +26,12 @@ the `create_app(*, settings=...)` factory with a lifespan readiness gate, the
 service invocation (`verify_and_authorize` / `callctx_sign` /
 `get_permissions` + Noop/Fake doubles), the AuthN/AuthZ `require_permission`
 dependency (verify-and-authorize per route, `principal` + `auditEventId` on
-`request.state`, webhook + auth-bootstrap bypass classifier), and the CI gate
+`request.state`, webhook + auth-bootstrap bypass classifier), the
+URL-authoritative `resolve_workspace` dependency (path `{workspaceId}` binds
+`request.state.workspace_id`; a body naming a different workspace is rejected
+`400 workspace-mismatch`; unscoped routes resolve cleanly), and the CI gate
 (`.github/workflows/python-services.yml`) are in place. Subsequent tasks layer
-in the workspace resolver + call-context minting (Phase B), the cross-cutting
+in call-context minting (Phase B), the cross-cutting
 write-path middleware (Phase C), the downstream router + route registry +
 webhook + device-code surfaces (Phase D), full `create_app` wiring + OpenAPI +
 observability (Phase E), and Helm wiring + verification + docs (Phase F).
@@ -50,6 +54,7 @@ src/custos_gateway/
     __init__.py    # cross-cutting middleware package
     auth.py        # require_permission dependency + bypass classifier
     correlation.py # x-correlation-id ingress + UUIDv7 generation
+    workspace.py   # URL-authoritative workspace resolver + mismatch guard
   clients/
     __init__.py    # outbound delegation clients package
     auth.py        # AuthServiceClient over Dapr (verify/sign/permissions)
@@ -62,6 +67,7 @@ tests/
   test_correlation.py # correlation-id ingress + propagation
   test_auth_client.py # Auth Service Dapr client + doubles
   test_auth_middleware.py # require_permission enforcement + bypass
+  test_workspace_middleware.py # URL-authoritative workspace resolution
 ```
 
 ## Development

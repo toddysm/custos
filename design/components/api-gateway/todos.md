@@ -24,7 +24,7 @@ Full M1 gateway implementation, packaged at `src/services/api-gateway/` (Python 
 
 - [x] AGW-IMPL-004 (#714): AuthServiceClient over Dapr service invocation.
 - [x] AGW-IMPL-005 (#715): AuthN/AuthZ middleware + per-route required permission.
-- [F] AGW-IMPL-006 (#716): Workspace Resolver.
+- [x] AGW-IMPL-006 (#716): Workspace Resolver.
 - [F] AGW-IMPL-007 (#717): Call-Context Minter.
 - [F] AGW-IMPL-008 (#718): Startup permission validation.
 
