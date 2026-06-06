@@ -17,12 +17,18 @@ from custos_gateway.middleware.correlation import (
     CorrelationIdMiddleware,
     new_correlation_id,
 )
+from custos_gateway.middleware.workspace import (
+    ResolvedWorkspace,
+    resolve_workspace,
+)
 
 __all__ = [
     "AuthorizedCaller",
     "CorrelationIdMiddleware",
+    "ResolvedWorkspace",
     "get_auth_client",
     "is_auth_bypass_path",
     "new_correlation_id",
     "require_permission",
+    "resolve_workspace",
 ]
