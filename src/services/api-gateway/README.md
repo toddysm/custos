@@ -113,10 +113,16 @@ workspaceId, principalId, correlationId, decisionAuditEventId}`, increments the
 `gateway_idempotency_replays_total` counters, and observes the
 `gateway_request_duration_seconds` / `gateway_downstream_duration_seconds`
 histograms; `opentelemetry-api`-only, inert until an SDK + exporter is wired),
-and the
+the Helm subchart wiring (AGW-IMPL-019 — `deploy/helm/charts/api-gateway`
+projects the `CUSTOS_GATEWAY_*` config + TLS secret refs through the ConfigMap),
+the in-process conformance suite (AGW-IMPL-020 —
+`tests/integration/test_conformance.py` exercises authn/authz, workspace,
+idempotency (all four reserve outcomes), rate-limit, validation, routing,
+webhook, and the device-code 503 against a stub downstream + fake Auth +
+in-memory SPL store), and the
 CI gate
-(`.github/workflows/python-services.yml`) are in place. Subsequent tasks layer
-in Helm wiring + verification + docs (Phase F).
+(`.github/workflows/python-services.yml`) are in place. The remaining task layers
+in developer docs (Phase F).
 
 Tracker: [#732](https://github.com/toddysm/custos/issues/732) —
 `AGW-IMPL-000-API-GATEWAY`.
@@ -177,6 +183,9 @@ tests/
   test_pipeline.py # end-to-end ingress pipeline through the wired create_app
   test_openapi.py # OpenAPI 3.1 doc: schemes + x-custos-* extensions + error schema
   test_telemetry.py # OTel spans + request/ratelimit/idempotency counters + histograms
+  integration/
+    harness.py # in-process conformance harness: stub downstream + fake Auth + SPL store
+    test_conformance.py # cross-cutting pipeline conformance across every stage
 ```
 
 ## Development
