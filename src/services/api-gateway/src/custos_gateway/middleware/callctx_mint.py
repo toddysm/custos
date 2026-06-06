@@ -21,6 +21,7 @@ no context.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
 from custos_callctx import CALLCTX_HEADER
@@ -112,11 +113,14 @@ async def mint_call_context(request: Request) -> MintedCallContext:
         CALLCTX_HEADER: signed.token,
         CORRELATION_ID_HEADER: correlation_id,
     }
+    # Bind the single mutable mapping to ``request.state`` for the downstream
+    # router to attach, and expose a read-only view of the *same* backing data
+    # on the value object so the two can never silently diverge.
     minted = MintedCallContext(
         token=signed.token,
         correlation_id=correlation_id,
-        metadata=metadata,
+        metadata=MappingProxyType(metadata),
     )
     setattr(request.state, CALL_CONTEXT_STATE_ATTR, minted)
-    setattr(request.state, OUTBOUND_METADATA_STATE_ATTR, dict(metadata))
+    setattr(request.state, OUTBOUND_METADATA_STATE_ATTR, metadata)
     return minted

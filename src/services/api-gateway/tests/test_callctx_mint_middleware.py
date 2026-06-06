@@ -60,7 +60,7 @@ def _build_app(client: FakeAuthServiceClient) -> FastAPI:
     return app
 
 
-def _allow(principal: str = "sa_1", workspace: str = "ws_42") -> FakeAuthServiceClient:
+def _allow(principal: str = "sa_1") -> FakeAuthServiceClient:
     return FakeAuthServiceClient(
         decision=VerifyAndAuthorizeResponse(
             principal_id=principal,
@@ -120,7 +120,7 @@ def test_minted_correlation_id_propagates_when_generated() -> None:
 
 
 def test_unscoped_platform_workspace_is_signed() -> None:
-    fake = _allow(workspace="__platform__")
+    fake = _allow()
     app = FastAPI()
     app.add_middleware(CorrelationIdMiddleware)
     register_exception_handlers(app)
