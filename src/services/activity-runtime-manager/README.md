@@ -24,9 +24,11 @@ adapter (`ScheduleActivity` / `CancelActivity`), cancel + deadline/timeout,
 OpenTelemetry spans + metrics, and a kind/k8s integration suite — all under the
 ruff + mypy (strict) + pytest (≥90 % coverage) quality-gate toolchain.
 
-Deferred (tracked separately): the ARM↔pod I/O bridge for full output
-round-trips on `kind` ([#613](https://github.com/toddysm/custos/issues/613)),
-and the `http` / `wasm` runtime drivers (later milestones).
+Deferred (tracked separately): the `http` / `wasm` runtime drivers (later
+milestones).
+
+The ARM↔pod I/O bridge ([#613](https://github.com/toddysm/custos/issues/613))
+has landed — see § The ARM↔pod I/O bridge below.
 
 Tracking issue: [#591](https://github.com/toddysm/custos/issues/591)
 (ARM-IMPL-000).
@@ -109,6 +111,41 @@ are parsed and validated to positive `timedelta` values.
 > `restartPolicy: Always`), which requires **Kubernetes >= 1.28**. On older
 > clusters the activity Pod will be rejected by the API server (or stick in
 > `Init`), so deploy ARM only against a 1.28+ control plane.
+
+## The ARM↔pod I/O bridge
+
+ARM never shares a writable volume with the activity container. Instead it
+brokers the activity's typed inputs, outputs, and artifacts across the pod
+boundary with two short-lived helper containers built from `ARM_IO_BRIDGE_IMAGE`
+(both mount the same emptyDir contract volumes the activity sees at `/custos/in`
+and `/custos/out`):
+
+- **Input injector** — an `initContainer` that blocks until ARM streams a tar of
+  the materialized contract directory into it (`tar -x -C /custos/in`) and drops
+  a readiness sentinel. The stream is recursive, so `inputs.json`, `ctx.json`,
+  the secret tree, and any downstream-materialized artifacts under
+  `/custos/in/artifacts/` all land before the activity starts.
+- **Output collector** — a **native sidecar** (`initContainers` entry with
+  `restartPolicy: Always`) that idles after the activity exits, ignoring
+  `SIGTERM`, until ARM execs `tar -c -C /custos/out` to stream `outputs.json` and
+  produced artifacts back, then drops the collected sentinel so the pod can drain.
+
+On the host side the **I/O Broker** runs the two schema-validation boundaries of
+an attempt: it validates the materialized `inputs` payload against the activity's
+input JSON Schema before start, and after exit runs two-phase output
+finalization — parse `outputs.json` (size-capped by `ARM_OUTPUT_MAX_BYTES`),
+upload every declared `spec.outputs.artifacts[]` (capped by
+`ARM_ARTIFACT_MAX_BYTES`), rewrite each `ArtifactRef` with its store-assigned
+`id`/`digest`/`mediaType`/`size`, synthesize `produced[]`, and validate the
+finalized `outputs` against the output JSON Schema. A downstream step's input
+`ArtifactRef`s are fetched by `id` and materialized onto `/custos/in/artifacts/`
+so the consuming activity reads a plain local file.
+
+**Image pinning.** Production activities always run digest-pinned
+(content-addressed) bits — a manifest without a runtime digest is rejected. The
+`ARM_ALLOW_UNPINNED_IMAGES` escape hatch is a test/dev affordance only (for a
+locally `kind load`ed image that has no registry digest to pin against); leave it
+`false` in production.
 
 ## Development
 

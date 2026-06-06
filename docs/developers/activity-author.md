@@ -40,6 +40,7 @@ written by ARM before start) and `/custos/out` (written by your activity).
 | `/custos/in/ctx.json` | ARM → activity | Execution context: `runId`, `stepId`, `attempt`, `workspaceId`, activity type/version, connector handles (no credentials), deadline. Read-only. |
 | `/custos/in/secrets/<connector>/<key>` | ARM → activity | One file per injected secret, namespaced under the manifest connector slot name. Plaintext credentials live **only** here. Read-only, `0400`. |
 | `/custos/in/sidecar-token` | ARM → activity | Bootstrap token for the sidecar Connector API. Send it in the `Custos-Sidecar-Token` header on every sidecar request. `0400`. |
+| `/custos/in/artifacts/<name>` | ARM → activity | Upstream artifacts you consume: when an input `ArtifactRef` references an artifact a previous step produced, ARM fetches it and stages it here as a plain file before start. Read-only. |
 | `/custos/out/outputs.json` | activity → ARM | The outputs envelope (below). Required on success. |
 | `/custos/out/artifacts/<name>` | activity → ARM | Files you produce, keyed by `spec.outputs.artifacts[].name`. ARM uploads them and rewrites `outputs.json` with store IDs. |
 | `/custos/out/audit.jsonl` | activity → ARM | Optional structured audit lines, forwarded to Observability/Audit. |
@@ -61,6 +62,15 @@ your manifest's input JSON Schema (Draft 2020-12). Secrets never appear here.
   }
 }
 ```
+
+When an input value is an `ArtifactRef` (`{ "kind": "ArtifactRef", "name": ...,
+"id": ... }`) produced by an earlier step, ARM fetches that artifact by `id`
+before your container starts and stages it at `/custos/in/artifacts/<name>`. Read
+the local file — you never call the artifact store yourself. Both directions
+cross the pod boundary through the **ARM↔pod I/O bridge** (ARM streams
+`/custos/in` in through an init container and streams `/custos/out` back through
+a native-sidecar collector); the bridge is transparent to your activity, which
+only ever reads and writes plain files under `/custos`.
 
 ### `outputs.json` — success
 

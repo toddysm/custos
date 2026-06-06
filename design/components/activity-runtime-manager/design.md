@@ -1,8 +1,8 @@
 # Component Design: Activity Runtime Manager
 
 Slug: `activity-runtime-manager`
-Last Updated: 2026-06-02
-Version: 6
+Last Updated: 2026-06-06
+Version: 7
 Status: Draft
 
 > This document captures the design decisions locked in so far. The Internal Structure, Sandbox and Isolation Model, Key Operations, Data Models, Public Interface, Configuration, and Failure Modes sections were filled in the 2026-06-02 iteration (closing TODO-006/007/008).
@@ -875,6 +875,8 @@ The return value of `ScheduleActivity` mirrors the Workflow Service's `ActivityR
 | `ARM_ARTIFACT_MAX_BYTES` | No | `5368709120` | Per-artifact upload ceiling. |
 | `ARM_IDEMPOTENCY_TTL` | No | `PT24H` | Retention of terminal execution records for replay dedup. |
 | `ARM_SIDECAR_IMAGE` | Yes | — | Connector sidecar image injected into every activity Pod. |
+| `ARM_IO_BRIDGE_IMAGE` | No | `busybox:1.37.0@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028` | Image for the io-bridge input-injector init container and output-collector native sidecar; override to point at an internal mirror. Digest-pinned by default. |
+| `ARM_ALLOW_UNPINNED_IMAGES` | No | `false` | **Test/dev escape hatch.** When `true`, a digest-less activity image renders tag-only with `imagePullPolicy: IfNotPresent` instead of being rejected. Production stays strictly digest-pinned (content-addressed) — leave `false`. |
 | `ENVIRONMENT` | No | `development` | Operational env tag. The dev-shim refuses to start when this is `production`. |
 | `HOST` | No | `0.0.0.0` | Address the service binds to. |
 | `PORT` | No | `8080` | Port the service listens on. |
