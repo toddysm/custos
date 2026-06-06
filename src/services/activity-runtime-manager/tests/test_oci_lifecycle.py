@@ -8,6 +8,8 @@ cancel/cleanup) without a cluster. The real ``kind`` path lives in the
 
 from __future__ import annotations
 
+import io
+import tarfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -37,6 +39,8 @@ from custos_arm.runtime.oci import (
     ACTIVITY_OOM_KILLED,
     ACTIVITY_SANDBOX_FAILURE,
     ACTIVITY_TIMEOUT,
+    INPUT_BRIDGE_CONTAINER_NAME,
+    INPUT_READY_SENTINEL,
     ImagePullError,
     OciContainerDriver,
     SandboxFailureError,
@@ -45,7 +49,11 @@ from custos_arm.runtime.oci import (
     job_name,
     signal_error_code,
 )
-from custos_arm.runtime.oci.lifecycle import DEADLINE_EXIT_CODE
+from custos_arm.runtime.oci.lifecycle import (
+    DEADLINE_EXIT_CODE,
+    ExecResult,
+    _init_container_state,
+)
 
 _DIGEST = "sha256:" + "a" * 64
 _DEADLINE = datetime(2025, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -114,6 +122,73 @@ def _pod_list(container_statuses: list[SimpleNamespace] | None) -> SimpleNamespa
     )
 
 
+def _init_running(name: str = INPUT_BRIDGE_CONTAINER_NAME) -> SimpleNamespace:
+    return SimpleNamespace(
+        name=name,
+        state=SimpleNamespace(running=SimpleNamespace(), terminated=None, waiting=None),
+    )
+
+
+def _init_terminated(name: str = INPUT_BRIDGE_CONTAINER_NAME) -> SimpleNamespace:
+    return SimpleNamespace(
+        name=name,
+        state=SimpleNamespace(
+            running=None,
+            terminated=SimpleNamespace(exit_code=0, reason="Completed"),
+            waiting=None,
+        ),
+    )
+
+
+def _pod_with_init(
+    init_statuses: list[SimpleNamespace] | None,
+    *,
+    pod_name: str = "sandbox-pod-abc12",
+) -> SimpleNamespace:
+    if init_statuses is None:
+        return SimpleNamespace(items=[])
+    return SimpleNamespace(
+        items=[
+            SimpleNamespace(
+                metadata=SimpleNamespace(name=pod_name),
+                status=SimpleNamespace(
+                    container_statuses=[], init_container_statuses=init_statuses
+                ),
+            )
+        ]
+    )
+
+
+class _RecordingExec:
+    """A fake :class:`PodExec` that records calls and returns canned results."""
+
+    def __init__(self, results: list[ExecResult] | None = None) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self._results = results or []
+
+    def __call__(
+        self,
+        *,
+        namespace: str,
+        pod: str,
+        container: str,
+        command: list[str],
+        stdin: bytes | None,
+    ) -> ExecResult:
+        self.calls.append(
+            {
+                "namespace": namespace,
+                "pod": pod,
+                "container": container,
+                "command": command,
+                "stdin": stdin,
+            }
+        )
+        if self._results:
+            return self._results.pop(0)
+        return ExecResult(exit_code=0)
+
+
 class _ApiError(Exception):
     """Mimics ``kubernetes.client.exceptions.ApiException`` (carries ``status``)."""
 
@@ -128,6 +203,8 @@ def _driver(
     core: Any = None,
     staging_root: Path,
     now: datetime = _DEADLINE - timedelta(seconds=1),
+    pod_exec: Any = None,
+    start_timeout: float = 120.0,
 ) -> OciContainerDriver:
     return OciContainerDriver(
         batch_api=batch or MagicMock(),
@@ -136,6 +213,8 @@ def _driver(
         poll_interval=0.0,
         sleep=MagicMock(),
         now=lambda: now,
+        pod_exec=pod_exec,
+        start_timeout=start_timeout,
     )
 
 
@@ -264,17 +343,128 @@ def test_prepare_wraps_client_failure(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 # start
 # --------------------------------------------------------------------------- #
-def test_start_unsuspends_job(tmp_path: Path) -> None:
+def test_start_unsuspends_then_streams_inputs_and_writes_sentinel(tmp_path: Path) -> None:
     batch = MagicMock()
+    core = MagicMock()
+    core.list_namespaced_pod.return_value = _pod_with_init([_init_running()])
+    exec_ = _RecordingExec()
     plan = _plan()
-    driver = _driver(batch=batch, staging_root=tmp_path)
+    driver = _driver(batch=batch, core=core, staging_root=tmp_path, pod_exec=exec_)
 
-    driver.start(_handle(plan, tmp_path))
+    handle = _handle(plan, tmp_path)
+    handle.input_root.mkdir(parents=True, exist_ok=True)
+    (handle.input_root / "inputs.json").write_text('{"x": 1}')
+    (handle.input_root / "nested").mkdir()
+    (handle.input_root / "nested" / "ctx.json").write_text("{}")
 
+    driver.start(handle)
+
+    # The Job is un-suspended so its Pod can be scheduled.
     _, kwargs = batch.patch_namespaced_job.call_args
     assert kwargs["name"] == job_name(plan.step)
     assert kwargs["namespace"] == plan.namespace
     assert kwargs["body"] == {"spec": {"suspend": False}}
+
+    # Exactly two execs target the input bridge of the discovered Pod.
+    assert len(exec_.calls) == 2
+    stream_call, sentinel_call = exec_.calls
+    assert stream_call["pod"] == "sandbox-pod-abc12"
+    assert stream_call["namespace"] == plan.namespace
+    assert stream_call["container"] == INPUT_BRIDGE_CONTAINER_NAME
+    # ``head -c <len>`` closes the pipe so ``tar`` gets a clean EOF.
+    archive = stream_call["stdin"]
+    assert stream_call["command"] == ["sh", "-c", f"head -c {len(archive)} | tar -x -C /custos/in"]
+
+    # The streamed raw tar round-trips the host input tree.
+    with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+        assert sorted(tar.getnames()) == ["inputs.json", "nested", "nested/ctx.json"]
+
+    # The sentinel that releases the input gate is written last.
+    assert sentinel_call["command"] == ["touch", INPUT_READY_SENTINEL]
+    assert sentinel_call["stdin"] is None
+
+
+def test_start_waits_for_the_input_bridge_to_start(tmp_path: Path) -> None:
+    core = MagicMock()
+    core.list_namespaced_pod.side_effect = [
+        _pod_with_init(None),  # Pod not scheduled yet.
+        _pod_with_init([_init_running()]),  # Bridge now running.
+    ]
+    exec_ = _RecordingExec()
+    sleep = MagicMock()
+    driver = OciContainerDriver(
+        batch_api=MagicMock(),
+        core_api=core,
+        staging_root=tmp_path,
+        poll_interval=0.0,
+        sleep=sleep,
+        now=lambda: _DEADLINE - timedelta(seconds=1),
+        pod_exec=exec_,
+        start_timeout=120.0,
+    )
+
+    handle = _handle(_plan(), tmp_path)
+    handle.input_root.mkdir(parents=True, exist_ok=True)
+
+    driver.start(handle)
+
+    assert sleep.call_count == 1
+    assert len(exec_.calls) == 2
+
+
+def test_start_raises_when_input_bridge_exited_before_staging(tmp_path: Path) -> None:
+    core = MagicMock()
+    core.list_namespaced_pod.return_value = _pod_with_init([_init_terminated()])
+    driver = _driver(core=core, staging_root=tmp_path, pod_exec=_RecordingExec())
+
+    handle = _handle(_plan(), tmp_path)
+    handle.input_root.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(SandboxFailureError):
+        driver.start(handle)
+
+
+def test_start_raises_when_input_bridge_never_starts(tmp_path: Path) -> None:
+    core = MagicMock()
+    core.list_namespaced_pod.return_value = _pod_with_init(None)
+    driver = _driver(
+        core=core,
+        staging_root=tmp_path,
+        pod_exec=_RecordingExec(),
+        start_timeout=0.0,
+    )
+
+    handle = _handle(_plan(), tmp_path)
+    handle.input_root.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(SandboxFailureError):
+        driver.start(handle)
+
+
+def test_start_raises_when_streaming_inputs_fails(tmp_path: Path) -> None:
+    core = MagicMock()
+    core.list_namespaced_pod.return_value = _pod_with_init([_init_running()])
+    exec_ = _RecordingExec([ExecResult(exit_code=1, stderr="tar: write error")])
+    driver = _driver(core=core, staging_root=tmp_path, pod_exec=exec_)
+
+    handle = _handle(_plan(), tmp_path)
+    handle.input_root.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(SandboxFailureError):
+        driver.start(handle)
+
+
+def test_start_raises_when_writing_sentinel_fails(tmp_path: Path) -> None:
+    core = MagicMock()
+    core.list_namespaced_pod.return_value = _pod_with_init([_init_running()])
+    exec_ = _RecordingExec([ExecResult(exit_code=0), ExecResult(exit_code=2)])
+    driver = _driver(core=core, staging_root=tmp_path, pod_exec=exec_)
+
+    handle = _handle(_plan(), tmp_path)
+    handle.input_root.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(SandboxFailureError):
+        driver.start(handle)
 
 
 def test_start_wraps_client_failure(tmp_path: Path) -> None:
@@ -284,6 +474,14 @@ def test_start_wraps_client_failure(tmp_path: Path) -> None:
 
     with pytest.raises(SandboxFailureError):
         driver.start(_handle(_plan(), tmp_path))
+
+
+def test_init_container_state_handles_missing_status_and_container() -> None:
+    # A Pod without a status block yields no state.
+    assert _init_container_state(SimpleNamespace(status=None), INPUT_BRIDGE_CONTAINER_NAME) is None
+    # A Pod whose init statuses omit the bridge yields no state.
+    pod = SimpleNamespace(status=SimpleNamespace(init_container_statuses=[_init_running("other")]))
+    assert _init_container_state(pod, INPUT_BRIDGE_CONTAINER_NAME) is None
 
 
 # --------------------------------------------------------------------------- #

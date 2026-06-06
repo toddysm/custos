@@ -26,12 +26,15 @@ with fakes; the real ``kind``-cluster path is exercised by the
 
 from __future__ import annotations
 
+import io
 import shutil
+import tarfile
 import time
 from collections.abc import Callable
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Protocol
 
 from custos_arm.contract import ErrorClass
 from custos_arm.runtime.models import (
@@ -44,14 +47,22 @@ from custos_arm.runtime.models import (
     SandboxSignal,
 )
 from custos_arm.runtime.oci.errors import ImagePullError, SandboxFailureError
-from custos_arm.runtime.oci.job import ACTIVITY_CONTAINER_NAME, build_activity_job, job_name
+from custos_arm.runtime.oci.job import (
+    ACTIVITY_CONTAINER_NAME,
+    INPUT_BRIDGE_CONTAINER_NAME,
+    INPUT_READY_SENTINEL,
+    build_activity_job,
+    job_name,
+)
 
 __all__ = [
     "DEADLINE_EXIT_CODE",
     "IMAGE_PULL_WAITING_REASONS",
     "OOM_TERMINATED_REASON",
     "SIGKILL_EXIT_CODE",
+    "ExecResult",
     "OciContainerDriver",
+    "PodExec",
     "classify_signal",
     "is_image_pull_waiting_reason",
     "signal_error_code",
@@ -77,6 +88,42 @@ DEADLINE_EXIT_CODE: Final[int] = 124
 _JOB_NAME_LABEL: Final[str] = "job-name"
 #: Default poll interval (seconds) while awaiting terminal Pod state.
 _DEFAULT_POLL_INTERVAL: Final[float] = 1.0
+#: Default ceiling (seconds) for the input bridge to reach ``Running`` so the
+#: monitor can stream ``/custos/in`` in; exceeding it surfaces a sandbox failure.
+_DEFAULT_START_TIMEOUT: Final[float] = 120.0
+
+
+@dataclass(frozen=True, slots=True)
+class ExecResult:
+    """The outcome of a single ``pods/exec`` invocation.
+
+    ``exit_code`` is the remote command's status (``0`` on success) and
+    ``stderr`` carries whatever the command wrote to standard error, surfaced in
+    the :class:`~custos_arm.runtime.oci.errors.SandboxFailureError` message when
+    the command fails.
+    """
+
+    exit_code: int
+    stderr: str = ""
+
+
+class PodExec(Protocol):
+    """Runs a command in a pod container, optionally feeding it ``stdin``.
+
+    Injected into :class:`OciContainerDriver` so the streaming logic is
+    unit-testable with a fake channel; the default implementation drives the
+    Kubernetes ``connect_get_namespaced_pod_exec`` websocket.
+    """
+
+    def __call__(
+        self,
+        *,
+        namespace: str,
+        pod: str,
+        container: str,
+        command: list[str],
+        stdin: bytes | None,
+    ) -> ExecResult: ...
 
 
 def is_image_pull_waiting_reason(reason: str | None) -> bool:
@@ -154,6 +201,8 @@ class OciContainerDriver:
         poll_interval: float = _DEFAULT_POLL_INTERVAL,
         sleep: Callable[[float], None] = time.sleep,
         now: Callable[[], datetime] | None = None,
+        pod_exec: PodExec | None = None,
+        start_timeout: float = _DEFAULT_START_TIMEOUT,
     ) -> None:
         self._batch = batch_api
         self._core = core_api
@@ -161,6 +210,8 @@ class OciContainerDriver:
         self._poll_interval = poll_interval
         self._sleep = sleep
         self._now = now or (lambda: datetime.now(UTC))
+        self._exec = pod_exec or self._default_pod_exec
+        self._start_timeout = start_timeout
         # Records a scheduler-driven cancel keyed by handle reference so the
         # blocking ``await_terminal`` loop (running on another thread) observes
         # it and reports the right signal instead of blocking to the deadline.
@@ -199,7 +250,18 @@ class OciContainerDriver:
         )
 
     def start(self, handle: SandboxHandle) -> None:
-        """Un-suspend the Job so the activity Pod is scheduled and run."""
+        """Un-suspend the Job, then stream ``/custos/in`` in and release the gate.
+
+        After the Pod is scheduled the input bridge init container blocks on the
+        readiness sentinel. This method ``tar``-streams ARM's host-local staging
+        ``in/`` tree into that container over ``pods/exec`` and then writes the
+        sentinel, which lets the init container complete and the activity
+        container start behind a fully-staged ``/custos/in``.
+
+        Raises:
+            SandboxFailureError: the Job could not be un-suspended, the input
+                bridge never started, or the streaming/sentinel exec failed.
+        """
         namespace, name = _split_reference(handle.reference)
         try:
             self._batch.patch_namespaced_job(
@@ -209,6 +271,67 @@ class OciContainerDriver:
             )
         except Exception as exc:
             raise SandboxFailureError(f"failed to start sandbox Job {name!r}: {exc}") from exc
+
+        self._stream_inputs(handle, namespace, name)
+
+    def _stream_inputs(self, handle: SandboxHandle, namespace: str, name: str) -> None:
+        """Stream the host ``in/`` tree into the input bridge and drop the gate."""
+        pod_name = self._await_input_bridge(namespace, name)
+        archive = _tar_directory(handle.input_root)
+
+        # The exec stdin channel cannot be half-closed by the Kubernetes client,
+        # so ``tar`` would block forever waiting for EOF. ``head -c <len>`` reads
+        # exactly the archive's bytes and then closes its end of the pipe, which
+        # gives ``tar`` a clean EOF and lets it extract and exit on its own.
+        extracted = self._exec(
+            namespace=namespace,
+            pod=pod_name,
+            container=INPUT_BRIDGE_CONTAINER_NAME,
+            command=["sh", "-c", f"head -c {len(archive)} | tar -x -C /custos/in"],
+            stdin=archive,
+        )
+        if extracted.exit_code != 0:
+            raise SandboxFailureError(
+                f"failed to stream inputs into sandbox {name!r} "
+                f"(exit {extracted.exit_code}): {extracted.stderr}"
+            )
+
+        released = self._exec(
+            namespace=namespace,
+            pod=pod_name,
+            container=INPUT_BRIDGE_CONTAINER_NAME,
+            command=["touch", INPUT_READY_SENTINEL],
+            stdin=None,
+        )
+        if released.exit_code != 0:
+            raise SandboxFailureError(
+                f"failed to release input bridge for sandbox {name!r} "
+                f"(exit {released.exit_code}): {released.stderr}"
+            )
+
+    def _await_input_bridge(self, namespace: str, name: str) -> str:
+        """Block until the input bridge container is ``Running``; return its Pod.
+
+        Raises:
+            SandboxFailureError: the bridge terminated before inputs were staged
+                or did not start within ``start_timeout``.
+        """
+        deadline = self._now() + timedelta(seconds=self._start_timeout)
+        while True:
+            pod = self._activity_pod(namespace, name)
+            if pod is not None:
+                state = _init_container_state(pod, INPUT_BRIDGE_CONTAINER_NAME)
+                if state is not None and getattr(state, "running", None) is not None:
+                    return str(pod.metadata.name)
+                if state is not None and getattr(state, "terminated", None) is not None:
+                    raise SandboxFailureError(
+                        f"input bridge for sandbox {name!r} exited before inputs were staged"
+                    )
+            if self._now() >= deadline:
+                raise SandboxFailureError(
+                    f"input bridge for sandbox {name!r} did not start within {self._start_timeout}s"
+                )
+            self._sleep(self._poll_interval)
 
     def await_terminal(self, handle: SandboxHandle, deadline: datetime) -> SandboxOutcome:
         """Block until the activity container terminates or the deadline passes.
@@ -305,10 +428,76 @@ class OciContainerDriver:
         items = list(pods.items)
         return items[0] if items else None
 
+    def _default_pod_exec(  # pragma: no cover - exercised against a real cluster
+        self,
+        *,
+        namespace: str,
+        pod: str,
+        container: str,
+        command: list[str],
+        stdin: bytes | None,
+    ) -> ExecResult:
+        """Drive ``connect_get_namespaced_pod_exec`` over a websocket stream."""
+        from kubernetes.stream import stream
+
+        client = stream(
+            self._core.connect_get_namespaced_pod_exec,
+            pod,
+            namespace,
+            container=container,
+            command=command,
+            stderr=True,
+            stdin=stdin is not None,
+            stdout=True,
+            tty=False,
+            _preload_content=False,
+        )
+        stderr_parts: list[str] = []
+        try:
+            if stdin is not None:
+                client.write_stdin(stdin)
+            while client.is_open():
+                client.update(timeout=1)
+                if client.peek_stdout():
+                    client.read_stdout()
+                if client.peek_stderr():
+                    stderr_parts.append(client.read_stderr())
+            returncode = client.returncode
+        finally:
+            client.close()
+        return ExecResult(
+            exit_code=returncode if returncode is not None else 0,
+            stderr="".join(stderr_parts),
+        )
+
 
 def _split_reference(reference: str) -> tuple[str, str]:
     namespace, _, name = reference.partition("/")
     return namespace, name
+
+
+def _tar_directory(root: Path) -> bytes:
+    """Pack ``root``'s contents into an uncompressed tar (members relative to it).
+
+    Entries are added under paths relative to ``root`` so the archive extracts
+    directly into ``/custos/in``. An empty tree yields a valid empty archive.
+    """
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        for path in sorted(root.rglob("*")):
+            archive.add(path, arcname=str(path.relative_to(root)), recursive=False)
+    return buffer.getvalue()
+
+
+def _init_container_state(pod: Any, container_name: str) -> Any | None:
+    status = getattr(pod, "status", None)
+    if status is None:
+        return None
+    statuses = getattr(status, "init_container_statuses", None) or []
+    for container_status in statuses:
+        if container_status.name == container_name:
+            return getattr(container_status, "state", None)
+    return None
 
 
 def _activity_container_status(pod: Any) -> Any | None:
