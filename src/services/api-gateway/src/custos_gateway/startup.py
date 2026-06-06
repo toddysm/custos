@@ -7,9 +7,9 @@ exist in the Auth Service permission registry (``GET /v1/permissions``). This
 module performs that cross-check once, inside the FastAPI lifespan *before*
 readiness flips, and refuses to boot
 (:class:`GatewayStartupError`, code ``gateway-startup-permission-missing``) when
-a route references an undeclared permission. A drifted route name is therefore a
-loud fail-fast at startup rather than a per-request authorization surprise (see
-``design/components/api-gateway/design.md`` § Failure Modes).
+a route references an undeclared permission. A drifted permission name is
+therefore a loud fail-fast at startup rather than a per-request authorization
+surprise (see ``design/components/api-gateway/design.md`` § Failure Modes).
 """
 
 from __future__ import annotations
