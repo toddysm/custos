@@ -4,12 +4,20 @@ The gateway has no domain routes of its own: its public surface is the union of
 every downstream component's externally-facing REST contract, mounted under
 ``/v1/`` and threaded through the cross-cutting middleware. This package holds
 that declarative contract (:mod:`custos_gateway.routes.registry`), the anonymous
-webhook pass-through (:mod:`custos_gateway.routes.webhook`), and the router
+webhook pass-through (:mod:`custos_gateway.routes.webhook`), the auth-bootstrap
+device-code routes (:mod:`custos_gateway.routes.devicecode`), and the router
 factories that materialize them onto a FastAPI app.
 """
 
 from __future__ import annotations
 
+from custos_gateway.routes.devicecode import (
+    DEVICE_CODE_LANDING_PATH,
+    DEVICE_CODE_POLL_PATH,
+    DEVICE_CODE_START_PATH,
+    DEVICE_CODE_STORE_STATE_ATTR,
+    build_device_code_router,
+)
 from custos_gateway.routes.registry import (
     CATALOG_APP_ID,
     CONNECTOR_APP_ID,
@@ -32,6 +40,10 @@ from custos_gateway.routes.webhook import (
 __all__ = [
     "CATALOG_APP_ID",
     "CONNECTOR_APP_ID",
+    "DEVICE_CODE_LANDING_PATH",
+    "DEVICE_CODE_POLL_PATH",
+    "DEVICE_CODE_START_PATH",
+    "DEVICE_CODE_STORE_STATE_ATTR",
     "DOWNSTREAM_ROUTER_STATE_ATTR",
     "M1_ROUTE_REGISTRY",
     "OBSERVABILITY_APP_ID",
@@ -41,6 +53,7 @@ __all__ = [
     "WORKFLOW_APP_ID",
     "RateLimitClass",
     "RouteSpec",
+    "build_device_code_router",
     "build_registry_router",
     "build_webhook_router",
     "registry_required_permissions",
