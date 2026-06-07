@@ -127,8 +127,8 @@ gateway:
   tlsSecretName: custos-gateway-tls
   # Serving certificate for the Gateway HTTPS listener, issued by cert-manager.
   # The Certificate populates `tlsSecretName`, which the Gateway listener
-  # references. Set `certManager.enabled: false` to supply the TLS Secret
-  # out-of-band instead.
+  # references. Set `gateway.tls.certManager.enabled: false` to supply the TLS
+  # Secret out-of-band instead.
   tls:
     certManager:
       enabled: true
