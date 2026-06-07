@@ -135,6 +135,7 @@ graph TB
 | SPL adapters bundle | `ghcr.io/custos/spl-postgres:VERSION` | GHCR pull | Mirror |
 | Observability Service | `ghcr.io/custos/observability:VERSION` | GHCR pull | Mirror |
 | Migration runner | `ghcr.io/custos/migrate:VERSION` | GHCR pull | Mirror |
+| Bootstrap runner | `ghcr.io/custos/bootstrap:VERSION` | GHCR pull | Mirror |
 | Core connector bundle (OCI artifact) | `ghcr.io/custos/connectors-core:VERSION` | GHCR pull | Mirror to internal OCI registry |
 | Envoy Gateway | upstream | upstream | Mirror |
 | cert-manager | upstream | upstream | Mirror |
@@ -145,8 +146,55 @@ graph TB
 | OTel Collector | upstream | upstream | Mirror |
 | MinIO (HA only) | upstream | upstream | Mirror |
 | External Secrets Operator (HA only) | upstream | upstream | Mirror |
+| Redis (Dapr pub/sub broker) | upstream | upstream | Mirror |
 
 The chart parameterizes every image reference on `global.imageRegistry` so a one-line override redirects all pulls to the customer's mirror.
+
+> **Bootstrap image.** `custos-bootstrap` is a **dedicated** image (built from `src/jobs/bootstrap/`, currently empty). The post-install bootstrap Job runs it to upsert permissions/roles, seed the default tenant/workspace, and create the admin binding via SPL. Keeping it separate from `auth-service` gives the Job a minimal image (only the SPL/auth domain logic it needs, no FastAPI serving surface) and an independent build/scan/sign lifecycle.
+
+## Image Build & Supply Chain
+
+### Base image and build context
+
+- **Base image:** `python:3.14-slim` for every Custos-authored image (services + jobs). This standardizes the runtime; the previously 3.11/3.12 images (connector-sidecar, connector plugins) are bumped to match.
+- **Multi-stage** (`builder` → `runtime`), mirroring the existing `connector-sidecar` pattern: the `builder` stage produces wheels (`pip wheel`) and the `runtime` stage installs them offline (`--no-index --find-links`) into a venv at `/opt/custos/venv`.
+- **Build context = repository root.** Unlike the self-contained sidecar, the eight services depend on in-repo path libraries (`custos-spl`, `custos-callctx`, `custos-common`, `custos-s3`, `custos-csi`, …). Each service Dockerfile copies and builds the exact `custos-*` libraries declared in its `pyproject.toml` `dependencies`, then the service wheel. A per-image `.dockerignore` keeps `.venv`, caches, and tests out of the context.
+- **Non-root** `custos` user, UID/GID **1000**; `PATH` includes the venv; entrypoint is the service's console script (`custos-<service>`).
+- **Probes/health:** `EXPOSE 8080` (app) + `8090` (metrics); `HEALTHCHECK` hits the readiness path.
+- **Python version risk:** 3.14 is recent; if a transitive dependency lacks a 3.14 wheel at build time, the affected image pins to the highest version that does and the deviation is recorded here. CI's image-build matrix surfaces this early.
+
+### OCI image annotations (immutable, in the manifest)
+
+Provenance is carried as **OCI image-manifest annotations** (`org.opencontainers.image.*` under the manifest's `annotations`), **not** mutable Docker config labels. Annotations are part of the content-addressed manifest, so they are immutable and travel with the digest. They are applied at push time by the build workflow (`docker buildx --annotation` / BuildKit `--output type=image,annotation.*`), so they bind to the manifest rather than only the config blob.
+
+Every Custos image manifest carries:
+
+| Annotation key | Value | Source |
+|---|---|---|
+| `org.opencontainers.image.created` | Build timestamp (RFC 3339) | CI build time |
+| `org.opencontainers.image.version` | Build / release tag | `vX.Y.Z` or `dev` |
+| `org.opencontainers.image.revision` | Git commit SHA | `${GITHUB_SHA}` |
+| `org.opencontainers.image.source` | Source repository URL | `https://github.com/toddysm/custos` |
+| `org.opencontainers.image.title` | Image/component name | per service |
+| `org.opencontainers.image.licenses` | `Apache-2.0` | static |
+| `vnd.custos.build.tag` | Build tag | CI tag input |
+| `vnd.custos.build.actor` | User who triggered the build | `${GITHUB_ACTOR}` |
+| `vnd.custos.build.agent` | Build agent / runner | `github-actions` |
+| `vnd.custos.build.run-id` | CI run that produced the image | `${GITHUB_RUN_ID}` |
+| `vnd.custos.build.run-url` | Direct link to the build run | Actions run URL |
+
+The `vnd.custos.build.*` keys are vendor-extension annotations (the OCI spec reserves `org.opencontainers.image.*` and recommends a vendor-namespaced key for custom values) capturing build-tag, build-actor, build-agent, and run traceability, which have no standard `org.opencontainers` equivalent. `vnd.custos.build.tag` is retained alongside `org.opencontainers.image.version` so the build tag is explicit and decoupled from the image version.
+
+### Supply-chain attestations
+
+Every published image is accompanied by signed, verifiable attestations referenced from the registry (OCI referrers API / cosign attach):
+
+- **SBOM** — generated per image (Syft) in SPDX + CycloneDX, attached as an in-toto attestation and signed.
+- **SLSA provenance** — SLSA Build L3 provenance produced by the GitHub Actions builder (`slsa-github-generator` / `docker buildx --provenance=mode=max`), attesting the builder identity, source, and materials.
+- **Sigstore signatures** — keyless **cosign** signing via GitHub OIDC (Fulcio short-lived certs + Rekor transparency log); the image, its SBOM, and its SLSA provenance are all signed.
+- **Verification policy** — a documented cosign/policy-controller verification policy (issuer = GitHub Actions OIDC, identity = the Custos build workflow) so air-gapped operators can mirror the signatures + Rekor bundle and verify offline.
+
+This extends to the connector-bundle OCI artifact (cosign-signed, same policy), resolving the prior signing TODO.
 
 ## Networking
 
@@ -412,11 +460,11 @@ The chart **does not** install: the cluster itself, the OIDC issuer (airgapped),
 ## Open TODOs
 
 - [ ] TODO-001: Decide whether to ship a pre-baked Keycloak chart for airgapped, or stay strictly "operator prereq". Tradeoff: install simplicity vs operator lock-in. (added 2026-05-17)
-- [ ] TODO-002: Define the connector-bundle OCI artifact format and signing model (cosign keys, verification policy). (added 2026-05-17)
+- [x] TODO-002: ~~Define the connector-bundle OCI artifact format and signing model (cosign keys, verification policy).~~ **Resolved 2026-06-07:** keyless cosign signing via GitHub OIDC (Fulcio + Rekor), same verification policy as service images; see *Image Build & Supply Chain*. (added 2026-05-17)
 - [ ] TODO-003: Define the `helm test` synthetic test scenarios (login → create workspace → register connector → start workflow → inspect run). (added 2026-05-17)
 - [ ] TODO-004: Define the network policy matrix precisely (which component talks to which on which port). (added 2026-05-17)
 - [ ] TODO-005: Define the Grafana dashboard bundle contents (per-component dashboards, audit-event dashboard, drainer-lag dashboard). (added 2026-05-17)
-- [ ] TODO-006: Decide whether the chart owns Dapr installation as a vendored subchart or treats it as an operator prereq. Current lean: vendored subchart for one-command install. (added 2026-05-17)
+- [x] TODO-006: ~~Decide whether the chart owns Dapr installation as a vendored subchart or treats it as an operator prereq.~~ **Resolved 2026-06-07:** Dapr ships as a vendored subchart (`dapr.install=true`, disablable when pre-installed) for one-command install. Pub/sub uses Redis (vendored) for event fan-out plus a Postgres-backed component for durable/state-aligned messaging. (added 2026-05-17)
 - [ ] TODO-007: Document the upgrade-with-breaking-schema runbook (maintenance window, read-only fallback for the migration window, rollback procedure). (added 2026-05-17)
 
 ## Open Questions
@@ -428,3 +476,4 @@ _(none — all v1 reference deployment design questions resolved this session.)_
 | Date | Change | GitHub Issue |
 |---|---|---|
 | 2026-05-17 | Initial reference deployment design: single Helm chart with two topologies (`connected`, `airgapped`) × two profiles (`eval`, `HA`). Envoy Gateway + cert-manager + Gateway API for ingress (nginx-ingress rejected). CloudNativePG for Postgres. MinIO for HA-only object storage. External Secrets Operator with Vault/cloud-vault backend for HA Layer-2 secrets; Sealed Secrets documented as no-vault airgapped alternative. Dapr Secret Store wired to same backend as ESO for Layer-1/Layer-2 alignment. Helm pre-install migration Job preserving SPL strict migration policy. Post-install bootstrap Job seeds default tenant/workspace and admin binding. Single namespace `custos-system` (multi-tenancy stays application-layer in v1). Air-gapped offline-install tarball with vendored charts and image archives. | #75 |
+| 2026-06-07 | Added *Image Build & Supply Chain* section: `python:3.14-slim` standardized base, monorepo (repo-root) build context for service images, non-root UID 1000. Provenance carried as immutable OCI image-manifest annotations (`org.opencontainers.image.created/version/revision/source/title/licenses` + vendor `vnd.custos.build.tag/actor/agent/run-id/run-url`). Supply-chain attestations: Syft SBOM (SPDX+CycloneDX), SLSA Build L3 provenance, keyless cosign signing (Fulcio + Rekor) with documented offline-verifiable policy. Decisions: Dapr kept as service-layer mesh (no Istio/Linkerd); Dapr vendored subchart (TODO-006); Dapr pub/sub backend = Redis + Postgres; bootstrap built as a dedicated image; built-in actions tracked separately. Resolved TODO-002 + TODO-006. | — |
