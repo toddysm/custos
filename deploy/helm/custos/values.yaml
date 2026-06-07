@@ -125,6 +125,49 @@ gateway:
   className: envoy
   hostname: custos.local
   tlsSecretName: custos-gateway-tls
+  # Serving certificate for the Gateway HTTPS listener, issued by cert-manager.
+  # The Certificate populates `tlsSecretName`, which the Gateway listener
+  # references. Set `certManager.enabled: false` to supply the TLS Secret
+  # out-of-band instead.
+  tls:
+    certManager:
+      enabled: true
+      # Issuer the Certificate references. When `issuer.create` is true the
+      # chart templates this Issuer; otherwise it must already exist.
+      issuerRef:
+        name: custos-gateway-issuer
+        # Issuer (namespaced) | ClusterIssuer (cluster-scoped).
+        kind: Issuer
+      issuer:
+        create: true
+        # selfSigned (portable eval / air-gapped default) | acme (Let's Encrypt
+        # or other ACME CA — set `acme.email` and switch type to use it).
+        type: selfSigned
+        acme:
+          server: https://acme-v02.api.letsencrypt.org/directory
+          email: ""
+          privateKeySecretRef: custos-gateway-acme-key
+
+# North-south ingress (vendored upstream subcharts — DEPLOY-IMPL-013).
+# `install: true` brings each up with a single `helm install`; set it false when
+# the cluster already provides Envoy Gateway / cert-manager (the dependency is
+# then skipped via its `*.install` condition). These toggle keys are separate
+# from the subcharts' own value namespaces (`gateway-helm:` / `cert-manager:`)
+# because cert-manager ships a strict values schema.
+envoyGateway:
+  install: true
+certManager:
+  install: true
+
+# cert-manager subchart values. CRDs ship in-chart so a fresh cluster needs no
+# separate CRD apply; `imageRegistry` (default quay.io) is overridden for
+# air-gapped mirrors. The Envoy Gateway subchart needs no image override here —
+# it reads the umbrella `global.imageRegistry`, which already routes its images
+# to the mirror in the air-gapped profiles.
+cert-manager:
+  crds:
+    enabled: true
+  imageRegistry: quay.io
 
 # Dapr control plane (vendored upstream subchart — DEPLOY-IMPL-011).
 # `install: true` brings the control plane up with a single `helm install`; set

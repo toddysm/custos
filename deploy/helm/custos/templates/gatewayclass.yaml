@@ -1,0 +1,14 @@
+{{- if .Values.envoyGateway.install -}}
+# GatewayClass bound to the vendored Envoy Gateway controller. Rendered only
+# when the chart installs Envoy Gateway; when the cluster already provides it,
+# set `envoyGateway.install: false` and point `gateway.className` at the
+# existing class.
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: {{ .Values.gateway.className | quote }}
+  labels:
+    {{- include "custos.labels" . | nindent 4 }}
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+{{- end }}

@@ -14,6 +14,10 @@ dapr:
   global:
     registry: registry.internal/dapr
 
+# Mirror the cert-manager images (Envoy Gateway uses the umbrella global registry).
+cert-manager:
+  imageRegistry: registry.internal
+
 postgres:
   embedded: true
   instances: 1

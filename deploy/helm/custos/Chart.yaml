@@ -65,3 +65,17 @@ dependencies:
     version: 1.14.0
     repository: "https://dapr.github.io/helm-charts/"
     condition: dapr.install
+  # North-south ingress stack (vendored upstream subcharts). Toggle with
+  # `envoyGateway.install` / `certManager.install`; set false when the cluster
+  # already provides Envoy Gateway / cert-manager. The toggle keys are kept
+  # separate from each subchart's own values namespace (`gateway-helm:` /
+  # `cert-manager:`) because cert-manager ships a strict values schema that
+  # rejects unknown keys.
+  - name: gateway-helm
+    version: 1.8.1
+    repository: "oci://docker.io/envoyproxy"
+    condition: envoyGateway.install
+  - name: cert-manager
+    version: v1.20.2
+    repository: "https://charts.jetstack.io"
+    condition: certManager.install
