@@ -59,6 +59,10 @@ jobs:
 
       - name: Detect changed image sources
         id: changes
+        # paths-filter relies on a well-defined commit range, which only exists
+        # for ``push`` events. For tags, manual dispatch, and ``workflow_call``
+        # BUILD_ALL forces a full rebuild, so the per-image diff is not needed.
+        if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')
         uses: dorny/paths-filter@v3
         with:
           filters: |
@@ -106,7 +110,9 @@ jobs:
 
           build_all = sys.argv[1] == "true"
           libs_changed = sys.argv[2] == "true"
-          changed = json.loads(os.environ["CHANGED_JSON"])
+          # CHANGED_JSON is "null"/"{}" when the change-detection step is skipped
+          # (tags/dispatch/workflow_call); fall back to an empty mapping.
+          changed = json.loads(os.environ["CHANGED_JSON"]) or {}
 
           services = [
               "api-gateway",
@@ -177,13 +183,19 @@ jobs:
         id: meta
         env:
           IMAGE_TITLE: ${{ matrix.title }}
+          INPUT_REF: ${{ inputs.ref }}
         run: |
           set -euo pipefail
-          SHA_TAG="${IMAGE}:sha-${GITHUB_SHA::12}"
-          if [[ "${GITHUB_REF}" == refs/tags/v*.*.* ]]; then
-            VERSION="${GITHUB_REF#refs/tags/}"
+          # Derive tags/annotations from the commit that was *actually* checked
+          # out (``inputs.ref`` under workflow_call may differ from the calling
+          # run's GITHUB_SHA/GITHUB_REF).
+          BUILD_SHA="$(git rev-parse HEAD)"
+          BUILD_REF="${INPUT_REF:-$GITHUB_REF}"
+          SHA_TAG="${IMAGE}:sha-${BUILD_SHA::12}"
+          if [[ "${BUILD_REF}" == refs/tags/v*.*.* ]]; then
+            VERSION="${BUILD_REF#refs/tags/}"
             TAGS="${IMAGE}:${VERSION},${SHA_TAG}"
-          elif [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+          elif [[ "${BUILD_REF}" == "refs/heads/main" || "${BUILD_REF}" == "main" ]]; then
             VERSION="dev"
             TAGS="${IMAGE}:dev,${SHA_TAG}"
           else
@@ -199,7 +211,7 @@ jobs:
             echo "annotations<<EOF"
             echo "org.opencontainers.image.created=${CREATED}"
             echo "org.opencontainers.image.version=${VERSION}"
-            echo "org.opencontainers.image.revision=${GITHUB_SHA}"
+            echo "org.opencontainers.image.revision=${BUILD_SHA}"
             echo "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
             echo "org.opencontainers.image.title=${IMAGE_TITLE}"
             echo "org.opencontainers.image.licenses=Apache-2.0"
@@ -212,7 +224,10 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "primary=${IMAGE}:${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "sha_tag=${SHA_TAG}" >> "$GITHUB_OUTPUT"
+          # Inspect the immutable sha tag, which is always pushed (the
+          # ``:dev``/``:vX.Y.Z`` tag is absent for non-main, non-tag builds).
+          echo "primary=${SHA_TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push image
         uses: docker/build-push-action@v6
@@ -268,11 +283,16 @@ jobs:
   collect:
     name: Collect image references
     needs: [setup, build]
-    if: always() && needs.setup.outputs.any == 'true'
+    # Always run so ``workflow_call`` consumers get a stable JSON output even
+    # when nothing was built (the output defaults to ``[]``).
+    if: always()
     runs-on: ubuntu-latest
     outputs:
       images: ${{ steps.collect.outputs.images }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
       - name: Assemble image list
         id: collect
         env:
@@ -280,10 +300,16 @@ jobs:
           OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
+          # Return fully-qualified, immutable ``:sha-...`` references (the same
+          # tag every build always pushes) so downstream jobs can consume them
+          # directly. Defaults to ``[]`` when no image was built.
+          SHA_TAG="sha-$(git rev-parse HEAD | cut -c1-12)"
+          export SHA_TAG
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
           matrix = json.loads(os.environ["MATRIX"])["include"]
           owner = os.environ["OWNER"]
-          images = [f"ghcr.io/{owner}/{e['image']}" for e in matrix]
+          sha_tag = os.environ["SHA_TAG"]
+          images = [f"ghcr.io/{owner}/{e['image']}:{sha_tag}" for e in matrix]
           print("images=" + json.dumps(images))
           PY
