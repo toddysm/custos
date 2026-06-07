@@ -1,0 +1,102 @@
+{{- if .Values.dapr.install -}}
+{{- $ns := include "custos.namespace" . -}}
+{{- $components := .Values.dapr.components -}}
+{{- with $components.stateStore }}
+{{- if .enabled }}
+# State store backed by the CNPG Postgres cluster. The connection URI is pulled
+# from the CNPG application secret through the built-in `kubernetes` secret
+# store so the credential never appears in the rendered manifest.
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: {{ .name | quote }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "custos.labels" $ | nindent 4 }}
+spec:
+  type: state.postgresql
+  version: v1
+  metadata:
+    - name: connectionString
+      secretKeyRef:
+        name: {{ .connectionSecret | default $.Values.postgres.secretName | quote }}
+        key: {{ .connectionKey | quote }}
+auth:
+  secretStore: kubernetes
+{{- end }}
+{{- end }}
+{{- with $components.secretStore }}
+{{- if .enabled }}
+---
+# Dapr secret store wired to the Layer-1 backend. Defaults to the built-in
+# Kubernetes secret store; HA installs override `type`/`metadata` to target the
+# same backend ESO manages.
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: {{ .name | quote }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "custos.labels" $ | nindent 4 }}
+spec:
+  type: {{ .type | quote }}
+  version: {{ .version | default "v1" | quote }}
+  metadata:
+    {{- with .metadata }}
+    {{- toYaml . | nindent 4 }}
+    {{- else }} []
+    {{- end }}
+{{- end }}
+{{- end }}
+{{- with $components.pubsub.redis }}
+{{- if .enabled }}
+---
+# Redis pub/sub broker for low-latency fan-out. Services reference this
+# component by name (custos-pubsub). The Redis broker itself is provisioned in
+# DEPLOY-IMPL-015; the password is resolved via the kubernetes secret store.
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: {{ .name | quote }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "custos.labels" $ | nindent 4 }}
+spec:
+  type: pubsub.redis
+  version: v1
+  metadata:
+    - name: redisHost
+      value: {{ .host | quote }}
+    - name: redisPassword
+      secretKeyRef:
+        name: {{ .passwordSecret | quote }}
+        key: {{ .passwordKey | quote }}
+auth:
+  secretStore: kubernetes
+{{- end }}
+{{- end }}
+{{- with $components.pubsub.postgres }}
+{{- if .enabled }}
+---
+# Postgres-backed pub/sub for durable, state-aligned messaging (design D3).
+# Shares the CNPG cluster credentials via the kubernetes secret store.
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: {{ .name | quote }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "custos.labels" $ | nindent 4 }}
+spec:
+  type: pubsub.postgres
+  version: v1
+  metadata:
+    - name: connectionString
+      secretKeyRef:
+        name: {{ .connectionSecret | default $.Values.postgres.secretName | quote }}
+        key: {{ .connectionKey | quote }}
+auth:
+  secretStore: kubernetes
+{{- end }}
+{{- end }}
+{{- end }}
