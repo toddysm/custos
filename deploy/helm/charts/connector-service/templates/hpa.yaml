@@ -23,20 +23,19 @@ spec:
   minReplicas: {{ $as.minReplicas | default 3 }}
   maxReplicas: {{ $as.maxReplicas | default 6 }}
   metrics:
-    {{- with $as.targetCPUUtilizationPercentage }}
+    # Both metrics always render with leaf defaults so a null/0 override can
+    # never produce an empty (invalid) spec.metrics. Drop a metric by setting
+    # autoscaling.enabled per-service rather than nulling a single target.
     - type: Resource
       resource:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: {{ . }}
-    {{- end }}
-    {{- with $as.targetMemoryUtilizationPercentage }}
+          averageUtilization: {{ $as.targetCPUUtilizationPercentage | default 70 }}
     - type: Resource
       resource:
         name: memory
         target:
           type: Utilization
-          averageUtilization: {{ . }}
-    {{- end }}
+          averageUtilization: {{ $as.targetMemoryUtilizationPercentage | default 80 }}
 {{- end }}
