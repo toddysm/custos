@@ -21,7 +21,7 @@ service invocation is sidecar-to-sidecar, so the east-west rules also
 allow the Dapr sidecar ports.
 */ -}}
 {{- $np := .Values.networkPolicy | default dict -}}
-{{- $g := (.Values.global | default dict).networkPolicies | default dict -}}
+{{- $g := ((.Values.global | default dict).networkPolicies) | default dict -}}
 {{- $enabled := $g.enabled | default false -}}
 {{- if not (kindIs "invalid" $np.enabled) -}}{{- $enabled = $np.enabled -}}{{- end -}}
 {{- if $enabled -}}
@@ -57,7 +57,8 @@ spec:
           port: {{ $appPort }}
     {{- end }}
     {{- if $np.ingressFromGateway }}
-    # North-south ingress from the Envoy Gateway data plane.
+    # North-south ingress from the Envoy Gateway data plane reaches the
+    # service's app port only (Dapr sidecar ports are east-west / internal).
     - from:
         - namespaceSelector:
             matchLabels:
@@ -65,10 +66,6 @@ spec:
       ports:
         - protocol: TCP
           port: {{ $appPort }}
-        {{- range $p := $daprPorts }}
-        - protocol: TCP
-          port: {{ $p }}
-        {{- end }}
     {{- end }}
     {{- with $np.ingressFromServices }}
     # East-west ingress from the Custos services that call this one
