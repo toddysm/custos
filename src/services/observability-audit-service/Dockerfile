@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 #
-# Custos Observability & Audit Service (COMP-008) — service image
+# Custos Observability & Audit Service (COMP-009) — service image
 # (DEPLOY-IMPL-003).
 #
 # Follows the canonical multi-stage service pattern established by the
