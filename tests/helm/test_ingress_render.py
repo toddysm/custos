@@ -130,7 +130,7 @@ def test_install_toggles_skip_subcharts() -> None:
     # Scope to cert-manager's own CRDs so the test stays focused on the toggle
     # rather than failing if an unrelated subchart starts shipping CRDs.
     crds = {d["metadata"]["name"] for d in _by_kind(docs, "CustomResourceDefinition")}
-    assert not {c for c in crds if c.endswith("cert-manager.io")}
+    assert not {c for c in crds if "cert-manager" in c}
 
 
 def test_certmanager_off_keeps_issuer_for_cluster_provided() -> None:
