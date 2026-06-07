@@ -1,0 +1,72 @@
+# Reusable SBOM + keyless cosign signing for a single OCI artifact
+# (DEPLOY-IMPL-007). Generates a Syft SBOM in both SPDX and CycloneDX, attaches
+# each as a signed in-toto attestation, and keyless-signs the artifact itself
+# via GitHub OIDC (Fulcio short-lived cert + Rekor transparency log).
+#
+# Used by build-images.yml for every service/job image and (later) by the
+# connector-bundle workflow for the connectors-core OCI artifact, so a single
+# signing policy covers all published artifacts.
+#
+# The calling job MUST grant ``id-token: write`` (keyless OIDC) and
+# ``packages: write`` (attach signatures/attestations to GHCR), and must have
+# already logged in to the target registry.
+name: SBOM + cosign sign
+description: Generate an SBOM (SPDX + CycloneDX) and keyless-sign an OCI artifact with cosign.
+
+inputs:
+  image:
+    description: "Image/artifact reference to sign. MUST be pinned by digest (name@sha256:...)."
+    required: true
+  subject-name:
+    description: "Human-readable name recorded as the SBOM source (defaults to the image ref)."
+    required: false
+    default: ""
+  cosign-version:
+    description: "cosign release to install."
+    required: false
+    default: "v2.4.1"
+  syft-version:
+    description: "syft release to install."
+    required: false
+    default: "v1.18.1"
+
+runs:
+  using: composite
+  steps:
+    - name: Install cosign
+      uses: sigstore/cosign-installer@v3
+      with:
+        cosign-release: ${{ inputs.cosign-version }}
+
+    - name: Install syft
+      uses: anchore/sbom-action/download-syft@v0
+      with:
+        syft-version: ${{ inputs.syft-version }}
+
+    - name: Generate and attach signed SBOM + signature
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        SUBJECT_NAME: ${{ inputs.subject-name }}
+      run: |
+        set -euo pipefail
+        if [[ "$IMAGE" != *"@sha256:"* ]]; then
+          echo "::error::image must be pinned by digest (name@sha256:...), got: $IMAGE" >&2
+          exit 1
+        fi
+        SOURCE_NAME="${SUBJECT_NAME:-$IMAGE}"
+
+        # Syft reads the image straight from the registry (it reuses the docker
+        # login already performed by the calling job).
+        echo "Generating SBOMs for $IMAGE"
+        syft "registry:$IMAGE" -o spdx-json="sbom.spdx.json" --source-name "$SOURCE_NAME"
+        syft "registry:$IMAGE" -o cyclonedx-json="sbom.cdx.json" --source-name "$SOURCE_NAME"
+
+        # Keyless signing + attestation. cosign v2 uses the ambient GitHub OIDC
+        # token (id-token: write) for Fulcio, and logs to Rekor by default.
+        echo "Signing $IMAGE (keyless)"
+        cosign sign --yes "$IMAGE"
+
+        echo "Attaching signed SBOM attestations"
+        cosign attest --yes --type spdxjson    --predicate "sbom.spdx.json" "$IMAGE"
+        cosign attest --yes --type cyclonedx   --predicate "sbom.cdx.json"  "$IMAGE"
