@@ -1,17 +1,18 @@
 # Supply-chain verification policy
 
-Every Custos image published to `ghcr.io/toddysm/custos/<name>` carries three
-keyless [Sigstore](https://www.sigstore.dev/) attestations, all signed with the
+Every Custos image published to `ghcr.io/toddysm/custos/<name>` carries one
+keyless [cosign](https://docs.sigstore.dev/) **signature** plus three
+keyless **attestations** (two SBOMs + SLSA provenance), all signed with the
 build workflow's short-lived [Fulcio](https://docs.sigstore.dev/certificate_authority/overview/)
 identity and recorded in the [Rekor](https://docs.sigstore.dev/logging/overview/)
 transparency log:
 
-| Artifact | Produced by | cosign predicate type |
-|---|---|---|
-| Image signature | `cosign sign` | — |
-| SBOM (SPDX) | Syft | `spdxjson` |
-| SBOM (CycloneDX) | Syft | `cyclonedx` |
-| SLSA provenance | build workflow | `slsaprovenance` |
+| Artifact | Kind | Produced by | cosign predicate type |
+|---|---|---|---|
+| Image signature | signature | `cosign sign` | — |
+| SBOM (SPDX) | attestation | Syft | `spdxjson` |
+| SBOM (CycloneDX) | attestation | Syft | `cyclonedx` |
+| SLSA provenance | attestation | build workflow | `slsaprovenance` |
 
 The signing identity (the OIDC "subject") is the build workflow itself:
 

@@ -47,12 +47,17 @@ runs:
           echo "::error::image must be pinned by digest (name@sha256:...), got: $IMAGE" >&2
           exit 1
         fi
+        if ! git rev-parse HEAD >/dev/null 2>&1; then
+          echo "::error::no git checkout found — the calling job must run actions/checkout before this action" >&2
+          exit 1
+        fi
 
-        BUILD_SHA="$(git rev-parse HEAD)"
-        SOURCE_URI="git+${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}@${GITHUB_REF}"
-        BUILDER_ID="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/build-images.yml@${GITHUB_REF}"
-        INVOCATION_ID="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}"
-        STARTED_ON="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        # ``export`` so the embedded python3 snippet can read these via os.environ.
+        export BUILD_SHA="$(git rev-parse HEAD)"
+        export SOURCE_URI="git+${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}@${GITHUB_REF}"
+        export BUILDER_ID="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/build-images.yml@${GITHUB_REF}"
+        export INVOCATION_ID="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}"
+        export STARTED_ON="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
         # SLSA v0.2 provenance predicate (cosign ``--type slsaprovenance``).
         python3 - > provenance.json <<'PY'
