@@ -5,6 +5,7 @@ topology: connected
 profile: ha
 
 global:
+  profile: ha
   replicaCount: 3
   resources:
     requests:

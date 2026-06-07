@@ -1,0 +1,23 @@
+{{- /*
+PodDisruptionBudget (DEPLOY-IMPL-010) — HA-gated.
+
+Renders only when it resolves on: per-service
+`.Values.podDisruptionBudget.enabled` (true/false) overrides, else inherits
+the HA profile (`.Values.global.profile == "ha"`). Eval profiles emit no PDB.
+Keeps at least N-1 pods available during voluntary disruptions
+(`maxUnavailable: 1` by default).
+*/ -}}
+{{- if eq (include "svc.pdbEnabled" .) "true" -}}
+{{- $pdb := .Values.podDisruptionBudget | default dict -}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "svc.fullname" . }}
+  labels:
+    {{- include "svc.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: {{ $pdb.maxUnavailable | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "svc.selectorLabels" . | nindent 6 }}
+{{- end }}

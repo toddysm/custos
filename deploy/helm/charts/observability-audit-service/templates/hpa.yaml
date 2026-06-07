@@ -1,0 +1,42 @@
+{{- /*
+HorizontalPodAutoscaler (DEPLOY-IMPL-010) — HA-gated.
+
+Renders only when autoscaling resolves on: per-service
+`.Values.autoscaling.enabled` (true/false) overrides, else inherits the HA
+profile (`.Values.global.profile == "ha"`). The eval profiles therefore emit
+no HPA. When the HPA is active the Deployment omits its static `replicas`
+field (see deployment.yaml) so Helm and the HPA do not fight over the count.
+*/ -}}
+{{- if eq (include "svc.autoscalingEnabled" .) "true" -}}
+{{- $as := .Values.autoscaling | default dict -}}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "svc.fullname" . }}
+  labels:
+    {{- include "svc.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "svc.fullname" . }}
+  minReplicas: {{ $as.minReplicas | default 3 }}
+  maxReplicas: {{ $as.maxReplicas | default 6 }}
+  metrics:
+    {{- with $as.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ . }}
+    {{- end }}
+    {{- with $as.targetMemoryUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ . }}
+    {{- end }}
+{{- end }}

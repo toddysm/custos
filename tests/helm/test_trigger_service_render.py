@@ -176,13 +176,21 @@ def test_dapr_sidecar_annotations_present(
 def test_ha_profiles_inherit_ha_replica_count(
     rendered: dict[str, list[dict[str, Any]]], profile: str
 ) -> None:
-    """HA umbrella profiles set ``global.replicaCount: 3``; the subchart
-    inherits that by leaving ``replicaCount: ""`` in its own values.yaml.
+    """Under HA the HPA owns the replica count, so the Deployment omits its
+    static ``replicas`` field; the HA scale floor (minReplicas) is 3.
     """
     dep = _find(rendered[profile], "Deployment", "custos-trigger-service")
     assert dep is not None
-    assert dep["spec"]["replicas"] == 3, (
-        f"{profile}: expected trigger-service to inherit global.replicaCount=3"
+    assert "replicas" not in dep["spec"], (
+        f"{profile}: trigger-service Deployment must not set static replicas "
+        "when the HPA is active"
+    )
+    hpa = _find(
+        rendered[profile], "HorizontalPodAutoscaler", "custos-trigger-service"
+    )
+    assert hpa is not None
+    assert hpa["spec"]["minReplicas"] == 3, (
+        f"{profile}: expected trigger-service HPA floor of 3"
     )
 
 

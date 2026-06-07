@@ -41,6 +41,35 @@ Tag precedence: .Values.image.tag, then .Values.global.imageTag, then "dev".
 {{- $global := .Values.global | default dict -}}
 {{- default ($global.replicaCount | default 1) .Values.replicaCount -}}
 {{- end -}}
+{{- /*
+Resolve whether HA-gated autoscaling is on for this service. Per-service
+`.Values.autoscaling.enabled` (true/false) overrides; when null it inherits
+`.Values.global.profile == "ha"`. Returns the string "true" or "false" so
+callers compare with `eq (include "svc.autoscalingEnabled" .) "true"`.
+*/ -}}
+{{- define "svc.autoscalingEnabled" -}}
+{{- $as := .Values.autoscaling | default dict -}}
+{{- $global := .Values.global | default dict -}}
+{{- if not (kindIs "invalid" $as.enabled) -}}
+{{- $as.enabled -}}
+{{- else -}}
+{{- eq ($global.profile | default "eval") "ha" -}}
+{{- end -}}
+{{- end -}}
+{{- /*
+Resolve whether a PodDisruptionBudget should render. Same inheritance rule as
+autoscaling: per-service `.Values.podDisruptionBudget.enabled` overrides, else
+inherits the HA profile. Returns "true"/"false".
+*/ -}}
+{{- define "svc.pdbEnabled" -}}
+{{- $pdb := .Values.podDisruptionBudget | default dict -}}
+{{- $global := .Values.global | default dict -}}
+{{- if not (kindIs "invalid" $pdb.enabled) -}}
+{{- $pdb.enabled -}}
+{{- else -}}
+{{- eq ($global.profile | default "eval") "ha" -}}
+{{- end -}}
+{{- end -}}
 {{- define "svc.resources" -}}
 {{- $global := .Values.global | default dict -}}
 {{- $local := .Values.resources | default dict -}}
