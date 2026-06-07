@@ -7,7 +7,7 @@ metadata:
   labels:
     {{- include "custos.labels" . | nindent 4 }}
   annotations:
-    "helm.sh/hook": post-install
+    "helm.sh/hook": post-install,post-upgrade
     "helm.sh/hook-weight": "10"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
@@ -24,12 +24,31 @@ spec:
         - name: bootstrap
           image: "{{ .Values.bootstrap.image.repository }}:{{ .Values.bootstrap.image.tag }}"
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          # Postgres connection details are read from the secret the CNPG
+          # operator generates for the application user (default name
+          # `<cluster>-app`; configurable via postgres.secretName). The
+          # secret exposes username/password/host/port/dbname/uri keys; the
+          # bootstrap entrypoint resolves CUSTOS_PG_DSN from `uri`.
+          envFrom:
+            - secretRef:
+                name: {{ .Values.postgres.secretName | quote }}
+          # The initial platform admin is pre-bound by their OIDC identity so
+          # they can authenticate immediately after install. Both values are
+          # optional: when absent the seeder still seeds
+          # permissions/roles/tenant/workspace and an operator can bind an
+          # admin later.
           env:
-            - name: CUSTOS_ADMIN_PRINCIPAL_ID
+            - name: CUSTOS_BOOTSTRAP_ADMIN_OIDC_ISSUER
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.bootstrap.adminPrincipalIdRef.name | quote }}
-                  key: {{ .Values.bootstrap.adminPrincipalIdRef.key | quote }}
+                  name: {{ .Values.bootstrap.adminOidcRef.name | quote }}
+                  key: {{ .Values.bootstrap.adminOidcRef.issuerKey | quote }}
+                  optional: true
+            - name: CUSTOS_BOOTSTRAP_ADMIN_OIDC_SUBJECT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.bootstrap.adminOidcRef.name | quote }}
+                  key: {{ .Values.bootstrap.adminOidcRef.subjectKey | quote }}
                   optional: true
 ---
 apiVersion: v1
@@ -38,7 +57,7 @@ metadata:
   name: custos-bootstrap
   namespace: {{ include "custos.namespace" . }}
   annotations:
-    "helm.sh/hook": post-install
+    "helm.sh/hook": post-install,post-upgrade
     "helm.sh/hook-weight": "9"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 {{- end }}

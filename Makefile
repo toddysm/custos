@@ -16,7 +16,7 @@ SERVICES       := api-gateway auth-service workflow-service trigger-service \
                   observability-audit-service
 # Run-to-completion job images. These live under src/jobs/<name> (not
 # src/services), so they get their own build recipe.
-JOBS           := migrate
+JOBS           := migrate bootstrap
 DOCKER_BUILD_TARGETS     := $(addprefix docker-build-,$(SERVICES))
 DOCKER_BUILD_JOB_TARGETS := $(addprefix docker-build-job-,$(JOBS))
 
