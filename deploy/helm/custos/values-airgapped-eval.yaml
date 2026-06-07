@@ -18,6 +18,20 @@ dapr:
 cert-manager:
   imageRegistry: registry.internal
 
+# Mirror the observability subchart images. Loki and the OTel Collector honour
+# the umbrella `global.imageRegistry` (registry.internal/custos), so they are
+# redirected automatically. Prometheus pins full image paths (no global knob),
+# so repoint it at the mirror explicitly. Eval keeps Loki on filesystem storage
+# (no MinIO).
+prometheus:
+  server:
+    image:
+      repository: registry.internal/prometheus/prometheus
+  configmapReload:
+    prometheus:
+      image:
+        repository: registry.internal/prometheus-operator/prometheus-config-reloader
+
 postgres:
   embedded: true
   instances: 1

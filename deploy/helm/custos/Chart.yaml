@@ -79,3 +79,22 @@ dependencies:
     version: v1.20.2
     repository: "https://charts.jetstack.io"
     condition: certManager.install
+  # Observability pipeline (vendored upstream subcharts — DEPLOY-IMPL-014).
+  # In-cluster sinks for metrics (Prometheus), traces/metrics ingestion (OTel
+  # Collector), and logs (Loki). Each is toggled via the existing
+  # `observability.<backend>.enabled` flag — a Custos-owned block kept separate
+  # from each subchart's own values namespace (`prometheus:` / `loki:` /
+  # `opentelemetry-collector:`) so the strict subchart schemas never see an
+  # unknown toggle key.
+  - name: prometheus
+    version: 29.10.0
+    repository: "https://prometheus-community.github.io/helm-charts"
+    condition: observability.prometheus.enabled
+  - name: loki
+    version: 6.55.0
+    repository: "https://grafana.github.io/helm-charts"
+    condition: observability.loki.enabled
+  - name: opentelemetry-collector
+    version: 0.158.1
+    repository: "https://open-telemetry.github.io/opentelemetry-helm-charts"
+    condition: observability.otelCollector.enabled

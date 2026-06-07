@@ -29,6 +29,19 @@ dapr:
 cert-manager:
   imageRegistry: registry.internal
 
+# Mirror the observability subchart images. Loki and the OTel Collector honour
+# the umbrella `global.imageRegistry` (registry.internal/custos), so they are
+# redirected automatically. Prometheus pins full image paths (no global knob),
+# so repoint it at the mirror explicitly.
+prometheus:
+  server:
+    image:
+      repository: registry.internal/prometheus/prometheus
+  configmapReload:
+    prometheus:
+      image:
+        repository: registry.internal/prometheus-operator/prometheus-config-reloader
+
 postgres:
   embedded: true
   instances: 3
@@ -38,6 +51,50 @@ objectStorage:
   embedded: true
   nodes: 4
   driveSize: 200Gi
+
+# HA log storage: move Loki off the eval filesystem onto the MinIO
+# `custos-loki` bucket (design: object-storage chunks). The MinIO credentials
+# are injected as env vars from the `custos-minio` Secret and expanded into the
+# Loki config via `-config.expand-env=true`, so no plaintext keys land in the
+# ConfigMap. Loki images are mirrored via the umbrella `global.imageRegistry`.
+loki:
+  loki:
+    storage:
+      type: s3
+      bucketNames:
+        chunks: custos-loki
+        ruler: custos-loki
+        admin: custos-loki
+      s3:
+        endpoint: minio:9000
+        region: us-east-1
+        s3ForcePathStyle: true
+        insecure: true
+        accessKeyId: ${AWS_ACCESS_KEY_ID}
+        secretAccessKey: ${AWS_SECRET_ACCESS_KEY}
+    schemaConfig:
+      configs:
+        - from: "2024-04-01"
+          store: tsdb
+          object_store: s3
+          schema: v13
+          index:
+            prefix: loki_index_
+            period: 24h
+  singleBinary:
+    extraArgs:
+      - -config.expand-env=true
+    extraEnv:
+      - name: AWS_ACCESS_KEY_ID
+        valueFrom:
+          secretKeyRef:
+            name: custos-minio
+            key: accessKey
+      - name: AWS_SECRET_ACCESS_KEY
+        valueFrom:
+          secretKeyRef:
+            name: custos-minio
+            key: secretKey
 
 secrets:
   backend: sealed
