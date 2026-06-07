@@ -126,11 +126,25 @@ gateway:
   hostname: custos.local
   tlsSecretName: custos-gateway-tls
 
-# Dapr sidecar injection (Dapr installed out-of-band)
+# Dapr control plane (vendored upstream subchart — DEPLOY-IMPL-011).
+# `install: true` brings the control plane up with a single `helm install`; set
+# it to false when Dapr is managed out-of-band (the dependency is then skipped
+# via its `dapr.install` condition). Per-service sidecar injection is configured
+# in each service subchart's own `dapr:` block, independent of this control
+# plane toggle.
+#
+# Image mirroring: the upstream chart pulls from its own `global.registry`
+# (Dapr convention), which is distinct from the Custos `global.imageRegistry`.
+# For air-gapped installs, point `dapr.global.registry` at the same mirror you
+# use for `global.imageRegistry` (the profile overlays do this).
 dapr:
-  enabled: true
-  logLevel: info
-  appProtocol: http
+  install: true
+  global:
+    registry: ghcr.io/dapr
+    tag: "1.14.0"
+    # Control-plane high availability — flipped on by the HA profile overlays.
+    ha:
+      enabled: false
 
 # Observability backends
 observability:
