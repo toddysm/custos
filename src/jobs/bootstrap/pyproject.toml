@@ -1,0 +1,123 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "custos-bootstrap-job"
+version = "0.1.0"
+description = "Custos bootstrap Job — idempotent post-install Helm hook that seeds a usable platform: canonical permissions + roles, the default tenant/workspace, and the admin role binding."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Custos contributors" }]
+keywords = ["custos", "bootstrap", "rbac", "seed", "helm-hook"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
+]
+# The job reuses the canonical auth domain (single source of truth) rather
+# than re-declaring permissions/roles: `custos-auth-service` owns the bundled
+# permission registry (`seed_permissions_and_validate_roles`) and the built-in
+# role table (`seed_builtin_roles`, `BUILTIN_ROLES`); `custos-spl` owns the
+# `AuthStoreProvider` interface + domain dataclasses; `custos-postgres` provides
+# the Postgres `AuthStoreProvider` adapter the seeding writes through. Installed
+# from path locally and in CI (the in-repo `custos-*` distributions are not on
+# any index):
+#
+#   pip install -e src/libs/storage-provider-layer[dev]
+#   pip install -e src/libs/custos-postgres[dev]
+#   pip install -e src/services/auth-service
+#   pip install -e src/jobs/bootstrap[dev]
+dependencies = [
+    "custos-spl",
+    "custos-postgres",
+    "custos-auth-service",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "ruff>=0.4",
+    "mypy>=1.10",
+]
+
+[project.urls]
+Repository = "https://github.com/toddysm/custos"
+Issues = "https://github.com/toddysm/custos/issues"
+Design = "https://github.com/toddysm/custos/blob/main/design/architecture/reference-deployment.md"
+
+[project.scripts]
+custos-bootstrap = "custos_bootstrap.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/custos_bootstrap"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "SIM", # flake8-simplify
+    "RUF", # ruff-specific
+]
+ignore = []
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_any_generics = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+check_untyped_defs = true
+namespace_packages = true
+explicit_package_bases = true
+mypy_path = "src:../../libs/storage-provider-layer/src:../../libs/custos-postgres/src:../../services/auth-service/src"
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+]
+
+[tool.coverage.run]
+branch = false
+source = ["custos_bootstrap"]
+
+[tool.coverage.report]
+precision = 1
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "if typing.TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "\\.\\.\\.",
+    "if __name__ == .__main__.:",
+    "@overload",
+]

@@ -24,6 +24,14 @@ spec:
         - name: bootstrap
           image: "{{ .Values.bootstrap.image.repository }}:{{ .Values.bootstrap.image.tag }}"
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          # Postgres connection details are read from the secret the CNPG
+          # operator generates for the application user (default name
+          # `<cluster>-app`; configurable via postgres.secretName). The
+          # secret exposes username/password/host/port/dbname/uri keys; the
+          # bootstrap entrypoint resolves CUSTOS_PG_DSN from `uri`.
+          envFrom:
+            - secretRef:
+                name: {{ .Values.postgres.secretName | quote }}
           env:
             - name: CUSTOS_ADMIN_PRINCIPAL_ID
               valueFrom:
