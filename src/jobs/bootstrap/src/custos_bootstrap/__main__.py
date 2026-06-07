@@ -15,24 +15,34 @@ the adapter.
 
 Admin binding
 -------------
-The admin principal id is read from ``CUSTOS_ADMIN_PRINCIPAL_ID``. The Helm hook
-injects it from an optional secret, so when it is absent the seeder still seeds
-permissions/roles/tenant/workspace and exits ``0`` (the platform is usable; an
-operator can bind an admin later).
+The initial platform admin is pre-bound by their OIDC identity so they can
+authenticate immediately after install. The operator supplies the issuer and
+subject via ``CUSTOS_BOOTSTRAP_ADMIN_OIDC_ISSUER`` /
+``CUSTOS_BOOTSTRAP_ADMIN_OIDC_SUBJECT`` (the Helm hook injects them from an
+optional secret). The seeder provisions an internal user, links the
+``(issuer, subject)`` OIDC identity to it, and grants it platform-admin. When
+either value is absent the seeder still seeds permissions/roles/tenant/workspace
+and exits ``0`` (the platform is usable; an operator can bind an admin later).
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
 import os
 import sys
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import cast
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
+from custos_auth.oidc_identity import (
+    OidcIdentityAlreadyBound,
+    find_user_by_oidc,
+    link_oidc_identity,
+)
 from custos_auth.permission_registry import seed_permissions_and_validate_roles
 from custos_auth.roles import BUILTIN_ROLES, ROLE_PLATFORM_ADMIN, seed_builtin_roles
 from custos_spl import AuthStoreProvider
@@ -58,8 +68,9 @@ DSN_ENV_VAR = "CUSTOS_PG_DSN"
 #: Fallback env vars, in priority order, carrying a ready-made connection URL.
 _DSN_FALLBACK_VARS = ("DATABASE_URL", "uri")
 
-#: Env var carrying the principal id to grant platform-admin to.
-ADMIN_PRINCIPAL_ENV = "CUSTOS_ADMIN_PRINCIPAL_ID"
+#: Env vars carrying the initial admin's OIDC issuer + subject to pre-bind.
+ADMIN_OIDC_ISSUER_ENV = "CUSTOS_BOOTSTRAP_ADMIN_OIDC_ISSUER"
+ADMIN_OIDC_SUBJECT_ENV = "CUSTOS_BOOTSTRAP_ADMIN_OIDC_SUBJECT"
 
 #: Canonical default tenant / workspace seeded for a usable single-tenant
 #: install. They are plain string ids (not UUIDs) so they are stable and
@@ -114,24 +125,50 @@ async def _ensure_workspace(auth_store: AuthStoreProvider, now: datetime) -> Non
     )
 
 
-async def _ensure_admin(
-    auth_store: AuthStoreProvider, admin_principal_id: str, now: datetime
-) -> None:
-    principal_id = PrincipalId(admin_principal_id)
+def _admin_principal_id(issuer: str, subject: str) -> PrincipalId:
+    """Return a stable internal principal id derived from the OIDC identity.
 
-    if await auth_store.get_principal(principal_id) is None:
-        await auth_store.put_principal(
-            User(
-                kind="user",
-                principal_id=principal_id,
-                tenant_id=DEFAULT_TENANT_ID,
-                display_name="Bootstrap Admin",
-                email=None,
-                disabled_at=None,
-                disabled_reason=None,
-                created_at=now,
+    Deterministic (``uuid5`` over ``issuer|subject``) so repeated runs converge
+    on the same user without a lookup, and distinct admins never collide.
+    """
+    return PrincipalId(f"user-{uuid5(NAMESPACE_URL, f'{issuer}|{subject}')}")
+
+
+async def _ensure_admin(
+    auth_store: AuthStoreProvider, *, issuer: str, subject: str, now: datetime
+) -> None:
+    # Reuse the principal already bound to this OIDC identity when present so a
+    # re-run never provisions a second user for the same admin.
+    existing_user = await find_user_by_oidc(auth_store, issuer=issuer, subject=subject)
+    if existing_user is not None:
+        principal_id = PrincipalId(existing_user)
+    else:
+        principal_id = _admin_principal_id(issuer, subject)
+        if await auth_store.get_principal(principal_id) is None:
+            await auth_store.put_principal(
+                User(
+                    kind="user",
+                    principal_id=principal_id,
+                    tenant_id=DEFAULT_TENANT_ID,
+                    display_name="Bootstrap Admin",
+                    email=None,
+                    disabled_at=None,
+                    disabled_reason=None,
+                    created_at=now,
+                )
             )
-        )
+        # Pre-bind the OIDC identity so the admin can authenticate immediately.
+        # ``link_oidc_identity`` is write-once; treat an existing binding (from a
+        # prior partial run) as success. Audit is skipped (no metadata store).
+        with contextlib.suppress(OidcIdentityAlreadyBound):
+            await link_oidc_identity(
+                auth_store,
+                None,
+                user_id=principal_id,
+                issuer=issuer,
+                subject=subject,
+                actor=_BOOTSTRAP_ACTOR,
+            )
 
     # Grant platform-admin (global, implicit superuser) once. Guard on the
     # existing global bindings so a re-run — or a binding an operator added
@@ -154,14 +191,15 @@ async def _ensure_admin(
 async def seed_platform(
     auth_store: AuthStoreProvider,
     *,
-    admin_principal_id: str | None,
+    admin_oidc_issuer: str | None,
+    admin_oidc_subject: str | None,
     now: datetime,
 ) -> None:
     """Seed permissions, roles, the default tenant/workspace, and the admin.
 
     Idempotent: permissions/roles are upserted by name/id, the tenant and
-    workspace are created only when absent, and the admin binding is created
-    only when the principal has no platform-admin grant yet.
+    workspace are created only when absent, and the admin user / OIDC identity /
+    platform-admin grant are created only when missing.
     """
     roles_spl = [role.to_spl() for role in BUILTIN_ROLES]
     await seed_permissions_and_validate_roles(auth_store, paths=[], roles=roles_spl)
@@ -170,14 +208,22 @@ async def seed_platform(
     await _ensure_tenant(auth_store, now)
     await _ensure_workspace(auth_store, now)
 
-    if admin_principal_id:
-        await _ensure_admin(auth_store, admin_principal_id, now)
-        _LOGGER.info("bootstrap seeded admin binding principal=%s", admin_principal_id)
+    if admin_oidc_issuer and admin_oidc_subject:
+        await _ensure_admin(
+            auth_store, issuer=admin_oidc_issuer, subject=admin_oidc_subject, now=now
+        )
+        _LOGGER.info(
+            "bootstrap linked admin OIDC identity issuer=%s subject=%s",
+            admin_oidc_issuer,
+            admin_oidc_subject,
+        )
     else:
         _LOGGER.warning(
-            "%s not set; skipping admin principal + platform-admin binding "
-            "(permissions, roles, default tenant/workspace still seeded)",
-            ADMIN_PRINCIPAL_ENV,
+            "%s / %s not both set; skipping admin user + OIDC link + "
+            "platform-admin binding (permissions, roles, default "
+            "tenant/workspace still seeded)",
+            ADMIN_OIDC_ISSUER_ENV,
+            ADMIN_OIDC_SUBJECT_ENV,
         )
 
 
@@ -190,11 +236,19 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--admin-principal-id",
+        "--admin-oidc-issuer",
         default=None,
         help=(
-            "principal id to grant platform-admin; overrides the "
-            f"{ADMIN_PRINCIPAL_ENV} environment variable."
+            "OIDC issuer URL of the initial admin to pre-bind; overrides the "
+            f"{ADMIN_OIDC_ISSUER_ENV} environment variable."
+        ),
+    )
+    parser.add_argument(
+        "--admin-oidc-subject",
+        default=None,
+        help=(
+            "OIDC subject (``sub`` claim) of the initial admin to pre-bind; "
+            f"overrides the {ADMIN_OIDC_SUBJECT_ENV} environment variable."
         ),
     )
     return parser
@@ -214,8 +268,10 @@ async def _run(args: argparse.Namespace) -> int:
 
     from custos_pg.adapters.auth import make_adapter
 
-    admin_principal_id = args.admin_principal_id or os.environ.get(ADMIN_PRINCIPAL_ENV)
-    admin_principal_id = admin_principal_id.strip() if admin_principal_id else None
+    issuer = args.admin_oidc_issuer or os.environ.get(ADMIN_OIDC_ISSUER_ENV)
+    issuer = issuer.strip() if issuer else None
+    subject = args.admin_oidc_subject or os.environ.get(ADMIN_OIDC_SUBJECT_ENV)
+    subject = subject.strip() if subject else None
 
     # `make_adapter()` returns a concrete `PgAuthAdapter`; it satisfies the
     # `AuthStoreProvider` protocol at runtime (the only static mismatch is a
@@ -223,7 +279,8 @@ async def _run(args: argparse.Namespace) -> int:
     auth_store = cast(AuthStoreProvider, make_adapter())
     await seed_platform(
         auth_store,
-        admin_principal_id=admin_principal_id or None,
+        admin_oidc_issuer=issuer or None,
+        admin_oidc_subject=subject or None,
         now=datetime.now(UTC),
     )
     return 0

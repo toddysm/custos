@@ -139,15 +139,19 @@ migrate:
     tag: dev
   backoffLimit: 3
 
-# Post-install bootstrap Job (tenant-default, workspace-default, admin binding)
+# Post-install/upgrade bootstrap Job (tenant-default, workspace-default, admin)
 bootstrap:
   enabled: true
   image:
     repository: ghcr.io/toddysm/custos/custos-bootstrap
     tag: dev
-  adminPrincipalIdRef:
-    name: custos-bootstrap
-    key: adminPrincipalId
+  # The initial platform admin is pre-bound by their OIDC identity (issuer +
+  # subject) so they can authenticate immediately after install. Both keys are
+  # read from the referenced Secret and are optional.
+  adminOidcRef:
+    name: custos-bootstrap-admin
+    issuerKey: oidcIssuer
+    subjectKey: oidcSubject
 
 # NetworkPolicies — default deny-all + explicit allow per service.
 # DISABLED BY DEFAULT until the per-service allow set is implemented:
