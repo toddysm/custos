@@ -111,7 +111,9 @@ def test_subcharts_installed_by_default(
     assert "custos-cert-manager" in deployments, f"cert-manager missing from {profile}"
     # cert-manager ships its CRDs in-chart.
     crds = {d["metadata"]["name"] for d in _by_kind(docs, "CustomResourceDefinition")}
-    assert "certificates.cert-manager.io" in crds, f"CRDs missing from {profile}"
+    assert crds.issuperset({"certificates.cert-manager.io"}), (
+        f"CRDs missing from {profile}"
+    )
 
 
 def test_install_toggles_skip_subcharts() -> None:
