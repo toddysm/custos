@@ -9,6 +9,11 @@ global:
   imageTag: dev
   replicaCount: 1
 
+# Mirror the Dapr control-plane images alongside the Custos images.
+dapr:
+  global:
+    registry: registry.internal/dapr
+
 postgres:
   embedded: true
   instances: 1

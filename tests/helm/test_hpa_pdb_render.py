@@ -46,7 +46,14 @@ def test_eval_renders_no_hpa_or_pdb(
 ) -> None:
     docs = rendered[profile]
     assert _by_kind(docs, "HorizontalPodAutoscaler") == []
-    assert _by_kind(docs, "PodDisruptionBudget") == []
+    # Scope to Custos-owned PDBs; vendored subcharts (e.g. Dapr) may ship their
+    # own disruption budgets independent of the HA-gated service templates.
+    custos_pdbs = [
+        d
+        for d in _by_kind(docs, "PodDisruptionBudget")
+        if d["metadata"]["name"].startswith("custos-")
+    ]
+    assert custos_pdbs == []
 
 
 @pytest.mark.parametrize("profile", EVAL_PROFILES)
@@ -77,6 +84,7 @@ def test_ha_renders_pdb_per_service(
     pdbs = {
         d["metadata"]["name"]
         for d in _by_kind(rendered[profile], "PodDisruptionBudget")
+        if d["metadata"]["name"].startswith("custos-")
     }
     assert pdbs == {f"custos-{svc}" for svc in SERVICES}
 

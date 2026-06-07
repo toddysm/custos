@@ -15,6 +15,13 @@ global:
       cpu: 1000m
       memory: 1Gi
 
+# Run the Dapr control plane in HA (multi-replica Sentry / Placement /
+# Operator / Injector) to match the platform's HA topology.
+dapr:
+  global:
+    ha:
+      enabled: true
+
 postgres:
   embedded: true
   instances: 3
