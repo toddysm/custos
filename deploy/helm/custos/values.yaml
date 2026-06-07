@@ -25,6 +25,29 @@ global:
     limits:
       cpu: 500m
       memory: 512Mi
+  # NetworkPolicy plumbing shared by the umbrella deny-all and every service
+  # subchart's networkpolicy.yaml. Flip `enabled` on to turn on the umbrella
+  # deny-all *and* every per-service allow set together (DEPLOY-IMPL-009).
+  # DISABLED BY DEFAULT: enabling the deny-all without the allow set — or with
+  # an incomplete one — blocks platform traffic (incl. DNS). The per-service
+  # allow templates implement the design's Networking allow matrix; flip this
+  # on once they are validated for the target cluster's namespace layout.
+  networkPolicies:
+    enabled: false
+    # Namespace (by `kubernetes.io/metadata.name`) Prometheus scrapes from.
+    monitoringNamespace: monitoring
+    # Namespace the Envoy Gateway data plane runs in (north-south ingress).
+    gatewayNamespace: custos-system
+    # Cluster DNS namespace (egress on 53 is always required).
+    dnsNamespace: kube-system
+    # Dapr control-plane namespace (Sentry / Placement / Operator / Injector).
+    daprNamespace: dapr-system
+    # Dapr sidecar ports used for service-to-service invocation.
+    daprPorts: [3500, 50001, 50002]
+    # CNPG Postgres cluster pod selector + port (egress for DB-backed services).
+    postgresPort: 5432
+    postgresPodSelector:
+      cnpg.io/cluster: custos
 
 # Namespace management. By default the chart does NOT create the namespace
 # (and therefore does not require cluster-scoped permissions); pass
@@ -152,14 +175,6 @@ bootstrap:
     name: custos-bootstrap-admin
     issuerKey: oidcIssuer
     subjectKey: oidcSubject
-
-# NetworkPolicies — default deny-all + explicit allow per service.
-# DISABLED BY DEFAULT until the per-service allow set is implemented:
-# enabling the deny-all alone blocks all ingress/egress (including DNS) and
-# breaks the platform. Tracked in reference-deployment.md (TODO-004: network
-# policy matrix). Set to true only after the allow policies are merged.
-networkPolicies:
-  enabled: false
 
 # Subchart toggles (when umbrella renders subcharts)
 api-gateway:

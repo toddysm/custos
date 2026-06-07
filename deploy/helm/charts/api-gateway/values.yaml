@@ -41,6 +41,34 @@ dapr:
 serviceMonitor:
   enabled: false
 
+# NetworkPolicy (DEPLOY-IMPL-009) — this service's slice of the design
+# Networking allow matrix. Pairs with the umbrella deny-all.
+# `enabled: null` inherits the umbrella `global.networkPolicies.enabled`;
+# set true/false here to override this one service. Shared plumbing (DNS,
+# Dapr, Postgres, monitoring/gateway namespaces) lives under the umbrella
+# `global.networkPolicies` block.
+networkPolicy:
+  enabled: null
+  # Allow Prometheus to scrape /metrics (shares the app port).
+  prometheusScrape: true
+  # Optional pod selector inside the monitoring namespace (empty = any pod).
+  prometheusPodSelector: {}
+  # North-south ingress from the Envoy Gateway data plane (gateway fronts all).
+  ingressFromGateway: true
+  # No internal service calls the gateway (north-south entrypoint only).
+  ingressFromServices: []
+  # The gateway fans out to every internal service.
+  egressToServices:
+    - auth-service
+    - workflow-service
+    - trigger-service
+    - connector-service
+    - catalog-service
+    - activity-runtime-manager
+    - observability-audit-service
+  # The gateway holds no database.
+  egressToPostgres: false
+
 # Non-secret CUSTOS_GATEWAY_* env vars projected into the ConfigMap.
 # Values and defaults come from design.md § Configuration.
 config:
