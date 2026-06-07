@@ -1,0 +1,43 @@
+# Root .dockerignore — applies to image builds that use the repository root as
+# their build context (all Custos *service* and *job* images, per DEPLOY-IMPL).
+# Keeps caches, virtualenvs, tests, and VCS metadata out of the build context so
+# builds stay fast and reproducible.
+
+# Version control
+.git/
+.gitignore
+.gitattributes
+
+# Python caches / build artifacts
+**/__pycache__/
+**/*.py[cod]
+**/.mypy_cache/
+**/.pytest_cache/
+**/.ruff_cache/
+**/.coverage
+**/htmlcov/
+**/*.egg-info/
+**/build/
+**/dist/
+**/*.whl
+
+# Virtual environments
+.venv/
+**/.venv/
+**/venv/
+
+# Tests are not needed in runtime images
+**/tests/
+
+# Editor / OS noise
+.vscode/
+.idea/
+**/.DS_Store
+
+# Repo docs / design / deploy assets not needed inside service images
+.github/
+design/
+docs/
+tests/
+build/
+deploy/offline/

@@ -5,6 +5,17 @@ CHART_DIR := deploy/helm/custos
 PROFILES  := connected-eval connected-ha airgapped-eval airgapped-ha
 BUILD_DIR := build
 
+# Image build settings. Override on the command line, e.g.
+#   make docker-build-api-gateway IMAGE_TAG=v1.2.3
+# The build context is always the repository root so service images can install
+# their in-repo `custos-*` path libraries (see src/services/<svc>/Dockerfile).
+IMAGE_REGISTRY ?= ghcr.io/toddysm/custos
+IMAGE_TAG      ?= dev
+SERVICES       := api-gateway auth-service workflow-service trigger-service \
+                  connector-service activity-runtime-manager catalog-service \
+                  observability-audit-service
+DOCKER_BUILD_TARGETS := $(addprefix docker-build-,$(SERVICES))
+
 # Fail on the first error in any recipe shell line. Without this, a multi-line
 # `for` loop continues past a failed `helm template` and Make can exit 0.
 SHELL    := /bin/bash
@@ -12,7 +23,7 @@ SHELL    := /bin/bash
 
 TEMPLATE_TARGETS := $(addprefix template-,$(PROFILES))
 
-.PHONY: lint template $(TEMPLATE_TARGETS) deps clean bundle help helm-test
+.PHONY: lint template $(TEMPLATE_TARGETS) deps clean bundle help helm-test docker-build $(DOCKER_BUILD_TARGETS)
 
 help:
 	@echo "Targets:"
@@ -20,6 +31,8 @@ help:
 	@echo "  template          - render manifests to $(BUILD_DIR)/ for all 4 profiles"
 	@echo "  template-<profile>- render a single profile (connected-eval | connected-ha | airgapped-eval | airgapped-ha)"
 	@echo "  helm-test         - pytest-based render assertions in tests/helm (requires helm + python)"
+	@echo "  docker-build      - build all service images (context = repo root)"
+	@echo "  docker-build-<svc>- build a single service image (e.g. docker-build-api-gateway)"
 	@echo "  bundle            - build air-gapped offline tarball (delegates to deploy/offline)"
 	@echo "  clean             - remove build artifacts"
 
@@ -45,6 +58,17 @@ bundle:
 
 helm-test: deps
 	cd tests/helm && pip install -e . >/dev/null && pytest -q
+
+# Build all service images. The build context is the repository root so each
+# Dockerfile can copy the in-repo `custos-*` path libraries it depends on.
+docker-build: $(DOCKER_BUILD_TARGETS)
+
+# Per-service image build. `docker-build-<svc>` builds src/services/<svc> with
+# the repo root as the context, tagging `$(IMAGE_REGISTRY)/<svc>:$(IMAGE_TAG)`.
+# Provenance OCI manifest annotations are applied by the publish workflow
+# (DEPLOY-IMPL-006), not here.
+$(DOCKER_BUILD_TARGETS): docker-build-%:
+	docker build -f src/services/$*/Dockerfile -t $(IMAGE_REGISTRY)/$*:$(IMAGE_TAG) .
 
 clean:
 	rm -rf $(BUILD_DIR)
