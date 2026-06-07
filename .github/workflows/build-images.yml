@@ -1,6 +1,6 @@
 name: build-images
 
-# Reusable image build/publish workflow (DEPLOY-IMPL-006).
+# Reusable image build/publish workflow (DEPLOY-IMPL-006, DEPLOY-IMPL-007).
 #
 # Builds and pushes all ten Custos images to ``ghcr.io/<owner>/custos/<name>``,
 # stamping the agreed immutable OCI manifest annotations
@@ -9,6 +9,12 @@ name: build-images
 # *manifest* (content-addressed, immutable) rather than the mutable config
 # labels — see design/architecture/reference-deployment.md § OCI image
 # annotations.
+#
+# Each image is additionally accompanied by a Syft SBOM (SPDX + CycloneDX)
+# attached as a signed in-toto attestation, and the image manifest itself is
+# keyless-signed with cosign via GitHub OIDC (Fulcio + Rekor) — see the
+# ``./.github/actions/sbom-sign`` composite action and the supply-chain
+# attestations section of the design.
 #
 # Triggers:
 #   * push to ``main``         — build changed images, tag ``:dev`` + ``:sha-...``
@@ -159,6 +165,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Keyless cosign signing via the ambient GitHub OIDC token (Fulcio).
+      id-token: write
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
@@ -230,6 +238,7 @@ jobs:
           echo "primary=${SHA_TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push image
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -240,8 +249,9 @@ jobs:
           # Bind the annotations to the image manifest (not just config labels).
           annotations: ${{ steps.meta.outputs.annotations }}
           # Push a plain single-platform image manifest so the annotations land
-          # directly on the manifest. SLSA provenance (DEPLOY-IMPL-008) and SBOM
-          # (DEPLOY-IMPL-007) attestations layer on in their own workflows.
+          # directly on the manifest. SLSA provenance (DEPLOY-IMPL-008) layers
+          # on in its own workflow; the Syft SBOM + cosign signing below attach
+          # as referrers rather than inline manifest descriptors.
           provenance: false
           sbom: false
           cache-from: type=gha,scope=${{ matrix.key }}
@@ -277,6 +287,14 @@ jobs:
               raise SystemExit(f"manifest missing required annotations: {missing}")
           print("all required manifest annotations present")
           PY
+
+      - name: Generate SBOM and keyless-sign
+        uses: ./.github/actions/sbom-sign
+        with:
+          # Sign by digest so the signature/attestations bind to the immutable
+          # manifest and cover every tag that points at it.
+          image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          subject-name: ${{ matrix.title }}
 
   # Aggregate the built image references so ``workflow_call`` consumers (release
   # + offline bundle) can fan out from a single output.
