@@ -7,6 +7,7 @@ profile: ha
 global:
   imageRegistry: registry.internal/custos
   imageTag: dev
+  profile: ha
   replicaCount: 3
   resources:
     requests:

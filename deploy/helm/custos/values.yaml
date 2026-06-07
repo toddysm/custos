@@ -14,6 +14,10 @@ global:
   imagePullSecrets: []
   # correlationId header name minted by API Gateway and propagated downstream
   correlationIdHeader: x-correlation-id
+  # Deployment profile exposed to every subchart (top-level `profile` is not
+  # visible inside subcharts). HA-gated resources — HPA + PDB — render only
+  # when this is "ha". Profile values files set it; defaults to "eval".
+  profile: eval
   # Default replicas and resources for every service subchart. Each subchart
   # uses .Values.global.replicaCount / .Values.global.resources when its local
   # values are empty, so umbrella profiles can scale all services in one knob.

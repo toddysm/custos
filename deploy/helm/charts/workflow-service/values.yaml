@@ -42,6 +42,24 @@ dapr:
 serviceMonitor:
   enabled: false
 
+# HA-gated autoscaling (DEPLOY-IMPL-010). HPA renders only when this resolves
+# on: `enabled: null` inherits the umbrella HA profile
+# (`global.profile == "ha"`); set true/false to override this one service.
+# When the HPA is active the Deployment drops its static `replicas` so the
+# autoscaler owns the count.
+autoscaling:
+  enabled: null
+  minReplicas: 3
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+# HA-gated PodDisruptionBudget (DEPLOY-IMPL-010). Same inheritance rule as
+# autoscaling. Keeps at least N-1 pods available during voluntary disruptions.
+podDisruptionBudget:
+  enabled: null
+  maxUnavailable: 1
+
 # NetworkPolicy (DEPLOY-IMPL-009) — this service's slice of the design
 # Networking allow matrix. Pairs with the umbrella deny-all.
 # `enabled: null` inherits the umbrella `global.networkPolicies.enabled`;

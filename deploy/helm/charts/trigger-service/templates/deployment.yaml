@@ -5,7 +5,10 @@ metadata:
   labels:
     {{- include "svc.labels" . | nindent 4 }}
 spec:
+  {{- if ne (include "svc.autoscalingEnabled" .) "true" }}
+  # Static replica count. Omitted when the HPA is active so it owns the count.
   replicas: {{ include "svc.replicaCount" . }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "svc.selectorLabels" . | nindent 6 }}

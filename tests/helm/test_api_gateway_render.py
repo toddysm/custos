@@ -196,8 +196,16 @@ def test_ha_profiles_inherit_ha_replica_count(
 ) -> None:
     dep = _find(rendered[profile], "Deployment", "custos-api-gateway")
     assert dep is not None
-    assert dep["spec"]["replicas"] == 3, (
-        f"{profile}: expected api-gateway to inherit global.replicaCount=3"
+    assert "replicas" not in dep["spec"], (
+        f"{profile}: api-gateway Deployment must not set static replicas "
+        "when the HPA is active"
+    )
+    hpa = _find(
+        rendered[profile], "HorizontalPodAutoscaler", "custos-api-gateway"
+    )
+    assert hpa is not None
+    assert hpa["spec"]["minReplicas"] == 3, (
+        f"{profile}: expected api-gateway HPA floor of 3"
     )
 
 
