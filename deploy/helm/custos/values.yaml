@@ -146,6 +146,75 @@ dapr:
     ha:
       enabled: false
 
+  # Dapr building-block CRs (DEPLOY-IMPL-012). The Component + Subscription CRs
+  # below are rendered only when `dapr.install` is true; each is individually
+  # toggleable. Secret-backed metadata is resolved through the built-in
+  # `kubernetes` secret store, so plaintext credentials never live in the CRs.
+  components:
+    # State store backed by the CNPG Postgres cluster. Reads the libpq URI from
+    # the CNPG application secret (postgres.secretName) — same secret the
+    # migration Job and services consume.
+    stateStore:
+      enabled: true
+      name: custos-statestore
+      # Secret + key holding the Postgres connection URI. Empty secret name
+      # falls back to postgres.secretName.
+      connectionSecret: ""
+      connectionKey: uri
+    # Dapr secret store wired to the Layer-1 backend. Defaults to the built-in
+    # Kubernetes secret store (eval); HA installs point `type` at the same
+    # backend ESO manages (e.g. secretstores.hashicorp.vault).
+    secretStore:
+      enabled: true
+      name: custos-secretstore
+      type: secretstores.kubernetes
+      version: v1
+      # Free-form metadata entries ({name, value}) for non-kubernetes backends.
+      metadata: []
+    # Pub/sub: Redis broker for low-latency fan-out plus a Postgres-backed
+    # component for durable, state-aligned messaging (design decision D3).
+    pubsub:
+      # Fan-out broker. Services reference this component name by default
+      # (custos-pubsub — see the trigger/connector service settings).
+      redis:
+        enabled: true
+        name: custos-pubsub
+        # Redis broker address (the Redis subchart lands in DEPLOY-IMPL-015).
+        host: custos-redis-master:6379
+        # Secret + key holding the Redis password.
+        passwordSecret: custos-redis
+        passwordKey: redis-password
+      # Durable messaging on Postgres, sharing the CNPG cluster.
+      postgres:
+        enabled: true
+        name: custos-pubsub-durable
+        connectionSecret: ""
+        connectionKey: uri
+
+  # Declarative Subscription CRs for the platform's pub/sub consumers. Both the
+  # trigger-service and the observability-audit-service consume the workflow
+  # lifecycle stream (`custos.workflow.events`): the trigger-service to fire
+  # matching triggers, the observability-audit-service for trace/metric
+  # correlation (its audit trail itself arrives via the SPL outbox drain, not
+  # pub/sub). `scopes` restricts delivery to the named Dapr app-ids.
+  subscriptions:
+    triggerWorkflowEvents:
+      enabled: true
+      name: trigger-workflow-events
+      pubsub: custos-pubsub
+      topic: custos.workflow.events
+      route: /internal/events/workflow
+      scopes:
+        - trigger-service
+    observabilityWorkflowEvents:
+      enabled: true
+      name: observability-workflow-events
+      pubsub: custos-pubsub
+      topic: custos.workflow.events
+      route: /internal/events/workflow
+      scopes:
+        - observability-audit-service
+
 # Observability backends
 observability:
   loki:
