@@ -41,6 +41,13 @@ def _find(docs: list[dict[str, Any]], kind: str, name: str) -> dict[str, Any] | 
 
 def _render_with(profile: str, *sets: str) -> list[dict[str, Any]]:
     """Render one profile with extra ``--set`` overrides."""
+    # Populate ./charts/ first so the vendored Dapr dependency exists when this
+    # file is run in isolation or before the session fixture has rendered.
+    subprocess.run(
+        ["helm", "dependency", "update", str(UMBRELLA)],
+        check=True,
+        capture_output=True,
+    )
     cmd = [
         "helm",
         "template",
