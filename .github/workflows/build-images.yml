@@ -1,6 +1,6 @@
 name: build-images
 
-# Reusable image build/publish workflow (DEPLOY-IMPL-006, DEPLOY-IMPL-007).
+# Reusable image build/publish workflow (DEPLOY-IMPL-006, 007, 008).
 #
 # Builds and pushes all ten Custos images to ``ghcr.io/<owner>/custos/<name>``,
 # stamping the agreed immutable OCI manifest annotations
@@ -11,10 +11,12 @@ name: build-images
 # annotations.
 #
 # Each image is additionally accompanied by a Syft SBOM (SPDX + CycloneDX)
-# attached as a signed in-toto attestation, and the image manifest itself is
+# attached as a signed in-toto attestation, an SLSA provenance attestation
+# (builder identity, source, materials), and the image manifest itself is
 # keyless-signed with cosign via GitHub OIDC (Fulcio + Rekor) — see the
-# ``./.github/actions/sbom-sign`` composite action and the supply-chain
-# attestations section of the design.
+# ``./.github/actions/sbom-sign`` and ``./.github/actions/slsa-provenance``
+# composite actions, the supply-chain attestations section of the design, and
+# docs/operations/supply-chain-verification.md for the verification policy.
 #
 # Triggers:
 #   * push to ``main``         — build changed images, tag ``:dev`` + ``:sha-...``
@@ -295,6 +297,11 @@ jobs:
           # manifest and cover every tag that points at it.
           image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
           subject-name: ${{ matrix.title }}
+
+      - name: Attach SLSA provenance
+        uses: ./.github/actions/slsa-provenance
+        with:
+          image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
 
   # Aggregate the built image references so ``workflow_call`` consumers (release
   # + offline bundle) can fan out from a single output.

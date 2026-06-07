@@ -1,0 +1,101 @@
+# Reusable SLSA provenance generation + keyless cosign attestation
+# (DEPLOY-IMPL-008). Builds an SLSA v0.2 provenance predicate from the GitHub
+# Actions build context (builder identity, source, materials) and attaches it
+# to a digest-pinned OCI artifact as a keyless-signed in-toto attestation, so
+# operators can verify it with:
+#
+#   cosign verify-attestation --type slsaprovenance \
+#     --certificate-identity-regexp '...build-images.yml@.*' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+#     <image>@<digest>
+#
+# The provenance is produced by the GitHub-hosted runner and signed with the
+# workflow's short-lived Fulcio identity + Rekor entry, giving a non-repudiable
+# record of which workflow/run/commit produced the image (SLSA Build provenance;
+# see design § Supply-chain attestations).
+#
+# The calling job MUST grant ``id-token: write`` (keyless OIDC) and
+# ``packages: write`` (attach to GHCR), and must already be logged in to the
+# registry.
+name: SLSA provenance + cosign attest
+description: Generate SLSA provenance and keyless-attest it onto an OCI artifact with cosign.
+
+inputs:
+  image:
+    description: "Image/artifact reference. MUST be pinned by digest (name@sha256:...)."
+    required: true
+  cosign-version:
+    description: "cosign release to install."
+    required: false
+    default: "v2.4.1"
+
+runs:
+  using: composite
+  steps:
+    - name: Install cosign
+      uses: sigstore/cosign-installer@v3
+      with:
+        cosign-release: ${{ inputs.cosign-version }}
+
+    - name: Generate and attest SLSA provenance
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+      run: |
+        set -euo pipefail
+        if [[ "$IMAGE" != *"@sha256:"* ]]; then
+          echo "::error::image must be pinned by digest (name@sha256:...), got: $IMAGE" >&2
+          exit 1
+        fi
+
+        BUILD_SHA="$(git rev-parse HEAD)"
+        SOURCE_URI="git+${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}@${GITHUB_REF}"
+        BUILDER_ID="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/build-images.yml@${GITHUB_REF}"
+        INVOCATION_ID="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}"
+        STARTED_ON="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+        # SLSA v0.2 provenance predicate (cosign ``--type slsaprovenance``).
+        python3 - > provenance.json <<'PY'
+        import json, os
+
+        repo = os.environ["GITHUB_REPOSITORY"]
+        server = os.environ["GITHUB_SERVER_URL"]
+        ref = os.environ["GITHUB_REF"]
+        sha = os.environ["BUILD_SHA"]
+        source_uri = os.environ["SOURCE_URI"]
+        predicate = {
+            "builder": {"id": os.environ["BUILDER_ID"]},
+            "buildType": f"{server}/{repo}/buildtypes/docker-buildx@v1",
+            "invocation": {
+                "configSource": {
+                    "uri": source_uri,
+                    "digest": {"sha1": sha},
+                    "entryPoint": ".github/workflows/build-images.yml",
+                },
+                "environment": {
+                    "github_run_id": os.environ["GITHUB_RUN_ID"],
+                    "github_run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+                    "github_actor": os.environ["GITHUB_ACTOR"],
+                    "github_event_name": os.environ["GITHUB_EVENT_NAME"],
+                    "github_ref": ref,
+                },
+            },
+            "metadata": {
+                "buildInvocationId": os.environ["INVOCATION_ID"],
+                "startedOn": os.environ["STARTED_ON"],
+                "completeness": {
+                    "parameters": True,
+                    "environment": False,
+                    "materials": True,
+                },
+                "reproducible": False,
+            },
+            "materials": [
+                {"uri": source_uri, "digest": {"sha1": sha}},
+            ],
+        }
+        print(json.dumps(predicate, indent=2))
+        PY
+
+        echo "Attaching signed SLSA provenance to $IMAGE"
+        cosign attest --yes --type slsaprovenance --predicate provenance.json "$IMAGE"
