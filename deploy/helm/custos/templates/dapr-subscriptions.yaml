@@ -1,7 +1,10 @@
 {{- if .Values.dapr.install -}}
 {{- $ns := include "custos.namespace" . -}}
+{{- $subs := .Values.dapr.subscriptions -}}
 {{- $first := true -}}
-{{- range $key, $sub := .Values.dapr.subscriptions }}
+{{/* Iterate sorted keys so the rendered manifest stays stable across runs. */}}
+{{- range $key := keys $subs | sortAlpha }}
+{{- $sub := index $subs $key }}
 {{- if $sub.enabled }}
 {{- if $first }}{{ $first = false }}{{ else }}
 ---

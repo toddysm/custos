@@ -1,11 +1,19 @@
 {{- if .Values.dapr.install -}}
 {{- $ns := include "custos.namespace" . -}}
 {{- $components := .Values.dapr.components -}}
+{{/*
+Credential-bearing Components resolve their `secretKeyRef`s through the Dapr
+secret store. When the secret-store Component is enabled, route through it (so
+HA installs that move secrets to e.g. Vault take effect); otherwise fall back to
+the runtime's built-in `kubernetes` store.
+*/}}
+{{- $secretStore := "kubernetes" -}}
+{{- if $components.secretStore.enabled -}}{{- $secretStore = $components.secretStore.name -}}{{- end -}}
 {{- with $components.stateStore }}
 {{- if .enabled }}
 # State store backed by the CNPG Postgres cluster. The connection URI is pulled
-# from the CNPG application secret through the built-in `kubernetes` secret
-# store so the credential never appears in the rendered manifest.
+# from the CNPG application secret through the configured Dapr secret store so
+# the credential never appears in the rendered manifest.
 apiVersion: dapr.io/v1alpha1
 kind: Component
 metadata:
@@ -22,7 +30,7 @@ spec:
         name: {{ .connectionSecret | default $.Values.postgres.secretName | quote }}
         key: {{ .connectionKey | quote }}
 auth:
-  secretStore: kubernetes
+  secretStore: {{ $secretStore | quote }}
 {{- end }}
 {{- end }}
 {{- with $components.secretStore }}
@@ -53,7 +61,7 @@ spec:
 ---
 # Redis pub/sub broker for low-latency fan-out. Services reference this
 # component by name (custos-pubsub). The Redis broker itself is provisioned in
-# DEPLOY-IMPL-015; the password is resolved via the kubernetes secret store.
+# DEPLOY-IMPL-015; the password is resolved via the configured secret store.
 apiVersion: dapr.io/v1alpha1
 kind: Component
 metadata:
@@ -72,14 +80,14 @@ spec:
         name: {{ .passwordSecret | quote }}
         key: {{ .passwordKey | quote }}
 auth:
-  secretStore: kubernetes
+  secretStore: {{ $secretStore | quote }}
 {{- end }}
 {{- end }}
 {{- with $components.pubsub.postgres }}
 {{- if .enabled }}
 ---
 # Postgres-backed pub/sub for durable, state-aligned messaging (design D3).
-# Shares the CNPG cluster credentials via the kubernetes secret store.
+# Shares the CNPG cluster credentials via the configured secret store.
 apiVersion: dapr.io/v1alpha1
 kind: Component
 metadata:
@@ -96,7 +104,7 @@ spec:
         name: {{ .connectionSecret | default $.Values.postgres.secretName | quote }}
         key: {{ .connectionKey | quote }}
 auth:
-  secretStore: kubernetes
+  secretStore: {{ $secretStore | quote }}
 {{- end }}
 {{- end }}
 {{- end }}

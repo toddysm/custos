@@ -127,11 +127,19 @@ def test_secrets_resolved_via_secret_store(
     for name in ("custos-statestore", "custos-pubsub", "custos-pubsub-durable"):
         comp = _find(docs, "Component", name)
         assert comp is not None, f"{name} missing from {profile}"
-        assert comp["auth"]["secretStore"] == "kubernetes"
+        assert comp["auth"]["secretStore"] == "custos-secretstore"
         secret_refs = [
             entry for entry in comp["spec"]["metadata"] if "secretKeyRef" in entry
         ]
         assert secret_refs, f"{name} has no secretKeyRef metadata"
+
+
+def test_secret_store_disabled_falls_back_to_builtin() -> None:
+    """With the secret-store Component off, credentials use the built-in store."""
+    docs = _render_with("connected-eval", "dapr.components.secretStore.enabled=false")
+    comp = _find(docs, "Component", "custos-statestore")
+    assert comp is not None
+    assert comp["auth"]["secretStore"] == "kubernetes"
 
 
 def test_statestore_binds_to_cnpg_secret() -> None:
