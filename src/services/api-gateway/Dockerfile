@@ -91,7 +91,8 @@ RUN /opt/custos/venv/bin/pip install --no-index --find-links=/tmp/wheels \
 USER custos
 WORKDIR /home/custos
 
-# Application port (HTTPS REST surface) and metrics port.
+# Application port (plain HTTP; TLS is terminated upstream at the Envoy Gateway)
+# and metrics port.
 EXPOSE 8080 8090
 
 # Liveness/readiness during ``docker run`` smoke tests; Kubernetes uses the
