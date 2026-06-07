@@ -1,0 +1,120 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "custos-migrate-job"
+version = "0.1.0"
+description = "Custos migration Job — Helm pre-install/pre-upgrade hook that applies pending SPL schema revisions (forward-only `migrate up`) before any component starts."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Custos contributors" }]
+keywords = ["custos", "migrate", "schema", "postgres", "helm-hook"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
+]
+# The job is a thin wrapper around the SPL migration CLI
+# (`custos_spl.migrations.cli`). `custos-spl` provides the runner + strict
+# revision policy; `custos-postgres` registers the Postgres adapter
+# entry points (group `custos_spl.adapters`) the CLI discovers and applies
+# `migrate up` against. Installed from path locally and in CI:
+#
+#   pip install -e src/libs/storage-provider-layer[dev]
+#   pip install -e src/libs/custos-postgres[dev]
+#   pip install -e src/jobs/migrate[dev]
+dependencies = [
+    "custos-spl",
+    "custos-postgres",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.4",
+    "mypy>=1.10",
+]
+
+[project.urls]
+Repository = "https://github.com/toddysm/custos"
+Issues = "https://github.com/toddysm/custos/issues"
+Design = "https://github.com/toddysm/custos/blob/main/design/architecture/reference-deployment.md"
+
+# NOTE: `custos-spl` already exposes a `custos-migrate` console script
+# (`custos_spl.migrations.cli:main`). Because both distributions are installed
+# in the same image, this job uses the distinct `custos-migrate-job` name to
+# avoid a console-script collision; the image ENTRYPOINT invokes it.
+[project.scripts]
+custos-migrate-job = "custos_migrate.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/custos_migrate"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "SIM", # flake8-simplify
+    "RUF", # ruff-specific
+]
+ignore = []
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_any_generics = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+check_untyped_defs = true
+namespace_packages = true
+explicit_package_bases = true
+mypy_path = "src:../../libs/storage-provider-layer/src:../../libs/custos-postgres/src"
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+]
+
+[tool.coverage.run]
+branch = false
+source = ["custos_migrate"]
+
+[tool.coverage.report]
+precision = 1
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "if typing.TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "\\.\\.\\.",
+    "if __name__ == .__main__.:",
+    "@overload",
+]
