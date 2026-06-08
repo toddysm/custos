@@ -49,10 +49,11 @@ spec:
           resources:
             {{- include "svc.resources" . | nindent 12 }}
           {{- if .Values.startupProbe.enabled }}
-          # The gateway's startup permission cross-check converges readiness in
-          # the background when Auth Service / the Dapr sidecar are not yet
-          # reachable on a cold cluster; the startupProbe absorbs that window so
-          # liveness/readiness do not crash-loop the pod (issue #815).
+          # The flat `/healthz` startupProbe covers the cold-start window until
+          # uvicorn is serving HTTP so the livenessProbe does not restart a
+          # slow-starting pod. Readiness convergence (the background startup
+          # permission cross-check, issue #815) is surfaced via `/readyz` and is
+          # not bounded by this probe.
           startupProbe:
             httpGet:
               path: /healthz

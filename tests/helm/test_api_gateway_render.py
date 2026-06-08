@@ -167,14 +167,15 @@ def test_deployment_probes_hit_healthz_and_readyz(
 def test_deployment_has_startup_probe_for_resilient_startup(
     rendered: dict[str, list[dict[str, Any]]], profile: str
 ) -> None:
-    """A startupProbe must absorb the resilient-startup convergence window.
+    """A startupProbe must cover the cold-start HTTP-serving window.
 
-    The gateway's startup permission cross-check converges readiness in the
-    background when the Auth Service / Dapr sidecar are not yet reachable on a
-    cold cluster (issue #815), so ``/readyz`` returns 503 until the first
-    validation succeeds. The startupProbe gates liveness/readiness and must hit
-    ``/healthz`` with a failure budget large enough to cover that convergence
-    before liveness can restart the pod.
+    The startupProbe hits the flat ``/healthz`` liveness endpoint, so it gates
+    the ``livenessProbe`` until uvicorn is serving HTTP and keeps a slow cold
+    start from crash-looping the pod. (Readiness convergence — the background
+    startup permission cross-check, issue #815 — is surfaced separately via
+    ``/readyz`` and is not bounded by this probe.) The probe must hit
+    ``/healthz`` with a failure budget large enough to cover a realistic
+    cold-start window.
     """
     dep = _find(rendered[profile], "Deployment", "custos-api-gateway")
     assert dep is not None
@@ -186,7 +187,7 @@ def test_deployment_has_startup_probe_for_resilient_startup(
     budget = startup["periodSeconds"] * startup["failureThreshold"]
     assert budget >= 60, (
         f"{profile}: startupProbe budget {budget}s is too small to cover the "
-        "resilient-startup convergence window"
+        "cold-start HTTP-serving window"
     )
 
 

@@ -38,12 +38,13 @@ dapr:
   appProtocol: http
   logLevel: info
 
-# The gateway's startup permission cross-check converges readiness in the
-# background when the Auth Service / Dapr sidecar are not yet reachable on a
-# cold cluster (issue #815). The startupProbe gates liveness/readiness until
-# the process is serving HTTP and gives that convergence a generous budget
-# (periodSeconds * failureThreshold seconds) before liveness can restart the
-# pod.
+# The startupProbe hits the flat `/healthz` liveness endpoint, so it covers the
+# cold-start window until uvicorn is serving HTTP and keeps the livenessProbe
+# from restarting a slow-starting pod. The gateway's startup permission
+# cross-check converges `/readyz` in the background (issue #815); that readiness
+# convergence is NOT bounded by this probe — a 503 from `/readyz` only holds the
+# pod out of the Service endpoints, it never restarts the pod. Size the
+# cold-start budget via periodSeconds * failureThreshold seconds.
 startupProbe:
   enabled: true
   periodSeconds: 5
