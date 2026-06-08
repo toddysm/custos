@@ -98,3 +98,23 @@ dependencies:
     version: 0.158.1
     repository: "https://open-telemetry.github.io/opentelemetry-helm-charts"
     condition: observability.otelCollector.enabled
+  # Pub/sub broker + optional air-gapped auth/secrets backends
+  # (DEPLOY-IMPL-015, resolves design TODO-001). Redis is the Dapr pub/sub
+  # fan-out broker (design D3) and installs with the Redis pub/sub component.
+  # Keycloak (self-hosted OIDC) and Sealed Secrets (no-Vault Layer-2) are
+  # optional and default-off; they reuse the existing `oidc.keycloak.enabled`
+  # and `secrets.sealed.enabled` feature flags, mirroring the
+  # `secrets.eso.enabled` -> eso subchart precedent. Each subchart keeps its own
+  # values namespace (`redis:` / `keycloak:` / `sealed-secrets:`).
+  - name: redis
+    version: 27.0.4
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: dapr.components.pubsub.redis.enabled
+  - name: keycloak
+    version: 25.2.0
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: oidc.keycloak.enabled
+  - name: sealed-secrets
+    version: 2.18.6
+    repository: "https://bitnami-labs.github.io/sealed-secrets"
+    condition: secrets.sealed.enabled
