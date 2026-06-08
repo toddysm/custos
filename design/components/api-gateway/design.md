@@ -311,7 +311,7 @@ The spec includes:
 | `downstream-unavailable` (503) | Router | Retry with backoff; `correlationId` carries trace. |
 | `webhook-route-not-found` (404) | Webhook Pass-through | `{connectorInstanceId}` does not resolve in Trigger Service. |
 | `device-code-expired` (400) | Device-Code Session Mgr | Restart device-code flow. |
-| `gateway-startup-permission-missing` (panic) | Startup | Programming error: a route declared a permission name absent from Auth Service's registry. Keeps the gateway permanently not-ready (surfaced via `/readyz`) rather than crash-looping; a *transient* Auth Service outage at boot instead retries in the background (issue #815). |
+| `gateway-startup-permission-missing` (not-ready) | Startup | Programming error: a route declared a permission name absent from Auth Service's registry. Keeps the gateway permanently not-ready (surfaced via `/readyz`) rather than crash-looping; a *transient* Auth Service outage at boot instead retries in the background (issue #815). |
 
 ## Error Envelope
 

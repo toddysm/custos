@@ -9,7 +9,8 @@ readiness once it passes.
 
 The check is resilient to dependency start order (issue #815): the Auth Service
 and the Dapr sidecar may not be reachable yet on a cold cluster, so a *transient*
-transport / ``5xx`` failure does not crash the process. Instead the gateway stays
+failure (a transport error or a retryable ``408`` / ``429`` / ``5xx`` status)
+does not crash the process. Instead the gateway stays
 up but not-ready and :func:`converge_route_permissions` keeps retrying in the
 background until the registry becomes reachable. A *permanent* failure — a
 permission drift (:class:`GatewayStartupError`, code

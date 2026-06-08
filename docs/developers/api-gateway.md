@@ -63,12 +63,13 @@ permission name that drifts from the platform keeps the gateway not-ready rather
 than becoming a per-request surprise.
 
 The cross-check is resilient to dependency start order: if the Auth Service or
-the Dapr sidecar is not yet reachable at boot (a transient transport / `5xx`
-failure), the gateway stays up but not-ready and keeps retrying in the
-background (with exponential backoff) until the registry becomes reachable —
-it never crash-loops. A permission *drift* (or any non-retryable Auth Service
-contract error) is a permanent failure: the gateway stays up but never becomes
-ready, and `/readyz` returns `503` with an operator-actionable `detail`.
+the Dapr sidecar is not yet reachable at boot (a transient transport error or a
+retryable `408` / `429` / `5xx` status), the gateway stays up but not-ready and
+keeps retrying in the background (with exponential backoff) until the registry
+becomes reachable — it never crash-loops. A permission *drift* (or any
+non-retryable Auth Service contract error) is a permanent failure: the gateway
+stays up but never becomes ready, and `/readyz` returns `503` with an
+operator-actionable `detail`.
 
 CORS is enforced for the configured origin allow-list only — there is **no
 wildcard origin**. The CORS layer sits outermost, so every response (success or
