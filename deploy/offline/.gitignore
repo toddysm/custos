@@ -1,0 +1,3 @@
+# Offline bundle build outputs (produced by `make bundle`).
+/custos-*-airgapped/
+/custos-*-airgapped.tar.gz

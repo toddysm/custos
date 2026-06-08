@@ -1,0 +1,77 @@
+# Custos Air-Gapped Install — __VERSION__
+
+This bundle (`custos-__VERSION__-airgapped.tar.gz`) is self-contained: it ships
+the Custos Helm chart with every dependency subchart vendored, a `docker save`
+archive of every required container image, the `connectors-core` OCI artifact,
+and SHA-256 checksums. No internet access is required on the target cluster.
+
+## Contents
+
+```
+chart/custos/         Helm chart with vendored dependency subcharts
+images/*.tar          docker save archive per image (see images.txt)
+connectors/           connectors-core OCI artifact (or a mirror note)
+checksums.sha256      SHA-256 of every bundled file
+INSTALL-AIRGAPPED.md  this runbook
+```
+
+## Prerequisites on the target side
+
+- A host with `kubectl`, `helm`, and `skopeo` (or `docker`) that can reach both
+  the cluster API and your internal OCI registry (`registry.internal/custos`).
+- The CloudNativePG and External Secrets operators installed cluster-wide
+  (their images are listed under "cluster prerequisites" in `images.txt`).
+
+## Steps
+
+1. **Verify checksums**
+
+   ```bash
+   tar -xzf custos-__VERSION__-airgapped.tar.gz
+   cd custos-__VERSION__-airgapped
+   sha256sum -c checksums.sha256   # or: shasum -a 256 -c checksums.sha256
+   ```
+
+2. **Load and push the images into your internal registry**
+
+   Each archive restores its original image reference; retag it under your
+   mirror and push. For example:
+
+   ```bash
+   REGISTRY=registry.internal/custos
+   for tar in images/*.tar; do
+     ref=$(docker load -q -i "$tar" | sed -E 's/^Loaded image: //')
+     mirror="$REGISTRY/${ref#*/}"          # strip the upstream registry host
+     docker tag "$ref" "$mirror"
+     docker push "$mirror"
+   done
+   ```
+
+   (`skopeo copy docker-archive:images/<file>.tar docker://$REGISTRY/...` works
+   equivalently and does not require a local Docker daemon.)
+
+3. **Push the `connectors-core` OCI artifact** into the same registry (see
+   `connectors/`).
+
+4. **Configure Layer-2 secrets** — install Vault, or apply Sealed Secrets, and
+   populate the connection/credential secrets the chart expects.
+
+5. **Configure the OIDC issuer** — install Keycloak (bundled) or point the chart
+   at an existing issuer; wire identity federation if desired.
+
+6. **Install Custos**
+
+   ```bash
+   helm install custos chart/custos \
+     -f chart/custos/values-airgapped-ha.yaml \
+     --set global.imageRegistry=registry.internal/custos
+   ```
+
+7. **Verify**
+
+   ```bash
+   kubectl -n custos-system get pods
+   ```
+
+See `design/architecture/reference-deployment.md` for the full air-gapped
+reference recipe.
