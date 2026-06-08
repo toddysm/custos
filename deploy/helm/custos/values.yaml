@@ -419,6 +419,56 @@ opentelemetry-collector:
           receivers: [otlp]
           exporters: [debug]
 
+# Redis — Dapr pub/sub broker (design decision D3). Installs whenever the Redis
+# pub/sub component is enabled (`dapr.components.pubsub.redis.enabled`). The Dapr
+# Component CR points at the `custos-redis-master` Service and the `custos-redis`
+# Secret (key `redis-password`) that this chart provisions, so the names must
+# stay aligned. The default is a single standalone broker (HA overlays switch to
+# replication). Images honour the umbrella `global.imageRegistry`, so the
+# air-gapped overlays mirror them automatically. Bitnami's free tier publishes
+# only the `latest` image tag; pin `redis.image.tag` (and mirror that tag) for a
+# reproducible install.
+redis:
+  architecture: standalone
+  auth:
+    enabled: true
+  master:
+    persistence:
+      enabled: true
+      size: 8Gi
+  # The umbrella owns network policy as an explicit, all-or-nothing decision
+  # (`global.networkPolicies.enabled`), so suppress the chart's own bundled
+  # NetworkPolicy to avoid an always-on policy outside that toggle.
+  networkPolicy:
+    enabled: false
+
+# Keycloak — optional self-hosted OIDC issuer for air-gapped installs (resolves
+# design TODO-001). Default-off; the air-gapped overlays enable it via
+# `oidc.keycloak.enabled`. The bundled Postgres backs Keycloak's own state;
+# operators can repoint it at an external database. Images honour the umbrella
+# `global.imageRegistry`, so the air-gapped overlays mirror them automatically.
+# As with Redis, pin `keycloak.image.tag` for a reproducible install (Bitnami's
+# free tier ships only `latest`).
+keycloak:
+  production: false
+  auth:
+    adminUser: admin
+  # As with Redis, leave network policy to the umbrella's all-or-nothing toggle.
+  networkPolicy:
+    enabled: false
+  # The bundled Postgres ships its own NetworkPolicy too; suppress it for the
+  # same reason.
+  postgresql:
+    networkPolicy:
+      enabled: false
+
+# Sealed Secrets — optional no-Vault Layer-2 secret mechanism (design: no-vault
+# alternative). Default-off; the air-gapped overlays enable it via
+# `secrets.sealed.enabled`. This chart pins `image.registry` and does NOT read
+# the umbrella `global.imageRegistry`, so the air-gapped overlays repoint
+# `sealed-secrets.image.registry` at the mirror explicitly.
+sealed-secrets: {}
+
 # Default resource requests/limits applied to services without overrides.
 # Subcharts read from .Values.global.resources via the umbrella, with
 # .Values.resources here serving as the source for that propagation.

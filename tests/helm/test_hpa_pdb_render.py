@@ -28,6 +28,11 @@ SERVICES = (
     "observability-audit-service",
 )
 
+# Fully-qualified Custos service resource names. Vendored subcharts (Dapr,
+# Redis, ...) also release under the ``custos`` name, so filter to this exact
+# set instead of a ``custos-`` prefix when asserting per-service resources.
+SERVICE_NAMES = frozenset(f"custos-{svc}" for svc in SERVICES)
+
 
 def _find(docs: list[dict[str, Any]], kind: str, name: str) -> dict[str, Any] | None:
     for doc in docs:
@@ -46,12 +51,13 @@ def test_eval_renders_no_hpa_or_pdb(
 ) -> None:
     docs = rendered[profile]
     assert _by_kind(docs, "HorizontalPodAutoscaler") == []
-    # Scope to Custos-owned PDBs; vendored subcharts (e.g. Dapr) may ship their
-    # own disruption budgets independent of the HA-gated service templates.
+    # Scope to Custos service PDBs; vendored subcharts (e.g. Dapr, Redis) may
+    # ship their own disruption budgets independent of the HA-gated service
+    # templates, some of which also release under the ``custos`` name.
     custos_pdbs = [
         d
         for d in _by_kind(docs, "PodDisruptionBudget")
-        if d["metadata"]["name"].startswith("custos-")
+        if d["metadata"]["name"] in SERVICE_NAMES
     ]
     assert custos_pdbs == []
 
@@ -84,7 +90,7 @@ def test_ha_renders_pdb_per_service(
     pdbs = {
         d["metadata"]["name"]
         for d in _by_kind(rendered[profile], "PodDisruptionBudget")
-        if d["metadata"]["name"].startswith("custos-")
+        if d["metadata"]["name"] in SERVICE_NAMES
     }
     assert pdbs == {f"custos-{svc}" for svc in SERVICES}
 

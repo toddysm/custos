@@ -32,6 +32,14 @@ objectStorage:
   nodes: 4
   driveSize: 200Gi
 
+# HA pub/sub broker: run Redis with a primary + replicas instead of the eval
+# standalone. The Dapr pub/sub component still targets the `custos-redis-master`
+# Service, so no component rewiring is needed.
+redis:
+  architecture: replication
+  replica:
+    replicaCount: 2
+
 # HA log storage: move Loki off the eval filesystem onto the MinIO
 # `custos-loki` bucket (design: object-storage chunks). The MinIO credentials
 # are injected as env vars from the `custos-minio` Secret and expanded into the

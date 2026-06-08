@@ -8,6 +8,10 @@ global:
   imageRegistry: registry.internal/custos
   imageTag: dev
   replicaCount: 1
+  # The Bitnami subcharts (Redis / Keycloak) refuse mirrored images unless this
+  # is set, since the air-gapped registry is not the upstream Bitnami one.
+  security:
+    allowInsecureImages: true
 
 # Mirror the Dapr control-plane images alongside the Custos images.
 dapr:
@@ -31,6 +35,14 @@ prometheus:
     prometheus:
       image:
         repository: registry.internal/prometheus-operator/prometheus-config-reloader
+
+# Sealed Secrets pins its own `image.registry` and ignores the umbrella
+# `global.imageRegistry`, so repoint it at the mirror explicitly (the controller
+# only renders because `secrets.sealed.enabled` is true below). Keycloak honours
+# the umbrella global registry, so it is mirrored automatically.
+sealed-secrets:
+  image:
+    registry: registry.internal/custos
 
 postgres:
   embedded: true

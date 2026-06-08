@@ -9,6 +9,10 @@ global:
   imageTag: dev
   profile: ha
   replicaCount: 3
+  # The Bitnami subcharts (Redis / Keycloak) refuse mirrored images unless this
+  # is set, since the air-gapped registry is not the upstream Bitnami one.
+  security:
+    allowInsecureImages: true
   resources:
     requests:
       cpu: 250m
@@ -42,6 +46,14 @@ prometheus:
       image:
         repository: registry.internal/prometheus-operator/prometheus-config-reloader
 
+# Sealed Secrets pins its own `image.registry` and ignores the umbrella
+# `global.imageRegistry`, so repoint it at the mirror explicitly (the controller
+# only renders because `secrets.sealed.enabled` is true below). Keycloak honours
+# the umbrella global registry, so it is mirrored automatically.
+sealed-secrets:
+  image:
+    registry: registry.internal/custos
+
 postgres:
   embedded: true
   instances: 3
@@ -51,6 +63,15 @@ objectStorage:
   embedded: true
   nodes: 4
   driveSize: 200Gi
+
+# HA pub/sub broker: run Redis with a primary + replicas instead of the eval
+# standalone. The Dapr pub/sub component still targets the `custos-redis-master`
+# Service, so no component rewiring is needed. Images mirror via the umbrella
+# `global.imageRegistry`.
+redis:
+  architecture: replication
+  replica:
+    replicaCount: 2
 
 # HA log storage: move Loki off the eval filesystem onto the MinIO
 # `custos-loki` bucket (design: object-storage chunks). The MinIO credentials
