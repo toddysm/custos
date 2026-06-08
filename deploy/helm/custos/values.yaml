@@ -8,7 +8,15 @@ global:
   # target namespace at install time with `helm install -n <ns>` (or
   # `--create-namespace`). The chart itself does NOT create the namespace
   # by default — see the `namespace.create` toggle below.
-  imageRegistry: ghcr.io/toddysm/custos
+  #
+  # `imageRegistry` is intentionally NOT set here. Custos service charts and the
+  # umbrella default it to `ghcr.io/toddysm/custos`, so connected installs pull
+  # Custos images from GHCR while the vendored third-party subcharts (Loki, OTel
+  # Collector, …) keep their own upstream registries. The air-gapped overlays
+  # set `global.imageRegistry: registry.internal/custos`, which then redirects
+  # every chart that honours the Helm global (Custos services + Loki + OTel) to
+  # the mirror in one knob. Prometheus does not read the global and is mirrored
+  # explicitly in those overlays.
   imageTag: dev
   imagePullPolicy: IfNotPresent
   imagePullSecrets: []
@@ -259,15 +267,157 @@ dapr:
         - observability-audit-service
 
 # Observability backends
+#
+# The `enabled` flags double as the install toggles for the vendored upstream
+# subcharts (DEPLOY-IMPL-014): flip one off to skip rendering that backend (the
+# dependency is dropped via its `observability.<backend>.enabled` condition) when
+# the cluster already provides the sink out-of-band. The `url` values point the
+# observability-audit-service at the in-cluster Service names the subcharts
+# render (release-prefixed).
 observability:
   loki:
     enabled: true
-    url: http://loki:3100
+    url: http://custos-loki:3100
   prometheus:
     enabled: true
-    url: http://prometheus-server
+    url: http://custos-prometheus-server
   otelCollector:
     enabled: true
+
+# --- Vendored observability subchart values (DEPLOY-IMPL-014) ------------------
+# These namespaces carry ONLY valid upstream subchart values; the install
+# toggles live under `observability:` above so the strict subchart schemas never
+# see an unknown key. Air-gapped image mirroring is handled in the profile
+# overlays.
+
+# Prometheus — single server instance with a PV-backed TSDB (design:
+# "Prometheus single instance, PV"). The bundled alertmanager / pushgateway /
+# node-exporter / kube-state-metrics are disabled to keep the footprint to the
+# server that scrapes the per-service `/metrics` endpoints.
+prometheus:
+  server:
+    replicaCount: 1
+    persistentVolume:
+      enabled: true
+      size: 20Gi
+  alertmanager:
+    enabled: false
+  prometheus-pushgateway:
+    enabled: false
+  prometheus-node-exporter:
+    enabled: false
+  kube-state-metrics:
+    enabled: false
+  # Scrape the Custos services' `/metrics` endpoints. The vendored
+  # prometheus-community chart has no Prometheus Operator, so ServiceMonitors do
+  # not apply; this static job uses Kubernetes pod discovery instead. Every
+  # Custos service container exposes a port named `http` (the app port that also
+  # serves `/metrics`), whereas the vendored sinks and the Dapr sidecar use
+  # differently-named ports — so keeping only the `http` port targets exactly the
+  # Custos workloads. Rendered through the chart's `tpl`, hence `.Release.*`.
+  extraScrapeConfigs: |
+    - job_name: custos-services
+      metrics_path: /metrics
+      kubernetes_sd_configs:
+        - role: pod
+          namespaces:
+            names:
+              - {{ .Release.Namespace }}
+      relabel_configs:
+        - source_labels: [__meta_kubernetes_pod_container_port_name]
+          regex: http
+          action: keep
+        - source_labels: [__meta_kubernetes_namespace]
+          target_label: namespace
+        - source_labels: [__meta_kubernetes_pod_name]
+          target_label: pod
+        - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+          target_label: app
+
+# Loki — single-binary deployment with filesystem storage (design: "Loki
+# single-binary, filesystem" for eval). HA profiles swap `loki.storage` to the
+# MinIO `custos-loki` bucket. The caches / gateway / canary are disabled so the
+# eval footprint stays to one pod.
+loki:
+  deploymentMode: SingleBinary
+  loki:
+    auth_enabled: false
+    commonConfig:
+      replication_factor: 1
+    schemaConfig:
+      configs:
+        - from: "2024-04-01"
+          store: tsdb
+          object_store: filesystem
+          schema: v13
+          index:
+            prefix: loki_index_
+            period: 24h
+    storage:
+      type: filesystem
+    limits_config:
+      retention_period: 744h
+  singleBinary:
+    replicas: 1
+  read:
+    replicas: 0
+  write:
+    replicas: 0
+  backend:
+    replicas: 0
+  chunksCache:
+    enabled: false
+  resultsCache:
+    enabled: false
+  gateway:
+    enabled: false
+  lokiCanary:
+    enabled: false
+  test:
+    enabled: false
+  monitoring:
+    selfMonitoring:
+      enabled: false
+      grafanaAgent:
+        installOperator: false
+
+# OpenTelemetry Collector — a single deployment that ingests OTLP from the
+# services. The shipped pipeline uses the `debug` exporter as a safe default;
+# operators add exporters (e.g. otlphttp → Loki, prometheus remote-write) for
+# their chosen backends. The `${env:MY_POD_IP}` receiver endpoints resolve via
+# the `MY_POD_IP` env var the upstream chart injects into the collector Pod. The
+# contrib image is pinned so the air-gapped mirror has a deterministic source.
+opentelemetry-collector:
+  mode: deployment
+  replicaCount: 1
+  image:
+    repository: otel/opentelemetry-collector-contrib
+  command:
+    name: otelcol-contrib
+  presets:
+    kubernetesAttributes:
+      enabled: false
+  config:
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: ${env:MY_POD_IP}:4317
+          http:
+            endpoint: ${env:MY_POD_IP}:4318
+    exporters:
+      debug: {}
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          exporters: [debug]
+        metrics:
+          receivers: [otlp]
+          exporters: [debug]
+        logs:
+          receivers: [otlp]
+          exporters: [debug]
 
 # Default resource requests/limits applied to services without overrides.
 # Subcharts read from .Values.global.resources via the umbrella, with
