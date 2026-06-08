@@ -1,27 +1,73 @@
 # Images required for an offline Custos install.
-# Format: <image>:<tag>
-# This list is consumed by `make bundle` to produce `docker save` archives.
+#
+# Format: <image>:<tag>, one per line. Blank lines and lines starting with `#`
+# are ignored. Consumed by `make bundle` (deploy/offline/Makefile) to produce a
+# `docker save` archive per image.
+#
+# The platform tags below mirror what the umbrella chart renders for the
+# connected-ha profile (with the optional Keycloak + Sealed Secrets backends
+# enabled). Regenerate after bumping any subchart in
+# deploy/helm/custos/Chart.yaml:
+#
+#   helm template custos deploy/helm/custos -f deploy/helm/custos/values-connected-ha.yaml \
+#     --set oidc.keycloak.enabled=true --set secrets.sealed.enabled=true \
+#     | grep -hoE 'image: "?[^"]+' | sed -E 's/^image: "?//' | sort -u
 
-# Custos services
+# --- Custos service + job images -------------------------------------------
+# Built and pushed by .github/workflows/build-images.yml (`:dev` on main,
+# `:vX.Y.Z` on release). `make bundle CUSTOS_IMAGE_TAG=vX.Y.Z` retags these to
+# the release version as they are saved.
 ghcr.io/toddysm/custos/api-gateway:dev
 ghcr.io/toddysm/custos/auth-service:dev
 ghcr.io/toddysm/custos/workflow-service:dev
 ghcr.io/toddysm/custos/trigger-service:dev
 ghcr.io/toddysm/custos/connector-service:dev
-ghcr.io/toddysm/custos/connector-sidecar:dev
 ghcr.io/toddysm/custos/activity-runtime-manager:dev
 ghcr.io/toddysm/custos/catalog-service:dev
 ghcr.io/toddysm/custos/observability-audit-service:dev
 ghcr.io/toddysm/custos/custos-migrate:dev
 ghcr.io/toddysm/custos/custos-bootstrap:dev
+# Runtime-injected into connector pods (not a standalone Deployment).
+ghcr.io/toddysm/custos/connector-sidecar:dev
 
-# Platform dependencies
-ghcr.io/cloudnative-pg/postgresql:16.4
-minio/minio:RELEASE.2025-01-01T00-00-00Z
-ghcr.io/external-secrets/external-secrets:v0.10.0
-quay.io/keycloak/keycloak:25.0
-docker.io/grafana/loki:3.0.0
-docker.io/prom/prometheus:v2.55.0
-otel/opentelemetry-collector-contrib:0.110.0
-docker.io/envoyproxy/envoy:v1.32.0
+# --- Dapr (control plane + runtime-injected sidecar) -----------------------
+ghcr.io/dapr/injector:1.14.0
+ghcr.io/dapr/operator:1.14.0
+ghcr.io/dapr/placement:1.14.0
+ghcr.io/dapr/scheduler:1.14.0
+ghcr.io/dapr/sentry:1.14.0
 ghcr.io/dapr/daprd:1.14.0
+
+# --- Ingress (Envoy Gateway + cert-manager) --------------------------------
+docker.io/envoyproxy/gateway:v1.8.1
+docker.io/envoyproxy/ratelimit:ff287602
+quay.io/jetstack/cert-manager-controller:v1.20.2
+quay.io/jetstack/cert-manager-cainjector:v1.20.2
+quay.io/jetstack/cert-manager-webhook:v1.20.2
+quay.io/jetstack/cert-manager-startupapicheck:v1.20.2
+
+# --- Observability (Prometheus + OTel Collector + Loki) --------------------
+quay.io/prometheus/prometheus:v3.12.0
+quay.io/prometheus-operator/prometheus-config-reloader:v0.91.0
+otel/opentelemetry-collector-contrib:0.153.0
+docker.io/grafana/loki:3.6.7
+docker.io/kiwigrid/k8s-sidecar:2.5.0
+
+# --- Dapr pub/sub broker (Redis) -------------------------------------------
+# The Bitnami free tier renders the floating `latest` tag; pin `redis.image.tag`
+# in your values to the digest you mirror for a reproducible install.
+docker.io/bitnami/redis:latest
+
+# --- Object storage (MinIO, HA profiles) -----------------------------------
+minio/minio:RELEASE.2025-01-01T00-00-00Z
+
+# --- Optional air-gapped auth/secrets backends -----------------------------
+docker.io/bitnami/keycloak:26.3.3-debian-12-r0
+docker.io/bitnami/postgresql:17.6.0-debian-12-r0
+docker.io/bitnami/sealed-secrets-controller:0.37.0
+
+# --- Cluster prerequisites referenced by the chart's CRs -------------------
+# The CloudNativePG and External Secrets operators are installed out-of-band;
+# only the data-plane images the chart's CRs pin are listed here.
+ghcr.io/cloudnative-pg/postgresql:16.4
+ghcr.io/external-secrets/external-secrets:v0.10.0
