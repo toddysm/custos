@@ -1,0 +1,115 @@
+name: helm-release
+
+# Package + publish the umbrella Helm chart as a signed OCI artifact
+# (DEPLOY-IMPL-017).
+#
+# On a ``v*.*.*`` tag the chart ``version`` + ``appVersion`` are aligned to the
+# tag (so the published chart tracks the image tag), the chart — with every
+# dependency subchart vendored — is ``helm push``ed to
+# ``ghcr.io/<owner>/custos/charts/custos``, and the pushed artifact is
+# keyless-signed with cosign under the same policy as the container images
+# (Fulcio short-lived cert + Rekor transparency log via the ambient GitHub OIDC
+# token). A manual ``workflow_dispatch`` on a tag ref re-runs the same path.
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag ref to package (must be a v*.*.* tag)."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  CHART_OCI_REPO: ghcr.io/${{ github.repository_owner }}/custos/charts
+
+jobs:
+  release:
+    name: Package + publish chart
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      # Keyless cosign signing via the ambient GitHub OIDC token (Fulcio).
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          fetch-depth: 0
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: v2.4.1
+
+      - name: Resolve version
+        id: ver
+        env:
+          REF: ${{ inputs.ref || github.ref }}
+        run: |
+          set -euo pipefail
+          # The chart SemVer drops the leading ``v`` from the tag; both the
+          # chart version and appVersion use it so the chart tracks the image
+          # tag (which keeps the ``v`` — see build-images.yml).
+          if [[ "$REF" == refs/tags/v*.*.* ]]; then
+            VERSION="${REF#refs/tags/v}"
+          else
+            echo "::error::helm-release requires a v*.*.* tag ref (got: $REF)" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Vendor chart dependencies
+        run: cd deploy/helm/custos && helm dependency update
+
+      - name: Log in to GHCR
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GHCR_TOKEN" | helm registry login "$REGISTRY" \
+            --username "$GHCR_USER" --password-stdin
+
+      - name: Package + push chart
+        id: push
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # --version / --app-version stamp the packaged Chart.yaml so the
+          # published artifact is consistent with the image tag.
+          helm package deploy/helm/custos \
+            --version "$VERSION" --app-version "$VERSION" --destination dist
+          OUT="$(helm push "dist/custos-${VERSION}.tgz" "oci://${CHART_OCI_REPO}" 2>&1 | tee /dev/stderr)"
+          DIGEST="$(echo "$OUT" | awk '/[Dd]igest:/ {print $2}')"
+          if [[ -z "$DIGEST" ]]; then
+            echo "::error::could not parse pushed chart digest" >&2
+            exit 1
+          fi
+          echo "ref=${CHART_OCI_REPO}/custos@${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Keyless-sign the chart artifact
+        env:
+          CHART_REF: ${{ steps.push.outputs.ref }}
+        run: cosign sign --yes "$CHART_REF"
+
+      - name: Verify the published chart pulls
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          helm pull "oci://${CHART_OCI_REPO}/custos" --version "$VERSION" --destination /tmp/pull
+          test -f "/tmp/pull/custos-${VERSION}.tgz"
+          echo "Pulled custos-${VERSION}.tgz from oci://${CHART_OCI_REPO}/custos"
