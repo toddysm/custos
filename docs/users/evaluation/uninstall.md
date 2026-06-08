@@ -21,8 +21,11 @@ export RELEASE=custos
 ## 1. Uninstall the Helm release
 
 Remove the release. This deletes the control-plane Deployments, Services,
-ConfigMaps, the `Gateway`/`GatewayClass`, and the chart-managed cert-manager,
-Envoy Gateway, and Dapr resources installed by the chart:
+ConfigMaps, and the chart-managed cert-manager, Envoy Gateway, and Dapr
+resources installed by the chart. The `Gateway`/`GatewayClass` objects are
+removed only if the chart created them (`envoyGateway.install: true`); if you
+disabled the bundled Envoy Gateway because your cluster already provides one,
+those objects are owned elsewhere and survive the uninstall:
 
 ```bash
 helm uninstall "$RELEASE" -n "$NS"
@@ -60,10 +63,12 @@ kubectl delete pvc --all -n "$NS"
 ```
 
 Depending on the StorageClass reclaim policy, the underlying PersistentVolumes
-may need separate cleanup:
+may need separate cleanup. PV objects are cluster-scoped, so filter on the bound
+claim's namespace rather than the name:
 
 ```bash
-kubectl get pv | grep "$NS" || true
+kubectl get pv -o json \
+  | jq -r --arg ns "$NS" '.items[] | select(.spec.claimRef.namespace==$ns) | .metadata.name'
 ```
 
 ## 4. Delete the namespace
@@ -80,7 +85,7 @@ kubectl delete namespace "$NS"
 
 The prerequisites you installed out-of-band are **cluster-scoped** and may be
 shared with other workloads. Only remove them if no other application depends on
-them. See [Prerequisites](prerequisites.md#out-of-band-operators) for how each
+them. See [Prerequisites](prerequisites.md#pre-install-operators) for how each
 was installed.
 
 > **⚠️ Cluster-wide impact.** These operators and their CRDs are not specific to
