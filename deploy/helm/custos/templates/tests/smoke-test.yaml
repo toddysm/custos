@@ -1,0 +1,99 @@
+{{- if .Values.tests.enabled }}
+{{- $img := .Values.tests.image | default dict }}
+{{- $registry := include "custos.imageRegistry" . }}
+{{- $repo := default (printf "%s/api-gateway" $registry) $img.repository }}
+{{- $tag := default (.Values.global.imageTag | default "dev") $img.tag }}
+{{- $pull := default .Values.global.imagePullPolicy $img.pullPolicy }}
+{{- $svc := default (printf "%s-api-gateway" .Release.Name) .Values.tests.gateway.serviceName }}
+{{- $port := .Values.tests.gateway.port | default 8080 }}
+{{- $name := printf "%s-smoke-test" .Release.Name | trunc 63 | trimSuffix "-" }}
+# helm test synthetic scenario (DEPLOY-IMPL-018). `helm test <release>` runs the
+# Pod below, which drives the public API through the api-gateway Service. The
+# scenario script is shipped as a ConfigMap so it stays readable + lint-clean.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  namespace: {{ include "custos.namespace" . }}
+  labels:
+    {{- include "custos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: smoke-test
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation
+data:
+  smoke.py: |
+{{ .Files.Get "files/smoke.py" | indent 4 }}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ $name }}
+  namespace: {{ include "custos.namespace" . }}
+  labels:
+    {{- include "custos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: smoke-test
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-weight": "1"
+    # Keep the pod after a run so its logs remain inspectable; it is replaced on
+    # the next `helm test`.
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  restartPolicy: Never
+  {{- with .Values.global.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: smoke
+      image: "{{ $repo }}:{{ $tag }}"
+      imagePullPolicy: {{ $pull }}
+      command: ["python3", "/opt/smoke/smoke.py"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      env:
+        - name: PYTHONDONTWRITEBYTECODE
+          value: "1"
+        - name: CUSTOS_GATEWAY_URL
+          value: "http://{{ $svc }}:{{ $port }}"
+        - name: CUSTOS_API_PREFIX
+          value: "/v1"
+        - name: CUSTOS_TENANT_ID
+          value: {{ .Values.tests.tenantId | quote }}
+        - name: CUSTOS_WORKSPACE_ID
+          value: {{ .Values.tests.workspaceId | quote }}
+        - name: CUSTOS_WORKFLOW_VERSION_ID
+          value: {{ .Values.tests.workflowVersionId | quote }}
+        - name: CUSTOS_READY_TIMEOUT
+          value: {{ .Values.tests.readyTimeoutSeconds | quote }}
+        - name: CUSTOS_RUN_POLL_TIMEOUT
+          value: {{ .Values.tests.runPollTimeoutSeconds | quote }}
+        {{- if .Values.tests.auth.tokenSecret }}
+        - name: CUSTOS_TEST_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.tests.auth.tokenSecret | quote }}
+              key: {{ .Values.tests.auth.tokenKey | quote }}
+        {{- end }}
+      volumeMounts:
+        - name: smoke-script
+          mountPath: /opt/smoke
+          readOnly: true
+      resources:
+        {{- toYaml .Values.tests.resources | nindent 8 }}
+  volumes:
+    - name: smoke-script
+      configMap:
+        name: {{ $name }}
+        defaultMode: 0555
+{{- end }}

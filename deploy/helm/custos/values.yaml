@@ -523,3 +523,48 @@ catalog-service:
   enabled: true
 observability-audit-service:
   enabled: true
+
+# helm test synthetic scenario (DEPLOY-IMPL-018). `helm test <release>` runs a
+# Pod that drives the public API through the api-gateway Service:
+#   1. waits for /readyz, then checks /healthz + /openapi.json (always), and
+#   2. when a bearer token is supplied, runs the end-to-end scenario:
+#      verify token -> create workspace -> register connector ->
+#      (optional) start workflow run -> poll run status to a terminal state.
+# The authenticated scenario is opt-in: without `tests.auth.tokenSecret` the
+# test only exercises readiness/reachability, so `helm test` stays green on a
+# healthy release that has no seeded credentials.
+tests:
+  enabled: true
+  image:
+    # Defaults to the api-gateway image (Python stdlib only — nothing extra to
+    # mirror for air-gapped). Override to pin a dedicated test client.
+    repository: ""
+    tag: ""
+    pullPolicy: ""
+  # In-cluster api-gateway Service. serviceName empty -> <release>-api-gateway.
+  gateway:
+    serviceName: ""
+    port: 8080
+  # Bearer token enabling the authenticated end-to-end scenario. Point at an
+  # existing Secret + key holding a Custos service token (cst_...). Leave
+  # tokenSecret empty to run readiness/reachability checks only.
+  auth:
+    tokenSecret: ""
+    tokenKey: token
+  # Seeded tenant the workspace is created under (bootstrap seeds tenant-default).
+  tenantId: tenant-default
+  # Workspace id the scenario creates (re-runs tolerate an existing workspace).
+  workspaceId: ws-smoke-test
+  # When set, the scenario starts a run for this published workflow version and
+  # polls it to a terminal status. Leave empty to skip the workflow/run steps.
+  workflowVersionId: ""
+  # Timeouts (seconds).
+  readyTimeoutSeconds: 120
+  runPollTimeoutSeconds: 120
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
