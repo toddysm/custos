@@ -61,3 +61,15 @@ The gateway terminates TLS on `CUSTOS_GATEWAY_LISTEN_ADDR` (`:8443`) using the
 cert/key it resolves from the Dapr Secrets API via `CUSTOS_GATEWAY_TLS_CERT_REF`
 / `CUSTOS_GATEWAY_TLS_KEY_REF`. The in-cluster HTTP listener the Dapr sidecar
 and the `/healthz` / `/readyz` probes use is `service.port` (`8080`).
+
+## Probes
+
+`livenessProbe` hits `/healthz` and `readinessProbe` hits `/readyz`. A
+`startupProbe` (also `/healthz`) gates both until the process is serving HTTP.
+The gateway's startup permission cross-check converges readiness in the
+background when the Auth Service / Dapr sidecar are not yet reachable on a cold
+cluster, so `/readyz` returns `503` until that first validation succeeds (issue
+#815); the startupProbe gives that convergence a generous budget before liveness
+can restart the pod. Tune the cold-start budget via
+`startupProbe.periodSeconds` × `startupProbe.failureThreshold` (default
+`5 × 30 = 150s`); set `startupProbe.enabled: false` to drop it.

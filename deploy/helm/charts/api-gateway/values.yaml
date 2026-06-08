@@ -38,6 +38,18 @@ dapr:
   appProtocol: http
   logLevel: info
 
+# The gateway's startup permission cross-check converges readiness in the
+# background when the Auth Service / Dapr sidecar are not yet reachable on a
+# cold cluster (issue #815). The startupProbe gates liveness/readiness until
+# the process is serving HTTP and gives that convergence a generous budget
+# (periodSeconds * failureThreshold seconds) before liveness can restart the
+# pod.
+startupProbe:
+  enabled: true
+  periodSeconds: 5
+  failureThreshold: 30
+  timeoutSeconds: 3
+
 serviceMonitor:
   enabled: false
 

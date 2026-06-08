@@ -164,6 +164,33 @@ def test_deployment_probes_hit_healthz_and_readyz(
 
 
 @pytest.mark.parametrize("profile", ALL_PROFILES)
+def test_deployment_has_startup_probe_for_resilient_startup(
+    rendered: dict[str, list[dict[str, Any]]], profile: str
+) -> None:
+    """A startupProbe must absorb the resilient-startup convergence window.
+
+    The gateway's startup permission cross-check converges readiness in the
+    background when the Auth Service / Dapr sidecar are not yet reachable on a
+    cold cluster (issue #815), so ``/readyz`` returns 503 until the first
+    validation succeeds. The startupProbe gates liveness/readiness and must hit
+    ``/healthz`` with a failure budget large enough to cover that convergence
+    before liveness can restart the pod.
+    """
+    dep = _find(rendered[profile], "Deployment", "custos-api-gateway")
+    assert dep is not None
+    container = dep["spec"]["template"]["spec"]["containers"][0]
+    startup = container.get("startupProbe")
+    assert startup is not None, f"{profile}: api-gateway must define a startupProbe"
+    assert startup["httpGet"]["path"] == "/healthz"
+    assert startup["httpGet"]["port"] == "http"
+    budget = startup["periodSeconds"] * startup["failureThreshold"]
+    assert budget >= 60, (
+        f"{profile}: startupProbe budget {budget}s is too small to cover the "
+        "resilient-startup convergence window"
+    )
+
+
+@pytest.mark.parametrize("profile", ALL_PROFILES)
 def test_service_renders_with_expected_port(
     rendered: dict[str, list[dict[str, Any]]], profile: str
 ) -> None:
