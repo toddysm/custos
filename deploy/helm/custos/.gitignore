@@ -2,3 +2,5 @@
 # Reconstructed from `dependencies` in Chart.yaml on every fresh checkout.
 Chart.lock
 charts/
+# Scratch directory helm creates while rebuilding an already-populated charts/.
+tmpcharts-*/
