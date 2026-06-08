@@ -88,6 +88,28 @@ def test_components_rendered_by_default(
 
 
 @pytest.mark.parametrize("profile", ALL_PROFILES)
+def test_state_store_is_actor_state_store(
+    rendered: dict[str, list[dict[str, Any]]], profile: str
+) -> None:
+    """The CNPG-backed state store must advertise ``actorStateStore: "true"``.
+
+    Dapr Workflow is built on the actor model (REQ-046); without an actor
+    state store the workflow-service sidecar never hosts the workflow engine
+    and its worker never reaches ready (issue #816).
+    """
+    docs = rendered[profile]
+    store = _find(docs, "Component", "custos-statestore")
+    assert store is not None, f"custos-statestore missing in {profile}"
+    metadata = store["spec"]["metadata"]
+    actor_entries = [m for m in metadata if m.get("name") == "actorStateStore"]
+    assert actor_entries, (
+        f"{profile}: custos-statestore must set actorStateStore so the Dapr "
+        "Workflow engine initialises (issue #816)"
+    )
+    assert actor_entries[0]["value"] == "true"
+
+
+@pytest.mark.parametrize("profile", ALL_PROFILES)
 def test_pubsub_uses_redis_and_postgres(
     rendered: dict[str, list[dict[str, Any]]], profile: str
 ) -> None:

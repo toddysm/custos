@@ -212,6 +212,13 @@ dapr:
       # falls back to postgres.secretName.
       connectionSecret: ""
       connectionKey: uri
+      # Dapr Workflow is built on the actor model (REQ-046), so the workflow
+      # engine only starts once a state store is flagged as the actor state
+      # store. Without this the workflow-service sidecar never hosts the
+      # workflow engine and the worker never reports ready (issue #816). Keep
+      # this on the CNPG-backed store so workflow/actor state shares the same
+      # durable Postgres cluster the services already consume.
+      actorStateStore: true
     # Dapr secret store wired to the Layer-1 backend. Defaults to the built-in
     # Kubernetes secret store (eval); HA installs point `type` at the same
     # backend ESO manages (e.g. secretstores.hashicorp.vault).

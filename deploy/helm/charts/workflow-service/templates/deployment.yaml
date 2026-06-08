@@ -54,6 +54,18 @@ spec:
           {{- end }}
           resources:
             {{- include "svc.resources" . | nindent 12 }}
+          {{- if .Values.startupProbe.enabled }}
+          # The lifespan blocks on the Dapr Workflow worker reporting ready
+          # before uvicorn serves HTTP; the startupProbe absorbs that cold-start
+          # window so liveness/readiness do not crash-loop the pod (issue #816).
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: {{ .Values.startupProbe.periodSeconds }}
+            failureThreshold: {{ .Values.startupProbe.failureThreshold }}
+            timeoutSeconds: {{ .Values.startupProbe.timeoutSeconds }}
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz

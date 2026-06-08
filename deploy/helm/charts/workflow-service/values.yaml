@@ -39,6 +39,19 @@ dapr:
   appProtocol: http
   logLevel: info
 
+# Startup probe. The FastAPI lifespan blocks on the Dapr Workflow worker
+# reporting ready before uvicorn starts serving HTTP, so on a cold cluster the
+# liveness/readiness probes would otherwise hit a connection-refused window and
+# crash-loop the pod before the worker converges (issue #816). The startupProbe
+# gates liveness/readiness until the process is serving and gives the
+# worker-ready wait (plus Dapr sidecar/placement cold start) a generous budget:
+# periodSeconds * failureThreshold seconds.
+startupProbe:
+  enabled: true
+  periodSeconds: 5
+  failureThreshold: 30
+  timeoutSeconds: 3
+
 serviceMonitor:
   enabled: false
 
