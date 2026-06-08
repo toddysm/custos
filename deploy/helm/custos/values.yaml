@@ -283,6 +283,20 @@ observability:
     url: http://custos-prometheus-server
   otelCollector:
     enabled: true
+  # Grafana dashboard bundle (DEPLOY-IMPL-020 / design TODO-005). Each JSON under
+  # `dashboards/` ships as a ConfigMap carrying the sidecar discovery label so an
+  # operator-supplied Grafana (kiwigrid/k8s-sidecar dashboard provider) imports
+  # them automatically. The chart does NOT install Grafana; flip `enabled: false`
+  # if you import the dashboards by hand instead.
+  grafanaDashboards:
+    enabled: true
+    # Label the Grafana dashboard sidecar watches for.
+    label: grafana_dashboard
+    labelValue: "1"
+    # Folder the sidecar files the dashboards under (via the folder annotation).
+    # Set `folder: ""` to skip the annotation and use the sidecar default folder.
+    folder: Custos
+    folderAnnotation: grafana_folder
 
 # --- Vendored observability subchart values (DEPLOY-IMPL-014) ------------------
 # These namespaces carry ONLY valid upstream subchart values; the install

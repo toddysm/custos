@@ -1,0 +1,39 @@
+{{- /*
+Grafana dashboard bundle (DEPLOY-IMPL-020 / design TODO-005).
+
+Each JSON file under `dashboards/` is shipped as its own ConfigMap carrying the
+Grafana sidecar discovery label (default `grafana_dashboard: "1"`), so a cluster
+that already runs Grafana with the kiwigrid/k8s-sidecar dashboard provider picks
+them up automatically. The chart does NOT install Grafana itself — these are
+import-ready artifacts for an operator-supplied Grafana, matching the
+"ships alongside the chart as a ConfigMap" contract in reference-deployment.md
+§ Observability of the Reference Deployment Itself.
+
+The dashboards target the in-cluster Prometheus the chart renders
+(`custos-prometheus-server`) via a templated `datasource` variable, so they work
+against any Prometheus datasource the operator selects in Grafana.
+*/ -}}
+{{- if .Values.observability.grafanaDashboards.enabled }}
+{{- $root := . }}
+{{- $cfg := .Values.observability.grafanaDashboards }}
+{{- range $path, $_ := .Files.Glob "dashboards/*.json" }}
+{{- $file := base $path }}
+{{- $slug := trimSuffix ".json" $file }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "custos-dashboard-%s" $slug }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "custos.labels" $root | nindent 4 }}
+    {{ $cfg.label }}: {{ $cfg.labelValue | quote }}
+  {{- if $cfg.folder }}
+  annotations:
+    {{ $cfg.folderAnnotation }}: {{ $cfg.folder | quote }}
+  {{- end }}
+data:
+  {{ $file }}: |-
+{{ $root.Files.Get $path | indent 4 }}
+{{- end }}
+{{- end }}
