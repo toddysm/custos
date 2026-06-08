@@ -203,6 +203,23 @@ jobs:
               kubectl describe -n "$NS" "pod/$pod" || true
             done
           echo "::endgroup::"
+          echo "::group::not-ready pod logs (current + previous)"
+          # CrashLoopBackOff containers exit before readiness, so the running
+          # container often has no logs — capture the previous instance too.
+          kubectl get pods -n "$NS" \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.phase}{"\t"}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}' \
+            2>/dev/null | while IFS=$'\t' read -r pod phase ready; do
+              if [ "$phase" = "Succeeded" ] || { [ "$phase" = "Running" ] && [ "$ready" = "True" ]; }; then
+                continue
+              fi
+              echo "--- logs pod/$pod (current) ---"
+              kubectl logs -n "$NS" "pod/$pod" --all-containers --tail=200 2>/dev/null \
+                || echo "(no current logs for $pod)"
+              echo "--- logs pod/$pod (previous) ---"
+              kubectl logs -n "$NS" "pod/$pod" --all-containers --previous --tail=200 2>/dev/null \
+                || echo "(no previous logs for $pod)"
+            done
+          echo "::endgroup::"
           echo "::group::hook job logs"
           for job in custos-migrate custos-bootstrap custos-smoke-test; do
             echo "--- logs job/$job ---"
