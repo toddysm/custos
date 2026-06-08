@@ -34,6 +34,9 @@ REDIS_SECRET = "custos-redis"
 KEYCLOAK = "custos-keycloak"
 SEALED_SECRETS = "custos-sealed-secrets"
 
+# Prefix the air-gapped overlays mirror every image under.
+MIRROR_PREFIX = "registry.internal/"
+
 
 def _find(docs: list[dict[str, Any]], kind: str, name: str) -> dict[str, Any] | None:
     for doc in docs:
@@ -159,10 +162,13 @@ def test_dapr_pubsub_component_targets_broker(
 def test_connected_uses_upstream_redis_registry(
     rendered: dict[str, list[dict[str, Any]]], profile: str
 ) -> None:
-    """Connected installs keep Redis on the upstream Bitnami registry."""
+    """Connected installs keep Redis on the upstream registry (not mirrored)."""
     redis = [i for i in _images(rendered[profile]) if "bitnami/redis" in i]
     assert redis, f"No Redis image in {profile}"
-    assert all(i.startswith("registry-1.docker.io/") for i in redis), redis
+    # Assert the image is NOT redirected to the air-gapped mirror rather than
+    # pinning an exact Docker Hub prefix (which varies between
+    # `docker.io/` and `registry-1.docker.io/`).
+    assert not any(i.startswith(MIRROR_PREFIX) for i in redis), redis
 
 
 @pytest.mark.parametrize("profile", AIRGAPPED_PROFILES)
@@ -172,7 +178,7 @@ def test_airgapped_mirrors_redis(
     """Air-gapped installs mirror Redis via the umbrella global registry."""
     redis = [i for i in _images(rendered[profile]) if "bitnami/redis" in i]
     assert redis, f"No Redis image in {profile}"
-    assert all(i.startswith("registry.internal/") for i in redis), redis
+    assert all(i.startswith(MIRROR_PREFIX) for i in redis), redis
 
 
 # --- Optional Keycloak + Sealed Secrets -------------------------------------
@@ -225,4 +231,4 @@ def test_airgapped_mirrors_sealed_secrets_image(
     """Sealed Secrets pins its own registry, so the overlay repoints the mirror."""
     sealed = [i for i in _images(rendered[profile]) if "sealed-secrets" in i]
     assert sealed, f"No Sealed Secrets image in {profile}"
-    assert all(i.startswith("registry.internal/") for i in sealed), sealed
+    assert all(i.startswith(MIRROR_PREFIX) for i in sealed), sealed
