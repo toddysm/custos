@@ -38,9 +38,32 @@ jobs:
       # Keyless cosign signing via the ambient GitHub OIDC token (Fulcio).
       id-token: write
     steps:
+      # Validate the ref BEFORE checkout so a manual dispatch can only ever
+      # package/publish from a real release tag (the checkout ref is taken from
+      # this step's validated output, never the raw input).
+      - name: Resolve version
+        id: ver
+        env:
+          REF: ${{ inputs.ref || github.ref }}
+        run: |
+          set -euo pipefail
+          # Strict vX.Y.Z tags only — reject branches, arbitrary refs, and
+          # pre-release/build-metadata tags (e.g. v1.2.3-rc1) so the published
+          # OCI artifact can only originate from a real release tag.
+          if [[ ! "$REF" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::helm-release requires a strict vX.Y.Z tag ref (got: $REF)" >&2
+            exit 1
+          fi
+          # The chart version is strict SemVer (no leading ``v``); the
+          # appVersion keeps the leading ``v`` so it matches the release image
+          # tag (which is vX.Y.Z — see build-images.yml).
+          echo "version=${REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          echo "app_version=${REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref || github.ref }}
+          ref: ${{ steps.ver.outputs.ref }}
           fetch-depth: 0
 
       - name: Set up Helm
@@ -52,23 +75,6 @@ jobs:
         uses: sigstore/cosign-installer@v3
         with:
           cosign-release: v2.4.1
-
-      - name: Resolve version
-        id: ver
-        env:
-          REF: ${{ inputs.ref || github.ref }}
-        run: |
-          set -euo pipefail
-          # The chart SemVer drops the leading ``v`` from the tag; both the
-          # chart version and appVersion use it so the chart tracks the image
-          # tag (which keeps the ``v`` — see build-images.yml).
-          if [[ "$REF" == refs/tags/v*.*.* ]]; then
-            VERSION="${REF#refs/tags/v}"
-          else
-            echo "::error::helm-release requires a v*.*.* tag ref (got: $REF)" >&2
-            exit 1
-          fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Vendor chart dependencies
         run: cd deploy/helm/custos && helm dependency update
@@ -85,13 +91,15 @@ jobs:
         id: push
         env:
           VERSION: ${{ steps.ver.outputs.version }}
+          APP_VERSION: ${{ steps.ver.outputs.app_version }}
         run: |
           set -euo pipefail
           mkdir -p dist
-          # --version / --app-version stamp the packaged Chart.yaml so the
-          # published artifact is consistent with the image tag.
+          # --version (SemVer) / --app-version (vX.Y.Z, matching the image tag)
+          # stamp the packaged Chart.yaml so the published artifact is
+          # consistent with the release.
           helm package deploy/helm/custos \
-            --version "$VERSION" --app-version "$VERSION" --destination dist
+            --version "$VERSION" --app-version "$APP_VERSION" --destination dist
           OUT="$(helm push "dist/custos-${VERSION}.tgz" "oci://${CHART_OCI_REPO}" 2>&1 | tee /dev/stderr)"
           DIGEST="$(echo "$OUT" | awk '/[Dd]igest:/ {print $2}')"
           if [[ -z "$DIGEST" ]]; then
