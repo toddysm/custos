@@ -53,8 +53,8 @@ curl -sS "$GATEWAY/v1/workspaces/$WS" \
   -H "authorization: Bearer $TOKEN"
 ```
 
-To create a separate workspace for evaluation (idempotent — a duplicate returns
-`409`):
+To create a separate workspace for evaluation (returns `409 Conflict` if a
+workspace with that id already exists):
 
 ```bash
 curl -sS -X POST "$GATEWAY/v1/tenants/tenant-default/workspaces" \
@@ -66,7 +66,10 @@ curl -sS -X POST "$GATEWAY/v1/tenants/tenant-default/workspaces" \
 ## 3. Publish a workflow
 
 Publish a workflow definition into the workspace catalog. The request body wraps
-the definition document as a string under `definition`:
+the definition document as a string under `definition`. The document must be a
+valid Custos `Workflow` (`apiVersion`, `kind`, `metadata`, and `spec.steps`).
+The sample below uses a single connectorless `let` step, so it publishes without
+any activity-type or connector-type needing to be registered first:
 
 ```bash
 curl -sS -X POST "$GATEWAY/v1/workspaces/$WS/workflows" \
@@ -74,7 +77,7 @@ curl -sS -X POST "$GATEWAY/v1/workspaces/$WS/workflows" \
   -H 'content-type: application/json' \
   -d @- <<'JSON'
 {
-  "definition": "name: hello\nversion: 1\nsteps:\n  - id: greet\n    type: noop\n"
+  "definition": "apiVersion: custos.dev/v1\nkind: Workflow\nmetadata:\n  name: hello\nspec:\n  steps:\n    - id: greet\n      let:\n        message: hello from custos\n"
 }
 JSON
 ```
@@ -88,21 +91,19 @@ monotonic integer version:
 
 > **Publish-time validation.** The catalog validates the document in two passes
 > (syntax/schema, then ref + CEL resolution). Any activity-type or connector-type
-> the workflow references must already be published in the workspace, or publish
-> fails with a `catalog.publish.*` error. Adapt the sample above to the
-> activity-types available in your evaluation. See the
+> an `activity` step references must already be published in the workspace, or
+> publish fails with a `catalog.publish.*` error. To run real activities, adapt
+> the sample to the activity-types available in your evaluation. See the
 > [Catalog API](../../developers/catalog-api.md) and the
 > [workflow authoring guide](../../developers/workflow-api.md) for the full
 > document schema.
 
-Read the published version back to obtain its **workflow-version-id** (the
-`id` field, formatted `wfv-...`), which the run API needs:
+The **workflow-version-id** the run API needs is the triple
+`<workspaceId>/<workflowName>@<version>`, which you can construct directly from
+the publish response — no extra lookup required:
 
 ```bash
-curl -sS "$GATEWAY/v1/workspaces/$WS/workflows/hello" \
-  -H "authorization: Bearer $TOKEN"
-
-export WFV=wfv-...        # copy the id from the response
+export WFV="$WS/hello@1"        # <workspaceId>/<workflowName>@<version>
 ```
 
 ## 4. Start a run
@@ -128,7 +129,7 @@ The response is a run handle:
   "runId": "run-...",
   "status": "running",
   "workspaceId": "ws-default",
-  "workflowVersionId": "wfv-...",
+  "workflowVersionId": "ws-default/hello@1",
   "startedAt": "2026-06-08T12:00:00Z"
 }
 ```
@@ -160,9 +161,13 @@ Fetch the run's logs and metrics through the Observability API:
 curl -sS "$GATEWAY/v1/workspaces/$WS/runs/$RUN/logs" \
   -H "authorization: Bearer $TOKEN"
 
-# Run metrics.
-curl -sS "$GATEWAY/v1/workspaces/$WS/runs/$RUN/metrics" \
-  -H "authorization: Bearer $TOKEN"
+# Run metrics. metric, from, and to are required query parameters; from/to are
+# timezone-aware ISO-8601 timestamps bounding the window.
+curl -sS -G "$GATEWAY/v1/workspaces/$WS/runs/$RUN/metrics" \
+  -H "authorization: Bearer $TOKEN" \
+  --data-urlencode 'metric=workflow_step_duration_seconds' \
+  --data-urlencode 'from=2026-06-08T00:00:00Z' \
+  --data-urlencode 'to=2026-06-08T23:59:59Z'
 ```
 
 See the [Observability API](../../developers/observability-api.md) for log
@@ -179,7 +184,7 @@ tailing, the audit trail, and per-step log endpoints.
 ## Troubleshooting
 
 If a call returns `401`/`403`, re-check the token and that your principal has the
-required permission (e.g. `catalog:workflow:publish` to publish). If publish
+required permission (e.g. `catalog:workflows:write` to publish). If publish
 returns a `catalog.publish.*` error, fix the referenced activity/connector types.
 See [Troubleshooting](troubleshooting.md).
 
