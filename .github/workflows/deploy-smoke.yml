@@ -96,6 +96,35 @@ jobs:
             --namespace cnpg-system --create-namespace \
             --wait --timeout 5m
 
+      - name: Install cert-manager
+        run: |
+          # The umbrella chart templates a cert-manager Certificate + selfSigned
+          # Issuer (the gateway TLS cert). Its CRDs must already be registered or
+          # the umbrella `helm install` can't map the kinds. Pre-install the same
+          # version the chart pins, and install the umbrella with
+          # `certManager.install=false` so the subchart is skipped.
+          helm repo add jetstack https://charts.jetstack.io
+          helm repo update
+          helm install cert-manager jetstack/cert-manager \
+            --version v1.20.2 \
+            --namespace cert-manager --create-namespace \
+            --set crds.enabled=true \
+            --wait --timeout 5m
+
+      - name: Install External Secrets Operator
+        run: |
+          # The eval profile templates an ESO ClusterSecretStore (operator install
+          # is out-of-band by design). Its CRDs must exist before the umbrella
+          # install so the kind maps; the store stays unsynced (no Vault) but that
+          # doesn't gate `--wait`, which only waits on workloads.
+          helm repo add external-secrets https://charts.external-secrets.io
+          helm repo update
+          helm install external-secrets external-secrets/external-secrets \
+            --version 0.10.0 \
+            --namespace external-secrets --create-namespace \
+            --set installCRDs=true \
+            --wait --timeout 5m
+
       - name: Build + load Custos images
         env:
           DOCKER_BUILDKIT: "1"
@@ -138,11 +167,13 @@ jobs:
         run: |
           set -euo pipefail
           # embedded=false: reuse the pre-provisioned CNPG Cluster (above) so the
-          # pre-install migrate hook finds its Secret. All other subcharts stay
-          # at their eval defaults. PVCs default to kind's `standard` class.
+          # pre-install migrate hook finds its Secret. certManager.install=false:
+          # cert-manager is pre-installed out-of-band (above). All other subcharts
+          # stay at their eval defaults. PVCs default to kind's `standard` class.
           helm install "$RELEASE" "$CHART" -f "$VALUES" \
             --namespace "$NS" \
             --set postgres.embedded=false \
+            --set certManager.install=false \
             --wait --timeout 20m
 
       - name: Run helm test
