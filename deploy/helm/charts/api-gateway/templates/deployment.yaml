@@ -48,6 +48,20 @@ spec:
           {{- end }}
           resources:
             {{- include "svc.resources" . | nindent 12 }}
+          {{- if .Values.startupProbe.enabled }}
+          # The flat `/healthz` startupProbe covers the cold-start window until
+          # uvicorn is serving HTTP so the livenessProbe does not restart a
+          # slow-starting pod. Readiness convergence (the background startup
+          # permission cross-check, issue #815) is surfaced via `/readyz` and is
+          # not bounded by this probe.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: {{ .Values.startupProbe.periodSeconds }}
+            failureThreshold: {{ .Values.startupProbe.failureThreshold }}
+            timeoutSeconds: {{ .Values.startupProbe.timeoutSeconds }}
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz

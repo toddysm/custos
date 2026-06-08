@@ -38,6 +38,19 @@ dapr:
   appProtocol: http
   logLevel: info
 
+# The startupProbe hits the flat `/healthz` liveness endpoint, so it covers the
+# cold-start window until uvicorn is serving HTTP and keeps the livenessProbe
+# from restarting a slow-starting pod. The gateway's startup permission
+# cross-check converges `/readyz` in the background (issue #815); that readiness
+# convergence is NOT bounded by this probe — a 503 from `/readyz` only holds the
+# pod out of the Service endpoints, it never restarts the pod. Size the
+# cold-start budget via periodSeconds * failureThreshold seconds.
+startupProbe:
+  enabled: true
+  periodSeconds: 5
+  failureThreshold: 30
+  timeoutSeconds: 3
+
 serviceMonitor:
   enabled: false
 

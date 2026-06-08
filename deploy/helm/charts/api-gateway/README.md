@@ -61,3 +61,18 @@ The gateway terminates TLS on `CUSTOS_GATEWAY_LISTEN_ADDR` (`:8443`) using the
 cert/key it resolves from the Dapr Secrets API via `CUSTOS_GATEWAY_TLS_CERT_REF`
 / `CUSTOS_GATEWAY_TLS_KEY_REF`. The in-cluster HTTP listener the Dapr sidecar
 and the `/healthz` / `/readyz` probes use is `service.port` (`8080`).
+
+## Probes
+
+`livenessProbe` hits `/healthz` and `readinessProbe` hits `/readyz`. A
+`startupProbe` (also `/healthz`) gates both until the process is serving HTTP.
+Because `/healthz` is a flat liveness signal that returns `200` as soon as
+uvicorn accepts connections, the startupProbe only covers the cold-start window
+until the HTTP server is serving — it keeps the `livenessProbe` from restarting a
+slow-starting pod. It does **not** bound readiness: the gateway's startup
+permission cross-check converges `/readyz` in the background (issue #815) and
+`/readyz` keeps returning `503` until the first validation succeeds, which only
+holds the pod out of the Service endpoints (it never restarts the pod). Tune the
+cold-start budget via `startupProbe.periodSeconds` ×
+`startupProbe.failureThreshold` (default `5 × 30 = 150s`); set
+`startupProbe.enabled: false` to drop it.
