@@ -49,6 +49,7 @@ postgres-catalog = "custos_pg.adapters.catalog:make_adapter"
 postgres-connector-instance = "custos_pg.adapters.connector_instance:make_adapter"
 postgres-lease = "custos_pg.adapters.lease:make_adapter"
 postgres-metadata = "custos_pg.adapters.metadata:make_adapter"
+postgres-auth = "custos_pg.adapters.auth:make_adapter"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/custos_pg"]

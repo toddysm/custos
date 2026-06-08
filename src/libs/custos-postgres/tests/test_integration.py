@@ -329,22 +329,34 @@ async def test_catalog_list_paginates(pg_pool: Pool) -> None:
 # ----- Cross-interface negotiation sanity check -----
 
 
-async def test_check_revisions_reports_only_unmigrated_interfaces(pg_pool: Pool) -> None:
-    """With only Definition+Catalog adapters declared, MetadataStore /
-    AuthStore / ArtifactStore appear as gaps. Confirms the runner
-    treats per-interface revisions independently."""
+async def test_check_revisions_scoped_to_deployed_adapters(pg_pool: Pool) -> None:
+    """The strict check is scoped to interfaces a deployed adapter owns.
+
+    With only Definition + Catalog adapters deployed and applied, the
+    check passes even though MetadataStore / AuthStore / ArtifactStore
+    are required platform-wide: they are unowned here (no deployed
+    migration-capable adapter) and therefore not gated. A subsequently
+    deployed but unmigrated Metadata adapter — which owns its interface
+    — is still caught.
+    """
     defn = PgDefinitionAdapter(pool=pg_pool)
     cat = PgCatalogAdapter(pool=pg_pool)
     await defn.apply_pending()
     await cat.apply_pending()
     from custos_spl.errors import MigrationRequired
 
+    # Unowned interfaces (Metadata/Auth/Artifact) are not gated.
+    check_revisions([defn, cat])
+
+    # A deployed-but-unmigrated adapter still surfaces its own gap.
+    meta = PgMetadataAdapter(pool=pg_pool)
     with pytest.raises(MigrationRequired) as exc:
-        check_revisions([defn, cat])
+        check_revisions([defn, cat, meta])
     gap_interfaces = {iface for iface, _ in exc.value.gaps}
+    assert "MetadataStoreProvider" in gap_interfaces
     assert "DefinitionStoreProvider" not in gap_interfaces
     assert "CatalogStoreProvider" not in gap_interfaces
-    assert "MetadataStoreProvider" in gap_interfaces
+    assert "ArtifactStoreProvider" not in gap_interfaces
 
 
 # ----- MetadataStoreProvider (#127 slice) -----

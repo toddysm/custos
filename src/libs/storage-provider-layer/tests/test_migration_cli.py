@@ -65,15 +65,20 @@ def _full_declared() -> dict[str, set[int]]:
 # ----- status -----
 
 
-def test_status_no_adapters_reports_gaps(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_status_no_adapters_is_clean(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With nothing deployed there is nothing to gate, so status is clean.
+
+    The check is scoped to interfaces a deployed adapter owns; an empty
+    adapter set owns nothing, so `status` reports no discovered adapters
+    and exits 0 rather than listing every required interface as a gap.
+    """
     monkeypatch.setattr(cli, "_discover_entry_points", lambda: [])
     out = io.StringIO()
     code = cli.main(["status"], stream=out)
-    assert code == 2
+    assert code == 0
     text = out.getvalue()
     assert "No adapters discovered." in text
-    assert "MigrationRequired" in text
-    assert "custos migrate up" in text
+    assert "All required revisions are present." in text
 
 
 def test_status_clean_when_revisions_satisfied(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -154,9 +159,7 @@ def test_up_check_does_not_apply(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_up_check_reports_gap_with_exit_2(monkeypatch: pytest.MonkeyPatch) -> None:
-    adapter = _FakeAdapter(
-        {iface: set() for iface in runner.required_revisions()}
-    )
+    adapter = _FakeAdapter({iface: set() for iface in runner.required_revisions()})
     monkeypatch.setattr(
         cli,
         "_discover_entry_points",

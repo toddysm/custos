@@ -13,10 +13,15 @@ Contract (per `design/components/storage-provider-layer/design.md`
    declares `{1, 2, ..., N}` (every step has been applied), but the
    contract is "is the required revision in the set" so non-contiguous
    sets are permitted.
-3. `check_revisions(adapters)` collects every adapter's declarations
-   and raises `MigrationRequired` listing per-interface gaps. The
-   platform calls this at startup and refuses to start on any gap;
-   this is the **strict** policy. `permissive` is intentionally not
+3. `check_revisions(adapters)` collects every deployed adapter's
+   declarations and raises `MigrationRequired` listing per-interface
+   gaps. The check is scoped to interfaces a deployed
+   `MigrationCapable` adapter actually owns: an interface with no
+   deployed migration-capable adapter (e.g. the object-storage
+   `ArtifactStoreProvider`, which has no relational schema) is not
+   gated. A deployed-but-behind adapter still raises. The platform
+   calls this at startup and refuses to start on any gap; this is the
+   **strict** policy. `permissive` is intentionally not
    implemented in v1 (would silently mask writes).
 4. The platform never auto-migrates. An operator runs the
    `custos migrate up` CLI (see `custos_spl.migrations.cli`) which
@@ -121,14 +126,25 @@ def check_revisions(adapters: Iterable[object]) -> None:
             skipped silently — they are stateless or out of scope for
             migration.
 
+    The check is scoped to the **deployed** adapter set: a required
+    interface is only gated when some `MigrationCapable` adapter in
+    `adapters` actually owns it (declares it in `declared_revisions`).
+    Interfaces with no deployed migration-capable adapter — e.g. the
+    object-storage-backed `ArtifactStoreProvider`, which has no
+    relational schema to migrate — cannot be migrated here and are
+    therefore not gated. A deployed adapter that owns an interface but
+    is behind still raises (it declares the interface with a short
+    revision set), so genuinely-unmigrated stores are still caught.
+
     Raises:
-        MigrationRequired: when any required revision is not present
-            in the union of the adapters' declared revisions. The
-            exception carries `gaps` so operator logs can list exactly
-            what `custos migrate up` needs to apply.
+        MigrationRequired: when a deployed adapter owns a required
+            interface but its declared revisions don't include the
+            required level. The exception carries `gaps` so operator
+            logs can list exactly what `custos migrate up` needs to
+            apply.
     """
     required = required_revisions()
-    declared: dict[str, set[int]] = {name: set() for name in required}
+    declared: dict[str, set[int]] = {}
     for adapter in adapters:
         if not isinstance(adapter, MigrationCapable):
             continue
@@ -136,7 +152,9 @@ def check_revisions(adapters: Iterable[object]) -> None:
             declared.setdefault(iface_name, set()).update(revs)
 
     gaps: list[tuple[str, int]] = sorted(
-        (iface, rev) for iface, rev in required.items() if rev not in declared[iface]
+        (iface, rev)
+        for iface, rev in required.items()
+        if iface in declared and rev not in declared[iface]
     )
     if gaps:
         raise MigrationRequired(gaps)
