@@ -2,17 +2,18 @@
 {{- $img := .Values.tests.image | default dict }}
 {{- $registry := include "custos.imageRegistry" . }}
 {{- $repo := default (printf "%s/api-gateway" $registry) $img.repository }}
-{{- $tag := default .Values.global.imageTag $img.tag }}
+{{- $tag := default (.Values.global.imageTag | default "dev") $img.tag }}
 {{- $pull := default .Values.global.imagePullPolicy $img.pullPolicy }}
 {{- $svc := default (printf "%s-api-gateway" .Release.Name) .Values.tests.gateway.serviceName }}
 {{- $port := .Values.tests.gateway.port | default 8080 }}
+{{- $name := printf "%s-smoke-test" .Release.Name | trunc 63 | trimSuffix "-" }}
 # helm test synthetic scenario (DEPLOY-IMPL-018). `helm test <release>` runs the
 # Pod below, which drives the public API through the api-gateway Service. The
 # scenario script is shipped as a ConfigMap so it stays readable + lint-clean.
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: custos-smoke-test
+  name: {{ $name }}
   namespace: {{ include "custos.namespace" . }}
   labels:
     {{- include "custos.labels" . | nindent 4 }}
@@ -28,7 +29,7 @@ data:
 apiVersion: v1
 kind: Pod
 metadata:
-  name: custos-smoke-test
+  name: {{ $name }}
   namespace: {{ include "custos.namespace" . }}
   labels:
     {{- include "custos.labels" . | nindent 4 }}
@@ -93,6 +94,6 @@ spec:
   volumes:
     - name: smoke-script
       configMap:
-        name: custos-smoke-test
+        name: {{ $name }}
         defaultMode: 0555
 {{- end }}

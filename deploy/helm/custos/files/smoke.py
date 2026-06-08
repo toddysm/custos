@@ -120,7 +120,9 @@ def authenticated_scenario():
         "version": "1.0.0",
         "name": "smoke-test-registry",
         "enabled": True,
-        "targetConfig": {"endpoint": "https://ghcr.io"},
+        # oci-registry instances require repositoryNamespace (connector-service
+        # validator); endpoint alone 400s.
+        "targetConfig": {"repositoryNamespace": "smoke/test"},
     }
     status, raw = _request(
         "POST", f"{PREFIX}/workspaces/{WORKSPACE_ID}/connectors", body, token=TOKEN
@@ -136,7 +138,9 @@ def authenticated_scenario():
     body = {
         "workflowVersionId": WORKFLOW_VERSION_ID,
         "inputs": {},
-        "idempotencyKey": f"smoke-{int(time.time())}",
+        # Nanosecond resolution so back-to-back reruns don't collide on the
+        # idempotency key and unintentionally replay the same run.
+        "idempotencyKey": f"smoke-{time.time_ns()}",
     }
     status, raw = _request(
         "POST", f"{PREFIX}/workspaces/{WORKSPACE_ID}/runs", body, token=TOKEN
