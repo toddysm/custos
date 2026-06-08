@@ -29,6 +29,14 @@ spec:
       secretKeyRef:
         name: {{ .connectionSecret | default $.Values.postgres.secretName | quote }}
         key: {{ .connectionKey | quote }}
+    {{- if .actorStateStore }}
+    # Dapr Workflow is built on the actor model (REQ-046); the workflow engine
+    # only initialises once a state store advertises itself as the actor state
+    # store. Flagging the CNPG-backed store here lets the workflow-service
+    # sidecar host the workflow engine so its worker reaches ready (issue #816).
+    - name: actorStateStore
+      value: "true"
+    {{- end }}
 auth:
   secretStore: {{ $secretStore | quote }}
 {{- end }}

@@ -142,6 +142,35 @@ def test_deployment_probes_hit_healthz_and_readyz(
 
 
 @pytest.mark.parametrize("profile", ALL_PROFILES)
+def test_deployment_has_startup_probe_for_worker_cold_start(
+    rendered: dict[str, list[dict[str, Any]]], profile: str
+) -> None:
+    """A startupProbe must absorb the Dapr Workflow worker cold-start window.
+
+    The FastAPI lifespan blocks on the worker reporting ready before uvicorn
+    serves HTTP, so without a startupProbe the default liveness/readiness
+    probes hit a connection-refused window and crash-loop the pod before the
+    worker converges (issue #816). The probe must hit ``/healthz`` and carry a
+    failure budget large enough to cover the worker-ready wait plus the Dapr
+    sidecar/placement cold start.
+    """
+    dep = _find(rendered[profile], "Deployment", "custos-workflow-service")
+    assert dep is not None
+    container = dep["spec"]["template"]["spec"]["containers"][0]
+    startup = container.get("startupProbe")
+    assert startup is not None, f"{profile}: workflow-service must define a startupProbe"
+    assert startup["httpGet"]["path"] == "/healthz"
+    assert startup["httpGet"]["port"] == "http"
+    # periodSeconds * failureThreshold must comfortably exceed the 30s
+    # worker-ready wait the lifespan blocks on during cold start.
+    budget = startup["periodSeconds"] * startup["failureThreshold"]
+    assert budget >= 60, (
+        f"{profile}: startupProbe budget {budget}s is too small to cover the "
+        "worker-ready cold-start wait"
+    )
+
+
+@pytest.mark.parametrize("profile", ALL_PROFILES)
 def test_service_renders_with_expected_port(
     rendered: dict[str, list[dict[str, Any]]], profile: str
 ) -> None:

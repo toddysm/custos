@@ -46,8 +46,17 @@ will touch:
 
 ## Failure modes covered
 
-`livenessProbe` hits `/healthz` and `readinessProbe` hits `/readyz`. The
-process implementing those endpoints is WF-IMPL-015's responsibility;
-until that lands, deploying the chart produces a pod that crash-loops on
-the not-yet-implemented FastAPI factory. This is intentional: deploys do
-not silently succeed before the runtime is real.
+`livenessProbe` hits `/healthz` and `readinessProbe` hits `/readyz`. A
+`startupProbe` (also `/healthz`) gates both until the process is serving: the
+FastAPI lifespan blocks on the Dapr Workflow worker reporting ready before
+uvicorn accepts connections, so on a cold cluster the liveness/readiness probes
+would otherwise hit a connection-refused window and crash-loop the pod before
+the worker converges (issue #816). Tune the cold-start budget via
+`startupProbe.periodSeconds` × `startupProbe.failureThreshold`.
+
+The Dapr Workflow engine is built on the actor model (REQ-046) and only
+initialises once a state store advertises `actorStateStore: "true"`. That flag
+is set on the umbrella's `custos-statestore` Component
+(`dapr.components.stateStore.actorStateStore`), not in this subchart — without
+it the workflow-service sidecar never hosts the workflow engine and the worker
+never reaches ready.
