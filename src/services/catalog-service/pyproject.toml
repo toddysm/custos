@@ -45,6 +45,10 @@ dependencies = [
     "pyyaml>=6.0,<7",
     "jsonschema>=4.21,<5",
     "opentelemetry-api>=1.20,<2",
+    # Runtime dependency: clients/connector.py imports httpx at module load
+    # for the ValidateConnector internal RPC. Must ship in the service image,
+    # not just the dev extra.
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]

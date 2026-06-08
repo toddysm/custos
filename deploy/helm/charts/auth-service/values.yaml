@@ -101,7 +101,9 @@ networkPolicy:
 # bring-up.
 config:
   # design.md § Configuration defaults
-  serviceTokenTtlDefault: "90d"
+  # Integer seconds. The settings parser rejects duration suffixes, so keep
+  # this a plain integer. 7776000 = 90 days (DEFAULT_SERVICE_TOKEN_TTL_SECONDS).
+  serviceTokenTtlDefault: "7776000"
   # Integer seconds. ``0`` disables the in-process rotation loop
   # (operator manages rotation externally). The default matches the
   # design's 7-day rotation cadence (AS-IMPL-018).
@@ -118,8 +120,11 @@ config:
   # value (AS-IMPL-019).
   callContextAudience: "custos.internal"
   internalIdentityMode: "jwt"
-  authzCacheTtl: "60s"
-  authnCacheTtl: "30s"
+  # Integer seconds. ``0`` disables the cache (every verify hits the
+  # store). The parser rejects duration suffixes, so keep these plain
+  # integers (AS-IMPL settings._parse_authz_cache_ttl).
+  authzCacheTtl: "60"
+  authnCacheTtl: "30"
   # OIDC end-user login (POST /v1/auth/login/oidc/callback). AS-IMPL-024
   # feature flag gating the handler shipped in AS-IMPL-020..023. With
   # this flag off the callback returns 503 ``oidc_not_enabled``; with

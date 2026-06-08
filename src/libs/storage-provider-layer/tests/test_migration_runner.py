@@ -150,22 +150,47 @@ def test_check_revisions_raises_when_required_revision_missing() -> None:
     assert ("MetadataStoreProvider", req["MetadataStoreProvider"]) in exc.value.gaps
 
 
-def test_check_revisions_raises_with_no_adapters() -> None:
-    """An empty adapter list must surface every required revision as a gap."""
+def test_check_revisions_with_no_adapters_is_noop() -> None:
+    """With nothing deployed there is nothing to migrate, so no gaps.
+
+    The check is scoped to interfaces a deployed MigrationCapable adapter
+    owns; an empty adapter set owns nothing and must not raise.
+    """
+    check_revisions([])
+
+
+def test_check_revisions_skips_unowned_interfaces() -> None:
+    """A required interface with no deployed adapter is not gated.
+
+    Mirrors the ArtifactStoreProvider case: it is required platform-wide
+    but its only adapter (object storage) is not MigrationCapable, so a
+    Postgres-only migrate run that satisfies every interface it *does*
+    own must pass.
+    """
+    req = required_revisions()
+    owned = {
+        iface: set(range(1, rev + 1))
+        for iface, rev in req.items()
+        if iface != "ArtifactStoreProvider"
+    }
+    # No adapter owns ArtifactStoreProvider, yet the check must pass.
+    check_revisions([_FakeAdapter(owned)])
+
+
+def test_check_revisions_raises_for_owned_but_behind_interface() -> None:
+    """A deployed adapter that owns an interface but is behind still gates."""
+    req = required_revisions()
+    # Owns Auth but declares no revisions (fresh, unmigrated store).
+    adapter = _FakeAdapter({"AuthStoreProvider": set()})
     with pytest.raises(MigrationRequired) as exc:
-        check_revisions([])
-    gap_ifaces = {iface for iface, _ in exc.value.gaps}
-    # Every stateful Protocol must appear.
-    assert "MetadataStoreProvider" in gap_ifaces
-    assert "DefinitionStoreProvider" in gap_ifaces
-    assert "CatalogStoreProvider" in gap_ifaces
-    assert "AuthStoreProvider" in gap_ifaces
-    assert "ArtifactStoreProvider" in gap_ifaces
-    assert "LeaseStoreProvider" in gap_ifaces
+        check_revisions([adapter])
+    assert ("AuthStoreProvider", req["AuthStoreProvider"]) in exc.value.gaps
 
 
 def test_check_revisions_reports_sorted_gaps() -> None:
     """Stable ordering keeps operator logs diff-friendly across runs."""
+    # Two owned-but-unmigrated interfaces produce multiple gaps.
+    adapter = _FakeAdapter({"AuthStoreProvider": set(), "MetadataStoreProvider": set()})
     with pytest.raises(MigrationRequired) as exc:
-        check_revisions([])
+        check_revisions([adapter])
     assert exc.value.gaps == sorted(exc.value.gaps)

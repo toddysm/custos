@@ -1,0 +1,239 @@
+name: deploy-smoke
+
+# Deployment regression gate (DEPLOY-IMPL-019). Spins up a throwaway kind
+# cluster, installs the connected-eval profile of the umbrella chart end-to-end
+# with freshly built `:dev` images, and runs `helm test` in-cluster. The job
+# fails loudly — with pod/job logs and events — whenever a workload doesn't
+# become Ready or a hook fails.
+#
+# Postgres ordering note: the migrate Job is a `pre-install` hook that reads the
+# CNPG-generated `custos-app` Secret, but the embedded CNPG `Cluster` CR is a
+# normal chart resource created *after* pre-install hooks — a chicken/egg on a
+# fresh install. The smoke job therefore pre-provisions Postgres by applying the
+# chart's own rendered `Cluster` CR first, waits for it to be Ready, then
+# installs the chart with `postgres.embedded=false` so the same database is
+# reused and the pre-install migrate hook finds its Secret.
+
+# Trigger: manual dispatch only — for now.
+#
+# The connected-eval profile does not yet deploy fully clean: api-gateway eagerly
+# dials the auth-service/Dapr sidecar at startup and crashes when they are not yet
+# reachable (#815), and workflow-service never reaches Ready pending its Dapr
+# workflow-runtime wiring (#816). Until those are resolved the end-to-end `helm
+# install --wait` cannot go green, so running this as a required `pull_request`
+# gate would block every PR on a known-red deploy. Restore the `pull_request`
+# trigger (paths: deploy/helm/**, src/services/**, src/jobs/**, src/libs/**,
+# .github/workflows/deploy-smoke.yml) once #815 and #816 land and connected-eval
+# is deploy-clean.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: kind install + helm test (connected-eval)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CLUSTER: custos-smoke
+      RELEASE: custos
+      NS: custos-system
+      CHART: deploy/helm/custos
+      VALUES: deploy/helm/custos/values-connected-eval.yaml
+      IMAGE_PREFIX: ghcr.io/toddysm/custos
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1.10.0
+        with:
+          cluster_name: custos-smoke
+          node_image: kindest/node:v1.31.2
+
+      # Optional Docker Hub login to dodge anonymous pull rate limits on the
+      # third-party subchart images (Redis, Loki sidecar, …). The `secrets`
+      # context can't be read from an `if:` directly, so a detector step turns
+      # the (variable AND secret) presence into an output. This keeps fork PRs
+      # green — they get neither the variable nor the secret.
+      - name: Detect Docker Hub credentials
+        id: dockerhub
+        env:
+          DH_USER: ${{ vars.DOCKERHUB_USERNAME }}
+          DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -n "$DH_USER" ] && [ -n "$DH_TOKEN" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Log in to Docker Hub
+        if: steps.dockerhub.outputs.enabled == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Install Gateway API CRDs
+        run: |
+          kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.1.0/standard-install.yaml
+
+      - name: Install CNPG operator
+        run: |
+          helm repo add cnpg https://cloudnative-pg.github.io/charts
+          helm repo update
+          # Pinned so this regression gate isn't perturbed by upstream releases;
+          # bump intentionally.
+          helm install cnpg cnpg/cloudnative-pg \
+            --version 0.22.1 \
+            --namespace cnpg-system --create-namespace \
+            --wait --timeout 5m
+
+      - name: Install cert-manager
+        run: |
+          # The umbrella chart templates a cert-manager Certificate + selfSigned
+          # Issuer (the gateway TLS cert). Its CRDs must already be registered or
+          # the umbrella `helm install` can't map the kinds. Pre-install the same
+          # version the chart pins, and install the umbrella with
+          # `certManager.install=false` so the subchart is skipped.
+          helm repo add jetstack https://charts.jetstack.io
+          helm repo update
+          helm install cert-manager jetstack/cert-manager \
+            --version v1.20.2 \
+            --namespace cert-manager --create-namespace \
+            --set crds.enabled=true \
+            --wait --timeout 5m
+
+      - name: Install External Secrets Operator
+        run: |
+          # The eval profile templates an ESO ClusterSecretStore (operator install
+          # is out-of-band by design). Its CRDs must exist before the umbrella
+          # install so the kind maps; the store stays unsynced (no Vault) but that
+          # doesn't gate `--wait`, which only waits on workloads.
+          helm repo add external-secrets https://charts.external-secrets.io
+          helm repo update
+          helm install external-secrets external-secrets/external-secrets \
+            --version 0.10.0 \
+            --namespace external-secrets --create-namespace \
+            --set installCRDs=true \
+            --wait --timeout 5m
+
+      - name: Build + load Custos images
+        env:
+          DOCKER_BUILDKIT: "1"
+        run: |
+          set -euo pipefail
+          services="api-gateway auth-service workflow-service trigger-service \
+            connector-service activity-runtime-manager catalog-service \
+            observability-audit-service"
+          for s in $services; do
+            echo "::group::build $s"
+            docker build -t "${IMAGE_PREFIX}/${s}:dev" -f "src/services/${s}/Dockerfile" .
+            kind load docker-image "${IMAGE_PREFIX}/${s}:dev" --name "$CLUSTER"
+            echo "::endgroup::"
+          done
+          for j in migrate bootstrap; do
+            echo "::group::build custos-$j"
+            docker build -t "${IMAGE_PREFIX}/custos-${j}:dev" -f "src/jobs/${j}/Dockerfile" .
+            kind load docker-image "${IMAGE_PREFIX}/custos-${j}:dev" --name "$CLUSTER"
+            echo "::endgroup::"
+          done
+
+      - name: Vendor chart dependencies
+        run: helm dependency update "$CHART"
+
+      - name: Pre-provision Postgres (CNPG Cluster)
+        run: |
+          set -euo pipefail
+          kubectl create namespace "$NS"
+          # Apply the chart's own rendered Cluster CR so the database matches
+          # what the chart would create (embedded path), then wait for CNPG to
+          # provision it + emit the `custos-app` Secret the migrate hook needs.
+          helm template "$RELEASE" "$CHART" -f "$VALUES" \
+            --namespace "$NS" \
+            --set postgres.storageClass=standard \
+            --show-only charts/cnpg/templates/cluster.yaml > /tmp/pg-cluster.yaml
+          kubectl apply -n "$NS" -f /tmp/pg-cluster.yaml
+          kubectl wait --for=condition=Ready cluster/custos -n "$NS" --timeout=5m
+
+      - name: Install Custos (connected-eval)
+        run: |
+          set -euo pipefail
+          # embedded=false: reuse the pre-provisioned CNPG Cluster (above) so the
+          # pre-install migrate hook finds its Secret. certManager.install=false:
+          # cert-manager is pre-installed out-of-band (above). All other subcharts
+          # stay at their eval defaults. PVCs default to kind's `standard` class.
+          helm install "$RELEASE" "$CHART" -f "$VALUES" \
+            --namespace "$NS" \
+            --set postgres.embedded=false \
+            --set certManager.install=false \
+            --wait --timeout 20m
+
+      - name: Run helm test
+        run: helm test "$RELEASE" -n "$NS" --logs
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          echo "::group::all pods"
+          kubectl get pods -A -o wide || true
+          echo "::endgroup::"
+          echo "::group::namespace events"
+          kubectl get events -n "$NS" --sort-by=.lastTimestamp || true
+          echo "::endgroup::"
+          echo "::group::not-ready pods (describe)"
+          # Describe every pod that isn't both Succeeded and fully Ready. A pod
+          # can be phase=Running yet not Ready (CrashLoopBackOff, failing
+          # readiness probe), so a phase filter alone would miss the most common
+          # failure mode — inspect Ready conditions instead.
+          kubectl get pods -n "$NS" \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.phase}{"\t"}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}' \
+            2>/dev/null | while IFS=$'\t' read -r pod phase ready; do
+              if [ "$phase" = "Succeeded" ] || { [ "$phase" = "Running" ] && [ "$ready" = "True" ]; }; then
+                continue
+              fi
+              echo "--- describe pod/$pod (phase=$phase ready=$ready) ---"
+              kubectl describe -n "$NS" "pod/$pod" || true
+            done
+          echo "::endgroup::"
+          echo "::group::not-ready pod logs (current + previous)"
+          # CrashLoopBackOff containers exit before readiness, so the running
+          # container often has no logs — capture the previous instance too.
+          kubectl get pods -n "$NS" \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.phase}{"\t"}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}' \
+            2>/dev/null | while IFS=$'\t' read -r pod phase ready; do
+              if [ "$phase" = "Succeeded" ] || { [ "$phase" = "Running" ] && [ "$ready" = "True" ]; }; then
+                continue
+              fi
+              echo "--- logs pod/$pod (current) ---"
+              kubectl logs -n "$NS" "pod/$pod" --all-containers --tail=200 2>/dev/null \
+                || echo "(no current logs for $pod)"
+              echo "--- logs pod/$pod (previous) ---"
+              kubectl logs -n "$NS" "pod/$pod" --all-containers --previous --tail=200 2>/dev/null \
+                || echo "(no previous logs for $pod)"
+            done
+          echo "::endgroup::"
+          echo "::group::hook job logs"
+          for job in custos-migrate custos-bootstrap custos-smoke-test; do
+            echo "--- logs job/$job ---"
+            # Job pods are name-suffixed, so the fallback selects by the
+            # standard job-name label rather than a bare pod name.
+            kubectl logs -n "$NS" "job/$job" --all-containers --tail=200 2>/dev/null \
+              || kubectl logs -n "$NS" -l job-name="$job" --all-containers --tail=200 2>/dev/null \
+              || echo "(no logs for $job)"
+          done
+          echo "::endgroup::"
+          echo "::group::CNPG cluster status"
+          kubectl describe cluster/custos -n "$NS" || true
+          echo "::endgroup::"

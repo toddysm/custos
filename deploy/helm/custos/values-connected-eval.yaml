@@ -29,3 +29,109 @@ oidc:
 
 gateway:
   hostname: custos.local
+
+# ---------------------------------------------------------------------------
+# Eval-profile service configuration.
+#
+# The HA / connected profiles project each service's required DSNs through an
+# ExternalSecret backed by a real secret store (Vault). The eval profile has no
+# such backend, so it synthesises the Postgres DSNs directly from the CNPG
+# application secret (`postgres.secretName`, default `custos-app`) — the same
+# secret the migrate Job consumes. All stateful services share the single
+# `custos-app` database; the migrate Job creates every interface schema inside
+# it, so each `*_STORE*` DSN points at the same connection URI.
+#
+# Non-secret config (provider selectors, in-cluster endpoints, the sandbox
+# namespace and the connector sidecar image) is supplied as literal env. These
+# stay release-name aware for the reference release name `custos`.
+# ---------------------------------------------------------------------------
+
+auth-service:
+  env:
+    - name: CUSTOS_AUTH_STORE_DSN
+      valueFrom:
+        secretKeyRef:
+          name: custos-app
+          key: uri
+    - name: CUSTOS_AUTH_METADATA_STORE_DSN
+      valueFrom:
+        secretKeyRef:
+          name: custos-app
+          key: uri
+
+catalog-service:
+  env:
+    - name: CAT_DEFINITION_STORE
+      valueFrom:
+        secretKeyRef:
+          name: custos-app
+          key: uri
+    - name: CAT_CATALOG_STORE
+      valueFrom:
+        secretKeyRef:
+          name: custos-app
+          key: uri
+    - name: CAT_METADATA_STORE
+      valueFrom:
+        secretKeyRef:
+          name: custos-app
+          key: uri
+
+connector-service:
+  env:
+    - name: CONN_CATALOG_STORE
+      valueFrom:
+        secretKeyRef:
+          name: custos-app
+          key: uri
+    - name: CONN_METADATA_STORE
+      valueFrom:
+        secretKeyRef:
+          name: custos-app
+          key: uri
+
+trigger-service:
+  env:
+    - name: TRIGGER_METADATA_STORE
+      valueFrom:
+        secretKeyRef:
+          name: custos-app
+          key: uri
+
+observability-audit-service:
+  env:
+    - name: CUSTOS_OBS_METADATA_STORE_DSN
+      valueFrom:
+        secretKeyRef:
+          name: custos-app
+          key: uri
+    - name: CUSTOS_LOG_QUERY_PROVIDER
+      value: loki
+    - name: CUSTOS_METRICS_QUERY_PROVIDER
+      value: prometheus
+    - name: CUSTOS_LOKI_URL
+      value: http://custos-loki:3100
+    - name: CUSTOS_PROMETHEUS_URL
+      value: http://custos-prometheus-server:80
+
+activity-runtime-manager:
+  env:
+    - name: ARM_METADATA_STORE
+      valueFrom:
+        secretKeyRef:
+          name: custos-app
+          key: uri
+    # ARM stores the artifact-store binding as an opaque string and only
+    # resolves it lazily once the scheduler is attached, so a non-empty value
+    # is enough for startup readiness. Functional object I/O against the eval
+    # MinIO is tracked as a follow-up.
+    - name: ARM_ARTIFACT_STORE
+      value: s3://custos-artifacts
+    - name: ARM_CATALOG_ENDPOINT
+      value: http://custos-catalog-service:8080
+    - name: ARM_CONNECTOR_ENDPOINT
+      value: http://custos-connector-service:8080
+    - name: ARM_SANDBOX_NAMESPACE
+      value: custos-system
+    - name: ARM_SIDECAR_IMAGE
+      value: ghcr.io/toddysm/custos/connector-sidecar:dev
