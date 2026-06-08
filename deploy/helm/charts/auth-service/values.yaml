@@ -101,7 +101,9 @@ networkPolicy:
 # bring-up.
 config:
   # design.md § Configuration defaults
-  serviceTokenTtlDefault: "90d"
+  # Integer seconds. The settings parser rejects duration suffixes, so keep
+  # this a plain integer. 7776000 = 90 days (DEFAULT_SERVICE_TOKEN_TTL_SECONDS).
+  serviceTokenTtlDefault: "7776000"
   # Integer seconds. ``0`` disables the in-process rotation loop
   # (operator manages rotation externally). The default matches the
   # design's 7-day rotation cadence (AS-IMPL-018).
