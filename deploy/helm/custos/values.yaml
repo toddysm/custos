@@ -293,7 +293,7 @@ observability:
 # Prometheus — single server instance with a PV-backed TSDB (design:
 # "Prometheus single instance, PV"). The bundled alertmanager / pushgateway /
 # node-exporter / kube-state-metrics are disabled to keep the footprint to the
-# server that scrapes the per-service `/metrics` endpoints via pod annotations.
+# server that scrapes the per-service `/metrics` endpoints.
 prometheus:
   server:
     replicaCount: 1
@@ -308,6 +308,31 @@ prometheus:
     enabled: false
   kube-state-metrics:
     enabled: false
+  # Scrape the Custos services' `/metrics` endpoints. The vendored
+  # prometheus-community chart has no Prometheus Operator, so ServiceMonitors do
+  # not apply; this static job uses Kubernetes pod discovery instead. Every
+  # Custos service container exposes a port named `http` (the app port that also
+  # serves `/metrics`), whereas the vendored sinks and the Dapr sidecar use
+  # differently-named ports — so keeping only the `http` port targets exactly the
+  # Custos workloads. Rendered through the chart's `tpl`, hence `.Release.*`.
+  extraScrapeConfigs: |
+    - job_name: custos-services
+      metrics_path: /metrics
+      kubernetes_sd_configs:
+        - role: pod
+          namespaces:
+            names:
+              - {{ .Release.Namespace }}
+      relabel_configs:
+        - source_labels: [__meta_kubernetes_pod_container_port_name]
+          regex: http
+          action: keep
+        - source_labels: [__meta_kubernetes_namespace]
+          target_label: namespace
+        - source_labels: [__meta_kubernetes_pod_name]
+          target_label: pod
+        - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+          target_label: app
 
 # Loki — single-binary deployment with filesystem storage (design: "Loki
 # single-binary, filesystem" for eval). HA profiles swap `loki.storage` to the
@@ -357,8 +382,11 @@ loki:
         installOperator: false
 
 # OpenTelemetry Collector — a single deployment that ingests OTLP from the
-# services and fans out to the in-cluster sinks. The contrib image is pinned so
-# the air-gapped mirror has a deterministic source.
+# services. The shipped pipeline uses the `debug` exporter as a safe default;
+# operators add exporters (e.g. otlphttp → Loki, prometheus remote-write) for
+# their chosen backends. The `${env:MY_POD_IP}` receiver endpoints resolve via
+# the `MY_POD_IP` env var the upstream chart injects into the collector Pod. The
+# contrib image is pinned so the air-gapped mirror has a deterministic source.
 opentelemetry-collector:
   mode: deployment
   replicaCount: 1

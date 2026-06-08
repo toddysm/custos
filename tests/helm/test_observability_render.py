@@ -66,13 +66,25 @@ def _loki_config(docs: list[dict[str, Any]]) -> dict[str, Any]:
     return yaml.safe_load(cm["data"]["config.yaml"])
 
 
-def _render_with(profile: str, *sets: str) -> list[dict[str, Any]]:
-    """Render one profile with extra ``--set`` overrides."""
+_DEPS_UPDATED = False
+
+
+def _ensure_dependencies() -> None:
+    """Vendor the umbrella subcharts once per test process."""
+    global _DEPS_UPDATED
+    if _DEPS_UPDATED:
+        return
     subprocess.run(
         ["helm", "dependency", "update", str(UMBRELLA)],
         check=True,
         capture_output=True,
     )
+    _DEPS_UPDATED = True
+
+
+def _render_with(profile: str, *sets: str) -> list[dict[str, Any]]:
+    """Render one profile with extra ``--set`` overrides."""
+    _ensure_dependencies()
     cmd = [
         "helm",
         "template",
@@ -122,6 +134,28 @@ def test_otel_collector_renders(
     assert _find(docs, "Deployment", OTEL_COLLECTOR) is not None, (
         f"OTel Collector missing from {profile}"
     )
+
+
+def test_prometheus_scrapes_custos_services() -> None:
+    """Prometheus carries a pod-discovery job for the Custos /metrics ports."""
+    docs = _render_with("connected-eval")
+    cm = _find(docs, "ConfigMap", PROMETHEUS_SERVER)
+    assert cm is not None
+    cfg = yaml.safe_load(cm["data"]["prometheus.yml"])
+    job = next(
+        (j for j in cfg["scrape_configs"] if j["job_name"] == "custos-services"),
+        None,
+    )
+    assert job is not None, "custos-services scrape job missing"
+    assert job["metrics_path"] == "/metrics"
+    # Only the app container port named "http" is kept (Dapr / sink ports differ).
+    keep = [
+        r
+        for r in job["relabel_configs"]
+        if r.get("action") == "keep"
+        and r.get("source_labels") == ["__meta_kubernetes_pod_container_port_name"]
+    ]
+    assert keep and keep[0]["regex"] == "http"
 
 
 @pytest.mark.parametrize("profile", ALL_PROFILES)
