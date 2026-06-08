@@ -99,8 +99,21 @@ def test_dashboards_can_be_disabled(profile: str) -> None:
     import subprocess
     from pathlib import Path
 
+    import yaml
+
     repo_root = Path(__file__).resolve().parents[2]
     umbrella = repo_root / "deploy" / "helm" / "custos"
+
+    # Vendor subchart deps so the render works in isolation (before the session
+    # ``rendered`` fixture has populated ``./charts/``).
+    subprocess.run(
+        ["helm", "dependency", "update", str(umbrella)],
+        check=True,
+        capture_output=True,
+    )
+    # Render the whole chart (not ``--show-only``, which exits non-zero when the
+    # single template renders empty) and assert Helm succeeds, then confirm no
+    # dashboard ConfigMap is present.
     result = subprocess.run(
         [
             "helm",
@@ -111,15 +124,20 @@ def test_dashboards_can_be_disabled(profile: str) -> None:
             str(umbrella / f"values-{profile}.yaml"),
             "--set",
             "observability.grafanaDashboards.enabled=false",
-            "--show-only",
-            "templates/grafana-dashboards.yaml",
         ],
         capture_output=True,
         text=True,
     )
-    # helm exits non-zero with "could not find template ... in chart" when the
-    # template renders empty, which is the expected "disabled" outcome.
-    combined = result.stdout + result.stderr
-    assert "kind: ConfigMap" not in result.stdout, (
-        f"dashboards should not render when disabled in {profile}: {combined}"
+    assert result.returncode == 0, (
+        f"helm template failed for {profile}: {result.stderr}"
+    )
+    docs = [doc for doc in yaml.safe_load_all(result.stdout) if doc is not None]
+    dashboard_cms = [
+        doc["metadata"]["name"]
+        for doc in docs
+        if doc.get("kind") == "ConfigMap"
+        and doc.get("metadata", {}).get("name", "").startswith("custos-dashboard-")
+    ]
+    assert not dashboard_cms, (
+        f"dashboards should not render when disabled in {profile}: {dashboard_cms}"
     )

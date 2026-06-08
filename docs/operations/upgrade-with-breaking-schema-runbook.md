@@ -109,11 +109,14 @@ and let it settle toward zero before you cut writes back on.
    ```
 
 5. **Let the rolling update finish.** Anti-affinity + PodDisruptionBudgets (HA)
-   prevent simultaneous loss of all replicas. Confirm every Deployment reaches
-   the new revision and `Ready`:
+   prevent simultaneous loss of all replicas. `kubectl rollout status` needs a
+   named resource, so wait on each Custos Deployment in turn:
 
    ```bash
-   kubectl -n custos-system rollout status deploy --timeout=10m
+   for d in $(kubectl -n custos-system get deploy \
+       -l app.kubernetes.io/instance=custos -o name); do
+     kubectl -n custos-system rollout status "$d" --timeout=10m
+   done
    ```
 
 6. **Re-enable writes.** Scale the write-path components back to their configured
@@ -160,15 +163,22 @@ the pre-upgrade backup and reinstalling the prior chart:
 2. Restore Postgres from the backup taken in step 1 of the upgrade (CNPG
    point-in-time recovery to just before the migrate Job ran, or your managed
    snapshot restore).
-3. Reinstall the **previous** chart version against the restored database:
+3. Reinstall the **previous** chart version against the restored database. Run
+   this from a checkout (or `helm pull` extraction) of the **previous** chart so
+   `deploy/helm/custos` *is* the old chart — a local chart directory has no
+   `--version` selector, so the version is whatever is on disk:
 
    ```bash
+   # From the previous release's checkout / extracted chart package:
    helm upgrade custos deploy/helm/custos \
      -n custos-system \
-     --version <previous-chart-version> \
      -f deploy/helm/custos/values-<profile>.yaml \
      --wait --timeout 30m
    ```
+
+   If you publish the chart to an OCI/HTTP registry instead, pull a specific
+   prior version directly with `helm upgrade custos <repo>/custos --version
+   <previous-chart-version> ...`.
 
 4. Lift the read-only fallback and smoke test.
 
