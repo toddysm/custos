@@ -31,11 +31,14 @@ async def readyz(request: Request) -> JSONResponse:
     """Readiness probe — 503 until the lifespan hook marks the app ready."""
     if getattr(request.app.state, "ready", False):
         return JSONResponse({"status": "ready"})
+    detail = getattr(request.app.state, "ready_detail", None) or (
+        "api-gateway has not finished startup"
+    )
     return JSONResponse(
         status_code=503,
         content={
             "status": "not_ready",
-            "detail": "api-gateway has not finished startup",
+            "detail": detail,
         },
     )
 

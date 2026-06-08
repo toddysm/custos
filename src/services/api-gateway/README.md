@@ -36,7 +36,10 @@ URL-authoritative `resolve_workspace` dependency (path `{workspaceId}` binds
 request via `callctx.sign`, staged with `x-correlation-id` on the outbound Dapr
 metadata), the startup permission validator (`startup.py` cross-checks every
 route's declared `requiredPermission` against the Auth Service registry inside
-the lifespan and refuses to become ready on any undeclared permission), the
+the lifespan; a transient Auth Service / Dapr-sidecar outage at boot is
+non-fatal — the gateway stays up not-ready and converges in the background with
+exponential backoff (issue #815) — while a permission drift or non-retryable
+contract error keeps it permanently not-ready instead of crash-looping), the
 write-path Idempotency Coordinator (`idempotency.py` derives the
 `(workspaceId, principalId, route, idempotencyKey)` key + SHA-256 request hash,
 reserves/completes records on the SPL `MetadataStoreProvider`, and maps the four

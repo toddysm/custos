@@ -16,10 +16,11 @@ permission cross-check) happens inside the FastAPI lifespan context.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import TYPE_CHECKING
 
 import httpx
@@ -42,7 +43,11 @@ from custos_gateway.routes import (
     build_webhook_router,
 )
 from custos_gateway.settings import Settings, load_settings
-from custos_gateway.startup import validate_route_permissions
+from custos_gateway.startup import (
+    StartupCheckOutcome,
+    converge_route_permissions,
+    run_startup_permission_check,
+)
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -104,6 +109,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         owned_client: httpx.AsyncClient | None = None
+        converge_task: asyncio.Task[None] | None = None
 
         def owned_http_client() -> httpx.AsyncClient:
             # Lazily build a single httpx client shared by the downstream router
@@ -146,12 +152,31 @@ def create_app(
             )
         )
         setattr(app.state, AUTH_CLIENT_STATE_ATTR, effective_auth_client)
-        await validate_route_permissions(app=app, client=effective_auth_client)
-        app.state.ready = True
-        logger.info("api-gateway is ready")
+        # Resilient to dependency start order (issue #815): a transient
+        # Auth Service / Dapr-sidecar outage at boot must not crash the process.
+        # Attempt the cross-check once; on a transient failure stay not-ready and
+        # converge in the background until the registry becomes reachable.
+        outcome = await run_startup_permission_check(app=app, client=effective_auth_client)
+        if outcome is StartupCheckOutcome.TRANSIENT_FAILURE:
+            converge_task = asyncio.create_task(
+                converge_route_permissions(
+                    app=app,
+                    client=effective_auth_client,
+                    initial_backoff_seconds=(
+                        effective_settings.startup_permission_check_initial_backoff_seconds
+                    ),
+                    max_backoff_seconds=(
+                        effective_settings.startup_permission_check_max_backoff_seconds
+                    ),
+                )
+            )
         try:
             yield
         finally:
+            if converge_task is not None:
+                converge_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await converge_task
             if owned_client is not None:
                 await owned_client.aclose()
 
@@ -163,6 +188,7 @@ def create_app(
     )
     app.state.settings = effective_settings
     app.state.ready = False
+    app.state.ready_detail = "api-gateway has not finished startup"
 
     # The correlation middleware is added first and the CORS middleware second so
     # CORS sits outermost: every response that reaches the app — normal replies

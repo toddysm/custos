@@ -353,3 +353,72 @@ flowchart TD
 ## Open questions
 
 _(none — resolved at gate 1: prefix `AGW-IMPL`, full-contract route registry as one task, device-code 503 stub retained.)_
+
+---
+
+# Follow-up: Resilient startup (#815)
+
+> Derived from `design/components/api-gateway/design.md`, `src/services/api-gateway/src/custos_gateway/{app,startup,health,clients/auth}.py`, and issue #815 on 2026-06-08.
+> Scope: the single bug in #815 (gateway crash-loops when auth-service / Dapr sidecar aren't yet reachable at startup). Extends the already-delivered AGW-IMPL-001..021 component build; not a redesign.
+
+## Summary
+
+The gateway lifespan eagerly runs `validate_route_permissions`, which calls `AuthServiceClient.get_permissions()` over the Dapr sidecar. On a cold cluster the sidecar/auth-service aren't up yet, the call raises `AuthServiceClientTransportError` (a **retryable** error), the lifespan propagates it, and uvicorn exits with *"Application startup failed"* — crash-looping until dependencies happen to start first. The fix makes startup resilient: transient/retryable failures during the initial permission cross-check become non-fatal and converge in the background, with `/readyz` reporting 503 (plus an operator-actionable detail) until the first successful validation. A genuine permission drift (`GatewayStartupError`, non-retryable) keeps the pod up but permanently not-ready (rather than crash-looping), surfacing an operator-actionable detail. A companion deploy task adds a `startupProbe` to the api-gateway subchart for cold-start budget (mirrors the #816 workflow-service hardening).
+
+## Conventions (follow-up)
+
+- Task prefix: `AGW-IMPL-`.
+- Numbering continues at `AGW-IMPL-022` (next free id after a `component:api-gateway` scan; highest existing is AGW-IMPL-021).
+- The two follow-up tasks are independently mergeable.
+
+## Resolved decisions
+
+1. **Permission-drift behavior**: stay-up-but-permanently-not-ready with an operator detail (option a). Avoids crash-looping (the point of #815) while making drift diagnosable. The pod does not exit on `GatewayStartupError`.
+2. **Retry budget**: unbounded background retry for retryable (transport/5xx) errors, with the Kubernetes `startupProbe` from AGW-IMPL-023 providing the outer time bound.
+
+## Dependency graph (follow-up)
+
+```mermaid
+flowchart TD
+    A022["AGW-IMPL-022: background-converging readiness (service fix)"]
+    B023["AGW-IMPL-023: api-gateway startupProbe + render coverage"]
+    A022 -.->|independent, logically paired| B023
+```
+
+## Phase A2 — Resilient gateway startup (service)
+
+### `AGW-IMPL-022`: Make startup permission validation non-fatal and background-converging
+
+- **Scope**:
+  - `src/services/api-gateway/src/custos_gateway/app.py` — in the lifespan, stop `await`-ing `validate_route_permissions` as a boot-blocking, crash-on-failure call. Instead: attempt it once; on a **retryable** `AuthServiceClientError` (transport / 408 / 429 / 5xx) leave `app.state.ready = False`, set `app.state.ready_detail`, log a warning, and launch a background retry task that re-runs the check on a backoff until it succeeds (then flips `ready = True`). Cancel + await the task on lifespan shutdown.
+  - `src/services/api-gateway/src/custos_gateway/startup.py` — add a small reusable coroutine (e.g. `converge_route_permissions(app, client, *, backoff…)`) that wraps `validate_route_permissions`, classifies errors via the existing `AuthServiceClientError.retryable` flag, and owns the retry/backoff loop. Keep `validate_route_permissions` itself unchanged (single-shot, raises) so the pure cross-check stays unit-testable.
+  - `src/services/api-gateway/src/custos_gateway/health.py` — surface `app.state.ready_detail` in the `/readyz` 503 body (replacing the static "has not finished startup" string) so operators can see *why* it's not ready.
+  - `src/services/api-gateway/src/custos_gateway/settings.py` — add optional knobs for the startup convergence budget (initial delay, max backoff), with safe defaults.
+- **Acceptance criteria**:
+  - With an auth-service client that raises `AuthServiceClientTransportError` on the first N calls then succeeds, `create_app()` starts cleanly (no exception out of the lifespan), `/readyz` returns 503 with a transport detail while unreachable, and flips to 200 after the client recovers.
+  - A non-retryable `GatewayStartupError` (permission drift) keeps `/readyz` at 503 with the drift detail and does **not** crash the process (no infinite background retry on a permanent error).
+  - The background task is cancelled and awaited on shutdown (no "task was destroyed" warnings; no leaked task).
+  - New/adjusted unit tests in `tests/test_startup.py` / `tests/test_app.py` cover: initially-unreachable→recovers, permanent permission-drift→stays-not-ready, and shutdown-cancels-the-task.
+  - Quality gates green from `src/services/api-gateway` (`ruff format . && ruff check . && mypy src tests && pytest -q`, coverage floor `--cov-fail-under=90`).
+- **Depends on**: _(none — builds on the delivered AGW-IMPL-002/008)_.
+- **Complexity**: M.
+
+## Phase B2 — Deploy cold-start hardening
+
+### `AGW-IMPL-023`: Add a `startupProbe` to the api-gateway subchart with render coverage
+
+- **Scope**:
+  - `deploy/helm/charts/api-gateway/values.yaml` — add a configurable `startupProbe` block (enabled by default; `periodSeconds` × `failureThreshold` cold-start budget), matching the pattern landed for workflow-service in #816.
+  - `deploy/helm/charts/api-gateway/templates/deployment.yaml` — render the `startupProbe` (→ `/healthz`) gating liveness/readiness so the readiness convergence window doesn't trip liveness restarts on a slow cold start.
+  - `deploy/helm/charts/api-gateway/README.md` — document the probe + the resilient-startup behavior.
+  - `tests/helm/test_api_gateway_render.py` — assert the `startupProbe` renders with an adequate budget across all four profiles.
+- **Acceptance criteria**:
+  - `helm template` for all four profiles renders an api-gateway `startupProbe` hitting `/healthz` with `periodSeconds × failureThreshold ≥ 60s`.
+  - New render test passes; existing api-gateway render tests stay green.
+- **Depends on**: _(none — independent of 022, but sequenced after it)_.
+- **Complexity**: S.
+
+## Out of scope (follow-up)
+
+- Re-enabling the `deploy-smoke` workflow as a required `pull_request` gate — that's the umbrella follow-up once both #815 and #816 are green (tracked in DEPLOY-IMPL-019 / #792), not part of this fix.
+- Switching the readiness model to a Dapr-state/health-API-backed probe — M2.

@@ -146,7 +146,7 @@ sequenceDiagram
     end
 ```
 
-The required permission for each route is declared at route-registration time (FastAPI dependency); the gateway never invents permission names — they must exist in the Auth Service permission registry (validated at startup via `GET /v1/permissions`; gateway refuses to start if it references an undeclared permission).
+The required permission for each route is declared at route-registration time (FastAPI dependency); the gateway never invents permission names — they must exist in the Auth Service permission registry (validated at startup via `GET /v1/permissions`). The check is resilient to dependency start order (issue #815): a transient Auth Service / Dapr-sidecar outage at boot is non-fatal — the gateway stays up but not-ready and keeps retrying in the background until the registry is reachable — while a permission drift keeps it permanently not-ready (surfaced via `/readyz`) rather than crash-looping.
 
 ## Idempotency Coordinator
 
@@ -311,7 +311,7 @@ The spec includes:
 | `downstream-unavailable` (503) | Router | Retry with backoff; `correlationId` carries trace. |
 | `webhook-route-not-found` (404) | Webhook Pass-through | `{connectorInstanceId}` does not resolve in Trigger Service. |
 | `device-code-expired` (400) | Device-Code Session Mgr | Restart device-code flow. |
-| `gateway-startup-permission-missing` (panic) | Startup | Programming error: a route declared a permission name absent from Auth Service's registry. Refuses startup. |
+| `gateway-startup-permission-missing` (panic) | Startup | Programming error: a route declared a permission name absent from Auth Service's registry. Keeps the gateway permanently not-ready (surfaced via `/readyz`) rather than crash-looping; a *transient* Auth Service outage at boot instead retries in the background (issue #815). |
 
 ## Error Envelope
 

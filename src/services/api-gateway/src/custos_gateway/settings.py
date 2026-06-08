@@ -67,6 +67,18 @@ ENV_DEVICE_CODE_POLL_INTERVAL: Final[str] = "CUSTOS_GATEWAY_DEVICE_CODE_POLL_INT
 #: ``CUSTOS_AUTH_OIDC_ISSUERS``) for the device-code landing page.
 ENV_OIDC_DEFAULT_ISSUER: Final[str] = "CUSTOS_GATEWAY_OIDC_DEFAULT_ISSUER"
 
+#: Optional. Initial backoff between startup permission-check retries when the
+#: Auth Service is transiently unreachable (seconds). Default ``1``.
+ENV_STARTUP_PERMISSION_CHECK_INITIAL_BACKOFF: Final[str] = (
+    "CUSTOS_GATEWAY_STARTUP_PERMISSION_CHECK_INITIAL_BACKOFF_SECONDS"
+)
+
+#: Optional. Maximum backoff between startup permission-check retries (seconds).
+#: Default ``30``.
+ENV_STARTUP_PERMISSION_CHECK_MAX_BACKOFF: Final[str] = (
+    "CUSTOS_GATEWAY_STARTUP_PERMISSION_CHECK_MAX_BACKOFF_SECONDS"
+)
+
 # --- Dapr sidecar coordinates -------------------------------------------------
 
 #: Optional. Dapr sidecar HTTP host. Default ``127.0.0.1``.
@@ -92,6 +104,8 @@ DEFAULT_RATE_LIMIT_WORKSPACE_WRITES_BURST: Final[int] = 400
 DEFAULT_IDEMPOTENCY_TTL_SECONDS: Final[int] = 24 * 60 * 60
 DEFAULT_DEVICE_CODE_TTL_SECONDS: Final[int] = 15 * 60
 DEFAULT_DEVICE_CODE_POLL_INTERVAL_SECONDS: Final[int] = 5
+DEFAULT_STARTUP_PERMISSION_CHECK_INITIAL_BACKOFF_SECONDS: Final[int] = 1
+DEFAULT_STARTUP_PERMISSION_CHECK_MAX_BACKOFF_SECONDS: Final[int] = 30
 DEFAULT_DAPR_HTTP_HOST: Final[str] = "127.0.0.1"
 DEFAULT_DAPR_HTTP_PORT: Final[int] = 3500
 DEFAULT_ENVIRONMENT: Final[str] = "development"
@@ -127,6 +141,8 @@ class Settings:
     idempotency_ttl_seconds: int
     device_code_ttl_seconds: int
     device_code_poll_interval_seconds: int
+    startup_permission_check_initial_backoff_seconds: int
+    startup_permission_check_max_backoff_seconds: int
     oidc_default_issuer: str  # empty string means "device-code flow disabled"
     dapr_http_host: str
     dapr_http_port: int
@@ -241,6 +257,16 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         device_code_poll_interval_seconds=_opt_duration_seconds(
             ENV_DEVICE_CODE_POLL_INTERVAL, src, DEFAULT_DEVICE_CODE_POLL_INTERVAL_SECONDS
         ),
+        startup_permission_check_initial_backoff_seconds=_opt_positive_int(
+            ENV_STARTUP_PERMISSION_CHECK_INITIAL_BACKOFF,
+            src,
+            DEFAULT_STARTUP_PERMISSION_CHECK_INITIAL_BACKOFF_SECONDS,
+        ),
+        startup_permission_check_max_backoff_seconds=_opt_positive_int(
+            ENV_STARTUP_PERMISSION_CHECK_MAX_BACKOFF,
+            src,
+            DEFAULT_STARTUP_PERMISSION_CHECK_MAX_BACKOFF_SECONDS,
+        ),
         oidc_default_issuer=_opt_str(ENV_OIDC_DEFAULT_ISSUER, src, ""),
         dapr_http_host=_opt_str(ENV_DAPR_HTTP_HOST, src, DEFAULT_DAPR_HTTP_HOST),
         dapr_http_port=_opt_positive_int(ENV_DAPR_HTTP_PORT, src, DEFAULT_DAPR_HTTP_PORT),
@@ -262,6 +288,8 @@ __all__ = [
     "DEFAULT_RATE_LIMIT_PRINCIPAL_WRITES_RPS",
     "DEFAULT_RATE_LIMIT_WORKSPACE_WRITES_BURST",
     "DEFAULT_RATE_LIMIT_WORKSPACE_WRITES_RPS",
+    "DEFAULT_STARTUP_PERMISSION_CHECK_INITIAL_BACKOFF_SECONDS",
+    "DEFAULT_STARTUP_PERMISSION_CHECK_MAX_BACKOFF_SECONDS",
     "ENV_CORS_ALLOWED_ORIGINS",
     "ENV_TLS_CERT_REF",
     "ENV_TLS_KEY_REF",
