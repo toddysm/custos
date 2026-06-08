@@ -48,7 +48,8 @@ kubectl describe cluster custos -n "$NS"
 | `custos-migrate` pre-install hook fails / times out | The CNPG `custos-app` Secret does not exist yet — the embedded Postgres Cluster is created *after* pre-install hooks. | Pre-provision Postgres before install. See [Connected install](install-connected.md#4-pre-provision-postgres-install-ordering-caveat). |
 | api-gateway pod is `Running` but `0/1` Ready; gateway returns `503` | The gateway is still converging its startup permission cross-check (a transient dependency hiccup), so `/readyz` is not yet `200`. | This self-heals — the gateway retries with backoff and never crash-loops. Wait, then inspect `/readyz`. See [Background readiness](#api-gateway-stays-not-ready) below. |
 | api-gateway never becomes Ready; `/readyz` detail shows a permission error | Permission drift — the gateway's required permissions are not granted, which is a permanent (not transient) failure. | The gateway intentionally stays up-but-not-ready. Fix the permission/role binding, then restart the deployment. |
-| Service pod shows `1/2` containers ready | The Dapr sidecar was not injected, or the sidecar itself is unhealthy. | Confirm the namespace/pod has Dapr injection enabled and the Dapr control plane is healthy (see [Dapr sidecar not injected](#dapr-sidecar-not-injected)). |
+| Service pod shows `1/2` containers ready | The Dapr sidecar (`daprd`) was injected but is not passing its readiness check (often because the Dapr control plane is unhealthy). | Inspect the sidecar: `kubectl logs <pod> -c daprd` and confirm the Dapr control plane is healthy. See [Dapr sidecar problems](#dapr-sidecar-problems). |
+| Service pod shows a single container (`1/1`, no `daprd`) | The Dapr sidecar was **not injected** — the pod/namespace is missing Dapr injection, or the injector was not running when the pod started. | Confirm Dapr injection is enabled and the Dapr control plane was healthy, then restart the deployment. See [Dapr sidecar problems](#dapr-sidecar-problems). |
 | `helm install` fails on missing CRDs (Gateway API, CNPG, ESO) | The out-of-band operators were not installed before the chart. | Install the required operators first. See [Prerequisites](prerequisites.md#out-of-band-operators). |
 | `helm test` fails | A control-plane service is not ready, or the seeded test token is missing/invalid. | Re-run with logs: `helm test $RELEASE -n $NS --logs`; then debug the failing service from its pod logs. |
 | Gateway endpoint unreachable | The `Gateway` has no address, DNS for `custos.local` is not pointed at it, or TLS trust is missing. | Re-check the gateway endpoint and port-forward fallback in [Verify](verify.md). Add `-k` to `curl` for the eval self-signed certificate. |
@@ -80,15 +81,23 @@ role/permission binding and restart the deployment:
 kubectl rollout restart deployment/custos-api-gateway -n "$NS"
 ```
 
-## Dapr sidecar not injected
+## Dapr sidecar problems
 
 Every control-plane service pod should report **2/2** containers (the service
-plus the injected `daprd` sidecar). A pod stuck at `1/2` usually means the Dapr
-sidecar injector did not run:
+plus the injected `daprd` sidecar). There are two distinct failure shapes:
+
+- **`1/2` containers** — the `daprd` sidecar **was** injected but is not passing
+  its readiness check (commonly because the Dapr control plane is unhealthy).
+- **A single container (`1/1`, no `daprd`)** — the sidecar was **not injected**
+  at all; the pod or namespace is missing Dapr injection, or the injector was
+  not running when the pod was created.
 
 ```bash
 # Confirm the Dapr control plane is healthy.
 kubectl get pods -n dapr-system
+
+# Inspect the sidecar's own logs (only present when it was injected).
+kubectl logs <pod> -n "$NS" -c daprd
 
 # Inspect the pod's containers and injection annotations.
 kubectl describe pod <pod> -n "$NS"
@@ -96,6 +105,8 @@ kubectl describe pod <pod> -n "$NS"
 
 If the Dapr control plane is unhealthy, the chart-managed Dapr install may not
 have completed — re-check the install output and the `dapr-system` namespace.
+If the sidecar was never injected (single-container pod), confirm injection is
+enabled and restart the deployment once the Dapr control plane is healthy.
 
 ## Known M1 limitations
 
@@ -114,7 +125,9 @@ These are expected behaviors in the M1 "Core engine" milestone, not bugs:
 
 If you hit a problem not covered here, gather the failing pod's description and
 logs (commands above) and file an issue on the
-[project issue tracker](https://github.com/toddysm/custos/issues).
+[project issue tracker](https://github.com/toddysm/custos/issues). Known issues
+and the in-progress evaluation-deployment documentation are tracked under the
+[`USERDOC-000-EVAL-DEPLOY` tracker (#824)](https://github.com/toddysm/custos/issues/824).
 
 ## Next step
 
