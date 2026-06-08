@@ -55,6 +55,13 @@ Full M1 gateway implementation, packaged at `src/services/api-gateway/` (Python 
 
 Tracker: #732 — `AGW-IMPL-000-API-GATEWAY`.
 
+### Follow-up — Resilient startup (#815)
+
+- [x] AGW-IMPL-022 (#819): Make startup permission validation non-fatal and background-converging.
+- [F] AGW-IMPL-023 (#820): Add a startupProbe to the api-gateway subchart with render coverage.
+
+Tracker: #821 — `AGW-IMPL-000-API-GATEWAY-STARTUP`.
+
 ## Closed
 
 _(none yet)_

@@ -59,8 +59,17 @@ The gateway listens for TLS traffic and exposes:
 The Dapr app-id is `api-gateway`. Readiness only flips `true` after the startup
 **permission cross-check** succeeds: every permission declared by the route
 registry is validated against the Auth Service permission registry, so a
-permission name that drifts from the platform is a loud boot failure rather than
-a per-request surprise.
+permission name that drifts from the platform keeps the gateway not-ready rather
+than becoming a per-request surprise.
+
+The cross-check is resilient to dependency start order: if the Auth Service or
+the Dapr sidecar is not yet reachable at boot (a transient transport error or a
+retryable `408` / `429` / `5xx` status), the gateway stays up but not-ready and
+keeps retrying in the background (with exponential backoff) until the registry
+becomes reachable — it never crash-loops. A permission *drift* (or any
+non-retryable Auth Service contract error) is a permanent failure: the gateway
+stays up but never becomes ready, and `/readyz` returns `503` with an
+operator-actionable `detail`.
 
 CORS is enforced for the configured origin allow-list only — there is **no
 wildcard origin**. The CORS layer sits outermost, so every response (success or
@@ -240,11 +249,13 @@ the wire. The closed code → HTTP-status set:
 | `downstream-unavailable` | 503 | The owning component returned `5xx` or was unreachable |
 | `webhook-route-not-found` | 404 | The webhook target instance is unknown downstream |
 | `device-code-expired` | 400 | The device-code session has expired |
-| `gateway-startup-permission-missing` | 500 | A route declares a permission the Auth Service does not know (boot-time panic) |
+| `gateway-startup-permission-missing` | 500 | A route declares a permission the Auth Service does not know (keeps the gateway permanently not-ready) |
 
-`gateway-startup-permission-missing` is a startup-time refusal-to-boot, not a
+`gateway-startup-permission-missing` is a startup-time readiness failure, not a
 served response — it is listed so the taxonomy is complete, but the gateway never
-reaches the wire with it.
+reaches the wire with it. A drifted permission keeps the gateway up but
+permanently not-ready (surfaced via `/readyz` `503` with a `detail`) rather than
+crash-looping.
 
 ---
 
@@ -371,6 +382,8 @@ Dapr sidecar coordinates used to reach downstream components and the Auth Servic
 | `CUSTOS_GATEWAY_DEVICE_CODE_TTL` | `15m` | Device-code session lifetime |
 | `CUSTOS_GATEWAY_DEVICE_CODE_POLL_INTERVAL` | `5s` | Device-code poll-interval hint returned to the CLI |
 | `CUSTOS_GATEWAY_OIDC_DEFAULT_ISSUER` | _(empty)_ | Default OIDC issuer; empty disables the device-code flow |
+| `CUSTOS_GATEWAY_STARTUP_PERMISSION_CHECK_INITIAL_BACKOFF_SECONDS` | `1` | Initial backoff between startup permission-check retries when the Auth Service is transiently unreachable |
+| `CUSTOS_GATEWAY_STARTUP_PERMISSION_CHECK_MAX_BACKOFF_SECONDS` | `30` | Maximum backoff between startup permission-check retries |
 | `DAPR_HTTP_HOST` | `127.0.0.1` | Dapr sidecar HTTP host |
 | `DAPR_HTTP_PORT` | `3500` | Dapr sidecar HTTP port |
 | `ENVIRONMENT` | `development` | Operational environment tag |
