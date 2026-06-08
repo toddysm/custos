@@ -1,6 +1,6 @@
 # Documentation: Custos
 
-Last Updated: 2026-05-16
+Last Updated: 2026-06-08
 
 ## Audiences
 
@@ -8,4 +8,4 @@ Last Updated: 2026-05-16
 |---|---|---|
 | Contributors | Building and maintaining the project | _coming soon_ |
 | Plugin, Activity & Connection Developers | Extending the platform | [developers/README.md](developers/README.md) |
-| Users | Using the application | _coming soon_ |
+| Users | Deploying and operating the platform | [users/README.md](users/README.md) |
