@@ -32,23 +32,42 @@ INSTALL-AIRGAPPED.md  this runbook
    sha256sum -c checksums.sha256   # or: shasum -a 256 -c checksums.sha256
    ```
 
-2. **Load and push the images into your internal registry**
+2. **Load and mirror the images into your internal registry**
 
-   Each archive restores its original image reference; retag it under your
-   mirror and push. For example:
+   The air-gapped values files are pre-wired to pull from a mirror registry
+   (`registry.internal`, with the Custos + Bitnami images under
+   `registry.internal/custos` and Dapr / cert-manager / Prometheus directly
+   under `registry.internal`). Edit `global.imageRegistry` (and the per-subchart
+   registry overrides alongside it) in
+   `chart/custos/values-airgapped-<profile>.yaml` to match your registry before
+   installing.
+
+   The chart rewrites image paths per subchart, so there is no single string
+   rule that maps every source image to its mirror target. Instead, render the
+   chosen profile to get the authoritative source-to-target mapping and push
+   each loaded archive to the reference the install actually expects:
 
    ```bash
-   REGISTRY=registry.internal/custos
-   for tar in images/*.tar; do
-     ref=$(docker load -q -i "$tar" | sed -E 's/^Loaded image: //')
-     mirror="$REGISTRY/${ref#*/}"          # strip the upstream registry host
-     docker tag "$ref" "$mirror"
-     docker push "$mirror"
-   done
+   # 1. Load every archived image locally.
+   for tar in images/*.tar; do docker load -q -i "$tar"; done
+
+   # 2. For each image the air-gapped profile renders, retag the matching loaded
+   #    image (matched by repository name + tag) and push it to your mirror.
+   helm template custos chart/custos -f chart/custos/values-airgapped-ha.yaml \
+       --set oidc.keycloak.enabled=true --set secrets.sealed.enabled=true \
+     | grep -hoE 'image: "?[^"]+' | sed -E 's/image: "?//' | sort -u \
+     | while read -r target; do
+         tag="${target##*:}"; name="${target%:*}"; name="${name##*/}"
+         src="$(docker images --format '{{.Repository}}:{{.Tag}}' \
+                  | grep -E "(^|/)${name}:${tag}\$" | head -n1)"
+         [ -z "$src" ] && { echo "no archive for $target" >&2; continue; }
+         docker tag "$src" "$target"
+         docker push "$target"
+       done
    ```
 
-   (`skopeo copy docker-archive:images/<file>.tar docker://$REGISTRY/...` works
-   equivalently and does not require a local Docker daemon.)
+   (`skopeo copy docker-archive:images/<file>.tar docker://<target>` works
+   equivalently and needs no local Docker daemon.)
 
 3. **Push the `connectors-core` OCI artifact** into the same registry (see
    `connectors/`).

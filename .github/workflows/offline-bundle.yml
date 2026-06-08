@@ -77,6 +77,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # The bundle pulls dozens of upstream images, many from Docker Hub. An
+      # authenticated pull avoids the anonymous rate limit that otherwise makes
+      # tag builds flaky. Skipped automatically when the credentials are unset.
+      - name: Login to Docker Hub (optional)
+        if: vars.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Build offline bundle
         env:
           BUNDLE_VERSION: ${{ steps.ver.outputs.version }}
