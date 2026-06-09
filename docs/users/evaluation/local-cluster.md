@@ -39,7 +39,7 @@ git clone https://github.com/toddysm/custos.git
 cd custos
 ```
 
-Set the shared variables used throughout:
+Set the shared variables used throughout. **In Runme, run this cell first and keep the rest of the guide in the same session** — the exports persist across cells, but a notebook reload resets them, so re-run this cell before any later step if you reload. A later step running with these unset (e.g. an empty `$VALUES`/`$RELEASE`) makes `helm install` fail while rendering the chart:
 
 ```bash {"promptEnv":"false"}
 export RELEASE=custos
