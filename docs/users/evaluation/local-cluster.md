@@ -118,7 +118,7 @@ Build all service and job images locally (context is the repo root). Pass
 `IMAGE_REGISTRY="$IMAGE_PREFIX"` so the build tags match the `kind load` commands
 below (the Makefile default is also `ghcr.io/toddysm/custos`):
 
-```bash
+```bash {"cwd":"../../.."}
 make docker-build IMAGE_REGISTRY="$IMAGE_PREFIX"   # tags $IMAGE_PREFIX/<svc>:dev and $IMAGE_PREFIX/custos-<job>:dev
 ```
 
@@ -148,7 +148,7 @@ make docker-build IMAGE_REGISTRY="$IMAGE_PREFIX"   # tags $IMAGE_PREFIX/<svc>:de
 
 ## 5. Vendor chart dependencies and pre-provision Postgres
 
-```bash
+```bash {"cwd":"../../.."}
 # Pull the vendored subcharts into the umbrella chart.
 make deps      # == cd deploy/helm/custos && helm dependency update
 ```
@@ -159,7 +159,7 @@ hook** that needs the CNPG-generated `custos-app` Secret, but the embedded CNPG
 the chart's own `Cluster` first and wait for it (see the
 [install-ordering caveat](install-connected.md#4-pre-provision-postgres-install-ordering-caveat)):
 
-```bash
+```bash {"cwd":"../../.."}
 kubectl create namespace "$NS"
 
 helm template "$RELEASE" "$CHART" -f "$VALUES" \
@@ -177,7 +177,7 @@ kubectl wait --for=condition=Ready cluster/custos -n "$NS" --timeout=5m
 
 ## 6. Install Custos
 
-```bash
+```bash {"cwd":"../../.."}
 helm install "$RELEASE" "$CHART" -f "$VALUES" \
   --namespace "$NS" \
   --set postgres.embedded=false \
