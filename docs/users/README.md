@@ -23,6 +23,13 @@ it is healthy, and running your first workflow.
 >
 > See the [evaluation overview](evaluation/overview.md) for the full list.
 
+## Quickstart (local cluster)
+
+Want to try Custos on your laptop first? The
+[local-cluster quickstart](evaluation/local-cluster.md) stands up the platform on
+**kind** or **Docker Desktop Kubernetes** with locally built images, then points
+you at the first-workflow walkthrough.
+
 ## Evaluation deployment
 
 The evaluation guides are organized as a sequence — read them in order the first

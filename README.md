@@ -98,6 +98,7 @@ Target cluster environments: AKS, EKS, GKE, k3s, OpenShift, and vanilla Kubernet
 | Document | Description |
 |---|---|
 | [docs/README.md](docs/README.md) | Documentation index across audiences |
+| [docs/users/evaluation/local-cluster.md](docs/users/evaluation/local-cluster.md) | Getting-started quickstart — deploy on a local kind / Docker Desktop Kubernetes cluster |
 | [docs/developers/README.md](docs/developers/README.md) | Plugin, connection, and activity developer guide |
 | [docs/developers/connections-api.md](docs/developers/connections-api.md) | Connector Manifest v1 reference for connection developers |
 
