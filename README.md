@@ -1,3 +1,9 @@
+<p align="center">
+  <img src="media/custos-icon.png" alt="Custos" width="160" />
+</p>
+
+<p align="center"><sub>Icon by <a href="https://www.instagram.com/graffitonic/">@graffitonic</a> on Instagram.</sub></p>
+
 # Custos
 
 ![GitHub issues](https://img.shields.io/github/issues-raw/toddysm/custos?link=https%3A%2F%2Fgithub.com%2Ftoddysm%2Fcustos%2Fissues)
@@ -6,6 +12,14 @@
 > **Custos** (Latin: *guardian*, *keeper*) — *Custos verifies, isolates, and orchestrates.*
 
 Custos is a **pluggable workflow orchestrator for supply-chain security operations on OCI artifacts**. Security analysts, DevOps engineers, and developers define workflows in YAML (or via a visual designer) that operate on container images and other cloud-native artifacts stored in OCI-compliant registries. The orchestrator executes them durably on top of [Dapr Workflow](https://docs.dapr.io/developing-applications/building-blocks/workflow/); all real work happens inside independently versioned and deployable *actions* that conform to a stable orchestrator–action contract.
+
+## 🚀 Get started
+
+**New to Custos? [Deploy it on your laptop in minutes](docs/users/evaluation/local-cluster.md).** The local-cluster quickstart stands the platform up on **kind** or **Docker Desktop Kubernetes** with locally built images, then walks you through running your first workflow.
+
+- 📘 [Local-cluster quickstart](docs/users/evaluation/local-cluster.md) — fastest way to try Custos
+- 📚 [User & evaluation guide](docs/users/README.md) — deploy, verify, and operate the platform
+- 🧩 [Developer guide](docs/developers/README.md) — write connectors, activities, and plugins
 
 ## What Custos does
 
