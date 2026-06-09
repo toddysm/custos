@@ -39,9 +39,9 @@ git clone https://github.com/toddysm/custos.git
 cd custos
 ```
 
-Set the shared variables used throughout:
+Set the shared variables used throughout. **In Runme, run this cell first and keep the rest of the guide in the same session** — the exports persist across cells, but a notebook reload resets them, so re-run this cell before any later step if you reload. A later step running with these unset (e.g. an empty `$VALUES`/`$RELEASE`) makes `helm install` fail while rendering the chart:
 
-```bash
+```bash {"promptEnv":"false"}
 export RELEASE=custos
 export NS=custos-system
 export CHART=deploy/helm/custos
@@ -78,10 +78,14 @@ PersistentVolume-backed eval dependencies (Postgres, Loki, Prometheus) use.
 The umbrella chart references CRDs from operators that must exist **before**
 `helm install`. Install them at the versions pinned by the regression gate:
 
-```bash
-# Gateway API CRDs.
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.1.0/standard-install.yaml
+> The Gateway API CRDs are shipped by the chart itself (the Envoy Gateway
+> subchart's `crds/`), so they are **not** pre-installed here. Installing them
+> out-of-band with `kubectl apply` makes Helm 4's server-side CRD apply conflict
+> with the cluster-installed copy (owned by the `kubectl-client-side-apply`
+> field manager) and fails `helm install` with CRD ownership conflicts. Helm 3
+> tolerated this; Helm 4 does not.
 
+```bash
 # CloudNativePG operator (provisions Postgres).
 helm repo add cnpg https://cloudnative-pg.github.io/charts
 helm repo add jetstack https://charts.jetstack.io
@@ -118,7 +122,7 @@ Build all service and job images locally (context is the repo root). Pass
 `IMAGE_REGISTRY="$IMAGE_PREFIX"` so the build tags match the `kind load` commands
 below (the Makefile default is also `ghcr.io/toddysm/custos`):
 
-```bash
+```bash {"cwd":"../../.."}
 make docker-build IMAGE_REGISTRY="$IMAGE_PREFIX"   # tags $IMAGE_PREFIX/<svc>:dev and $IMAGE_PREFIX/custos-<job>:dev
 ```
 
@@ -148,7 +152,7 @@ make docker-build IMAGE_REGISTRY="$IMAGE_PREFIX"   # tags $IMAGE_PREFIX/<svc>:de
 
 ## 5. Vendor chart dependencies and pre-provision Postgres
 
-```bash
+```bash {"cwd":"../../.."}
 # Pull the vendored subcharts into the umbrella chart.
 make deps      # == cd deploy/helm/custos && helm dependency update
 ```
@@ -159,7 +163,7 @@ hook** that needs the CNPG-generated `custos-app` Secret, but the embedded CNPG
 the chart's own `Cluster` first and wait for it (see the
 [install-ordering caveat](install-connected.md#4-pre-provision-postgres-install-ordering-caveat)):
 
-```bash
+```bash {"cwd":"../../.."}
 kubectl create namespace "$NS"
 
 helm template "$RELEASE" "$CHART" -f "$VALUES" \
@@ -177,7 +181,7 @@ kubectl wait --for=condition=Ready cluster/custos -n "$NS" --timeout=5m
 
 ## 6. Install Custos
 
-```bash
+```bash {"cwd":"../../.."}
 helm install "$RELEASE" "$CHART" -f "$VALUES" \
   --namespace "$NS" \
   --set postgres.embedded=false \
