@@ -41,7 +41,7 @@ cd custos
 
 Set the shared variables used throughout:
 
-```bash
+```bash {"promptEnv":"false"}
 export RELEASE=custos
 export NS=custos-system
 export CHART=deploy/helm/custos
