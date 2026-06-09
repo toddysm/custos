@@ -114,10 +114,12 @@ other bundled subcharts (Dapr, Envoy Gateway, Redis) stay at their eval defaults
 
 ## 4. Build the Custos images and make them available
 
-Build all service and job images locally (context is the repo root):
+Build all service and job images locally (context is the repo root). Pass
+`IMAGE_REGISTRY="$IMAGE_PREFIX"` so the build tags match the `kind load` commands
+below (the Makefile default is also `ghcr.io/toddysm/custos`):
 
 ```bash
-make docker-build      # tags ghcr.io/toddysm/custos/<svc>:dev and custos-<job>:dev
+make docker-build IMAGE_REGISTRY="$IMAGE_PREFIX"   # tags $IMAGE_PREFIX/<svc>:dev and $IMAGE_PREFIX/custos-<job>:dev
 ```
 
 **Make the images reachable by the cluster:**
@@ -162,7 +164,7 @@ kubectl create namespace "$NS"
 
 helm template "$RELEASE" "$CHART" -f "$VALUES" \
   --namespace "$NS" \
-  --set postgres.storageClass=standard \
+  --set cnpg.storageClass=standard \
   --show-only charts/cnpg/templates/cluster.yaml > /tmp/pg-cluster.yaml
 
 kubectl apply -n "$NS" -f /tmp/pg-cluster.yaml
@@ -170,7 +172,7 @@ kubectl wait --for=condition=Ready cluster/custos -n "$NS" --timeout=5m
 ```
 
 > On Docker Desktop the default StorageClass is `hostpath`, not `standard`. If
-> `--set postgres.storageClass=standard` does not bind, drop the flag to use the
+> `--set cnpg.storageClass=standard` does not bind, drop the flag to use the
 > cluster default, or pass your actual class (`kubectl get storageclass`).
 
 ## 6. Install Custos
