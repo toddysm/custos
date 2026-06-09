@@ -78,10 +78,14 @@ PersistentVolume-backed eval dependencies (Postgres, Loki, Prometheus) use.
 The umbrella chart references CRDs from operators that must exist **before**
 `helm install`. Install them at the versions pinned by the regression gate:
 
-```bash
-# Gateway API CRDs.
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.1.0/standard-install.yaml
+> The Gateway API CRDs are shipped by the chart itself (the Envoy Gateway
+> subchart's `crds/`), so they are **not** pre-installed here. Installing them
+> out-of-band with `kubectl apply` makes Helm 4's server-side CRD apply conflict
+> with the cluster-installed copy (owned by the `kubectl-client-side-apply`
+> field manager) and fails `helm install` with CRD ownership conflicts. Helm 3
+> tolerated this; Helm 4 does not.
 
+```bash
 # CloudNativePG operator (provisions Postgres).
 helm repo add cnpg https://cloudnative-pg.github.io/charts
 helm repo add jetstack https://charts.jetstack.io
