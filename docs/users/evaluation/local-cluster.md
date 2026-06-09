@@ -236,12 +236,24 @@ kind delete cluster --name "$CLUSTER"
 
 On **Docker Desktop**, uninstall the release and namespace instead of deleting
 the cluster (see [Uninstall](uninstall.md) for full cleanup, including PVCs and
-the pre-provisioned Postgres `Cluster`):
+the pre-provisioned Postgres `Cluster`).
+
+Every command below is **idempotent** — each tolerates an already-removed or
+never-created resource — so this same block also cleans up a **partially failed
+install**. If `helm install` (step 6) errored partway, no release was recorded,
+so `helm uninstall --ignore-not-found` is a harmless no-op and the remaining
+commands still remove the pre-provisioned Postgres `Cluster`, the namespace, and
+the chart-shipped CRDs. You can re-run this block safely as many times as needed.
 
 ```bash
-helm uninstall "$RELEASE" -n "$NS"
-kubectl delete cluster custos -n "$NS"
-kubectl delete namespace "$NS"
+# Remove the Custos release if one was recorded (no-op if the install never
+# completed far enough to create a release).
+helm uninstall "$RELEASE" -n "$NS" --ignore-not-found
+
+# Delete the pre-provisioned Postgres Cluster and the namespace (which also
+# removes any half-created workloads, Secrets, and ConfigMaps inside it).
+kubectl delete cluster custos -n "$NS" --ignore-not-found
+kubectl delete namespace "$NS" --ignore-not-found
 
 # Remove the chart-shipped CRDs (Dapr + Envoy Gateway / Gateway API).
 # helm uninstall never deletes crds/-shipped CRDs, so they survive teardown
@@ -253,6 +265,11 @@ kubectl get crd -o name \
   | grep -E '\.(dapr\.io|gateway\.networking\.k8s\.io|gateway\.networking\.x-k8s\.io|gateway\.envoyproxy\.io)$' \
   | xargs -r kubectl delete
 ```
+
+> **A delete hangs (namespace stuck `Terminating`)?** A finalizer is usually
+> waiting on a controller that is already gone. Find the holdout with
+> `kubectl get all,gateway,gatewayclass -n "$NS"` and clear its finalizer, e.g.
+> `kubectl patch <resource> -n "$NS" -p '{"metadata":{"finalizers":null}}' --type=merge`.
 
 ## Related documentation
 

@@ -25,10 +25,16 @@ ConfigMaps, and the chart-managed cert-manager, Envoy Gateway, and Dapr
 resources installed by the chart. The `Gateway`/`GatewayClass` objects are
 removed only if the chart created them (`envoyGateway.install: true`); if you
 disabled the bundled Envoy Gateway because your cluster already provides one,
-those objects are owned elsewhere and survive the uninstall:
+those objects are owned elsewhere and survive the uninstall.
+
+> **Install failed partway?** If `helm install` never recorded a release, this
+> step would normally error with `release: not found`. The `--ignore-not-found`
+> flag below treats that as success, and every later step (`kubectl delete ...
+> --ignore-not-found`) is likewise safe to run against a partially created
+> deployment. Run the steps top to bottom regardless of how far the install got.
 
 ```bash
-helm uninstall "$RELEASE" -n "$NS"
+helm uninstall "$RELEASE" -n "$NS" --ignore-not-found
 ```
 
 Confirm the workloads are gone (only the pre-provisioned Postgres `Cluster` and
@@ -46,7 +52,7 @@ the CloudNativePG `Cluster` is **not** owned by the Helm release and must be
 deleted explicitly. Deleting it destroys the database:
 
 ```bash
-kubectl delete cluster custos -n "$NS"
+kubectl delete cluster custos -n "$NS" --ignore-not-found
 ```
 
 ## 3. Delete PersistentVolumeClaims
@@ -78,7 +84,7 @@ clear any leftover Secrets, ConfigMaps, or cert-manager `Certificate`/`Issuer`
 objects scoped to it:
 
 ```bash
-kubectl delete namespace "$NS"
+kubectl delete namespace "$NS" --ignore-not-found
 ```
 
 ## 5. Remove chart-shipped CRDs (for a clean reinstall)
