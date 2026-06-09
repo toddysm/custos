@@ -92,20 +92,20 @@ helm repo add jetstack https://charts.jetstack.io
 helm repo add external-secrets https://charts.external-secrets.io
 helm repo update
 
-helm install cnpg cnpg/cloudnative-pg \
+helm upgrade --install cnpg cnpg/cloudnative-pg \
   --version 0.22.1 \
   --namespace cnpg-system --create-namespace \
   --wait --timeout 5m
 
 # cert-manager (the chart's gateway TLS Certificate + selfSigned Issuer).
-helm install cert-manager jetstack/cert-manager \
+helm upgrade --install cert-manager jetstack/cert-manager \
   --version v1.20.2 \
   --namespace cert-manager --create-namespace \
   --set crds.enabled=true \
   --wait --timeout 5m
 
 # External Secrets Operator (the connected-eval ClusterSecretStore).
-helm install external-secrets external-secrets/external-secrets \
+helm upgrade --install external-secrets external-secrets/external-secrets \
   --version 0.10.0 \
   --namespace external-secrets --create-namespace \
   --set installCRDs=true \
