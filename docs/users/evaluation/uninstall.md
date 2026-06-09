@@ -81,7 +81,26 @@ objects scoped to it:
 kubectl delete namespace "$NS"
 ```
 
-## 5. (Optional) Remove shared cluster operators
+## 5. Remove chart-shipped CRDs (for a clean reinstall)
+
+The bundled Dapr and Envoy Gateway subcharts ship their CRDs in `crds/`,
+which `helm install` creates but `helm uninstall` **never removes**. They
+survive the teardown above, so Helm 4 server-side apply then conflicts with
+the stale copies on a reinstall (`conflict occurred while applying object
+... Kind=CustomResourceDefinition`). Remove them so the chart can recreate
+them cleanly. **Skip this if other workloads on the cluster use Dapr or
+Gateway API.**
+
+> **⚠️ Cluster-wide impact.** CRDs are cluster-scoped. Deleting a CRD also
+> deletes every custom resource of that kind across all namespaces.
+
+```bash
+kubectl get crd -o name \
+  | grep -E '\.(dapr\.io|gateway\.networking\.k8s\.io|gateway\.networking\.x-k8s\.io|gateway\.envoyproxy\.io)$' \
+  | xargs -r kubectl delete
+```
+
+## 6. (Optional) Remove shared cluster operators
 
 The prerequisites you installed out-of-band are **cluster-scoped** and may be
 shared with other workloads. Only remove them if no other application depends on
@@ -97,9 +116,6 @@ helm uninstall external-secrets -n external-secrets
 
 # CloudNativePG operator.
 helm uninstall cnpg -n cnpg-system
-
-# Gateway API CRDs.
-kubectl delete -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.1.0/standard-install.yaml
 ```
 
 Remove the operator namespaces if they are no longer needed:
@@ -114,6 +130,7 @@ kubectl delete namespace external-secrets cnpg-system
 - [ ] Pre-provisioned Postgres `Cluster custos` deleted (if it was created).
 - [ ] PVCs deleted (only if you intend to destroy all data).
 - [ ] Namespace `custos-system` deleted.
+- [ ] Chart-shipped CRDs (Dapr + Gateway API) removed, for a clean reinstall.
 - [ ] (Optional) Shared operators removed, only if unused elsewhere.
 
 ## Related documentation

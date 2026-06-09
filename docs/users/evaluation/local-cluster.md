@@ -192,6 +192,13 @@ helm install "$RELEASE" "$CHART" -f "$VALUES" \
 - `postgres.embedded=false` — reuse the Postgres `Cluster` you pre-provisioned.
 - `certManager.install=false` — cert-manager was installed out-of-band in step 3.
 
+> **Reinstalling after a teardown?** If `helm install` fails with
+> `conflict occurred while applying object ... Kind=CustomResourceDefinition`,
+> a previous install left the chart-shipped Dapr / Gateway API CRDs behind
+> (`helm uninstall` never removes `crds/`). Delete the stale CRDs with the
+> CRD-cleanup command in [section 8 (Tear down)](#8-tear-down) (or see
+> [Uninstall](uninstall.md)), then re-run this step.
+
 ## 7. Verify and run a workflow
 
 Run the in-cluster synthetic scenario:
@@ -235,6 +242,16 @@ the pre-provisioned Postgres `Cluster`):
 helm uninstall "$RELEASE" -n "$NS"
 kubectl delete cluster custos -n "$NS"
 kubectl delete namespace "$NS"
+
+# Remove the chart-shipped CRDs (Dapr + Envoy Gateway / Gateway API).
+# helm uninstall never deletes crds/-shipped CRDs, so they survive teardown
+# and Helm 4 server-side apply conflicts with the stale copies on a reinstall
+# ("conflict occurred while applying object ... CustomResourceDefinition").
+# Safe here because the eval chart owns them; skip if other workloads on the
+# cluster use Dapr or Gateway API.
+kubectl get crd -o name \
+  | grep -E '\.(dapr\.io|gateway\.networking\.k8s\.io|gateway\.networking\.x-k8s\.io|gateway\.envoyproxy\.io)$' \
+  | xargs -r kubectl delete
 ```
 
 ## Related documentation
