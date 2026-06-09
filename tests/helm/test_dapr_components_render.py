@@ -26,7 +26,7 @@ EXPECTED_COMPONENTS = {
     "custos-statestore": "state.postgresql",
     "custos-secretstore": "secretstores.kubernetes",
     "custos-pubsub": "pubsub.redis",
-    "custos-pubsub-durable": "pubsub.postgres",
+    "custos-pubsub-durable": "pubsub.postgresql",
 }
 
 # Subscription name -> (topic, scope app-id).
@@ -121,7 +121,7 @@ def test_pubsub_uses_redis_and_postgres(
         if str(d["metadata"]["name"]).startswith("custos-pubsub")
     }
     assert "pubsub.redis" in pubsub_types
-    assert "pubsub.postgres" in pubsub_types
+    assert "pubsub.postgresql" in pubsub_types
 
 
 @pytest.mark.parametrize("profile", ALL_PROFILES)

@@ -104,7 +104,7 @@ metadata:
   labels:
     {{- include "custos.labels" $ | nindent 4 }}
 spec:
-  type: pubsub.postgres
+  type: pubsub.postgresql
   version: v1
   metadata:
     - name: connectionString
