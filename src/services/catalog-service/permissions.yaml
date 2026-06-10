@@ -1,0 +1,43 @@
+# Permissions registry shipped by the Catalog Service (COMP-004).
+#
+# The auth-service permission-registry loader
+# (``custos_auth.permission_registry``) ingests this file when
+# ``CUSTOS_AUTH_PERMISSIONS_PATHS`` points at it, upserting each row into the
+# SPL ``Permission`` table. These are the fine-grained catalog authoring and
+# registry-read permissions the API Gateway route table requires (the gateway
+# is the canonical owner of the route→permission mapping).
+#
+# Each entry carries:
+# * ``name``        — canonical permission identifier the call-context and
+#                     authorize engine consume.
+# * ``description`` — operator-facing human description.
+# * ``declaredBy``  — pipe-delimited list of components that ship the
+#                     permission.
+
+permissions:
+  - name: catalog:workflows:read
+    description: List and read workflow definitions in the workspace catalog.
+    declaredBy: catalog-service
+  - name: catalog:workflows:write
+    description: |
+      Create, update, deprecate, and extract templates from workflow
+      definitions in the workspace catalog.
+    declaredBy: catalog-service
+  - name: catalog:templates:read
+    description: List and read workflow templates in the workspace catalog.
+    declaredBy: catalog-service
+  - name: catalog:templates:write
+    description: Publish, update, and materialize workflow templates.
+    declaredBy: catalog-service
+  - name: catalog:activity-types:read
+    description: List and read activity-type definitions in the workspace catalog.
+    declaredBy: catalog-service
+  - name: catalog:activity-types:write
+    description: Register, update, and deprecate activity-type definitions.
+    declaredBy: catalog-service
+  - name: catalog:connector-types:read
+    description: List and read connector-type definitions in the platform catalog.
+    declaredBy: catalog-service
+  - name: catalog:connector-types:write
+    description: Register, update, and deprecate connector-type definitions.
+    declaredBy: catalog-service

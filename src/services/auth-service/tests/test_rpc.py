@@ -148,7 +148,7 @@ def test_rpc_authz_authorize_allow_path(
         "/rpc/authz.authorize",
         json={
             "principal_id": SA,
-            "permission": "workflow:read",
+            "permission": "catalog:workflows:read",
             "workspace_id": WORKSPACE,
             "caller_component": "workflow-service",
         },
@@ -219,7 +219,7 @@ def test_rpc_authz_verify_and_authorize_allow_path(
         "/rpc/authz.verifyAndAuthorize",
         json={
             "token": plaintext,
-            "permission": "workflow:read",
+            "permission": "catalog:workflows:read",
             "workspace_id": WORKSPACE,
         },
     )

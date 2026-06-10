@@ -65,6 +65,18 @@ RUN /opt/custos/venv/bin/pip install --no-index --find-links=/tmp/wheels \
         custos-auth-service && \
     rm -rf /tmp/wheels
 
+# Per-component permission registries (#867). auth-service aggregates every
+# component's permissions.yaml at startup when CUSTOS_AUTH_PERMISSIONS_PATHS
+# points at these files. The union must cover every permission the API Gateway
+# route table requires; the permission-drift guard test keeps these in lockstep
+# with the bundled aggregate embedded in the custos_auth wheel.
+COPY src/services/auth-service/permissions.yaml /opt/custos/permissions/auth-service.yaml
+COPY src/services/catalog-service/permissions.yaml /opt/custos/permissions/catalog-service.yaml
+COPY src/services/workflow-service/permissions.yaml /opt/custos/permissions/workflow-service.yaml
+COPY src/services/trigger-service/permissions.yaml /opt/custos/permissions/trigger-service.yaml
+COPY src/services/connector-service/permissions.yaml /opt/custos/permissions/connector-service.yaml
+COPY src/services/observability-audit-service/permissions.yaml /opt/custos/permissions/observability-audit-service.yaml
+
 USER custos
 WORKDIR /home/custos
 

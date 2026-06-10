@@ -34,3 +34,10 @@ data:
   {{- with .Values.config.platformAdminBootstrap }}
   CUSTOS_AUTH_PLATFORM_ADMIN_BOOTSTRAP: {{ . | quote }}
   {{- end }}
+  # Colon-separated permission-registry files the service aggregates at
+  # startup (#867). Each component ships its own permissions.yaml baked
+  # into the auth-service image; the union must cover every permission
+  # the API Gateway route table requires. Empty ⇒ bundled aggregate.
+  {{- with .Values.config.permissionsPaths }}
+  CUSTOS_AUTH_PERMISSIONS_PATHS: {{ . | quote }}
+  {{- end }}

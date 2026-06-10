@@ -163,6 +163,14 @@ config:
   oidcIssuers: ""
   callContextKeyRef: ""
   platformAdminBootstrap: ""
+  # Colon-separated list of permission-registry files the service
+  # aggregates at startup (CUSTOS_AUTH_PERMISSIONS_PATHS). These point at
+  # each component's own ``permissions.yaml`` baked into the auth-service
+  # image (build context = repo root; see src/services/auth-service/
+  # Dockerfile). Leaving this empty falls back to the complete bundled
+  # aggregate embedded in the ``custos_auth`` wheel; the two are kept in
+  # lockstep by tests/helm + the permission-drift guard test.
+  permissionsPaths: "/opt/custos/permissions/auth-service.yaml:/opt/custos/permissions/catalog-service.yaml:/opt/custos/permissions/workflow-service.yaml:/opt/custos/permissions/trigger-service.yaml:/opt/custos/permissions/connector-service.yaml:/opt/custos/permissions/observability-audit-service.yaml"
 
 # ExternalSecret carrying the two Postgres DSNs the service reads at
 # startup (CUSTOS_AUTH_STORE_DSN, CUSTOS_AUTH_METADATA_STORE_DSN).

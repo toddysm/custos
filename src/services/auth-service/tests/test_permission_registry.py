@@ -49,13 +49,14 @@ def _write_yaml(tmp_path: Path, name: str, body: str) -> str:
 
 def test_load_bundled_registry_returns_full_platform_m1_set() -> None:
     declared = load_permission_registry(())
-    # The bundled file declares auth-service's own four perms plus the
-    # cross-component perms referenced by every v1 built-in role.
+    # The bundled file declares auth-service's own admin perms plus the
+    # fine-grained cross-component perms referenced by every v1 built-in
+    # role and required by the API Gateway route table.
     assert "admin:role-binding" in declared
     assert "admin:service-account" in declared
     assert "admin:workspace" in declared
     assert "audit:read" in declared
-    assert "workflow:read" in declared
+    assert "catalog:workflows:read" in declared
     assert "workflow:execute" in declared
     # Multi-declarer attribution is preserved.
     assert "auth-service" in declared["audit:read"].declared_by.split(DECLARED_BY_SEPARATOR)

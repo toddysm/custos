@@ -271,6 +271,35 @@ jobs:
                 || echo "(no previous logs for $pod)"
             done
           echo "::endgroup::"
+          echo "::group::not-ready readiness detail (/readyz body + startup lines)"
+          # The default --tail above can bury a service's minute-0 startup lines
+          # (e.g. the api-gateway permission cross-check) under steady-state
+          # probe access-log spam. For every not-ready pod, read the /readyz body
+          # straight from the container (it carries the exact failure reason) and
+          # grep the FULL log history (no tail) for the startup/readiness lines.
+          kubectl get pods -n "$NS" \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.phase}{"\t"}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}' \
+            2>/dev/null | while IFS=$'\t' read -r pod phase ready; do
+              if [ "$phase" = "Succeeded" ] || { [ "$phase" = "Running" ] && [ "$ready" = "True" ]; }; then
+                continue
+              fi
+              echo "--- /readyz body pod/$pod ---"
+              kubectl exec -n "$NS" "pod/$pod" -- python -c 'import urllib.request,urllib.error,os
+url="http://127.0.0.1:%s/readyz" % os.environ.get("PORT","8080")
+try:
+    print(urllib.request.urlopen(url, timeout=3).read().decode())
+except urllib.error.HTTPError as e:
+    print(e.code, e.read().decode())
+except Exception as e:  # noqa: BLE001
+    print("(/readyz unreachable: %r)" % e)' 2>/dev/null \
+                || echo "(could not exec /readyz probe in $pod)"
+              echo "--- startup/readiness log lines pod/$pod (full history) ---"
+              kubectl logs -n "$NS" "pod/$pod" --all-containers 2>/dev/null \
+                | grep -iE "startup|permission|not.?ready|readyz|converge|GatewayStartup|GATEWAY_STARTUP|missing|declared" \
+                | head -100 \
+                || echo "(no matching startup/readiness lines for $pod)"
+            done
+          echo "::endgroup::"
           echo "::group::hook job logs"
           for job in custos-migrate custos-bootstrap custos-smoke-test; do
             echo "--- logs job/$job ---"

@@ -95,8 +95,10 @@ ROLE_PLATFORM_ADMIN: Final[RoleId] = RoleId("role:platform.admin")
 
 
 _VIEWER_PERMS: Final[tuple[str, ...]] = (
-    "workflow:read",
-    "template:read",
+    "catalog:workflows:read",
+    "catalog:templates:read",
+    "catalog:activity-types:read",
+    "catalog:connector-types:read",
     "connector:read",
     "audit:read",
     "run:read",
@@ -106,8 +108,10 @@ _VIEWER_PERMS: Final[tuple[str, ...]] = (
 
 _AUTHOR_PERMS: Final[tuple[str, ...]] = (
     *_VIEWER_PERMS,
-    "workflow:create",
-    "template:create",
+    "catalog:workflows:write",
+    "catalog:templates:write",
+    "catalog:activity-types:write",
+    "catalog:connector-types:write",
     "workflow:execute",
     "run:cancel",
 )
@@ -115,7 +119,10 @@ _AUTHOR_PERMS: Final[tuple[str, ...]] = (
 _OPERATOR_PERMS: Final[tuple[str, ...]] = (
     *_AUTHOR_PERMS,
     "admin:connector",
-    "admin:trigger",
+    "trigger:subscriptions:read",
+    "trigger:subscriptions:write",
+    "trigger:subscriptions:delete",
+    "trigger:subscriptions:fire",
 )
 
 _WORKSPACE_ADMIN_PERMS: Final[tuple[str, ...]] = (

@@ -1,35 +1,32 @@
-# Platform-M1 permissions registry shipped with auth-service.
+# Platform permissions registry bundled with auth-service.
 #
-# Phase D / AS-IMPL-008. The registry loader in
-# ``custos_auth.permission_registry`` reads this file (and any extra files
-# pointed at by ``CUSTOS_AUTH_PERMISSIONS_PATHS``) at service startup,
-# upserts each row into the SPL ``Permission`` table, and refuses to
-# start the service if any built-in role references a name no path
-# declared.
+# This file is the COMPLETE aggregate of every component's permission
+# surface — the union of all per-service ``permissions.yaml`` files
+# (``src/services/<svc>/permissions.yaml``). The registry loader in
+# ``custos_auth.permission_registry`` reads it as the fallback when
+# ``CUSTOS_AUTH_PERMISSIONS_PATHS`` is unset (dev + unit tests), so the
+# service can bootstrap a complete registry without operator configuration.
+#
+# In a real deployment ``CUSTOS_AUTH_PERMISSIONS_PATHS`` points at each
+# component's own ``permissions.yaml`` (baked into the auth-service and
+# bootstrap images) and this bundled aggregate is NOT consulted. The
+# ``test_permissions_drift`` guard asserts this file stays exactly equal to
+# the union of the per-service files so the two delivery paths never diverge.
+#
+# The permission names here are the canonical fine-grained identifiers the
+# API Gateway route table (``custos_gateway.routes.registry``) requires; the
+# gateway refuses to become ready unless every name its routes declare is
+# present in this registry.
 #
 # Each entry carries:
-# * ``name``        — canonical permission identifier the call-context
-#                     and authorize engine consume.
+# * ``name``        — canonical permission identifier the call-context and
+#                     authorize engine consume.
 # * ``description`` — operator-facing human description; surfaced via
-#                     ``GET /v1/permissions`` and rendered in the
-#                     audit-trail diagnostic when a role references an
-#                     unknown name.
+#                     ``GET /v1/permissions``.
 # * ``declaredBy``  — pipe-delimited list of components that ship this
-#                     permission. Multi-declarer entries (e.g.
-#                     ``audit:read`` shipped by both auth-service and
-#                     observability-audit-service) merge with ``|`` so
-#                     the registry can attribute every name to the
-#                     component(s) that own it.
-#
-# The three ``admin:*`` entries auth-service owns end-to-end
-# (``admin:service-account``, ``admin:role-binding``, ``admin:workspace``)
-# stay first so a reviewer can read the auth-service-side surface in
-# one block; the rest are the cross-component perms the v1 built-in
-# roles (``workspace.viewer`` → ``platform.admin``) reference. As each
-# component lands its own service, it will ship its own
-# ``permissions.yaml`` and ``CUSTOS_AUTH_PERMISSIONS_PATHS`` will be
-# pointed at that file instead of relying on the platform-M1 fallback
-# embedded here.
+#                     permission. Multi-declarer entries (e.g. ``audit:read``
+#                     shipped by both auth-service and observability-audit)
+#                     merge with ``|``.
 
 permissions:
   # ----- auth-service-owned admin permissions ------------------------
@@ -51,57 +48,79 @@ permissions:
       Held by tenant.admin and platform.admin.
     declaredBy: auth-service
 
+  # ----- catalog-service-owned permissions ---------------------------
+  - name: catalog:workflows:read
+    description: List and read workflow definitions in the workspace catalog.
+    declaredBy: catalog-service
+  - name: catalog:workflows:write
+    description: |
+      Create, update, deprecate, and extract templates from workflow
+      definitions in the workspace catalog.
+    declaredBy: catalog-service
+  - name: catalog:templates:read
+    description: List and read workflow templates in the workspace catalog.
+    declaredBy: catalog-service
+  - name: catalog:templates:write
+    description: Publish, update, and materialize workflow templates.
+    declaredBy: catalog-service
+  - name: catalog:activity-types:read
+    description: List and read activity-type definitions in the workspace catalog.
+    declaredBy: catalog-service
+  - name: catalog:activity-types:write
+    description: Register, update, and deprecate activity-type definitions.
+    declaredBy: catalog-service
+  - name: catalog:connector-types:read
+    description: List and read connector-type definitions in the platform catalog.
+    declaredBy: catalog-service
+  - name: catalog:connector-types:write
+    description: Register, update, and deprecate connector-type definitions.
+    declaredBy: catalog-service
+
   # ----- workflow-service-owned permissions --------------------------
-  - name: workflow:read
-    description: List workflows and read workflow definitions in a workspace.
-    declaredBy: workflow-service
-  - name: workflow:create
-    description: Create, update, and publish workflows in a workspace.
-    declaredBy: workflow-service
   - name: workflow:execute
     description: |
       Trigger workflow runs (manual or via signed trigger receivers).
       Required for every POST /runs call.
     declaredBy: workflow-service
   - name: run:read
-    description: Read workflow run history, step outputs, and run-level audit rows.
+    description: Read workflow run history, step outputs, and run-level state.
     declaredBy: workflow-service
   - name: run:cancel
     description: Cancel an in-flight run owned by the calling workspace.
     declaredBy: workflow-service
 
-  # ----- catalog-service-owned permissions ---------------------------
-  - name: template:read
-    description: List and read workflow templates in the workspace catalog.
-    declaredBy: catalog-service
-  - name: template:create
-    description: Publish new templates and update existing template versions.
-    declaredBy: catalog-service
+  # ----- trigger-service-owned permissions ---------------------------
+  - name: trigger:subscriptions:read
+    description: List and read trigger subscriptions in a workspace.
+    declaredBy: trigger-service
+  - name: trigger:subscriptions:write
+    description: |
+      Create and update trigger subscriptions (webhooks, cron, and
+      external-event receivers) in a workspace.
+    declaredBy: trigger-service
+  - name: trigger:subscriptions:delete
+    description: Delete trigger subscriptions in a workspace.
+    declaredBy: trigger-service
+  - name: trigger:subscriptions:fire
+    description: Manually fire a trigger subscription in a workspace.
+    declaredBy: trigger-service
 
   # ----- connector-service-owned permissions -------------------------
   - name: connector:read
-    description: List connectors and read connector metadata for a workspace.
+    description: |
+      List connectors and read connector metadata, health, leases, and
+      cursor state for a workspace.
     declaredBy: connector-service
   - name: admin:connector
     description: |
-      Register, update, and remove connectors in a workspace
-      (including connection secret bindings).
+      Register, update, enable/disable, and remove connectors in a
+      workspace (including lease and pull-loop administration).
     declaredBy: connector-service
 
-  # ----- trigger-service-owned permissions ---------------------------
-  - name: admin:trigger
-    description: |
-      Create, update, and disable trigger receivers (webhooks, cron,
-      and external-event subscriptions) in a workspace.
-    declaredBy: trigger-service
-
   # ----- observability-audit-service-owned permissions ---------------
-  # `audit:read` is multi-declarer: auth-service owns the
-  # role-binding/principal audit projection, observability-audit
-  # owns the consolidated audit log.
-  - name: audit:read
-    description: Read audit-trail events for a workspace, tenant, or platform scope.
-    declaredBy: auth-service|observability-audit-service
+  # ``audit:read`` is multi-declarer: auth-service owns the
+  # role-binding/principal audit projection, observability-audit owns the
+  # consolidated audit log.
   - name: logs:read
     description: |
       Read run logs and connector logs streamed to the workspace
@@ -112,3 +131,6 @@ permissions:
       Read workspace-scoped metric series (run latency, run failure
       rates, queue depth).
     declaredBy: observability-audit-service
+  - name: audit:read
+    description: Read audit-trail events for a workspace, tenant, or platform scope.
+    declaredBy: auth-service|observability-audit-service
