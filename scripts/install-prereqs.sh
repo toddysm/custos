@@ -21,7 +21,14 @@
 # Options (all default to the connected-eval profile's needs):
 #   --keycloak         also install Keycloak           (air-gapped auth backend)
 #   --sealed-secrets   also install Sealed Secrets      (air-gapped secrets backend)
-#   --registry <host>  mirror prefix for air-gapped installs (e.g. registry.internal)
+#   --registry <host>  rewrite the image registry for the prerequisite charts
+#                      that expose a registry override (Dapr, cert-manager,
+#                      Loki, OTel Collector, Redis, Keycloak, Sealed Secrets).
+#                      This is a convenience for partial mirrors, NOT a full
+#                      air-gapped solution: Envoy Gateway and Prometheus images
+#                      and the Gateway API CRDs (fetched from github.com) are
+#                      not redirected. For a fully air-gapped install, mirror
+#                      every image/CRD bundle (see deploy/offline/).
 #   --wait             pass `--wait` to every helm install (slower; CI-style)
 #   -h, --help         show this help and exit
 #
@@ -98,8 +105,11 @@ img() {
 log() { echo "==> $*"; }
 
 helm_repo_add() {
-  # Idempotent: `helm repo add` re-adds without error unless the URL changes.
-  helm repo add "$1" "$2" >/dev/null 2>&1 || true
+  # `--force-update` keeps re-adding a repo idempotent even when an existing
+  # name points at a different URL (without it, that case fails). We do NOT
+  # swallow errors here: a genuine failure (bad URL, no network) should stop
+  # the script rather than silently install charts from an unexpected repo.
+  helm repo add --force-update "$1" "$2" >/dev/null
 }
 
 # ---------------------------------------------------------------------------

@@ -115,11 +115,13 @@ helm upgrade --install external-secrets external-secrets/external-secrets \
 release so the `custos-redis-master` Service and `custos-redis` Secret the
 chart's Dapr pub/sub Component references resolve. Run
 `"$REPO_ROOT/scripts/install-prereqs.sh" --help` for the available flags (e.g. `--registry`
-for an air-gapped mirror, `--keycloak` / `--sealed-secrets` for the air-gapped
-auth/secrets backends). Because Dapr, Envoy Gateway, cert-manager, and the
-observability backends are now installed here, you pass `dapr.install=false`,
-`envoyGateway.install=false`, and `certManager.install=false` in step 6 so the
-chart only renders its own glue CRs.
+for a partial air-gapped mirror, `--keycloak` / `--sealed-secrets` for the air-gapped
+auth/secrets backends). The operators installed here (Dapr, Envoy Gateway,
+cert-manager, and the observability backends) are deliberately left to their
+defaults in step 6: the umbrella's `dapr.install` / `envoyGateway.install` keys
+no longer install any operator — they gate whether the chart renders its own glue
+CRs (the Dapr Components/Subscriptions and the GatewayClass), so they must stay at
+their default `true` for those resources to land against the pre-installed CRDs.
 
 ## 4. Build the Custos images and make them available
 
@@ -218,9 +220,6 @@ echo "--- preflight (helm install --dry-run=server) ---"
 helm install "$RELEASE" "$CHART" -f "$VALUES" \
   --namespace "$NS" \
   --set postgres.embedded=false \
-  --set dapr.install=false \
-  --set envoyGateway.install=false \
-  --set certManager.install=false \
   --dry-run=server >/dev/null
 echo "preflight OK"
 
@@ -229,9 +228,6 @@ echo "--- installing (this blocks until all workloads are Ready) ---"
 helm install "$RELEASE" "$CHART" -f "$VALUES" \
   --namespace "$NS" \
   --set postgres.embedded=false \
-  --set dapr.install=false \
-  --set envoyGateway.install=false \
-  --set certManager.install=false \
   --wait --timeout 20m
 ```
 
@@ -251,9 +247,15 @@ What the cell does, in order:
 The flags:
 
 - `postgres.embedded=false` — reuse the Postgres `Cluster` you pre-provisioned.
-- `dapr.install=false` / `envoyGateway.install=false` / `certManager.install=false`
-   — these operators were installed out-of-band in step 3, so the chart skips
-   trying to pre-install them and only renders its own CRs against their CRDs.
+
+> **Why no `dapr.install=false` / `envoyGateway.install=false`?** In this slimmed
+> chart those keys no longer gate any operator install — the operators were
+
+> vendored out-of-band in step 3. What they gate now is whether the umbrella> pub/sub broker and gateway would never come up.
+
+> renders its OWN glue CRs: the Dapr Components/Subscriptions> pre-installed CRDs. Passing `=false` would silently drop all of them and the
+
+> (`templates/dapr-*.yaml`) and the GatewayClass (`templates/gatewayclass.yaml`).> Leave them at their default `true` so those resources render against the
 
 > **Reinstalling after a teardown?** A `helm uninstall` leaves the out-of-band
 > operators (and their CRDs) in place — that's expected, since the chart no

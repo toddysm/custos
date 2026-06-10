@@ -83,6 +83,9 @@ dependencies:
   # The umbrella still ships its OWN resources that target these operators'
   # CRDs (Dapr Components/Subscriptions, Gateway/GatewayClass/Certificate,
   # Grafana dashboards) — those CRDs must exist (installed out-of-band) before
-  # this chart is applied. The `dapr.install` / `envoyGateway.install` /
-  # `certManager.install` / `observability.*.enabled` value keys are retained
-  # and consumed by scripts/install-prereqs.sh to decide what to pre-install.
+  # this chart is applied. The `dapr.install` / `envoyGateway.install` value
+  # keys gate whether the umbrella renders those glue CRs (templates/dapr-*.yaml
+  # and templates/gatewayclass.yaml); keep them at their default `true` so the
+  # CRs render against the pre-installed CRDs. These keys are NOT read by
+  # scripts/install-prereqs.sh — that script decides what to pre-install from
+  # its own --flags and INSTALL_* environment variables.
