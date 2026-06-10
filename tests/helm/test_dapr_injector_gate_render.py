@@ -116,14 +116,18 @@ def test_injector_gate_rbac_scoped_to_dapr_namespace(
 def test_injector_gate_job_waits_on_injector_deployment(
     rendered: dict[str, list[dict[str, Any]]], profile: str
 ) -> None:
-    """The Job command must roll-status the injector Deployment in dapr-system."""
+    """The Job must ``rollout status`` the injector Deployment in dapr-system.
+
+    The kubectl image is distroless (no shell), so the command is the kubectl
+    entrypoint plus args rather than a ``/bin/sh -c`` script.
+    """
     job = _find(rendered[profile], "Job", GATE_NAME)
     assert job is not None
     container = job["spec"]["template"]["spec"]["containers"][0]
-    script = container["command"][-1]
-    assert "rollout status" in script
-    assert "dapr-sidecar-injector" in script
-    assert DAPR_NAMESPACE in script
+    argv = " ".join(container.get("command", []) + container.get("args", []))
+    assert "rollout" in argv and "status" in argv
+    assert "dapr-sidecar-injector" in argv
+    assert DAPR_NAMESPACE in argv
 
 
 @pytest.mark.parametrize("profile", ("airgapped-eval", "airgapped-ha"))

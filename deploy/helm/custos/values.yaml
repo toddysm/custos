@@ -214,14 +214,10 @@ dapr:
     injectorDeployment: dapr-sidecar-injector
     # How long the hook waits for the injector Deployment to become Ready.
     timeout: 180s
-    # Extra settle after the Deployment reports Ready, to let the webhook's
-    # TLS cert / CA bundle propagate before the service pods are created. 0 to
-    # disable.
-    settleSeconds: 5
     backoffLimit: 3
     image:
-      # Standalone kubectl image. Mirror for air-gapped installs — see
-      # deploy/offline/images.txt.
+      # Standalone kubectl image (distroless — invoked via its entrypoint, no
+      # shell). Mirror for air-gapped installs — see deploy/offline/images.txt.
       repository: registry.k8s.io/kubectl
       tag: v1.31.4
       # Falls back to global.imagePullPolicy when empty.
