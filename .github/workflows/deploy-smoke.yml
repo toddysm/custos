@@ -16,18 +16,20 @@ name: deploy-smoke
 
 # Trigger: manual dispatch only — for now.
 #
-# This gate was previously red because the kind cluster was missing the Dapr
-# control plane: every Custos service Pod carries Dapr sidecar-injection
+# This gate was previously red because the kind cluster was missing out-of-band
+# prerequisites. Every Custos service Pod carries Dapr sidecar-injection
 # annotations, but with no injector webhook the sidecars were never injected, so
 # api-gateway (its /readyz dials auth-service over Dapr) and workflow-service
 # (its worker needs the Dapr workflow runtime) never reached Ready and `helm
-# install --wait` timed out (#854). The job now installs Dapr out-of-band — the
-# same way scripts/install-prereqs.sh does — before the umbrella install, so
-# connected-eval deploys clean. The earlier api-gateway / workflow-service
-# startup blockers (#815, #816) are resolved. Consider restoring the
-# `pull_request` trigger (paths: deploy/helm/**, src/services/**, src/jobs/**,
-# src/libs/**, .github/workflows/deploy-smoke.yml) as a required gate once this
-# has run green a few times on dispatch.
+# install --wait` timed out (#854). Even with Dapr present, each service's
+# `daprd` sidecar exits fatally if the Redis pub/sub broker (`custos-pubsub`
+# Component) is absent, so the broker must exist too (#865). The job now installs
+# Dapr and Redis out-of-band — the same way scripts/install-prereqs.sh does —
+# before the umbrella install, so connected-eval deploys clean. The earlier
+# api-gateway / workflow-service startup blockers (#815, #816) are resolved.
+# Consider restoring the `pull_request` trigger (paths: deploy/helm/**,
+# src/services/**, src/jobs/**, src/libs/**, .github/workflows/deploy-smoke.yml)
+# as a required gate once this has run green a few times on dispatch.
 on:
   workflow_dispatch:
 
@@ -188,6 +190,29 @@ jobs:
             --show-only charts/cnpg/templates/cluster.yaml > /tmp/pg-cluster.yaml
           kubectl apply -n "$NS" -f /tmp/pg-cluster.yaml
           kubectl wait --for=condition=Ready cluster/custos -n "$NS" --timeout=5m
+
+      - name: Install Redis broker
+        run: |
+          # Redis is an out-of-band prerequisite since the broker subchart was
+          # un-vendored (#851/#852); scripts/install-prereqs.sh installs it as
+          # release `custos-redis` into custos-system. The umbrella's
+          # `custos-pubsub` Dapr Component (pubsub.redis/v1) targets the
+          # `custos-redis-master:6379` Service and reads the `custos-redis`
+          # Secret (key `redis-password`), so the release name MUST be
+          # `custos-redis` for those names to resolve. Without the broker every
+          # service's `daprd` sidecar exits fatally on component init
+          # (`custos-pubsub ... server misbehaving` / `secrets "custos-redis"
+          # not found`), the Pods CrashLoopBackOff and `helm install --wait`
+          # times out (#865). Version pinned to match scripts/install-prereqs.sh
+          # (REDIS_VERSION) and deploy/offline/images.txt. The namespace already
+          # exists (created above); --create-namespace is a harmless no-op.
+          helm repo add bitnami https://charts.bitnami.com/bitnami
+          helm repo update
+          helm upgrade --install custos-redis bitnami/redis \
+            --version 27.0.4 \
+            --namespace "$NS" --create-namespace \
+            --set architecture=standalone \
+            --wait --timeout 5m
 
       - name: Install Custos (connected-eval)
         run: |
