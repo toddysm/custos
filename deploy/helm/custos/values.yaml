@@ -197,6 +197,36 @@ dapr:
     ha:
       enabled: false
 
+  # Pre-install readiness gate for the Dapr sidecar injector (issue #847).
+  # Dapr is installed out-of-band into `injectorReadyGate.namespace` BEFORE the
+  # umbrella (scripts/install-prereqs.sh). On a cold start the injector's mutating
+  # webhook may not yet be serving when the service pods are created; because the
+  # webhook runs `failurePolicy: Ignore`, those pods come up with NO sidecar (1/1
+  # not 2/2) and `helm install --wait` then times out. This pre-install hook Job
+  # blocks until the injector Deployment is Ready, so the Dapr-enabled service
+  # Deployments that follow are injected on first creation. Disable only when Dapr
+  # sidecar injection is not used.
+  injectorReadyGate:
+    enabled: true
+    # Namespace the out-of-band Dapr control plane (sidecar injector) runs in.
+    namespace: dapr-system
+    # Injector Deployment name to wait on (upstream Dapr chart default).
+    injectorDeployment: dapr-sidecar-injector
+    # How long the hook waits for the injector Deployment to become Ready.
+    timeout: 180s
+    # Extra settle after the Deployment reports Ready, to let the webhook's
+    # TLS cert / CA bundle propagate before the service pods are created. 0 to
+    # disable.
+    settleSeconds: 5
+    backoffLimit: 3
+    image:
+      # Standalone kubectl image. Mirror for air-gapped installs — see
+      # deploy/offline/images.txt.
+      repository: registry.k8s.io/kubectl
+      tag: v1.31.4
+      # Falls back to global.imagePullPolicy when empty.
+      pullPolicy: ""
+
   # Dapr building-block CRs (DEPLOY-IMPL-012). The Component + Subscription CRs
   # below are rendered only when `dapr.install` is true; each is individually
   # toggleable. Secret-backed metadata is resolved through the built-in

@@ -61,7 +61,7 @@ The api-gateway separates **liveness** from **readiness** deliberately:
 
 - `/healthz` returns `200` as soon as the HTTP server is accepting connections.
 - `/readyz` only flips to `200` **after** a startup permission cross-check
-  against the Auth Service succeeds.
+   against the Auth Service succeeds.
 
 If the Auth Service or the Dapr sidecar is not reachable at boot, the gateway
 retries with exponential backoff. It **does not** crash-loop, and `/readyz`
@@ -88,10 +88,10 @@ Every control-plane service pod should report **2/2** containers (the service
 plus the injected `daprd` sidecar). There are two distinct failure shapes:
 
 - **`1/2` containers** — the `daprd` sidecar **was** injected but is not passing
-  its readiness check (commonly because the Dapr control plane is unhealthy).
+   its readiness check (commonly because the Dapr control plane is unhealthy).
 - **A single container (`1/1`, no `daprd`)** — the sidecar was **not injected**
-  at all; the pod or namespace is missing Dapr injection, or the injector was
-  not running when the pod was created.
+   at all; the pod or namespace is missing Dapr injection, or the injector was
+   not running when the pod was created.
 
 ```bash
 # Confirm the Dapr control plane is healthy.
@@ -109,18 +109,33 @@ have completed — re-check the install output and the `dapr-system` namespace.
 If the sidecar was never injected (single-container pod), confirm injection is
 enabled and restart the deployment once the Dapr control plane is healthy.
 
+On a cold-start install the umbrella runs a `pre-install`/`pre-upgrade` hook Job
+(`<release>-dapr-injector-wait`) that blocks until the `dapr-sidecar-injector`
+Deployment in `dapr-system` is Ready, so the service pods are injected on first
+creation and you should not normally see un-injected (`1/1`) pods
+([#847](https://github.com/toddysm/custos/issues/847)). If you do, inspect that
+hook Job's logs and confirm the injector is healthy:
+
+```bash
+kubectl logs job/"$RELEASE"-dapr-injector-wait -n "$NS"
+kubectl rollout status deployment/dapr-sidecar-injector -n dapr-system
+```
+
+The gate is on by default; set `dapr.injectorReadyGate.enabled=false` only when
+Dapr sidecar injection is not used.
+
 ## Known M1 limitations
 
 These are expected behaviors in the M1 "Core engine" milestone, not bugs:
 
 - **No Web UI.** All interaction is through the HTTP API
-  (see [First use](first-workflow.md)).
+   (see [First use](first-workflow.md)).
 - **Pre-provisioned tokens only.** The interactive OIDC device-code flow is
-  disabled; authenticate with a `cst_...` service token.
+   disabled; authenticate with a `cst_...` service token.
 - **No HA.** The eval profile is single-replica with no PodDisruptionBudgets,
-  HorizontalPodAutoscalers, or anti-affinity.
+   HorizontalPodAutoscalers, or anti-affinity.
 - **No off-cluster backups.** Postgres/Loki/Prometheus data lives on
-  in-cluster PersistentVolumes only.
+   in-cluster PersistentVolumes only.
 
 ## Filing issues
 

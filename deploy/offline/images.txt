@@ -43,6 +43,11 @@ ghcr.io/dapr/scheduler:1.14.0
 ghcr.io/dapr/sentry:1.14.0
 ghcr.io/dapr/daprd:1.14.0
 
+# --- Install tooling (Dapr injector-readiness gate hook, issue #847) --------
+# Standalone kubectl image the umbrella's pre-install hook Job uses to wait
+# for the Dapr sidecar injector before the service pods are created.
+registry.k8s.io/kubectl:v1.31.4
+
 # --- Ingress (Envoy Gateway + cert-manager) --------------------------------
 docker.io/envoyproxy/gateway:v1.8.1
 docker.io/envoyproxy/ratelimit:ff287602
