@@ -116,7 +116,7 @@ def test_injector_gate_rbac_scoped_to_dapr_namespace(
 def test_injector_gate_job_waits_on_injector_deployment(
     rendered: dict[str, list[dict[str, Any]]], profile: str
 ) -> None:
-    """The Job command must roll-status the injector Deployment in dapr-system.
+    """The Job must ``rollout status`` the injector Deployment in dapr-system.
 
     The kubectl image is distroless (no shell), so the command is the kubectl
     entrypoint plus args rather than a ``/bin/sh -c`` script.
