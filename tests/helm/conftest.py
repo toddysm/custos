@@ -26,18 +26,29 @@ PROFILES = (
 )
 
 
-def _render(profile: str) -> list[dict[str, Any]]:
-    """Run ``helm template`` for one profile, returning the parsed docs."""
-    # `helm dependency build` populates ./charts/ from Chart.lock; safe to
-    # re-run. All dependencies are local `file://` subcharts (the upstream
-    # operators/CRD bundles are installed out-of-band — see #851/#852), so
-    # `build` resolves entirely offline and avoids a slow per-render network
-    # refresh of remote chart repositories.
+@pytest.fixture(scope="session", autouse=True)
+def chart_dependencies() -> None:
+    """Vendor the umbrella chart's subcharts once per test session.
+
+    `helm dependency build` populates ./charts/ from Chart.lock. All
+    dependencies are local `file://` subcharts (the upstream operators/CRD
+    bundles are installed out-of-band — see #851/#852), so `build` resolves
+    entirely offline. Running it once per session (rather than per render)
+    avoids redundant vendoring across the many render tests in this directory.
+    """
     subprocess.run(
         ["helm", "dependency", "build", str(UMBRELLA)],
         check=True,
         capture_output=True,
     )
+
+
+def _render(profile: str) -> list[dict[str, Any]]:
+    """Run ``helm template`` for one profile, returning the parsed docs.
+
+    Subchart dependencies are vendored once per session by the autouse
+    ``chart_dependencies`` fixture, so this only invokes ``helm template``.
+    """
     result = subprocess.run(
         [
             "helm",

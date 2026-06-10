@@ -31,6 +31,7 @@ from custos_bootstrap import (
     DEFAULT_WORKSPACE_ID,
     main,
     resolve_dsn,
+    resolve_permission_paths,
     seed_platform,
 )
 
@@ -126,6 +127,28 @@ def test_resolve_dsn_none_when_absent() -> None:
     assert resolve_dsn({}) is None
 
 
+def test_resolve_permission_paths_splits_colon_list() -> None:
+    env = {
+        "CUSTOS_AUTH_PERMISSIONS_PATHS": (
+            "/opt/custos/permissions/auth-service.yaml:/opt/custos/permissions/catalog-service.yaml"
+        )
+    }
+    assert resolve_permission_paths(env) == [
+        "/opt/custos/permissions/auth-service.yaml",
+        "/opt/custos/permissions/catalog-service.yaml",
+    ]
+
+
+def test_resolve_permission_paths_empty_when_unset() -> None:
+    assert resolve_permission_paths({}) == []
+    assert resolve_permission_paths({"CUSTOS_AUTH_PERMISSIONS_PATHS": ""}) == []
+
+
+def test_resolve_permission_paths_trims_and_drops_blanks() -> None:
+    env = {"CUSTOS_AUTH_PERMISSIONS_PATHS": "  /a.yaml : : /b.yaml  "}
+    assert resolve_permission_paths(env) == ["/a.yaml", "/b.yaml"]
+
+
 async def test_seed_platform_seeds_everything() -> None:
     fake, store = _store()
 
@@ -184,6 +207,58 @@ async def test_seed_platform_without_admin_skips_principal_and_binding(
     assert fake.principals == {}
     assert fake.oidc == {}
     assert fake.bindings == []
+
+
+async def test_seed_platform_forwards_permission_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The resolved per-service paths reach the registry seeder verbatim."""
+    _, store = _store()
+    captured: dict[str, object] = {}
+
+    import custos_bootstrap.__main__ as bootstrap_main
+
+    async def _fake_seed(auth_store: object, *, paths: object, roles: object) -> dict[str, object]:
+        captured["paths"] = paths
+        return {}
+
+    monkeypatch.setattr(bootstrap_main, "seed_permissions_and_validate_roles", _fake_seed)
+
+    paths = ["/opt/custos/permissions/auth-service.yaml"]
+    await seed_platform(
+        store,
+        admin_oidc_issuer=None,
+        admin_oidc_subject=None,
+        now=_NOW,
+        permission_paths=paths,
+    )
+
+    assert captured["paths"] == paths
+
+
+async def test_seed_platform_defaults_to_bundled_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Omitting ``permission_paths`` keeps the empty bundled-fallback contract."""
+    _, store = _store()
+    captured: dict[str, object] = {}
+
+    import custos_bootstrap.__main__ as bootstrap_main
+
+    async def _fake_seed(auth_store: object, *, paths: object, roles: object) -> dict[str, object]:
+        captured["paths"] = paths
+        return {}
+
+    monkeypatch.setattr(bootstrap_main, "seed_permissions_and_validate_roles", _fake_seed)
+
+    await seed_platform(
+        store,
+        admin_oidc_issuer=None,
+        admin_oidc_subject=None,
+        now=_NOW,
+    )
+
+    assert list(cast("tuple[str, ...]", captured["paths"])) == []
 
 
 def test_main_missing_dsn_returns_nonzero(

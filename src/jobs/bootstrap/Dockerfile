@@ -77,6 +77,20 @@ RUN /opt/custos/venv/bin/pip install --no-index --find-links=/tmp/wheels \
         custos-bootstrap-job && \
     rm -rf /tmp/wheels
 
+# Per-component permission registries (#867 / AS-IMPL-032). The bootstrap seeder
+# aggregates every component's permissions.yaml when CUSTOS_AUTH_PERMISSIONS_PATHS
+# points at these files (mirroring the auth-service image), so the post-install
+# seed and the running auth-service pod load the identical registry surface. An
+# empty CUSTOS_AUTH_PERMISSIONS_PATHS falls back to the bundled aggregate embedded
+# in the custos_auth wheel; the permission-drift guard test keeps the two paths in
+# lockstep.
+COPY src/services/auth-service/permissions.yaml /opt/custos/permissions/auth-service.yaml
+COPY src/services/catalog-service/permissions.yaml /opt/custos/permissions/catalog-service.yaml
+COPY src/services/workflow-service/permissions.yaml /opt/custos/permissions/workflow-service.yaml
+COPY src/services/trigger-service/permissions.yaml /opt/custos/permissions/trigger-service.yaml
+COPY src/services/connector-service/permissions.yaml /opt/custos/permissions/connector-service.yaml
+COPY src/services/observability-audit-service/permissions.yaml /opt/custos/permissions/observability-audit-service.yaml
+
 USER custos
 WORKDIR /home/custos
 

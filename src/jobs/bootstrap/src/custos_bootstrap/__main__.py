@@ -45,6 +45,7 @@ from custos_auth.oidc_identity import (
 )
 from custos_auth.permission_registry import seed_permissions_and_validate_roles
 from custos_auth.roles import BUILTIN_ROLES, ROLE_PLATFORM_ADMIN, seed_builtin_roles
+from custos_auth.settings import ENV_PERMISSIONS_PATHS
 from custos_spl import AuthStoreProvider
 from custos_spl.ids import (
     PrincipalId,
@@ -96,6 +97,23 @@ def resolve_dsn(env: Mapping[str, str]) -> str | None:
         if value:
             return value
     return None
+
+
+def resolve_permission_paths(env: Mapping[str, str]) -> list[str]:
+    """Return the per-service ``permissions.yaml`` paths to seed from.
+
+    Reads ``CUSTOS_AUTH_PERMISSIONS_PATHS`` — the same colon-separated env var
+    the auth-service runtime consumes — and splits it the same way as
+    ``custos_auth.settings._parse_paths`` (trim entries, drop empties). An empty
+    or unset value yields an empty list, which makes
+    :func:`seed_permissions_and_validate_roles` fall back to the bundled
+    platform-M1 aggregate embedded in the ``custos_auth`` wheel (the dev/test
+    path). When set, the listed files are the canonical per-service
+    declarations baked into the bootstrap image, so the seeder and the
+    auth-service pod aggregate the identical registry surface.
+    """
+    raw = env.get(ENV_PERMISSIONS_PATHS, "").strip()
+    return [part.strip() for part in raw.split(":") if part.strip()]
 
 
 async def _ensure_tenant(auth_store: AuthStoreProvider, now: datetime) -> None:
@@ -194,15 +212,21 @@ async def seed_platform(
     admin_oidc_issuer: str | None,
     admin_oidc_subject: str | None,
     now: datetime,
+    permission_paths: Sequence[str] = (),
 ) -> None:
     """Seed permissions, roles, the default tenant/workspace, and the admin.
 
     Idempotent: permissions/roles are upserted by name/id, the tenant and
     workspace are created only when absent, and the admin user / OIDC identity /
     platform-admin grant are created only when missing.
+
+    ``permission_paths`` carries the per-service ``permissions.yaml`` files to
+    aggregate (from :func:`resolve_permission_paths`). An empty sequence falls
+    back to the bundled platform-M1 aggregate, keeping dev/test runs working
+    without any registry files on disk.
     """
     roles_spl = [role.to_spl() for role in BUILTIN_ROLES]
-    await seed_permissions_and_validate_roles(auth_store, paths=[], roles=roles_spl)
+    await seed_permissions_and_validate_roles(auth_store, paths=permission_paths, roles=roles_spl)
     await seed_builtin_roles(auth_store)
 
     await _ensure_tenant(auth_store, now)
@@ -282,6 +306,7 @@ async def _run(args: argparse.Namespace) -> int:
         admin_oidc_issuer=issuer or None,
         admin_oidc_subject=subject or None,
         now=datetime.now(UTC),
+        permission_paths=resolve_permission_paths(os.environ),
     )
     return 0
 

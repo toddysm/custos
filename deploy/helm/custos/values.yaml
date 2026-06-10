@@ -556,6 +556,14 @@ bootstrap:
   image:
     repository: ghcr.io/toddysm/custos/custos-bootstrap
     tag: dev
+  # Colon-separated list of per-component permissions.yaml files the seeder
+  # aggregates at startup (CUSTOS_AUTH_PERMISSIONS_PATHS), mirroring the
+  # auth-service chart so the post-install seed and the running auth-service pod
+  # load the identical registry surface. These point at the files baked into the
+  # bootstrap image (see src/jobs/bootstrap/Dockerfile). Leaving this empty falls
+  # back to the complete bundled aggregate embedded in the custos_auth wheel; the
+  # two are kept in lockstep by the permission-drift guard test.
+  permissionsPaths: "/opt/custos/permissions/auth-service.yaml:/opt/custos/permissions/catalog-service.yaml:/opt/custos/permissions/workflow-service.yaml:/opt/custos/permissions/trigger-service.yaml:/opt/custos/permissions/connector-service.yaml:/opt/custos/permissions/observability-audit-service.yaml"
   # The initial platform admin is pre-bound by their OIDC identity (issuer +
   # subject) so they can authenticate immediately after install. Both keys are
   # read from the referenced Secret and are optional.
