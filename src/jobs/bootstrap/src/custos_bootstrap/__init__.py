@@ -30,6 +30,7 @@ from custos_bootstrap.__main__ import (
     DSN_ENV_VAR,
     main,
     resolve_dsn,
+    resolve_permission_paths,
     seed_platform,
 )
 
@@ -41,6 +42,7 @@ __all__ = [
     "DSN_ENV_VAR",
     "main",
     "resolve_dsn",
+    "resolve_permission_paths",
     "seed_platform",
 ]
 __version__ = "0.1.0"

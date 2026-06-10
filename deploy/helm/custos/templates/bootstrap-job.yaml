@@ -38,6 +38,14 @@ spec:
           # permissions/roles/tenant/workspace and an operator can bind an
           # admin later.
           env:
+            {{- with .Values.bootstrap.permissionsPaths }}
+            # Per-component permissions.yaml files the seeder aggregates at
+            # startup (#867 / AS-IMPL-032), mirroring the auth-service chart so
+            # the post-install seed and the auth-service pod load the identical
+            # registry surface. Empty ⇒ bundled aggregate fallback.
+            - name: CUSTOS_AUTH_PERMISSIONS_PATHS
+              value: {{ . | quote }}
+            {{- end }}
             - name: CUSTOS_BOOTSTRAP_ADMIN_OIDC_ISSUER
               valueFrom:
                 secretKeyRef:
