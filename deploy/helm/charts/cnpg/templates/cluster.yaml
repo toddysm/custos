@@ -4,7 +4,7 @@ metadata:
   name: custos
   labels:
     app.kubernetes.io/name: custos-postgres
-    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
 spec:
   instances: {{ .Values.instances }}
   imageName: {{ .Values.imageName | quote }}

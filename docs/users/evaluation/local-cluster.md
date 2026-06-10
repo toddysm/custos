@@ -193,6 +193,39 @@ kubectl wait --for=condition=Ready cluster/custos -n "$NS" --timeout=5m
 ## 6. Install Custos
 
 ```bash {"cwd":"../../.."}
+# --- Show exactly what we're about to install (catches unset/stale Runme env) ---
+echo "RELEASE = ${RELEASE:?run the step-1 variables cell first}"
+echo "NS      = ${NS:?run the step-1 variables cell first}"
+echo "CHART   = ${CHART:?run the step-1 variables cell first}"
+echo "VALUES  = ${VALUES:?run the step-1 variables cell first}"
+
+# --- Validate RELEASE is a usable Kubernetes name. A numeric/dotted value
+#     (e.g. "0.1" carried in from a Runme env prompt) is NOT a valid release
+#     name and historically rendered a bare numeric app.kubernetes.io/instance
+#     label, failing the install with
+#     'cannot unmarshal number into ObjectMeta.metadata.labels'. Re-run the
+#     step-1 variables cell if this fires (RELEASE=custos). ---
+if ! printf '%s' "$RELEASE" | grep -Eq '^[a-z]([a-z0-9-]*[a-z0-9])?$'; then
+  echo "!! RELEASE='$RELEASE' is not a valid release name. Re-run the step-1 variables cell (RELEASE=custos)." >&2
+  exit 1
+fi
+
+# --- Preflight: render + server-side decode WITHOUT mutating the cluster.
+#     This exercises the same Build()/decode path as the real install, so any
+#     manifest error surfaces here with a clear message instead of a half-done
+#     install. ---
+echo "--- preflight (helm install --dry-run=server) ---"
+helm install "$RELEASE" "$CHART" -f "$VALUES" \
+  --namespace "$NS" \
+  --set postgres.embedded=false \
+  --set dapr.install=false \
+  --set envoyGateway.install=false \
+  --set certManager.install=false \
+  --dry-run=server >/dev/null
+echo "preflight OK"
+
+# --- Real install. --wait blocks until every workload is Ready (up to 20m). ---
+echo "--- installing (this blocks until all workloads are Ready) ---"
 helm install "$RELEASE" "$CHART" -f "$VALUES" \
   --namespace "$NS" \
   --set postgres.embedded=false \
@@ -201,6 +234,21 @@ helm install "$RELEASE" "$CHART" -f "$VALUES" \
   --set certManager.install=false \
   --wait --timeout 20m
 ```
+
+What the cell does, in order:
+
+1. **Echoes the resolved variables** so you can confirm Runme actually has them
+   (an empty `$VALUES`/`$RELEASE` from a reloaded notebook is a common cause of
+   a render failure). It hard-stops with a clear message if any are unset.
+2. **Validates `$RELEASE` is a usable Kubernetes name** and stops if not. A
+   numeric/dotted value (e.g. `0.1`) is invalid and historically caused the
+   `cannot unmarshal number into ObjectMeta.metadata.labels` install error.
+3. **Preflights with `--dry-run=server`** — renders and decodes the manifests
+   against the live API server without changing anything, so a bad manifest
+   fails here cleanly instead of leaving a half-applied release.
+4. **Installs for real** with `--wait` (blocks until every workload is Ready).
+
+The flags:
 
 - `postgres.embedded=false` — reuse the Postgres `Cluster` you pre-provisioned.
 - `dapr.install=false` / `envoyGateway.install=false` / `certManager.install=false`
