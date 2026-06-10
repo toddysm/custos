@@ -30,10 +30,6 @@ GATE_NAME = "custos-dapr-injector-wait"
 DAPR_NAMESPACE = "dapr-system"
 
 
-def _by_kind(docs: list[dict[str, Any]], kind: str) -> list[dict[str, Any]]:
-    return [d for d in docs if d.get("kind") == kind]
-
-
 def _find(docs: list[dict[str, Any]], kind: str, name: str) -> dict[str, Any] | None:
     for doc in docs:
         if doc.get("kind") == kind and doc.get("metadata", {}).get("name") == name:

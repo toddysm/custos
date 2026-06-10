@@ -130,7 +130,7 @@ These are expected behaviors in the M1 "Core engine" milestone, not bugs:
 
 - **No Web UI.** All interaction is through the HTTP API
    (see [First use](first-workflow.md)).
-- __Pre-provisioned tokens only.__ The interactive OIDC device-code flow is
+- **Pre-provisioned tokens only.** The interactive OIDC device-code flow is
    disabled; authenticate with a `cst_...` service token.
 - **No HA.** The eval profile is single-replica with no PodDisruptionBudgets,
    HorizontalPodAutoscalers, or anti-affinity.
