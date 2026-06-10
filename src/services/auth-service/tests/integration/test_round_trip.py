@@ -154,7 +154,7 @@ def test_grant_authorize_revoke_round_trip(client: TestClient) -> None:
     1. Seed tenant + workspace + SA.
     2. Bind ``role:workspace.viewer`` to the SA at workspace scope.
     3. ``rpc/authz.authorize`` for one of the role's permissions
-       (``workflow:read``) returns ``allowed=True``.
+       (``catalog:workflows:read``) returns ``allowed=True``.
     4. Revoke the binding.
     5. The same RPC now returns ``allowed=False`` — the in-process
        :class:`LocalBindingChangedBus` must have evicted the cache
@@ -182,7 +182,7 @@ def test_grant_authorize_revoke_round_trip(client: TestClient) -> None:
     # Step 3 — authorize returns True.
     allowed_body = {
         "principal_id": "sa-int",
-        "permission": "workflow:read",
+        "permission": "catalog:workflows:read",
         "workspace_id": "ws-int",
         "caller_component": "integration-test",
     }
