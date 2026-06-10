@@ -160,7 +160,12 @@ if [[ "$INSTALL_PROMETHEUS" == "true" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Loki — log aggregation backend.
+# Loki — log aggregation backend. The upstream chart defaults to the
+# SimpleScalable deployment, which mandates object storage and fails on a bare
+# eval cluster ("Please define loki.storage.bucketNames.chunks"). Pin it to the
+# single-binary / filesystem profile the umbrella's bundled subchart used (see
+# deploy/helm/custos/values.yaml), with caches / gateway / canary off so the
+# eval footprint stays to one pod.
 # ---------------------------------------------------------------------------
 if [[ "$INSTALL_LOKI" == "true" ]]; then
   log "Loki ($LOKI_VERSION)"
@@ -168,11 +173,61 @@ if [[ "$INSTALL_LOKI" == "true" ]]; then
   helm upgrade --install custos-loki grafana/loki \
     --version "$LOKI_VERSION" \
     --namespace custos-system --create-namespace \
-    $WAIT_FLAG
+    ${REGISTRY:+--set global.image.registry="$REGISTRY"} \
+    $WAIT_FLAG \
+    -f - <<'EOF'
+deploymentMode: SingleBinary
+loki:
+  auth_enabled: false
+  commonConfig:
+    replication_factor: 1
+  schemaConfig:
+    configs:
+      - from: "2024-04-01"
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: loki_index_
+          period: 24h
+  storage:
+    type: filesystem
+  limits_config:
+    retention_period: 744h
+singleBinary:
+  replicas: 1
+read:
+  replicas: 0
+write:
+  replicas: 0
+backend:
+  replicas: 0
+chunksCache:
+  enabled: false
+resultsCache:
+  enabled: false
+gateway:
+  enabled: false
+lokiCanary:
+  enabled: false
+test:
+  enabled: false
+monitoring:
+  selfMonitoring:
+    enabled: false
+    grafanaAgent:
+      installOperator: false
+EOF
 fi
 
 # ---------------------------------------------------------------------------
-# OpenTelemetry Collector — trace/metric pipeline.
+# OpenTelemetry Collector — trace/metric pipeline. The contrib image's binary
+# is `otelcol-contrib`, so `command.name` must be set or the pod crash-loops;
+# the chart also ships no usable default pipeline. Mirror the umbrella subchart's
+# OTLP-in / debug-out config (deploy/helm/custos/values.yaml). The literal
+# ${env:MY_POD_IP} is an OTel config reference resolved at runtime (the chart
+# injects MY_POD_IP into the Pod), NOT a shell variable — the quoted heredoc
+# keeps it intact.
 # ---------------------------------------------------------------------------
 if [[ "$INSTALL_OTEL_COLLECTOR" == "true" ]]; then
   log "OpenTelemetry Collector ($OTEL_COLLECTOR_VERSION)"
@@ -180,9 +235,38 @@ if [[ "$INSTALL_OTEL_COLLECTOR" == "true" ]]; then
   helm upgrade --install custos-otel-collector open-telemetry/opentelemetry-collector \
     --version "$OTEL_COLLECTOR_VERSION" \
     --namespace custos-system --create-namespace \
-    --set mode=deployment \
     --set image.repository="$(img otel/opentelemetry-collector-contrib)" \
-    $WAIT_FLAG
+    $WAIT_FLAG \
+    -f - <<'EOF'
+mode: deployment
+replicaCount: 1
+command:
+  name: otelcol-contrib
+presets:
+  kubernetesAttributes:
+    enabled: false
+config:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: ${env:MY_POD_IP}:4317
+        http:
+          endpoint: ${env:MY_POD_IP}:4318
+  exporters:
+    debug: {}
+  service:
+    pipelines:
+      traces:
+        receivers: [otlp]
+        exporters: [debug]
+      metrics:
+        receivers: [otlp]
+        exporters: [debug]
+      logs:
+        receivers: [otlp]
+        exporters: [debug]
+EOF
 fi
 
 # ---------------------------------------------------------------------------
