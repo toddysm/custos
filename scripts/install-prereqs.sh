@@ -35,7 +35,6 @@ set -euo pipefail
 
 # --- Pinned versions (keep in sync with deploy/helm/custos/Chart.yaml and
 #     deploy/offline/images.txt) ---------------------------------------------
-GATEWAY_API_VERSION="v1.1.0"
 DAPR_VERSION="1.14.0"
 ENVOY_GATEWAY_VERSION="1.8.1"
 CERT_MANAGER_VERSION="v1.20.2"
@@ -104,16 +103,6 @@ helm_repo_add() {
 }
 
 # ---------------------------------------------------------------------------
-# Gateway API CRDs — required by the umbrella's Gateway + GatewayClass.
-# Installed via kubectl apply (CRD bundle, not a Helm release). Idempotent.
-# ---------------------------------------------------------------------------
-if [[ "$INSTALL_ENVOY_GATEWAY" == "true" ]]; then
-  log "Gateway API CRDs ($GATEWAY_API_VERSION)"
-  kubectl apply -f \
-    "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
-fi
-
-# ---------------------------------------------------------------------------
 # Dapr control plane — required by the umbrella's Component/Subscription CRs.
 # ---------------------------------------------------------------------------
 if [[ "$INSTALL_DAPR" == "true" ]]; then
@@ -127,7 +116,12 @@ if [[ "$INSTALL_DAPR" == "true" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Envoy Gateway — backs the GatewayClass the umbrella renders.
+# Envoy Gateway — backs the GatewayClass the umbrella renders. The gateway-helm
+# chart bundles the Gateway API CRDs (in its Helm `crds/` directory) alongside
+# its own gateway.envoyproxy.io CRDs, so it is the single owner of those CRDs —
+# we deliberately do NOT pre-apply a standalone Gateway API CRD bundle, which
+# would conflict on field ownership (server-side apply) and also fail in an
+# air-gapped cluster (it fetches from github.com).
 # Published as an OCI chart on Docker Hub.
 # ---------------------------------------------------------------------------
 if [[ "$INSTALL_ENVOY_GATEWAY" == "true" ]]; then
