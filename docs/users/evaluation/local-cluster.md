@@ -134,7 +134,7 @@ make -C "$REPO_ROOT" docker-build IMAGE_REGISTRY="$IMAGE_PREFIX"   # tags $IMAGE
 **Make the images reachable by the cluster:**
 
 - **kind** — kind nodes do not share your Docker daemon, so load each image into
-the cluster:
+   the cluster:
 
 ```bash
 for s in api-gateway auth-service workflow-service trigger-service \
@@ -252,8 +252,8 @@ The flags:
 
 - `postgres.embedded=false` — reuse the Postgres `Cluster` you pre-provisioned.
 - `dapr.install=false` / `envoyGateway.install=false` / `certManager.install=false`
-  — these operators were installed out-of-band in step 3, so the chart skips
-  trying to pre-install them and only renders its own CRs against their CRDs.
+   — these operators were installed out-of-band in step 3, so the chart skips
+   trying to pre-install them and only renders its own CRs against their CRDs.
 
 > **Reinstalling after a teardown?** A `helm uninstall` leaves the out-of-band
 > operators (and their CRDs) in place — that's expected, since the chart no

@@ -14,7 +14,7 @@ app.kubernetes.io/instance: {{ .Release.Name | quote }}
 {{- define "svc.daprAnnotations" -}}
 {{- if .Values.dapr.enabled }}
 dapr.io/enabled: "true"
-dapr.io/app-id: {{ include "svc.name" . | quote }}
+dapr.io/app-id: {{ .Values.dapr.appId | default (include "svc.name" .) | quote }}
 dapr.io/app-port: {{ .Values.dapr.appPort | quote }}
 dapr.io/app-protocol: {{ .Values.dapr.appProtocol | quote }}
 dapr.io/log-level: {{ .Values.dapr.logLevel | quote }}
