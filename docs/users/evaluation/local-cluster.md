@@ -160,9 +160,11 @@ done
 ```bash {"cwd":"../../.."}
 # Resolve the chart's local subchart dependencies (the Custos services + the
 # embedded CNPG/MinIO/ESO charts). The heavy upstream operators are installed
-
 # out-of-band in step 3, so this no longer pulls anything from the network.
-make -C "$REPO_ROOT" deps      # == cd deploy/helm/custos && helm dependency update
+# `make deps` first purges deploy/helm/custos/charts/ so a directory vendored
+# before the chart was slimmed can't re-install the externalized operators
+# (which would fail the install with a numeric-label decode error).
+make -C "$REPO_ROOT" deps      # == cd deploy/helm/custos && rm -rf charts && helm dependency update
 ```
 
 Pre-provision Postgres before installing. The migration runs as a **pre-install
