@@ -50,11 +50,8 @@ def _bootstrap_env(docs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
 
 def _render(profile: str, *set_args: str) -> list[dict[str, Any]]:
-    subprocess.run(
-        ["helm", "dependency", "build", str(UMBRELLA)],
-        check=True,
-        capture_output=True,
-    )
+    # Subchart dependencies are vendored once per session by the autouse
+    # ``chart_dependencies`` fixture in conftest.py, so this only templates.
     cmd = [
         "helm",
         "template",
