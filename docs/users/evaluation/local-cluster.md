@@ -42,10 +42,11 @@ cd custos
 Set the shared variables used throughout. **In Runme, run this cell first and keep the rest of the guide in the same session** — the exports persist across cells, but a notebook reload resets them, so re-run this cell before any later step if you reload. A later step running with these unset (e.g. an empty `$VALUES`/`$RELEASE`) makes `helm install` fail while rendering the chart:
 
 ```bash {"promptEnv":"false"}
+export REPO_ROOT="$(git rev-parse --show-toplevel)"   # repo root; later cells use absolute paths so they work from any cwd
 export RELEASE=custos
 export NS=custos-system
-export CHART=deploy/helm/custos
-export VALUES=deploy/helm/custos/values-connected-eval.yaml
+export CHART="$REPO_ROOT/deploy/helm/custos"
+export VALUES="$REPO_ROOT/deploy/helm/custos/values-connected-eval.yaml"
 export IMAGE_PREFIX=ghcr.io/toddysm/custos   # local image tags; not pulled remotely
 export CLUSTER=custos-local
 ```
@@ -90,7 +91,7 @@ the regression gate pins. It is safe to re-run:
 ```bash
 # Dapr, Envoy Gateway (+ Gateway API CRDs), cert-manager, Prometheus, Loki,
 # the OTel Collector, and the Redis pub/sub broker the umbrella's CRs target.
-./scripts/install-prereqs.sh
+"$REPO_ROOT/scripts/install-prereqs.sh"
 
 # CloudNativePG operator (provisions Postgres) and the External Secrets Operator
 # (the connected-eval ClusterSecretStore) are not covered by the script above.
@@ -113,7 +114,7 @@ helm upgrade --install external-secrets external-secrets/external-secrets \
 `scripts/install-prereqs.sh` installs the Redis broker as the `custos-redis`
 release so the `custos-redis-master` Service and `custos-redis` Secret the
 chart's Dapr pub/sub Component references resolve. Run
-`./scripts/install-prereqs.sh --help` for the available flags (e.g. `--registry`
+`"$REPO_ROOT/scripts/install-prereqs.sh" --help` for the available flags (e.g. `--registry`
 for an air-gapped mirror, `--keycloak` / `--sealed-secrets` for the air-gapped
 auth/secrets backends). Because Dapr, Envoy Gateway, cert-manager, and the
 observability backends are now installed here, you pass `dapr.install=false`,
@@ -127,7 +128,7 @@ Build all service and job images locally (context is the repo root). Pass
 below (the Makefile default is also `ghcr.io/toddysm/custos`):
 
 ```bash {"cwd":"../../.."}
-make docker-build IMAGE_REGISTRY="$IMAGE_PREFIX"   # tags $IMAGE_PREFIX/<svc>:dev and $IMAGE_PREFIX/custos-<job>:dev
+make -C "$REPO_ROOT" docker-build IMAGE_REGISTRY="$IMAGE_PREFIX"   # tags $IMAGE_PREFIX/<svc>:dev and $IMAGE_PREFIX/custos-<job>:dev
 ```
 
 **Make the images reachable by the cluster:**
@@ -160,7 +161,8 @@ done
 # Resolve the chart's local subchart dependencies (the Custos services + the
 # embedded CNPG/MinIO/ESO charts). The heavy upstream operators are installed
 
-# out-of-band in step 3, so this no longer pulls anything from the network.make deps      # == cd deploy/helm/custos && helm dependency update
+# out-of-band in step 3, so this no longer pulls anything from the network.
+make -C "$REPO_ROOT" deps      # == cd deploy/helm/custos && helm dependency update
 ```
 
 Pre-provision Postgres before installing. The migration runs as a **pre-install
