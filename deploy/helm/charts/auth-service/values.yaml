@@ -38,6 +38,12 @@ env: []
 
 dapr:
   enabled: true
+  # Dapr app-id under which other components reach the Auth Service via
+  # service invocation. Unlike the other services (whose app-id defaults to
+  # their chart name), the Auth Service is addressed as `custos-auth` — the
+  # identity the api-gateway invokes and the value documented as its app-id
+  # (docs/developers/api-gateway.md) and used as the call-context JWT issuer.
+  appId: custos-auth
   appPort: 8080
   appProtocol: http
   logLevel: info

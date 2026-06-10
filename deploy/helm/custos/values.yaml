@@ -243,8 +243,19 @@ dapr:
         passwordSecret: custos-redis
         passwordKey: redis-password
       # Durable messaging on Postgres, sharing the CNPG cluster.
+      #
+      # DISABLED: the pinned Dapr runtime (1.14.0, see Chart.yaml /
+      # scripts/install-prereqs.sh) ships NO Postgres pub/sub component — daprd
+      # 1.14 has no `pubsub.postgres`/`pubsub.postgresql` building block at all
+      # (only state.postgresql, bindings.postgres, configuration.postgres). With
+      # this enabled every service sidecar fails component init with
+      # `couldn't find message bus pubsub.postgresql/v1` and CrashLoopBackOffs,
+      # taking the whole control plane down. Nothing consumes this component yet
+      # (no Subscription or service references `custos-pubsub-durable`), so it is
+      # off by default. Re-enable only once the out-of-band Dapr is bumped to a
+      # release that includes the Postgres pub/sub component (>= 1.15).
       postgres:
-        enabled: true
+        enabled: false
         name: custos-pubsub-durable
         connectionSecret: ""
         connectionKey: uri

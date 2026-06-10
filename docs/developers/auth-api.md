@@ -36,7 +36,7 @@ broader design rationale and component boundaries see
 All endpoints are served by the auth-service deployment and routed
 through the API gateway:
 
-```
+```sh
 https://<gateway>/auth/...
 ```
 
@@ -51,7 +51,6 @@ Two complementary mechanisms front every call:
    These endpoints accept a raw service-token and return a
    `PrincipalResponse` envelope. Everywhere else the auth service
    refuses bearer tokens.
-
 2. **Call-context header (`x-custos-callctx`)** — used by every
    admin endpoint. The gateway mints a signed call-context after a
    successful verify and forwards it to upstream services. The auth
@@ -63,7 +62,7 @@ Two complementary mechanisms front every call:
 
 The header name is the constant `x-custos-callctx`. The payload is a
 short-lived EdDSA-signed JWT in production; in development the
-auth-service runs a **dev-shim** mode that accepts a plain JSON
+auth-service runs a __dev-shim__ mode that accepts a plain JSON
 object for ergonomics (this mode is disabled when
 `CUSTOS_AUTH_CALLCTX_VERIFIER_URL` is set).
 
@@ -98,6 +97,7 @@ identity (no call-context exists yet) or expose public infrastructure:
 | `/v1/authz/verify-and-authorize` | Gateway hot-path: verify + authorize in one shot |
 | `/v1/auth/login/oidc/callback` | External OIDC redirect |
 | `/.well-known/jwks.json` | Public-key endpoint |
+| `/v1/permissions` | Public permission registry — the gateway cross-checks its route grants at startup, before it holds a call-context |
 | `/openapi.json`, `/docs`, `/docs/oauth2-redirect`, `/redoc` | OpenAPI / docs |
 | `/rpc/authn.verifyToken` | Bootstrap RPC: verify a bearer |
 | `/rpc/authz.verifyAndAuthorize` | Bootstrap RPC: hot-path |
@@ -123,7 +123,7 @@ Every non-`2xx` response uses a uniform envelope:
 ```
 
 `code` is always present and machine-readable. `detail` is a
-human-readable summary. `issues` is an **optional** array that
+human-readable summary. `issues` is an __optional__ array that
 appears only on `request_validation_failed` (Pydantic body
 validation) and carries one record per offending field:
 `{"loc": [...], "msg": "...", "type": "..."}`.
@@ -150,7 +150,7 @@ The full set of codes emitted by the auth service is:
 | `not_implemented` | 501 | `POST /v1/roles` — custom roles are M2+ |
 | `http_error` | varies | Defensive wrapper for raw `HTTPException` |
 
-`POST /rpc/callctx.verify` does **not** return error envelopes; it
+`POST /rpc/callctx.verify` does __not__ return error envelopes; it
 returns HTTP 200 with a structured `{valid: bool, reason: "..."}`
 payload. The closed-set reason codes are: `malformed`, `unknown_kid`,
 `bad_signature`, `expired`, `wrong_audience`, `wrong_issuer`.
@@ -210,7 +210,7 @@ not_implemented`); the catalog is exposed read-only via
 
 ### Create a tenant
 
-```
+```sh
 POST /v1/tenants
 ```
 
@@ -239,7 +239,7 @@ Errors: `409 conflict` if the `tenant_id` already exists.
 
 ### List tenants
 
-```
+```sh
 GET /v1/tenants
 ```
 
@@ -265,7 +265,7 @@ tenants:
 
 ### Create a workspace
 
-```
+```ini
 POST /v1/tenants/{tenant_id}/workspaces
 ```
 
@@ -296,7 +296,7 @@ cross-tenant; `400 invalid_request` if the tenant is disabled;
 
 ### List workspaces
 
-```
+```sh
 GET /v1/workspaces
 ```
 
@@ -306,12 +306,12 @@ Returns workspaces visible to the caller:
 
 - `platform.admin` — all workspaces, every tenant.
 - `tenant.admin` — every workspace inside the caller's
-  `ctx.tenant_id`.
+   `ctx.tenant_id`.
 - otherwise — only the caller's `ctx.workspace_id` (if set).
 
 ### Get a workspace
 
-```
+```sh
 GET /v1/workspaces/{workspace_id}
 ```
 
@@ -323,7 +323,7 @@ Returns `404 not_found` on cross-tenant reads (existence-hiding).
 
 ### Create a service account
 
-```
+```sh
 POST /v1/service-accounts
 ```
 
@@ -366,7 +366,7 @@ salted hash is persisted.
 
 ### Mint a token
 
-```
+```sh
 POST /v1/service-accounts/{principal_id}/tokens
 ```
 
@@ -396,7 +396,7 @@ Audit: emits `token.issued`.
 
 ### List tokens for a service account
 
-```
+```sh
 GET /v1/service-accounts/{principal_id}/tokens
 ```
 
@@ -415,7 +415,7 @@ tokens:
 
 ### Revoke a single token
 
-```
+```sh
 DELETE /v1/tokens/{token_id}
 ```
 
@@ -434,7 +434,7 @@ Audit: emits `token.revoked`.
 
 ### Revoke all tokens for a service account
 
-```
+```ini
 DELETE /v1/service-accounts/{principal_id}/tokens
 ```
 
@@ -464,7 +464,7 @@ scopes are M2.
 
 ### Create a binding
 
-```
+```sh
 POST /v1/workspaces/{workspace_id}/role-bindings
 ```
 
@@ -494,9 +494,9 @@ bound_by: user-1
 Errors:
 
 - `400 invalid_role_scope` if the role is not allowed at workspace
-  scope (e.g. `role:platform.admin`).
+   scope (e.g. `role:platform.admin`).
 - `404 not_found` if the workspace does not exist or is
-  cross-tenant.
+   cross-tenant.
 
 Audit: emits `role-binding.granted`. The service also publishes a
 binding-changed event so other services can invalidate their authz
@@ -504,7 +504,7 @@ cache.
 
 ### Delete a binding
 
-```
+```sh
 DELETE /v1/workspaces/{workspace_id}/role-bindings/{binding_id}
 ```
 
@@ -519,7 +519,7 @@ Audit: emits `role-binding.revoked`.
 
 ## Roles and permissions catalog
 
-```
+```sh
 GET /v1/roles
 GET /v1/permissions
 ```
@@ -536,7 +536,7 @@ not_implemented`.
 
 ### Get the calling principal
 
-```
+```sh
 GET /v1/principals/me
 ```
 
@@ -558,7 +558,7 @@ created_at: "2026-05-27T18:00:00Z"
 
 ### Disable a principal
 
-```
+```sh
 POST /v1/principals/{principal_id}/disable
 ```
 
@@ -579,7 +579,7 @@ collapse to `404 not_found`. Audit: emits `principal.disabled`.
 
 ### Verify a service token
 
-```
+```sh
 POST /v1/auth/verify
 ```
 
@@ -603,7 +603,7 @@ propagates it.
 
 ### OIDC callback
 
-```
+```sh
 POST /v1/auth/login/oidc/callback
 ```
 
@@ -637,7 +637,7 @@ Audit: emits `authn.success` / `authn.failure` with
 
 ## Authz: verify-and-authorize
 
-```
+```sh
 POST /v1/authz/verify-and-authorize
 ```
 
@@ -672,7 +672,7 @@ separately.
 
 ## JWKS and `.well-known`
 
-```
+```sh
 GET /.well-known/jwks.json
 ```
 
@@ -715,7 +715,7 @@ them as `POST /v1.0/invoke/custos-auth/method/<namespace>.<method>`.
 
 ### `authn.verifyToken`
 
-```
+```sh
 POST /rpc/authn.verifyToken
 ```
 
@@ -740,7 +740,7 @@ principal:
 
 ### `authz.authorize`
 
-```
+```sh
 POST /rpc/authz.authorize
 ```
 
@@ -764,7 +764,7 @@ audit_event_id: ae-01HZX...
 
 ### `authz.verifyAndAuthorize`
 
-```
+```sh
 POST /rpc/authz.verifyAndAuthorize
 ```
 
@@ -775,7 +775,7 @@ not need to traverse the public REST surface.
 
 ### `callctx.sign`
 
-```
+```sh
 POST /rpc/callctx.sign
 ```
 
@@ -837,7 +837,7 @@ permission.
 
 ### `callctx.verify`
 
-```
+```sh
 POST /rpc/callctx.verify
 ```
 
@@ -941,7 +941,7 @@ returned by `GET /v1/principals/me` once a call-context exists.
 This example grants `role:workspace.viewer` to the service account
 from Example 1 and then exercises an authorization decision.
 
-**Step 1 — grant the binding.** The caller's call-context must
+__Step 1 — grant the binding.__ The caller's call-context must
 include `tenant_id` matching the workspace's tenant; the
 workspace-scope resolver collapses cross-tenant requests to `404`.
 
@@ -1015,7 +1015,7 @@ token: cst_eyJhbGciOi...
 
 Response: a `principal` envelope (or `null` on failure).
 
-**Step 2 — mint the call-context.** The gateway records its own
+__Step 2 — mint the call-context.__ The gateway records its own
 identity in `caller_component`.
 
 ```yaml

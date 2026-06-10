@@ -1,10 +1,13 @@
-"""Render-time assertions for the north-south ingress stack (DEPLOY-IMPL-013).
+"""Render-time assertions for the north-south ingress stack.
 
-The umbrella vendors Envoy Gateway and cert-manager as subcharts gated on
-``envoyGateway.install`` / ``certManager.install``. It also templates the
-Gateway API ``GatewayClass`` bound to the Envoy Gateway controller and the
-cert-manager ``Issuer`` + ``Certificate`` that issue the Gateway's serving
-TLS material.
+Since #851/#852 the umbrella no longer vendors Envoy Gateway or cert-manager —
+they are installed out-of-band by ``scripts/install-prereqs.sh`` before
+``helm install custos`` (the bundled subcharts pushed the packaged release past
+Helm's 1 MB release-Secret limit). The umbrella still templates its own
+Gateway API ``Gateway`` + ``GatewayClass`` (bound to the Envoy Gateway
+controller) and the cert-manager ``Issuer`` + ``Certificate`` that issue the
+Gateway's serving TLS material. These tests assert that umbrella-owned glue and
+that the ingress controllers themselves are not bundled.
 """
 
 from __future__ import annotations
@@ -20,9 +23,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 UMBRELLA = REPO_ROOT / "deploy" / "helm" / "custos"
 
 ALL_PROFILES = ("connected-eval", "connected-ha", "airgapped-eval", "airgapped-ha")
-AIRGAPPED_PROFILES = ("airgapped-eval", "airgapped-ha")
 
 ENVOY_CONTROLLER = "gateway.envoyproxy.io/gatewayclass-controller"
+
+# Ingress controller workloads that used to ship in the umbrella and now come
+# from the out-of-band prerequisites install.
+OUT_OF_BAND_WORKLOADS = ("envoy-gateway", "custos-cert-manager")
 
 
 def _by_kind(docs: list[dict[str, Any]], kind: str) -> list[dict[str, Any]]:
@@ -36,13 +42,25 @@ def _find(docs: list[dict[str, Any]], kind: str, name: str) -> dict[str, Any] | 
     return None
 
 
-def _render_with(profile: str, *sets: str) -> list[dict[str, Any]]:
-    """Render one profile with extra ``--set`` overrides."""
+_DEPS_UPDATED = False
+
+
+def _ensure_dependencies() -> None:
+    """Populate ./charts/ once per test process (all deps are local)."""
+    global _DEPS_UPDATED
+    if _DEPS_UPDATED:
+        return
     subprocess.run(
-        ["helm", "dependency", "update", str(UMBRELLA)],
+        ["helm", "dependency", "build", str(UMBRELLA)],
         check=True,
         capture_output=True,
     )
+    _DEPS_UPDATED = True
+
+
+def _render_with(profile: str, *sets: str) -> list[dict[str, Any]]:
+    """Render one profile with extra ``--set`` overrides."""
+    _ensure_dependencies()
     cmd = [
         "helm",
         "template",
@@ -101,36 +119,28 @@ def test_certmanager_issues_gateway_tls(
 
 
 @pytest.mark.parametrize("profile", ALL_PROFILES)
-def test_subcharts_installed_by_default(
+def test_ingress_controllers_not_bundled(
     rendered: dict[str, list[dict[str, Any]]], profile: str
 ) -> None:
-    """Envoy Gateway + cert-manager controllers come up by default."""
+    """Envoy Gateway + cert-manager controllers must not be bundled."""
     docs = rendered[profile]
     deployments = {d["metadata"]["name"] for d in _by_kind(docs, "Deployment")}
-    assert "envoy-gateway" in deployments, f"envoy-gateway missing from {profile}"
-    assert "custos-cert-manager" in deployments, f"cert-manager missing from {profile}"
-    # cert-manager ships its CRDs in-chart.
+    for workload in OUT_OF_BAND_WORKLOADS:
+        assert workload not in deployments, (
+            f"{workload} is bundled in {profile}; the ingress controllers must "
+            "be installed out-of-band (scripts/install-prereqs.sh)"
+        )
+    # cert-manager ships its own CRDs out-of-band too — none come from the chart.
     crds = {d["metadata"]["name"] for d in _by_kind(docs, "CustomResourceDefinition")}
-    assert crds.issuperset({"certificates.cert-manager.io"}), (
-        f"CRDs missing from {profile}"
+    assert not {c for c in crds if "cert-manager" in c}, (
+        f"cert-manager CRDs leaked into {profile}"
     )
 
 
-def test_install_toggles_skip_subcharts() -> None:
-    """``*.install=false`` removes the subcharts and the GatewayClass."""
-    docs = _render_with(
-        "connected-eval",
-        "envoyGateway.install=false",
-        "certManager.install=false",
-    )
-    deployments = {d["metadata"]["name"] for d in _by_kind(docs, "Deployment")}
-    assert "envoy-gateway" not in deployments
-    assert "custos-cert-manager" not in deployments
+def test_envoy_install_false_drops_gatewayclass() -> None:
+    """``envoyGateway.install=false`` removes the umbrella-owned GatewayClass."""
+    docs = _render_with("connected-eval", "envoyGateway.install=false")
     assert _find(docs, "GatewayClass", "envoy") is None
-    # Scope to cert-manager's own CRDs so the test stays focused on the toggle
-    # rather than failing if an unrelated subchart starts shipping CRDs.
-    crds = {d["metadata"]["name"] for d in _by_kind(docs, "CustomResourceDefinition")}
-    assert not {c for c in crds if "cert-manager" in c}
 
 
 def test_certmanager_off_keeps_issuer_for_cluster_provided() -> None:
@@ -160,20 +170,3 @@ def test_acme_issuer_renders_solver() -> None:
     assert acme["email"] == "ops@example.com"
     solver = acme["solvers"][0]["http01"]["gatewayHTTPRoute"]
     assert solver["parentRefs"][0]["name"] == "custos"
-
-
-@pytest.mark.parametrize("profile", AIRGAPPED_PROFILES)
-def test_airgapped_mirrors_ingress_images(
-    rendered: dict[str, list[dict[str, Any]]], profile: str
-) -> None:
-    """Air-gapped profiles pull the ingress images from the internal mirror."""
-    docs = rendered[profile]
-    images = [
-        c["image"]
-        for d in _by_kind(docs, "Deployment")
-        for c in d["spec"]["template"]["spec"]["containers"]
-    ]
-    envoy = [i for i in images if "envoyproxy/gateway" in i]
-    certmgr = [i for i in images if "cert-manager-controller" in i]
-    assert envoy and all(i.startswith("registry.internal") for i in envoy)
-    assert certmgr and all(i.startswith("registry.internal") for i in certmgr)

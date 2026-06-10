@@ -45,7 +45,13 @@ lint:
 	./scripts/lint-charts.sh
 
 deps:
-	cd $(CHART_DIR) && helm dependency update
+	# Purge the vendored subchart archives before re-resolving so charts/ exactly
+	# matches Chart.yaml. `helm dependency update` does NOT remove orphaned .tgz,
+	# and Helm renders ANY archive physically in charts/ (only warning that it is
+	# not in Chart.yaml). A charts/ left over from before the umbrella was slimmed
+	# would otherwise re-install the externalized operators (Dapr, Prometheus,
+	# Loki, ...) and fail with a numeric-label decode error at install time.
+	cd $(CHART_DIR) && rm -rf charts tmpcharts-* Chart.lock && helm dependency update
 
 template: deps $(TEMPLATE_TARGETS)
 

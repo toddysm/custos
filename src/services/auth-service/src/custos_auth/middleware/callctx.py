@@ -83,6 +83,14 @@ CALLCTX_HEADER: str = "x-custos-callctx"
 #: * JWKS endpoint — every component fetches the public key set
 #:   anonymously to verify call-contexts locally; requiring a
 #:   call-context here would be a chicken-and-egg deadlock.
+#: * Permission registry (``GET /v1/permissions``) — the declared
+#:   permission registry is a public bootstrap artefact (its full
+#:   contents are published in docs/developers/auth-api.md). The API
+#:   Gateway fetches it at startup to cross-check its route grants
+#:   *before* it can hold any call-context, so gating it would be the
+#:   same chicken-and-egg deadlock as JWKS. ``GET /v1/roles`` is NOT
+#:   bypassed — it exposes role→permission policy and its callers
+#:   already hold a context.
 #: * OpenAPI / docs endpoints — the spec is a public artefact used by
 #:   client codegen, gateways, and external operators; gating it
 #:   behind a call-context would mean nothing could discover the
@@ -102,6 +110,7 @@ _BYPASS_PATHS: frozenset[str] = frozenset(
         "/v1/auth/verify",
         "/v1/auth/login/oidc/callback",
         "/v1/authz/verify-and-authorize",
+        "/v1/permissions",
         "/.well-known/jwks.json",
         "/openapi.json",
         "/docs",

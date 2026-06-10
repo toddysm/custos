@@ -102,9 +102,16 @@ def test_list_permissions_carries_multi_declarer_attribution(
     assert "observability-audit-service" in parts
 
 
-def test_list_permissions_requires_callctx(client: TestClient) -> None:
+def test_list_permissions_is_public_bootstrap_artefact(client: TestClient) -> None:
+    """The permission registry is a public read — no call-context required.
+
+    The API Gateway fetches it at startup to cross-check its route grants
+    *before* it holds any call-context (the path is on the middleware
+    bypass list). ``GET /v1/roles`` stays authenticated by contrast.
+    """
     response = client.get("/v1/permissions")
-    assert response.status_code == 401
+    assert response.status_code == 200
+    assert "permissions" in response.json()
 
 
 def test_list_permissions_is_sorted_by_name(

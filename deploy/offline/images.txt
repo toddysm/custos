@@ -4,13 +4,18 @@
 # are ignored. Consumed by `make bundle` (deploy/offline/Makefile) to produce a
 # `docker save` archive per image.
 #
-# The platform tags below mirror what the umbrella chart renders for the
-# connected-ha profile (with the optional Keycloak + Sealed Secrets backends
-# enabled). Regenerate after bumping any subchart in
-# deploy/helm/custos/Chart.yaml:
+# This list covers BOTH the Custos service/job images the umbrella renders AND
+# the out-of-band prerequisites the umbrella no longer bundles (#851/#852) but
+# still depends on at runtime — Dapr, Envoy Gateway, cert-manager, Prometheus,
+# the OpenTelemetry Collector, Loki, the Redis pub/sub broker, and the optional
+# Keycloak + Sealed Secrets backends. Those are installed out-of-band by
+# scripts/install-prereqs.sh, so they no longer appear in `helm template custos`
+# output; keep their tags here in sync with the pinned versions in
+# scripts/install-prereqs.sh and deploy/helm/custos/Chart.yaml.
+#
+# To refresh the Custos service/job tags from the chart render:
 #
 #   helm template custos deploy/helm/custos -f deploy/helm/custos/values-connected-ha.yaml \
-#     --set oidc.keycloak.enabled=true --set secrets.sealed.enabled=true \
 #     | grep -hoE 'image: "?[^"]+' | sed -E 's/^image: "?//' | sort -u
 
 # --- Custos service + job images -------------------------------------------

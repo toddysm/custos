@@ -28,9 +28,13 @@ PROFILES = (
 
 def _render(profile: str) -> list[dict[str, Any]]:
     """Run ``helm template`` for one profile, returning the parsed docs."""
-    # `helm dependency update` populates ./charts/; safe to re-run.
+    # `helm dependency build` populates ./charts/ from Chart.lock; safe to
+    # re-run. All dependencies are local `file://` subcharts (the upstream
+    # operators/CRD bundles are installed out-of-band — see #851/#852), so
+    # `build` resolves entirely offline and avoids a slow per-render network
+    # refresh of remote chart repositories.
     subprocess.run(
-        ["helm", "dependency", "update", str(UMBRELLA)],
+        ["helm", "dependency", "build", str(UMBRELLA)],
         check=True,
         capture_output=True,
     )
