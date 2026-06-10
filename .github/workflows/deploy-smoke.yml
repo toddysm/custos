@@ -284,14 +284,7 @@ jobs:
                 continue
               fi
               echo "--- /readyz body pod/$pod ---"
-              kubectl exec -n "$NS" "pod/$pod" -- python -c 'import urllib.request,urllib.error,os
-url="http://127.0.0.1:%s/readyz" % os.environ.get("PORT","8080")
-try:
-    print(urllib.request.urlopen(url, timeout=3).read().decode())
-except urllib.error.HTTPError as e:
-    print(e.code, e.read().decode())
-except Exception as e:  # noqa: BLE001
-    print("(/readyz unreachable: %r)" % e)' 2>/dev/null \
+              kubectl exec -n "$NS" "pod/$pod" -- python -c 'import os, http.client; c = http.client.HTTPConnection("127.0.0.1", int(os.environ.get("PORT", "8080")), timeout=3); c.request("GET", "/readyz"); r = c.getresponse(); print(r.status, r.read().decode())' 2>/dev/null \
                 || echo "(could not exec /readyz probe in $pod)"
               echo "--- startup/readiness log lines pod/$pod (full history) ---"
               kubectl logs -n "$NS" "pod/$pod" --all-containers 2>/dev/null \
