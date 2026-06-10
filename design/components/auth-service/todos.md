@@ -1,6 +1,6 @@
 # Auth Service TODOs
 
-Last Updated: 2026-05-28
+Last Updated: 2026-06-10
 
 ## Open
 
@@ -11,11 +11,10 @@ Last Updated: 2026-05-28
 - [ ] Cross-region replication strategy for Auth Service state (multi-region M2+).
 - [ ] Custom role authoring API (M2+).
 - [ ] SPIFFE/SPIRE cutover plan (M2/M3). ___Resolved__ 2026-05-28 via AS-IMPL-031 (#266). Planning doc landed at `spiffe-cutover-plan.md`; auth-service ships the fail-fast settings stub for `CUSTOS_AUTH_INTERNAL_IDENTITY_MODE`. The SPIRE verifier swap itself is M3._
-- [F] AS-IMPL-032 (#869): wire the bootstrap seeder through `CUSTOS_AUTH_PERMISSIONS_PATHS` (complete Option 2 from #867/#868; per #856). See `implementation-plan.md`.
 
 ## Closed
 
-_(none yet)_
+- [x] AS-IMPL-032 (#869): wired the bootstrap seeder through `CUSTOS_AUTH_PERMISSIONS_PATHS`, completing Option 2 from #867/#868 (per #856). Merged via #870. See `implementation-plan.md`.
 
 ## Implementation
 
