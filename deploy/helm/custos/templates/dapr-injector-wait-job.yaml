@@ -42,20 +42,19 @@ spec:
         - name: wait
           image: "{{ $gate.image.repository }}:{{ $gate.image.tag }}"
           imagePullPolicy: {{ $gate.image.pullPolicy | default .Values.global.imagePullPolicy }}
-          command:
-            - /bin/sh
-            - -c
-            - |
-              set -eu
-              echo "Waiting for Dapr sidecar injector deployment/{{ $gate.injectorDeployment }} in namespace {{ $gate.namespace }} to be Ready (timeout {{ $gate.timeout }})..."
-              kubectl rollout status "deployment/{{ $gate.injectorDeployment }}" \
-                --namespace "{{ $gate.namespace }}" \
-                --timeout "{{ $gate.timeout }}"
-              {{- if gt (int $gate.settleSeconds) 0 }}
-              echo "Injector Deployment Ready; settling {{ $gate.settleSeconds }}s for webhook CA/cert propagation..."
-              sleep {{ $gate.settleSeconds }}
-              {{- end }}
-              echo "Dapr sidecar injector is ready; proceeding with install."
+          # registry.k8s.io/kubectl is a distroless image with no shell, so the
+          # kubectl entrypoint is invoked directly with args (a `/bin/sh -c`
+          # wrapper would fail with `exec: "/bin/sh": no such file`). `kubectl
+          # rollout status` blocks until the injector Deployment is Ready, which
+          # is the readiness barrier this gate exists to provide.
+          args:
+            - rollout
+            - status
+            - "deployment/{{ $gate.injectorDeployment }}"
+            - "--namespace"
+            - "{{ $gate.namespace }}"
+            - "--timeout"
+            - "{{ $gate.timeout }}"
 ---
 apiVersion: v1
 kind: ServiceAccount
