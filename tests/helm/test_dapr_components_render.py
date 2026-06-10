@@ -1,10 +1,15 @@
 """Render-time assertions for the Dapr building-block CRs (DEPLOY-IMPL-012).
 
 The umbrella renders Dapr ``Component`` CRs (state store, secret store, and the
-Redis + Postgres pub/sub brokers) plus declarative ``Subscription`` CRs for the
+Redis pub/sub broker) plus declarative ``Subscription`` CRs for the
 trigger-service and observability-audit-service consumers. Everything is gated
 on ``dapr.install`` and individually toggleable. Secret-backed metadata must be
 resolved through a Dapr secret store rather than inlined.
+
+The Postgres ``custos-pubsub-durable`` broker is **disabled by default**: the
+pinned Dapr runtime (1.14.0) ships no ``pubsub.postgresql`` building block, so
+rendering it would crash every sidecar at startup. It stays off until the
+out-of-band Dapr is bumped to a release that provides it.
 """
 
 from __future__ import annotations
@@ -22,11 +27,13 @@ UMBRELLA = REPO_ROOT / "deploy" / "helm" / "custos"
 ALL_PROFILES = ("connected-eval", "connected-ha", "airgapped-eval", "airgapped-ha")
 
 # Component names the umbrella must render by default, keyed by Dapr type.
+# The Postgres ``custos-pubsub-durable`` broker is intentionally absent: Dapr
+# 1.14.0 has no ``pubsub.postgresql`` building block, so it is disabled by
+# default (see module docstring).
 EXPECTED_COMPONENTS = {
     "custos-statestore": "state.postgresql",
     "custos-secretstore": "secretstores.kubernetes",
     "custos-pubsub": "pubsub.redis",
-    "custos-pubsub-durable": "pubsub.postgresql",
 }
 
 # Subscription name -> (topic, scope app-id).
@@ -110,10 +117,15 @@ def test_state_store_is_actor_state_store(
 
 
 @pytest.mark.parametrize("profile", ALL_PROFILES)
-def test_pubsub_uses_redis_and_postgres(
+def test_pubsub_uses_redis_only_by_default(
     rendered: dict[str, list[dict[str, Any]]], profile: str
 ) -> None:
-    """Pub/sub spans a Redis fan-out broker and a Postgres durable broker (D3)."""
+    """Pub/sub renders the Redis fan-out broker; the Postgres durable broker is off.
+
+    Dapr 1.14.0 has no ``pubsub.postgresql`` building block, so the durable
+    ``custos-pubsub-durable`` Component is disabled by default — rendering it
+    would crash every sidecar at startup.
+    """
     docs = rendered[profile]
     pubsub_types = {
         d.get("spec", {}).get("type")
@@ -121,7 +133,8 @@ def test_pubsub_uses_redis_and_postgres(
         if str(d["metadata"]["name"]).startswith("custos-pubsub")
     }
     assert "pubsub.redis" in pubsub_types
-    assert "pubsub.postgresql" in pubsub_types
+    assert "pubsub.postgresql" not in pubsub_types
+    assert _find(docs, "Component", "custos-pubsub-durable") is None
 
 
 @pytest.mark.parametrize("profile", ALL_PROFILES)
@@ -146,7 +159,7 @@ def test_secrets_resolved_via_secret_store(
 ) -> None:
     """Credential-bearing Components reference a secret store, never inline values."""
     docs = rendered[profile]
-    for name in ("custos-statestore", "custos-pubsub", "custos-pubsub-durable"):
+    for name in ("custos-statestore", "custos-pubsub"):
         comp = _find(docs, "Component", name)
         assert comp is not None, f"{name} missing from {profile}"
         assert comp["auth"]["secretStore"] == "custos-secretstore"

@@ -110,13 +110,18 @@ async def create_role(
     response_model=PermissionListResponse,
 )
 async def list_permissions(
-    _ctx: Annotated[CallContext, Depends(get_call_context)],
     declared: Annotated[
         dict[str, DeclaredPermission],
         Depends(get_declared_permissions),
     ],
 ) -> PermissionListResponse:
     """List every declared permission with multi-declarer attribution.
+
+    Public, unauthenticated read: the permission registry is a bootstrap
+    artefact (its full contents are published in the developer docs) that
+    the API Gateway cross-checks at startup *before* it can hold a
+    call-context. The path is on the middleware bypass list, so unlike
+    ``GET /v1/roles`` this route declares no call-context dependency.
 
     Reads the registry materialised by the startup loader; does **not**
     round-trip through ``AuthStoreProvider.list_permissions`` because
