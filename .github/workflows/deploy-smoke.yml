@@ -16,15 +16,18 @@ name: deploy-smoke
 
 # Trigger: manual dispatch only — for now.
 #
-# The connected-eval profile does not yet deploy fully clean: api-gateway eagerly
-# dials the auth-service/Dapr sidecar at startup and crashes when they are not yet
-# reachable (#815), and workflow-service never reaches Ready pending its Dapr
-# workflow-runtime wiring (#816). Until those are resolved the end-to-end `helm
-# install --wait` cannot go green, so running this as a required `pull_request`
-# gate would block every PR on a known-red deploy. Restore the `pull_request`
-# trigger (paths: deploy/helm/**, src/services/**, src/jobs/**, src/libs/**,
-# .github/workflows/deploy-smoke.yml) once #815 and #816 land and connected-eval
-# is deploy-clean.
+# This gate was previously red because the kind cluster was missing the Dapr
+# control plane: every Custos service Pod carries Dapr sidecar-injection
+# annotations, but with no injector webhook the sidecars were never injected, so
+# api-gateway (its /readyz dials auth-service over Dapr) and workflow-service
+# (its worker needs the Dapr workflow runtime) never reached Ready and `helm
+# install --wait` timed out (#854). The job now installs Dapr out-of-band — the
+# same way scripts/install-prereqs.sh does — before the umbrella install, so
+# connected-eval deploys clean. The earlier api-gateway / workflow-service
+# startup blockers (#815, #816) are resolved. Consider restoring the
+# `pull_request` trigger (paths: deploy/helm/**, src/services/**, src/jobs/**,
+# src/libs/**, .github/workflows/deploy-smoke.yml) as a required gate once this
+# has run green a few times on dispatch.
 on:
   workflow_dispatch:
 
@@ -127,6 +130,25 @@ jobs:
             --version 0.10.0 \
             --namespace external-secrets --create-namespace \
             --set installCRDs=true \
+            --wait --timeout 5m
+
+      - name: Install Dapr control plane
+        run: |
+          # Dapr is an out-of-band prerequisite since the control-plane subchart
+          # was un-vendored (#851/#852); scripts/install-prereqs.sh installs it
+          # into `dapr-system`. Every Custos service Pod carries sidecar-injection
+          # annotations, so without the injector webhook api-gateway and
+          # workflow-service never get their sidecars and never reach Ready —
+          # `helm install --wait` then times out (#854). `--wait` here makes the
+          # `dapr-sidecar-injector` Deployment Ready before the umbrella install,
+          # which also satisfies the umbrella's pre-install injector-readiness
+          # gate (#847). Version pinned to match scripts/install-prereqs.sh
+          # (DAPR_VERSION) and deploy/offline/images.txt.
+          helm repo add dapr https://dapr.github.io/helm-charts/
+          helm repo update
+          helm upgrade --install dapr dapr/dapr \
+            --version 1.14.0 \
+            --namespace dapr-system --create-namespace \
             --wait --timeout 5m
 
       - name: Build + load Custos images
