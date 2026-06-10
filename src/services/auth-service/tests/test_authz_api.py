@@ -95,7 +95,7 @@ def test_verify_and_authorize_allow_path(
         "/v1/authz/verify-and-authorize",
         json={
             "token": plaintext,
-            "permission": "workflow:read",
+            "permission": "catalog:workflows:read",
             "workspace_id": WORKSPACE,
         },
     )

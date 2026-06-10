@@ -53,7 +53,7 @@ def test_list_roles_includes_permission_names(
     response = client.get("/v1/roles", headers=auth_header)
     by_id = {r["role_id"]: r for r in response.json()["roles"]}
     viewer = by_id["role:workspace.viewer"]
-    assert "workflow:read" in viewer["permission_names"]
+    assert "catalog:workflows:read" in viewer["permission_names"]
     assert "audit:read" in viewer["permission_names"]
     # platform.admin has the empty permission tuple — it short-circuits
     # in the authorize engine rather than listing every permission.
@@ -85,7 +85,7 @@ def test_list_permissions_returns_bundled_registry(
     names = {p["name"] for p in body["permissions"]}
     # Spot-check both auth-service-owned and cross-component entries.
     assert "admin:role-binding" in names
-    assert "workflow:read" in names
+    assert "catalog:workflows:read" in names
     assert "audit:read" in names
 
 

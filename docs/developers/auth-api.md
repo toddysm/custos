@@ -74,7 +74,7 @@ principal_id: "user-1"
 tenant_id: "t-acme"      # optional; may be null
 workspace_id: "ws-1"     # optional; may be null
 permissions:             # optional; coerced to set on the server
-  - workflow:read
+  - catalog:workflows:read
   - audit:read
 iat: 1717000000          # optional unix seconds
 exp: 1717003600          # optional unix seconds
@@ -168,16 +168,23 @@ registry is:
 | `admin:service-account` | auth-service | `workspace.admin`, `platform.admin` |
 | `admin:role-binding` | auth-service | `workspace.admin`, `tenant.admin`, `platform.admin` |
 | `admin:workspace` | auth-service | `tenant.admin`, `platform.admin` |
-| `workflow:read` | workflow-service | `workspace.viewer/author/operator/admin`, `platform.admin` |
-| `workflow:create` | workflow-service | `workspace.author/operator/admin`, `platform.admin` |
+| `catalog:workflows:read` | catalog-service | `workspace.viewer/author/operator/admin`, `platform.admin` |
+| `catalog:workflows:write` | catalog-service | `workspace.author/operator/admin`, `platform.admin` |
+| `catalog:templates:read` | catalog-service | `workspace.viewer/author/operator/admin`, `platform.admin` |
+| `catalog:templates:write` | catalog-service | `workspace.author/operator/admin`, `platform.admin` |
+| `catalog:activity-types:read` | catalog-service | `workspace.viewer/author/operator/admin`, `platform.admin` |
+| `catalog:activity-types:write` | catalog-service | `workspace.author/operator/admin`, `platform.admin` |
+| `catalog:connector-types:read` | catalog-service | `workspace.viewer/author/operator/admin`, `platform.admin` |
+| `catalog:connector-types:write` | catalog-service | `workspace.author/operator/admin`, `platform.admin` |
 | `workflow:execute` | workflow-service | `workspace.author/operator/admin`, `platform.admin` |
 | `run:read` | workflow-service | `workspace.viewer/author/operator/admin`, `platform.admin` |
 | `run:cancel` | workflow-service | `workspace.author/operator/admin`, `platform.admin` |
-| `template:read` | catalog-service | `workspace.viewer/author/operator/admin`, `platform.admin` |
-| `template:create` | catalog-service | `workspace.author/operator/admin`, `platform.admin` |
 | `connector:read` | connector-service | `workspace.viewer/author/operator/admin`, `platform.admin` |
 | `admin:connector` | connector-service | `workspace.operator/admin`, `platform.admin` |
-| `admin:trigger` | trigger-service | `workspace.operator/admin`, `platform.admin` |
+| `trigger:subscriptions:read` | trigger-service | `workspace.operator/admin`, `platform.admin` |
+| `trigger:subscriptions:write` | trigger-service | `workspace.operator/admin`, `platform.admin` |
+| `trigger:subscriptions:delete` | trigger-service | `workspace.operator/admin`, `platform.admin` |
+| `trigger:subscriptions:fire` | trigger-service | `workspace.operator/admin`, `platform.admin` |
 | `audit:read` | auth + observability-audit | `workspace.viewer/author/operator/admin`, `tenant.admin`, `platform.admin` |
 | `logs:read` | observability-audit-service | `workspace.viewer/author/operator/admin`, `platform.admin` |
 | `metrics:read` | observability-audit-service | `workspace.viewer/author/operator/admin`, `platform.admin` |
@@ -190,9 +197,9 @@ The live registry is exposed read-only via `GET /v1/permissions`.
 
 | Role id | Scope | Grants (cumulative) |
 |---|---|---|
-| `role:workspace.viewer` | workspace | `workflow:read`, `template:read`, `connector:read`, `audit:read`, `run:read`, `logs:read`, `metrics:read` |
-| `role:workspace.author` | workspace | viewer + `workflow:create`, `template:create`, `workflow:execute`, `run:cancel` |
-| `role:workspace.operator` | workspace | author + `admin:connector`, `admin:trigger` |
+| `role:workspace.viewer` | workspace | `catalog:workflows:read`, `catalog:templates:read`, `catalog:activity-types:read`, `catalog:connector-types:read`, `connector:read`, `audit:read`, `run:read`, `logs:read`, `metrics:read` |
+| `role:workspace.author` | workspace | viewer + `catalog:workflows:write`, `catalog:templates:write`, `catalog:activity-types:write`, `catalog:connector-types:write`, `workflow:execute`, `run:cancel` |
+| `role:workspace.operator` | workspace | author + `admin:connector`, `trigger:subscriptions:read`, `trigger:subscriptions:write`, `trigger:subscriptions:delete`, `trigger:subscriptions:fire` |
 | `role:workspace.admin` | workspace | operator + `admin:role-binding`, `admin:service-account` |
 | `role:tenant.admin` | tenant | `admin:workspace`, `admin:role-binding` |
 | `role:platform.admin` | platform | **all permissions at every scope** (authorize engine short-circuits) |
@@ -647,7 +654,7 @@ Request body:
 
 ```yaml
 token: cst_eyJ...
-permission: workflow:read
+permission: catalog:workflows:read
 workspace_id: ws-payments
 ```
 
@@ -752,7 +759,7 @@ audit row.
 ```yaml
 # Request
 principal_id: sa-ci-publisher
-permission: workflow:read
+permission: catalog:workflows:read
 workspace_id: ws-payments
 caller_component: workflow-service
 
@@ -970,11 +977,11 @@ call-context required.
 ```yaml
 # POST /v1/authz/verify-and-authorize
 token: cst_eyJhbGciOi...
-permission: workflow:read
+permission: catalog:workflows:read
 workspace_id: ws-payments
 ```
 
-Response `200 OK` (the binding grants `workflow:read` via the
+Response `200 OK` (the binding grants `catalog:workflows:read` via the
 `workspace.viewer` role):
 
 ```yaml
@@ -985,8 +992,8 @@ audit_event_id: ae-01HZX...
 ```
 
 **Step 3 — authorize a non-granted permission.** Same shape, with
-`permission: workflow:create`. The viewer role does **not** grant
-`workflow:create`, so the response is:
+`permission: catalog:workflows:write`. The viewer role does **not** grant
+`catalog:workflows:write`, so the response is:
 
 ```yaml
 principal_id: sa-ci-publisher

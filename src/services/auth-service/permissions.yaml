@@ -1,0 +1,36 @@
+# Permissions registry shipped by the Auth Service (COMP-001).
+#
+# These are the admin permissions auth-service owns end-to-end. The
+# permission-registry loader (``custos_auth.permission_registry``) ingests
+# this file (alongside every other component's ``permissions.yaml``) when
+# ``CUSTOS_AUTH_PERMISSIONS_PATHS`` points at it, upserting each row into the
+# SPL ``Permission`` table. ``admin:service-account`` and
+# ``admin:role-binding`` back single-permission management routes in the API
+# Gateway route table; ``admin:workspace`` is role-only (held by tenant.admin
+# and platform.admin) and guards workspace lifecycle.
+#
+# Each entry carries:
+# * ``name``        — canonical permission identifier the call-context and
+#                     authorize engine consume.
+# * ``description`` — operator-facing human description.
+# * ``declaredBy``  — pipe-delimited list of components that ship the
+#                     permission.
+
+permissions:
+  - name: admin:service-account
+    description: |
+      Create, disable, and list service accounts within a workspace.
+      Required to provision automation principals and rotate their
+      credentials.
+    declaredBy: auth-service
+  - name: admin:role-binding
+    description: |
+      Grant or revoke role bindings for principals within a scope
+      (workspace, tenant, or platform). Required for every call to
+      POST/DELETE /v1/.../role-bindings.
+    declaredBy: auth-service
+  - name: admin:workspace
+    description: |
+      Manage workspace lifecycle (create, disable) within a tenant.
+      Held by tenant.admin and platform.admin.
+    declaredBy: auth-service

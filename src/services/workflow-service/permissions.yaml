@@ -1,0 +1,28 @@
+# Permissions registry shipped by the Workflow Service (COMP-002).
+#
+# The auth-service permission-registry loader
+# (``custos_auth.permission_registry``) ingests this file when
+# ``CUSTOS_AUTH_PERMISSIONS_PATHS`` points at it, upserting each row into the
+# SPL ``Permission`` table. These are the run-lifecycle permissions the API
+# Gateway route table requires (the gateway is the canonical owner of the
+# route→permission mapping).
+#
+# Each entry carries:
+# * ``name``        — canonical permission identifier the call-context and
+#                     authorize engine consume.
+# * ``description`` — operator-facing human description.
+# * ``declaredBy``  — pipe-delimited list of components that ship the
+#                     permission.
+
+permissions:
+  - name: workflow:execute
+    description: |
+      Trigger workflow runs (manual or via signed trigger receivers).
+      Required for every POST /runs call.
+    declaredBy: workflow-service
+  - name: run:read
+    description: Read workflow run history, step outputs, and run-level state.
+    declaredBy: workflow-service
+  - name: run:cancel
+    description: Cancel an in-flight run owned by the calling workspace.
+    declaredBy: workflow-service

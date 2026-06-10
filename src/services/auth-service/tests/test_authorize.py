@@ -163,7 +163,7 @@ async def test_allow_workspace_binding_grants_permission(
         auth_store,
         metadata_store,
         principal_id=PRINCIPAL,
-        permission="workflow:read",
+        permission="catalog:workflows:read",
         workspace_id=WORKSPACE,
         caller_component="api-gateway",
     )
@@ -607,7 +607,7 @@ async def test_cache_miss_populates_the_cache(
         auth_store,
         metadata_store,
         principal_id=PRINCIPAL,
-        permission="workflow:read",
+        permission="catalog:workflows:read",
         workspace_id=WORKSPACE,
         caller_component="api-gateway",
         cache=cache,
@@ -617,7 +617,7 @@ async def test_cache_miss_populates_the_cache(
     assert decision.reason == REASON_ALLOW_BOUND
     # First call missed and populated the cache.
     assert cache.misses == 1
-    cached = cache.get(PRINCIPAL, WORKSPACE, "workflow:read")
+    cached = cache.get(PRINCIPAL, WORKSPACE, "catalog:workflows:read")
     assert cached is not None
     assert cached.allowed is True
     assert cached.reason == REASON_ALLOW_BOUND
@@ -730,7 +730,7 @@ async def test_cache_miss_then_hit_skips_auth_store_on_second_call(
         auth_store,
         metadata_store,
         principal_id=PRINCIPAL,
-        permission="workflow:read",
+        permission="catalog:workflows:read",
         workspace_id=WORKSPACE,
         caller_component="api-gateway",
         cache=cache,
@@ -747,7 +747,7 @@ async def test_cache_miss_then_hit_skips_auth_store_on_second_call(
         auth_store,
         metadata_store,
         principal_id=PRINCIPAL,
-        permission="workflow:read",
+        permission="catalog:workflows:read",
         workspace_id=WORKSPACE,
         caller_component="api-gateway",
         cache=cache,

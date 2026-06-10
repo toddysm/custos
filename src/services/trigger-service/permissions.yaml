@@ -1,0 +1,31 @@
+# Permissions registry shipped by the Trigger Service (COMP-008).
+#
+# The auth-service permission-registry loader
+# (``custos_auth.permission_registry``) ingests this file when
+# ``CUSTOS_AUTH_PERMISSIONS_PATHS`` points at it, upserting each row into the
+# SPL ``Permission`` table. These are the fine-grained trigger-subscription
+# permissions the API Gateway route table requires (the gateway is the
+# canonical owner of the route→permission mapping).
+#
+# Each entry carries:
+# * ``name``        — canonical permission identifier the call-context and
+#                     authorize engine consume.
+# * ``description`` — operator-facing human description.
+# * ``declaredBy``  — pipe-delimited list of components that ship the
+#                     permission.
+
+permissions:
+  - name: trigger:subscriptions:read
+    description: List and read trigger subscriptions in a workspace.
+    declaredBy: trigger-service
+  - name: trigger:subscriptions:write
+    description: |
+      Create and update trigger subscriptions (webhooks, cron, and
+      external-event receivers) in a workspace.
+    declaredBy: trigger-service
+  - name: trigger:subscriptions:delete
+    description: Delete trigger subscriptions in a workspace.
+    declaredBy: trigger-service
+  - name: trigger:subscriptions:fire
+    description: Manually fire a trigger subscription in a workspace.
+    declaredBy: trigger-service
