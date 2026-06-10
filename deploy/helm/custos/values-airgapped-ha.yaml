@@ -28,6 +28,10 @@ dapr:
     registry: registry.internal/dapr
     ha:
       enabled: true
+  # Mirror the kubectl image the Dapr injector-readiness gate hook uses (#847).
+  injectorReadyGate:
+    image:
+      repository: registry.internal/kubectl
 
 # Mirror the cert-manager images (Envoy Gateway uses the umbrella global registry).
 cert-manager:

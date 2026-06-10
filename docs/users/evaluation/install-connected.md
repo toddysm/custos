@@ -101,6 +101,13 @@ helm install "$RELEASE" "$CHART" -f "$VALUES" \
 `custos-bootstrap` post-install hook seeds the default tenant, workspace, roles,
 and admin binding.
 
+The `<release>-dapr-injector-wait` pre-install hook runs first and blocks until
+the out-of-band `dapr-sidecar-injector` Deployment in `dapr-system` is Ready, so
+the service pods are sidecar-injected on first creation instead of racing the
+injector on a cold start
+([#847](https://github.com/toddysm/custos/issues/847)). Disable it with
+`--set dapr.injectorReadyGate.enabled=false` only when Dapr injection is unused.
+
 > If your cluster already runs Dapr, Envoy Gateway, or cert-manager, disable the
 > corresponding subchart so the chart doesn't install a second copy:
 > `--set dapr.install=false`, `--set envoyGateway.install=false`,

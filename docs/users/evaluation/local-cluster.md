@@ -244,6 +244,12 @@ What the cell does, in order:
    fails here cleanly instead of leaving a half-applied release.
 4. **Installs for real** with `--wait` (blocks until every workload is Ready).
 
+A `pre-install` hook Job (`$RELEASE-dapr-injector-wait`) runs first and blocks
+until the out-of-band `dapr-sidecar-injector` Deployment in `dapr-system` is
+Ready, so the service pods are sidecar-injected on first creation rather than
+racing the injector on a cold start
+([#847](https://github.com/toddysm/custos/issues/847)).
+
 The flags:
 
 - `postgres.embedded=false` — reuse the Postgres `Cluster` you pre-provisioned.

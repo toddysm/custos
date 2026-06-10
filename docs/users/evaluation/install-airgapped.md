@@ -94,6 +94,14 @@ helm install custos chart/custos \
 > `custos-app` Secret does not yet exist, pre-provision the CNPG `Cluster`
 > first, wait for it to be Ready, and install with `--set postgres.embedded=false`.
 
+> **Dapr injector readiness gate.** A `<release>-dapr-injector-wait` pre-install
+> hook blocks until the out-of-band `dapr-sidecar-injector` Deployment in
+> `dapr-system` is Ready, so the service pods are sidecar-injected on first
+> creation rather than racing the injector on a cold start
+> ([#847](https://github.com/toddysm/custos/issues/847)). It uses a standalone
+> `kubectl` image — mirror `registry.k8s.io/kubectl` (see the offline image
+> manifest); the air-gapped overlays point it at `registry.internal/kubectl`.
+
 ## 5. Confirm the release installed
 
 ```bash

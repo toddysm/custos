@@ -1,0 +1,113 @@
+{{- if .Values.dapr.injectorReadyGate.enabled -}}
+{{- $gate := .Values.dapr.injectorReadyGate -}}
+{{/*
+Pre-install/upgrade readiness barrier for the Dapr sidecar injector (issue #847).
+
+Dapr is installed OUT-OF-BAND into `{{ $gate.namespace }}` before the umbrella
+(scripts/install-prereqs.sh), so the injector Deployment already exists when this
+chart is applied. On a cold start its mutating webhook may not yet be serving when
+the service pods are created; because the webhook runs `failurePolicy: Ignore`,
+those pods are admitted with NO sidecar (`1/1` not `2/2`) and `helm install --wait`
+then times out (api-gateway /readyz stays 503, the workflow-service worker never
+reports ready).
+
+This pre-install hook Job blocks until the injector Deployment is Ready, so the
+Dapr-enabled service Deployments that follow in the main wave are injected on first
+creation — no rollout restart required. It runs at hook-weight -10, ahead of the
+migrate hook (weight 0). Set `dapr.injectorReadyGate.enabled: false` when Dapr
+sidecar injection is not used.
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-dapr-injector-wait
+  namespace: {{ include "custos.namespace" . }}
+  labels:
+    {{- include "custos.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ $gate.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "custos.labels" . | nindent 8 }}
+        app.kubernetes.io/component: dapr-injector-wait
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ .Release.Name }}-dapr-injector-wait
+      containers:
+        - name: wait
+          image: "{{ $gate.image.repository }}:{{ $gate.image.tag }}"
+          imagePullPolicy: {{ $gate.image.pullPolicy | default .Values.global.imagePullPolicy }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              echo "Waiting for Dapr sidecar injector deployment/{{ $gate.injectorDeployment }} in namespace {{ $gate.namespace }} to be Ready (timeout {{ $gate.timeout }})..."
+              kubectl rollout status "deployment/{{ $gate.injectorDeployment }}" \
+                --namespace "{{ $gate.namespace }}" \
+                --timeout "{{ $gate.timeout }}"
+              {{- if gt (int $gate.settleSeconds) 0 }}
+              echo "Injector Deployment Ready; settling {{ $gate.settleSeconds }}s for webhook CA/cert propagation..."
+              sleep {{ $gate.settleSeconds }}
+              {{- end }}
+              echo "Dapr sidecar injector is ready; proceeding with install."
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Release.Name }}-dapr-injector-wait
+  namespace: {{ include "custos.namespace" . }}
+  labels:
+    {{- include "custos.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-12"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+---
+{{/*
+The injector runs out-of-band in `{{ $gate.namespace }}`, so the wait Job's
+ServiceAccount (in the release namespace) needs cross-namespace read access to
+that Deployment. Least privilege: get/list/watch on deployments only, scoped to
+the Dapr control-plane namespace.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-dapr-injector-wait
+  namespace: {{ $gate.namespace }}
+  labels:
+    {{- include "custos.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-12"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-dapr-injector-wait
+  namespace: {{ $gate.namespace }}
+  labels:
+    {{- include "custos.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-11"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Release.Name }}-dapr-injector-wait
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-dapr-injector-wait
+    namespace: {{ include "custos.namespace" . }}
+{{- end }}
