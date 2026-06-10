@@ -172,7 +172,8 @@ the chart's own `Cluster` first and wait for it (see the
 [install-ordering caveat](install-connected.md#4-pre-provision-postgres-install-ordering-caveat)):
 
 ```bash {"cwd":"../../.."}
-kubectl create namespace "$NS"
+# Idempotent: step 3's prereqs already created custos-system, so tolerate it.
+kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
 
 helm template "$RELEASE" "$CHART" -f "$VALUES" \
   --namespace "$NS" \
