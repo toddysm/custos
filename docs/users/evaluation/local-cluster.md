@@ -92,20 +92,20 @@ helm repo add jetstack https://charts.jetstack.io
 helm repo add external-secrets https://charts.external-secrets.io
 helm repo update
 
-helm install cnpg cnpg/cloudnative-pg \
+helm upgrade --install cnpg cnpg/cloudnative-pg \
   --version 0.22.1 \
   --namespace cnpg-system --create-namespace \
   --wait --timeout 5m
 
 # cert-manager (the chart's gateway TLS Certificate + selfSigned Issuer).
-helm install cert-manager jetstack/cert-manager \
+helm upgrade --install cert-manager jetstack/cert-manager \
   --version v1.20.2 \
   --namespace cert-manager --create-namespace \
   --set crds.enabled=true \
   --wait --timeout 5m
 
 # External Secrets Operator (the connected-eval ClusterSecretStore).
-helm install external-secrets external-secrets/external-secrets \
+helm upgrade --install external-secrets external-secrets/external-secrets \
   --version 0.10.0 \
   --namespace external-secrets --create-namespace \
   --set installCRDs=true \
@@ -192,6 +192,13 @@ helm install "$RELEASE" "$CHART" -f "$VALUES" \
 - `postgres.embedded=false` — reuse the Postgres `Cluster` you pre-provisioned.
 - `certManager.install=false` — cert-manager was installed out-of-band in step 3.
 
+> **Reinstalling after a teardown?** If `helm install` fails with
+> `conflict occurred while applying object ... Kind=CustomResourceDefinition`,
+> a previous install left the chart-shipped Dapr / Gateway API CRDs behind
+> (`helm uninstall` never removes `crds/`). Delete the stale CRDs with the
+> CRD-cleanup command in [section 8 (Tear down)](#8-tear-down) (or see
+> [Uninstall](uninstall.md)), then re-run this step.
+
 ## 7. Verify and run a workflow
 
 Run the in-cluster synthetic scenario:
@@ -229,13 +236,40 @@ kind delete cluster --name "$CLUSTER"
 
 On **Docker Desktop**, uninstall the release and namespace instead of deleting
 the cluster (see [Uninstall](uninstall.md) for full cleanup, including PVCs and
-the pre-provisioned Postgres `Cluster`):
+the pre-provisioned Postgres `Cluster`).
+
+Every command below is **idempotent** — each tolerates an already-removed or
+never-created resource — so this same block also cleans up a **partially failed
+install**. If `helm install` (step 6) errored partway, no release was recorded,
+so `helm uninstall --ignore-not-found` is a harmless no-op and the remaining
+commands still remove the pre-provisioned Postgres `Cluster`, the namespace, and
+the chart-shipped CRDs. You can re-run this block safely as many times as needed.
 
 ```bash
-helm uninstall "$RELEASE" -n "$NS"
-kubectl delete cluster custos -n "$NS"
-kubectl delete namespace "$NS"
+# Remove the Custos release if one was recorded (no-op if the install never
+# completed far enough to create a release).
+helm uninstall "$RELEASE" -n "$NS" --ignore-not-found
+
+# Delete the pre-provisioned Postgres Cluster and the namespace (which also
+# removes any half-created workloads, Secrets, and ConfigMaps inside it).
+kubectl delete cluster custos -n "$NS" --ignore-not-found
+kubectl delete namespace "$NS" --ignore-not-found
+
+# Remove the chart-shipped CRDs (Dapr + Envoy Gateway / Gateway API).
+# helm uninstall never deletes crds/-shipped CRDs, so they survive teardown
+# and Helm 4 server-side apply conflicts with the stale copies on a reinstall
+# ("conflict occurred while applying object ... CustomResourceDefinition").
+# Safe here because the eval chart owns them; skip if other workloads on the
+# cluster use Dapr or Gateway API.
+kubectl get crd -o name \
+  | grep -E '\.(dapr\.io|gateway\.networking\.k8s\.io|gateway\.networking\.x-k8s\.io|gateway\.envoyproxy\.io)$' \
+  | xargs -r kubectl delete
 ```
+
+> **A delete hangs (namespace stuck `Terminating`)?** A finalizer is usually
+> waiting on a controller that is already gone. Find the holdout with
+> `kubectl get all,gateway,gatewayclass -n "$NS"` and clear its finalizer, e.g.
+> `kubectl patch <resource> -n "$NS" -p '{"metadata":{"finalizers":null}}' --type=merge`.
 
 ## Related documentation
 
