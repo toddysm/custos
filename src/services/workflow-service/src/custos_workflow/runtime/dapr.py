@@ -463,7 +463,7 @@ class WorkflowClient:
 
         def _call() -> str:
             return client.schedule_new_workflow(
-                request.workflow,  # type: ignore[arg-type]
+                request.workflow,  # type: ignore[arg-type, unused-ignore]
                 input=request.input,
                 instance_id=request.instance_id,
                 start_at=request.start_at,
