@@ -59,62 +59,30 @@ dependencies:
     version: 0.1.0
     repository: "file://../charts/eso"
     condition: secrets.eso.enabled
-  # Dapr control plane (vendored upstream subchart). Toggle with `dapr.install`;
-  # set it false when Dapr is managed out-of-band / already installed.
-  - name: dapr
-    version: 1.14.0
-    repository: "https://dapr.github.io/helm-charts/"
-    condition: dapr.install
-  # North-south ingress stack (vendored upstream subcharts). Toggle with
-  # `envoyGateway.install` / `certManager.install`; set false when the cluster
-  # already provides Envoy Gateway / cert-manager. The toggle keys are kept
-  # separate from each subchart's own values namespace (`gateway-helm:` /
-  # `cert-manager:`) because cert-manager ships a strict values schema that
-  # rejects unknown keys.
-  - name: gateway-helm
-    version: 1.8.1
-    repository: "oci://docker.io/envoyproxy"
-    condition: envoyGateway.install
-  - name: cert-manager
-    version: v1.20.2
-    repository: "https://charts.jetstack.io"
-    condition: certManager.install
-  # Observability pipeline (vendored upstream subcharts — DEPLOY-IMPL-014).
-  # In-cluster sinks for metrics (Prometheus), traces/metrics ingestion (OTel
-  # Collector), and logs (Loki). Each is toggled via the existing
-  # `observability.<backend>.enabled` flag — a Custos-owned block kept separate
-  # from each subchart's own values namespace (`prometheus:` / `loki:` /
-  # `opentelemetry-collector:`) so the strict subchart schemas never see an
-  # unknown toggle key.
-  - name: prometheus
-    version: 29.10.0
-    repository: "https://prometheus-community.github.io/helm-charts"
-    condition: observability.prometheus.enabled
-  - name: loki
-    version: 6.55.0
-    repository: "https://grafana.github.io/helm-charts"
-    condition: observability.loki.enabled
-  - name: opentelemetry-collector
-    version: 0.158.1
-    repository: "https://open-telemetry.github.io/opentelemetry-helm-charts"
-    condition: observability.otelCollector.enabled
-  # Pub/sub broker + optional air-gapped auth/secrets backends
-  # (DEPLOY-IMPL-015, resolves design TODO-001). Redis is the Dapr pub/sub
-  # fan-out broker (design D3) and installs with the Redis pub/sub component.
-  # Keycloak (self-hosted OIDC) and Sealed Secrets (no-Vault Layer-2) are
-  # optional and default-off; they reuse the existing `oidc.keycloak.enabled`
-  # and `secrets.sealed.enabled` feature flags, mirroring the
-  # `secrets.eso.enabled` -> eso subchart precedent. Each subchart keeps its own
-  # values namespace (`redis:` / `keycloak:` / `sealed-secrets:`).
-  - name: redis
-    version: 27.0.4
-    repository: "https://charts.bitnami.com/bitnami"
-    condition: dapr.components.pubsub.redis.enabled
-  - name: keycloak
-    version: 25.2.0
-    repository: "https://charts.bitnami.com/bitnami"
-    condition: oidc.keycloak.enabled
-  - name: sealed-secrets
-    version: 2.18.6
-    repository: "https://bitnami-labs.github.io/sealed-secrets"
-    condition: secrets.sealed.enabled
+  # ---------------------------------------------------------------------------
+  # Out-of-band prerequisites (NOT bundled — see #851/#852).
+  #
+  # The following upstream operators/CRD bundles are intentionally NOT vendored
+  # as subchart dependencies. Bundling them pushed the packaged umbrella to
+  # ~2 MB, and Helm stores the gzipped chart in the release Secret whose hard
+  # cap is 1 MB — so `helm install` always failed with
+  # `Secret "sh.helm.release.v1.<rel>.v1" is invalid: data: Too long`.
+  #
+  # Install these out-of-band BEFORE `helm install custos` (see
+  # scripts/install-prereqs.sh and docs/users/evaluation/local-cluster.md):
+  #   - dapr                     (https://dapr.github.io/helm-charts/, 1.14.0)
+  #   - gateway-helm / Envoy GW  (oci://docker.io/envoyproxy, 1.8.1)
+  #   - cert-manager             (https://charts.jetstack.io, v1.20.2)
+  #   - prometheus               (prometheus-community, 29.10.0)
+  #   - loki                     (grafana, 6.55.0)
+  #   - opentelemetry-collector  (open-telemetry, 0.158.1)
+  #   - redis                    (bitnami, 27.0.4)
+  #   - keycloak                 (bitnami, 25.2.0; optional)
+  #   - sealed-secrets           (bitnami-labs, 2.18.6; optional)
+  #
+  # The umbrella still ships its OWN resources that target these operators'
+  # CRDs (Dapr Components/Subscriptions, Gateway/GatewayClass/Certificate,
+  # Grafana dashboards) — those CRDs must exist (installed out-of-band) before
+  # this chart is applied. The `dapr.install` / `envoyGateway.install` /
+  # `certManager.install` / `observability.*.enabled` value keys are retained
+  # and consumed by scripts/install-prereqs.sh to decide what to pre-install.

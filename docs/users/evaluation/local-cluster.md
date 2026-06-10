@@ -1,15 +1,15 @@
 # Getting Started — Deploy on a Local Cluster (kind / Docker Desktop)
 
-Last Updated: 2026-06-08
+Last Updated: 2026-06-09
 
 This quickstart stands up the Custos M1 control plane on a **local Kubernetes
 cluster** — either [`kind`](https://kind.sigs.k8s.io/) or **Docker Desktop
 Kubernetes** — using images you build locally. It is the fastest way to try the
 platform on a laptop.
 
-It mirrors the `connected-eval` profile exercised by the project's deployment
-regression gate ([`.github/workflows/deploy-smoke.yml`](../../../.github/workflows/deploy-smoke.yml)),
-so the commands here are known-good. For a managed/remote cluster, follow
+It follows the same `connected-eval` profile as the project's deployment
+regression gate ([`.github/workflows/deploy-smoke.yml`](../../../.github/workflows/deploy-smoke.yml)).
+For a managed/remote cluster, follow
 [Install — connected](install-connected.md) instead; this page is the local
 variant of the same flow.
 
@@ -73,22 +73,28 @@ kubectl config use-context docker-desktop
 Both options ship a default `standard`/`hostpath` StorageClass, which the
 PersistentVolume-backed eval dependencies (Postgres, Loki, Prometheus) use.
 
-## 3. Install the pre-install operators
+## 3. Install the out-of-band prerequisites
 
-The umbrella chart references CRDs from operators that must exist **before**
-`helm install`. Install them at the versions pinned by the regression gate:
+The umbrella chart does **not** bundle the heavy upstream operators (Dapr, Envoy
+Gateway, cert-manager, Prometheus, Loki, the OpenTelemetry Collector, and the
+Redis pub/sub broker). Bundling them pushed the packaged chart past Helm's 1 MB
+release-Secret limit, so `helm install` failed before anything was applied
+([#851](https://github.com/toddysm/custos/issues/851)). They are installed
+out-of-band instead — the chart still ships the CRs that target their CRDs (Dapr
+Components/Subscriptions, the Gateway/GatewayClass/Certificate, the Grafana
+dashboards), so those operators must exist **before** `helm install`.
 
-> The Gateway API CRDs are shipped by the chart itself (the Envoy Gateway
-> subchart's `crds/`), so they are **not** pre-installed here. Installing them
-> out-of-band with `kubectl apply` makes Helm 4's server-side CRD apply conflict
-> with the cluster-installed copy (owned by the `kubectl-client-side-apply`
-> field manager) and fails `helm install` with CRD ownership conflicts. Helm 3
-> tolerated this; Helm 4 does not.
+The repo ships an idempotent installer that brings them all up at the versions
+the regression gate pins. It is safe to re-run:
 
 ```bash
-# CloudNativePG operator (provisions Postgres).
+# Dapr, Envoy Gateway (+ Gateway API CRDs), cert-manager, Prometheus, Loki,
+# the OTel Collector, and the Redis pub/sub broker the umbrella's CRs target.
+./scripts/install-prereqs.sh
+
+# CloudNativePG operator (provisions Postgres) and the External Secrets Operator
+# (the connected-eval ClusterSecretStore) are not covered by the script above.
 helm repo add cnpg https://cloudnative-pg.github.io/charts
-helm repo add jetstack https://charts.jetstack.io
 helm repo add external-secrets https://charts.external-secrets.io
 helm repo update
 
@@ -97,14 +103,6 @@ helm upgrade --install cnpg cnpg/cloudnative-pg \
   --namespace cnpg-system --create-namespace \
   --wait --timeout 5m
 
-# cert-manager (the chart's gateway TLS Certificate + selfSigned Issuer).
-helm upgrade --install cert-manager jetstack/cert-manager \
-  --version v1.20.2 \
-  --namespace cert-manager --create-namespace \
-  --set crds.enabled=true \
-  --wait --timeout 5m
-
-# External Secrets Operator (the connected-eval ClusterSecretStore).
 helm upgrade --install external-secrets external-secrets/external-secrets \
   --version 0.10.0 \
   --namespace external-secrets --create-namespace \
@@ -112,9 +110,15 @@ helm upgrade --install external-secrets external-secrets/external-secrets \
   --wait --timeout 5m
 ```
 
-Because cert-manager is pre-installed here, you install the umbrella chart with
-`certManager.install=false` in step 6 so its bundled subchart is skipped. The
-other bundled subcharts (Dapr, Envoy Gateway, Redis) stay at their eval defaults.
+`scripts/install-prereqs.sh` installs the Redis broker as the `custos-redis`
+release so the `custos-redis-master` Service and `custos-redis` Secret the
+chart's Dapr pub/sub Component references resolve. Run
+`./scripts/install-prereqs.sh --help` for the available flags (e.g. `--registry`
+for an air-gapped mirror, `--keycloak` / `--sealed-secrets` for the air-gapped
+auth/secrets backends). Because Dapr, Envoy Gateway, cert-manager, and the
+observability backends are now installed here, you pass `dapr.install=false`,
+`envoyGateway.install=false`, and `certManager.install=false` in step 6 so the
+chart only renders its own glue CRs.
 
 ## 4. Build the Custos images and make them available
 
@@ -129,21 +133,21 @@ make docker-build IMAGE_REGISTRY="$IMAGE_PREFIX"   # tags $IMAGE_PREFIX/<svc>:de
 **Make the images reachable by the cluster:**
 
 - **kind** — kind nodes do not share your Docker daemon, so load each image into
-  the cluster:
+the cluster:
 
-  ```bash
-  for s in api-gateway auth-service workflow-service trigger-service \
-           connector-service activity-runtime-manager catalog-service \
-           observability-audit-service; do
-    kind load docker-image "$IMAGE_PREFIX/$s:dev" --name "$CLUSTER"
-  done
-  for j in migrate bootstrap; do
-    kind load docker-image "$IMAGE_PREFIX/custos-$j:dev" --name "$CLUSTER"
-  done
-  ```
+```bash
+for s in api-gateway auth-service workflow-service trigger-service \
+         connector-service activity-runtime-manager catalog-service \
+         observability-audit-service; do
+  kind load docker-image "$IMAGE_PREFIX/$s:dev" --name "$CLUSTER"
+done
+for j in migrate bootstrap; do
+  kind load docker-image "$IMAGE_PREFIX/custos-$j:dev" --name "$CLUSTER"
+done
+```
 
 - **Docker Desktop Kubernetes** — the cluster shares the Docker daemon, so the
-  images you just built are already visible. **No load step is needed.**
+   images you just built are already visible. **No load step is needed.**
 
 > The eval values set `imagePullPolicy` so locally present `:dev` images are used
 > without a registry pull. If you see `ErrImagePull`, confirm the image tags
@@ -153,8 +157,10 @@ make docker-build IMAGE_REGISTRY="$IMAGE_PREFIX"   # tags $IMAGE_PREFIX/<svc>:de
 ## 5. Vendor chart dependencies and pre-provision Postgres
 
 ```bash {"cwd":"../../.."}
-# Pull the vendored subcharts into the umbrella chart.
-make deps      # == cd deploy/helm/custos && helm dependency update
+# Resolve the chart's local subchart dependencies (the Custos services + the
+# embedded CNPG/MinIO/ESO charts). The heavy upstream operators are installed
+
+# out-of-band in step 3, so this no longer pulls anything from the network.make deps      # == cd deploy/helm/custos && helm dependency update
 ```
 
 Pre-provision Postgres before installing. The migration runs as a **pre-install
@@ -185,19 +191,22 @@ kubectl wait --for=condition=Ready cluster/custos -n "$NS" --timeout=5m
 helm install "$RELEASE" "$CHART" -f "$VALUES" \
   --namespace "$NS" \
   --set postgres.embedded=false \
+  --set dapr.install=false \
+  --set envoyGateway.install=false \
   --set certManager.install=false \
   --wait --timeout 20m
 ```
 
 - `postgres.embedded=false` — reuse the Postgres `Cluster` you pre-provisioned.
-- `certManager.install=false` — cert-manager was installed out-of-band in step 3.
+- `dapr.install=false` / `envoyGateway.install=false` / `certManager.install=false`
+  — these operators were installed out-of-band in step 3, so the chart skips
+  trying to pre-install them and only renders its own CRs against their CRDs.
 
-> **Reinstalling after a teardown?** If `helm install` fails with
-> `conflict occurred while applying object ... Kind=CustomResourceDefinition`,
-> a previous install left the chart-shipped Dapr / Gateway API CRDs behind
-> (`helm uninstall` never removes `crds/`). Delete the stale CRDs with the
-> CRD-cleanup command in [section 8 (Tear down)](#8-tear-down) (or see
-> [Uninstall](uninstall.md)), then re-run this step.
+> **Reinstalling after a teardown?** A `helm uninstall` leaves the out-of-band
+> operators (and their CRDs) in place — that's expected, since the chart no
+> longer owns them. Just re-run this step. If you also removed the operators
+> (e.g. you ran the optional CRD cleanup in [section 8](#8-tear-down)), re-run
+> step 3 first so the chart's CRs find their CRDs.
 
 ## 7. Verify and run a workflow
 
@@ -242,8 +251,8 @@ Every command below is **idempotent** — each tolerates an already-removed or
 never-created resource — so this same block also cleans up a **partially failed
 install**. If `helm install` (step 6) errored partway, no release was recorded,
 so `helm uninstall --ignore-not-found` is a harmless no-op and the remaining
-commands still remove the pre-provisioned Postgres `Cluster`, the namespace, and
-the chart-shipped CRDs. You can re-run this block safely as many times as needed.
+commands still remove the pre-provisioned Postgres `Cluster` and the namespace.
+You can re-run this block safely as many times as needed.
 
 ```bash
 # Remove the Custos release if one was recorded (no-op if the install never
@@ -254,13 +263,28 @@ helm uninstall "$RELEASE" -n "$NS" --ignore-not-found
 # removes any half-created workloads, Secrets, and ConfigMaps inside it).
 kubectl delete cluster custos -n "$NS" --ignore-not-found
 kubectl delete namespace "$NS" --ignore-not-found
+```
 
-# Remove the chart-shipped CRDs (Dapr + Envoy Gateway / Gateway API).
-# helm uninstall never deletes crds/-shipped CRDs, so they survive teardown
-# and Helm 4 server-side apply conflicts with the stale copies on a reinstall
-# ("conflict occurred while applying object ... CustomResourceDefinition").
-# Safe here because the eval chart owns them; skip if other workloads on the
-# cluster use Dapr or Gateway API.
+The out-of-band prerequisites from step 3 (Dapr, Envoy Gateway, cert-manager,
+Prometheus, Loki, the OTel Collector, Redis, CNPG, ESO) are **not** removed by
+the block above — the chart never owned them. They are harmless to leave
+installed for a re-run. To fully clean them up, uninstall each Helm release and
+then delete their CRDs. Skip this if other workloads on the cluster use Dapr or
+the Gateway API:
+
+```bash
+for rel in custos-redis custos-loki custos-prometheus custos-otel-collector; do
+  helm uninstall "$rel" -n "$NS" --ignore-not-found
+done
+helm uninstall dapr -n dapr-system --ignore-not-found
+helm uninstall envoy-gateway -n envoy-gateway-system --ignore-not-found
+helm uninstall cert-manager -n cert-manager --ignore-not-found
+helm uninstall cnpg -n cnpg-system --ignore-not-found
+helm uninstall external-secrets -n external-secrets --ignore-not-found
+
+# Operators leave their CRDs behind on uninstall. Remove the Dapr + Gateway API
+# CRDs so a later reinstall starts clean (Helm 4 server-side apply conflicts
+# with stale copies otherwise).
 kubectl get crd -o name \
   | grep -E '\.(dapr\.io|gateway\.networking\.k8s\.io|gateway\.networking\.x-k8s\.io|gateway\.envoyproxy\.io)$' \
   | xargs -r kubectl delete
