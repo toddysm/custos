@@ -79,7 +79,18 @@ jobs:
       - name: Vendor chart dependencies
         run: cd deploy/helm/custos && helm dependency update
 
-      - name: Log in to GHCR
+      # cosign uses the docker / go-containerregistry keychain
+      # (~/.docker/config.json), NOT Helm's own registry credential store, so it
+      # needs its own GHCR login or the signature push fails with
+      # ``UNAUTHORIZED: unauthenticated``.
+      - name: Log in to GHCR (cosign / OCI keychain)
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to GHCR (Helm)
         env:
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
