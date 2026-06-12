@@ -24,9 +24,16 @@ INSTALL-AIRGAPPED.md  this runbook
 
 ## Steps
 
-1. **Verify checksums**
+1. **Reassemble and verify the bundle**
+
+   GitHub caps each release asset at 2 GiB, so the bundle is published as
+   ~1.9 GiB split parts (`custos-__VERSION__-airgapped.tar.gz.part00`,
+   `.part01`, …) alongside `custos-__VERSION__-airgapped.tar.gz.sha256`.
+   Reassemble them in order, verify, then extract:
 
    ```bash
+   cat custos-__VERSION__-airgapped.tar.gz.part* > custos-__VERSION__-airgapped.tar.gz
+   sha256sum -c custos-__VERSION__-airgapped.tar.gz.sha256   # or: shasum -a 256 -c …
    tar -xzf custos-__VERSION__-airgapped.tar.gz
    cd custos-__VERSION__-airgapped
    sha256sum -c checksums.sha256   # or: shasum -a 256 -c checksums.sha256
