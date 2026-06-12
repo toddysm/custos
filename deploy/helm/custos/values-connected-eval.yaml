@@ -1,5 +1,7 @@
 # Profile: connected + eval
-# Small footprint, single replica, external OIDC (GitHub/Entra), ESO for secrets.
+# Small footprint, single replica, external OIDC (GitHub/Entra). Secrets come
+# directly from the CNPG `custos-app` Secret (no real secret backend); the ESO
+# ClusterSecretStore is disabled (see `secrets.eso.enabled` below).
 
 topology: connected
 profile: eval
@@ -17,7 +19,12 @@ objectStorage:
 secrets:
   backend: eso
   eso:
-    enabled: true
+    # Eval has NO real secret backend (no Vault): services read DSNs directly
+    # from the CNPG `custos-app` secret via secretKeyRef, and no ExternalSecret
+    # is rendered. Rendering the Vault-backed ClusterSecretStore here would leave
+    # a permanently `Ready: False` CR which Helm v4's kstatus-based `--wait`
+    # blocks on, timing out the install. Disabled so the store is not rendered.
+    enabled: false
     provider: vault
   sealed:
     enabled: false

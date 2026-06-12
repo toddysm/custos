@@ -93,8 +93,12 @@ the regression gate pins. It is safe to re-run:
 # the OTel Collector, and the Redis pub/sub broker the umbrella's CRs target.
 "$REPO_ROOT/scripts/install-prereqs.sh"
 
-# CloudNativePG operator (provisions Postgres) and the External Secrets Operator
-# (the connected-eval ClusterSecretStore) are not covered by the script above.
+# CloudNativePG operator (provisions Postgres) is required and not covered by
+# the script above. The External Secrets Operator below is OPTIONAL for
+# connected-eval: that profile reads its DSNs directly from the CNPG
+# `custos-app` Secret and no longer renders an ESO ClusterSecretStore
+# (`secrets.eso.enabled=false`). It is installed here only so the ESO CRDs exist
+# if you re-enable the store; skip the `external-secrets` repo/install otherwise.
 helm repo add cnpg https://cloudnative-pg.github.io/charts
 helm repo add external-secrets https://charts.external-secrets.io
 helm repo update
@@ -269,6 +273,31 @@ The flags:
 > (e.g. you ran the optional CRD cleanup in [section 8](#8-tear-down)), re-run
 > step 3 first so the chart's CRs find their CRDs.
 
+> **Docker Desktop + Helm 4: the install may block on the `Gateway`.** Helm 4's
+> `--wait` (kstatus) waits for *every* release resource — including the `Gateway`
+> custom resource — to report ready. The chart's `Gateway` only becomes
+> `Programmed` once Envoy Gateway's `LoadBalancer` Service receives an external
+> address, but Docker Desktop has **no LoadBalancer provider**, so that Service
+> stays `<pending>` and `helm install --wait` blocks until it times out — even
+> though every pod is already Ready. (Helm 3, which CI pins, ignores CR readiness,
+> so this only bites locally with Helm 4.)
+>
+> Workaround: while the step-6 install is still running, open a **second
+> terminal** and give the Envoy Service a placeholder ingress address. Nothing
+> reverts it (there is no LoadBalancer controller), so the `Gateway` flips to
+> `Programmed` and the install completes:
+
+```bash
+# Run in a SECOND terminal WHILE the step-6 `helm install --wait` is blocking.
+# Only needed on Docker Desktop with Helm 4; harmless to skip on Helm 3.
+NS=custos-system
+SVC=$(kubectl get svc -n envoy-gateway-system \
+  -l gateway.envoyproxy.io/owning-gateway-namespace="$NS" -o name | head -1)
+kubectl patch "$SVC" -n envoy-gateway-system --subresource=status --type=merge \
+  -p '{"status":{"loadBalancer":{"ingress":[{"ip":"127.0.0.1"}]}}}'
+kubectl get gateway custos -n "$NS"   # PROGRAMMED should flip to True
+```
+
 ## 7. Verify and run a workflow
 
 Run the in-cluster synthetic scenario:
@@ -284,18 +313,35 @@ service plus its injected Dapr sidecar):
 kubectl get pods -n "$NS"
 ```
 
-Reach the API gateway via a port-forward (simplest on a local cluster):
+Reach the API gateway via a port-forward (simplest on a local cluster).
+`kubectl port-forward` is a **foreground** process that runs until you stop it
+(Ctrl-C), so it can't share a cell with the `curl` that uses it. The cell below
+is self-contained: it starts the port-forward in the background, probes
+`/healthz`, then tears it down again.
 
 ```bash
-kubectl port-forward -n "$NS" deploy/custos-api-gateway 8080:8080
-# in another shell:
-curl -fsS localhost:8080/healthz
+# Self-contained health probe: background the port-forward, curl, then stop it.
+kubectl port-forward -n "$NS" deploy/custos-api-gateway 8080:8080 >/tmp/custos-pf.log 2>&1 &
+PF_PID=$!
+# Wait for the local listener to come up before curling.
+for i in $(seq 1 10); do curl -fsS -m 2 localhost:8080/healthz >/dev/null 2>&1 && break; sleep 1; done
+echo "healthz: $(curl -fsS -m 5 localhost:8080/healthz)"   # {"status":"ok"}
+echo "readyz:  $(curl -fsS -m 5 localhost:8080/readyz)"    # {"status":"ready"}
+kill "$PF_PID" 2>/dev/null
 ```
 
-Then follow [First use](first-workflow.md) to authenticate and run a sample
-workflow against `http://localhost:8080`. For deeper health checks and gateway
-endpoint discovery, see [Verify](verify.md); if anything is stuck, see
-[Troubleshooting](troubleshooting.md).
+To actually drive the gateway (next step), keep a port-forward running in its
+**own dedicated terminal** — not in this notebook, where it would block the cell
+indefinitely:
+
+```bash
+kubectl port-forward -n custos-system deploy/custos-api-gateway 8080:8080
+```
+
+Leave it running, then follow [First use](first-workflow.md) to authenticate and
+run a sample workflow against `http://localhost:8080`. For deeper health checks
+and gateway endpoint discovery, see [Verify](verify.md); if anything is stuck,
+see [Troubleshooting](troubleshooting.md).
 
 ## 8. Tear down
 
