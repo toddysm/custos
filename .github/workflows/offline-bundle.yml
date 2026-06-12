@@ -110,6 +110,13 @@ jobs:
           TAG: ${{ github.ref_name }}
           BUNDLE_VERSION: ${{ steps.ver.outputs.version }}
         run: |
+          # The release-tag pipeline owns the GitHub Release: create it (with
+          # auto-generated notes) the first time, then attach the bundle. Without
+          # this, `gh release upload` fails with "release not found" because no
+          # Release exists for the tag yet.
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes
+          fi
           gh release upload "$TAG" \
             "deploy/offline/custos-${BUNDLE_VERSION}-airgapped.tar.gz" \
             --clobber
