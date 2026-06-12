@@ -1,5 +1,7 @@
 # Profile: connected + eval
-# Small footprint, single replica, external OIDC (GitHub/Entra), ESO for secrets.
+# Small footprint, single replica, external OIDC (GitHub/Entra). Secrets come
+# directly from the CNPG `custos-app` Secret (no real secret backend); the ESO
+# ClusterSecretStore is disabled (see `secrets.eso.enabled` below).
 
 topology: connected
 profile: eval
