@@ -141,6 +141,9 @@ jobs:
                   "title": svc,
                   "image": f"custos/{svc}",
                   "dockerfile": f"src/services/{svc}/Dockerfile",
+                  # Service/job images depend on in-repo path libraries, so
+                  # they build from the repository root.
+                  "context": ".",
               })
           for job in jobs:
               table.append({
@@ -148,6 +151,24 @@ jobs:
                   "title": f"custos-{job}",
                   "image": f"custos/custos-{job}",
                   "dockerfile": f"src/jobs/{job}/Dockerfile",
+                  "context": ".",
+              })
+
+          # connector-sidecar is a release image (it ships in images.txt and the
+          # chart references it), but on main it is built+pushed by
+          # python-services.yml gated on its mTLS/E2E integration tests. Build
+          # it here only for full/release builds (tags, dispatch, workflow_call)
+          # so the release pipeline + offline bundle get connector-sidecar:vX.Y.Z
+          # without double-building it on every main push. Unlike the path-lib
+          # services it is self-contained, so its build context is the service
+          # directory (no monorepo copy step).
+          if build_all:
+              table.append({
+                  "key": "connector-sidecar",
+                  "title": "connector-sidecar",
+                  "image": "custos/connector-sidecar",
+                  "dockerfile": "src/services/connector-sidecar/Dockerfile",
+                  "context": "src/services/connector-sidecar",
               })
 
           selected = [
@@ -243,7 +264,7 @@ jobs:
         id: build
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
           push: true
           platforms: linux/amd64
