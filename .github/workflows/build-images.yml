@@ -265,12 +265,16 @@ jobs:
         run: |
           set -euo pipefail
           # Confirm the agreed annotations landed on the image *manifest*.
-          ANNOTATIONS="$(docker buildx imagetools inspect "$PRIMARY" \
-            --format '{{json .Manifest.Annotations}}')"
-          echo "$ANNOTATIONS" | python3 -m json.tool
-          echo "$ANNOTATIONS" | python3 - <<'PY'
+          # ``imagetools inspect --raw`` returns the pushed manifest JSON, whose
+          # top-level ``.annotations`` carries the ``--annotation`` values. (The
+          # ``--format '{{json .Manifest.Annotations}}'`` template reads the
+          # *descriptor*-level annotations, which are empty for these
+          # single-platform manifests, so it must not be used here.)
+          docker buildx imagetools inspect "$PRIMARY" --raw | python3 - <<'PY'
           import json, sys
-          ann = json.load(sys.stdin) or {}
+          manifest = json.load(sys.stdin)
+          ann = manifest.get("annotations") or {}
+          print(json.dumps(ann, indent=2))
           required = [
               "org.opencontainers.image.created",
               "org.opencontainers.image.version",
