@@ -122,10 +122,13 @@ jobs:
 
       - name: Install External Secrets Operator
         run: |
-          # The eval profile templates an ESO ClusterSecretStore (operator install
-          # is out-of-band by design). Its CRDs must exist before the umbrella
-          # install so the kind maps; the store stays unsynced (no Vault) but that
-          # doesn't gate `--wait`, which only waits on workloads.
+          # The connected-eval profile no longer renders an ESO ClusterSecretStore
+          # (secrets.eso.enabled=false — it reads DSNs directly from the CNPG
+          # `custos-app` Secret), so ESO is not strictly required for this smoke.
+          # It is installed anyway (harmless) so the CRDs map if the store is ever
+          # re-enabled. NOTE: this job pins Helm v3 (see "Set up Helm"), whose
+          # `--wait` ignores CR readiness; under Helm 4 (kstatus) a re-enabled,
+          # unsynced (no-Vault) store would stay Ready=False and block `--wait`.
           helm repo add external-secrets https://charts.external-secrets.io
           helm repo update
           helm install external-secrets external-secrets/external-secrets \
@@ -221,6 +224,15 @@ jobs:
           # pre-install migrate hook finds its Secret. certManager.install=false:
           # cert-manager is pre-installed out-of-band (above). All other subcharts
           # stay at their eval defaults. PVCs default to kind's `standard` class.
+          #
+          # HELM VERSION CAVEAT: this completes because the job pins Helm v3 (see
+          # "Set up Helm"), whose `--wait` only waits on built-in workloads. The
+          # chart's `Gateway` never gets a LoadBalancer address on kind (no LB
+          # provider) so it stays Programmed=False — Helm 3 ignores that, but
+          # Helm 4 (kstatus) would block `--wait` on the Gateway until timeout.
+          # Bumping the pinned Helm here requires giving the Envoy Service a
+          # status address (kubectl patch ... loadBalancer.ingress) so the
+          # Gateway programs.
           helm install "$RELEASE" "$CHART" -f "$VALUES" \
             --namespace "$NS" \
             --set postgres.embedded=false \

@@ -93,8 +93,12 @@ the regression gate pins. It is safe to re-run:
 # the OTel Collector, and the Redis pub/sub broker the umbrella's CRs target.
 "$REPO_ROOT/scripts/install-prereqs.sh"
 
-# CloudNativePG operator (provisions Postgres) and the External Secrets Operator
-# (the connected-eval ClusterSecretStore) are not covered by the script above.
+# CloudNativePG operator (provisions Postgres) is required and not covered by
+# the script above. The External Secrets Operator below is OPTIONAL for
+# connected-eval: that profile reads its DSNs directly from the CNPG
+# `custos-app` Secret and no longer renders an ESO ClusterSecretStore
+# (`secrets.eso.enabled=false`). It is installed here only so the ESO CRDs exist
+# if you re-enable the store; skip the `external-secrets` repo/install otherwise.
 helm repo add cnpg https://cloudnative-pg.github.io/charts
 helm repo add external-secrets https://charts.external-secrets.io
 helm repo update
@@ -268,6 +272,31 @@ The flags:
 > longer owns them. Just re-run this step. If you also removed the operators
 > (e.g. you ran the optional CRD cleanup in [section 8](#8-tear-down)), re-run
 > step 3 first so the chart's CRs find their CRDs.
+
+> **Docker Desktop + Helm 4: the install may block on the `Gateway`.** Helm 4's
+> `--wait` (kstatus) waits for *every* release resource — including the `Gateway`
+> custom resource — to report ready. The chart's `Gateway` only becomes
+> `Programmed` once Envoy Gateway's `LoadBalancer` Service receives an external
+> address, but Docker Desktop has **no LoadBalancer provider**, so that Service
+> stays `<pending>` and `helm install --wait` blocks until it times out — even
+> though every pod is already Ready. (Helm 3, which CI pins, ignores CR readiness,
+> so this only bites locally with Helm 4.)
+>
+> Workaround: while the step-6 install is still running, open a **second
+> terminal** and give the Envoy Service a placeholder ingress address. Nothing
+> reverts it (there is no LoadBalancer controller), so the `Gateway` flips to
+> `Programmed` and the install completes:
+
+```bash
+# Run in a SECOND terminal WHILE the step-6 `helm install --wait` is blocking.
+# Only needed on Docker Desktop with Helm 4; harmless to skip on Helm 3.
+NS=custos-system
+SVC=$(kubectl get svc -n envoy-gateway-system \
+  -l gateway.envoyproxy.io/owning-gateway-namespace="$NS" -o name | head -1)
+kubectl patch "$SVC" -n envoy-gateway-system --subresource=status --type=merge \
+  -p '{"status":{"loadBalancer":{"ingress":[{"ip":"127.0.0.1"}]}}}'
+kubectl get gateway custos -n "$NS"   # PROGRAMMED should flip to True
+```
 
 ## 7. Verify and run a workflow
 
