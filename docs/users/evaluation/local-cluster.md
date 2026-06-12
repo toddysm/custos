@@ -313,18 +313,35 @@ service plus its injected Dapr sidecar):
 kubectl get pods -n "$NS"
 ```
 
-Reach the API gateway via a port-forward (simplest on a local cluster):
+Reach the API gateway via a port-forward (simplest on a local cluster).
+`kubectl port-forward` is a **foreground** process that runs until you stop it
+(Ctrl-C), so it can't share a cell with the `curl` that uses it. The cell below
+is self-contained: it starts the port-forward in the background, probes
+`/healthz`, then tears it down again.
 
 ```bash
-kubectl port-forward -n "$NS" deploy/custos-api-gateway 8080:8080
-# in another shell:
-curl -fsS localhost:8080/healthz
+# Self-contained health probe: background the port-forward, curl, then stop it.
+kubectl port-forward -n "$NS" deploy/custos-api-gateway 8080:8080 >/tmp/custos-pf.log 2>&1 &
+PF_PID=$!
+# Wait for the local listener to come up before curling.
+for i in $(seq 1 10); do curl -fsS -m 2 localhost:8080/healthz >/dev/null 2>&1 && break; sleep 1; done
+echo "healthz: $(curl -fsS -m 5 localhost:8080/healthz)"   # {"status":"ok"}
+echo "readyz:  $(curl -fsS -m 5 localhost:8080/readyz)"    # {"status":"ready"}
+kill "$PF_PID" 2>/dev/null
 ```
 
-Then follow [First use](first-workflow.md) to authenticate and run a sample
-workflow against `http://localhost:8080`. For deeper health checks and gateway
-endpoint discovery, see [Verify](verify.md); if anything is stuck, see
-[Troubleshooting](troubleshooting.md).
+To actually drive the gateway (next step), keep a port-forward running in its
+**own dedicated terminal** — not in this notebook, where it would block the cell
+indefinitely:
+
+```bash
+kubectl port-forward -n custos-system deploy/custos-api-gateway 8080:8080
+```
+
+Leave it running, then follow [First use](first-workflow.md) to authenticate and
+run a sample workflow against `http://localhost:8080`. For deeper health checks
+and gateway endpoint discovery, see [Verify](verify.md); if anything is stuck,
+see [Troubleshooting](troubleshooting.md).
 
 ## 8. Tear down
 
