@@ -117,6 +117,13 @@ jobs:
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes
           fi
+          cd deploy/offline
+          BUNDLE="custos-${BUNDLE_VERSION}-airgapped.tar.gz"
+          # GitHub caps each release asset at 2 GiB and the bundle exceeds that,
+          # so publish a checksum of the whole tarball plus ~1.9 GiB split parts.
+          # The runbook reassembles them with `cat …part* > …tar.gz`.
+          sha256sum "$BUNDLE" > "${BUNDLE}.sha256"
+          split -b 1900M -d -a 2 "$BUNDLE" "${BUNDLE}.part"
           gh release upload "$TAG" \
-            "deploy/offline/custos-${BUNDLE_VERSION}-airgapped.tar.gz" \
+            "${BUNDLE}.sha256" "${BUNDLE}.part"* \
             --clobber
