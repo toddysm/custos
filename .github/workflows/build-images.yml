@@ -270,9 +270,15 @@ jobs:
           # ``--format '{{json .Manifest.Annotations}}'`` template reads the
           # *descriptor*-level annotations, which are empty for these
           # single-platform manifests, so it must not be used here.)
-          docker buildx imagetools inspect "$PRIMARY" --raw | python3 - <<'PY'
-          import json, sys
-          manifest = json.load(sys.stdin)
+          #
+          # Write the manifest to a file rather than piping into ``python3 -``:
+          # a heredoc-fed ``python3 - <<'PY'`` takes its *program* from the
+          # heredoc, so a piped manifest would never reach ``sys.stdin``.
+          docker buildx imagetools inspect "$PRIMARY" --raw > manifest.json
+          python3 - <<'PY'
+          import json
+          with open("manifest.json") as fh:
+              manifest = json.load(fh)
           ann = manifest.get("annotations") or {}
           print(json.dumps(ann, indent=2))
           required = [

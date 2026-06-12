@@ -129,6 +129,10 @@ jobs:
           VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
+          # helm pull writes to <destination>/<name>.tgz, but the destination
+          # directory must already exist or the underlying temp-file rename
+          # fails with "no such file or directory".
+          mkdir -p /tmp/pull
           helm pull "oci://${CHART_OCI_REPO}/custos" --version "$VERSION" --destination /tmp/pull
           test -f "/tmp/pull/custos-${VERSION}.tgz"
           echo "Pulled custos-${VERSION}.tgz from oci://${CHART_OCI_REPO}/custos"
