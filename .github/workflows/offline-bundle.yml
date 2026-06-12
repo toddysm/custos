@@ -115,7 +115,7 @@ jobs:
           # this, `gh release upload` fails with "release not found" because no
           # Release exists for the tag yet.
           if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --title "$TAG" --generate-notes
+            gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes
           fi
           gh release upload "$TAG" \
             "deploy/offline/custos-${BUNDLE_VERSION}-airgapped.tar.gz" \
