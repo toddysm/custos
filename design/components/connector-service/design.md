@@ -1,7 +1,7 @@
 # Component Design: Connector Service
 
 Slug: connector-service
-Last Updated: 2026-05-18
+Last Updated: 2026-06-26
 Version: 9
 Status: Draft
 
@@ -251,7 +251,7 @@ Validation requirements:
   - `oci-registry` requires `config.repositoryNamespace`.
   - `azure-blob-storage` requires `config.storageAccount` and `config.container`.
   - `amazon-s3-bucket` requires `config.bucket` and `config.region`.
-- Inline `credentials` block defines auth mode via concrete `authenticationType` (`azure-key-vault`, `amazon-kms`, `azure-managed-identity`, `oidc`) and a generic `authentication` property bag.
+- Inline `credentials` block defines auth mode via concrete `authenticationType` (`azure-key-vault`, `amazon-kms`, `azure-managed-identity`, `oidc`, and the platform-provided vendor type `x-dapr-secret`) and a generic `authentication` property bag.
 - `credentials.authentication` is interpreted according to `credentials.authenticationType` and remains extensible for future auth types.
 - Manifest payload is self-contained; target and credential requirements are defined inline.
 - Identity category (KMS-backed, workload, federated) is derived from `credentials.authenticationType` by the Connector Service; manifests do not declare it. Vendor `x-*` auth types register their category at plugin-registration time, out of band.
@@ -514,6 +514,37 @@ This writes the new cursor envelope through SPL's `rewindCursor(instanceId, newV
 | `cursor.encoding_mismatch` | Plugin returned `CursorEncodingMismatch`. Carries persisted `encoding`, plugin-declared `encoding`. |
 
 Audit events never carry raw cursor `value`. Cursor values are opaque and MUST NOT embed secrets, tokens, credentials, or other sensitive material. For audit/logging, implementations MUST emit only a non-reversible fingerprint of `value` (for example, a stable hash) and MAY include non-sensitive metadata such as `encoding` and value length; truncating and logging any prefix of `value` is not permitted.
+
+## Static credentials via the Dapr secret store (`x-dapr-secret`)
+
+Not every upstream uses a KMS, workload identity, or OIDC federation. Some targets — notably container registries such as Docker Hub and GHCR — authenticate with a static username + Personal Access Token (PAT). The `x-dapr-secret` vendor `authenticationType` lets a connector instance source such a credential from a **Kubernetes Secret**, read through the platform's **Dapr secret store**.
+
+The connector instance carries only a *reference*; the secret value is never embedded in the manifest or instance config:
+
+```json
+"credentials": {
+  "authenticationType": "x-dapr-secret",
+  "authentication": {
+    "secretName": "dockerhub-pat",
+    "usernameKey": "username",
+    "tokenKey": "token",
+    "namespace": "custos-connectors",
+    "store": "custos-secretstore"
+  }
+}
+```
+
+It is implemented as an identity resolver (`identity/resolvers/dapr_secret.py`, category `kms`) that fronts the Dapr Secrets API (`GET {dapr}/v1.0/secrets/{store}/{secretName}`) — the same seam the `azure-managed-identity` resolver uses — and forwards `{ username, token }` to the plugin through the secret bridge. Because it is store-agnostic, the same `authenticationType` works against any configured Dapr secret store: the Kubernetes secret store (chart default component name `custos-secretstore`, a `secretstores.kubernetes` component), an external backend such as Vault for HA, or a local file/env store for off-cluster development. Secret values are never logged; the audit trail carries only the non-secret `descriptor` (`dapr-secret://<store>/<secretName>`) and the resolved key names.
+
+### Adding connectors and credentials at runtime (no redeploy)
+
+Connectors are managed at runtime, not at deploy time:
+
+- **Connector type** — registered via the Connector Service API (the loader pulls the OCI manifest on demand).
+- **Connector instance** — created/enabled via the instance CRUD API.
+- **Credential** — supplied as a Kubernetes Secret in a dedicated credential namespace (default `custos-connectors`). The platform is granted `get` on Secrets in that namespace **once** at install time (a namespace-scoped `Role` + cross-namespace `RoleBinding`, without per-secret `resourceNames`), so an operator adds a new credential to a running cluster with a single `kubectl create secret -n custos-connectors …` and no `helm upgrade`.
+
+The dedicated namespace holds only connector credentials, keeping the platform's secret-read RBAC scoped (read any secret in that namespace, nothing else). A strict per-secret `resourceNames` mode remains available for operators who prefer redeploy-per-secret least privilege.
 
 ## Secret and Token Flow to Activities
 
