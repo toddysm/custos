@@ -1,0 +1,35 @@
+{
+  "apiVersion": "custos.dev/connector-manifest/v1",
+  "kind": "ConnectorManifest",
+  "metadata": {
+    "type": "custos-dockerhub",
+    "version": "0.1.0",
+    "contractVersion": "1"
+  },
+  "spec": {
+    "description": "Out-of-the-box Docker Hub connector. Resolves a durable Docker Hub Personal Access Token through the x-dapr-secret credential mechanism (leased via the connector sidecar) and shapes a data-plane ConnectorContext for OCI pull/push/list activities against registry-1.docker.io. The plugin never sees the resolved PAT and never mints registry bearer tokens — bind emits a placeholder the sidecar substitutes, and the per-repository Layer-2 token exchange against auth.docker.io is performed by the consuming activity (see design/architecture/registry-credential-refresh.md).",
+    "capabilities": [
+      "oci.pull",
+      "oci.push",
+      "oci.list-tags",
+      "oci.list-referrers"
+    ],
+    "target": {
+      "kind": "oci-registry",
+      "endpoint": "https://registry-1.docker.io",
+      "verifyTls": true,
+      "config": {
+        "repositoryNamespace": "library"
+      }
+    },
+    "credentials": {
+      "authenticationType": "x-dapr-secret",
+      "authentication": {
+        "secretName": "dockerhub-pat",
+        "usernameKey": "username",
+        "tokenKey": "token",
+        "namespace": "custos-connectors"
+      }
+    }
+  }
+}
