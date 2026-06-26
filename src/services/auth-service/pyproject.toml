@@ -32,7 +32,7 @@ classifiers = [
 # `httpx` for OIDC JWKS fetching and the authorization-code token
 # exchange against external OIDC providers.
 dependencies = [
-    "fastapi>=0.110,<1",
+    "fastapi>=0.110,<0.137",  # pin <0.137: 0.137 made include_router lazy (_IncludedRouter), breaking app.routes introspection
     "uvicorn[standard]>=0.27,<1",
     "pydantic>=2.6,<3",
     "opentelemetry-api>=1.20,<2",
