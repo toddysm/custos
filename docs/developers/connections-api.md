@@ -1,6 +1,6 @@
 # Connections API Reference: Custos
 
-Last Updated: 2026-05-16
+Last Updated: 2026-06-26
 
 This document describes the **Connector Manifest v1** contract. A connector manifest declares everything Custos needs to know about a connector type: what it targets, how it authenticates, what data-plane operations it supports, and what events it produces.
 
@@ -245,6 +245,7 @@ Describes the authentication mechanism the connector uses to reach its target.
 | `amazon-kms` | KMS-backed: secret material stored in AWS Secrets Manager and protected by KMS. |
 | `azure-managed-identity` | Workload identity: connector uses an Azure managed identity directly. |
 | `oidc` | Federated identity: connector exchanges an OIDC token for a target-system credential. |
+| `x-dapr-secret` | Vendor extension (platform-provided): static credential (e.g. a registry username + PAT) sourced from a Kubernetes Secret via the Dapr secret store. |
 | `x-<vendor>` | Vendor extension. Must match `^x-[a-z0-9][a-z0-9.-]{1,63}$`. Vendor types register their identity category and required `authentication` fields at plugin-registration time, out of band. |
 
 ### Identity categories (derived, not declared)
@@ -253,7 +254,7 @@ The Connector Service **derives** an internal identity category from `authentica
 
 | Identity category | Concrete `authenticationType` values |
 |---|---|
-| `kms` (KMS-backed credentials) | `azure-key-vault`, `amazon-kms` |
+| `kms` (KMS-backed credentials) | `azure-key-vault`, `amazon-kms`, `x-dapr-secret` |
 | `workload` (workload identity) | `azure-managed-identity` |
 | `federated` (federated identity) | `oidc` |
 
@@ -267,8 +268,38 @@ These are conventional shapes used by the canonical authentication types. The sc
 | `amazon-kms` | `secretRef` (Secrets Manager or KMS ARN), `connectorIdentity` (IAM role ARN used to read the secret) |
 | `azure-managed-identity` | `identityRef` (managed identity URI), `audience` (target audience the token is acquired for) |
 | `oidc` | `issuer` (OIDC issuer URL), `audience` (audience the IdP must mint), `subjectTemplate` (template for the federated subject claim) |
+| `x-dapr-secret` | `secretName` (Secret name in the Dapr secret store), `usernameKey` / `tokenKey` (keys within the Secret), `namespace` (optional; credential namespace, default `custos-connectors`), `store` (optional Dapr secret-store name; defaults to the configured store) |
 
 The connector manifest does not embed actual secret material. `secretRef`-style fields point to external secret stores; the runtime resolves them through the Connector Service's secret bridge.
+
+### Supplying credentials from a Kubernetes Secret (`x-dapr-secret`)
+
+`x-dapr-secret` sources a static credential — for example a registry username + Personal Access Token (PAT) — from a **Kubernetes Secret**, read through the platform's **Dapr secret store**. The connector instance carries only a reference; the secret value never appears in the connector config.
+
+```json
+"credentials": {
+  "authenticationType": "x-dapr-secret",
+  "authentication": {
+    "secretName": "dockerhub-pat",
+    "usernameKey": "username",
+    "tokenKey": "token",
+    "namespace": "custos-connectors"
+  }
+}
+```
+
+At bind/health time the Connector Service reads the named Secret through the configured Dapr secret store (eval default `secretstores.kubernetes`) and delivers `{ username, token }` to the plugin via the secret bridge. Because the resolver is store-agnostic, the same `authenticationType` works against any Dapr secret store — Kubernetes, Vault, or a local file/env store for off-cluster development — by pointing `authentication.store` at it.
+
+#### Adding connectors at runtime (no redeploy)
+
+Registering a connector **type** and creating a connector **instance** are runtime Connector Service API calls. Credentials are runtime too: the platform grants `get` on Secrets in a dedicated credential namespace (default `custos-connectors`) once at install time, so an operator adds a new connector credential to a running cluster with:
+
+```bash
+kubectl create secret generic dockerhub-pat -n custos-connectors \
+  --from-literal=username='<user>' --from-literal=token='<PAT>'
+```
+
+then creates the connector instance referencing it — **no `helm upgrade`**. The credential namespace holds only connector credentials, keeping the platform's secret-read RBAC scoped.
 
 ---
 
