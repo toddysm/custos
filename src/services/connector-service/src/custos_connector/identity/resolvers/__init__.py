@@ -19,11 +19,13 @@ from custos_connector.identity.resolvers.azure_key_vault import (
 from custos_connector.identity.resolvers.azure_managed_identity import (
     AzureManagedIdentityResolver,
 )
+from custos_connector.identity.resolvers.dapr_secret import DaprSecretResolver
 from custos_connector.identity.resolvers.oidc import OidcFederatedResolver
 
 __all__ = [
     "AmazonKmsResolver",
     "AzureKeyVaultResolver",
     "AzureManagedIdentityResolver",
+    "DaprSecretResolver",
     "OidcFederatedResolver",
 ]

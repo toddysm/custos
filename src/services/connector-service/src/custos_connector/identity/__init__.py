@@ -49,6 +49,7 @@ from custos_connector.identity.resolvers import (
     AmazonKmsResolver,
     AzureKeyVaultResolver,
     AzureManagedIdentityResolver,
+    DaprSecretResolver,
     OidcFederatedResolver,
 )
 from custos_connector.identity.transport import (
@@ -63,6 +64,7 @@ __all__ = [
     "AsyncHttpClient",
     "AzureKeyVaultResolver",
     "AzureManagedIdentityResolver",
+    "DaprSecretResolver",
     "HttpRequest",
     "HttpResponse",
     "HttpxAsyncHttpClient",
