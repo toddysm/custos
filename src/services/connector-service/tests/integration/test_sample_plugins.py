@@ -1,7 +1,7 @@
 """End-to-end integration test for the sample plugin manifests.
 
 This test takes the two sample plugin manifests that ship under
-``src/libs/connector-plugins/`` — exactly the bytes a packager would
+``extensions/connectors/`` — exactly the bytes a packager would
 publish to an OCI registry as the connector-manifest artifact — and
 verifies:
 
@@ -56,7 +56,10 @@ pytestmark = [pytest.mark.integration, pytest.mark.oci_integration]
 #:    <repo>/src/services/connector-service/tests/integration/<this>
 _REPO_ROOT = Path(__file__).resolve().parents[5]
 
-_SAMPLE_PLUGINS_DIR = _REPO_ROOT / "src" / "libs" / "connector-plugins"
+#: The reference connector plugins live in the decoupled out-of-the-box
+#: catalog (``extensions/connectors/``), not in the platform source tree.
+#: See ``design/architecture/ootb-catalog.md``.
+_SAMPLE_PLUGINS_DIR = _REPO_ROOT / "extensions" / "connectors"
 
 _OCI_REGISTRY_MANIFEST_PATH = _SAMPLE_PLUGINS_DIR / "oci-registry" / "connector-manifest.json"
 _SLACK_NOTIFIER_MANIFEST_PATH = _SAMPLE_PLUGINS_DIR / "slack-notifier" / "connector-manifest.json"

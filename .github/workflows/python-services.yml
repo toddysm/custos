@@ -8,14 +8,14 @@ on:
     paths:
       - "src/services/**"
       - "src/jobs/**"
-      - "src/libs/connector-plugins/**"
+      - "extensions/connectors/**"
       - ".github/workflows/python-services.yml"
   push:
     branches: [main]
     paths:
       - "src/services/**"
       - "src/jobs/**"
-      - "src/libs/connector-plugins/**"
+      - "extensions/connectors/**"
       - ".github/workflows/python-services.yml"
 
 jobs:
@@ -938,7 +938,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Each reference plugin lives under src/libs/connector-plugins/<plugin>
+        # Each reference plugin lives under extensions/connectors/<plugin>
         # and is self-contained (its own pyproject + Dockerfile + tests).
         # Matrix-parallelise so a regression in one plugin doesn't mask
         # the other. ``package`` is the importable name (``-`` -> ``_`` +
@@ -960,7 +960,7 @@ jobs:
             python-version: "3.12"
     defaults:
       run:
-        working-directory: src/libs/connector-plugins/${{ matrix.plugin }}
+        working-directory: extensions/connectors/${{ matrix.plugin }}
     steps:
       - uses: actions/checkout@v4
 
@@ -1002,8 +1002,8 @@ jobs:
         if: matrix.python-version == '3.12'
         uses: docker/build-push-action@v6
         with:
-          context: src/libs/connector-plugins/${{ matrix.plugin }}
-          file: src/libs/connector-plugins/${{ matrix.plugin }}/Dockerfile
+          context: extensions/connectors/${{ matrix.plugin }}
+          file: extensions/connectors/${{ matrix.plugin }}/Dockerfile
           push: false
           tags: custos-plugin-${{ matrix.plugin }}:ci
           cache-from: type=gha,scope=connector-plugin-${{ matrix.plugin }}

@@ -6,7 +6,7 @@ This directory holds the reference connector plugins shipped with Custos.
 They serve two purposes:
 
 1. **Documentation fixtures** — every code snippet in
-   [`docs/developers/connector-plugin-author.md`](../../../docs/developers/connector-plugin-author.md)
+   [`docs/developers/connector-plugin-author.md`](../../docs/developers/connector-plugin-author.md)
    resolves to a real file in this tree, so plugin authors can copy a
    complete working example rather than splicing fragments together.
 2. **Integration test fixtures** — the connector-service integration
@@ -59,7 +59,7 @@ the Plugin Runtime adapter (`custos_connector.runtime`). The contract:
   { "ok": false, "error": { "code": "upstream-unreachable", "detail": "...", "data": { ... } } }
   ```
 
-See [`docs/developers/connector-plugin-author.md`](../../../docs/developers/connector-plugin-author.md)
+See [`docs/developers/connector-plugin-author.md`](../../docs/developers/connector-plugin-author.md)
 for the per-hook result schemas and the full error taxonomy.
 
 ## Packaging
@@ -84,7 +84,7 @@ so the build step itself is gated.
 ## Local development
 
 ```sh
-cd src/libs/connector-plugins/oci-registry
+cd extensions/connectors/oci-registry
 python -m oci_registry_plugin bind <<EOF
 { "apiVersion": 1, "hook": "bind", ... }
 EOF
@@ -93,6 +93,6 @@ EOF
 The plugin tests can be run independently:
 
 ```sh
-pip install -e src/libs/connector-plugins/oci-registry[dev]
-pytest src/libs/connector-plugins/oci-registry/tests -q
+pip install -e extensions/connectors/oci-registry[dev]
+pytest extensions/connectors/oci-registry/tests -q
 ```
