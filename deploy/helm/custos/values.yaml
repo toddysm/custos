@@ -590,6 +590,22 @@ catalog-service:
 observability-audit-service:
   enabled: true
 
+# Connector credential RBAC (CONN-DAPRSEC-02): a dedicated namespace plus
+# namespace-scoped `get secrets` RBAC so operators can add connector
+# credentials (registry PATs read via the x-dapr-secret resolver) to a running
+# platform with `kubectl create secret` and no `helm upgrade`. Only rendered
+# when the Dapr secret store is Kubernetes-backed.
+connectorCredentials:
+  enabled: true
+  # Dedicated namespace that holds ONLY connector credential Secrets.
+  namespace: custos-connectors
+  # Create the namespace as part of the chart (set false to manage it yourself).
+  createNamespace: true
+  # Opt-in strict least-privilege: scope the Role to exactly these Secret names
+  # (resourceNames). Leave empty for the namespace-scoped default that supports
+  # runtime credential addition without a redeploy.
+  strictSecretNames: []
+
 # helm test synthetic scenario (DEPLOY-IMPL-018). `helm test <release>` runs a
 # Pod that drives the public API through the api-gateway Service:
 #   1. waits for /readyz, then checks /healthz + /openapi.json (always), and
