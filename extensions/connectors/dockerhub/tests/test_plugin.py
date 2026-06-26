@@ -114,7 +114,8 @@ def test_bind_returns_v2_endpoint_under_namespace() -> None:
     assert result["handle"]["slot"] == "source"
     assert result["handle"]["capability"] == "oci.pull"
     assert result["handle"]["instanceId"] == "inst-1"
-    assert result["extras"]["registryKind"] == "dockerhub"
+    assert result["extras"]["registryKind"] == "oci-registry"
+    assert result["extras"]["registryProvider"] == "dockerhub"
     assert result["extras"]["tokenEndpoint"] == "https://auth.docker.io/token"
     assert result["extras"]["service"] == "registry.docker.io"
     assert result["extras"]["verifyTls"] is True
@@ -147,6 +148,30 @@ def test_bind_missing_endpoint_is_upstream_unreachable() -> None:
     with pytest.raises(PluginError) as excinfo:
         handle("bind", request)
     assert excinfo.value.code == "upstream-unreachable"
+
+
+def test_bind_rejects_non_dockerhub_endpoint() -> None:
+    request = _request("bind", hook_input={"slot": "source", "capability": "oci.pull"})
+    request["connector"]["manifest"]["spec"]["target"]["endpoint"] = "https://evil.example.com"
+    with pytest.raises(PluginError) as excinfo:
+        handle("bind", request)
+    assert excinfo.value.code == "invalid-response"
+    assert "evil.example.com" in excinfo.value.detail
+
+
+def test_bind_rejects_non_https_endpoint() -> None:
+    request = _request("bind", hook_input={"slot": "source", "capability": "oci.pull"})
+    request["connector"]["manifest"]["spec"]["target"]["endpoint"] = "http://registry-1.docker.io"
+    with pytest.raises(PluginError) as excinfo:
+        handle("bind", request)
+    assert excinfo.value.code == "invalid-response"
+
+
+def test_bind_accepts_redirect_host_registry_docker_io() -> None:
+    request = _request("bind", hook_input={"slot": "source", "capability": "oci.pull"})
+    request["connector"]["manifest"]["spec"]["target"]["endpoint"] = "https://registry.docker.io"
+    result = handle("bind", request)["result"]
+    assert result["endpoint"] == "https://registry.docker.io/v2/acme"
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +219,20 @@ def test_health_missing_endpoint_is_unhealthy_without_probe() -> None:
     result = handle("health", request)["result"]
     assert result["healthy"] is False
     assert "endpoint" in result["detail"]
+
+
+def test_health_rejects_non_dockerhub_endpoint_without_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(*_a: Any, **_k: Any) -> dict[str, Any]:
+        raise AssertionError("probe must not be called for a non-Docker-Hub endpoint")
+
+    monkeypatch.setattr("dockerhub_plugin.plugin.probe.check_reachability", boom)
+    request = _request("health")
+    request["connector"]["manifest"]["spec"]["target"]["endpoint"] = "https://evil.example.com"
+    result = handle("health", request)["result"]
+    assert result["healthy"] is False
+    assert "evil.example.com" in result["detail"]
 
 
 # ---------------------------------------------------------------------------

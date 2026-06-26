@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any, Final
+from urllib.parse import urlsplit
 
 from . import probe
 
@@ -47,6 +48,15 @@ _ADVERTISED_CAPABILITIES: Final[frozenset[str]] = frozenset(
 # exchange without re-deriving these constants.
 _TOKEN_ENDPOINT: Final[str] = "https://auth.docker.io/token"
 _AUTH_SERVICE: Final[str] = "registry.docker.io"
+
+# This connector is fixed to Docker Hub. The manifest endpoint is
+# attacker-influenceable in principle (the request envelope carries the
+# manifest verbatim), so both ``bind`` and ``health`` pin the target host
+# to Docker Hub's registry endpoints over HTTPS. ``registry.docker.io``
+# 307-redirects to ``registry-1.docker.io``; both are accepted.
+_ALLOWED_REGISTRY_HOSTS: Final[frozenset[str]] = frozenset(
+    {"registry-1.docker.io", "registry.docker.io"}
+)
 
 
 class PluginError(Exception):
@@ -110,6 +120,23 @@ def _manifest_target(connector: dict[str, Any]) -> dict[str, Any]:
     return target if isinstance(target, dict) else {}
 
 
+def _validated_endpoint(endpoint: str) -> str:
+    """Pin the manifest endpoint to a Docker Hub registry host over HTTPS.
+
+    Raises :class:`PluginError` (``invalid-response``) for any other host
+    or scheme so a spoofed / miswired manifest cannot redirect activities
+    (or the ``health`` probe) at an unintended registry.
+    """
+    parts = urlsplit(endpoint)
+    if parts.scheme != "https" or parts.hostname not in _ALLOWED_REGISTRY_HOSTS:
+        raise PluginError(
+            "invalid-response",
+            "dockerhub connector only targets "
+            f"{sorted(_ALLOWED_REGISTRY_HOSTS)} over https; refusing endpoint {endpoint!r}",
+        )
+    return endpoint.rstrip("/")
+
+
 def _bind(
     connector: dict[str, Any],
     instance: dict[str, Any],
@@ -147,7 +174,7 @@ def _bind(
             "upstream-unreachable",
             "manifest spec.target.endpoint is missing — cannot derive bind endpoint",
         )
-    base = endpoint.rstrip("/")
+    base = _validated_endpoint(endpoint)
     full_endpoint = f"{base}/v2/{repo_ns}".rstrip("/") if repo_ns else f"{base}/v2"
     return {
         "endpoint": full_endpoint,
@@ -158,7 +185,8 @@ def _bind(
             "instanceId": instance.get("instanceId"),
         },
         "extras": {
-            "registryKind": "dockerhub",
+            "registryKind": "oci-registry",
+            "registryProvider": "dockerhub",
             "tokenEndpoint": _TOKEN_ENDPOINT,
             "service": _AUTH_SERVICE,
             "verifyTls": bool(target.get("verifyTls", True)),
@@ -188,8 +216,19 @@ def _health(connector: dict[str, Any], instance: dict[str, Any]) -> dict[str, An
             "checkedAt": _now(),
             "extras": {"instanceId": instance.get("instanceId")},
         }
+    try:
+        validated = _validated_endpoint(endpoint)
+    except PluginError as exc:
+        # Refuse to issue a live request at a non-Docker-Hub host: return
+        # an unhealthy verdict without touching the network (SSRF guard).
+        return {
+            "healthy": False,
+            "detail": exc.detail,
+            "checkedAt": _now(),
+            "extras": {"instanceId": instance.get("instanceId")},
+        }
     verify_tls = bool(target.get("verifyTls", True))
-    result = probe.check_reachability(endpoint, verify_tls=verify_tls)
+    result = probe.check_reachability(validated, verify_tls=verify_tls)
     extras: dict[str, Any] = {"instanceId": instance.get("instanceId")}
     for key in ("registryEndpoint", "tokenEndpoint", "service"):
         if key in result:
