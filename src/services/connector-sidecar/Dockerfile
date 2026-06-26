@@ -54,7 +54,7 @@ RUN python -m build --wheel --outdir /wheels .
 # so the runtime stage can ``pip install`` from a local index with no
 # network access.
 RUN pip wheel --wheel-dir /wheels \
-        "fastapi>=0.110,<1" \
+        "fastapi>=0.110,<0.137" \
         "uvicorn[standard]>=0.27,<1" \
         "pydantic>=2.6,<3" \
         "httpx>=0.27,<1" \
