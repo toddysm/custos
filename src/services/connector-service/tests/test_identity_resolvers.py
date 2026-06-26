@@ -22,6 +22,7 @@ from custos_connector.identity import (
     AmazonKmsResolver,
     AzureKeyVaultResolver,
     AzureManagedIdentityResolver,
+    DaprSecretResolver,
     HttpRequest,
     HttpResponse,
     IdentityResolverError,
@@ -490,3 +491,171 @@ class TestOidcFederatedResolver:
     async def test_negative_cache_ttl_rejected(self) -> None:
         with pytest.raises(ValueError, match=">= 0"):
             OidcFederatedResolver(http=_StubHttp(), jwks_cache_ttl_seconds=-1)
+
+
+# ---------------------------------------------------------------------------
+# DaprSecretResolver (x-dapr-secret)
+# ---------------------------------------------------------------------------
+
+
+class TestDaprSecretResolver:
+    @pytest.mark.asyncio
+    async def test_happy_path_extracts_username_and_token(self) -> None:
+        http = _StubHttp(
+            responses=[
+                HttpResponse(200, body=_json_body({"username": "alice", "token": "pat-xyz"}))
+            ]
+        )
+        resolver = DaprSecretResolver(http=http, default_store="custos-secretstore")
+        identity = await resolver.resolve(
+            credentials_authentication={"secretName": "dockerhub-pat"},
+            context=_context(),
+        )
+        assert identity.category is IdentityCategory.KMS
+        assert identity.authentication_type == "x-dapr-secret"
+        assert identity.material == {"username": "alice", "token": "pat-xyz"}
+        assert identity.descriptor == "dapr-secret://custos-secretstore/dockerhub-pat"
+        assert identity.expires_at is None
+        outbound = http.requests[0]
+        assert outbound.method == "GET"
+        assert outbound.url.endswith("/v1.0/secrets/custos-secretstore/dockerhub-pat")
+
+    @pytest.mark.asyncio
+    async def test_store_override_and_namespace_query(self) -> None:
+        http = _StubHttp(
+            responses=[HttpResponse(200, body=_json_body({"username": "u", "token": "t"}))]
+        )
+        resolver = DaprSecretResolver(http=http, default_store="default-store")
+        identity = await resolver.resolve(
+            credentials_authentication={
+                "secretName": "ghcr-pat",
+                "store": "vault-store",
+                "namespace": "custos-connectors",
+            },
+            context=_context(),
+        )
+        url = http.requests[0].url
+        assert "/v1.0/secrets/vault-store/ghcr-pat" in url
+        assert "metadata.namespace=custos-connectors" in url
+        assert identity.descriptor == "dapr-secret://vault-store/custos-connectors/ghcr-pat"
+
+    @pytest.mark.asyncio
+    async def test_custom_username_and_token_keys(self) -> None:
+        http = _StubHttp(
+            responses=[HttpResponse(200, body=_json_body({"user": "bob", "pat": "secret-pat"}))]
+        )
+        resolver = DaprSecretResolver(http=http, default_store="s")
+        identity = await resolver.resolve(
+            credentials_authentication={
+                "secretName": "n",
+                "usernameKey": "user",
+                "tokenKey": "pat",
+            },
+            context=_context(),
+        )
+        assert identity.material == {"username": "bob", "token": "secret-pat"}
+
+    @pytest.mark.asyncio
+    async def test_url_quoting_handles_path_separators(self) -> None:
+        http = _StubHttp(
+            responses=[HttpResponse(200, body=_json_body({"username": "u", "token": "t"}))]
+        )
+        resolver = DaprSecretResolver(http=http, default_store="a/b")
+        await resolver.resolve(
+            credentials_authentication={"secretName": "c/d"},
+            context=_context(),
+        )
+        url = http.requests[0].url
+        assert "a%2Fb" in url
+        assert "c%2Fd" in url
+
+    @pytest.mark.asyncio
+    async def test_missing_secret_name_is_missing_credential_field(self) -> None:
+        resolver = DaprSecretResolver(http=_StubHttp(), default_store="s")
+        with pytest.raises(IdentityResolverError) as info:
+            await resolver.resolve(credentials_authentication={}, context=_context())
+        assert info.value.code is IdentityResolverErrorCode.MISSING_CREDENTIAL_FIELD
+
+    @pytest.mark.asyncio
+    async def test_blank_secret_name_is_invalid_credential_field(self) -> None:
+        resolver = DaprSecretResolver(http=_StubHttp(), default_store="s")
+        with pytest.raises(IdentityResolverError) as info:
+            await resolver.resolve(
+                credentials_authentication={"secretName": "   "}, context=_context()
+            )
+        assert info.value.code is IdentityResolverErrorCode.INVALID_CREDENTIAL_FIELD
+
+    @pytest.mark.asyncio
+    async def test_missing_token_key_does_not_leak_other_values(self) -> None:
+        # Secret has the username but no token. The error must surface the
+        # missing *key name* without ever echoing the present secret value.
+        http = _StubHttp(
+            responses=[HttpResponse(200, body=_json_body({"username": "super-secret-user"}))]
+        )
+        resolver = DaprSecretResolver(http=http, default_store="s")
+        with pytest.raises(IdentityResolverError) as info:
+            await resolver.resolve(
+                credentials_authentication={"secretName": "n"}, context=_context()
+            )
+        err = info.value
+        assert err.code is IdentityResolverErrorCode.INVALID_UPSTREAM_RESPONSE
+        blob = f"{err.detail} {err.data}"
+        assert "super-secret-user" not in blob
+        assert "token" in blob  # the missing key name is reported
+
+    @pytest.mark.asyncio
+    async def test_non_string_secret_value_is_invalid_response(self) -> None:
+        http = _StubHttp(
+            responses=[HttpResponse(200, body=_json_body({"username": "u", "token": 5}))]
+        )
+        resolver = DaprSecretResolver(http=http, default_store="s")
+        with pytest.raises(IdentityResolverError) as info:
+            await resolver.resolve(
+                credentials_authentication={"secretName": "n"}, context=_context()
+            )
+        assert info.value.code is IdentityResolverErrorCode.INVALID_UPSTREAM_RESPONSE
+
+    @pytest.mark.asyncio
+    async def test_empty_body_is_invalid_response(self) -> None:
+        http = _StubHttp(responses=[HttpResponse(200, body=_json_body({}))])
+        resolver = DaprSecretResolver(http=http, default_store="s")
+        with pytest.raises(IdentityResolverError) as info:
+            await resolver.resolve(
+                credentials_authentication={"secretName": "n"}, context=_context()
+            )
+        assert info.value.code is IdentityResolverErrorCode.INVALID_UPSTREAM_RESPONSE
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", [401, 403])
+    async def test_auth_failure_maps_to_unauthorized(self, status: int) -> None:
+        http = _StubHttp(responses=[HttpResponse(status, body=b"")])
+        resolver = DaprSecretResolver(http=http, default_store="s")
+        with pytest.raises(IdentityResolverError) as info:
+            await resolver.resolve(
+                credentials_authentication={"secretName": "n"}, context=_context()
+            )
+        assert info.value.code is IdentityResolverErrorCode.UPSTREAM_UNAUTHORIZED
+
+    @pytest.mark.asyncio
+    async def test_server_error_maps_to_rejected(self) -> None:
+        http = _StubHttp(responses=[HttpResponse(500, body=b"")])
+        resolver = DaprSecretResolver(http=http, default_store="s")
+        with pytest.raises(IdentityResolverError) as info:
+            await resolver.resolve(
+                credentials_authentication={"secretName": "n"}, context=_context()
+            )
+        assert info.value.code is IdentityResolverErrorCode.UPSTREAM_REJECTED
+
+    @pytest.mark.asyncio
+    async def test_transport_error_maps_to_unavailable(self) -> None:
+        http = _StubHttp(responses=[UpstreamTransportError("connection refused")])
+        resolver = DaprSecretResolver(http=http, default_store="s")
+        with pytest.raises(IdentityResolverError) as info:
+            await resolver.resolve(
+                credentials_authentication={"secretName": "n"}, context=_context()
+            )
+        assert info.value.code is IdentityResolverErrorCode.UPSTREAM_UNAVAILABLE
+
+    def test_constructor_rejects_blank_default_store(self) -> None:
+        with pytest.raises(ValueError):
+            DaprSecretResolver(http=_StubHttp(), default_store="  ")

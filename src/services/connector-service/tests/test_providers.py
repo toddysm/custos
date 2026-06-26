@@ -171,3 +171,22 @@ def test_load_providers_constructs_postgres_adapters_from_settings() -> None:
     # Each adapter must declare its own interface name once refreshed.
     assert hasattr(bundle.catalog_store, "declared_revisions")
     assert hasattr(bundle.metadata_store, "declared_revisions")
+
+
+def test_load_identity_registry_registers_dapr_secret_vendor_resolver() -> None:
+    """The first-party x-dapr-secret resolver is wired at startup (CONN-DAPRSEC-01)."""
+    from custos_connector.identity.resolvers.dapr_secret import DaprSecretResolver
+    from custos_connector.loader.identity import IdentityCategory
+    from custos_connector.providers import load_identity_registry
+
+    registry = load_identity_registry(
+        metadata_store=FakeMetadataAdapter(),  # type: ignore[arg-type]
+        dapr_secret_store="custos-secretstore",
+    )
+    # The vendor resolver is registered with the KMS identity category and
+    # carries the operator-configured default store name.
+    assert "x-dapr-secret" in registry._vendor
+    resolver = registry._vendor["x-dapr-secret"]
+    assert isinstance(resolver, DaprSecretResolver)
+    assert registry._vendor_categories["x-dapr-secret"] is IdentityCategory.KMS
+    assert resolver._default_store == "custos-secretstore"

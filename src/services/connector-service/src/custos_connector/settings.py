@@ -81,6 +81,13 @@ ENV_DAPR_PUBSUB_NAME: Final[str] = "CONN_DAPR_PUBSUB_NAME"
 #: per design § Public Interface → Internal RPCs (CONN-IMPL-027).
 ENV_DAPR_EVENT_TOPIC: Final[str] = "CONN_DAPR_EVENT_TOPIC"
 
+#: Optional. Name of the Dapr secret-store Component the Connector
+#: Service reads ``x-dapr-secret`` credentials from at bind time.
+#: Defaults to ``custos-secretstore`` to match the Helm chart's
+#: secret-store Component name (NOT the ``secretstores.kubernetes``
+#: component *type*).
+ENV_DAPR_SECRET_STORE: Final[str] = "CONN_DAPR_SECRET_STORE"
+
 #: Operational env tag. The call-context dev shim refuses to run when this
 #: is ``production`` (case-insensitive).
 ENV_ENVIRONMENT: Final[str] = "ENVIRONMENT"
@@ -93,6 +100,7 @@ DEFAULT_PULL_LOOP_MIN_INTERVAL_SEC: Final[int] = 10
 DEFAULT_HEALTH_CACHE_TTL_S: Final[int] = 60
 DEFAULT_DAPR_PUBSUB_NAME: Final[str] = "custos-pubsub"
 DEFAULT_DAPR_EVENT_TOPIC: Final[str] = "custos.connector.events"
+DEFAULT_DAPR_SECRET_STORE: Final[str] = "custos-secretstore"
 
 #: Minimum pull-loop interval the design allows (CONN-IMPL-023). Set
 #: ``CONN_PULL_LOOP_MIN_INTERVAL_SEC`` above this; smaller values are rejected.
@@ -126,6 +134,10 @@ class Settings:
     dapr_http_endpoint: str = ""  # empty string means "Dapr publishing disabled"
     dapr_pubsub_name: str = DEFAULT_DAPR_PUBSUB_NAME
     dapr_event_topic: str = DEFAULT_DAPR_EVENT_TOPIC
+    #: Dapr secret-store Component name used by the ``x-dapr-secret``
+    #: identity resolver (CONN-DAPRSEC-01). Default keeps local-dev +
+    #: existing test constructions working.
+    dapr_secret_store: str = DEFAULT_DAPR_SECRET_STORE
 
     @property
     def use_callctx_dev_shim(self) -> bool:
@@ -208,6 +220,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         dapr_http_endpoint=src.get(ENV_DAPR_HTTP_ENDPOINT, "").strip(),
         dapr_pubsub_name=src.get(ENV_DAPR_PUBSUB_NAME, "").strip() or DEFAULT_DAPR_PUBSUB_NAME,
         dapr_event_topic=src.get(ENV_DAPR_EVENT_TOPIC, "").strip() or DEFAULT_DAPR_EVENT_TOPIC,
+        dapr_secret_store=src.get(ENV_DAPR_SECRET_STORE, "").strip() or DEFAULT_DAPR_SECRET_STORE,
         environment=src.get(ENV_ENVIRONMENT, "development").strip() or "development",
     )
 
@@ -215,6 +228,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
 __all__ = [
     "DEFAULT_DAPR_EVENT_TOPIC",
     "DEFAULT_DAPR_PUBSUB_NAME",
+    "DEFAULT_DAPR_SECRET_STORE",
     "DEFAULT_HEALTH_CACHE_TTL_S",
     "DEFAULT_LEASE_MAX_CONCURRENT",
     "DEFAULT_OCI_REFERRERS_TIMEOUT_MS",
@@ -227,6 +241,7 @@ __all__ = [
     "ENV_DAPR_EVENT_TOPIC",
     "ENV_DAPR_HTTP_ENDPOINT",
     "ENV_DAPR_PUBSUB_NAME",
+    "ENV_DAPR_SECRET_STORE",
     "ENV_ENVIRONMENT",
     "ENV_HEALTH_CACHE_TTL_S",
     "ENV_LEASE_MAX_CONCURRENT",

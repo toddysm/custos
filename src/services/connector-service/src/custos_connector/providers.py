@@ -56,6 +56,7 @@ from custos_connector.identity import (
     AmazonKmsResolver,
     AzureKeyVaultResolver,
     AzureManagedIdentityResolver,
+    DaprSecretResolver,
     HttpxAsyncHttpClient,
     IdentityResolverRegistry,
     OidcFederatedResolver,
@@ -68,9 +69,10 @@ from custos_connector.listen.publisher import (
     EventPublisher,
     NoOpEventPublisher,
 )
+from custos_connector.loader.identity import IdentityCategory
 from custos_connector.runtime import DockerCliHookRunner, PluginInvoker
 from custos_connector.scheduler import PullLoopScheduler
-from custos_connector.settings import Settings
+from custos_connector.settings import DEFAULT_DAPR_SECRET_STORE, Settings
 from custos_connector.sidecar_admin import (
     InMemorySidecarRegistry,
     SidecarAdminClient,
@@ -241,7 +243,10 @@ def load_providers(settings: Settings) -> Providers:
     typed_instances = cast(ConnectorInstanceStoreProvider, instance_store)
     typed_metadata = cast(MetadataStoreProvider, metadata_store)
     typed_lease = cast(LeaseStoreProvider, lease_store)
-    identity_registry = load_identity_registry(metadata_store=typed_metadata)
+    identity_registry = load_identity_registry(
+        metadata_store=typed_metadata,
+        dapr_secret_store=settings.dapr_secret_store,
+    )
     event_publisher, dapr_http_client = load_event_publisher(settings=settings)
     return Providers(
         catalog_store=typed_catalog,
@@ -278,6 +283,7 @@ def load_providers(settings: Settings) -> Providers:
 def load_identity_registry(
     *,
     metadata_store: MetadataStoreProvider,
+    dapr_secret_store: str = DEFAULT_DAPR_SECRET_STORE,
 ) -> IdentityResolverRegistry:
     """Build the default :class:`IdentityResolverRegistry`.
 
@@ -287,9 +293,13 @@ def load_identity_registry(
     free (no sockets are opened until the first request), so this factory
     remains safe to call during startup.
 
-    Operators that need vendor (``x-<vendor>``) resolvers register them
-    via :meth:`IdentityResolverRegistry.register_vendor_resolver` after
-    the lifespan hook has bound the registry to ``app.state``.
+    The first-party ``x-dapr-secret`` vendor resolver (CONN-DAPRSEC-01)
+    is registered here because it ships with the platform and backs the
+    OOTB registry connectors; it reads static credentials from the
+    configured Dapr secret store (``dapr_secret_store``). Operators that
+    need *additional* vendor (``x-<vendor>``) resolvers register them via
+    :meth:`IdentityResolverRegistry.register_vendor_resolver` after the
+    lifespan hook has bound the registry to ``app.state``.
 
     The default per-resolver token providers raise an
     :class:`IdentityResolverError` so a misconfigured environment
@@ -303,7 +313,7 @@ def load_identity_registry(
     http_client = httpx.AsyncClient()
     transport = HttpxAsyncHttpClient(http_client, owns_client=True)
 
-    return IdentityResolverRegistry(
+    registry = IdentityResolverRegistry(
         resolvers=[
             AzureKeyVaultResolver(http=transport),
             AmazonKmsResolver(http=transport),
@@ -313,6 +323,11 @@ def load_identity_registry(
         metadata_store=metadata_store,
         http_transport=transport,
     )
+    registry.register_vendor_resolver(
+        DaprSecretResolver(http=transport, default_store=dapr_secret_store),
+        category=IdentityCategory.KMS,
+    )
+    return registry
 
 
 def load_event_publisher(

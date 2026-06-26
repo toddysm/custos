@@ -89,3 +89,18 @@ def test_sidecar_mtls_issuer_propagates_when_set() -> None:
 def test_health_cache_ttl_override() -> None:
     s = load_settings({**_MIN_ENV, "CONN_HEALTH_CACHE_TTL_S": "15"})
     assert s.health_cache_ttl_s == 15
+
+
+def test_dapr_secret_store_defaults_to_chart_component_name() -> None:
+    s = load_settings(_MIN_ENV)
+    assert s.dapr_secret_store == "custos-secretstore"
+
+
+def test_dapr_secret_store_override() -> None:
+    s = load_settings({**_MIN_ENV, "CONN_DAPR_SECRET_STORE": "vault-store"})
+    assert s.dapr_secret_store == "vault-store"
+
+
+def test_dapr_secret_store_blank_falls_back_to_default() -> None:
+    s = load_settings({**_MIN_ENV, "CONN_DAPR_SECRET_STORE": "   "})
+    assert s.dapr_secret_store == "custos-secretstore"
