@@ -10,14 +10,14 @@ modes.
 * **Hooks**: implemented in
   [`src/oci_registry_plugin/plugin.py`](src/oci_registry_plugin/plugin.py).
 * **Wire contract**: documented in
-  [`docs/developers/connector-plugin-author.md`](../../../../docs/developers/connector-plugin-author.md).
+  [`docs/developers/connector-plugin-author.md`](../../../docs/developers/connector-plugin-author.md).
 
 ## Building the image
 
 ```sh
 docker build -t custos-sample/oci-registry-plugin:1.0.0 \
-    -f src/libs/connector-plugins/oci-registry/Dockerfile \
-    src/libs/connector-plugins/oci-registry
+    -f extensions/connectors/oci-registry/Dockerfile \
+    extensions/connectors/oci-registry
 ```
 
 ## Running a hook locally

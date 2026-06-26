@@ -1,6 +1,6 @@
 # Connector Plugin Author Guide
 
-Last Updated: 2026-05-28
+Last Updated: 2026-06-25
 
 > This guide is for engineers writing **connector plugins** — the
 > small executables the Connector Service invokes to bind workflows
@@ -9,8 +9,8 @@ Last Updated: 2026-05-28
 > (which covers the manifest schema in full) and the two reference
 > plugins shipped in the repository:
 >
-> * [`src/libs/connector-plugins/oci-registry`](../../src/libs/connector-plugins/oci-registry/) — bidirectional registry connector
-> * [`src/libs/connector-plugins/slack-notifier`](../../src/libs/connector-plugins/slack-notifier/) — sink connector (Slack incoming-webhook)
+> * [`extensions/connectors/oci-registry`](../../extensions/connectors/oci-registry/) — bidirectional registry connector
+> * [`extensions/connectors/slack-notifier`](../../extensions/connectors/slack-notifier/) — sink connector (Slack incoming-webhook)
 
 ## Audience and scope
 
@@ -115,8 +115,8 @@ A v1 connector manifest is the JSON document validated by the schema
 
 The two reference manifests show the two ends of the spectrum:
 
-* The [`oci-registry`](../../src/libs/connector-plugins/oci-registry/connector-manifest.json) sample uses every capability token in the Tier‑1 `oci.*` group and ships a full `events` block (pull-mode with `oci-list-tags-v1` cursor encoding plus a push-mode receiver).
-* The [`slack-notifier`](../../src/libs/connector-plugins/slack-notifier/connector-manifest.json) sample is intentionally minimal — a single capability, no `events` block, no `listen` implementation.
+* The [`oci-registry`](../../extensions/connectors/oci-registry/connector-manifest.json) sample uses every capability token in the Tier‑1 `oci.*` group and ships a full `events` block (pull-mode with `oci-list-tags-v1` cursor encoding plus a push-mode receiver).
+* The [`slack-notifier`](../../extensions/connectors/slack-notifier/connector-manifest.json) sample is intentionally minimal — a single capability, no `events` block, no `listen` implementation.
 
 See the [Connections API reference](connections-api.md) for the
 per-field reference, including the per-`target.kind` config schemas.
@@ -426,5 +426,5 @@ object on stdout.
 * [Connections API](connections-api.md) — full manifest schema reference
 * [Capabilities](../../design/architecture/capabilities.md) — Tier‑1 token registry
 * [Connector Service component design](../../design/components/connector-service/) — runtime, sidecar API, OCI discovery
-* [Sample plugins index](../../src/libs/connector-plugins/README.md)
+* [Sample plugins index](../../extensions/connectors/README.md)
 * [`examples/`](examples/) — minimal manifest stubs by `target.kind`

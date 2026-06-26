@@ -214,7 +214,7 @@ The shape of `target.config` is validated against a different sub-schema dependi
 |---|---|---|---|
 | `channel` | string | Yes | Slack channel that the incoming-webhook posts target. Leading `#` is optional. Pattern: `^#?[a-z0-9][a-z0-9._-]{0,79}$` (max 80 chars). |
 
-The `slack-webhook` kind is used by sink connectors that POST to a Slack incoming-webhook URL. Because the webhook URL itself is a secret, `target.endpoint` SHOULD be the Slack API host (`https://hooks.slack.com`) and the per-channel URL MUST be supplied at runtime via the credentials block — never embedded in `target.endpoint`. The reference sample is [`src/libs/connector-plugins/slack-notifier/connector-manifest.json`](../../src/libs/connector-plugins/slack-notifier/connector-manifest.json); see also the [Connector Plugin Author Guide](connector-plugin-author.md).
+The `slack-webhook` kind is used by sink connectors that POST to a Slack incoming-webhook URL. Because the webhook URL itself is a secret, `target.endpoint` SHOULD be the Slack API host (`https://hooks.slack.com`) and the per-channel URL MUST be supplied at runtime via the credentials block — never embedded in `target.endpoint`. The reference sample is [`extensions/connectors/slack-notifier/connector-manifest.json`](../../extensions/connectors/slack-notifier/connector-manifest.json); see also the [Connector Plugin Author Guide](connector-plugin-author.md).
 
 ---
 
