@@ -534,7 +534,7 @@ The connector instance carries only a *reference*; the secret value is never emb
 }
 ```
 
-It is implemented as an identity resolver (`identity/resolvers/dapr_secret.py`, category `kms`) that fronts the Dapr Secrets API (`GET {dapr}/v1.0/secrets/{store}/{secretName}`) — the same seam the `azure-managed-identity` resolver uses — and forwards `{ username, token }` to the plugin through the secret bridge. Because it is store-agnostic, the same `authenticationType` works against any configured Dapr secret store: the Kubernetes secret store (eval default `secretstores.kubernetes`), an external backend such as Vault for HA, or a local file/env store for off-cluster development. Secret values are never logged; the audit trail carries only the non-secret `descriptor` (`dapr-secret://<store>/<secretName>`) and the resolved key names.
+It is implemented as an identity resolver (`identity/resolvers/dapr_secret.py`, category `kms`) that fronts the Dapr Secrets API (`GET {dapr}/v1.0/secrets/{store}/{secretName}`) — the same seam the `azure-managed-identity` resolver uses — and forwards `{ username, token }` to the plugin through the secret bridge. Because it is store-agnostic, the same `authenticationType` works against any configured Dapr secret store: the Kubernetes secret store (chart default component name `custos-secretstore`, a `secretstores.kubernetes` component), an external backend such as Vault for HA, or a local file/env store for off-cluster development. Secret values are never logged; the audit trail carries only the non-secret `descriptor` (`dapr-secret://<store>/<secretName>`) and the resolved key names.
 
 ### Adding connectors and credentials at runtime (no redeploy)
 

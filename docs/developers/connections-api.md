@@ -6,7 +6,7 @@ This document describes the **Connector Manifest v1** contract. A connector mani
 
 The normative schema lives at:
 
-```
+```sh
 design/components/connector-service/schemas/connector-manifest.v1.schema.json
 ```
 
@@ -288,7 +288,7 @@ The connector manifest does not embed actual secret material. `secretRef`-style 
 }
 ```
 
-At bind/health time the Connector Service reads the named Secret through the configured Dapr secret store (eval default `secretstores.kubernetes`) and delivers `{ username, token }` to the plugin via the secret bridge. Because the resolver is store-agnostic, the same `authenticationType` works against any Dapr secret store — Kubernetes, Vault, or a local file/env store for off-cluster development — by pointing `authentication.store` at it.
+At bind/health time the Connector Service reads the named Secret through the configured Dapr secret store (chart default store name `custos-secretstore`, a `secretstores.kubernetes` component; this store *name* is what `authentication.store` expects) and delivers `{ username, token }` to the plugin via the secret bridge. Because the resolver is store-agnostic, the same `authenticationType` works against any Dapr secret store — Kubernetes, Vault, or a local file/env store for off-cluster development — by pointing `authentication.store` at it.
 
 #### Adding connectors at runtime (no redeploy)
 
