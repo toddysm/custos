@@ -36,8 +36,10 @@ def _find(docs: list[dict[str, Any]], kind: str, name: str) -> dict[str, Any] | 
 
 def _render_with(profile: str, *sets: str) -> list[dict[str, Any]]:
     """Render one profile with extra ``--set`` overrides."""
+    # Vendor subcharts offline from Chart.lock (mirrors the session
+    # ``chart_dependencies`` fixture); ``build`` never rewrites Chart.lock.
     subprocess.run(
-        ["helm", "dependency", "update", str(UMBRELLA)],
+        ["helm", "dependency", "build", str(UMBRELLA)],
         check=True,
         capture_output=True,
     )
