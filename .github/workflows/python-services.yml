@@ -958,6 +958,12 @@ jobs:
           - plugin: slack-notifier
             package: slack_notifier_plugin
             python-version: "3.12"
+          - plugin: dockerhub
+            package: dockerhub_plugin
+            python-version: "3.11"
+          - plugin: dockerhub
+            package: dockerhub_plugin
+            python-version: "3.12"
     defaults:
       run:
         working-directory: extensions/connectors/${{ matrix.plugin }}
