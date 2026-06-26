@@ -1,6 +1,6 @@
 # Connector Plugin Author Guide
 
-Last Updated: 2026-05-28
+Last Updated: 2026-06-25
 
 > This guide is for engineers writing **connector plugins** — the
 > small executables the Connector Service invokes to bind workflows
