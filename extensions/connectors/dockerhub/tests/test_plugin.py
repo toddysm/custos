@@ -156,7 +156,8 @@ def test_bind_rejects_non_dockerhub_endpoint() -> None:
     with pytest.raises(PluginError) as excinfo:
         handle("bind", request)
     assert excinfo.value.code == "invalid-response"
-    assert "evil.example.com" in excinfo.value.detail
+    assert excinfo.value.detail.startswith("dockerhub connector only targets")
+    assert "refusing endpoint" in excinfo.value.detail
 
 
 def test_bind_rejects_non_https_endpoint() -> None:
@@ -232,7 +233,7 @@ def test_health_rejects_non_dockerhub_endpoint_without_probe(
     request["connector"]["manifest"]["spec"]["target"]["endpoint"] = "https://evil.example.com"
     result = handle("health", request)["result"]
     assert result["healthy"] is False
-    assert "evil.example.com" in result["detail"]
+    assert "refusing endpoint" in result["detail"]
 
 
 # ---------------------------------------------------------------------------
