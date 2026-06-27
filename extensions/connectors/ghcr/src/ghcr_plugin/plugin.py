@@ -118,20 +118,32 @@ def _manifest_target(connector: dict[str, Any]) -> dict[str, Any]:
 
 
 def _validated_endpoint(endpoint: str) -> str:
-    """Pin the manifest endpoint to the GHCR registry host over HTTPS.
+    """Pin the manifest endpoint to the GHCR registry origin over HTTPS.
 
-    Raises :class:`PluginError` (``invalid-response``) for any other host
-    or scheme so a spoofed / miswired manifest cannot redirect activities
-    (or the ``health`` probe) at an unintended registry.
+    Requires `https://<allowed-host>` with no userinfo, port, path, query,
+    or fragment, and normalizes to the bare origin. Raises
+    :class:`PluginError` (``invalid-response``) otherwise so a spoofed /
+    miswired manifest cannot redirect activities (or the ``health`` probe)
+    at an unintended registry or sub-path.
     """
     parts = urlsplit(endpoint)
-    if parts.scheme != "https" or parts.hostname not in _ALLOWED_REGISTRY_HOSTS:
+    if (
+        parts.scheme != "https"
+        or parts.hostname not in _ALLOWED_REGISTRY_HOSTS
+        or parts.username is not None
+        or parts.password is not None
+        or parts.port is not None
+        or parts.path not in ("", "/")
+        or parts.query
+        or parts.fragment
+    ):
         raise PluginError(
             "invalid-response",
             "ghcr connector only targets "
-            f"{sorted(_ALLOWED_REGISTRY_HOSTS)} over https; refusing endpoint {endpoint!r}",
+            f"{sorted(_ALLOWED_REGISTRY_HOSTS)} over https (origin only); "
+            f"refusing endpoint {endpoint!r}",
         )
-    return endpoint.rstrip("/")
+    return f"https://{parts.hostname}"
 
 
 def _bind(

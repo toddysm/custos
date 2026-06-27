@@ -168,6 +168,22 @@ def test_bind_rejects_non_https_endpoint() -> None:
     assert excinfo.value.code == "invalid-response"
 
 
+def test_bind_rejects_endpoint_with_path_or_userinfo() -> None:
+    for bad in ("https://ghcr.io/foo", "https://user@ghcr.io", "https://ghcr.io:8443"):
+        request = _request("bind", hook_input={"slot": "source", "capability": "oci.pull"})
+        request["connector"]["manifest"]["spec"]["target"]["endpoint"] = bad
+        with pytest.raises(PluginError) as excinfo:
+            handle("bind", request)
+        assert excinfo.value.code == "invalid-response", bad
+
+
+def test_bind_normalizes_trailing_slash_endpoint() -> None:
+    request = _request("bind", hook_input={"slot": "source", "capability": "oci.pull"})
+    request["connector"]["manifest"]["spec"]["target"]["endpoint"] = "https://ghcr.io/"
+    result = handle("bind", request)["result"]
+    assert result["endpoint"] == "https://ghcr.io/v2/acme"
+
+
 # ---------------------------------------------------------------------------
 # health
 # ---------------------------------------------------------------------------
@@ -219,7 +235,7 @@ def test_health_rejects_non_ghcr_endpoint_without_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def boom(*_a: Any, **_k: Any) -> dict[str, Any]:
-        raise AssertionError("probe must not be called for a non-Docker-Hub endpoint")
+        raise AssertionError("probe must not be called for a non-GHCR endpoint")
 
     monkeypatch.setattr("ghcr_plugin.plugin.probe.check_reachability", boom)
     request = _request("health")
