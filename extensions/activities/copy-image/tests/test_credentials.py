@@ -53,26 +53,25 @@ def test_docker_auth_is_base64_user_colon_secret() -> None:
 
 
 def test_build_auths_keys_by_host() -> None:
-    doc = build_auths(
-        {
-            "registry-1.docker.io": SlotCredentials("alice", "p1"),
-            "ghcr.io": SlotCredentials("bob", "p2"),
-        }
-    )
-    assert set(doc["auths"]) == {"registry-1.docker.io", "ghcr.io"}
-    assert base64.b64decode(doc["auths"]["ghcr.io"]["auth"]).decode() == "bob:p2"
+    entries = {
+        "registry-1.docker.io": SlotCredentials("alice", "p1"),
+        "ghcr.io": SlotCredentials("bob", "p2"),
+    }
+    doc = build_auths(entries)
+    assert doc["auths"].keys() == entries.keys()
+    for host, creds in entries.items():
+        decoded = base64.b64decode(doc["auths"][host]["auth"]).decode()
+        assert decoded == f"{creds.username}:{creds.secret}"
 
 
 def test_write_authfile_is_private_and_valid(tmp_path: Path) -> None:
-    path = write_authfile(
-        tmp_path / "run",
-        {"ghcr.io": SlotCredentials("bob", "p2")},
-    )
+    entries = {"ghcr.io": SlotCredentials("bob", "p2")}
+    path = write_authfile(tmp_path / "run", entries)
     assert path.name == "auth.json"
     mode = stat.S_IMODE(path.stat().st_mode)
     assert mode == 0o600, oct(mode)
     doc = json.loads(path.read_text())
-    assert "ghcr.io" in doc["auths"]
+    assert doc["auths"].keys() == entries.keys()
 
 
 def test_redact_scrubs_secrets() -> None:

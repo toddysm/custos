@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -72,7 +73,8 @@ def build_auths(
     host_to_creds: Mapping[str, SlotCredentials],
 ) -> dict[str, dict[str, dict[str, str]]]:
     """Build a Docker ``auth.json`` document keyed by registry host."""
-    return {"auths": {host: {"auth": creds.docker_auth()} for host, creds in host_to_creds.items()}}
+    auths = {host: {"auth": creds.docker_auth()} for host, creds in host_to_creds.items()}
+    return {"auths": auths}
 
 
 def write_authfile(directory: Path, host_to_creds: Mapping[str, SlotCredentials]) -> Path:
@@ -80,12 +82,16 @@ def write_authfile(directory: Path, host_to_creds: Mapping[str, SlotCredentials]
 
     ``skopeo`` is invoked with ``--authfile <path>``; keeping creds in a file
     (rather than on the command line) avoids leaking them through the process
-    table.
+    table. The file is created with ``0600`` up front and ``fchmod``-ed before
+    any secret material is written, so there is no window where the auth
+    document is readable with a broader mode (even if it pre-existed).
     """
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "auth.json"
-    path.write_text(json.dumps(build_auths(host_to_creds)), encoding="utf-8")
-    path.chmod(0o600)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        os.fchmod(handle.fileno(), 0o600)
+        handle.write(json.dumps(build_auths(host_to_creds)))
     return path
 
 
