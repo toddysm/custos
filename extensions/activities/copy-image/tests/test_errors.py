@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from copy_image.contract import exit_code_for
 from copy_image.errors import classify_skopeo_error
 
 
@@ -15,6 +16,7 @@ def test_source_unauthorized() -> None:
     )
     assert err.code == "source.unauthorized"
     assert err.error_class == "permanent"
+    assert exit_code_for(err.error_class) == 2
 
 
 def test_dest_unauthorized() -> None:
@@ -23,18 +25,21 @@ def test_dest_unauthorized() -> None:
     )
     assert err.code == "dest.unauthorized"
     assert err.error_class == "permanent"
+    assert exit_code_for(err.error_class) == 2
 
 
 def test_source_not_found() -> None:
     err = classify_skopeo_error("Error reading manifest v9: manifest unknown")
     assert err.code == "source.not_found"
     assert err.error_class == "permanent"
+    assert exit_code_for(err.error_class) == 2
 
 
 def test_copy_manifest_mismatch() -> None:
     err = classify_skopeo_error("Error: Digest did not match, expected sha256:aaa, got sha256:bbb")
     assert err.code == "copy.manifest_mismatch"
     assert err.error_class == "permanent"
+    assert exit_code_for(err.error_class) == 2
 
 
 def test_unclassified_is_dest_push_failed_retryable() -> None:
@@ -43,6 +48,7 @@ def test_unclassified_is_dest_push_failed_retryable() -> None:
     )
     assert err.code == "dest.push_failed"
     assert err.error_class == "retryable"
+    assert exit_code_for(err.error_class) == 1
 
 
 def test_empty_stderr_has_a_detail() -> None:
