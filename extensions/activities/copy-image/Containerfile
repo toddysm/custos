@@ -1,0 +1,37 @@
+# syntax=docker/dockerfile:1
+#
+# Out-of-the-box Custos copy-image activity.
+#
+# ARM runs the image's ENTRYPOINT with the activity sandbox mounted:
+# inputs at /custos/in (read-only) and /custos/out for results. The
+# activity reads inputs.json/ctx.json + injected per-slot secrets and
+# drives `skopeo` (baked in below) to copy the image, then writes
+# /custos/out/outputs.json.
+
+FROM python:3.12-slim AS runtime
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1
+
+# skopeo performs the actual manifest + blob copy. ca-certificates is
+# needed for TLS to the registries.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends skopeo ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/activity
+
+COPY pyproject.toml README.md ./
+COPY app/ ./app/
+
+# Installing the project wires up the `custos-copy-image` console script.
+# The activity has no third-party Python runtime dependency (the copy is
+# delegated to the skopeo binary).
+RUN pip install --no-cache-dir .
+
+# Run as an unprivileged user under ARM's hardened security context.
+RUN useradd --create-home --uid 65532 --shell /usr/sbin/nologin activity
+USER activity
+
+ENTRYPOINT ["custos-copy-image"]

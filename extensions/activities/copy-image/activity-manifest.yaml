@@ -1,0 +1,99 @@
+apiVersion: custos.dev/v1
+kind: ActivityManifest
+metadata:
+  type: copy-image
+  version: 0.1.0
+  namespace: custos.builtin
+  description: "Copy an OCI image from a source registry to a destination registry (canonical binding: Docker Hub to GHCR). Registry-agnostic: both slots are oci-registry connectors."
+  labels:
+    category: registry
+  owner: custos-maintainers
+spec:
+  contractVersion: "1"
+  runtime:
+    kind: oci-container
+    image: ghcr.io/toddysm/custos/copy-image:0.1.0
+    digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    isolation:
+      minTier: process
+  inputs:
+    schema:
+      $schema: "https://json-schema.org/draft/2020-12/schema"
+      type: object
+      required: [source, destination]
+      additionalProperties: false
+      properties:
+        source:
+          $ref: "custos://types/ImageRef"
+        destination:
+          type: object
+          required: [repository]
+          additionalProperties: false
+          properties:
+            repository:
+              type: string
+              minLength: 1
+            tag:
+              type: string
+              minLength: 1
+        copyReferrers:
+          type: boolean
+          default: false
+        allPlatforms:
+          type: boolean
+          default: false
+        platform:
+          type: string
+          description: "GOOS/GOARCH selector (e.g. linux/amd64); ignored when allPlatforms is true."
+  outputs:
+    schema:
+      $schema: "https://json-schema.org/draft/2020-12/schema"
+      type: object
+      required: [destinationRef, digest]
+      properties:
+        destinationRef:
+          type: string
+        digest:
+          type: string
+        bytesCopied:
+          type: integer
+        manifestsCopied:
+          type: integer
+        reportRef:
+          $ref: "custos://types/ArtifactRef"
+    artifacts:
+      - name: copy-report
+        mediaType: application/json
+        required: false
+  connectors:
+    - name: source
+      type: oci-registry
+      required: true
+      capabilities: [oci.pull, oci.list-referrers]
+    - name: dest
+      type: oci-registry
+      required: true
+      capabilities: [oci.push]
+  resources:
+    cpu:
+      request: "250m"
+      limit: "2"
+    memory:
+      request: "256Mi"
+      limit: "1Gi"
+    ephemeralStorage:
+      limit: "10Gi"
+    timeout: PT30M
+  errors:
+    - code: source.unauthorized
+      class: permanent
+    - code: dest.unauthorized
+      class: permanent
+    - code: source.not_found
+      class: permanent
+    - code: dest.push_failed
+      class: retryable
+    - code: copy.manifest_mismatch
+      class: permanent
+  determinism: side-effecting
+  idempotency: by-input-hash

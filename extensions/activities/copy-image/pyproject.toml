@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "custos-copy-image-activity"
+version = "0.1.0"
+description = "Out-of-the-box copy-image activity (copy an OCI image source -> dest, e.g. Docker Hub -> GHCR)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Custos contributors" }]
+
+# The activity implements the file-based ARM activity contract
+# (`/custos/in` -> `/custos/out`) documented in
+# ``docs/developers/activity-author.md``. It does NOT import any platform
+# package — the contract is a stable file/JSON ABI. The actual byte copy
+# is performed by the ``skopeo`` binary baked into the image, so there is
+# no third-party Python runtime dependency.
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+    "mypy>=1.10",
+    "pyyaml>=6.0",
+    "types-PyYAML>=6.0",
+]
+
+[project.scripts]
+custos-copy-image = "copy_image.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app/copy_image"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"app/copy_image/py.typed" = "copy_image/py.typed"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+namespace_packages = true
+explicit_package_bases = true
+mypy_path = "app"
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers", "--strict-config"]
