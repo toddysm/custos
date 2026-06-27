@@ -34,6 +34,7 @@ Module layout
 from __future__ import annotations
 
 from custos_connector.api.audit import router as audit_router
+from custos_connector.api.connector_register import router as connector_register_router
 from custos_connector.api.connector_types import router as connector_types_router
 from custos_connector.api.instances import router as instances_router
 from custos_connector.api.lease_admin import router as lease_admin_router
@@ -42,6 +43,7 @@ from custos_connector.api.validate import router as validate_router
 
 __all__ = [
     "audit_router",
+    "connector_register_router",
     "connector_types_router",
     "instances_router",
     "lease_admin_router",
