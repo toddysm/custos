@@ -71,7 +71,7 @@ def check_reachability(
     url = f"{base}/v2/"
     owns_client = client is None
     if client is None:
-        client = httpx.Client(verify=verify_tls, timeout=timeout, follow_redirects=True)
+        client = httpx.Client(verify=verify_tls, timeout=timeout, follow_redirects=False)
     try:
         try:
             response = client.get(url)
