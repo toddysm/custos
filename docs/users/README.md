@@ -50,6 +50,17 @@ Choose **one** install path at step 3 based on whether your cluster has outbound
 internet access to the public container registry (connected) or is isolated
 behind an air gap (air-gapped).
 
+## Connectors
+
+Once the platform is running, connectors let your workflows talk to external
+systems. The out-of-the-box **registry connectors** ship ready to use:
+
+| Guide | What it covers |
+|---|---|
+| [Using the OOTB registry connectors](connectors/README.md) | Shared concepts: the `x-dapr-secret` credential model, auth, and the five-step lifecycle |
+| [Docker Hub connector](connectors/dockerhub.md) | Pull from / push to Docker Hub (`custos-dockerhub`) |
+| [GHCR connector](connectors/ghcr.md) | Pull from / push to GitHub Container Registry (`custos-ghcr`) |
+
 ## Related documentation
 
 | Document | Description |
