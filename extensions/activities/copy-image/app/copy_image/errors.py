@@ -57,7 +57,7 @@ _DEST_SIDE = (
 
 def classify_skopeo_error(stderr: str, *, redactions: Iterable[str] = ()) -> ActivityError:
     """Map a ``skopeo copy`` stderr blob onto a declared :class:`ActivityError`."""
-    detail = redact(stderr.strip(), redactions) or "skopeo copy failed"
+    detail = redact(stderr.strip(), redactions) or "registry copy failed"
     low = stderr.lower()
 
     if any(token in low for token in _MISMATCH):

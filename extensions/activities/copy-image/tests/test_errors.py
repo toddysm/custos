@@ -54,7 +54,7 @@ def test_unclassified_is_dest_push_failed_retryable() -> None:
 def test_empty_stderr_has_a_detail() -> None:
     err = classify_skopeo_error("")
     assert err.code == "dest.push_failed"
-    assert err.message == "skopeo copy failed"
+    assert err.message == "registry copy failed"
 
 
 def test_detail_is_redacted() -> None:

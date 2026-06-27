@@ -159,6 +159,98 @@ def test_build_argv_all_platforms() -> None:
     assert "--all" in argv
 
 
+def test_build_argv_platform_override() -> None:
+    doc = json.loads(json.dumps(_INPUTS))
+    doc["inputs"]["platform"] = "linux/arm64"
+    argv = build_argv(_plan(doc), Path("/a"), Path("/d"))
+    # global --override-* come before the `copy` subcommand.
+    assert argv.index("--override-os") < argv.index("copy")
+    assert argv[argv.index("--override-os") + 1] == "linux"
+    assert argv[argv.index("--override-arch") + 1] == "arm64"
+
+
+def test_resolve_plan_parses_copy_referrers() -> None:
+    doc = json.loads(json.dumps(_INPUTS))
+    doc["inputs"]["copyReferrers"] = True
+    plan = _plan(doc)
+    assert plan.copy_referrers is True
+    assert plan.source_ref == "registry-1.docker.io/library/hello-world:latest"
+
+
+def test_plan_rejects_non_bool_copy_referrers() -> None:
+    from copy_image.contract import ActivityError
+
+    doc = json.loads(json.dumps(_INPUTS))
+    doc["inputs"]["copyReferrers"] = "yes"
+    with pytest.raises(ActivityError) as excinfo:
+        _plan(doc)
+    assert excinfo.value.error_class == "permanent"
+
+
+def test_build_oras_argv() -> None:
+    from copy_image.copy import build_oras_argv
+
+    plan = _plan()
+    argv = build_oras_argv(plan, Path("/run/auth.json"))
+    assert argv[0:3] == ["oras", "cp", "--recursive"]
+    assert "--registry-config" in argv and "/run/auth.json" in argv
+    assert argv[-2:] == [plan.source_ref, plan.destination_ref]
+
+
+def test_build_oras_argv_platform() -> None:
+    from copy_image.copy import build_oras_argv
+
+    doc = json.loads(json.dumps(_INPUTS))
+    doc["inputs"]["platform"] = "linux/arm64"
+    argv = build_oras_argv(_plan(doc), Path("/run/auth.json"))
+    assert argv[argv.index("--platform") + 1] == "linux/arm64"
+
+
+def test_build_oras_argv_all_platforms_skips_platform() -> None:
+    from copy_image.copy import build_oras_argv
+
+    doc = json.loads(json.dumps(_INPUTS))
+    doc["inputs"]["platform"] = "linux/arm64"
+    doc["inputs"]["allPlatforms"] = True
+    argv = build_oras_argv(_plan(doc), Path("/run/auth.json"))
+    assert "--platform" not in argv
+
+
+def _oras_runner(returncode: int, *, stdout: str = "", stderr: str = ""):  # type: ignore[no-untyped-def]
+    def runner(argv: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
+
+    return runner
+
+
+def test_run_oras_copy_success(tmp_path: Path) -> None:
+    from copy_image.copy import run_oras_copy
+
+    image = "sha256:" + "e" * 64
+    referrer = "sha256:" + "f" * 64
+    stdout = f"Copied src => dst {image}\nReferrer {referrer}\nDigest: {image}\n"
+    outcome = run_oras_copy(_plan(), tmp_path / "auth", runner=_oras_runner(0, stdout=stdout))
+    assert outcome.digest == image
+    assert outcome.manifests_copied == 2  # image + 1 referrer
+
+
+def test_run_oras_copy_failure(tmp_path: Path) -> None:
+    from copy_image.copy import OrasError, run_oras_copy
+
+    with pytest.raises(OrasError) as excinfo:
+        run_oras_copy(_plan(), tmp_path / "a", runner=_oras_runner(1, stderr="denied"))
+    assert excinfo.value.returncode == 1
+
+
+def test_run_oras_copy_no_digest_is_retryable(tmp_path: Path) -> None:
+    from copy_image.contract import ActivityError
+    from copy_image.copy import run_oras_copy
+
+    with pytest.raises(ActivityError) as excinfo:
+        run_oras_copy(_plan(), tmp_path / "a", runner=_oras_runner(0, stdout="done"))
+    assert excinfo.value.error_class == "retryable"
+
+
 def _fake_runner(returncode: int, *, digest: str = "", stderr: str = ""):  # type: ignore[no-untyped-def]
     def runner(argv: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
         if returncode == 0 and digest:
@@ -273,3 +365,30 @@ def test_main_copy_failure_redacts_secret(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert out["status"] == "failure"
     assert "pat-source" not in out["error"]["message"]
     assert "***" in out["error"]["message"]
+
+
+def test_main_copy_referrers_uses_oras(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from copy_image.__main__ import main
+
+    doc = json.loads(json.dumps(_INPUTS))
+    doc["inputs"]["copyReferrers"] = True
+    _seed_sandbox(tmp_path)
+    (tmp_path / "in" / "inputs.json").write_text(json.dumps(doc), encoding="utf-8")
+    monkeypatch.setenv("CUSTOS_IO_ROOT", str(tmp_path))
+
+    image = "sha256:" + "a" * 64
+    referrer = "sha256:" + "b" * 64
+    seen: dict[str, list[str]] = {}
+
+    def runner(argv: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        seen["argv"] = argv
+        stdout = f"Copied {image}\nReferrer {referrer}\nDigest: {image}\n"
+        return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+    monkeypatch.setattr("copy_image.copy.subprocess.run", runner)
+    assert main([]) == 0
+    assert seen["argv"][0:2] == ["oras", "cp"]
+    out = json.loads((tmp_path / "out" / "outputs.json").read_text())
+    assert out["status"] == "success"
+    assert out["outputs"]["digest"] == image
+    assert out["outputs"]["manifestsCopied"] == 2
