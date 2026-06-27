@@ -31,6 +31,7 @@ This guide covers:
 5. [Error taxonomy](#5-error-taxonomy)
 6. [Packaging and OCI publication](#6-packaging-and-oci-publication)
 7. [Testing locally](#7-testing-locally)
+8. [Registering the connector type](#8-registering-the-connector-type)
 
 For the API the activity sees once a connection is bound (the
 "sidecar API"), see the [Connections API reference](connections-api.md).
@@ -457,8 +458,8 @@ curl -sS -X POST https://connector-service/internal/v1/connectors:register \
 
 ### Rejection codes
 
-The Loader maps every failure to a stable code in the
-`{ "error": { "code", "detail" } }` envelope:
+The Loader maps every failure to a stable code in the service error
+envelope `{ "error": { "code": "<code>", "detail": "<message>" } }`:
 
 | HTTP | Code | Meaning |
 |---|---|---|
