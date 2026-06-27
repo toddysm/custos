@@ -18,13 +18,40 @@ import yaml
 
 _MANIFEST = Path(__file__).resolve().parents[1] / "activity-manifest.yaml"
 
-_CAPABILITY_RE = re.compile(r"^[a-z0-9]+(?:\.[a-z0-9-]+)+$")
-_SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
-_DURATION_RE = re.compile(r"^P(?:\d+D)?(?:T(?:\d+H)?(?:\d+M)?(?:\d+S)?)?$")
+# These mirror the platform validators exactly (custos_arm.manifest._base,
+# custos_arm.contract._base) so this decoupled CI gate stays aligned with
+# what ARM/Catalog actually enforce.
+_CAPABILITY_RE = re.compile(r"^[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+$")
+_SEMVER_RE = re.compile(r"^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$")
+_DURATION_RE = re.compile(
+    r"^P(?:"
+    r"(?P<weeks>\d+)W"
+    r"|"
+    r"(?:(?P<days>\d+)D)?"
+    r"(?:T(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+(?:\.\d+)?)S)?)?"
+    r")$"
+)
 _ERROR_CLASSES = {"permanent", "retryable", "cancelled"}
 _ISOLATION_TIERS = {"process", "vm", "microvm"}
 _DETERMINISM = {"pure", "side-effecting"}
 _IDEMPOTENCY = {"by-input-hash", "none"}
+
+
+def _is_capability(token: str) -> bool:
+    """Mirror ``custos_arm.manifest._base.is_capability_token``: dot-namespaced
+    lowercase grammar, and ``event.*`` verbs are rejected."""
+    if token.startswith("event."):
+        return False
+    return _CAPABILITY_RE.match(token) is not None
+
+
+def _is_duration(value: str) -> bool:
+    """Mirror ``custos_arm.contract._base.is_iso8601_duration``: matches the
+    grammar AND carries at least one component (empty ``P``/``PT`` rejected)."""
+    match = _DURATION_RE.match(value)
+    if match is None:
+        return False
+    return any(match.group(p) for p in ("weeks", "days", "hours", "minutes", "seconds"))
 
 
 def _load() -> dict[str, Any]:
@@ -53,6 +80,8 @@ def test_runtime() -> None:
     rt = _load()["spec"]["runtime"]
     assert rt["kind"] == "oci-container"
     assert rt["image"]
+    # Repo image-naming convention: ghcr.io/toddysm/custos/<name>.
+    assert rt["image"].startswith("ghcr.io/toddysm/custos/")
     assert str(rt["digest"]).startswith("sha256:")
     assert rt.get("isolation", {}).get("minTier") in _ISOLATION_TIERS
 
@@ -94,14 +123,14 @@ def test_connector_slots() -> None:
         assert c["type"] == "oci-registry"
         assert isinstance(c["required"], bool)
         for token in c["capabilities"]:
-            assert _CAPABILITY_RE.match(token), token
+            assert _is_capability(token), token
     assert "oci.pull" in by_name["source"]["capabilities"]
     assert "oci.push" in by_name["dest"]["capabilities"]
 
 
 def test_resources() -> None:
     res = _load()["spec"]["resources"]
-    assert _DURATION_RE.match(res["timeout"]), res["timeout"]
+    assert _is_duration(res["timeout"]), res["timeout"]
     assert res["ephemeralStorage"]["limit"]
 
 

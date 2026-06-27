@@ -12,7 +12,7 @@ spec:
   contractVersion: "1"
   runtime:
     kind: oci-container
-    image: ghcr.io/toddysm/custos-copy-image:0.1.0
+    image: ghcr.io/toddysm/custos/copy-image:0.1.0
     digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
     isolation:
       minTier: process
