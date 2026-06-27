@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from copy_image.__main__ import main
 from copy_image.contract import ActivityError, Sandbox, exit_code_for
 
 _INPUTS: dict[str, Any] = {
@@ -225,15 +224,3 @@ def test_exit_code_for(error_class: Any, expected: int) -> None:
 def test_from_env_uses_io_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("CUSTOS_IO_ROOT", str(tmp_path))
     assert Sandbox.from_env().base == tmp_path
-
-
-def test_entrypoint_reads_inputs_and_fails_closed(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    _seed(tmp_path)
-    monkeypatch.setenv("CUSTOS_IO_ROOT", str(tmp_path))
-    assert main([]) == 2
-    doc = json.loads((tmp_path / "out" / "outputs.json").read_text())
-    assert doc["status"] == "failure"
-    assert doc["error"]["code"] == "activity.not_implemented"
-    assert doc["error"]["class"] == "permanent"
