@@ -14,6 +14,7 @@ error codes lands in COPY-IMPL-005; here a non-zero exit raises
 
 from __future__ import annotations
 
+import re
 import subprocess
 import tempfile
 from collections.abc import Callable
@@ -37,11 +38,13 @@ class CopyPlan:
 
     source_transport: str  # docker://<host>/<repo>:<tag|@digest>
     dest_transport: str  # docker://<host>/<repo>:<tag>
+    source_ref: str  # bare <host>/<repo>:<tag|@digest> (for oras)
     destination_ref: str  # <host>/<repo>:<tag>
     source_host: str
     dest_host: str
     all_platforms: bool
     platform: str | None
+    copy_referrers: bool
 
 
 @dataclass(frozen=True)
@@ -145,35 +148,47 @@ def resolve_copy_plan(inputs: InputsEnvelope, ctx: Context) -> CopyPlan:
             "ctx.connectors.dest.endpoint is required to derive the destination host",
         )
 
-    if isinstance(digest, str) and digest:
-        source_transport = "docker://" + _ref_with_digest(ref, digest)
-    else:
-        source_transport = "docker://" + ref
+    source_ref = _ref_with_digest(ref, digest) if isinstance(digest, str) and digest else ref
 
     destination_ref = f"{dest_host}/{repository}:{tag}"
     raw_platform = inputs.inputs.get("platform")
     platform = raw_platform if isinstance(raw_platform, str) and raw_platform else None
     return CopyPlan(
-        source_transport=source_transport,
+        source_transport="docker://" + source_ref,
         dest_transport="docker://" + destination_ref,
+        source_ref=source_ref,
         destination_ref=destination_ref,
         source_host=source_host,
         dest_host=dest_host,
         all_platforms=_bool_flag(inputs.inputs.get("allPlatforms"), where="inputs.allPlatforms"),
         platform=platform,
+        copy_referrers=_bool_flag(inputs.inputs.get("copyReferrers"), where="inputs.copyReferrers"),
     )
+
+
+def _platform_overrides(platform: str | None) -> list[str]:
+    """Translate ``os/arch[/variant]`` into skopeo ``--override-*`` globals."""
+    if not platform:
+        return []
+    parts = platform.split("/")
+    args: list[str] = []
+    if parts and parts[0]:
+        args += ["--override-os", parts[0]]
+    if len(parts) > 1 and parts[1]:
+        args += ["--override-arch", parts[1]]
+    if len(parts) > 2 and parts[2]:
+        args += ["--override-variant", parts[2]]
+    return args
 
 
 def build_argv(plan: CopyPlan, authfile: Path, digestfile: Path) -> list[str]:
     """Assemble the ``skopeo copy`` argv for ``plan``."""
-    argv = [
-        SKOPEO,
-        "copy",
-        "--authfile",
-        str(authfile),
-        "--digestfile",
-        str(digestfile),
-    ]
+    argv = [SKOPEO]
+    # ``--override-*`` are skopeo *global* options (before the subcommand);
+    # only meaningful when selecting a single platform from an index.
+    if not plan.all_platforms and plan.platform:
+        argv += _platform_overrides(plan.platform)
+    argv += ["copy", "--authfile", str(authfile), "--digestfile", str(digestfile)]
     if plan.all_platforms:
         argv.append("--all")
     argv += [plan.source_transport, plan.dest_transport]
@@ -218,4 +233,73 @@ def run_skopeo_copy(
         destination_ref=plan.destination_ref,
         digest=digest,
         manifests_copied=1,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Referrers copy (oras)
+# ---------------------------------------------------------------------------
+
+#: The artifact-aware copy binary baked into the image. ``skopeo copy`` does
+#: not copy OCI referrers; ``oras cp --recursive`` copies the image manifest
+#: plus its referrers (signatures / SBOM / attestations) in one pass.
+ORAS = "oras"
+
+_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
+_LABELED_DIGEST_RE = re.compile(r"Digest:\s*(sha256:[0-9a-f]{64})")
+
+
+class OrasError(Exception):
+    """Raised when ``oras cp`` exits non-zero. Classified like SkopeoError."""
+
+    def __init__(self, returncode: int, stderr: str) -> None:
+        self.returncode = returncode
+        self.stderr = stderr
+        super().__init__(f"oras cp exited {returncode}")
+
+
+def build_oras_argv(plan: CopyPlan, authfile: Path) -> list[str]:
+    """Assemble the ``oras cp --recursive`` argv for ``plan``."""
+    return [
+        ORAS,
+        "cp",
+        "--recursive",
+        "--registry-config",
+        str(authfile),
+        plan.source_ref,
+        plan.destination_ref,
+    ]
+
+
+def run_oras_copy(
+    plan: CopyPlan,
+    authfile: Path,
+    *,
+    runner: Runner | None = None,
+) -> CopyOutcome:
+    """Copy the image **and its referrers** with ``oras cp --recursive``.
+
+    Raises :class:`OrasError` on a non-zero exit. The destination digest and
+    the count of copied manifests (image + referrers) are parsed from oras's
+    output.
+    """
+    run = runner if runner is not None else subprocess.run
+    argv = build_oras_argv(plan, authfile)
+    proc = run(argv, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise OrasError(proc.returncode, proc.stderr or "")
+    output = (proc.stdout or "") + "\n" + (proc.stderr or "")
+    all_digests = _DIGEST_RE.findall(output)
+    labeled = _LABELED_DIGEST_RE.findall(output)
+    digest = labeled[-1] if labeled else (all_digests[-1] if all_digests else "")
+    if not digest:
+        raise ActivityError(
+            "activity.unexpected_error",
+            "retryable",
+            "oras cp exited 0 but reported no digest",
+        )
+    return CopyOutcome(
+        destination_ref=plan.destination_ref,
+        digest=digest,
+        manifests_copied=len(set(all_digests)) or 1,
     )

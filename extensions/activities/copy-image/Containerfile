@@ -14,11 +14,16 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1
 
-# skopeo performs the actual manifest + blob copy. ca-certificates is
-# needed for TLS to the registries.
+# skopeo performs the manifest + blob copy; oras cp --recursive copies OCI
+# referrers (signatures / SBOM / attestations). ca-certificates is needed for
+# TLS to the registries.
+ARG ORAS_VERSION=1.2.0
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends skopeo ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get install -y --no-install-recommends skopeo ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz" \
+       | tar -xz -C /usr/local/bin oras \
+    && chmod +x /usr/local/bin/oras
 
 WORKDIR /opt/activity
 
