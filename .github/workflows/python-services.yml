@@ -964,6 +964,12 @@ jobs:
           - plugin: dockerhub
             package: dockerhub_plugin
             python-version: "3.12"
+          - plugin: ghcr
+            package: ghcr_plugin
+            python-version: "3.11"
+          - plugin: ghcr
+            package: ghcr_plugin
+            python-version: "3.12"
     defaults:
       run:
         working-directory: extensions/connectors/${{ matrix.plugin }}
