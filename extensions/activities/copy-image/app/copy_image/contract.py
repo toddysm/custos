@@ -128,6 +128,21 @@ def _require_str(value: Any, *, where: str) -> str:
     return value
 
 
+def _validate_segment(value: str, *, what: str) -> str:
+    """Reject anything that is not a single, safe path segment.
+
+    Guards ``secrets/<slot>/<key>`` and ``artifacts/<name>`` against path
+    traversal (``..``) or separators escaping the sandbox subtree.
+    """
+    if not value or value in {".", ".."} or "/" in value or "\\" in value:
+        raise ActivityError(
+            "activity.contract_violation",
+            "permanent",
+            f"{what} must be a single path segment (got {value!r})",
+        )
+    return value
+
+
 # ---------------------------------------------------------------------------
 # Sandbox
 # ---------------------------------------------------------------------------
@@ -179,6 +194,22 @@ class Sandbox:
 
     def read_inputs(self) -> InputsEnvelope:
         doc = self._read_json(self.in_dir / "inputs.json")
+        schema_version = str(doc.get("schemaVersion", _SCHEMA_VERSION))
+        contract_version = str(doc.get("contractVersion", _CONTRACT_VERSION))
+        if schema_version != _SCHEMA_VERSION:
+            raise ActivityError(
+                "activity.contract_violation",
+                "permanent",
+                f"unsupported inputs.json schemaVersion {schema_version!r}; "
+                f"this activity speaks {_SCHEMA_VERSION!r}",
+            )
+        if contract_version != _CONTRACT_VERSION:
+            raise ActivityError(
+                "activity.contract_violation",
+                "permanent",
+                f"unsupported inputs.json contractVersion {contract_version!r}; "
+                f"this activity speaks {_CONTRACT_VERSION!r}",
+            )
         activity = _require_mapping(doc.get("activity"), where="inputs.json activity")
         step = _require_mapping(doc.get("step"), where="inputs.json step")
         inputs = _require_mapping(doc.get("inputs", {}), where="inputs.json inputs")
@@ -190,8 +221,8 @@ class Sandbox:
                 "inputs.json step.attempt must be an int",
             )
         return InputsEnvelope(
-            schema_version=str(doc.get("schemaVersion", _SCHEMA_VERSION)),
-            contract_version=str(doc.get("contractVersion", _CONTRACT_VERSION)),
+            schema_version=schema_version,
+            contract_version=contract_version,
             activity=ActivityIdentity(
                 type=_require_str(activity.get("type"), where="inputs.json activity.type"),
                 version=_require_str(activity.get("version"), where="inputs.json activity.version"),
@@ -212,12 +243,19 @@ class Sandbox:
         attempt = doc.get("attempt", 1)
         if not isinstance(attempt, int):
             attempt = 1
+        workspace_id = doc.get("workspaceId")
+        if workspace_id is not None and not isinstance(workspace_id, str):
+            raise ActivityError(
+                "activity.contract_violation",
+                "permanent",
+                "ctx.json workspaceId must be a string when present",
+            )
         deadline = doc.get("deadline")
         return Context(
-            run_id=str(doc.get("runId", "")),
-            step_id=str(doc.get("stepId", "")),
+            run_id=_require_str(doc.get("runId"), where="ctx.json runId"),
+            step_id=_require_str(doc.get("stepId"), where="ctx.json stepId"),
             attempt=attempt,
-            workspace_id=doc.get("workspaceId"),
+            workspace_id=workspace_id,
             connectors=connectors,
             deadline=deadline if isinstance(deadline, str) else None,
             raw=doc,
@@ -226,6 +264,8 @@ class Sandbox:
     # -- secrets -----------------------------------------------------------
 
     def secret_path(self, slot: str, key: str) -> Path:
+        _validate_segment(slot, what="connector slot")
+        _validate_segment(key, what="secret key")
         return self.in_dir / "secrets" / slot / key
 
     def has_secret(self, slot: str, key: str) -> bool:
@@ -234,7 +274,7 @@ class Sandbox:
     def read_secret(self, slot: str, key: str) -> str:
         path = self.secret_path(slot, key)
         try:
-            return path.read_text(encoding="utf-8").rstrip("\n")
+            return path.read_text(encoding="utf-8").rstrip("\r\n")
         except FileNotFoundError as exc:
             raise ActivityError(
                 f"{slot}.unauthorized",
@@ -278,6 +318,7 @@ class Sandbox:
         )
 
     def write_artifact(self, name: str, content: str | bytes) -> None:
+        _validate_segment(name, what="artifact name")
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
         target = self.artifacts_dir / name
         if isinstance(content, str):

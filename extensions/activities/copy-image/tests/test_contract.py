@@ -89,6 +89,28 @@ def test_inputs_missing_required_field_is_contract_violation(tmp_path: Path) -> 
         sandbox.read_inputs()
 
 
+def test_unsupported_versions_are_contract_violations(tmp_path: Path) -> None:
+    for field_name in ("schemaVersion", "contractVersion"):
+        bad = {**_INPUTS, field_name: "2"}
+        with pytest.raises(ActivityError) as excinfo:
+            _seed(tmp_path, inputs=bad).read_inputs()
+        assert excinfo.value.code == "activity.contract_violation"
+        assert excinfo.value.error_class == "permanent"
+
+
+def test_context_requires_run_and_step_ids(tmp_path: Path) -> None:
+    bad = {k: v for k, v in _CTX.items() if k != "runId"}
+    with pytest.raises(ActivityError) as excinfo:
+        _seed(tmp_path, ctx=bad).read_context()
+    assert excinfo.value.error_class == "permanent"
+
+
+def test_context_rejects_non_string_workspace_id(tmp_path: Path) -> None:
+    bad = {**_CTX, "workspaceId": 123}
+    with pytest.raises(ActivityError):
+        _seed(tmp_path, ctx=bad).read_context()
+
+
 # ---------------------------------------------------------------------------
 # secrets
 # ---------------------------------------------------------------------------
@@ -117,6 +139,29 @@ def test_sidecar_token(tmp_path: Path) -> None:
     assert sandbox.sidecar_token() is None
     (tmp_path / "in" / "sidecar-token").write_text("tok\n", encoding="utf-8")
     assert sandbox.sidecar_token() == "tok"
+
+
+def test_read_secret_strips_crlf(tmp_path: Path) -> None:
+    sandbox = _seed(tmp_path)
+    secret_dir = tmp_path / "in" / "secrets" / "source"
+    secret_dir.mkdir(parents=True)
+    (secret_dir / "token").write_bytes(b"pat-value\r\n")
+    assert sandbox.read_secret("source", "token") == "pat-value"
+
+
+@pytest.mark.parametrize("bad", ["../escape", "a/b", "..", ".", "a\\b", ""])
+def test_secret_path_rejects_traversal(tmp_path: Path, bad: str) -> None:
+    sandbox = Sandbox(base=tmp_path)
+    with pytest.raises(ActivityError) as excinfo:
+        sandbox.secret_path(bad, "token")
+    assert excinfo.value.error_class == "permanent"
+
+
+@pytest.mark.parametrize("bad", ["../outputs.json", "a/b", ".."])
+def test_write_artifact_rejects_traversal(tmp_path: Path, bad: str) -> None:
+    sandbox = Sandbox(base=tmp_path)
+    with pytest.raises(ActivityError):
+        sandbox.write_artifact(bad, "x")
 
 
 # ---------------------------------------------------------------------------
