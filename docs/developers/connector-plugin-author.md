@@ -1,6 +1,6 @@
 # Connector Plugin Author Guide
 
-Last Updated: 2026-06-25
+Last Updated: 2026-06-27
 
 > This guide is for engineers writing **connector plugins** — the
 > small executables the Connector Service invokes to bind workflows
@@ -31,6 +31,7 @@ This guide covers:
 5. [Error taxonomy](#5-error-taxonomy)
 6. [Packaging and OCI publication](#6-packaging-and-oci-publication)
 7. [Testing locally](#7-testing-locally)
+8. [Registering the connector type](#8-registering-the-connector-type)
 
 For the API the activity sees once a connection is bound (the
 "sidecar API"), see the [Connections API reference](connections-api.md).
@@ -418,6 +419,73 @@ docker run --rm -i ghcr.io/example/custos-oci-registry:1.0.0 health \
 
 A well-formed plugin always returns exit code `0` and a single JSON
 object on stdout.
+
+
+---
+
+## 8. Registering the connector type
+
+Publishing the image (§6) makes the connector *available*; it does not
+make it usable. A connector **type** must be registered with the
+Connector Service before a workspace can create instances of it. The
+Connector Service exposes a service-to-service registration RPC:
+
+```
+POST /internal/v1/connectors:register
+```
+
+* **Permission:** `connector:register` (held by the control-plane /
+  operator identity that manages the platform-global connector-type
+  catalog; never granted to end users).
+* **Body:** `{ "imageRef": "<repository>@sha256:<digest>" }`. The
+  reference is **digest-pinned** (tags are rejected in v1) and
+  **host-relative** — the registry host is fixed by the
+  `CONN_CONNECTOR_REGISTRY_URL` the service is deployed with, so the
+  body carries only the repository + digest.
+* **What it does:** drives the Plugin Loader — discovers the connector
+  manifest from the image (Referrers API or the deterministic fallback
+  tag, §6), validates it against `connector-manifest.v1`, derives the
+  identity category from `spec.credentials.authenticationType`, and
+  persists the `ConnectorTypeVersion` row.
+* **Success:** `201` with `{ type, version, digest, imageRef, deprecated }`.
+
+```sh
+curl -sS -X POST https://connector-service/internal/v1/connectors:register \
+  -H "x-custos-call-context: $CALLCTX" \
+  -H 'content-type: application/json' \
+  -d '{"imageRef":"custos-plugins/oci-registry@sha256:<hex>"}'
+```
+
+### Rejection codes
+
+The Loader maps every failure to a stable code in the service error
+envelope `{ "error": { "code": "<code>", "detail": "<message>" } }`:
+
+| HTTP | Code | Meaning |
+|---|---|---|
+| 400 | `invalid-image-ref` | `imageRef` is not `<repository>@sha256:<hex>` |
+| 409 | `conflict-digest` | re-registering an existing `(type, version)` with a different normalized digest |
+| 409 | `capability-regression` | a patch/minor bump drops a capability (only allowed at a major bump) |
+| 422 | `manifest-invalid` / `invalid-artifact-manifest` / `payload-not-json` | the discovered manifest payload is malformed |
+| 422 | `unknown-vendor-auth-type` / `unknown-authentication-type` | `authenticationType` has no registered identity category |
+| 502 | `discovery-failed` / `payload-fetch-failed` / `payload-digest-mismatch` | the connector-image registry was unreachable or returned a bad response |
+
+### Vendor authentication types (`x-…`)
+
+A manifest may declare a vendor `authenticationType` such as
+`x-dapr-secret`. These resolve only when the Connector Service has a
+registered identity-category for the token. The first-party
+`x-dapr-secret` resolver ships with the platform and maps to the `kms`
+category, and the Loader derives its vendor overrides from the **same**
+resolver-registry snapshot used at bind time — so a manifest using
+`x-dapr-secret` registers cleanly without any extra wiring. A vendor
+token with no registered category is rejected with
+`unknown-vendor-auth-type`.
+
+> **Deployment:** the registration surface is enabled by setting
+> `CONN_CONNECTOR_REGISTRY_URL` (and, for private registries,
+> `CONN_CONNECTOR_REGISTRY_TOKEN`). When the URL is unset the surface is
+> disabled and the route returns a startup-wiring `500`.
 
 ---
 
