@@ -115,6 +115,28 @@ def test_plan_requires_dest_endpoint() -> None:
     assert excinfo.value.error_class == "permanent"
 
 
+def test_plan_requires_source_host() -> None:
+    from copy_image.contract import ActivityError
+
+    ctx = json.loads(json.dumps(_CTX))
+    ctx["connectors"]["source"] = {}  # no endpoint
+    inputs = json.loads(json.dumps(_INPUTS))
+    inputs["inputs"]["source"]["ref"] = "/"  # host_of("/") == ""
+    with pytest.raises(ActivityError) as excinfo:
+        _plan(inputs, ctx)
+    assert excinfo.value.error_class == "permanent"
+
+
+def test_plan_rejects_non_bool_all_platforms() -> None:
+    from copy_image.contract import ActivityError
+
+    doc = json.loads(json.dumps(_INPUTS))
+    doc["inputs"]["allPlatforms"] = "false"
+    with pytest.raises(ActivityError) as excinfo:
+        _plan(doc)
+    assert excinfo.value.error_class == "permanent"
+
+
 # ---------------------------------------------------------------------------
 # argv + run
 # ---------------------------------------------------------------------------
@@ -178,6 +200,19 @@ def test_run_skopeo_copy_raises_on_failure(tmp_path: Path) -> None:
         )
     assert excinfo.value.returncode == 1
     assert excinfo.value.stderr == "boom"
+
+
+def test_run_skopeo_copy_empty_digest_is_retryable(tmp_path: Path) -> None:
+    from copy_image.contract import ActivityError
+
+    with pytest.raises(ActivityError) as excinfo:
+        run_skopeo_copy(
+            _plan(),
+            tmp_path / "a",
+            runner=_fake_runner(0, digest=""),  # success but no digestfile written
+            work_dir=tmp_path / "w",
+        )
+    assert excinfo.value.error_class == "retryable"
 
 
 # ---------------------------------------------------------------------------

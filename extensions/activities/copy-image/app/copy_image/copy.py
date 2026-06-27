@@ -97,6 +97,22 @@ def _require_str(value: Any, *, where: str) -> str:
     return value
 
 
+def _bool_flag(value: Any, *, where: str) -> bool:
+    """Parse an optional boolean input flag, rejecting non-bool values.
+
+    ``bool("false")`` is truthy, so a permissive cast would silently flip
+    behavior; an explicit non-bool (e.g. the string ``"false"``) is a
+    permanent contract violation.
+    """
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise ActivityError(
+            "activity.contract_violation", "permanent", f"{where} must be a boolean"
+        )
+    return value
+
+
 def resolve_copy_plan(inputs: InputsEnvelope, ctx: Context) -> CopyPlan:
     """Turn the activity inputs + connector contexts into a :class:`CopyPlan`."""
     source = _require_object(inputs.inputs.get("source"), where="inputs.source")
@@ -115,6 +131,13 @@ def resolve_copy_plan(inputs: InputsEnvelope, ctx: Context) -> CopyPlan:
 
     source_host = host_of(source_endpoint) or host_of(ref)
     dest_host = host_of(dest_endpoint)
+    if not source_host:
+        raise ActivityError(
+            "activity.contract_violation",
+            "permanent",
+            "could not derive the source registry host from "
+            "ctx.connectors.source.endpoint or inputs.source.ref",
+        )
     if not dest_host:
         raise ActivityError(
             "activity.contract_violation",
@@ -136,7 +159,7 @@ def resolve_copy_plan(inputs: InputsEnvelope, ctx: Context) -> CopyPlan:
         destination_ref=destination_ref,
         source_host=source_host,
         dest_host=dest_host,
-        all_platforms=bool(inputs.inputs.get("allPlatforms", False)),
+        all_platforms=_bool_flag(inputs.inputs.get("allPlatforms"), where="inputs.allPlatforms"),
         platform=platform,
     )
 
@@ -185,6 +208,12 @@ def run_skopeo_copy(
         digest = digestfile.read_text(encoding="utf-8").strip()
     except FileNotFoundError:
         digest = ""
+    if not digest:
+        raise ActivityError(
+            "activity.unexpected_error",
+            "retryable",
+            "skopeo exited 0 but wrote no digest",
+        )
     return CopyOutcome(
         destination_ref=plan.destination_ref,
         digest=digest,
