@@ -151,6 +151,8 @@ def test_register_x_dapr_secret_manifest_succeeds() -> None:
     assert body["type"] == payload["metadata"]["type"]
     assert body["version"] == payload["metadata"]["version"]
     assert body["imageRef"] == IMAGE_REF
+    assert body["digest"].startswith("sha256:")
+    assert len(body["digest"]) == len("sha256:") + 64
     assert body["deprecated"] is False
 
 
@@ -227,3 +229,7 @@ def test_register_rejects_unknown_body_fields() -> None:
             headers=_ctx_header(),
         )
     assert response.status_code == 422, response.text
+    # Unknown fields go through the service-wide RequestValidationError
+    # handler, which renders the canonical envelope (not FastAPI's default
+    # ``{"detail": [...]}``).
+    assert response.json()["error"]["code"] == "invalid-request"
