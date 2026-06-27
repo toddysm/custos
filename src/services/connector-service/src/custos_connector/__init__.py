@@ -41,6 +41,7 @@ from starlette.responses import JSONResponse
 from custos_connector._runtime import install_otel_providers
 from custos_connector.api import (
     audit_router,
+    connector_register_router,
     connector_types_router,
     instances_router,
     lease_admin_router,
@@ -230,6 +231,8 @@ def create_app(
     app.include_router(subscribe_router)
     # CONN-IMPL-026 — public REST surface.
     app.include_router(connector_types_router)
+    # CONN-REG (#898) — connector-type registration (drives the Loader).
+    app.include_router(connector_register_router)
     app.include_router(instances_router)
     app.include_router(lease_admin_router)
     app.include_router(audit_router)

@@ -71,6 +71,12 @@ CONNECTOR_LEASE_MINT: Final[str] = "connector:lease-mint"
 #: config validation surface; never granted to human operators.
 CONNECTOR_VALIDATE: Final[str] = "connector:validate"
 
+#: ``POST /internal/v1/connectors:register`` (CONN-REG / #898). Held by
+#: the operator/control-plane identity that registers connector-type
+#: versions from their OCI images; drives the platform-global connector
+#: type catalog.
+CONNECTOR_REGISTER: Final[str] = "connector:register"
+
 #: ``POST /internal/v1/events:subscribe`` (CONN-IMPL-027). Held by the
 #: Trigger Service so it can discover the Dapr Pub/Sub subscription
 #: metadata for ``custos.connector.events``; never granted to human
@@ -85,6 +91,7 @@ ALL_PERMISSIONS: Final[tuple[str, ...]] = (
     CONNECTOR_BIND,
     CONNECTOR_LEASE_MINT,
     CONNECTOR_READ,
+    CONNECTOR_REGISTER,
     CONNECTOR_VALIDATE,
     EVENTS_SUBSCRIBE,
 )
@@ -97,6 +104,7 @@ __all__ = [
     "CONNECTOR_BIND",
     "CONNECTOR_LEASE_MINT",
     "CONNECTOR_READ",
+    "CONNECTOR_REGISTER",
     "CONNECTOR_VALIDATE",
     "EVENTS_SUBSCRIBE",
 ]

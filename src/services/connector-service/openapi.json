@@ -180,6 +180,40 @@
         "title": "_ConnectorContextWire",
         "type": "object"
       },
+      "_ConnectorTypeVersionWire": {
+        "description": "Wire shape of one connector-type version row in the list response.",
+        "properties": {
+          "deprecated": {
+            "default": false,
+            "title": "Deprecated",
+            "type": "boolean"
+          },
+          "digest": {
+            "title": "Digest",
+            "type": "string"
+          },
+          "imageRef": {
+            "title": "Imageref",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "version",
+          "digest",
+          "imageRef"
+        ],
+        "title": "_ConnectorTypeVersionWire",
+        "type": "object"
+      },
       "_CreateConnectorRequest": {
         "additionalProperties": false,
         "description": "Body for ``POST /v1/workspaces/{ws}/connectors``.",
@@ -484,6 +518,22 @@
           "leaseId"
         ],
         "title": "_RefreshWire",
+        "type": "object"
+      },
+      "_RegisterConnectorWire": {
+        "additionalProperties": false,
+        "description": "Wire shape for the registration request body.",
+        "properties": {
+          "imageRef": {
+            "minLength": 1,
+            "title": "Imageref",
+            "type": "string"
+          }
+        },
+        "required": [
+          "imageRef"
+        ],
+        "title": "_RegisterConnectorWire",
         "type": "object"
       },
       "_ReleaseWire": {
@@ -801,6 +851,48 @@
         "summary": "Bind For Step",
         "tags": [
           "binding"
+        ]
+      }
+    },
+    "/internal/v1/connectors:register": {
+      "post": {
+        "description": "Register a connector-type version from its OCI image reference.",
+        "operationId": "register_connector_internal_v1_connectors_register_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_RegisterConnectorWire"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/_ConnectorTypeVersionWire"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Register Connector",
+        "tags": [
+          "connector-types"
         ]
       }
     },
