@@ -16,14 +16,23 @@ ENV PYTHONUNBUFFERED=1 \
 
 # skopeo performs the manifest + blob copy; oras cp --recursive copies OCI
 # referrers (signatures / SBOM / attestations). ca-certificates is needed for
-# TLS to the registries.
+# TLS to the registries. The oras binary is selected for the build's target
+# architecture (TARGETARCH is supplied automatically by buildx) and verified
+# against the release's published SHA256 checksums.
 ARG ORAS_VERSION=1.2.0
+ARG TARGETARCH=amd64
 RUN apt-get update \
     && apt-get install -y --no-install-recommends skopeo ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
-    && curl -fsSL "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz" \
-       | tar -xz -C /usr/local/bin oras \
-    && chmod +x /usr/local/bin/oras
+    && arch="${TARGETARCH:-amd64}" \
+    && tarball="oras_${ORAS_VERSION}_linux_${arch}.tar.gz" \
+    && base="https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}" \
+    && curl -fsSLO "${base}/${tarball}" \
+    && curl -fsSLO "${base}/oras_${ORAS_VERSION}_checksums.txt" \
+    && grep " ${tarball}\$" "oras_${ORAS_VERSION}_checksums.txt" | sha256sum -c - \
+    && tar -xzf "${tarball}" -C /usr/local/bin oras \
+    && chmod +x /usr/local/bin/oras \
+    && rm -f "${tarball}" "oras_${ORAS_VERSION}_checksums.txt"
 
 WORKDIR /opt/activity
 

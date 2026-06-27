@@ -260,15 +260,18 @@ class OrasError(Exception):
 
 def build_oras_argv(plan: CopyPlan, authfile: Path) -> list[str]:
     """Assemble the ``oras cp --recursive`` argv for ``plan``."""
-    return [
+    argv = [
         ORAS,
         "cp",
         "--recursive",
         "--registry-config",
         str(authfile),
-        plan.source_ref,
-        plan.destination_ref,
     ]
+    # Honor single-platform selection, mirroring the skopeo path.
+    if not plan.all_platforms and plan.platform:
+        argv += ["--platform", plan.platform]
+    argv += [plan.source_ref, plan.destination_ref]
+    return argv
 
 
 def run_oras_copy(
@@ -291,12 +294,15 @@ def run_oras_copy(
     output = (proc.stdout or "") + "\n" + (proc.stderr or "")
     all_digests = _DIGEST_RE.findall(output)
     labeled = _LABELED_DIGEST_RE.findall(output)
-    digest = labeled[-1] if labeled else (all_digests[-1] if all_digests else "")
+    # Only trust the labeled ``Digest:`` line for the destination digest; an
+    # unlabeled bare token may be a referrer digest, so fail (retryable)
+    # rather than misreport it.
+    digest = labeled[-1] if labeled else ""
     if not digest:
         raise ActivityError(
             "activity.unexpected_error",
             "retryable",
-            "oras cp exited 0 but reported no digest",
+            "oras cp exited 0 but reported no labeled destination digest",
         )
     return CopyOutcome(
         destination_ref=plan.destination_ref,

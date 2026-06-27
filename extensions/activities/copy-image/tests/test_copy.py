@@ -197,6 +197,25 @@ def test_build_oras_argv() -> None:
     assert argv[-2:] == [plan.source_ref, plan.destination_ref]
 
 
+def test_build_oras_argv_platform() -> None:
+    from copy_image.copy import build_oras_argv
+
+    doc = json.loads(json.dumps(_INPUTS))
+    doc["inputs"]["platform"] = "linux/arm64"
+    argv = build_oras_argv(_plan(doc), Path("/run/auth.json"))
+    assert argv[argv.index("--platform") + 1] == "linux/arm64"
+
+
+def test_build_oras_argv_all_platforms_skips_platform() -> None:
+    from copy_image.copy import build_oras_argv
+
+    doc = json.loads(json.dumps(_INPUTS))
+    doc["inputs"]["platform"] = "linux/arm64"
+    doc["inputs"]["allPlatforms"] = True
+    argv = build_oras_argv(_plan(doc), Path("/run/auth.json"))
+    assert "--platform" not in argv
+
+
 def _oras_runner(returncode: int, *, stdout: str = "", stderr: str = ""):  # type: ignore[no-untyped-def]
     def runner(argv: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
