@@ -40,6 +40,29 @@ def test_load_settings_applies_documented_defaults() -> None:
     assert s.is_production is False
 
 
+def test_connector_registry_defaults_disable_registration_surface() -> None:
+    s = load_settings(_MIN_ENV)
+    assert s.connector_registry_url == ""
+    assert s.connector_registry_token is None
+
+
+def test_connector_registry_settings_parse() -> None:
+    s = load_settings(
+        {
+            **_MIN_ENV,
+            "CONN_CONNECTOR_REGISTRY_URL": "https://ghcr.io",
+            "CONN_CONNECTOR_REGISTRY_TOKEN": "ghp_example",
+        }
+    )
+    assert s.connector_registry_url == "https://ghcr.io"
+    assert s.connector_registry_token == "ghp_example"
+
+
+def test_connector_registry_token_blank_is_none() -> None:
+    s = load_settings({**_MIN_ENV, "CONN_CONNECTOR_REGISTRY_TOKEN": "   "})
+    assert s.connector_registry_token is None
+
+
 def test_use_callctx_dev_shim_flips_off_when_authz_endpoint_set() -> None:
     s = load_settings({**_MIN_ENV, "CONN_AUTHZ_ENDPOINT": "http://auth-service:8080"})
     assert s.use_callctx_dev_shim is False
