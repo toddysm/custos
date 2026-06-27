@@ -1,0 +1,35 @@
+{
+  "apiVersion": "custos.dev/connector-manifest/v1",
+  "kind": "ConnectorManifest",
+  "metadata": {
+    "type": "custos-ghcr",
+    "version": "0.1.0",
+    "contractVersion": "1"
+  },
+  "spec": {
+    "description": "Out-of-the-box GHCR (GitHub Container Registry) connector. Resolves a durable GitHub Personal Access Token (write:packages) through the x-dapr-secret credential mechanism (leased via the connector sidecar) and shapes a data-plane ConnectorContext for OCI pull/push/list activities against ghcr.io. The plugin never sees the resolved PAT and never mints registry bearer tokens — bind hands back a binding handle the sidecar maps onto the lease, and the per-repository Layer-2 token exchange against ghcr.io/token is performed by the consuming activity (see design/architecture/registry-credential-refresh.md).",
+    "capabilities": [
+      "oci.pull",
+      "oci.push",
+      "oci.list-tags",
+      "oci.list-referrers"
+    ],
+    "target": {
+      "kind": "oci-registry",
+      "endpoint": "https://ghcr.io",
+      "verifyTls": true,
+      "config": {
+        "repositoryNamespace": "octo-org"
+      }
+    },
+    "credentials": {
+      "authenticationType": "x-dapr-secret",
+      "authentication": {
+        "secretName": "ghcr-pat",
+        "usernameKey": "username",
+        "tokenKey": "token",
+        "namespace": "custos-connectors"
+      }
+    }
+  }
+}
