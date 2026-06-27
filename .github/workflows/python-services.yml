@@ -9,6 +9,7 @@ on:
       - "src/services/**"
       - "src/jobs/**"
       - "extensions/connectors/**"
+      - "extensions/activities/**"
       - ".github/workflows/python-services.yml"
   push:
     branches: [main]
@@ -16,6 +17,7 @@ on:
       - "src/services/**"
       - "src/jobs/**"
       - "extensions/connectors/**"
+      - "extensions/activities/**"
       - ".github/workflows/python-services.yml"
 
 jobs:
@@ -1020,6 +1022,73 @@ jobs:
           tags: custos-plugin-${{ matrix.plugin }}:ci
           cache-from: type=gha,scope=connector-plugin-${{ matrix.plugin }}
           cache-to: type=gha,mode=max,scope=connector-plugin-${{ matrix.plugin }}
+          platforms: linux/amd64
+
+  activities:
+    name: activities (lint + types + tests + image build)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each out-of-the-box activity lives under
+        # extensions/activities/<activity> and is self-contained (its own
+        # pyproject + Containerfile + tests). ``package`` is the importable
+        # name handed to mypy so it can analyze the installed package
+        # alongside the test sources without double-discovering the in-tree
+        # ``app/`` layout.
+        include:
+          - activity: copy-image
+            package: copy_image
+            python-version: "3.11"
+          - activity: copy-image
+            package: copy_image
+            python-version: "3.12"
+    defaults:
+      run:
+        working-directory: extensions/activities/${{ matrix.activity }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install package and dev dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Ruff lint
+        run: ruff check app tests
+
+      - name: Ruff format check
+        run: ruff format --check app tests
+
+      - name: Mypy (strict)
+        # Two invocations so we don't mix mypy's mutually-exclusive
+        # ``-p <package>`` and positional-files modes.
+        run: |
+          mypy -p ${{ matrix.package }}
+          mypy tests
+
+      - name: Pytest (unit)
+        run: pytest -q
+
+      - name: Set up Docker Buildx
+        # Only build the image on one Python version to keep CI fast;
+        # the Containerfile pins its own ``python:3.12-slim`` base.
+        if: matrix.python-version == '3.12'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build activity image (no push)
+        if: matrix.python-version == '3.12'
+        uses: docker/build-push-action@v6
+        with:
+          context: extensions/activities/${{ matrix.activity }}
+          file: extensions/activities/${{ matrix.activity }}/Containerfile
+          push: false
+          tags: custos-activity-${{ matrix.activity }}:ci
+          cache-from: type=gha,scope=activity-${{ matrix.activity }}
+          cache-to: type=gha,mode=max,scope=activity-${{ matrix.activity }}
           platforms: linux/amd64
 
   migrate-job:
