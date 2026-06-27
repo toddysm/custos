@@ -44,7 +44,7 @@ activity never calls platform APIs directly and imports no platform packages.
 |---|---|---|
 | `destinationRef` | string | The `<host>/<repo>:<tag>` written. |
 | `digest` | string | The destination manifest digest (`sha256:...`). |
-| `bytesCopied` | integer | Bytes transferred (best-effort). |
+| `bytesCopied` | integer | Reserved by the output schema; **not emitted** by v0.1.0 (skopeo/oras do not surface a reliable byte count). |
 | `manifestsCopied` | integer | Number of manifests copied (image + referrers). |
 | `reportRef` | `ArtifactRef` | Reference to the `copy-report` artifact (JSON). |
 
