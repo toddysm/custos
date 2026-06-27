@@ -24,7 +24,7 @@ Developer settings -> Personal access tokens -> Tokens (classic)*) with:
 
 - `write:packages` — required to push,
 - `read:packages` — required to pull **private** packages (public packages pull
-  anonymously),
+   anonymously),
 - `delete:packages` — only if you intend to delete.
 
 Store it as a Kubernetes Secret in the connector-credentials namespace:
@@ -110,7 +110,7 @@ JSON
 ```
 
 - `repositoryNamespace` is the GitHub org or user that owns the packages
-  (the `<owner>` in `ghcr.io/<owner>/<image>`).
+   (the `<owner>` in `ghcr.io/<owner>/<image>`).
 - `credentialsAuthentication` **references** the Secret — it carries no token.
 - `leaseTtlSeconds` is optional (see [lease TTL](README.md#lease-ttl)).
 
@@ -169,8 +169,47 @@ A step that copies from a source to a destination names each one under a slot:
 capabilities it needs per slot; the binder rejects the step before execution if
 the named instance does not advertise them.
 
-> A worked **Docker Hub -> GHCR copy** example will be added here once the
-> copy-image activity ships (tracked in #889).
+### Worked example: copy Docker Hub -> GHCR
+
+With this GHCR connector in the `dest` slot and a `dockerhub` connector in the
+`source` slot, the out-of-the-box
+[`copy-image`](../../../extensions/activities/copy-image/README.md) activity
+mirrors an image into GHCR. A workflow step:
+
+```yaml
+spec:
+  steps:
+    - id: copy-hello-world
+      activity: custos.builtin/copy-image@0
+      connectors:
+        source: dockerhub-prod        # a Docker Hub instance (oci.pull)
+        dest: ghcr-prod               # this GHCR instance (oci.push)
+      with:
+        source:
+          ref: docker.io/library/hello-world:latest
+        destination:
+          repository: octo-org/hello-world
+          tag: mirrored
+        # copyReferrers: true         # also copy signatures / SBOM / attestations
+        # allPlatforms: true          # copy every arch in the manifest list
+```
+
+On success the step's outputs include the destination reference and digest:
+
+```json
+{
+  "destinationRef": "ghcr.io/octo-org/hello-world:mirrored",
+  "digest": "sha256:...",
+  "manifestsCopied": 1
+}
+```
+
+GHCR is the push target here, so this instance must advertise `oci.push`; the
+binder rejects the step before execution otherwise. The destination
+`repository` is the path under `ghcr.io` (the host comes from the connector).
+See the
+[copy-image README](../../../extensions/activities/copy-image/README.md) for
+the full input/output and error-code reference.
 
 ## 5. Verify & operate
 
