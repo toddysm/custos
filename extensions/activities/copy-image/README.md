@@ -6,9 +6,10 @@ The canonical binding is **Docker Hub -> GHCR**, but the activity is
 registry-agnostic — both slots are `oci-registry` connectors — so it doubles
 as a general registry-to-registry copy.
 
-> Status: scaffolding (COPY-IMPL-001). Input/output handling, the skopeo copy
-> engine, referrers/multi-arch, error mapping, CI, and the worked example land
-> in COPY-IMPL-002...008 (tracker #930).
+> Status: in progress. The manifest + scaffold (COPY-IMPL-001) and the
+> file-based I/O contract (COPY-IMPL-002) have landed; the skopeo copy engine,
+> credential materialization, referrers/multi-arch, error mapping, CI, and the
+> worked example land in COPY-IMPL-003...008 (tracker #930).
 
 | | |
 |---|---|
