@@ -16,9 +16,11 @@ the two guides share the same five-step shape. This page covers the concepts
 common to both; follow the per-connector guide for the registry-specific
 details (PAT creation, namespaces, caveats).
 
-> These are **operator** guides: everything is done through the Custos HTTP API
-> via the gateway. M1 has no Web UI. Examples use `curl` with a service token —
-> see [First Use](../evaluation/first-workflow.md) for how to obtain one.
+> These are **operator** guides. M1 has no Web UI. Most actions are HTTP API
+> calls through the gateway (examples use `curl` with a service token — see
+> [First Use](../evaluation/first-workflow.md) for how to obtain one); creating
+> the credential Secret (step 1) uses `kubectl`, and registering a connector
+> type (step 2) is a control-plane action.
 
 ## The five-step lifecycle
 
@@ -30,10 +32,10 @@ details (PAT creation, namespaces, caveats).
 5. Verify & operate               (API — health, enable/disable)
 ```
 
-Steps 1–3 and 5 are operator actions against the gateway. Step 2 is a
-control-plane action (see below). Step 4 happens in your workflow definition;
-the actual credential binding is performed automatically by the Workflow
-Service at step-execution time.
+Step 1 is a `kubectl` action and step 2 is a control-plane action (see below).
+Steps 3 and 5 are operator API calls against the gateway. Step 4 happens in
+your workflow definition; the actual credential binding is performed
+automatically by the Workflow Service at step-execution time.
 
 ## Credential model (`x-dapr-secret`)
 
