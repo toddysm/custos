@@ -89,11 +89,11 @@ ENV_DAPR_EVENT_TOPIC: Final[str] = "CONN_DAPR_EVENT_TOPIC"
 ENV_DAPR_SECRET_STORE: Final[str] = "CONN_DAPR_SECRET_STORE"
 
 #: Optional. Base URL of the OCI registry that hosts connector *plugin*
-#: images. When set, the connector-type registration surface
-#: (``POST /internal/v1/connectors:register``, CONN-REG) is wired with an
-#: ``httpx.AsyncClient`` bound to this base URL; the registration request
-#: carries only a host-relative ``<repository>@sha256:<digest>``. Empty
-#: disables the registration surface (the Loader is not constructed).
+#: images. When set, the connector-type registration ``Loader`` (CONN-REG)
+#: is constructed with an ``httpx.AsyncClient`` bound to this base URL, so
+#: registration pulls carry only a host-relative
+#: ``<repository>@sha256:<digest>``. Empty leaves the Loader unconstructed.
+#: The HTTP route that drives the Loader lands in a follow-up (CONN-REG T4).
 ENV_CONNECTOR_REGISTRY_URL: Final[str] = "CONN_CONNECTOR_REGISTRY_URL"
 
 #: Optional. Static bearer token presented as ``Authorization: Bearer``

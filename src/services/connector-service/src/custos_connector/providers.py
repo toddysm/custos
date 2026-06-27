@@ -199,8 +199,9 @@ class Providers:
     sidecar_registry: SidecarRegistry = field(default_factory=InMemorySidecarRegistry)
     #: Connector-type registration entry point (CONN-REG / #898). ``None``
     #: when ``CONN_CONNECTOR_REGISTRY_URL`` is unset, which leaves the
-    #: registration route unwired (it raises a startup-wiring error on
-    #: use). Constructed with ``vendor_identity_categories`` sourced from
+    #: Loader unconstructed (the future registration route — CONN-REG T4 —
+    #: treats ``None`` as a startup-wiring error). Constructed with
+    #: ``vendor_identity_categories`` sourced from
     #: :attr:`identity_registry.vendor_categories` so the Loader's
     #: ``x-<vendor>`` identity-category table is a single source of truth
     #: with the resolver registry (no drift; folds in #896).
@@ -215,12 +216,12 @@ def load_registration_registry_client(settings: Settings) -> httpx.AsyncClient |
     """Build the OCI registry client the connector-type Loader pulls through.
 
     Returns ``None`` when ``CONN_CONNECTOR_REGISTRY_URL`` is unset, which
-    leaves the registration surface disabled (the route raises a
-    startup-wiring error on use). When set, the client is bound to that
-    registry's base URL so the Loader's base-URL-relative
-    ``/v2/<repo>/manifests|blobs`` requests resolve, with an optional
-    static bearer for private registries. The caller owns the lifecycle;
-    the app lifespan closes it on shutdown.
+    leaves the Loader unconstructed (the future registration route, CONN-REG
+    T4, treats a missing Loader as a startup-wiring error). When set, the
+    client is bound to that registry's base URL so the Loader's
+    base-URL-relative ``/v2/<repo>/manifests|blobs`` requests resolve, with
+    an optional static bearer for private registries. The caller owns the
+    lifecycle; the app lifespan closes it on shutdown.
     """
     base_url = settings.connector_registry_url
     if not base_url:
