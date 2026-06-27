@@ -175,6 +175,26 @@ def test_bind_accepts_redirect_host_registry_docker_io() -> None:
     assert result["endpoint"] == "https://registry.docker.io/v2/acme"
 
 
+def test_bind_rejects_endpoint_with_path_or_userinfo() -> None:
+    for bad in (
+        "https://registry-1.docker.io/foo",
+        "https://user@registry-1.docker.io",
+        "https://registry-1.docker.io:8443",
+    ):
+        request = _request("bind", hook_input={"slot": "source", "capability": "oci.pull"})
+        request["connector"]["manifest"]["spec"]["target"]["endpoint"] = bad
+        with pytest.raises(PluginError) as excinfo:
+            handle("bind", request)
+        assert excinfo.value.code == "invalid-response", bad
+
+
+def test_bind_normalizes_trailing_slash_endpoint() -> None:
+    request = _request("bind", hook_input={"slot": "source", "capability": "oci.pull"})
+    request["connector"]["manifest"]["spec"]["target"]["endpoint"] = "https://registry-1.docker.io/"
+    result = handle("bind", request)["result"]
+    assert result["endpoint"] == "https://registry-1.docker.io/v2/acme"
+
+
 # ---------------------------------------------------------------------------
 # health
 # ---------------------------------------------------------------------------
