@@ -88,6 +88,20 @@ ENV_DAPR_EVENT_TOPIC: Final[str] = "CONN_DAPR_EVENT_TOPIC"
 #: component *type*).
 ENV_DAPR_SECRET_STORE: Final[str] = "CONN_DAPR_SECRET_STORE"
 
+#: Optional. Base URL of the OCI registry that hosts connector *plugin*
+#: images. When set, the connector-type registration surface
+#: (``POST /internal/v1/connectors:register``, CONN-REG) is wired with an
+#: ``httpx.AsyncClient`` bound to this base URL; the registration request
+#: carries only a host-relative ``<repository>@sha256:<digest>``. Empty
+#: disables the registration surface (the Loader is not constructed).
+ENV_CONNECTOR_REGISTRY_URL: Final[str] = "CONN_CONNECTOR_REGISTRY_URL"
+
+#: Optional. Static bearer token presented as ``Authorization: Bearer``
+#: on connector-image pulls for private registries. Empty means anonymous
+#: pulls (the default for public registries). Per-registry credential
+#: resolution is a deliberate follow-up.
+ENV_CONNECTOR_REGISTRY_TOKEN: Final[str] = "CONN_CONNECTOR_REGISTRY_TOKEN"
+
 #: Operational env tag. The call-context dev shim refuses to run when this
 #: is ``production`` (case-insensitive).
 ENV_ENVIRONMENT: Final[str] = "ENVIRONMENT"
@@ -138,6 +152,14 @@ class Settings:
     #: identity resolver (CONN-DAPRSEC-01). Default keeps local-dev +
     #: existing test constructions working.
     dapr_secret_store: str = DEFAULT_DAPR_SECRET_STORE
+    #: Base URL of the OCI registry hosting connector plugin images
+    #: (CONN-REG). Empty disables the connector-type registration
+    #: surface. Default keeps local-dev + existing test constructions
+    #: working.
+    connector_registry_url: str = ""
+    #: Optional static bearer for private connector-image pulls
+    #: (CONN-REG). ``None`` means anonymous pulls.
+    connector_registry_token: str | None = None
 
     @property
     def use_callctx_dev_shim(self) -> bool:
@@ -221,6 +243,8 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         dapr_pubsub_name=src.get(ENV_DAPR_PUBSUB_NAME, "").strip() or DEFAULT_DAPR_PUBSUB_NAME,
         dapr_event_topic=src.get(ENV_DAPR_EVENT_TOPIC, "").strip() or DEFAULT_DAPR_EVENT_TOPIC,
         dapr_secret_store=src.get(ENV_DAPR_SECRET_STORE, "").strip() or DEFAULT_DAPR_SECRET_STORE,
+        connector_registry_url=src.get(ENV_CONNECTOR_REGISTRY_URL, "").strip(),
+        connector_registry_token=src.get(ENV_CONNECTOR_REGISTRY_TOKEN, "").strip() or None,
         environment=src.get(ENV_ENVIRONMENT, "development").strip() or "development",
     )
 
@@ -238,6 +262,8 @@ __all__ = [
     "ENV_AUTHZ_ENDPOINT",
     "ENV_CATALOG_ENDPOINT",
     "ENV_CATALOG_STORE",
+    "ENV_CONNECTOR_REGISTRY_TOKEN",
+    "ENV_CONNECTOR_REGISTRY_URL",
     "ENV_DAPR_EVENT_TOPIC",
     "ENV_DAPR_HTTP_ENDPOINT",
     "ENV_DAPR_PUBSUB_NAME",

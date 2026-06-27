@@ -190,3 +190,93 @@ def test_load_identity_registry_registers_dapr_secret_vendor_resolver() -> None:
     assert isinstance(resolver, DaprSecretResolver)
     assert registry._vendor_categories["x-dapr-secret"] is IdentityCategory.KMS
     assert resolver._default_store == "custos-secretstore"
+
+
+# ---------------------------------------------------------------------------
+# CONN-REG (#898 T1/T2) — connector-type registration Loader wiring
+# ---------------------------------------------------------------------------
+
+_REG_ENV = {
+    "CONN_CATALOG_STORE": "postgresql://u:p@h:5432/cat",
+    "CONN_METADATA_STORE": "postgresql://u:p@h:5432/meta",
+    "CONN_CATALOG_ENDPOINT": "http://catalog-service:8080",
+}
+
+
+async def test_load_registration_registry_client_returns_none_when_url_unset() -> None:
+    from custos_connector.providers import load_registration_registry_client
+    from custos_connector.settings import load_settings
+
+    settings = load_settings(_REG_ENV)
+    assert load_registration_registry_client(settings) is None
+
+
+async def test_load_registration_registry_client_builds_client_with_auth() -> None:
+    from custos_connector.providers import load_registration_registry_client
+    from custos_connector.settings import load_settings
+
+    settings = load_settings(
+        {
+            **_REG_ENV,
+            "CONN_CONNECTOR_REGISTRY_URL": "https://ghcr.io",
+            "CONN_CONNECTOR_REGISTRY_TOKEN": "tok",
+        }
+    )
+    client = load_registration_registry_client(settings)
+    assert client is not None
+    try:
+        assert client.base_url.host == "ghcr.io"
+        assert client.headers["authorization"] == "Bearer tok"
+    finally:
+        await client.aclose()
+
+
+async def test_load_registration_registry_client_anonymous_when_token_unset() -> None:
+    from custos_connector.providers import load_registration_registry_client
+    from custos_connector.settings import load_settings
+
+    settings = load_settings({**_REG_ENV, "CONN_CONNECTOR_REGISTRY_URL": "https://ghcr.io"})
+    client = load_registration_registry_client(settings)
+    assert client is not None
+    try:
+        assert "authorization" not in client.headers
+    finally:
+        await client.aclose()
+
+
+async def test_load_providers_leaves_loader_unset_without_registry_url() -> None:
+    from custos_connector.providers import load_providers
+    from custos_connector.settings import load_settings
+
+    bundle = load_providers(load_settings(_REG_ENV))
+    try:
+        assert bundle.loader is None
+        assert bundle.registration_registry_client is None
+    finally:
+        await bundle.identity_registry.aclose()
+
+
+async def test_load_providers_wires_loader_with_registry_vendor_categories() -> None:
+    """The Loader's vendor identity-category overrides are sourced from the
+    resolver registry snapshot — single source of truth, no drift (#896)."""
+    from custos_connector.loader.identity import IdentityCategory
+    from custos_connector.providers import load_providers
+    from custos_connector.settings import load_settings
+
+    bundle = load_providers(
+        load_settings({**_REG_ENV, "CONN_CONNECTOR_REGISTRY_URL": "https://ghcr.io"})
+    )
+    try:
+        assert bundle.loader is not None
+        assert bundle.registration_registry_client is not None
+        # x-dapr-secret -> KMS is registered on the resolver registry...
+        assert bundle.identity_registry.vendor_categories["x-dapr-secret"] is IdentityCategory.KMS
+        # ...and the Loader was fed exactly that snapshot (drift guard).
+        assert bundle.loader._vendor_overrides is not None
+        assert dict(bundle.loader._vendor_overrides) == dict(
+            bundle.identity_registry.vendor_categories
+        )
+    finally:
+        await bundle.identity_registry.aclose()
+        if bundle.registration_registry_client is not None:
+            await bundle.registration_registry_client.aclose()

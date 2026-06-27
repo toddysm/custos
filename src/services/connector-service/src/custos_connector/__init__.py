@@ -176,6 +176,17 @@ def create_app(
                     await local_providers.sidecar_admin_client.aclose()
                 except Exception:
                     logger.exception("sidecar-admin http client aclose failed during shutdown")
+            # Release the httpx client the connector-type registration
+            # Loader pulls connector-image manifests through (CONN-REG /
+            # #898). ``None`` whenever the registration surface is
+            # disabled (``CONN_CONNECTOR_REGISTRY_URL`` unset).
+            if local_providers.registration_registry_client is not None:
+                try:
+                    await local_providers.registration_registry_client.aclose()
+                except Exception:
+                    logger.exception(
+                        "registration registry http client aclose failed during shutdown"
+                    )
 
     app = FastAPI(
         title="Custos Connector Service",

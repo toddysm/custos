@@ -69,6 +69,7 @@ from custos_connector.listen.publisher import (
     EventPublisher,
     NoOpEventPublisher,
 )
+from custos_connector.loader import Loader
 from custos_connector.loader.identity import IdentityCategory
 from custos_connector.runtime import DockerCliHookRunner, PluginInvoker
 from custos_connector.scheduler import PullLoopScheduler
@@ -196,6 +197,42 @@ class Providers:
     #: registry so the operator routes can no-op-fan-out without a
     #: None guard at every call site.
     sidecar_registry: SidecarRegistry = field(default_factory=InMemorySidecarRegistry)
+    #: Connector-type registration entry point (CONN-REG / #898). ``None``
+    #: when ``CONN_CONNECTOR_REGISTRY_URL`` is unset, which leaves the
+    #: registration route unwired (it raises a startup-wiring error on
+    #: use). Constructed with ``vendor_identity_categories`` sourced from
+    #: :attr:`identity_registry.vendor_categories` so the Loader's
+    #: ``x-<vendor>`` identity-category table is a single source of truth
+    #: with the resolver registry (no drift; folds in #896).
+    loader: Loader | None = field(default=None)
+    #: httpx client the Loader uses to pull connector-image manifests at
+    #: registration time (CONN-REG). The lifespan hook closes it on
+    #: shutdown. ``None`` whenever the registration surface is disabled.
+    registration_registry_client: httpx.AsyncClient | None = field(default=None)
+
+
+def load_registration_registry_client(settings: Settings) -> httpx.AsyncClient | None:
+    """Build the OCI registry client the connector-type Loader pulls through.
+
+    Returns ``None`` when ``CONN_CONNECTOR_REGISTRY_URL`` is unset, which
+    leaves the registration surface disabled (the route raises a
+    startup-wiring error on use). When set, the client is bound to that
+    registry's base URL so the Loader's base-URL-relative
+    ``/v2/<repo>/manifests|blobs`` requests resolve, with an optional
+    static bearer for private registries. The caller owns the lifecycle;
+    the app lifespan closes it on shutdown.
+    """
+    base_url = settings.connector_registry_url
+    if not base_url:
+        return None
+    headers: dict[str, str] = {}
+    if settings.connector_registry_token:
+        headers["Authorization"] = f"Bearer {settings.connector_registry_token}"
+    return httpx.AsyncClient(
+        base_url=base_url,
+        headers=headers,
+        timeout=httpx.Timeout(30.0),
+    )
 
 
 def load_providers(settings: Settings) -> Providers:
@@ -248,6 +285,23 @@ def load_providers(settings: Settings) -> Providers:
         dapr_secret_store=settings.dapr_secret_store,
     )
     event_publisher, dapr_http_client = load_event_publisher(settings=settings)
+    # Connector-type registration entry point (CONN-REG / #898). The
+    # Loader's vendor identity-category overrides are sourced from the
+    # resolver registry's own snapshot so the ``x-<vendor>`` table stays a
+    # single source of truth (no drift; this is what folds in #896 — a
+    # manifest declaring ``authenticationType: x-dapr-secret`` derives its
+    # KMS category from the same registration that wired the resolver).
+    registration_registry_client = load_registration_registry_client(settings)
+    loader = (
+        Loader(
+            catalog_store=typed_catalog,
+            registry_client=registration_registry_client,
+            vendor_identity_categories=identity_registry.vendor_categories,
+            metadata_store=typed_metadata,
+        )
+        if registration_registry_client is not None
+        else None
+    )
     return Providers(
         catalog_store=typed_catalog,
         instance_store=typed_instances,
@@ -277,6 +331,8 @@ def load_providers(settings: Settings) -> Providers:
         ),
         event_publisher=event_publisher,
         dapr_http_client=dapr_http_client,
+        loader=loader,
+        registration_registry_client=registration_registry_client,
     )
 
 
