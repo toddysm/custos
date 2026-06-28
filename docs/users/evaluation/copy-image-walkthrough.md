@@ -72,7 +72,7 @@ curl -sS "$GATEWAY/v1/catalog/connector-types" \
   -H "authorization: Bearer $TOKEN"
 
 # The built-in activity-type (resolvable from any workspace).
-curl -sS "$GATEWAY/v1/workspaces/custos.builtin/activity-types/custos.builtin/copy-image@0" \
+curl -sS "$GATEWAY/v1/workspaces/$WS/activity-types/custos.builtin/copy-image@0" \
   -H "authorization: Bearer $TOKEN"
 ```
 
@@ -90,7 +90,7 @@ The instance bodies look like this (the `type` is the connector manifest's
 `metadata.type`):
 
 ```bash
-# Source: Docker Hub (oci.pull). References the dockerhub-pat Secret from the guide.
+# Source: Docker Hub (oci.pull + oci.list-referrers). References the dockerhub-pat Secret.
 curl -sS -X POST "$GATEWAY/v1/workspaces/$WS/connectors" \
   -H "authorization: Bearer $TOKEN" \
   -H 'content-type: application/json' \
@@ -106,7 +106,7 @@ curl -sS -X POST "$GATEWAY/v1/workspaces/$WS/connectors" \
     "tokenKey": "token",
     "namespace": "custos-connectors"
   },
-  "usedCapabilities": ["oci.pull"],
+  "usedCapabilities": ["oci.pull", "oci.list-referrers"],
   "leaseTtlSeconds": 3600
 }
 JSON
@@ -173,8 +173,8 @@ curl -sS -X POST "$GATEWAY/v1/workspaces/$WS/workflows" \
 ```
 
 Publishing succeeds only if `custos.builtin/copy-image@0` resolves and both
-named instances advertise the required capabilities (`oci.pull` on `source`,
-`oci.push` on `dest`) — otherwise the validator returns a `catalog.publish.*`
+named instances advertise the required capabilities (`oci.pull` +
+`oci.list-referrers` on `source`, `oci.push` on `dest`) — otherwise the validator returns a `catalog.publish.*`
 error. The workflow-version-id is `<workspaceId>/<name>@<version>`:
 
 ```bash
@@ -197,8 +197,8 @@ export RUN=run-...   # copy runId from the response
 ## 6. Inspect the result
 
 Poll the run to a terminal state and read the copy step's outputs
-(`destinationRef`, `digest`, `manifestsCopied`, and the `copy-report` artifact
-reference) from the step timeline:
+(`destinationRef`, `digest`, `manifestsCopied`, and `reportRef`, which points
+to the `copy-report` artifact) from the step timeline:
 
 ```bash
 curl -sS "$GATEWAY/v1/workspaces/$WS/runs/$RUN" \
@@ -217,7 +217,8 @@ On success the `copy` step reports the destination it wrote, e.g.:
 {
   "destinationRef": "ghcr.io/<your-gh-namespace>/hello-world:mirrored",
   "digest": "sha256:...",
-  "manifestsCopied": 1
+  "manifestsCopied": 1,
+  "reportRef": { "kind": "ArtifactRef", "name": "copy-report" }
 }
 ```
 

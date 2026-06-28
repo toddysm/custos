@@ -157,3 +157,4 @@ tooling.
 | [Reference deployment](../../../design/architecture/reference-deployment.md) | Full topology and profile matrix, component/image inventory, supply chain |
 | [Architecture overview](../../../design/architecture/overview.md) | System architecture, domain model, and contracts |
 | [User Guide index](../README.md) | All evaluation deployment guides |
+| [Copy-image walkthrough](copy-image-walkthrough.md) | Onboard the OOTB connectors + copy-image activity and run a Docker Hub -> GHCR copy end to end |
