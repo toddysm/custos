@@ -1,6 +1,6 @@
 # Custos — Design Documentation
 
-Last Updated: 2026-05-18
+Last Updated: 2026-06-27
 
 ## Overview
 

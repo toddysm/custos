@@ -1,6 +1,6 @@
 # Activity Author Guide
 
-Last Updated: 2026-06-04
+Last Updated: 2026-06-27
 
 > **Audience:** developers writing **activities** — the units of work a Custos
 > workflow step executes. This guide covers the file-based activity contract,

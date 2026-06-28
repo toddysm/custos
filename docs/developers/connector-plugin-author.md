@@ -32,6 +32,7 @@ This guide covers:
 6. [Packaging and OCI publication](#6-packaging-and-oci-publication)
 7. [Testing locally](#7-testing-locally)
 8. [Registering the connector type](#8-registering-the-connector-type)
+9. [Publish & onboard checklist](#9-publish--onboard-checklist)
 
 For the API the activity sees once a connection is bound (the
 "sidecar API"), see the [Connections API reference](connections-api.md).
