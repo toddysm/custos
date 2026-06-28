@@ -53,15 +53,26 @@ jobs:
         id: meta
         run: |
           set -euo pipefail
+          # Strict SemVer (MAJOR.MINOR.PATCH, no leading zeros) — mirrors the
+          # ARM manifest validator so a malformed version can never be published.
+          SEMVER='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
           MANIFEST_VERSION="$(grep -E '^  version:' "${EXT_DIR}/activity-manifest.yaml" | head -1 | awk '{print $2}')"
           if [[ -z "${MANIFEST_VERSION}" ]]; then
             echo "::error::could not read metadata.version from ${EXT_DIR}/activity-manifest.yaml" >&2
+            exit 1
+          fi
+          if [[ ! "${MANIFEST_VERSION}" =~ ${SEMVER} ]]; then
+            echo "::error::manifest version '${MANIFEST_VERSION}' is not strict SemVer (MAJOR.MINOR.PATCH)" >&2
             exit 1
           fi
           BUILD_SHA="$(git rev-parse HEAD)"
           SHA_TAG="${IMAGE}:sha-${BUILD_SHA::12}"
           if [[ "${GITHUB_REF}" == refs/tags/activity-copy-image-v*.*.* ]]; then
             TAG_VERSION="${GITHUB_REF#refs/tags/activity-copy-image-v}"
+            if [[ ! "${TAG_VERSION}" =~ ${SEMVER} ]]; then
+              echo "::error::tag version '${TAG_VERSION}' is not strict SemVer (MAJOR.MINOR.PATCH)" >&2
+              exit 1
+            fi
             if [[ "${TAG_VERSION}" != "${MANIFEST_VERSION}" ]]; then
               echo "::error::tag version ${TAG_VERSION} != manifest version ${MANIFEST_VERSION}" >&2
               exit 1
@@ -70,25 +81,28 @@ jobs:
           else
             VERSION="${MANIFEST_VERSION}"
           fi
-          TAGS="${IMAGE}:v${VERSION},${SHA_TAG}"
+          # Single ``vX.Y.Z`` form used for the image tag and both version
+          # annotations, matching the core build-images.yml contract.
+          VERSION_TAG="v${VERSION}"
+          TAGS="${IMAGE}:${VERSION_TAG},${SHA_TAG}"
           CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           {
             echo "annotations<<EOF"
             echo "org.opencontainers.image.created=${CREATED}"
-            echo "org.opencontainers.image.version=${VERSION}"
+            echo "org.opencontainers.image.version=${VERSION_TAG}"
             echo "org.opencontainers.image.revision=${BUILD_SHA}"
             echo "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
             echo "org.opencontainers.image.title=${TITLE}"
             echo "org.opencontainers.image.licenses=Apache-2.0"
-            echo "vnd.custos.build.tag=v${VERSION}"
+            echo "vnd.custos.build.tag=${VERSION_TAG}"
             echo "vnd.custos.build.actor=${GITHUB_ACTOR}"
             echo "vnd.custos.build.agent=github-actions"
             echo "vnd.custos.build.run-id=${GITHUB_RUN_ID}"
             echo "vnd.custos.build.run-url=${RUN_URL}"
             echo "EOF"
             echo "tags=${TAGS}"
-            echo "version=${VERSION}"
+            echo "version_tag=${VERSION_TAG}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Build and push image
@@ -124,7 +138,7 @@ jobs:
       - name: Publish digest to job summary
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
-          VERSION: ${{ steps.meta.outputs.version }}
+          VERSION_TAG: ${{ steps.meta.outputs.version_tag }}
         run: |
           set -euo pipefail
           {
@@ -132,7 +146,7 @@ jobs:
             echo ""
             echo "| Field | Value |"
             echo "|---|---|"
-            echo "| Image | \`${IMAGE}:v${VERSION}\` |"
+            echo "| Image | \`${IMAGE}:${VERSION_TAG}\` |"
             echo "| Digest | \`${DIGEST}\` |"
             echo "| Pinned ref | \`${IMAGE}@${DIGEST}\` |"
             echo ""
