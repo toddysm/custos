@@ -1,0 +1,164 @@
+name: publish-connector-ghcr
+
+# Dedicated publish workflow for the out-of-the-box ghcr connector
+# (OOTB-PUB-002). Builds + pushes the connector image to
+# ghcr.io/<owner>/custos/ghcr with the same supply-chain treatment as the
+# core images, and publishes the connector-manifest.json as an OCI referrer of
+# the image (plus the deterministic custos fallback tag) so the Connector
+# Service can discover it either way. One dedicated workflow per extension is
+# the OOTB convention (see design/architecture/ootb-publishing-onboarding.md).
+#
+# Triggers:
+#   * push of a ``connector-ghcr-v*.*.*`` tag — release build. The tag
+#     SemVer MUST equal the connector manifest metadata.version.
+#   * ``workflow_dispatch`` — manual build at the current manifest version.
+
+on:
+  push:
+    tags: ["connector-ghcr-v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  EXT_DIR: extensions/connectors/ghcr
+  IMAGE: ghcr.io/${{ github.repository_owner }}/custos/ghcr
+  TITLE: ghcr
+  MANIFEST_TYPE: application/vnd.custos.connector.manifest.v1+json
+
+jobs:
+  publish:
+    name: ghcr (build + push + manifest + sign)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Set up ORAS
+        uses: oras-project/setup-oras@v1
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve version and verify tag matches the manifest
+        id: meta
+        run: |
+          set -euo pipefail
+          SEMVER='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          MANIFEST_VERSION="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['metadata']['version'])" "${EXT_DIR}/connector-manifest.json")"
+          if [[ ! "${MANIFEST_VERSION}" =~ ${SEMVER} ]]; then
+            echo "::error::manifest version '${MANIFEST_VERSION}' is not strict SemVer (MAJOR.MINOR.PATCH)" >&2
+            exit 1
+          fi
+          BUILD_SHA="$(git rev-parse HEAD)"
+          SHA_TAG="${IMAGE}:sha-${BUILD_SHA::12}"
+          if [[ "${GITHUB_REF}" == refs/tags/connector-ghcr-v*.*.* ]]; then
+            TAG_VERSION="${GITHUB_REF#refs/tags/connector-ghcr-v}"
+            if [[ ! "${TAG_VERSION}" =~ ${SEMVER} ]]; then
+              echo "::error::tag version '${TAG_VERSION}' is not strict SemVer (MAJOR.MINOR.PATCH)" >&2
+              exit 1
+            fi
+            if [[ "${TAG_VERSION}" != "${MANIFEST_VERSION}" ]]; then
+              echo "::error::tag version ${TAG_VERSION} != manifest version ${MANIFEST_VERSION}" >&2
+              exit 1
+            fi
+            VERSION="${TAG_VERSION}"
+          else
+            VERSION="${MANIFEST_VERSION}"
+          fi
+          VERSION_TAG="v${VERSION}"
+          TAGS="${IMAGE}:${VERSION_TAG},${SHA_TAG}"
+          CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          {
+            echo "annotations<<EOF"
+            echo "org.opencontainers.image.created=${CREATED}"
+            echo "org.opencontainers.image.version=${VERSION_TAG}"
+            echo "org.opencontainers.image.revision=${BUILD_SHA}"
+            echo "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+            echo "org.opencontainers.image.title=${TITLE}"
+            echo "org.opencontainers.image.licenses=Apache-2.0"
+            echo "vnd.custos.build.tag=${VERSION_TAG}"
+            echo "vnd.custos.build.actor=${GITHUB_ACTOR}"
+            echo "vnd.custos.build.agent=github-actions"
+            echo "vnd.custos.build.run-id=${GITHUB_RUN_ID}"
+            echo "vnd.custos.build.run-url=${RUN_URL}"
+            echo "EOF"
+            echo "tags=${TAGS}"
+            echo "version_tag=${VERSION_TAG}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.EXT_DIR }}
+          file: ${{ env.EXT_DIR }}/Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=connector-ghcr
+          cache-to: type=gha,mode=max,scope=connector-ghcr
+
+      - name: Publish connector manifest (referrer + fallback tag)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          PINNED="${IMAGE}@${DIGEST}"
+          MANIFEST_FILE="${EXT_DIR}/connector-manifest.json"
+          # OCI Referrers API (preferred; GHCR supports it): attach the manifest
+          # as a referrer of the image.
+          oras attach --artifact-type "${MANIFEST_TYPE}" "${PINNED}" \
+            "${MANIFEST_FILE}:${MANIFEST_TYPE}"
+          # Deterministic custos fallback tag (for registries without Referrers),
+          # derived from the image digest: custos-connector-manifest-v1_sha256-<hex>.
+          HEX="${DIGEST#sha256:}"
+          FB_TAG="custos-connector-manifest-v1_sha256-${HEX}"
+          oras push "${IMAGE}:${FB_TAG}" --artifact-type "${MANIFEST_TYPE}" \
+            "${MANIFEST_FILE}:${MANIFEST_TYPE}"
+
+      - name: Generate SBOM and keyless-sign
+        uses: ./.github/actions/sbom-sign
+        with:
+          image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          subject-name: ${{ env.TITLE }}
+
+      - name: Attach SLSA provenance
+        uses: ./.github/actions/slsa-provenance
+        with:
+          image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+
+      - name: Publish digest to job summary
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          VERSION_TAG: ${{ steps.meta.outputs.version_tag }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### ghcr connector published"
+            echo ""
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Image | \`${IMAGE}:${VERSION_TAG}\` |"
+            echo "| Digest | \`${DIGEST}\` |"
+            echo "| Pinned ref | \`${IMAGE}@${DIGEST}\` |"
+            echo "| Manifest | published as referrer + fallback tag |"
+            echo ""
+            echo "Onboard the connector-type with \`scripts/seed-ootb.sh\`."
+          } >> "$GITHUB_STEP_SUMMARY"
