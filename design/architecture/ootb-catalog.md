@@ -221,8 +221,15 @@ for end users.
    applicable), tests, and image-builds each extension, keyed off changes under
    `extensions/**`. This replaces the current `connector-plugins` job that keys
    off `src/libs/connector-plugins/**`.
-- **Publish.** Each extension publishes its OCI image and (for connectors) the
-   manifest artifact. The on-disk source is the buildable origin.
+- **Publish.** Each extension has its **own dedicated publish workflow**
+   (`.github/workflows/publish-<kind>-<name>.yml`) that builds + pushes
+   `ghcr.io/<owner>/custos/<name>` on a per-extension version tag with OCI
+   annotations + SBOM/cosign/SLSA, and (for connectors) publishes the manifest
+   as an OCI referrer plus the deterministic fallback tag. See
+   [`ootb-publishing-onboarding.md`](ootb-publishing-onboarding.md).
+- **Onboard.** Registering the published connector-/activity-types into a
+   running catalog is done by [`scripts/seed-ootb.sh`](../../scripts/seed-ootb.sh)
+   (idempotent); every new extension adds an entry there.
 
 ## 9. Shared SDK — Deferred (No SDK Now)
 

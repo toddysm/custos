@@ -219,6 +219,17 @@ Wait for the user to say "approve" or provide edits. Only create issues after ap
 ### Issue Body Template
 
 ```markdown
+## Connector & Activity Deliverables
+
+When a design session covers a new out-of-the-box **connector** or **activity**,
+its implementation plan MUST include three publishing/onboarding deliverables in
+addition to the extension itself (see
+`design/architecture/ootb-publishing-onboarding.md`):
+
+1. A dedicated `.github/workflows/publish-<kind>-<name>.yml` publish workflow.
+2. A registration entry in `scripts/seed-ootb.sh`.
+3. An `extensions/<kind>s/README.md` OOTB index row.
+
 ## Summary
 <one paragraph description>
 

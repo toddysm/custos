@@ -23,6 +23,7 @@ Custos is a pluggable workflow orchestrator for supply-chain security operations
 - [Capabilities Registry](architecture/capabilities.md)
 - [Reference Deployment](architecture/reference-deployment.md)
 - [Out-of-the-Box Catalog (Connectors & Activities)](architecture/ootb-catalog.md)
+- [OOTB Publishing & Onboarding](architecture/ootb-publishing-onboarding.md)
 
 ## Components
 
@@ -43,6 +44,7 @@ Custos is a pluggable workflow orchestrator for supply-chain security operations
 
 | Date | Change | Issue |
 |---|---|---|
+| 2026-06-27 | OOTB Publishing & Onboarding: per-extension publish workflows, `scripts/seed-ootb.sh` onboarding, end-to-end runbook, and author-guide + skill requirements | #944 |
 | 2026-06-25 | Out-of-the-Box Catalog structure design: decoupled `extensions/` root for connectors & activities, no-SDK/language-agnostic conventions, plugin migration plan | #880, #881, #884 |
 | 2026-05-18 | Bucket A design alignment: design/README.md refresh, REQ-080/081 assigned to M2, SPL documented as 7 interfaces, M1 scope reconciliation (contract vs implementation) | #87, #91, #96, #97 |
 | 2026-05-18 | Repository scaffold + Helm umbrella chart and 11 subcharts | #77 |

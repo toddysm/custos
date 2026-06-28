@@ -489,6 +489,23 @@ token with no registered category is rejected with
 
 ---
 
+## 9. Publish & onboard checklist
+
+Every OOTB connector ships three additional deliverables (see
+[`design/architecture/ootb-publishing-onboarding.md`](../../design/architecture/ootb-publishing-onboarding.md)):
+
+1. **A dedicated publish workflow** — `.github/workflows/publish-connector-<name>.yml`
+   that builds + pushes `ghcr.io/<owner>/custos/<name>` on a
+   `connector-<name>-vX.Y.Z` tag, stamps the OCI annotations, signs the image
+   (SBOM + cosign + SLSA via the shared composite actions), and publishes the
+   connector manifest as an OCI referrer plus the deterministic fallback tag.
+2. **An onboarding entry** — a registration block in
+   [`scripts/seed-ootb.sh`](../../scripts/seed-ootb.sh) so the connector-type is
+   registered into a running catalog.
+3. **An OOTB index row** — a row in
+   [`extensions/connectors/README.md`](../../extensions/connectors/README.md)
+   and the top-level [`extensions/README.md`](../../extensions/README.md).
+
 ## Related references
 
 * [Connections API](connections-api.md) — full manifest schema reference
