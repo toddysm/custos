@@ -1,0 +1,140 @@
+name: publish-activity-copy-image
+
+# Dedicated publish workflow for the out-of-the-box copy-image activity
+# (OOTB-PUB-001). Builds and pushes the activity image to
+# ghcr.io/<owner>/custos/copy-image with the same supply-chain treatment as the
+# core images (OCI manifest annotations, Syft SBOM, keyless cosign signature,
+# SLSA provenance — via the shared composite actions). One dedicated workflow
+# per extension is the OOTB convention (see
+# design/architecture/ootb-publishing-onboarding.md).
+#
+# Triggers:
+#   * push of an ``activity-copy-image-v*.*.*`` tag — release build, tagged
+#     ``:vX.Y.Z`` + ``:sha-...``. The tag SemVer MUST equal the manifest version.
+#   * ``workflow_dispatch`` — manual build at the current manifest version.
+
+on:
+  push:
+    tags: ["activity-copy-image-v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  EXT_DIR: extensions/activities/copy-image
+  IMAGE: ghcr.io/${{ github.repository_owner }}/custos/copy-image
+  TITLE: copy-image
+
+jobs:
+  publish:
+    name: copy-image (build + push + sign)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      # Keyless cosign signing via the ambient GitHub OIDC token (Fulcio).
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve version and verify tag matches the manifest
+        id: meta
+        run: |
+          set -euo pipefail
+          MANIFEST_VERSION="$(grep -E '^  version:' "${EXT_DIR}/activity-manifest.yaml" | head -1 | awk '{print $2}')"
+          if [[ -z "${MANIFEST_VERSION}" ]]; then
+            echo "::error::could not read metadata.version from ${EXT_DIR}/activity-manifest.yaml" >&2
+            exit 1
+          fi
+          BUILD_SHA="$(git rev-parse HEAD)"
+          SHA_TAG="${IMAGE}:sha-${BUILD_SHA::12}"
+          if [[ "${GITHUB_REF}" == refs/tags/activity-copy-image-v*.*.* ]]; then
+            TAG_VERSION="${GITHUB_REF#refs/tags/activity-copy-image-v}"
+            if [[ "${TAG_VERSION}" != "${MANIFEST_VERSION}" ]]; then
+              echo "::error::tag version ${TAG_VERSION} != manifest version ${MANIFEST_VERSION}" >&2
+              exit 1
+            fi
+            VERSION="${TAG_VERSION}"
+          else
+            VERSION="${MANIFEST_VERSION}"
+          fi
+          TAGS="${IMAGE}:v${VERSION},${SHA_TAG}"
+          CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          {
+            echo "annotations<<EOF"
+            echo "org.opencontainers.image.created=${CREATED}"
+            echo "org.opencontainers.image.version=${VERSION}"
+            echo "org.opencontainers.image.revision=${BUILD_SHA}"
+            echo "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+            echo "org.opencontainers.image.title=${TITLE}"
+            echo "org.opencontainers.image.licenses=Apache-2.0"
+            echo "vnd.custos.build.tag=v${VERSION}"
+            echo "vnd.custos.build.actor=${GITHUB_ACTOR}"
+            echo "vnd.custos.build.agent=github-actions"
+            echo "vnd.custos.build.run-id=${GITHUB_RUN_ID}"
+            echo "vnd.custos.build.run-url=${RUN_URL}"
+            echo "EOF"
+            echo "tags=${TAGS}"
+            echo "version=${VERSION}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.EXT_DIR }}
+          file: ${{ env.EXT_DIR }}/Containerfile
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          # Single-platform manifest so the annotations bind to it directly; the
+          # SBOM + cosign signature + SLSA provenance attach as referrers below.
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=activity-copy-image
+          cache-to: type=gha,mode=max,scope=activity-copy-image
+
+      - name: Generate SBOM and keyless-sign
+        uses: ./.github/actions/sbom-sign
+        with:
+          # Sign by digest so the signature/attestations bind to the immutable
+          # manifest and cover every tag that points at it.
+          image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          subject-name: ${{ env.TITLE }}
+
+      - name: Attach SLSA provenance
+        uses: ./.github/actions/slsa-provenance
+        with:
+          image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+
+      - name: Publish digest to job summary
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### copy-image activity published"
+            echo ""
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Image | \`${IMAGE}:v${VERSION}\` |"
+            echo "| Digest | \`${DIGEST}\` |"
+            echo "| Pinned ref | \`${IMAGE}@${DIGEST}\` |"
+            echo ""
+            echo "Update \`spec.runtime.digest\` in \`${EXT_DIR}/activity-manifest.yaml\` to \`${DIGEST}\` and onboard with \`scripts/seed-ootb.sh\`."
+          } >> "$GITHUB_STEP_SUMMARY"
