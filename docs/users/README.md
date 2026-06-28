@@ -17,7 +17,7 @@ it is healthy, and running your first workflow.
 > engine, not for production. In M1:
 >
 > - Authentication uses **pre-provisioned tokens**; the interactive OIDC
->   device-code flow is disabled.
+>    device-code flow is disabled.
 > - There is **no Web UI** — you interact with the platform through its HTTP APIs.
 > - Infrastructure runs **single-replica and PersistentVolume-backed** (no HA).
 >
@@ -43,6 +43,7 @@ time, then use them as a reference.
 | 3b | [Install — air-gapped](evaluation/install-airgapped.md) | Deploy the `airgapped-eval` profile from an offline bundle and a private registry |
 | 4 | [Verify](evaluation/verify.md) | Confirm the platform is healthy and find the API gateway endpoint |
 | 5 | [First workflow](evaluation/first-workflow.md) | Authenticate and run a sample workflow end to end |
+| 5b | [Copy-image walkthrough](evaluation/copy-image-walkthrough.md) | Onboard the OOTB connectors + copy-image activity and run a Docker Hub -> GHCR copy end to end |
 | 6 | [Troubleshooting](evaluation/troubleshooting.md) | Common failure modes, debug commands, and known issues |
 | 7 | [Uninstall](evaluation/uninstall.md) | Tear down an evaluation deployment and clean up |
 

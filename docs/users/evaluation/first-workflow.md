@@ -192,6 +192,7 @@ See [Troubleshooting](troubleshooting.md).
 
 | Document | Description |
 |---|---|
+| [Copy-image walkthrough](copy-image-walkthrough.md) | Onboard the OOTB connectors + copy-image activity and run a Docker Hub -> GHCR copy end to end |
 | [Auth API](../../developers/auth-api.md) | Tokens, service accounts, workspaces, permissions |
 | [Catalog API](../../developers/catalog-api.md) | Publishing and resolving workflow definitions |
 | [Workflow API](../../developers/workflow-api.md) | Starting, reading, and cancelling runs |
