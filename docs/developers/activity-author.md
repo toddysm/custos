@@ -1,6 +1,6 @@
 # Activity Author Guide
 
-Last Updated: 2026-06-04
+Last Updated: 2026-06-27
 
 > **Audience:** developers writing **activities** — the units of work a Custos
 > workflow step executes. This guide covers the file-based activity contract,
@@ -247,6 +247,22 @@ The author-relevant knobs:
   the step deadline.
 - `ARM_OUTPUT_MAX_BYTES` — maximum `outputs.json` size.
 - `ARM_ARTIFACT_MAX_BYTES` — per-artifact upload ceiling.
+
+## Publish & onboard checklist
+
+Every OOTB activity ships three additional deliverables (see
+[`design/architecture/ootb-publishing-onboarding.md`](../../design/architecture/ootb-publishing-onboarding.md)):
+
+1. **A dedicated publish workflow** — `.github/workflows/publish-activity-<name>.yml`
+   that builds + pushes `ghcr.io/<owner>/custos/<name>` on an
+   `activity-<name>-vX.Y.Z` tag, stamps the OCI annotations, and signs the image
+   (SBOM + cosign + SLSA via the shared composite actions).
+2. **An onboarding entry** — a registration block in
+   [`scripts/seed-ootb.sh`](../../scripts/seed-ootb.sh) so the activity-type is
+   registered into a running catalog.
+3. **An OOTB index row** — a row in
+   [`extensions/activities/README.md`](../../extensions/activities/README.md)
+   and the top-level [`extensions/README.md`](../../extensions/README.md).
 
 ## See also
 

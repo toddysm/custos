@@ -46,6 +46,7 @@ These rules are non-negotiable. Re-read them at the start of every session.
 - For every Copilot review comment: (a) implement fix, (b) commit + push, (c) `POST /pulls/{PR#}/comments/{id}/replies` describing the fix, (d) GraphQL `resolveReviewThread`.
 - For every failing CI check: read the failing job logs, fix, push, re-watch CI.
 - Quality gates **always** run from the package's source root (e.g. `src/services/<svc>`), never from the repo root. Standard sequence: `ruff format . && ruff check . && mypy src tests && pytest -q` (honor the project's documented coverage floor).
+- For a new OOTB **connector** or **activity** extension, the task plan MUST include: a dedicated `.github/workflows/publish-<kind>-<name>.yml` workflow, a registration entry in `scripts/seed-ootb.sh`, and an `extensions/<kind>s/README.md` index row (see `design/architecture/ootb-publishing-onboarding.md`).
 - macOS hidden-pth fix on `ModuleNotFoundError` after pip install: `chflags -R nohidden ../../../.venv/lib/python*/site-packages/`.
 - Commit messages = Conventional Commits (`<type>(<scope>): <PREFIX>-NNN <summary>`) with body listing changed files + quality summary + `Closes #NNN`.
 - Merge mode = `--squash --delete-branch`.
