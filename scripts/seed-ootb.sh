@@ -3,13 +3,15 @@
 # Onboard the out-of-the-box (OOTB) connector-types and the copy-image
 # activity-type into a running Custos catalog. Idempotent and re-runnable.
 #
-# This is the standalone onboarding step referenced by the end-to-end runbook
-# (docs/users/evaluation/copy-image-walkthrough.md) and the design
-# (design/architecture/ootb-publishing-onboarding.md). It registers, via the
-# public Catalog API:
+# This is the standalone onboarding step run after the platform is deployed and
+# the OOTB images are published. It registers, via the public Catalog API:
 #   * connector-types  dockerhub, ghcr   (POST /v1/catalog/connector-types)
 #   * activity-type    custos.builtin/copy-image
 #                      (POST /v1/workspaces/custos.builtin/activity-types)
+#
+# After onboarding, create connector *instances* using the usage guides under
+# docs/users/connectors/ (dockerhub.md, ghcr.md); the OOTB catalog is indexed in
+# extensions/README.md.
 #
 # It resolves each published image's digest and registers against it; it refuses
 # to register against the manifest placeholder digest. Re-registering the same
@@ -60,7 +62,9 @@ done
 
 [ -n "$GATEWAY" ] || { echo "error: GATEWAY is required" >&2; exit 2; }
 [ -n "$TOKEN" ] || { echo "error: TOKEN is required (platform-admin service token)" >&2; exit 2; }
-command -v jq >/dev/null 2>&1 || { echo "error: jq is required" >&2; exit 2; }
+for tool in curl jq python3; do
+  command -v "$tool" >/dev/null 2>&1 || { echo "error: ${tool} is required" >&2; exit 2; }
+done
 
 CURL_OPTS=(-sS)
 [ -n "$INSECURE" ] && CURL_OPTS+=(-k)
@@ -131,9 +135,12 @@ register_connector() {
   echo "connector-type ${name}@${version} (${image})"
   digest="$(resolve_digest "$image")" || return 1
   ref="${image}@${digest}"
+  echo "  ref ${ref}"
   body="$(mktemp)"
   jq -n --slurpfile m "$mf" --arg ref "$ref" '{manifest: $m[0], referrerRef: $ref}' > "$body"
-  api_post "/v1/catalog/connector-types" "$body" "connector-type ${name}@${version}"
+  if ! api_post "/v1/catalog/connector-types" "$body" "connector-type ${name}@${version}"; then
+    rm -f "$body"; return 1
+  fi
   rm -f "$body"
 }
 
@@ -147,6 +154,7 @@ register_activity_copy_image() {
   echo "activity-type ${BUILTIN_NS}/copy-image@${version} (${image})"
   digest="$(resolve_digest "$image")" || return 1
   ref="${image}@${digest}"
+  echo "  ref ${ref}"
   # YAML -> JSON, then inject the resolved published image + digest into the
   # runtime block (the on-disk manifest carries a placeholder digest).
   mjson="$(python3 - "$mf" <<'PY'
@@ -163,7 +171,9 @@ PY
   body="$(mktemp)"
   printf '%s' "$mjson" | jq --arg img "$image" --arg dg "$digest" --arg ref "$ref" \
     '.spec.runtime.image = $img | .spec.runtime.digest = $dg | {manifest: ., referrerRef: $ref}' > "$body"
-  api_post "/v1/workspaces/${BUILTIN_NS}/activity-types" "$body" "activity-type ${BUILTIN_NS}/copy-image@${version}"
+  if ! api_post "/v1/workspaces/${BUILTIN_NS}/activity-types" "$body" "activity-type ${BUILTIN_NS}/copy-image@${version}"; then
+    rm -f "$body"; return 1
+  fi
   rm -f "$body"
 }
 
