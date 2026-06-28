@@ -122,15 +122,15 @@ jobs:
           set -euo pipefail
           PINNED="${IMAGE}@${DIGEST}"
           MANIFEST_FILE="${EXT_DIR}/connector-manifest.json"
-          # OCI Referrers API (preferred; GHCR supports it): attach the manifest
-          # as a referrer of the image.
-          oras attach --artifact-type "${MANIFEST_TYPE}" "${PINNED}" \
-            "${MANIFEST_FILE}:${MANIFEST_TYPE}"
-          # Deterministic custos fallback tag (for registries without Referrers),
-          # derived from the image digest: custos-connector-manifest-v1_sha256-<hex>.
-          HEX="${DIGEST#sha256:}"
+          # Lowercase-canonicalize the digest hex, matching the Connector
+          # Service's fallback_tag_for_digest normalization.
+          HEX="$(printf '%s' "${DIGEST#sha256:}" | tr 'A-F' 'a-f')"
           FB_TAG="custos-connector-manifest-v1_sha256-${HEX}"
-          oras push "${IMAGE}:${FB_TAG}" --artifact-type "${MANIFEST_TYPE}" \
+          # Publish the connector manifest once, carrying BOTH a subject (so the
+          # OCI Referrers API resolves it -- GHCR supports referrers) AND the
+          # deterministic custos fallback tag (for registries without Referrers).
+          oras push --artifact-type "${MANIFEST_TYPE}" --subject "${PINNED}" \
+            "${IMAGE}:${FB_TAG}" \
             "${MANIFEST_FILE}:${MANIFEST_TYPE}"
 
       - name: Generate SBOM and keyless-sign
