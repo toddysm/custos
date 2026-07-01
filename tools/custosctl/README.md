@@ -8,11 +8,12 @@ APIs.
 
 Design: [`design/components/custosctl/design.md`](../../design/components/custosctl/design.md).
 
-> **Status:** scaffold (DEVCLI-IMPL-001, #952). The root command group, the
-> `CUSTOS_*` configuration model, the `--target {local,remote}` abstraction, and
-> the `doctor` preflight are implemented. Lifecycle (`up`/`down`/`status`) and
-> API commands (`connector`/`activity`/`workflow`/`seed-ootb`/`e2e`) land in the
-> sibling DEVCLI tasks (#953–#962).
+> **Status:** scaffold + local lifecycle. The root command group, the
+> `CUSTOS_*` configuration model, the `--target {local,remote}` abstraction, the
+> `doctor` preflight, and the **local** `up`/`down`/`status` commands are
+> implemented (#952, #953). Remote lifecycle (#954) and the API commands
+> (`connector`/`activity`/`workflow`/`seed-ootb`/`e2e`, #955–#962) land in the
+> sibling DEVCLI tasks.
 
 ## Install (editable)
 
@@ -26,6 +27,11 @@ pip install -e 'tools/custosctl[dev]'
 custosctl --help
 custosctl doctor                 # preflight the local (kind) toolchain
 custosctl --target remote doctor # preflight a remote kube-context
+
+# Local lifecycle (target=local): run from inside the checkout, or set CUSTOS_REPO_ROOT
+custosctl up                     # create kind cluster, prereqs, helm install --wait
+custosctl status                 # kind cluster / release / pod summary (+ gateway if CUSTOS_GATEWAY set)
+custosctl down --yes             # uninstall the release and delete the kind cluster
 ```
 
 ## Configuration
@@ -40,6 +46,8 @@ table for the full list. Common keys:
 | `CUSTOS_KUBE_CONTEXT` | `kind-<cluster>` (local) | kube-context to operate against |
 | `CUSTOS_CLUSTER` | `custos-local` | kind cluster name (local) |
 | `CUSTOS_NAMESPACE` | `custos-system` | release namespace |
+| `CUSTOS_REPO_ROOT` | autodetected | Custos checkout the lifecycle commands run against |
+| `CUSTOS_HELM_TIMEOUT` | `15m` | `helm install --wait` timeout |
 | `CUSTOS_GATEWAY` | — | API Gateway base URL (API commands) |
 | `CUSTOS_TOKEN` | — | platform-admin service token (API commands) |
 

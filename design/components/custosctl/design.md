@@ -175,6 +175,8 @@ take precedence. Prefix `CUSTOS_`.
 | `CUSTOS_TOKEN` | Yes (API cmds) | — | Platform-admin service token (`cst_...`) |
 | `CUSTOS_INSECURE` | No | `false` | Pass `-k`/verify=false for the eval self-signed cert |
 | `CUSTOS_PREREQS` | No | `install` (local) / `skip` (remote) | Whether `up` runs `install-prereqs.sh` |
+| `CUSTOS_REPO_ROOT` | No | autodetected | Custos checkout the lifecycle commands shell out to (chart, scripts, Makefile) |
+| `CUSTOS_HELM_TIMEOUT` | No | `15m` | `helm install --wait` timeout |
 
 ## Dependencies
 

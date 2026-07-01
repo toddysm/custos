@@ -12,9 +12,9 @@ from dataclasses import dataclass
 
 import click
 
-from custosctl import __version__
+from custosctl import __version__, lifecycle
 from custosctl.config import Settings, Target
-from custosctl.shell import ToolStatus, kube_context_reachable, probe_tool
+from custosctl.shell import CommandError, ToolStatus, kube_context_reachable, probe_tool
 
 #: External CLIs each target relies on. Presence gates the preflight.
 _LOCAL_TOOLS: tuple[str, ...] = ("docker", "kind", "kubectl", "helm")
@@ -99,6 +99,56 @@ def doctor(obj: Context) -> None:
     if not ok:
         raise click.ClickException("preflight failed; resolve the items marked MISS above")
     click.echo("preflight OK")
+
+
+def _require_local(target: Target) -> None:
+    """Guard the local-only lifecycle commands (remote arrives in #954)."""
+    if target is not Target.LOCAL:
+        raise click.ClickException(
+            "remote lifecycle (up/down/status) is not implemented yet — "
+            "it arrives in DEVCLI-IMPL-003 (#954). Use --target local for now."
+        )
+
+
+@cli.command()
+@click.pass_obj
+def up(obj: Context) -> None:
+    """Bring the platform up on a local kind cluster."""
+    _require_local(obj.settings.target)
+    try:
+        lifecycle.up(obj.settings, echo=click.echo)
+    except (CommandError, RuntimeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@cli.command()
+@click.pass_obj
+def down(obj: Context) -> None:
+    """Uninstall the release and delete the local kind cluster."""
+    settings = obj.settings
+    _require_local(settings.target)
+    if not obj.assume_yes:
+        click.confirm(
+            f"Delete kind cluster '{settings.cluster}' and uninstall release '{settings.release}'?",
+            abort=True,
+        )
+    try:
+        lifecycle.down(settings, echo=click.echo)
+    except (CommandError, RuntimeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@cli.command()
+@click.pass_obj
+def status(obj: Context) -> None:
+    """Report kind cluster, release, and pod status."""
+    _require_local(obj.settings.target)
+    try:
+        healthy = lifecycle.status(obj.settings, echo=click.echo)
+    except (CommandError, RuntimeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    if not healthy:
+        raise SystemExit(1)
 
 
 def main() -> None:

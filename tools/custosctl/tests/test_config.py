@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from custosctl.config import Settings, Target
+from custosctl.config import Settings, Target, resolve_repo_root
 
 _CUSTOS_KEYS = (
     "CUSTOS_TARGET",
@@ -78,3 +78,34 @@ def test_effective_kube_context_explicit_wins(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setenv("CUSTOS_KUBE_CONTEXT", "prod-ctx")
     settings = Settings()
     assert settings.effective_kube_context() == "prod-ctx"
+
+
+def _make_checkout(root: Path) -> Path:
+    (root / "deploy" / "helm" / "custos").mkdir(parents=True)
+    (root / "deploy" / "helm" / "custos" / "Chart.yaml").write_text("name: custos\n")
+    (root / "scripts").mkdir()
+    (root / "scripts" / "install-prereqs.sh").write_text("#!/usr/bin/env bash\n")
+    (root / "Makefile").write_text("deps:\n\t@true\n")
+    return root
+
+
+def test_resolve_repo_root_autodetects_from_subdir(tmp_path: Path) -> None:
+    root = _make_checkout(tmp_path / "repo")
+    nested = root / "a" / "b"
+    nested.mkdir(parents=True)
+    assert resolve_repo_root(None, start=nested) == root.resolve()
+
+
+def test_resolve_repo_root_uses_configured(tmp_path: Path) -> None:
+    root = _make_checkout(tmp_path / "repo")
+    assert resolve_repo_root(root) == root.resolve()
+
+
+def test_resolve_repo_root_configured_invalid_raises(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="does not look like a Custos checkout"):
+        resolve_repo_root(tmp_path)
+
+
+def test_resolve_repo_root_not_found_raises(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="could not locate the Custos repository root"):
+        resolve_repo_root(None, start=tmp_path)
