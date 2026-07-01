@@ -69,9 +69,11 @@ class Settings(BaseSettings):
 
         For ``LOCAL`` the context defaults to ``kind-<cluster>`` (the name
         ``kind create cluster --name <cluster>`` produces) unless an
-        explicit ``kube_context`` is set. For ``REMOTE`` there is no
-        default: the operator must select the context (via
-        ``CUSTOS_KUBE_CONTEXT`` or ``kubectl config use-context``).
+        explicit ``kube_context`` is set. For ``REMOTE`` the explicit
+        ``kube_context`` (``CUSTOS_KUBE_CONTEXT``) is used when set;
+        otherwise ``None`` is returned, meaning custosctl operates against
+        kubectl's *current* context (as selected by
+        ``kubectl config use-context``).
         """
         if self.kube_context:
             return self.kube_context

@@ -90,16 +90,11 @@ def doctor(obj: Context) -> None:
 
     if target is Target.REMOTE:
         context = settings.effective_kube_context()
-        if context is None:
-            click.echo(
-                "  [MISS] kube-context  not set (CUSTOS_KUBE_CONTEXT or kubectl config use-context)"
-            )
-            ok = False
-        else:
-            reachable = kube_context_reachable(context)
-            mark = "ok  " if reachable else "MISS"
-            click.echo(f"  [{mark}] context  {context}")
-            ok = ok and reachable
+        label = context or "(current kubectl context)"
+        reachable = kube_context_reachable(context)
+        mark = "ok  " if reachable else "MISS"
+        click.echo(f"  [{mark}] context  {label}")
+        ok = ok and reachable
 
     if not ok:
         raise click.ClickException("preflight failed; resolve the items marked MISS above")

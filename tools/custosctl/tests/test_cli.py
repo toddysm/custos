@@ -78,21 +78,43 @@ def test_doctor_remote_unreachable_fails(
     assert result.exit_code != 0
 
 
-def test_doctor_remote_without_context_fails(
+def test_doctor_remote_without_explicit_context_probes_current(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # No CUSTOS_KUBE_CONTEXT: doctor falls back to kubectl's current context
+    # (effective_kube_context() is None). Here the current context is reachable.
+    monkeypatch.setattr(cli_module, "probe_tool", _all_present)
+    seen: list[str | None] = []
+
+    def _reachable(ctx: str | None, **_kw: object) -> bool:
+        seen.append(ctx)
+        return True
+
+    monkeypatch.setattr(cli_module, "kube_context_reachable", _reachable)
+    result = runner.invoke(cli, ["--target", "remote", "doctor"], env={})
+    assert result.exit_code == 0, result.output
+    assert "current kubectl context" in result.output
+    assert seen == [None]
+
+
+def test_doctor_remote_unreachable_current_context_fails(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(cli_module, "probe_tool", _all_present)
+    monkeypatch.setattr(cli_module, "kube_context_reachable", lambda ctx, **kw: False)
     result = runner.invoke(cli, ["--target", "remote", "doctor"], env={})
     assert result.exit_code != 0
-    assert "kube-context" in result.output
+    assert "current kubectl context" in result.output
 
 
 def test_target_flag_overrides_env(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli_module, "probe_tool", _all_present)
-    # env says local; the flag forces remote, which needs a context.
+    monkeypatch.setattr(cli_module, "kube_context_reachable", lambda ctx, **kw: True)
+    # env says local; the flag forces remote (which runs the kube-context probe).
     result = runner.invoke(
         cli,
         ["--target", "remote", "doctor"],
         env={"CUSTOS_TARGET": "local"},
     )
+    assert result.exit_code == 0, result.output
     assert "target: remote" in result.output

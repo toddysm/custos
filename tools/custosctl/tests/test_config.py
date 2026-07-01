@@ -67,7 +67,8 @@ def test_effective_kube_context_local_default(monkeypatch: pytest.MonkeyPatch) -
     assert settings.effective_kube_context() == "kind-demo"
 
 
-def test_effective_kube_context_remote_requires_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_effective_kube_context_remote_defaults_to_current(monkeypatch: pytest.MonkeyPatch) -> None:
+    # For remote with no explicit context, None means "kubectl's current context".
     monkeypatch.setenv("CUSTOS_TARGET", "remote")
     settings = Settings()
     assert settings.effective_kube_context() is None
