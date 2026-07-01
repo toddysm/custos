@@ -50,11 +50,16 @@ def _post(
     *,
     headers: dict[str, str] | None = None,
 ) -> Response:
-    return client.post(
+    # Assign through an annotated local rather than casting: TestClient.post
+    # is typed as returning Any on some starlette versions and httpx.Response
+    # on others, and an annotated assignment satisfies both without tripping
+    # no-any-return (Any version) or warn_redundant_casts (Response version).
+    resp: Response = client.post(
         "/internal/v1/connectors:deprecate",
         json=body,
         headers=headers if headers is not None else _ctx_header(),
     )
+    return resp
 
 
 # ---------------------------------------------------------------------------
