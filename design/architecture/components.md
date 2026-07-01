@@ -1,6 +1,6 @@
 # Component Registry: Custos
 
-Last Updated: 2026-05-28
+Last Updated: 2026-06-30
 
 ## Components
 
@@ -16,6 +16,7 @@ Last Updated: 2026-05-28
 | COMP-008 | Storage Provider Layer | storage-provider-layer | Abstraction and adapters for definitions, metadata, catalog, artifacts, auth state, and log/metric query | Python interfaces, provider plugins | Designed |
 | COMP-009 | Observability and Audit Service | observability-audit-service | Structured execution events, audit records, logs/traces/metrics export | OpenTelemetry, Kubernetes logging stack | Designed |
 | COMP-010 | Web UI and Template Designer | web-ui | Workflow authoring, template authoring, run inspection and ops UX | React, TypeScript | Defined, deferred to M2+ |
+| COMP-011 | Local Dev & Test CLI | custosctl | Deploy the platform to a local (kind) or remote cluster and drive the extension lifecycle (register connectors/activities, apply/run workflows, e2e) via the public APIs | Python, Click, httpx, pydantic-settings | Designed (0.2) |
 
 ## Internal Architecture
 
