@@ -180,6 +180,26 @@
         "title": "_ConnectorContextWire",
         "type": "object"
       },
+      "_ConnectorDeprecationWire": {
+        "additionalProperties": false,
+        "description": "Wire shape for the deprecation response \u2014 the applied state.",
+        "properties": {
+          "deprecated": {
+            "title": "Deprecated",
+            "type": "boolean"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "deprecated"
+        ],
+        "title": "_ConnectorDeprecationWire",
+        "type": "object"
+      },
       "_ConnectorTypeVersionWire": {
         "description": "Wire shape of one connector-type version row in the list response.",
         "properties": {
@@ -299,6 +319,27 @@
           "version"
         ],
         "title": "_CreateConnectorRequest",
+        "type": "object"
+      },
+      "_DeprecateConnectorWire": {
+        "additionalProperties": false,
+        "description": "Wire shape for the deprecation request body.",
+        "properties": {
+          "deprecated": {
+            "default": true,
+            "title": "Deprecated",
+            "type": "boolean"
+          },
+          "type": {
+            "minLength": 1,
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "title": "_DeprecateConnectorWire",
         "type": "object"
       },
       "_IssueWire": {
@@ -851,6 +892,48 @@
         "summary": "Bind For Step",
         "tags": [
           "binding"
+        ]
+      }
+    },
+    "/internal/v1/connectors:deprecate": {
+      "post": {
+        "description": "Toggle the platform-global deprecation flag for a connector-type.\n\nIdempotent: the underlying SPL ``set_connector_type_deprecated`` is an\nupsert, so re-applying the same value is a no-op at the storage layer\nwhile the loader still emits the ``connector.deprecation.toggled``\naudit event. Returns the applied ``{type, deprecated}`` state.",
+        "operationId": "deprecate_connector_internal_v1_connectors_deprecate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_DeprecateConnectorWire"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/_ConnectorDeprecationWire"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Deprecate Connector",
+        "tags": [
+          "connector-types"
         ]
       }
     },

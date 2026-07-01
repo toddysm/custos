@@ -20,6 +20,14 @@ context is still required for authz.
 Successful response: ``201`` with the registered
 ``{type, version, digest, imageRef, deprecated}`` row. Loader rejections
 map onto stable 4xx/5xx envelopes via :data:`_STATUS_BY_CODE`.
+
+This module also serves the sibling connector-type lifecycle RPC
+``POST /internal/v1/connectors:deprecate`` (CONN-REG-T5 / #903), which
+toggles the platform-global connector-type deprecation flag via
+:meth:`~custos_connector.loader.Loader.deprecate`. It is gated by
+:data:`custos_connector.permissions.CONNECTOR_DEPRECATE`, is idempotent
+(the underlying SPL upsert is), and returns the applied
+``{type, deprecated}`` state.
 """
 
 from __future__ import annotations
@@ -34,7 +42,7 @@ from custos_connector.api._common import error_response
 from custos_connector.api.connector_types import _ConnectorTypeVersionWire, _row_to_wire
 from custos_connector.loader import Loader, LoaderError, LoaderErrorCode
 from custos_connector.middleware import CallContext, require_permission
-from custos_connector.permissions import CONNECTOR_REGISTER
+from custos_connector.permissions import CONNECTOR_DEPRECATE, CONNECTOR_REGISTER
 
 router = APIRouter(prefix="/internal/v1", tags=["connector-types"])
 
@@ -64,6 +72,24 @@ class _RegisterConnectorWire(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     image_ref: str = Field(..., min_length=1, alias="imageRef")
+
+
+class _DeprecateConnectorWire(BaseModel):
+    """Wire shape for the deprecation request body."""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    type: str = Field(..., min_length=1)
+    deprecated: bool = True
+
+
+class _ConnectorDeprecationWire(BaseModel):
+    """Wire shape for the deprecation response — the applied state."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: str
+    deprecated: bool
 
 
 def _resolve_loader(request: Request) -> Loader:
@@ -105,6 +131,32 @@ async def register_connector(
         )
     wire = _row_to_wire(loaded.row)
     return JSONResponse(status_code=201, content=wire.model_dump(by_alias=True))
+
+
+@router.post("/connectors:deprecate", response_model=_ConnectorDeprecationWire, status_code=200)
+async def deprecate_connector(
+    body: Annotated[_DeprecateConnectorWire, Body()],
+    request: Request,
+    ctx: Annotated[CallContext, Depends(require_permission(CONNECTOR_DEPRECATE))],
+) -> JSONResponse:
+    """Toggle the platform-global deprecation flag for a connector-type.
+
+    Idempotent: the underlying SPL ``set_connector_type_deprecated`` is an
+    upsert, so re-applying the same value is a no-op at the storage layer
+    while the loader still emits the ``connector.deprecation.toggled``
+    audit event. Returns the applied ``{type, deprecated}`` state.
+    """
+    loader = _resolve_loader(request)
+    try:
+        await loader.deprecate(body.type, deprecated=body.deprecated)
+    except LoaderError as exc:
+        return error_response(
+            status_code=_STATUS_BY_CODE.get(exc.code, 400),
+            code=str(exc.code),
+            detail=exc.detail,
+        )
+    wire = _ConnectorDeprecationWire(type=body.type, deprecated=body.deprecated)
+    return JSONResponse(status_code=200, content=wire.model_dump())
 
 
 __all__ = ["router"]

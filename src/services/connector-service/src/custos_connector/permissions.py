@@ -77,6 +77,12 @@ CONNECTOR_VALIDATE: Final[str] = "connector:validate"
 #: type catalog.
 CONNECTOR_REGISTER: Final[str] = "connector:register"
 
+#: ``POST /internal/v1/connectors:deprecate`` (CONN-REG-T5 / #903). Held
+#: by the operator/control-plane identity that toggles the
+#: platform-global connector-type deprecation flag; never granted to end
+#: users.
+CONNECTOR_DEPRECATE: Final[str] = "connector:deprecate"
+
 #: ``POST /internal/v1/events:subscribe`` (CONN-IMPL-027). Held by the
 #: Trigger Service so it can discover the Dapr Pub/Sub subscription
 #: metadata for ``custos.connector.events``; never granted to human
@@ -89,6 +95,7 @@ ALL_PERMISSIONS: Final[tuple[str, ...]] = (
     ADMIN_CONNECTOR,
     AUDIT_READ,
     CONNECTOR_BIND,
+    CONNECTOR_DEPRECATE,
     CONNECTOR_LEASE_MINT,
     CONNECTOR_READ,
     CONNECTOR_REGISTER,
@@ -102,6 +109,7 @@ __all__ = [
     "ALL_PERMISSIONS",
     "AUDIT_READ",
     "CONNECTOR_BIND",
+    "CONNECTOR_DEPRECATE",
     "CONNECTOR_LEASE_MINT",
     "CONNECTOR_READ",
     "CONNECTOR_REGISTER",
