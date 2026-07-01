@@ -1,17 +1,20 @@
 """Thin helpers around external CLIs (``docker``/``kind``/``kubectl``/``helm``).
 
-The scaffold only needs presence + version probing for ``doctor``; richer
-subprocess orchestration (cluster create, helm install) arrives with the
-lifecycle tasks. Keeping these as small, individually patchable functions
-lets the ``doctor`` tests stub tool availability without spawning real
-processes.
+``doctor`` needs only presence + version probing; the lifecycle commands
+(``up``/``down``/``status``) add a small ``run`` subprocess primitive plus
+named ``kind``/``helm``/``kubectl`` actions. Keeping each action as its own
+patchable function lets the lifecycle tests assert the orchestration without
+spawning real processes.
 """
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,4 +87,254 @@ def kube_context_reachable(context: str | None, *, timeout: int = 15) -> bool:
     return completed.returncode == 0
 
 
-__all__ = ["ToolStatus", "kube_context_reachable", "probe_tool", "which"]
+class CommandError(RuntimeError):
+    """A subprocess invoked by the lifecycle commands exited non-zero."""
+
+    def __init__(self, argv: Sequence[str], returncode: int, stderr: str = "") -> None:
+        self.argv = list(argv)
+        self.returncode = returncode
+        self.stderr = stderr
+        printable = " ".join(self.argv)
+        detail = f": {stderr.strip()}" if stderr.strip() else ""
+        super().__init__(f"command failed ({returncode}): {printable}{detail}")
+
+
+def run(
+    argv: Sequence[str],
+    *,
+    cwd: Path | None = None,
+    input_text: str | None = None,
+    timeout: int | None = None,
+    check: bool = True,
+    capture: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    """Run ``argv`` (never through a shell) and optionally capture its output.
+
+    ``capture=False`` inherits the parent's stdio so long-running commands
+    (``helm install``, ``kind create``) stream live progress. ``capture=True``
+    returns stdout/stderr for parsing. Raises :class:`CommandError` when
+    ``check`` and the process exits non-zero.
+    """
+    completed = subprocess.run(
+        list(argv),
+        cwd=str(cwd) if cwd is not None else None,
+        input=input_text,
+        capture_output=capture,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    if check and completed.returncode != 0:
+        raise CommandError(
+            argv,
+            completed.returncode,
+            completed.stderr or "" if capture else "",
+        )
+    return completed
+
+
+# --- kind -----------------------------------------------------------------
+
+
+def kind_cluster_exists(name: str) -> bool:
+    """Return whether a ``kind`` cluster named ``name`` already exists."""
+    completed = run(["kind", "get", "clusters"], capture=True, check=False)
+    if completed.returncode != 0:
+        return False
+    return name in completed.stdout.split()
+
+
+def kind_create(name: str, node_image: str) -> None:
+    run(["kind", "create", "cluster", "--name", name, "--image", node_image])
+
+
+def kind_delete(name: str) -> None:
+    run(["kind", "delete", "cluster", "--name", name])
+
+
+# --- helm / make / scripts ------------------------------------------------
+
+
+def run_script(path: Path, *, cwd: Path, args: Sequence[str] = ()) -> None:
+    run([str(path), *args], cwd=cwd)
+
+
+def make_target(target: str, *, cwd: Path) -> None:
+    run(["make", "-C", str(cwd), target])
+
+
+def helm_release_exists(release: str, namespace: str, *, context: str | None = None) -> bool:
+    argv = ["helm", "status", release, "-n", namespace]
+    if context:
+        argv += ["--kube-context", context]
+    return run(argv, capture=True, check=False).returncode == 0
+
+
+def helm_repo_add(name: str, url: str) -> None:
+    run(["helm", "repo", "add", name, url, "--force-update"])
+
+
+def helm_repo_update() -> None:
+    run(["helm", "repo", "update"])
+
+
+def helm_install(
+    release: str,
+    chart: str | Path,
+    *,
+    namespace: str,
+    values: Path | None = None,
+    sets: Sequence[str] = (),
+    version: str | None = None,
+    create_namespace: bool = False,
+    wait: bool = True,
+    timeout: str = "15m",
+    context: str | None = None,
+) -> None:
+    argv = ["helm", "upgrade", "--install", release, str(chart), "-n", namespace]
+    if version is not None:
+        argv += ["--version", version]
+    if create_namespace:
+        argv += ["--create-namespace"]
+    if values is not None:
+        argv += ["-f", str(values)]
+    for item in sets:
+        argv += ["--set", item]
+    if wait:
+        argv += ["--wait", "--timeout", timeout]
+    if context:
+        argv += ["--kube-context", context]
+    run(argv)
+
+
+def helm_template(
+    release: str,
+    chart: str | Path,
+    *,
+    namespace: str,
+    values: Path | None = None,
+    sets: Sequence[str] = (),
+    show_only: str | None = None,
+) -> str:
+    """Render chart manifests to a string (``helm template``)."""
+    argv = ["helm", "template", release, str(chart), "-n", namespace]
+    if values is not None:
+        argv += ["-f", str(values)]
+    for item in sets:
+        argv += ["--set", item]
+    if show_only is not None:
+        argv += ["--show-only", show_only]
+    return run(argv, capture=True).stdout
+
+
+def helm_uninstall(
+    release: str, *, namespace: str, context: str | None = None, ignore_not_found: bool = True
+) -> None:
+    argv = ["helm", "uninstall", release, "-n", namespace]
+    if ignore_not_found:
+        argv += ["--ignore-not-found"]
+    if context:
+        argv += ["--kube-context", context]
+    run(argv)
+
+
+# --- kubectl --------------------------------------------------------------
+
+
+def _kubectl(argv: Sequence[str], *, context: str | None) -> list[str]:
+    out = ["kubectl"]
+    if context:
+        out += ["--context", context]
+    return [*out, *argv]
+
+
+def kubectl_ensure_namespace(namespace: str, *, context: str | None = None) -> None:
+    """Create ``namespace`` if absent (idempotent via dry-run + apply)."""
+    manifest = run(
+        _kubectl(
+            ["create", "namespace", namespace, "--dry-run=client", "-o", "yaml"],
+            context=context,
+        ),
+        capture=True,
+    ).stdout
+    run(_kubectl(["apply", "-f", "-"], context=context), input_text=manifest)
+
+
+def kubectl_apply_stdin(manifest: str, *, namespace: str, context: str | None = None) -> None:
+    run(
+        _kubectl(["apply", "-n", namespace, "-f", "-"], context=context),
+        input_text=manifest,
+    )
+
+
+def kubectl_wait(
+    resource: str,
+    *,
+    namespace: str,
+    condition: str,
+    timeout: str = "5m",
+    context: str | None = None,
+) -> None:
+    run(
+        _kubectl(
+            [
+                "wait",
+                f"--for=condition={condition}",
+                resource,
+                "-n",
+                namespace,
+                f"--timeout={timeout}",
+            ],
+            context=context,
+        )
+    )
+
+
+def kubectl_pod_phases(namespace: str, *, context: str | None = None) -> list[tuple[str, str]]:
+    """Return ``(pod_name, phase)`` for every pod in ``namespace``.
+
+    An empty list is returned when the namespace is absent or unreadable —
+    ``status`` treats that as "nothing deployed" rather than an error.
+    """
+    completed = run(
+        _kubectl(["get", "pods", "-n", namespace, "-o", "json"], context=context),
+        capture=True,
+        check=False,
+    )
+    if completed.returncode != 0 or not completed.stdout.strip():
+        return []
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        return []
+    pods: list[tuple[str, str]] = []
+    for item in payload.get("items", []):
+        name = item.get("metadata", {}).get("name", "?")
+        phase = item.get("status", {}).get("phase", "Unknown")
+        pods.append((name, phase))
+    return pods
+
+
+__all__ = [
+    "CommandError",
+    "ToolStatus",
+    "helm_install",
+    "helm_release_exists",
+    "helm_repo_add",
+    "helm_repo_update",
+    "helm_template",
+    "helm_uninstall",
+    "kind_cluster_exists",
+    "kind_create",
+    "kind_delete",
+    "kube_context_reachable",
+    "kubectl_apply_stdin",
+    "kubectl_ensure_namespace",
+    "kubectl_pod_phases",
+    "kubectl_wait",
+    "make_target",
+    "probe_tool",
+    "run",
+    "run_script",
+    "which",
+]

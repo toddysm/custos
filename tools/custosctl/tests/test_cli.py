@@ -8,6 +8,7 @@ import pytest
 from click.testing import CliRunner
 
 from custosctl import cli as cli_module
+from custosctl import lifecycle as lifecycle_module
 from custosctl.cli import cli
 from custosctl.shell import ToolStatus
 
@@ -118,3 +119,47 @@ def test_target_flag_overrides_env(runner: CliRunner, monkeypatch: pytest.Monkey
     )
     assert result.exit_code == 0, result.output
     assert "target: remote" in result.output
+
+
+# --- lifecycle commands (DEVCLI-IMPL-002) ---------------------------------
+
+
+def test_up_local_invokes_lifecycle(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    called: list[str] = []
+    monkeypatch.setattr(lifecycle_module, "up", lambda s, echo: called.append("up"))
+    result = runner.invoke(cli, ["up"], env={})
+    assert result.exit_code == 0, result.output
+    assert called == ["up"]
+
+
+def test_up_remote_not_implemented(runner: CliRunner) -> None:
+    result = runner.invoke(cli, ["--target", "remote", "up"], env={"CUSTOS_KUBE_CONTEXT": "x"})
+    assert result.exit_code != 0
+    assert "#954" in result.output
+
+
+def test_down_aborts_without_yes(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    called: list[str] = []
+    monkeypatch.setattr(lifecycle_module, "down", lambda s, echo: called.append("down"))
+    result = runner.invoke(cli, ["down"], input="n\n", env={})
+    assert result.exit_code != 0  # aborted
+    assert called == []
+
+
+def test_down_with_yes_invokes_lifecycle(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    called: list[str] = []
+    monkeypatch.setattr(lifecycle_module, "down", lambda s, echo: called.append("down"))
+    result = runner.invoke(cli, ["--yes", "down"], env={})
+    assert result.exit_code == 0, result.output
+    assert called == ["down"]
+
+
+def test_status_exit_code_reflects_health(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(lifecycle_module, "status", lambda s, echo: True)
+    assert runner.invoke(cli, ["status"], env={}).exit_code == 0
+    monkeypatch.setattr(lifecycle_module, "status", lambda s, echo: False)
+    assert runner.invoke(cli, ["status"], env={}).exit_code == 1

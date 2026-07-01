@@ -14,9 +14,18 @@ surface. See ``design/components/custosctl/design.md`` § Configuration.
 from __future__ import annotations
 
 from enum import StrEnum
+from pathlib import Path
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+#: Markers that identify the Custos repository root — the lifecycle commands
+#: shell out to these paths (the umbrella chart, the prereq/onboarding scripts,
+#: the Makefile), so ``custosctl`` must locate the checkout it runs against.
+_REPO_MARKERS: tuple[str, ...] = (
+    "deploy/helm/custos/Chart.yaml",
+    "scripts/install-prereqs.sh",
+)
 
 
 class Target(StrEnum):
@@ -63,6 +72,8 @@ class Settings(BaseSettings):
 
     # --- lifecycle knobs ---
     prereqs: str | None = None
+    repo_root: Path | None = None
+    helm_timeout: str = "15m"
 
     def effective_kube_context(self) -> str | None:
         """Resolve the kube-context to operate against.
@@ -82,4 +93,34 @@ class Settings(BaseSettings):
         return None
 
 
-__all__ = ["Settings", "Target"]
+def _is_repo_root(path: Path) -> bool:
+    return all((path / marker).is_file() for marker in _REPO_MARKERS)
+
+
+def resolve_repo_root(configured: Path | None, start: Path | None = None) -> Path:
+    """Locate the Custos checkout the lifecycle commands operate on.
+
+    Uses ``configured`` (``CUSTOS_REPO_ROOT``) when set, otherwise walks up
+    from ``start`` (default: the current working directory) looking for the
+    repository markers. Raises :class:`RuntimeError` with actionable guidance
+    when no checkout can be found.
+    """
+    if configured is not None:
+        root = configured.expanduser().resolve()
+        if not _is_repo_root(root):
+            raise RuntimeError(
+                f"CUSTOS_REPO_ROOT={root} does not look like a Custos checkout "
+                f"(missing one of: {', '.join(_REPO_MARKERS)})"
+            )
+        return root
+    here = (start or Path.cwd()).resolve()
+    for candidate in (here, *here.parents):
+        if _is_repo_root(candidate):
+            return candidate
+    raise RuntimeError(
+        "could not locate the Custos repository root from "
+        f"{here}; run custosctl from inside the checkout or set CUSTOS_REPO_ROOT"
+    )
+
+
+__all__ = ["Settings", "Target", "resolve_repo_root"]
