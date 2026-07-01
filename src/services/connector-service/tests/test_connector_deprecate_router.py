@@ -44,7 +44,9 @@ def _ctx_header(*, permissions: list[str] | None = None) -> dict[str, str]:
 
 
 def _post(client: TestClient, body: dict[str, object], **kw: object) -> object:
-    headers = kw.pop("headers", _ctx_header())
+    headers = kw.pop("headers", None)
+    if headers is None:
+        headers = _ctx_header()
     return client.post("/internal/v1/connectors:deprecate", json=body, headers=headers)
 
 
