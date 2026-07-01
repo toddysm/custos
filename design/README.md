@@ -1,6 +1,6 @@
 # Custos — Design Documentation
 
-Last Updated: 2026-06-27
+Last Updated: 2026-06-30
 
 ## Overview
 
@@ -39,11 +39,13 @@ Custos is a pluggable workflow orchestrator for supply-chain security operations
 | COMP-008 | Storage Provider Layer | storage-provider-layer | [design.md](components/storage-provider-layer/design.md) | Designed |
 | COMP-009 | Observability and Audit Service | observability-audit-service | [design.md](components/observability-audit-service/design.md) | Designed |
 | COMP-010 | Web UI and Template Designer | web-ui | — | Defined, deferred to M2+ |
+| COMP-011 | Local Dev & Test CLI (`custosctl`) | custosctl | [design.md](components/custosctl/design.md) | Designed (0.2) |
 
 ## Recent Changes
 
 | Date | Change | Issue |
 |---|---|---|
+| 2026-06-30 | Local Dev & Test CLI (`custosctl`) component design — target-aware local (kind) + remote deploy and extension lifecycle (0.2, GHCR-only) | #951 |
 | 2026-06-27 | OOTB Publishing & Onboarding: per-extension publish workflows, `scripts/seed-ootb.sh` onboarding, end-to-end runbook, and author-guide + skill requirements | #944 |
 | 2026-06-25 | Out-of-the-Box Catalog structure design: decoupled `extensions/` root for connectors & activities, no-SDK/language-agnostic conventions, plugin migration plan | #880, #881, #884 |
 | 2026-05-18 | Bucket A design alignment: design/README.md refresh, REQ-080/081 assigned to M2, SPL documented as 7 interfaces, M1 scope reconciliation (contract vs implementation) | #87, #91, #96, #97 |
