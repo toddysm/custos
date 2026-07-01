@@ -30,10 +30,14 @@ them.
 
 ## Scope for 0.2
 
-- **Images**: **GHCR-only.** The platform, jobs, and OOTB extension images are
-  pulled digest-pinned from GHCR (`ghcr.io/<owner>/custos/...`). No local
-  registry and no local-build path in 0.2 — testing unpublished, locally built
-  images is deferred to a later milestone.
+- **Images**: **GHCR-only.** The platform and job images are deployed by the
+  umbrella Helm chart, which composes them as
+  `<global.imageRegistry>/<chart>:<global.imageTag>` — i.e. **tag-pinned** in
+  0.2 (the chart has no digest support today; adding it is out of scope). OOTB
+  **extension** registration is different: the catalog resolves and stores each
+  extension image's **digest** at register time (as `scripts/seed-ootb.sh` does).
+  No local registry and no local-build path in 0.2 — testing unpublished,
+  locally built images is deferred to a later milestone.
 - **Targets**: `local` (a `kind` cluster `custosctl` creates/deletes) and
   `remote` (an existing cluster selected by kube-context; `custosctl` never
   creates or deletes the cluster itself).
@@ -138,9 +142,9 @@ sequenceDiagram
 | `custosctl up` | yes | Create/verify cluster, install prereqs, `helm install`, wait for health |
 | `custosctl down` | yes | `helm uninstall`; local also `kind delete`; remote never deletes the cluster |
 | `custosctl status` | yes | Pod readiness + gateway `/healthz` `/readyz` |
-| `custosctl connector register <path\|imageRef>` | no | Register a connector-type via the API |
+| `custosctl connector register <path-or-image>` | no | Register a connector-type via the API (extension folder or image ref) |
 | `custosctl connector list` | no | Show registered connector-types (catalog view) |
-| `custosctl activity register <path\|imageRef>` | no | Register an activity-type via the API |
+| `custosctl activity register <path-or-image>` | no | Register an activity-type via the API (extension folder or image ref) |
 | `custosctl activity list` | no | Show registered activity-types |
 | `custosctl workflow apply <file>` | no | Create/update a workflow definition |
 | `custosctl workflow run <ref>` | no | Start a run of a workflow |
@@ -165,8 +169,8 @@ take precedence. Prefix `CUSTOS_`.
 | `CUSTOS_NAMESPACE` | No | `custos-system` | Release namespace |
 | `CUSTOS_RELEASE` | No | `custos` | Helm release name |
 | `CUSTOS_PROFILE` | No | `connected-eval` | Umbrella-chart values profile |
-| `CUSTOS_IMAGE_PREFIX` | No | `ghcr.io/toddysm/custos` | GHCR image repository prefix |
-| `CUSTOS_IMAGE_TAG` | No | (release tag) | Image tag/version to deploy (digest-pinned) |
+| `CUSTOS_IMAGE_PREFIX` | No | `ghcr.io/toddysm/custos` | Maps to the chart's `global.imageRegistry`; service repos are derived as `<registry>/<chart>` |
+| `CUSTOS_IMAGE_TAG` | No | `dev` (chart default) | Maps to the chart's `global.imageTag`; platform images are tag-pinned in 0.2 |
 | `CUSTOS_GATEWAY` | Yes (API cmds) | — | API Gateway base URL |
 | `CUSTOS_TOKEN` | Yes (API cmds) | — | Platform-admin service token (`cst_...`) |
 | `CUSTOS_INSECURE` | No | `false` | Pass `-k`/verify=false for the eval self-signed cert |
@@ -196,13 +200,7 @@ local/remote dev and test.
 
 ## Open TODOs
 
-- [ ] TODO-001: Decide the connector/activity registration input form — accept a
-  local extension folder (resolve its published GHCR image + manifest) vs. a
-  bare digest-pinned image ref. (added 2026-06-30)
-- [ ] TODO-002: Define the sample workflow fixture used by `e2e` (which OOTB
-  connectors/activities it exercises). (added 2026-06-30)
-- [ ] TODO-003: Decide whether `e2e` in CI runs against a real `kind` cluster
-  (gated job) or is smoke-only locally. (added 2026-06-30)
+Tracked in [`todos.md`](todos.md) to avoid duplication (single source of truth).
 
 ## Change History
 
