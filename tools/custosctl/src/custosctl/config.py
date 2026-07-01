@@ -25,6 +25,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _REPO_MARKERS: tuple[str, ...] = (
     "deploy/helm/custos/Chart.yaml",
     "scripts/install-prereqs.sh",
+    "Makefile",
 )
 
 

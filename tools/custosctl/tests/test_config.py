@@ -85,6 +85,7 @@ def _make_checkout(root: Path) -> Path:
     (root / "deploy" / "helm" / "custos" / "Chart.yaml").write_text("name: custos\n")
     (root / "scripts").mkdir()
     (root / "scripts" / "install-prereqs.sh").write_text("#!/usr/bin/env bash\n")
+    (root / "Makefile").write_text("deps:\n\t@true\n")
     return root
 
 

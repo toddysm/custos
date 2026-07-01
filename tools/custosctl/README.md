@@ -47,6 +47,7 @@ table for the full list. Common keys:
 | `CUSTOS_CLUSTER` | `custos-local` | kind cluster name (local) |
 | `CUSTOS_NAMESPACE` | `custos-system` | release namespace |
 | `CUSTOS_REPO_ROOT` | autodetected | Custos checkout the lifecycle commands run against |
+| `CUSTOS_HELM_TIMEOUT` | `15m` | `helm install --wait` timeout |
 | `CUSTOS_GATEWAY` | — | API Gateway base URL (API commands) |
 | `CUSTOS_TOKEN` | — | platform-admin service token (API commands) |
 

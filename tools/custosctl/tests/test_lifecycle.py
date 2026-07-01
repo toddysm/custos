@@ -18,6 +18,7 @@ def _fake_checkout(tmp_path: Path, *, profile: str = "connected-eval") -> Path:
     (tmp_path / "deploy" / "helm" / "custos" / f"values-{profile}.yaml").write_text("{}\n")
     (tmp_path / "scripts").mkdir()
     (tmp_path / "scripts" / "install-prereqs.sh").write_text("#!/usr/bin/env bash\n")
+    (tmp_path / "Makefile").write_text("deps:\n\t@true\n")
     return tmp_path
 
 
