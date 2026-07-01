@@ -133,10 +133,12 @@ The fastest start is to **copy the closest reference extension** and edit it:
 ### 5. Test in place
 
 Tests live under the extension's own `tests/` and run with no platform packages
-on the path:
+on the path. The commands below use a connector; for an activity, substitute
+`extensions/activities/<name>`. Quote the extras spec so the shell does not
+treat `[dev]` as a glob character class:
 
 ```sh
-pip install -e extensions/connectors/<name>[dev]
+pip install -e 'extensions/connectors/<name>[dev]'
 pytest extensions/connectors/<name>/tests -q
 ```
 

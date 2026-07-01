@@ -48,7 +48,7 @@ Custos is a pluggable workflow orchestrator. Developers extend the platform by w
 ## Quick Start for Activity Developers
 
 1. Read the [Activity Author Guide](activity-author.md) to understand the file-based contract and Activity Manifest.
-2. Scaffold a folder under [`extensions/activities/<name>/`](../../extensions/README.md) — the fastest start is to copy the reference activity [`copy-image`](../../extensions/activities/copy-image/).
+2. Scaffold a folder under [`extensions/activities/<name>/`](../../extensions/activities/) — the fastest start is to copy the reference activity [`copy-image`](../../extensions/activities/copy-image/).
 3. Author `activity-manifest.yaml` (`custos.dev/v1`): declare inputs/outputs JSON Schemas, connector slots + capabilities, resource limits, isolation tier, and error codes.
 4. Implement the container to read `/custos/in/inputs.json` + `/custos/in/ctx.json` and write `/custos/out/outputs.json` plus declared `/custos/out/artifacts/<name>`.
 5. Test in place (`pytest extensions/activities/<name>/tests -q`), then wire the publish workflow + [`scripts/seed-ootb.sh`](../../scripts/seed-ootb.sh) onboarding entry per the [OOTB catalog index](../../extensions/README.md).
