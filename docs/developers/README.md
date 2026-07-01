@@ -1,10 +1,10 @@
 # Developer Guide: Custos — Plugins, Connections & Activities
 
-Last Updated: 2026-06-04
+Last Updated: 2026-06-30
 
 ## Overview
 
-Custos is a pluggable workflow orchestrator. Developers extend the platform by writing **connectors** (access to external systems), **activities** (units of work executed inside workflows), and **plugins** (broader extension types). Each extension is packaged and distributed as an OCI artifact and described by a versioned manifest contract.
+Custos is a pluggable workflow orchestrator. Developers extend the platform by writing **connectors** (access to external systems), **activities** (units of work executed inside workflows), and **plugins** (broader extension types). Each extension is packaged and distributed as an OCI artifact and described by a versioned manifest contract. Bundled connectors and activities ship in the decoupled **out-of-the-box (OOTB) catalog** under [`extensions/`](../../extensions/README.md), kept physically separate from the platform service source and used as the worked examples throughout the authoring guides below.
 
 ## Extension Types
 
@@ -21,6 +21,7 @@ Custos is a pluggable workflow orchestrator. Developers extend the platform by w
 | [Connections API](connections-api.md) | Connector manifest schema, field reference, and examples |
 | [Connector Plugin Author Guide](connector-plugin-author.md) | End-to-end guide for writing, packaging, and publishing a connector plugin (manifest, hook contract, error taxonomy, OCI publication) |
 | [Activity Author Guide](activity-author.md) | Writing activities: the file-based activity contract (`/custos/in` + `/custos/out`), inputs/outputs envelopes, two-phase artifact finalization, Activity Manifest v1, sandbox & isolation tiers, exit-code semantics, and the `ARM_*` configuration |
+| [OOTB Catalog Index](../../extensions/README.md) | Getting-started index for the decoupled extension catalog: bundled connectors + activities, how to scaffold a new extension, and the build/test/publish/onboard lifecycle |
 | [Catalog API](catalog-api.md) | REST surface for workflows, templates, activity- and connector-types; validation taxonomy, immutability and deprecation contracts, placeholder reference |
 | [Auth API](auth-api.md) | REST and RPC surface for tenants, workspaces, service accounts, tokens, role bindings, and call-context signing; error taxonomy, permission registry, built-in roles |
 | [API Gateway](api-gateway.md) | Single HTTPS entrypoint: request pipeline, auth/authz delegation, call-context minting, idempotency, rate limiting, request validation, RFC 7807 error envelope, route registry, webhook ingress, device-code flow (M1 503), Configuration |
@@ -43,3 +44,11 @@ Custos is a pluggable workflow orchestrator. Developers extend the platform by w
 3. Copy the matching [example manifest](examples/) and edit `metadata`, `target`, `credentials`, and `events` for your connector.
 4. Validate your manifest against the JSON Schema at `design/components/connector-service/schemas/connector-manifest.v1.schema.json`.
 5. Publish the manifest as an OCI referrer of your connector image, using `artifactType = application/vnd.custos.connector.manifest.v1+json`.
+
+## Quick Start for Activity Developers
+
+1. Read the [Activity Author Guide](activity-author.md) to understand the file-based contract and Activity Manifest.
+2. Scaffold a folder under [`extensions/activities/<name>/`](../../extensions/README.md) — the fastest start is to copy the reference activity [`copy-image`](../../extensions/activities/copy-image/).
+3. Author `activity-manifest.yaml` (`custos.dev/v1`): declare inputs/outputs JSON Schemas, connector slots + capabilities, resource limits, isolation tier, and error codes.
+4. Implement the container to read `/custos/in/inputs.json` + `/custos/in/ctx.json` and write `/custos/out/outputs.json` plus declared `/custos/out/artifacts/<name>`.
+5. Test in place (`pytest extensions/activities/<name>/tests -q`), then wire the publish workflow + [`scripts/seed-ootb.sh`](../../scripts/seed-ootb.sh) onboarding entry per the [OOTB catalog index](../../extensions/README.md).
