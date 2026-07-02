@@ -172,6 +172,17 @@ def test_down_remote_force_passthrough(runner: CliRunner, monkeypatch: pytest.Mo
     assert seen == [True]
 
 
+def test_down_force_local_errors(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    called: list[str] = []
+    monkeypatch.setattr(
+        lifecycle_module, "down", lambda s, echo, force=False: called.append("down")
+    )
+    result = runner.invoke(cli, ["--yes", "down", "--force"], env={})
+    assert result.exit_code != 0
+    assert "only to --target remote" in result.output
+    assert called == []
+
+
 def test_status_exit_code_reflects_health(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:

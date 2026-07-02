@@ -44,6 +44,7 @@ class _Recorder:
         self.pods: list[tuple[str, str]] = [("api-gateway-0", "Running")]
         self.release_installed = True
         self.reachable = True
+        self.current_context: str | None = None
 
         def rec(name: str, ret: object = None) -> Callable[..., object]:
             def _fn(*_a: object, **_k: object) -> object:
@@ -54,6 +55,9 @@ class _Recorder:
 
         monkeypatch.setattr(shell, "kind_cluster_exists", lambda *_a, **_k: self._cluster_exists)
         monkeypatch.setattr(shell, "kube_context_reachable", lambda *_a, **_k: self.reachable)
+        monkeypatch.setattr(
+            shell, "kubectl_current_context", lambda *_a, **_k: self.current_context
+        )
         monkeypatch.setattr(shell, "kind_create", rec("kind_create"))
         monkeypatch.setattr(shell, "kind_delete", rec("kind_delete"))
         monkeypatch.setattr(shell, "run_script", rec("run_script"))
@@ -178,6 +182,17 @@ def test_up_remote_with_prereqs_install(tmp_path: Path, monkeypatch: pytest.Monk
     lifecycle.up(_remote(root, prereqs="install"), echo=lambda _m: None)
     assert "run_script" in rec.calls
     assert "helm_install:cnpg" in rec.calls
+
+
+def test_up_remote_prereqs_context_mismatch_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _fake_checkout(tmp_path)
+    rec = _Recorder(monkeypatch, cluster_exists=False)
+    rec.current_context = "some-other-context"  # != pinned 'prod-ctx'
+    with pytest.raises(RuntimeError, match="current context"):
+        lifecycle.up(_remote(root, prereqs="install"), echo=lambda _m: None)
+    assert "run_script" not in rec.calls
 
 
 def test_down_remote_never_deletes_cluster(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -84,6 +84,7 @@ def _up_remote(settings: Settings, *, echo: Echo) -> None:
 
     # Prerequisites default to skip for remote (the cluster likely provides them).
     if settings.effective_prereqs() == "install":
+        _guard_prereqs_context(context)
         _install_prereqs(root, context=context, echo=echo)
     else:
         echo(
@@ -101,6 +102,26 @@ def _require_values(root: Path, profile: str) -> Path:
     if not values.is_file():
         raise RuntimeError(f"values file not found: {values} (unknown profile {profile!r})")
     return values
+
+
+def _guard_prereqs_context(context: str | None) -> None:
+    """Refuse remote ``prereqs=install`` when the pinned context isn't current.
+
+    ``scripts/install-prereqs.sh`` operates on kubectl's *current* context and
+    cannot be pointed at an explicit ``--context``. If the user pinned a
+    different context (``CUSTOS_KUBE_CONTEXT``), installing prerequisites would
+    silently target the wrong cluster, so fail with actionable guidance.
+    """
+    if context is None:
+        return
+    current = shell.kubectl_current_context()
+    if current is not None and current != context:
+        raise RuntimeError(
+            f"CUSTOS_PREREQS=install runs install-prereqs.sh against kubectl's "
+            f"current context ({current!r}), not {context!r}. Switch first with "
+            f"'kubectl config use-context {context}', or unset CUSTOS_KUBE_CONTEXT "
+            "to use the current context."
+        )
 
 
 def _install_prereqs(root: Path, *, context: str | None, echo: Echo) -> None:

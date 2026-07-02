@@ -125,6 +125,11 @@ def down(obj: Context, force: bool) -> None:
     with --force, deletes the namespace/PVCs) — it never deletes the cluster.
     """
     settings = obj.settings
+    if force and settings.target is Target.LOCAL:
+        raise click.ClickException(
+            "--force applies only to --target remote (local 'down' deletes the "
+            "whole kind cluster anyway)"
+        )
     if settings.target is Target.LOCAL:
         prompt = (
             f"Delete kind cluster '{settings.cluster}' and uninstall release '{settings.release}'?"
