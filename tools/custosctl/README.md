@@ -8,10 +8,10 @@ APIs.
 
 Design: [`design/components/custosctl/design.md`](../../design/components/custosctl/design.md).
 
-> **Status:** scaffold + local lifecycle. The root command group, the
+> **Status:** scaffold + local & remote lifecycle. The root command group, the
 > `CUSTOS_*` configuration model, the `--target {local,remote}` abstraction, the
-> `doctor` preflight, and the **local** `up`/`down`/`status` commands are
-> implemented (#952, #953). Remote lifecycle (#954) and the API commands
+> `doctor` preflight, and the `up`/`down`/`status` commands for **both** targets
+> are implemented (#952, #953, #954). The API commands
 > (`connector`/`activity`/`workflow`/`seed-ootb`/`e2e`, #955–#962) land in the
 > sibling DEVCLI tasks.
 
@@ -32,6 +32,14 @@ custosctl --target remote doctor # preflight a remote kube-context
 custosctl up                     # create kind cluster, prereqs, helm install --wait
 custosctl status                 # kind cluster / release / pod summary (+ gateway if CUSTOS_GATEWAY set)
 custosctl down --yes             # uninstall the release and delete the kind cluster
+
+# Remote lifecycle (target=remote): operate against an existing kube-context;
+# never creates/deletes the cluster. Prereqs default to skip (CUSTOS_PREREQS=install to run them).
+export CUSTOS_TARGET=remote CUSTOS_KUBE_CONTEXT=my-cluster
+custosctl up                     # install the platform against the current/selected context
+custosctl status
+custosctl down --yes             # uninstall the release only
+custosctl down --yes --force     # ...also delete the namespace and its PVCs (destructive)
 ```
 
 ## Configuration

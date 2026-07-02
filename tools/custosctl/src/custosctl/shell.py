@@ -267,6 +267,11 @@ def kubectl_apply_stdin(manifest: str, *, namespace: str, context: str | None = 
     )
 
 
+def kubectl_delete_namespace(namespace: str, *, context: str | None = None) -> None:
+    """Delete ``namespace`` (and everything in it, incl. PVCs). Idempotent."""
+    run(_kubectl(["delete", "namespace", namespace, "--ignore-not-found"], context=context))
+
+
 def kubectl_wait(
     resource: str,
     *,
@@ -329,6 +334,7 @@ __all__ = [
     "kind_delete",
     "kube_context_reachable",
     "kubectl_apply_stdin",
+    "kubectl_delete_namespace",
     "kubectl_ensure_namespace",
     "kubectl_pod_phases",
     "kubectl_wait",

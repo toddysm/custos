@@ -121,7 +121,7 @@ def test_target_flag_overrides_env(runner: CliRunner, monkeypatch: pytest.Monkey
     assert "target: remote" in result.output
 
 
-# --- lifecycle commands (DEVCLI-IMPL-002) ---------------------------------
+# --- lifecycle commands (DEVCLI-IMPL-002 / 003) ---------------------------
 
 
 def test_up_local_invokes_lifecycle(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -132,15 +132,19 @@ def test_up_local_invokes_lifecycle(runner: CliRunner, monkeypatch: pytest.Monke
     assert called == ["up"]
 
 
-def test_up_remote_not_implemented(runner: CliRunner) -> None:
+def test_up_remote_invokes_lifecycle(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    called: list[str] = []
+    monkeypatch.setattr(lifecycle_module, "up", lambda s, echo: called.append("up"))
     result = runner.invoke(cli, ["--target", "remote", "up"], env={"CUSTOS_KUBE_CONTEXT": "x"})
-    assert result.exit_code != 0
-    assert "#954" in result.output
+    assert result.exit_code == 0, result.output
+    assert called == ["up"]
 
 
 def test_down_aborts_without_yes(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
     called: list[str] = []
-    monkeypatch.setattr(lifecycle_module, "down", lambda s, echo: called.append("down"))
+    monkeypatch.setattr(
+        lifecycle_module, "down", lambda s, echo, force=False: called.append("down")
+    )
     result = runner.invoke(cli, ["down"], input="n\n", env={})
     assert result.exit_code != 0  # aborted
     assert called == []
@@ -149,11 +153,23 @@ def test_down_aborts_without_yes(runner: CliRunner, monkeypatch: pytest.MonkeyPa
 def test_down_with_yes_invokes_lifecycle(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    called: list[str] = []
-    monkeypatch.setattr(lifecycle_module, "down", lambda s, echo: called.append("down"))
+    seen: list[bool] = []
+    monkeypatch.setattr(lifecycle_module, "down", lambda s, echo, force=False: seen.append(force))
     result = runner.invoke(cli, ["--yes", "down"], env={})
     assert result.exit_code == 0, result.output
-    assert called == ["down"]
+    assert seen == [False]
+
+
+def test_down_remote_force_passthrough(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[bool] = []
+    monkeypatch.setattr(lifecycle_module, "down", lambda s, echo, force=False: seen.append(force))
+    result = runner.invoke(
+        cli,
+        ["--target", "remote", "--yes", "down", "--force"],
+        env={"CUSTOS_KUBE_CONTEXT": "prod"},
+    )
+    assert result.exit_code == 0, result.output
+    assert seen == [True]
 
 
 def test_status_exit_code_reflects_health(

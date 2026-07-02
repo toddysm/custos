@@ -101,20 +101,10 @@ def doctor(obj: Context) -> None:
     click.echo("preflight OK")
 
 
-def _require_local(target: Target) -> None:
-    """Guard the local-only lifecycle commands (remote arrives in #954)."""
-    if target is not Target.LOCAL:
-        raise click.ClickException(
-            "remote lifecycle (up/down/status) is not implemented yet — "
-            "it arrives in DEVCLI-IMPL-003 (#954). Use --target local for now."
-        )
-
-
 @cli.command()
 @click.pass_obj
 def up(obj: Context) -> None:
-    """Bring the platform up on a local kind cluster."""
-    _require_local(obj.settings.target)
+    """Bring the platform up (local kind cluster or remote kube-context)."""
     try:
         lifecycle.up(obj.settings, echo=click.echo)
     except (CommandError, RuntimeError) as exc:
@@ -122,18 +112,31 @@ def up(obj: Context) -> None:
 
 
 @cli.command()
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Remote only: also delete the namespace and its PVCs (destructive).",
+)
 @click.pass_obj
-def down(obj: Context) -> None:
-    """Uninstall the release and delete the local kind cluster."""
+def down(obj: Context, force: bool) -> None:
+    """Tear the platform down.
+
+    Local deletes the kind cluster; remote only uninstalls the release (and,
+    with --force, deletes the namespace/PVCs) — it never deletes the cluster.
+    """
     settings = obj.settings
-    _require_local(settings.target)
-    if not obj.assume_yes:
-        click.confirm(
-            f"Delete kind cluster '{settings.cluster}' and uninstall release '{settings.release}'?",
-            abort=True,
+    if settings.target is Target.LOCAL:
+        prompt = (
+            f"Delete kind cluster '{settings.cluster}' and uninstall release '{settings.release}'?"
         )
+    else:
+        context = settings.effective_kube_context() or "(current kubectl context)"
+        extra = f" and DELETE namespace '{settings.namespace}' (PVCs)" if force else ""
+        prompt = f"Uninstall release '{settings.release}' from kube-context '{context}'{extra}?"
+    if not obj.assume_yes:
+        click.confirm(prompt, abort=True)
     try:
-        lifecycle.down(settings, echo=click.echo)
+        lifecycle.down(settings, echo=click.echo, force=force)
     except (CommandError, RuntimeError) as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -141,8 +144,7 @@ def down(obj: Context) -> None:
 @cli.command()
 @click.pass_obj
 def status(obj: Context) -> None:
-    """Report kind cluster, release, and pod status."""
-    _require_local(obj.settings.target)
+    """Report cluster/context, release, and pod status."""
     try:
         healthy = lifecycle.status(obj.settings, echo=click.echo)
     except (CommandError, RuntimeError) as exc:
