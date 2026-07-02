@@ -163,10 +163,18 @@ def test_wait_for_times_out() -> None:
             _settings(),
             run_id="run-9",
             client=client,
-            timeout=-1.0,  # already past the deadline on first non-terminal read
+            timeout=0.0,  # deadline is immediately in the past after the first read
             interval=0.0,
             sleep=lambda _s: None,
         )
+
+
+def test_wait_for_rejects_negative_interval() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - not reached
+        return httpx.Response(200, json={})
+
+    with _client(handler) as client, pytest.raises(RuntimeError, match="non-negative"):
+        workflows.wait_for(_settings(), run_id="run-9", client=client, interval=-1.0)
 
 
 def test_is_success() -> None:

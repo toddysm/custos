@@ -5,7 +5,9 @@ Three thin wrappers over the gateway:
 * ``apply`` — publish a workflow definition
   (`POST /v1/workspaces/<ws>/workflows`, body ``{definition: <text>}``).
 * ``run`` — start a run
-  (`POST /v1/workspaces/<ws>/runs`, body ``{workflowVersionId, inputs?, idempotencyKey?}``).
+  (`POST /v1/workspaces/<ws>/runs`, body ``{workflowVersionId, inputs?}``). An
+  optional idempotency key is sent via the ``Idempotency-Key`` header (the
+  gateway also accepts a body ``idempotencyKey``; this client uses the header).
 * ``get_status`` / ``wait_for`` — read a run
   (`GET /v1/workspaces/<ws>/runs/<run_id>`) and optionally poll to a terminal state.
 
@@ -116,6 +118,8 @@ def wait_for(
     Returns the last run record read. Raises :class:`TimeoutError` if the run
     is still non-terminal when ``timeout`` is exceeded.
     """
+    if interval < 0 or timeout < 0:
+        raise RuntimeError("--timeout and --interval must be non-negative")
     ws = resolve_workspace(settings, workspace)
     owns = client is None
     client = client or build_client(settings)

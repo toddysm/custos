@@ -364,6 +364,14 @@ def test_workflow_run_rejects_bad_input(runner: CliRunner) -> None:
     assert "KEY=VALUE" in result.output
 
 
+def test_workflow_run_rejects_empty_key(runner: CliRunner) -> None:
+    result = runner.invoke(
+        cli, ["workflow", "run", "wfv-1", "--input", "=3"], env={"CUSTOS_WORKSPACE": "w"}
+    )
+    assert result.exit_code != 0
+    assert "non-empty key" in result.output
+
+
 def test_workflow_status_prints(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
     from custosctl import workflows as workflows_module
 

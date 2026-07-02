@@ -271,11 +271,18 @@ def _parse_inputs(inputs_file: str | None, input_pairs: tuple[str, ...]) -> dict
             ) from exc
         if not isinstance(loaded, dict):
             raise click.ClickException("--inputs-file must contain a JSON/YAML object")
-        result.update(loaded)
+        for raw_key, value in loaded.items():
+            key = str(raw_key).strip()
+            if not key:
+                raise click.ClickException("--inputs-file contains an empty key")
+            result[key] = value
     for pair in input_pairs:
         key, sep, raw = pair.partition("=")
-        if not sep:
-            raise click.ClickException(f"--input must be KEY=VALUE; got {pair!r}")
+        key = key.strip()
+        if not sep or not key:
+            raise click.ClickException(
+                f"--input must be KEY=VALUE with a non-empty key; got {pair!r}"
+            )
         try:
             result[key] = json.loads(raw)
         except json.JSONDecodeError:
@@ -335,8 +342,18 @@ def workflow_run(
 @click.argument("run_id")
 @click.option("--workspace", default=None, help="Workspace (defaults to CUSTOS_WORKSPACE).")
 @click.option("--watch", is_flag=True, help="Poll until the run reaches a terminal status.")
-@click.option("--timeout", type=float, default=600.0, help="Watch timeout in seconds.")
-@click.option("--interval", type=float, default=3.0, help="Watch poll interval in seconds.")
+@click.option(
+    "--timeout",
+    type=click.FloatRange(min=0),
+    default=600.0,
+    help="Watch timeout in seconds.",
+)
+@click.option(
+    "--interval",
+    type=click.FloatRange(min=0),
+    default=3.0,
+    help="Watch poll interval in seconds.",
+)
 @click.pass_obj
 def workflow_status(
     obj: Context,
