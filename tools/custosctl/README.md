@@ -12,9 +12,9 @@ Design: [`design/components/custosctl/design.md`](../../design/components/custos
 > `CUSTOS_*` configuration model, the `--target {local,remote}` abstraction, the
 > `doctor` preflight, and the `up`/`down`/`status` commands for **both** targets
 > are implemented (#952, #953, #954), along with the typed gateway API client
-> that backs the API commands (#955), plus `connector` and `activity`
-> register/list (#956, #957). The remaining API commands
-> (`workflow`/`seed-ootb`/`e2e`, #958–#962) land in the sibling DEVCLI tasks.
+> that backs the API commands (#955), plus `connector`/`activity` register/list
+> (#956, #957) and `workflow apply`/`run`/`status` (#958). The remaining commands
+> (`seed-ootb`/`e2e`, #959–#962) land in the sibling DEVCLI tasks.
 
 ## Install (editable)
 
@@ -48,6 +48,11 @@ custosctl connector register extensions/connectors/ghcr --image-ref ghcr.io/acme
 custosctl connector list dockerhub                            # list registered versions of a type
 custosctl activity register extensions/activities/copy-image  # inject digest + POST manifest
 custosctl activity list custos.builtin copy-image             # list versions of an activity-type
+
+# Workflows (needs CUSTOS_WORKSPACE or --workspace):
+custosctl workflow apply my-workflow.yaml                     # publish a workflow definition
+custosctl workflow run wfv-... --input image=ghcr.io/x:1      # start a run
+custosctl workflow status run-... --watch                     # poll to a terminal status (exit 1 unless succeeded)
 ```
 
 ## Configuration
@@ -66,6 +71,7 @@ table for the full list. Common keys:
 | `CUSTOS_HELM_TIMEOUT` | `15m` | `helm install --wait` timeout |
 | `CUSTOS_GATEWAY` | — | API Gateway base URL (API commands) |
 | `CUSTOS_TOKEN` | — | platform-admin service token (API commands) |
+| `CUSTOS_WORKSPACE` | — | default workspace for the `workflow` commands |
 
 ## Develop
 

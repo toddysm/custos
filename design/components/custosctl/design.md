@@ -173,6 +173,7 @@ take precedence. Prefix `CUSTOS_`.
 | `CUSTOS_IMAGE_TAG` | No | `dev` (chart default) | Maps to the chart's `global.imageTag`; platform images are tag-pinned in 0.2 |
 | `CUSTOS_GATEWAY` | Yes (API cmds) | — | API Gateway base URL |
 | `CUSTOS_TOKEN` | Yes (API cmds) | — | Platform-admin service token (`cst_...`) |
+| `CUSTOS_WORKSPACE` | Yes (workflow cmds) | — | Default workspace for the `workflow` commands |
 | `CUSTOS_INSECURE` | No | `false` | Pass `-k`/verify=false for the eval self-signed cert |
 | `CUSTOS_PREREQS` | No | `install` (local) / `skip` (remote) | Whether `up` runs `install-prereqs.sh` |
 | `CUSTOS_REPO_ROOT` | No | autodetected | Custos checkout the lifecycle commands shell out to (chart, scripts, Makefile) |

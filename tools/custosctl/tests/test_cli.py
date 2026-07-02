@@ -304,3 +304,97 @@ def test_activity_list_empty(runner: CliRunner, monkeypatch: pytest.MonkeyPatch)
     result = runner.invoke(cli, ["activity", "list", "ns", "nope"], env={})
     assert result.exit_code == 0, result.output
     assert "no versions registered" in result.output
+
+
+# --- workflow commands (DEVCLI-IMPL-007) ----------------------------------
+
+
+def test_workflow_apply_prints_ref(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
+    from custosctl import workflows as workflows_module
+
+    monkeypatch.setattr(
+        workflows_module,
+        "apply",
+        lambda s, *, path, workspace: {
+            "workspaceId": "ws-prod",
+            "workflowName": "demo",
+            "version": 3,
+        },
+    )
+    result = runner.invoke(cli, ["workflow", "apply", "wf.yaml", "--workspace", "ws-prod"], env={})
+    assert result.exit_code == 0, result.output
+    assert "published demo@3 (workspace ws-prod)" in result.output
+
+
+def test_workflow_run_parses_inputs(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    from custosctl import workflows as workflows_module
+
+    seen: dict[str, object] = {}
+
+    def _run(
+        s: object,
+        *,
+        workflow_version_id: str,
+        workspace: str | None,
+        inputs: dict[str, object],
+        idempotency_key: str | None,
+    ) -> dict[str, str]:
+        seen["inputs"] = inputs
+        return {"runId": "run-1", "status": "running"}
+
+    monkeypatch.setattr(workflows_module, "run", _run)
+    result = runner.invoke(
+        cli,
+        ["workflow", "run", "wfv-1", "--input", "count=3", "--input", "name=demo"],
+        env={"CUSTOS_WORKSPACE": "ws-prod"},
+    )
+    assert result.exit_code == 0, result.output
+    assert "started run-1 (status running)" in result.output
+    # count parses as JSON int; name is a bare string.
+    assert seen["inputs"] == {"count": 3, "name": "demo"}
+
+
+def test_workflow_run_rejects_bad_input(runner: CliRunner) -> None:
+    result = runner.invoke(
+        cli, ["workflow", "run", "wfv-1", "--input", "noequals"], env={"CUSTOS_WORKSPACE": "w"}
+    )
+    assert result.exit_code != 0
+    assert "KEY=VALUE" in result.output
+
+
+def test_workflow_status_prints(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    from custosctl import workflows as workflows_module
+
+    monkeypatch.setattr(
+        workflows_module,
+        "get_status",
+        lambda s, *, run_id, workspace: {"runId": run_id, "status": "succeeded"},
+    )
+    result = runner.invoke(cli, ["workflow", "status", "run-9"], env={"CUSTOS_WORKSPACE": "ws"})
+    assert result.exit_code == 0, result.output
+    assert "run-9: succeeded" in result.output
+
+
+def test_workflow_status_watch_nonzero_on_failure(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from custosctl import workflows as workflows_module
+
+    monkeypatch.setattr(
+        workflows_module,
+        "wait_for",
+        lambda s, *, run_id, workspace, timeout, interval: {
+            "runId": run_id,
+            "status": "failed",
+            "reason": "boom",
+        },
+    )
+    monkeypatch.setattr(workflows_module, "is_success", lambda r: False)
+    result = runner.invoke(
+        cli, ["workflow", "status", "run-9", "--watch"], env={"CUSTOS_WORKSPACE": "ws"}
+    )
+    assert result.exit_code == 1
+    assert "failed" in result.output
+    assert "reason: boom" in result.output
