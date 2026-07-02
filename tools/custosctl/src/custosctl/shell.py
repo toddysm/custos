@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -104,6 +104,7 @@ def run(
     *,
     cwd: Path | None = None,
     input_text: str | None = None,
+    env: Mapping[str, str] | None = None,
     timeout: int | None = None,
     check: bool = True,
     capture: bool = False,
@@ -112,13 +113,15 @@ def run(
 
     ``capture=False`` inherits the parent's stdio so long-running commands
     (``helm install``, ``kind create``) stream live progress. ``capture=True``
-    returns stdout/stderr for parsing. Raises :class:`CommandError` when
-    ``check`` and the process exits non-zero.
+    returns stdout/stderr for parsing. ``env``, when given, is the full child
+    environment (callers merge onto ``os.environ`` themselves). Raises
+    :class:`CommandError` when ``check`` and the process exits non-zero.
     """
     completed = subprocess.run(
         list(argv),
         cwd=str(cwd) if cwd is not None else None,
         input=input_text,
+        env=dict(env) if env is not None else None,
         capture_output=capture,
         text=True,
         timeout=timeout,

@@ -14,7 +14,7 @@ from pathlib import Path
 
 import click
 
-from custosctl import __version__, activities, connectors, lifecycle, workflows
+from custosctl import __version__, activities, connectors, lifecycle, seed, workflows
 from custosctl.api import ApiError
 from custosctl.config import Settings, Target
 from custosctl.shell import CommandError, ToolStatus, kube_context_reachable, probe_tool
@@ -384,6 +384,22 @@ def workflow_status(
         click.echo(f"  reason: {reason}")
     if watch and not workflows.is_success(record):
         raise SystemExit(1)
+
+
+@cli.command("seed-ootb")
+@click.option(
+    "--allow-existing",
+    is_flag=True,
+    help="Treat an already-registered type (409 digest conflict) as non-fatal.",
+)
+@click.pass_obj
+def seed_ootb(obj: Context, allow_existing: bool) -> None:
+    """Onboard the OOTB connectors and activities (wraps scripts/seed-ootb.sh)."""
+    try:
+        seed.seed_ootb(obj.settings, allow_existing=allow_existing)
+    except (CommandError, RuntimeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo("OOTB catalog onboarded")
 
 
 def main() -> None:
