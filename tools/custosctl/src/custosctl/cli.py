@@ -15,6 +15,7 @@ from pathlib import Path
 import click
 
 from custosctl import __version__, activities, connectors, lifecycle, seed, workflows
+from custosctl import e2e as e2e_module
 from custosctl.api import ApiError
 from custosctl.config import Settings, Target
 from custosctl.shell import CommandError, ToolStatus, kube_context_reachable, probe_tool
@@ -400,6 +401,58 @@ def seed_ootb(obj: Context, allow_existing: bool) -> None:
     except (CommandError, RuntimeError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo("OOTB catalog onboarded")
+
+
+@cli.command()
+@click.option("--workflow", default=None, help="Workflow file to apply (default: packaged sample).")
+@click.option("--workspace", default=None, help="Workspace (defaults to CUSTOS_WORKSPACE).")
+@click.option("--input", "inputs", multiple=True, help="Run input as KEY=VALUE (repeatable).")
+@click.option("--inputs-file", default=None, help="JSON/YAML file of run inputs.")
+@click.option("--skip-up", is_flag=True, help="Assume the platform is already up.")
+@click.option("--teardown", is_flag=True, help="Tear the platform down when finished.")
+@click.option(
+    "--allow-existing/--no-allow-existing",
+    default=True,
+    help="Treat already-registered OOTB types as non-fatal during seed (default: on).",
+)
+@click.option(
+    "--timeout", type=click.FloatRange(min=0), default=1200.0, help="Run wait timeout (s)."
+)
+@click.option(
+    "--interval", type=click.FloatRange(min=0), default=5.0, help="Run poll interval (s)."
+)
+@click.pass_obj
+def e2e(
+    obj: Context,
+    workflow: str | None,
+    workspace: str | None,
+    inputs: tuple[str, ...],
+    inputs_file: str | None,
+    skip_up: bool,
+    teardown: bool,
+    allow_existing: bool,
+    timeout: float,
+    interval: float,
+) -> None:
+    """Run the full end-to-end smoke: up -> seed -> apply -> run -> assert."""
+    parsed_inputs = _parse_inputs(inputs_file, inputs)
+    try:
+        ok = e2e_module.run_e2e(
+            obj.settings,
+            echo=click.echo,
+            workflow=workflow,
+            workspace=workspace,
+            inputs=parsed_inputs,
+            skip_up=skip_up,
+            teardown=teardown,
+            allow_existing=allow_existing,
+            timeout=timeout,
+            interval=interval,
+        )
+    except (CommandError, RuntimeError, ApiError, TimeoutError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    if not ok:
+        raise SystemExit(1)
 
 
 def main() -> None:

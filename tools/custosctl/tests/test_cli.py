@@ -434,3 +434,45 @@ def test_seed_ootb_maps_errors(runner: CliRunner, monkeypatch: pytest.MonkeyPatc
     result = runner.invoke(cli, ["seed-ootb"], env={})
     assert result.exit_code != 0
     assert "CUSTOS_GATEWAY is required" in result.output
+
+
+# --- e2e command (DEVCLI-IMPL-009) ----------------------------------------
+
+
+def test_e2e_success_exit_zero(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    from custosctl import e2e as e2e_mod
+
+    seen: dict[str, object] = {}
+
+    def _run(s: object, *, echo: object, **kw: object) -> bool:
+        seen.update(kw)
+        return True
+
+    monkeypatch.setattr(e2e_mod, "run_e2e", _run)
+    result = runner.invoke(
+        cli, ["e2e", "--skip-up", "--teardown", "--input", "n=1"], env={"CUSTOS_WORKSPACE": "ws"}
+    )
+    assert result.exit_code == 0, result.output
+    assert seen["skip_up"] is True
+    assert seen["teardown"] is True
+    assert seen["inputs"] == {"n": 1}
+
+
+def test_e2e_failure_exit_one(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    from custosctl import e2e as e2e_mod
+
+    monkeypatch.setattr(e2e_mod, "run_e2e", lambda s, *, echo, **kw: False)
+    result = runner.invoke(cli, ["e2e"], env={"CUSTOS_WORKSPACE": "ws"})
+    assert result.exit_code == 1
+
+
+def test_e2e_maps_errors(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    from custosctl import e2e as e2e_mod
+
+    def _boom(s: object, *, echo: object, **kw: object) -> bool:
+        raise RuntimeError("a workspace is required")
+
+    monkeypatch.setattr(e2e_mod, "run_e2e", _boom)
+    result = runner.invoke(cli, ["e2e"], env={})
+    assert result.exit_code != 0
+    assert "a workspace is required" in result.output
