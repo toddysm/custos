@@ -65,6 +65,17 @@ def test_run_nonzero_raises_command_error(monkeypatch: pytest.MonkeyPatch) -> No
     assert "boom" in str(excinfo.value)
 
 
+def test_run_nonzero_capture_false_omits_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Per shell.run's contract, stderr is only attached to CommandError when
+    # capture=True; without capture the child streamed to the parent's stderr.
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _completed(2, "", "boom"))
+    with pytest.raises(shell.CommandError) as excinfo:
+        shell.run(["false"], capture=False)
+    assert excinfo.value.returncode == 2
+    assert excinfo.value.stderr == ""
+    assert "boom" not in str(excinfo.value)
+
+
 def test_run_nonzero_check_false_returns(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: _completed(1))
     result = shell.run(["x"], check=False)
@@ -224,14 +235,36 @@ def test_helm_template_and_uninstall(monkeypatch: pytest.MonkeyPatch, tmp_path: 
 def test_kubectl_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     spy = _RunSpy(monkeypatch, [_completed(0, "manifest"), _completed(0)])
     shell.kubectl_ensure_namespace("ns", context="ctx")
-    # second call is the apply.
-    assert spy.calls[-1][0][:2] == ["kubectl", "--context"]
+    # first call renders the namespace (dry-run), second applies it.
+    assert spy.calls[-2][0] == [
+        "kubectl",
+        "--context",
+        "ctx",
+        "create",
+        "namespace",
+        "ns",
+        "--dry-run=client",
+        "-o",
+        "yaml",
+    ]
+    assert spy.calls[-1][0] == ["kubectl", "--context", "ctx", "apply", "-f", "-"]
+
     shell.kubectl_apply_stdin("doc", namespace="ns")
-    assert spy.last_argv[-3:] == ["-n", "ns", "-f"] or "-f" in spy.last_argv
+    assert spy.last_argv == ["kubectl", "apply", "-n", "ns", "-f", "-"]
+
     shell.kubectl_delete_namespace("ns")
     assert spy.last_argv == ["kubectl", "delete", "namespace", "ns", "--ignore-not-found"]
+
     shell.kubectl_wait("cluster/custos", namespace="ns", condition="Ready", timeout="1m")
-    assert "wait" in spy.last_argv and "--for=condition=Ready" in spy.last_argv
+    assert spy.last_argv == [
+        "kubectl",
+        "wait",
+        "--for=condition=Ready",
+        "cluster/custos",
+        "-n",
+        "ns",
+        "--timeout=1m",
+    ]
 
 
 def test_kubectl_current_context(monkeypatch: pytest.MonkeyPatch) -> None:
