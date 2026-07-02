@@ -1,13 +1,13 @@
-"""Local (kind) platform lifecycle: ``up`` / ``down`` / ``status``.
+"""Platform lifecycle: ``up`` / ``down`` / ``status`` for local and remote.
 
-These functions orchestrate the same steps as the evaluation guide
-[`docs/users/evaluation/local-cluster.md`] as a single, scripted flow:
-create the kind cluster, install the out-of-band prerequisites, pre-provision
-Postgres (the install-ordering caveat), then ``helm install --wait`` the
-umbrella chart. Every external action is a patchable :mod:`custosctl.shell`
-helper so this module can be unit-tested without a real cluster.
-
-Remote-target lifecycle lands in DEVCLI-IMPL-003 (#954); the CLI routes there.
+For ``target=local`` these orchestrate the evaluation guide
+[`docs/users/evaluation/local-cluster.md`] as a single scripted flow (create
+the kind cluster, install prerequisites, pre-provision Postgres, ``helm
+install --wait``). For ``target=remote`` the same platform install runs against
+an existing kube-context — custosctl never creates or deletes the cluster, and
+``down`` only removes the namespace/PVCs when explicitly ``--force``d. Every
+external action is a patchable :mod:`custosctl.shell` helper so this module is
+unit-tested without a real cluster.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from pathlib import Path
 import httpx
 
 from custosctl import shell
-from custosctl.config import Settings, resolve_repo_root
+from custosctl.config import Settings, Target, resolve_repo_root
 
 #: Progress sink — the CLI passes ``click.echo``; tests pass a list append.
 Echo = Callable[[str], None]
@@ -37,15 +37,17 @@ def _values_file(root: Path, profile: str) -> Path:
 
 
 def up(settings: Settings, *, echo: Echo) -> None:
-    """Bring the platform up on a local kind cluster."""
+    """Bring the platform up on the configured target (local kind or remote)."""
+    if settings.target is Target.REMOTE:
+        _up_remote(settings, echo=echo)
+    else:
+        _up_local(settings, echo=echo)
+
+
+def _up_local(settings: Settings, *, echo: Echo) -> None:
     root = resolve_repo_root(settings.repo_root)
     context = settings.effective_kube_context()
-    chart = _chart_dir(root)
-    values = _values_file(root, settings.profile)
-    if not values.is_file():
-        raise RuntimeError(
-            f"values file not found: {values} (unknown profile {settings.profile!r})"
-        )
+    _require_values(root, settings.profile)
 
     # 1. kind cluster
     if shell.kind_cluster_exists(settings.cluster):
@@ -54,14 +56,77 @@ def up(settings: Settings, *, echo: Echo) -> None:
         echo(f"==> creating kind cluster '{settings.cluster}'")
         shell.kind_create(settings.cluster, settings.kind_node_image)
 
-    # 2. out-of-band prerequisites (Dapr, Envoy Gateway, cert-manager, ...)
-    if settings.prereqs == "skip":
+    # 2. prerequisites (default install for local)
+    if settings.effective_prereqs() == "skip":
         echo("==> skipping prerequisites (CUSTOS_PREREQS=skip)")
     else:
-        echo("==> installing out-of-band prerequisites (install-prereqs.sh)")
-        shell.run_script(root / "scripts" / "install-prereqs.sh", cwd=root)
+        _install_prereqs(root, context=context, echo=echo)
 
-    # 3. CloudNativePG operator (required; not covered by install-prereqs.sh)
+    # 3. platform
+    _install_platform(settings, root=root, context=context, echo=echo)
+    _report_health(settings, echo=echo)
+    echo("platform up")
+
+
+def _up_remote(settings: Settings, *, echo: Echo) -> None:
+    root = resolve_repo_root(settings.repo_root)
+    context = settings.effective_kube_context()
+    label = context or "(current kubectl context)"
+    _require_values(root, settings.profile)
+
+    # Never create a cluster on remote — verify the context is reachable first.
+    if not shell.kube_context_reachable(context):
+        raise RuntimeError(
+            f"kube-context {label} is not reachable; select it with "
+            "CUSTOS_KUBE_CONTEXT or 'kubectl config use-context'"
+        )
+    echo(f"==> using kube-context: {label}")
+
+    # Prerequisites default to skip for remote (the cluster likely provides them).
+    if settings.effective_prereqs() == "install":
+        _guard_prereqs_context(context)
+        _install_prereqs(root, context=context, echo=echo)
+    else:
+        echo(
+            "==> skipping prerequisites (CUSTOS_PREREQS=skip); assuming the cluster "
+            "already provides Dapr/Gateway/CNPG/observability"
+        )
+
+    _install_platform(settings, root=root, context=context, echo=echo)
+    _report_health(settings, echo=echo)
+    echo("platform up")
+
+
+def _require_values(root: Path, profile: str) -> Path:
+    values = _values_file(root, profile)
+    if not values.is_file():
+        raise RuntimeError(f"values file not found: {values} (unknown profile {profile!r})")
+    return values
+
+
+def _guard_prereqs_context(context: str | None) -> None:
+    """Refuse remote ``prereqs=install`` when the pinned context isn't current.
+
+    ``scripts/install-prereqs.sh`` operates on kubectl's *current* context and
+    cannot be pointed at an explicit ``--context``. If the user pinned a
+    different context (``CUSTOS_KUBE_CONTEXT``), installing prerequisites would
+    silently target the wrong cluster, so fail with actionable guidance.
+    """
+    if context is None:
+        return
+    current = shell.kubectl_current_context()
+    if current is not None and current != context:
+        raise RuntimeError(
+            f"CUSTOS_PREREQS=install runs install-prereqs.sh against kubectl's "
+            f"current context ({current!r}), not {context!r}. Switch first with "
+            f"'kubectl config use-context {context}', or unset CUSTOS_KUBE_CONTEXT "
+            "to use the current context."
+        )
+
+
+def _install_prereqs(root: Path, *, context: str | None, echo: Echo) -> None:
+    echo("==> installing out-of-band prerequisites (install-prereqs.sh)")
+    shell.run_script(root / "scripts" / "install-prereqs.sh", cwd=root)
     echo("==> installing CloudNativePG operator")
     shell.helm_repo_add("cnpg", _CNPG_REPO)
     shell.helm_repo_update()
@@ -76,13 +141,17 @@ def up(settings: Settings, *, echo: Echo) -> None:
         context=context,
     )
 
-    # 4. chart dependencies
+
+def _install_platform(settings: Settings, *, root: Path, context: str | None, echo: Echo) -> None:
+    chart = _chart_dir(root)
+    values = _values_file(root, settings.profile)
+
     echo("==> resolving chart dependencies (make deps)")
     shell.make_target("deps", cwd=root)
 
-    # 5. namespace + Postgres pre-provision (install-ordering caveat; guide step 5)
     echo(f"==> ensuring namespace '{settings.namespace}'")
     shell.kubectl_ensure_namespace(settings.namespace, context=context)
+
     echo("==> pre-provisioning Postgres (CNPG Cluster)")
     manifest = shell.helm_template(
         settings.release,
@@ -101,7 +170,6 @@ def up(settings: Settings, *, echo: Echo) -> None:
         context=context,
     )
 
-    # 6. install Custos
     echo("==> installing Custos (helm upgrade --install --wait)")
     shell.helm_install(
         settings.release,
@@ -114,27 +182,43 @@ def up(settings: Settings, *, echo: Echo) -> None:
         context=context,
     )
 
-    # 7. gateway health
-    _report_health(settings, echo=echo)
-    echo("platform up")
 
+def down(settings: Settings, *, echo: Echo, force: bool = False) -> None:
+    """Uninstall the release.
 
-def down(settings: Settings, *, echo: Echo) -> None:
-    """Uninstall the release and delete the local kind cluster."""
+    ``local`` also deletes the kind cluster. ``remote`` never touches the
+    cluster and only deletes the namespace (and its PVCs) when ``force``.
+    """
     context = settings.effective_kube_context()
     echo(f"==> uninstalling release '{settings.release}'")
     shell.helm_uninstall(settings.release, namespace=settings.namespace, context=context)
-    echo(f"==> deleting kind cluster '{settings.cluster}'")
-    shell.kind_delete(settings.cluster)
+
+    if settings.target is Target.LOCAL:
+        echo(f"==> deleting kind cluster '{settings.cluster}'")
+        shell.kind_delete(settings.cluster)
+    elif force:
+        echo(f"==> deleting namespace '{settings.namespace}' and its PVCs (--force)")
+        shell.kubectl_delete_namespace(settings.namespace, context=context)
+    else:
+        echo(
+            f"note: left namespace '{settings.namespace}' and its PVCs in place "
+            "(pass --force to delete them)"
+        )
     echo("platform down")
 
 
 def status(settings: Settings, *, echo: Echo) -> bool:
-    """Report cluster/release/pod state. Returns ``True`` when fully up."""
+    """Report cluster/context, release, and pod state. ``True`` when fully up."""
     context = settings.effective_kube_context()
-    exists = shell.kind_cluster_exists(settings.cluster)
-    echo(f"kind cluster '{settings.cluster}': {'present' if exists else 'absent'}")
-    if not exists:
+
+    if settings.target is Target.LOCAL:
+        up_ok = shell.kind_cluster_exists(settings.cluster)
+        echo(f"kind cluster '{settings.cluster}': {'present' if up_ok else 'absent'}")
+    else:
+        label = context or "(current kubectl context)"
+        up_ok = shell.kube_context_reachable(context)
+        echo(f"kube-context '{label}': {'reachable' if up_ok else 'unreachable'}")
+    if not up_ok:
         return False
 
     installed = shell.helm_release_exists(settings.release, settings.namespace, context=context)
@@ -154,7 +238,7 @@ def status(settings: Settings, *, echo: Echo) -> bool:
         healthy = _poll_health(settings.gateway, insecure=settings.insecure, attempts=1, delay=0.0)
         echo(f"gateway {settings.gateway}: {'healthy' if healthy else 'unreachable'}")
 
-    return exists and installed and all_running
+    return up_ok and installed and all_running
 
 
 def _report_health(settings: Settings, *, echo: Echo) -> None:

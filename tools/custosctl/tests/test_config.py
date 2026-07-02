@@ -80,6 +80,20 @@ def test_effective_kube_context_explicit_wins(monkeypatch: pytest.MonkeyPatch) -
     assert settings.effective_kube_context() == "prod-ctx"
 
 
+def test_effective_prereqs_defaults_by_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert Settings().effective_prereqs() == "install"  # local default
+    monkeypatch.setenv("CUSTOS_TARGET", "remote")
+    assert Settings().effective_prereqs() == "skip"  # remote default
+
+
+def test_effective_prereqs_explicit_wins(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CUSTOS_PREREQS", "skip")
+    assert Settings().effective_prereqs() == "skip"  # local, overridden
+    monkeypatch.setenv("CUSTOS_TARGET", "remote")
+    monkeypatch.setenv("CUSTOS_PREREQS", "install")
+    assert Settings().effective_prereqs() == "install"  # remote, overridden
+
+
 def _make_checkout(root: Path) -> Path:
     (root / "deploy" / "helm" / "custos").mkdir(parents=True)
     (root / "deploy" / "helm" / "custos" / "Chart.yaml").write_text("name: custos\n")

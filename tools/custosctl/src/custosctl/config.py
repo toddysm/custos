@@ -93,6 +93,18 @@ class Settings(BaseSettings):
             return f"kind-{self.cluster}"
         return None
 
+    def effective_prereqs(self) -> str:
+        """Whether ``up`` installs the out-of-band prerequisites.
+
+        Returns the explicit ``prereqs`` value when set, otherwise the
+        per-target default: ``install`` for ``LOCAL`` (a fresh kind cluster
+        has nothing), ``skip`` for ``REMOTE`` (an existing cluster is assumed
+        to already provide the operators).
+        """
+        if self.prereqs:
+            return self.prereqs
+        return "install" if self.target is Target.LOCAL else "skip"
+
 
 def _is_repo_root(path: Path) -> bool:
     return all((path / marker).is_file() for marker in _REPO_MARKERS)

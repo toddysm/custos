@@ -248,6 +248,14 @@ def _kubectl(argv: Sequence[str], *, context: str | None) -> list[str]:
     return [*out, *argv]
 
 
+def kubectl_current_context() -> str | None:
+    """Return kubectl's current context, or ``None`` if unset/unavailable."""
+    completed = run(["kubectl", "config", "current-context"], capture=True, check=False)
+    if completed.returncode != 0:
+        return None
+    return completed.stdout.strip() or None
+
+
 def kubectl_ensure_namespace(namespace: str, *, context: str | None = None) -> None:
     """Create ``namespace`` if absent (idempotent via dry-run + apply)."""
     manifest = run(
@@ -265,6 +273,11 @@ def kubectl_apply_stdin(manifest: str, *, namespace: str, context: str | None = 
         _kubectl(["apply", "-n", namespace, "-f", "-"], context=context),
         input_text=manifest,
     )
+
+
+def kubectl_delete_namespace(namespace: str, *, context: str | None = None) -> None:
+    """Delete ``namespace`` (and everything in it, incl. PVCs). Idempotent."""
+    run(_kubectl(["delete", "namespace", namespace, "--ignore-not-found"], context=context))
 
 
 def kubectl_wait(
@@ -329,6 +342,8 @@ __all__ = [
     "kind_delete",
     "kube_context_reachable",
     "kubectl_apply_stdin",
+    "kubectl_current_context",
+    "kubectl_delete_namespace",
     "kubectl_ensure_namespace",
     "kubectl_pod_phases",
     "kubectl_wait",

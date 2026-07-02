@@ -1,4 +1,4 @@
-"""Tests for the local (kind) lifecycle orchestration (DEVCLI-IMPL-002)."""
+"""Tests for the platform lifecycle orchestration (DEVCLI-IMPL-002/003)."""
 
 from __future__ import annotations
 
@@ -43,6 +43,8 @@ class _Recorder:
         self._cluster_exists = cluster_exists
         self.pods: list[tuple[str, str]] = [("api-gateway-0", "Running")]
         self.release_installed = True
+        self.reachable = True
+        self.current_context: str | None = None
 
         def rec(name: str, ret: object = None) -> Callable[..., object]:
             def _fn(*_a: object, **_k: object) -> object:
@@ -52,6 +54,10 @@ class _Recorder:
             return _fn
 
         monkeypatch.setattr(shell, "kind_cluster_exists", lambda *_a, **_k: self._cluster_exists)
+        monkeypatch.setattr(shell, "kube_context_reachable", lambda *_a, **_k: self.reachable)
+        monkeypatch.setattr(
+            shell, "kubectl_current_context", lambda *_a, **_k: self.current_context
+        )
         monkeypatch.setattr(shell, "kind_create", rec("kind_create"))
         monkeypatch.setattr(shell, "kind_delete", rec("kind_delete"))
         monkeypatch.setattr(shell, "run_script", rec("run_script"))
@@ -59,6 +65,7 @@ class _Recorder:
         monkeypatch.setattr(shell, "helm_repo_update", rec("helm_repo_update"))
         monkeypatch.setattr(shell, "make_target", rec("make_target"))
         monkeypatch.setattr(shell, "kubectl_ensure_namespace", rec("kubectl_ensure_namespace"))
+        monkeypatch.setattr(shell, "kubectl_delete_namespace", rec("kubectl_delete_namespace"))
         monkeypatch.setattr(shell, "helm_template", rec("helm_template", "manifest"))
         monkeypatch.setattr(shell, "kubectl_apply_stdin", rec("kubectl_apply_stdin"))
         monkeypatch.setattr(shell, "kubectl_wait", rec("kubectl_wait"))
@@ -135,3 +142,88 @@ def test_status_not_all_running_is_false(tmp_path: Path, monkeypatch: pytest.Mon
     rec = _Recorder(monkeypatch, cluster_exists=True)
     rec.pods = [("api-gateway-0", "Running"), ("auth-0", "Pending")]
     assert lifecycle.status(_settings(root), echo=lambda _m: None) is False
+
+
+# --- remote target (DEVCLI-IMPL-003) --------------------------------------
+
+
+def _remote(root: Path, **overrides: object) -> Settings:
+    return _settings(root, target=Target.REMOTE, kube_context="prod-ctx", **overrides)
+
+
+def test_up_remote_verifies_context_and_never_creates_cluster(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _fake_checkout(tmp_path)
+    rec = _Recorder(monkeypatch, cluster_exists=False)
+    echoes: list[str] = []
+    lifecycle.up(_remote(root), echo=echoes.append)
+
+    assert "kind_create" not in rec.calls
+    # Prereqs default to skip on remote, so install-prereqs.sh + CNPG are not run.
+    assert "run_script" not in rec.calls
+    assert "helm_install:cnpg" not in rec.calls
+    # The platform is still installed against the remote context.
+    assert "helm_install:custos" in rec.calls
+    assert echoes[-1] == "platform up"
+
+
+def test_up_remote_unreachable_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _fake_checkout(tmp_path)
+    rec = _Recorder(monkeypatch, cluster_exists=False)
+    rec.reachable = False
+    with pytest.raises(RuntimeError, match="not reachable"):
+        lifecycle.up(_remote(root), echo=lambda _m: None)
+
+
+def test_up_remote_with_prereqs_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _fake_checkout(tmp_path)
+    rec = _Recorder(monkeypatch, cluster_exists=False)
+    lifecycle.up(_remote(root, prereqs="install"), echo=lambda _m: None)
+    assert "run_script" in rec.calls
+    assert "helm_install:cnpg" in rec.calls
+
+
+def test_up_remote_prereqs_context_mismatch_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _fake_checkout(tmp_path)
+    rec = _Recorder(monkeypatch, cluster_exists=False)
+    rec.current_context = "some-other-context"  # != pinned 'prod-ctx'
+    with pytest.raises(RuntimeError, match="current context"):
+        lifecycle.up(_remote(root, prereqs="install"), echo=lambda _m: None)
+    assert "run_script" not in rec.calls
+
+
+def test_down_remote_never_deletes_cluster(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _fake_checkout(tmp_path)
+    rec = _Recorder(monkeypatch, cluster_exists=True)
+    lifecycle.down(_remote(root), echo=lambda _m: None)
+    assert "helm_uninstall" in rec.calls
+    assert "kind_delete" not in rec.calls
+    assert "kubectl_delete_namespace" not in rec.calls
+
+
+def test_down_remote_force_deletes_namespace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _fake_checkout(tmp_path)
+    rec = _Recorder(monkeypatch, cluster_exists=True)
+    lifecycle.down(_remote(root), echo=lambda _m: None, force=True)
+    assert "kubectl_delete_namespace" in rec.calls
+    assert "kind_delete" not in rec.calls
+
+
+def test_status_remote_reachable_is_true(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _fake_checkout(tmp_path)
+    _Recorder(monkeypatch, cluster_exists=False)  # remote ignores kind clusters
+    assert lifecycle.status(_remote(root), echo=lambda _m: None) is True
+
+
+def test_status_remote_unreachable_is_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _fake_checkout(tmp_path)
+    rec = _Recorder(monkeypatch, cluster_exists=True)
+    rec.reachable = False
+    assert lifecycle.status(_remote(root), echo=lambda _m: None) is False
