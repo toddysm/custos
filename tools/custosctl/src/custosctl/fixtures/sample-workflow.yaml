@@ -1,0 +1,28 @@
+# Sample Custos workflow shipped with custosctl (DEVCLI-IMPL-008).
+#
+# A one-step image copy: the OOTB `copy-image` activity bound to two
+# `oci-registry` connector instances. This is the definition the `custosctl
+# e2e` command applies and runs.
+#
+# Before applying, create the two connector instances referenced below (see
+# docs/users/evaluation/copy-image-walkthrough.md) and replace the
+# <gh-namespace> placeholder in the destination repository:
+#   - source connector instance: `dockerhub-source` (custos-dockerhub, oci.pull)
+#   - dest   connector instance: `ghcr-dest`        (custos-ghcr, oci.push)
+apiVersion: custos.dev/v1
+kind: Workflow
+metadata:
+  name: custosctl-sample-copy-image
+spec:
+  steps:
+    - id: copy
+      activity: custos.builtin/copy-image@0
+      connectors:
+        source: dockerhub-source
+        dest: ghcr-dest
+      with:
+        source:
+          ref: docker.io/library/hello-world:latest
+        destination:
+          repository: <gh-namespace>/hello-world
+          tag: custosctl-sample

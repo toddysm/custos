@@ -406,3 +406,31 @@ def test_workflow_status_watch_nonzero_on_failure(
     assert result.exit_code == 1
     assert "failed" in result.output
     assert "reason: boom" in result.output
+
+
+# --- seed-ootb command (DEVCLI-IMPL-008) ----------------------------------
+
+
+def test_seed_ootb_invokes_wrapper(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    from custosctl import seed as seed_module
+
+    seen: list[bool] = []
+    monkeypatch.setattr(
+        seed_module, "seed_ootb", lambda s, *, allow_existing: seen.append(allow_existing)
+    )
+    result = runner.invoke(cli, ["seed-ootb", "--allow-existing"], env={})
+    assert result.exit_code == 0, result.output
+    assert seen == [True]
+    assert "OOTB catalog onboarded" in result.output
+
+
+def test_seed_ootb_maps_errors(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    from custosctl import seed as seed_module
+
+    def _boom(s: object, *, allow_existing: bool) -> None:
+        raise RuntimeError("CUSTOS_GATEWAY is required for seed-ootb")
+
+    monkeypatch.setattr(seed_module, "seed_ootb", _boom)
+    result = runner.invoke(cli, ["seed-ootb"], env={})
+    assert result.exit_code != 0
+    assert "CUSTOS_GATEWAY is required" in result.output

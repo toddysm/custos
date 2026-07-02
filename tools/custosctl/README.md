@@ -13,8 +13,9 @@ Design: [`design/components/custosctl/design.md`](../../design/components/custos
 > `doctor` preflight, and the `up`/`down`/`status` commands for **both** targets
 > are implemented (#952, #953, #954), along with the typed gateway API client
 > that backs the API commands (#955), plus `connector`/`activity` register/list
-> (#956, #957) and `workflow apply`/`run`/`status` (#958). The remaining commands
-> (`seed-ootb`/`e2e`, #959–#962) land in the sibling DEVCLI tasks.
+> (#956, #957), `workflow apply`/`run`/`status` (#958), and `seed-ootb` (#959).
+> The remaining commands (`e2e`, #960) and CI/docs (#961, #962) land in the
+> sibling DEVCLI tasks.
 
 ## Install (editable)
 
@@ -53,6 +54,9 @@ custosctl activity list custos.builtin copy-image             # list versions of
 custosctl workflow apply my-workflow.yaml                     # publish a workflow definition
 custosctl workflow run wfv-... --input image=ghcr.io/x:1      # start a run
 custosctl workflow status run-... --watch                     # poll to a terminal status (exit 1 unless succeeded)
+
+# Onboard the OOTB catalog (wraps scripts/seed-ootb.sh; run from the checkout):
+custosctl seed-ootb --allow-existing
 ```
 
 ## Configuration
