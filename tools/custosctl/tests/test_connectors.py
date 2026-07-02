@@ -132,6 +132,21 @@ def test_register_rejects_untagged_image_ref(tmp_path: Path) -> None:
         )
 
 
+def test_register_rejects_malformed_digest(tmp_path: Path) -> None:
+    d = _connector_dir(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - not reached
+        return httpx.Response(201, json={})
+
+    with _client(handler) as client, pytest.raises(RuntimeError, match="digest-pinned"):
+        connectors.register(
+            _settings(),
+            path=str(d),
+            image_ref="ghcr.io/acme/x@sha256:abc",
+            client=client,
+        )
+
+
 def test_register_manifest_not_found(tmp_path: Path) -> None:
     def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - not reached
         return httpx.Response(201, json={})
@@ -183,3 +198,11 @@ def test_list_versions_follows_pages() -> None:
     assert [i["version"] for i in items] == ["1.0.0", "1.1.0"]
     assert calls[0]["type"] == "dockerhub"
     assert calls[1]["cursor"] == "c2"
+
+
+def test_list_versions_rejects_non_list_items() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"items": "not-a-list"})
+
+    with _client(handler) as client, pytest.raises(RuntimeError, match="not a list"):
+        connectors.list_versions(_settings(), connector_type="dockerhub", client=client)

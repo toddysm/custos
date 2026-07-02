@@ -12,6 +12,7 @@ versions of a connector type, not all types). Both accept an injected
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,8 @@ from custosctl.config import Settings
 
 _MANIFEST_NAME = "connector-manifest.json"
 _CONNECTOR_TYPES_PATH = "/v1/catalog/connector-types"
+#: A fully digest-pinned reference: ``<repo>@sha256:<64 lowercase hex>``.
+_DIGEST_PINNED_RE = re.compile(r".+@sha256:[0-9a-f]{64}$")
 
 
 def register(
@@ -74,7 +77,13 @@ def list_versions(
             page = client.get(_CONNECTOR_TYPES_PATH, params=params)
             if not isinstance(page, dict):
                 raise RuntimeError("unexpected list response (expected a JSON object)")
-            items.extend(page.get("items", []))
+            page_items = page.get("items", [])
+            if not isinstance(page_items, list):
+                raise RuntimeError("unexpected list response ('items' is not a list)")
+            for item in page_items:
+                if not isinstance(item, dict):
+                    raise RuntimeError("unexpected list response (item is not an object)")
+                items.append(item)
             next_cursor = page.get("nextCursor")
             cursor = next_cursor if isinstance(next_cursor, str) else None
             if not cursor:
@@ -114,9 +123,17 @@ def _manifest_meta(manifest: dict[str, Any]) -> tuple[str, str]:
 
 def _resolve_ref(settings: Settings, *, name: str, version: str, image_ref: str | None) -> str:
     if image_ref:
-        if "@sha256:" not in image_ref:
-            raise RuntimeError(f"--image-ref must be digest-pinned (…@sha256:…); got {image_ref!r}")
+        if not _DIGEST_PINNED_RE.match(image_ref):
+            raise RuntimeError(
+                "--image-ref must be a digest-pinned reference "
+                f"(<repo>@sha256:<64 hex>); got {image_ref!r}"
+            )
         return image_ref
+    # ``name`` is the image repository basename, which by the OOTB publish
+    # convention is the extension *folder* name (e.g. ``dockerhub``) — this is
+    # where publish-connector-<name>.yml and seed-ootb.sh push. It is distinct
+    # from the registered connector-type (manifest ``metadata.type``, e.g.
+    # ``custos-dockerhub``); use --image-ref when the image lives elsewhere.
     image = f"{settings.image_prefix}/{name}:v{version}"
     digest = shell.resolve_image_digest(image)
     return f"{image}@{digest}"
