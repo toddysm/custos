@@ -11,8 +11,9 @@ Design: [`design/components/custosctl/design.md`](../../design/components/custos
 > **Status:** scaffold + local & remote lifecycle. The root command group, the
 > `CUSTOS_*` configuration model, the `--target {local,remote}` abstraction, the
 > `doctor` preflight, and the `up`/`down`/`status` commands for **both** targets
-> are implemented (#952, #953, #954). The API commands
-> (`connector`/`activity`/`workflow`/`seed-ootb`/`e2e`, #955–#962) land in the
+> are implemented (#952, #953, #954), along with the typed gateway API client
+> that backs the API commands (#955). The API commands
+> (`connector`/`activity`/`workflow`/`seed-ootb`/`e2e`, #956–#962) land in the
 > sibling DEVCLI tasks.
 
 ## Install (editable)
