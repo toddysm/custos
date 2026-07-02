@@ -333,6 +333,10 @@ jobs:
         uses: ./.github/actions/slsa-provenance
         with:
           image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          # build-images.yml is also invoked via workflow_call (release +
+          # offline bundle); pass an explicit builder id so its provenance
+          # identity stays build-images.yml regardless of the entry workflow.
+          builder-id: ${{ github.server_url }}/${{ github.repository }}/.github/workflows/build-images.yml@${{ github.ref }}
 
   # Aggregate the built image references so ``workflow_call`` consumers (release
   # + offline bundle) can fan out from a single output.

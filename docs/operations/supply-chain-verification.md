@@ -17,8 +17,15 @@ transparency log:
 The signing identity (the OIDC "subject") is the build workflow itself:
 
 - **Issuer:** `https://token.actions.githubusercontent.com`
-- **Identity:** `https://github.com/toddysm/custos/.github/workflows/build-images.yml@refs/heads/main`
-  (or `@refs/tags/vX.Y.Z` for release builds)
+- **Identity:** the workflow that built and signed the image:
+  - Core service/job images → `https://github.com/toddysm/custos/.github/workflows/build-images.yml@refs/heads/main`
+    (or `@refs/tags/vX.Y.Z` for release builds).
+  - OOTB extension images (`copy-image`, `dockerhub`, `ghcr`) → their own
+    publisher workflow, e.g.
+    `.../publish-activity-copy-image.yml@refs/tags/activity-copy-image-vX.Y.Z` or
+    `.../publish-connector-dockerhub.yml@refs/tags/connector-dockerhub-vX.Y.Z`.
+
+  The SLSA provenance `builder.id` matches this signing identity.
 
 ## Online verification
 
@@ -63,7 +70,7 @@ For release builds substitute the tag ref, or match either with a regexp:
 
 ```bash
 cosign verify \
-  --certificate-identity-regexp '^https://github.com/toddysm/custos/\.github/workflows/build-images\.yml@refs/(heads/main|tags/v.*)$' \
+  --certificate-identity-regexp '^https://github.com/toddysm/custos/\.github/workflows/(build-images|publish-activity-[a-z0-9-]+|publish-connector-[a-z0-9-]+)\.yml@refs/(heads/main|tags/(v[0-9]+\.[0-9]+\.[0-9]+|(activity|connector)-[a-z0-9-]+-v[0-9]+\.[0-9]+\.[0-9]+))$' \
   --certificate-oidc-issuer "$ISSUER" \
   "$IMAGE"
 ```
@@ -106,7 +113,7 @@ done
 cosign verify \
   --insecure-ignore-tlog=false \
   --offline=true \
-  --certificate-identity-regexp '^https://github.com/toddysm/custos/\.github/workflows/build-images\.yml@refs/(heads/main|tags/v.*)$' \
+  --certificate-identity-regexp '^https://github.com/toddysm/custos/\.github/workflows/(build-images|publish-activity-[a-z0-9-]+|publish-connector-[a-z0-9-]+)\.yml@refs/(heads/main|tags/(v[0-9]+\.[0-9]+\.[0-9]+|(activity|connector)-[a-z0-9-]+-v[0-9]+\.[0-9]+\.[0-9]+))$' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
   registry.internal/custos/api-gateway@sha256:<digest>
 ```
