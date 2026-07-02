@@ -77,8 +77,19 @@ runs:
         # GITHUB_WORKFLOW_REF names the caller, not the reusable workflow).
         if [[ -n "${BUILDER_ID_INPUT}" ]]; then
           BUILDER_ID="${BUILDER_ID_INPUT}"
-        else
+        elif [[ -n "${GITHUB_WORKFLOW_REF:-}" ]]; then
           BUILDER_ID="${GITHUB_SERVER_URL}/${GITHUB_WORKFLOW_REF}"
+        else
+          echo "::error::GITHUB_WORKFLOW_REF is unset — pass the builder-id input explicitly" >&2
+          exit 1
+        fi
+        # Validate the builder id is a well-formed workflow URL for this repo,
+        # so a malformed override can't yield a bogus entryPoint/predicate:
+        # <server>/<owner>/<repo>/.github/workflows/<wf>.yml@<ref>.
+        _prefix="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/"
+        if [[ "${BUILDER_ID}" != "${_prefix}"*.yml@* ]]; then
+          echo "::error::builder id '${BUILDER_ID}' is not a ${_prefix}<wf>.yml@<ref> URL" >&2
+          exit 1
         fi
         export BUILDER_ID
         # entryPoint is the workflow path portion of the builder id: strip the

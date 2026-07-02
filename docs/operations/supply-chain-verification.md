@@ -70,7 +70,7 @@ For release builds substitute the tag ref, or match either with a regexp:
 
 ```bash
 cosign verify \
-  --certificate-identity-regexp '^https://github.com/toddysm/custos/\.github/workflows/(build-images|publish-activity-[a-z0-9-]+|publish-connector-[a-z0-9-]+)\.yml@refs/(heads/main|tags/.*)$' \
+  --certificate-identity-regexp '^https://github.com/toddysm/custos/\.github/workflows/(build-images|publish-activity-[a-z0-9-]+|publish-connector-[a-z0-9-]+)\.yml@refs/(heads/main|tags/(v[0-9]+\.[0-9]+\.[0-9]+|(activity|connector)-[a-z0-9-]+-v[0-9]+\.[0-9]+\.[0-9]+))$' \
   --certificate-oidc-issuer "$ISSUER" \
   "$IMAGE"
 ```
@@ -113,7 +113,7 @@ done
 cosign verify \
   --insecure-ignore-tlog=false \
   --offline=true \
-  --certificate-identity-regexp '^https://github.com/toddysm/custos/\.github/workflows/(build-images|publish-activity-[a-z0-9-]+|publish-connector-[a-z0-9-]+)\.yml@refs/(heads/main|tags/.*)$' \
+  --certificate-identity-regexp '^https://github.com/toddysm/custos/\.github/workflows/(build-images|publish-activity-[a-z0-9-]+|publish-connector-[a-z0-9-]+)\.yml@refs/(heads/main|tags/(v[0-9]+\.[0-9]+\.[0-9]+|(activity|connector)-[a-z0-9-]+-v[0-9]+\.[0-9]+\.[0-9]+))$' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
   registry.internal/custos/api-gateway@sha256:<digest>
 ```
