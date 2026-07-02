@@ -14,8 +14,8 @@ Design: [`design/components/custosctl/design.md`](../../design/components/custos
 > are implemented (#952, #953, #954), along with the typed gateway API client
 > that backs the API commands (#955), plus `connector`/`activity` register/list
 > (#956, #957), `workflow apply`/`run`/`status` (#958), `seed-ootb` (#959), and
-> the `e2e` one-shot (#960). CI/docs (#961, #962) land in the sibling DEVCLI
-> tasks.
+> the `e2e` one-shot (#960), and a CI job (#961). Reference docs (#962) land in
+> the final sibling DEVCLI task.
 
 ## Install (editable)
 
@@ -86,6 +86,10 @@ table for the full list. Common keys:
 ```sh
 cd tools/custosctl
 pip install -e '.[dev]'
-pytest -q
-ruff check . && mypy src tests
+pytest -q --cov=custosctl --cov-fail-under=90
+ruff check . && ruff format --check . && mypy src tests
 ```
+
+CI (`.github/workflows/python-services.yml`, job `custosctl`) runs the same
+lint / format / mypy / pytest-with-90%-coverage gate on Python 3.11 and 3.12 for
+changes under `tools/custosctl/**`.
