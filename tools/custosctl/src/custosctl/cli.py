@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 import click
 
-from custosctl import __version__, connectors, lifecycle
+from custosctl import __version__, activities, connectors, lifecycle
 from custosctl.api import ApiError
 from custosctl.config import Settings, Target
 from custosctl.shell import CommandError, ToolStatus, kube_context_reachable, probe_tool
@@ -193,6 +193,63 @@ def connector_list(obj: Context, connector_type: str) -> None:
         raise click.ClickException(str(exc)) from exc
     if not items:
         click.echo(f"no versions registered for connector-type '{connector_type}'")
+        return
+    for item in items:
+        click.echo(f"  {item['version']:<12} {item['digest']}")
+
+
+@cli.group()
+def activity() -> None:
+    """Register and list activity-types in the catalog."""
+
+
+@activity.command("register")
+@click.argument("path")
+@click.option(
+    "--image-ref",
+    default=None,
+    help="Digest-pinned image ref (…@sha256:…). If omitted, derived from "
+    "CUSTOS_IMAGE_PREFIX and resolved via docker buildx / skopeo / crane.",
+)
+@click.option(
+    "--workspace",
+    default=None,
+    help="Workspace to register under (defaults to the manifest's metadata.namespace).",
+)
+@click.pass_obj
+def activity_register(
+    obj: Context, path: str, image_ref: str | None, workspace: str | None
+) -> None:
+    """Register an activity-type from an extension folder or manifest PATH."""
+    try:
+        ref = activities.register(obj.settings, path=path, image_ref=image_ref, workspace=workspace)
+    except (CommandError, RuntimeError, ApiError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"registered {ref['namespace']}/{ref['type']}@{ref['version']} ({ref['digest']})")
+
+
+@activity.command("list")
+@click.argument("namespace")
+@click.argument("activity_type")
+@click.option(
+    "--workspace",
+    default=None,
+    help="Workspace to query (defaults to NAMESPACE).",
+)
+@click.pass_obj
+def activity_list(obj: Context, namespace: str, activity_type: str, workspace: str | None) -> None:
+    """List registered versions of NAMESPACE/ACTIVITY_TYPE."""
+    try:
+        items = activities.list_versions(
+            obj.settings,
+            namespace=namespace,
+            activity_type=activity_type,
+            workspace=workspace,
+        )
+    except (CommandError, RuntimeError, ApiError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    if not items:
+        click.echo(f"no versions registered for activity-type '{namespace}/{activity_type}'")
         return
     for item in items:
         click.echo(f"  {item['version']:<12} {item['digest']}")
