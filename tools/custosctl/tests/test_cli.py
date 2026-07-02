@@ -250,3 +250,57 @@ def test_connector_register_maps_errors(runner: CliRunner, monkeypatch: pytest.M
     result = runner.invoke(cli, ["connector", "register", "x"], env={})
     assert result.exit_code != 0
     assert "CUSTOS_GATEWAY is required" in result.output
+
+
+# --- activity commands (DEVCLI-IMPL-006) ----------------------------------
+
+
+def test_activity_register_prints_ref(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    from custosctl import activities as activities_module
+
+    monkeypatch.setattr(
+        activities_module,
+        "register",
+        lambda s, *, path, image_ref, workspace: {
+            "namespace": "custos.builtin",
+            "type": "copy-image",
+            "version": "0.1.0",
+            "digest": "sha256:ab",
+        },
+    )
+    result = runner.invoke(
+        cli, ["activity", "register", "extensions/activities/copy-image"], env={}
+    )
+    assert result.exit_code == 0, result.output
+    assert "registered custos.builtin/copy-image@0.1.0 (sha256:ab)" in result.output
+
+
+def test_activity_list_prints_versions(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    from custosctl import activities as activities_module
+
+    monkeypatch.setattr(
+        activities_module,
+        "list_versions",
+        lambda s, *, namespace, activity_type, workspace: [
+            {
+                "namespace": namespace,
+                "type": activity_type,
+                "version": "0.1.0",
+                "digest": "sha256:1",
+            },
+        ],
+    )
+    result = runner.invoke(cli, ["activity", "list", "custos.builtin", "copy-image"], env={})
+    assert result.exit_code == 0, result.output
+    assert "0.1.0" in result.output
+
+
+def test_activity_list_empty(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    from custosctl import activities as activities_module
+
+    monkeypatch.setattr(
+        activities_module, "list_versions", lambda s, *, namespace, activity_type, workspace: []
+    )
+    result = runner.invoke(cli, ["activity", "list", "ns", "nope"], env={})
+    assert result.exit_code == 0, result.output
+    assert "no versions registered" in result.output

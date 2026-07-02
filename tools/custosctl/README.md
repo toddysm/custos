@@ -12,10 +12,9 @@ Design: [`design/components/custosctl/design.md`](../../design/components/custos
 > `CUSTOS_*` configuration model, the `--target {local,remote}` abstraction, the
 > `doctor` preflight, and the `up`/`down`/`status` commands for **both** targets
 > are implemented (#952, #953, #954), along with the typed gateway API client
-> that backs the API commands (#955), plus `connector register`/`connector list`
-> (#956). The remaining API commands
-> (`activity`/`workflow`/`seed-ootb`/`e2e`, #957–#962) land in the sibling
-> DEVCLI tasks.
+> that backs the API commands (#955), plus `connector` and `activity`
+> register/list (#956, #957). The remaining API commands
+> (`workflow`/`seed-ootb`/`e2e`, #958–#962) land in the sibling DEVCLI tasks.
 
 ## Install (editable)
 
@@ -47,6 +46,8 @@ custosctl down --yes --force     # ...also delete the namespace and its PVCs (de
 custosctl connector register extensions/connectors/dockerhub  # resolve digest + POST manifest
 custosctl connector register extensions/connectors/ghcr --image-ref ghcr.io/acme/custos/ghcr:v0.1.0@sha256:...
 custosctl connector list dockerhub                            # list registered versions of a type
+custosctl activity register extensions/activities/copy-image  # inject digest + POST manifest
+custosctl activity list custos.builtin copy-image             # list versions of an activity-type
 ```
 
 ## Configuration

@@ -12,18 +12,15 @@ versions of a connector type, not all types). Both accept an injected
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any
 
-from custosctl import shell
+from custosctl import imageref
 from custosctl.api import ApiClient, build_client
 from custosctl.config import Settings
 
 _MANIFEST_NAME = "connector-manifest.json"
 _CONNECTOR_TYPES_PATH = "/v1/catalog/connector-types"
-#: A fully digest-pinned reference: ``<repo>@sha256:<64 lowercase hex>``.
-_DIGEST_PINNED_RE = re.compile(r".+@sha256:[0-9a-f]{64}$")
 
 
 def register(
@@ -41,7 +38,7 @@ def register(
     """
     name, manifest = _load_manifest(Path(path))
     _, version = _manifest_meta(manifest)
-    ref = _resolve_ref(settings, name=name, version=version, image_ref=image_ref)
+    _, ref = imageref.resolve_image_ref(settings, name=name, version=version, image_ref=image_ref)
 
     owns = client is None
     client = client or build_client(settings)
@@ -119,24 +116,6 @@ def _manifest_meta(manifest: dict[str, Any]) -> tuple[str, str]:
     if not type_ or not version:
         raise RuntimeError("connector manifest is missing metadata.type / metadata.version")
     return str(type_), str(version)
-
-
-def _resolve_ref(settings: Settings, *, name: str, version: str, image_ref: str | None) -> str:
-    if image_ref:
-        if not _DIGEST_PINNED_RE.match(image_ref):
-            raise RuntimeError(
-                "--image-ref must be a digest-pinned reference "
-                f"(<repo>@sha256:<64 hex>); got {image_ref!r}"
-            )
-        return image_ref
-    # ``name`` is the image repository basename, which by the OOTB publish
-    # convention is the extension *folder* name (e.g. ``dockerhub``) — this is
-    # where publish-connector-<name>.yml and seed-ootb.sh push. It is distinct
-    # from the registered connector-type (manifest ``metadata.type``, e.g.
-    # ``custos-dockerhub``); use --image-ref when the image lives elsewhere.
-    image = f"{settings.image_prefix}/{name}:v{version}"
-    digest = shell.resolve_image_digest(image)
-    return f"{image}@{digest}"
 
 
 __all__ = ["list_versions", "register"]
