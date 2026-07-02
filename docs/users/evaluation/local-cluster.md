@@ -16,6 +16,8 @@ variant of the same flow.
 > **M1 evaluation build.** No Web UI, pre-provisioned tokens only, single-replica
 > infrastructure. See the [evaluation overview](overview.md).
 
+> **Prefer to script it?** [`custosctl`](../../developers/custosctl.md) is the developer CLI that automates this exact flow — `custosctl up` performs steps 2–6 (create the `kind` cluster, install prereqs, `helm install`), and `custosctl e2e` also seeds the OOTB catalog and runs a sample workflow. This page is the readable walkthrough of what the CLI does under the hood.
+
 ## 1. Prerequisites
 
 Install on your workstation:
@@ -412,3 +414,4 @@ kubectl get crd -o name \
 | [First use](first-workflow.md) | Authenticate and run a workflow |
 | [Troubleshooting](troubleshooting.md) | Common failure modes and debug commands |
 | [Uninstall](uninstall.md) | Full teardown and cleanup |
+| [`custosctl` CLI](../../developers/custosctl.md) | Script this whole flow (`up`/`e2e`) instead of running the cells by hand |

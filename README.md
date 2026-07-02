@@ -20,6 +20,7 @@ Custos is a **pluggable workflow orchestrator for supply-chain security operatio
 - 📘 [Local-cluster quickstart](docs/users/evaluation/local-cluster.md) — fastest way to try Custos
 - 📚 [User & evaluation guide](docs/users/README.md) — deploy, verify, and operate the platform
 - 🧩 [Developer guide](docs/developers/README.md) — write connectors, activities, and plugins
+- ⚙️ [`custosctl` CLI](docs/developers/custosctl.md) — script the deploy + onboarding + first-workflow flow (`custosctl up` / `e2e`)
 
 ## What Custos does
 
@@ -114,6 +115,7 @@ Target cluster environments: AKS, EKS, GKE, k3s, OpenShift, and vanilla Kubernet
 | [docs/README.md](docs/README.md) | Documentation index across audiences |
 | [docs/users/evaluation/local-cluster.md](docs/users/evaluation/local-cluster.md) | Getting-started quickstart — deploy on a local kind / Docker Desktop Kubernetes cluster |
 | [docs/developers/README.md](docs/developers/README.md) | Plugin, connection, and activity developer guide |
+| [docs/developers/custosctl.md](docs/developers/custosctl.md) | `custosctl` dev/test CLI reference — local & remote lifecycle, catalog/workflow commands, `e2e` |
 | [docs/developers/connections-api.md](docs/developers/connections-api.md) | Connector Manifest v1 reference for connection developers |
 
 ## Repository layout
