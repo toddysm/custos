@@ -163,6 +163,44 @@ def make_target(target: str, *, cwd: Path) -> None:
     run(["make", "-C", str(cwd), target])
 
 
+def resolve_image_digest(image_ref: str) -> str:
+    """Resolve ``image_ref`` to its ``sha256:<hex>`` manifest digest.
+
+    Tries ``docker buildx imagetools``, then ``skopeo``, then ``crane`` —
+    whichever is installed and can reach the registry. Raises
+    :class:`CommandError` when none can resolve a digest.
+    """
+    probes: list[tuple[str, list[str]]] = [
+        (
+            "docker",
+            [
+                "docker",
+                "buildx",
+                "imagetools",
+                "inspect",
+                image_ref,
+                "--format",
+                "{{.Manifest.Digest}}",
+            ],
+        ),
+        ("skopeo", ["skopeo", "inspect", "--format", "{{.Digest}}", f"docker://{image_ref}"]),
+        ("crane", ["crane", "digest", image_ref]),
+    ]
+    for tool, argv in probes:
+        if which(tool) is None:
+            continue
+        completed = run(argv, capture=True, check=False)
+        digest = completed.stdout.strip()
+        if completed.returncode == 0 and digest.startswith("sha256:"):
+            return digest
+    raise CommandError(
+        ["<digest-resolver>"],
+        1,
+        f"could not resolve a digest for {image_ref}; install docker buildx, "
+        "skopeo, or crane with pull access, or pass --image-ref",
+    )
+
+
 def helm_release_exists(release: str, namespace: str, *, context: str | None = None) -> bool:
     argv = ["helm", "status", release, "-n", namespace]
     if context:
@@ -349,6 +387,7 @@ __all__ = [
     "kubectl_wait",
     "make_target",
     "probe_tool",
+    "resolve_image_digest",
     "run",
     "run_script",
     "which",

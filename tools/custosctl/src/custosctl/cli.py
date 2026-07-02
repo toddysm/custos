@@ -12,7 +12,8 @@ from dataclasses import dataclass
 
 import click
 
-from custosctl import __version__, lifecycle
+from custosctl import __version__, connectors, lifecycle
+from custosctl.api import ApiError
 from custosctl.config import Settings, Target
 from custosctl.shell import CommandError, ToolStatus, kube_context_reachable, probe_tool
 
@@ -156,6 +157,45 @@ def status(obj: Context) -> None:
         raise click.ClickException(str(exc)) from exc
     if not healthy:
         raise SystemExit(1)
+
+
+@cli.group()
+def connector() -> None:
+    """Register and list connector-types in the catalog."""
+
+
+@connector.command("register")
+@click.argument("path")
+@click.option(
+    "--image-ref",
+    default=None,
+    help="Digest-pinned image ref (…@sha256:…). If omitted, derived from "
+    "CUSTOS_IMAGE_PREFIX and resolved via docker buildx / skopeo / crane.",
+)
+@click.pass_obj
+def connector_register(obj: Context, path: str, image_ref: str | None) -> None:
+    """Register a connector-type from an extension folder or manifest PATH."""
+    try:
+        ref = connectors.register(obj.settings, path=path, image_ref=image_ref)
+    except (CommandError, RuntimeError, ApiError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"registered {ref['type']}@{ref['version']} ({ref['digest']})")
+
+
+@connector.command("list")
+@click.argument("connector_type")
+@click.pass_obj
+def connector_list(obj: Context, connector_type: str) -> None:
+    """List registered versions of CONNECTOR_TYPE."""
+    try:
+        items = connectors.list_versions(obj.settings, connector_type=connector_type)
+    except (CommandError, RuntimeError, ApiError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    if not items:
+        click.echo(f"no versions registered for connector-type '{connector_type}'")
+        return
+    for item in items:
+        click.echo(f"  {item['version']:<12} {item['digest']}")
 
 
 def main() -> None:
