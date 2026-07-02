@@ -102,6 +102,18 @@ def test_non_json_error_still_raises() -> None:
     assert excinfo.value.code is None
 
 
+def test_success_with_undecodable_body_raises_response_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        # A 200 that is not JSON (e.g. an HTML page from a proxy) must not be
+        # silently dropped to None.
+        return httpx.Response(200, text="<html>oops</html>")
+
+    with _client(handler) as client, pytest.raises(ApiError) as excinfo:
+        client.get("/v1/thing")
+    assert excinfo.value.status_code == 200
+    assert "API response error" in str(excinfo.value)
+
+
 def test_transport_error_becomes_api_error() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("refused", request=request)
@@ -126,6 +138,16 @@ def test_build_client_requires_gateway() -> None:
 def test_build_client_requires_token() -> None:
     with pytest.raises(RuntimeError, match="CUSTOS_TOKEN is required"):
         build_client(_settings(gateway="https://gw.example"))
+
+
+def test_build_client_rejects_blank_gateway() -> None:
+    with pytest.raises(RuntimeError, match="CUSTOS_GATEWAY is required"):
+        build_client(_settings(gateway="   ", token="cst_x"))
+
+
+def test_build_client_rejects_blank_token() -> None:
+    with pytest.raises(RuntimeError, match="CUSTOS_TOKEN is required"):
+        build_client(_settings(gateway="https://gw.example", token="   "))
 
 
 def test_build_client_verify_toggles_with_insecure() -> None:

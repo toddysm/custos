@@ -45,7 +45,12 @@ class ApiError(RuntimeError):
         self.type = type
         self.code = code
         message = detail or title or code or f"HTTP {status_code}"
-        prefix = "API request failed" if status_code == 0 else f"API error {status_code}"
+        if status_code == 0:
+            prefix = "API request failed"
+        elif 200 <= status_code < 300:
+            prefix = "API response error"
+        else:
+            prefix = f"API error {status_code}"
         super().__init__(f"{prefix}: {message}")
 
     @classmethod
@@ -93,7 +98,7 @@ class ApiClient:
             verify=verify,
             timeout=timeout,
             transport=transport,
-            headers={"authorization": f"Bearer {token}"},
+            headers={"Authorization": f"Bearer {token}"},
         )
 
     def __enter__(self) -> ApiClient:
@@ -125,7 +130,7 @@ class ApiClient:
         """
         headers: dict[str, str] = {}
         if idempotency_key is not None:
-            headers["idempotency-key"] = idempotency_key
+            headers["Idempotency-Key"] = idempotency_key
         try:
             response = self._client.request(
                 method,
@@ -156,9 +161,13 @@ class ApiClient:
 def _decode(response: httpx.Response) -> Any:
     if response.status_code == 204 or not response.content:
         return None
-    if "json" in response.headers.get("content-type", ""):
+    try:
         return response.json()
-    return None
+    except ValueError as exc:
+        raise ApiError(
+            status_code=response.status_code,
+            detail=f"could not decode response body as JSON: {exc}",
+        ) from exc
 
 
 def build_client(settings: Settings, *, transport: httpx.BaseTransport | None = None) -> ApiClient:
@@ -167,13 +176,14 @@ def build_client(settings: Settings, *, transport: httpx.BaseTransport | None = 
     Raises :class:`RuntimeError` when the gateway URL or token is missing —
     the API-driven commands surface this as an actionable CLI error.
     """
-    if not settings.gateway:
+    if not settings.gateway or not settings.gateway.strip():
         raise RuntimeError("CUSTOS_GATEWAY is required for API commands (the gateway base URL)")
-    if settings.token is None:
+    token = settings.token.get_secret_value().strip() if settings.token is not None else ""
+    if not token:
         raise RuntimeError("CUSTOS_TOKEN is required for API commands (a platform service token)")
     return ApiClient(
-        base_url=settings.gateway,
-        token=settings.token.get_secret_value(),
+        base_url=settings.gateway.strip(),
+        token=token,
         verify=not settings.insecure,
         transport=transport,
     )
