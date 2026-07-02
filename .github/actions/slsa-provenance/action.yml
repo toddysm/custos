@@ -5,9 +5,13 @@
 # operators can verify it with:
 #
 #   cosign verify-attestation --type slsaprovenance \
-#     --certificate-identity-regexp '...build-images.yml@.*' \
+#     --certificate-identity-regexp '...<publisher-workflow>.yml@.*' \
 #     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
 #     <image>@<digest>
+#
+# The provenance ``builder.id`` tracks the workflow that ran (and signed) the
+# job, so it matches the Fulcio signing identity. See
+# docs/operations/supply-chain-verification.md for the verification policy.
 #
 # The provenance is produced by the GitHub-hosted runner and signed with the
 # workflow's short-lived Fulcio identity + Rekor entry, giving a non-repudiable
@@ -24,6 +28,16 @@ inputs:
   image:
     description: "Image/artifact reference. MUST be pinned by digest (name@sha256:...)."
     required: true
+  builder-id:
+    description: >-
+      Optional explicit SLSA builder id (a full
+      `<server>/<owner>/<repo>/.github/workflows/<wf>.yml@<ref>` URL). When
+      omitted, it is derived from `GITHUB_WORKFLOW_REF` (the calling workflow).
+      Pass this from a reusable workflow invoked via `workflow_call`, where
+      `GITHUB_WORKFLOW_REF` points at the caller rather than the reusable
+      workflow, to keep the provenance identity stable.
+    required: false
+    default: ""
   cosign-version:
     description: "cosign release to install."
     required: false
@@ -41,6 +55,7 @@ runs:
       shell: bash
       env:
         IMAGE: ${{ inputs.image }}
+        BUILDER_ID_INPUT: ${{ inputs.builder-id }}
       run: |
         set -euo pipefail
         if [[ "$IMAGE" != *"@sha256:"* ]]; then
@@ -55,7 +70,21 @@ runs:
         # ``export`` so the embedded python3 snippet can read these via os.environ.
         export BUILD_SHA="$(git rev-parse HEAD)"
         export SOURCE_URI="git+${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}@${GITHUB_REF}"
-        export BUILDER_ID="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/build-images.yml@${GITHUB_REF}"
+        # Builder identity tracks the workflow that actually ran (and signed)
+        # this job, so the SLSA predicate matches the Fulcio signing identity
+        # that verification pins. ``builder-id`` overrides the derived value for
+        # reusable workflows invoked via ``workflow_call`` (where
+        # GITHUB_WORKFLOW_REF names the caller, not the reusable workflow).
+        if [[ -n "${BUILDER_ID_INPUT}" ]]; then
+          BUILDER_ID="${BUILDER_ID_INPUT}"
+        else
+          BUILDER_ID="${GITHUB_SERVER_URL}/${GITHUB_WORKFLOW_REF}"
+        fi
+        export BUILDER_ID
+        # entryPoint is the workflow path portion of the builder id: strip the
+        # ``<server>/<owner>/<repo>/`` prefix and the ``@<ref>`` suffix.
+        REF_PATH="${BUILDER_ID#"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/"}"
+        export ENTRYPOINT="${REF_PATH%@*}"
         export INVOCATION_ID="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}"
         export STARTED_ON="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
@@ -75,7 +104,7 @@ runs:
                 "configSource": {
                     "uri": source_uri,
                     "digest": {"sha1": sha},
-                    "entryPoint": ".github/workflows/build-images.yml",
+                    "entryPoint": os.environ["ENTRYPOINT"],
                 },
                 "environment": {
                     "github_run_id": os.environ["GITHUB_RUN_ID"],
