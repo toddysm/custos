@@ -8,11 +8,13 @@ API command groups are registered by later DEVCLI tasks.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
 
 import click
 
-from custosctl import __version__, activities, connectors, lifecycle
+from custosctl import __version__, activities, connectors, lifecycle, workflows
 from custosctl.api import ApiError
 from custosctl.config import Settings, Target
 from custosctl.shell import CommandError, ToolStatus, kube_context_reachable, probe_tool
@@ -253,6 +255,135 @@ def activity_list(obj: Context, namespace: str, activity_type: str, workspace: s
         return
     for item in items:
         click.echo(f"  {item['version']:<12} {item['digest']}")
+
+
+def _parse_inputs(inputs_file: str | None, input_pairs: tuple[str, ...]) -> dict[str, object]:
+    """Build the run inputs from an optional JSON/YAML file plus k=v overrides."""
+    result: dict[str, object] = {}
+    if inputs_file is not None:
+        import yaml
+
+        try:
+            loaded = yaml.safe_load(Path(inputs_file).read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError) as exc:
+            raise click.ClickException(
+                f"could not read --inputs-file {inputs_file}: {exc}"
+            ) from exc
+        if not isinstance(loaded, dict):
+            raise click.ClickException("--inputs-file must contain a JSON/YAML object")
+        for raw_key, value in loaded.items():
+            key = str(raw_key).strip()
+            if not key:
+                raise click.ClickException("--inputs-file contains an empty key")
+            result[key] = value
+    for pair in input_pairs:
+        key, sep, raw = pair.partition("=")
+        key = key.strip()
+        if not sep or not key:
+            raise click.ClickException(
+                f"--input must be KEY=VALUE with a non-empty key; got {pair!r}"
+            )
+        try:
+            result[key] = json.loads(raw)
+        except json.JSONDecodeError:
+            result[key] = raw
+    return result
+
+
+@cli.group()
+def workflow() -> None:
+    """Publish workflow definitions and drive runs."""
+
+
+@workflow.command("apply")
+@click.argument("file")
+@click.option("--workspace", default=None, help="Workspace (defaults to CUSTOS_WORKSPACE).")
+@click.pass_obj
+def workflow_apply(obj: Context, file: str, workspace: str | None) -> None:
+    """Publish the workflow definition in FILE."""
+    try:
+        ref = workflows.apply(obj.settings, path=file, workspace=workspace)
+    except (CommandError, RuntimeError, ApiError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"published {ref['workflowName']}@{ref['version']} (workspace {ref['workspaceId']})")
+
+
+@workflow.command("run")
+@click.argument("workflow_version_id")
+@click.option("--workspace", default=None, help="Workspace (defaults to CUSTOS_WORKSPACE).")
+@click.option("--input", "inputs", multiple=True, help="Run input as KEY=VALUE (repeatable).")
+@click.option("--inputs-file", default=None, help="JSON/YAML file of run inputs.")
+@click.option("--idempotency-key", default=None, help="Idempotency-Key for the start request.")
+@click.pass_obj
+def workflow_run(
+    obj: Context,
+    workflow_version_id: str,
+    workspace: str | None,
+    inputs: tuple[str, ...],
+    inputs_file: str | None,
+    idempotency_key: str | None,
+) -> None:
+    """Start a run of WORKFLOW_VERSION_ID."""
+    parsed_inputs = _parse_inputs(inputs_file, inputs)
+    try:
+        ref = workflows.run(
+            obj.settings,
+            workflow_version_id=workflow_version_id,
+            workspace=workspace,
+            inputs=parsed_inputs,
+            idempotency_key=idempotency_key,
+        )
+    except (CommandError, RuntimeError, ApiError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"started {ref['runId']} (status {ref['status']})")
+
+
+@workflow.command("status")
+@click.argument("run_id")
+@click.option("--workspace", default=None, help="Workspace (defaults to CUSTOS_WORKSPACE).")
+@click.option("--watch", is_flag=True, help="Poll until the run reaches a terminal status.")
+@click.option(
+    "--timeout",
+    type=click.FloatRange(min=0),
+    default=600.0,
+    help="Watch timeout in seconds.",
+)
+@click.option(
+    "--interval",
+    type=click.FloatRange(min=0),
+    default=3.0,
+    help="Watch poll interval in seconds.",
+)
+@click.pass_obj
+def workflow_status(
+    obj: Context,
+    run_id: str,
+    workspace: str | None,
+    watch: bool,
+    timeout: float,
+    interval: float,
+) -> None:
+    """Show the status of RUN_ID (optionally --watch to a terminal state)."""
+    try:
+        if watch:
+            record = workflows.wait_for(
+                obj.settings,
+                run_id=run_id,
+                workspace=workspace,
+                timeout=timeout,
+                interval=interval,
+            )
+        else:
+            record = workflows.get_status(obj.settings, run_id=run_id, workspace=workspace)
+    except (CommandError, RuntimeError, ApiError, TimeoutError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    status = record.get("status", "unknown")
+    click.echo(f"{run_id}: {status}")
+    reason = record.get("reason")
+    if reason:
+        click.echo(f"  reason: {reason}")
+    if watch and not workflows.is_success(record):
+        raise SystemExit(1)
 
 
 def main() -> None:

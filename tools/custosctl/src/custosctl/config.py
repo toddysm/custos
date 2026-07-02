@@ -70,6 +70,7 @@ class Settings(BaseSettings):
     gateway: str | None = None
     token: SecretStr | None = None
     insecure: bool = False
+    workspace: str | None = None
 
     # --- lifecycle knobs ---
     prereqs: str | None = None
