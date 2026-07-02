@@ -190,3 +190,63 @@ def test_status_exit_code_reflects_health(
     assert runner.invoke(cli, ["status"], env={}).exit_code == 0
     monkeypatch.setattr(lifecycle_module, "status", lambda s, echo: False)
     assert runner.invoke(cli, ["status"], env={}).exit_code == 1
+
+
+# --- connector commands (DEVCLI-IMPL-005) ---------------------------------
+
+
+def test_connector_register_prints_ref(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    from custosctl import connectors as connectors_module
+
+    monkeypatch.setattr(
+        connectors_module,
+        "register",
+        lambda s, *, path, image_ref: {
+            "type": "dockerhub",
+            "version": "1.2.0",
+            "digest": "sha256:ab",
+        },
+    )
+    result = runner.invoke(
+        cli, ["connector", "register", "extensions/connectors/dockerhub"], env={}
+    )
+    assert result.exit_code == 0, result.output
+    assert "registered dockerhub@1.2.0 (sha256:ab)" in result.output
+
+
+def test_connector_list_prints_versions(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    from custosctl import connectors as connectors_module
+
+    monkeypatch.setattr(
+        connectors_module,
+        "list_versions",
+        lambda s, *, connector_type: [
+            {"type": "dockerhub", "version": "1.0.0", "digest": "sha256:1"},
+            {"type": "dockerhub", "version": "1.1.0", "digest": "sha256:2"},
+        ],
+    )
+    result = runner.invoke(cli, ["connector", "list", "dockerhub"], env={})
+    assert result.exit_code == 0, result.output
+    assert "1.0.0" in result.output
+    assert "1.1.0" in result.output
+
+
+def test_connector_list_empty(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    from custosctl import connectors as connectors_module
+
+    monkeypatch.setattr(connectors_module, "list_versions", lambda s, *, connector_type: [])
+    result = runner.invoke(cli, ["connector", "list", "nope"], env={})
+    assert result.exit_code == 0, result.output
+    assert "no versions registered" in result.output
+
+
+def test_connector_register_maps_errors(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    from custosctl import connectors as connectors_module
+
+    def _boom(s: object, *, path: str, image_ref: str | None) -> dict[str, str]:
+        raise RuntimeError("CUSTOS_GATEWAY is required for API commands")
+
+    monkeypatch.setattr(connectors_module, "register", _boom)
+    result = runner.invoke(cli, ["connector", "register", "x"], env={})
+    assert result.exit_code != 0
+    assert "CUSTOS_GATEWAY is required" in result.output
