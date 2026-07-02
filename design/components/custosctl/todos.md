@@ -7,7 +7,6 @@ Last Updated: 2026-07-01
 - [ ] TODO-001: Decide the connector/activity registration input form — local
   extension folder (resolve published GHCR image + manifest) vs. bare
   digest-pinned image ref. (added 2026-06-30; tracked in #956/#957)
-  (gated job) or is smoke-only locally. (added 2026-06-30; tracked in #961)
 
 ## Closed
 

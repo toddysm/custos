@@ -434,7 +434,12 @@ def e2e(
     timeout: float,
     interval: float,
 ) -> None:
-    """Run the full end-to-end smoke: up -> seed -> apply -> run -> assert."""
+    """Run the full end-to-end smoke.
+
+    up (unless --skip-up) -> seed-ootb -> verify the OOTB catalog -> workflow
+    apply -> run -> wait for a terminal status -> assert success, optionally
+    tearing down afterwards. Exits non-zero if the run does not succeed.
+    """
     parsed_inputs = _parse_inputs(inputs_file, inputs)
     try:
         ok = e2e_module.run_e2e(

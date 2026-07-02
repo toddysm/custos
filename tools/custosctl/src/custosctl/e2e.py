@@ -41,7 +41,9 @@ def run_e2e(
     """Run the end-to-end flow. Returns ``True`` iff the workflow run succeeded.
 
     Infrastructure failures (bring-up, seed, apply, run) propagate as
-    exceptions; a completed-but-unsuccessful run returns ``False``.
+    exceptions, and :func:`workflows.wait_for` raises :class:`TimeoutError` if
+    the run never reaches a terminal status within ``timeout``. A completed but
+    unsuccessful run returns ``False`` (no exception).
     """
     workflow_path = workflow or str(fixtures.sample_workflow_path())
     try:
