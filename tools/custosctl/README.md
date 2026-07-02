@@ -13,9 +13,9 @@ Design: [`design/components/custosctl/design.md`](../../design/components/custos
 > `doctor` preflight, and the `up`/`down`/`status` commands for **both** targets
 > are implemented (#952, #953, #954), along with the typed gateway API client
 > that backs the API commands (#955), plus `connector`/`activity` register/list
-> (#956, #957), `workflow apply`/`run`/`status` (#958), and `seed-ootb` (#959).
-> The remaining commands (`e2e`, #960) and CI/docs (#961, #962) land in the
-> sibling DEVCLI tasks.
+> (#956, #957), `workflow apply`/`run`/`status` (#958), `seed-ootb` (#959), and
+> the `e2e` one-shot (#960). CI/docs (#961, #962) land in the sibling DEVCLI
+> tasks.
 
 ## Install (editable)
 
@@ -57,6 +57,10 @@ custosctl workflow status run-... --watch                     # poll to a termin
 
 # Onboard the OOTB catalog (wraps scripts/seed-ootb.sh; run from the checkout):
 custosctl seed-ootb --allow-existing
+
+# One-shot smoke: up -> seed -> verify -> apply -> run -> assert (exit 1 on failure):
+custosctl e2e --teardown                                      # local kind, torn down after
+custosctl --target remote e2e --skip-up --workflow my-wf.yaml # against an existing platform
 ```
 
 ## Configuration
