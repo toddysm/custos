@@ -1,6 +1,6 @@
 # TODOs: Local Dev & Test CLI (`custosctl`)
 
-Last Updated: 2026-06-30
+Last Updated: 2026-07-01
 
 ## Open
 

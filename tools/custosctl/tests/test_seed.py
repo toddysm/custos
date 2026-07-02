@@ -103,6 +103,17 @@ def test_seed_script_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
         seed.seed_ootb(_settings(root))
 
 
+def test_seed_maps_oserror_to_runtimeerror(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _checkout(tmp_path)
+
+    def _raise(*_a: object, **_k: object) -> None:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(shell, "run", _raise)
+    with pytest.raises(RuntimeError, match="could not run"):
+        seed.seed_ootb(_settings(root))
+
+
 # --- fixture --------------------------------------------------------------
 
 

@@ -38,7 +38,13 @@ def seed_ootb(settings: Settings, *, allow_existing: bool = False) -> None:
     argv = [str(script)]
     if allow_existing:
         argv.append("--allow-existing")
-    shell.run(argv, cwd=root, env=env)
+    try:
+        shell.run(argv, cwd=root, env=env)
+    except OSError as exc:
+        raise RuntimeError(
+            f"could not run {script}: {exc} — ensure it is executable "
+            "(chmod +x) and bash is on PATH"
+        ) from exc
 
 
 __all__ = ["seed_ootb"]
