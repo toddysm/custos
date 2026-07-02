@@ -16,7 +16,7 @@ variant of the same flow.
 > **M1 evaluation build.** No Web UI, pre-provisioned tokens only, single-replica
 > infrastructure. See the [evaluation overview](overview.md).
 
-> **Prefer to script it?** [`custosctl`](../../developers/custosctl.md) is the developer CLI that automates this exact flow — `custosctl up` performs steps 2–6 (create the `kind` cluster, install prereqs, `helm install`), and `custosctl e2e` also seeds the OOTB catalog and runs a sample workflow. This page is the readable walkthrough of what the CLI does under the hood.
+> **Prefer to script it?** [`custosctl`](../../developers/custosctl.md) is the developer CLI that automates most of this flow — `custosctl up` creates the `kind` cluster, installs the prereqs, and runs `helm install` (steps 2–3 and 5–6; you still build/load the images in step 4 yourself), and `custosctl e2e` also seeds the OOTB catalog and runs a sample workflow. This page is the readable walkthrough of what the CLI does under the hood.
 
 ## 1. Prerequisites
 

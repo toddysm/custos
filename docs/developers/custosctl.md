@@ -38,18 +38,19 @@ Every lifecycle command is **target-aware** via the global `--target` flag (or
 | Target | Cluster | `up` creates it? | `down` deletes it? | Prereqs default |
 |---|---|---|---|---|
 | `local` (default) | a `kind` cluster (`CUSTOS_CLUSTER`) | yes | yes (`kind delete`) | `install` |
-| `remote` | an existing `CUSTOS_KUBE_CONTEXT` | no | no (release only; `--force` also drops the namespace) | `skip` |
+| `remote` | a kube-context (`CUSTOS_KUBE_CONTEXT`, or the current one) | no | no (release only; `--force` also drops the namespace) | `skip` |
 
-`local` is the laptop flow (build images, create the cluster, install). `remote`
-operates against a cluster you already have — it never creates or deletes the
-cluster itself, only the Custos release (and, with `down --force`, the namespace
-and its PVCs).
+`local` is the laptop flow: create the cluster, install prereqs, and run
+`helm install` (you build/load the images yourself — `up` does not). `remote`
+operates against a cluster you already have (`CUSTOS_KUBE_CONTEXT`, defaulting
+to kubectl's current context); it never creates or deletes the cluster itself,
+only the Custos release (and, with `down --force`, the namespace and its PVCs).
 
 ## Command reference
 
 `custosctl` exposes a CLI (not a network API). Global flags:
-`--target {local,remote}`, `--config <path>`, `--yes`, `--verbose`. CLI flags
-override `.env`/environment values.
+`--target {local,remote}`, `--yes`, `--verbose`. CLI flags override
+`.env`/environment values.
 
 ### Lifecycle
 
@@ -74,16 +75,17 @@ custosctl down --yes --force     # ...also delete the namespace and its PVCs
 
 ### Catalog — connectors & activities
 
-Needs `CUSTOS_GATEWAY` + `CUSTOS_TOKEN`. `register` accepts **either** a local
-extension folder (the CLI resolves the published GHCR image, pins it by digest,
-and reads the manifest) **or** a bare digest-pinned image reference via
-`--image-ref`.
+Needs `CUSTOS_GATEWAY` + `CUSTOS_TOKEN`. `register` always takes a local
+extension folder (or a manifest file) as its `PATH`: the CLI reads the manifest
+from there and derives a digest-pinned image reference from `CUSTOS_IMAGE_PREFIX`.
+Pass `--image-ref <ref>@sha256:...` to override that derived image reference
+(the manifest still comes from `PATH`).
 
 | Command | Purpose |
 |---|---|
-| `custosctl connector register <path-or-image>` | Register a connector-type (folder or `--image-ref`) |
+| `custosctl connector register <path>` | Register a connector-type from an extension folder/manifest; `--image-ref` overrides the derived image |
 | `custosctl connector list <type>` | List registered versions of a connector-type |
-| `custosctl activity register <path-or-image>` | Register an activity-type |
+| `custosctl activity register <path>` | Register an activity-type from an extension folder/manifest; `--image-ref` overrides the derived image |
 | `custosctl activity list <namespace> <name>` | List registered versions of an activity-type |
 
 ```sh
@@ -153,7 +155,7 @@ using the `CUSTOS_` prefix; CLI flags take precedence.
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `CUSTOS_TARGET` | No | `local` | `local` (kind) or `remote` (existing kube-context) |
-| `CUSTOS_KUBE_CONTEXT` | No | `kind-<cluster>` (local) | kube-context to operate against |
+| `CUSTOS_KUBE_CONTEXT` | No | `kind-<cluster>` (local) / current context (remote) | kube-context to operate against |
 | `CUSTOS_CLUSTER` | No | `custos-local` | kind cluster name (local only) |
 | `CUSTOS_KIND_NODE_IMAGE` | No | `kindest/node:v1.31.2` | kind node image (local only) |
 | `CUSTOS_NAMESPACE` | No | `custos-system` | Release namespace |
