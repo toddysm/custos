@@ -8,14 +8,16 @@ APIs.
 
 Design: [`design/components/custosctl/design.md`](../../design/components/custosctl/design.md).
 
+User-facing reference: [`docs/developers/custosctl.md`](../../docs/developers/custosctl.md).
+
 > **Status:** scaffold + local & remote lifecycle. The root command group, the
 > `CUSTOS_*` configuration model, the `--target {local,remote}` abstraction, the
 > `doctor` preflight, and the `up`/`down`/`status` commands for **both** targets
 > are implemented (#952, #953, #954), along with the typed gateway API client
 > that backs the API commands (#955), plus `connector`/`activity` register/list
 > (#956, #957), `workflow apply`/`run`/`status` (#958), `seed-ootb` (#959), and
-> the `e2e` one-shot (#960), and a CI job (#961). Reference docs (#962) land in
-> the final sibling DEVCLI task.
+> the `e2e` one-shot (#960), a CI job (#961), and the published reference
+> docs (#962). Milestone 0.2 is complete.
 
 ## Install (editable)
 

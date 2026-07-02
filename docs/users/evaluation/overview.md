@@ -158,3 +158,4 @@ tooling.
 | [Architecture overview](../../../design/architecture/overview.md) | System architecture, domain model, and contracts |
 | [User Guide index](../README.md) | All evaluation deployment guides |
 | [Copy-image walkthrough](copy-image-walkthrough.md) | Onboard the OOTB connectors + copy-image activity and run a Docker Hub -> GHCR copy end to end |
+| [`custosctl` CLI](../../developers/custosctl.md) | Developer CLI that scripts the deploy + onboarding + first-workflow flow (`custosctl up` / `e2e`) |
