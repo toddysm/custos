@@ -313,7 +313,7 @@ fi
 # ---------------------------------------------------------------------------
 if [[ "$INSTALL_SEALED_SECRETS" == "true" ]]; then
   log "Sealed Secrets ($SEALED_SECRETS_VERSION) — release name custos-sealed-secrets"
-  helm_repo_add sealed-secrets https://bitnami-labs.github.io/sealed-secrets
+  helm_repo_add sealed-secrets https://bitnami.github.io/sealed-secrets
   helm upgrade --install custos-sealed-secrets sealed-secrets/sealed-secrets \
     --version "$SEALED_SECRETS_VERSION" \
     --namespace custos-system --create-namespace \

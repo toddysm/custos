@@ -103,7 +103,10 @@ the regression gate pins. It is safe to re-run:
 # if you re-enable the store; skip the `external-secrets` repo/install otherwise.
 helm repo add cnpg https://cloudnative-pg.github.io/charts
 helm repo add external-secrets https://charts.external-secrets.io
-helm repo update
+# Update only the repos we just added — a plain `helm repo update` refreshes
+# EVERY configured repo and fails the whole step if any unrelated repo is
+# unreachable (e.g. a stale `sealed-secrets` repo from an earlier run).
+helm repo update cnpg external-secrets
 
 helm upgrade --install cnpg cnpg/cloudnative-pg \
   --version 0.22.1 \
