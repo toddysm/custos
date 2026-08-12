@@ -107,7 +107,11 @@ def run_ceremony(
             chart,
             namespace=settings.namespace,
             values=values,
-            sets=["postgres.embedded=false"],
+            sets=[
+                "postgres.embedded=false",
+                "bootstrap.adminToken.mode=disabled",
+                "bootstrap.adminToken.secretName=",
+            ],
             timeout=settings.helm_timeout,
             context=context,
         )

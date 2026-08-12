@@ -156,23 +156,29 @@ def test_bootstrap_admin_values_have_no_plaintext_field() -> None:
 def test_bootstrap_admin_rejects_plaintext_value(profile: str) -> None:
     plaintext = "custos_plaintext-must-never-enter-helm-values"
     error = _render_error(profile, f"bootstrap.adminToken.token={plaintext}")
-    assert "additional properties 'token' not allowed" in error
+    assert "token" in error
+    assert "not allowed" in error.lower()
     assert plaintext not in error
 
 
 @pytest.mark.parametrize("profile", ALL_PROFILES)
 def test_bootstrap_admin_token_rejects_invalid_mode(profile: str) -> None:
     error = _render_error(profile, "bootstrap.adminToken.mode=replace")
-    assert "/bootstrap/adminToken/mode" in error
-    assert "value must be one of" in error
+    assert "bootstrap.adminToken.mode" in error.replace("/", ".")
+    assert "one of" in error
 
 
 @pytest.mark.parametrize("profile", ALL_PROFILES)
 @pytest.mark.parametrize("ttl", ("0", "31536001"))
 def test_bootstrap_admin_token_rejects_invalid_ttl(profile: str, ttl: str) -> None:
     error = _render_error(profile, f"bootstrap.adminToken.ttlSeconds={ttl}")
-    assert "/bootstrap/adminToken/ttlSeconds" in error
-    assert ("minimum" if ttl == "0" else "maximum") in error
+    assert "bootstrap.adminToken.ttlSeconds" in error.replace("/", ".")
+    bounds = (
+        ("minimum", "greater than or equal")
+        if ttl == "0"
+        else ("maximum", "less than or equal")
+    )
+    assert any(bound in error for bound in bounds)
 
 
 @pytest.mark.parametrize("profile", ALL_PROFILES)

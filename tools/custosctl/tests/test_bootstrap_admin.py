@@ -91,18 +91,19 @@ def _settings() -> Settings:
 def test_ceremony_cleans_up_only_after_verification(monkeypatch: pytest.MonkeyPatch) -> None:
     events: list[str] = []
     manifests: list[str] = []
+    helm_sets: list[list[str]] = []
     monkeypatch.setattr(bootstrap_admin, "mint_token", lambda: "custos_secret-value")
 
     def _apply(manifest: str, **_kwargs: object) -> None:
         manifests.append(manifest)
         events.append("apply")
 
+    def _helm(*_args: object, **kwargs: Any) -> None:
+        helm_sets.append(kwargs["sets"])
+        events.append(f"helm:{len(events)}")
+
     monkeypatch.setattr(shell, "kubectl_apply_stdin", _apply)
-    monkeypatch.setattr(
-        shell,
-        "helm_install",
-        lambda *args, **kwargs: events.append(f"helm:{len(events)}"),
-    )
+    monkeypatch.setattr(shell, "helm_install", _helm)
     monkeypatch.setattr(
         bootstrap_admin,
         "ApiClient",
@@ -130,6 +131,8 @@ def test_ceremony_cleans_up_only_after_verification(monkeypatch: pytest.MonkeyPa
         index for index, event in enumerate(events) if event.startswith("verify:")
     )
     assert sum(event.startswith("helm:") for event in events) == 2
+    assert "bootstrap.adminToken.mode=disabled" in helm_sets[1]
+    assert "bootstrap.adminToken.secretName=" in helm_sets[1]
 
 
 def test_ceremony_retains_secret_and_redacts_failure(

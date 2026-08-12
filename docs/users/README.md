@@ -39,16 +39,16 @@ time, then use them as a reference.
 |---|---|---|
 | 1 | [Overview](evaluation/overview.md) | What "evaluation" is, what gets deployed, connected vs air-gapped, and M1 limitations |
 | 2 | [Prerequisites](evaluation/prerequisites.md) | Tooling versions, cluster requirements, and the operators you install before Custos |
-| 3a | [Install — connected](evaluation/install-connected.md) | Deploy the `connected-eval` profile pulling images from the public registry |
-| 3b | [Install — air-gapped](evaluation/install-airgapped.md) | Deploy the `airgapped-eval` profile from an offline bundle and a private registry |
-| 4 | [Verify](evaluation/verify.md) | Confirm the platform is healthy and find the API gateway endpoint |
-| 5 | [Bootstrap administrator](../operations/bootstrap-admin.md) | Create, verify, retain, recover, and clean up the first platform-admin credential |
-| 6 | [First workflow](evaluation/first-workflow.md) | Authenticate and run a sample workflow end to end |
-| 5b | [Copy-image walkthrough](evaluation/copy-image-walkthrough.md) | Onboard the OOTB connectors + copy-image activity and run a Docker Hub -> GHCR copy end to end |
-| 6 | [Troubleshooting](evaluation/troubleshooting.md) | Common failure modes, debug commands, and known issues |
-| 7 | [Uninstall](evaluation/uninstall.md) | Tear down an evaluation deployment and clean up |
+| 3 | [Install — connected](evaluation/install-connected.md) | Deploy the `connected-eval` profile pulling images from the public registry |
+| 4 | [Install — air-gapped](evaluation/install-airgapped.md) | Deploy the `airgapped-eval` profile from an offline bundle and a private registry |
+| 5 | [Verify](evaluation/verify.md) | Confirm the platform is healthy and find the API gateway endpoint |
+| 6 | [Bootstrap administrator](../operations/bootstrap-admin.md) | Create, verify, retain, recover, and clean up the first platform-admin credential |
+| 7 | [First workflow](evaluation/first-workflow.md) | Authenticate and run a sample workflow end to end |
+| 8 | [Copy-image walkthrough](evaluation/copy-image-walkthrough.md) | Onboard the OOTB connectors + copy-image activity and run a Docker Hub -> GHCR copy end to end |
+| 9 | [Troubleshooting](evaluation/troubleshooting.md) | Common failure modes, debug commands, and known issues |
+| 10 | [Uninstall](evaluation/uninstall.md) | Tear down an evaluation deployment and clean up |
 
-Choose **one** install path at step 3 based on whether your cluster has outbound
+Choose **one** install path from steps 3-4 based on whether your cluster has outbound
 internet access to the public container registry (connected) or is isolated
 behind an air gap (air-gapped).
 

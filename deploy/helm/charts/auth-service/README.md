@@ -24,14 +24,10 @@ signer and JWKS rotation.
 ## Configuration
 
 All non-secret `CUSTOS_AUTH_*` env vars are surfaced under the `config:`
-block in [`values.yaml`](values.yaml). The required-at-install values
-(`oidcIssuers`, `callContextKeyRef`, `platformAdminBootstrap`) are left
-empty by default so `helm template` stays green on the scaffold; operators
-MUST set them per-profile or via a pre-install workflow before the
-service can pass AS-IMPL-018 / AS-IMPL-020 bring-up.
-markdown
-markdown
-source
+block in [`values.yaml`](values.yaml). `oidcIssuers` and
+`callContextKeyRef` are empty by default; operators set them per profile when
+those authentication features are enabled. First-admin credentials are owned
+by the umbrella chart's Secret-backed bootstrap Job, not this subchart.
 
 - Implementation tracker: [#267](https://github.com/toddysm/custos/issues/267) (AS-IMPL-000).
 - This chart: [#237](https://github.com/toddysm/custos/issues/237) (AS-IMPL-002).
