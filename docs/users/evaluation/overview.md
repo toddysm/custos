@@ -14,12 +14,12 @@ core engine end to end. It is sized for **trying it out**, not for production:
 
 - Every component and dependency runs **single-replica**.
 - Stateful dependencies are **PersistentVolume-backed** (no off-cluster
-  backups, no distributed storage).
+   backups, no distributed storage).
 - There are **no** HorizontalPodAutoscalers, PodDisruptionBudgets, or
-  cross-zone anti-affinity rules.
+   cross-zone anti-affinity rules.
 - Platform secrets are **Kubernetes Secrets** managed by the chart.
 - Modest resource footprint (roughly **6 vCPU / 12 GiB** in total, excluding
-  the cluster itself).
+   the cluster itself).
 
 If you want a production-grade topology, see the `HA` profile in the
 [reference deployment](../../../design/architecture/reference-deployment.md);
@@ -133,15 +133,15 @@ gap, use [Install — air-gapped](install-airgapped.md).
 The evaluation build targets the **core engine** milestone. Be aware of these
 constraints before evaluating:
 
-- **Pre-provisioned tokens only.** Authentication uses API tokens seeded at
-  install time. The interactive OIDC device-code flow is **disabled** in M1;
-  an OIDC issuer is not required until M3.
+- **Operator-bootstrapped tokens.** Authentication uses API tokens created by
+   the [first-admin ceremony](../../operations/bootstrap-admin.md). The interactive OIDC device-code flow is **disabled** in M1;
+   an OIDC issuer is not required until M3.
 - **No Web UI.** All interaction is through the HTTP APIs. See the
-  [Developer Guide](../../developers/README.md) for the API references.
+   [Developer Guide](../../developers/README.md) for the API references.
 - **No high availability.** Single-replica, PV-backed dependencies; not
-  intended to survive node loss or to be upgraded without downtime.
+   intended to survive node loss or to be upgraded without downtime.
 - **No off-cluster backups.** Tearing down the deployment or losing the
-  PersistentVolumes loses the data.
+   PersistentVolumes loses the data.
 
 See [Troubleshooting](troubleshooting.md) for failure modes and debugging.
 

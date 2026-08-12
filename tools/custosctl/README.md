@@ -10,9 +10,9 @@ Design: [`design/components/custosctl/design.md`](../../design/components/custos
 
 User-facing reference: [`docs/developers/custosctl.md`](../../docs/developers/custosctl.md).
 
-> **Status:** scaffold + local & remote lifecycle. The root command group, the
+> __Status:__ scaffold + local & remote lifecycle. The root command group, the
 > `CUSTOS_*` configuration model, the `--target {local,remote}` abstraction, the
-> `doctor` preflight, and the `up`/`down`/`status` commands for **both** targets
+> `doctor` preflight, and the `up`/`down`/`status` commands for __both__ targets
 > are implemented (#952, #953, #954), along with the typed gateway API client
 > that backs the API commands (#955), plus `connector`/`activity` register/list
 > (#956, #957), `workflow apply`/`run`/`status` (#958), `seed-ootb` (#959), and
@@ -35,6 +35,9 @@ custosctl --target remote doctor # preflight a remote kube-context
 # Local lifecycle (target=local): run from inside the checkout, or set CUSTOS_REPO_ROOT
 custosctl up                     # create kind cluster, prereqs, helm install --wait
 custosctl status                 # kind cluster / release / pod summary (+ gateway if CUSTOS_GATEWAY set)
+export CUSTOS_GATEWAY=https://custos.local
+custosctl bootstrap-admin init --show-token    # first credential; save one-time output
+custosctl --yes bootstrap-admin recover --show-token  # revoke old tokens + replace
 custosctl down --yes             # uninstall the release and delete the kind cluster
 
 # Remote lifecycle (target=remote): operate against an existing kube-context;

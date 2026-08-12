@@ -24,7 +24,7 @@ details (PAT creation, namespaces, caveats).
 
 ## The five-step lifecycle
 
-```
+```ini
 1. Create the credential Secret   (kubectl — store the registry PAT)
 2. Register the connector type    (control-plane — usually pre-seeded)
 3. Create a connector instance    (API — bind the type to a namespace + secret)
@@ -60,9 +60,9 @@ Both registries use the standard OCI auth flow, which involves **two**
 credentials:
 
 - **Layer 1 — the durable PAT** you store in the Secret (Docker Hub PAT /
-  GitHub PAT). This is what `x-dapr-secret` resolves and leases.
+   GitHub PAT). This is what `x-dapr-secret` resolves and leases.
 - **Layer 2 — a short-lived, per-repository registry bearer** that the
-  registry's token endpoint mints in exchange for the PAT.
+   registry's token endpoint mints in exchange for the PAT.
 
 The connector delivers the PAT to the activity as HTTP **Basic** credentials
 (`tokenTypeHint: "basic"`) plus the registry's token endpoint; the consuming
@@ -76,7 +76,7 @@ All operator calls go through the API gateway with a bearer service token:
 ```bash
 export GATEWAY=https://custos.local   # your gateway endpoint
 export WS=ws-default                  # your workspace id
-export TOKEN=cst_...                  # a Custos service token
+export TOKEN=custos_...               # a Custos service token
 ```
 
 The token's principal must carry the right permissions:
@@ -90,15 +90,15 @@ The token's principal must carry the right permissions:
 ## Lease TTL
 
 The PAT is durable, so a longer lease reduces token-exchange churn during long
-operations while staying revocable. Set it per **instance** with
+operations while staying revocable. Set it per __instance__ with
 `leaseTtlSeconds` on create (recommended `3600` / 1 hour). The platform default
 is 10 minutes (`CONN_SIDECAR_DEFAULT_TTL`); a lease never outlives the step.
 
 ## Related references
 
 - [Connections API](../../developers/connections-api.md) — connector manifest
-  schema, the workflow step binding model, and the sidecar/lease contract.
+   schema, the workflow step binding model, and the sidecar/lease contract.
 - [Connector plugin author guide](../../developers/connector-plugin-author.md) —
-  §8 documents the `connectors:register` registration RPC.
+   §8 documents the `connectors:register` registration RPC.
 - Per-connector READMEs in `extensions/connectors/<name>/` — the connector's own
-  manifest, hooks, and config reference.
+   manifest, hooks, and config reference.

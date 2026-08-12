@@ -11,7 +11,7 @@ connector to let your workflows pull from and push to
 ```bash
 export GATEWAY=https://custos.local   # your gateway endpoint
 export WS=ws-default                  # your workspace id
-export TOKEN=cst_...                  # a Custos service token (see First Use)
+export TOKEN=custos_...               # a Custos service token (see First Use)
 ```
 
 > Examples use `curl`. Add `-k` if your gateway uses the eval self-signed

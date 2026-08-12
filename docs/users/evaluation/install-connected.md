@@ -127,7 +127,9 @@ pods should show `Completed`.
 ## Next step
 
 Continue to [Verify](verify.md) to confirm the platform is healthy and find the
-API gateway endpoint.
+API gateway endpoint, then run the
+[first-admin bootstrap ceremony](../../operations/bootstrap-admin.md). The same
+runbook covers `connected-eval` and `connected-ha` profiles.
 
 ## Related documentation
 
@@ -135,5 +137,6 @@ API gateway endpoint.
 |---|---|
 | [Prerequisites](prerequisites.md) | Tooling, cluster requirements, and pre-install operators |
 | [Verify](verify.md) | Health checks and finding the gateway endpoint |
+| [Bootstrap administrator](../../operations/bootstrap-admin.md) | custosctl and direct Helm init/recovery for connected and HA releases |
 | [Troubleshooting](troubleshooting.md) | Install failure modes and known issues |
 | [Reference deployment](../../../design/architecture/reference-deployment.md) | Full topology, profile matrix, and supply chain |

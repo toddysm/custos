@@ -15,7 +15,7 @@ idempotent subcommands you can chain in CI or a `Makefile`.
 - Component: COMP-011 · Milestone: 0.2
 
 > **Scope (0.2).** `custosctl` targets the M1 evaluation build: single-cluster,
-> pre-provisioned tokens, digest-pinned OOTB images. It talks to the platform
+> operator-bootstrapped tokens, digest-pinned OOTB images. It talks to the platform
 > through the **public API Gateway** for all catalog/workflow operations and
 > shells out to the checkout's chart/scripts/`Makefile` only for the cluster
 > lifecycle. It is a dev/test aid — not a production deployment tool.
@@ -32,7 +32,7 @@ Requires Python 3.11+. The console entry point is `custosctl`
 
 ## Targets
 
-Every lifecycle command is **target-aware** via the global `--target` flag (or
+Every lifecycle command is __target-aware__ via the global `--target` flag (or
 `CUSTOS_TARGET`):
 
 | Target | Cluster | `up` creates it? | `down` deletes it? | Prereqs default |
@@ -59,12 +59,16 @@ only the Custos release (and, with `down --force`, the namespace and its PVCs).
 | `custosctl doctor` | yes | Preflight: docker/kind/kubectl/helm versions (local); kube-context reachability (remote) |
 | `custosctl up` | yes | Create/verify the cluster, install prereqs, `helm install`, wait for health |
 | `custosctl status` | yes | Cluster/release/pod summary (+ gateway `/healthz`,`/readyz` when `CUSTOS_GATEWAY` is set) |
+| `custosctl bootstrap-admin init [--show-token|--keep-secret]` | yes | Generate, install, verify, and safely retain the first platform-admin credential |
+| `custosctl bootstrap-admin recover [--show-token|--keep-secret]` | yes | Confirm, revoke prior bootstrap tokens, install a replacement, and verify it |
 | `custosctl down [--yes] [--force]` | yes | `helm uninstall`; `local` also `kind delete`; `remote --force` also deletes the namespace (destructive) |
 
 ```sh
 custosctl doctor                 # preflight the local (kind) toolchain
 custosctl up                     # create kind cluster, prereqs, helm install --wait
 custosctl status                 # cluster / release / pod summary
+export CUSTOS_GATEWAY=https://custos.local
+custosctl bootstrap-admin init --show-token  # save the one-time CUSTOS_TOKEN output
 custosctl down --yes             # uninstall the release and delete the kind cluster
 
 # Remote: operate against an existing kube-context (never creates/deletes the cluster)
@@ -164,7 +168,7 @@ using the `CUSTOS_` prefix; CLI flags take precedence.
 | `CUSTOS_IMAGE_PREFIX` | No | `ghcr.io/toddysm/custos` | Maps to `global.imageRegistry` |
 | `CUSTOS_IMAGE_TAG` | No | `dev` (chart default) | Maps to `global.imageTag` |
 | `CUSTOS_GATEWAY` | Yes (API cmds) | — | API Gateway base URL |
-| `CUSTOS_TOKEN` | Yes (API cmds) | — | Platform-admin service token (`cst_...`) |
+| `CUSTOS_TOKEN` | Yes (API cmds) | — | Platform-admin service token (`custos_...`); create it with `bootstrap-admin init` |
 | `CUSTOS_WORKSPACE` | Yes (workflow cmds) | — | Default workspace for `workflow` commands |
 | `CUSTOS_INSECURE` | No | `false` | Skip TLS verify for the eval self-signed cert |
 | `CUSTOS_PREREQS` | No | `install` (local) / `skip` (remote) | Whether `up` runs `install-prereqs.sh` |

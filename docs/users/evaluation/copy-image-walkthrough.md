@@ -12,14 +12,15 @@ the result. Everything is done through the **HTTP API** — M1 has no Web UI.
 ## Prerequisites
 
 - A deployed evaluation platform — see [prerequisites](prerequisites.md),
-  [install (connected)](install-connected.md), and [verify](verify.md) for the
-  gateway endpoint.
-- A **platform-admin** service token (`cst_...`). Onboarding registers types in
-  the reserved `custos.builtin` namespace and the platform-scoped connector
-  catalog, which require platform admin. See
-  [First Use](first-workflow.md#1-get-an-access-token-m1) for obtaining a token.
+   [install (connected)](install-connected.md), and [verify](verify.md) for the
+   gateway endpoint.
+- A __platform-admin__ service token (`custos_...`). Onboarding registers types in
+   the reserved `custos.builtin` namespace and the platform-scoped connector
+   catalog, which require platform admin. See
+   the [first-admin bootstrap runbook](../../operations/bootstrap-admin.md), then
+   return to [First Use](first-workflow.md#1-get-an-access-token-m1).
 - A Docker Hub account/token and a GitHub `write:packages` PAT for the two
-  connector instances (used in [Create connector instances](#3-create-connector-instances)).
+   connector instances (used in [Create connector instances](#3-create-connector-instances)).
 - The OOTB images published to your registry (next section).
 
 Shared variables (adjust the values; add `-k` to `curl` if your gateway uses the
@@ -28,7 +29,7 @@ eval self-signed certificate):
 ```bash {"promptEnv":"false"}
 export GATEWAY=https://custos.local
 export WS=ws-default
-export TOKEN=cst_REPLACE_ME
+export TOKEN="$CUSTOS_TOKEN"
 ```
 
 ## 1. Publish (or reuse) the OOTB images
@@ -228,11 +229,11 @@ the [Observability API](../../developers/observability-api.md).
 ## Troubleshooting
 
 - `catalog.publish.*` on publish → the activity-type or a connector instance
-  isn't registered/bound; re-run [onboarding](#2-onboard-the-ootb-types-into-the-catalog)
-  and confirm the instances exist.
+   isn't registered/bound; re-run [onboarding](#2-onboard-the-ootb-types-into-the-catalog)
+   and confirm the instances exist.
 - `source.unauthorized` / `dest.unauthorized` in the run → the connector
-  credential Secret is missing or lacks pull/push rights; re-check step 1 of the
-  connector guides.
+   credential Secret is missing or lacks pull/push rights; re-check step 1 of the
+   connector guides.
 - General gateway/auth issues → [Troubleshooting](troubleshooting.md).
 
 ## Related documentation

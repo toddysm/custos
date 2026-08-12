@@ -12,6 +12,7 @@ Auth Service owns identity issuance, identity verification, and authorization de
 ## Boundaries
 
 - Owns:
+
    - The principal model (Users + Service Accounts) and their lifecycles.
    - The tenant / workspace data model and the management endpoints that mutate it.
    - The OIDC integration (issuer config, JWKS, identity linking).
@@ -23,6 +24,7 @@ Auth Service owns identity issuance, identity verification, and authorization de
    - The internal call-context signing key and propagation contract.
 
 - Does NOT own:
+
    - Plaintext secret material (Dapr Secrets API is the boundary; signing key is referenced, never embedded).
    - Workflow / activity / connector authorization semantics (Auth Service decides "yes / no"; the calling component decides what to do with that decision).
    - Per-component permission name semantics (each component declares its permission names in its own `permissions.yaml`; Auth Service stores and resolves them).
@@ -290,7 +292,7 @@ Auth Service persists exclusively through the new `AuthStoreProvider` interface 
 | `CUSTOS_AUTH_INTERNAL_IDENTITY_MODE` | No | `jwt` | `jwt` (M1) or `spiffe` (M3 cutover, not implemented yet — see [`spiffe-cutover-plan.md`](spiffe-cutover-plan.md)). Setting to `spiffe` currently raises `SettingsError` at boot. |
 | `CUSTOS_AUTH_AUTHZ_CACHE_TTL` | No | `60s` | Authz decision cache TTL. |
 | `CUSTOS_AUTH_AUTHN_CACHE_TTL` | No | `30s` | Token-verification cache TTL. |
-| `CUSTOS_AUTH_PLATFORM_ADMIN_BOOTSTRAP` | Yes-at-install | — | First-boot platform admin principal id; ignored after first successful binding. |
+| Bootstrap administrator | Operator action | — | A dedicated service account and normal hashed token are created by the Kubernetes-anchored [first-admin ceremony](changes/2026-08-11-003-first-admin-service-token-bootstrap.md); Auth Service exposes no unauthenticated bootstrap endpoint. |
 
 ## Dependencies
 

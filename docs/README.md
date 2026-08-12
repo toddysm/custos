@@ -13,3 +13,4 @@ Last Updated: 2026-06-09
 | Contributors | Building and maintaining the project | _coming soon_ |
 | Plugin, Activity & Connection Developers | Extending the platform | [developers/README.md](developers/README.md) |
 | Users | Deploying and operating the platform | [users/README.md](users/README.md) |
+| Operators | First credential bootstrap and recovery | [operations/bootstrap-admin.md](operations/bootstrap-admin.md) |

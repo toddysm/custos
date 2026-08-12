@@ -21,14 +21,14 @@ export WS=ws-default                      # the bootstrap-seeded workspace
 
 ## 1. Get an access token (M1)
 
-In M1, authentication uses **pre-provisioned service tokens** — the interactive
-OIDC device-code flow is disabled. Your operator provisions a Custos service
-token (a string beginning with `cst_`) via the Auth API
-([`POST /v1/service-accounts/{principal_id}/tokens`](../../developers/auth-api.md#service-tokens)),
-which returns the plaintext token **once**. Obtain that token and export it:
+M1 uses service-token authentication; the interactive OIDC device-code flow is
+disabled. On a clean installation, follow the
+[first-admin bootstrap ceremony](../../operations/bootstrap-admin.md) to create
+the dedicated platform administrator. The token begins with `custos_`, is shown
+only when explicitly requested, and cannot be retrieved later. Export it:
 
 ```bash
-export TOKEN=cst_...      # the pre-provisioned service token
+export TOKEN="$CUSTOS_TOKEN"  # created by custosctl bootstrap-admin init
 ```
 
 Verify the token is accepted and see the principal it resolves to:
@@ -175,7 +175,7 @@ tailing, the audit trail, and per-step log endpoints.
 
 ## What you just did
 
-1. Authenticated with a pre-provisioned service token (M1 — no device-code flow).
+1. Authenticated with an operator-bootstrapped service token (M1 — no device-code flow).
 2. Confirmed the bootstrap-seeded workspace.
 3. Published a workflow into the catalog.
 4. Started a run and polled it to completion.
