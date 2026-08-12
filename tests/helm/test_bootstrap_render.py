@@ -134,19 +134,45 @@ def test_bootstrap_admin_token_secret_wired(profile: str, mode: str) -> None:
     )
     assert env["CUSTOS_BOOTSTRAP_ADMIN_WORKSPACE_ID"]["value"] == "workspace-default"
     assert env["CUSTOS_BOOTSTRAP_ADMIN_TOKEN_TTL_SECONDS"]["value"] == "7776000"
+    rendered_text = yaml.safe_dump_all(docs)
+    assert "custos_plaintext-must-never-render" not in rendered_text
+    assert "valueFrom" in rendered_text
+
+
+def test_bootstrap_admin_values_have_no_plaintext_field() -> None:
+    values = yaml.safe_load((UMBRELLA / "values.yaml").read_text())
+    admin_token = values["bootstrap"]["adminToken"]
+    assert set(admin_token) == {
+        "mode",
+        "secretName",
+        "secretKey",
+        "principalId",
+        "workspaceId",
+        "ttlSeconds",
+    }
+
+
+@pytest.mark.parametrize("profile", ALL_PROFILES)
+def test_bootstrap_admin_rejects_plaintext_value(profile: str) -> None:
+    plaintext = "custos_plaintext-must-never-enter-helm-values"
+    error = _render_error(profile, f"bootstrap.adminToken.token={plaintext}")
+    assert "additional properties 'token' not allowed" in error
+    assert plaintext not in error
 
 
 @pytest.mark.parametrize("profile", ALL_PROFILES)
 def test_bootstrap_admin_token_rejects_invalid_mode(profile: str) -> None:
     error = _render_error(profile, "bootstrap.adminToken.mode=replace")
-    assert "mode must be one of" in error
+    assert "/bootstrap/adminToken/mode" in error
+    assert "value must be one of" in error
 
 
 @pytest.mark.parametrize("profile", ALL_PROFILES)
 @pytest.mark.parametrize("ttl", ("0", "31536001"))
 def test_bootstrap_admin_token_rejects_invalid_ttl(profile: str, ttl: str) -> None:
     error = _render_error(profile, f"bootstrap.adminToken.ttlSeconds={ttl}")
-    assert "ttlSeconds must be between" in error
+    assert "/bootstrap/adminToken/ttlSeconds" in error
+    assert ("minimum" if ttl == "0" else "maximum") in error
 
 
 @pytest.mark.parametrize("profile", ALL_PROFILES)

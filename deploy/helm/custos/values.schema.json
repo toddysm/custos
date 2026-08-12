@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "bootstrap": {
+      "type": "object",
+      "properties": {
+        "adminToken": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "secretName",
+            "secretKey",
+            "principalId",
+            "workspaceId",
+            "ttlSeconds"
+          ],
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": ["disabled", "init", "recover"]
+            },
+            "secretName": {
+              "type": "string"
+            },
+            "secretKey": {
+              "type": "string"
+            },
+            "principalId": {
+              "type": "string"
+            },
+            "workspaceId": {
+              "type": "string"
+            },
+            "ttlSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 31536000
+            }
+          }
+        }
+      }
+    }
+  }
+}

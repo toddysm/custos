@@ -12,9 +12,11 @@ from datetime import UTC, datetime
 from typing import cast
 
 import pytest
+from custos_auth.authn import verify_token
+from custos_auth.authn_cache import AuthnCache
 from custos_auth.roles import BUILTIN_ROLES, ROLE_PLATFORM_ADMIN
 from custos_auth.tokens import hash_token, mint_token
-from custos_spl import AuthStoreProvider
+from custos_spl import AuthStoreProvider, MetadataStoreProvider
 from custos_spl.errors import ImmutableViolation
 from custos_spl.ids import PrincipalId, RoleId, ServiceTokenId, TenantId, WorkspaceId
 from custos_spl.interfaces.auth_store import (
@@ -24,6 +26,7 @@ from custos_spl.interfaces.auth_store import (
     Role,
     RoleBinding,
     RoleBindingScope,
+    ServiceAccount,
     ServiceToken,
     Tenant,
     Workspace,
@@ -108,6 +111,9 @@ class FakeAuthStore:
     async def put_service_token(self, token: ServiceToken) -> None:
         self.tokens[token.token_id] = token
 
+    async def get_service_token_by_hash(self, hash: str) -> ServiceToken | None:
+        return next((token for token in self.tokens.values() if token.hash == hash), None)
+
     async def list_service_tokens_for_service_account(
         self, service_account_id: PrincipalId
     ) -> tuple[ServiceToken, ...]:
@@ -135,6 +141,14 @@ def _store() -> tuple[FakeAuthStore, AuthStoreProvider]:
 
 
 _NOW = datetime(2025, 1, 1, tzinfo=UTC)
+
+
+class FakeMetadataStore:
+    def __init__(self) -> None:
+        self.events: list[tuple[object, object]] = []
+
+    async def append_audit(self, workspace_id: object, event: object, tx: object = None) -> None:
+        self.events.append((workspace_id, event))
 
 
 def test_resolve_dsn_prefers_explicit() -> None:
@@ -359,6 +373,91 @@ async def test_seed_platform_disabled_does_not_create_bootstrap_credential() -> 
     )
     assert fake.principals == {}
     assert fake.tokens == {}
+
+
+async def test_bootstrap_tokens_use_normal_auth_verification_and_recovery() -> None:
+    _, store = _store()
+    metadata = cast(MetadataStoreProvider, FakeMetadataStore())
+    initial, _ = mint_token()
+    config = BootstrapAdminTokenConfig(mode=BootstrapAdminMode.INIT, token=initial)
+    await seed_platform(
+        store,
+        admin_oidc_issuer=None,
+        admin_oidc_subject=None,
+        now=_NOW,
+        bootstrap_admin_token=config,
+    )
+
+    principal = await verify_token(
+        initial,
+        auth_store=store,
+        metadata_store=metadata,
+        authn_cache=AuthnCache(ttl_seconds=0),
+        now=lambda: _NOW,
+    )
+    assert isinstance(principal, ServiceAccount)
+    assert principal.principal_id == config.principal_id
+
+    replacement, _ = mint_token()
+    await seed_platform(
+        store,
+        admin_oidc_issuer=None,
+        admin_oidc_subject=None,
+        now=_NOW,
+        bootstrap_admin_token=replace(
+            config,
+            mode=BootstrapAdminMode.RECOVER,
+            token=replacement,
+        ),
+    )
+    assert (
+        await verify_token(
+            initial,
+            auth_store=store,
+            metadata_store=metadata,
+            authn_cache=AuthnCache(ttl_seconds=0),
+            now=lambda: _NOW,
+        )
+        is None
+    )
+    assert (
+        await verify_token(
+            replacement,
+            auth_store=store,
+            metadata_store=metadata,
+            authn_cache=AuthnCache(ttl_seconds=0),
+            now=lambda: _NOW,
+        )
+        is not None
+    )
+
+
+async def test_bootstrap_token_expiry_is_enforced_by_auth_verification() -> None:
+    _, store = _store()
+    metadata = cast(MetadataStoreProvider, FakeMetadataStore())
+    plaintext, _ = mint_token()
+    config = BootstrapAdminTokenConfig(
+        mode=BootstrapAdminMode.INIT,
+        token=plaintext,
+        ttl_seconds=1,
+    )
+    await seed_platform(
+        store,
+        admin_oidc_issuer=None,
+        admin_oidc_subject=None,
+        now=_NOW,
+        bootstrap_admin_token=config,
+    )
+    assert (
+        await verify_token(
+            plaintext,
+            auth_store=store,
+            metadata_store=metadata,
+            authn_cache=AuthnCache(ttl_seconds=0),
+            now=lambda: _NOW.replace(second=2),
+        )
+        is None
+    )
 
 
 @pytest.mark.parametrize(
