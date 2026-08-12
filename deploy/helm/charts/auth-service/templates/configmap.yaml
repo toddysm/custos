@@ -31,9 +31,6 @@ data:
   {{- with .Values.config.oidcIssuers }}
   CUSTOS_AUTH_OIDC_ISSUERS: {{ . | quote }}
   {{- end }}
-  {{- with .Values.config.platformAdminBootstrap }}
-  CUSTOS_AUTH_PLATFORM_ADMIN_BOOTSTRAP: {{ . | quote }}
-  {{- end }}
   # Colon-separated permission-registry files the service aggregates at
   # startup (#867). Each component ships its own permissions.yaml baked
   # into the auth-service image; the union must cover every permission

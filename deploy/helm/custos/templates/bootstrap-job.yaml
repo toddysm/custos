@@ -1,4 +1,17 @@
 {{- if .Values.bootstrap.enabled -}}
+{{- $adminToken := .Values.bootstrap.adminToken -}}
+{{- if not (has $adminToken.mode (list "disabled" "init" "recover")) -}}
+{{- fail "bootstrap.adminToken.mode must be one of: disabled, init, recover" -}}
+{{- end -}}
+{{- if or (lt (int $adminToken.ttlSeconds) 1) (gt (int $adminToken.ttlSeconds) 31536000) -}}
+{{- fail "bootstrap.adminToken.ttlSeconds must be between 1 and 31536000" -}}
+{{- end -}}
+{{- if ne $adminToken.mode "disabled" -}}
+{{- required "bootstrap.adminToken.secretName is required for init/recover" $adminToken.secretName -}}
+{{- required "bootstrap.adminToken.secretKey is required for init/recover" $adminToken.secretKey -}}
+{{- required "bootstrap.adminToken.principalId is required for init/recover" $adminToken.principalId -}}
+{{- required "bootstrap.adminToken.workspaceId is required for init/recover" $adminToken.workspaceId -}}
+{{- end -}}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -58,6 +71,21 @@ spec:
                   name: {{ .Values.bootstrap.adminOidcRef.name | quote }}
                   key: {{ .Values.bootstrap.adminOidcRef.subjectKey | quote }}
                   optional: true
+            {{- if ne $adminToken.mode "disabled" }}
+            - name: CUSTOS_BOOTSTRAP_ADMIN_TOKEN_MODE
+              value: {{ $adminToken.mode | quote }}
+            - name: CUSTOS_BOOTSTRAP_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $adminToken.secretName | quote }}
+                  key: {{ $adminToken.secretKey | quote }}
+            - name: CUSTOS_BOOTSTRAP_ADMIN_PRINCIPAL_ID
+              value: {{ $adminToken.principalId | quote }}
+            - name: CUSTOS_BOOTSTRAP_ADMIN_WORKSPACE_ID
+              value: {{ $adminToken.workspaceId | quote }}
+            - name: CUSTOS_BOOTSTRAP_ADMIN_TOKEN_TTL_SECONDS
+              value: {{ printf "%d" (int $adminToken.ttlSeconds) | quote }}
+            {{- end }}
 ---
 apiVersion: v1
 kind: ServiceAccount

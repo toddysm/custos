@@ -162,7 +162,6 @@ config:
   #     ]}
   oidcIssuers: ""
   callContextKeyRef: ""
-  platformAdminBootstrap: ""
   # Colon-separated list of permission-registry files the service
   # aggregates at startup (CUSTOS_AUTH_PERMISSIONS_PATHS). These point at
   # each component's own ``permissions.yaml`` baked into the auth-service

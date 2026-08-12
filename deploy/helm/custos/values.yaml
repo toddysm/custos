@@ -571,6 +571,16 @@ bootstrap:
     name: custos-bootstrap-admin
     issuerKey: oidcIssuer
     subjectKey: oidcSubject
+  # Operator-controlled first-admin credential ceremony. The plaintext token
+  # must exist only in the referenced Secret; chart values contain no token
+  # field. Keep disabled for ordinary installs and upgrades.
+  adminToken:
+    mode: disabled
+    secretName: ""
+    secretKey: token
+    principalId: custos-bootstrap-admin
+    workspaceId: workspace-default
+    ttlSeconds: 7776000
 
 # Subchart toggles (when umbrella renders subcharts)
 api-gateway:
