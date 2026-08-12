@@ -34,7 +34,9 @@ import logging
 import os
 import sys
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from typing import cast
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
@@ -46,16 +48,20 @@ from custos_auth.oidc_identity import (
 from custos_auth.permission_registry import seed_permissions_and_validate_roles
 from custos_auth.roles import BUILTIN_ROLES, ROLE_PLATFORM_ADMIN, seed_builtin_roles
 from custos_auth.settings import ENV_PERMISSIONS_PATHS
+from custos_auth.tokens import hash_token, looks_like_custos_token
 from custos_spl import AuthStoreProvider
 from custos_spl.ids import (
     PrincipalId,
     RoleBindingId,
+    ServiceTokenId,
     TenantId,
     WorkspaceId,
 )
 from custos_spl.interfaces.auth_store import (
     GlobalScope,
     RoleBinding,
+    ServiceAccount,
+    ServiceToken,
     Tenant,
     User,
     Workspace,
@@ -73,6 +79,16 @@ _DSN_FALLBACK_VARS = ("DATABASE_URL", "uri")
 ADMIN_OIDC_ISSUER_ENV = "CUSTOS_BOOTSTRAP_ADMIN_OIDC_ISSUER"
 ADMIN_OIDC_SUBJECT_ENV = "CUSTOS_BOOTSTRAP_ADMIN_OIDC_SUBJECT"
 
+ADMIN_TOKEN_MODE_ENV = "CUSTOS_BOOTSTRAP_ADMIN_TOKEN_MODE"
+ADMIN_TOKEN_ENV = "CUSTOS_BOOTSTRAP_ADMIN_TOKEN"
+ADMIN_TOKEN_PRINCIPAL_ID_ENV = "CUSTOS_BOOTSTRAP_ADMIN_PRINCIPAL_ID"
+ADMIN_TOKEN_WORKSPACE_ID_ENV = "CUSTOS_BOOTSTRAP_ADMIN_WORKSPACE_ID"
+ADMIN_TOKEN_TTL_SECONDS_ENV = "CUSTOS_BOOTSTRAP_ADMIN_TOKEN_TTL_SECONDS"
+
+DEFAULT_ADMIN_TOKEN_PRINCIPAL_ID = PrincipalId("custos-bootstrap-admin")
+DEFAULT_ADMIN_TOKEN_TTL_SECONDS = 90 * 24 * 60 * 60
+MAX_ADMIN_TOKEN_TTL_SECONDS = 10 * 365 * 24 * 60 * 60
+
 #: Canonical default tenant / workspace seeded for a usable single-tenant
 #: install. They are plain string ids (not UUIDs) so they are stable and
 #: human-recognisable across installs.
@@ -81,6 +97,74 @@ DEFAULT_WORKSPACE_ID = WorkspaceId("workspace-default")
 
 #: Actor recorded as ``bound_by`` on the admin binding the seeder creates.
 _BOOTSTRAP_ACTOR = PrincipalId("custos-bootstrap")
+
+
+class BootstrapAdminMode(StrEnum):
+    """Allowed first-admin credential state transitions."""
+
+    DISABLED = "disabled"
+    INIT = "init"
+    RECOVER = "recover"
+
+
+@dataclass(frozen=True, slots=True)
+class BootstrapAdminTokenConfig:
+    """Validated non-secret settings plus the Secret-projected token."""
+
+    mode: BootstrapAdminMode
+    token: str | None
+    principal_id: PrincipalId = DEFAULT_ADMIN_TOKEN_PRINCIPAL_ID
+    workspace_id: WorkspaceId = DEFAULT_WORKSPACE_ID
+    ttl_seconds: int = DEFAULT_ADMIN_TOKEN_TTL_SECONDS
+
+
+def resolve_bootstrap_admin_token_config(env: Mapping[str, str]) -> BootstrapAdminTokenConfig:
+    """Parse and validate the bootstrap-admin token environment contract."""
+    raw_mode = env.get(ADMIN_TOKEN_MODE_ENV, BootstrapAdminMode.DISABLED.value).strip().lower()
+    try:
+        mode = BootstrapAdminMode(raw_mode)
+    except ValueError as exc:
+        allowed = ", ".join(item.value for item in BootstrapAdminMode)
+        raise ValueError(f"{ADMIN_TOKEN_MODE_ENV} must be one of: {allowed}") from exc
+
+    token = env.get(ADMIN_TOKEN_ENV)
+    token = token.strip() if token else None
+    principal_raw = env.get(
+        ADMIN_TOKEN_PRINCIPAL_ID_ENV, str(DEFAULT_ADMIN_TOKEN_PRINCIPAL_ID)
+    ).strip()
+    workspace_raw = env.get(ADMIN_TOKEN_WORKSPACE_ID_ENV, str(DEFAULT_WORKSPACE_ID)).strip()
+    if not principal_raw:
+        raise ValueError(f"{ADMIN_TOKEN_PRINCIPAL_ID_ENV} must not be empty")
+    if not workspace_raw:
+        raise ValueError(f"{ADMIN_TOKEN_WORKSPACE_ID_ENV} must not be empty")
+
+    raw_ttl = env.get(ADMIN_TOKEN_TTL_SECONDS_ENV, str(DEFAULT_ADMIN_TOKEN_TTL_SECONDS)).strip()
+    try:
+        ttl_seconds = int(raw_ttl)
+    except ValueError as exc:
+        raise ValueError(f"{ADMIN_TOKEN_TTL_SECONDS_ENV} must be an integer") from exc
+    if not 1 <= ttl_seconds <= MAX_ADMIN_TOKEN_TTL_SECONDS:
+        raise ValueError(
+            f"{ADMIN_TOKEN_TTL_SECONDS_ENV} must be between 1 and {MAX_ADMIN_TOKEN_TTL_SECONDS}"
+        )
+
+    if mode is BootstrapAdminMode.DISABLED:
+        if token is not None:
+            raise ValueError(
+                f"{ADMIN_TOKEN_ENV} must be absent when {ADMIN_TOKEN_MODE_ENV}=disabled"
+            )
+    elif token is None:
+        raise ValueError(f"{ADMIN_TOKEN_ENV} is required when {ADMIN_TOKEN_MODE_ENV}={mode.value}")
+    elif not looks_like_custos_token(token):
+        raise ValueError(f"{ADMIN_TOKEN_ENV} is not a canonical Custos service token")
+
+    return BootstrapAdminTokenConfig(
+        mode=mode,
+        token=token,
+        principal_id=PrincipalId(principal_raw),
+        workspace_id=WorkspaceId(workspace_raw),
+        ttl_seconds=ttl_seconds,
+    )
 
 
 def resolve_dsn(env: Mapping[str, str]) -> str | None:
@@ -206,6 +290,91 @@ async def _ensure_admin(
     )
 
 
+async def _ensure_platform_admin_binding(
+    auth_store: AuthStoreProvider, principal_id: PrincipalId, now: datetime
+) -> None:
+    existing = await auth_store.list_role_bindings_for_principal(principal_id, (GlobalScope(),))
+    if any(binding.role_id == ROLE_PLATFORM_ADMIN for binding in existing):
+        return
+    await auth_store.put_role_binding(
+        RoleBinding(
+            binding_id=RoleBindingId(str(uuid4())),
+            principal_id=principal_id,
+            role_id=ROLE_PLATFORM_ADMIN,
+            scope=GlobalScope(),
+            bound_at=now,
+            bound_by=_BOOTSTRAP_ACTOR,
+        )
+    )
+
+
+async def _apply_bootstrap_admin_token(
+    auth_store: AuthStoreProvider,
+    config: BootstrapAdminTokenConfig,
+    now: datetime,
+) -> None:
+    if config.mode is BootstrapAdminMode.DISABLED:
+        return
+    assert config.token is not None
+
+    workspace = await auth_store.get_workspace(config.workspace_id)
+    if workspace is None:
+        raise ValueError(f"bootstrap admin workspace '{config.workspace_id}' does not exist")
+
+    principal = await auth_store.get_principal(config.principal_id)
+    if config.mode is BootstrapAdminMode.INIT:
+        if principal is not None:
+            raise ValueError(
+                f"bootstrap admin principal '{config.principal_id}' already exists; "
+                "use recover to replace its credential"
+            )
+        await auth_store.put_principal(
+            ServiceAccount(
+                kind="serviceAccount",
+                principal_id=config.principal_id,
+                workspace_id=config.workspace_id,
+                display_name="Custos Bootstrap Administrator",
+                disabled_at=None,
+                disabled_reason=None,
+                created_at=now,
+            )
+        )
+    else:
+        if not isinstance(principal, ServiceAccount):
+            raise ValueError(
+                f"bootstrap admin principal '{config.principal_id}' is not a service account"
+            )
+        if principal.workspace_id != config.workspace_id:
+            raise ValueError(
+                f"bootstrap admin principal '{config.principal_id}' belongs to workspace "
+                f"'{principal.workspace_id}', not '{config.workspace_id}'"
+            )
+        for existing_token in await auth_store.list_service_tokens_for_service_account(
+            config.principal_id
+        ):
+            if existing_token.revoked_at is None:
+                await auth_store.revoke_service_token(
+                    existing_token.token_id,
+                    _BOOTSTRAP_ACTOR,
+                    "bootstrap admin credential recovery",
+                )
+
+    await _ensure_platform_admin_binding(auth_store, config.principal_id, now)
+    await auth_store.put_service_token(
+        ServiceToken(
+            token_id=ServiceTokenId(str(uuid4())),
+            service_account_id=config.principal_id,
+            hash=hash_token(config.token),
+            issued_at=now,
+            expires_at=now + timedelta(seconds=config.ttl_seconds),
+            revoked_at=None,
+            revoked_by=None,
+            revoked_reason=None,
+        )
+    )
+    _LOGGER.info("bootstrap.admin-token.%s principal=%s", config.mode.value, config.principal_id)
+
+
 async def seed_platform(
     auth_store: AuthStoreProvider,
     *,
@@ -213,6 +382,7 @@ async def seed_platform(
     admin_oidc_subject: str | None,
     now: datetime,
     permission_paths: Sequence[str] = (),
+    bootstrap_admin_token: BootstrapAdminTokenConfig | None = None,
 ) -> None:
     """Seed permissions, roles, the default tenant/workspace, and the admin.
 
@@ -231,6 +401,9 @@ async def seed_platform(
 
     await _ensure_tenant(auth_store, now)
     await _ensure_workspace(auth_store, now)
+
+    if bootstrap_admin_token is not None:
+        await _apply_bootstrap_admin_token(auth_store, bootstrap_admin_token, now)
 
     if admin_oidc_issuer and admin_oidc_subject:
         await _ensure_admin(
@@ -301,13 +474,18 @@ async def _run(args: argparse.Namespace) -> int:
     # `AuthStoreProvider` protocol at runtime (the only static mismatch is a
     # ``SCHEMA_REVISION`` ClassVar-vs-instance-var technicality), so cast.
     auth_store = cast(AuthStoreProvider, make_adapter())
-    await seed_platform(
-        auth_store,
-        admin_oidc_issuer=issuer or None,
-        admin_oidc_subject=subject or None,
-        now=datetime.now(UTC),
-        permission_paths=resolve_permission_paths(os.environ),
-    )
+    try:
+        await seed_platform(
+            auth_store,
+            admin_oidc_issuer=issuer or None,
+            admin_oidc_subject=subject or None,
+            now=datetime.now(UTC),
+            permission_paths=resolve_permission_paths(os.environ),
+            bootstrap_admin_token=resolve_bootstrap_admin_token_config(os.environ),
+        )
+    except ValueError as exc:
+        _LOGGER.error("bootstrap.admin-token.rejected: %s", exc)
+        return 2
     return 0
 
 

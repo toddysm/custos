@@ -321,6 +321,15 @@ def kubectl_delete_namespace(namespace: str, *, context: str | None = None) -> N
     run(_kubectl(["delete", "namespace", namespace, "--ignore-not-found"], context=context))
 
 
+def kubectl_delete_secret(name: str, *, namespace: str, context: str | None = None) -> None:
+    run(
+        _kubectl(
+            ["delete", "secret", name, "-n", namespace, "--ignore-not-found"],
+            context=context,
+        )
+    )
+
+
 def kubectl_wait(
     resource: str,
     *,

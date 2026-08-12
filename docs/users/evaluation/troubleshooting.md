@@ -130,8 +130,9 @@ These are expected behaviors in the M1 "Core engine" milestone, not bugs:
 
 - **No Web UI.** All interaction is through the HTTP API
    (see [First use](first-workflow.md)).
-- **Pre-provisioned tokens only.** The interactive OIDC device-code flow is
-   disabled; authenticate with a `cst_...` service token.
+- __Operator-bootstrapped tokens.__ The interactive OIDC device-code flow is
+   disabled; create or recover a `custos_...` token with the
+   [first-admin runbook](../../operations/bootstrap-admin.md).
 - **No HA.** The eval profile is single-replica with no PodDisruptionBudgets,
    HorizontalPodAutoscalers, or anti-affinity.
 - **No off-cluster backups.** Postgres/Loki/Prometheus data lives on

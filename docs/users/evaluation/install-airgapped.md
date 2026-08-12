@@ -115,7 +115,9 @@ kubectl get pods -n custos-system
 ## Next step
 
 Continue to [Verify](verify.md) to confirm the platform is healthy and find the
-API gateway endpoint.
+API gateway endpoint, then follow the air-gapped/direct Helm path in the
+[first-admin bootstrap runbook](../../operations/bootstrap-admin.md). Generate
+the token and create its temporary Secret only on the isolated side.
 
 ## Related documentation
 
@@ -124,4 +126,5 @@ API gateway endpoint.
 | [`deploy/offline/README.md`](../../../deploy/offline/README.md) | How the offline bundle is built and what it contains |
 | [Install — connected](install-connected.md) | The connected install path and the Postgres ordering caveat in full |
 | [Prerequisites](prerequisites.md) | Tooling, cluster requirements, and pre-install operators |
+| [Bootstrap administrator](../../operations/bootstrap-admin.md) | Offline token generation, Secret lifecycle, verification, and recovery |
 | [Reference deployment](../../../design/architecture/reference-deployment.md) | Full air-gapped reference recipe and supply chain |

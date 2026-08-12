@@ -66,6 +66,22 @@ def _render(profile: str, *set_args: str) -> list[dict[str, Any]]:
     return [doc for doc in yaml.safe_load_all(result.stdout) if doc is not None]
 
 
+def _render_error(profile: str, *set_args: str) -> str:
+    cmd = [
+        "helm",
+        "template",
+        "custos",
+        str(UMBRELLA),
+        "-f",
+        str(UMBRELLA / f"values-{profile}.yaml"),
+    ]
+    for arg in set_args:
+        cmd.extend(["--set", arg])
+    result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    assert result.returncode != 0
+    return result.stderr
+
+
 @pytest.mark.parametrize("profile", ALL_PROFILES)
 def test_bootstrap_permissions_paths_wired_by_default(
     rendered: dict[str, list[dict[str, Any]]], profile: str
@@ -86,3 +102,86 @@ def test_bootstrap_permissions_paths_omitted_when_empty(profile: str) -> None:
         f"{profile}: clearing bootstrap.permissionsPaths must omit the env var so "
         "the seeder falls back to the bundled aggregate"
     )
+
+
+@pytest.mark.parametrize("profile", ALL_PROFILES)
+def test_bootstrap_admin_token_disabled_by_default(
+    rendered: dict[str, list[dict[str, Any]]], profile: str
+) -> None:
+    env = _bootstrap_env(rendered[profile])
+    assert not any(name.startswith("CUSTOS_BOOTSTRAP_ADMIN_TOKEN") for name in env)
+    assert "CUSTOS_BOOTSTRAP_ADMIN_PRINCIPAL_ID" not in env
+    assert "CUSTOS_BOOTSTRAP_ADMIN_WORKSPACE_ID" not in env
+
+
+@pytest.mark.parametrize("profile", ALL_PROFILES)
+@pytest.mark.parametrize("mode", ("init", "recover"))
+def test_bootstrap_admin_token_secret_wired(profile: str, mode: str) -> None:
+    docs = _render(
+        profile,
+        f"bootstrap.adminToken.mode={mode}",
+        "bootstrap.adminToken.secretName=bootstrap-credential",
+        "bootstrap.adminToken.secretKey=admin-token",
+    )
+    env = _bootstrap_env(docs)
+    assert env["CUSTOS_BOOTSTRAP_ADMIN_TOKEN_MODE"]["value"] == mode
+    assert env["CUSTOS_BOOTSTRAP_ADMIN_TOKEN"]["valueFrom"]["secretKeyRef"] == {
+        "name": "bootstrap-credential",
+        "key": "admin-token",
+    }
+    assert env["CUSTOS_BOOTSTRAP_ADMIN_PRINCIPAL_ID"]["value"] == (
+        "custos-bootstrap-admin"
+    )
+    assert env["CUSTOS_BOOTSTRAP_ADMIN_WORKSPACE_ID"]["value"] == "workspace-default"
+    assert env["CUSTOS_BOOTSTRAP_ADMIN_TOKEN_TTL_SECONDS"]["value"] == "7776000"
+    rendered_text = yaml.safe_dump_all(docs)
+    assert "custos_plaintext-must-never-render" not in rendered_text
+    assert "valueFrom" in rendered_text
+
+
+def test_bootstrap_admin_values_have_no_plaintext_field() -> None:
+    values = yaml.safe_load((UMBRELLA / "values.yaml").read_text())
+    admin_token = values["bootstrap"]["adminToken"]
+    assert set(admin_token) == {
+        "mode",
+        "secretName",
+        "secretKey",
+        "principalId",
+        "workspaceId",
+        "ttlSeconds",
+    }
+
+
+@pytest.mark.parametrize("profile", ALL_PROFILES)
+def test_bootstrap_admin_rejects_plaintext_value(profile: str) -> None:
+    plaintext = "custos_plaintext-must-never-enter-helm-values"
+    error = _render_error(profile, f"bootstrap.adminToken.token={plaintext}")
+    assert "token" in error
+    assert "not allowed" in error.lower()
+    assert plaintext not in error
+
+
+@pytest.mark.parametrize("profile", ALL_PROFILES)
+def test_bootstrap_admin_token_rejects_invalid_mode(profile: str) -> None:
+    error = _render_error(profile, "bootstrap.adminToken.mode=replace")
+    assert "bootstrap.adminToken.mode" in error.replace("/", ".")
+    assert "one of" in error
+
+
+@pytest.mark.parametrize("profile", ALL_PROFILES)
+@pytest.mark.parametrize("ttl", ("0", "31536001"))
+def test_bootstrap_admin_token_rejects_invalid_ttl(profile: str, ttl: str) -> None:
+    error = _render_error(profile, f"bootstrap.adminToken.ttlSeconds={ttl}")
+    assert "bootstrap.adminToken.ttlSeconds" in error.replace("/", ".")
+    bounds = (
+        ("minimum", "greater than or equal")
+        if ttl == "0"
+        else ("maximum", "less than or equal")
+    )
+    assert any(bound in error for bound in bounds)
+
+
+@pytest.mark.parametrize("profile", ALL_PROFILES)
+def test_bootstrap_admin_token_requires_secret_reference(profile: str) -> None:
+    error = _render_error(profile, "bootstrap.adminToken.mode=init")
+    assert "secretName is required" in error

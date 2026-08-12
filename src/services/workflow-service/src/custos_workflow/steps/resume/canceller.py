@@ -180,7 +180,7 @@ class ResumeSubscriptionCanceller:
                     # un-awaited coroutine while the span/counter still recorded
                     # ``success``.
                     cancel = cast(
-                        "Callable[[CancelResumeSubscriptionRequest], None | Awaitable[None]]",
+                        "Callable[[CancelResumeSubscriptionRequest], Awaitable[None] | None]",
                         self._trigger_client.cancel_resume_subscription,
                     )
                     result = cancel(

@@ -390,7 +390,7 @@ Response `201 Created`:
 ```yaml
 token_id: tk-01HZX...
 service_account_id: sa-ci-publisher
-token: cst_eyJ...        # plaintext, shown once
+token: custos_eyJ...        # plaintext, shown once
 issued_at: "2026-05-27T18:00:00Z"
 expires_at: "2026-05-28T18:00:00Z"
 ```
@@ -595,7 +595,7 @@ Permissions: none (bypassed).
 Request body:
 
 ```yaml
-token: cst_eyJ...
+token: custos_eyJ...
 ```
 
 Returns `200 OK` with a `PrincipalResponse` envelope on success and
@@ -653,7 +653,7 @@ Permissions: none (bypassed).
 Request body:
 
 ```yaml
-token: cst_eyJ...
+token: custos_eyJ...
 permission: catalog:workflows:read
 workspace_id: ws-payments
 ```
@@ -732,7 +732,7 @@ flavour does **not** raise `401` — failure is signalled by `null`).
 
 ```yaml
 # Request
-token: cst_eyJ...
+token: custos_eyJ...
 
 # Response
 principal:
@@ -927,7 +927,7 @@ Response (truncated, plaintext returned exactly once):
 ```yaml
 token_id: tk-01HZX...
 service_account_id: sa-ci-publisher
-token: cst_eyJhbGciOi...
+token: custos_eyJhbGciOi...
 issued_at: "2026-05-27T18:00:00Z"
 expires_at: "2026-05-27T19:00:00Z"
 ```
@@ -937,7 +937,7 @@ endpoint is on the bypass list.
 
 ```yaml
 # POST /v1/auth/verify
-token: cst_eyJhbGciOi...
+token: custos_eyJhbGciOi...
 ```
 
 Response: a `PrincipalResponse` envelope identical to the one
@@ -976,7 +976,7 @@ call-context required.
 
 ```yaml
 # POST /v1/authz/verify-and-authorize
-token: cst_eyJhbGciOi...
+token: custos_eyJhbGciOi...
 permission: catalog:workflows:read
 workspace_id: ws-payments
 ```
@@ -1017,7 +1017,7 @@ on behalf of the inbound request.
 
 ```yaml
 # POST /rpc/authn.verifyToken
-token: cst_eyJhbGciOi...
+token: custos_eyJhbGciOi...
 ```
 
 Response: a `principal` envelope (or `null` on failure).

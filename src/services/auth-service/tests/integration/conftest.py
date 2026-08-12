@@ -41,6 +41,7 @@ import asyncio
 import json
 import os
 from collections.abc import Iterable, Iterator
+from importlib import import_module
 
 import pytest
 from fastapi.testclient import TestClient
@@ -64,7 +65,7 @@ def _postgres_dsn() -> Iterator[str]:
         return
 
     try:
-        from testcontainers.postgres import PostgresContainer  # type: ignore[import-untyped]
+        PostgresContainer = import_module("testcontainers.postgres").PostgresContainer
     except ImportError:  # pragma: no cover - dev-dep gate
         pytest.skip("CUSTOS_AUTH_PG_DSN not set and testcontainers not installed")
 

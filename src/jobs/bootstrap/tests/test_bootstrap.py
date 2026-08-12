@@ -7,14 +7,18 @@ Postgres.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import cast
 
 import pytest
+from custos_auth.authn import verify_token
+from custos_auth.authn_cache import AuthnCache
 from custos_auth.roles import BUILTIN_ROLES, ROLE_PLATFORM_ADMIN
-from custos_spl import AuthStoreProvider
+from custos_auth.tokens import hash_token, mint_token
+from custos_spl import AuthStoreProvider, MetadataStoreProvider
 from custos_spl.errors import ImmutableViolation
-from custos_spl.ids import PrincipalId, RoleId, TenantId, WorkspaceId
+from custos_spl.ids import PrincipalId, RoleId, ServiceTokenId, TenantId, WorkspaceId
 from custos_spl.interfaces.auth_store import (
     GlobalScope,
     Permission,
@@ -22,6 +26,8 @@ from custos_spl.interfaces.auth_store import (
     Role,
     RoleBinding,
     RoleBindingScope,
+    ServiceAccount,
+    ServiceToken,
     Tenant,
     Workspace,
 )
@@ -33,6 +39,13 @@ from custos_bootstrap import (
     resolve_dsn,
     resolve_permission_paths,
     seed_platform,
+)
+from custos_bootstrap.__main__ import (
+    ADMIN_TOKEN_ENV,
+    ADMIN_TOKEN_MODE_ENV,
+    BootstrapAdminMode,
+    BootstrapAdminTokenConfig,
+    resolve_bootstrap_admin_token_config,
 )
 
 _ISSUER = "https://login.example.com"
@@ -50,6 +63,7 @@ class FakeAuthStore:
         self.principals: dict[PrincipalId, Principal] = {}
         self.oidc: dict[tuple[str, str], PrincipalId] = {}
         self.bindings: list[RoleBinding] = []
+        self.tokens: dict[ServiceTokenId, ServiceToken] = {}
 
     async def upsert_permission(self, permission: Permission) -> None:
         self.permissions[permission.name] = permission
@@ -94,6 +108,32 @@ class FakeAuthStore:
     async def put_role_binding(self, binding: RoleBinding) -> None:
         self.bindings.append(binding)
 
+    async def put_service_token(self, token: ServiceToken) -> None:
+        self.tokens[token.token_id] = token
+
+    async def get_service_token_by_hash(self, hash: str) -> ServiceToken | None:
+        return next((token for token in self.tokens.values() if token.hash == hash), None)
+
+    async def list_service_tokens_for_service_account(
+        self, service_account_id: PrincipalId
+    ) -> tuple[ServiceToken, ...]:
+        return tuple(
+            token
+            for token in self.tokens.values()
+            if token.service_account_id == service_account_id
+        )
+
+    async def revoke_service_token(
+        self, token_id: ServiceTokenId, actor: PrincipalId, reason: str
+    ) -> None:
+        token = self.tokens[token_id]
+        self.tokens[token_id] = replace(
+            token,
+            revoked_at=_NOW,
+            revoked_by=actor,
+            revoked_reason=reason,
+        )
+
 
 def _store() -> tuple[FakeAuthStore, AuthStoreProvider]:
     fake = FakeAuthStore()
@@ -101,6 +141,14 @@ def _store() -> tuple[FakeAuthStore, AuthStoreProvider]:
 
 
 _NOW = datetime(2025, 1, 1, tzinfo=UTC)
+
+
+class FakeMetadataStore:
+    def __init__(self) -> None:
+        self.events: list[tuple[object, object]] = []
+
+    async def append_audit(self, workspace_id: object, event: object, tx: object = None) -> None:
+        self.events.append((workspace_id, event))
 
 
 def test_resolve_dsn_prefers_explicit() -> None:
@@ -149,6 +197,25 @@ def test_resolve_permission_paths_trims_and_drops_blanks() -> None:
     assert resolve_permission_paths(env) == ["/a.yaml", "/b.yaml"]
 
 
+def test_resolve_bootstrap_admin_token_config_defaults_disabled() -> None:
+    config = resolve_bootstrap_admin_token_config({})
+    assert config.mode is BootstrapAdminMode.DISABLED
+    assert config.token is None
+
+
+def test_resolve_bootstrap_admin_token_config_requires_canonical_token() -> None:
+    with pytest.raises(ValueError, match="canonical Custos service token"):
+        resolve_bootstrap_admin_token_config(
+            {ADMIN_TOKEN_MODE_ENV: "init", ADMIN_TOKEN_ENV: "not-a-token"}
+        )
+
+
+def test_resolve_bootstrap_admin_token_config_rejects_secret_when_disabled() -> None:
+    plaintext, _ = mint_token()
+    with pytest.raises(ValueError, match="must be absent"):
+        resolve_bootstrap_admin_token_config({ADMIN_TOKEN_ENV: plaintext})
+
+
 async def test_seed_platform_seeds_everything() -> None:
     fake, store = _store()
 
@@ -187,6 +254,210 @@ async def test_seed_platform_is_idempotent() -> None:
     assert len(fake.oidc) == 1
     assert len([b for b in fake.bindings if b.role_id == ROLE_PLATFORM_ADMIN]) == 1
     assert fake.tenants[DEFAULT_TENANT_ID].created_at == tenant_created_at
+
+
+async def test_seed_platform_initializes_bootstrap_admin_token() -> None:
+    fake, store = _store()
+    plaintext, expected_hash = mint_token()
+    config = BootstrapAdminTokenConfig(mode=BootstrapAdminMode.INIT, token=plaintext)
+
+    await seed_platform(
+        store,
+        admin_oidc_issuer=None,
+        admin_oidc_subject=None,
+        now=_NOW,
+        bootstrap_admin_token=config,
+    )
+
+    principal = fake.principals[config.principal_id]
+    assert principal.kind == "serviceAccount"
+    assert len(fake.tokens) == 1
+    token = next(iter(fake.tokens.values()))
+    assert token.hash == expected_hash
+    assert plaintext not in repr(token)
+    assert any(
+        binding.principal_id == config.principal_id
+        and binding.role_id == ROLE_PLATFORM_ADMIN
+        and isinstance(binding.scope, GlobalScope)
+        for binding in fake.bindings
+    )
+
+
+async def test_seed_platform_rejects_replayed_init() -> None:
+    fake, store = _store()
+    first, _ = mint_token()
+    config = BootstrapAdminTokenConfig(mode=BootstrapAdminMode.INIT, token=first)
+    await seed_platform(
+        store,
+        admin_oidc_issuer=None,
+        admin_oidc_subject=None,
+        now=_NOW,
+        bootstrap_admin_token=config,
+    )
+
+    second, _ = mint_token()
+    with pytest.raises(ValueError, match="already exists"):
+        await seed_platform(
+            store,
+            admin_oidc_issuer=None,
+            admin_oidc_subject=None,
+            now=_NOW,
+            bootstrap_admin_token=replace(config, token=second),
+        )
+    assert len(fake.tokens) == 1
+
+
+async def test_seed_platform_recovers_bootstrap_admin_token() -> None:
+    fake, store = _store()
+    first, _ = mint_token()
+    init = BootstrapAdminTokenConfig(mode=BootstrapAdminMode.INIT, token=first)
+    await seed_platform(
+        store,
+        admin_oidc_issuer=None,
+        admin_oidc_subject=None,
+        now=_NOW,
+        bootstrap_admin_token=init,
+    )
+
+    replacement, replacement_hash = mint_token()
+    await seed_platform(
+        store,
+        admin_oidc_issuer=None,
+        admin_oidc_subject=None,
+        now=_NOW,
+        bootstrap_admin_token=replace(
+            init,
+            mode=BootstrapAdminMode.RECOVER,
+            token=replacement,
+        ),
+    )
+
+    assert len(fake.tokens) == 2
+    assert sum(token.revoked_at is None for token in fake.tokens.values()) == 1
+    assert any(
+        token.hash == replacement_hash and token.revoked_at is None
+        for token in fake.tokens.values()
+    )
+    assert all(
+        token.hash != hash_token(first) or token.revoked_at for token in fake.tokens.values()
+    )
+
+
+async def test_seed_platform_recovery_requires_existing_service_account() -> None:
+    fake, store = _store()
+    plaintext, _ = mint_token()
+    config = BootstrapAdminTokenConfig(mode=BootstrapAdminMode.RECOVER, token=plaintext)
+
+    with pytest.raises(ValueError, match="is not a service account"):
+        await seed_platform(
+            store,
+            admin_oidc_issuer=None,
+            admin_oidc_subject=None,
+            now=_NOW,
+            bootstrap_admin_token=config,
+        )
+    assert fake.tokens == {}
+
+
+async def test_seed_platform_disabled_does_not_create_bootstrap_credential() -> None:
+    fake, store = _store()
+    await seed_platform(
+        store,
+        admin_oidc_issuer=None,
+        admin_oidc_subject=None,
+        now=_NOW,
+        bootstrap_admin_token=BootstrapAdminTokenConfig(
+            mode=BootstrapAdminMode.DISABLED,
+            token=None,
+        ),
+    )
+    assert fake.principals == {}
+    assert fake.tokens == {}
+
+
+async def test_bootstrap_tokens_use_normal_auth_verification_and_recovery() -> None:
+    _, store = _store()
+    metadata = cast(MetadataStoreProvider, FakeMetadataStore())
+    initial, _ = mint_token()
+    config = BootstrapAdminTokenConfig(mode=BootstrapAdminMode.INIT, token=initial)
+    await seed_platform(
+        store,
+        admin_oidc_issuer=None,
+        admin_oidc_subject=None,
+        now=_NOW,
+        bootstrap_admin_token=config,
+    )
+
+    principal = await verify_token(
+        initial,
+        auth_store=store,
+        metadata_store=metadata,
+        authn_cache=AuthnCache(ttl_seconds=0),
+        now=lambda: _NOW,
+    )
+    assert isinstance(principal, ServiceAccount)
+    assert principal.principal_id == config.principal_id
+
+    replacement, _ = mint_token()
+    await seed_platform(
+        store,
+        admin_oidc_issuer=None,
+        admin_oidc_subject=None,
+        now=_NOW,
+        bootstrap_admin_token=replace(
+            config,
+            mode=BootstrapAdminMode.RECOVER,
+            token=replacement,
+        ),
+    )
+    assert (
+        await verify_token(
+            initial,
+            auth_store=store,
+            metadata_store=metadata,
+            authn_cache=AuthnCache(ttl_seconds=0),
+            now=lambda: _NOW,
+        )
+        is None
+    )
+    assert (
+        await verify_token(
+            replacement,
+            auth_store=store,
+            metadata_store=metadata,
+            authn_cache=AuthnCache(ttl_seconds=0),
+            now=lambda: _NOW,
+        )
+        is not None
+    )
+
+
+async def test_bootstrap_token_expiry_is_enforced_by_auth_verification() -> None:
+    _, store = _store()
+    metadata = cast(MetadataStoreProvider, FakeMetadataStore())
+    plaintext, _ = mint_token()
+    config = BootstrapAdminTokenConfig(
+        mode=BootstrapAdminMode.INIT,
+        token=plaintext,
+        ttl_seconds=1,
+    )
+    await seed_platform(
+        store,
+        admin_oidc_issuer=None,
+        admin_oidc_subject=None,
+        now=_NOW,
+        bootstrap_admin_token=config,
+    )
+    assert (
+        await verify_token(
+            plaintext,
+            auth_store=store,
+            metadata_store=metadata,
+            authn_cache=AuthnCache(ttl_seconds=0),
+            now=lambda: _NOW.replace(second=2),
+        )
+        is None
+    )
 
 
 @pytest.mark.parametrize(
