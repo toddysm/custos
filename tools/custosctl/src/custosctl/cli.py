@@ -9,12 +9,21 @@ API command groups are registered by later DEVCLI tasks.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 import click
 
-from custosctl import __version__, activities, connectors, lifecycle, seed, workflows
+from custosctl import (
+    __version__,
+    activities,
+    bootstrap_admin,
+    connectors,
+    lifecycle,
+    seed,
+    workflows,
+)
 from custosctl import e2e as e2e_module
 from custosctl.api import ApiError
 from custosctl.config import Settings, Target
@@ -160,6 +169,75 @@ def status(obj: Context) -> None:
         raise click.ClickException(str(exc)) from exc
     if not healthy:
         raise SystemExit(1)
+
+
+@cli.group("bootstrap-admin")
+def bootstrap_admin_group() -> None:
+    """Create or recover the first platform-admin credential."""
+
+
+def _run_bootstrap_admin(
+    obj: Context,
+    mode: bootstrap_admin.BootstrapMode,
+    show_token: bool,
+    keep_secret: bool,
+) -> None:
+    if mode is bootstrap_admin.BootstrapMode.RECOVER and not obj.assume_yes:
+        click.confirm(
+            "Revoke all live bootstrap-admin tokens and create a replacement?", abort=True
+        )
+    try:
+        token = bootstrap_admin.run_ceremony(
+            obj.settings,
+            mode=mode,
+            show_token=show_token,
+            keep_secret=keep_secret,
+            echo=click.echo,
+        )
+    except (CommandError, ApiError, RuntimeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"bootstrap-admin {mode.value} completed")
+    if show_token:
+        click.echo(f"CUSTOS_TOKEN={token}")
+
+
+def _bootstrap_options(command: Callable[..., None]) -> Callable[..., None]:
+    command = click.option(
+        "--show-token",
+        is_flag=True,
+        help="Print the generated token once after successful verification.",
+    )(command)
+    return click.option(
+        "--keep-secret",
+        is_flag=True,
+        help="Retain the temporary Kubernetes Secret after success.",
+    )(command)
+
+
+@bootstrap_admin_group.command("init")
+@_bootstrap_options
+@click.pass_obj
+def bootstrap_admin_init(obj: Context, show_token: bool, keep_secret: bool) -> None:
+    """Initialize the first platform-admin service token."""
+    _run_bootstrap_admin(
+        obj,
+        bootstrap_admin.BootstrapMode.INIT,
+        show_token,
+        keep_secret,
+    )
+
+
+@bootstrap_admin_group.command("recover")
+@_bootstrap_options
+@click.pass_obj
+def bootstrap_admin_recover(obj: Context, show_token: bool, keep_secret: bool) -> None:
+    """Revoke prior bootstrap-admin tokens and create a replacement."""
+    _run_bootstrap_admin(
+        obj,
+        bootstrap_admin.BootstrapMode.RECOVER,
+        show_token,
+        keep_secret,
+    )
 
 
 @cli.group()
