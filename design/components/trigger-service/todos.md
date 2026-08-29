@@ -45,7 +45,7 @@ First implementation milestone: the MVP vertical slice that unblocks the Workflo
 ## Open
 
 - [x] TODO-003: Specify scheduler leader-election mechanism — resolved 2026-08-28 (Postgres leader-lease row + `epoch` fence + per-fire dedup key). See `changes/2026-08-28-008-scheduler-leader-election.md`. Closes #20.
-- [ ] TODO-005: Dead-letter handling and replay UX for dispatch failures (added 2026-05-16, issue #22)
+- [x] TODO-005: Dead-letter handling and replay UX — resolved 2026-08-29 (durable `DeadLetterEntry` store via MetadataStoreProvider + TTL retention + `trigger:admin` replay/discard/list routes; replay reuses the original idempotency key). See `changes/2026-08-29-010-dead-letter-replay.md`. Closes #22.
 - [x] TODO-006: Owner of webhook signing keys — resolved 2026-08-29 (Connector Service owns signing material per connector instance; Generic Webhook Receiver delegates verification). See `changes/2026-08-29-009-webhook-signing-key-ownership.md`. Closes #23.
 
 ## Closed
