@@ -76,7 +76,7 @@ Receivers are uniform in shape: each accepts source-specific input and emits a `
 |---|---|
 | Manual Receiver | Accepts `POST /v1/workspaces/{ws}/triggers/{id}:fire` from API Gateway; emits a normalized event with `source.type = manual`. |
 | Scheduler Receiver | Owns cron evaluation per active schedule; fires normalized events at scheduled times. Uses `Schedule Store` for the durable schedule set. |
-| Generic Webhook Receiver | Accepts inbound webhooks forwarded by the API Gateway pass-through (`POST /v1/webhooks/{connectorInstanceId}`); validates HMAC or token auth per connector-instance config, then **de-multiplexes** to all matching subscriptions on that connector instance (selector + payload match). Webhook URLs are connector-instance-scoped, not subscription-scoped — one URL is shared by all subscriptions attached to a given instance. Emits a normalized event per matched subscription with raw body + headers. |
+| Generic Webhook Receiver | Accepts inbound webhooks forwarded by the API Gateway pass-through (`POST /v1/webhooks/{connectorInstanceId}`); **delegates** HMAC/token verification to the Connector Service, which owns the per-instance signing material (see § Webhook Signature Verification), then **de-multiplexes** to all matching subscriptions on that connector instance (selector + payload match). Webhook URLs are connector-instance-scoped, not subscription-scoped — one URL is shared by all subscriptions attached to a given instance. Emits a normalized event per matched subscription with raw body + headers. |
 | Vendor Push Receivers | Host process for connector `listen(mode=push)` streams. Receives push events from connector plugins via the Connector Service's listen channel. |
 | Pull Receivers / Pollers | Host process for connector `listen(mode=pull)` streams. Drives interval polls per configured pull subscription; the Connector Service reads and advances its own per-instance cursor before returning normalized events to the receiver. |
 | Internal Event Receiver | Subscribes to `custos.workflow.events` topic where Workflow Service publishes workflow lifecycle events (`workflow.completed`, `workflow.failed`, custom emit). Emits them as normalized events. |
@@ -363,7 +363,7 @@ See change record
 
 ### REST API (mounted under API Gateway)
 
-All paths are workspace-scoped and routed by the API Gateway under the `/v1/workspaces/{ws}/triggers/*` prefix. Webhook ingest is gateway-owned at `POST /v1/webhooks/{connectorInstanceId}` (connector-instance-scoped, not subscription-scoped) and is forwarded to this service after gateway-side pass-through processing (including TLS termination and other ingress handling defined by the API Gateway); the gateway does not add authn/call-context or perform signature verification for this route, and signature verification plus subscription demux happen here.
+All paths are workspace-scoped and routed by the API Gateway under the `/v1/workspaces/{ws}/triggers/*` prefix. Webhook ingest is gateway-owned at `POST /v1/webhooks/{connectorInstanceId}` (connector-instance-scoped, not subscription-scoped) and is forwarded to this service after gateway-side pass-through processing (including TLS termination and other ingress handling defined by the API Gateway); the gateway does not add authn/call-context or perform signature verification for this route; signature verification is delegated to the Connector Service (the owner of the per-instance signing material — see § Webhook Signature Verification) and subscription demux happens here.
 
 | Method | Path | Request | Response | Description |
 |---|---|---|---|---|
@@ -373,7 +373,7 @@ All paths are workspace-scoped and routed by the API Gateway under the `/v1/work
 | DELETE | `/v1/workspaces/{ws}/triggers/{id}` | — | `204` | Remove subscription. |
 | POST | `/v1/workspaces/{ws}/triggers/{id}:fire` | `{ inputs }` | `{ runId }` | Manual trigger; returns started run id. |
 
-Webhook ingest does not appear in this table because it is an unauthenticated gateway-owned route (`POST /v1/webhooks/{connectorInstanceId}`) that the gateway forwards to Trigger Service via Dapr invocation with no call-context. See the API Gateway design § Webhook Pass-through for the inbound contract; this service's § Generic Webhook Receiver owns HMAC/token verification and subscription demux per connector instance.
+Webhook ingest does not appear in this table because it is an unauthenticated gateway-owned route (`POST /v1/webhooks/{connectorInstanceId}`) that the gateway forwards to Trigger Service via Dapr invocation with no call-context. See the API Gateway design § Webhook Pass-through for the inbound contract; this service's § Generic Webhook Receiver delegates HMAC/token verification to the Connector Service (owner of the per-instance signing material) and owns subscription demux per connector instance.
 
 ### Internal RPC (Workflow Service ⇄ Trigger Service)
 
@@ -481,6 +481,44 @@ stale leader's duplicate collides on that key and is dropped (`trigger.deduped`)
 Leader-lease (single firer) **plus** the `epoch` fence **plus** the per-fire dedup
 key together deliver exactly-once without a distributed transaction.
 
+## Webhook Signature Verification (REQ-006)
+
+Inbound webhooks arrive on the gateway-owned, connector-instance-scoped route
+`POST /v1/webhooks/{connectorInstanceId}` and are forwarded to this service's
+Generic Webhook Receiver. Each request must be authenticated (HMAC signature or
+bearer token) before any subscription is matched. This section fixes **who owns
+the signing material** and **who verifies**.
+
+### Decision
+
+**Signing/verification material is owned by the Connector Service, per connector
+instance — never by the Trigger Service per subscription.** The Generic Webhook
+Receiver **delegates** verification to the Connector Service; raw signing secrets
+never enter the Trigger Service.
+
+| Question | Answer |
+|---|---|
+| Who owns the secret? | Connector Service, per `ConnectorInstance`, as part of the instance credential model (resolved via the Secret Bridge / an identity resolver such as `x-dapr-secret`). |
+| Who verifies the request? | The Connector Service (the connector plugin's `push`-mode handler), because signature schemes are vendor-specific (e.g. GitHub `X-Hub-Signature-256`, Slack signing secret, generic HMAC). |
+| What does the Trigger Service see? | Only the verified request outcome and the normalized event — never the secret. It owns subscription demux, dedup, and dispatch. |
+
+### Why not per-subscription in the Trigger Service
+
+1. **Instance-scoped URLs make per-subscription keys impossible.** One webhook URL is shared by every subscription on a `ConnectorInstance` (INCON-025), so the external system signs with a single instance secret; there is no per-subscription secret for it to use.
+2. **The Connector Service already owns per-instance credentials** (Identity and Credential Model, Secret Bridge, `x-dapr-secret`) and the `listen(push)` webhook wiring via the Listen Manager. Duplicating a signing-secret store in the Trigger Service would fork secret management and contradict the platform rule that plaintext credentials never traverse service APIs — plugins receive opaque secret handles.
+3. **Verification is vendor-specific**, so it belongs to the connector plugin (loaded by the Connector Service), not to the source-agnostic Trigger pipeline.
+
+### Flow
+
+1. The gateway forwards the raw body + headers to the Generic Webhook Receiver (no verification at the gateway).
+2. The receiver calls the Connector Service verification seam for `connectorInstanceId` (raw body + headers); the Connector Service resolves the instance secret through the Secret Bridge and runs the plugin's verifier.
+3. On **success** the receiver normalizes the event and de-multiplexes it to every matching subscription (selector + payload), then dedups and dispatches.
+4. On **failure** the request is rejected with `401` and an audit event `trigger.webhook.rejected` (reason `signature_invalid` / `signature_missing`); no subscription is matched and no dispatch occurs.
+
+### Rotation
+
+Because the secret lives with the `ConnectorInstance`, rotation is a Connector-Service credential operation (update the referenced Kubernetes Secret / KMS entry) with no Trigger Service change and no per-subscription fan-out.
+
 ## Configuration
 
 | Variable | Required | Default | Description |
@@ -498,12 +536,12 @@ key together deliver exactly-once without a distributed transaction.
 
 | Dependency | Type | Purpose |
 |---|---|---|
-| Connector Service | Runtime | `listen(push)` and `listen(pull)` streams per connector instance (ADR-013). |
+| Connector Service | Runtime | `listen(push)` / `listen(pull)` streams per connector instance (ADR-013); owns per-instance webhook signing material and verifies inbound webhook signatures on the Trigger Service's behalf (see § Webhook Signature Verification). |
 | Workflow Service | Runtime | `StartRun`, `RaiseExternalEvent`, publisher of internal workflow events. |
 | MetadataStoreProvider | Runtime | Persistence for Subscription, Schedule, DedupKey, ResumeSubscription. (Pull cursors live with the Connector Service, not here.) |
 | Dapr Pub/Sub | Runtime | Internal transport for `custos.triggers.normalized` and `custos.workflow.events`. |
 | Observability/Audit | Runtime | Emit `trigger.matched`, `trigger.deduped`, `trigger.dispatched`, `resume.delivered` audit events. |
-| Auth Service | Runtime | Webhook receiver HMAC/token verification; manual trigger RBAC. |
+| Auth Service | Runtime | Manual trigger RBAC. Webhook signing material is Connector-Service-owned (see § Webhook Signature Verification), not Auth-Service-issued. |
 
 ## Failure Modes
 
@@ -519,7 +557,6 @@ key together deliver exactly-once without a distributed transaction.
 ## Open TODOs
 
 - [ ] TODO-005: Define dead-letter handling and replay UX for dispatch failures (added 2026-05-16).
-- [ ] TODO-006: Decide whether webhook signing/HMAC keys are owned by Trigger Service per subscription or come from Connector Service per instance (added 2026-05-16).
 - [ ] TODO-007: Selective `DedupKey` clear admin API (e.g. `POST /v1/workspaces/{ws}/triggers/dedup:clear` with selectors over `subscriptionId`, `connectorInstanceId`, `eventId`, time window) — needed so operators can re-fire downstream dispatches after a Connector Service cursor rewind without waiting for the dedup TTL window to expire. Deferred to M2+; v1 rewind procedure documents the workaround (wait for TTL, or rewind past the dedup window) (added 2026-05-18, #103).
 
 ## Closed TODOs
@@ -528,6 +565,7 @@ key together deliver exactly-once without a distributed transaction.
 - [x] TODO-002: Decide selector language. Resolved 2026-06-04 — selectors are CEL boolean expressions over an `event` binding root (ADR-011 parity with `inputMapping`); legacy field/match-type tuples desugar to CEL. See [`changes/2026-06-04-006-selector-cel-parity.md`](changes/2026-06-04-006-selector-cel-parity.md), closes #19.
 - [x] TODO-004: Specify resume-subscription registration as a Workflow Service responsibility in that component's design (cross-component) — REQ-081. Resolved 2026-05-17 by Workflow Service design (`design/components/workflow-service/design.md` § Step Resume on External Event and § Resume Subscription Replay Protocol). Idempotent re-registration semantics also documented on the TS Internal RPC table above.
 - [x] TODO-003: Specify scheduler leader-election mechanism. Resolved 2026-08-28 — a **Postgres leader-lease row** held via `MetadataStoreProvider` (explicit TTL matching `TRIGGER_SCHEDULER_LEADER_LEASE_SECONDS`, `epoch` fencing token) elects a single scheduler; exactly-once is guaranteed by leader-lease + fencing + a per-fire dedup key `hash(scheduleId, plannedFireAt)`. Kubernetes `Lease` and Dapr locks rejected (new infra / control-plane coupling). See [`changes/2026-08-28-008-scheduler-leader-election.md`](changes/2026-08-28-008-scheduler-leader-election.md) — REQ-005, closes #20.
+- [x] TODO-006: Owner of webhook signing keys. Resolved 2026-08-29 — signing/verification material is **owned by the Connector Service, per connector instance** (part of the instance credential model, resolved via the Secret Bridge / `x-dapr-secret`), not by the Trigger Service per subscription. The Generic Webhook Receiver **delegates** HMAC/token verification to the Connector Service so raw secrets never enter the Trigger Service, then demuxes verified events to subscriptions. Per-subscription keys are impossible anyway: webhook URLs are connector-instance-scoped (INCON-025). See [`changes/2026-08-29-009-webhook-signing-key-ownership.md`](changes/2026-08-29-009-webhook-signing-key-ownership.md) — REQ-006, closes #23.
 
 ## Change History
 
@@ -544,3 +582,4 @@ key together deliver exactly-once without a distributed transaction.
 | 2026-06-04 | TODO-002 resolved: selector language is CEL (ADR-011) over a new `event` binding root, with legacy field/match-type tuples desugaring to CEL; added § Selector Language — CEL | #19 |
 | 2026-06-04 | TODO-001 / INCON-013 resolved: locked the platform event taxonomy — closed platform-owned domain registry (`manual`/`cron`/`webhook`/`workflow`/`run`/`step`/`activity`/`registry`/`pr`/`scan`) + vendor-domain shape rule; added § Event Taxonomy | #18 |
 | 2026-08-28 | TODO-003 resolved: scheduler leader-election is a Postgres leader-lease row (`epoch` fencing) via `MetadataStoreProvider`, with a per-fire dedup key `hash(scheduleId, plannedFireAt)` for exactly-once; added § Scheduler Leader Election and `TRIGGER_SCHEDULER_LEADER_RENEW_SECONDS`; Kubernetes `Lease` and Dapr lock rejected | #20 |
+| 2026-08-29 | TODO-006 resolved: webhook signing/verification material is Connector-Service-owned per connector instance (not Trigger-Service per subscription); the Generic Webhook Receiver delegates HMAC/token verification to the Connector Service so raw secrets never enter this service; added § Webhook Signature Verification; reconciled the Connector Service / Auth Service dependency rows | #23 |
