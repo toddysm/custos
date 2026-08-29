@@ -26,7 +26,7 @@ Status vocabulary: **Implemented** · **In progress** · **Planned** · **Deferr
 | COMP-001 | API Gateway | api-gateway | Implemented | M2 items — #990 |
 | COMP-002 | AuthN/AuthZ Service | auth-service | Implemented | — |
 | COMP-003 | Workflow Service | workflow-service | In progress | Observability Client integration — #989 |
-| COMP-004 | Trigger Service | trigger-service | In progress | M2 receivers — #988; design TODOs #22 / #23 (#20 resolved) |
+| COMP-004 | Trigger Service | trigger-service | In progress | M2 receivers — #988; design TODO #22 (#20, #23 resolved) |
 | COMP-005 | Connector Service | connector-service | Implemented | — |
 | COMP-006 | Activity Runtime Manager | activity-runtime-manager | Implemented | M2 deferrals — #991; Kata tier validation — #763 |
 | COMP-007 | Definition/Template/Catalog Service | catalog-service | Implemented | — |
@@ -41,7 +41,7 @@ Status vocabulary: **Implemented** · **In progress** · **Planned** · **Deferr
 |---|---|---|---|---|
 | #20 | Design TODO | trigger-service | Done | Scheduler leader-election — Postgres leader-lease row; resolved via #997 (2026-08-28); implementation follows in #988 |
 | #22 | Design TODO | trigger-service | Open | Dead-letter handling + replay UX |
-| #23 | Design TODO | trigger-service | Open | Owner of webhook signing keys |
+| #23 | Design TODO | trigger-service | Done | Owner of webhook signing keys — Connector Service owns per-instance signing material; resolved via #1000 (2026-08-29); implementation follows in #988 |
 | #763 | Enhancement | activity-runtime-manager | Open | Validate vm/microvm (Kata) tier specifics |
 | #988 | Implementation gap | trigger-service | Open | M2 receivers (scheduler, webhook, vendor-push, pull) |
 | #989 | Implementation gap | workflow-service | Open | Full Observability Client integration |
