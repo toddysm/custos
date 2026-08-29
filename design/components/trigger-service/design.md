@@ -16,18 +16,19 @@ It owns ingestion. It does **not** own orchestration control flow.
 ## Boundaries
 
 - **Owns**:
-  - Trigger configuration (subscriptions tying sources to target workflows).
-  - Resume subscriptions (in-flight `(runId, stepId)` waiting on an external signal).
-  - Receiver runtime for manual, scheduled, generic webhook, vendor push, polling, and internal sources.
-  - Event normalization, classification, matching, dedup, and dispatch.
-  - Schedule state for cron-based triggers, persisted via `MetadataStoreProvider`.
-  - Subscription, dedup, and resume-subscription state.
+   - Trigger configuration (subscriptions tying sources to target workflows).
+   - Resume subscriptions (in-flight `(runId, stepId)` waiting on an external signal).
+   - Receiver runtime for manual, scheduled, generic webhook, vendor push, polling, and internal sources.
+   - Event normalization, classification, matching, dedup, and dispatch.
+   - Schedule state for cron-based triggers, persisted via `MetadataStoreProvider`.
+   - Subscription, dedup, and resume-subscription state.
+
 - **Does NOT own**:
-  - Connector pull cursors. Pull cursors are owned by the Connector Service and keyed per `ConnectorInstance` (see Connector Service design § Cursor Ownership). Pull Receivers drive `listen(mode=pull)` against the Connector Service and consume the normalized events it emits; the Connector Service reads and advances the cursor against the upstream API on the platform's behalf.
-  - Orchestration state machine, retries, fan-out, approval gates — those remain in Workflow Service (ADR-007).
-  - Connector plugin loading, credential resolution, or context issuance — those belong to Connector Service. Vendor push receivers and pollers are *driven by* connector `listen()` (ADR-013) but the runtime host is Trigger Service.
-  - Activity execution — Activity Runtime Manager.
-  - Audit storage — events are emitted to Observability/Audit, not stored here.
+   - Connector pull cursors. Pull cursors are owned by the Connector Service and keyed per `ConnectorInstance` (see Connector Service design § Cursor Ownership). Pull Receivers drive `listen(mode=pull)` against the Connector Service and consume the normalized events it emits; the Connector Service reads and advances the cursor against the upstream API on the platform's behalf.
+   - Orchestration state machine, retries, fan-out, approval gates — those remain in Workflow Service (ADR-007).
+   - Connector plugin loading, credential resolution, or context issuance — those belong to Connector Service. Vendor push receivers and pollers are *driven by* connector `listen()` (ADR-013) but the runtime host is Trigger Service.
+   - Activity execution — Activity Runtime Manager.
+   - Audit storage — events are emitted to Observability/Audit, not stored here.
 
 ## Internal Structure
 
@@ -277,9 +278,9 @@ erDiagram
 
 ### Event Taxonomy (resolves TODO-001 / INCON-013)
 
-`kind` strings are **dot-namespaced** `<domain>.<event>` and validated against
+`kind` strings are __dot-namespaced__ `<domain>.<event>` and validated against
 `^[a-z][a-z0-9]*(\.[a-z][a-z0-9_]*)+$` — lowercase, at least one dot, the first
-segment being the **domain**. Two tiers exist:
+segment being the __domain__. Two tiers exist:
 
 **Platform-owned domains** form a *closed* registry whose kind lists are
 enumerated and validated exactly. This is the single source of truth for the
@@ -345,10 +346,10 @@ Lifecycle:
    `matchType = "cel"`, `value = <cel expr>`, `fieldPath = ""` — the
    contract-locked SPL v1 schema is preserved; `cel` joins the existing
    match-type enum as the canonical value.
-3. **Create / patch (fail-fast).** `parse()` + `type_check()` against the
+3. __Create / patch (fail-fast).__ `parse()` + `type_check()` against the
    `event` bindings; invalid CEL → `trigger.selector_invalid` (HTTP 422) before
    persistence. The typed AST is cached in-process by `(subscriptionId, exprHash)`.
-4. **Match (hot path).** `evaluate(typed_ast, BindingScope(event=…), clock)`
+4. __Match (hot path).__ `evaluate(typed_ast, BindingScope(event=…), clock)`
    under the per-evaluation timeout budget; a non-bool result →
    `trigger.selector_type_error` (no-match + audit); a timeout → no-match + audit.
 5. **Resume selectors.** `RegisterResumeSubscription(selector=…)` is likewise a
@@ -437,6 +438,49 @@ spec:
 
 `mode: pull` is available on **any** trigger type whose connector implements `listen(pull)`. The platform makes no distinction between "registry trigger" and "any other pollable source" at the pipeline level — that's a connector-author concern. `type: workflow.completed` is the first-class internal trigger surface for REQ-080.
 
+## Scheduler Leader Election (REQ-005)
+
+key together deliver exactly-once without a distributed transaction.
+
+The Scheduler Receiver must fire each active schedule **exactly once** across allLeader-lease (single firer) **plus** the `epoch` fence **plus** the per-fire dedup
+
+Trigger Service replicas (REQ-005). Custos elects a single scheduler leader with astale leader's duplicate collides on that key and is dropped (`trigger.deduped`).
+
+**Postgres leader-lease row** held through `MetadataStoreProvider`, reinforced by a`hash(scheduleId, plannedFireAt)` in the existing dedup store before dispatch; a
+
+per-fire idempotency key for defence in depth.even in that window, each fire is recorded under a deterministic idempotency key
+
+could briefly overlap a new one during failover. To make double-firing impossible
+
+### Why Postgres, not a Kubernetes Lease or a Dapr lockLeader election bounds firing to one replica, but a paused-then-resumed old leader
+
+
+
+| Option | Verdict | Reason |### Exactly-once guarantee
+
+|---|---|---|
+
+| **Postgres leader-lease row** | **Chosen** | Postgres is already a hard dependency (the Schedule Store lives in `MetadataStoreProvider`). No new infrastructure; an explicit, tunable TTL that matches the existing `TRIGGER_SCHEDULER_LEADER_LEASE_SECONDS`; connection-pooler-safe (PgBouncer); observable (`SELECT` the current holder); testable without a cluster; portable across the connected, eval, and air-gapped profiles. |   and API traffic.
+
+| Kubernetes `Lease` (`coordination.k8s.io`) | Rejected | Adds a hard Kubernetes-API dependency plus RBAC the service does not otherwise need, breaks local/non-cluster testing, and couples a storage concern to the control plane against the storage-provider abstraction. |   non-leaders idle the scheduler loop but continue to serve all other receivers
+
+| Dapr distributed lock | Rejected | The Lock building block is alpha and needs a lock-store component (typically Redis). Redis is not a base-profile dependency — it is only an M2 option for the coordinated rate-limiter — so this would force new infra into the eval/air-gapped profiles. |4. **Only the leader evaluates cron** and enqueues normalized `cron.tick` events;
+
+   increments on every handover and acts as a **fencing token**.
+
+### Lease protocol   acquires within `TRIGGER_SCHEDULER_LEADER_LEASE_SECONDS` (default `30`). `epoch`
+
+3. **Failover** — if the leader dies, its lease expires and the next replica
+
+A single row in a `scheduler_leader` table (one logical scheduler group per   acquisition on the same tick.
+
+deployment) carries `holder_id`, `epoch`, and `expires_at`:   (default `10`, ≈ lease ÷ 3) so a healthy leader never lapses; non-leaders retry
+
+2. **Renew cadence** — the leader renews every `TRIGGER_SCHEDULER_LEADER_RENEW_SECONDS`
+
+1. **Acquire / renew** — every replica runs a conditional update:   The replica whose statement affects the row (row count = 1) is the leader.
+   `UPDATE scheduler_leader SET holder_id = :me, epoch = epoch + 1, expires_at = now() + :lease WHERE expires_at < now() OR holder_id = :me`.
+
 ## Configuration
 
 | Variable | Required | Default | Description |
@@ -447,7 +491,8 @@ spec:
 | `TRIGGER_RESUME_DEFAULT_TTL_SECONDS` | No | `604800` | Default expiry for resume subscriptions (7 days). |
 | `TRIGGER_DISPATCH_MAX_RETRIES` | No | `5` | Max retries dispatching to Workflow Service. |
 | `TRIGGER_FANOUT_MAX_DEPTH` | No | `16` | Max per-tenant fan-out depth before a dispatch is rejected as a loop (`trigger.loop.detected`). |
-| `TRIGGER_SCHEDULER_LEADER_LEASE_SECONDS` | No | `30` | Scheduler leader lock TTL (single-fire guarantee across replicas). |
+| `TRIGGER_SCHEDULER_LEADER_LEASE_SECONDS` | No | `30` | Scheduler leader-lease TTL (single-fire guarantee across replicas); failover bound. |
+| `TRIGGER_SCHEDULER_LEADER_RENEW_SECONDS` | No | `10` | Scheduler leader-lease renew interval (≈ lease ÷ 3); the leader re-acquires on this cadence to avoid lapsing. |
 
 ## Dependencies
 
@@ -468,12 +513,11 @@ spec:
 | Duplicate inbound event | Dedup key hit | No dispatch | N/A |
 | Poller falls behind | `nextFireAt < now - threshold` metric | Subscription marked `degraded`; alert | Operator increases interval or scales pod |
 | Resume subscription expires before event arrives | TTL sweeper | Wait cancelled via `CancelResumeSubscription` callback | Workflow step takes its timeout branch (ADR-007) |
-| Scheduler split-brain across replicas | Leader lease | Only leader fires schedules; non-leaders wait | Lease auto-renews; on failover next replica acquires within `LEADER_LEASE_SECONDS` |
+| Scheduler split-brain across replicas | Postgres leader-lease row (`epoch` fencing) | Only the lease holder fires schedules; non-leaders idle the scheduler loop | Lease auto-renews every `LEADER_RENEW_SECONDS`; on failover the next replica acquires within `LEADER_LEASE_SECONDS`; a stale leader's duplicate fire collides on the per-fire dedup key `hash(scheduleId, plannedFireAt)` |
 | Internal event loop (workflow A starts B starts A) | Per-tenant fan-out depth counter | Reject dispatch when depth > `TRIGGER_FANOUT_MAX_DEPTH` | Audit `trigger.loop.detected`; operator inspects subscription graph |
 
 ## Open TODOs
 
-- [ ] TODO-003: Specify scheduler leader-election mechanism (Dapr distributed lock vs. Postgres advisory lock vs. Kubernetes lease) — REQ-005 (added 2026-05-16).
 - [ ] TODO-005: Define dead-letter handling and replay UX for dispatch failures (added 2026-05-16).
 - [ ] TODO-006: Decide whether webhook signing/HMAC keys are owned by Trigger Service per subscription or come from Connector Service per instance (added 2026-05-16).
 - [ ] TODO-007: Selective `DedupKey` clear admin API (e.g. `POST /v1/workspaces/{ws}/triggers/dedup:clear` with selectors over `subscriptionId`, `connectorInstanceId`, `eventId`, time window) — needed so operators can re-fire downstream dispatches after a Connector Service cursor rewind without waiting for the dedup TTL window to expire. Deferred to M2+; v1 rewind procedure documents the workaround (wait for TTL, or rewind past the dedup window) (added 2026-05-18, #103).
@@ -483,6 +527,7 @@ spec:
 - [x] TODO-001: Define the platform event taxonomy. Resolved 2026-06-04 — § Event Taxonomy locks the closed platform-owned domain registry + the vendor-domain shape rule + the unified `kind` namespace (INCON-013). See [`changes/2026-06-04-007-event-taxonomy.md`](changes/2026-06-04-007-event-taxonomy.md), closes #18.
 - [x] TODO-002: Decide selector language. Resolved 2026-06-04 — selectors are CEL boolean expressions over an `event` binding root (ADR-011 parity with `inputMapping`); legacy field/match-type tuples desugar to CEL. See [`changes/2026-06-04-006-selector-cel-parity.md`](changes/2026-06-04-006-selector-cel-parity.md), closes #19.
 - [x] TODO-004: Specify resume-subscription registration as a Workflow Service responsibility in that component's design (cross-component) — REQ-081. Resolved 2026-05-17 by Workflow Service design (`design/components/workflow-service/design.md` § Step Resume on External Event and § Resume Subscription Replay Protocol). Idempotent re-registration semantics also documented on the TS Internal RPC table above.
+- [x] TODO-003: Specify scheduler leader-election mechanism. Resolved 2026-08-28 — a **Postgres leader-lease row** held via `MetadataStoreProvider` (explicit TTL matching `TRIGGER_SCHEDULER_LEADER_LEASE_SECONDS`, `epoch` fencing token) elects a single scheduler; exactly-once is guaranteed by leader-lease + fencing + a per-fire dedup key `hash(scheduleId, plannedFireAt)`. Kubernetes `Lease` and Dapr locks rejected (new infra / control-plane coupling). See [`changes/2026-08-28-008-scheduler-leader-election.md`](changes/2026-08-28-008-scheduler-leader-election.md) — REQ-005, closes #20.
 
 ## Change History
 
@@ -498,3 +543,4 @@ spec:
 | 2026-05-18 | INCON-027: Added TODO-007 for a selective `DedupKey` clear admin API (deferred to M2+). Connector Service cursor rewind no longer documents a Trigger admin step that does not exist; until TODO-007 ships, re-firing after rewind is governed by Trigger's existing dedup TTL window | #103 |
 | 2026-06-04 | TODO-002 resolved: selector language is CEL (ADR-011) over a new `event` binding root, with legacy field/match-type tuples desugaring to CEL; added § Selector Language — CEL | #19 |
 | 2026-06-04 | TODO-001 / INCON-013 resolved: locked the platform event taxonomy — closed platform-owned domain registry (`manual`/`cron`/`webhook`/`workflow`/`run`/`step`/`activity`/`registry`/`pr`/`scan`) + vendor-domain shape rule; added § Event Taxonomy | #18 |
+| 2026-08-28 | TODO-003 resolved: scheduler leader-election is a Postgres leader-lease row (`epoch` fencing) via `MetadataStoreProvider`, with a per-fire dedup key `hash(scheduleId, plannedFireAt)` for exactly-once; added § Scheduler Leader Election and `TRIGGER_SCHEDULER_LEADER_RENEW_SECONDS`; Kubernetes `Lease` and Dapr lock rejected | #20 |
