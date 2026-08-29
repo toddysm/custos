@@ -440,46 +440,46 @@ spec:
 
 ## Scheduler Leader Election (REQ-005)
 
-key together deliver exactly-once without a distributed transaction.
+The Scheduler Receiver must fire each active schedule **exactly once** across all
+Trigger Service replicas (REQ-005). Custos elects a single scheduler leader with a
+**Postgres leader-lease row** held through `MetadataStoreProvider`, reinforced by a
+per-fire idempotency key for defence in depth.
 
-The Scheduler Receiver must fire each active schedule **exactly once** across allLeader-lease (single firer) **plus** the `epoch` fence **plus** the per-fire dedup
+### Why Postgres, not a Kubernetes Lease or a Dapr lock
 
-Trigger Service replicas (REQ-005). Custos elects a single scheduler leader with astale leader's duplicate collides on that key and is dropped (`trigger.deduped`).
-
-**Postgres leader-lease row** held through `MetadataStoreProvider`, reinforced by a`hash(scheduleId, plannedFireAt)` in the existing dedup store before dispatch; a
-
-per-fire idempotency key for defence in depth.even in that window, each fire is recorded under a deterministic idempotency key
-
-could briefly overlap a new one during failover. To make double-firing impossible
-
-### Why Postgres, not a Kubernetes Lease or a Dapr lockLeader election bounds firing to one replica, but a paused-then-resumed old leader
-
-
-
-| Option | Verdict | Reason |### Exactly-once guarantee
-
+| Option | Verdict | Reason |
 |---|---|---|
+| **Postgres leader-lease row** | **Chosen** | Postgres is already a hard dependency (the Schedule Store lives in `MetadataStoreProvider`). No new infrastructure; an explicit, tunable TTL that matches the existing `TRIGGER_SCHEDULER_LEADER_LEASE_SECONDS`; connection-pooler-safe (PgBouncer); observable (`SELECT` the current holder); testable without a cluster; portable across the connected, eval, and air-gapped profiles. |
+| Kubernetes `Lease` (`coordination.k8s.io`) | Rejected | Adds a hard Kubernetes-API dependency plus RBAC the service does not otherwise need, breaks local/non-cluster testing, and couples a storage concern to the control plane against the storage-provider abstraction. |
+| Dapr distributed lock | Rejected | The Lock building block is alpha and needs a lock-store component (typically Redis). Redis is not a base-profile dependency — it is only an M2 option for the coordinated rate-limiter — so this would force new infra into the eval/air-gapped profiles. |
 
-| **Postgres leader-lease row** | **Chosen** | Postgres is already a hard dependency (the Schedule Store lives in `MetadataStoreProvider`). No new infrastructure; an explicit, tunable TTL that matches the existing `TRIGGER_SCHEDULER_LEADER_LEASE_SECONDS`; connection-pooler-safe (PgBouncer); observable (`SELECT` the current holder); testable without a cluster; portable across the connected, eval, and air-gapped profiles. |   and API traffic.
+### Lease protocol
 
-| Kubernetes `Lease` (`coordination.k8s.io`) | Rejected | Adds a hard Kubernetes-API dependency plus RBAC the service does not otherwise need, breaks local/non-cluster testing, and couples a storage concern to the control plane against the storage-provider abstraction. |   non-leaders idle the scheduler loop but continue to serve all other receivers
+A single row in a `scheduler_leader` table (one logical scheduler group per
+deployment) carries `holder_id`, `epoch`, and `expires_at`:
 
-| Dapr distributed lock | Rejected | The Lock building block is alpha and needs a lock-store component (typically Redis). Redis is not a base-profile dependency — it is only an M2 option for the coordinated rate-limiter — so this would force new infra into the eval/air-gapped profiles. |4. **Only the leader evaluates cron** and enqueues normalized `cron.tick` events;
-
-   increments on every handover and acts as a **fencing token**.
-
-### Lease protocol   acquires within `TRIGGER_SCHEDULER_LEADER_LEASE_SECONDS` (default `30`). `epoch`
-
-3. **Failover** — if the leader dies, its lease expires and the next replica
-
-A single row in a `scheduler_leader` table (one logical scheduler group per   acquisition on the same tick.
-
-deployment) carries `holder_id`, `epoch`, and `expires_at`:   (default `10`, ≈ lease ÷ 3) so a healthy leader never lapses; non-leaders retry
-
-2. **Renew cadence** — the leader renews every `TRIGGER_SCHEDULER_LEADER_RENEW_SECONDS`
-
-1. **Acquire / renew** — every replica runs a conditional update:   The replica whose statement affects the row (row count = 1) is the leader.
+1. **Acquire / renew** — every replica runs a conditional update:
    `UPDATE scheduler_leader SET holder_id = :me, epoch = epoch + 1, expires_at = now() + :lease WHERE expires_at < now() OR holder_id = :me`.
+   The replica whose statement affects the row (row count = 1) is the leader.
+2. **Renew cadence** — the leader renews every `TRIGGER_SCHEDULER_LEADER_RENEW_SECONDS`
+   (default `10`, ≈ lease ÷ 3) so a healthy leader never lapses; non-leaders retry
+   acquisition on the same tick.
+3. **Failover** — if the leader dies, its lease expires and the next replica
+   acquires within `TRIGGER_SCHEDULER_LEADER_LEASE_SECONDS` (default `30`). `epoch`
+   increments on every handover and acts as a **fencing token**.
+4. **Only the leader evaluates cron** and enqueues normalized `cron.tick` events;
+   non-leaders idle the scheduler loop but continue to serve all other receivers
+   and API traffic.
+
+### Exactly-once guarantee
+
+Leader election bounds firing to one replica, but a paused-then-resumed old leader
+could briefly overlap a new one during failover. To make double-firing impossible
+even in that window, each fire is recorded under a deterministic idempotency key
+`hash(scheduleId, plannedFireAt)` in the existing dedup store before dispatch; a
+stale leader's duplicate collides on that key and is dropped (`trigger.deduped`).
+Leader-lease (single firer) **plus** the `epoch` fence **plus** the per-fire dedup
+key together deliver exactly-once without a distributed transaction.
 
 ## Configuration
 
