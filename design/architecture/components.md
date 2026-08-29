@@ -1,22 +1,22 @@
 # Component Registry: Custos
 
-Last Updated: 2026-06-30
+Last Updated: 2026-08-28
 
 ## Components
 
 | ID | Name | Slug | Responsibility | Tech Stack | Status |
 |---|---|---|---|---|---|
-| COMP-001 | API Gateway | api-gateway | Unified entrypoint for UI, CLI, SDK, and automation APIs | Python, FastAPI, Dapr sidecar | Designed |
+| COMP-001 | API Gateway | api-gateway | Unified entrypoint for UI, CLI, SDK, and automation APIs | Python, FastAPI, Dapr sidecar | Implemented |
 | COMP-002 | AuthN/AuthZ Service | auth-service | OIDC login, service token auth, RBAC enforcement | Python, OIDC libs, Dapr | Implemented |
 | COMP-003 | Workflow Service | workflow-service | Workflow validation, versioning, orchestration lifecycle | Python, Dapr Workflow | In Progress |
-| COMP-004 | Trigger Service | trigger-service | Generic push/pull trigger ingestion, normalization, and dispatch across source categories | Python, Dapr Pub/Sub | Designed |
+| COMP-004 | Trigger Service | trigger-service | Generic push/pull trigger ingestion, normalization, and dispatch across source categories | Python, Dapr Pub/Sub | In Progress |
 | COMP-005 | Connector Service | connector-service | Connector runtime and connector plugin loading/execution | Python plugin runtime, Dapr Secrets | Implemented |
-| COMP-006 | Activity Runtime Manager | activity-runtime-manager | Activity resolution, execution, lifecycle, and result mapping | Python, Kubernetes Jobs, Dapr | Designed |
-| COMP-007 | Definition/Template/Catalog Service | catalog-service | Workflow definitions, template lifecycle, activity/connector catalog metadata | Python, provider abstractions | In Progress |
-| COMP-008 | Storage Provider Layer | storage-provider-layer | Abstraction and adapters for definitions, metadata, catalog, artifacts, auth state, and log/metric query | Python interfaces, provider plugins | Designed |
-| COMP-009 | Observability and Audit Service | observability-audit-service | Structured execution events, audit records, logs/traces/metrics export | OpenTelemetry, Kubernetes logging stack | Designed |
+| COMP-006 | Activity Runtime Manager | activity-runtime-manager | Activity resolution, execution, lifecycle, and result mapping | Python, Kubernetes Jobs, Dapr | Implemented |
+| COMP-007 | Definition/Template/Catalog Service | catalog-service | Workflow definitions, template lifecycle, activity/connector catalog metadata | Python, provider abstractions | Implemented |
+| COMP-008 | Storage Provider Layer | storage-provider-layer | Abstraction and adapters for definitions, metadata, catalog, artifacts, auth state, and log/metric query | Python interfaces, provider plugins | Implemented |
+| COMP-009 | Observability and Audit Service | observability-audit-service | Structured execution events, audit records, logs/traces/metrics export | OpenTelemetry, Kubernetes logging stack | Implemented |
 | COMP-010 | Web UI and Template Designer | web-ui | Workflow authoring, template authoring, run inspection and ops UX | React, TypeScript | Defined, deferred to M2+ |
-| COMP-011 | Local Dev & Test CLI | custosctl | Deploy the platform to a local (kind) or remote cluster and drive the extension lifecycle (register connectors/activities, apply/run workflows, e2e) via the public APIs | Python, Click, httpx, pydantic-settings | Designed (0.2) |
+| COMP-011 | Local Dev & Test CLI | custosctl | Deploy the platform to a local (kind) or remote cluster and drive the extension lifecycle (register connectors/activities, apply/run workflows, e2e) via the public APIs | Python, Click, httpx, pydantic-settings | Implemented |
 
 ## Internal Architecture
 
@@ -40,6 +40,7 @@ graph LR
 ```
 
 Key sub-modules:
+
 - `Definition Compiler` turns YAML/SDK definitions into an internal execution graph.
 - `Run Controller` drives one Dapr Workflow per Custos run (start, pause, resume, cancel).
 - `Step Coordinator` selects the right primitive for each graph node.
