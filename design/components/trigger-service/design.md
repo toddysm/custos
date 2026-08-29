@@ -85,7 +85,7 @@ Receivers are uniform in shape: each accepts source-specific input and emits a `
 | Start Matcher | Finds all `Subscription` rows of kind `start` whose selector matches the event. |
 | Resume Matcher | Finds all `Subscription` rows of kind `resume` whose `(runId, stepId, eventKey)` matches the event. |
 | Dedup / Idempotency | Computes dedup key = `hash(subscriptionId, source.eventId)`; rejects duplicates within retention window. |
-| Dispatcher | For start matches: calls Workflow Service `StartRun(workflowVersionId, inputs)`. For resume matches: calls Workflow Service `RaiseExternalEvent(runId, stepId, eventName, payload)`. Retries on transient errors with exponential backoff. |
+| Dispatcher | For start matches: calls Workflow Service `StartRun(workflowVersionId, inputs)`. For resume matches: calls Workflow Service `RaiseExternalEvent(runId, stepId, eventName, payload)`. Retries on transient errors with exponential backoff; on retry exhaustion the event is written to the durable dead-letter store for operator replay (see § Dead-Letter Handling & Replay). |
 
 ## Key Operations
 
@@ -203,6 +203,7 @@ erDiagram
     Subscription ||--o{ DedupKey : produces
     Schedule ||--|| Subscription : drives
     Subscription ||--o| ResumeSubscription : "specialized as (kind=resume)"
+    Subscription ||--o{ DeadLetterEntry : "failed dispatch"
 
     Subscription {
         string id PK
@@ -247,6 +248,22 @@ erDiagram
         bool oneShot
         timestamp registeredAt
         timestamp expiresAt
+    }
+
+    DeadLetterEntry {
+        string id PK
+        string workspaceId
+        string subscriptionId "resolved match at failure time"
+        string matchKind "start | resume"
+        string targetRef "workflowVersionId (start) or runId:stepId (resume)"
+        string idempotencyKey "reused on replay"
+        json normalizedEvent "stored envelope for replay"
+        int attempts
+        string lastError
+        string status "pending | replaying | replayed | discarded | expired"
+        timestamp failedAt
+        timestamp lastAttemptAt
+        timestamp expiresAt "retention TTL"
     }
 ```
 
@@ -372,6 +389,11 @@ All paths are workspace-scoped and routed by the API Gateway under the `/v1/work
 | PATCH | `/v1/workspaces/{ws}/triggers/{id}` | `SubscriptionPatch` | `Subscription` | Update state, selector, mapping, schedule. |
 | DELETE | `/v1/workspaces/{ws}/triggers/{id}` | — | `204` | Remove subscription. |
 | POST | `/v1/workspaces/{ws}/triggers/{id}:fire` | `{ inputs }` | `{ runId }` | Manual trigger; returns started run id. |
+| GET | `/v1/workspaces/{ws}/triggers/deadletter` | — | `DeadLetterPage` | List dead-lettered dispatches (filters `subscriptionId`, `status`, `since`/`until`; paginated). Requires `trigger:admin`. |
+| GET | `/v1/workspaces/{ws}/triggers/deadletter/{id}` | — | `DeadLetterEntry` | Inspect one entry (stored event + attempt/error history). Requires `trigger:admin`. |
+| POST | `/v1/workspaces/{ws}/triggers/deadletter/{id}:replay` | — | `{ status }` | Re-dispatch the stored event via the Dispatcher; reuses the original `idempotencyKey`. Requires `trigger:admin`. |
+| POST | `/v1/workspaces/{ws}/triggers/deadletter/{id}:discard` | `{ reason? }` | `204` | Mark the entry `discarded` (never replayed). Requires `trigger:admin`. |
+| POST | `/v1/workspaces/{ws}/triggers/deadletter:replay` | `DeadLetterReplaySelector` | `{ accepted, rejected }` | Bulk replay by selector. Requires `trigger:admin`. |
 
 Webhook ingest does not appear in this table because it is an unauthenticated gateway-owned route (`POST /v1/webhooks/{connectorInstanceId}`) that the gateway forwards to Trigger Service via Dapr invocation with no call-context. See the API Gateway design § Webhook Pass-through for the inbound contract; this service's § Generic Webhook Receiver delegates HMAC/token verification to the Connector Service (owner of the per-instance signing material) and owns subscription demux per connector instance.
 
@@ -519,6 +541,66 @@ never enter the Trigger Service.
 
 Because the secret lives with the `ConnectorInstance`, rotation is a Connector-Service credential operation (update the referenced Kubernetes Secret / KMS entry) with no Trigger Service change and no per-subscription fan-out.
 
+## Dead-Letter Handling & Replay
+
+When the Dispatcher exhausts `TRIGGER_DISPATCH_MAX_RETRIES` against the Workflow
+Service (or hits a non-retryable dispatch error), the event is **not dropped** —
+it is written to a durable **dead-letter store** for operator inspection and
+replay. This section fixes the destination, retention, and replay UX left open by
+TS-TODO-005.
+
+### Destination
+
+Dead-lettered dispatches are persisted as `DeadLetterEntry` rows through the
+`MetadataStoreProvider` (Postgres), workspace-scoped — the same durable store that
+already holds `Subscription` / `Schedule` / `DedupKey` / `ResumeSubscription`. No
+new infrastructure (no separate broker DLQ), and the rows are directly queryable,
+which is exactly what the replay UX needs. Each entry stores the full
+`NormalizedEvent` envelope, the resolved match (`subscriptionId`, `matchKind`
+start/resume, target ref), the reused `idempotencyKey`, the attempt count, the
+last error, and status.
+
+### Lifecycle & status
+
+`pending` → (`replaying`) → `replayed` | `discarded` | `expired`.
+
+- **pending** — retries exhausted; awaiting operator action. Emits `trigger.deadletter.stored`.
+- **replaying** — an operator replay is in flight (short-lived; guards concurrent replays of the same entry).
+- **replayed** — a replay dispatch succeeded. Emits `trigger.deadletter.replayed`.
+- **discarded** — operator chose not to replay, or replay attempts hit `TRIGGER_DEADLETTER_MAX_REPLAY_ATTEMPTS`. Emits `trigger.deadletter.discarded`.
+- **expired** — retention TTL elapsed before resolution; the sweeper GCs it and emits `trigger.deadletter.expired`.
+
+### Retention
+
+A background sweeper deletes entries older than `TRIGGER_DEADLETTER_RETENTION_SECONDS`
+(default 30 days) regardless of status, so the store cannot grow unbounded; terminal
+(`replayed` / `discarded`) entries are kept until TTL for audit. Retention is
+workspace-uniform in v1.
+
+### Replay UX
+
+Operators drive replay through workspace-scoped admin routes, all gated by a
+`trigger:admin` permission via the gateway call-context:
+
+- `GET …/triggers/deadletter` — list/filter (`subscriptionId`, `status`, `since`/`until`), paginated.
+- `GET …/triggers/deadletter/{id}` — inspect the stored event + attempt/error history.
+- `POST …/triggers/deadletter/{id}:replay` — re-inject the stored event into the Dispatcher.
+- `POST …/triggers/deadletter/{id}:discard` — mark it `discarded`.
+- `POST …/triggers/deadletter:replay` — bulk replay by selector.
+
+### Replay semantics (exactly-once preserved)
+
+Replay re-runs the normal Dispatcher path with the **original `idempotencyKey`**
+(`StartRun` / `RaiseExternalEvent` are idempotent on it), so a replay can never
+double-start a run even if a prior attempt partially reached the Workflow Service.
+On dispatch **success** the entry moves to `replayed` and the dedup key is committed
+(it was intentionally *not* committed at failure time — see § Failure Modes); on
+**failure** the attempt count increments, a `trigger.deadletter.replay_failed` event
+is emitted, and the entry stays `pending` until `TRIGGER_DEADLETTER_MAX_REPLAY_ATTEMPTS`
+pins it to `discarded`. Because replay reuses the idempotency key, it is safe against
+the dedup store: resume replays that target an already-completed step are absorbed by
+the Workflow Service exactly as an ordinary duplicate would be.
+
 ## Configuration
 
 | Variable | Required | Default | Description |
@@ -531,6 +613,8 @@ Because the secret lives with the `ConnectorInstance`, rotation is a Connector-S
 | `TRIGGER_FANOUT_MAX_DEPTH` | No | `16` | Max per-tenant fan-out depth before a dispatch is rejected as a loop (`trigger.loop.detected`). |
 | `TRIGGER_SCHEDULER_LEADER_LEASE_SECONDS` | No | `30` | Scheduler leader-lease TTL (single-fire guarantee across replicas); failover bound. |
 | `TRIGGER_SCHEDULER_LEADER_RENEW_SECONDS` | No | `10` | Scheduler leader-lease renew interval (≈ lease ÷ 3); the leader re-acquires on this cadence to avoid lapsing. |
+| `TRIGGER_DEADLETTER_RETENTION_SECONDS` | No | `2592000` | Dead-letter entry retention before the sweeper GCs it (30 days). |
+| `TRIGGER_DEADLETTER_MAX_REPLAY_ATTEMPTS` | No | `3` | Max operator-initiated replay attempts per entry before it is pinned to `discarded` (guards a poison event from looping). |
 
 ## Dependencies
 
@@ -538,16 +622,16 @@ Because the secret lives with the `ConnectorInstance`, rotation is a Connector-S
 |---|---|---|
 | Connector Service | Runtime | `listen(push)` / `listen(pull)` streams per connector instance (ADR-013); owns per-instance webhook signing material and verifies inbound webhook signatures on the Trigger Service's behalf (see § Webhook Signature Verification). |
 | Workflow Service | Runtime | `StartRun`, `RaiseExternalEvent`, publisher of internal workflow events. |
-| MetadataStoreProvider | Runtime | Persistence for Subscription, Schedule, DedupKey, ResumeSubscription. (Pull cursors live with the Connector Service, not here.) |
+| MetadataStoreProvider | Runtime | Persistence for Subscription, Schedule, DedupKey, ResumeSubscription, and DeadLetterEntry. (Pull cursors live with the Connector Service, not here.) |
 | Dapr Pub/Sub | Runtime | Internal transport for `custos.triggers.normalized` and `custos.workflow.events`. |
-| Observability/Audit | Runtime | Emit `trigger.matched`, `trigger.deduped`, `trigger.dispatched`, `resume.delivered` audit events. |
+| Observability/Audit | Runtime | Emit `trigger.matched`, `trigger.deduped`, `trigger.dispatched`, `resume.delivered`, and dead-letter (`trigger.deadletter.stored` / `.replayed` / `.replay_failed` / `.discarded` / `.expired`) audit events. |
 | Auth Service | Runtime | Manual trigger RBAC. Webhook signing material is Connector-Service-owned (see § Webhook Signature Verification), not Auth-Service-issued. |
 
 ## Failure Modes
 
 | Failure | Detection | Containment | Recovery |
 |---|---|---|---|
-| Workflow Service unreachable on dispatch | RPC timeout | Event remains in retry queue; dedup key not committed | Exponential backoff up to `TRIGGER_DISPATCH_MAX_RETRIES`, then dead-letter with `trigger.dispatch.failed` audit event |
+| Workflow Service unreachable on dispatch | RPC timeout | Event remains in retry queue; dedup key not committed | Exponential backoff up to `TRIGGER_DISPATCH_MAX_RETRIES`, then the event is persisted to the durable dead-letter store (`trigger.dispatch.failed` + `trigger.deadletter.stored`) for operator inspection and replay (see § Dead-Letter Handling & Replay) |
 | Duplicate inbound event | Dedup key hit | No dispatch | N/A |
 | Poller falls behind | `nextFireAt < now - threshold` metric | Subscription marked `degraded`; alert | Operator increases interval or scales pod |
 | Resume subscription expires before event arrives | TTL sweeper | Wait cancelled via `CancelResumeSubscription` callback | Workflow step takes its timeout branch (ADR-007) |
@@ -556,7 +640,6 @@ Because the secret lives with the `ConnectorInstance`, rotation is a Connector-S
 
 ## Open TODOs
 
-- [ ] TODO-005: Define dead-letter handling and replay UX for dispatch failures (added 2026-05-16).
 - [ ] TODO-007: Selective `DedupKey` clear admin API (e.g. `POST /v1/workspaces/{ws}/triggers/dedup:clear` with selectors over `subscriptionId`, `connectorInstanceId`, `eventId`, time window) — needed so operators can re-fire downstream dispatches after a Connector Service cursor rewind without waiting for the dedup TTL window to expire. Deferred to M2+; v1 rewind procedure documents the workaround (wait for TTL, or rewind past the dedup window) (added 2026-05-18, #103).
 
 ## Closed TODOs
@@ -566,6 +649,7 @@ Because the secret lives with the `ConnectorInstance`, rotation is a Connector-S
 - [x] TODO-004: Specify resume-subscription registration as a Workflow Service responsibility in that component's design (cross-component) — REQ-081. Resolved 2026-05-17 by Workflow Service design (`design/components/workflow-service/design.md` § Step Resume on External Event and § Resume Subscription Replay Protocol). Idempotent re-registration semantics also documented on the TS Internal RPC table above.
 - [x] TODO-003: Specify scheduler leader-election mechanism. Resolved 2026-08-28 — a **Postgres leader-lease row** held via `MetadataStoreProvider` (explicit TTL matching `TRIGGER_SCHEDULER_LEADER_LEASE_SECONDS`, `epoch` fencing token) elects a single scheduler; exactly-once is guaranteed by leader-lease + fencing + a per-fire dedup key `hash(scheduleId, plannedFireAt)`. Kubernetes `Lease` and Dapr locks rejected (new infra / control-plane coupling). See [`changes/2026-08-28-008-scheduler-leader-election.md`](changes/2026-08-28-008-scheduler-leader-election.md) — REQ-005, closes #20.
 - [x] TODO-006: Owner of webhook signing keys. Resolved 2026-08-29 — signing/verification material is **owned by the Connector Service, per connector instance** (part of the instance credential model, resolved via the Secret Bridge / `x-dapr-secret`), not by the Trigger Service per subscription. The Generic Webhook Receiver **delegates** HMAC/token verification to the Connector Service so raw secrets never enter the Trigger Service, then demuxes verified events to subscriptions. Per-subscription keys are impossible anyway: webhook URLs are connector-instance-scoped (INCON-025). See [`changes/2026-08-29-009-webhook-signing-key-ownership.md`](changes/2026-08-29-009-webhook-signing-key-ownership.md) — REQ-006, closes #23.
+- [x] TODO-005: Dead-letter handling and replay UX. Resolved 2026-08-29 — retry-exhausted dispatches are persisted as `DeadLetterEntry` rows via `MetadataStoreProvider` (Postgres), retained for `TRIGGER_DEADLETTER_RETENTION_SECONDS` (30 days), and driven through `trigger:admin` replay/discard/list routes under `/v1/workspaces/{ws}/triggers/deadletter`. Replay reuses the original `idempotencyKey` so exactly-once is preserved. See [`changes/2026-08-29-010-dead-letter-replay.md`](changes/2026-08-29-010-dead-letter-replay.md) — dispatch reliability, closes #22.
 
 ## Change History
 
@@ -583,3 +667,4 @@ Because the secret lives with the `ConnectorInstance`, rotation is a Connector-S
 | 2026-06-04 | TODO-001 / INCON-013 resolved: locked the platform event taxonomy — closed platform-owned domain registry (`manual`/`cron`/`webhook`/`workflow`/`run`/`step`/`activity`/`registry`/`pr`/`scan`) + vendor-domain shape rule; added § Event Taxonomy | #18 |
 | 2026-08-28 | TODO-003 resolved: scheduler leader-election is a Postgres leader-lease row (`epoch` fencing) via `MetadataStoreProvider`, with a per-fire dedup key `hash(scheduleId, plannedFireAt)` for exactly-once; added § Scheduler Leader Election and `TRIGGER_SCHEDULER_LEADER_RENEW_SECONDS`; Kubernetes `Lease` and Dapr lock rejected | #20 |
 | 2026-08-29 | TODO-006 resolved: webhook signing/verification material is Connector-Service-owned per connector instance (not Trigger-Service per subscription); the Generic Webhook Receiver delegates HMAC/token verification to the Connector Service so raw secrets never enter this service; added § Webhook Signature Verification; reconciled the Connector Service / Auth Service dependency rows | #23 |
+| 2026-08-29 | TODO-005 resolved: retry-exhausted dispatches persist as `DeadLetterEntry` rows via `MetadataStoreProvider` with `TRIGGER_DEADLETTER_RETENTION_SECONDS` retention; added § Dead-Letter Handling & Replay, the `DeadLetterEntry` entity, `trigger:admin` deadletter replay/discard/list routes, and `trigger.deadletter.*` audit events; replay reuses the original `idempotencyKey` (exactly-once) | #22 |
