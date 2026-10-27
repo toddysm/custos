@@ -1,6 +1,21 @@
 # TODOs: Trigger Service
 
-Last Updated: 2026-06-04 (M1 implementation filed under tracker [#652](https://github.com/toddysm/custos/issues/652); TS-IMPL-001..021 filed)
+Last Updated: 2026-10-27 (M1 complete; M2 planning published, implementation not started)
+
+## Implementation - M2 receiver completion
+
+Parent: [#988](https://github.com/toddysm/custos/issues/988).
+Design gate: [#1004](https://github.com/toddysm/custos/issues/1004).
+See the [M2 plan](implementation-plan-m2.md) for all 15 delivery items,
+dependencies and acceptance evidence. The linked
+[requirements/design](../../requirements/trigger-m2-receivers.md) records
+proposed decisions D01-D05. Publication is not design approval or authorization
+to implement.
+
+- [ ] Approve the reviewed M2 design and breakdown.
+- [ ] Complete TS-IMPL-022..035 implementation and validation.
+- [ ] Complete TS-IMPL-036 developer/operator documentation.
+- [ ] Merge the reviewed capability-inventory close-out before closing #988.
 
 ## Implementation — M1 vertical slice
 

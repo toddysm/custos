@@ -5,6 +5,14 @@ Last Updated: 2026-05-18
 Version: 2
 Status: Draft
 
+> **Proposed Trigger M2 provider extension (2026-10-27):**
+> [The #988 design](../../requirements/trigger-m2-receivers.md) requires production
+> trigger queries, fenced scheduler/pending-fire state, durable dead-letter
+> records and recoverable replay/dedup claims. Implement these as additive,
+> versioned provider/adapter capabilities with migration and conformance tests.
+> This proposal awaits approval and does not resolve the general multi-revision
+> migration-policy issue #993.
+
 ## Responsibility
 
 The Storage Provider Layer (SPL) defines seven small, stable interfaces — `DefinitionStoreProvider`, `CatalogStoreProvider`, `MetadataStoreProvider`, `ArtifactStoreProvider`, `AuthStoreProvider`, `LogQueryProvider`, `MetricsQueryProvider` — and routes all platform persistence and observability-query access through them. The rest of Custos has no compile-time or run-time dependency on Postgres, OCI registries, S3, or any other concrete backend. Adapters implement the interfaces; the platform is unaware of them.

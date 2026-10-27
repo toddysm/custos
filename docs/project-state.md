@@ -6,6 +6,9 @@
 
 Last reconciled: 2026-08-28
 
+Trigger M2 planning checkpoint: 2026-10-27. This scoped update does not claim
+a fresh reconciliation of unrelated capabilities.
+
 ## Configuration
 
 | Key | Value |
@@ -26,7 +29,7 @@ Status vocabulary: **Implemented** · **In progress** · **Planned** · **Deferr
 | COMP-001 | API Gateway | api-gateway | Implemented | M2 items — #990 |
 | COMP-002 | AuthN/AuthZ Service | auth-service | Implemented | — |
 | COMP-003 | Workflow Service | workflow-service | In progress | Observability Client integration — #989 |
-| COMP-004 | Trigger Service | trigger-service | In progress | M2 receivers — #988 (all design TODOs #20/#22/#23 resolved) |
+| COMP-004 | Trigger Service | trigger-service | In progress | M2 receivers — [#988](https://github.com/toddysm/custos/issues/988); [design](../design/requirements/trigger-m2-receivers.md) and [15-item delivery plan](../design/components/trigger-service/implementation-plan-m2.md) proposed; awaiting approval, implementation not started |
 | COMP-005 | Connector Service | connector-service | Implemented | — |
 | COMP-006 | Activity Runtime Manager | activity-runtime-manager | Implemented | M2 deferrals — #991; Kata tier validation — #763 |
 | COMP-007 | Definition/Template/Catalog Service | catalog-service | Implemented | — |
@@ -43,7 +46,7 @@ Status vocabulary: **Implemented** · **In progress** · **Planned** · **Deferr
 | #22 | Design TODO | trigger-service | Done | Dead-letter handling + replay UX — durable DeadLetterEntry store + TTL + trigger:admin replay routes; resolved via #1002 (2026-08-29); implementation follows in #988 |
 | #23 | Design TODO | trigger-service | Done | Owner of webhook signing keys — Connector Service owns per-instance signing material; resolved via #1000 (2026-08-29); implementation follows in #988 |
 | #763 | Enhancement | activity-runtime-manager | Open | Validate vm/microvm (Kata) tier specifics |
-| #988 | Implementation gap | trigger-service | Open | M2 receivers (scheduler, webhook, vendor-push, pull) |
+| [#988](https://github.com/toddysm/custos/issues/988) | Implementation gap | trigger-service | Planning / awaiting approval | Full design [#1004](https://github.com/toddysm/custos/issues/1004); TS-IMPL-022..036 native children filed; hosted CI and Copilot review selected; no implementation authorized |
 | #989 | Implementation gap | workflow-service | Open | Full Observability Client integration |
 | #990 | Implementation gap | api-gateway | Open | M2 items (thin-client, OpenAPI ext, device-code, rate-limiter, multi-region) |
 | #991 | Implementation gap | activity-runtime-manager | Open | M2 deferrals (manifest signing, artifact schema, secret slots, short-form refs, policy-eval@1) |
@@ -52,6 +55,11 @@ Status vocabulary: **Implemented** · **In progress** · **Planned** · **Deferr
 | #994 | Implementation gap | web-ui | Open | Component not yet implemented (deferred M2+) |
 
 ## Deferred / Won't-do
+
+The #988 design's decisions D01-D05 are proposals awaiting explicit human
+approval. Original design TODOs #20/#22/#23 remain resolved. Review and
+implementation status is maintained in the #988 issue ledger; do not mark
+COMP-004 Implemented until all required work and its inventory close-out merge.
 
 | Item | Reason |
 |---|---|
