@@ -1,6 +1,6 @@
 # Trigger Service M2 implementation plan
 
-Status: **Proposed; awaiting human approval.** Updated: 2026-10-27.
+Status: **Proposed; awaiting human approval.** Revision: 2. Updated: 2026-10-27.
 
 Parent: [#988](https://github.com/toddysm/custos/issues/988).
 Design: [#1004](https://github.com/toddysm/custos/issues/1004) and the
@@ -29,14 +29,14 @@ design gate [#1004](https://github.com/toddysm/custos/issues/1004).
 
 | Task | Issue | Deliverable and exit evidence | Depends on |
 |---|---|---|---|
-| TS-IMPL-022 | [#1005](https://github.com/toddysm/custos/issues/1005) | Production async subscription/resume/schedule queries; PostgreSQL/memory parity and tenant isolation | - |
-| TS-IMPL-023 | [#1006](https://github.com/toddysm/custos/issues/1006) | Persisted source configuration and lifecycle; invalid configuration rejected, legacy bodies preserved | 022 |
+| TS-IMPL-022 | [#1005](https://github.com/toddysm/custos/issues/1005) | Production async subscription/resume/schedule queries, including source-scoped external waits; PostgreSQL/memory parity and tenant isolation | - |
+| TS-IMPL-023 | [#1006](https://github.com/toddysm/custos/issues/1006) | Persisted source configuration and Workflow resume association/registration; invalid configuration rejected, legacy bodies preserved | 022 |
 | TS-IMPL-024 | [#1007](https://github.com/toddysm/custos/issues/1007) | Atomic scheduler lease and fencing; expired/stale holders cannot advance a fire | - |
 | TS-IMPL-025 | [#1008](https://github.com/toddysm/custos/issues/1008) | Cron/interval receiver; deterministic identity, restart/failover and time-transition tests | 022, 023, 024 |
-| TS-IMPL-026 | [#1009](https://github.com/toddysm/custos/issues/1009) | Connector-owned verification; raw-byte checks, instance-secret rotation and isolation | - |
+| TS-IMPL-026 | [#1009](https://github.com/toddysm/custos/issues/1009) | Connector-owned verification; raw-byte checks, rotation, isolation and indexed sanitized per-event rejection metadata | - |
 | TS-IMPL-027 | [#1011](https://github.com/toddysm/custos/issues/1011) | Gateway-to-Trigger webhook ingestion; scoped routing, credential separation and bounded durable acceptance | 022, 023, 026, 028 |
-| TS-IMPL-028 | [#1010](https://github.com/toddysm/custos/issues/1010) | Shared connector-envelope adapter and vendor-push delivery; start/resume fan-out and redelivery tests | 022, 023, 026 |
-| TS-IMPL-029 | [#1012](https://github.com/toddysm/custos/issues/1012) | Pull-subscription reconciliation using existing connector scheduler/cursors; publish-failure recovery | 023, 028 |
+| TS-IMPL-028 | [#1010](https://github.com/toddysm/custos/issues/1010) | Shared connector-envelope adapter and vendor-push delivery; source-scoped resume correlation without payload run/step IDs | 022, 023, 026 |
+| TS-IMPL-029 | [#1012](https://github.com/toddysm/custos/issues/1012) | Existing polling/cursor reuse plus durable operator-pause and shared due-time control; resume-only demand and publish-failure recovery | 023, 028 |
 | TS-IMPL-030 | [#1013](https://github.com/toddysm/custos/issues/1013) | Durable dead-letter storage and fenced expiring replay claims; pagination and sanitized persistence | - |
 | TS-IMPL-031 | [#1014](https://github.com/toddysm/custos/issues/1014) | Durable failure/replay and downstream idempotency across restart and retention horizon; no duplicate effect | 022, 030 |
 | TS-IMPL-032 | [#1015](https://github.com/toddysm/custos/issues/1015) | Production signed call-context verification and trigger:admin; forged/expired/wrong-workspace rejection | - |
@@ -71,6 +71,12 @@ separate authorization. Proposed branches follow
 The design document owns the exact contracts, alternatives and migration impact.
 All five decisions are proposed, not implicitly approved by filing these issues.
 
+Revision 2 incorporates the initial Codex/Copilot findings: operator pauses need
+durable intent, cursor leases alone do not enforce the polling interval across
+replicas, external resume waits need source association/correlation and polling
+demand, and verification must return sanitized per-event rejection metadata.
+These refinements belong to the existing linked items, not untracked extra work.
+
 ## Validation and completion
 
 Code items add tests alongside their code. Reuse Ruff, strict Mypy, the existing
@@ -84,6 +90,10 @@ lost responses after successful remote calls; replay after 24 hours and a
 Workflow restart; wrong workspace; invalid signature; cursor publication
 failure; route precedence; pause/deletion; and all existing manual/internal
 flows. Do not call a test-only raw SQL adapter production coverage.
+
+Also require pause-before-registration and restart-while-paused tests, staggered
+two-Connector-replica interval tests, external resume-only polling without
+source-supplied run/step IDs, and exact mixed-batch acceptance/rejection counts.
 
 The documentation issue uses applicable documentation/link checks, not unit
 coverage. The plan-only pull request may not trigger runtime workflows because

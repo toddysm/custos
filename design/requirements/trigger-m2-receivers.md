@@ -1,7 +1,7 @@
 # Trigger M2 receivers - product requirements and engineering design
 
 - Status: **Proposed; awaiting human approval. No implementation authorized.**
-- Planning format: full; revision 1.
+- Planning format: full; revision 2 (review refinements; still unapproved).
 - Tracking: [#988](https://github.com/toddysm/custos/issues/988).
 - Design work item: [#1004](https://github.com/toddysm/custos/issues/1004).
 - Updated: 2026-10-27; baseline commit `e344ab2`.
@@ -314,13 +314,75 @@ A batch advances its cursor only after every publish succeeds, as the
 and implementation require. Failure leaves the previous cursor intact.
 Subscription pause/remove updates registration demand; an explicit connector
 operator pause/revoke always wins. Registration reconciliation runs on restart
-and on subscription changes; cursor leases protect concurrent replicas.
+and on subscription changes.
+
+The existing scheduler's pause flag and next-due time are process-local, so
+reusing its loop alone does not provide either restart-safe pause or an
+instance-wide interval floor. TS-IMPL-029 adds a workspace/instance-scoped
+`ConnectorPullControl` provider record containing `operatorPaused`, `revision`,
+`nextEligibleAt`, `updatedAt` and `updatedBy`, with an additive PostgreSQL
+migration and in-memory adapter parity. Pause/resume endpoints persist intent
+and its audit record before acknowledging or updating the local scheduler,
+including when no local registration exists. Reconciliation reads this state;
+subscription changes never clear an operator pause. An already-running tick
+may complete, but no subsequent tick starts until explicit operator resume.
+
+Before calling an upstream plugin, every replica uses an atomic provider
+operation to check the persisted pause state and database-time `nextEligibleAt`,
+validate/claim the cursor lease and reserve the next eligible time. Successful
+cursor commit may release the cursor lease, but must not clear that interval
+reservation. Failure/backoff updates the same shared next-eligible state;
+another replica cannot immediately poll after the first releases its lease.
+Interval changes apply to future reservations without shortening an existing
+reservation. A crashed tick leaves the cursor unchanged and can retry when
+both its lease and shared due-time conditions allow it.
+
+Legacy instances require an explicit control-state migration during disabled
+rollout. If prior operator-pause intent cannot be established, leave polling
+blocked pending operator confirmation rather than infer "running" from active
+subscriptions. A control-store failure also blocks new ticks. Test pause before
+registration, restart while paused, subscription mutation while paused, explicit
+resume and staggered ticks on two Connector replicas within one interval.
 
 Rejected: moving or duplicating the working polling/cursor machinery in Trigger.
 Approval/test gate: [#1004](https://github.com/toddysm/custos/issues/1004);
 implementation [#1010](https://github.com/toddysm/custos/issues/1010) /
 [#1012](https://github.com/toddysm/custos/issues/1012). Test shared subscriptions,
 restart, lease contention, partial publish and operator pause.
+
+#### Source-scoped correlation for external resume waits
+
+External sources must not supply trusted Workflow run/step identifiers.
+The existing direct `runId`/`stepId` extraction remains only for legacy internal
+events. Extend `RegisterResumeSubscription` additively with `workspaceId` and
+`source: {connectorInstanceId, deliveryModes, pollIntervalSeconds?}`. If `source`
+is present, require a trusted workspace and a non-empty event selector; validate
+the instance association through the calling Workflow's context. Extend the
+Workflow wait configuration, compiler/validator and trigger client to transmit
+these fields. Existing internal/manual registrations without `source` retain
+their current behavior and are never enumerated as external-source candidates.
+
+Store this source association with the existing run, step, event key, selector
+and expiry. Query active resume registrations by workspace and connector
+instance/delivery mode before selector evaluation. Evaluate the selector against
+the normalized external event, then dispatch each matching registration using
+its stored run/step/event key; never trust equivalent fields from the event
+payload. External events can therefore match starts, resumes or both even when
+the source payload contains no run/step IDs. Use bounded, paginated candidate
+queries and the existing per-registration delivery identity.
+
+Polling demand is the union of active pull-start subscriptions and unexpired
+source-associated pull-resume registrations. A resume-only wait starts demand
+without requiring a dummy start subscription. Cancellation, completion and
+expiry remove that demand; they do not erase connector operator-pause intent.
+Reconcile after registration changes and on startup. A source selector may
+intentionally match multiple waiting runs, but never another workspace.
+
+TS-IMPL-022 owns the query/index support; TS-IMPL-023 owns source-association
+models, Workflow registration/client changes and validation; TS-IMPL-028 owns
+candidate correlation and delivery; TS-IMPL-029 includes resume-only polling
+demand. TS-IMPL-035 tests push and pull resumes without payload run/step IDs,
+two workspaces, multiple waits, expiry/cancellation and a resume-only poller.
 
 #### D04 - Scheduling and leader-fencing semantics
 
@@ -405,7 +467,7 @@ Touch [Trigger Service](../../src/services/trigger-service),
 [Workflow Service](../../src/services/workflow-service), the
 [shared call-context library](../../src/libs/custos-callctx) as a reused dependency,
 the Auth Service permission registry, and [deployment](../../deploy/helm).
-Provider reads remain asynchronous. The new lease, pending-fire and dead-letter
+Provider reads remain asynchronous. The new lease, pending-fire, connector pull-control and dead-letter
 entities require additive numbered migrations and explicit provider capability
 checks; missing production capabilities fail readiness.
 
@@ -440,19 +502,53 @@ configuration on read. Reject unsupported fields/combinations with 422.
 
 Internal `POST /VerifyWebhook` is versioned by `schemaVersion: "1"` and carries
 `workspaceId`, `connectorInstanceId`, `bodyBase64` and bounded `headers`.
-It is callable only through the permitted service identity, is side-effect-free,
-and returns verified connector envelopes `{schemaVersion, events: [...]}`.
+It is callable only through the permitted service identity and is
+side-effect-free. A verified, structurally valid batch returns:
+
+```json
+{
+  "schemaVersion": "1",
+  "receivedCount": 2,
+  "events": [{"index": 0, "event": {"schemaVersion": "1", "eventId": "evt-1", "eventType": "registry.push", "source": {"workspaceId": "team-a", "instanceId": "registry-a", "deliveryMode": "push", "receivedAt": "2026-10-27T20:00:00Z"}, "payload": {"repository": "example"}}}],
+  "rejections": [{"index": 1, "code": "missing-event-id"}]
+}
+```
+
+The envelope inside each success item remains the existing connector envelope.
+Each original batch index appears exactly once in `events` or `rejections`;
+`receivedCount == len(events) + len(rejections)`. Rejections contain only a
+zero-based index and an allow-listed reason code, not raw payloads, headers,
+secret material or arbitrary exception messages. Valid events retain input
+order. A well-formed verified batch returns this shape even if all events fail
+normalization, allowing Trigger to count and audit each rejection.
+
 Invalid/missing signatures return 401; unknown/inactive pair 404; malformed
-verified payload 400; unavailable credential resolver/verifier 503.
+top-level verified payload (invalid JSON, invalid batch container or empty
+batch) returns 400 without claiming per-event acceptance; unavailable
+credential resolver/verifier returns 503.
 A one-MiB raw body expands in base64; cap the internal encoded request at two
 MiB and headers at 16 KiB, rejecting larger requests before parsing.
 
 Generic webhook success is `200 {"accepted":N,"rejected":M}` after durable
 publication acknowledgment, not a promise that workflows have finished.
-All-invalid verified batches return 400; mixed batches expose rejected counts
-and audit reasons. Publication failure returns 503 so the sender can retry.
+Trigger combines verifier rejections with any subsequent canonical-adapter
+rejections, preserving original indices and sanitized reason codes for audit.
+`accepted + rejected` equals `receivedCount` for a completed batch. All-invalid
+verified batches return 400 `trigger.webhook.no_valid_events`; mixed batches
+publish the valid events and expose accurate rejected counts. Publication
+failure returns 503, not partial-success counts, so the sender can retry.
 Internal topic consumption acknowledges only after successful dispatch or
 durable dead-letter capture; storage failure requests redelivery.
+
+External resume registration uses the existing versioned internal registration
+surface with additive `workspaceId: string` and `source` fields described in
+Part II.D. `source.deliveryModes` is a non-empty subset of `push|pull`;
+`pollIntervalSeconds` is an integer at least the connector floor and is valid
+only when pull is requested. Missing workspace/selector, unsupported mode,
+invalid interval or cross-workspace association fails registration explicitly.
+Source fields are immutable for an existing deterministic registration key;
+a divergent re-registration preserves the original and emits the existing
+divergence audit rather than silently reattaching a wait to another source.
 
 Dead-letter routes under `/v1/workspaces/{ws}/triggers/deadletter`:
 
@@ -577,7 +673,8 @@ provider/Workflow support, then connector verification/listening, then Trigger
 and Gateway code with M2 receivers disabled. Reconcile registrations and verify
 readiness before controlled enablement. Store proposed flags/settings in the
 existing Helm profiles, not manual cluster edits. Existing subscriptions need
-no sourceConfig backfill unless they enable an M2 receiver; invalid legacy
+no sourceConfig backfill unless they enable an M2 receiver; connector pull-control
+state is migrated explicitly as described in D03. Invalid legacy
 incomplete M2 configuration remains disabled with an explicit diagnostic.
 
 ### L. Multi-tenancy
@@ -624,6 +721,11 @@ Use existing Ruff, format, strict Mypy and pytest jobs with Python 3.11/3.12 and
 the 90% Trigger coverage floor. Extend real PostgreSQL fixtures to call actual
 provider/read paths. Add deployed receiver-to-Workflow tests, clock-controlled
 lease/retention tests, and all D01-D05 failure/compatibility cases.
+
+Review-added cases: durable pause before registration and across restart;
+staggered two-Connector-replica ticks within one polling interval; source-scoped
+resume without payload run/step IDs and with no start subscription; and
+mixed/all-invalid verification batches with exact counts and sanitized reasons.
 
 The plan-only pull request changes documentation; path-filtered service jobs
 may not run. Report that as not applicable, not green runtime evidence.
