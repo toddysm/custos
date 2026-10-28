@@ -9,9 +9,9 @@ surface of :class:`custos_spl.interfaces.metadata_store.MetadataStoreProvider`.
 env knob: an empty value or a ``memory`` sentinel binds the in-process
 :class:`InMemoryTriggerMetadataStore` (local dev + tests); any other value is
 treated as a Postgres DSN and bound to ``custos_pg.PgMetadataAdapter`` via a
-lazily-constructed pool. No new schema is invented — the rich Trigger Service
-metadata rides in the locked SPL rows' free-form JSON blobs (see
-:mod:`custos_trigger.models`).
+lazily-constructed pool. Rich subscription configuration remains in selector
+blobs; the optional scheduler capability adds versioned lease/pending-fire
+tables without changing the existing row contracts.
 """
 
 from __future__ import annotations
@@ -43,6 +43,14 @@ from custos_spl.interfaces.metadata_store import (
 )
 from custos_spl.interfaces.metadata_store import (
     SubscriptionSelector as SplSubscriptionSelector,
+)
+from custos_spl.interfaces.scheduler import (
+    PendingScheduleFire,
+    SchedulerLease,
+    lease_duration,
+    prepare_schedule_fire,
+    require_scheduler_lease,
+    utc_instant,
 )
 from custos_spl.interfaces.trigger_queries import SubscriptionSnapshot, prepare_subscription_write
 from custos_spl.pagination import (
@@ -120,6 +128,136 @@ class InMemoryTriggerMetadataStore:
         self._resume: dict[tuple[str, str], SplResumeSubscription] = {}
         self._dedup: dict[tuple[str, str], SplDedupKey] = {}
         self._schedules: dict[tuple[str, str], SplSchedule] = {}
+        self._scheduler_leases: dict[str, SchedulerLease] = {}
+        self._pending_fires: dict[tuple[str, str], PendingScheduleFire] = {}
+
+    async def check_scheduler_ready(self) -> None:
+        """Memory scheduler structures exist at construction; no durable backend is implied."""
+
+    async def scheduler_now(self) -> datetime:
+        """Expose the injected provider clock, independent of receiver-local wall clocks."""
+        return utc_instant(self._now())
+
+    async def acquire_scheduler_lease(
+        self, deployment_id: str, holder_id: str, *, ttl_seconds: int
+    ) -> SchedulerLease | None:
+        """Acquire atomically on one event loop, retaining epochs across expiry and release."""
+        duration = lease_duration(deployment_id, holder_id, ttl_seconds)
+        now = utc_instant(self._now())
+        current = self._scheduler_leases.get(deployment_id)
+        if current is not None and current.expires_at > now:
+            return replace(current, observed_at=now) if current.holder_id == holder_id else None
+        try:
+            expires = now + duration
+        except OverflowError as exc:
+            raise ValueError("lease expiry exceeds the timestamp range") from exc
+        lease = SchedulerLease(
+            deployment_id, holder_id, current.epoch + 1 if current else 1, expires, now
+        )
+        self._scheduler_leases[deployment_id] = lease
+        return lease
+
+    async def renew_scheduler_lease(
+        self, lease: SchedulerLease, *, ttl_seconds: int
+    ) -> SchedulerLease:
+        """Renew a live epoch without rotating its fencing token."""
+        duration = lease_duration(lease.deployment_id, lease.holder_id, ttl_seconds)
+        now = utc_instant(self._now())
+        current = self._scheduler_leases.get(lease.deployment_id)
+        require_scheduler_lease(current, lease, now)
+        assert current is not None
+        try:
+            expires = max(current.expires_at, now + duration)
+        except OverflowError as exc:
+            raise ValueError("lease expiry exceeds the timestamp range") from exc
+        renewed = replace(current, expires_at=expires, observed_at=now)
+        self._scheduler_leases[lease.deployment_id] = renewed
+        return renewed
+
+    async def release_scheduler_lease(self, lease: SchedulerLease) -> None:
+        """Retain the fencing epoch while making the row immediately acquirable."""
+        now = utc_instant(self._now())
+        current = self._scheduler_leases.get(lease.deployment_id)
+        require_scheduler_lease(current, lease, now)
+        assert current is not None
+        self._scheduler_leases[lease.deployment_id] = replace(
+            current, expires_at=now, observed_at=now
+        )
+
+    async def advance_schedule(
+        self,
+        workspace_id: WorkspaceId,
+        schedule_id: str,
+        lease: SchedulerLease,
+        *,
+        expected_next_fire_at: datetime,
+        expected_revision: int,
+        planned_fire_at: datetime,
+        next_fire_at: datetime,
+    ) -> PendingScheduleFire:
+        """Validate all state before publishing either the pending occurrence or advancement."""
+        key = (str(workspace_id), schedule_id)
+        row = self._subscriptions.get(key)
+        selectors = self._selectors.get(key, [])
+        snapshot = SubscriptionSnapshot(row, selectors[-1] if selectors else None) if row else None
+        schedule = self._schedules.get(key)
+        pending = prepare_schedule_fire(
+            workspace_id,
+            lease,
+            self._scheduler_leases.get(lease.deployment_id),
+            snapshot,
+            schedule,
+            expected_next_fire_at=expected_next_fire_at,
+            expected_revision=expected_revision,
+            planned_fire_at=planned_fire_at,
+            next_fire_at=next_fire_at,
+            now=self._now(),
+        )
+        pending_key = (str(workspace_id), pending.fire_id)
+        if pending_key in self._pending_fires:
+            raise ImmutableViolation("planned schedule occurrence already exists")
+        require_scheduler_lease(self._scheduler_leases.get(lease.deployment_id), lease, self._now())
+        assert schedule is not None
+        self._pending_fires[pending_key] = pending
+        self._schedules[key] = replace(schedule, next_fire_at=utc_instant(next_fire_at))
+        return pending
+
+    async def query_pending_schedule_fires(
+        self,
+        workspace_id: WorkspaceId,
+        deployment_id: str,
+        *,
+        cursor: Cursor | None = None,
+        limit: int | None = None,
+    ) -> Page[PendingScheduleFire]:
+        """Read the same bounded recovery pages and scoped cursors as PostgreSQL."""
+        rows = [
+            row
+            for row in self._pending_fires.values()
+            if row.workspace_id == workspace_id
+            and row.deployment_id == deployment_id
+            and row.delivered_at is None
+        ]
+        return _query_page(
+            rows,
+            ("pending-schedule-fires", str(workspace_id), deployment_id),
+            cursor,
+            limit,
+            lambda row: row.fire_id,
+        )
+
+    async def acknowledge_schedule_fire(
+        self, workspace_id: WorkspaceId, fire_id: str, lease: SchedulerLease
+    ) -> None:
+        """Mark a recovered occurrence delivered without letting stale holders acknowledge it."""
+        now = utc_instant(self._now())
+        require_scheduler_lease(self._scheduler_leases.get(lease.deployment_id), lease, now)
+        key = (str(workspace_id), fire_id)
+        row = self._pending_fires.get(key)
+        if row is None or row.deployment_id != lease.deployment_id:
+            raise ImmutableViolation("pending fire is absent from this workspace/deployment")
+        if row.delivered_at is None:
+            self._pending_fires[key] = replace(row, delivered_at=now)
 
     # ----- Subscriptions -----
 

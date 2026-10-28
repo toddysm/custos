@@ -399,7 +399,7 @@ async def test_metadata_fully_satisfied_after_trigger_query_indexes(pg_pool: Poo
     """Apply the required schema plus backward-compatible trigger-query indexes."""
     adapter = PgMetadataAdapter(pool=pg_pool)
     await adapter.apply_pending()
-    assert adapter.declared_revisions["MetadataStoreProvider"] == frozenset({1, 2, 3, 4, 5})
+    assert adapter.declared_revisions["MetadataStoreProvider"] == frozenset({1, 2, 3, 4, 5, 6})
 
 
 async def test_put_run_and_get(pg_pool: Pool) -> None:

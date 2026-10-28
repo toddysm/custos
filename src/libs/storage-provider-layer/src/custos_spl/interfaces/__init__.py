@@ -100,6 +100,11 @@ from custos_spl.interfaces.metrics_query import (
     MetricSeries,
     MetricsQueryProvider,
 )
+from custos_spl.interfaces.scheduler import (
+    PendingScheduleFire,
+    SchedulerLease,
+    SchedulerStateProvider,
+)
 from custos_spl.interfaces.trigger_queries import (
     ResumeRegistrationProvider,
     SubscriptionMutationProvider,
@@ -154,6 +159,7 @@ __all__ = [
     "MetricsQueryProvider",
     "NotifyEvent",
     "OidcIdentity",
+    "PendingScheduleFire",
     "Permission",
     "Principal",
     "PrincipalFilter",
@@ -169,6 +175,8 @@ __all__ = [
     "Run",
     "RunFilter",
     "Schedule",
+    "SchedulerLease",
+    "SchedulerStateProvider",
     "ServiceAccount",
     "ServiceToken",
     "Severity",

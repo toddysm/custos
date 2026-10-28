@@ -15,9 +15,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+from custos_spl.interfaces.auth_store import AuthStoreProvider
 from custos_spl.interfaces.catalog_store import CatalogStoreProvider
 from custos_spl.interfaces.definition_store import DefinitionStoreProvider
-from custos_spl.interfaces.auth_store import AuthStoreProvider
 from custos_spl.interfaces.metadata_store import (
     MetadataStoreProvider,
     TransactionHandle,
@@ -44,8 +44,24 @@ from custos_pg.adapters.metadata import make_adapter as make_metadata_adapter
 from custos_pg.migrations.auth import AUTH_REV1
 from custos_pg.migrations.catalog import CATALOG_REV1
 from custos_pg.migrations.definition import DEFINITION_REV1
-from custos_pg.migrations.metadata import METADATA_REV1, METADATA_REV2, METADATA_REV3, METADATA_REV5
+from custos_pg.migrations.metadata import (
+    METADATA_REV1,
+    METADATA_REV2,
+    METADATA_REV3,
+    METADATA_REV5,
+    METADATA_REV6,
+)
 from custos_pg.pool import DSN_ENV_VAR, LazyPool, read_dsn_from_env
+
+
+def test_scheduler_migration_is_additive() -> None:
+    """Scheduler tables are additive and leave existing row shapes untouched."""
+    assert METADATA_REV6.number == 6
+    statements = " ".join(METADATA_REV6.statements)
+    assert "scheduler_lease" in statements and "pending_schedule_fire" in statements
+    assert "UNIQUE (workspace_id, schedule_id, planned_fire_at)" in statements
+    assert "DROP " not in statements and "ALTER " not in statements
+
 
 # ----- Protocol conformance -----
 
@@ -73,9 +89,7 @@ def test_metadata_adapter_satisfies_trigger_query_capability() -> None:
 
 def test_trigger_indexes_cover_unfiltered_identifier_order() -> None:
     """Unfiltered subscription pages need the same C-collation order as the queries."""
-    statement = next(
-        sql for sql in METADATA_REV5.statements if "subscription_by_query_id" in sql
-    )
+    statement = next(sql for sql in METADATA_REV5.statements if "subscription_by_query_id" in sql)
     assert '(workspace_id, subscription_id COLLATE "C")' in statement
 
 
@@ -124,6 +138,7 @@ async def test_auth_adapter_with_transaction_returns_body_value_and_closes_handl
         seen_handle = handle
         assert isinstance(handle, TransactionHandle)
         from custos_pg.adapters.auth import PgAuthTransactionHandle
+
         assert isinstance(handle, PgAuthTransactionHandle)
         assert getattr(handle, "_closed", False) is False
         events.append("body_called")
@@ -134,6 +149,7 @@ async def test_auth_adapter_with_transaction_returns_body_value_and_closes_handl
     assert result == "body-result"
     assert seen_handle is not None
     from custos_pg.adapters.auth import PgAuthTransactionHandle
+
     assert isinstance(seen_handle, PgAuthTransactionHandle)
     assert getattr(seen_handle, "_closed", False) is True
     assert events == [
