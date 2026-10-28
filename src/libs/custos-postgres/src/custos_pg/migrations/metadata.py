@@ -311,6 +311,10 @@ METADATA_REV5 = Revision(
     number=5,
     statements=(
         """
+        CREATE INDEX IF NOT EXISTS subscription_by_query_id
+            ON custos_state.subscription (workspace_id, subscription_id COLLATE "C")
+        """,
+        """
         CREATE INDEX IF NOT EXISTS subscription_by_state
             ON custos_state.subscription
                 (workspace_id, state, subscription_id COLLATE "C")

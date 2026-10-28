@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, cast
+from zoneinfo import ZoneInfo
 
 import pytest
 from custos_pg import PgMetadataAdapter
@@ -138,7 +139,7 @@ async def _put_resume(
     identifier: str,
     *,
     workspace: WorkspaceId = _WS,
-    connector: str = "registry",
+    connector: object = "registry",
     modes: object = None,
     expires_at: datetime = _NOW + timedelta(days=1),
     legacy: bool = False,
@@ -280,6 +281,56 @@ async def test_query_validation(backend: QueryStore) -> None:
             delivery_mode="pull",
             as_of=_NOW,
         )
+
+
+async def test_resume_source_requires_string_identifier(backend: QueryStore) -> None:
+    """Malformed JSON source values must not coerce into another connector's ID."""
+    await _put_resume(backend, "numeric", connector=123)
+    await _put_resume(backend, "string", connector="123")
+    page = await backend.query_resume_subscriptions(
+        _WS, connector_instance_id="123", delivery_mode="pull", as_of=_NOW
+    )
+    assert [row.resume_id for row in page.items] == ["string"]
+
+
+async def test_resume_expiry_uses_instants_during_repeated_hour(backend: QueryStore) -> None:
+    """A first-fold expiry is past even when its wall time is later than the cutoff."""
+    zone = ZoneInfo("America/New_York")
+    cutoff = datetime(2026, 11, 1, 1, 15, tzinfo=zone, fold=1)
+    await _put_resume(
+        backend,
+        "expired-first-fold",
+        expires_at=datetime(2026, 11, 1, 1, 45, tzinfo=zone, fold=0),
+    )
+    await _put_resume(
+        backend,
+        "live-second-fold",
+        expires_at=datetime(2026, 11, 1, 1, 30, tzinfo=zone, fold=1),
+    )
+    page = await backend.query_resume_subscriptions(
+        _WS, connector_instance_id="registry", delivery_mode="pull", as_of=cutoff
+    )
+    assert [row.resume_id for row in page.items] == ["live-second-fold"]
+
+
+async def test_schedule_due_uses_instants_during_repeated_hour(backend: QueryStore) -> None:
+    """The memory scheduler's due set matches PostgreSQL across a repeated local hour."""
+    zone = ZoneInfo("America/New_York")
+    cutoff = datetime(2026, 11, 1, 1, 15, tzinfo=zone, fold=1)
+    store = ScheduleStore(backend)
+    for identifier, due in (
+        ("due-first-fold", datetime(2026, 11, 1, 1, 45, tzinfo=zone, fold=0)),
+        ("future-second-fold", datetime(2026, 11, 1, 1, 30, tzinfo=zone, fold=1)),
+    ):
+        await store.put(
+            workspace_id=_WS,
+            schedule_id=identifier,
+            workflow_id="workflow",
+            cron="0 * * * *",
+            next_fire_at=due,
+        )
+    page = await store.query_due(_WS, due_at=cutoff)
+    assert [row.schedule_id for row in page.items] == ["due-first-fold"]
 
 
 async def test_write_only_providers_fail_explicitly() -> None:

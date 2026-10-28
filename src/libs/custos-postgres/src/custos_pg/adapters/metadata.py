@@ -728,6 +728,7 @@ class PgMetadataAdapter:
                 SELECT workspace_id, resume_id, run_id, step_id, expires_at, payload
                 FROM custos_state.resume_subscription
                 WHERE workspace_id = $1
+                  AND jsonb_typeof(payload #> '{source,connectorInstanceId}') = 'string'
                   AND payload #>> '{source,connectorInstanceId}' = $2
                   AND jsonb_typeof(payload #> '{source,deliveryModes}') = 'array'
                   AND (payload #> '{source,deliveryModes}') ? $3

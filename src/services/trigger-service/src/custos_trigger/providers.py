@@ -323,7 +323,7 @@ class InMemoryTriggerMetadataStore:
             raise ValueError("resume queries require a connector instance and push/pull mode")
         rows: list[SplResumeSubscription] = []
         for (workspace, _), row in self._resume.items():
-            if workspace != workspace_id or row.expires_at <= as_of:
+            if workspace != workspace_id or row.expires_at.astimezone(UTC) <= as_of.astimezone(UTC):
                 continue
             source = row.payload.get("source")
             if not isinstance(source, Mapping):
@@ -361,7 +361,9 @@ class InMemoryTriggerMetadataStore:
         rows = [
             row
             for (workspace, _), row in self._schedules.items()
-            if workspace == workspace_id and row.enabled and row.next_fire_at <= due_at
+            if workspace == workspace_id
+            and row.enabled
+            and row.next_fire_at.astimezone(UTC) <= due_at.astimezone(UTC)
         ]
         return _query_page(
             rows,
