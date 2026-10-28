@@ -30,6 +30,9 @@ publishing only metadata, the next put replaces that orphan before publishing
 its blob. The mount must support POSIX advisory locks and atomic rename.
 Concurrent access must use adapters participating in this locking protocol;
 quiesce writes/deletion when upgrading from older, non-locking adapter versions.
+Downloads release the shared lock once the blob is open, then stream from that
+descriptor. A slow reader does not block publication or deletion; POSIX keeps
+an opened inode readable even after the sweeper removes its pathname.
 Existing blobs without metadata remain readable with an unknown (`None`) media
 type. Corrupt metadata produces an explicit backend error. Sweeper deletion
 removes both the blob and its metadata; restarting the adapter preserves the

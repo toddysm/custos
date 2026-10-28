@@ -13,7 +13,7 @@ import json
 import os
 import uuid
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager, suppress
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from functools import partial
 from pathlib import Path
 from typing import ClassVar
@@ -192,20 +192,21 @@ class CsiArtifactAdapter:
         workspace_id: WorkspaceId,
         artifact_id: ArtifactId,
     ) -> AsyncIterator[bytes]:
-        """Implementation of get as async generator."""
+        """Open under the shared lock, then stream the stable POSIX inode without it."""
         try:
             digest = await self._verify_workspace(workspace_id, artifact_id)
             path = self._artifact_path(workspace_id, digest)
 
-            async with _artifact_lock(path, exclusive=False):
-                if not await aiofiles.os.path.exists(path):
-                    raise ArtifactNotFound(f"artifact not found: {artifact_id}")
-                async with aiofiles.open(path, "rb") as f:
-                    while True:
-                        chunk = await f.read(65536)  # 64KB chunks
-                        if not chunk:
-                            break
-                        yield chunk
+            async with AsyncExitStack() as resources:
+                async with _artifact_lock(path, exclusive=False):
+                    if not await aiofiles.os.path.exists(path):
+                        raise ArtifactNotFound(f"artifact not found: {artifact_id}")
+                    reader = await resources.enter_async_context(aiofiles.open(path, "rb"))
+                while True:
+                    chunk = await reader.read(65536)  # 64KB chunks
+                    if not chunk:
+                        break
+                    yield chunk
         except (ArtifactNotFound, WorkspaceMismatch):
             raise
         except OSError as exc:

@@ -5,8 +5,8 @@ import fcntl
 import multiprocessing
 import os
 import threading
-from collections.abc import AsyncIterator
-from contextlib import suppress
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import aclosing, suppress
 from multiprocessing.connection import Connection
 from pathlib import Path
 
@@ -260,3 +260,27 @@ async def test_cancellation_waits_for_inflight_filesystem_mutation(missing: bool
     finally:
         release.set()
         await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_paused_download_does_not_block_sweeper(tmp_path: Path) -> None:
+    """Keep reading the opened inode after deletion without retaining the prefix lock."""
+    payload = b"streamed content" * 10000
+
+    async def content() -> AsyncIterator[bytes]:
+        """Supply enough bytes to require more than one read chunk."""
+        yield payload
+
+    adapter = CsiArtifactAdapter(tmp_path)
+    workspace = WorkspaceId("metadata-test")
+    descriptor = await adapter.put(workspace, content())
+    stream = adapter.get(workspace, descriptor.artifact_id)
+    assert isinstance(stream, AsyncGenerator)
+    async with aclosing(stream):
+        first = await anext(stream)
+        assert len(first) < len(payload)
+        await asyncio.wait_for(
+            adapter.delete(workspace, descriptor.artifact_id, is_sweeper=True), 5
+        )
+        assert await adapter.head(workspace, descriptor.artifact_id) is None
+        remainder = b"".join([chunk async for chunk in stream])
+    assert first + remainder == payload
