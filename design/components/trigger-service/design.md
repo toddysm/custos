@@ -485,31 +485,40 @@ per-fire idempotency key for defence in depth.
 
 ### Lease protocol
 
-A single row in a `scheduler_leader` table (one logical scheduler group per
-deployment) carries `holder_id`, `epoch`, and `expires_at`:
+A row in `custos_state.scheduler_lease`, keyed by the logical deployment ID,
+carries `holder_id`, `epoch`, and `expires_at`. The approved M2 D04 contract
+clarifies the original example: renewal does not rotate the fencing epoch.
 
-1. **Acquire / renew** — every replica runs a conditional update:
-   `UPDATE scheduler_leader SET holder_id = :me, epoch = epoch + 1, expires_at = now() + :lease WHERE expires_at < now() OR holder_id = :me`.
-   The replica whose statement affects the row (row count = 1) is the leader.
+1. **Acquire** — serialize on the deployment row using database time.
+   Expiry/release permits acquisition and increments the epoch. A live
+   same-holder retry returns the existing token without extending its expiry;
+   another holder receives a normal contention result.
 2. **Renew cadence** — the leader renews every `TRIGGER_SCHEDULER_LEADER_RENEW_SECONDS`
-   (default `10`, ≈ lease ÷ 3) so a healthy leader never lapses; non-leaders retry
-   acquisition on the same tick.
-3. **Failover** — if the leader dies, its lease expires and the next replica
-   acquires within `TRIGGER_SCHEDULER_LEADER_LEASE_SECONDS` (default `30`). `epoch`
-   increments on every handover and acts as a **fencing token**.
+   (default `10`, strictly less than the default `30`-second lease), preserving
+   its epoch. A partial-TTL retry retains the renewal safety margin. Non-leaders
+   attempt acquisition on each scan; local monotonic time only schedules renewal.
+3. **Failover** — the first successful eligible scan after expiry can acquire.
+   Network/database outages are not bounded by the lease duration. Release keeps
+   the epoch tombstone so old tokens cannot become valid again.
 4. **Only the leader evaluates cron** and enqueues normalized `cron.tick` events;
    non-leaders idle the scheduler loop but continue to serve all other receivers
    and API traffic.
 
 ### Exactly-once guarantee
 
-Leader election bounds firing to one replica, but a paused-then-resumed old leader
-could briefly overlap a new one during failover. To make double-firing impossible
-even in that window, each fire is recorded under a deterministic idempotency key
-`hash(scheduleId, plannedFireAt)` in the existing dedup store before dispatch; a
-stale leader's duplicate collides on that key and is dropped (`trigger.deduped`).
-Leader-lease (single firer) **plus** the `epoch` fence **plus** the per-fire dedup
-key together deliver exactly-once without a distributed transaction.
+Lease ownership is checked using fresh database time after all relevant locks.
+The fenced operation checks the active subscription revision, managed schedule
+association and expected due instant, then creates a pending-fire record and
+advances the schedule in one transaction. Failure rolls back both writes.
+Competing attempts cannot advance the same occurrence twice.
+
+Pending identities derive from schedule ID and canonical planned UTC instant;
+workspace-scoped keys prevent tenant collisions. A later leader can recover and
+acknowledge the same pending occurrence. Publication is at least once: the
+receiver publishes before acknowledgment, and downstream idempotency supplies
+the workflow-effect guarantee. The publisher/receiver is #1008; durable replay
+idempotency is #1014. #1007 supplies storage and lease maintenance, not an
+automatically started scheduler.
 
 ## Webhook Signature Verification (REQ-006)
 
@@ -619,8 +628,8 @@ the Workflow Service exactly as an ordinary duplicate would be.
 | `TRIGGER_RESUME_DEFAULT_TTL_SECONDS` | No | `604800` | Default expiry for resume subscriptions (7 days). |
 | `TRIGGER_DISPATCH_MAX_RETRIES` | No | `5` | Max retries dispatching to Workflow Service. |
 | `TRIGGER_FANOUT_MAX_DEPTH` | No | `16` | Max per-tenant fan-out depth before a dispatch is rejected as a loop (`trigger.loop.detected`). |
-| `TRIGGER_SCHEDULER_LEADER_LEASE_SECONDS` | No | `30` | Scheduler leader-lease TTL (single-fire guarantee across replicas); failover bound. |
-| `TRIGGER_SCHEDULER_LEADER_RENEW_SECONDS` | No | `10` | Scheduler leader-lease renew interval (≈ lease ÷ 3); the leader re-acquires on this cadence to avoid lapsing. |
+| `TRIGGER_SCHEDULER_LEADER_LEASE_SECONDS` | No | `30` | Scheduler lease duration; takeover is possible on the first successful scan after expiry, not a bound on outages. |
+| `TRIGGER_SCHEDULER_LEADER_RENEW_SECONDS` | No | `10` | Positive renewal interval strictly below the lease duration; renewals preserve the epoch. |
 | `TRIGGER_DEADLETTER_RETENTION_SECONDS` | No | `2592000` | Dead-letter entry retention before the sweeper GCs it (30 days). |
 | `TRIGGER_DEADLETTER_MAX_REPLAY_ATTEMPTS` | No | `3` | Max operator-initiated replay attempts per entry before it is pinned to `discarded` (guards a poison event from looping). |
 

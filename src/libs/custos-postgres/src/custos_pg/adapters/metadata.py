@@ -31,20 +31,23 @@ import base64
 import json
 from collections.abc import Awaitable, Callable, Mapping
 from collections.abc import Set as AbstractSet
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
-from asyncpg import UniqueViolationError
+from asyncpg import InterfaceError, PostgresError, UndefinedTableError, UniqueViolationError
 from custos_spl.errors import (
     BackendUnavailable,
     ImmutableViolation,
     InvalidTransactionHandle,
     LeaseBusy,
     LeaseExpired,
+    MigrationRequired,
     NotReserved,
     QueryUnsupported,
 )
+from custos_spl.ids import WorkspaceId
 from custos_spl.interfaces.metadata_store import (
     ArtifactUse,
     AuditEvent,
@@ -75,6 +78,15 @@ from custos_spl.interfaces.metadata_store import (
     SubscriptionSelector,
     TransactionHandle,
 )
+from custos_spl.interfaces.scheduler import (
+    SCHEDULER_SCHEMA_REVISION,
+    PendingScheduleFire,
+    SchedulerLease,
+    lease_duration,
+    prepare_schedule_fire,
+    require_scheduler_lease,
+    utc_instant,
+)
 from custos_spl.interfaces.trigger_queries import SubscriptionSnapshot, prepare_subscription_write
 from custos_spl.middleware.transactions import bind_handle, check_handle
 from custos_spl.pagination import (
@@ -91,6 +103,7 @@ from custos_pg.migrations.metadata import (
     METADATA_REV3,
     METADATA_REV4,
     METADATA_REV5,
+    METADATA_REV6,
 )
 from custos_pg.pool import LazyPool, read_dsn_from_env
 from custos_pg.revisions import ensure_ledger, read_declared, record_revision
@@ -119,6 +132,37 @@ LEFT JOIN LATERAL (
 """
 
 T = TypeVar("T")
+
+
+def _scheduler_lease(row: Record, observed_at: datetime) -> SchedulerLease:
+    """Decode authoritative lease state with a fresh provider-time observation."""
+    return SchedulerLease(
+        row["deployment_id"], row["holder_id"], row["epoch"], row["expires_at"], observed_at
+    )
+
+
+def _pending_fire(row: Record) -> PendingScheduleFire:
+    """Decode a persisted planned occurrence without consulting mutable subscription state."""
+    return PendingScheduleFire(
+        workspace_id=WorkspaceId(row["workspace_id"]),
+        fire_id=row["fire_id"],
+        schedule_id=row["schedule_id"],
+        workflow_id=row["workflow_id"],
+        deployment_id=row["deployment_id"],
+        epoch=row["epoch"],
+        subscription_revision=row["subscription_revision"],
+        planned_fire_at=row["planned_fire_at"],
+        created_at=row["created_at"],
+        delivered_at=row["delivered_at"],
+    )
+
+
+async def _scheduler_now(conn: Connection) -> datetime:
+    """Read wall-clock database time after lock acquisition, not transaction-start time."""
+    now = await conn.fetchval("SELECT clock_timestamp()")
+    if not isinstance(now, datetime):
+        raise BackendUnavailable("scheduler clock returned an invalid timestamp")
+    return utc_instant(now)
 
 
 # ----- Handle types -----
@@ -437,8 +481,8 @@ class PgMetadataAdapter:
     async def apply_pending(self) -> list[str]:
         """Apply revisions in scope for this adapter slice.
 
-        Revisions 1-4 define the required row shapes. Revision 5 adds
-        trigger-query indexes without raising the shared schema minimum.
+        Revisions 1-4 define the shared minimum. Revisions 5-6 add trigger
+        query indexes and optional fenced scheduler state without raising it.
         """
         summaries: list[str] = []
         pool = await self._pool_ref()
@@ -449,7 +493,14 @@ class PgMetadataAdapter:
                 INTERFACE_NAME,
             )
             already = {int(r["revision"]) for r in applied}
-            for rev in (METADATA_REV1, METADATA_REV2, METADATA_REV3, METADATA_REV4, METADATA_REV5):
+            for rev in (
+                METADATA_REV1,
+                METADATA_REV2,
+                METADATA_REV3,
+                METADATA_REV4,
+                METADATA_REV5,
+                METADATA_REV6,
+            ):
                 if rev.number in already:
                     continue
                 for stmt in rev.statements:
@@ -460,6 +511,280 @@ class PgMetadataAdapter:
                 )
         await self.refresh_declared()
         return summaries
+
+    @asynccontextmanager
+    async def _scheduler_transaction(self) -> AsyncIterator[Connection]:
+        """Rollback partial scheduler writes and classify concrete backend failures."""
+        try:
+            pool = await self._pool_ref()
+            async with pool.acquire() as conn, conn.transaction():
+                yield conn
+        except UniqueViolationError as exc:
+            raise ImmutableViolation("planned schedule occurrence already exists") from exc
+        except (OSError, InterfaceError, PostgresError) as exc:
+            raise BackendUnavailable("scheduler storage operation failed", cause=exc) from exc
+
+    async def check_scheduler_ready(self) -> None:
+        """Require the additive scheduler revision without raising the shared metadata minimum."""
+        async with self._scheduler_transaction() as conn:
+            try:
+                exists = await conn.fetchval(
+                    "SELECT EXISTS(SELECT 1 FROM custos_meta.adapter_revisions "
+                    "WHERE interface_name = $1 AND revision = $2)",
+                    INTERFACE_NAME,
+                    SCHEDULER_SCHEMA_REVISION,
+                )
+            except UndefinedTableError as exc:
+                raise MigrationRequired([(INTERFACE_NAME, SCHEDULER_SCHEMA_REVISION)]) from exc
+            if not exists:
+                raise MigrationRequired([(INTERFACE_NAME, SCHEDULER_SCHEMA_REVISION)])
+
+    async def scheduler_now(self) -> datetime:
+        """Return authoritative database time for due-scan planning."""
+        async with self._scheduler_transaction() as conn:
+            return await _scheduler_now(conn)
+
+    async def acquire_scheduler_lease(
+        self, deployment_id: str, holder_id: str, *, ttl_seconds: int
+    ) -> SchedulerLease | None:
+        """Serialize acquisition and advance the epoch only when ownership is newly acquired."""
+        duration = lease_duration(deployment_id, holder_id, ttl_seconds)
+        async with self._scheduler_transaction() as conn:
+            inserted = await conn.fetchval(
+                "INSERT INTO custos_state.scheduler_lease "
+                "(deployment_id, holder_id, epoch, expires_at) "
+                "VALUES ($1, $2, 1, clock_timestamp()) "
+                "ON CONFLICT (deployment_id) DO NOTHING RETURNING deployment_id",
+                deployment_id,
+                holder_id,
+            )
+            row = await conn.fetchrow(
+                "SELECT * FROM custos_state.scheduler_lease WHERE deployment_id = $1 FOR UPDATE",
+                deployment_id,
+            )
+            assert row is not None
+            now = await _scheduler_now(conn)
+            current = _scheduler_lease(row, now)
+            if inserted is None and current.expires_at > now:
+                return current if current.holder_id == holder_id else None
+            try:
+                expires = now + duration
+            except OverflowError as exc:
+                raise ValueError("lease expiry exceeds the timestamp range") from exc
+            epoch = current.epoch if inserted is not None else current.epoch + 1
+            await conn.execute(
+                "UPDATE custos_state.scheduler_lease SET holder_id=$2, epoch=$3, expires_at=$4 "
+                "WHERE deployment_id=$1",
+                deployment_id,
+                holder_id,
+                epoch,
+                expires,
+            )
+            return SchedulerLease(deployment_id, holder_id, epoch, expires, now)
+
+    async def renew_scheduler_lease(
+        self, lease: SchedulerLease, *, ttl_seconds: int
+    ) -> SchedulerLease:
+        """Renew a live owner using fresh database time while preserving its epoch."""
+        duration = lease_duration(lease.deployment_id, lease.holder_id, ttl_seconds)
+        async with self._scheduler_transaction() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM custos_state.scheduler_lease WHERE deployment_id=$1 FOR UPDATE",
+                lease.deployment_id,
+            )
+            now = await _scheduler_now(conn)
+            current = _scheduler_lease(row, now) if row is not None else None
+            require_scheduler_lease(current, lease, now)
+            assert current is not None
+            try:
+                expires = max(current.expires_at, now + duration)
+            except OverflowError as exc:
+                raise ValueError("lease expiry exceeds the timestamp range") from exc
+            updated = await conn.fetchval(
+                "UPDATE custos_state.scheduler_lease SET expires_at=$4 "
+                "WHERE deployment_id=$1 AND holder_id=$2 AND epoch=$3 "
+                "AND expires_at > clock_timestamp() RETURNING epoch",
+                lease.deployment_id,
+                lease.holder_id,
+                lease.epoch,
+                expires,
+            )
+            if updated is None:
+                raise LeaseExpired("scheduler lease expired during renewal")
+            return SchedulerLease(lease.deployment_id, lease.holder_id, lease.epoch, expires, now)
+
+    async def release_scheduler_lease(self, lease: SchedulerLease) -> None:
+        """Retain the epoch tombstone while expiring only the current live ownership."""
+        async with self._scheduler_transaction() as conn:
+            current = await conn.fetchrow(
+                "SELECT * FROM custos_state.scheduler_lease WHERE deployment_id=$1 FOR UPDATE",
+                lease.deployment_id,
+            )
+            now = await _scheduler_now(conn)
+            require_scheduler_lease(
+                _scheduler_lease(current, now) if current is not None else None, lease, now
+            )
+            row = await conn.fetchval(
+                "UPDATE custos_state.scheduler_lease SET expires_at=clock_timestamp() "
+                "WHERE deployment_id=$1 AND holder_id=$2 AND epoch=$3 "
+                "AND expires_at > clock_timestamp() RETURNING epoch",
+                lease.deployment_id,
+                lease.holder_id,
+                lease.epoch,
+            )
+            if row is None:
+                raise LeaseExpired("scheduler lease is expired or no longer owned")
+
+    async def advance_schedule(
+        self,
+        workspace_id: WorkspaceId,
+        schedule_id: str,
+        lease: SchedulerLease,
+        *,
+        expected_next_fire_at: datetime,
+        expected_revision: int,
+        planned_fire_at: datetime,
+        next_fire_at: datetime,
+    ) -> PendingScheduleFire:
+        """Commit a durable pending fire and next-fire advancement under one live fence."""
+        async with self._scheduler_transaction() as conn:
+            lease_row = await conn.fetchrow(
+                "SELECT * FROM custos_state.scheduler_lease WHERE deployment_id=$1 FOR UPDATE",
+                lease.deployment_id,
+            )
+            await conn.fetchrow(
+                "SELECT subscription_id FROM custos_state.subscription "
+                "WHERE workspace_id=$1 AND subscription_id=$2 FOR UPDATE",
+                workspace_id,
+                schedule_id,
+            )
+            subscription = await conn.fetchrow(
+                _SUBSCRIPTION_QUERY + " WHERE s.workspace_id=$1 AND s.subscription_id=$2",
+                workspace_id,
+                schedule_id,
+            )
+            schedule = await conn.fetchrow(
+                "SELECT * FROM custos_state.schedule "
+                "WHERE workspace_id=$1 AND schedule_id=$2 FOR UPDATE",
+                workspace_id,
+                schedule_id,
+            )
+            now = await _scheduler_now(conn)
+            pending = prepare_schedule_fire(
+                workspace_id,
+                lease,
+                _scheduler_lease(lease_row, now) if lease_row is not None else None,
+                _row_to_subscription_snapshot(subscription) if subscription is not None else None,
+                _row_to_schedule(schedule) if schedule is not None else None,
+                expected_next_fire_at=expected_next_fire_at,
+                expected_revision=expected_revision,
+                planned_fire_at=planned_fire_at,
+                next_fire_at=next_fire_at,
+                now=now,
+            )
+            await conn.execute(
+                "INSERT INTO custos_state.pending_schedule_fire "
+                "(workspace_id, fire_id, schedule_id, workflow_id, deployment_id, epoch, "
+                "subscription_revision, planned_fire_at, created_at) "
+                "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+                workspace_id,
+                pending.fire_id,
+                schedule_id,
+                pending.workflow_id,
+                lease.deployment_id,
+                lease.epoch,
+                expected_revision,
+                pending.planned_fire_at,
+                now,
+            )
+            updated = await conn.fetchval(
+                "UPDATE custos_state.schedule SET next_fire_at=$3 "
+                "WHERE workspace_id=$1 AND schedule_id=$2 "
+                "AND $3 > clock_timestamp() AND $7 <= clock_timestamp() "
+                "AND EXISTS(SELECT 1 FROM custos_state.scheduler_lease "
+                "WHERE deployment_id=$4 AND holder_id=$5 AND epoch=$6 "
+                "AND expires_at > clock_timestamp()) RETURNING schedule_id",
+                workspace_id,
+                schedule_id,
+                utc_instant(next_fire_at),
+                lease.deployment_id,
+                lease.holder_id,
+                lease.epoch,
+                pending.planned_fire_at,
+            )
+            if updated is None:
+                require_scheduler_lease(
+                    _scheduler_lease(lease_row, now) if lease_row is not None else None,
+                    lease,
+                    await _scheduler_now(conn),
+                )
+                raise ImmutableViolation("provider time moved outside the planned-fire window")
+            return pending
+
+    async def query_pending_schedule_fires(
+        self,
+        workspace_id: WorkspaceId,
+        deployment_id: str,
+        *,
+        cursor: Cursor | None = None,
+        limit: int | None = None,
+    ) -> Page[PendingScheduleFire]:
+        """Read a bounded, tenant/deployment-bound recovery page without an N+1 lookup."""
+        scope = ("pending-schedule-fires", str(workspace_id), deployment_id)
+        after = decode_query_cursor(cursor, scope)
+        size = query_page_limit(limit)
+        async with self._scheduler_transaction() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM custos_state.pending_schedule_fire "
+                "WHERE workspace_id=$1 AND deployment_id=$2 AND delivered_at IS NULL "
+                'AND ($3::text IS NULL OR fire_id COLLATE "C" > $3) '
+                'ORDER BY fire_id COLLATE "C" LIMIT $4',
+                workspace_id,
+                deployment_id,
+                after,
+                size + 1,
+            )
+        cursor_out = (
+            encode_query_cursor(scope, rows[size - 1]["fire_id"]) if len(rows) > size else None
+        )
+        return Page((_pending_fire(row) for row in rows[:size]), cursor_out)
+
+    async def acknowledge_schedule_fire(
+        self, workspace_id: WorkspaceId, fire_id: str, lease: SchedulerLease
+    ) -> None:
+        """A current holder may acknowledge an older epoch's recovered publication."""
+        async with self._scheduler_transaction() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM custos_state.scheduler_lease WHERE deployment_id=$1 FOR UPDATE",
+                lease.deployment_id,
+            )
+            await conn.fetchrow(
+                "SELECT fire_id FROM custos_state.pending_schedule_fire "
+                "WHERE workspace_id=$1 AND fire_id=$2 AND deployment_id=$3 FOR UPDATE",
+                workspace_id,
+                fire_id,
+                lease.deployment_id,
+            )
+            now = await _scheduler_now(conn)
+            require_scheduler_lease(_scheduler_lease(row, now) if row else None, lease, now)
+            updated = await conn.fetchval(
+                "UPDATE custos_state.pending_schedule_fire "
+                "SET delivered_at=COALESCE(delivered_at, clock_timestamp()) "
+                "WHERE workspace_id=$1 AND fire_id=$2 AND deployment_id=$3 "
+                "AND EXISTS(SELECT 1 FROM custos_state.scheduler_lease "
+                "WHERE deployment_id=$3 AND holder_id=$4 AND epoch=$5 "
+                "AND expires_at > clock_timestamp()) RETURNING fire_id",
+                workspace_id,
+                fire_id,
+                lease.deployment_id,
+                lease.holder_id,
+                lease.epoch,
+            )
+            if updated is None:
+                require_scheduler_lease(
+                    _scheduler_lease(row, now) if row else None, lease, await _scheduler_now(conn)
+                )
+                raise ImmutableViolation("pending fire is absent from this workspace/deployment")
 
     # ----- Runtime execution state -----
 

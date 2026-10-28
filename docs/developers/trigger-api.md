@@ -88,6 +88,40 @@ This is an index-only additive revision; existing revision-4 row shapes and
 other services' schema minimum remain compatible. Older adapters without the
 query capability fail explicitly instead of returning an empty match set.
 
+## Fenced scheduler storage
+
+The optional
+[`SchedulerStateProvider`](../../src/libs/storage-provider-layer/src/custos_spl/interfaces/scheduler.py)
+capability provides deployment-scoped acquire/renew/release, database-time scans,
+fenced due-fire advancement, and bounded workspace/deployment recovery pages.
+PostgreSQL metadata revision 6 adds lease and pending-fire tables; the general
+metadata schema minimum remains revision 4. Scheduler readiness explicitly
+requires revision 6 and fails rather than falling back to unfenced writes.
+
+[`SchedulerLeadership`](../../src/services/trigger-service/src/custos_trigger/scheduler.py)
+is a scan-loop collaborator, not a background worker. Call `poll` at least as
+often as the configured renewal interval. Defaults are a 30-second lease and
+10-second renewal; invalid or non-positive combinations fail configuration.
+Only provider time decides ownership. Renewals retain the epoch, acquisition
+after expiry/release advances it, and backend failure clears local authority
+and propagates an error. Reacquiring a partial live lease schedules renewal
+without assuming a fresh time-to-live.
+
+The advance operation takes a captured subscription revision and due instant.
+It checks the current live fence, active managed association and planned-time
+window, then commits the pending occurrence and next-fire value atomically.
+Stale tokens raise `LeaseExpired`; changed eligibility/revisions raise
+`ImmutableViolation`. A pending event is not marked delivered until the
+receiver acknowledges publication. Recovery can therefore republish the same
+stable event identity rather than lose an event.
+
+Use the same deployment ID for replicas of one logical scheduler and a distinct
+holder ID per process. Generic legacy schedule maintenance methods are not
+scheduler fencing APIs. The scheduled receiver/publication loop remains
+[#1008](https://github.com/toddysm/custos/issues/1008); production lifecycle,
+readiness and deployment enablement remain
+[#1017](https://github.com/toddysm/custos/issues/1017).
+
 ## Authentication and call context
 
 REST routes are tenant-scoped and require a signed Custos call context. The
@@ -764,6 +798,7 @@ The service is configured by environment variables (design § Configuration):
 | `TRIGGER_DISPATCH_MAX_RETRIES` | `5` | Max retries for a transient dispatch failure |
 | `TRIGGER_FANOUT_MAX_DEPTH` | `16` | Fan-out depth cap before `loop_rejected` |
 | `TRIGGER_SCHEDULER_LEADER_LEASE_SECONDS` | `30` | Scheduler leader lease (M2) |
+| `TRIGGER_SCHEDULER_LEADER_RENEW_SECONDS` | `10` | Positive renewal cadence strictly shorter than the lease; epochs remain stable during renewal |
 | `TRIGGER_RECEIVER_CONFIGURATION_ENABLED` | `false` | Acknowledge that all writers are upgraded before enabling managed receiver writes; does not bypass scoped RPC authentication |
 | `TRIGGER_PUBSUB_COMPONENT` | `custos-pubsub` | Dapr pub/sub component name |
 | `TRIGGER_NORMALIZED_TOPIC` | `custos.triggers.normalized` | Normalized-event topic |

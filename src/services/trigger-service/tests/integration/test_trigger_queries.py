@@ -76,7 +76,7 @@ async def backend(query_dsn: str | None) -> AsyncIterator[QueryStore]:
     try:
         adapter = PgMetadataAdapter(pool=pool)
         await adapter.apply_pending()
-        assert adapter.declared_revisions["MetadataStoreProvider"] == frozenset({1, 2, 3, 4, 5})
+        assert adapter.declared_revisions["MetadataStoreProvider"] == frozenset({1, 2, 3, 4, 5, 6})
         yield adapter
     finally:
         await pool.close()

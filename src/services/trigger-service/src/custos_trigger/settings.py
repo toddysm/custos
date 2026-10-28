@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Final
 
 # --- § Configuration knobs (design.md § Configuration) -----------------------
@@ -47,6 +48,7 @@ ENV_FANOUT_MAX_DEPTH: Final[str] = "TRIGGER_FANOUT_MAX_DEPTH"
 #: Optional. Scheduler leader lock TTL (seconds) — the single-fire guarantee
 #: across replicas. Default ``30``.
 ENV_SCHEDULER_LEADER_LEASE_SECONDS: Final[str] = "TRIGGER_SCHEDULER_LEADER_LEASE_SECONDS"
+ENV_SCHEDULER_LEADER_RENEW_SECONDS: Final[str] = "TRIGGER_SCHEDULER_LEADER_RENEW_SECONDS"
 
 #: Enable only after every subscription writer uses atomic receiver mutations.
 ENV_RECEIVER_CONFIGURATION_ENABLED: Final[str] = "TRIGGER_RECEIVER_CONFIGURATION_ENABLED"
@@ -95,6 +97,7 @@ DEFAULT_RESUME_DEFAULT_TTL_SECONDS: Final[int] = 604_800
 DEFAULT_DISPATCH_MAX_RETRIES: Final[int] = 5
 DEFAULT_FANOUT_MAX_DEPTH: Final[int] = 16
 DEFAULT_SCHEDULER_LEADER_LEASE_SECONDS: Final[int] = 30
+DEFAULT_SCHEDULER_LEADER_RENEW_SECONDS: Final[int] = 10
 DEFAULT_PUBSUB_COMPONENT: Final[str] = "custos-pubsub"
 DEFAULT_NORMALIZED_TOPIC: Final[str] = "custos.triggers.normalized"
 DEFAULT_WORKFLOW_EVENTS_TOPIC: Final[str] = "custos.workflow.events"
@@ -125,6 +128,13 @@ class Settings:
     authz_endpoint: str  # empty string means "dev shim active"
     environment: str
     receiver_configuration_enabled: bool = False
+    scheduler_leader_renew_seconds: int = DEFAULT_SCHEDULER_LEADER_RENEW_SECONDS
+
+    def __post_init__(self) -> None:
+        """Reject scheduler timing that cannot sustain a live lease."""
+        validate_scheduler_timing(
+            self.scheduler_leader_lease_seconds, self.scheduler_leader_renew_seconds
+        )
 
     @property
     def use_callctx_dev_shim(self) -> bool:
@@ -134,6 +144,22 @@ class Settings:
     @property
     def is_production(self) -> bool:
         return self.environment.lower() == "production"
+
+
+def validate_scheduler_timing(lease_seconds: int, renew_seconds: int) -> None:
+    """Require positive integer intervals with renewal strictly before lease expiry."""
+    if (
+        type(lease_seconds) is not int
+        or type(renew_seconds) is not int
+        or not 0 < renew_seconds < lease_seconds
+    ):
+        raise SettingsError("scheduler timing requires 0 < renew seconds < lease seconds")
+    try:
+        duration = timedelta(seconds=lease_seconds)
+    except OverflowError as exc:
+        raise SettingsError("scheduler lease duration is out of range") from exc
+    if duration > datetime.max - datetime.min:
+        raise SettingsError("scheduler lease duration exceeds the datetime range")
 
 
 def _require(name: str, env: dict[str, str]) -> str:
@@ -197,6 +223,9 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         scheduler_leader_lease_seconds=_opt_non_negative_int(
             ENV_SCHEDULER_LEADER_LEASE_SECONDS, src, DEFAULT_SCHEDULER_LEADER_LEASE_SECONDS
         ),
+        scheduler_leader_renew_seconds=_opt_non_negative_int(
+            ENV_SCHEDULER_LEADER_RENEW_SECONDS, src, DEFAULT_SCHEDULER_LEADER_RENEW_SECONDS
+        ),
         pubsub_component=src.get(ENV_PUBSUB_COMPONENT, "").strip() or DEFAULT_PUBSUB_COMPONENT,
         normalized_topic=src.get(ENV_NORMALIZED_TOPIC, "").strip() or DEFAULT_NORMALIZED_TOPIC,
         workflow_events_topic=(
@@ -220,6 +249,7 @@ __all__ = [
     "DEFAULT_PUBSUB_COMPONENT",
     "DEFAULT_RESUME_DEFAULT_TTL_SECONDS",
     "DEFAULT_SCHEDULER_LEADER_LEASE_SECONDS",
+    "DEFAULT_SCHEDULER_LEADER_RENEW_SECONDS",
     "DEFAULT_WORKFLOW_EVENTS_TOPIC",
     "ENV_AUTHZ_ENDPOINT",
     "ENV_CONNECTOR_ENDPOINT",
@@ -234,6 +264,7 @@ __all__ = [
     "ENV_RECEIVER_CONFIGURATION_ENABLED",
     "ENV_RESUME_DEFAULT_TTL_SECONDS",
     "ENV_SCHEDULER_LEADER_LEASE_SECONDS",
+    "ENV_SCHEDULER_LEADER_RENEW_SECONDS",
     "ENV_WEBHOOK_BASE_URL",
     "ENV_WORKFLOW_ENDPOINT",
     "ENV_WORKFLOW_EVENTS_TOPIC",
@@ -241,4 +272,5 @@ __all__ = [
     "SettingsError",
     "load_settings",
     "read_receiver_configuration_enabled",
+    "validate_scheduler_timing",
 ]

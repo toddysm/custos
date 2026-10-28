@@ -22,6 +22,10 @@ REV3 adds device-code session storage for OIDC device-code flow (pending
 
 REV5 adds indexes for the optional trigger-query capability. It changes no
 row shape; revision-4 readers and writers remain compatible.
+
+REV6 adds deployment-scoped scheduler fencing and durable pending occurrences.
+Only scheduler consumers require this revision; existing metadata shapes and
+the shared revision-4 minimum remain unchanged.
 """
 
 from __future__ import annotations
@@ -335,4 +339,48 @@ METADATA_REV5 = Revision(
 )
 
 
-__all__ = ["METADATA_REV1", "METADATA_REV2", "METADATA_REV3", "METADATA_REV4", "METADATA_REV5"]
+METADATA_REV6 = Revision(
+    number=6,
+    statements=(
+        """
+        CREATE TABLE IF NOT EXISTS custos_state.scheduler_lease (
+            deployment_id TEXT PRIMARY KEY,
+            holder_id TEXT NOT NULL,
+            epoch BIGINT NOT NULL CHECK (epoch > 0),
+            expires_at TIMESTAMPTZ NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS custos_state.pending_schedule_fire (
+            workspace_id TEXT NOT NULL,
+            fire_id TEXT NOT NULL,
+            schedule_id TEXT NOT NULL,
+            workflow_id TEXT NOT NULL,
+            deployment_id TEXT NOT NULL,
+            epoch BIGINT NOT NULL CHECK (epoch > 0),
+            subscription_revision BIGINT NOT NULL CHECK (subscription_revision >= 0),
+            planned_fire_at TIMESTAMPTZ NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL,
+            delivered_at TIMESTAMPTZ,
+            PRIMARY KEY (workspace_id, fire_id),
+            UNIQUE (workspace_id, schedule_id, planned_fire_at)
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS pending_schedule_fire_undelivered
+            ON custos_state.pending_schedule_fire
+                (workspace_id, deployment_id, fire_id COLLATE "C")
+            WHERE delivered_at IS NULL
+        """,
+    ),
+)
+
+
+__all__ = [
+    "METADATA_REV1",
+    "METADATA_REV2",
+    "METADATA_REV3",
+    "METADATA_REV4",
+    "METADATA_REV5",
+    "METADATA_REV6",
+]
