@@ -30,20 +30,33 @@ def parse_resume_duration(value: str) -> timedelta:
     """Return a positive, representable ISO duration at Python datetime precision.
 
     Actual deadline overflow remains a runtime check because execution time is
-    unknown at publication. Intrinsically impossible durations and values below
-    microsecond precision are rejected rather than rounded into a default TTL.
+    unknown at publication. Fractional digits round exactly to even microseconds.
+    Impossible durations and values rounding to zero never become a default TTL.
     """
     match = _DURATION_PATTERN.fullmatch(value) if isinstance(value, str) else None
     if match is None:
         raise ValueError("duration must be a valid ISO-8601 duration")
     parts = match.groupdict()
     try:
+        whole_seconds, _, fraction = (parts["seconds"] or "0").partition(".")
+        microseconds = int((fraction + "000000")[:6])
+        remainder = fraction[6:]
+        # Round ties to even without converting the whole seconds to floating point.
+        if remainder and (
+            int(remainder[0]) > 5
+            or (
+                int(remainder[0]) == 5
+                and (any(int(digit) != 0 for digit in remainder[1:]) or microseconds % 2 == 1)
+            )
+        ):
+            microseconds += 1
         duration = timedelta(
             weeks=int(parts["weeks"] or 0),
             days=int(parts["days"] or 0),
             hours=int(parts["hours"] or 0),
             minutes=int(parts["minutes"] or 0),
-            seconds=float(parts["seconds"] or 0),
+            seconds=int(whole_seconds),
+            microseconds=microseconds,
         )
     except (OverflowError, ValueError) as exc:
         raise ValueError("duration exceeds the supported range") from exc

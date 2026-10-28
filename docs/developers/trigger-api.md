@@ -396,7 +396,7 @@ match on the event key alone). `ttl` is an ISO-8601 duration the wait stays live
 `TRIGGER_RESUME_DEFAULT_TTL_SECONDS` (default 7 days).
 Fractional seconds are preserved using the same microsecond rounding as
 Workflow mirrors; a subsecond value never becomes the multi-day default.
-Positive values below microsecond precision and unrepresentable durations or
+Values rounding to zero microseconds and unrepresentable durations or
 deadlines are rejected explicitly.
 
 Register request — `RegisterResumeRequest`:

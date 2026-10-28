@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+from custos_cel import Literal, parse
 from fastapi.testclient import TestClient
 
 from tests.api.conftest import (
@@ -87,17 +88,21 @@ def test_sourced_wait_template_materializes_with_scoped_reference_checks(
         "/v1/workspaces/ws-1/templates", json={"definition": doc}, headers=headers
     )
     assert published.status_code == 201, published.text
+    bound_topic = 'orders"}}\\\n\U0001f680'
     materialized = client.post(
         "/v1/workspaces/ws-1/templates/orders-tmpl@1:materialize",
-        json={"targetName": "source-prod", "bindings": {"topic": 'orders"}}\\\n'}},
+        json={"targetName": "source-prod", "bindings": {"topic": bound_topic}},
         headers=headers,
     )
     assert materialized.status_code == 201, materialized.text
     stored = stores[0].workflows[("ws-1", "source-prod")][0]
     assert stored.normalized_doc["spec"]["steps"][0]["waitFor"]["source"] == source
-    assert stored.normalized_doc["spec"]["steps"][0]["waitFor"]["eventKey"] == (
-        "${{ " + json.dumps('orders"}}\\\n') + " }}"
-    )
+    expression = stored.normalized_doc["spec"]["steps"][0]["waitFor"]["eventKey"]
+    assert expression == "${{ " + json.dumps(bound_topic, ensure_ascii=False) + " }}"
+    literal = parse(expression[3:-2].strip())
+    assert isinstance(literal, Literal) and isinstance(literal.value, str)
+    assert literal.value == bound_topic
+    assert literal.value.encode("utf-8") == bound_topic.encode("utf-8")
     assert connector_references.calls == [("ws-1", "registry"), ("ws-1", "registry")]
 
 

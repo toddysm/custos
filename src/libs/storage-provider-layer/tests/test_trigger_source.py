@@ -84,3 +84,18 @@ def test_duration_contract_rejects_unrepresentable_values(value: str) -> None:
 def test_duration_contract_preserves_fractional_components() -> None:
     """Large integer day components cannot erase microseconds."""
     assert parse_resume_duration("P100000DT0.000001S") == timedelta(days=100000, microseconds=1)
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("PT10000000000.000001S", timedelta(seconds=10000000000, microseconds=1)),
+        ("PT100000000000.000001S", timedelta(seconds=100000000000, microseconds=1)),
+        ("PT1.0000015S", timedelta(seconds=1, microseconds=2)),
+        ("PT1.0000025S", timedelta(seconds=1, microseconds=2)),
+        ("PT1.9999996S", timedelta(seconds=2)),
+    ],
+)
+def test_duration_uses_exact_fraction_rounding(source: str, expected: timedelta) -> None:
+    """Whole seconds cannot consume fractional precision; ties round to even microseconds."""
+    assert parse_resume_duration(source) == expected

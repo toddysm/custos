@@ -131,12 +131,15 @@ Dependencies must name earlier, distinct steps; publication rejects missing,
 self and forward references before storing a version.
 Activity-only `retry` and `on_error` fields are rejected on waits. Authored
 fractional time-to-live values use identical microsecond rounding in Workflow
-mirrors and Trigger registrations. Unrepresentable durations and values below
-microsecond precision are rejected at publication. Runtime deadline overflow
+mirrors and Trigger registrations using exact ties-to-even arithmetic.
+Unrepresentable durations and values rounding to zero microseconds are rejected
+at publication. Runtime deadline overflow
 fails the step explicitly before mirror persistence or registration.
 
 Whole string placeholders in template `waitFor.eventKey` and `selector` slots
 are materialized as safely quoted CEL string expressions, not raw strings.
+Unicode characters are preserved, and this transformation applies only to
+direct wait-step fields, never similarly named nested application data.
 Compound placeholder expressions and known non-string placeholder types are
 rejected for these slots during template publication.
 

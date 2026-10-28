@@ -213,7 +213,13 @@ def _substitute_scalar(
             )
             return value
         bound = bindings[name]
-        if path[-2:] in (("waitFor", "eventKey"), ("waitFor", "selector")):
+        if (
+            len(path) == 6
+            and path[:3] == ("spec", "workflow", "steps")
+            and isinstance(path[3], int)
+            and path[4] == "waitFor"
+            and path[5] in ("eventKey", "selector")
+        ):
             if not isinstance(bound, str):
                 issues.append(
                     TemplateRenderIssue(
@@ -223,7 +229,18 @@ def _substitute_scalar(
                     )
                 )
                 return value
-            return "${{ " + json.dumps(bound) + " }}"
+            try:
+                bound.encode("utf-8")
+            except UnicodeEncodeError:
+                issues.append(
+                    TemplateRenderIssue(
+                        path=_render_path(path),
+                        code="invalid_wait_binding",
+                        message="wait expression placeholders must be valid Unicode strings",
+                    )
+                )
+                return value
+            return "${{ " + json.dumps(bound, ensure_ascii=False) + " }}"
         return bound
 
     embedded = _EMBEDDED_TOKEN.search(value)
