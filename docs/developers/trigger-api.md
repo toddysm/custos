@@ -195,15 +195,68 @@ The response is the full stored `Subscription`:
 A selector that fails to compile is rejected at create time with
 `422 trigger.selector_invalid`.
 
+#### Receiver configuration
+
+`scheduled`, `webhook`, `vendor-push`, and `pull` requests require
+`sourceConfig`. Manual/internal requests remain unchanged and do not accept it.
+Configuration is persisted now; the scheduler, webhook and polling receiver
+workers are separate M2 delivery items, not activated by this API change.
+
+| `sourceType` | `sourceConfig` |
+|---|---|
+| `scheduled` | Exactly one of five-field `cron` or positive integer `intervalSeconds`. Cron accepts an IANA `timezone` (default `UTC`); intervals do not. |
+| `webhook`, `vendor-push` | Required `connectorInstanceId`; no schedule or polling fields. |
+| `pull` | Required `connectorInstanceId`; optional integer `pollIntervalSeconds` of at least 10. |
+
+Unknown fields, boolean/string intervals, randomized/hash cron extensions and
+invalid combinations are rejected with `422 trigger.source_config_invalid`.
+Polling intervals express requested cadence; Connector Service still owns
+runtime polling policy, higher configured floors, activation and capabilities.
+
+<!-- doctest: SubscriptionCreate -->
+```json
+{
+  "sourceType": "scheduled",
+  "workflowId": "nightly-scan",
+  "sourceConfig": {"cron": "0 1 * * *", "timezone": "America/New_York"}
+}
+```
+
+<!-- doctest: SubscriptionCreate -->
+```json
+{
+  "sourceType": "pull",
+  "workflowId": "scan-new-image",
+  "sourceConfig": {"connectorInstanceId": "registry", "pollIntervalSeconds": 60}
+}
+```
+
+Successful creation returns `201` with the stored `sourceConfig` in the
+subscription response. Connector references are checked only in the trusted
+workspace: missing and foreign references both return
+`404 trigger.source_not_found`. The PostgreSQL reader selects only existence,
+not credentials or target configuration. It requires Connector Service's
+instance schema in the shared metadata database. Custom/in-memory deployments
+must inject a scoped reference reader; missing or unavailable validation returns
+`503 trigger.source_unavailable`, never implicit acceptance.
+
+Subscription state, selector revision and managed schedule eligibility commit
+atomically. Schedules use the subscription ID; interval rows use an empty
+storage-level `cron`, with `sourceConfig.intervalSeconds` and subscription
+`createdAt` providing the UTC interval and anchor. Cron calculation skips
+nonexistent local times and includes both repeated-hour instants. State-only
+updates preserve schedule progress. Internal revision fields are not exposed in
+responses; concurrent stale writes return `409 trigger.subscription_conflict`.
+
 ### Read a subscription
 
 `GET /v1/workspaces/{workspaceId}/triggers/{subscriptionId}` returns the
 `Subscription` shown above, or `404 trigger.subscription_not_found`.
 
 > Reading a subscription requires a backend that implements the subscription
-> read surface. The in-memory backend does; the M1 Postgres adapter implements
-> only the durable write surface and returns
-> `501 trigger.api.subscription_read_unsupported` for reads.
+> read surface. Both in-memory and PostgreSQL providers implement it. A custom
+> backend without this capability returns
+> `501 trigger.api.subscription_read_unsupported`.
 
 ### Update a subscription
 
@@ -211,6 +264,11 @@ A selector that fails to compile is rejected at create time with
 `state` drives the `active` → `paused` → `expired` transitions; `selector` and
 `inputMapping` re-author the match and mapping. An explicit `null` clears
 `selector` or `targetWorkflowVersionId`; omitting a field leaves it untouched.
+`sourceType` and `sourceConfig` may be replaced together, subject to the same
+source-specific validation. A null `sourceType`, like a null `state`, means no
+change. Clearing `sourceConfig` is allowed only for manual/internal or inactive
+subscriptions. Activating a connector-backed subscription revalidates its
+reference; pure pause/delete remains available during a reference-store outage.
 
 <!-- doctest: SubscriptionPatch -->
 ```json
@@ -281,6 +339,11 @@ Validation, dispatch, dedup, and resource errors are returned as
 | `trigger.dispatch_failed` | 502 | Dispatch to the Workflow Service failed |
 | `trigger.dedup_duplicate` | 409 | A run for this event was already dispatched |
 | `trigger.loop_detected` | 409 | Fan-out depth limit exceeded |
+| `trigger.source_config_invalid` | 422 | Invalid receiver configuration or external resume association |
+| `trigger.source_not_found` | 404 | No connector reference in the trusted workspace |
+| `trigger.source_unavailable` | 503 | Scoped reference validation is unavailable |
+| `trigger.subscription_conflict` | 409 | Concurrent subscription update; re-read before retrying |
+| `trigger.resume_divergent` | 409 | Attempt to rebind an existing resume key to a different source |
 | `trigger.api.bad_request` | 400 | Malformed request or workspace mismatch |
 | `trigger.api.subscription_not_fireable` | 409 | Subscription inactive or selector miss |
 | `trigger.api.subscription_read_unsupported` | 501 | Backend has no subscription read surface |
@@ -339,6 +402,31 @@ Register response — `RegisterResumeResponse`:
 ```
 
 The `subscriptionId` is deterministic: `res_<sha256(runId\0stepId\0eventKey)>`.
+External waits add the owning run's `workspaceId` and a `source` association.
+Their selector must be nonblank; the reserved `_resume` workspace is forbidden.
+
+<!-- doctest: RegisterResumeRequest -->
+```json
+{
+  "runId": "run-9",
+  "stepId": "step-3",
+  "eventKey": "image-ready",
+  "workspaceId": "ws-acme",
+  "source": {
+    "connectorInstanceId": "registry",
+    "deliveryModes": ["pull", "push"],
+    "pollIntervalSeconds": 60
+  },
+  "selector": "event.data.image == \"example/app:v1\"",
+  "ttl": "PT24H"
+}
+```
+
+`deliveryModes` is a nonempty, duplicate-free subset of `push`/`pull`, normalized
+to a stable order. `pollIntervalSeconds` requires `pull` and is at least 10.
+Connector existence is checked for new registrations and expiry refreshes.
+External cancellation sends the same `workspaceId` alongside the original
+triple; omitting it targets only legacy internal waits.
 
 Cancel request — `CancelResumeRequest`:
 
@@ -357,17 +445,21 @@ Cancel request — `CancelResumeRequest`:
   new write.
 - If a replay carries a **divergent** selector, the original registration wins
   and a `resume.subscription.divergent` audit event is emitted.
-- If the prior wait has lapsed past its TTL, the stale row is dropped and the
-  registration is treated as fresh.
+- If the prior wait has lapsed past its TTL, it is refreshed atomically only
+  when its source association is unchanged.
+- A divergent source is audited and rejected with
+  `409 trigger.resume_divergent`, including expired keys and concurrent
+  registrations. The original source is never overwritten.
 - The selector is compiled on **every** path, so malformed CEL is rejected with
   `422` even on a replay.
 
 Cancellation is idempotent: cancelling an unknown or already-expired triple is a
 clean `204` no-op.
 
-Resume registrations are stored under the reserved `_resume` workspace sentinel
-(the triple is globally unique because run ids are global); the tenant workspace
-is taken from the inbound event at delivery time.
+Legacy registrations remain under `_resume`. External registrations are stored
+in the supplied trusted run workspace, so source queries and cancellation cannot
+cross tenants even when triples collide. These are internal calls: Workflow
+must derive workspace from the owning run, never from authored source input.
 
 ---
 

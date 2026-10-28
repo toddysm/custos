@@ -53,7 +53,8 @@ async def test_create_subscription_round_trips(
 
     result = await store.create(subscription)
 
-    assert result == subscription
+    assert result.model_dump() == subscription.model_dump()
+    assert result.store_revision == 1
     # The minimal base row + the first selector revision are persisted.
     assert metadata_store.subscription("ws-1", "sub-1") is not None
     selectors = metadata_store.subscription_selectors("ws-1", "sub-1")
@@ -116,9 +117,11 @@ async def test_reauthor_selector_appends_revision(
     metadata_store: InMemoryTriggerMetadataStore,
 ) -> None:
     store = SubscriptionStore(metadata_store, now=lambda: FIXED_NOW)
-    await store.create(_subscription())
+    original = await store.create(_subscription())
 
-    await store.reauthor_selector(_subscription(selector="event.kind == 'gitlab.push'"))
+    await store.reauthor_selector(
+        original.model_copy(update={"selector": "event.kind == 'gitlab.push'"})
+    )
 
     selectors = metadata_store.subscription_selectors("ws-1", "sub-1")
     assert len(selectors) == 2

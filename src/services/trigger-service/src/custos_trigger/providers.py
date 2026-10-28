@@ -23,6 +23,7 @@ from typing import Literal, TypeVar, cast
 
 from custos_spl.errors import ImmutableViolation
 from custos_spl.ids import SubscriptionId, WorkspaceId
+from custos_spl.interfaces.connector_instance_store import ConnectorReferenceReader
 from custos_spl.interfaces.metadata_store import (
     DedupDuplicate,
     DedupReserved,
@@ -43,7 +44,7 @@ from custos_spl.interfaces.metadata_store import (
 from custos_spl.interfaces.metadata_store import (
     SubscriptionSelector as SplSubscriptionSelector,
 )
-from custos_spl.interfaces.trigger_queries import SubscriptionSnapshot
+from custos_spl.interfaces.trigger_queries import SubscriptionSnapshot, prepare_subscription_write
 from custos_spl.pagination import (
     Cursor,
     Page,
@@ -121,6 +122,42 @@ class InMemoryTriggerMetadataStore:
         self._schedules: dict[tuple[str, str], SplSchedule] = {}
 
     # ----- Subscriptions -----
+
+    async def write_subscription(
+        self,
+        workspace_id: WorkspaceId,
+        subscription: SplSubscription,
+        selector: SplSubscriptionSelector,
+        *,
+        expected_revision: int | None,
+        schedule: SplSchedule | None,
+        reset_schedule: bool,
+    ) -> SubscriptionSnapshot:
+        """Apply the shared transaction contract without yielding or publishing partial state."""
+        key = (str(workspace_id), str(subscription.subscription_id))
+        prior_row = self._subscriptions.get(key)
+        prior_selectors = self._selectors.get(key, [])
+        current = (
+            SubscriptionSnapshot(prior_row, prior_selectors[-1] if prior_selectors else None)
+            if prior_row is not None
+            else None
+        )
+        snapshot, next_schedule = prepare_subscription_write(
+            workspace_id,
+            subscription,
+            selector,
+            current,
+            self._schedules.get(key),
+            expected_revision=expected_revision,
+            schedule=schedule,
+            reset_schedule=reset_schedule,
+        )
+        assert snapshot.selector is not None
+        self._subscriptions[key] = snapshot.subscription
+        self._selectors.setdefault(key, []).append(snapshot.selector)
+        if next_schedule is not None:
+            self._schedules[key] = next_schedule
+        return snapshot
 
     async def put_subscription(
         self, workspace_id: WorkspaceId, subscription: SplSubscription
@@ -314,7 +351,10 @@ class InMemoryTriggerMetadataStore:
             raise ValueError("resume registration cutoff must be timezone-aware")
         key = (str(workspace_id), resume.resume_id)
         existing = self._resume.get(key)
-        if existing is not None and existing.expires_at.astimezone(UTC) > as_of.astimezone(UTC):
+        if existing is not None and (
+            existing.payload.get("source") != resume.payload.get("source")
+            or existing.expires_at.astimezone(UTC) > as_of.astimezone(UTC)
+        ):
             return existing
         self._resume[key] = resume
         return resume
@@ -396,6 +436,7 @@ class Providers:
     """
 
     metadata_store: TriggerMetadataStore
+    connector_references: ConnectorReferenceReader | None = None
 
 
 def load_providers(metadata_store_dsn: str) -> Providers:
@@ -410,7 +451,7 @@ def load_providers(metadata_store_dsn: str) -> Providers:
     if is_memory_dsn(metadata_store_dsn):
         return Providers(metadata_store=InMemoryTriggerMetadataStore())
 
-    from custos_pg import PgMetadataAdapter
+    from custos_pg import PgConnectorInstanceAdapter, PgMetadataAdapter
     from custos_pg.pool import LazyPool
 
     # ``PgMetadataAdapter`` implements the full ``MetadataStoreProvider`` but
@@ -420,5 +461,9 @@ def load_providers(metadata_store_dsn: str) -> Providers:
     # this consumer boundary. custos-postgres has its own strict mypy job
     # verifying the adapter against the SPL Protocol at the implementation
     # site; the cast keeps the consumer view typed.
-    adapter = PgMetadataAdapter(lazy=LazyPool(metadata_store_dsn.strip()))
-    return Providers(metadata_store=cast(TriggerMetadataStore, adapter))
+    lazy = LazyPool(metadata_store_dsn.strip())
+    adapter = PgMetadataAdapter(lazy=lazy)
+    return Providers(
+        metadata_store=cast(TriggerMetadataStore, adapter),
+        connector_references=PgConnectorInstanceAdapter(lazy=lazy),
+    )

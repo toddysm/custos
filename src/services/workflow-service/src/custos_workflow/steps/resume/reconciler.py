@@ -83,6 +83,7 @@ from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
 
 from custos_cel.scope import BindingScope
+from custos_spl.interfaces.trigger_source import ResumeSource
 
 from custos_workflow._telemetry import (
     observe_resume_registration,
@@ -385,8 +386,14 @@ class ResumeSubscriptionReplayReconciler:
         sink can never block the critical idempotent re-registration.
         """
         ttl = self._resolve_ttl(node)
+        if mirror.source is not None and mirror.workspace_id != ctx.workspace_id:
+            raise ValueError("resume mirror workspace does not match the owning run")
         replay_selector = self._resolve_replay_selector(ctx, scope, node, mirror)
-        is_divergent = replay_selector != mirror.selector
+        replay_source = mirror.source
+        if node is not None and isinstance(node.step_source, WaitForStep):
+            declaration = node.step_source.wait_for.source
+            replay_source = declaration.to_source() if declaration is not None else None
+        is_divergent = replay_selector != mirror.selector or replay_source != mirror.source
 
         # Original wins: re-register with the persisted selector.
         request = RegisterResumeSubscriptionRequest(
@@ -395,16 +402,9 @@ class ResumeSubscriptionReplayReconciler:
             event_key=mirror.event_key,
             ttl=ttl,
             selector=mirror.selector,
+            workspace_id=mirror.workspace_id,
+            source=mirror.source,
         )
-        # Bridge the sync ``TriggerServiceClient`` Protocol surface and
-        # the production ``DaprTriggerServiceClient`` (whose
-        # ``register_resume_subscription`` is ``async``): in-process
-        # fakes return the response directly, while the Dapr adapter
-        # returns a coroutine this async core must await. Mirrors the
-        # ``_call_sync_or_async`` bridge the activity / connector path
-        # uses for the same sync-Protocol / async-Dapr split. WF-IMPL-108
-        # wires the async Dapr client here, so without this the RPC would
-        # be dropped as an un-awaited coroutine.
         with observe_resume_registration():
             result = self._trigger_client.register_resume_subscription(request)
             response = await result if inspect.isawaitable(result) else result
@@ -423,12 +423,16 @@ class ResumeSubscriptionReplayReconciler:
                     registered_at=mirror.registered_at,
                     expires_at=mirror.expires_at,
                     selector=mirror.selector,
+                    workspace_id=mirror.workspace_id,
+                    source=mirror.source,
                 )
             )
             was_updated = True
 
         if is_divergent:
-            await self._emit_divergent(ctx, mirror, replay_selector, occurred_at)
+            await self._emit_divergent(
+                ctx, mirror, replay_selector, occurred_at, replay_source=replay_source
+            )
 
         return is_divergent, was_updated
 
@@ -490,6 +494,8 @@ class ResumeSubscriptionReplayReconciler:
         mirror: ResumeSubscriptionMirror,
         replay_selector: str | None,
         occurred_at: datetime,
+        *,
+        replay_source: ResumeSource | None = None,
     ) -> None:
         """Emit the ``step.resume_subscription_divergent`` audit event (best-effort).
 
@@ -501,7 +507,7 @@ class ResumeSubscriptionReplayReconciler:
         """
         record_resume_subscription_divergent()
         error = ResumeSubscriptionDivergentError(
-            f"resume subscription selector for step {mirror.step_id!r} diverged on "
+            f"resume subscription for step {mirror.step_id!r} diverged on "
             "replay; the original registration wins",
             run_id=mirror.run_id,
             step_id=mirror.step_id,
@@ -509,11 +515,15 @@ class ResumeSubscriptionReplayReconciler:
             original_selector=mirror.selector,
             replay_selector=replay_selector,
         )
+        envelope = error.to_dict()
+        if mirror.source is not None or replay_source is not None:
+            envelope["originalSource"] = mirror.source.to_wire() if mirror.source else None
+            envelope["replaySource"] = replay_source.to_wire() if replay_source else None
         try:
             await self._audit_publisher.emit_resume_subscription_divergent(
                 workspace_id=ctx.workspace_id,
                 occurred_at=occurred_at,
-                envelope=MappingProxyType(error.to_dict()),
+                envelope=MappingProxyType(envelope),
             )
         except Exception:
             # Best-effort: the divergence is already handled (original

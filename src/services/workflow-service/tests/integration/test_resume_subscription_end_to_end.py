@@ -43,14 +43,23 @@ dependency); ``asyncio_mode = "auto"`` wraps each coroutine test.
 
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 from typing import Any
 
+import httpx
+import pytest
 from custos_cel import FixedClock, SchemaBindings, parse, type_check
+from custos_spl.interfaces.trigger_source import ResumeSource
+from pydantic import ValidationError
 
+from custos_workflow.clients._dapr_invoke import DaprInvokeEndpoint
 from custos_workflow.clients.trigger import (
+    REGISTER_RESUME_SUBSCRIPTION_DAPR_METHOD,
     CancelResumeSubscriptionRequest,
+    DaprTriggerServiceClient,
     FakeTriggerServiceClient,
     RegisterResumeSubscriptionRequest,
 )
@@ -122,7 +131,9 @@ def _wait_for_node(
     event_key_cel: str = "inputs.key",
     selector_cel: str | None = None,
     ttl: str | None = None,
+    source: dict[str, object] | None = None,
 ) -> ExecutionNode:
+    """Build a typed wait node with optional source metadata and compiled binding slots."""
     call_sites: dict[str, TypedCallSite] = {
         "waitFor.eventKey": _call_site(
             event_key_cel,
@@ -140,6 +151,8 @@ def _wait_for_node(
         spec["selector"] = f"${{{{ {selector_cel} }}}}"
     if ttl is not None:
         spec["ttl"] = ttl
+    if source is not None:
+        spec["source"] = source
     return ExecutionNode(
         step_id=step_id,
         kind=StepKind.WAIT_FOR,
@@ -160,10 +173,13 @@ def _graph(*nodes: ExecutionNode) -> ExecutionGraph:
     )
 
 
-def _ctx(*, inputs: dict[str, Any] | None = None, run_id: str = "run-1") -> StepExecutionContext:
+def _ctx(
+    *, inputs: dict[str, Any] | None = None, run_id: str = "run-1", workspace_id: str = "ws-1"
+) -> StepExecutionContext:
+    """Supply immutable run scope independently of authored graph metadata."""
     return StepExecutionContext(
         run_id=RunId(run_id),
-        workspace_id="ws-1",
+        workspace_id=workspace_id,
         workflow_version_id="wfv-1",
         inputs=MappingProxyType(dict(inputs or {})),
         workflow_context=FakeWorkflowContext(instance_id=run_id, now=_NOW),
@@ -261,6 +277,173 @@ class TestRegisterParkResume:
         assert len(trigger.cancel_calls) == 1
         assert trigger.cancel_calls[0].event_key == "resume-evt"
         assert await repo.list_open("run-1") == ()
+
+
+_SOURCE: dict[str, object] = {
+    "connectorInstanceId": "registry",
+    "deliveryModes": ["push", "pull"],
+    "pollIntervalSeconds": 10,
+}
+
+
+async def test_external_source_survives_mirror_replay_and_cancel() -> None:
+    """Source identity follows trusted run scope through parking, replay and cancellation."""
+    trigger = FakeTriggerServiceClient()
+    repo = InMemoryResumeSubscriptionMirrorRepository()
+    handler = WaitForStepHandler(repo)
+    graph = _graph(_wait_for_node(selector_cel="inputs.sel", source=_SOURCE))
+    ctx = _ctx(inputs={"key": "external", "sel": "event.data.key == 'one'"})
+    park = await drive_resume_registration_to_wait(
+        handler.iter_resume(ctx, graph, "await-event"), trigger, repo
+    )
+    assert isinstance(park, WaitForExternalEventCall)
+    mirror = (await repo.list_open("run-1"))[0]
+    assert mirror.workspace_id == ctx.workspace_id
+    assert mirror.source == ResumeSource.from_wire(_SOURCE)
+    assert ResumeSubscriptionMirror.from_json(mirror.to_json()) == mirror
+    assert trigger.register_calls[0].workspace_id == ctx.workspace_id
+    assert trigger.register_calls[0].source == mirror.source
+    report = await ResumeSubscriptionReplayReconciler(repo, trigger).reconcile(ctx, graph)
+    assert report.reregistered == (mirror.mirror_id,)
+    assert trigger.register_calls[-1].source == mirror.source
+    cancelled = await ResumeSubscriptionCanceller(repo, trigger).cancel_run("run-1")
+    assert cancelled.failed == ()
+    assert trigger.cancel_calls[-1].workspace_id == ctx.workspace_id
+    assert await repo.list_open("run-1") == ()
+
+
+async def test_external_handler_drives_real_async_transport() -> None:
+    """Both drivers await the production client and send scoped registration/cancel envelopes."""
+    requests: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        """Record actual transport JSON and return the Trigger response contract."""
+        requests.append(json.loads(request.content))
+        if request.url.path.endswith("/" + REGISTER_RESUME_SUBSCRIPTION_DAPR_METHOD):
+            return httpx.Response(200, json={"subscriptionId": "ts-http"})
+        return httpx.Response(204)
+
+    repo = InMemoryResumeSubscriptionMirrorRepository()
+    handler = WaitForStepHandler(repo)
+    graph = _graph(_wait_for_node(selector_cel="inputs.sel", source=_SOURCE))
+    ctx = _ctx(
+        inputs={"key": "external", "sel": "event.data.key == 'one'"},
+        workspace_id="trusted-run-workspace",
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        trigger = DaprTriggerServiceClient(
+            http_client=http,
+            endpoint=DaprInvokeEndpoint(host="127.0.0.1", http_port=3500, app_id="trigger-service"),
+        )
+        parked = await drive_resume_registration_to_wait(
+            handler.iter_resume(ctx, graph, "await-event"), trigger, repo
+        )
+        assert isinstance(parked, WaitForExternalEventCall)
+        assert (await repo.list_open("run-1"))[0].ts_subscription_id == "ts-http"
+        result = await drive_resume_generator(
+            handler.iter_resume(ctx, graph, "await-event"),
+            trigger,
+            repo,
+            resume_payload={"accepted": True},
+        )
+    assert isinstance(result, StepSucceeded)
+    assert requests[0]["workspaceId"] == requests[1]["workspaceId"] == ctx.workspace_id
+    assert (
+        requests[0]["source"] == requests[1]["source"] == ResumeSource.from_wire(_SOURCE).to_wire()
+    )
+    assert requests[2] == {
+        "runId": "run-1",
+        "stepId": "await-event",
+        "eventKey": "external",
+        "workspaceId": ctx.workspace_id,
+    }
+    assert await repo.list_open("run-1") == ()
+
+
+async def test_source_divergence_keeps_original_and_audits() -> None:
+    """A changed graph cannot silently rebind an already-persisted external wait."""
+    trigger = FakeTriggerServiceClient()
+    repo = InMemoryResumeSubscriptionMirrorRepository()
+    handler = WaitForStepHandler(repo)
+    ctx = _ctx(inputs={"key": "external", "sel": "event.data.key == 'one'"})
+    original_graph = _graph(_wait_for_node(selector_cel="inputs.sel", source=_SOURCE))
+    await drive_resume_registration_to_wait(
+        handler.iter_resume(ctx, original_graph, "await-event"), trigger, repo
+    )
+    original = (await repo.list_open("run-1"))[0]
+    assert original.source is not None
+    changed_source = {**_SOURCE, "connectorInstanceId": "different"}
+    changed_graph = _graph(_wait_for_node(selector_cel="inputs.sel", source=changed_source))
+    audit = _RecordingAuditPublisher()
+    report = await ResumeSubscriptionReplayReconciler(
+        repo, trigger, audit_publisher=audit
+    ).reconcile(ctx, changed_graph)
+    assert report.divergent == (original.mirror_id,)
+    assert trigger.register_calls[-1].source == original.source
+    assert await repo.list_open("run-1") == (original,)
+    assert audit.events[0]["envelope"]["originalSource"] == original.source.to_wire()
+    assert audit.events[0]["envelope"]["replaySource"]["connectorInstanceId"] == "different"
+    with pytest.raises(ValueError, match="cannot be rebound"):
+        await repo.put(replace(original, source=ResumeSource.from_wire(changed_source)))
+    assert await repo.list_open("run-1") == (original,)
+
+
+async def test_external_replay_rejects_mirror_from_another_workspace() -> None:
+    """Replay must fail before any registration when run scope and stored scope disagree."""
+    trigger = FakeTriggerServiceClient()
+    repo = InMemoryResumeSubscriptionMirrorRepository()
+    graph = _graph(_wait_for_node(selector_cel="inputs.sel", source=_SOURCE))
+    inputs = {"key": "external", "sel": "event.data.key == 'one'"}
+    await drive_resume_registration_to_wait(
+        WaitForStepHandler(repo).iter_resume(_ctx(inputs=inputs), graph, "await-event"),
+        trigger,
+        repo,
+    )
+    mirror = (await repo.list_open("run-1"))[0]
+    report = await ResumeSubscriptionReplayReconciler(repo, trigger).reconcile(
+        _ctx(inputs=inputs, workspace_id="another"), graph
+    )
+    assert report.failed == (mirror.mirror_id,)
+    assert len(trigger.register_calls) == 1
+
+
+async def test_blank_external_selector_fails_before_effects() -> None:
+    """A valid expression resolving to whitespace follows the typed input-failure path."""
+    trigger = FakeTriggerServiceClient()
+    repo = InMemoryResumeSubscriptionMirrorRepository()
+    graph = _graph(_wait_for_node(selector_cel="inputs.sel", source=_SOURCE))
+    result = await drive_resume_registration_to_wait(
+        WaitForStepHandler(repo).iter_resume(
+            _ctx(inputs={"key": "external", "sel": "  "}), graph, "await-event"
+        ),
+        trigger,
+        repo,
+    )
+    assert isinstance(result, StepFailed)
+    assert result.envelope["kind"] == "step.with_input_resolution_error"
+    assert trigger.register_calls == []
+    assert await repo.list_open("run-1") == ()
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        {**_SOURCE, "connectorInstanceId": "${{ inputs.key }}"},
+        {**_SOURCE, "workspaceId": "authored-tenant"},
+        {**_SOURCE, "pollIntervalSeconds": True},
+        {**_SOURCE, "deliveryModes": ["push"], "pollIntervalSeconds": 10},
+    ],
+)
+def test_invalid_workflow_source_is_rejected(source: dict[str, object]) -> None:
+    """Authoring cannot supply trusted workspace or dynamic connector identity."""
+    with pytest.raises(ValidationError):
+        _wait_for_node(selector_cel="inputs.sel", source=source)
+
+
+def test_source_requires_authored_selector() -> None:
+    """Selective matching is mandatory for source-associated waits."""
+    with pytest.raises(ValidationError, match="requires a selector"):
+        _wait_for_node(source=_SOURCE)
 
 
 # ---------------------------------------------------------------------------

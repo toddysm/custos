@@ -23,6 +23,10 @@ The codes mirror design ``§ Failure Modes`` and the audit-event taxonomy:
   dispatch is performed.
 * ``trigger.loop_detected`` — a per-tenant fan-out depth limit was exceeded
   (workflow A starts B starts A).
+* ``trigger.source_config_invalid`` — source-specific fields are invalid.
+* ``trigger.source_not_found`` — no connector exists in the trusted workspace.
+* ``trigger.source_unavailable`` — scoped reference validation is unavailable.
+* ``trigger.subscription_conflict`` — an atomic configuration write lost a race.
 """
 
 from __future__ import annotations
@@ -41,6 +45,10 @@ class TriggerErrorKind(StrEnum):
     RESUME_DIVERGENT = "trigger.resume_divergent"
     DEDUP_DUPLICATE = "trigger.dedup_duplicate"
     LOOP_DETECTED = "trigger.loop_detected"
+    SOURCE_CONFIG_INVALID = "trigger.source_config_invalid"
+    SOURCE_NOT_FOUND = "trigger.source_not_found"
+    SOURCE_UNAVAILABLE = "trigger.source_unavailable"
+    SUBSCRIPTION_CONFLICT = "trigger.subscription_conflict"
 
 
 #: The locked set of ``trigger.*`` kind strings. Adding or removing a member of

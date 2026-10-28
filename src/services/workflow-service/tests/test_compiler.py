@@ -25,6 +25,7 @@ from custos_workflow.compiler import (
 from custos_workflow.document import (
     ActivityStep,
     LetStep,
+    WaitForStep,
     WorkflowDocument,
     WorkflowStep,
     parse_document,
@@ -37,6 +38,8 @@ from custos_workflow.graph import (
     OnErrorActionTag,
     PrimitiveHandler,
     StepKind,
+    from_json,
+    to_json,
 )
 
 # ---------------------------------------------------------------------------
@@ -243,6 +246,28 @@ spec:
         assert node.kind is StepKind.WAIT_FOR
         assert node.primitive_handler is PrimitiveHandler.RESUME_SUBSCRIPTION
         # The eventKey/selector CEL slots are collected + type-checked.
+        assert set(node.call_sites) == {"waitFor.eventKey", "waitFor.selector"}
+
+    def test_sourced_wait_survives_compilation_and_graph_serialization(self) -> None:
+        """Static source metadata round-trips without creating a runtime binding slot."""
+        doc = _doc(
+            [
+                {
+                    "id": "external",
+                    "waitFor": {
+                        "eventKey": "${{ inputs.target }}",
+                        "selector": "${{ inputs.target }}",
+                        "source": {"connectorInstanceId": "registry", "deliveryModes": ["pull"]},
+                    },
+                }
+            ]
+        )
+        graph = compile_workflow(doc, _run_meta(), _registry())
+        restored = from_json(to_json(graph))
+        node = restored.nodes[0]
+        assert isinstance(node.step_source, WaitForStep)
+        assert node.step_source.wait_for.source is not None
+        assert node.step_source.wait_for.source.connector_instance_id == "registry"
         assert set(node.call_sites) == {"waitFor.eventKey", "waitFor.selector"}
 
     def test_for_each_step_is_tagged_sub_orchestration(self) -> None:

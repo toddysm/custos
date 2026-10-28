@@ -40,11 +40,13 @@ import re
 from enum import StrEnum
 from typing import Annotated, Any, Final, Literal, NewType
 
+from custos_spl.interfaces.trigger_source import DeliveryMode, ResumeSource
 from pydantic import (
     BaseModel,
     ConfigDict,
     Discriminator,
     Field,
+    StrictInt,
     Tag,
     model_validator,
 )
@@ -546,6 +548,28 @@ class ApprovalStep(_StepCommon):
     approval: ApprovalSpec
 
 
+class WaitForSourceSpec(_StrictModel):
+    """Constant source association; workspace is supplied only by the owning run."""
+
+    connector_instance_id: str = Field(alias="connectorInstanceId", min_length=1)
+    delivery_modes: tuple[DeliveryMode, ...] = Field(alias="deliveryModes")
+    poll_interval_seconds: StrictInt | None = Field(default=None, alias="pollIntervalSeconds")
+
+    @model_validator(mode="after")
+    def validate_source(self) -> WaitForSourceSpec:
+        """Validate shared delivery rules and reject runtime connector rebinding expressions."""
+        self.to_source()
+        if _CEL_TOKEN_PATTERN.match(self.connector_instance_id):
+            raise ValueError("waitFor source connectorInstanceId must be a constant")
+        return self
+
+    def to_source(self) -> ResumeSource:
+        """Return the immutable canonical association used by runtime and transport."""
+        return ResumeSource(
+            self.connector_instance_id, self.delivery_modes, self.poll_interval_seconds
+        )
+
+
 class WaitForSpec(_StrictModel):
     """The ``waitFor:`` block of a :class:`WaitForStep` (REQ-081).
 
@@ -574,6 +598,7 @@ class WaitForSpec(_StrictModel):
     event_key: CelSource = Field(alias="eventKey")
     selector: CelSource | None = None
     ttl: str | None = None
+    source: WaitForSourceSpec | None = None
 
     @model_validator(mode="after")
     def _event_key_is_cel_token(self) -> WaitForSpec:
@@ -585,6 +610,9 @@ class WaitForSpec(_StrictModel):
 
     @model_validator(mode="after")
     def _selector_is_cel_token(self) -> WaitForSpec:
+        """Require a selector for sourced waits and validate its authored expression shape."""
+        if self.source is not None and self.selector is None:
+            raise ValueError("waitFor source requires a selector expression")
         if self.selector is not None and not _CEL_TOKEN_PATTERN.match(self.selector):
             raise ValueError(
                 "waitFor 'selector' must be a CEL expression token of the form '${{ ... }}'"

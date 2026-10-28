@@ -59,11 +59,13 @@ All four share one `ResumeSubscriptionMirrorRepository` and one
 `TriggerServiceClient` instance, wired together in
 [`providers.py`](../../src/services/workflow-service/src/custos_workflow/providers.py).
 
-> **Status.** The Trigger Service (COMP-004) is not yet implemented, so
-> the production resume-event *delivery* path is deferred. The manager
-> ships behind the `TriggerServiceClient` Protocol and is exercised
-> end-to-end against in-memory fakes (see
-> [`tests/integration/test_resume_subscription_end_to_end.py`](../../src/services/workflow-service/tests/integration/test_resume_subscription_end_to_end.py)).
+> **Status.** Trigger registration/persistence and the asynchronous Dapr client
+> are implemented, including scoped external-source contracts. Production
+> Workflow wait execution is still incomplete: the orchestrator currently closes
+> the handler after its first effect, and provider wiring uses an in-memory
+> mirror repository. The subsystem drivers are exercised in
+> [`tests/integration/test_resume_subscription_end_to_end.py`](../../src/services/workflow-service/tests/integration/test_resume_subscription_end_to_end.py);
+> this is not evidence that deployed durable wait execution is complete.
 
 ## The `waitFor:` schema
 
@@ -83,6 +85,7 @@ A `waitFor:` step carries a single `waitFor:` block
 | `event_key` | `eventKey` | CEL token `${{ … }}` | **Yes** | Resolves the resume event key at run time (e.g. from `inputs` or earlier `steps.*.outputs`). Must be a `${{ … }}` token. |
 | `selector` | `selector` | CEL token `${{ … }}` | No | Narrows which external events match. Must be a `${{ … }}` token when present; when omitted the subscription matches on `eventKey` alone. |
 | `ttl` | `ttl` | ISO-8601 duration string | No | How long the subscription stays open. A **constant** string resolved at compile time — *not* a CEL expression. Must be a valid `P[nD][T[nH][nM][nS]]` / `PnW` duration with at least one non-zero component. When omitted, the manager applies `WF_RESUME_SUB_DEFAULT_TTL` (`PT24H`). |
+| `source` | `source` | Object | No | External connector association. Requires a constant `connectorInstanceId`, nonempty `deliveryModes` (`push`/`pull`) and a selector. Optional `pollIntervalSeconds` requires `pull` and is at least 10. |
 
 Validation rules (enforced by `WaitForSpec`):
 
@@ -91,6 +94,27 @@ Validation rules (enforced by `WaitForSpec`):
 - `selector`, when present, must match the same token pattern.
 - `ttl`, when present, must be a constant ISO-8601 duration (a CEL
   token is rejected), and must specify a positive (non-zero) duration.
+- A source-associated selector must resolve to a nonblank string; otherwise
+  the step fails with `step.with_input_resolution_error` before any effects.
+- `source` cannot contain `workspaceId`, credentials, or a dynamic connector
+  expression. Workspace comes from the immutable run context.
+
+For an external source, add:
+
+```
+source:
+  connectorInstanceId: registry
+  deliveryModes: [push, pull]
+  pollIntervalSeconds: 60
+```
+
+The compiler and graph serializer preserve this association. Registration,
+mirror serialization, replay and cancellation propagate the run workspace.
+Legacy graphs, mirror records and request envelopes omit the additive fields.
+Replay preserves the original persisted source and audits a changed graph
+association; a mirror from another workspace fails reconciliation before any
+registration. Trigger rejects source rebinding with `409
+trigger.resume_divergent`, even after expiry.
 
 ## Register / replay / cancel sequence
 

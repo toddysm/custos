@@ -18,12 +18,9 @@ envelope: the Workflow Service ``DaprTriggerServiceClient`` propagates no
 therefore bypasses both method paths (see
 :mod:`custos_trigger.middleware.callctx`).
 
-A resume registration carries no workspace of its own — the
-``(runId, stepId, eventKey)`` triple is globally unique because ``runId`` is a
-Workflow Service-owned global id — so every resume row is partitioned under
-the reserved :data:`RESUME_WORKSPACE` sentinel. The dispatch back to the
-Workflow Service (TS-IMPL-017) carries the tenant workspace from the inbound
-event instead.
+Legacy internal registrations use the reserved :data:`RESUME_WORKSPACE`
+partition. External registrations carry the owning run's workspace and an
+immutable connector/delivery association; cancellation must use that workspace.
 
 The Dapr sidecar forwards ``…/v1.0/invoke/<trigger-app-id>/method/<Method>``
 to the app at ``POST /<Method>``, so the route paths are the bare method
@@ -41,10 +38,12 @@ from fastapi import APIRouter, Depends, Response, status
 
 from custos_trigger.dependencies import (
     get_audit_sink,
+    get_providers,
     get_resume_default_ttl_seconds,
     get_resume_subscription_store,
     get_selector_evaluator,
 )
+from custos_trigger.errors import TriggerError, TriggerErrorKind
 from custos_trigger.models import (
     CancelResumeRequest,
     RegisterResumeRequest,
@@ -52,7 +51,9 @@ from custos_trigger.models import (
     ResumeRegistration,
 )
 from custos_trigger.pipeline.dispatch import AuditSink
+from custos_trigger.providers import Providers
 from custos_trigger.selector import SelectorEvaluator
+from custos_trigger.source_config import validate_connector_reference
 from custos_trigger.stores import ResumeSubscriptionStore
 
 __all__ = [
@@ -70,8 +71,7 @@ __all__ = [
 REGISTER_RESUME_PATH: Final[str] = "/RegisterResumeSubscription"
 CANCEL_RESUME_PATH: Final[str] = "/CancelResumeSubscription"
 
-#: Reserved partition for resume rows. A resume registration has no workspace;
-#: the globally-unique ``(runId, stepId, eventKey)`` triple keys it instead.
+#: Reserved partition for legacy internal registrations without a source.
 RESUME_WORKSPACE: Final[str] = "_resume"
 
 #: Audit event emitted when a replay registers a divergent selector for an
@@ -85,6 +85,38 @@ ResumeStoreDep = Annotated[ResumeSubscriptionStore, Depends(get_resume_subscript
 EvaluatorDep = Annotated[SelectorEvaluator, Depends(get_selector_evaluator)]
 AuditSinkDep = Annotated[AuditSink, Depends(get_audit_sink)]
 DefaultTtlDep = Annotated[int, Depends(get_resume_default_ttl_seconds)]
+ProvidersDep = Annotated[Providers, Depends(get_providers)]
+
+
+async def _reject_source_rebinding(
+    original: ResumeRegistration,
+    body: RegisterResumeRequest,
+    audit: AuditSink,
+    *,
+    workspace_id: str,
+    resume_id: str,
+) -> None:
+    """Audit and reject a different source while leaving the persisted association untouched."""
+    if original.source == body.source:
+        return
+    await audit.emit(
+        AUDIT_RESUME_DIVERGENT,
+        workspace_id=workspace_id,
+        attributes={
+            "resumeId": resume_id,
+            "runId": body.run_id,
+            "stepId": body.step_id,
+            "eventKey": body.event_key,
+            "reason": "source_rebinding",
+            "originalSource": original.source.to_source().to_wire() if original.source else None,
+            "replaySource": body.source.to_source().to_wire() if body.source else None,
+        },
+    )
+    raise TriggerError(
+        TriggerErrorKind.RESUME_DIVERGENT,
+        "the source association of an existing resume key cannot be changed",
+        details={"resumeId": resume_id},
+    )
 
 
 def _now() -> datetime:
@@ -163,6 +195,7 @@ async def register_resume_subscription(
     evaluator: EvaluatorDep,
     audit: AuditSinkDep,
     default_ttl_seconds: DefaultTtlDep,
+    providers: ProvidersDep,
 ) -> RegisterResumeResponse:
     """Register a one-shot resume wait, idempotent on the request triple.
 
@@ -183,10 +216,19 @@ async def register_resume_subscription(
         evaluator.compile(body.selector, subscription_id="resume-register")
 
     resume_id = compute_resume_id(body.run_id, body.step_id, body.event_key)
-    existing = await store.get(RESUME_WORKSPACE, resume_id)
+    workspace_id = body.workspace_id if body.workspace_id is not None else RESUME_WORKSPACE
+    existing = await store.get(workspace_id, resume_id)
     now = _now()
 
+    if existing is not None:
+        await _reject_source_rebinding(
+            existing.registration, body, audit, workspace_id=workspace_id, resume_id=resume_id
+        )
     if existing is None or existing.expires_at <= now:
+        if body.source is not None:
+            await validate_connector_reference(
+                providers.connector_references, workspace_id, body.source.connector_instance_id
+            )
         ttl_seconds = _resolve_ttl_seconds(body.ttl, default_ttl_seconds)
         existing = await store.register_or_get(
             ResumeRegistration(
@@ -194,16 +236,21 @@ async def register_resume_subscription(
                 step_id=body.step_id,
                 event_key=body.event_key,
                 selector=body.selector,
+                workspace_id=body.workspace_id,
+                source=body.source,
             ),
-            workspace_id=RESUME_WORKSPACE,
+            workspace_id=workspace_id,
             resume_id=resume_id,
             expires_at=now + timedelta(seconds=ttl_seconds),
             as_of=now,
         )
+        await _reject_source_rebinding(
+            existing.registration, body, audit, workspace_id=workspace_id, resume_id=resume_id
+        )
     if existing.registration.selector != body.selector:
         await audit.emit(
             AUDIT_RESUME_DIVERGENT,
-            workspace_id=RESUME_WORKSPACE,
+            workspace_id=workspace_id,
             attributes={
                 "resumeId": resume_id,
                 "runId": body.run_id,
@@ -232,5 +279,7 @@ async def cancel_resume_subscription(
     treats any 2xx (and 404/409) as a clean no-op.
     """
     resume_id = compute_resume_id(body.run_id, body.step_id, body.event_key)
-    await store.cancel(RESUME_WORKSPACE, resume_id)
+    await store.cancel(
+        body.workspace_id if body.workspace_id is not None else RESUME_WORKSPACE, resume_id
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)

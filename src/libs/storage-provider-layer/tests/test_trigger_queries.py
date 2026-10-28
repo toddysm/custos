@@ -3,10 +3,17 @@
 import base64
 import inspect
 import json
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
+from custos_spl.errors import ImmutableViolation, WorkspaceMismatch
+from custos_spl.ids import SubscriptionId, WorkflowId, WorkspaceId
 from custos_spl.interfaces import ResumeRegistrationProvider, TriggerQueryProvider
+from custos_spl.interfaces.metadata_store import Schedule, Subscription, SubscriptionSelector
+from custos_spl.interfaces.trigger_queries import SubscriptionSnapshot, prepare_subscription_write
 from custos_spl.pagination import (
     Cursor,
     decode_query_cursor,
@@ -72,3 +79,146 @@ def test_atomic_registration_is_an_explicit_workspace_scoped_capability() -> Non
     parameters = inspect.signature(method).parameters
     assert list(parameters)[1] == "workspace_id"
     assert parameters["as_of"].kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_subscription_write_revision_and_schedule_ownership() -> None:
+    """Private revision keys are provider-owned; resets cannot adopt a foreign schedule."""
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    ws, identifier, workflow = WorkspaceId("ws"), SubscriptionId("sub"), WorkflowId("wf")
+    row = Subscription(ws, identifier, workflow, "active", now, now)
+    selector = SubscriptionSelector(
+        ws, identifier, {"_revision": 999, "_scheduleId": "foreign"}, now
+    )
+    schedule = Schedule(ws, str(identifier), workflow, "* * * * *", now, True)
+    created, managed = prepare_subscription_write(
+        ws,
+        row,
+        selector,
+        None,
+        None,
+        expected_revision=None,
+        schedule=schedule,
+        reset_schedule=True,
+    )
+    assert created.selector is not None
+    assert created.selector.selector == {"_revision": 1, "_scheduleId": "sub"}
+    assert managed == schedule
+    for existing in (
+        replace(schedule, workflow_id=WorkflowId("other")),
+        replace(schedule, workspace_id=WorkspaceId("other")),
+        replace(schedule, schedule_id="other"),
+    ):
+        with pytest.raises(ImmutableViolation, match="schedule"):
+            prepare_subscription_write(
+                ws,
+                row,
+                selector,
+                created,
+                existing,
+                expected_revision=1,
+                schedule=schedule,
+                reset_schedule=True,
+            )
+    for revision in (None, 0, 2):
+        with pytest.raises(ImmutableViolation):
+            prepare_subscription_write(
+                ws,
+                row,
+                selector,
+                created,
+                schedule,
+                expected_revision=revision,
+                schedule=schedule,
+                reset_schedule=False,
+            )
+    with pytest.raises(WorkspaceMismatch):
+        prepare_subscription_write(
+            "other",
+            row,
+            selector,
+            None,
+            None,
+            expected_revision=None,
+            schedule=None,
+            reset_schedule=False,
+        )
+    progressed = replace(schedule, next_fire_at=now + timedelta(hours=2))
+    _, kept = prepare_subscription_write(
+        ws,
+        row,
+        selector,
+        created,
+        progressed,
+        expected_revision=1,
+        schedule=schedule,
+        reset_schedule=False,
+    )
+    assert kept == progressed
+    _, disabled = prepare_subscription_write(
+        ws,
+        replace(row, state="paused"),
+        selector,
+        created,
+        progressed,
+        expected_revision=1,
+        schedule=None,
+        reset_schedule=False,
+    )
+    assert disabled == replace(progressed, enabled=False)
+
+
+@pytest.mark.parametrize("revision", [True, -1])
+def test_subscription_write_rejects_invalid_revision(revision: int) -> None:
+    """Invalid caller revisions fail before any state can be mutated."""
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    row = Subscription(
+        WorkspaceId("ws"), SubscriptionId("sub"), WorkflowId("wf"), "active", now, now
+    )
+    selector = SubscriptionSelector(row.workspace_id, row.subscription_id, {}, now)
+    with pytest.raises(ValueError, match="expected_revision"):
+        prepare_subscription_write(
+            "ws",
+            row,
+            selector,
+            SubscriptionSnapshot(row, selector),
+            None,
+            expected_revision=revision,
+            schedule=None,
+            reset_schedule=False,
+        )
+
+
+def test_subscription_creation_anchor_is_an_immutable_instant() -> None:
+    """Repeated local hours cannot disguise a change to the interval's creation anchor."""
+    first = datetime(2026, 11, 1, 1, 30, tzinfo=ZoneInfo("America/New_York"), fold=0)
+    row = Subscription(
+        WorkspaceId("ws"), SubscriptionId("sub"), WorkflowId("wf"), "active", first, first
+    )
+    selector = SubscriptionSelector(row.workspace_id, row.subscription_id, {}, first)
+    current = SubscriptionSnapshot(row, selector)
+    for changed in (
+        replace(row, created_at=first.replace(fold=1)),
+        replace(row, workflow_id=WorkflowId("other")),
+    ):
+        with pytest.raises(ImmutableViolation, match="identity"):
+            prepare_subscription_write(
+                "ws",
+                changed,
+                selector,
+                current,
+                None,
+                expected_revision=0,
+                schedule=None,
+                reset_schedule=False,
+            )
+    with pytest.raises(ValueError, match="timezone-aware"):
+        prepare_subscription_write(
+            "ws",
+            replace(row, created_at=first.replace(tzinfo=None)),
+            selector,
+            current,
+            None,
+            expected_revision=0,
+            schedule=None,
+            reset_schedule=False,
+        )

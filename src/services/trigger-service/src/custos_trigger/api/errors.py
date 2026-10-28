@@ -22,12 +22,14 @@ from __future__ import annotations
 
 from typing import Any, Final
 
+from custos_spl.errors import ImmutableViolation
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from custos_trigger.errors import TriggerError
+from custos_trigger.source_config import SourceConfigurationError
 from custos_trigger.stores import (
     ResumeReadUnsupportedError,
     SubscriptionReadUnsupportedError,
@@ -72,6 +74,11 @@ LOCKED_API_KIND_TO_STATUS: Final[dict[str, int]] = {
     "trigger.dispatch_failed": 502,
     "trigger.dedup_duplicate": 409,
     "trigger.loop_detected": 409,
+    "trigger.resume_divergent": 409,
+    "trigger.source_config_invalid": 422,
+    "trigger.source_not_found": 404,
+    "trigger.source_unavailable": 503,
+    "trigger.subscription_conflict": 409,
     # Route-local API kinds
     API_BAD_REQUEST: 400,
     API_SUBSCRIPTION_NOT_FIREABLE: 409,
@@ -90,6 +97,11 @@ _TITLE_FOR_KIND: Final[dict[str, str]] = {
     "trigger.dispatch_failed": "Dispatch to the Workflow Service failed",
     "trigger.dedup_duplicate": "Duplicate request",
     "trigger.loop_detected": "Fan-out loop detected",
+    "trigger.resume_divergent": "Resume source association changed",
+    "trigger.source_config_invalid": "Invalid source configuration",
+    "trigger.source_not_found": "Connector source not found",
+    "trigger.source_unavailable": "Source validation unavailable",
+    "trigger.subscription_conflict": "Subscription changed concurrently",
     API_BAD_REQUEST: "Bad request",
     API_SUBSCRIPTION_NOT_FIREABLE: "Subscription is not fireable",
     API_SUBSCRIPTION_READ_UNSUPPORTED: "Subscription read is not supported by this backend",
@@ -193,7 +205,29 @@ async def _validation_error_handler(request: Request, exc: Exception) -> JSONRes
         detail = f"{loc}: {first.get('msg', 'invalid request')}".lstrip(": ")
     else:
         detail = "invalid request"
-    return problem_response(request, kind=API_BAD_REQUEST, detail=detail)
+    source_fields = {"sourceConfig", "source_config", "source", "workspaceId", "workspace_id"}
+    source_error = (
+        isinstance(exc.body, dict) and bool(source_fields.intersection(exc.body))
+    ) or any(
+        isinstance(error.get("ctx", {}).get("error"), SourceConfigurationError)
+        or bool(source_fields.intersection(str(part) for part in error.get("loc", ())))
+        for error in errors
+    )
+    return problem_response(
+        request,
+        kind="trigger.source_config_invalid" if source_error else API_BAD_REQUEST,
+        detail=detail,
+    )
+
+
+async def _source_configuration_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Render cross-field and schedule-initialization failures as explicit 422 errors."""
+    return problem_response(request, kind="trigger.source_config_invalid", detail=str(exc))
+
+
+async def _subscription_conflict_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Report a failed compare-and-swap instead of silently losing concurrent edits."""
+    return problem_response(request, kind="trigger.subscription_conflict", detail=str(exc))
 
 
 async def _read_unsupported_handler(request: Request, exc: Exception) -> JSONResponse:
@@ -242,3 +276,5 @@ def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(RequestValidationError, _validation_error_handler)
     app.add_exception_handler(SubscriptionReadUnsupportedError, _read_unsupported_handler)
     app.add_exception_handler(ResumeReadUnsupportedError, _resume_read_unsupported_handler)
+    app.add_exception_handler(SourceConfigurationError, _source_configuration_handler)
+    app.add_exception_handler(ImmutableViolation, _subscription_conflict_handler)
