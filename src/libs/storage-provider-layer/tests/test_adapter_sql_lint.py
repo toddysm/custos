@@ -29,17 +29,13 @@ from pathlib import Path
 from typing import NamedTuple
 
 # Adapter package root: <repo>/src/libs/storage-provider-layer/src/custos_spl/adapters
-_ADAPTERS_ROOT = (
-    Path(__file__).resolve().parents[1] / "src" / "custos_spl" / "adapters"
-)
+_ADAPTERS_ROOT = Path(__file__).resolve().parents[1] / "src" / "custos_spl" / "adapters"
 
 # Subpaths exempt from workspace scoping.
 _EXEMPT_DIRS: tuple[str, ...] = ("auth", "catalog")
 
 # SQL statements that can carry a WHERE clause.
-_SQL_KEYWORDS = re.compile(
-    r"\b(SELECT|UPDATE|DELETE|RETURNING|UPSERT|MERGE)\b", re.IGNORECASE
-)
+_SQL_KEYWORDS = re.compile(r"\b(SELECT|UPDATE|DELETE|RETURNING|UPSERT|MERGE)\b", re.IGNORECASE)
 _WHERE_RE = re.compile(r"\bWHERE\b", re.IGNORECASE)
 _WORKSPACE_RE = re.compile(r"\bworkspace_id\b", re.IGNORECASE)
 _NOQA_RE = re.compile(r"#\s*noqa:\s*SPL008", re.IGNORECASE)
@@ -88,9 +84,7 @@ def find_violations(adapters_root: Path = _ADAPTERS_ROOT) -> list[_Violation]:
             if _WORKSPACE_RE.search(value):
                 continue
             # honor inline opt-out on the line where the literal starts
-            line_text = (
-                source_lines[lineno - 1] if 0 < lineno <= len(source_lines) else ""
-            )
+            line_text = source_lines[lineno - 1] if 0 < lineno <= len(source_lines) else ""
             if _NOQA_RE.search(line_text):
                 continue
             snippet = value.strip().splitlines()[0][:120]
@@ -125,9 +119,7 @@ def test_rule_detects_missing_workspace_id(tmp_path: Path) -> None:
 
 def test_rule_accepts_workspace_filter(tmp_path: Path) -> None:
     good = tmp_path / "good_adapter.py"
-    good.write_text(
-        'SQL = "SELECT id FROM things WHERE workspace_id = ? AND id = ?"\n'
-    )
+    good.write_text('SQL = "SELECT id FROM things WHERE workspace_id = ? AND id = ?"\n')
     assert find_violations(tmp_path) == []
 
 
@@ -140,18 +132,14 @@ def test_rule_accepts_insert_without_where(tmp_path: Path) -> None:
 
 def test_rule_honors_inline_noqa(tmp_path: Path) -> None:
     f = tmp_path / "ok.py"
-    f.write_text(
-        'SQL = "SELECT id FROM platform_table WHERE id = ?"  # noqa: SPL008\n'
-    )
+    f.write_text('SQL = "SELECT id FROM platform_table WHERE id = ?"  # noqa: SPL008\n')
     assert find_violations(tmp_path) == []
 
 
 def test_rule_skips_exempt_subdirectories(tmp_path: Path) -> None:
     """`auth/` and `catalog/` subtrees are exempt."""
     (tmp_path / "auth").mkdir()
-    (tmp_path / "auth" / "store.py").write_text(
-        'SQL = "SELECT id FROM users WHERE email = ?"\n'
-    )
+    (tmp_path / "auth" / "store.py").write_text('SQL = "SELECT id FROM users WHERE email = ?"\n')
     (tmp_path / "catalog").mkdir()
     (tmp_path / "catalog" / "store.py").write_text(
         'SQL = "SELECT id FROM activity_types WHERE namespace = ?"\n'

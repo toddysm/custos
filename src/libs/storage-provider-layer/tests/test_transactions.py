@@ -88,9 +88,7 @@ def test_check_handle_rejects_cross_provider_use() -> None:
     p2 = _FakeProvider()
     handle = _PgTx(conn=object())
     bind_handle(handle, p1)
-    with pytest.raises(
-        InvalidTransactionHandle, match="different provider"
-    ):
+    with pytest.raises(InvalidTransactionHandle, match="different provider"):
         check_handle(handle, p2)
 
 
@@ -165,9 +163,7 @@ def test_dead_provider_invalidates_handle() -> None:
     del provider
     gc.collect()
 
-    with pytest.raises(
-        InvalidTransactionHandle, match="garbage collected"
-    ):
+    with pytest.raises(InvalidTransactionHandle, match="garbage collected"):
         check_handle(handle, _FakeProvider())
 
 

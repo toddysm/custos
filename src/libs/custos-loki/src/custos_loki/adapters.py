@@ -11,10 +11,9 @@ import json
 import os
 from collections.abc import AsyncIterator
 from datetime import datetime
-from typing import Literal
+from typing import ClassVar, Literal
 
 import httpx
-
 from custos_spl.errors import BackendUnavailable, WorkspaceMismatch
 from custos_spl.ids import RunId, StepId, WorkspaceId
 from custos_spl.interfaces.log_query import (
@@ -52,6 +51,8 @@ class LokiLogQueryAdapter:
     Queries logs from Loki using label selectors and returns paged LogRecords.
     All queries are workspace-scoped via label filter.
     """
+
+    SCHEMA_REVISION: ClassVar[int] = 0
 
     def __init__(
         self,
@@ -149,7 +150,7 @@ class LokiLogQueryAdapter:
 
             # Add message filter if specified
             if filter.message_contains:
-                query += f' | "{filter.message_contains}"'
+                query += f" |= {json.dumps(filter.message_contains, ensure_ascii=False)}"
 
             params: dict = {"query": query}
 
@@ -176,7 +177,7 @@ class LokiLogQueryAdapter:
                 response.raise_for_status()
 
             data = response.json()
-            records = self._parse_log_records(workspace_id, run_id, None, data)
+            records = self._parse_log_records(workspace_id, run_id, None, data["data"])
 
             # Extract pagination token if present
             next_cursor = None
@@ -186,6 +187,8 @@ class LokiLogQueryAdapter:
             return LogPage(items=tuple(records), next_cursor=next_cursor)
         except httpx.HTTPError as exc:
             raise BackendUnavailable(f"Loki query failed: {exc}") from exc
+        except WorkspaceMismatch:
+            raise
         except Exception as exc:
             raise BackendUnavailable(f"Loki query failed: {exc}") from exc
 
@@ -230,9 +233,7 @@ class LokiLogQueryAdapter:
                             continue
                         try:
                             data = json.loads(line)
-                            records = self._parse_log_records(
-                                workspace_id, run_id, None, data
-                            )
+                            records = self._parse_log_records(workspace_id, run_id, None, data)
                             for record in records:
                                 yield record
                         except (json.JSONDecodeError, ValueError):
@@ -252,9 +253,7 @@ class LokiLogQueryAdapter:
     ) -> LogPage:
         """Paged historical query scoped to a single step within a run."""
         try:
-            selector = self._build_selector(
-                workspace_id, run_id=run_id, step_id=step_id
-            )
+            selector = self._build_selector(workspace_id, run_id=run_id, step_id=step_id)
             query = selector
 
             # Add severity filter if specified
@@ -274,7 +273,7 @@ class LokiLogQueryAdapter:
 
             # Add message filter if specified
             if filter.message_contains:
-                query += f' | "{filter.message_contains}"'
+                query += f" |= {json.dumps(filter.message_contains, ensure_ascii=False)}"
 
             params: dict = {"query": query}
 
@@ -301,7 +300,7 @@ class LokiLogQueryAdapter:
                 response.raise_for_status()
 
             data = response.json()
-            records = self._parse_log_records(workspace_id, run_id, step_id, data)
+            records = self._parse_log_records(workspace_id, run_id, step_id, data["data"])
 
             # Extract pagination token if present
             next_cursor = None
@@ -311,6 +310,8 @@ class LokiLogQueryAdapter:
             return LogPage(items=tuple(records), next_cursor=next_cursor)
         except httpx.HTTPError as exc:
             raise BackendUnavailable(f"Loki query failed: {exc}") from exc
+        except WorkspaceMismatch:
+            raise
         except Exception as exc:
             raise BackendUnavailable(f"Loki query failed: {exc}") from exc
 
@@ -335,7 +336,8 @@ class LokiLogQueryAdapter:
             # Verify workspace match
             if stream_labels.get("workspace_id") != str(workspace_id):
                 raise WorkspaceMismatch(
-                    f"stream workspace_id mismatch: {stream_labels.get('workspace_id')} != {workspace_id}"
+                    f"stream workspace_id mismatch: {stream_labels.get('workspace_id')} "
+                    f"!= {workspace_id}"
                 )
 
             # Parse log entries
@@ -356,9 +358,7 @@ class LokiLogQueryAdapter:
                     )
                     records.append(record)
                 except (ValueError, KeyError, TypeError) as exc:
-                    raise BackendUnavailable(
-                        f"Failed to parse log record: {exc}"
-                    ) from exc
+                    raise BackendUnavailable(f"Failed to parse log record: {exc}") from exc
 
         return records
 

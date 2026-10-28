@@ -62,15 +62,13 @@ def _load_adapter(ep: EntryPoint) -> MigrationCapable:
         factory = ep.load()
     except Exception as exc:
         raise RuntimeError(
-            f"failed to import adapter entry point {ep.name!r} "
-            f"({ep.value}): {exc}"
+            f"failed to import adapter entry point {ep.name!r} ({ep.value}): {exc}"
         ) from exc
     try:
         instance = factory()
     except Exception as exc:
         raise RuntimeError(
-            f"adapter factory {ep.name!r} ({ep.value}) raised on "
-            f"instantiation: {exc}"
+            f"adapter factory {ep.name!r} ({ep.value}) raised on instantiation: {exc}"
         ) from exc
     if not isinstance(instance, MigrationCapable):
         raise RuntimeError(
@@ -81,9 +79,7 @@ def _load_adapter(ep: EntryPoint) -> MigrationCapable:
     return instance
 
 
-def _select(
-    entries: Sequence[EntryPoint], requested: str | None
-) -> list[EntryPoint]:
+def _select(entries: Sequence[EntryPoint], requested: str | None) -> list[EntryPoint]:
     """Filter entry points to those the operator selected.
 
     `None` means "every registered adapter". A literal name must match
@@ -95,8 +91,7 @@ def _select(
     if not matching:
         known = ", ".join(sorted(ep.name for ep in entries)) or "(none)"
         raise RuntimeError(
-            f"no adapter named {requested!r} registered under "
-            f"{ENTRY_POINT_GROUP!r}; known: {known}"
+            f"no adapter named {requested!r} registered under {ENTRY_POINT_GROUP!r}; known: {known}"
         )
     return matching
 
@@ -135,14 +130,11 @@ def _cmd_up(args: argparse.Namespace, stream: TextIO) -> int:
     entries = _select(_discover_entry_points(), args.adapter)
     if not entries:
         print(
-            f"No adapters registered under {ENTRY_POINT_GROUP!r}; "
-            "nothing to migrate.",
+            f"No adapters registered under {ENTRY_POINT_GROUP!r}; nothing to migrate.",
             file=stream,
         )
         return 1
-    adapters: list[tuple[str, MigrationCapable]] = [
-        (ep.name, _load_adapter(ep)) for ep in entries
-    ]
+    adapters: list[tuple[str, MigrationCapable]] = [(ep.name, _load_adapter(ep)) for ep in entries]
 
     if args.check:
         try:

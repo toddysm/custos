@@ -30,9 +30,7 @@ class _FakeStore:
         self.calls.append(("list_things", (workspace_id,), {}))
         return []
 
-    def tail(
-        self, workspace_id: WorkspaceId
-    ) -> AsyncIterator[str]:
+    def tail(self, workspace_id: WorkspaceId) -> AsyncIterator[str]:
         """Plain `def` returning an AsyncIterator — like tail_run_logs."""
         self.calls.append(("tail", (workspace_id,), {}))
 
@@ -60,25 +58,19 @@ def wrapped(inner: _FakeStore) -> _FakeStore:
 # ----- forwarding -----
 
 
-def test_proxy_forwards_class_attributes(
-    inner: _FakeStore, wrapped: _FakeStore
-) -> None:
+def test_proxy_forwards_class_attributes(inner: _FakeStore, wrapped: _FakeStore) -> None:
     assert wrapped.SCHEMA_REVISION == inner.SCHEMA_REVISION
 
 
 @pytest.mark.asyncio
-async def test_proxy_forwards_valid_call(
-    inner: _FakeStore, wrapped: _FakeStore
-) -> None:
+async def test_proxy_forwards_valid_call(inner: _FakeStore, wrapped: _FakeStore) -> None:
     result = await wrapped.get_thing(WorkspaceId("ws-1"), "t-1")
     assert result == "ws-1:t-1"
     assert inner.calls == [("get_thing", (WorkspaceId("ws-1"), "t-1"), {})]
 
 
 @pytest.mark.asyncio
-async def test_proxy_forwards_valid_call_via_kwargs(
-    inner: _FakeStore, wrapped: _FakeStore
-) -> None:
+async def test_proxy_forwards_valid_call_via_kwargs(inner: _FakeStore, wrapped: _FakeStore) -> None:
     result = await wrapped.get_thing(workspace_id=WorkspaceId("ws-1"), thing_id="t-1")
     assert result == "ws-1:t-1"
 
@@ -136,9 +128,7 @@ def test_rejects_sync_iter_method_with_none(wrapped: _FakeStore) -> None:
 
 
 @pytest.mark.asyncio
-async def test_violation_does_not_invoke_inner(
-    inner: _FakeStore, wrapped: _FakeStore
-) -> None:
+async def test_violation_does_not_invoke_inner(inner: _FakeStore, wrapped: _FakeStore) -> None:
     with pytest.raises(WorkspaceScopingViolation):
         await wrapped.get_thing(None, "t-1")  # type: ignore[arg-type]
     assert inner.calls == []

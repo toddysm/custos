@@ -11,23 +11,40 @@ Tests that any ArtifactStore implementation must pass:
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from typing import Protocol
+
 import pytest
 
-from custos_spl.errors import BackendUnavailable, WorkspaceMismatch
+from custos_spl.errors import WorkspaceMismatch
 from custos_spl.ids import ArtifactId, WorkspaceId
 from custos_spl.interfaces.artifact_store import ArtifactStoreProvider
 
 from .base import AdapterConformanceBase
 
 
+class _SweeperArtifactStore(ArtifactStoreProvider, Protocol):
+    """Built-in adapter capability with explicit sweeper authorization.
+
+    The general provider permits caller-side gating instead; this suite's
+    guarded-delete cases specifically exercise the CSI/S3 adapter flag.
+    """
+
+    async def delete(
+        self, workspace_id: WorkspaceId, artifact_id: ArtifactId, is_sweeper: bool = False
+    ) -> None:
+        """Reject non-sweeper calls; permit idempotent authorized deletion."""
+        ...
+
+
 class ArtifactStoreConformanceTests(AdapterConformanceBase):
     """Base conformance tests for ArtifactStoreProvider adapters.
 
     Subclasses MUST provide these pytest fixtures:
-    - `adapter` → ArtifactStoreProvider instance, configured and ready
+    - `adapter` → built-in artifact provider with an explicit `is_sweeper` flag
     - `workspace_id` → WorkspaceId for testing
     - `other_workspace_id` → different WorkspaceId for cross-workspace tests
-    - `sample_content` → async iterator of bytes for put() testing
+    - `sample_content` → bytes used to construct fresh put() streams
 
     Tests will skip if required fixtures are not provided.
 
@@ -43,7 +60,7 @@ class ArtifactStoreConformanceTests(AdapterConformanceBase):
     """
 
     @pytest.fixture
-    def adapter(self) -> ArtifactStoreProvider:
+    def adapter(self) -> _SweeperArtifactStore:
         """Adapter fixture (must be overridden by subclass)."""
         pytest.skip("adapter fixture not provided by subclass")
 
@@ -65,7 +82,7 @@ class ArtifactStoreConformanceTests(AdapterConformanceBase):
     @pytest.mark.asyncio
     async def test_sweeper_only_deletion_requires_flag(
         self,
-        adapter: ArtifactStoreProvider,
+        adapter: _SweeperArtifactStore,
         workspace_id: WorkspaceId,
         sample_content: bytes,
     ) -> None:
@@ -74,8 +91,10 @@ class ArtifactStoreConformanceTests(AdapterConformanceBase):
         Prevents accidental deletion; only sweeper process can garbage-collect.
         Calling delete() without is_sweeper=True MUST raise ValueError.
         """
+
         # Create a sample artifact
-        async def content_iter():
+        async def content_iter() -> AsyncIterator[bytes]:
+            """Yield one fresh stream for the guarded-deletion test."""
             yield sample_content
 
         descriptor = await adapter.put(workspace_id, content_iter())
@@ -90,7 +109,7 @@ class ArtifactStoreConformanceTests(AdapterConformanceBase):
     @pytest.mark.asyncio
     async def test_deletion_idempotency_no_error_if_missing(
         self,
-        adapter: ArtifactStoreProvider,
+        adapter: _SweeperArtifactStore,
         workspace_id: WorkspaceId,
     ) -> None:
         """delete() succeeds even if artifact already absent.
@@ -115,8 +134,10 @@ class ArtifactStoreConformanceTests(AdapterConformanceBase):
         Attempting to retrieve artifact from different workspace
         raises WorkspaceMismatch (caller maps to 404).
         """
+
         # Put artifact in workspace A
-        async def content_iter():
+        async def content_iter() -> AsyncIterator[bytes]:
+            """Yield content owned by the primary workspace."""
             yield sample_content
 
         descriptor = await adapter.put(workspace_id, content_iter())
@@ -138,8 +159,10 @@ class ArtifactStoreConformanceTests(AdapterConformanceBase):
 
         Doesn't disclose cross-workspace existence (returns None, not error).
         """
+
         # Put artifact in workspace A
-        async def content_iter():
+        async def content_iter() -> AsyncIterator[bytes]:
+            """Yield content for the cross-workspace metadata check."""
             yield sample_content
 
         descriptor = await adapter.put(workspace_id, content_iter())
@@ -160,11 +183,14 @@ class ArtifactStoreConformanceTests(AdapterConformanceBase):
         Writing the same content twice must produce the same artifact_id
         and digest (idempotency guarantee).
         """
+
         # Put same content twice
-        async def content_iter1():
+        async def content_iter1() -> AsyncIterator[bytes]:
+            """Yield the first independently consumed content stream."""
             yield sample_content
 
-        async def content_iter2():
+        async def content_iter2() -> AsyncIterator[bytes]:
+            """Yield an identical second stream to test content addressing."""
             yield sample_content
 
         descriptor1 = await adapter.put(workspace_id, content_iter1())
@@ -175,27 +201,31 @@ class ArtifactStoreConformanceTests(AdapterConformanceBase):
         assert descriptor1.digest == descriptor2.digest
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("media_type", [None, "application/octet-stream", "text/plain"])
     async def test_media_type_consistency_stored_vs_returned(
         self,
         adapter: ArtifactStoreProvider,
         workspace_id: WorkspaceId,
         sample_content: bytes,
+        media_type: str | None,
     ) -> None:
         """put() stores and returns consistent media_type.
 
         Returned ArtifactDescriptor.media_type must match what was stored,
         not just the input argument (which may be None).
         """
-        # Put with media_type=None
-        async def content_iter():
+
+        async def content_iter() -> AsyncIterator[bytes]:
+            """Yield content for the selected optional media-type declaration."""
             yield sample_content
 
-        descriptor = await adapter.put(workspace_id, content_iter(), media_type=None)
+        descriptor = await adapter.put(workspace_id, content_iter(), media_type=media_type)
 
-        # media_type in descriptor should be effective type, not None
-        assert descriptor.media_type is not None
-        assert isinstance(descriptor.media_type, str)
-        assert len(descriptor.media_type) > 0
+        if media_type is not None:
+            assert descriptor.media_type == media_type
+        elif descriptor.media_type is not None:
+            assert isinstance(descriptor.media_type, str)
+            assert len(descriptor.media_type) > 0
 
         # head() should return same media_type
         head_result = await adapter.head(workspace_id, descriptor.artifact_id)

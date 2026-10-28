@@ -1,63 +1,62 @@
-"""Conformance tests for S3 ArtifactStore adapter.
-
-These tests verify that the S3 adapter satisfies the ArtifactStoreProvider
-conformance contract. They use moto to mock S3 — no real AWS account needed.
-
-Run with: pytest tests/test_conformance.py -v -m integration
-"""
+"""S3 conformance against a loopback Moto server compatible with async clients."""
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import boto3
 import pytest
-from moto import mock_s3
-
 from custos_spl.conformance import ArtifactStoreConformanceTests
 from custos_spl.ids import WorkspaceId
-
-pytest.importorskip("custos_s3")
+from moto.server import ThreadedMotoServer
 
 from custos_s3.adapters import S3ArtifactAdapter
 
 
-@mock_s3
+@pytest.fixture
+def s3_endpoint(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    """Run an isolated loopback S3 endpoint with inert, test-only credentials."""
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    monkeypatch.setenv("AWS_SESSION_TOKEN", "testing")
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+    server = ThreadedMotoServer(ip_address="127.0.0.1", port=0, verbose=False)
+    server.start()
+    try:
+        host, port = server.get_host_and_port()
+        endpoint = f"http://{host}:{port}"
+        client = boto3.client("s3", region_name="us-east-1", endpoint_url=endpoint)
+        try:
+            client.create_bucket(Bucket="conformance-test")
+        finally:
+            client.close()
+        yield endpoint
+    finally:
+        server.stop()
+
+
 @pytest.mark.integration
 class TestS3ArtifactConformance(ArtifactStoreConformanceTests):
-    """S3 adapter conformance tests.
-
-    Uses moto to mock S3; no external service needed.
-    """
-
-    @pytest.fixture(scope="class", autouse=True)
-    def _setup_s3_bucket(self) -> None:
-        """Create test bucket before running conformance tests.
-
-        Required because S3ArtifactAdapter calls put_object() which fails
-        if the bucket doesn't exist (NoSuchBucket error).
-        """
-        s3 = boto3.client("s3", region_name="us-east-1")
-        s3.create_bucket(Bucket="conformance-test")
+    """Exercise the real async adapter over HTTP, without synchronous Moto interception."""
 
     @pytest.fixture
-    def adapter(self) -> S3ArtifactAdapter:
-        """Provide configured S3 artifact adapter with mocked S3."""
+    def adapter(self, s3_endpoint: str) -> S3ArtifactAdapter:
+        """Bind the adapter exclusively to the fixture's loopback endpoint."""
         return S3ArtifactAdapter(
-            bucket="conformance-test",
-            region="us-east-1",
+            bucket="conformance-test", region="us-east-1", endpoint_url=s3_endpoint
         )
 
     @pytest.fixture
     def workspace_id(self) -> WorkspaceId:
-        """Primary test workspace."""
+        """Return the primary artifact workspace."""
         return WorkspaceId("ws-conformance-test-primary")
 
     @pytest.fixture
     def other_workspace_id(self) -> WorkspaceId:
-        """Secondary workspace for cross-workspace tests."""
+        """Return a separate workspace for isolation checks."""
         return WorkspaceId("ws-conformance-test-secondary")
 
     @pytest.fixture
     async def sample_content(self) -> bytes:
-        """Sample content for artifact store tests."""
+        """Return stable bytes for streaming and content-addressing checks."""
         return b"sample s3 artifact content for conformance testing"
-

@@ -44,6 +44,30 @@ mypy src tests
 pytest
 ```
 
+The development dependencies include the PostgreSQL testcontainer fixture used
+by the shared conformance helpers. Entering `PostgresContainer` waits for
+readiness; no additional connection-client method is required.
+
+## Adapter conformance in continuous integration
+
+The [library workflow](../../../.github/workflows/python-libs.yml) runs each
+adapter's suite in a separate pytest process from that package's directory.
+Several adapters use the same `tests.test_conformance` module name; collecting
+them together can reuse the wrong module even with importlib import mode.
+
+PostgreSQL, Loki and Prometheus use the workflow's service containers. Readiness
+is checked from the runner rather than assuming `curl` exists inside an image.
+The [Prometheus test configuration](../../../.github/prometheus.yml) adds the
+workspace/run labels required by the metric queries. Explicitly configured
+unavailable backends fail instead of silently skipping.
+
+CSI filesystem behavior is checked against an isolated temporary mount, not a
+shared cluster volume. S3 uses a loopback Moto server so the real asynchronous
+client receives HTTP responses rather than incompatible synchronous mock
+responses. This does not certify a Kubernetes CSI driver or a live cloud account.
+Artifact media types remain optional; conformance checks preserve explicit types
+and require the returned descriptor to agree with stored metadata.
+
 ## Status
 
 Implementation tracked under GitHub label

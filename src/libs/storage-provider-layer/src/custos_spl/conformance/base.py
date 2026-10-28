@@ -6,8 +6,6 @@ must satisfy regardless of provider type.
 
 from __future__ import annotations
 
-import pytest
-
 from custos_spl.errors import BackendUnavailable, WorkspaceMismatch
 
 
@@ -32,10 +30,11 @@ class AdapterConformanceBase:
         assert issubclass(BackendUnavailable, Exception)
         assert BackendUnavailable.__module__ == "custos_spl.errors"
 
-    def test_adapter_has_schema_revision(self) -> None:
+    def test_adapter_has_schema_revision(self, adapter: object) -> None:
         """All adapters must declare SCHEMA_REVISION class constant.
 
         This is required by SPL for compatibility tracking across adapter versions.
         """
-        # This test requires the adapter fixture — subclasses provide it
-        pytest.skip("Adapter fixture not provided — subclass must implement with adapter fixture")
+        revision = getattr(adapter, "SCHEMA_REVISION", None)
+        assert isinstance(revision, int) and not isinstance(revision, bool)
+        assert revision >= 0

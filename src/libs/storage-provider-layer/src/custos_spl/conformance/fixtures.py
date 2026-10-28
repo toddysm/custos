@@ -6,7 +6,7 @@ test data factories.
 
 from __future__ import annotations
 
-from typing import Generator
+from collections.abc import Generator
 
 import pytest
 from testcontainers.postgres import PostgresContainer
@@ -25,8 +25,6 @@ def postgres_container() -> Generator[PostgresContainer, None, None]:
         username="custos",
         password="test_password",
     ) as container:
-        # Wait for container to be ready
-        container.get_connection_client().close()
         yield container
 
 
