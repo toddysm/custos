@@ -33,7 +33,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from collections.abc import Set as AbstractSet
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
 from custos_spl.errors import (
     BackendUnavailable,
@@ -74,14 +74,22 @@ from custos_spl.interfaces.metadata_store import (
     SubscriptionSelector,
     TransactionHandle,
 )
+from custos_spl.interfaces.trigger_queries import SubscriptionSnapshot
 from custos_spl.middleware.transactions import bind_handle, check_handle
-from custos_spl.pagination import Cursor, Page
+from custos_spl.pagination import (
+    Cursor,
+    Page,
+    decode_query_cursor,
+    encode_query_cursor,
+    query_page_limit,
+)
 
 from custos_pg.migrations.metadata import (
     METADATA_REV1,
     METADATA_REV2,
     METADATA_REV3,
     METADATA_REV4,
+    METADATA_REV5,
 )
 from custos_pg.pool import LazyPool, read_dsn_from_env
 from custos_pg.revisions import ensure_ledger, read_declared, record_revision
@@ -95,6 +103,19 @@ if TYPE_CHECKING:
 INTERFACE_NAME = "MetadataStoreProvider"
 DEFAULT_LIST_LIMIT = 50
 MAX_LIST_LIMIT = 200
+
+_SUBSCRIPTION_QUERY = """
+SELECT s.workspace_id, s.subscription_id, s.workflow_id, s.state,
+       s.created_at, s.updated_at, latest.seq AS selector_seq,
+       latest.selector, latest.added_at
+FROM custos_state.subscription AS s
+LEFT JOIN LATERAL (
+    SELECT seq, selector, added_at
+    FROM custos_state.subscription_selector
+    WHERE workspace_id = s.workspace_id AND subscription_id = s.subscription_id
+    ORDER BY seq DESC LIMIT 1
+) AS latest ON true
+"""
 
 T = TypeVar("T")
 
@@ -184,6 +205,14 @@ def _resolve_limit(limit: int | None) -> int:
 
 
 # ----- Row → dataclass mapping -----
+
+
+def _row_to_subscription_snapshot(row: Record) -> SubscriptionSnapshot:
+    """Rehydrate a subscription/selector pair from one consistent SQL statement."""
+    return SubscriptionSnapshot(
+        subscription=_row_to_subscription(row),
+        selector=_row_to_subscription_selector(row) if row["selector_seq"] is not None else None,
+    )
 
 
 def _json_payload(value: Any) -> Any:
@@ -407,9 +436,8 @@ class PgMetadataAdapter:
     async def apply_pending(self) -> list[str]:
         """Apply revisions in scope for this adapter slice.
 
-        Revisions 1-4 complete the MetadataStore. After #129 merges,
-        `declared_revisions` will report {1, 2, 3, 4}, matching the
-        platform's `SCHEMA_REVISION = 4` with no gaps.
+        Revisions 1-4 define the required row shapes. Revision 5 adds
+        trigger-query indexes without raising the shared schema minimum.
         """
         summaries: list[str] = []
         pool = await self._pool_ref()
@@ -420,7 +448,7 @@ class PgMetadataAdapter:
                 INTERFACE_NAME,
             )
             already = {int(r["revision"]) for r in applied}
-            for rev in (METADATA_REV1, METADATA_REV2, METADATA_REV3, METADATA_REV4):
+            for rev in (METADATA_REV1, METADATA_REV2, METADATA_REV3, METADATA_REV4, METADATA_REV5):
                 if rev.number in already:
                     continue
                 for stmt in rev.statements:
@@ -614,6 +642,192 @@ class PgMetadataAdapter:
         return tuple(_row_to_step_attempt(r) for r in rows)
 
     # ----- Trigger Service state -----
+
+    async def get_subscription(
+        self, workspace_id: str, subscription_id: str
+    ) -> SubscriptionSnapshot | None:
+        """Read a workspace-scoped subscription with its latest appended selector."""
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                _SUBSCRIPTION_QUERY + " WHERE s.workspace_id = $1 AND s.subscription_id = $2",
+                workspace_id,
+                subscription_id,
+            )
+        return _row_to_subscription_snapshot(row) if row is not None else None
+
+    async def query_subscriptions(
+        self,
+        workspace_id: str,
+        *,
+        state: str | None = None,
+        cursor: Cursor | None = None,
+        limit: int | None = None,
+    ) -> Page[SubscriptionSnapshot]:
+        """Page subscriptions and latest selectors atomically in identifier order."""
+        size = query_page_limit(limit)
+        scope = ("subscriptions", workspace_id, state)
+        after = decode_query_cursor(cursor, scope)
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                _SUBSCRIPTION_QUERY
+                + """
+                WHERE s.workspace_id = $1 AND ($2::text IS NULL OR s.state = $2)
+                  AND ($3::text IS NULL OR s.subscription_id COLLATE "C" > $3)
+                ORDER BY s.subscription_id COLLATE "C" LIMIT $4
+                """,
+                workspace_id,
+                state,
+                after,
+                size + 1,
+            )
+        next_cursor = (
+            encode_query_cursor(scope, rows[size - 1]["subscription_id"])
+            if len(rows) > size
+            else None
+        )
+        return Page((_row_to_subscription_snapshot(row) for row in rows[:size]), next_cursor)
+
+    async def get_resume_subscription(
+        self, workspace_id: str, resume_id: str
+    ) -> ResumeSubscription | None:
+        """Read a resume row, retaining expired records for idempotent re-registration."""
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT workspace_id, resume_id, run_id, step_id, expires_at, payload "
+                "FROM custos_state.resume_subscription WHERE workspace_id = $1 AND resume_id = $2",
+                workspace_id,
+                resume_id,
+            )
+        return _row_to_resume(row) if row is not None else None
+
+    async def register_resume_subscription(
+        self, workspace_id: str, resume: ResumeSubscription, *, as_of: datetime
+    ) -> ResumeSubscription:
+        """Atomically register a new/expired wait or return the unchanged live winner."""
+        if as_of.utcoffset() is None:
+            raise ValueError("resume registration cutoff must be timezone-aware")
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO custos_state.resume_subscription AS stored
+                    (workspace_id, resume_id, run_id, step_id, expires_at, payload)
+                VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+                ON CONFLICT (workspace_id, resume_id) DO UPDATE SET
+                    run_id = CASE WHEN stored.expires_at <= $7
+                        THEN EXCLUDED.run_id ELSE stored.run_id END,
+                    step_id = CASE WHEN stored.expires_at <= $7
+                        THEN EXCLUDED.step_id ELSE stored.step_id END,
+                    expires_at = CASE WHEN stored.expires_at <= $7
+                        THEN EXCLUDED.expires_at ELSE stored.expires_at END,
+                    payload = CASE WHEN stored.expires_at <= $7
+                        THEN EXCLUDED.payload ELSE stored.payload END
+                RETURNING workspace_id, resume_id, run_id, step_id, expires_at, payload
+                """,
+                workspace_id,
+                resume.resume_id,
+                resume.run_id,
+                resume.step_id,
+                resume.expires_at,
+                json.dumps(dict(resume.payload)),
+                as_of,
+            )
+        assert row is not None
+        return _row_to_resume(row)
+
+    async def query_resume_subscriptions(
+        self,
+        workspace_id: str,
+        *,
+        connector_instance_id: str,
+        delivery_mode: Literal["push", "pull"],
+        as_of: datetime,
+        cursor: Cursor | None = None,
+        limit: int | None = None,
+    ) -> Page[ResumeSubscription]:
+        """Page unexpired waits for the exact workspace/source and delivery mode."""
+        size = query_page_limit(limit)
+        if as_of.utcoffset() is None:
+            raise ValueError("resume query cutoff must be timezone-aware")
+        if not connector_instance_id or delivery_mode not in ("push", "pull"):
+            raise ValueError("resume queries require a connector instance and push/pull mode")
+        scope = ("resume", workspace_id, connector_instance_id, delivery_mode, as_of.isoformat())
+        after = decode_query_cursor(cursor, scope)
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT workspace_id, resume_id, run_id, step_id, expires_at, payload
+                FROM custos_state.resume_subscription
+                WHERE workspace_id = $1
+                  AND jsonb_typeof(payload #> '{source,connectorInstanceId}') = 'string'
+                  AND payload #>> '{source,connectorInstanceId}' = $2
+                  AND jsonb_typeof(payload #> '{source,deliveryModes}') = 'array'
+                  AND (payload #> '{source,deliveryModes}') ? $3
+                  AND expires_at > $4
+                  AND ($5::text IS NULL OR resume_id COLLATE "C" > $5)
+                ORDER BY resume_id COLLATE "C" LIMIT $6
+                """,
+                workspace_id,
+                connector_instance_id,
+                delivery_mode,
+                as_of,
+                after,
+                size + 1,
+            )
+        next_cursor = (
+            encode_query_cursor(scope, rows[size - 1]["resume_id"]) if len(rows) > size else None
+        )
+        return Page((_row_to_resume(row) for row in rows[:size]), next_cursor)
+
+    async def get_schedule(self, workspace_id: str, schedule_id: str) -> Schedule | None:
+        """Read a schedule by its exact workspace and identifier."""
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT workspace_id, schedule_id, workflow_id, cron, next_fire_at, enabled "
+                "FROM custos_state.schedule WHERE workspace_id = $1 AND schedule_id = $2",
+                workspace_id,
+                schedule_id,
+            )
+        return _row_to_schedule(row) if row is not None else None
+
+    async def query_due_schedules(
+        self,
+        workspace_id: str,
+        *,
+        due_at: datetime,
+        cursor: Cursor | None = None,
+        limit: int | None = None,
+    ) -> Page[Schedule]:
+        """Page enabled schedules due at or before the fixed cutoff, by identifier."""
+        size = query_page_limit(limit)
+        if due_at.utcoffset() is None:
+            raise ValueError("schedule query cutoff must be timezone-aware")
+        scope = ("schedules", workspace_id, due_at.isoformat())
+        after = decode_query_cursor(cursor, scope)
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT workspace_id, schedule_id, workflow_id, cron, next_fire_at, enabled
+                FROM custos_state.schedule
+                WHERE workspace_id = $1 AND enabled AND next_fire_at <= $2
+                  AND ($3::text IS NULL OR schedule_id COLLATE "C" > $3)
+                ORDER BY schedule_id COLLATE "C" LIMIT $4
+                """,
+                workspace_id,
+                due_at,
+                after,
+                size + 1,
+            )
+        next_cursor = (
+            encode_query_cursor(scope, rows[size - 1]["schedule_id"]) if len(rows) > size else None
+        )
+        return Page((_row_to_schedule(row) for row in rows[:size]), next_cursor)
 
     async def put_subscription(self, workspace_id: str, subscription: Subscription) -> Subscription:
         pool = await self._pool_ref()

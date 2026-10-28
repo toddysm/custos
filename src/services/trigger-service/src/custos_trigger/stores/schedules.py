@@ -9,8 +9,11 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from custos_spl.errors import QueryUnsupported
 from custos_spl.ids import WorkspaceId
 from custos_spl.interfaces.metadata_store import Schedule as SplSchedule
+from custos_spl.interfaces.trigger_queries import TriggerQueryProvider
+from custos_spl.pagination import Cursor, Page
 
 from custos_trigger.models import to_spl_schedule
 from custos_trigger.stores.base import TriggerMetadataStore
@@ -23,6 +26,30 @@ class ScheduleStore:
 
     def __init__(self, store: TriggerMetadataStore) -> None:
         self._store = store
+
+    async def get(self, workspace_id: str, schedule_id: str) -> SplSchedule | None:
+        """Read a schedule, raising QueryUnsupported for a write-only provider."""
+        if not isinstance(self._store, TriggerQueryProvider):
+            raise QueryUnsupported("metadata store exposes no schedule query capability")
+        return await self._store.get_schedule(WorkspaceId(workspace_id), schedule_id)
+
+    async def query_due(
+        self,
+        workspace_id: str,
+        *,
+        due_at: datetime,
+        cursor: Cursor | None = None,
+        limit: int | None = None,
+    ) -> Page[SplSchedule]:
+        """Read a bounded page of enabled schedules due by the fixed cutoff."""
+        if not isinstance(self._store, TriggerQueryProvider):
+            raise QueryUnsupported("metadata store exposes no schedule query capability")
+        return await self._store.query_due_schedules(
+            WorkspaceId(workspace_id),
+            due_at=due_at,
+            cursor=cursor,
+            limit=limit,
+        )
 
     async def put(
         self,

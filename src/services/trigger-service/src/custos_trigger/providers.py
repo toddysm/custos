@@ -16,10 +16,10 @@ metadata rides in the locked SPL rows' free-form JSON blobs (see
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from typing import cast
+from typing import Literal, TypeVar, cast
 
 from custos_spl.errors import ImmutableViolation
 from custos_spl.ids import SubscriptionId, WorkspaceId
@@ -43,6 +43,14 @@ from custos_spl.interfaces.metadata_store import (
 from custos_spl.interfaces.metadata_store import (
     SubscriptionSelector as SplSubscriptionSelector,
 )
+from custos_spl.interfaces.trigger_queries import SubscriptionSnapshot
+from custos_spl.pagination import (
+    Cursor,
+    Page,
+    decode_query_cursor,
+    encode_query_cursor,
+    query_page_limit,
+)
 
 from custos_trigger.stores.base import TriggerMetadataStore
 
@@ -57,6 +65,25 @@ __all__ = [
 #: in-process backend. An empty/unset value defaults to in-memory too so the
 #: app factory boots without a database for local development and tests.
 _MEMORY_DSN_SENTINELS: frozenset[str] = frozenset({"memory", "inmemory", "in-memory"})
+
+_Row = TypeVar("_Row")
+
+
+def _query_page(
+    rows: Sequence[_Row],
+    scope: tuple[str | None, ...],
+    cursor: Cursor | None,
+    limit: int | None,
+    key: Callable[[_Row], str],
+) -> Page[_Row]:
+    """Apply the shared scoped keyset contract to an in-memory row collection."""
+    size = query_page_limit(limit)
+    after = decode_query_cursor(cursor, scope)
+    ordered = sorted((row for row in rows if after is None or key(row) > after), key=key)
+    next_cursor = (
+        encode_query_cursor(scope, key(ordered[size - 1])) if len(ordered) > size else None
+    )
+    return Page(ordered[:size], next_cursor)
 
 
 def _utcnow() -> datetime:
@@ -80,9 +107,9 @@ class InMemoryTriggerMetadataStore:
     families are intentionally absent; this backend exists only to exercise
     the Trigger Service store adapters without a database.
 
-    The read accessors (:meth:`subscription`, :meth:`subscription_selectors`,
-    …) are dev/test conveniences outside the SPL Protocol; production code
-    reads through the Postgres adapter's own query surface.
+    Async reads implement the shared ``TriggerQueryProvider`` capability with
+    the same ordering, filtering and cursor validation as PostgreSQL. Legacy
+    synchronous accessors remain test conveniences, not production store APIs.
     """
 
     def __init__(self, *, now: Callable[[], datetime] | None = None) -> None:
@@ -222,9 +249,8 @@ class InMemoryTriggerMetadataStore:
     def list_subscriptions(self, workspace_id: str) -> tuple[SplSubscription, ...]:
         """Return every subscription row stored under *workspace_id*.
 
-        Backs the internal event receiver's candidate enumeration
-        (:class:`~custos_trigger.stores.base.SubscriptionListable`); rows are
-        returned in insertion order.
+        Legacy test inspection returns insertion order. Production candidate
+        enumeration uses the asynchronous, identifier-ordered query capability.
         """
         return tuple(row for (ws, _sid), row in self._subscriptions.items() if ws == workspace_id)
 
@@ -241,6 +267,124 @@ class InMemoryTriggerMetadataStore:
     def dedup_key(self, workspace_id: str, key: str) -> SplDedupKey | None:
         """Return the stored dedup row, or ``None`` when absent."""
         return self._dedup.get((workspace_id, key))
+
+    async def get_subscription(
+        self, workspace_id: WorkspaceId, subscription_id: SubscriptionId
+    ) -> SubscriptionSnapshot | None:
+        """Return the base row and latest append-ordered selector together."""
+        row = self.subscription(workspace_id, subscription_id)
+        if row is None:
+            return None
+        selectors = self.subscription_selectors(workspace_id, subscription_id)
+        return SubscriptionSnapshot(row, selectors[-1] if selectors else None)
+
+    async def query_subscriptions(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        state: str | None = None,
+        cursor: Cursor | None = None,
+        limit: int | None = None,
+    ) -> Page[SubscriptionSnapshot]:
+        """Page workspace subscriptions and their latest selector revisions."""
+        snapshots: list[SubscriptionSnapshot] = []
+        for row in self.list_subscriptions(workspace_id):
+            if state is None or row.state == state:
+                selectors = self.subscription_selectors(workspace_id, row.subscription_id)
+                snapshots.append(SubscriptionSnapshot(row, selectors[-1] if selectors else None))
+        return _query_page(
+            snapshots,
+            ("subscriptions", workspace_id, state),
+            cursor,
+            limit,
+            lambda snapshot: snapshot.subscription.subscription_id,
+        )
+
+    async def get_resume_subscription(
+        self, workspace_id: WorkspaceId, resume_id: str
+    ) -> SplResumeSubscription | None:
+        """Read a resume registration, including expired rows for re-registration."""
+        return self.resume_subscription(workspace_id, resume_id)
+
+    async def register_resume_subscription(
+        self, workspace_id: WorkspaceId, resume: SplResumeSubscription, *, as_of: datetime
+    ) -> SplResumeSubscription:
+        """Register without yielding between checking expiry and preserving the live winner."""
+        if as_of.utcoffset() is None:
+            raise ValueError("resume registration cutoff must be timezone-aware")
+        key = (str(workspace_id), resume.resume_id)
+        existing = self._resume.get(key)
+        if existing is not None and existing.expires_at.astimezone(UTC) > as_of.astimezone(UTC):
+            return existing
+        self._resume[key] = resume
+        return resume
+
+    async def query_resume_subscriptions(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        connector_instance_id: str,
+        delivery_mode: Literal["push", "pull"],
+        as_of: datetime,
+        cursor: Cursor | None = None,
+        limit: int | None = None,
+    ) -> Page[SplResumeSubscription]:
+        """Page unexpired source-scoped waits; legacy registrations never match."""
+        if as_of.utcoffset() is None:
+            raise ValueError("resume query cutoff must be timezone-aware")
+        if not connector_instance_id or delivery_mode not in ("push", "pull"):
+            raise ValueError("resume queries require a connector instance and push/pull mode")
+        rows: list[SplResumeSubscription] = []
+        for (workspace, _), row in self._resume.items():
+            if workspace != workspace_id or row.expires_at.astimezone(UTC) <= as_of.astimezone(UTC):
+                continue
+            source = row.payload.get("source")
+            if not isinstance(source, Mapping):
+                continue
+            modes = source.get("deliveryModes")
+            if (
+                source.get("connectorInstanceId") == connector_instance_id
+                and isinstance(modes, list)
+                and delivery_mode in modes
+            ):
+                rows.append(row)
+        return _query_page(
+            rows,
+            ("resume", workspace_id, connector_instance_id, delivery_mode, as_of.isoformat()),
+            cursor,
+            limit,
+            lambda row: row.resume_id,
+        )
+
+    async def get_schedule(self, workspace_id: WorkspaceId, schedule_id: str) -> SplSchedule | None:
+        """Read one schedule without filtering disabled or future rows."""
+        return self.schedule(workspace_id, schedule_id)
+
+    async def query_due_schedules(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        due_at: datetime,
+        cursor: Cursor | None = None,
+        limit: int | None = None,
+    ) -> Page[SplSchedule]:
+        """Page enabled schedules due by the timezone-aware cutoff."""
+        if due_at.utcoffset() is None:
+            raise ValueError("schedule query cutoff must be timezone-aware")
+        rows = [
+            row
+            for (workspace, _), row in self._schedules.items()
+            if workspace == workspace_id
+            and row.enabled
+            and row.next_fire_at.astimezone(UTC) <= due_at.astimezone(UTC)
+        ]
+        return _query_page(
+            rows,
+            ("schedules", workspace_id, due_at.isoformat()),
+            cursor,
+            limit,
+            lambda row: row.schedule_id,
+        )
 
 
 @dataclass(frozen=True, slots=True)

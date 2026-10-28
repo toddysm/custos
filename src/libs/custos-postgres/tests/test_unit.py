@@ -22,6 +22,7 @@ from custos_spl.interfaces.metadata_store import (
     MetadataStoreProvider,
     TransactionHandle,
 )
+from custos_spl.interfaces.trigger_queries import TriggerQueryProvider
 from custos_spl.migrations.runner import MigrationCapable
 
 from custos_pg.adapters.auth import PgAuthAdapter
@@ -43,7 +44,7 @@ from custos_pg.adapters.metadata import make_adapter as make_metadata_adapter
 from custos_pg.migrations.auth import AUTH_REV1
 from custos_pg.migrations.catalog import CATALOG_REV1
 from custos_pg.migrations.definition import DEFINITION_REV1
-from custos_pg.migrations.metadata import METADATA_REV1, METADATA_REV2, METADATA_REV3
+from custos_pg.migrations.metadata import METADATA_REV1, METADATA_REV2, METADATA_REV3, METADATA_REV5
 from custos_pg.pool import DSN_ENV_VAR, LazyPool, read_dsn_from_env
 
 # ----- Protocol conformance -----
@@ -62,6 +63,20 @@ def test_catalog_adapter_satisfies_catalog_protocol() -> None:
 def test_metadata_adapter_satisfies_metadata_protocol() -> None:
     adapter = PgMetadataAdapter(lazy=LazyPool("postgresql://noop"))
     assert isinstance(adapter, MetadataStoreProvider)
+
+
+def test_metadata_adapter_satisfies_trigger_query_capability() -> None:
+    """The production adapter supplies the same async reads as the memory provider."""
+    adapter = PgMetadataAdapter(lazy=LazyPool("postgresql://noop"))
+    assert isinstance(adapter, TriggerQueryProvider)
+
+
+def test_trigger_indexes_cover_unfiltered_identifier_order() -> None:
+    """Unfiltered subscription pages need the same C-collation order as the queries."""
+    statement = next(
+        sql for sql in METADATA_REV5.statements if "subscription_by_query_id" in sql
+    )
+    assert '(workspace_id, subscription_id COLLATE "C")' in statement
 
 
 def test_auth_adapter_satisfies_auth_protocol() -> None:

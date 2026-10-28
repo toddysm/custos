@@ -170,8 +170,9 @@ async def register_resume_subscription(
     existing ``subscriptionId`` without a write; a divergent ``selector`` keeps
     the original registration and emits a ``resume.subscription.divergent``
     audit. A registration whose prior row has lapsed past its TTL is treated as
-    a fresh registration (the stale row is dropped first so the immutable store
-    accepts the re-put). The CEL ``selector`` is compiled up front on every
+    a fresh registration by an atomic provider operation. Concurrent requests
+    return the same live winner, including during expiry refresh. The CEL
+    ``selector`` is compiled up front on every
     path (including an idempotent replay) so a malformed expression is rejected
     (422) rather than silently never matching.
     """
@@ -185,40 +186,33 @@ async def register_resume_subscription(
     existing = await store.get(RESUME_WORKSPACE, resume_id)
     now = _now()
 
-    if existing is not None and existing.expires_at > now:
-        # Idempotent replay of a still-live wait. Original wins on divergence.
-        if existing.registration.selector != body.selector:
-            await audit.emit(
-                AUDIT_RESUME_DIVERGENT,
-                workspace_id=RESUME_WORKSPACE,
-                attributes={
-                    "resumeId": resume_id,
-                    "runId": body.run_id,
-                    "stepId": body.step_id,
-                    "eventKey": body.event_key,
-                    "originalSelector": existing.registration.selector,
-                    "replaySelector": body.selector,
-                },
-            )
-        return RegisterResumeResponse(subscription_id=resume_id)
-
-    if existing is not None:
-        # Prior row lapsed past its TTL — drop it so the re-put is accepted.
-        await store.cancel(RESUME_WORKSPACE, resume_id)
-
-    ttl_seconds = _resolve_ttl_seconds(body.ttl, default_ttl_seconds)
-    expires_at = now + timedelta(seconds=ttl_seconds)
-    await store.register(
-        ResumeRegistration(
-            run_id=body.run_id,
-            step_id=body.step_id,
-            event_key=body.event_key,
-            selector=body.selector,
-        ),
-        workspace_id=RESUME_WORKSPACE,
-        resume_id=resume_id,
-        expires_at=expires_at,
-    )
+    if existing is None or existing.expires_at <= now:
+        ttl_seconds = _resolve_ttl_seconds(body.ttl, default_ttl_seconds)
+        existing = await store.register_or_get(
+            ResumeRegistration(
+                run_id=body.run_id,
+                step_id=body.step_id,
+                event_key=body.event_key,
+                selector=body.selector,
+            ),
+            workspace_id=RESUME_WORKSPACE,
+            resume_id=resume_id,
+            expires_at=now + timedelta(seconds=ttl_seconds),
+            as_of=now,
+        )
+    if existing.registration.selector != body.selector:
+        await audit.emit(
+            AUDIT_RESUME_DIVERGENT,
+            workspace_id=RESUME_WORKSPACE,
+            attributes={
+                "resumeId": resume_id,
+                "runId": body.run_id,
+                "stepId": body.step_id,
+                "eventKey": body.event_key,
+                "originalSelector": existing.registration.selector,
+                "replaySelector": body.selector,
+            },
+        )
     return RegisterResumeResponse(subscription_id=resume_id)
 
 

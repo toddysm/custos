@@ -8,6 +8,10 @@ narrow lets the in-process test/dev backend implement only the trigger
 families while the production Postgres adapter — which implements the full
 ``MetadataStoreProvider`` — satisfies it structurally.
 
+Production reads use the SPL ``TriggerQueryProvider`` capability. The legacy
+read protocols below describe synchronous in-memory inspection helpers only;
+they are retained for existing test callers, not used by store adapters.
+
 The method signatures mirror the SPL Protocol verbatim so a conformant
 ``MetadataStoreProvider`` is assignable to a ``TriggerMetadataStore`` without
 adaptation.
@@ -97,25 +101,7 @@ class TriggerMetadataStore(Protocol):
 
 @runtime_checkable
 class SubscriptionReadable(Protocol):
-    """Optional read-back capability for subscription rows + selector blobs.
-
-    The locked SPL ``MetadataStoreProvider`` is a *write* surface — it exposes
-    no subscription read or list method (design ``§ Data Models``). The REST
-    surface (TS-IMPL-015) nonetheless needs to read a single subscription back
-    by id for ``GET`` / ``PATCH`` / ``DELETE`` / ``:fire``, so this narrow
-    capability Protocol is probed structurally (``runtime_checkable``) by
-    :meth:`custos_trigger.stores.SubscriptionStore.get`.
-
-    The in-process backend satisfies it via its dev/test read accessors; the
-    Postgres adapter gains its own query surface in a later task, at which
-    point it satisfies this Protocol too. Until then a backend that does not
-    implement it surfaces a clear ``SubscriptionReadUnsupportedError`` rather
-    than a silent miss.
-
-    The accessors are synchronous to match the in-process backend's existing
-    read helpers; a future async query surface can widen this without breaking
-    the consumer, which already awaits the wrapping ``SubscriptionStore.get``.
-    """
+    """Legacy synchronous in-memory inspection of subscription rows and selectors."""
 
     def subscription(self, workspace_id: str, subscription_id: str) -> SplSubscription | None: ...
 
@@ -126,48 +112,14 @@ class SubscriptionReadable(Protocol):
 
 @runtime_checkable
 class SubscriptionListable(Protocol):
-    """Optional list capability for a workspace's subscription rows.
-
-    The locked SPL ``MetadataStoreProvider`` exposes no list surface, but the
-    internal event receiver (TS-IMPL-017) has to enumerate the *candidate*
-    start subscriptions a normalized event could fire — the start matcher is a
-    pure function over a caller-supplied candidate list and there is no
-    deterministic key to point-read a start subscription by (unlike resume
-    registrations, whose ``resume_id`` is derived from the event triple). This
-    narrow capability Protocol is probed structurally by
-    :meth:`custos_trigger.stores.SubscriptionStore.list_in_workspace`.
-
-    The in-process backend satisfies it by iterating its dev/test row map; the
-    Postgres adapter gains its own indexed query surface in a later task. A
-    backend that does not implement it surfaces a clear
-    ``SubscriptionListUnsupportedError`` rather than silently matching nothing.
-
-    The accessor is synchronous to match the in-process backend's existing
-    read helpers and returns full rows so the caller can rehydrate each
-    :class:`custos_trigger.models.Subscription` with its latest selector blob
-    via :class:`SubscriptionReadable`.
-    """
+    """Legacy synchronous in-memory enumeration; production stores use query pages."""
 
     def list_subscriptions(self, workspace_id: str) -> tuple[SplSubscription, ...]: ...
 
 
 @runtime_checkable
 class ResumeReadable(Protocol):
-    """Optional read-back capability for resume rows (idempotent re-register).
-
-    The locked SPL ``MetadataStoreProvider`` writes resume tokens but exposes
-    no read method. The ``RegisterResumeSubscription`` RPC (TS-IMPL-016) must
-    read a single resume row back by id to honor its idempotency contract
-    (re-registration returns the existing handle), so this narrow capability
-    Protocol is probed structurally by
-    :meth:`custos_trigger.stores.ResumeSubscriptionStore.get`.
-
-    The in-process backend satisfies it via its dev/test read accessor; the
-    Postgres adapter gains the capability in a later task. A backend that does
-    not implement it surfaces a clear ``ResumeReadUnsupportedError`` rather
-    than a silent miss. The accessor is synchronous to match the in-process
-    backend's existing read helpers.
-    """
+    """Legacy synchronous in-memory inspection of resume rows, including expired ones."""
 
     def resume_subscription(
         self, workspace_id: str, resume_id: str

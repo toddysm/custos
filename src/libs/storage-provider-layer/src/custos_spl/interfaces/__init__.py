@@ -99,6 +99,11 @@ from custos_spl.interfaces.metrics_query import (
     MetricSeries,
     MetricsQueryProvider,
 )
+from custos_spl.interfaces.trigger_queries import (
+    ResumeRegistrationProvider,
+    SubscriptionSnapshot,
+    TriggerQueryProvider,
+)
 
 __all__ = [
     "ActivityTypeVersion",
@@ -149,6 +154,7 @@ __all__ = [
     "PrincipalFilter",
     "PutDedupKeyResult",
     "ReserveIdempotencyResult",
+    "ResumeRegistrationProvider",
     "ResumeSubscription",
     "Role",
     "RoleBinding",
@@ -164,10 +170,12 @@ __all__ = [
     "StepAttempt",
     "Subscription",
     "SubscriptionSelector",
+    "SubscriptionSnapshot",
     "Tenant",
     "TenantFilter",
     "TenantScope",
     "TransactionHandle",
+    "TriggerQueryProvider",
     "User",
     "WorkflowTemplateVersion",
     "WorkflowVersion",
