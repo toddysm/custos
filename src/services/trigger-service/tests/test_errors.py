@@ -22,6 +22,10 @@ _EXPECTED_KINDS: dict[str, str] = {
     "RESUME_DIVERGENT": "trigger.resume_divergent",
     "DEDUP_DUPLICATE": "trigger.dedup_duplicate",
     "LOOP_DETECTED": "trigger.loop_detected",
+    "SOURCE_CONFIG_INVALID": "trigger.source_config_invalid",
+    "SOURCE_NOT_FOUND": "trigger.source_not_found",
+    "SOURCE_UNAVAILABLE": "trigger.source_unavailable",
+    "SUBSCRIPTION_CONFLICT": "trigger.subscription_conflict",
 }
 
 

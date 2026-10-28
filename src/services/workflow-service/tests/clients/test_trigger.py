@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import dataclasses
+from typing import Any
 
 import pytest
+from custos_spl.interfaces.trigger_source import ResumeSource
 
 from custos_workflow.clients import (
     CancelResumeSubscriptionRequest,
@@ -46,6 +48,40 @@ def _cancel(
     event_key: str = "evt-1",
 ) -> CancelResumeSubscriptionRequest:
     return CancelResumeSubscriptionRequest(run_id=run_id, step_id=step_id, event_key=event_key)
+
+
+@pytest.mark.parametrize("workspace", ["", " ", "_resume", 123])
+def test_cancel_rejects_invalid_explicit_workspace(workspace: Any) -> None:
+    """Malformed tenant partitions cannot be confused with legacy cancellation."""
+    with pytest.raises(ValueError, match="workspace"):
+        CancelResumeSubscriptionRequest("run", "step", "event", workspace_id=workspace)
+
+
+def test_fake_scopes_identity_and_rejects_source_rebinding() -> None:
+    """The fake preserves the same tenant and immutable-source contract as the real routes."""
+    client = FakeTriggerServiceClient()
+    request = RegisterResumeSubscriptionRequest(
+        "run",
+        "step",
+        "event",
+        "PT1H",
+        selector="event.data.key == 'one'",
+        workspace_id="one",
+        source=ResumeSource("registry", ("push",)),
+    )
+    other = dataclasses.replace(request, workspace_id="two")
+    first = client.register_resume_subscription(request)
+    second = client.register_resume_subscription(other)
+    assert first != second
+    with pytest.raises(ValueError, match="source"):
+        client.register_resume_subscription(
+            dataclasses.replace(request, source=ResumeSource("different", ("push",)))
+        )
+    assert client.register_resume_subscription(request) == first
+    client.cancel_resume_subscription(
+        CancelResumeSubscriptionRequest("run", "step", "event", "one")
+    )
+    assert client.register_resume_subscription(other) == second
 
 
 # ---------------------------------------------------------------------------

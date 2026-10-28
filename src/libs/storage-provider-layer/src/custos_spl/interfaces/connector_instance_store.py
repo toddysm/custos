@@ -193,4 +193,16 @@ __all__ = [
     "ConnectorInstance",
     "ConnectorInstanceFilter",
     "ConnectorInstanceStoreProvider",
+    "ConnectorReferenceReader",
 ]
+
+
+@runtime_checkable
+class ConnectorReferenceReader(Protocol):
+    """Credential-free existence checks for references into a trusted workspace."""
+
+    async def has_connector_instance(
+        self, workspace_id: WorkspaceId, instance_id: ConnectorInstanceId
+    ) -> bool:
+        """Return whether the exact scoped reference exists; never disclose other workspaces."""
+        ...

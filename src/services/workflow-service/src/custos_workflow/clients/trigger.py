@@ -14,11 +14,10 @@ step's lifecycle:
   Trigger Service treats it as idempotent (cancelling an unknown
   or already-expired key is a no-op).
 
-This module ships only the contract surface and two test doubles.
-The Trigger Service is **not yet implemented** (COMP-004 has no
-source), so the fake unblocks the rest of the sub-module; the
-production Dapr Service-Invocation adapter lands separately in
-``WF-IMPL-103``.
+This module includes the asynchronous Dapr adapter and test doubles.
+External waits add the trusted workspace and immutable source association;
+legacy requests omit both fields. Drivers support synchronous test doubles
+and await the production adapter explicitly.
 
 Acceptance criteria (mirrored from #540):
 
@@ -40,11 +39,12 @@ Design references:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Final, Protocol, runtime_checkable
 
 import httpx
+from custos_spl.interfaces.trigger_source import ResumeSource, validate_resume_context
 
 from custos_workflow.clients._dapr_invoke import (
     DEFAULT_OUTBOUND_RPC_TIMEOUT_SECONDS,
@@ -127,8 +127,12 @@ class RegisterResumeSubscriptionRequest:
     event_key: str
     ttl: str
     selector: str | None = None
+    workspace_id: str | None = None
+    source: ResumeSource | None = None
 
     def __post_init__(self) -> None:
+        """Validate resolved values and require tenant/selective context for external waits."""
+        validate_resume_context(self.workspace_id, self.source, self.selector)
         if not self.run_id:
             raise ValueError("RegisterResumeSubscriptionRequest.run_id must be a non-empty string")
         if not self.step_id:
@@ -146,13 +150,14 @@ class RegisterResumeSubscriptionRequest:
             )
 
     @property
-    def idempotency_key(self) -> tuple[str, str, str]:
-        """The ``(run_id, step_id, event_key)`` tuple the Trigger Service dedups on.
+    def idempotency_key(self) -> tuple[str, ...]:
+        """The legacy triple, prefixed with workspace for an external registration.
 
         Exposed so callers (and the fake) share one definition of
         the replay idempotency key instead of re-deriving it.
         """
-        return (self.run_id, self.step_id, self.event_key)
+        triple = (self.run_id, self.step_id, self.event_key)
+        return (self.workspace_id, *triple) if self.workspace_id is not None else triple
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,8 +199,16 @@ class CancelResumeSubscriptionRequest:
     run_id: str
     step_id: str
     event_key: str
+    workspace_id: str | None = None
 
     def __post_init__(self) -> None:
+        """Validate the cancellation triple and optional non-reserved tenant partition."""
+        if self.workspace_id is not None and (
+            not isinstance(self.workspace_id, str)
+            or not self.workspace_id.strip()
+            or self.workspace_id == "_resume"
+        ):
+            raise ValueError("cancel workspace_id must name a non-reserved workspace")
         if not self.run_id:
             raise ValueError("CancelResumeSubscriptionRequest.run_id must be a non-empty string")
         if not self.step_id:
@@ -204,9 +217,10 @@ class CancelResumeSubscriptionRequest:
             raise ValueError("CancelResumeSubscriptionRequest.event_key must be a non-empty string")
 
     @property
-    def idempotency_key(self) -> tuple[str, str, str]:
-        """The ``(run_id, step_id, event_key)`` tuple shared with registration."""
-        return (self.run_id, self.step_id, self.event_key)
+    def idempotency_key(self) -> tuple[str, ...]:
+        """The workspace-prefixed external key or legacy triple shared with registration."""
+        triple = (self.run_id, self.step_id, self.event_key)
+        return (self.workspace_id, *triple) if self.workspace_id is not None else triple
 
 
 # ---------------------------------------------------------------------------
@@ -228,18 +242,19 @@ class TriggerServiceClient(Protocol):
 
     def register_resume_subscription(
         self, request: RegisterResumeSubscriptionRequest
-    ) -> RegisterResumeSubscriptionResponse:
+    ) -> RegisterResumeSubscriptionResponse | Awaitable[RegisterResumeSubscriptionResponse]:
         """Register (or idempotently re-register) a resume subscription.
 
         Re-registering the same ``(run_id, step_id, event_key)``
         returns the existing ``tsSubscriptionId`` rather than
-        creating a duplicate. The call is synchronous from the
-        manager's perspective — the production adapter hides the
-        Dapr async boundary.
+        creating a duplicate. Test doubles return directly; the
+        production adapter returns an awaitable that drivers must resolve.
         """
         ...
 
-    def cancel_resume_subscription(self, request: CancelResumeSubscriptionRequest) -> None:
+    def cancel_resume_subscription(
+        self, request: CancelResumeSubscriptionRequest
+    ) -> Awaitable[None] | None:
         """Cancel an open resume subscription; a no-op for unknown keys."""
         ...
 
@@ -300,7 +315,8 @@ class FakeTriggerServiceClient:
     """
 
     id_prefix: str = "ts-sub-"
-    subscriptions: dict[tuple[str, str, str], str] = field(default_factory=dict)
+    subscriptions: dict[tuple[str, ...], str] = field(default_factory=dict)
+    _sources: dict[tuple[str, ...], ResumeSource | None] = field(default_factory=dict)
     register_calls: list[RegisterResumeSubscriptionRequest] = field(default_factory=list)
     cancel_calls: list[CancelResumeSubscriptionRequest] = field(default_factory=list)
     _next_id: int = 1
@@ -312,10 +328,13 @@ class FakeTriggerServiceClient:
         key = request.idempotency_key
         existing = self.subscriptions.get(key)
         if existing is not None:
+            if self._sources.get(key) != request.source:
+                raise ValueError("resume source association cannot be rebound")
             return RegisterResumeSubscriptionResponse(ts_subscription_id=existing)
         minted = f"{self.id_prefix}{self._next_id}"
         self._next_id += 1
         self.subscriptions[key] = minted
+        self._sources[key] = request.source
         return RegisterResumeSubscriptionResponse(ts_subscription_id=minted)
 
     def cancel_resume_subscription(self, request: CancelResumeSubscriptionRequest) -> None:
@@ -323,6 +342,7 @@ class FakeTriggerServiceClient:
         # Idempotent: cancelling an unknown / already-cancelled key
         # is a no-op, matching the Trigger Service contract.
         self.subscriptions.pop(request.idempotency_key, None)
+        self._sources.pop(request.idempotency_key, None)
 
 
 # ---------------------------------------------------------------------------
@@ -339,22 +359,29 @@ def _register_request_to_wire(request: RegisterResumeSubscriptionRequest) -> Map
     *match on event key alone* apart from an empty narrowing
     predicate.
     """
-    return {
+    wire: dict[str, Any] = {
         "runId": request.run_id,
         "stepId": request.step_id,
         "eventKey": request.event_key,
         "selector": request.selector,
         "ttl": request.ttl,
     }
+    if request.source is not None:
+        wire["workspaceId"] = request.workspace_id
+        wire["source"] = request.source.to_wire()
+    return wire
 
 
 def _cancel_request_to_wire(request: CancelResumeSubscriptionRequest) -> Mapping[str, Any]:
     """Render a cancel request to its camelCase wire form."""
-    return {
+    wire: dict[str, Any] = {
         "runId": request.run_id,
         "stepId": request.step_id,
         "eventKey": request.event_key,
     }
+    if request.workspace_id is not None:
+        wire["workspaceId"] = request.workspace_id
+    return wire
 
 
 def _parse_register_response(body: Any) -> RegisterResumeSubscriptionResponse:

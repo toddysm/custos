@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Final
+from typing import Any, Final, Self
 
 from custos_spl.ids import RunId, StepId, SubscriptionId, WorkflowId, WorkspaceId
 from custos_spl.interfaces.metadata_store import (
@@ -38,9 +38,16 @@ from custos_spl.interfaces.metadata_store import (
 from custos_spl.interfaces.metadata_store import (
     SubscriptionSelector as SplSubscriptionSelector,
 )
-from pydantic import Field
+from custos_spl.interfaces.trigger_source import validate_resume_context
+from pydantic import Field, model_validator
 
 from custos_trigger._wire import WireModel
+from custos_trigger.source_config import (
+    ResumeSourceWire,
+    SourceConfig,
+    SourceConfigurationError,
+    validate_source_config,
+)
 
 
 class SubscriptionKind(StrEnum):
@@ -110,6 +117,13 @@ class SubscriptionCreate(WireModel):
     target_workflow_version_id: str | None = None
     selector: str | None = None
     input_mapping: dict[str, Any] = Field(default_factory=dict)
+    source_config: SourceConfig | None = None
+
+    @model_validator(mode="after")
+    def validate_receiver(self) -> Self:
+        """Require and validate only the fields belonging to the selected source type."""
+        validate_source_config(self.source_type.value, self.source_config)
+        return self
 
 
 class SubscriptionPatch(WireModel):
@@ -124,6 +138,8 @@ class SubscriptionPatch(WireModel):
     selector: str | None = None
     input_mapping: dict[str, Any] | None = None
     target_workflow_version_id: str | None = None
+    source_config: SourceConfig | None = None
+    source_type: SourceType | None = None
 
 
 class ManualFireRequest(WireModel):
@@ -158,6 +174,14 @@ class RegisterResumeRequest(WireModel):
     event_key: str = Field(..., min_length=1)
     selector: str | None = None
     ttl: str | None = None
+    workspace_id: str | None = Field(default=None, min_length=1)
+    source: ResumeSourceWire | None = None
+
+    @model_validator(mode="after")
+    def validate_source_association(self) -> Self:
+        """External waits require a workspace and an explicit, nonblank event selector."""
+        _validate_resume_source(self.workspace_id, self.source, self.selector)
+        return self
 
 
 class RegisterResumeResponse(WireModel):
@@ -180,6 +204,16 @@ class CancelResumeRequest(WireModel):
     run_id: str = Field(..., min_length=1)
     step_id: str = Field(..., min_length=1)
     event_key: str = Field(..., min_length=1)
+    workspace_id: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def validate_workspace(self) -> Self:
+        """Keep the legacy sentinel out of the explicit tenant-scoped wire field."""
+        if self.workspace_id is not None and (
+            not self.workspace_id.strip() or self.workspace_id == "_resume"
+        ):
+            raise SourceConfigurationError("workspaceId must name a non-reserved workspace")
+        return self
 
 
 class Subscription(WireModel):
@@ -201,6 +235,14 @@ class Subscription(WireModel):
     state: SubscriptionState = SubscriptionState.ACTIVE
     created_at: datetime
     updated_at: datetime
+    source_config: SourceConfig | None = None
+    store_revision: int = Field(default=0, ge=0, strict=True, exclude=True)
+
+    @model_validator(mode="after")
+    def validate_stored_configuration(self) -> Self:
+        """Read legacy rows without config, but never accept malformed present config."""
+        validate_source_config(self.source_type.value, self.source_config, required=False)
+        return self
 
 
 class ResumeRegistration(WireModel):
@@ -216,6 +258,24 @@ class ResumeRegistration(WireModel):
     step_id: str = Field(..., min_length=1)
     event_key: str = Field(..., min_length=1)
     selector: str | None = None
+    workspace_id: str | None = Field(default=None, min_length=1)
+    source: ResumeSourceWire | None = None
+
+    @model_validator(mode="after")
+    def validate_source_association(self) -> Self:
+        """Apply the same persisted-association invariants as the registration request."""
+        _validate_resume_source(self.workspace_id, self.source, self.selector)
+        return self
+
+
+def _validate_resume_source(
+    workspace_id: str | None, source: ResumeSourceWire | None, selector: str | None
+) -> None:
+    """Keep legacy waits unchanged and require a scoped, selective external association."""
+    try:
+        validate_resume_context(workspace_id, source.to_source() if source else None, selector)
+    except ValueError as exc:
+        raise SourceConfigurationError(str(exc)) from exc
 
 
 #: Keys the Trigger Service stamps into the free-form
@@ -231,7 +291,7 @@ def build_selector_blob(sub: Subscription) -> dict[str, Any]:
     the rich fields plus the locked ``matchType``/``value``/``fieldPath``
     triple (``matchType="cel"``, ``fieldPath=""``).
     """
-    return {
+    result: dict[str, Any] = {
         _BLOB_KIND: sub.kind.value,
         _BLOB_SOURCE_TYPE: sub.source_type.value,
         _BLOB_TARGET_VERSION: sub.target_workflow_version_id,
@@ -240,6 +300,11 @@ def build_selector_blob(sub: Subscription) -> dict[str, Any]:
         _BLOB_VALUE: sub.selector or "",
         _BLOB_FIELD_PATH: "",
     }
+    if sub.source_config is not None:
+        result["sourceConfig"] = sub.source_config.model_dump(
+            mode="json", by_alias=True, exclude_none=True
+        )
+    return result
 
 
 def to_spl_subscription(sub: Subscription) -> SplSubscription:
@@ -287,6 +352,8 @@ def subscription_from_spl(
         state=SubscriptionState(row.state),
         created_at=row.created_at,
         updated_at=row.updated_at,
+        source_config=blob.get("sourceConfig"),
+        store_revision=blob.get("_revision", 0),
     )
 
 
@@ -302,16 +369,21 @@ def to_spl_resume_subscription(
     The ``eventKey`` and optional CEL ``selector`` are carried in ``payload``,
     the free-form extension point the minimal row provides.
     """
+    payload: dict[str, Any] = {
+        _PAYLOAD_EVENT_KEY: reg.event_key,
+        _PAYLOAD_SELECTOR: reg.selector,
+    }
+    if reg.source is not None:
+        if reg.workspace_id != workspace_id:
+            raise ValueError("resume source workspace does not match the storage partition")
+        payload["source"] = reg.source.to_source().to_wire()
     return SplResumeSubscription(
         workspace_id=WorkspaceId(workspace_id),
         resume_id=resume_id,
         run_id=RunId(reg.run_id),
         step_id=StepId(reg.step_id),
         expires_at=expires_at,
-        payload={
-            _PAYLOAD_EVENT_KEY: reg.event_key,
-            _PAYLOAD_SELECTOR: reg.selector,
-        },
+        payload=payload,
     )
 
 
@@ -323,6 +395,8 @@ def resume_registration_from_spl(row: SplResumeSubscription) -> ResumeRegistrati
         step_id=str(row.step_id),
         event_key=str(payload.get(_PAYLOAD_EVENT_KEY, "")),
         selector=payload.get(_PAYLOAD_SELECTOR),
+        source=payload.get("source"),
+        workspace_id=str(row.workspace_id) if payload.get("source") is not None else None,
     )
 
 

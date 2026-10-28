@@ -39,6 +39,10 @@ from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
+from custos_spl.errors import BackendUnavailable
+from custos_spl.ids import ConnectorInstanceId, WorkspaceId
+from custos_spl.interfaces.connector_instance_store import ConnectorReferenceReader
+
 from custos_catalog.clients.connector import (
     ConnectorClient,
     ConnectorServiceUnavailable,
@@ -530,6 +534,7 @@ async def apply_resolutions(
     definition_store: SubworkflowResolver,
     connector_client: ConnectorClient,
     workspace_id: str,
+    connector_references: ConnectorReferenceReader | None = None,
 ) -> NormalizedWorkflow:
     """Fill every :class:`RefResolutionSlot` in ``norm`` and return the result.
 
@@ -556,6 +561,7 @@ async def apply_resolutions(
             definition_store=definition_store,
             connector_client=connector_client,
             workspace_id=workspace_id,
+            connector_references=connector_references,
         )
         if replacement is not None:
             _set_at_path(new_doc, slot.path, replacement)
@@ -569,6 +575,7 @@ async def apply_template_resolutions(
     definition_store: SubworkflowResolver,
     connector_client: ConnectorClient,
     workspace_id: str,
+    connector_references: ConnectorReferenceReader | None = None,
 ) -> NormalizedTemplate:
     """Same as :func:`apply_resolutions` but for templates.
 
@@ -585,6 +592,7 @@ async def apply_template_resolutions(
             definition_store=definition_store,
             connector_client=connector_client,
             workspace_id=workspace_id,
+            connector_references=connector_references,
         )
         if replacement is not None:
             _set_at_path(new_doc, slot.path, replacement)
@@ -598,14 +606,14 @@ async def _resolve_slot(
     definition_store: SubworkflowResolver,
     connector_client: ConnectorClient,
     workspace_id: str,
+    connector_references: ConnectorReferenceReader | None = None,
 ) -> str | None:
     """Resolve one slot. Returns the replacement string, or ``None``.
 
-    Connector-instance slots do NOT have a substitution — the
-    reference name in the document is the canonical form. The
-    Connector Service call is purely an existence assertion, so this
-    helper returns ``None`` for that kind to signal "no document
-    rewrite".
+    Connector slots do not rewrite the document. Legacy activity references
+    retain Connector Service validation; source references use only scoped
+    storage existence, without type-version, capability or caller-permission checks
+    from the stronger ValidateConnector operation.
     """
     kind: SlotKind = slot.kind
     if kind == "activity":
@@ -628,6 +636,26 @@ async def _resolve_slot(
             workspace_id=workspace_id,
         )
         return None  # no document mutation
+    if kind == "source_connector_instance":
+        if connector_references is None:
+            raise ConnectorServiceUnavailable(
+                "scoped source-reference validation is not configured"
+            )
+        try:
+            exists = await connector_references.has_connector_instance(
+                WorkspaceId(workspace_id), ConnectorInstanceId(slot.original_ref)
+            )
+        except BackendUnavailable as exc:
+            raise ConnectorServiceUnavailable(
+                "scoped source-reference validation is unavailable"
+            ) from exc
+        if not exists:
+            raise ConnectorInstanceMissing(
+                f"connector instance {slot.original_ref!r} "
+                f"does not exist in workspace {workspace_id!r}",
+                ref=slot.original_ref,
+            )
+        return None
     raise ResolveError(f"unknown slot kind {kind!r}", ref=slot.original_ref)
 
 

@@ -12,10 +12,11 @@ Implementation plan: [`design/components/trigger-service/implementation-plan.md`
 
 ## Status
 
-**Implemented** — the `TS-IMPL-000-TRIGGER-SERVICE` milestone
+**Milestone 1 implemented; Milestone 2 in progress.**
+The `TS-IMPL-000-TRIGGER-SERVICE` milestone
 ([#652](https://github.com/toddysm/custos/issues/652)) is complete; all 21 child
 tasks (TS-IMPL-001 … TS-IMPL-021) are merged and the tracking issue is closed.
-The service implements the full design: typed settings + the locked `trigger.*`
+The M1 service includes typed settings + the locked `trigger.*`
 error taxonomy, the `custos-cel` event-binding root + canonical event-taxonomy
 registry, the `NormalizedEvent` envelope + subscription/domain models, SPL store
 adapters over `MetadataStoreProvider` + `providers.py` wiring, reserve-before-
@@ -32,6 +33,16 @@ events. Backed by a unit + integration suite at the ≥90 % coverage gate
 
 Tracking issue: [#652](https://github.com/toddysm/custos/issues/652)
 (`TS-IMPL-000`).
+
+Receiver configuration and scoped external-wait contracts are added by
+[#1006](https://github.com/toddysm/custos/issues/1006). Receiver workers and
+deployed durable wait execution remain part of
+[#988](https://github.com/toddysm/custos/issues/988).
+New receiver writes are default-off until every writer has been upgraded:
+`TRIGGER_RECEIVER_CONFIGURATION_ENABLED=true` is an explicit rollout acknowledgment.
+Scoped resume operations additionally require a configured Workflow caller
+authenticator; production wiring remains
+[#1015](https://github.com/toddysm/custos/issues/1015). The default app fails closed.
 
 ## Layout
 
@@ -52,8 +63,13 @@ From this directory (`src/services/trigger-service`):
 pip install -e ../../libs/storage-provider-layer[dev]
 pip install -e ../../libs/custos-postgres[dev]
 pip install -e ../../libs/custos-cel[dev]
+pip install -e ../workflow-service
 pip install -e ".[dev]"
 
 ruff format . && ruff check . && mypy src tests
 pytest -q --cov=custos_trigger --cov-report=term-missing --cov-fail-under=90
 ```
+
+The Workflow package is a development dependency for cross-service contract
+tests and their type checking, not a Trigger runtime dependency. Database
+integration tests also require `CUSTOS_PG_DSN` or local Docker.

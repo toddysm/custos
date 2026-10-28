@@ -82,6 +82,7 @@ async def _reset_and_migrate(dsn: str) -> None:
         async with pool.acquire() as conn:
             await conn.execute("DROP SCHEMA IF EXISTS custos_state CASCADE")
             await conn.execute("DROP SCHEMA IF EXISTS custos_meta CASCADE")
+            await conn.execute("DROP SCHEMA IF EXISTS connector_instance CASCADE")
         await PgMetadataAdapter(pool=pool).apply_pending()
     finally:
         await pool.close()

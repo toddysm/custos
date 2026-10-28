@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 
+from custos_cel import Literal, parse
 from fastapi.testclient import TestClient
 
 from tests.api.conftest import (
     FakeCatalogStore,
+    FakeConnectorReferences,
     FakeDefinitionStore,
     FakeMetadataStore,
     admin_header,
@@ -47,6 +49,84 @@ def test_publish_template_requires_write_permission(client: TestClient) -> None:
         headers=callctx_header(workspace_id="ws-1", permissions=["catalog:templates:read"]),
     )
     assert resp.status_code == 403
+
+
+def test_sourced_wait_template_materializes_with_scoped_reference_checks(
+    client: TestClient,
+    connector_references: FakeConnectorReferences,
+    stores: tuple[FakeDefinitionStore, FakeCatalogStore, FakeMetadataStore],
+) -> None:
+    """Template and materialized Workflow publication both use the scoped source reader."""
+    connector_references.rows.add(("ws-1", "registry"))
+    source = {"connectorInstanceId": "registry", "deliveryModes": ["push"]}
+    doc = minimal_template()
+    doc["spec"]["placeholders"].append(
+        {
+            "name": "selector",
+            "type": "string",
+            "default": "event.data.key == 'one'",
+        }
+    )
+    doc["spec"]["workflow"]["steps"] = [
+        {
+            "id": "await",
+            "waitFor": {
+                "eventKey": "${{ placeholders.topic }}",
+                "selector": "${{ placeholders.selector }}",
+                "source": source,
+            },
+        }
+    ]
+    headers = callctx_header(
+        permissions=[
+            "catalog:templates:write",
+            "catalog:templates:read",
+            "catalog:workflows:write",
+        ]
+    )
+    published = client.post(
+        "/v1/workspaces/ws-1/templates", json={"definition": doc}, headers=headers
+    )
+    assert published.status_code == 201, published.text
+    bound_topic = 'orders"}}\\\n\U0001f680'
+    materialized = client.post(
+        "/v1/workspaces/ws-1/templates/orders-tmpl@1:materialize",
+        json={"targetName": "source-prod", "bindings": {"topic": bound_topic}},
+        headers=headers,
+    )
+    assert materialized.status_code == 201, materialized.text
+    stored = stores[0].workflows[("ws-1", "source-prod")][0]
+    assert stored.normalized_doc["spec"]["steps"][0]["waitFor"]["source"] == source
+    expression = stored.normalized_doc["spec"]["steps"][0]["waitFor"]["eventKey"]
+    assert expression == "${{ " + json.dumps(bound_topic, ensure_ascii=False) + " }}"
+    literal = parse(expression[3:-2].strip())
+    assert isinstance(literal, Literal) and isinstance(literal.value, str)
+    assert literal.value == bound_topic
+    assert literal.value.encode("utf-8") == bound_topic.encode("utf-8")
+    assert connector_references.calls == [("ws-1", "registry"), ("ws-1", "registry")]
+
+
+def test_wait_json_placeholder_rejects_non_string_binding(client: TestClient) -> None:
+    """A polymorphic JSON placeholder must still produce a string in a wait expression slot."""
+    doc = minimal_template()
+    doc["spec"]["placeholders"][0]["type"] = "json"
+    doc["spec"]["workflow"]["steps"] = [
+        {
+            "id": "await",
+            "waitFor": {"eventKey": "${{ placeholders.topic }}"},
+        }
+    ]
+    published = client.post(
+        "/v1/workspaces/ws-1/templates", json={"definition": doc}, headers=admin_header()
+    )
+    assert published.status_code == 201, published.text
+    response = client.post(
+        "/v1/workspaces/ws-1/templates/orders-tmpl@1:materialize",
+        json={"targetName": "invalid-wait", "bindings": {"topic": True}},
+        headers=admin_header(),
+    )
+    assert response.status_code == 400
+    assert "must bind to strings" in response.text
 
 
 # ---------------------------------------------------------------------------

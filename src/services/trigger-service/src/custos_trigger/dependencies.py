@@ -1,4 +1,4 @@
-"""FastAPI dependency helpers for the SPL provider bundle (TS-IMPL-008).
+"""FastAPI dependencies for providers, receiver readiness and scoped caller verification.
 
 The lifespan in :mod:`custos_trigger.app` stashes the :class:`Providers`
 bundle on ``app.state.providers``; these helpers surface it (and the
@@ -8,26 +8,64 @@ phases (TS-IMPL-015..018), mirroring the auth-service convention.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Annotated, cast
 
 from fastapi import Depends, Request
 
+from custos_trigger.errors import TriggerError, TriggerErrorKind
 from custos_trigger.pipeline.dispatch import AuditSink, Dispatcher
 from custos_trigger.providers import Providers
 from custos_trigger.selector import SelectorEvaluator
 from custos_trigger.stores import ResumeSubscriptionStore, SubscriptionStore
 from custos_trigger.stores.base import TriggerMetadataStore
 
+#: Must authenticate the Workflow service on every transport, including direct
+#: app-port requests. Return only after verification; raise on any failure.
+WorkflowCallerVerifier = Callable[[Request], Awaitable[None]]
+
 __all__ = [
+    "WorkflowCallerVerifier",
     "get_audit_sink",
     "get_dispatcher",
     "get_metadata_store",
     "get_providers",
+    "get_receiver_configuration_enabled",
     "get_resume_default_ttl_seconds",
     "get_resume_subscription_store",
     "get_selector_evaluator",
     "get_subscription_store",
+    "get_workflow_caller_verifier",
+    "require_workflow_caller",
 ]
+
+
+def get_receiver_configuration_enabled(request: Request) -> bool:
+    """Return the explicitly initialized compatibility rollout gate."""
+    enabled = getattr(request.app.state, "receiver_configuration_enabled", None)
+    if not isinstance(enabled, bool):
+        raise RuntimeError("receiver configuration gate is not initialized; did the lifespan run?")
+    return enabled
+
+
+def get_workflow_caller_verifier(request: Request) -> WorkflowCallerVerifier | None:
+    """Return the trusted authenticator, never an implicit allow-all implementation."""
+    return cast(
+        WorkflowCallerVerifier | None,
+        getattr(request.app.state, "workflow_caller_verifier", None),
+    )
+
+
+async def require_workflow_caller(
+    request: Request, verifier: WorkflowCallerVerifier | None
+) -> None:
+    """Fail closed before scoped state access until authenticated Workflow access is wired."""
+    if verifier is None:
+        raise TriggerError(
+            TriggerErrorKind.SOURCE_UNAVAILABLE,
+            "authenticated Workflow service access is not configured for scoped resume RPCs",
+        )
+    await verifier(request)
 
 
 def get_providers(request: Request) -> Providers:

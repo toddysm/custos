@@ -35,6 +35,7 @@ from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
+from asyncpg import UniqueViolationError
 from custos_spl.errors import (
     BackendUnavailable,
     ImmutableViolation,
@@ -74,7 +75,7 @@ from custos_spl.interfaces.metadata_store import (
     SubscriptionSelector,
     TransactionHandle,
 )
-from custos_spl.interfaces.trigger_queries import SubscriptionSnapshot
+from custos_spl.interfaces.trigger_queries import SubscriptionSnapshot, prepare_subscription_write
 from custos_spl.middleware.transactions import bind_handle, check_handle
 from custos_spl.pagination import (
     Cursor,
@@ -717,13 +718,21 @@ class PgMetadataAdapter:
                     (workspace_id, resume_id, run_id, step_id, expires_at, payload)
                 VALUES ($1, $2, $3, $4, $5, $6::jsonb)
                 ON CONFLICT (workspace_id, resume_id) DO UPDATE SET
-                    run_id = CASE WHEN stored.expires_at <= $7
+                    run_id = CASE WHEN stored.expires_at <= $7 AND
+                        NULLIF(stored.payload->'source', 'null'::jsonb) IS NOT DISTINCT FROM
+                        NULLIF(EXCLUDED.payload->'source', 'null'::jsonb)
                         THEN EXCLUDED.run_id ELSE stored.run_id END,
-                    step_id = CASE WHEN stored.expires_at <= $7
+                    step_id = CASE WHEN stored.expires_at <= $7 AND
+                        NULLIF(stored.payload->'source', 'null'::jsonb) IS NOT DISTINCT FROM
+                        NULLIF(EXCLUDED.payload->'source', 'null'::jsonb)
                         THEN EXCLUDED.step_id ELSE stored.step_id END,
-                    expires_at = CASE WHEN stored.expires_at <= $7
+                    expires_at = CASE WHEN stored.expires_at <= $7 AND
+                        NULLIF(stored.payload->'source', 'null'::jsonb) IS NOT DISTINCT FROM
+                        NULLIF(EXCLUDED.payload->'source', 'null'::jsonb)
                         THEN EXCLUDED.expires_at ELSE stored.expires_at END,
-                    payload = CASE WHEN stored.expires_at <= $7
+                    payload = CASE WHEN stored.expires_at <= $7 AND
+                        NULLIF(stored.payload->'source', 'null'::jsonb) IS NOT DISTINCT FROM
+                        NULLIF(EXCLUDED.payload->'source', 'null'::jsonb)
                         THEN EXCLUDED.payload ELSE stored.payload END
                 RETURNING workspace_id, resume_id, run_id, step_id, expires_at, payload
                 """,
@@ -828,6 +837,112 @@ class PgMetadataAdapter:
             encode_query_cursor(scope, rows[size - 1]["schedule_id"]) if len(rows) > size else None
         )
         return Page((_row_to_schedule(row) for row in rows[:size]), next_cursor)
+
+    async def write_subscription(
+        self,
+        workspace_id: str,
+        subscription: Subscription,
+        selector: SubscriptionSelector,
+        *,
+        expected_revision: int | None,
+        schedule: Schedule | None,
+        reset_schedule: bool,
+        preserve_state: bool = False,
+    ) -> SubscriptionSnapshot:
+        """Commit base state, selector revision and schedule eligibility in one transaction."""
+        pool = await self._pool_ref()
+        try:
+            async with pool.acquire() as conn, conn.transaction():
+                locked = await conn.fetchrow(
+                    "SELECT subscription_id FROM custos_state.subscription "
+                    "WHERE workspace_id = $1 AND subscription_id = $2 FOR UPDATE",
+                    workspace_id,
+                    subscription.subscription_id,
+                )
+                # Read selectors with a fresh READ COMMITTED snapshot after acquiring
+                # the lock: a contender may have appended a revision while we waited.
+                current_row = (
+                    await conn.fetchrow(
+                        _SUBSCRIPTION_QUERY
+                        + " WHERE s.workspace_id = $1 AND s.subscription_id = $2",
+                        workspace_id,
+                        subscription.subscription_id,
+                    )
+                    if locked is not None
+                    else None
+                )
+                schedule_row = await conn.fetchrow(
+                    "SELECT workspace_id, schedule_id, workflow_id, cron, next_fire_at, enabled "
+                    "FROM custos_state.schedule WHERE workspace_id = $1 AND schedule_id = $2 "
+                    "FOR UPDATE",
+                    workspace_id,
+                    subscription.subscription_id,
+                )
+                snapshot, next_schedule = prepare_subscription_write(
+                    workspace_id,
+                    subscription,
+                    selector,
+                    _row_to_subscription_snapshot(current_row) if current_row is not None else None,
+                    _row_to_schedule(schedule_row) if schedule_row is not None else None,
+                    expected_revision=expected_revision,
+                    schedule=schedule,
+                    reset_schedule=reset_schedule,
+                    preserve_state=preserve_state,
+                )
+                if current_row is None:
+                    await conn.execute(
+                        "INSERT INTO custos_state.subscription "
+                        "(workspace_id, subscription_id, workflow_id, state, "
+                        "created_at, updated_at) "
+                        "VALUES ($1, $2, $3, $4, $5, $6)",
+                        workspace_id,
+                        subscription.subscription_id,
+                        subscription.workflow_id,
+                        snapshot.subscription.state,
+                        subscription.created_at,
+                        subscription.updated_at,
+                    )
+                else:
+                    await conn.execute(
+                        "UPDATE custos_state.subscription SET state = $3, updated_at = $4 "
+                        "WHERE workspace_id = $1 AND subscription_id = $2",
+                        workspace_id,
+                        subscription.subscription_id,
+                        snapshot.subscription.state,
+                        subscription.updated_at,
+                    )
+                assert snapshot.selector is not None
+                await conn.execute(
+                    "INSERT INTO custos_state.subscription_selector "
+                    "(workspace_id, subscription_id, selector, added_at) "
+                    "VALUES ($1, $2, $3::jsonb, $4)",
+                    workspace_id,
+                    subscription.subscription_id,
+                    json.dumps(dict(snapshot.selector.selector)),
+                    snapshot.selector.added_at,
+                )
+                if next_schedule is not None:
+                    statement = (
+                        "INSERT INTO custos_state.schedule "
+                        "(workspace_id, schedule_id, workflow_id, cron, next_fire_at, enabled) "
+                        "VALUES ($1, $2, $3, $4, $5, $6)"
+                        if schedule_row is None
+                        else "UPDATE custos_state.schedule "
+                        "SET cron = $4, next_fire_at = $5, enabled = $6 "
+                        "WHERE workspace_id = $1 AND schedule_id = $2 AND workflow_id = $3"
+                    )
+                    await conn.execute(
+                        statement,
+                        workspace_id,
+                        next_schedule.schedule_id,
+                        next_schedule.workflow_id,
+                        next_schedule.cron,
+                        next_schedule.next_fire_at,
+                        next_schedule.enabled,
+                    )
+                return snapshot
+        except UniqueViolationError as exc:
+            raise ImmutableViolation("subscription or schedule was created concurrently") from exc
 
     async def put_subscription(self, workspace_id: str, subscription: Subscription) -> Subscription:
         pool = await self._pool_ref()

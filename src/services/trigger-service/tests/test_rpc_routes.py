@@ -30,6 +30,7 @@ from custos_trigger.middleware.callctx import _BYPASS_PATHS
 from custos_trigger.pipeline.dispatch import Dispatcher
 from custos_trigger.providers import InMemoryTriggerMetadataStore, Providers
 from custos_trigger.settings import DEFAULT_RESUME_DEFAULT_TTL_SECONDS
+from custos_trigger.source_config import SourceConfigurationError
 
 _T0 = datetime(2026, 6, 4, 12, 0, 0, tzinfo=UTC)
 
@@ -312,16 +313,18 @@ def test_compute_resume_id_is_deterministic_and_distinct() -> None:
         ("PT45S", 45),
         ("P1W", 604_800),
         ("P1DT2H3M4S", 93_784),
-        ("PT1.5S", 1),
+        ("PT1.5S", 1.5),
+        ("PT0.5S", 0.5),
     ],
 )
-def test_parse_iso8601_duration_seconds_valid(value: str, expected: int) -> None:
-    assert rpc._parse_iso8601_duration_seconds(value) == expected
+def test_parse_iso8601_duration_valid(value: str, expected: float) -> None:
+    """Preserve fractional durations with datetime's microsecond resolution."""
+    assert rpc._parse_iso8601_duration(value) == timedelta(seconds=expected)
 
 
 @pytest.mark.parametrize("value", ["", "P", "PT", "garbage", "24H", "PT24X"])
-def test_parse_iso8601_duration_seconds_invalid(value: str) -> None:
-    assert rpc._parse_iso8601_duration_seconds(value) is None
+def test_parse_iso8601_duration_invalid(value: str) -> None:
+    assert rpc._parse_iso8601_duration(value) is None
 
 
 @pytest.mark.parametrize(
@@ -334,8 +337,19 @@ def test_parse_iso8601_duration_seconds_invalid(value: str) -> None:
         ("PT0S", DEFAULT_RESUME_DEFAULT_TTL_SECONDS),
     ],
 )
-def test_resolve_ttl_seconds(ttl: str | None, expected: int) -> None:
-    assert rpc._resolve_ttl_seconds(ttl, DEFAULT_RESUME_DEFAULT_TTL_SECONDS) == expected
+def test_resolve_ttl(ttl: str | None, expected: int) -> None:
+    assert rpc._resolve_ttl(ttl, DEFAULT_RESUME_DEFAULT_TTL_SECONDS) == timedelta(seconds=expected)
+
+
+def test_ttl_keeps_day_precision_and_rejects_overflow() -> None:
+    """Large integer day components do not erase fractional microseconds or become a default."""
+    assert rpc._parse_iso8601_duration("P100000DT0.000001S") == timedelta(
+        days=100000, microseconds=1
+    )
+    with pytest.raises(SourceConfigurationError, match="supported range"):
+        rpc._parse_iso8601_duration("P9999999999W")
+    with pytest.raises(SourceConfigurationError, match="microsecond precision"):
+        rpc._parse_iso8601_duration("PT0.0000001S")
 
 
 # --------------------------------------------------------------------------

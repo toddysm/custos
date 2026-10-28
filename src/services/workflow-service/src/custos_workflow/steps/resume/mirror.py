@@ -56,6 +56,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from custos_spl.interfaces.trigger_source import ResumeSource, validate_resume_context
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
@@ -93,7 +95,8 @@ class ResumeSubscriptionMirror:
     ``ResumeSubscriptionMirror`` table in ``design.md`` § *Data
     Models*. :attr:`mirror_id` is the primary key the repository
     upserts on — re-``put``-ting a mirror with the same
-    :attr:`mirror_id` replaces the row (this is how a replay
+    :attr:`mirror_id` updates metadata without rebinding its source/workspace
+    (this is how a replay
     updates :attr:`ts_subscription_id` after the Trigger Service
     re-issues an id post-TTL).
 
@@ -120,8 +123,12 @@ class ResumeSubscriptionMirror:
     registered_at: datetime
     expires_at: datetime
     selector: str | None = None
+    workspace_id: str | None = None
+    source: ResumeSource | None = None
 
     def __post_init__(self) -> None:
+        """Validate mirror identity, timestamps and the optional external association."""
+        validate_resume_context(self.workspace_id, self.source, self.selector)
         if not self.mirror_id:
             raise ValueError("ResumeSubscriptionMirror.mirror_id must be a non-empty string")
         if not self.run_id:
@@ -160,7 +167,7 @@ class ResumeSubscriptionMirror:
         ``MetadataStoreProvider`` adapter can persist the dict
         unchanged.
         """
-        return {
+        wire: dict[str, Any] = {
             "mirrorId": self.mirror_id,
             "runId": self.run_id,
             "stepId": self.step_id,
@@ -170,6 +177,10 @@ class ResumeSubscriptionMirror:
             "registeredAt": self.registered_at.astimezone(UTC).isoformat(),
             "expiresAt": self.expires_at.astimezone(UTC).isoformat(),
         }
+        if self.source is not None:
+            wire["workspaceId"] = self.workspace_id
+            wire["source"] = self.source.to_wire()
+        return wire
 
     def to_json(self) -> str:
         """Serialize to a byte-stable canonical JSON string.
@@ -202,6 +213,10 @@ class ResumeSubscriptionMirror:
             registered_at=_parse_iso8601_utc(data["registeredAt"]),
             expires_at=_parse_iso8601_utc(data["expiresAt"]),
             selector=data.get("selector"),
+            workspace_id=data.get("workspaceId"),
+            source=ResumeSource.from_wire(data["source"])
+            if data.get("source") is not None
+            else None,
         )
 
     @classmethod
@@ -231,7 +246,8 @@ class ResumeSubscriptionMirrorRepository(Protocol):
         Upsert semantics: re-``put``-ting the same ``mirror_id``
         overwrites the row, which is how a replay updates
         ``ts_subscription_id`` after a Trigger Service
-        re-registration returns a fresh id.
+        re-registration returns a fresh id. A changed source/workspace must
+        raise ``ValueError`` and leave the original row untouched.
         """
         ...
 
@@ -281,7 +297,13 @@ class InMemoryResumeSubscriptionMirrorRepository:
         self._lock: asyncio.Lock = asyncio.Lock()
 
     async def put(self, mirror: ResumeSubscriptionMirror) -> ResumeSubscriptionMirror:
+        """Update replay metadata without rebinding a mirror's original source/workspace."""
         async with self._lock:
+            existing = self._rows.get(mirror.mirror_id)
+            if existing is not None and (
+                existing.workspace_id != mirror.workspace_id or existing.source != mirror.source
+            ):
+                raise ValueError("resume mirror source association cannot be rebound")
             self._rows[mirror.mirror_id] = mirror
         return mirror
 

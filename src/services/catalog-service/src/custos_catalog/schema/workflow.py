@@ -13,7 +13,7 @@ Design choices encoded here:
   The structural validator does NOT inspect the CEL source; that is
   CS-IMPL-007's responsibility, which sees the normalized document
   emitted by CS-IMPL-006.
-* The step union (``activity`` / ``let`` / ``workflow``) is enforced
+* The step union (``activity`` / ``let`` / ``workflow`` / ``waitFor``) is enforced
   through ``oneOf`` so a single field-path error names the violating
   branch (``spec/steps/2 -> oneOf branch did not match``).
 * ``connector:`` (singular, string) and ``connectors:`` (map of aliases)
@@ -30,6 +30,11 @@ Design choices encoded here:
 from __future__ import annotations
 
 from typing import Any
+
+from custos_spl.interfaces.trigger_source import (
+    CONNECTOR_EXPRESSION_PATTERN,
+    MIN_POLL_INTERVAL_SECONDS,
+)
 
 #: A CEL placeholder string of the form ``${{ ... }}``. Used wherever
 #: an interpolated expression is allowed (e.g. ``connector:`` values
@@ -177,7 +182,7 @@ def _trigger() -> dict[str, Any]:
 
 
 def _step_common_properties() -> dict[str, Any]:
-    """Properties shared by every step kind (activity / let / workflow)."""
+    """Properties shared by activity, let, workflow and waitFor steps."""
     return {
         "id": {"type": "string", "pattern": _STEP_ID_PATTERN},
         "description": {"type": "string"},
@@ -299,12 +304,93 @@ def _workflow_step() -> dict[str, Any]:
     }
 
 
+def _resume_source() -> dict[str, Any]:
+    """Constant credential-free source identity, with polling only for pull delivery."""
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["connectorInstanceId", "deliveryModes"],
+        "properties": {
+            "connectorInstanceId": {
+                "type": "string",
+                "pattern": r"\S",
+                "not": {"pattern": CONNECTOR_EXPRESSION_PATTERN},
+            },
+            "deliveryModes": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": True,
+                "items": {"enum": ["push", "pull"]},
+            },
+            "pollIntervalSeconds": {
+                "type": ["integer", "null"],
+                "minimum": MIN_POLL_INTERVAL_SECONDS,
+            },
+        },
+        "if": {
+            "required": ["pollIntervalSeconds"],
+            "properties": {"pollIntervalSeconds": {"type": "integer"}},
+        },
+        "then": {"properties": {"deliveryModes": {"contains": {"const": "pull"}}}},
+    }
+
+
+def _wait_for_step() -> dict[str, Any]:
+    """Resume wait with expression slots, a positive constant TTL and optional source."""
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["id", "waitFor"],
+        "properties": {
+            **{
+                key: value
+                for key, value in _step_common_properties().items()
+                if key not in ("retry", "on_error")
+            },
+            "needs": {
+                "type": ["array", "null"],
+                "minItems": 1,
+                "uniqueItems": True,
+                "items": {"type": "string", "pattern": _STEP_ID_PATTERN},
+            },
+            "waitFor": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["eventKey"],
+                "properties": {
+                    "eventKey": _expression_string(),
+                    "selector": {"anyOf": [_expression_string(), {"type": "null"}]},
+                    "ttl": {
+                        "type": ["string", "null"],
+                        "pattern": (
+                            r"^P(?=[0-9WDTHMS.]*[1-9])(?:[0-9]+W|"
+                            r"(?:[0-9]+D)?(?:T(?:[0-9]+H)?(?:[0-9]+M)?"
+                            r"(?:[0-9]+(?:\.[0-9]+)?S)?)?)$"
+                        ),
+                    },
+                    "source": {"anyOf": [_resume_source(), {"type": "null"}]},
+                },
+                "if": {
+                    "required": ["source"],
+                    "properties": {"source": {"type": "object"}},
+                },
+                "then": {
+                    "required": ["selector"],
+                    "properties": {"selector": _expression_string()},
+                },
+            },
+        },
+    }
+
+
 def _step() -> dict[str, Any]:
+    """Require exactly one supported step form."""
     return {
         "oneOf": [
             _activity_step(),
             _let_step(),
             _workflow_step(),
+            _wait_for_step(),
         ],
     }
 
@@ -378,7 +464,7 @@ def _metadata(*, require_workspace: bool) -> dict[str, Any]:
 #: and must be paired with a design changelog entry.
 WORKFLOW_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "$id": "https://custos.dev/schemas/workflow.v1.schema.json",
+    "$id": "https://custos.dev/schemas/workflow.v1.1.schema.json",
     "title": "Custos Workflow",
     "type": "object",
     "additionalProperties": False,

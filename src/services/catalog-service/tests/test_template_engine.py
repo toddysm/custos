@@ -60,6 +60,39 @@ def test_render_preserves_json_binding_structure() -> None:
     assert out["spec"]["settings"]["opts"] == {"a": [1, 2, 3], "b": {"nested": True}}
 
 
+@pytest.mark.parametrize("binding", ["orders", 42, True])
+def test_nested_wait_named_data_preserves_native_binding(binding: Any) -> None:
+    """Only direct workflow wait fields receive CEL literals; ordinary nested data is untouched."""
+    doc = _template(
+        {
+            "steps": [
+                {
+                    "id": "data",
+                    "let": {"nested": {"waitFor": {"eventKey": "${{ placeholders.topic }}"}}},
+                }
+            ]
+        }
+    )
+    rendered = render(doc, {"topic": binding}, target_workflow_name="nested")
+    assert rendered["spec"]["steps"][0]["let"]["nested"]["waitFor"]["eventKey"] == binding
+
+
+def test_wait_binding_rejects_unpaired_unicode_surrogate() -> None:
+    """Malformed Unicode is reported as a render error before downstream UTF-8 encoding."""
+    doc = _template(
+        {
+            "steps": [
+                {
+                    "id": "wait",
+                    "waitFor": {"eventKey": "${{ placeholders.topic }}"},
+                }
+            ]
+        }
+    )
+    with pytest.raises(TemplateRenderError, match="valid Unicode"):
+        render(doc, {"topic": "\ud800"}, target_workflow_name="invalid")
+
+
 def test_render_substitutes_activity_ref_placeholder() -> None:
     template_doc = _template(
         {

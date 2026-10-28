@@ -36,6 +36,60 @@ def _wf(
     }
 
 
+@pytest.mark.parametrize("field", ["eventKey", "selector"])
+def test_wait_expression_slots_are_publish_validated(field: str) -> None:
+    """Neither wait binding can bypass syntax and declared-input checks at publish time."""
+    wait = {"eventKey": "${{ inputs.key }}", "selector": "${{ inputs.key }}"}
+    document = _wf([{"id": "await", "waitFor": wait}], inputs={"key": {"type": "string"}})
+    normalized = normalize_workflow(document)
+    assert [slot.path for slot in discover_workflow_slots(normalized)] == [
+        "spec.steps[0].waitFor.eventKey",
+        "spec.steps[0].waitFor.selector",
+    ]
+    validate_expressions(normalized)
+    wait[field] = "${{ inputs.missing }}"
+    with pytest.raises(CelNameBindingError) as raised:
+        validate_expressions(normalize_workflow(document))
+    assert raised.value.issues[0].path == f"spec.steps[0].waitFor.{field}"
+    wait[field] = "${{ inputs.key + }}"
+    with pytest.raises(CelSyntaxError):
+        validate_expressions(normalize_workflow(document))
+
+
+@pytest.mark.parametrize(
+    "expression", ["${{ placeholders.topic + 'suffix' }}", "${{ placeholders['topic'] }}"]
+)
+def test_wait_template_rejects_unrenderable_placeholder_expressions(expression: str) -> None:
+    """Only whole dot-form placeholder bindings can be rendered safely in wait string slots."""
+    template = {
+        "spec": {
+            "placeholders": [{"name": "topic", "type": "string"}],
+            "workflow": {"steps": [{"id": "await", "waitFor": {"eventKey": expression}}]},
+        },
+    }
+    with pytest.raises(CelNameBindingError, match="complete expression"):
+        validate_template_expressions(normalize_template(template))
+
+
+def test_wait_template_rejects_non_string_placeholder_type() -> None:
+    """A known numeric placeholder cannot ever produce the required string binding."""
+    template = {
+        "spec": {
+            "placeholders": [{"name": "topic", "type": "integer"}],
+            "workflow": {
+                "steps": [
+                    {
+                        "id": "await",
+                        "waitFor": {"eventKey": "${{ placeholders.topic }}"},
+                    }
+                ]
+            },
+        },
+    }
+    with pytest.raises(CelNameBindingError, match="string-compatible"):
+        validate_template_expressions(normalize_template(template))
+
+
 # ---------------------------------------------------------------------------
 # Slot discovery
 # ---------------------------------------------------------------------------

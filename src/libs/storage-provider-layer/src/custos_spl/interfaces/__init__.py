@@ -42,6 +42,7 @@ from custos_spl.interfaces.connector_instance_store import (
     ConnectorInstance,
     ConnectorInstanceFilter,
     ConnectorInstanceStoreProvider,
+    ConnectorReferenceReader,
 )
 from custos_spl.interfaces.definition_store import (
     DefinitionListFilter,
@@ -101,9 +102,11 @@ from custos_spl.interfaces.metrics_query import (
 )
 from custos_spl.interfaces.trigger_queries import (
     ResumeRegistrationProvider,
+    SubscriptionMutationProvider,
     SubscriptionSnapshot,
     TriggerQueryProvider,
 )
+from custos_spl.interfaces.trigger_source import DeliveryMode, ResumeSource
 
 __all__ = [
     "ActivityTypeVersion",
@@ -120,12 +123,14 @@ __all__ = [
     "ConnectorInstance",
     "ConnectorInstanceFilter",
     "ConnectorInstanceStoreProvider",
+    "ConnectorReferenceReader",
     "ConnectorTypeVersion",
     "DedupDuplicate",
     "DedupKey",
     "DedupReserved",
     "DefinitionListFilter",
     "DefinitionStoreProvider",
+    "DeliveryMode",
     "DeviceCodeSession",
     "ExistingCompleted",
     "ExistingInFlight",
@@ -155,6 +160,7 @@ __all__ = [
     "PutDedupKeyResult",
     "ReserveIdempotencyResult",
     "ResumeRegistrationProvider",
+    "ResumeSource",
     "ResumeSubscription",
     "Role",
     "RoleBinding",
@@ -169,6 +175,7 @@ __all__ = [
     "Step",
     "StepAttempt",
     "Subscription",
+    "SubscriptionMutationProvider",
     "SubscriptionSelector",
     "SubscriptionSnapshot",
     "Tenant",

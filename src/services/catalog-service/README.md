@@ -53,12 +53,18 @@ Process bind:
 
 ```bash
 cd src/services/catalog-service
+pip install -e ../../libs/storage-provider-layer[dev]
+pip install -e ../../libs/custos-postgres[dev]
+pip install -e ../../libs/custos-cel[dev]
+pip install -e ../workflow-service
 pip install -e ".[dev]"
 ruff check .
 ruff format --check .
 mypy src tests
 pytest -q
 ```
+
+Workflow is a development-only dependency for publication-to-compiler contract tests.
 
 `python -m custos_catalog` starts the FastAPI app with the full REST +
 Internal RPC surface plus the `/healthz` and `/readyz` probes.

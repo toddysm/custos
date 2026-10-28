@@ -79,6 +79,7 @@ Acceptance criteria (mirrored from #543):
 from __future__ import annotations
 
 import hashlib
+import inspect
 from collections.abc import Generator, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
@@ -88,6 +89,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from custos_cel import CelError, evaluate
 from custos_cel.scope import BindingScope, RunInfo, StepBinding, WorkflowInfo
+from custos_spl.interfaces.trigger_source import validate_resume_context
 
 from custos_workflow._telemetry import (
     observe_resume_cancellation,
@@ -108,7 +110,7 @@ from custos_workflow.runs.step_handler import (
     StepResult,
     StepSucceeded,
 )
-from custos_workflow.runs.wait import parse_wait_duration
+from custos_workflow.runs.wait import WaitDurationError, parse_wait_duration
 from custos_workflow.steps.errors import (
     ResumeMirrorPersistError,
     ResumeRegistrationFailedError,
@@ -380,7 +382,7 @@ class WaitForStepHandler:
                 ctx.clock,
                 run_id_str,
                 expected_kind=CallSiteKind.WAIT_FOR_SELECTOR,
-                required=False,
+                required=wait_for_step.wait_for.source is not None,
             )
         except WithInputResolutionError as exc:
             return StepFailed(envelope=MappingProxyType(exc.to_dict()))
@@ -390,8 +392,30 @@ class WaitForStepHandler:
         assert event_key is not None
 
         ttl = wait_for_step.wait_for.ttl or self._default_ttl
+        source = (
+            wait_for_step.wait_for.source.to_source()
+            if wait_for_step.wait_for.source is not None
+            else None
+        )
+        source_workspace = ctx.workspace_id if source is not None else None
+        try:
+            validate_resume_context(source_workspace, source, selector)
+        except ValueError as exc:
+            source_failure = WithInputResolutionError(
+                str(exc), run_id=run_id_str, step_id=step_id, binding_name="source"
+            )
+            return StepFailed(envelope=MappingProxyType(source_failure.to_dict()))
         registered_at = ctx.workflow_context.current_utc_datetime
-        expires_at = registered_at + parse_wait_duration(step_id, ttl)
+        try:
+            expires_at = registered_at + parse_wait_duration(step_id, ttl)
+        except (WaitDurationError, OverflowError) as exc:
+            ttl_failure = WithInputResolutionError(
+                f"waitFor TTL cannot form a valid deadline: {exc}",
+                run_id=run_id_str,
+                step_id=step_id,
+                binding_name="ttl",
+            )
+            return StepFailed(envelope=MappingProxyType(ttl_failure.to_dict()))
         mirror_id = _derive_mirror_id(run_id_str, step_id, event_key)
 
         # 2. Persist the mirror BEFORE the Trigger Service call
@@ -405,6 +429,8 @@ class WaitForStepHandler:
             registered_at=registered_at,
             expires_at=expires_at,
             selector=selector,
+            workspace_id=source_workspace,
+            source=source,
         )
         try:
             yield PersistMirrorCall(mirror=pending_mirror)
@@ -427,6 +453,8 @@ class WaitForStepHandler:
             event_key=event_key,
             ttl=ttl,
             selector=selector,
+            workspace_id=source_workspace,
+            source=source,
         )
         attempt = 1
         while True:
@@ -472,6 +500,8 @@ class WaitForStepHandler:
             registered_at=registered_at,
             expires_at=expires_at,
             selector=selector,
+            workspace_id=source_workspace,
+            source=source,
         )
         try:
             yield PersistMirrorCall(mirror=registered_mirror)
@@ -501,6 +531,7 @@ class WaitForStepHandler:
                     run_id=run_id_str,
                     step_id=step_id,
                     event_key=event_key,
+                    workspace_id=source_workspace,
                 )
             )
         with suppress(Exception):
@@ -563,7 +594,8 @@ async def drive_resume_generator(
         elif isinstance(token, RegisterResumeSubscriptionCall):
             try:
                 with observe_resume_registration():
-                    sent = trigger_client.register_resume_subscription(token.request)
+                    result = trigger_client.register_resume_subscription(token.request)
+                    sent = await result if inspect.isawaitable(result) else result
             except Exception as exc:
                 pending_exc = exc
         elif isinstance(token, WaitForExternalEventCall):
@@ -572,7 +604,9 @@ async def drive_resume_generator(
         elif isinstance(token, CancelResumeSubscriptionCall):
             try:
                 with observe_resume_cancellation():
-                    trigger_client.cancel_resume_subscription(token.request)
+                    cancellation = trigger_client.cancel_resume_subscription(token.request)
+                    if inspect.isawaitable(cancellation):
+                        await cancellation
             except Exception as exc:
                 pending_exc = exc
         elif isinstance(token, DeleteMirrorCall):
@@ -633,7 +667,8 @@ async def drive_resume_registration_to_wait(
         elif isinstance(token, RegisterResumeSubscriptionCall):
             try:
                 with observe_resume_registration():
-                    sent = trigger_client.register_resume_subscription(token.request)
+                    result = trigger_client.register_resume_subscription(token.request)
+                    sent = await result if inspect.isawaitable(result) else result
             except Exception as exc:
                 pending_exc = exc
         else:  # pragma: no cover - cancel/delete never precede the wait yield

@@ -37,6 +37,8 @@ from custos_trigger.api.errors import (
 )
 from custos_trigger.dependencies import (
     get_dispatcher,
+    get_providers,
+    get_receiver_configuration_enabled,
     get_selector_evaluator,
     get_subscription_store,
 )
@@ -54,7 +56,13 @@ from custos_trigger.models import (
 from custos_trigger.normalize import normalize_manual_fire
 from custos_trigger.pipeline.dispatch import Dispatcher
 from custos_trigger.pipeline.match_start import StartMatcher
+from custos_trigger.providers import Providers
 from custos_trigger.selector import SelectorEvaluator
+from custos_trigger.source_config import (
+    require_receiver_configuration,
+    validate_connector_reference,
+    validate_source_config,
+)
 from custos_trigger.stores import SubscriptionStore
 
 __all__ = ["router"]
@@ -73,6 +81,8 @@ _SubscriptionPath = Annotated[str, Path(min_length=1, description="Subscription 
 StoreDep = Annotated[SubscriptionStore, Depends(get_subscription_store)]
 EvaluatorDep = Annotated[SelectorEvaluator, Depends(get_selector_evaluator)]
 DispatcherDep = Annotated[Dispatcher, Depends(get_dispatcher)]
+ProvidersDep = Annotated[Providers, Depends(get_providers)]
+ReceiverEnabledDep = Annotated[bool, Depends(get_receiver_configuration_enabled)]
 
 
 def _now() -> datetime:
@@ -129,11 +139,19 @@ async def create_subscription(
     store: StoreDep,
     evaluator: EvaluatorDep,
     ctx: Annotated[CallContext, Depends(require_permission(PERM_WRITE))],
+    providers: ProvidersDep,
+    receiver_enabled: ReceiverEnabledDep,
 ) -> Subscription:
     """Create a manual/start subscription and return the persisted row."""
     _ensure_workspace(ctx, workspace_id)
+    if body.source_type.value not in ("manual", "internal"):
+        require_receiver_configuration(receiver_enabled)
     subscription_id = uuid.uuid4().hex
     _validate_selector(evaluator, body.selector, subscription_id=subscription_id)
+    if body.source_config is not None and body.source_config.connector_instance_id is not None:
+        await validate_connector_reference(
+            providers.connector_references, workspace_id, body.source_config.connector_instance_id
+        )
     now = _now()
     subscription = Subscription(
         workspace_id=workspace_id,
@@ -147,6 +165,7 @@ async def create_subscription(
         state=SubscriptionState.ACTIVE,
         created_at=now,
         updated_at=now,
+        source_config=body.source_config,
     )
     return await store.create(subscription)
 
@@ -182,6 +201,8 @@ async def patch_subscription(
     store: StoreDep,
     evaluator: EvaluatorDep,
     ctx: Annotated[CallContext, Depends(require_permission(PERM_WRITE))],
+    providers: ProvidersDep,
+    receiver_enabled: ReceiverEnabledDep,
 ) -> Subscription:
     """Amend a subscription's selector / input mapping / target / state."""
     _ensure_workspace(ctx, workspace_id)
@@ -199,9 +220,7 @@ async def patch_subscription(
     if "selector" in fields_set and body.selector is not None:
         _validate_selector(evaluator, body.selector, subscription_id=subscription_id)
 
-    # Fields carried in the selector revision blob (selector / mapping /
-    # target) versus the base-row state column are persisted via distinct SPL
-    # writes, so split the patch accordingly.
+    # Configuration and state are committed together after validating the merged request.
     blob_updates: dict[str, object] = {}
     if "selector" in fields_set:
         blob_updates["selector"] = body.selector
@@ -209,19 +228,49 @@ async def patch_subscription(
         blob_updates["target_workflow_version_id"] = body.target_workflow_version_id
     if "input_mapping" in fields_set and body.input_mapping is not None:
         blob_updates["input_mapping"] = body.input_mapping
+    if "source_config" in fields_set:
+        blob_updates["source_config"] = body.source_config
+    if body.source_type is not None:
+        blob_updates["source_type"] = body.source_type
 
     next_state = body.state if body.state is not None else existing.state
     merged = existing.model_copy(update={**blob_updates, "state": next_state, "updated_at": _now()})
-
-    if body.state is not None and body.state is not existing.state:
-        await store.set_state(workspace_id, subscription_id, body.state)
-    if blob_updates:
-        await store.reauthor_selector(merged)
-
-    updated = await store.get(workspace_id, subscription_id)
-    if updated is None:  # pragma: no cover - row cannot vanish mid-request
-        raise _not_found(subscription_id)
-    return updated
+    validate_source_config(
+        merged.source_type.value,
+        merged.source_config,
+        required=merged.state is SubscriptionState.ACTIVE,
+    )
+    if not blob_updates and (body.state is None or body.state is existing.state):
+        return existing
+    source_changed = (
+        existing.source_config != merged.source_config or existing.source_type != merged.source_type
+    )
+    if merged.source_type.value not in ("manual", "internal") and (
+        source_changed or merged.state is SubscriptionState.ACTIVE
+    ):
+        require_receiver_configuration(receiver_enabled)
+    if (
+        merged.source_config is not None
+        and merged.source_config.connector_instance_id is not None
+        and (
+            existing.source_config != merged.source_config
+            or existing.source_type != merged.source_type
+            or (merged.state is SubscriptionState.ACTIVE and existing.state is not merged.state)
+        )
+    ):
+        await validate_connector_reference(
+            providers.connector_references, workspace_id, merged.source_config.connector_instance_id
+        )
+    return await store.update(
+        merged,
+        expected_revision=existing.store_revision,
+        preserve_state=body.state is None,
+        metadata_changed=bool(blob_updates),
+        reset_schedule=(
+            existing.source_config != merged.source_config
+            or existing.source_type != merged.source_type
+        ),
+    )
 
 
 @router.delete("/{subscription_id}", status_code=status.HTTP_204_NO_CONTENT)

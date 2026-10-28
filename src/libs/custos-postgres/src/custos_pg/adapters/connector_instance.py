@@ -33,6 +33,7 @@ from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar, Final
 
+from asyncpg import InterfaceError, PostgresError
 from custos_spl.errors import BackendUnavailable, ImmutableViolation
 from custos_spl.ids import ConnectorInstanceId, WorkspaceId
 from custos_spl.interfaces.connector_instance_store import (
@@ -274,6 +275,25 @@ class PgConnectorInstanceAdapter:
         if row is None:
             return None
         return _row_to_instance(row)
+
+    async def has_connector_instance(
+        self, workspace_id: WorkspaceId, instance_id: ConnectorInstanceId
+    ) -> bool:
+        """Check a scoped reference without selecting credential or target configuration."""
+        try:
+            pool = await self._pool_ref()
+            async with pool.acquire() as conn:
+                result = await conn.fetchval(
+                    "SELECT EXISTS(SELECT 1 FROM connector_instance.connector_instance "
+                    "WHERE workspace_id = $1 AND instance_id = $2)",
+                    workspace_id,
+                    instance_id,
+                )
+        except (OSError, InterfaceError, PostgresError) as exc:
+            raise BackendUnavailable("connector reference lookup failed") from exc
+        if not isinstance(result, bool):
+            raise BackendUnavailable("connector reference lookup returned an invalid result")
+        return result
 
     async def patch_connector_instance(
         self,

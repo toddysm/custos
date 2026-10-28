@@ -165,6 +165,9 @@ jobs:
                 custos-loki|custos-prometheus)
                   pytest tests/test_conformance.py tests/test_conformance_regressions.py tests/test_unit.py -v --tb=short
                   ;;
+                custos-postgres)
+                  pytest tests/test_conformance.py tests/test_unit.py tests/test_connector_reference.py -v --tb=short
+                  ;;
                 *)
                   pytest tests/test_conformance.py -v -m integration --tb=short
                   ;;

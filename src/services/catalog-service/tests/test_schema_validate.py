@@ -99,6 +99,141 @@ def _registry_quarantine_workflow() -> dict[str, Any]:
     }
 
 
+def _wait_workflow(source: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Build a minimal wait document for both legacy and external-source contracts."""
+    wait: dict[str, Any] = {"eventKey": "${{ inputs.key }}", "selector": "${{ inputs.key }}"}
+    if source is not None:
+        wait["source"] = source
+    return {
+        "apiVersion": "custos.dev/v1",
+        "kind": "Workflow",
+        "metadata": {"name": "wait"},
+        "spec": {
+            "inputs": {"key": {"type": "string"}},
+            "steps": [{"id": "await", "waitFor": wait}],
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        None,
+        {"connectorInstanceId": "registry", "deliveryModes": ["push"]},
+        {
+            "connectorInstanceId": "registry",
+            "deliveryModes": ["pull", "push"],
+            "pollIntervalSeconds": 10,
+        },
+    ],
+)
+def test_wait_source_workflow_and_template_schema(source: dict[str, Any] | None) -> None:
+    """Both normative schemas accept legacy waits and valid constant source associations."""
+    doc = _wait_workflow(source)
+    validate_workflow(doc)
+    template = _registry_quarantine_template()
+    template["spec"]["workflow"] = doc["spec"]
+    validate_template(template)
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"connectorInstanceId": " "},
+        {"connectorInstanceId": "${{ inputs.key }}"},
+        {"connectorInstanceId": " ${{ inputs.key }} "},
+        {"connectorInstanceId": "${{}}"},
+        {"workspaceId": "another"},
+        {"credentials": {}},
+        {"deliveryModes": []},
+        {"deliveryModes": ["push", "push"]},
+        {"deliveryModes": ["other"]},
+        {"pollIntervalSeconds": 9},
+        {"pollIntervalSeconds": True},
+        {"pollIntervalSeconds": 10.0},
+        {"pollIntervalSeconds": "10"},
+        {"deliveryModes": ["push"], "pollIntervalSeconds": 10},
+    ],
+)
+def test_invalid_wait_sources_fail_both_publish_schemas(patch: dict[str, Any]) -> None:
+    """Published associations obey the same strict source codec as Workflow and Trigger."""
+    source = {"connectorInstanceId": "registry", "deliveryModes": ["pull"], **patch}
+    doc = _wait_workflow(source)
+    with pytest.raises(WorkflowSchemaError):
+        validate_workflow(doc)
+    template = _registry_quarantine_template()
+    template["spec"]["workflow"] = doc["spec"]
+    with pytest.raises(TemplateSchemaError):
+        validate_template(template)
+
+
+@pytest.mark.parametrize("selector", [None, "literal", ""])
+def test_sourced_wait_requires_selector_token(selector: str | None) -> None:
+    """A source cannot publish with a missing, null or non-expression selector."""
+    doc = _wait_workflow({"connectorInstanceId": "registry", "deliveryModes": ["push"]})
+    doc["spec"]["steps"][0]["waitFor"]["selector"] = selector
+    with pytest.raises(WorkflowSchemaError):
+        validate_workflow(doc)
+
+
+@pytest.mark.parametrize("ttl", ["P", "PT", "PT0S", "P0D", "-PT1H", "${{ inputs.key }}"])
+def test_wait_rejects_nonpositive_or_dynamic_ttl(ttl: str) -> None:
+    """TTL validation agrees with Workflow's positive constant duration contract."""
+    doc = _wait_workflow()
+    doc["spec"]["steps"][0]["waitFor"]["ttl"] = ttl
+    with pytest.raises(WorkflowSchemaError):
+        validate_workflow(doc)
+
+
+@pytest.mark.parametrize("ttl", [None, "PT0.5S", "PT1H", "P1W"])
+def test_wait_accepts_optional_positive_ttl(ttl: str | None) -> None:
+    """The additive schema preserves optional legacy fields and fractional seconds."""
+    doc = _wait_workflow()
+    doc["spec"]["steps"][0]["waitFor"].update(ttl=ttl, source=None, selector=None)
+    validate_workflow(doc)
+
+
+@pytest.mark.parametrize("unsupported", [{"retry": {"maxAttempts": 2}}, {"on_error": []}])
+def test_wait_rejects_activity_only_error_fields(unsupported: dict[str, Any]) -> None:
+    """Publication cannot admit retry/error-routing fields that the wait compiler rejects."""
+    doc = _wait_workflow()
+    doc["spec"]["steps"][0].update(unsupported)
+    with pytest.raises(WorkflowSchemaError):
+        validate_workflow(doc)
+
+
+@pytest.mark.parametrize("needs", [[], ["one", "one"], ["bad id"], [123]])
+def test_wait_rejects_invalid_dependency_arrays(needs: list[Any]) -> None:
+    """Explicit dependencies follow Workflow's nonempty, unique step-ID contract."""
+    doc = _wait_workflow()
+    doc["spec"]["steps"][0]["needs"] = needs
+    with pytest.raises(WorkflowSchemaError):
+        validate_workflow(doc)
+
+
+@pytest.mark.parametrize("dependency", ["missing", "await", "future"])
+def test_dependency_relationships_rejected_for_workflows_and_templates(dependency: str) -> None:
+    """Publication rejects missing, self and forward dependencies before a version is stored."""
+    doc = _wait_workflow()
+    doc["spec"]["steps"][0]["needs"] = [dependency]
+    doc["spec"]["steps"].append({"id": "future", "let": {"value": 1}})
+    with pytest.raises(WorkflowSchemaError, match="earlier distinct step"):
+        validate_workflow(doc)
+    template = _registry_quarantine_template()
+    template["spec"]["workflow"] = doc["spec"]
+    with pytest.raises(TemplateSchemaError, match="earlier distinct step"):
+        validate_template(template)
+
+
+@pytest.mark.parametrize("ttl", ["P9999999999W", "P999999999D", "PT0.0000001S"])
+def test_unrepresentable_wait_durations_fail_publication(ttl: str) -> None:
+    """Schema-valid but unrepresentable durations cannot enter published versions."""
+    doc = _wait_workflow()
+    doc["spec"]["steps"][0]["waitFor"]["ttl"] = ttl
+    with pytest.raises(WorkflowSchemaError):
+        validate_workflow(doc)
+
+
 def _registry_quarantine_template() -> dict[str, Any]:
     """The template example from `overview.md` § Workflow and Template Schema."""
     return {

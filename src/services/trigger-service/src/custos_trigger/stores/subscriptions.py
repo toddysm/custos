@@ -1,9 +1,7 @@
 """``SubscriptionStore`` — domain ↔ SPL adapter for trigger subscriptions.
 
-Wraps the SPL ``put_subscription`` / ``append_subscription_selector`` /
-``update_subscription_state`` writes, mapping the :class:`Subscription`
-domain model onto the minimal SPL row plus its free-form selector blob
-(see :mod:`custos_trigger.models`).
+Uses the optional atomic mutation capability for receiver configuration.
+Unmanaged manual/internal records can retain the legacy provider write path.
 """
 
 from __future__ import annotations
@@ -11,8 +9,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import UTC, datetime
 
+from custos_spl.errors import ImmutableViolation
 from custos_spl.ids import SubscriptionId, WorkspaceId
-from custos_spl.interfaces.trigger_queries import TriggerQueryProvider
+from custos_spl.interfaces.metadata_store import Schedule
+from custos_spl.interfaces.trigger_queries import SubscriptionMutationProvider, TriggerQueryProvider
 from custos_spl.pagination import Cursor, Page
 
 from custos_trigger.models import (
@@ -22,6 +22,7 @@ from custos_trigger.models import (
     to_spl_subscription,
     to_spl_subscription_selector,
 )
+from custos_trigger.source_config import next_schedule_fire
 from custos_trigger.stores.base import TriggerMetadataStore
 
 __all__ = [
@@ -54,14 +55,11 @@ class SubscriptionListUnsupportedError(RuntimeError):
 class SubscriptionStore:
     """Persist + transition trigger subscriptions through the SPL provider.
 
-    The selector blob is append-only on the SPL side, so :meth:`create`
-    writes the base row and the first selector revision in one call and
-    :meth:`reauthor_selector` appends a fresh revision without rewriting
-    prior rows. :meth:`set_state` returns the subscription rebuilt from the
-    minimal SPL row alone — the rich blob fields default because
-    ``update_subscription_state`` touches only the base row (design
-    ``§ Data Models``); callers needing the full record re-read the latest
-    selector.
+    Capable backends fence mutations with internal revisions. Legacy backends
+    retain their existing nontransactional manual/internal writes, never managed
+    schedule mutations. Managed schedule IDs equal subscription IDs. Interval
+    schedules store an empty ``cron`` in the locked SPL row; their interval
+    lives in ``sourceConfig`` and their UTC anchor is subscription creation.
     """
 
     def __init__(
@@ -74,15 +72,142 @@ class SubscriptionStore:
         self._now = now if now is not None else _utcnow
 
     async def create(self, subscription: Subscription) -> Subscription:
-        """Persist *subscription*: base row + its first selector revision."""
-        workspace = WorkspaceId(subscription.workspace_id)
-        row = await self._store.put_subscription(
-            workspace,
-            to_spl_subscription(subscription),
+        """Create base state, selector and optional managed schedule atomically."""
+        return await self._write(subscription, expected_revision=None, reset_schedule=True)
+
+    async def update(
+        self,
+        subscription: Subscription,
+        *,
+        expected_revision: int,
+        reset_schedule: bool = False,
+        preserve_state: bool = False,
+        metadata_changed: bool = True,
+    ) -> Subscription:
+        """Update metadata atomically, optionally retaining the locked lifecycle state."""
+        return await self._write(
+            subscription,
+            expected_revision=expected_revision,
+            reset_schedule=reset_schedule,
+            preserve_state=preserve_state,
+            metadata_changed=metadata_changed,
         )
+
+    async def _write(
+        self,
+        subscription: Subscription,
+        *,
+        expected_revision: int | None,
+        reset_schedule: bool,
+        preserve_state: bool = False,
+        metadata_changed: bool = True,
+    ) -> Subscription:
+        """Build a complete provider transaction before touching persisted state."""
+        store = self._store
+        if not isinstance(store, SubscriptionMutationProvider):
+            return await self._write_legacy(
+                subscription,
+                expected_revision=expected_revision,
+                preserve_state=preserve_state,
+                metadata_changed=metadata_changed,
+            )
+        schedule = None
+        config = subscription.source_config
+        if subscription.source_type.value == "scheduled" and config is not None:
+            previous_schedule = None
+            if (
+                expected_revision is not None
+                and not reset_schedule
+                and isinstance(store, TriggerQueryProvider)
+            ):
+                previous_schedule = await store.get_schedule(
+                    WorkspaceId(subscription.workspace_id), subscription.subscription_id
+                )
+            schedule = Schedule(
+                workspace_id=WorkspaceId(subscription.workspace_id),
+                schedule_id=subscription.subscription_id,
+                workflow_id=to_spl_subscription(subscription).workflow_id,
+                cron=config.cron if config.cron is not None else "",
+                next_fire_at=(
+                    previous_schedule.next_fire_at
+                    if previous_schedule is not None
+                    else next_schedule_fire(
+                        config, anchor=subscription.created_at, after=self._now()
+                    )
+                ),
+                enabled=subscription.state is SubscriptionState.ACTIVE,
+            )
+        snapshot = await store.write_subscription(
+            WorkspaceId(subscription.workspace_id),
+            to_spl_subscription(subscription),
+            to_spl_subscription_selector(subscription, added_at=self._now()),
+            expected_revision=expected_revision,
+            schedule=schedule,
+            reset_schedule=reset_schedule,
+            preserve_state=preserve_state,
+        )
+        return subscription_from_spl(snapshot.subscription, snapshot.selector)
+
+    async def _write_legacy(
+        self,
+        subscription: Subscription,
+        *,
+        expected_revision: int | None,
+        preserve_state: bool,
+        metadata_changed: bool,
+    ) -> Subscription:
+        """Retain the M1 write contract only for unmanaged manual/internal subscriptions."""
+        if (
+            subscription.source_type.value not in ("manual", "internal")
+            or subscription.source_config
+        ):
+            raise SubscriptionReadUnsupportedError(
+                "metadata store does not support atomic receiver configuration"
+            )
+        workspace = WorkspaceId(subscription.workspace_id)
+        identifier = SubscriptionId(subscription.subscription_id)
+        if expected_revision is None:
+            row = await self._store.put_subscription(workspace, to_spl_subscription(subscription))
+        else:
+            if not isinstance(self._store, TriggerQueryProvider):
+                raise SubscriptionReadUnsupportedError(
+                    "legacy subscription updates require a read surface "
+                    "to exclude managed schedules"
+                )
+            current = await self._store.get_subscription(workspace, identifier)
+            if current is None:
+                raise ValueError(f"unknown subscription: {subscription.subscription_id!r}")
+            blob = current.selector.selector if current.selector is not None else {}
+            if (
+                blob.get("_scheduleId") is not None
+                or blob.get("sourceConfig") is not None
+                or blob.get("sourceType", "manual") not in ("manual", "internal")
+            ):
+                raise SubscriptionReadUnsupportedError(
+                    "managed receiver state requires atomic subscription mutation support"
+                )
+            if blob.get("_revision", 0) != expected_revision:
+                raise ImmutableViolation("subscription changed before legacy update")
+            row = current.subscription
+            if (
+                row.workflow_id != subscription.workflow_id
+                or row.created_at != subscription.created_at
+            ):
+                raise ImmutableViolation("subscription identity is immutable")
+            if not preserve_state and row.state != subscription.state.value:
+                if row.state == "expired":
+                    raise ImmutableViolation("expired subscription state is terminal")
+                row = await self._store.update_subscription_state(
+                    workspace, identifier, subscription.state.value
+                )
+            if not metadata_changed:
+                refreshed = await self._store.get_subscription(workspace, identifier)
+                if refreshed is None:
+                    raise ValueError(f"unknown subscription: {subscription.subscription_id!r}")
+                return subscription_from_spl(refreshed.subscription, refreshed.selector)
         selector = await self._store.append_subscription_selector(
             workspace,
-            SubscriptionId(subscription.subscription_id),
+            identifier,
             to_spl_subscription_selector(subscription, added_at=self._now()),
         )
         return subscription_from_spl(row, selector)
@@ -148,11 +273,25 @@ class SubscriptionStore:
                 return candidates
 
     async def reauthor_selector(self, subscription: Subscription) -> None:
-        """Append a fresh selector revision built from *subscription*."""
-        await self._store.append_subscription_selector(
-            WorkspaceId(subscription.workspace_id),
-            SubscriptionId(subscription.subscription_id),
-            to_spl_subscription_selector(subscription, added_at=self._now()),
+        """Reauthor a caller's current revision without overwriting concurrent edits."""
+        current = await self.get(subscription.workspace_id, subscription.subscription_id)
+        if current is None:
+            raise ValueError(f"unknown subscription: {subscription.subscription_id!r}")
+        candidate = subscription.model_copy(
+            update={
+                "state": current.state,
+                "created_at": current.created_at,
+                "updated_at": self._now(),
+            }
+        )
+        await self.update(
+            candidate,
+            expected_revision=subscription.store_revision,
+            preserve_state=True,
+            reset_schedule=(
+                current.source_config != candidate.source_config
+                or current.source_type != candidate.source_type
+            ),
         )
 
     async def set_state(
@@ -161,10 +300,12 @@ class SubscriptionStore:
         subscription_id: str,
         state: SubscriptionState,
     ) -> Subscription:
-        """Transition a subscription's lifecycle state."""
-        row = await self._store.update_subscription_state(
-            WorkspaceId(workspace_id),
-            SubscriptionId(subscription_id),
-            state.value,
+        """Transition state and managed-schedule eligibility atomically."""
+        current = await self.get(workspace_id, subscription_id)
+        if current is None:
+            raise ValueError(f"unknown subscription: {workspace_id!r}/{subscription_id!r}")
+        return await self.update(
+            current.model_copy(update={"state": state, "updated_at": self._now()}),
+            expected_revision=current.store_revision,
+            metadata_changed=False,
         )
-        return subscription_from_spl(row, None)

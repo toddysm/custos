@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import yaml
+from custos_spl.interfaces.trigger_source import ResumeSource, parse_resume_duration
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
 
@@ -31,7 +32,8 @@ class SchemaValidationIssue:
             errors at the document root.
         message: The validator-supplied human-readable message.
         validator: The JSON Schema keyword that produced the error
-            (e.g. ``"required"``, ``"pattern"``, ``"oneOf"``). Useful
+            (e.g. ``"required"``, ``"pattern"``, ``"oneOf"``), or
+            ``"source"``, ``"duration"`` or ``"dependency"`` for semantic checks. Useful
             for clients that want to map errors to remediations.
     """
 
@@ -149,6 +151,61 @@ _workflow_validator: Draft202012Validator = Draft202012Validator(WORKFLOW_SCHEMA
 _template_validator: Draft202012Validator = Draft202012Validator(TEMPLATE_SCHEMA)
 
 
+def _step_semantic_issues(spec: dict[str, Any], prefix: str) -> list[SchemaValidationIssue]:
+    """Validate dependency order, durations and source semantics after structural checks.
+
+    JSON Schema considers 10.0 an integer; the runtime association deliberately
+    requires an actual integer. Both publish entry points use the same codec.
+    """
+    issues: list[SchemaValidationIssue] = []
+    seen: set[str] = set()
+    for index, step in enumerate(spec["steps"]):
+        step_path = f"{prefix}/steps/{index}"
+        if step["id"] in seen:
+            issues.append(
+                SchemaValidationIssue(
+                    path=f"{step_path}/id", message="step ID is duplicated", validator="dependency"
+                )
+            )
+        for dependency in step.get("needs") or []:
+            if dependency not in seen or dependency == step["id"]:
+                issues.append(
+                    SchemaValidationIssue(
+                        path=f"{step_path}/needs",
+                        message=(
+                            f"dependency {dependency!r} must reference an earlier distinct step"
+                        ),
+                        validator="dependency",
+                    )
+                )
+        seen.add(step["id"])
+        wait = step.get("waitFor")
+        if not isinstance(wait, dict):
+            continue
+        if wait.get("ttl") is not None:
+            try:
+                parse_resume_duration(wait["ttl"])
+            except ValueError as exc:
+                issues.append(
+                    SchemaValidationIssue(
+                        path=f"{step_path}/waitFor/ttl", message=str(exc), validator="duration"
+                    )
+                )
+        if wait.get("source") is None:
+            continue
+        try:
+            ResumeSource.from_wire(wait["source"])
+        except ValueError as exc:
+            issues.append(
+                SchemaValidationIssue(
+                    path=f"{prefix}/steps/{index}/waitFor/source",
+                    message=str(exc),
+                    validator="source",
+                )
+            )
+    return issues
+
+
 def validate_workflow(doc: dict[str, Any]) -> None:
     """Validate ``doc`` against :data:`WORKFLOW_SCHEMA`.
 
@@ -158,6 +215,8 @@ def validate_workflow(doc: dict[str, Any]) -> None:
             error in a single pass (no first-error short-circuit).
     """
     issues = _collect(_workflow_validator, doc)
+    if not issues:
+        issues.extend(_step_semantic_issues(doc["spec"], "spec"))
     if issues:
         raise WorkflowSchemaError(issues)
 
@@ -172,5 +231,7 @@ def validate_template(doc: dict[str, Any]) -> None:
     :mod:`custos_catalog.schema.workflow`.
     """
     issues = _collect(_template_validator, doc)
+    if not issues:
+        issues.extend(_step_semantic_issues(doc["spec"]["workflow"], "spec/workflow"))
     if issues:
         raise TemplateSchemaError(issues)

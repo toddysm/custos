@@ -48,7 +48,7 @@ def _is_expression(value: object) -> bool:
     )
 
 
-SlotKind = Literal["activity", "subworkflow", "connector_instance"]
+SlotKind = Literal["activity", "subworkflow", "connector_instance", "source_connector_instance"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,8 +64,8 @@ class RefResolutionSlot:
 
     Attributes:
         kind: Discriminator (``activity`` / ``subworkflow`` /
-            ``connector_instance``) that picks which registry the
-            resolver should consult.
+            ``connector_instance`` / ``source_connector_instance``) that
+            selects legacy validation or source-only existence resolution.
         path: Sequence of dict keys (``str``) and list indices
             (``int``) navigating from the document root to the
             reference string.
@@ -186,8 +186,8 @@ def _discover_workflow_slots(
 ) -> list[RefResolutionSlot]:
     """Walk a workflow ``spec`` and emit one slot per concrete reference.
 
-    Concrete = a literal string. ``${{ ... }}`` expressions are NOT
-    slots — they're resolved at runtime by the Workflow Service.
+    Concrete = a literal string, including a waitFor source's connector ID.
+    ``${{ ... }}`` expressions in dynamic reference fields are not slots.
     """
     slots: list[RefResolutionSlot] = []
 
@@ -252,6 +252,18 @@ def _discover_workflow_slots(
                             original_ref=value,
                         ),
                     )
+
+        wait = step.get("waitFor")
+        source = wait.get("source") if isinstance(wait, dict) else None
+        connector = source.get("connectorInstanceId") if isinstance(source, dict) else None
+        if isinstance(connector, str) and not _is_expression(connector):
+            slots.append(
+                RefResolutionSlot(
+                    kind="source_connector_instance",
+                    path=(*step_path, "waitFor", "source", "connectorInstanceId"),
+                    original_ref=connector,
+                )
+            )
 
     return slots
 
