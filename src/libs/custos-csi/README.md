@@ -21,9 +21,15 @@ Example:
 ```
 
 New writes persist the optional media type in a neighboring `{digest}.json`
-file. Metadata and content are published from unique temporary files using
-same-filesystem hard links, so the first complete publication wins without
-overwriting another writer. The mount must support POSIX hard links.
+file. Metadata and content are published from unique temporary files under a
+process-safe POSIX advisory lock. Each workspace/digest-prefix directory retains
+one stable `.lock` file (at most 256 per workspace); do not remove these files
+while adapters can access the mount. Readers, publication and deletion use the
+same lock, and process exit releases it automatically. If a writer fails after
+publishing only metadata, the next put replaces that orphan before publishing
+its blob. The mount must support POSIX advisory locks and atomic rename.
+Concurrent access must use adapters participating in this locking protocol;
+quiesce writes/deletion when upgrading from older, non-locking adapter versions.
 Existing blobs without metadata remain readable with an unknown (`None`) media
 type. Corrupt metadata produces an explicit backend error. Sweeper deletion
 removes both the blob and its metadata; restarting the adapter preserves the

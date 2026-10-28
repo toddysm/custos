@@ -7,12 +7,14 @@ Layout: {workspace_id}/{digest-prefix-2}/{digest}
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import hashlib
 import json
 import os
 import uuid
-from collections.abc import AsyncIterator
-from contextlib import suppress
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager, suppress
+from functools import partial
 from pathlib import Path
 from typing import ClassVar
 
@@ -23,10 +25,53 @@ from custos_spl.ids import ArtifactId, WorkspaceId
 from custos_spl.interfaces.artifact_store import ArtifactDescriptor
 
 
+async def _finish_mutation(operation: Callable[[], None]) -> None:
+    """Keep the caller's lock until a filesystem mutation finishes, even on cancellation."""
+    task = asyncio.create_task(asyncio.to_thread(operation))
+    cancelled = False
+    while True:
+        try:
+            await asyncio.shield(task)
+            break
+        except asyncio.CancelledError:
+            if task.cancelled():
+                raise
+            cancelled = True
+        except OSError as exc:
+            if cancelled:
+                raise asyncio.CancelledError from exc
+            raise
+    if cancelled:
+        raise asyncio.CancelledError
+
+
 async def _publish_file(source: Path, destination: Path) -> None:
-    """Atomically publish a complete file without replacing another writer's result."""
-    with suppress(FileExistsError):
-        await asyncio.to_thread(os.link, source, destination)
+    """Replace a complete file while the caller owns the publication lock."""
+    await _finish_mutation(partial(os.replace, source, destination))
+
+
+@asynccontextmanager
+async def _artifact_lock(path: Path, *, exclusive: bool) -> AsyncIterator[None]:
+    """Coordinate blob/metadata operations across processes without blocking the loop.
+
+    One stable lock inode is retained per workspace/digest-prefix directory.
+    Never unlink it: replacing a lock inode can split concurrent lock owners.
+    Process exit releases the OS lock, permitting recovery of interrupted writes.
+    """
+    await aiofiles.os.makedirs(path.parent, exist_ok=True)
+    async with aiofiles.open(path.parent / ".lock", "a+b") as handle:
+        descriptor = handle.fileno()
+        mode = (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB
+        while True:
+            try:
+                fcntl.flock(descriptor, mode)
+                break
+            except BlockingIOError:
+                await asyncio.sleep(0.01)
+        try:
+            yield
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
 
 
 class CsiArtifactAdapter:
@@ -77,6 +122,8 @@ class CsiArtifactAdapter:
         stored_workspace, digest = parts
         if stored_workspace != str(workspace_id):
             raise WorkspaceMismatch(f"artifact belongs to {stored_workspace}, not {workspace_id}")
+        if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+            raise ArtifactNotFound("invalid artifact digest")
         return digest
 
     async def put(
@@ -89,7 +136,9 @@ class CsiArtifactAdapter:
 
         Computes the digest while streaming to a unique temporary file. Persist
         optional media metadata beside the blob so head() survives process restart.
-        Existing artifacts retain their original descriptor.
+        Existing artifacts retain their original descriptor. Publication and
+        deletion share a process-safe lock; retries replace orphan metadata
+        left by a failed or cancelled writer whose blob was never published.
         """
         try:
             sha = hashlib.sha256()
@@ -105,21 +154,21 @@ class CsiArtifactAdapter:
 
                 digest = sha.hexdigest()
                 artifact_id = ArtifactId(f"{workspace_id}:{digest}")
-                existing = await self.head(workspace_id, artifact_id)
-                if existing is not None:
-                    return existing
                 final_path = self._artifact_path(workspace_id, digest)
-                await aiofiles.os.makedirs(final_path.parent, exist_ok=True)
-                async with aiofiles.open(metadata_temp, "w", encoding="utf-8") as metadata:
-                    await metadata.write(json.dumps({"media_type": media_type}))
-                await _publish_file(metadata_temp, final_path.with_suffix(".json"))
-                await _publish_file(temp_path, final_path)
-                descriptor = await self.head(workspace_id, artifact_id)
-                if descriptor is None:
-                    raise BackendUnavailable(
-                        f"PVC artifact disappeared after publication: {artifact_id}"
-                    )
-                return descriptor
+                async with _artifact_lock(final_path, exclusive=True):
+                    existing = await self._head_unlocked(workspace_id, artifact_id, digest)
+                    if existing is not None:
+                        return existing
+                    async with aiofiles.open(metadata_temp, "w", encoding="utf-8") as metadata:
+                        await metadata.write(json.dumps({"media_type": media_type}))
+                    await _publish_file(metadata_temp, final_path.with_suffix(".json"))
+                    await _publish_file(temp_path, final_path)
+                    descriptor = await self._head_unlocked(workspace_id, artifact_id, digest)
+                    if descriptor is None:
+                        raise BackendUnavailable(
+                            f"PVC artifact disappeared after publication: {artifact_id}"
+                        )
+                    return descriptor
             finally:
                 for temporary in (temp_path, metadata_temp):
                     with suppress(FileNotFoundError):
@@ -148,15 +197,15 @@ class CsiArtifactAdapter:
             digest = await self._verify_workspace(workspace_id, artifact_id)
             path = self._artifact_path(workspace_id, digest)
 
-            if not await aiofiles.os.path.exists(path):
-                raise ArtifactNotFound(f"artifact not found: {artifact_id}")
-
-            async with aiofiles.open(path, "rb") as f:
-                while True:
-                    chunk = await f.read(65536)  # 64KB chunks
-                    if not chunk:
-                        break
-                    yield chunk
+            async with _artifact_lock(path, exclusive=False):
+                if not await aiofiles.os.path.exists(path):
+                    raise ArtifactNotFound(f"artifact not found: {artifact_id}")
+                async with aiofiles.open(path, "rb") as f:
+                    while True:
+                        chunk = await f.read(65536)  # 64KB chunks
+                        if not chunk:
+                            break
+                        yield chunk
         except (ArtifactNotFound, WorkspaceMismatch):
             raise
         except OSError as exc:
@@ -175,35 +224,41 @@ class CsiArtifactAdapter:
         try:
             digest = await self._verify_workspace(workspace_id, artifact_id)
             path = self._artifact_path(workspace_id, digest)
-
-            if not await aiofiles.os.path.exists(path):
-                return None
-
-            stat = await aiofiles.os.stat(path)
-            media_type = None
-            try:
-                async with aiofiles.open(path.with_suffix(".json"), encoding="utf-8") as metadata:
-                    stored = json.loads(await metadata.read())
-                if not isinstance(stored, dict) or "media_type" not in stored:
-                    raise ValueError("invalid artifact media metadata")
-                media_type = stored["media_type"]
-                if media_type is not None and not isinstance(media_type, str):
-                    raise ValueError("artifact media_type must be a string or null")
-            except FileNotFoundError:
-                pass
-            return ArtifactDescriptor(
-                workspace_id=workspace_id,
-                artifact_id=artifact_id,
-                digest=digest,
-                media_type=media_type,
-                size=stat.st_size,
-            )
+            async with _artifact_lock(path, exclusive=False):
+                return await self._head_unlocked(workspace_id, artifact_id, digest)
         except (WorkspaceMismatch, ArtifactNotFound):
             return None
         except OSError as exc:
             raise BackendUnavailable(f"PVC stat failed: {exc}") from exc
+
+    async def _head_unlocked(
+        self, workspace_id: WorkspaceId, artifact_id: ArtifactId, digest: str
+    ) -> ArtifactDescriptor | None:
+        """Read a blob/metadata pair while the caller holds its stable prefix lock."""
+        path = self._artifact_path(workspace_id, digest)
+        if not await aiofiles.os.path.exists(path):
+            return None
+        stat = await aiofiles.os.stat(path)
+        media_type = None
+        try:
+            async with aiofiles.open(path.with_suffix(".json"), encoding="utf-8") as metadata:
+                stored = json.loads(await metadata.read())
+            if not isinstance(stored, dict) or "media_type" not in stored:
+                raise ValueError("invalid artifact media metadata")
+            media_type = stored["media_type"]
+            if media_type is not None and not isinstance(media_type, str):
+                raise ValueError("artifact media_type must be a string or null")
+        except FileNotFoundError:
+            pass
         except (ValueError, UnicodeError) as exc:
             raise BackendUnavailable(f"PVC metadata is invalid for {artifact_id}") from exc
+        return ArtifactDescriptor(
+            workspace_id=workspace_id,
+            artifact_id=artifact_id,
+            digest=digest,
+            media_type=media_type,
+            size=stat.st_size,
+        )
 
     async def delete(
         self,
@@ -222,10 +277,11 @@ class CsiArtifactAdapter:
             digest = await self._verify_workspace(workspace_id, artifact_id)
             path = self._artifact_path(workspace_id, digest)
 
-            if await aiofiles.os.path.exists(path):
-                await aiofiles.os.remove(path)
-            with suppress(FileNotFoundError):
-                await aiofiles.os.remove(path.with_suffix(".json"))
+            async with _artifact_lock(path, exclusive=True):
+                with suppress(FileNotFoundError):
+                    await _finish_mutation(partial(os.remove, path))
+                with suppress(FileNotFoundError):
+                    await _finish_mutation(partial(os.remove, path.with_suffix(".json")))
         except (WorkspaceMismatch, ArtifactNotFound):
             # No-op: already absent or doesn't belong to workspace
             pass

@@ -150,7 +150,7 @@ class LokiLogQueryAdapter:
 
             # Add message filter if specified
             if filter.message_contains:
-                query += f" |= {json.dumps(filter.message_contains)}"
+                query += f" |= {json.dumps(filter.message_contains, ensure_ascii=False)}"
 
             params: dict = {"query": query}
 
@@ -273,7 +273,7 @@ class LokiLogQueryAdapter:
 
             # Add message filter if specified
             if filter.message_contains:
-                query += f" |= {json.dumps(filter.message_contains)}"
+                query += f" |= {json.dumps(filter.message_contains, ensure_ascii=False)}"
 
             params: dict = {"query": query}
 

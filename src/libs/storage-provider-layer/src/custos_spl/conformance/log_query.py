@@ -64,18 +64,20 @@ class LogQueryConformanceTests(AdapterConformanceBase):
         pytest.skip("run_id fixture not provided by subclass")
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("message", ["NONEXISTENT_STRING_XYZ_ABC", "NONEXISTENT \U0001f642"])
     async def test_empty_query_result_returns_empty_page(
         self,
         adapter: LogQueryProvider,
         workspace_id: WorkspaceId,
         run_id: RunId,
+        message: str,
     ) -> None:
         """Query with no matches returns empty LogPage.
 
         No error raised; items tuple is empty, next_cursor is None.
         """
         # Query with filter that should match nothing
-        log_filter = LogFilter(message_contains="NONEXISTENT_STRING_XYZ_ABC")
+        log_filter = LogFilter(message_contains=message)
         page = await adapter.query_run_logs(workspace_id, run_id, log_filter)
 
         assert len(page.items) == 0

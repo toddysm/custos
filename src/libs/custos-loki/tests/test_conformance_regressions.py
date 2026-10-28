@@ -15,7 +15,7 @@ from custos_loki.adapters import LokiLogQueryAdapter
 @pytest.mark.parametrize("scope", ["run", "step"])
 async def test_message_filter_uses_literal_substring_operator(scope: str) -> None:
     """Both query surfaces must generate valid LogQL without interpreting message syntax."""
-    message = 'quoted "value" with \\ slash'
+    message = 'quoted "value" with \\ slash and \U0001f642'
     response = httpx.Response(
         200,
         json={"status": "success", "data": {"result": []}},
@@ -33,4 +33,4 @@ async def test_message_filter_uses_literal_substring_operator(scope: str) -> Non
                 WorkspaceId("workspace"), RunId("run"), StepId("step"), query_filter
             )
         query = client.get.call_args.kwargs["params"]["query"]
-        assert query.endswith(f" |= {json.dumps(message)}")
+        assert query.endswith(f" |= {json.dumps(message, ensure_ascii=False)}")
