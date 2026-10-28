@@ -5,6 +5,13 @@ Last Updated: 2026-06-26
 Version: 9
 Status: Draft
 
+> **Proposed M2 integration amendment (2026-10-27):**
+> [Trigger M2 decisions D01-D03](../../requirements/trigger-m2-receivers.md)
+> specify workspace-scoped webhook addressing, verification-only credential
+> transport and reuse of this service's existing per-instance polling loop.
+> Publish-before-cursor-commit remains authoritative; Trigger must not introduce
+> another upstream polling owner. These proposals await human approval under #988.
+
 ## Responsibility
 
 The Connector Service is the access broker between workflows/activities and external systems.

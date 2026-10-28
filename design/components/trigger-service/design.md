@@ -5,6 +5,14 @@ Last Updated: 2026-06-04
 Version: 7
 Status: Draft
 
+> **M2 planning amendment (2026-10-27, not yet approved):**
+> [The receiver requirements/design](../../requirements/trigger-m2-receivers.md)
+> and [M2 implementation plan](implementation-plan-m2.md) track #988.
+> They propose explicit corrections to webhook addressing/credential forwarding,
+> polling ownership, scheduler fencing and durable replay assumptions. The
+> historical sections below must not be interpreted as evidence that those
+> paths are implemented. The original #20/#22/#23 decisions remain resolved.
+
 ## Responsibility
 
 The Trigger Service is the platform's **event ingestion and dispatch broker**. It receives signals from all sources that can cause work to happen — humans (manual), the clock (schedules), external systems (webhooks, pub/sub, polling), and other workflows (internal events) — normalizes them, deduplicates them, correlates them to either a workflow definition or an in-flight run+step, and dispatches them to the Workflow Service.

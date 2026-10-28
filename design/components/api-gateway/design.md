@@ -5,6 +5,13 @@ Last Updated: 2026-05-18
 Version: 3
 Status: Draft
 
+> **Proposed webhook contract amendment (2026-10-27):**
+> [Trigger M2 decisions D01/D02](../../requirements/trigger-m2-receivers.md)
+> propose a workspace-scoped webhook route and a verification-only private
+> credential transport. This is an explicit compatibility/security decision
+> awaiting approval under #988, not a change to the current implementation.
+> Existing non-webhook authentication and credential stripping remain unchanged.
+
 ## Responsibility
 
 API Gateway is the single, uniform HTTPS entrypoint for every external caller of Custos — UI, CLI, SDK, third-party automation, and inbound webhooks. It terminates TLS, validates request shape, delegates every authentication and authorization decision to Auth Service, mints the signed call context that internal RPCs travel on, deduplicates idempotent writes, applies coarse rate limits, normalizes errors into a single envelope, and routes the request to the owning downstream component via Dapr service invocation. It contains no domain logic.
