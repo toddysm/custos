@@ -77,6 +77,7 @@ async def _reset_and_migrate(dsn: str) -> None:
     import asyncpg
     from custos_pg import (
         PgCatalogAdapter,
+        PgConnectorInstanceAdapter,
         PgDefinitionAdapter,
         PgMetadataAdapter,
     )
@@ -89,12 +90,14 @@ async def _reset_and_migrate(dsn: str) -> None:
             await conn.execute("DROP SCHEMA IF EXISTS catalog CASCADE")
             await conn.execute("DROP SCHEMA IF EXISTS custos_state CASCADE")
             await conn.execute("DROP SCHEMA IF EXISTS custos_meta CASCADE")
+            await conn.execute("DROP SCHEMA IF EXISTS connector_instance CASCADE")
         # Migrations: each adapter records its declared revisions
         # into ``custos_meta.adapter_revisions`` which the startup
         # gate reads via ``refresh_declared``.
         await PgDefinitionAdapter(pool=pool).apply_pending()
         await PgCatalogAdapter(pool=pool).apply_pending()
         await PgMetadataAdapter(pool=pool).apply_pending()
+        await PgConnectorInstanceAdapter(pool=pool).apply_pending()
     finally:
         await pool.close()
 

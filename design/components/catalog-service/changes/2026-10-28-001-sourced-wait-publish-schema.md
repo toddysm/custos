@@ -14,6 +14,9 @@ sub-workflow forms remain valid.
 
 Both schemas accept `waitFor` with a required Common Expression Language (CEL)
 `eventKey` token, optional selector token and positive constant time-to-live.
+Waits accept explicit `needs` dependencies but not activity-only `retry` or
+`on_error` fields. Fractional durations retain Workflow's microsecond precision
+when registered with Trigger.
 An external `source` requires a constant, nonblank `connectorInstanceId` and a
 nonempty, duplicate-free subset of `push`/`pull` delivery modes. Its selector
 is mandatory. A polling interval requires pull delivery and an integer of at
@@ -28,8 +31,12 @@ by this constant-source contract.
 - Structural validation admits the new step form in workflows and templates.
 - The shared source codec prevents JavaScript Object Notation (JSON) Schema's acceptance of integral floats
   from weakening the runtime's strict integer contract.
-- Normalization emits a connector-reference resolution slot for the source identifier,
-  so the existing resolver checks it in the trusted publication workspace.
+- Normalization emits a dedicated source-reference slot. Its reader selects
+  only existence in the trusted publication workspace, independent of installed
+  connector type versions and the stronger `connector:validate` permission.
+  PostgreSQL wiring shares the metadata pool; custom deployments inject a
+  scoped reader. Missing wiring or backend failure is an explicit dependency
+  error, never a false missing-instance result.
 - The CEL gate parses and checks name bindings for both wait expressions.
 - Published versions preserve the source association.
 

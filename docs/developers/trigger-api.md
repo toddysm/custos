@@ -248,7 +248,7 @@ instance schema in the shared metadata database. Custom/in-memory deployments
 must inject a scoped reference reader; missing or unavailable validation returns
 `503 trigger.source_unavailable`, never implicit acceptance.
 
-Subscription state, selector revision and managed schedule eligibility commit
+Managed receiver state, selector revision and schedule eligibility commit
 atomically. Schedules use the subscription ID; interval rows use an empty
 storage-level `cron`, with `sourceConfig.intervalSeconds` and subscription
 `createdAt` providing the UTC interval and anchor. Cron calculation skips
@@ -258,6 +258,10 @@ responses; concurrent stale writes return `409 trigger.subscription_conflict`.
 Metadata-only patches preserve the locked lifecycle state even if a legacy
 writer changed it without advancing the selector revision. `expired` is
 terminal: a deleted receiver cannot be patched back to active or paused.
+Providers without the optional atomic mutation capability retain legacy
+manual/internal creates and safe unmanaged updates. That legacy path keeps its
+original nontransactional guarantees and cannot create or modify managed
+receiver state.
 
 ### Read a subscription
 
@@ -389,6 +393,8 @@ A resume wait is keyed by the `(runId, stepId, eventKey)` idempotency triple.
 match on the event key alone). `ttl` is an ISO-8601 duration the wait stays live
 (e.g. `PT24H`, `P7D`); an absent or unparseable `ttl` falls back to
 `TRIGGER_RESUME_DEFAULT_TTL_SECONDS` (default 7 days).
+Fractional seconds are preserved using the same microsecond rounding as
+Workflow mirrors; a subsecond value never becomes the multi-day default.
 
 Register request — `RegisterResumeRequest`:
 

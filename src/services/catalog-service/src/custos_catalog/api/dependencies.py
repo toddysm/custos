@@ -144,6 +144,7 @@ def get_definition_manager(
         activity_registry=activity_registry,
         connector_client=connector_client,
         versioning=versioning,
+        connector_references=providers.connector_references,
     )
 
 
@@ -161,6 +162,7 @@ def get_template_manager(
         activity_registry=activity_registry,
         connector_client=connector_client,
         versioning=versioning,
+        connector_references=providers.connector_references,
         definition_manager=definition_manager,
     )
 

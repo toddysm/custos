@@ -15,17 +15,88 @@ Per issue #222 scope:
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 import pytest
+from custos_pg import PgConnectorInstanceAdapter
+from custos_spl.ids import ConnectorInstanceId, WorkspaceId
+from custos_spl.interfaces.connector_instance_store import ConnectorInstance
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from custos_catalog.clients import HttpConnectorClient
 from tests.integration.conftest import (
     admin_header,
+    callctx_header,
     minimal_workflow,
     seed_echo_activity,
 )
 
 pytestmark = pytest.mark.integration
+
+
+@pytest.mark.parametrize(("instance_workspace", "status"), [("ws-1", 201), ("other", 400)])
+def test_source_publish_uses_scoped_existence_without_validate_permission(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    instance_workspace: str,
+    status: int,
+) -> None:
+    """A real stored source needs neither an installed type version nor connector:validate."""
+    assert isinstance(client.app, FastAPI)
+    reader = client.app.state.providers.connector_references
+    assert isinstance(reader, PgConnectorInstanceAdapter)
+
+    async def seed() -> None:
+        """Create only the instance row; deliberately leave its type version absent."""
+        now = datetime.now(UTC)
+        workspace = WorkspaceId(instance_workspace)
+        await reader.put_connector_instance(
+            workspace,
+            ConnectorInstance(
+                workspace_id=workspace,
+                instance_id=ConnectorInstanceId("registry"),
+                type="uninstalled-source-type",
+                version="99.0.0",
+                name=None,
+                lease_ttl_seconds=None,
+                enabled=False,
+                status="disabled",
+                health_status=None,
+                target_config={},
+                credentials_authentication={},
+                used_capabilities=None,
+                created_at=now,
+                updated_at=now,
+            ),
+        )
+
+    async def forbidden(self: HttpConnectorClient, workspace_id: str, name: str) -> bool:
+        """Fail if the source path invokes the stronger Connector validation RPC."""
+        raise AssertionError("source lookup must not invoke ValidateConnector")
+
+    monkeypatch.setattr(HttpConnectorClient, "exists_connector_instance", forbidden)
+    assert client.portal is not None
+    client.portal.call(seed)
+    doc = minimal_workflow(name="source-wait")
+    doc["spec"]["steps"] = [
+        {
+            "id": "await",
+            "waitFor": {
+                "eventKey": "${{ 'event' }}",
+                "selector": "${{ 'event.data.key == \"one\"' }}",
+                "source": {"connectorInstanceId": "registry", "deliveryModes": ["push"]},
+            },
+        }
+    ]
+    response = client.post(
+        "/v1/workspaces/ws-1/workflows",
+        json={"definition": doc},
+        headers=callctx_header(permissions=["catalog:workflows:write"]),
+    )
+    assert response.status_code == status, response.text
+    if status == 400:
+        assert "resolve.connector_instance_missing" in response.text
 
 
 def _publish(client: TestClient, name: str = "orders") -> dict[str, object]:

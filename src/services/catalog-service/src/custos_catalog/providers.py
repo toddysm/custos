@@ -42,6 +42,7 @@ from typing import Protocol, cast
 
 from custos_spl import MigrationRequired
 from custos_spl.interfaces.catalog_store import CatalogStoreProvider
+from custos_spl.interfaces.connector_instance_store import ConnectorReferenceReader
 from custos_spl.interfaces.definition_store import DefinitionStoreProvider
 from custos_spl.interfaces.metadata_store import MetadataStoreProvider
 
@@ -86,11 +87,15 @@ class Providers:
     Held on ``app.state.providers`` and exposed to FastAPI handlers via
     :func:`get_definition_store` / :func:`get_catalog_store` /
     :func:`get_metadata_store`.
+
+    Source references use the optional credential-free reader in the shared
+    metadata database. Other deployments must inject a scoped implementation.
     """
 
     definition_store: DefinitionStoreProvider
     catalog_store: CatalogStoreProvider
     metadata_store: MetadataStoreProvider
+    connector_references: ConnectorReferenceReader | None = None
 
 
 def load_providers(settings: Settings) -> Providers:
@@ -104,6 +109,7 @@ def load_providers(settings: Settings) -> Providers:
     # asyncpg dependency entirely.
     from custos_pg import (
         PgCatalogAdapter,
+        PgConnectorInstanceAdapter,
         PgDefinitionAdapter,
         PgMetadataAdapter,
     )
@@ -115,9 +121,8 @@ def load_providers(settings: Settings) -> Providers:
     catalog_store = PgCatalogAdapter(
         lazy=LazyPool(settings.catalog_store_dsn),
     )
-    metadata_store = PgMetadataAdapter(
-        lazy=LazyPool(settings.metadata_store_dsn),
-    )
+    metadata_pool = LazyPool(settings.metadata_store_dsn)
+    metadata_store = PgMetadataAdapter(lazy=metadata_pool)
     # The adapters declare SCHEMA_REVISION as a bare class attr rather
     # than a `ClassVar[int]`, so mypy can't see them as Protocol-conforming
     # at the consumer boundary. `custos-postgres` has its own strict mypy
@@ -127,6 +132,7 @@ def load_providers(settings: Settings) -> Providers:
         definition_store=cast(DefinitionStoreProvider, definition_store),
         catalog_store=cast(CatalogStoreProvider, catalog_store),
         metadata_store=cast(MetadataStoreProvider, metadata_store),
+        connector_references=PgConnectorInstanceAdapter(lazy=metadata_pool),
     )
 
 

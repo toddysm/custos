@@ -71,6 +71,7 @@ from uuid import UUID
 
 from custos_spl.errors import ImmutableViolation
 from custos_spl.ids import WorkflowId, WorkspaceId
+from custos_spl.interfaces.connector_instance_store import ConnectorReferenceReader
 from custos_spl.interfaces.definition_store import (
     DefinitionListFilter,
     DefinitionStoreProvider,
@@ -277,7 +278,7 @@ class DefinitionManager:
 
     Holds the :class:`DefinitionStoreProvider` and the collaborators
     needed by the publish pipeline (activity type registry, connector
-    client, versioning manager). One instance per process is
+    client, optional scoped source reader, versioning manager). One instance per process is
     sufficient — the manager is stateless and all of its
     collaborators are concurrency-safe by construction.
     """
@@ -291,11 +292,13 @@ class DefinitionManager:
         connector_client: ConnectorClient,
         versioning: VersioningManager,
         max_publish_retries: int = DEFAULT_MAX_PUBLISH_RETRIES,
+        connector_references: ConnectorReferenceReader | None = None,
     ) -> None:
         self._store = definition_store
         self._metadata_store = metadata_store
         self._activity_registry = activity_registry
         self._connector_client = connector_client
+        self._connector_references = connector_references
         self._versioning = versioning
         if max_publish_retries < 1:
             raise ValueError("max_publish_retries must be >= 1")
@@ -655,6 +658,7 @@ class DefinitionManager:
                 definition_store=self._subworkflow_adapter,
                 connector_client=self._connector_client,
                 workspace_id=workspace_id,
+                connector_references=self._connector_references,
             )
         except ResolveError as exc:
             raise PublishValidationError(

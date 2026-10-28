@@ -62,6 +62,7 @@ from custos_trigger.pipeline.dispatch import AuditSink
 from custos_trigger.providers import Providers
 from custos_trigger.selector import SelectorEvaluator
 from custos_trigger.source_config import (
+    SourceConfigurationError,
     require_receiver_configuration,
     validate_connector_reference,
 )
@@ -161,15 +162,15 @@ _ISO8601_DURATION_RE: Final[re.Pattern[str]] = re.compile(
     r"(?:T"
     r"(?:(?P<hours>\d+)H)?"
     r"(?:(?P<minutes>\d+)M)?"
-    r"(?:(?P<seconds>\d+)(?:\.\d+)?S)?"
+    r"(?:(?P<seconds>\d+(?:\.\d+)?)S)?"
     r")?$"
 )
 
 
-def _parse_iso8601_duration_seconds(value: str) -> int | None:
-    """Parse an ISO-8601 duration to whole seconds, or ``None`` if malformed.
+def _parse_iso8601_duration(value: str) -> timedelta | None:
+    """Parse a positive duration with the same microsecond rounding as Workflow.
 
-    Fractional seconds are truncated. Returns ``None`` for an empty match
+    Returns ``None`` for an empty match
     (e.g. bare ``P`` / ``PT``) so the caller falls back to the default TTL.
     """
     match = _ISO8601_DURATION_RE.fullmatch(value.strip())
@@ -182,21 +183,26 @@ def _parse_iso8601_duration_seconds(value: str) -> int | None:
     days = int(parts["days"] or 0)
     hours = int(parts["hours"] or 0)
     minutes = int(parts["minutes"] or 0)
-    seconds = int(parts["seconds"] or 0)
-    return ((((weeks * 7 + days) * 24 + hours) * 60 + minutes) * 60) + seconds
+    seconds = float(parts["seconds"] or 0)
+    if weeks == days == hours == minutes == seconds == 0:
+        return None
+    try:
+        return timedelta(weeks=weeks, days=days, hours=hours, minutes=minutes, seconds=seconds)
+    except OverflowError as exc:
+        raise SourceConfigurationError("resume TTL exceeds the supported duration range") from exc
 
 
-def _resolve_ttl_seconds(ttl: str | None, default_seconds: int) -> int:
-    """Resolve the request TTL to whole seconds, falling back to the default.
+def _resolve_ttl(ttl: str | None, default_seconds: int) -> timedelta:
+    """Resolve the request TTL with Workflow-compatible subsecond precision.
 
     An absent, blank, unparseable, or non-positive ``ttl`` yields the
     configured ``TRIGGER_RESUME_DEFAULT_TTL_SECONDS`` default.
     """
     if ttl:
-        parsed = _parse_iso8601_duration_seconds(ttl)
-        if parsed is not None and parsed > 0:
+        parsed = _parse_iso8601_duration(ttl)
+        if parsed is not None:
             return parsed
-    return default_seconds
+    return timedelta(seconds=default_seconds)
 
 
 @router.post(
@@ -250,7 +256,13 @@ async def register_resume_subscription(
             await validate_connector_reference(
                 providers.connector_references, workspace_id, body.source.connector_instance_id
             )
-        ttl_seconds = _resolve_ttl_seconds(body.ttl, default_ttl_seconds)
+        ttl = _resolve_ttl(body.ttl, default_ttl_seconds)
+        try:
+            expires_at = now + ttl
+        except OverflowError as exc:
+            raise SourceConfigurationError(
+                "resume TTL exceeds the supported timestamp range"
+            ) from exc
         existing = await store.register_or_get(
             ResumeRegistration(
                 run_id=body.run_id,
@@ -262,7 +274,7 @@ async def register_resume_subscription(
             ),
             workspace_id=workspace_id,
             resume_id=resume_id,
-            expires_at=now + timedelta(seconds=ttl_seconds),
+            expires_at=expires_at,
             as_of=now,
         )
         await _reject_source_rebinding(

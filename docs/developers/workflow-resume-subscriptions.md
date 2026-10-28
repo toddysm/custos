@@ -114,13 +114,22 @@ source:
 
 Catalog's normal workflow/template publication path accepts this declaration,
 validates both wait expressions and checks the constant source reference in the
-publication workspace. The compiler and graph serializer preserve the association. Registration,
+publication workspace using existence-only storage reads, not the stronger
+`ValidateConnector` operation. The publisher needs the normal Catalog
+publication permission, not `connector:validate`; installed type versions,
+activation and capabilities remain Connector Service concerns.
+The compiler and graph serializer preserve the association. Registration,
 mirror serialization, replay and cancellation propagate the run workspace.
 Legacy graphs, mirror records and request envelopes omit the additive fields.
 Replay preserves the original persisted source and audits a changed graph
 association; a mirror from another workspace fails reconciliation before any
 registration. Trigger rejects source rebinding with `409
 trigger.resume_divergent`, even after expiry.
+
+Wait steps may declare a nonempty `needs` array of unique step identifiers.
+Activity-only `retry` and `on_error` fields are rejected on waits. Authored
+fractional time-to-live values use identical microsecond rounding in Workflow
+mirrors and Trigger registrations.
 
 ## Register / replay / cancel sequence
 

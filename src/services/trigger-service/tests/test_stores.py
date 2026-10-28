@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
+from typing import cast
+from unittest.mock import Mock
 
 import pytest
 from custos_spl.errors import ImmutableViolation
+from fastapi.testclient import TestClient
 
+from custos_trigger.app import create_app
 from custos_trigger.models import (
     ResumeRegistration,
     SourceType,
@@ -14,12 +19,15 @@ from custos_trigger.models import (
     SubscriptionKind,
     SubscriptionState,
 )
-from custos_trigger.providers import InMemoryTriggerMetadataStore
+from custos_trigger.providers import InMemoryTriggerMetadataStore, Providers
+from custos_trigger.source_config import SourceConfig
 from custos_trigger.stores import (
     ResumeSubscriptionStore,
     ScheduleStore,
+    SubscriptionReadUnsupportedError,
     SubscriptionStore,
 )
+from custos_trigger.stores.base import TriggerMetadataStore
 
 # Mirrors the frozen clock the ``metadata_store`` fixture installs (conftest).
 FIXED_NOW = datetime(2026, 6, 4, 12, 0, 0, tzinfo=UTC)
@@ -40,6 +48,116 @@ def _subscription(**overrides: object) -> Subscription:
     }
     base.update(overrides)
     return Subscription(**base)  # type: ignore[arg-type]
+
+
+def _legacy_backend(
+    backend: InMemoryTriggerMetadataStore, *, reads: bool = True
+) -> TriggerMetadataStore:
+    """Expose the existing write/read capabilities without the optional atomic mutation API."""
+    legacy = Mock(spec=TriggerMetadataStore)
+    methods = [
+        "put_subscription",
+        "update_subscription_state",
+        "append_subscription_selector",
+        "put_resume_subscription",
+        "delete_resume_subscription",
+        "put_dedup_key",
+        "put_schedule",
+        "update_schedule_next_fire",
+    ]
+    if reads:
+        methods += [
+            "get_subscription",
+            "query_subscriptions",
+            "get_resume_subscription",
+            "query_resume_subscriptions",
+            "get_schedule",
+            "query_due_schedules",
+        ]
+    for name in methods:
+        setattr(legacy, name, getattr(backend, name))
+    return cast(TriggerMetadataStore, legacy)
+
+
+@pytest.mark.parametrize("kind", [SourceType.MANUAL, SourceType.INTERNAL])
+@pytest.mark.parametrize("reads", [False, True])
+async def test_legacy_provider_preserves_manual_internal_creates(
+    metadata_store: InMemoryTriggerMetadataStore, kind: SourceType, reads: bool
+) -> None:
+    """Existing write-only providers can still create sources without managed schedules."""
+    store = SubscriptionStore(_legacy_backend(metadata_store, reads=reads))
+    original = _subscription(source_type=kind)
+    created = await store.create(original)
+    assert created.model_dump() == original.model_dump()
+    assert created.store_revision == 0
+    assert metadata_store.subscription("ws-1", "sub-1") is not None
+
+
+@pytest.mark.parametrize("kind", ["manual", "internal"])
+def test_legacy_write_only_provider_accepts_existing_http_bodies(
+    metadata_store: InMemoryTriggerMetadataStore, kind: str
+) -> None:
+    """The public M1 create API still returns 201 with no query or mutation capability."""
+    app = create_app(
+        authz_endpoint="",
+        providers=Providers(metadata_store=_legacy_backend(metadata_store, reads=False)),
+        receiver_configuration_enabled=False,
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/workspaces/ws-1/triggers",
+            json={"sourceType": kind, "workflowId": "workflow"},
+            headers={
+                "x-custos-callctx": json.dumps(
+                    {
+                        "workspace_id": "ws-1",
+                        "principal_id": "author",
+                        "permissions": ["trigger:subscriptions:write"],
+                    }
+                )
+            },
+        )
+    assert response.status_code == 201, response.text
+    assert response.json()["sourceType"] == kind
+
+
+async def test_legacy_unmanaged_updates_preserve_state(
+    metadata_store: InMemoryTriggerMetadataStore,
+) -> None:
+    """Legacy metadata edits remain append-only while explicit state changes use the old API."""
+    store = SubscriptionStore(_legacy_backend(metadata_store))
+    original = await store.create(_subscription(source_type=SourceType.MANUAL))
+    await store.set_state("ws-1", "sub-1", SubscriptionState.PAUSED)
+    await store.reauthor_selector(original.model_copy(update={"selector": "true"}))
+    saved = await store.get("ws-1", "sub-1")
+    assert (
+        saved is not None and saved.state is SubscriptionState.PAUSED and saved.selector == "true"
+    )
+    await store.set_state("ws-1", "sub-1", SubscriptionState.EXPIRED)
+    with pytest.raises(ImmutableViolation, match="terminal"):
+        await store.set_state("ws-1", "sub-1", SubscriptionState.ACTIVE)
+
+
+async def test_legacy_provider_cannot_mutate_managed_state(
+    metadata_store: InMemoryTriggerMetadataStore,
+) -> None:
+    """New receivers and sources retaining managed schedules cannot use fallback writes."""
+    legacy = SubscriptionStore(_legacy_backend(metadata_store))
+    configured = _subscription(
+        source_type=SourceType.SCHEDULED, source_config=SourceConfig(interval_seconds=30)
+    )
+    with pytest.raises(SubscriptionReadUnsupportedError, match="atomic"):
+        await legacy.create(configured)
+    assert metadata_store.subscription("ws-1", "sub-1") is None
+    modern = SubscriptionStore(metadata_store)
+    created = await modern.create(configured)
+    manual = await modern.update(
+        created.model_copy(update={"source_type": SourceType.MANUAL, "source_config": None}),
+        expected_revision=created.store_revision,
+    )
+    with pytest.raises(SubscriptionReadUnsupportedError, match="managed"):
+        await legacy.reauthor_selector(manual.model_copy(update={"selector": "true"}))
+    assert await modern.get("ws-1", "sub-1") == manual
 
 
 # --- SubscriptionStore -------------------------------------------------------

@@ -604,10 +604,12 @@ class _SourceReferences:
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize("ttl", ["PT1H", "PT0.5S", "PT1.5S"])
 async def test_workflow_client_round_trips_real_trigger_routes(
     backend: QueryStore,
     monkeypatch: pytest.MonkeyPatch,
     workflow_auth: tuple[WorkflowCallerVerifier, dict[str, str]],
+    ttl: str,
 ) -> None:
     """Run the production Workflow transport through real Trigger routes and provider reads."""
     from custos_spl.interfaces.trigger_source import ResumeSource
@@ -617,6 +619,7 @@ async def test_workflow_client_round_trips_real_trigger_routes(
         DaprTriggerServiceClient,
         RegisterResumeSubscriptionRequest,
     )
+    from custos_workflow.runs.wait import parse_wait_duration
 
     monkeypatch.setattr(rpc, "_now", lambda: _NOW)
     app = create_app(
@@ -656,7 +659,7 @@ async def test_workflow_client_round_trips_real_trigger_routes(
                 run_id="contract-run",
                 step_id="wait",
                 event_key="event",
-                ttl="PT1H",
+                ttl=ttl,
                 selector="event.data.key == 'one'",
                 workspace_id=_WS,
                 source=source,
@@ -666,7 +669,7 @@ async def test_workflow_client_round_trips_real_trigger_routes(
         assert saved is not None and saved.registration.source is not None
         assert saved.registration.source.to_source() == source
         assert saved.registration.workspace_id == _WS
-        assert saved.expires_at == _NOW + timedelta(hours=1)
+        assert saved.expires_at == _NOW + parse_wait_duration("wait", ttl)
         matches = await backend.query_resume_subscriptions(
             _WS, connector_instance_id="a", delivery_mode="pull", as_of=_NOW
         )

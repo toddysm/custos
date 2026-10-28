@@ -191,6 +191,24 @@ def test_wait_accepts_optional_positive_ttl(ttl: str | None) -> None:
     validate_workflow(doc)
 
 
+@pytest.mark.parametrize("unsupported", [{"retry": {"maxAttempts": 2}}, {"on_error": []}])
+def test_wait_rejects_activity_only_error_fields(unsupported: dict[str, Any]) -> None:
+    """Publication cannot admit retry/error-routing fields that the wait compiler rejects."""
+    doc = _wait_workflow()
+    doc["spec"]["steps"][0].update(unsupported)
+    with pytest.raises(WorkflowSchemaError):
+        validate_workflow(doc)
+
+
+@pytest.mark.parametrize("needs", [[], ["one", "one"], ["bad id"], [123]])
+def test_wait_rejects_invalid_dependency_arrays(needs: list[Any]) -> None:
+    """Explicit dependencies follow Workflow's nonempty, unique step-ID contract."""
+    doc = _wait_workflow()
+    doc["spec"]["steps"][0]["needs"] = needs
+    with pytest.raises(WorkflowSchemaError):
+        validate_workflow(doc)
+
+
 def _registry_quarantine_template() -> dict[str, Any]:
     """The template example from `overview.md` § Workflow and Template Schema."""
     return {

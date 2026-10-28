@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -12,11 +13,14 @@ from custos_workflow.compiler import RunMeta
 from custos_workflow.compiler import compile as compile_workflow
 from custos_workflow.document import WaitForStep, WorkflowDocument
 from custos_workflow.graph import from_json, to_json
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from custos_catalog.clients import HttpConnectorClient
+from custos_catalog.providers import Providers
 from tests.api.conftest import (
     FakeCatalogStore,
+    FakeConnectorReferences,
     FakeDefinitionStore,
     FakeMetadataStore,
     admin_header,
@@ -70,16 +74,17 @@ def test_publish_sourced_wait_through_real_pipeline(
     stores: tuple[FakeDefinitionStore, FakeCatalogStore, FakeMetadataStore],
     monkeypatch: pytest.MonkeyPatch,
     exists: bool,
+    connector_references: FakeConnectorReferences,
 ) -> None:
     """Publish validates the actual wait source in URL scope and preserves it in the version."""
-    calls: list[tuple[str, str]] = []
 
     async def lookup(self: HttpConnectorClient, workspace_id: str, name: str) -> bool:
-        """Record trusted scope instead of allowing an unvalidated source reference."""
-        calls.append((workspace_id, name))
-        return exists
+        """A source reference must never require the stronger ValidateConnector operation."""
+        raise AssertionError("source publication must not call ValidateConnector")
 
     monkeypatch.setattr(HttpConnectorClient, "exists_connector_instance", lookup)
+    if exists:
+        connector_references.rows.add(("ws-1", "registry"))
     source: dict[str, Any] = {
         "connectorInstanceId": "registry",
         "deliveryModes": ["pull", "push"],
@@ -87,23 +92,27 @@ def test_publish_sourced_wait_through_real_pipeline(
     }
     doc = minimal_workflow()
     doc["spec"]["steps"] = [
+        {"id": "prepare", "let": {"image": "${{ inputs.image }}"}},
         {
             "id": "await",
+            "needs": ["prepare"],
             "waitFor": {
                 "eventKey": "${{ inputs.image }}",
                 "selector": "${{ inputs.image }}",
                 "source": source,
             },
-        }
+        },
     ]
     response = client.post(
-        "/v1/workspaces/ws-1/workflows", json={"definition": doc}, headers=admin_header()
+        "/v1/workspaces/ws-1/workflows",
+        json={"definition": doc},
+        headers=callctx_header(permissions=["catalog:workflows:write"]),
     )
-    assert calls == [("ws-1", "registry")]
+    assert connector_references.calls == [("ws-1", "registry")]
     if exists:
         assert response.status_code == 201, response.text
         stored = stores[0].workflows[("ws-1", "orders")][0]
-        assert stored.normalized_doc["spec"]["steps"][0]["waitFor"]["source"] == source
+        assert stored.normalized_doc["spec"]["steps"][1]["waitFor"]["source"] == source
         graph = compile_workflow(
             WorkflowDocument.model_validate(stored.normalized_doc),
             RunMeta(
@@ -115,13 +124,47 @@ def test_publish_sourced_wait_through_real_pipeline(
             ),
             InMemoryActivityTypeRegistry({}),
         )
-        step = from_json(to_json(graph)).nodes[0].step_source
+        step = from_json(to_json(graph)).nodes[1].step_source
         assert isinstance(step, WaitForStep) and step.wait_for.source is not None
         assert step.wait_for.source.connector_instance_id == "registry"
+        assert step.needs == ["prepare"]
     else:
         assert response.status_code == 400, response.text
         assert "resolve.connector_instance_missing" in response.text
         assert stores[0].workflows == {}
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_source_reference_backend_unavailable_is_not_missing(
+    client: TestClient,
+    providers: Providers,
+    connector_references: FakeConnectorReferences,
+    configured: bool,
+) -> None:
+    """Missing wiring and backend failures surface as dependency errors, never false absence."""
+    assert isinstance(client.app, FastAPI)
+    if configured:
+        connector_references.unavailable = True
+    else:
+        client.app.state.providers = replace(providers, connector_references=None)
+    doc = minimal_workflow()
+    doc["spec"]["steps"] = [
+        {
+            "id": "await",
+            "waitFor": {
+                "eventKey": "${{ inputs.image }}",
+                "selector": "${{ inputs.image }}",
+                "source": {"connectorInstanceId": "registry", "deliveryModes": ["push"]},
+            },
+        }
+    ]
+    response = client.post(
+        "/v1/workspaces/ws-1/workflows",
+        json={"definition": doc},
+        headers=callctx_header(permissions=["catalog:workflows:write"]),
+    )
+    assert response.status_code == 503, response.text
+    assert response.json()["error"]["code"] == "catalog.dependency_unavailable"
 
 
 def test_publish_requires_workspace_write_permission(client: TestClient) -> None:

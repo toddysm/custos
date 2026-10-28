@@ -47,7 +47,7 @@ def test_wait_source_emits_scoped_reference_resolution_slot() -> None:
     normalized = normalize_workflow(document)
     assert normalized.slots == (
         RefResolutionSlot(
-            kind="connector_instance",
+            kind="source_connector_instance",
             path=("spec", "steps", 0, "waitFor", "source", "connectorInstanceId"),
             original_ref="registry",
         ),

@@ -21,8 +21,8 @@ from datetime import UTC, datetime
 from typing import Any, ClassVar
 
 import pytest
-from custos_spl.errors import ConflictDigest, ImmutableViolation
-from custos_spl.ids import WorkflowId, WorkflowTemplateId, WorkspaceId
+from custos_spl.errors import BackendUnavailable, ConflictDigest, ImmutableViolation
+from custos_spl.ids import ConnectorInstanceId, WorkflowId, WorkflowTemplateId, WorkspaceId
 from custos_spl.interfaces.catalog_store import (
     ActivityTypeVersion,
     ConnectorTypeVersion,
@@ -553,9 +553,34 @@ def stores() -> tuple[FakeDefinitionStore, FakeCatalogStore, FakeMetadataStore]:
     return FakeDefinitionStore(), FakeCatalogStore(), FakeMetadataStore()
 
 
+@dataclass
+class FakeConnectorReferences:
+    """Credential-free scoped references, independent of Connector validation permissions."""
+
+    rows: set[tuple[str, str]] = field(default_factory=set)
+    calls: list[tuple[str, str]] = field(default_factory=list)
+    unavailable: bool = False
+
+    async def has_connector_instance(
+        self, workspace_id: WorkspaceId, instance_id: ConnectorInstanceId
+    ) -> bool:
+        """Record scope and distinguish backend failure from a missing row."""
+        self.calls.append((workspace_id, instance_id))
+        if self.unavailable:
+            raise BackendUnavailable("reference backend unavailable")
+        return (workspace_id, instance_id) in self.rows
+
+
+@pytest.fixture
+def connector_references() -> FakeConnectorReferences:
+    """Start each publication scenario without any connector references."""
+    return FakeConnectorReferences()
+
+
 @pytest.fixture
 def providers(
     stores: tuple[FakeDefinitionStore, FakeCatalogStore, FakeMetadataStore],
+    connector_references: FakeConnectorReferences,
 ) -> Providers:
     """Build a :class:`Providers` bundle from the in-memory stores."""
     definition_store, catalog_store, metadata_store = stores
@@ -563,6 +588,7 @@ def providers(
         definition_store=definition_store,  # type: ignore[arg-type, unused-ignore]
         catalog_store=catalog_store,  # type: ignore[arg-type, unused-ignore]
         metadata_store=metadata_store,  # type: ignore[arg-type, unused-ignore]
+        connector_references=connector_references,
     )
 
 

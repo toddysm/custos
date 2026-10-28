@@ -339,7 +339,17 @@ def _wait_for_step() -> dict[str, Any]:
         "additionalProperties": False,
         "required": ["id", "waitFor"],
         "properties": {
-            **_step_common_properties(),
+            **{
+                key: value
+                for key, value in _step_common_properties().items()
+                if key not in ("retry", "on_error")
+            },
+            "needs": {
+                "type": ["array", "null"],
+                "minItems": 1,
+                "uniqueItems": True,
+                "items": {"type": "string", "pattern": _STEP_ID_PATTERN},
+            },
             "waitFor": {
                 "type": "object",
                 "additionalProperties": False,
