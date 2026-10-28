@@ -31,7 +31,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from custos_spl.interfaces.trigger_source import MIN_POLL_INTERVAL_SECONDS
+from custos_spl.interfaces.trigger_source import (
+    CONNECTOR_EXPRESSION_PATTERN,
+    MIN_POLL_INTERVAL_SECONDS,
+)
 
 #: A CEL placeholder string of the form ``${{ ... }}``. Used wherever
 #: an interpolated expression is allowed (e.g. ``connector:`` values
@@ -311,7 +314,7 @@ def _resume_source() -> dict[str, Any]:
             "connectorInstanceId": {
                 "type": "string",
                 "pattern": r"\S",
-                "not": {"pattern": _CEL_TOKEN_PATTERN},
+                "not": {"pattern": CONNECTOR_EXPRESSION_PATTERN},
             },
             "deliveryModes": {
                 "type": "array",

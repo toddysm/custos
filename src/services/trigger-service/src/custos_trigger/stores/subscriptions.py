@@ -82,6 +82,7 @@ class SubscriptionStore:
         expected_revision: int,
         reset_schedule: bool = False,
         preserve_state: bool = False,
+        metadata_changed: bool = True,
     ) -> Subscription:
         """Update metadata atomically, optionally retaining the locked lifecycle state."""
         return await self._write(
@@ -89,6 +90,7 @@ class SubscriptionStore:
             expected_revision=expected_revision,
             reset_schedule=reset_schedule,
             preserve_state=preserve_state,
+            metadata_changed=metadata_changed,
         )
 
     async def _write(
@@ -98,12 +100,16 @@ class SubscriptionStore:
         expected_revision: int | None,
         reset_schedule: bool,
         preserve_state: bool = False,
+        metadata_changed: bool = True,
     ) -> Subscription:
         """Build a complete provider transaction before touching persisted state."""
         store = self._store
         if not isinstance(store, SubscriptionMutationProvider):
             return await self._write_legacy(
-                subscription, expected_revision=expected_revision, preserve_state=preserve_state
+                subscription,
+                expected_revision=expected_revision,
+                preserve_state=preserve_state,
+                metadata_changed=metadata_changed,
             )
         schedule = None
         config = subscription.source_config
@@ -143,7 +149,12 @@ class SubscriptionStore:
         return subscription_from_spl(snapshot.subscription, snapshot.selector)
 
     async def _write_legacy(
-        self, subscription: Subscription, *, expected_revision: int | None, preserve_state: bool
+        self,
+        subscription: Subscription,
+        *,
+        expected_revision: int | None,
+        preserve_state: bool,
+        metadata_changed: bool,
     ) -> Subscription:
         """Retain the M1 write contract only for unmanaged manual/internal subscriptions."""
         if (
@@ -189,6 +200,11 @@ class SubscriptionStore:
                 row = await self._store.update_subscription_state(
                     workspace, identifier, subscription.state.value
                 )
+            if not metadata_changed:
+                refreshed = await self._store.get_subscription(workspace, identifier)
+                if refreshed is None:
+                    raise ValueError(f"unknown subscription: {subscription.subscription_id!r}")
+                return subscription_from_spl(refreshed.subscription, refreshed.selector)
         selector = await self._store.append_subscription_selector(
             workspace,
             identifier,
@@ -291,4 +307,5 @@ class SubscriptionStore:
         return await self.update(
             current.model_copy(update={"state": state, "updated_at": self._now()}),
             expected_revision=current.store_revision,
+            metadata_changed=False,
         )

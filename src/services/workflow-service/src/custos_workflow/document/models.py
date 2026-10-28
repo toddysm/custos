@@ -40,7 +40,7 @@ import re
 from enum import StrEnum
 from typing import Annotated, Any, Final, Literal, NewType
 
-from custos_spl.interfaces.trigger_source import DeliveryMode, ResumeSource
+from custos_spl.interfaces.trigger_source import DeliveryMode, ResumeSource, parse_resume_duration
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -559,8 +559,6 @@ class WaitForSourceSpec(_StrictModel):
     def validate_source(self) -> WaitForSourceSpec:
         """Validate shared delivery rules and reject runtime connector rebinding expressions."""
         self.to_source()
-        if _CEL_TOKEN_PATTERN.match(self.connector_instance_id):
-            raise ValueError("waitFor source connectorInstanceId must be a constant")
         return self
 
     def to_source(self) -> ResumeSource:
@@ -645,6 +643,7 @@ class WaitForSpec(_StrictModel):
                 f"waitFor 'ttl' {self.ttl!r} must specify a positive "
                 "duration (at least one non-zero component)"
             )
+        parse_resume_duration(self.ttl)
         return self
 
 

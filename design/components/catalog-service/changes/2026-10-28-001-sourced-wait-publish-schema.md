@@ -17,6 +17,8 @@ Both schemas accept `waitFor` with a required Common Expression Language (CEL)
 Waits accept explicit `needs` dependencies but not activity-only `retry` or
 `on_error` fields. Fractional durations retain Workflow's microsecond precision
 when registered with Trigger.
+Missing, self and forward dependencies and unrepresentable durations are
+rejected before publication. Runtime checks also guard actual deadline overflow.
 An external `source` requires a constant, nonblank `connectorInstanceId` and a
 nonempty, duplicate-free subset of `push`/`pull` delivery modes. Its selector
 is mandatory. A polling interval requires pull delivery and an integer of at
@@ -25,6 +27,10 @@ least ten seconds. Workspace and credential fields are forbidden.
 Optional legacy fields may be absent or null. Runtime connector expressions,
 including template placeholders in the source identifier, are not supported
 by this constant-source contract.
+Whitespace-padded and empty expression wrappers are also rejected as connector
+identifiers. String placeholders in wait event-key/selector slots are safely
+quoted during materialization; compound placeholder expressions are rejected
+before publication instead of creating unusable template versions.
 
 ## Publication gates
 

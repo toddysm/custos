@@ -89,6 +89,7 @@ _GLOBAL_ROOTS: Final[frozenset[str]] = frozenset(
 #: optional whitespace around the inner expression to match how
 #: humans write these in YAML.
 _WRAPPER_RE: Final[re.Pattern[str]] = re.compile(r"^\s*\$\{\{(.+)\}\}\s*$", re.DOTALL)
+_WAIT_PLACEHOLDER_REF: Final[re.Pattern[str]] = re.compile(r"placeholders\.([a-zA-Z][a-zA-Z0-9_]*)")
 
 
 # ---------------------------------------------------------------------------
@@ -385,6 +386,18 @@ def _validate_expression(
 
     # Walk the AST and check every Member/Index chain root.
     binding_issues: list[CelValidationIssue] = []
+    if (
+        slot.scope.placeholders
+        and slot.path.endswith((".waitFor.eventKey", ".waitFor.selector"))
+        and any(isinstance(node, Ident) and node.name == "placeholders" for node in _iter_ast(ast))
+        and _WAIT_PLACEHOLDER_REF.fullmatch(slot.source.strip()) is None
+    ):
+        binding_issues.append(
+            CelValidationIssue(
+                path=slot.path,
+                message="wait template placeholders must occupy the complete expression",
+            )
+        )
 
     # Pre-compute parent links by traversing. For each Member/Index/Call,
     # find the leftmost node of the access chain (`_leftmost_target`),
@@ -674,7 +687,29 @@ def validate_template_expressions(norm: NormalizedTemplate) -> None:
     inner ``spec.workflow`` body as the slot source and exposes the
     declared placeholder names as legal roots.
     """
-    result = _run_validation(discover_template_slots(norm))
+    slots = discover_template_slots(norm)
+    result = _run_validation(slots)
+    spec = norm.document.get("spec")
+    declarations = {
+        declaration["name"]: declaration.get("type")
+        for declaration in ((spec.get("placeholders") or []) if isinstance(spec, dict) else [])
+        if isinstance(declaration, dict) and isinstance(declaration.get("name"), str)
+    }
+    for slot in slots:
+        if not slot.path.endswith((".waitFor.eventKey", ".waitFor.selector")):
+            continue
+        match = _WAIT_PLACEHOLDER_REF.fullmatch(slot.source.strip())
+        if match is not None and declarations.get(match.group(1)) in (
+            "integer",
+            "number",
+            "boolean",
+        ):
+            result.binding.append(
+                CelValidationIssue(
+                    path=slot.path,
+                    message="wait expression placeholders must have a string-compatible type",
+                )
+            )
     if result.syntax:
         raise CelSyntaxError(result.syntax)
     if result.binding:

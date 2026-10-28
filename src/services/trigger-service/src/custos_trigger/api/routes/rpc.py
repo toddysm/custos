@@ -38,6 +38,7 @@ import re
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Final
 
+from custos_spl.interfaces.trigger_source import parse_resume_duration
 from fastapi import APIRouter, Depends, Request, Response, status
 
 from custos_trigger.dependencies import (
@@ -179,17 +180,23 @@ def _parse_iso8601_duration(value: str) -> timedelta | None:
     parts = match.groupdict()
     if not any(parts.values()):
         return None
-    weeks = int(parts["weeks"] or 0)
-    days = int(parts["days"] or 0)
-    hours = int(parts["hours"] or 0)
-    minutes = int(parts["minutes"] or 0)
-    seconds = float(parts["seconds"] or 0)
+    try:
+        weeks = int(parts["weeks"] or 0)
+        days = int(parts["days"] or 0)
+        hours = int(parts["hours"] or 0)
+        minutes = int(parts["minutes"] or 0)
+        seconds = float(parts["seconds"] or 0)
+    except ValueError as exc:
+        raise SourceConfigurationError("resume TTL exceeds the supported numeric range") from exc
     if weeks == days == hours == minutes == seconds == 0:
         return None
     try:
-        return timedelta(weeks=weeks, days=days, hours=hours, minutes=minutes, seconds=seconds)
-    except OverflowError as exc:
-        raise SourceConfigurationError("resume TTL exceeds the supported duration range") from exc
+        # Retain the legacy combined week/day syntax while sharing strict
+        # precision/range validation with published Workflow waits.
+        normalized = f"P{weeks * 7 + days}DT{hours}H{minutes}M{parts['seconds'] or '0'}S"
+        return parse_resume_duration(normalized)
+    except ValueError as exc:
+        raise SourceConfigurationError(f"invalid resume TTL: {exc}") from exc
 
 
 def _resolve_ttl(ttl: str | None, default_seconds: int) -> timedelta:

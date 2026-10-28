@@ -167,6 +167,25 @@ def test_source_reference_backend_unavailable_is_not_missing(
     assert response.json()["error"]["code"] == "catalog.dependency_unavailable"
 
 
+@pytest.mark.parametrize("dependency", ["missing", "await", "future"])
+def test_publish_does_not_store_invalid_wait_dependencies(
+    client: TestClient,
+    stores: tuple[FakeDefinitionStore, FakeCatalogStore, FakeMetadataStore],
+    dependency: str,
+) -> None:
+    """The real publish path fails before storing an unusable dependency graph."""
+    doc = minimal_workflow()
+    doc["spec"]["steps"] = [
+        {"id": "await", "needs": [dependency], "waitFor": {"eventKey": "${{ inputs.image }}"}},
+        {"id": "future", "let": {"value": 1}},
+    ]
+    response = client.post(
+        "/v1/workspaces/ws-1/workflows", json={"definition": doc}, headers=admin_header()
+    )
+    assert response.status_code == 400
+    assert stores[0].workflows == {}
+
+
 def test_publish_requires_workspace_write_permission(client: TestClient) -> None:
     resp = client.post(
         "/v1/workspaces/ws-1/workflows",

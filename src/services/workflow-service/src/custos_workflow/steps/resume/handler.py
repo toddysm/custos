@@ -110,7 +110,7 @@ from custos_workflow.runs.step_handler import (
     StepResult,
     StepSucceeded,
 )
-from custos_workflow.runs.wait import parse_wait_duration
+from custos_workflow.runs.wait import WaitDurationError, parse_wait_duration
 from custos_workflow.steps.errors import (
     ResumeMirrorPersistError,
     ResumeRegistrationFailedError,
@@ -406,7 +406,16 @@ class WaitForStepHandler:
             )
             return StepFailed(envelope=MappingProxyType(source_failure.to_dict()))
         registered_at = ctx.workflow_context.current_utc_datetime
-        expires_at = registered_at + parse_wait_duration(step_id, ttl)
+        try:
+            expires_at = registered_at + parse_wait_duration(step_id, ttl)
+        except (WaitDurationError, OverflowError) as exc:
+            ttl_failure = WithInputResolutionError(
+                f"waitFor TTL cannot form a valid deadline: {exc}",
+                run_id=run_id_str,
+                step_id=step_id,
+                binding_name="ttl",
+            )
+            return StepFailed(envelope=MappingProxyType(ttl_failure.to_dict()))
         mirror_id = _derive_mirror_id(run_id_str, step_id, event_key)
 
         # 2. Persist the mirror BEFORE the Trigger Service call

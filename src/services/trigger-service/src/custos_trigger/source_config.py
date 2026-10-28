@@ -15,6 +15,7 @@ from custos_spl.interfaces.trigger_source import (
     MIN_POLL_INTERVAL_SECONDS,
     DeliveryMode,
     ResumeSource,
+    validate_connector_identifier,
 )
 from pydantic import Field, StrictInt, model_validator
 
@@ -48,8 +49,8 @@ class SourceConfig(WireModel):
     @model_validator(mode="after")
     def validate_values(self) -> Self:
         """Reject invalid expressions, zones and blank connector identifiers."""
-        if self.connector_instance_id is not None and not self.connector_instance_id.strip():
-            raise SourceConfigurationError("connectorInstanceId must not be blank")
+        if self.connector_instance_id is not None:
+            validate_connector_identifier(self.connector_instance_id)
         if self.cron is not None and (
             len(self.cron.split()) != 5
             or re.search(r"(?<![A-Z])[HR](?:\b|\()", self.cron.upper()) is not None

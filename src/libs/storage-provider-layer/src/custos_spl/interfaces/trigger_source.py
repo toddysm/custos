@@ -1,13 +1,57 @@
-"""Immutable source associations persisted with external resume registrations."""
+"""Shared source identity and representable duration contracts for resume registrations."""
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Final, Literal
 
 DeliveryMode = Literal["push", "pull"]
 MIN_POLL_INTERVAL_SECONDS: Final[int] = 10
+CONNECTOR_EXPRESSION_PATTERN: Final[str] = r"^\s*\$\{\{[\s\S]*\}\}\s*$"
+_DURATION_PATTERN = re.compile(
+    r"P(?:(?P<weeks>\d+)W|(?:(?P<days>\d+)D)?"
+    r"(?:T(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?"
+    r"(?:(?P<seconds>\d+(?:\.\d+)?)S)?)?)"
+)
+
+
+def validate_connector_identifier(value: str) -> None:
+    """Require a nonblank literal identifier, including when expression wrappers are padded."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("connectorInstanceId must be a non-empty string")
+    if re.fullmatch(CONNECTOR_EXPRESSION_PATTERN, value):
+        raise ValueError("connectorInstanceId must be a constant, not an expression")
+
+
+def parse_resume_duration(value: str) -> timedelta:
+    """Return a positive, representable ISO duration at Python datetime precision.
+
+    Actual deadline overflow remains a runtime check because execution time is
+    unknown at publication. Intrinsically impossible durations and values below
+    microsecond precision are rejected rather than rounded into a default TTL.
+    """
+    match = _DURATION_PATTERN.fullmatch(value) if isinstance(value, str) else None
+    if match is None:
+        raise ValueError("duration must be a valid ISO-8601 duration")
+    parts = match.groupdict()
+    try:
+        duration = timedelta(
+            weeks=int(parts["weeks"] or 0),
+            days=int(parts["days"] or 0),
+            hours=int(parts["hours"] or 0),
+            minutes=int(parts["minutes"] or 0),
+            seconds=float(parts["seconds"] or 0),
+        )
+    except (OverflowError, ValueError) as exc:
+        raise ValueError("duration exceeds the supported range") from exc
+    if duration <= timedelta(0):
+        raise ValueError("duration must be positive at microsecond precision")
+    if duration > datetime.max - datetime.min:
+        raise ValueError("duration exceeds the supported datetime range")
+    return duration
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,11 +69,7 @@ class ResumeSource:
 
     def __post_init__(self) -> None:
         """Validate identity/modes and canonicalize a hashable replay-safe association."""
-        if (
-            not isinstance(self.connector_instance_id, str)
-            or not self.connector_instance_id.strip()
-        ):
-            raise ValueError("connectorInstanceId must be a non-empty string")
+        validate_connector_identifier(self.connector_instance_id)
         if (
             not isinstance(self.delivery_modes, (list, tuple))
             or not self.delivery_modes
@@ -97,4 +137,12 @@ def validate_resume_context(
         raise ValueError("external source requires a non-empty selector")
 
 
-__all__ = ["MIN_POLL_INTERVAL_SECONDS", "DeliveryMode", "ResumeSource", "validate_resume_context"]
+__all__ = [
+    "CONNECTOR_EXPRESSION_PATTERN",
+    "MIN_POLL_INTERVAL_SECONDS",
+    "DeliveryMode",
+    "ResumeSource",
+    "parse_resume_duration",
+    "validate_connector_identifier",
+    "validate_resume_context",
+]

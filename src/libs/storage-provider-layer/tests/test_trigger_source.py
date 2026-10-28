@@ -1,10 +1,15 @@
 """Shared external resume associations validate and preserve their wire identity."""
 
+from datetime import timedelta
 from typing import Any
 
 import pytest
 
-from custos_spl.interfaces.trigger_source import ResumeSource, validate_resume_context
+from custos_spl.interfaces.trigger_source import (
+    ResumeSource,
+    parse_resume_duration,
+    validate_resume_context,
+)
 
 
 def test_source_is_canonical_hashable_and_round_trips() -> None:
@@ -30,6 +35,8 @@ def test_source_is_canonical_hashable_and_round_trips() -> None:
         {},
         {"connectorInstanceId": 1, "deliveryModes": ["push"]},
         {"connectorInstanceId": " ", "deliveryModes": ["push"]},
+        {"connectorInstanceId": " ${{ inputs.key }} ", "deliveryModes": ["push"]},
+        {"connectorInstanceId": "${{}}", "deliveryModes": ["push"]},
         {"connectorInstanceId": "c", "deliveryModes": "push"},
         {"connectorInstanceId": "c", "deliveryModes": []},
         {"connectorInstanceId": "c", "deliveryModes": ["push", "push"]},
@@ -65,3 +72,15 @@ def test_legacy_and_scoped_contexts_remain_distinct() -> None:
     validate_resume_context("ws", ResumeSource("c", ("pull",)), "event.data.id == 'one'")
     with pytest.raises(ValueError, match="requires a source"):
         validate_resume_context("ws", None, None)
+
+
+@pytest.mark.parametrize("value", ["P9999999999W", "P999999999D", "PT0.0000001S", "PT0S", "bad"])
+def test_duration_contract_rejects_unrepresentable_values(value: str) -> None:
+    """All consumers share positive, representable duration semantics."""
+    with pytest.raises(ValueError):
+        parse_resume_duration(value)
+
+
+def test_duration_contract_preserves_fractional_components() -> None:
+    """Large integer day components cannot erase microseconds."""
+    assert parse_resume_duration("P100000DT0.000001S") == timedelta(days=100000, microseconds=1)

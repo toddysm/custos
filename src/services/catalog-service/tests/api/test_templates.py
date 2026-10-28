@@ -59,12 +59,19 @@ def test_sourced_wait_template_materializes_with_scoped_reference_checks(
     connector_references.rows.add(("ws-1", "registry"))
     source = {"connectorInstanceId": "registry", "deliveryModes": ["push"]}
     doc = minimal_template()
+    doc["spec"]["placeholders"].append(
+        {
+            "name": "selector",
+            "type": "string",
+            "default": "event.data.key == 'one'",
+        }
+    )
     doc["spec"]["workflow"]["steps"] = [
         {
             "id": "await",
             "waitFor": {
-                "eventKey": "${{ inputs.image }}",
-                "selector": "${{ inputs.image }}",
+                "eventKey": "${{ placeholders.topic }}",
+                "selector": "${{ placeholders.selector }}",
                 "source": source,
             },
         }
@@ -82,13 +89,39 @@ def test_sourced_wait_template_materializes_with_scoped_reference_checks(
     assert published.status_code == 201, published.text
     materialized = client.post(
         "/v1/workspaces/ws-1/templates/orders-tmpl@1:materialize",
-        json={"targetName": "source-prod"},
+        json={"targetName": "source-prod", "bindings": {"topic": 'orders"}}\\\n'}},
         headers=headers,
     )
     assert materialized.status_code == 201, materialized.text
     stored = stores[0].workflows[("ws-1", "source-prod")][0]
     assert stored.normalized_doc["spec"]["steps"][0]["waitFor"]["source"] == source
+    assert stored.normalized_doc["spec"]["steps"][0]["waitFor"]["eventKey"] == (
+        "${{ " + json.dumps('orders"}}\\\n') + " }}"
+    )
     assert connector_references.calls == [("ws-1", "registry"), ("ws-1", "registry")]
+
+
+def test_wait_json_placeholder_rejects_non_string_binding(client: TestClient) -> None:
+    """A polymorphic JSON placeholder must still produce a string in a wait expression slot."""
+    doc = minimal_template()
+    doc["spec"]["placeholders"][0]["type"] = "json"
+    doc["spec"]["workflow"]["steps"] = [
+        {
+            "id": "await",
+            "waitFor": {"eventKey": "${{ placeholders.topic }}"},
+        }
+    ]
+    published = client.post(
+        "/v1/workspaces/ws-1/templates", json={"definition": doc}, headers=admin_header()
+    )
+    assert published.status_code == 201, published.text
+    response = client.post(
+        "/v1/workspaces/ws-1/templates/orders-tmpl@1:materialize",
+        json={"targetName": "invalid-wait", "bindings": {"topic": True}},
+        headers=admin_header(),
+    )
+    assert response.status_code == 400
+    assert "must bind to strings" in response.text
 
 
 # ---------------------------------------------------------------------------

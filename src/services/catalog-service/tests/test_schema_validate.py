@@ -141,6 +141,8 @@ def test_wait_source_workflow_and_template_schema(source: dict[str, Any] | None)
     [
         {"connectorInstanceId": " "},
         {"connectorInstanceId": "${{ inputs.key }}"},
+        {"connectorInstanceId": " ${{ inputs.key }} "},
+        {"connectorInstanceId": "${{}}"},
         {"workspaceId": "another"},
         {"credentials": {}},
         {"deliveryModes": []},
@@ -205,6 +207,29 @@ def test_wait_rejects_invalid_dependency_arrays(needs: list[Any]) -> None:
     """Explicit dependencies follow Workflow's nonempty, unique step-ID contract."""
     doc = _wait_workflow()
     doc["spec"]["steps"][0]["needs"] = needs
+    with pytest.raises(WorkflowSchemaError):
+        validate_workflow(doc)
+
+
+@pytest.mark.parametrize("dependency", ["missing", "await", "future"])
+def test_dependency_relationships_rejected_for_workflows_and_templates(dependency: str) -> None:
+    """Publication rejects missing, self and forward dependencies before a version is stored."""
+    doc = _wait_workflow()
+    doc["spec"]["steps"][0]["needs"] = [dependency]
+    doc["spec"]["steps"].append({"id": "future", "let": {"value": 1}})
+    with pytest.raises(WorkflowSchemaError, match="earlier distinct step"):
+        validate_workflow(doc)
+    template = _registry_quarantine_template()
+    template["spec"]["workflow"] = doc["spec"]
+    with pytest.raises(TemplateSchemaError, match="earlier distinct step"):
+        validate_template(template)
+
+
+@pytest.mark.parametrize("ttl", ["P9999999999W", "P999999999D", "PT0.0000001S"])
+def test_unrepresentable_wait_durations_fail_publication(ttl: str) -> None:
+    """Schema-valid but unrepresentable durations cannot enter published versions."""
+    doc = _wait_workflow()
+    doc["spec"]["steps"][0]["waitFor"]["ttl"] = ttl
     with pytest.raises(WorkflowSchemaError):
         validate_workflow(doc)
 

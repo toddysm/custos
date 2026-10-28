@@ -9,6 +9,8 @@ from unittest.mock import Mock
 
 import pytest
 from custos_spl.errors import ImmutableViolation
+from custos_spl.ids import SubscriptionId, WorkspaceId
+from custos_spl.interfaces.metadata_store import Subscription as SplSubscription
 from fastapi.testclient import TestClient
 
 from custos_trigger.app import create_app
@@ -18,6 +20,7 @@ from custos_trigger.models import (
     Subscription,
     SubscriptionKind,
     SubscriptionState,
+    to_spl_subscription_selector,
 )
 from custos_trigger.providers import InMemoryTriggerMetadataStore, Providers
 from custos_trigger.source_config import SourceConfig
@@ -136,6 +139,34 @@ async def test_legacy_unmanaged_updates_preserve_state(
     await store.set_state("ws-1", "sub-1", SubscriptionState.EXPIRED)
     with pytest.raises(ImmutableViolation, match="terminal"):
         await store.set_state("ws-1", "sub-1", SubscriptionState.ACTIVE)
+
+
+@pytest.mark.parametrize("state", [SubscriptionState.PAUSED, SubscriptionState.EXPIRED])
+async def test_legacy_state_only_write_cannot_overwrite_concurrent_metadata(
+    metadata_store: InMemoryTriggerMetadataStore,
+    monkeypatch: pytest.MonkeyPatch,
+    state: SubscriptionState,
+) -> None:
+    """Interleave a selector edit after the state caller's read; state writes must not append."""
+    legacy = _legacy_backend(metadata_store)
+    store = SubscriptionStore(legacy)
+    original = await store.create(_subscription(source_type=SourceType.MANUAL))
+    changed = original.model_copy(update={"selector": "false", "input_mapping": {"new": "value"}})
+
+    async def concurrent(
+        workspace: WorkspaceId, identifier: SubscriptionId, next_state: str
+    ) -> SplSubscription:
+        """Publish the competing metadata immediately before the legacy state update."""
+        await metadata_store.append_subscription_selector(
+            workspace, identifier, to_spl_subscription_selector(changed, added_at=FIXED_NOW)
+        )
+        return await metadata_store.update_subscription_state(workspace, identifier, next_state)
+
+    monkeypatch.setattr(legacy, "update_subscription_state", concurrent)
+    result = await store.set_state("ws-1", "sub-1", state)
+    assert result.state is state
+    assert result.selector == "false" and result.input_mapping == {"new": "value"}
+    assert len(metadata_store.subscription_selectors("ws-1", "sub-1")) == 2
 
 
 async def test_legacy_provider_cannot_mutate_managed_state(

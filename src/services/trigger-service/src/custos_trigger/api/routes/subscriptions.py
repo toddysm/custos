@@ -265,6 +265,7 @@ async def patch_subscription(
         merged,
         expected_revision=existing.store_revision,
         preserve_state=body.state is None,
+        metadata_changed=bool(blob_updates),
         reset_schedule=(
             existing.source_config != merged.source_config
             or existing.source_type != merged.source_type

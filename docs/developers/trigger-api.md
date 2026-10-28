@@ -261,7 +261,8 @@ terminal: a deleted receiver cannot be patched back to active or paused.
 Providers without the optional atomic mutation capability retain legacy
 manual/internal creates and safe unmanaged updates. That legacy path keeps its
 original nontransactional guarantees and cannot create or modify managed
-receiver state.
+receiver state. Legacy state-only operations do not append selector metadata,
+so a concurrent selector/input-mapping edit is not overwritten by pause/delete.
 
 ### Read a subscription
 
@@ -395,6 +396,8 @@ match on the event key alone). `ttl` is an ISO-8601 duration the wait stays live
 `TRIGGER_RESUME_DEFAULT_TTL_SECONDS` (default 7 days).
 Fractional seconds are preserved using the same microsecond rounding as
 Workflow mirrors; a subsecond value never becomes the multi-day default.
+Positive values below microsecond precision and unrepresentable durations or
+deadlines are rejected explicitly.
 
 Register request — `RegisterResumeRequest`:
 

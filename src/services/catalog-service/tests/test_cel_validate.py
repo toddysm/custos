@@ -56,6 +56,40 @@ def test_wait_expression_slots_are_publish_validated(field: str) -> None:
         validate_expressions(normalize_workflow(document))
 
 
+@pytest.mark.parametrize(
+    "expression", ["${{ placeholders.topic + 'suffix' }}", "${{ placeholders['topic'] }}"]
+)
+def test_wait_template_rejects_unrenderable_placeholder_expressions(expression: str) -> None:
+    """Only whole dot-form placeholder bindings can be rendered safely in wait string slots."""
+    template = {
+        "spec": {
+            "placeholders": [{"name": "topic", "type": "string"}],
+            "workflow": {"steps": [{"id": "await", "waitFor": {"eventKey": expression}}]},
+        },
+    }
+    with pytest.raises(CelNameBindingError, match="complete expression"):
+        validate_template_expressions(normalize_template(template))
+
+
+def test_wait_template_rejects_non_string_placeholder_type() -> None:
+    """A known numeric placeholder cannot ever produce the required string binding."""
+    template = {
+        "spec": {
+            "placeholders": [{"name": "topic", "type": "integer"}],
+            "workflow": {
+                "steps": [
+                    {
+                        "id": "await",
+                        "waitFor": {"eventKey": "${{ placeholders.topic }}"},
+                    }
+                ]
+            },
+        },
+    }
+    with pytest.raises(CelNameBindingError, match="string-compatible"):
+        validate_template_expressions(normalize_template(template))
+
+
 # ---------------------------------------------------------------------------
 # Slot discovery
 # ---------------------------------------------------------------------------

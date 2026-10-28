@@ -11,6 +11,8 @@ key invariants:
   bound value retains its native JSON type — an ``integer``
   placeholder produces an integer in the output, not a stringified
   integer.
+  Wait event-key/selector slots are the exception: string bindings become
+  safely quoted CEL string expressions because those slots require expressions.
 
 * Tokens that appear inside a larger expression (e.g. ``"prefix-${{
   placeholders.foo }}"``) are **not** substituted. Compound
@@ -40,6 +42,7 @@ CS-IMPL-014 (extractor) consumes the same data shapes in reverse.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -92,7 +95,7 @@ class TemplateRenderIssue:
     Attributes:
         code: Stable machine-readable code (one of
             ``"unbound_placeholder"``, ``"embedded_placeholder"``, or
-            ``"invalid_template"``).
+            ``"invalid_template"`` / ``"invalid_wait_binding"``).
     """
 
     path: str
@@ -209,7 +212,19 @@ def _substitute_scalar(
                 ),
             )
             return value
-        return bindings[name]
+        bound = bindings[name]
+        if path[-2:] in (("waitFor", "eventKey"), ("waitFor", "selector")):
+            if not isinstance(bound, str):
+                issues.append(
+                    TemplateRenderIssue(
+                        path=_render_path(path),
+                        code="invalid_wait_binding",
+                        message="wait expression placeholders must bind to strings",
+                    )
+                )
+                return value
+            return "${{ " + json.dumps(bound) + " }}"
+        return bound
 
     embedded = _EMBEDDED_TOKEN.search(value)
     if embedded is not None:

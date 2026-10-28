@@ -39,6 +39,8 @@ from collections.abc import Generator
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
 
+from custos_spl.interfaces.trigger_source import parse_resume_duration
+
 from custos_workflow.document import WaitStep
 from custos_workflow.errors import CompileError
 from custos_workflow.graph.model import StepKind
@@ -164,13 +166,10 @@ def parse_wait_duration(step_id: str, duration: str) -> timedelta:
     # ``\d+`` in the regex forbids negative components, and the
     # all-zero shape is already rejected above, so the constructed
     # timedelta is guaranteed positive here.
-    return timedelta(
-        weeks=weeks,
-        days=days,
-        hours=hours,
-        minutes=minutes,
-        seconds=seconds,
-    )
+    try:
+        return parse_resume_duration(duration)
+    except ValueError as exc:
+        raise WaitDurationError(step_id, duration, str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------

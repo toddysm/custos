@@ -315,7 +315,6 @@ def test_compute_resume_id_is_deterministic_and_distinct() -> None:
         ("P1DT2H3M4S", 93_784),
         ("PT1.5S", 1.5),
         ("PT0.5S", 0.5),
-        ("PT0.0000001S", 0),
     ],
 )
 def test_parse_iso8601_duration_valid(value: str, expected: float) -> None:
@@ -347,8 +346,10 @@ def test_ttl_keeps_day_precision_and_rejects_overflow() -> None:
     assert rpc._parse_iso8601_duration("P100000DT0.000001S") == timedelta(
         days=100000, microseconds=1
     )
-    with pytest.raises(SourceConfigurationError, match="duration range"):
+    with pytest.raises(SourceConfigurationError, match="supported range"):
         rpc._parse_iso8601_duration("P9999999999W")
+    with pytest.raises(SourceConfigurationError, match="microsecond precision"):
+        rpc._parse_iso8601_duration("PT0.0000001S")
 
 
 # --------------------------------------------------------------------------

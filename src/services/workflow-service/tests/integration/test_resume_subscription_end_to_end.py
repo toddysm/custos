@@ -79,6 +79,7 @@ from custos_workflow.runs import (
     StepFailed,
     StepSucceeded,
 )
+from custos_workflow.runs.wait import WaitDurationError, parse_wait_duration
 from custos_workflow.runtime import FakeWorkflowContext
 from custos_workflow.steps.resume import (
     InMemoryResumeSubscriptionMirrorRepository,
@@ -174,7 +175,11 @@ def _graph(*nodes: ExecutionNode) -> ExecutionGraph:
 
 
 def _ctx(
-    *, inputs: dict[str, Any] | None = None, run_id: str = "run-1", workspace_id: str = "ws-1"
+    *,
+    inputs: dict[str, Any] | None = None,
+    run_id: str = "run-1",
+    workspace_id: str = "ws-1",
+    now: datetime = _NOW,
 ) -> StepExecutionContext:
     """Supply immutable run scope independently of authored graph metadata."""
     return StepExecutionContext(
@@ -182,9 +187,9 @@ def _ctx(
         workspace_id=workspace_id,
         workflow_version_id="wfv-1",
         inputs=MappingProxyType(dict(inputs or {})),
-        workflow_context=FakeWorkflowContext(instance_id=run_id, now=_NOW),
+        workflow_context=FakeWorkflowContext(instance_id=run_id, now=now),
         outputs=MappingProxyType({}),
-        clock=_CLOCK,
+        clock=_CLOCK if now == _NOW else FixedClock(now),
     )
 
 
@@ -429,6 +434,8 @@ async def test_blank_external_selector_fails_before_effects() -> None:
     "source",
     [
         {**_SOURCE, "connectorInstanceId": "${{ inputs.key }}"},
+        {**_SOURCE, "connectorInstanceId": " ${{ inputs.key }} "},
+        {**_SOURCE, "connectorInstanceId": "${{}}"},
         {**_SOURCE, "workspaceId": "authored-tenant"},
         {**_SOURCE, "pollIntervalSeconds": True},
         {**_SOURCE, "deliveryModes": ["push"], "pollIntervalSeconds": 10},
@@ -444,6 +451,34 @@ def test_source_requires_authored_selector() -> None:
     """Selective matching is mandatory for source-associated waits."""
     with pytest.raises(ValidationError, match="requires a selector"):
         _wait_for_node(source=_SOURCE)
+
+
+@pytest.mark.parametrize("ttl", ["P9999999999W", "P999999999D", "PT0.0000001S"])
+def test_wait_ttl_rejects_unrepresentable_durations(ttl: str) -> None:
+    """Workflow authoring cannot accept a duration its datetime model cannot represent."""
+    with pytest.raises(ValidationError):
+        _wait_for_node(ttl=ttl)
+    with pytest.raises(WaitDurationError):
+        parse_wait_duration("await-event", ttl)
+
+
+async def test_runtime_timestamp_overflow_is_typed_and_precedes_effects() -> None:
+    """A representable duration can still overflow a late clock; fail before persistence."""
+    trigger = FakeTriggerServiceClient()
+    repo = InMemoryResumeSubscriptionMirrorRepository()
+    graph = _graph(_wait_for_node(ttl="P1D"))
+    result = await drive_resume_registration_to_wait(
+        WaitForStepHandler(repo).iter_resume(
+            _ctx(inputs={"key": "event"}, now=datetime.max.replace(tzinfo=UTC)),
+            graph,
+            "await-event",
+        ),
+        trigger,
+        repo,
+    )
+    assert isinstance(result, StepFailed)
+    assert result.envelope["kind"] == "step.with_input_resolution_error"
+    assert trigger.register_calls == [] and await repo.list_open("run-1") == ()
 
 
 # ---------------------------------------------------------------------------
