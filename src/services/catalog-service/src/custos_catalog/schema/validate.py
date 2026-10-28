@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import yaml
+from custos_spl.interfaces.trigger_source import ResumeSource
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
 
@@ -31,7 +32,8 @@ class SchemaValidationIssue:
             errors at the document root.
         message: The validator-supplied human-readable message.
         validator: The JSON Schema keyword that produced the error
-            (e.g. ``"required"``, ``"pattern"``, ``"oneOf"``). Useful
+            (e.g. ``"required"``, ``"pattern"``, ``"oneOf"``), or
+            ``"source"`` for shared resume-association semantics. Useful
             for clients that want to map errors to remediations.
     """
 
@@ -149,6 +151,30 @@ _workflow_validator: Draft202012Validator = Draft202012Validator(WORKFLOW_SCHEMA
 _template_validator: Draft202012Validator = Draft202012Validator(TEMPLATE_SCHEMA)
 
 
+def _resume_source_issues(spec: dict[str, Any], prefix: str) -> list[SchemaValidationIssue]:
+    """Apply shared source semantics after structural validation, without coercing numbers.
+
+    JSON Schema considers 10.0 an integer; the runtime association deliberately
+    requires an actual integer. Both publish entry points use the same codec.
+    """
+    issues: list[SchemaValidationIssue] = []
+    for index, step in enumerate(spec["steps"]):
+        wait = step.get("waitFor")
+        if not isinstance(wait, dict) or wait.get("source") is None:
+            continue
+        try:
+            ResumeSource.from_wire(wait["source"])
+        except ValueError as exc:
+            issues.append(
+                SchemaValidationIssue(
+                    path=f"{prefix}/steps/{index}/waitFor/source",
+                    message=str(exc),
+                    validator="source",
+                )
+            )
+    return issues
+
+
 def validate_workflow(doc: dict[str, Any]) -> None:
     """Validate ``doc`` against :data:`WORKFLOW_SCHEMA`.
 
@@ -158,6 +184,8 @@ def validate_workflow(doc: dict[str, Any]) -> None:
             error in a single pass (no first-error short-circuit).
     """
     issues = _collect(_workflow_validator, doc)
+    if not issues:
+        issues.extend(_resume_source_issues(doc["spec"], "spec"))
     if issues:
         raise WorkflowSchemaError(issues)
 
@@ -172,5 +200,7 @@ def validate_template(doc: dict[str, Any]) -> None:
     :mod:`custos_catalog.schema.workflow`.
     """
     issues = _collect(_template_validator, doc)
+    if not issues:
+        issues.extend(_resume_source_issues(doc["spec"]["workflow"], "spec/workflow"))
     if issues:
         raise TemplateSchemaError(issues)

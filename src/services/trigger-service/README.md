@@ -38,6 +38,11 @@ Receiver configuration and scoped external-wait contracts are added by
 [#1006](https://github.com/toddysm/custos/issues/1006). Receiver workers and
 deployed durable wait execution remain part of
 [#988](https://github.com/toddysm/custos/issues/988).
+New receiver writes are default-off until every writer has been upgraded:
+`TRIGGER_RECEIVER_CONFIGURATION_ENABLED=true` is an explicit rollout acknowledgment.
+Scoped resume operations additionally require a configured Workflow caller
+authenticator; production wiring remains
+[#1015](https://github.com/toddysm/custos/issues/1015). The default app fails closed.
 
 ## Layout
 

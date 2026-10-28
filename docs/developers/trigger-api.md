@@ -202,6 +202,14 @@ A selector that fails to compile is rejected at create time with
 Configuration is persisted now; the scheduler, webhook and polling receiver
 workers are separate M2 delivery items, not activated by this API change.
 
+**Rollout gate:** `TRIGGER_RECEIVER_CONFIGURATION_ENABLED` defaults to `false`.
+Deploy the new code with this gate closed until **all** subscription writers
+have upgraded to the atomic mutation path, then explicitly enable it. Do not
+roll back to legacy writers while managed receiver configurations exist.
+Creating/changing receiver configuration or making it active returns
+`503 trigger.source_unavailable` while the gate is closed. Reads and pure
+pause/delete remain available; manual/internal requests are unchanged.
+
 | `sourceType` | `sourceConfig` |
 |---|---|
 | `scheduled` | Exactly one of five-field `cron` or positive integer `intervalSeconds`. Cron accepts an IANA `timezone` (default `UTC`); intervals do not. |
@@ -247,6 +255,9 @@ storage-level `cron`, with `sourceConfig.intervalSeconds` and subscription
 nonexistent local times and includes both repeated-hour instants. State-only
 updates preserve schedule progress. Internal revision fields are not exposed in
 responses; concurrent stale writes return `409 trigger.subscription_conflict`.
+Metadata-only patches preserve the locked lifecycle state even if a legacy
+writer changed it without advancing the selector revision. `expired` is
+terminal: a deleted receiver cannot be patched back to active or paused.
 
 ### Read a subscription
 
@@ -341,8 +352,8 @@ Validation, dispatch, dedup, and resource errors are returned as
 | `trigger.loop_detected` | 409 | Fan-out depth limit exceeded |
 | `trigger.source_config_invalid` | 422 | Invalid receiver configuration or external resume association |
 | `trigger.source_not_found` | 404 | No connector reference in the trusted workspace |
-| `trigger.source_unavailable` | 503 | Scoped reference validation is unavailable |
-| `trigger.subscription_conflict` | 409 | Concurrent subscription update; re-read before retrying |
+| `trigger.source_unavailable` | 503 | Rollout gate closed, scoped authentication unconfigured, or reference validation unavailable |
+| `trigger.subscription_conflict` | 409 | Concurrent update or forbidden transition out of terminal `expired` state |
 | `trigger.resume_divergent` | 409 | Attempt to rebind an existing resume key to a different source |
 | `trigger.api.bad_request` | 400 | Malformed request or workspace mismatch |
 | `trigger.api.subscription_not_fireable` | 409 | Subscription inactive or selector miss |
@@ -421,6 +432,17 @@ Their selector must be nonblank; the reserved `_resume` workspace is forbidden.
   "ttl": "PT24H"
 }
 ```
+
+**Scoped authentication gate:** registration and cancellation with a tenant
+workspace require an explicit Workflow-service authenticator injected into
+[`create_app`](../../src/services/trigger-service/src/custos_trigger/app.py).
+It must verify the Workflow principal on every transport, including direct
+app-port calls. The default application has no allow-all verifier and returns
+`503 trigger.source_unavailable` before tenant state access. Production
+authentication wiring remains [#1015](https://github.com/toddysm/custos/issues/1015).
+Enabling the rollout flag alone does not open these RPCs; forged call-context or
+`dapr-caller-app-id` headers are not trusted. Authenticated scoped cancellation
+remains possible while the rollout gate is closed.
 
 `deliveryModes` is a nonempty, duplicate-free subset of `push`/`pull`, normalized
 to a stable order. `pollIntervalSeconds` requires `pull` and is at least 10.
@@ -733,6 +755,7 @@ The service is configured by environment variables (design § Configuration):
 | `TRIGGER_DISPATCH_MAX_RETRIES` | `5` | Max retries for a transient dispatch failure |
 | `TRIGGER_FANOUT_MAX_DEPTH` | `16` | Fan-out depth cap before `loop_rejected` |
 | `TRIGGER_SCHEDULER_LEADER_LEASE_SECONDS` | `30` | Scheduler leader lease (M2) |
+| `TRIGGER_RECEIVER_CONFIGURATION_ENABLED` | `false` | Acknowledge that all writers are upgraded before enabling managed receiver writes; does not bypass scoped RPC authentication |
 | `TRIGGER_PUBSUB_COMPONENT` | `custos-pubsub` | Dapr pub/sub component name |
 | `TRIGGER_NORMALIZED_TOPIC` | `custos.triggers.normalized` | Normalized-event topic |
 | `TRIGGER_WORKFLOW_EVENTS_TOPIC` | `custos.workflow.events` | Internal lifecycle-event topic |

@@ -26,6 +26,7 @@ classifiers = [
 #
 #   pip install -e src/libs/storage-provider-layer[dev]
 #   pip install -e src/libs/custos-postgres[dev]
+#   pip install -e src/services/workflow-service
 #   pip install -e src/services/catalog-service[dev]
 #
 # `custos-spl` provides the `DefinitionStoreProvider` /
@@ -53,6 +54,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "custos-workflow-service",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "pytest-cov>=5.0",

@@ -71,7 +71,7 @@ def _placeholder() -> dict[str, Any]:
 #: The WorkflowTemplate document JSON Schema (Draft 2020-12).
 TEMPLATE_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "$id": "https://custos.dev/schemas/workflow-template.v1.schema.json",
+    "$id": "https://custos.dev/schemas/workflow-template.v1.1.schema.json",
     "title": "Custos WorkflowTemplate",
     "type": "object",
     "additionalProperties": False,

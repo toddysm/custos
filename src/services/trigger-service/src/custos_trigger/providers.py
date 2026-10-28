@@ -132,6 +132,7 @@ class InMemoryTriggerMetadataStore:
         expected_revision: int | None,
         schedule: SplSchedule | None,
         reset_schedule: bool,
+        preserve_state: bool = False,
     ) -> SubscriptionSnapshot:
         """Apply the shared transaction contract without yielding or publishing partial state."""
         key = (str(workspace_id), str(subscription.subscription_id))
@@ -151,6 +152,7 @@ class InMemoryTriggerMetadataStore:
             expected_revision=expected_revision,
             schedule=schedule,
             reset_schedule=reset_schedule,
+            preserve_state=preserve_state,
         )
         assert snapshot.selector is not None
         self._subscriptions[key] = snapshot.subscription

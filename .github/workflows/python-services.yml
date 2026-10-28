@@ -81,6 +81,10 @@ jobs:
           pip install -e src/libs/custos-postgres[dev]
           pip install -e src/libs/custos-cel[dev]
 
+      - name: Install Workflow compiler for publication contract tests
+        working-directory: ${{ github.workspace }}
+        run: pip install -e src/services/workflow-service
+
       - name: Install package and dev dependencies
         run: pip install -e ".[dev]"
 
@@ -134,6 +138,10 @@ jobs:
           pip install -e src/libs/storage-provider-layer[dev]
           pip install -e src/libs/custos-postgres[dev]
           pip install -e src/libs/custos-cel[dev]
+
+      - name: Install Workflow compiler for publication contract tests
+        working-directory: ${{ github.workspace }}
+        run: pip install -e src/services/workflow-service
 
       - name: Install package and dev dependencies
         run: pip install -e ".[dev]"

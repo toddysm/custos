@@ -196,7 +196,7 @@ async def _trigger_error_handler(request: Request, exc: Exception) -> JSONRespon
 
 
 async def _validation_error_handler(request: Request, exc: Exception) -> JSONResponse:
-    """Render a request-validation rejection as ``trigger.api.bad_request``."""
+    """Classify actual source errors without relabeling unrelated malformed requests."""
     assert isinstance(exc, RequestValidationError)
     errors = exc.errors()
     if errors:
@@ -206,9 +206,7 @@ async def _validation_error_handler(request: Request, exc: Exception) -> JSONRes
     else:
         detail = "invalid request"
     source_fields = {"sourceConfig", "source_config", "source", "workspaceId", "workspace_id"}
-    source_error = (
-        isinstance(exc.body, dict) and bool(source_fields.intersection(exc.body))
-    ) or any(
+    source_error = bool(errors) and all(
         isinstance(error.get("ctx", {}).get("error"), SourceConfigurationError)
         or bool(source_fields.intersection(str(part) for part in error.get("loc", ())))
         for error in errors

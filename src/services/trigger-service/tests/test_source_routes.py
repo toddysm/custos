@@ -5,6 +5,7 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from custos_spl.errors import BackendUnavailable
@@ -15,9 +16,17 @@ from custos_trigger.api.routes import rpc
 from custos_trigger.app import create_app
 from custos_trigger.clients import FakeWorkflowServiceClient
 from custos_trigger.dedup import Deduplicator
+from custos_trigger.dependencies import WorkflowCallerVerifier
 from custos_trigger.middleware import CALLCTX_HEADER
+from custos_trigger.models import RegisterResumeRequest, ResumeRegistration
 from custos_trigger.pipeline.dispatch import Dispatcher
 from custos_trigger.providers import InMemoryTriggerMetadataStore, Providers
+from custos_trigger.settings import (
+    ENV_RECEIVER_CONFIGURATION_ENABLED,
+    SettingsError,
+    read_receiver_configuration_enabled,
+)
+from custos_trigger.stores import ResumeSubscriptionStore
 
 _PATH = "/v1/workspaces/ws_demo/triggers"
 _TRIPLE = {"runId": "run", "stepId": "wait", "eventKey": "event"}
@@ -67,7 +76,10 @@ def audit() -> Audit:
 
 @pytest.fixture
 def client(
-    metadata_store: InMemoryTriggerMetadataStore, references: References, audit: Audit
+    metadata_store: InMemoryTriggerMetadataStore,
+    references: References,
+    audit: Audit,
+    workflow_auth: tuple[WorkflowCallerVerifier, dict[str, str]],
 ) -> Iterator[TestClient]:
     """Run real route validation and persistence over injected local collaborators."""
     app = create_app(
@@ -75,8 +87,10 @@ def client(
         providers=Providers(metadata_store=metadata_store, connector_references=references),
         dispatcher=Dispatcher(FakeWorkflowServiceClient(), Deduplicator(metadata_store)),
         audit_sink=audit,
+        receiver_configuration_enabled=True,
+        workflow_caller_verifier=workflow_auth[0],
     )
-    with TestClient(app) as opened:
+    with TestClient(app, headers=workflow_auth[1]) as opened:
         yield opened
 
 
@@ -177,10 +191,16 @@ def test_pause_and_delete_work_during_reference_outage(
 
 def test_unconfigured_reference_validation_fails_explicitly(
     metadata_store: InMemoryTriggerMetadataStore,
+    workflow_auth: tuple[WorkflowCallerVerifier, dict[str, str]],
 ) -> None:
     """Memory mode must not silently accept arbitrary connector references."""
-    app = create_app(authz_endpoint="", providers=Providers(metadata_store=metadata_store))
-    with TestClient(app) as client:
+    app = create_app(
+        authz_endpoint="",
+        providers=Providers(metadata_store=metadata_store),
+        receiver_configuration_enabled=True,
+        workflow_caller_verifier=workflow_auth[0],
+    )
+    with TestClient(app, headers=workflow_auth[1]) as client:
         response = client.post("/RegisterResumeSubscription", json=_external())
     assert response.status_code == 503
     assert "trigger.source_unavailable" in response.text
@@ -240,6 +260,154 @@ async def test_mode_change_disables_managed_schedule(
     assert changed.json()["sourceType"] == "pull"
     schedule = await metadata_store.get_schedule(WorkspaceId("ws_demo"), identifier)
     assert schedule is not None and not schedule.enabled
+
+
+async def test_rollout_gate_blocks_new_configuration_but_allows_disabling(
+    metadata_store: InMemoryTriggerMetadataStore,
+) -> None:
+    """No managed receiver can be created before the explicit all-writers-upgraded gate."""
+    providers = Providers(metadata_store=metadata_store)
+    body = {"sourceType": "scheduled", "workflowId": "wf", "sourceConfig": {"intervalSeconds": 30}}
+    with TestClient(create_app(authz_endpoint="", providers=providers)) as blocked:
+        rejected = blocked.post(_PATH, json=body, headers=_headers())
+        assert rejected.status_code == 503
+        assert rejected.json()["code"] == "trigger.source_unavailable"
+    assert (await metadata_store.query_subscriptions(WorkspaceId("ws_demo"))).items == ()
+    with TestClient(
+        create_app(authz_endpoint="", providers=providers, receiver_configuration_enabled=True)
+    ) as enabled:
+        created = enabled.post(_PATH, json=body, headers=_headers())
+        assert created.status_code == 201, created.text
+        identifier = created.json()["subscriptionId"]
+    with TestClient(create_app(authz_endpoint="", providers=providers)) as disabled:
+        path = f"{_PATH}/{identifier}"
+        assert disabled.patch(path, json={"state": "paused"}, headers=_headers()).status_code == 200
+        assert disabled.patch(path, json={"state": "active"}, headers=_headers()).status_code == 503
+        assert disabled.delete(path, headers=_headers()).status_code == 204
+    schedule = await metadata_store.get_schedule(WorkspaceId("ws_demo"), identifier)
+    assert schedule is not None and not schedule.enabled
+
+
+@pytest.mark.parametrize("configured", [False, True])
+async def test_scoped_rpc_denies_direct_or_forged_callers_before_tenant_reads(
+    metadata_store: InMemoryTriggerMetadataStore,
+    references: References,
+    workflow_auth: tuple[WorkflowCallerVerifier, dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+    configured: bool,
+) -> None:
+    """An unavailable authenticator or invalid credential cannot read or delete another wait."""
+    identifier = rpc.compute_resume_id("run", "wait", "event")
+    request = RegisterResumeRequest.model_validate(_external())
+    await ResumeSubscriptionStore(metadata_store).register(
+        ResumeRegistration.model_validate(request.model_dump(exclude={"ttl"})),
+        workspace_id="ws_demo",
+        resume_id=identifier,
+        expires_at=_NOW + timedelta(days=1),
+    )
+    read = metadata_store.get_resume_subscription
+    original = await read(WorkspaceId("ws_demo"), identifier)
+    tracked = AsyncMock(wraps=read)
+    monkeypatch.setattr(metadata_store, "get_resume_subscription", tracked)
+    app = create_app(
+        authz_endpoint="",
+        providers=Providers(metadata_store=metadata_store, connector_references=references),
+        receiver_configuration_enabled=True,
+        workflow_caller_verifier=workflow_auth[0] if configured else None,
+    )
+    forged = {
+        **_headers(),
+        "dapr-caller-app-id": "workflow-service",
+        "authorization": "Bearer forged",
+    }
+    with TestClient(app) as caller:
+        register = caller.post("/RegisterResumeSubscription", json=_external(), headers=forged)
+        cancel = caller.post(
+            "/CancelResumeSubscription", json={**_TRIPLE, "workspaceId": "ws_demo"}, headers=forged
+        )
+    assert register.status_code == cancel.status_code == (403 if configured else 503)
+    tracked.assert_not_awaited()
+    assert await read(WorkspaceId("ws_demo"), identifier) == original
+
+
+def test_authenticated_source_registration_still_requires_rollout_gate(
+    metadata_store: InMemoryTriggerMetadataStore,
+    references: References,
+    workflow_auth: tuple[WorkflowCallerVerifier, dict[str, str]],
+) -> None:
+    """Authentication does not bypass the mixed-writer compatibility gate."""
+    app = create_app(
+        authz_endpoint="",
+        providers=Providers(metadata_store=metadata_store, connector_references=references),
+        workflow_caller_verifier=workflow_auth[0],
+    )
+    with TestClient(app, headers=workflow_auth[1]) as caller:
+        response = caller.post("/RegisterResumeSubscription", json=_external())
+    assert response.status_code == 503
+    assert "upgrade all writers" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        (_PATH, {"sourceType": "scheduled", "sourceConfig": {"intervalSeconds": 30}}),
+        (
+            "/CancelResumeSubscription",
+            {"workspaceId": "ws_demo", "stepId": "wait", "eventKey": "event"},
+        ),
+    ],
+)
+def test_valid_source_fields_do_not_reclassify_unrelated_validation(
+    client: TestClient, path: str, body: dict[str, object]
+) -> None:
+    """Missing workflow/run identity remains the established malformed-request error."""
+    response = client.post(path, json=body, headers=_headers())
+    assert response.status_code == 400
+    assert response.json()["code"] == "trigger.api.bad_request"
+
+
+async def test_deleted_receiver_cannot_be_reactivated(
+    client: TestClient, metadata_store: InMemoryTriggerMetadataStore
+) -> None:
+    """Expired is terminal and neither active nor paused can revive a deleted schedule."""
+    created = client.post(
+        _PATH,
+        json={
+            "sourceType": "scheduled",
+            "workflowId": "wf",
+            "sourceConfig": {"intervalSeconds": 30},
+        },
+        headers=_headers(),
+    )
+    assert created.status_code == 201
+    identifier = created.json()["subscriptionId"]
+    path = f"{_PATH}/{identifier}"
+    assert client.delete(path, headers=_headers()).status_code == 204
+    for state in ("active", "paused"):
+        response = client.patch(path, json={"state": state}, headers=_headers())
+        assert response.status_code == 409, response.text
+        assert "terminal" in response.json()["detail"]
+    assert client.get(path, headers=_headers()).json()["state"] == "expired"
+    schedule = await metadata_store.get_schedule(WorkspaceId("ws_demo"), identifier)
+    assert schedule is not None and not schedule.enabled
+
+
+@pytest.mark.parametrize(
+    ("raw", "enabled"), [("", False), ("false", False), ("0", False), ("true", True), ("1", True)]
+)
+def test_rollout_flag_is_explicit(raw: str, enabled: bool) -> None:
+    """Only explicit recognized true values enable the compatibility gate."""
+    assert read_receiver_configuration_enabled({ENV_RECEIVER_CONFIGURATION_ENABLED: raw}) is enabled
+
+
+def test_malformed_rollout_flag_fails_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A typo cannot silently enable or disable a safety-critical rollout setting."""
+    monkeypatch.setenv(ENV_RECEIVER_CONFIGURATION_ENABLED, "maybe")
+    with (
+        pytest.raises(SettingsError, match=ENV_RECEIVER_CONFIGURATION_ENABLED),
+        TestClient(create_app(authz_endpoint="")),
+    ):
+        pass
 
 
 @pytest.mark.parametrize(

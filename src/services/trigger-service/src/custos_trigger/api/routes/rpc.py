@@ -11,12 +11,16 @@ Dapr Service-Invocation method routes the Workflow Service calls across each
 * ``POST /CancelResumeSubscription`` — cancel an open wait; a clean no-op for
   an unknown / already-expired key.
 
-These are *internal* service-to-service calls authenticated at the Dapr mesh
-layer (mTLS + app-id allow-list), not through the public call-context
+These are *internal* service-to-service calls intended for the Dapr mesh,
+not through the public call-context
 envelope: the Workflow Service ``DaprTriggerServiceClient`` propagates no
 ``x-custos-callctx`` header on the Dapr invoke. The call-context middleware
 therefore bypasses both method paths (see
 :mod:`custos_trigger.middleware.callctx`).
+
+Scoped calls additionally require an explicitly configured Workflow-principal
+verifier before tenant access. Mesh/caller headers alone are not authentication;
+the default factory fails closed until production authentication is wired.
 
 Legacy internal registrations use the reserved :data:`RESUME_WORKSPACE`
 partition. External registrations carry the owning run's workspace and an
@@ -34,14 +38,18 @@ import re
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Final
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, Request, Response, status
 
 from custos_trigger.dependencies import (
+    WorkflowCallerVerifier,
     get_audit_sink,
     get_providers,
+    get_receiver_configuration_enabled,
     get_resume_default_ttl_seconds,
     get_resume_subscription_store,
     get_selector_evaluator,
+    get_workflow_caller_verifier,
+    require_workflow_caller,
 )
 from custos_trigger.errors import TriggerError, TriggerErrorKind
 from custos_trigger.models import (
@@ -53,7 +61,10 @@ from custos_trigger.models import (
 from custos_trigger.pipeline.dispatch import AuditSink
 from custos_trigger.providers import Providers
 from custos_trigger.selector import SelectorEvaluator
-from custos_trigger.source_config import validate_connector_reference
+from custos_trigger.source_config import (
+    require_receiver_configuration,
+    validate_connector_reference,
+)
 from custos_trigger.stores import ResumeSubscriptionStore
 
 __all__ = [
@@ -86,6 +97,10 @@ EvaluatorDep = Annotated[SelectorEvaluator, Depends(get_selector_evaluator)]
 AuditSinkDep = Annotated[AuditSink, Depends(get_audit_sink)]
 DefaultTtlDep = Annotated[int, Depends(get_resume_default_ttl_seconds)]
 ProvidersDep = Annotated[Providers, Depends(get_providers)]
+ReceiverEnabledDep = Annotated[bool, Depends(get_receiver_configuration_enabled)]
+WorkflowVerifierDep = Annotated[
+    WorkflowCallerVerifier | None, Depends(get_workflow_caller_verifier)
+]
 
 
 async def _reject_source_rebinding(
@@ -190,12 +205,15 @@ def _resolve_ttl_seconds(ttl: str | None, default_seconds: int) -> int:
     summary="Register (or idempotently re-register) a resume subscription.",
 )
 async def register_resume_subscription(
+    request: Request,
     body: RegisterResumeRequest,
     store: ResumeStoreDep,
     evaluator: EvaluatorDep,
     audit: AuditSinkDep,
     default_ttl_seconds: DefaultTtlDep,
     providers: ProvidersDep,
+    receiver_enabled: ReceiverEnabledDep,
+    workflow_verifier: WorkflowVerifierDep,
 ) -> RegisterResumeResponse:
     """Register a one-shot resume wait, idempotent on the request triple.
 
@@ -209,6 +227,9 @@ async def register_resume_subscription(
     path (including an idempotent replay) so a malformed expression is rejected
     (422) rather than silently never matching.
     """
+    if body.source is not None:
+        await require_workflow_caller(request, workflow_verifier)
+        require_receiver_configuration(receiver_enabled)
     if body.selector:
         # Compiled before the idempotency lookup so a malformed selector is
         # rejected on every path, replay included. Raises SelectorInvalidError
@@ -269,8 +290,10 @@ async def register_resume_subscription(
     summary="Cancel a resume subscription (idempotent no-op on unknown keys).",
 )
 async def cancel_resume_subscription(
+    request: Request,
     body: CancelResumeRequest,
     store: ResumeStoreDep,
+    workflow_verifier: WorkflowVerifierDep,
 ) -> Response:
     """Cancel an open resume wait; a clean no-op for an unknown/expired key.
 
@@ -278,6 +301,8 @@ async def cancel_resume_subscription(
     cancel always succeeds with ``204 No Content`` — the Workflow Service
     treats any 2xx (and 404/409) as a clean no-op.
     """
+    if body.workspace_id is not None:
+        await require_workflow_caller(request, workflow_verifier)
     resume_id = compute_resume_id(body.run_id, body.step_id, body.event_key)
     await store.cancel(
         body.workspace_id if body.workspace_id is not None else RESUME_WORKSPACE, resume_id

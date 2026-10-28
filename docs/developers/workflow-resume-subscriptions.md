@@ -66,6 +66,10 @@ All four share one `ResumeSubscriptionMirrorRepository` and one
 > mirror repository. The subsystem drivers are exercised in
 > [`tests/integration/test_resume_subscription_end_to_end.py`](../../src/services/workflow-service/tests/integration/test_resume_subscription_end_to_end.py);
 > this is not evidence that deployed durable wait execution is complete.
+> Scoped Trigger registration also fails closed until an authenticated Workflow
+> caller verifier is wired and the default-off receiver rollout gate is enabled.
+> These prerequisites are described in the
+> [Trigger contract](trigger-api.md#receiver-configuration).
 
 ## The `waitFor:` schema
 
@@ -108,7 +112,9 @@ source:
   pollIntervalSeconds: 60
 ```
 
-The compiler and graph serializer preserve this association. Registration,
+Catalog's normal workflow/template publication path accepts this declaration,
+validates both wait expressions and checks the constant source reference in the
+publication workspace. The compiler and graph serializer preserve the association. Registration,
 mirror serialization, replay and cancellation propagate the run workspace.
 Legacy graphs, mirror records and request envelopes omit the additive fields.
 Replay preserves the original persisted source and audits a changed graph

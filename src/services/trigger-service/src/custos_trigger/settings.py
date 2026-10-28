@@ -13,6 +13,7 @@ asyncpg, or the Dapr SDK.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Final
 
@@ -46,6 +47,9 @@ ENV_FANOUT_MAX_DEPTH: Final[str] = "TRIGGER_FANOUT_MAX_DEPTH"
 #: Optional. Scheduler leader lock TTL (seconds) — the single-fire guarantee
 #: across replicas. Default ``30``.
 ENV_SCHEDULER_LEADER_LEASE_SECONDS: Final[str] = "TRIGGER_SCHEDULER_LEADER_LEASE_SECONDS"
+
+#: Enable only after every subscription writer uses atomic receiver mutations.
+ENV_RECEIVER_CONFIGURATION_ENABLED: Final[str] = "TRIGGER_RECEIVER_CONFIGURATION_ENABLED"
 
 # --- Dapr Pub/Sub transport (chart § Dapr Pub/Sub subscriptions) -------------
 
@@ -120,6 +124,7 @@ class Settings:
     metadata_store_dsn: str
     authz_endpoint: str  # empty string means "dev shim active"
     environment: str
+    receiver_configuration_enabled: bool = False
 
     @property
     def use_callctx_dev_shim(self) -> bool:
@@ -154,6 +159,16 @@ def _opt_non_negative_int(name: str, env: dict[str, str], default: int) -> int:
     return value
 
 
+def read_receiver_configuration_enabled(env: Mapping[str, str]) -> bool:
+    """Parse the default-off rollout gate; malformed values never enable receiver writes."""
+    raw = env.get(ENV_RECEIVER_CONFIGURATION_ENABLED, "").strip().lower()
+    if raw in ("", "false", "0"):
+        return False
+    if raw in ("true", "1"):
+        return True
+    raise SettingsError(f"{ENV_RECEIVER_CONFIGURATION_ENABLED} must be true or false")
+
+
 def load_settings(env: dict[str, str] | None = None) -> Settings:
     """Parse a :class:`Settings` from the supplied env mapping (default ``os.environ``).
 
@@ -164,6 +179,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
     """
     src: dict[str, str] = dict(os.environ if env is None else env)
     return Settings(
+        receiver_configuration_enabled=read_receiver_configuration_enabled(src),
         webhook_base_url=_require(ENV_WEBHOOK_BASE_URL, src),
         dedup_ttl_seconds=_opt_non_negative_int(
             ENV_DEDUP_TTL_SECONDS, src, DEFAULT_DEDUP_TTL_SECONDS
@@ -215,6 +231,7 @@ __all__ = [
     "ENV_NORMALIZED_TOPIC",
     "ENV_POLLER_DEFAULT_INTERVAL_SECONDS",
     "ENV_PUBSUB_COMPONENT",
+    "ENV_RECEIVER_CONFIGURATION_ENABLED",
     "ENV_RESUME_DEFAULT_TTL_SECONDS",
     "ENV_SCHEDULER_LEADER_LEASE_SECONDS",
     "ENV_WEBHOOK_BASE_URL",
@@ -223,4 +240,5 @@ __all__ = [
     "Settings",
     "SettingsError",
     "load_settings",
+    "read_receiver_configuration_enabled",
 ]

@@ -3,9 +3,18 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
+from typing import Any
 
+import pytest
+from custos_workflow.bindings import InMemoryActivityTypeRegistry
+from custos_workflow.compiler import RunMeta
+from custos_workflow.compiler import compile as compile_workflow
+from custos_workflow.document import WaitForStep, WorkflowDocument
+from custos_workflow.graph import from_json, to_json
 from fastapi.testclient import TestClient
 
+from custos_catalog.clients import HttpConnectorClient
 from tests.api.conftest import (
     FakeCatalogStore,
     FakeDefinitionStore,
@@ -53,6 +62,66 @@ def test_publish_accepts_pre_parsed_object_body(
     )
 
     assert resp.status_code == 201, resp.text
+
+
+@pytest.mark.parametrize("exists", [True, False])
+def test_publish_sourced_wait_through_real_pipeline(
+    client: TestClient,
+    stores: tuple[FakeDefinitionStore, FakeCatalogStore, FakeMetadataStore],
+    monkeypatch: pytest.MonkeyPatch,
+    exists: bool,
+) -> None:
+    """Publish validates the actual wait source in URL scope and preserves it in the version."""
+    calls: list[tuple[str, str]] = []
+
+    async def lookup(self: HttpConnectorClient, workspace_id: str, name: str) -> bool:
+        """Record trusted scope instead of allowing an unvalidated source reference."""
+        calls.append((workspace_id, name))
+        return exists
+
+    monkeypatch.setattr(HttpConnectorClient, "exists_connector_instance", lookup)
+    source: dict[str, Any] = {
+        "connectorInstanceId": "registry",
+        "deliveryModes": ["pull", "push"],
+        "pollIntervalSeconds": 10,
+    }
+    doc = minimal_workflow()
+    doc["spec"]["steps"] = [
+        {
+            "id": "await",
+            "waitFor": {
+                "eventKey": "${{ inputs.image }}",
+                "selector": "${{ inputs.image }}",
+                "source": source,
+            },
+        }
+    ]
+    response = client.post(
+        "/v1/workspaces/ws-1/workflows", json={"definition": doc}, headers=admin_header()
+    )
+    assert calls == [("ws-1", "registry")]
+    if exists:
+        assert response.status_code == 201, response.text
+        stored = stores[0].workflows[("ws-1", "orders")][0]
+        assert stored.normalized_doc["spec"]["steps"][0]["waitFor"]["source"] == source
+        graph = compile_workflow(
+            WorkflowDocument.model_validate(stored.normalized_doc),
+            RunMeta(
+                workspace_id="ws-1",
+                workflow_version_id="wfv-source",
+                workflow_name="orders",
+                workflow_version_label="1",
+                started_at_default=datetime(2026, 10, 28, tzinfo=UTC),
+            ),
+            InMemoryActivityTypeRegistry({}),
+        )
+        step = from_json(to_json(graph)).nodes[0].step_source
+        assert isinstance(step, WaitForStep) and step.wait_for.source is not None
+        assert step.wait_for.source.connector_instance_id == "registry"
+    else:
+        assert response.status_code == 400, response.text
+        assert "resolve.connector_instance_missing" in response.text
+        assert stores[0].workflows == {}
 
 
 def test_publish_requires_workspace_write_permission(client: TestClient) -> None:

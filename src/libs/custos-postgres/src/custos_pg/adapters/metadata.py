@@ -847,6 +847,7 @@ class PgMetadataAdapter:
         expected_revision: int | None,
         schedule: Schedule | None,
         reset_schedule: bool,
+        preserve_state: bool = False,
     ) -> SubscriptionSnapshot:
         """Commit base state, selector revision and schedule eligibility in one transaction."""
         pool = await self._pool_ref()
@@ -886,6 +887,7 @@ class PgMetadataAdapter:
                     expected_revision=expected_revision,
                     schedule=schedule,
                     reset_schedule=reset_schedule,
+                    preserve_state=preserve_state,
                 )
                 if current_row is None:
                     await conn.execute(
@@ -896,7 +898,7 @@ class PgMetadataAdapter:
                         workspace_id,
                         subscription.subscription_id,
                         subscription.workflow_id,
-                        subscription.state,
+                        snapshot.subscription.state,
                         subscription.created_at,
                         subscription.updated_at,
                     )
@@ -906,7 +908,7 @@ class PgMetadataAdapter:
                         "WHERE workspace_id = $1 AND subscription_id = $2",
                         workspace_id,
                         subscription.subscription_id,
-                        subscription.state,
+                        snapshot.subscription.state,
                         subscription.updated_at,
                     )
                 assert snapshot.selector is not None

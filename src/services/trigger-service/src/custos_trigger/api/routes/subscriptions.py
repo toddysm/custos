@@ -38,6 +38,7 @@ from custos_trigger.api.errors import (
 from custos_trigger.dependencies import (
     get_dispatcher,
     get_providers,
+    get_receiver_configuration_enabled,
     get_selector_evaluator,
     get_subscription_store,
 )
@@ -57,7 +58,11 @@ from custos_trigger.pipeline.dispatch import Dispatcher
 from custos_trigger.pipeline.match_start import StartMatcher
 from custos_trigger.providers import Providers
 from custos_trigger.selector import SelectorEvaluator
-from custos_trigger.source_config import validate_connector_reference, validate_source_config
+from custos_trigger.source_config import (
+    require_receiver_configuration,
+    validate_connector_reference,
+    validate_source_config,
+)
 from custos_trigger.stores import SubscriptionStore
 
 __all__ = ["router"]
@@ -77,6 +82,7 @@ StoreDep = Annotated[SubscriptionStore, Depends(get_subscription_store)]
 EvaluatorDep = Annotated[SelectorEvaluator, Depends(get_selector_evaluator)]
 DispatcherDep = Annotated[Dispatcher, Depends(get_dispatcher)]
 ProvidersDep = Annotated[Providers, Depends(get_providers)]
+ReceiverEnabledDep = Annotated[bool, Depends(get_receiver_configuration_enabled)]
 
 
 def _now() -> datetime:
@@ -134,9 +140,12 @@ async def create_subscription(
     evaluator: EvaluatorDep,
     ctx: Annotated[CallContext, Depends(require_permission(PERM_WRITE))],
     providers: ProvidersDep,
+    receiver_enabled: ReceiverEnabledDep,
 ) -> Subscription:
     """Create a manual/start subscription and return the persisted row."""
     _ensure_workspace(ctx, workspace_id)
+    if body.source_type.value not in ("manual", "internal"):
+        require_receiver_configuration(receiver_enabled)
     subscription_id = uuid.uuid4().hex
     _validate_selector(evaluator, body.selector, subscription_id=subscription_id)
     if body.source_config is not None and body.source_config.connector_instance_id is not None:
@@ -193,6 +202,7 @@ async def patch_subscription(
     evaluator: EvaluatorDep,
     ctx: Annotated[CallContext, Depends(require_permission(PERM_WRITE))],
     providers: ProvidersDep,
+    receiver_enabled: ReceiverEnabledDep,
 ) -> Subscription:
     """Amend a subscription's selector / input mapping / target / state."""
     _ensure_workspace(ctx, workspace_id)
@@ -230,6 +240,15 @@ async def patch_subscription(
         merged.source_config,
         required=merged.state is SubscriptionState.ACTIVE,
     )
+    if not blob_updates and (body.state is None or body.state is existing.state):
+        return existing
+    source_changed = (
+        existing.source_config != merged.source_config or existing.source_type != merged.source_type
+    )
+    if merged.source_type.value not in ("manual", "internal") and (
+        source_changed or merged.state is SubscriptionState.ACTIVE
+    ):
+        require_receiver_configuration(receiver_enabled)
     if (
         merged.source_config is not None
         and merged.source_config.connector_instance_id is not None
@@ -242,11 +261,10 @@ async def patch_subscription(
         await validate_connector_reference(
             providers.connector_references, workspace_id, merged.source_config.connector_instance_id
         )
-    if not blob_updates and (body.state is None or body.state is existing.state):
-        return existing
     return await store.update(
         merged,
         expected_revision=existing.store_revision,
+        preserve_state=body.state is None,
         reset_schedule=(
             existing.source_config != merged.source_config
             or existing.source_type != merged.source_type

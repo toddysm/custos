@@ -471,7 +471,8 @@ def _walk_workflow_slots(
 
     The ``placeholders`` argument is non-empty when this spec is the
     inner ``workflow:`` body of a template; the resulting slots see
-    ``placeholders.<name>`` as a legal root.
+    ``placeholders.<name>`` as a legal root. WaitFor event-key and selector
+    expressions share the owning step's binding scope.
     """
     inputs = frozenset((spec.get("inputs") or {}).keys())
 
@@ -523,6 +524,17 @@ def _walk_workflow_slots(
                     source=expr,
                     scope=ExpressionScope(**item_scope_kwargs),
                 )
+
+        wait = step.get("waitFor")
+        if isinstance(wait, dict):
+            for field_name in ("eventKey", "selector"):
+                expr = _extract_expression(wait.get(field_name))
+                if expr is not None:
+                    yield CelSlot(
+                        path=f"{step_path}.waitFor.{field_name}",
+                        source=expr,
+                        scope=ExpressionScope(**item_scope_kwargs),
+                    )
 
         # `with` values: dict of names to (literal or expression).
         with_block = step.get("with")

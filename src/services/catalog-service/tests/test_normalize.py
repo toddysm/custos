@@ -29,6 +29,32 @@ def _wf(steps: list[dict[str, Any]], **extra: Any) -> dict[str, Any]:
     }
 
 
+def test_wait_source_emits_scoped_reference_resolution_slot() -> None:
+    """Source IDs participate in the existing publish-time connector existence gate."""
+    source = {"connectorInstanceId": "registry", "deliveryModes": ["push"]}
+    document = _wf(
+        [
+            {
+                "id": "await",
+                "waitFor": {
+                    "eventKey": "${{ inputs.key }}",
+                    "selector": "${{ inputs.key }}",
+                    "source": source,
+                },
+            }
+        ]
+    )
+    normalized = normalize_workflow(document)
+    assert normalized.slots == (
+        RefResolutionSlot(
+            kind="connector_instance",
+            path=("spec", "steps", 0, "waitFor", "source", "connectorInstanceId"),
+            original_ref="registry",
+        ),
+    )
+    assert normalized.document["spec"]["steps"][0]["waitFor"]["source"] == source
+
+
 # ---------------------------------------------------------------------------
 # Canonicalization
 # ---------------------------------------------------------------------------

@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING
 from custos_trigger._version import __version__
 from custos_trigger.api import register_exception_handlers
 from custos_trigger.api.routes import resume_rpc_router, subscriptions_router
+from custos_trigger.dependencies import WorkflowCallerVerifier
 from custos_trigger.health import router as health_router
 from custos_trigger.middleware import (
     CallContextError,
@@ -54,6 +55,7 @@ from custos_trigger.settings import (
     ENV_RESUME_DEFAULT_TTL_SECONDS,
     ENV_WORKFLOW_ENDPOINT,
     ENV_WORKFLOW_EVENTS_TOPIC,
+    read_receiver_configuration_enabled,
 )
 from custos_trigger.stores import (
     ResumeSubscriptionStore,
@@ -93,6 +95,8 @@ def create_app(
     providers: Providers | None = None,
     dispatcher: Dispatcher | None = None,
     audit_sink: AuditSink | None = None,
+    receiver_configuration_enabled: bool | None = None,
+    workflow_caller_verifier: WorkflowCallerVerifier | None = None,
 ) -> FastAPI:
     """Build and return the Trigger Service FastAPI application.
 
@@ -121,6 +125,13 @@ def create_app(
             :class:`~custos_trigger.pipeline.dispatch.NoopAuditSink`. Tests
             inject a recording sink to assert
             ``resume.subscription.divergent`` emission.
+        receiver_configuration_enabled: Default-off compatibility gate, read from
+            ``TRIGGER_RECEIVER_CONFIGURATION_ENABLED`` when omitted. Enable only
+            after every subscription writer has been upgraded.
+        workflow_caller_verifier: Authenticator for the Workflow service principal,
+            including direct app-port calls. Scoped resume operations fail closed
+            when absent. Production wiring belongs to TS-IMPL-032; this factory
+            supplies no unauthenticated fallback.
 
     The factory is import-safe: no DSN lookups, no socket connections. All
     side-effecting work happens inside the FastAPI lifespan context.
@@ -138,6 +149,12 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        app.state.receiver_configuration_enabled = (
+            receiver_configuration_enabled
+            if receiver_configuration_enabled is not None
+            else read_receiver_configuration_enabled(os.environ)
+        )
+        app.state.workflow_caller_verifier = workflow_caller_verifier
         # Bind the SPL providers (in-memory by default, Postgres when
         # TRIGGER_METADATA_STORE is a DSN) and the domain store adapters
         # the REST/RPC surface (TS-IMPL-015..018) drives. The provider

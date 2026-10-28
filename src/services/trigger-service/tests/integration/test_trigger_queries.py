@@ -36,7 +36,7 @@ from custos_trigger.api.routes import rpc
 from custos_trigger.app import create_app
 from custos_trigger.clients import FakeWorkflowServiceClient
 from custos_trigger.dedup import Deduplicator
-from custos_trigger.dependencies import get_resume_subscription_store
+from custos_trigger.dependencies import WorkflowCallerVerifier, get_resume_subscription_store
 from custos_trigger.models import ResumeRegistration, SourceType, Subscription, SubscriptionState
 from custos_trigger.pipeline.dispatch import Dispatcher
 from custos_trigger.providers import InMemoryTriggerMetadataStore, Providers
@@ -157,6 +157,38 @@ async def test_concurrent_subscription_updates_reject_stale_revision(backend: Qu
     assert len(winners) == 1
     assert await store.get(_WS, "concurrent") == winners[0]
     assert winners[0].store_revision == 2
+
+
+@pytest.mark.parametrize("scheduled", [False, True])
+async def test_metadata_patch_preserves_legacy_pause_and_delete(
+    backend: QueryStore, scheduled: bool
+) -> None:
+    """A legacy base-row change cannot be overwritten by a metadata-only atomic patch."""
+    store = SubscriptionStore(backend, now=lambda: _NOW)
+    candidate = _subscription("legacy-state")
+    if scheduled:
+        candidate = candidate.model_copy(
+            update={
+                "source_type": SourceType.SCHEDULED,
+                "source_config": SourceConfig(interval_seconds=30),
+            }
+        )
+    stale = await store.create(candidate)
+    for state in ("paused", "expired"):
+        await backend.update_subscription_state(_WS, SubscriptionId("legacy-state"), state)
+        updated = await store.update(
+            stale.model_copy(update={"selector": f"event.data.state == '{state}'"}),
+            expected_revision=stale.store_revision,
+            preserve_state=True,
+        )
+        assert updated.state.value == state
+        assert await store.get(_WS, "legacy-state") == updated
+        if scheduled:
+            schedule = await backend.get_schedule(_WS, "legacy-state")
+            assert schedule is not None and not schedule.enabled
+        stale = updated
+    with pytest.raises(ImmutableViolation, match="terminal"):
+        await store.set_state(_WS, "legacy-state", SubscriptionState.ACTIVE)
 
 
 @pytest.mark.parametrize("workflow", ["workflow", "unrelated"])
@@ -573,7 +605,9 @@ class _SourceReferences:
 
 @pytest.mark.integration
 async def test_workflow_client_round_trips_real_trigger_routes(
-    backend: QueryStore, monkeypatch: pytest.MonkeyPatch
+    backend: QueryStore,
+    monkeypatch: pytest.MonkeyPatch,
+    workflow_auth: tuple[WorkflowCallerVerifier, dict[str, str]],
 ) -> None:
     """Run the production Workflow transport through real Trigger routes and provider reads."""
     from custos_spl.interfaces.trigger_source import ResumeSource
@@ -589,6 +623,8 @@ async def test_workflow_client_round_trips_real_trigger_routes(
         authz_endpoint="",
         providers=Providers(metadata_store=backend, connector_references=_SourceReferences()),
         dispatcher=Dispatcher(FakeWorkflowServiceClient(), Deduplicator(backend)),
+        receiver_configuration_enabled=True,
+        workflow_caller_verifier=workflow_auth[0],
     )
     transport = httpx.ASGITransport(app=app)
 
@@ -609,7 +645,7 @@ async def test_workflow_client_round_trips_real_trigger_routes(
     async with (
         app.router.lifespan_context(app),
         transport,
-        httpx.AsyncClient(transport=httpx.MockTransport(forward)) as http,
+        httpx.AsyncClient(transport=httpx.MockTransport(forward), headers=workflow_auth[1]) as http,
     ):
         client = DaprTriggerServiceClient(
             http_client=http,
@@ -645,7 +681,10 @@ async def test_workflow_client_round_trips_real_trigger_routes(
 
 @pytest.mark.parametrize("expired", [False, True])
 async def test_concurrent_external_source_rebinding_is_rejected(
-    backend: QueryStore, monkeypatch: pytest.MonkeyPatch, expired: bool
+    backend: QueryStore,
+    monkeypatch: pytest.MonkeyPatch,
+    expired: bool,
+    workflow_auth: tuple[WorkflowCallerVerifier, dict[str, str]],
 ) -> None:
     """Racing sources cannot overwrite one another, even when refreshing an expired key."""
     monkeypatch.setattr(rpc, "_now", lambda: _NOW)
@@ -668,12 +707,16 @@ async def test_concurrent_external_source_rebinding_is_rejected(
         providers=Providers(metadata_store=backend, connector_references=_SourceReferences()),
         audit_sink=audit,
         dispatcher=Dispatcher(FakeWorkflowServiceClient(), Deduplicator(backend)),
+        receiver_configuration_enabled=True,
+        workflow_caller_verifier=workflow_auth[0],
     )
     app.dependency_overrides[get_resume_subscription_store] = lambda: store
     async with (
         app.router.lifespan_context(app),
         httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://trigger.test"
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://trigger.test",
+            headers=workflow_auth[1],
         ) as client,
     ):
         responses = await asyncio.gather(

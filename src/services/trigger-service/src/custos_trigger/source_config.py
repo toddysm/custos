@@ -26,6 +26,16 @@ class SourceConfigurationError(ValueError):
     """A receiver's source-specific fields do not form a supported configuration."""
 
 
+def require_receiver_configuration(enabled: bool) -> None:
+    """Reject new receiver eligibility until the operator has drained legacy writers."""
+    if not enabled:
+        raise TriggerError(
+            TriggerErrorKind.SOURCE_UNAVAILABLE,
+            "receiver configuration is disabled; upgrade all writers before enabling "
+            "TRIGGER_RECEIVER_CONFIGURATION_ENABLED",
+        )
+
+
 class SourceConfig(WireModel):
     """Optional fields whose allowed combinations are determined by sourceType."""
 

@@ -74,15 +74,28 @@ class SubscriptionStore:
         return await self._write(subscription, expected_revision=None, reset_schedule=True)
 
     async def update(
-        self, subscription: Subscription, *, expected_revision: int, reset_schedule: bool = False
+        self,
+        subscription: Subscription,
+        *,
+        expected_revision: int,
+        reset_schedule: bool = False,
+        preserve_state: bool = False,
     ) -> Subscription:
-        """Compare-and-swap all receiver state; preserve next-fire progress on state-only edits."""
+        """Update metadata atomically, optionally retaining the locked lifecycle state."""
         return await self._write(
-            subscription, expected_revision=expected_revision, reset_schedule=reset_schedule
+            subscription,
+            expected_revision=expected_revision,
+            reset_schedule=reset_schedule,
+            preserve_state=preserve_state,
         )
 
     async def _write(
-        self, subscription: Subscription, *, expected_revision: int | None, reset_schedule: bool
+        self,
+        subscription: Subscription,
+        *,
+        expected_revision: int | None,
+        reset_schedule: bool,
+        preserve_state: bool = False,
     ) -> Subscription:
         """Build a complete provider transaction before touching persisted state."""
         store = self._store
@@ -123,6 +136,7 @@ class SubscriptionStore:
             expected_revision=expected_revision,
             schedule=schedule,
             reset_schedule=reset_schedule,
+            preserve_state=preserve_state,
         )
         return subscription_from_spl(snapshot.subscription, snapshot.selector)
 
@@ -201,6 +215,7 @@ class SubscriptionStore:
         await self.update(
             candidate,
             expected_revision=subscription.store_revision,
+            preserve_state=True,
             reset_schedule=(
                 current.source_config != candidate.source_config
                 or current.source_type != candidate.source_type

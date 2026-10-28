@@ -132,6 +132,7 @@ class SubscriptionMutationProvider(Protocol):
         expected_revision: int | None,
         schedule: Schedule | None,
         reset_schedule: bool,
+        preserve_state: bool = False,
     ) -> SubscriptionSnapshot:
         """Create or compare-and-swap a subscription and its receiver eligibility.
 
@@ -139,7 +140,11 @@ class SubscriptionMutationProvider(Protocol):
         ``_revision`` (zero for legacy rows). Conflicts raise ImmutableViolation.
         Managed schedules use the subscription ID and record ``_scheduleId`` in
         the selector blob. Without a configuration change, next-fire progress
-        must survive state-only updates. No partial writes survive failure.
+        must survive state-only updates. ``preserve_state`` keeps the locked
+        lifecycle state for metadata-only patches, including legacy writers
+        that do not bump selector revisions. No partial writes survive failure.
+        Callers must gate introduction of managed configuration until legacy
+        writers are drained; this capability does not upgrade old write APIs.
         """
         ...
 
@@ -154,6 +159,7 @@ def prepare_subscription_write(
     expected_revision: int | None,
     schedule: Schedule | None,
     reset_schedule: bool,
+    preserve_state: bool = False,
 ) -> tuple[SubscriptionSnapshot, Schedule | None]:
     """Validate a complete atomic write before adapters change any state.
 
@@ -184,6 +190,12 @@ def prepare_subscription_write(
     else:
         if expected_revision is None or expected_revision != revision:
             raise ImmutableViolation("subscription changed before update")
+        if preserve_state:
+            subscription = replace(subscription, state=current.subscription.state)
+            if schedule is not None:
+                schedule = replace(schedule, enabled=subscription.state == "active")
+        if current.subscription.state == "expired" and subscription.state != "expired":
+            raise ImmutableViolation("expired subscription state is terminal")
         if (
             current.subscription.workflow_id != subscription.workflow_id
             or current.subscription.created_at.utcoffset() is None
