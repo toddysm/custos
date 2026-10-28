@@ -306,6 +306,19 @@ class InMemoryTriggerMetadataStore:
         """Read a resume registration, including expired rows for re-registration."""
         return self.resume_subscription(workspace_id, resume_id)
 
+    async def register_resume_subscription(
+        self, workspace_id: WorkspaceId, resume: SplResumeSubscription, *, as_of: datetime
+    ) -> SplResumeSubscription:
+        """Register without yielding between checking expiry and preserving the live winner."""
+        if as_of.utcoffset() is None:
+            raise ValueError("resume registration cutoff must be timezone-aware")
+        key = (str(workspace_id), resume.resume_id)
+        existing = self._resume.get(key)
+        if existing is not None and existing.expires_at.astimezone(UTC) > as_of.astimezone(UTC):
+            return existing
+        self._resume[key] = resume
+        return resume
+
     async def query_resume_subscriptions(
         self,
         workspace_id: WorkspaceId,

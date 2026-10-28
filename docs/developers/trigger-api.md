@@ -77,6 +77,12 @@ can inspect and replace them. Due-schedule queries include only enabled rows
 with `nextFireAt` at or before a timezone-aware cutoff. These provider operations
 do not themselves implement external receivers or scheduler execution.
 
+Registration uses the companion `ResumeRegistrationProvider` capability for
+an atomic insert-or-refresh. Concurrent requests for a new or expired wait
+return the same winning handle without deleting or overwriting another live
+registration. Original-selector-wins and divergence audit behavior also apply
+to these races; the raw immutable resume-write operation remains unchanged.
+
 Apply the normal metadata migrations to install revision-5 query indexes.
 This is an index-only additive revision; existing revision-4 row shapes and
 other services' schema minimum remain compatible. Older adapters without the

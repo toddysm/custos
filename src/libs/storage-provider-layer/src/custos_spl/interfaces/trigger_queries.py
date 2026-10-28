@@ -1,4 +1,4 @@
-"""Asynchronous, workspace-scoped reads for trigger metadata providers.
+"""Workspace-scoped reads and atomic resume registration for trigger metadata.
 
 This additive capability complements ``MetadataStoreProvider`` without requiring
 unrelated metadata consumers to implement trigger queries. Pages use ascending
@@ -100,4 +100,19 @@ class TriggerQueryProvider(Protocol):
         ...
 
 
-__all__ = ["SubscriptionSnapshot", "TriggerQueryProvider"]
+@runtime_checkable
+class ResumeRegistrationProvider(Protocol):
+    """Atomic original-wins registration, separate from immutable raw resume writes."""
+
+    async def register_resume_subscription(
+        self, workspace_id: WorkspaceId, resume: ResumeSubscription, *, as_of: datetime
+    ) -> ResumeSubscription:
+        """Insert or replace an expired row; return the winner when a live row exists.
+
+        ``as_of`` must be timezone-aware. A row expiring at the cutoff is expired.
+        Live registrations retain their payload, identity and expiry unchanged.
+        """
+        ...
+
+
+__all__ = ["ResumeRegistrationProvider", "SubscriptionSnapshot", "TriggerQueryProvider"]

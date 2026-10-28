@@ -703,6 +703,41 @@ class PgMetadataAdapter:
             )
         return _row_to_resume(row) if row is not None else None
 
+    async def register_resume_subscription(
+        self, workspace_id: str, resume: ResumeSubscription, *, as_of: datetime
+    ) -> ResumeSubscription:
+        """Atomically register a new/expired wait or return the unchanged live winner."""
+        if as_of.utcoffset() is None:
+            raise ValueError("resume registration cutoff must be timezone-aware")
+        pool = await self._pool_ref()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO custos_state.resume_subscription AS stored
+                    (workspace_id, resume_id, run_id, step_id, expires_at, payload)
+                VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+                ON CONFLICT (workspace_id, resume_id) DO UPDATE SET
+                    run_id = CASE WHEN stored.expires_at <= $7
+                        THEN EXCLUDED.run_id ELSE stored.run_id END,
+                    step_id = CASE WHEN stored.expires_at <= $7
+                        THEN EXCLUDED.step_id ELSE stored.step_id END,
+                    expires_at = CASE WHEN stored.expires_at <= $7
+                        THEN EXCLUDED.expires_at ELSE stored.expires_at END,
+                    payload = CASE WHEN stored.expires_at <= $7
+                        THEN EXCLUDED.payload ELSE stored.payload END
+                RETURNING workspace_id, resume_id, run_id, step_id, expires_at, payload
+                """,
+                workspace_id,
+                resume.resume_id,
+                resume.run_id,
+                resume.step_id,
+                resume.expires_at,
+                json.dumps(dict(resume.payload)),
+                as_of,
+            )
+        assert row is not None
+        return _row_to_resume(row)
+
     async def query_resume_subscriptions(
         self,
         workspace_id: str,

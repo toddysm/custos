@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from custos_spl.interfaces import TriggerQueryProvider
+from custos_spl.interfaces import ResumeRegistrationProvider, TriggerQueryProvider
 from custos_spl.pagination import (
     Cursor,
     decode_query_cursor,
@@ -63,3 +63,12 @@ def test_query_page_size_bounds() -> None:
     for value in (0, -1, True):
         with pytest.raises(ValueError, match="positive"):
             query_page_limit(value)
+
+
+def test_atomic_registration_is_an_explicit_workspace_scoped_capability() -> None:
+    """Atomic registration supplements, rather than weakens, immutable metadata writes."""
+    method = ResumeRegistrationProvider.register_resume_subscription
+    assert inspect.iscoroutinefunction(method)
+    parameters = inspect.signature(method).parameters
+    assert list(parameters)[1] == "workspace_id"
+    assert parameters["as_of"].kind is inspect.Parameter.KEYWORD_ONLY

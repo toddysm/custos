@@ -13,7 +13,7 @@ from typing import Literal, NamedTuple
 
 from custos_spl.ids import WorkspaceId
 from custos_spl.interfaces.metadata_store import ResumeSubscription
-from custos_spl.interfaces.trigger_queries import TriggerQueryProvider
+from custos_spl.interfaces.trigger_queries import ResumeRegistrationProvider, TriggerQueryProvider
 from custos_spl.pagination import Cursor, Page
 
 from custos_trigger.models import (
@@ -31,7 +31,7 @@ __all__ = [
 
 
 class ResumeReadUnsupportedError(RuntimeError):
-    """Raised when the bound backend exposes no resume read surface.
+    """Raised when the backend cannot serve a required resume-store capability.
 
     The backend must implement the asynchronous ``TriggerQueryProvider``
     capability supplied by the in-memory and PostgreSQL providers.
@@ -119,6 +119,32 @@ class ResumeSubscriptionStore:
             ),
         )
         return resume_registration_from_spl(row)
+
+    async def register_or_get(
+        self,
+        registration: ResumeRegistration,
+        *,
+        workspace_id: str,
+        resume_id: str,
+        expires_at: datetime,
+        as_of: datetime,
+    ) -> StoredResumeRegistration:
+        """Atomically create/refresh a wait without overwriting a concurrent live registration."""
+        if not isinstance(self._store, ResumeRegistrationProvider):
+            raise ResumeReadUnsupportedError(
+                "the bound metadata store exposes no atomic resume registration capability"
+            )
+        row = await self._store.register_resume_subscription(
+            WorkspaceId(workspace_id),
+            to_spl_resume_subscription(
+                registration,
+                workspace_id=workspace_id,
+                resume_id=resume_id,
+                expires_at=expires_at,
+            ),
+            as_of=as_of,
+        )
+        return StoredResumeRegistration(resume_registration_from_spl(row), row.expires_at)
 
     async def cancel(self, workspace_id: str, resume_id: str) -> None:
         """Delete a resume token. Idempotent — deleting an absent id is a no-op."""

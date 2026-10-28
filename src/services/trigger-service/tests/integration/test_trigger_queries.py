@@ -6,23 +6,32 @@ integration database fixture and run in the hosted PostgreSQL service job.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+import asyncio
+from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, cast
 from zoneinfo import ZoneInfo
 
+import httpx
 import pytest
 from custos_pg import PgMetadataAdapter
 from custos_spl.errors import QueryUnsupported
 from custos_spl.ids import RunId, StepId, SubscriptionId, WorkspaceId
 from custos_spl.interfaces.metadata_store import ResumeSubscription
-from custos_spl.interfaces.trigger_queries import TriggerQueryProvider
+from custos_spl.interfaces.trigger_queries import ResumeRegistrationProvider, TriggerQueryProvider
 from custos_spl.pagination import Cursor
 
-from custos_trigger.models import SourceType, Subscription, SubscriptionState
-from custos_trigger.providers import InMemoryTriggerMetadataStore
+from custos_trigger.api.routes import rpc
+from custos_trigger.app import create_app
+from custos_trigger.clients import FakeWorkflowServiceClient
+from custos_trigger.dedup import Deduplicator
+from custos_trigger.dependencies import get_resume_subscription_store
+from custos_trigger.models import ResumeRegistration, SourceType, Subscription, SubscriptionState
+from custos_trigger.pipeline.dispatch import Dispatcher
+from custos_trigger.providers import InMemoryTriggerMetadataStore, Providers
 from custos_trigger.stores import ResumeReadUnsupportedError, ResumeSubscriptionStore
 from custos_trigger.stores.base import TriggerMetadataStore
+from custos_trigger.stores.resume import StoredResumeRegistration
 from custos_trigger.stores.schedules import ScheduleStore
 from custos_trigger.stores.subscriptions import SubscriptionStore
 
@@ -30,7 +39,7 @@ _NOW = datetime(2026, 10, 28, 12, 0, tzinfo=UTC)
 _WS = WorkspaceId("query-ws")
 
 
-class QueryStore(TriggerMetadataStore, TriggerQueryProvider, Protocol):
+class QueryStore(TriggerMetadataStore, TriggerQueryProvider, ResumeRegistrationProvider, Protocol):
     """The write and read surfaces exercised by the shared contract tests."""
 
 
@@ -347,3 +356,130 @@ async def test_write_only_providers_fail_explicitly() -> None:
         await ScheduleStore(write_only).get(_WS, "schedule")
     with pytest.raises(QueryUnsupported):
         await ScheduleStore(write_only).query_due(_WS, due_at=_NOW)
+    with pytest.raises(ResumeReadUnsupportedError, match="atomic"):
+        await ResumeSubscriptionStore(write_only).register_or_get(
+            ResumeRegistration(run_id="run", step_id="step", event_key="approval"),
+            workspace_id=_WS,
+            resume_id="registration",
+            expires_at=_NOW,
+            as_of=_NOW,
+        )
+
+
+class _ConcurrentResumeStore(ResumeSubscriptionStore):
+    """Force two requests to observe the same initial row before either writes."""
+
+    def __init__(self, backend: TriggerMetadataStore) -> None:
+        """Create a two-request rendezvous around the production read method."""
+        super().__init__(backend)
+        self.barrier = asyncio.Barrier(2)
+
+    async def get(self, workspace_id: str, resume_id: str) -> StoredResumeRegistration | None:
+        """Return the captured initial snapshot only after the other request has read it."""
+        existing = await super().get(workspace_id, resume_id)
+        await asyncio.wait_for(self.barrier.wait(), 5)
+        return existing
+
+
+class _ResumeAudit:
+    """Capture divergent-selector events from the real HTTP registration route."""
+
+    def __init__(self) -> None:
+        """Start with no observed divergence."""
+        self.events: list[Mapping[str, object]] = []
+
+    async def emit(
+        self, event_name: str, *, workspace_id: str, attributes: Mapping[str, object]
+    ) -> None:
+        """Verify and record the registration conflict audit."""
+        assert event_name == rpc.AUDIT_RESUME_DIVERGENT
+        assert workspace_id == rpc.RESUME_WORKSPACE
+        self.events.append(attributes)
+
+
+@pytest.mark.parametrize("expired", [False, True])
+@pytest.mark.parametrize("divergent", [False, True])
+async def test_concurrent_resume_registration_is_original_wins(
+    backend: QueryStore, monkeypatch: pytest.MonkeyPatch, expired: bool, divergent: bool
+) -> None:
+    """Concurrent new/expired requests return one handle and preserve the winning selector."""
+    monkeypatch.setattr(rpc, "_now", lambda: _NOW)
+    resume_id = rpc.compute_resume_id("race-run", "step", "approval")
+    plain_store = ResumeSubscriptionStore(backend)
+    if expired:
+        await plain_store.register(
+            ResumeRegistration(run_id="race-run", step_id="step", event_key="approval"),
+            workspace_id=rpc.RESUME_WORKSPACE,
+            resume_id=resume_id,
+            expires_at=_NOW,
+        )
+    store = _ConcurrentResumeStore(backend)
+    audit = _ResumeAudit()
+    app = create_app(
+        authz_endpoint="",
+        providers=Providers(metadata_store=backend),
+        audit_sink=audit,
+        dispatcher=Dispatcher(FakeWorkflowServiceClient(), Deduplicator(backend)),
+    )
+    app.dependency_overrides[get_resume_subscription_store] = lambda: store
+    selector = "event.data.region == 'emea'"
+    other_selector = "event.data.region == 'apac'" if divergent else selector
+    body = {"runId": "race-run", "stepId": "step", "eventKey": "approval", "ttl": "PT1H"}
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://trigger.test"
+        ) as client,
+    ):
+        responses = await asyncio.gather(
+            client.post(rpc.REGISTER_RESUME_PATH, json={**body, "selector": selector}),
+            client.post(rpc.REGISTER_RESUME_PATH, json={**body, "selector": other_selector}),
+            return_exceptions=True,
+        )
+    for response in responses:
+        assert isinstance(response, httpx.Response), repr(response)
+        assert response.status_code == 200, response.text
+        assert response.json() == {"subscriptionId": resume_id}
+    stored = await plain_store.get(rpc.RESUME_WORKSPACE, resume_id)
+    assert stored is not None
+    assert stored.expires_at == _NOW + timedelta(hours=1)
+    assert stored.registration.selector in (selector, other_selector)
+    assert len(audit.events) == int(divergent)
+    if divergent:
+        assert audit.events[0]["originalSelector"] == stored.registration.selector
+        assert audit.events[0]["replaySelector"] != stored.registration.selector
+
+
+async def test_atomic_registration_retains_live_expiry(backend: QueryStore) -> None:
+    """An idempotent retry cannot extend a live wait or replace its selector."""
+    store = ResumeSubscriptionStore(backend)
+    original = ResumeRegistration(
+        run_id="run",
+        step_id="step",
+        event_key="approval",
+        selector="event.data.region == 'emea'",
+    )
+    first = await store.register_or_get(
+        original,
+        workspace_id=_WS,
+        resume_id="stable",
+        expires_at=_NOW + timedelta(hours=1),
+        as_of=_NOW,
+    )
+    replay = await store.register_or_get(
+        original.model_copy(update={"selector": "event.data.region == 'apac'"}),
+        workspace_id=_WS,
+        resume_id="stable",
+        expires_at=_NOW + timedelta(days=1),
+        as_of=_NOW,
+    )
+    assert replay == first
+    assert replay.expires_at == _NOW + timedelta(hours=1)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        await store.register_or_get(
+            original,
+            workspace_id=_WS,
+            resume_id="stable",
+            expires_at=_NOW,
+            as_of=_NOW.replace(tzinfo=None),
+        )
