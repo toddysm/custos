@@ -22,6 +22,7 @@ from custos_spl.interfaces.metadata_store import (
     MetadataStoreProvider,
     TransactionHandle,
 )
+from custos_spl.interfaces.trigger_queries import TriggerQueryProvider
 from custos_spl.migrations.runner import MigrationCapable
 
 from custos_pg.adapters.auth import PgAuthAdapter
@@ -62,6 +63,12 @@ def test_catalog_adapter_satisfies_catalog_protocol() -> None:
 def test_metadata_adapter_satisfies_metadata_protocol() -> None:
     adapter = PgMetadataAdapter(lazy=LazyPool("postgresql://noop"))
     assert isinstance(adapter, MetadataStoreProvider)
+
+
+def test_metadata_adapter_satisfies_trigger_query_capability() -> None:
+    """The production adapter supplies the same async reads as the memory provider."""
+    adapter = PgMetadataAdapter(lazy=LazyPool("postgresql://noop"))
+    assert isinstance(adapter, TriggerQueryProvider)
 
 
 def test_auth_adapter_satisfies_auth_protocol() -> None:

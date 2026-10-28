@@ -1,6 +1,6 @@
 # Trigger Service Public API
 
-Last Updated: 2026-06-04
+Last Updated: 2026-10-28
 
 The Trigger Service turns inbound events into workflow runs. It owns three
 surfaces:
@@ -50,9 +50,37 @@ linear `Classify → Match → Dedup → Dispatch` pipeline.
 - [Dispatch, dedup, and resume semantics](#dispatch-dedup-and-resume-semantics)
 - [Declarative trigger YAML (M2)](#declarative-trigger-yaml-m2)
 - [Configuration](#configuration)
+- [Provider-backed reads](#provider-backed-reads)
 - [Deferred to M2](#deferred-to-m2)
 
 ---
+
+## Provider-backed reads
+
+Trigger stores use the asynchronous
+[`TriggerQueryProvider`](../../src/libs/storage-provider-layer/src/custos_spl/interfaces/trigger_queries.py)
+capability implemented by the in-memory and PostgreSQL metadata providers.
+Subscription reads return the base row and latest **appended** selector together;
+an older caller-supplied selector timestamp does not override append order.
+The internal receiver drains bounded candidate pages rather than relying on
+test-only synchronous accessors or raw SQL rehydration.
+
+Queries are workspace-scoped, ordered by identifier, and use opaque keyset
+cursors bound to the workspace, query kind, filters and time cutoff. The default
+page contains up to 50 rows, capped at 200; invalid cursors or non-positive
+limits raise explicit errors. Keep the same filters and cutoff while paging.
+Pages are not a cross-request snapshot of concurrent writes.
+
+Source-scoped resume queries exclude expired and legacy unassociated waits.
+Point reads retain expired registrations so the existing re-registration path
+can inspect and replace them. Due-schedule queries include only enabled rows
+with `nextFireAt` at or before a timezone-aware cutoff. These provider operations
+do not themselves implement external receivers or scheduler execution.
+
+Apply the normal metadata migrations to install revision-5 query indexes.
+This is an index-only additive revision; existing revision-4 row shapes and
+other services' schema minimum remain compatible. Older adapters without the
+query capability fail explicitly instead of returning an empty match set.
 
 ## Authentication and call context
 

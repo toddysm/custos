@@ -21,7 +21,7 @@ candidate enumeration:
 
 * **start** subscriptions have no deterministic key — the receiver enumerates
   every subscription in the event's tenant ``workspace`` via the
-  :class:`~custos_trigger.stores.base.SubscriptionListable` capability and lets
+  asynchronous ``TriggerQueryProvider`` capability, draining bounded pages, and lets
   :class:`~custos_trigger.pipeline.match_start.StartMatcher` filter to
   ``START`` / ``ACTIVE`` rows whose selector matches.
 * **resume** registrations *do* have a deterministic key: ``resume_id`` is

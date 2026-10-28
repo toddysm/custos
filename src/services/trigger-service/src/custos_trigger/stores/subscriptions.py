@@ -12,6 +12,8 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 
 from custos_spl.ids import SubscriptionId, WorkspaceId
+from custos_spl.interfaces.trigger_queries import TriggerQueryProvider
+from custos_spl.pagination import Cursor, Page
 
 from custos_trigger.models import (
     Subscription,
@@ -20,11 +22,7 @@ from custos_trigger.models import (
     to_spl_subscription,
     to_spl_subscription_selector,
 )
-from custos_trigger.stores.base import (
-    SubscriptionListable,
-    SubscriptionReadable,
-    TriggerMetadataStore,
-)
+from custos_trigger.stores.base import TriggerMetadataStore
 
 __all__ = [
     "SubscriptionListUnsupportedError",
@@ -40,22 +38,16 @@ def _utcnow() -> datetime:
 class SubscriptionReadUnsupportedError(RuntimeError):
     """Raised when the bound backend exposes no subscription read surface.
 
-    The locked SPL write Protocol has no subscription read method; only a
-    backend that also satisfies
-    :class:`~custos_trigger.stores.base.SubscriptionReadable` can serve
-    :meth:`SubscriptionStore.get`. The in-process backend does; the Postgres
-    adapter gains the capability in a later task.
+    The backend must implement the asynchronous ``TriggerQueryProvider``
+    capability. Both the in-memory and PostgreSQL providers implement it.
     """
 
 
 class SubscriptionListUnsupportedError(RuntimeError):
     """Raised when the bound backend exposes no subscription list surface.
 
-    The internal event receiver (TS-IMPL-017) enumerates a workspace's start
-    subscriptions as match candidates; only a backend that also satisfies
-    :class:`~custos_trigger.stores.base.SubscriptionListable` can serve
-    :meth:`SubscriptionStore.list_in_workspace`. The in-process backend does;
-    the Postgres adapter gains the capability in a later task.
+    Candidate pages include latest selector revisions; a backend without the
+    asynchronous ``TriggerQueryProvider`` capability cannot safely enumerate them.
     """
 
 
@@ -99,53 +91,61 @@ class SubscriptionStore:
         """Read one subscription back by id, or ``None`` when absent.
 
         Rebuilds the full :class:`Subscription` from the base row plus its
-        latest selector revision (which carries the rich metadata blob). Raises
-        :class:`SubscriptionReadUnsupportedError` when the bound backend has no
-        :class:`~custos_trigger.stores.base.SubscriptionReadable` surface.
+        latest selector revision in one query. Raises
+        :class:`SubscriptionReadUnsupportedError` for a write-only backend.
         """
         store = self._store
-        if not isinstance(store, SubscriptionReadable):
+        if not isinstance(store, TriggerQueryProvider):
             raise SubscriptionReadUnsupportedError(
                 "the bound metadata store exposes no subscription read surface"
             )
-        row = store.subscription(workspace_id, subscription_id)
-        if row is None:
+        snapshot = await store.get_subscription(
+            WorkspaceId(workspace_id), SubscriptionId(subscription_id)
+        )
+        if snapshot is None:
             return None
-        selectors = store.subscription_selectors(workspace_id, subscription_id)
-        latest = selectors[-1] if selectors else None
-        return subscription_from_spl(row, latest)
+        return subscription_from_spl(snapshot.subscription, snapshot.selector)
+
+    async def query(
+        self,
+        workspace_id: str,
+        *,
+        state: SubscriptionState | None = None,
+        cursor: Cursor | None = None,
+        limit: int | None = None,
+    ) -> Page[Subscription]:
+        """Read one bounded, selector-hydrated candidate page from the provider."""
+        store = self._store
+        if not isinstance(store, TriggerQueryProvider):
+            raise SubscriptionListUnsupportedError(
+                "the bound metadata store exposes no asynchronous subscription query surface"
+            )
+        page = await store.query_subscriptions(
+            WorkspaceId(workspace_id),
+            state=state.value if state is not None else None,
+            cursor=cursor,
+            limit=limit,
+        )
+        return Page(
+            (subscription_from_spl(row.subscription, row.selector) for row in page.items),
+            page.next_cursor,
+        )
 
     async def list_in_workspace(self, workspace_id: str) -> list[Subscription]:
         """Return every subscription in *workspace_id* as match candidates.
 
-        Each row is rehydrated with its latest selector revision (the rich
-        metadata blob the matcher's CEL selector reads). Filtering to ``START``
-        kind / ``ACTIVE`` state is the matcher's job, so the full set is
-        returned here. Raises :class:`SubscriptionListUnsupportedError` when the
-        bound backend lacks either the
-        :class:`~custos_trigger.stores.base.SubscriptionListable` enumeration
-        surface or the
-        :class:`~custos_trigger.stores.base.SubscriptionReadable` surface needed
-        to rehydrate selectors — enumerating un-rehydrated rows would fall back
-        to defaults (``source_type=manual``, empty/unconditional selector) and
-        could fire the wrong workflows.
+        Drain bounded provider pages for the existing internal receiver.
+        Filtering to START/ACTIVE remains the matcher's responsibility;
+        selectors are hydrated by the provider rather than an N+1 read loop.
         """
-        store = self._store
-        if not isinstance(store, SubscriptionListable):
-            raise SubscriptionListUnsupportedError(
-                "the bound metadata store exposes no subscription list surface"
-            )
-        if not isinstance(store, SubscriptionReadable):
-            raise SubscriptionListUnsupportedError(
-                "the bound metadata store can list subscriptions but exposes no "
-                "read surface to rehydrate their selectors"
-            )
         candidates: list[Subscription] = []
-        for row in store.list_subscriptions(workspace_id):
-            selectors = store.subscription_selectors(workspace_id, str(row.subscription_id))
-            latest = selectors[-1] if selectors else None
-            candidates.append(subscription_from_spl(row, latest))
-        return candidates
+        cursor: Cursor | None = None
+        while True:
+            page = await self.query(workspace_id, cursor=cursor)
+            candidates.extend(page.items)
+            cursor = page.next_cursor
+            if cursor is None:
+                return candidates
 
     async def reauthor_selector(self, subscription: Subscription) -> None:
         """Append a fresh selector revision built from *subscription*."""

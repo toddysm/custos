@@ -7,6 +7,9 @@ box and pass it back unchanged on the next page request.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Generic, TypeVar
@@ -50,4 +53,46 @@ class Page(Generic[T]):
         object.__setattr__(self, "next_cursor", next_cursor)
 
 
-__all__ = ["Cursor", "Page"]
+def query_page_limit(limit: int | None) -> int:
+    """Resolve trigger-query page sizes, rejecting invalid or non-positive values."""
+    if limit is None:
+        return 50
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise ValueError("query limit must be a positive integer")
+    return min(limit, 200)
+
+
+def encode_query_cursor(scope: tuple[str | None, ...], key: str) -> Cursor:
+    """Encode an identifier and query scope as an opaque, versioned page cursor."""
+    raw = json.dumps([1, scope, key], ensure_ascii=True).encode("ascii")
+    return Cursor(base64.urlsafe_b64encode(raw).decode("ascii"))
+
+
+def decode_query_cursor(cursor: Cursor | None, scope: tuple[str | None, ...]) -> str | None:
+    """Decode a query cursor, rejecting malformed tokens and scope/filter changes."""
+    if cursor is None:
+        return None
+    try:
+        raw = base64.b64decode(cursor.token, altchars=b"-_", validate=True)
+        value = json.loads(raw)
+    except (ValueError, UnicodeError, binascii.Error) as exc:
+        raise ValueError("invalid query cursor") from exc
+    if (
+        not isinstance(value, list)
+        or len(value) != 3
+        or type(value[0]) is not int
+        or value[0] != 1
+        or value[1] != list(scope)
+        or not isinstance(value[2], str)
+    ):
+        raise ValueError("query cursor does not match this query")
+    return value[2]
+
+
+__all__ = [
+    "Cursor",
+    "Page",
+    "decode_query_cursor",
+    "encode_query_cursor",
+    "query_page_limit",
+]

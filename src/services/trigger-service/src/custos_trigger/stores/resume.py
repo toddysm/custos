@@ -9,16 +9,19 @@ in the row's free-form ``payload`` — see :mod:`custos_trigger.models`).
 from __future__ import annotations
 
 from datetime import datetime
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 from custos_spl.ids import WorkspaceId
+from custos_spl.interfaces.metadata_store import ResumeSubscription
+from custos_spl.interfaces.trigger_queries import TriggerQueryProvider
+from custos_spl.pagination import Cursor, Page
 
 from custos_trigger.models import (
     ResumeRegistration,
     resume_registration_from_spl,
     to_spl_resume_subscription,
 )
-from custos_trigger.stores.base import ResumeReadable, TriggerMetadataStore
+from custos_trigger.stores.base import TriggerMetadataStore
 
 __all__ = [
     "ResumeReadUnsupportedError",
@@ -30,11 +33,8 @@ __all__ = [
 class ResumeReadUnsupportedError(RuntimeError):
     """Raised when the bound backend exposes no resume read surface.
 
-    The locked SPL write Protocol has no resume read method; only a backend
-    that also satisfies
-    :class:`~custos_trigger.stores.base.ResumeReadable` can serve
-    :meth:`ResumeSubscriptionStore.get`. The in-process backend does; the
-    Postgres adapter gains the capability in a later task.
+    The backend must implement the asynchronous ``TriggerQueryProvider``
+    capability supplied by the in-memory and PostgreSQL providers.
     """
 
 
@@ -60,19 +60,44 @@ class ResumeSubscriptionStore:
         """Read one resume token back by id, or ``None`` when absent.
 
         Raises :class:`ResumeReadUnsupportedError` when the bound backend has
-        no :class:`~custos_trigger.stores.base.ResumeReadable` surface.
+        no asynchronous ``TriggerQueryProvider`` capability.
         """
         store = self._store
-        if not isinstance(store, ResumeReadable):
+        if not isinstance(store, TriggerQueryProvider):
             raise ResumeReadUnsupportedError(
                 "the bound metadata store exposes no resume read surface"
             )
-        row = store.resume_subscription(workspace_id, resume_id)
+        row = await store.get_resume_subscription(WorkspaceId(workspace_id), resume_id)
         if row is None:
             return None
         return StoredResumeRegistration(
             registration=resume_registration_from_spl(row),
             expires_at=row.expires_at,
+        )
+
+    async def query_for_source(
+        self,
+        workspace_id: str,
+        *,
+        connector_instance_id: str,
+        delivery_mode: Literal["push", "pull"],
+        as_of: datetime,
+        cursor: Cursor | None = None,
+        limit: int | None = None,
+    ) -> Page[ResumeSubscription]:
+        """Read source-scoped waits, retaining IDs and payload for external correlation."""
+        store = self._store
+        if not isinstance(store, TriggerQueryProvider):
+            raise ResumeReadUnsupportedError(
+                "the bound metadata store exposes no asynchronous resume query surface"
+            )
+        return await store.query_resume_subscriptions(
+            WorkspaceId(workspace_id),
+            connector_instance_id=connector_instance_id,
+            delivery_mode=delivery_mode,
+            as_of=as_of,
+            cursor=cursor,
+            limit=limit,
         )
 
     async def register(

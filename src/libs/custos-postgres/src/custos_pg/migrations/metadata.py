@@ -19,6 +19,9 @@ REV2 adds idempotency records for API-gateway deduplication (in_progress
 
 REV3 adds device-code session storage for OIDC device-code flow (pending
 → user_authorized → completed; expired rows reaped).
+
+REV5 adds indexes for the optional trigger-query capability. It changes no
+row shape; revision-4 readers and writers remain compatible.
 """
 
 from __future__ import annotations
@@ -304,4 +307,28 @@ METADATA_REV4 = Revision(
 )
 
 
-__all__ = ["METADATA_REV1", "METADATA_REV2", "METADATA_REV3", "METADATA_REV4"]
+METADATA_REV5 = Revision(
+    number=5,
+    statements=(
+        """
+        CREATE INDEX IF NOT EXISTS subscription_by_state
+            ON custos_state.subscription
+                (workspace_id, state, subscription_id COLLATE "C")
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS resume_subscription_by_source
+            ON custos_state.resume_subscription
+                (workspace_id, (payload #>> '{source,connectorInstanceId}'),
+                 resume_id COLLATE "C", expires_at)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS schedule_due_enabled
+            ON custos_state.schedule
+                (workspace_id, schedule_id COLLATE "C", next_fire_at)
+            WHERE enabled
+        """,
+    ),
+)
+
+
+__all__ = ["METADATA_REV1", "METADATA_REV2", "METADATA_REV3", "METADATA_REV4", "METADATA_REV5"]
