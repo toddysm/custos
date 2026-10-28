@@ -8,7 +8,6 @@ from datetime import datetime
 from typing import ClassVar
 
 import httpx
-
 from custos_spl.errors import BackendUnavailable, QueryUnsupported, WorkspaceMismatch
 from custos_spl.ids import RunId, WorkspaceId
 from custos_spl.interfaces.metrics_query import (
@@ -108,8 +107,8 @@ class PrometheusMetricsAdapter:
             escaped_value = self._escape_label_value(value)
             selector_matchers.append(f'{key}="{escaped_value}"')
 
-        all_matchers = [workspace_matchers] + selector_matchers
-        return f'{metric_name}{{{",".join(all_matchers)}}}'
+        all_matchers = [workspace_matchers, *selector_matchers]
+        return f"{metric_name}{{{','.join(all_matchers)}}}"
 
     async def query_run_metrics(
         self,
@@ -119,9 +118,8 @@ class PrometheusMetricsAdapter:
         range: MetricRange,
     ) -> MetricSeries:
         """Time-bucketed range query scoped to one run."""
+        query = self._build_query(selector, workspace_id, run_id)
         try:
-            query = self._build_query(selector, workspace_id, run_id)
-
             params: dict = {
                 "query": query,
                 "start": int(range.start.timestamp()),
@@ -146,8 +144,10 @@ class PrometheusMetricsAdapter:
 
         except httpx.HTTPStatusError as exc:
             raise BackendUnavailable(f"Prometheus query failed: {exc}") from exc
-        except (httpx.ConnectError, httpx.TimeoutError) as exc:
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
             raise BackendUnavailable(f"Prometheus unavailable: {exc}") from exc
+        except WorkspaceMismatch:
+            raise
         except Exception as exc:
             raise BackendUnavailable(f"Prometheus query failed: {exc}") from exc
 
@@ -158,9 +158,8 @@ class PrometheusMetricsAdapter:
         range: MetricRange,
     ) -> MetricSeries:
         """Workspace-scoped range query (no run filter)."""
+        query = self._build_query(selector, workspace_id, run_id=None)
         try:
-            query = self._build_query(selector, workspace_id, run_id=None)
-
             params: dict = {
                 "query": query,
                 "start": int(range.start.timestamp()),
@@ -185,8 +184,10 @@ class PrometheusMetricsAdapter:
 
         except httpx.HTTPStatusError as exc:
             raise BackendUnavailable(f"Prometheus query failed: {exc}") from exc
-        except (httpx.ConnectError, httpx.TimeoutError) as exc:
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
             raise BackendUnavailable(f"Prometheus unavailable: {exc}") from exc
+        except WorkspaceMismatch:
+            raise
         except Exception as exc:
             raise BackendUnavailable(f"Prometheus query failed: {exc}") from exc
 
@@ -197,9 +198,8 @@ class PrometheusMetricsAdapter:
         at: datetime,
     ) -> MetricSample:
         """Single-point lookup at a specific instant."""
+        query = self._build_query(selector, workspace_id, run_id=None)
         try:
-            query = self._build_query(selector, workspace_id, run_id=None)
-
             params: dict = {
                 "query": query,
                 "time": int(at.timestamp()),
@@ -222,8 +222,10 @@ class PrometheusMetricsAdapter:
 
         except httpx.HTTPStatusError as exc:
             raise BackendUnavailable(f"Prometheus instant query failed: {exc}") from exc
-        except (httpx.ConnectError, httpx.TimeoutError) as exc:
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
             raise BackendUnavailable(f"Prometheus unavailable: {exc}") from exc
+        except WorkspaceMismatch:
+            raise
         except Exception as exc:
             raise BackendUnavailable(f"Prometheus instant query failed: {exc}") from exc
 
@@ -253,8 +255,7 @@ class PrometheusMetricsAdapter:
         returned_workspace_id = labels.get("workspace_id")
         if returned_workspace_id != str(workspace_id):
             raise WorkspaceMismatch(
-                f"metric belongs to workspace {returned_workspace_id}, "
-                f"not {workspace_id}"
+                f"metric belongs to workspace {returned_workspace_id}, not {workspace_id}"
             )
 
         samples = []
@@ -302,8 +303,7 @@ class PrometheusMetricsAdapter:
             returned_workspace_id = labels.get("workspace_id")
             if returned_workspace_id != str(workspace_id):
                 raise WorkspaceMismatch(
-                    f"metric belongs to workspace {returned_workspace_id}, "
-                    f"not {workspace_id}"
+                    f"metric belongs to workspace {returned_workspace_id}, not {workspace_id}"
                 )
 
             try:
@@ -371,8 +371,7 @@ def make_prometheus_adapter() -> PrometheusMetricsAdapter:
     base_url = os.getenv("CUSTOS_PROMETHEUS_URL")
     if not base_url:
         raise RuntimeError(
-            "CUSTOS_PROMETHEUS_URL environment variable not set; "
-            "required for Prometheus adapter"
+            "CUSTOS_PROMETHEUS_URL environment variable not set; required for Prometheus adapter"
         )
 
     tenant_id = os.getenv("CUSTOS_PROMETHEUS_TENANT_ID")

@@ -57,9 +57,7 @@ def test_protocol_exposes_method(method: str) -> None:
 _NON_COROUTINE_METHODS = {"get"}
 
 
-@pytest.mark.parametrize(
-    "method", [m for m in REQUIRED_METHODS if m not in _NON_COROUTINE_METHODS]
-)
+@pytest.mark.parametrize("method", [m for m in REQUIRED_METHODS if m not in _NON_COROUTINE_METHODS])
 def test_protocol_methods_are_async(method: str) -> None:
     fn = getattr(ArtifactStoreProvider, method)
     assert inspect.iscoroutinefunction(fn), f"{method} must be async"

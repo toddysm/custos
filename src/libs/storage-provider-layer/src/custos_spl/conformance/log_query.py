@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from custos_spl.errors import BackendUnavailable, WorkspaceMismatch
+from custos_spl.errors import WorkspaceMismatch
 from custos_spl.ids import RunId, WorkspaceId
 from custos_spl.interfaces.log_query import LogFilter, LogQueryProvider
 
@@ -64,18 +64,20 @@ class LogQueryConformanceTests(AdapterConformanceBase):
         pytest.skip("run_id fixture not provided by subclass")
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("message", ["NONEXISTENT_STRING_XYZ_ABC", "NONEXISTENT \U0001f642"])
     async def test_empty_query_result_returns_empty_page(
         self,
         adapter: LogQueryProvider,
         workspace_id: WorkspaceId,
         run_id: RunId,
+        message: str,
     ) -> None:
         """Query with no matches returns empty LogPage.
 
         No error raised; items tuple is empty, next_cursor is None.
         """
         # Query with filter that should match nothing
-        log_filter = LogFilter(message_contains="NONEXISTENT_STRING_XYZ_ABC")
+        log_filter = LogFilter(message_contains=message)
         page = await adapter.query_run_logs(workspace_id, run_id, log_filter)
 
         assert len(page.items) == 0
@@ -137,9 +139,7 @@ class LogQueryConformanceTests(AdapterConformanceBase):
 
         # Query from workspace B for same run should return empty or raise
         try:
-            page_b = await adapter.query_run_logs(
-                other_workspace_id, run_id, log_filter
-            )
+            page_b = await adapter.query_run_logs(other_workspace_id, run_id, log_filter)
             # If it returns, should be empty
             assert len(page_b.items) == 0
         except WorkspaceMismatch:
@@ -184,6 +184,5 @@ class LogQueryConformanceTests(AdapterConformanceBase):
         # All returned logs should be within bounds
         for record in page.items:
             assert start <= record.timestamp < end, (
-                f"Log timestamp {record.timestamp} outside bounds "
-                f"[{start}, {end})"
+                f"Log timestamp {record.timestamp} outside bounds [{start}, {end})"
             )

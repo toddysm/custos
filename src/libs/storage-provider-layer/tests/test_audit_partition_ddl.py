@@ -61,9 +61,7 @@ def test_creates_audit_outbox_table(joined: str) -> None:
 
 
 def test_creates_audit_outbox_cursor_table(joined: str) -> None:
-    assert (
-        "CREATE TABLE IF NOT EXISTS custos_audit.audit_outbox_cursor" in joined
-    )
+    assert "CREATE TABLE IF NOT EXISTS custos_audit.audit_outbox_cursor" in joined
     assert "pipeline_id" in joined
 
 
@@ -83,21 +81,15 @@ def test_trigger_function_raises_on_mutation(joined: str) -> None:
 def test_trigger_function_permits_retention_role_delete(joined: str) -> None:
     """`audit_retention` role's DELETEs must pass — that's the retention worker."""
     # Look for the conditional that permits the dedicated role.
-    assert (
-        "TG_OP = 'DELETE' AND current_user = 'audit_retention'" in joined
-    )
+    assert "TG_OP = 'DELETE' AND lower(current_user) = lower('audit_retention')" in joined
 
 
 def test_before_update_or_delete_trigger_on_audit_events(ddl: list[str]) -> None:
-    assert any(
-        "BEFORE UPDATE OR DELETE ON custos_audit.audit_events" in s for s in ddl
-    )
+    assert any("BEFORE UPDATE OR DELETE ON custos_audit.audit_events" in s for s in ddl)
 
 
 def test_before_update_or_delete_trigger_on_audit_outbox(ddl: list[str]) -> None:
-    assert any(
-        "BEFORE UPDATE OR DELETE ON custos_audit.audit_outbox" in s for s in ddl
-    )
+    assert any("BEFORE UPDATE OR DELETE ON custos_audit.audit_outbox" in s for s in ddl)
 
 
 def test_no_trigger_on_cursor_table(joined: str) -> None:
@@ -125,17 +117,11 @@ def test_platform_role_loses_update_delete_on_outbox(joined: str) -> None:
 
 
 def test_platform_role_keeps_insert_select_on_events(joined: str) -> None:
-    assert (
-        "GRANT SELECT, INSERT ON custos_audit.audit_events TO custos_platform"
-        in joined
-    )
+    assert "GRANT SELECT, INSERT ON custos_audit.audit_events TO custos_platform" in joined
 
 
 def test_platform_role_keeps_insert_select_on_outbox(joined: str) -> None:
-    assert (
-        "GRANT SELECT, INSERT ON custos_audit.audit_outbox TO custos_platform"
-        in joined
-    )
+    assert "GRANT SELECT, INSERT ON custos_audit.audit_outbox TO custos_platform" in joined
 
 
 def test_platform_role_can_update_cursor_table(joined: str) -> None:
@@ -150,17 +136,11 @@ def test_platform_role_can_update_cursor_table(joined: str) -> None:
 
 
 def test_retention_role_can_delete_events(joined: str) -> None:
-    assert (
-        "GRANT SELECT, DELETE ON custos_audit.audit_events TO audit_retention"
-        in joined
-    )
+    assert "GRANT SELECT, DELETE ON custos_audit.audit_events TO audit_retention" in joined
 
 
 def test_retention_role_can_delete_outbox(joined: str) -> None:
-    assert (
-        "GRANT SELECT, DELETE ON custos_audit.audit_outbox TO audit_retention"
-        in joined
-    )
+    assert "GRANT SELECT, DELETE ON custos_audit.audit_outbox TO audit_retention" in joined
 
 
 def test_retention_role_never_receives_insert(joined: str) -> None:
@@ -168,9 +148,7 @@ def test_retention_role_never_receives_insert(joined: str) -> None:
     # The retention role only appears on SELECT/DELETE grants.
     for stmt in audit_partition_ddl():
         if "audit_retention" in stmt and "GRANT" in stmt and "INSERT" in stmt:
-            pytest.fail(
-                f"audit_retention should never receive INSERT: {stmt!r}"
-            )
+            pytest.fail(f"audit_retention should never receive INSERT: {stmt!r}")
 
 
 # ----- parameterization -----

@@ -39,6 +39,7 @@ Adapter developers inherit from base test classes and implement adapter fixtures
 from custos_spl.conformance import ArtifactStoreConformanceTests
 from my_adapter import MyS3Adapter
 
+
 class TestMyS3Adapter(ArtifactStoreConformanceTests):
     @pytest.fixture
     def adapter(self):
@@ -62,6 +63,7 @@ class TestMyS3Adapter(ArtifactStoreConformanceTests):
 ```python
 from custos_spl.conformance import LogQueryConformanceTests
 from my_adapter import MyLokiAdapter
+
 
 class TestMyLokiAdapter(LogQueryConformanceTests):
     @pytest.fixture
@@ -108,6 +110,7 @@ pytest.importorskip("your_adapter_module")
 
 from your_adapter_module.adapters import YourAdapter
 
+
 # STEP 3: Mark test class as integration and add backend availability check
 @pytest.mark.integration
 class TestYourAdapterConformance(MetricsQueryConformanceTests):
@@ -118,6 +121,7 @@ class TestYourAdapterConformance(MetricsQueryConformanceTests):
         """Skip entire test class if backend is not available."""
         try:
             import httpx
+
             response = httpx.get(
                 "http://your-backend:port/health",
                 timeout=2.0,

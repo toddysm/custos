@@ -61,18 +61,13 @@ def _extract_workspace_id(
 
 def _validate_workspace_id(value: object, method_name: str) -> None:
     if value is None:
-        raise WorkspaceScopingViolation(
-            f"{method_name}: workspace_id is required but was None"
-        )
+        raise WorkspaceScopingViolation(f"{method_name}: workspace_id is required but was None")
     if not isinstance(value, str):
         raise WorkspaceScopingViolation(
-            f"{method_name}: workspace_id must be a WorkspaceId (str), got "
-            f"{type(value).__name__}"
+            f"{method_name}: workspace_id must be a WorkspaceId (str), got {type(value).__name__}"
         )
     if value == "":
-        raise WorkspaceScopingViolation(
-            f"{method_name}: workspace_id must be non-empty"
-        )
+        raise WorkspaceScopingViolation(f"{method_name}: workspace_id must be non-empty")
 
 
 def _is_workspace_scoped_method(fn: Callable[..., object]) -> bool:
@@ -87,9 +82,7 @@ def _is_workspace_scoped_method(fn: Callable[..., object]) -> bool:
     return bool(non_self) and non_self[0] == _WORKSPACE_ID_PARAM
 
 
-def _wrap_async_method(
-    fn: Callable[..., Any], method_name: str
-) -> Callable[..., Any]:
+def _wrap_async_method(fn: Callable[..., Any], method_name: str) -> Callable[..., Any]:
     async def wrapper(*args: object, **kwargs: object) -> object:
         ws = _extract_workspace_id(
             [p for p in inspect.signature(fn).parameters if p != "self"],
@@ -104,9 +97,7 @@ def _wrap_async_method(
     return wrapper
 
 
-def _wrap_sync_method(
-    fn: Callable[..., Any], method_name: str
-) -> Callable[..., Any]:
+def _wrap_sync_method(fn: Callable[..., Any], method_name: str) -> Callable[..., Any]:
     """Wrap a plain `def` that returns (e.g.) an `AsyncIterator`.
 
     The validation happens synchronously at call-site; the returned

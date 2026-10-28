@@ -4,20 +4,19 @@ from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
+from custos_spl.errors import BackendUnavailable, QueryUnsupported, WorkspaceMismatch
+from custos_spl.ids import RunId, WorkspaceId
+from custos_spl.interfaces.metrics_query import (
+    MetricRange,
+    MetricSample,
+    MetricSelector,
+)
 
 from custos_prometheus.adapters import (
     NoopMetricsAdapter,
     PrometheusMetricsAdapter,
     make_noop_adapter,
     make_prometheus_adapter,
-)
-from custos_spl.errors import BackendUnavailable, QueryUnsupported
-from custos_spl.ids import RunId, WorkspaceId
-from custos_spl.interfaces.metrics_query import (
-    MetricRange,
-    MetricSample,
-    MetricSelector,
-    MetricSeries,
 )
 
 
@@ -53,9 +52,7 @@ class TestPrometheusAdapter:
         matchers = adapter._build_matchers(workspace_id, run_id)
         assert matchers == 'workspace_id="ws-123",run_id="run-456"'
 
-    def test_build_matchers_with_special_chars(
-        self, adapter: PrometheusMetricsAdapter
-    ) -> None:
+    def test_build_matchers_with_special_chars(self, adapter: PrometheusMetricsAdapter) -> None:
         """Matchers escape special characters to prevent injection."""
         workspace_id = WorkspaceId('ws"inject')
         run_id = RunId("run\\escape")
@@ -87,9 +84,7 @@ class TestPrometheusAdapter:
         adapter._validate_metric_name("test:metric")
         adapter._validate_metric_name("a")
 
-    def test_validate_metric_name_invalid(
-        self, adapter: PrometheusMetricsAdapter
-    ) -> None:
+    def test_validate_metric_name_invalid(self, adapter: PrometheusMetricsAdapter) -> None:
         """Invalid metric names raise QueryUnsupported."""
         with pytest.raises(QueryUnsupported, match="invalid metric name"):
             adapter._validate_metric_name("123abc")  # starts with digit
@@ -108,9 +103,7 @@ class TestPrometheusAdapter:
         adapter._validate_label_name("job_name")
         adapter._validate_label_name("a")
 
-    def test_validate_label_name_invalid(
-        self, adapter: PrometheusMetricsAdapter
-    ) -> None:
+    def test_validate_label_name_invalid(self, adapter: PrometheusMetricsAdapter) -> None:
         """Invalid label names raise QueryUnsupported."""
         with pytest.raises(QueryUnsupported, match="invalid label name"):
             adapter._validate_label_name("123abc")  # starts with digit
@@ -121,9 +114,7 @@ class TestPrometheusAdapter:
         with pytest.raises(QueryUnsupported, match="invalid label name"):
             adapter._validate_label_name("job name")  # space not allowed
 
-    def test_build_query_with_invalid_metric_name(
-        self, adapter: PrometheusMetricsAdapter
-    ) -> None:
+    def test_build_query_with_invalid_metric_name(self, adapter: PrometheusMetricsAdapter) -> None:
         """Build query rejects invalid metric names."""
         workspace_id = WorkspaceId("ws-123")
         selector = MetricSelector(name="123invalid")
@@ -131,9 +122,7 @@ class TestPrometheusAdapter:
         with pytest.raises(QueryUnsupported, match="invalid metric name"):
             adapter._build_query(selector, workspace_id)
 
-    def test_build_query_with_invalid_label_name(
-        self, adapter: PrometheusMetricsAdapter
-    ) -> None:
+    def test_build_query_with_invalid_label_name(self, adapter: PrometheusMetricsAdapter) -> None:
         """Build query rejects invalid label names."""
         workspace_id = WorkspaceId("ws-123")
         selector = MetricSelector(
@@ -145,9 +134,7 @@ class TestPrometheusAdapter:
             adapter._build_query(selector, workspace_id)
 
     @pytest.mark.asyncio
-    async def test_query_run_metrics_success(
-        self, adapter: PrometheusMetricsAdapter
-    ) -> None:
+    async def test_query_run_metrics_success(self, adapter: PrometheusMetricsAdapter) -> None:
         """Query run metrics returns MetricSeries."""
         workspace_id = WorkspaceId("ws-123")
         run_id = RunId("run-456")
@@ -178,13 +165,9 @@ class TestPrometheusAdapter:
             mock_response = MagicMock()
             mock_response.json.return_value = response_data
             mock_response.raise_for_status = MagicMock()
-            mock_client.return_value.__aenter__.return_value.get.return_value = (
-                mock_response
-            )
+            mock_client.return_value.__aenter__.return_value.get.return_value = mock_response
 
-            result = await adapter.query_run_metrics(
-                workspace_id, run_id, selector, range_query
-            )
+            result = await adapter.query_run_metrics(workspace_id, run_id, selector, range_query)
 
             assert result.name == "cpu_usage"
             assert len(result.samples) == 2
@@ -206,19 +189,15 @@ class TestPrometheusAdapter:
         )
 
         with patch("custos_prometheus.adapters.httpx.AsyncClient") as mock_client:
-            mock_client.return_value.__aenter__.return_value.get.side_effect = (
-                ConnectionError("Connection refused")
+            mock_client.return_value.__aenter__.return_value.get.side_effect = ConnectionError(
+                "Connection refused"
             )
 
             with pytest.raises(BackendUnavailable):
-                await adapter.query_run_metrics(
-                    workspace_id, run_id, selector, range_query
-                )
+                await adapter.query_run_metrics(workspace_id, run_id, selector, range_query)
 
     @pytest.mark.asyncio
-    async def test_query_instant_metric_success(
-        self, adapter: PrometheusMetricsAdapter
-    ) -> None:
+    async def test_query_instant_metric_success(self, adapter: PrometheusMetricsAdapter) -> None:
         """Query instant metric returns MetricSample."""
         workspace_id = WorkspaceId("ws-123")
         selector = MetricSelector(name="up")
@@ -230,7 +209,7 @@ class TestPrometheusAdapter:
                 "resultType": "vector",
                 "result": [
                     {
-                        "metric": {"__name__": "up", "job": "prometheus"},
+                        "metric": {"__name__": "up", "job": "prometheus", "workspace_id": "ws-123"},
                         "value": ["1147483647", "1"],
                     }
                 ],
@@ -241,9 +220,7 @@ class TestPrometheusAdapter:
             mock_response = MagicMock()
             mock_response.json.return_value = response_data
             mock_response.raise_for_status = MagicMock()
-            mock_client.return_value.__aenter__.return_value.get.return_value = (
-                mock_response
-            )
+            mock_client.return_value.__aenter__.return_value.get.return_value = mock_response
 
             result = await adapter.query_instant_metric(workspace_id, selector, at)
 
@@ -251,9 +228,7 @@ class TestPrometheusAdapter:
             assert result.value == 1.0
 
     @pytest.mark.asyncio
-    async def test_query_workspace_metrics_success(
-        self, adapter: PrometheusMetricsAdapter
-    ) -> None:
+    async def test_query_workspace_metrics_success(self, adapter: PrometheusMetricsAdapter) -> None:
         """Query workspace metrics (no run filter) returns MetricSeries."""
         workspace_id = WorkspaceId("ws-123")
         selector = MetricSelector(name="requests_total")
@@ -269,7 +244,7 @@ class TestPrometheusAdapter:
                 "resultType": "matrix",
                 "result": [
                     {
-                        "metric": {"__name__": "requests_total"},
+                        "metric": {"__name__": "requests_total", "workspace_id": "ws-123"},
                         "values": [["1147483647", "100"]],
                     }
                 ],
@@ -280,13 +255,9 @@ class TestPrometheusAdapter:
             mock_response = MagicMock()
             mock_response.json.return_value = response_data
             mock_response.raise_for_status = MagicMock()
-            mock_client.return_value.__aenter__.return_value.get.return_value = (
-                mock_response
-            )
+            mock_client.return_value.__aenter__.return_value.get.return_value = mock_response
 
-            result = await adapter.query_workspace_metrics(
-                workspace_id, selector, range_query
-            )
+            result = await adapter.query_workspace_metrics(workspace_id, selector, range_query)
 
             assert result.name == "requests_total"
             assert len(result.samples) == 1
@@ -385,16 +356,16 @@ class TestPrometheusAdapter:
         with pytest.raises(WorkspaceMismatch):
             adapter._parse_instant_response(data, at, workspace_id)
 
-    """Tests for NoopMetricsAdapter."""
+
+class TestNoopMetricsAdapter:
+    """Tests for NoopMetricsAdapter, isolated from the real adapter's fixtures."""
 
     @pytest.fixture
     def adapter(self) -> NoopMetricsAdapter:
         return NoopMetricsAdapter()
 
     @pytest.mark.asyncio
-    async def test_query_run_metrics_raises_unsupported(
-        self, adapter: NoopMetricsAdapter
-    ) -> None:
+    async def test_query_run_metrics_raises_unsupported(self, adapter: NoopMetricsAdapter) -> None:
         """Query run metrics raises QueryUnsupported."""
         workspace_id = WorkspaceId("ws-123")
         run_id = RunId("run-456")
@@ -406,9 +377,7 @@ class TestPrometheusAdapter:
         )
 
         with pytest.raises(QueryUnsupported):
-            await adapter.query_run_metrics(
-                workspace_id, run_id, selector, range_query
-            )
+            await adapter.query_run_metrics(workspace_id, run_id, selector, range_query)
 
     @pytest.mark.asyncio
     async def test_query_workspace_metrics_raises_unsupported(
@@ -443,9 +412,11 @@ class TestFactoryFunctions:
 
     def test_make_prometheus_adapter_requires_url(self) -> None:
         """Factory requires CUSTOS_PROMETHEUS_URL."""
-        with patch.dict("os.environ", {}, clear=True):
-            with pytest.raises(RuntimeError, match="CUSTOS_PROMETHEUS_URL"):
-                make_prometheus_adapter()
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            pytest.raises(RuntimeError, match="CUSTOS_PROMETHEUS_URL"),
+        ):
+            make_prometheus_adapter()
 
     def test_make_prometheus_adapter_with_env_vars(self) -> None:
         """Factory creates adapter from environment variables."""

@@ -39,9 +39,9 @@ from typing import Final
 from custos_spl.errors import InvalidTransactionHandle
 from custos_spl.interfaces.metadata_store import TransactionHandle
 
-_owner: Final[
-    weakref.WeakKeyDictionary[TransactionHandle, weakref.ref[object]]
-] = weakref.WeakKeyDictionary()
+_owner: Final[weakref.WeakKeyDictionary[TransactionHandle, weakref.ref[object]]] = (
+    weakref.WeakKeyDictionary()
+)
 """handle → weakref(provider). Weak keys so handles GC normally; weak
 values so a dead provider cannot have its identity recycled into a
 false match (id() values can be reused after GC)."""
@@ -59,10 +59,7 @@ def bind_handle(handle: TransactionHandle, provider: object) -> None:
             or if `provider` does not support weak references.
     """
     if not isinstance(handle, TransactionHandle):
-        raise TypeError(
-            f"bind_handle expected a TransactionHandle, "
-            f"got {type(handle).__name__}"
-        )
+        raise TypeError(f"bind_handle expected a TransactionHandle, got {type(handle).__name__}")
     try:
         _owner[handle] = weakref.ref(provider)
     except TypeError as exc:  # pragma: no cover - depends on host class
@@ -109,9 +106,7 @@ def check_handle(
             )
         return
     if not isinstance(handle, TransactionHandle):
-        raise InvalidTransactionHandle(
-            f"expected a TransactionHandle, got {type(handle).__name__}"
-        )
+        raise InvalidTransactionHandle(f"expected a TransactionHandle, got {type(handle).__name__}")
     owner_ref = _owner.get(handle)
     if owner_ref is None:
         raise InvalidTransactionHandle(

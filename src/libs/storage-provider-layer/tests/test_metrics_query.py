@@ -31,9 +31,7 @@ def test_metric_selector_is_frozen() -> None:
 
 
 def test_metric_selector_accepts_label_matchers() -> None:
-    s = MetricSelector(
-        name="cpu_seconds_total", label_matchers={"job": "api"}
-    )
+    s = MetricSelector(name="cpu_seconds_total", label_matchers={"job": "api"})
     assert s.label_matchers["job"] == "api"
 
 
@@ -56,9 +54,7 @@ def test_metric_series_defaults_to_empty_samples() -> None:
 
 
 def test_metric_series_carries_samples_and_labels() -> None:
-    sample = MetricSample(
-        timestamp=_now(), value=0.5, labels={"instance": "a"}
-    )
+    sample = MetricSample(timestamp=_now(), value=0.5, labels={"instance": "a"})
     series = MetricSeries(
         name="cpu_seconds_total",
         labels={"job": "api"},

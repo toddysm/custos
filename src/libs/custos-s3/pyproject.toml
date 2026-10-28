@@ -34,7 +34,7 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.4",
     "mypy>=1.10",
-    "moto>=4.0",
+    "moto[server]>=5.0",
 ]
 
 [project.urls]
