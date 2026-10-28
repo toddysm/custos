@@ -15,7 +15,6 @@ import os
 
 import httpx
 import pytest
-
 from custos_spl.conformance import LogQueryConformanceTests
 from custos_spl.ids import RunId, WorkspaceId
 
@@ -35,11 +34,13 @@ class TestLokiLogConformance(LogQueryConformanceTests):
     def _check_loki_available(self) -> None:
         """Skip entire test class if Loki is not reachable."""
         base_url = os.environ.get("CUSTOS_LOKI_URL", "http://localhost:3100")
-        health_url = f"{base_url}/-/ready"
+        health_url = f"{base_url}/ready"
         try:
             response = httpx.get(health_url, timeout=2.0)
             response.raise_for_status()
-        except (httpx.ConnectError, httpx.TimeoutError, httpx.HTTPError):
+        except httpx.HTTPError as exc:
+            if "CUSTOS_LOKI_URL" in os.environ:
+                pytest.fail(f"Configured Loki is unavailable at {health_url}: {exc}")
             pytest.skip(f"Loki not available at {health_url}")
 
     @pytest.fixture

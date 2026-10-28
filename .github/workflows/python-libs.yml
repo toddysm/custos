@@ -8,14 +8,13 @@ on:
     paths:
       - "src/libs/**"
       - ".github/workflows/python-libs.yml"
+      - ".github/prometheus.yml"
   push:
     branches: [main]
     paths:
       - "src/libs/**"
       - ".github/workflows/python-libs.yml"
-
-permissions:
-  contents: read
+      - ".github/prometheus.yml"
 
 jobs:
   storage-provider-layer:
@@ -104,21 +103,11 @@ jobs:
 
       loki:
         image: grafana/loki:latest
-        options: >-
-          --health-cmd "curl -f http://localhost:3100/-/ready || exit 1"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
         ports:
           - 3100:3100
 
       prometheus:
         image: prom/prometheus:latest
-        options: >-
-          --health-cmd "curl -f http://localhost:9090/-/healthy || exit 1"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
         ports:
           - 9090:9090
 
@@ -139,18 +128,49 @@ jobs:
           pip install -e src/libs/custos-prometheus[dev]
           pip install -e src/libs/custos-s3[dev]
 
-      - name: Wait for services to be ready
-        run: sleep 10
+      - name: Configure conformance metric labels
+        env:
+          PROMETHEUS_CONTAINER: ${{ job.services.prometheus.id }}
+        run: |
+          docker cp .github/prometheus.yml "$PROMETHEUS_CONTAINER:/etc/prometheus/prometheus.yml"
+          docker kill --signal=HUP "$PROMETHEUS_CONTAINER"
+
+      - name: Wait for backend readiness and test metrics
+        shell: bash
+        run: |
+          curl --fail --retry 30 --retry-connrefused --retry-all-errors --retry-delay 2 --max-time 5 http://localhost:3100/ready
+          curl --fail --retry 30 --retry-connrefused --retry-all-errors --retry-delay 2 --max-time 5 http://localhost:9090/-/ready
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --show-error --get \
+              --data-urlencode 'query=up{workspace_id="ws-conformance-test-primary"}' \
+              http://localhost:9090/api/v1/query |
+              python -c 'import json,sys; data=json.load(sys.stdin); sys.exit(0 if data["status"] == "success" and data["data"]["result"] else 1)'; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Prometheus did not expose the configured conformance metric" >&2
+          exit 1
 
       - name: Run conformance tests
+        shell: bash
         run: |
-          pytest \
-            src/libs/custos-csi/tests/test_conformance.py \
-            src/libs/custos-loki/tests/test_conformance.py \
-            src/libs/custos-postgres/tests/test_conformance.py \
-            src/libs/custos-prometheus/tests/test_conformance.py \
-            src/libs/custos-s3/tests/test_conformance.py \
-            -v -m integration --tb=short
+          for adapter in custos-csi custos-loki custos-postgres custos-prometheus custos-s3; do
+            (
+              cd "src/libs/$adapter"
+              case "$adapter" in
+                custos-csi)
+                  pytest tests/test_conformance.py tests/test_metadata.py tests/test_unit.py -v --tb=short
+                  ;;
+                custos-loki|custos-prometheus)
+                  pytest tests/test_conformance.py tests/test_conformance_regressions.py tests/test_unit.py -v --tb=short
+                  ;;
+                *)
+                  pytest tests/test_conformance.py -v -m integration --tb=short
+                  ;;
+              esac
+            )
+          done
         env:
           CUSTOS_PG_DSN: postgresql://testuser:testpass@localhost:5432/custos_test
           CUSTOS_LOKI_URL: http://localhost:3100

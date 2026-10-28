@@ -20,6 +20,15 @@ Example:
 /mnt/artifacts/ws-123/ab/abcdef1234567890...sha256
 ```
 
+New writes persist the optional media type in a neighboring `{digest}.json`
+file. Metadata and content are published from unique temporary files using
+same-filesystem hard links, so the first complete publication wins without
+overwriting another writer. The mount must support POSIX hard links.
+Existing blobs without metadata remain readable with an unknown (`None`) media
+type. Corrupt metadata produces an explicit backend error. Sweeper deletion
+removes both the blob and its metadata; restarting the adapter preserves the
+descriptor returned by `put`.
+
 ## Features
 
 - Content-addressed storage: identical bytes → identical digest, idempotent `put`

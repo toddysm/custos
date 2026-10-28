@@ -99,9 +99,7 @@ def test_protocol_exposes_method(method: str) -> None:
 _NON_COROUTINE_METHODS = {"tail_run_logs"}
 
 
-@pytest.mark.parametrize(
-    "method", [m for m in REQUIRED_METHODS if m not in _NON_COROUTINE_METHODS]
-)
+@pytest.mark.parametrize("method", [m for m in REQUIRED_METHODS if m not in _NON_COROUTINE_METHODS])
 def test_protocol_methods_are_async(method: str) -> None:
     fn = getattr(LogQueryProvider, method)
     assert inspect.iscoroutinefunction(fn), f"{method} must be async"
@@ -137,11 +135,9 @@ class _MinimalLogQuery:
 
     async def query_run_logs(self, *a: object, **kw: object) -> None: ...
 
-    # type: ignore[empty-body]
-    def tail_run_logs(
-        self, *a: object, **kw: object
-    ) -> AsyncIterator[LogRecord]:
-        ...
+    def tail_run_logs(self, *a: object, **kw: object) -> AsyncIterator[LogRecord]:
+        """Expose the iterator signature without implementing a backend in this shape test."""
+        raise NotImplementedError("protocol-shape test double has no log stream")
 
     async def query_step_logs(self, *a: object, **kw: object) -> None: ...
 

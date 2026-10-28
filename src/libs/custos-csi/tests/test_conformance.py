@@ -1,21 +1,16 @@
 """Conformance tests for CSI ArtifactStore adapter.
 
-These tests verify that the CSI adapter satisfies the ArtifactStoreProvider
-conformance contract. They require:
-- custos-spl[conformance] package installed
-- Kubernetes cluster or CSI volume accessible via CUSTOS_CSI_PVC_MOUNT
+These tests verify the filesystem adapter against an isolated temporary mount.
+They do not certify Kubernetes provisioning or a particular CSI driver.
 
 Run with: pytest tests/test_conformance.py -v -m integration
-Skip without CSI: pytest tests/test_conformance.py -v -m "not integration"
 """
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
-
 from custos_spl.conformance import ArtifactStoreConformanceTests
 from custos_spl.ids import WorkspaceId
 
@@ -28,32 +23,13 @@ from custos_csi.adapters import CsiArtifactAdapter
 class TestCsiArtifactConformance(ArtifactStoreConformanceTests):
     """CSI adapter conformance tests.
 
-    Skipped if CSI volume is unavailable or custos-csi not installed.
+    No cluster or shared volume is required for the adapter's filesystem contract.
     """
 
-    @pytest.fixture(scope="class", autouse=True)
-    def _check_csi_available(self) -> None:
-        """Skip entire test class if CSI volume is not accessible."""
-        pvc_mount = os.environ.get("CUSTOS_CSI_PVC_MOUNT")
-        if not pvc_mount:
-            pytest.skip(
-                "CUSTOS_CSI_PVC_MOUNT environment variable not set; skipping integration tests"
-            )
-        pvc_path = Path(pvc_mount)
-        if not pvc_path.exists() or not pvc_path.is_dir():
-            pytest.skip(
-                f"CSI volume not available at {pvc_mount} — skipping integration tests"
-            )
-
     @pytest.fixture
-    def adapter(self) -> CsiArtifactAdapter:
-        """Provide configured CSI artifact adapter."""
-        pvc_mount = os.environ.get("CUSTOS_CSI_PVC_MOUNT")
-        if not pvc_mount:
-            raise RuntimeError(
-                "CUSTOS_CSI_PVC_MOUNT environment variable not set; required for CSI adapter"
-            )
-        return CsiArtifactAdapter(pvc_mount=Path(pvc_mount))
+    def adapter(self, tmp_path: Path) -> CsiArtifactAdapter:
+        """Use a fresh mount directory so tests never share artifact state."""
+        return CsiArtifactAdapter(pvc_mount=tmp_path)
 
     @pytest.fixture
     def workspace_id(self) -> WorkspaceId:

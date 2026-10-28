@@ -6,23 +6,36 @@ Layout: {workspace_id}/{digest-prefix-2}/{digest}
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import json
+import os
+import uuid
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from pathlib import Path
+from typing import ClassVar
 
 import aiofiles
 import aiofiles.os
-
 from custos_spl.errors import ArtifactNotFound, BackendUnavailable, WorkspaceMismatch
 from custos_spl.ids import ArtifactId, WorkspaceId
 from custos_spl.interfaces.artifact_store import ArtifactDescriptor
 
 
+async def _publish_file(source: Path, destination: Path) -> None:
+    """Atomically publish a complete file without replacing another writer's result."""
+    with suppress(FileExistsError):
+        await asyncio.to_thread(os.link, source, destination)
+
+
 class CsiArtifactAdapter:
-    """Postgres adapter for `ArtifactStoreProvider`.
+    """Filesystem adapter for `ArtifactStoreProvider`.
 
     Stores artifacts on a mounted PVC, content-addressed by SHA256 digest.
     """
+
+    SCHEMA_REVISION: ClassVar[int] = 1
 
     def __init__(self, pvc_mount: Path) -> None:
         """Initialize with PVC mount path.
@@ -74,43 +87,43 @@ class CsiArtifactAdapter:
     ) -> ArtifactDescriptor:
         """Stream-write a blob with streaming SHA256 digest computation.
 
-        Computes digest incrementally as bytes arrive. If an identical digest
-        exists, returns the existing descriptor (idempotent).
+        Computes the digest while streaming to a unique temporary file. Persist
+        optional media metadata beside the blob so head() survives process restart.
+        Existing artifacts retain their original descriptor.
         """
         try:
             sha = hashlib.sha256()
-            size = 0
-            temp_path = self.pvc_mount / ".tmp" / "incoming"
+            temp_path = self.pvc_mount / ".tmp" / uuid.uuid4().hex
+            metadata_temp = temp_path.with_suffix(".json")
             await aiofiles.os.makedirs(temp_path.parent, exist_ok=True)
 
-            # Stream content, computing digest on-the-fly
-            async with aiofiles.open(temp_path, "wb") as f:
-                async for chunk in content:
-                    sha.update(chunk)
-                    size += len(chunk)
-                    await f.write(chunk)
-
-            digest = sha.hexdigest()
-            artifact_id = ArtifactId(f"{workspace_id}:{digest}")
-
-            # Final path
-            final_path = self._artifact_path(workspace_id, digest)
-            await aiofiles.os.makedirs(final_path.parent, exist_ok=True)
-
-            # Move (or skip if already exists — idempotent)
             try:
-                await aiofiles.os.rename(temp_path, final_path)
-            except FileExistsError:
-                # Already stored with this digest — idempotent
-                await aiofiles.os.remove(temp_path)
+                async with aiofiles.open(temp_path, "xb") as f:
+                    async for chunk in content:
+                        sha.update(chunk)
+                        await f.write(chunk)
 
-            return ArtifactDescriptor(
-                workspace_id=workspace_id,
-                artifact_id=artifact_id,
-                digest=digest,
-                media_type=media_type,
-                size=size,
-            )
+                digest = sha.hexdigest()
+                artifact_id = ArtifactId(f"{workspace_id}:{digest}")
+                existing = await self.head(workspace_id, artifact_id)
+                if existing is not None:
+                    return existing
+                final_path = self._artifact_path(workspace_id, digest)
+                await aiofiles.os.makedirs(final_path.parent, exist_ok=True)
+                async with aiofiles.open(metadata_temp, "w", encoding="utf-8") as metadata:
+                    await metadata.write(json.dumps({"media_type": media_type}))
+                await _publish_file(metadata_temp, final_path.with_suffix(".json"))
+                await _publish_file(temp_path, final_path)
+                descriptor = await self.head(workspace_id, artifact_id)
+                if descriptor is None:
+                    raise BackendUnavailable(
+                        f"PVC artifact disappeared after publication: {artifact_id}"
+                    )
+                return descriptor
+            finally:
+                for temporary in (temp_path, metadata_temp):
+                    with suppress(FileNotFoundError):
+                        await aiofiles.os.remove(temporary)
         except OSError as exc:
             raise BackendUnavailable(f"PVC write failed: {exc}") from exc
 
@@ -156,7 +169,8 @@ class CsiArtifactAdapter:
     ) -> ArtifactDescriptor | None:
         """Lightweight existence + metadata check.
 
-        Returns None for both absent rows and rows owned by different workspace.
+        Returns None for absent/cross-workspace blobs. Legacy blobs without a
+        metadata sidecar retain a nullable media type; corrupt metadata fails.
         """
         try:
             digest = await self._verify_workspace(workspace_id, artifact_id)
@@ -166,17 +180,30 @@ class CsiArtifactAdapter:
                 return None
 
             stat = await aiofiles.os.stat(path)
+            media_type = None
+            try:
+                async with aiofiles.open(path.with_suffix(".json"), encoding="utf-8") as metadata:
+                    stored = json.loads(await metadata.read())
+                if not isinstance(stored, dict) or "media_type" not in stored:
+                    raise ValueError("invalid artifact media metadata")
+                media_type = stored["media_type"]
+                if media_type is not None and not isinstance(media_type, str):
+                    raise ValueError("artifact media_type must be a string or null")
+            except FileNotFoundError:
+                pass
             return ArtifactDescriptor(
                 workspace_id=workspace_id,
                 artifact_id=artifact_id,
                 digest=digest,
-                media_type=None,
+                media_type=media_type,
                 size=stat.st_size,
             )
         except (WorkspaceMismatch, ArtifactNotFound):
             return None
         except OSError as exc:
             raise BackendUnavailable(f"PVC stat failed: {exc}") from exc
+        except (ValueError, UnicodeError) as exc:
+            raise BackendUnavailable(f"PVC metadata is invalid for {artifact_id}") from exc
 
     async def delete(
         self,
@@ -197,6 +224,8 @@ class CsiArtifactAdapter:
 
             if await aiofiles.os.path.exists(path):
                 await aiofiles.os.remove(path)
+            with suppress(FileNotFoundError):
+                await aiofiles.os.remove(path.with_suffix(".json"))
         except (WorkspaceMismatch, ArtifactNotFound):
             # No-op: already absent or doesn't belong to workspace
             pass
@@ -206,8 +235,6 @@ class CsiArtifactAdapter:
 
 def make_adapter() -> CsiArtifactAdapter:
     """Factory: create adapter from environment CUSTOS_CSI_PVC_MOUNT."""
-    import os
-
     mount_path = os.getenv("CUSTOS_CSI_PVC_MOUNT")
     if not mount_path:
         raise RuntimeError(

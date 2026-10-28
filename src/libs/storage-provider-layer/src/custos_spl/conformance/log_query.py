@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from custos_spl.errors import BackendUnavailable, WorkspaceMismatch
+from custos_spl.errors import WorkspaceMismatch
 from custos_spl.ids import RunId, WorkspaceId
 from custos_spl.interfaces.log_query import LogFilter, LogQueryProvider
 
@@ -137,9 +137,7 @@ class LogQueryConformanceTests(AdapterConformanceBase):
 
         # Query from workspace B for same run should return empty or raise
         try:
-            page_b = await adapter.query_run_logs(
-                other_workspace_id, run_id, log_filter
-            )
+            page_b = await adapter.query_run_logs(other_workspace_id, run_id, log_filter)
             # If it returns, should be empty
             assert len(page_b.items) == 0
         except WorkspaceMismatch:
@@ -184,6 +182,5 @@ class LogQueryConformanceTests(AdapterConformanceBase):
         # All returned logs should be within bounds
         for record in page.items:
             assert start <= record.timestamp < end, (
-                f"Log timestamp {record.timestamp} outside bounds "
-                f"[{start}, {end})"
+                f"Log timestamp {record.timestamp} outside bounds [{start}, {end})"
             )

@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from custos_spl.errors import BackendUnavailable, QueryUnsupported, WorkspaceMismatch
+from custos_spl.errors import QueryUnsupported, WorkspaceMismatch
 from custos_spl.ids import RunId, WorkspaceId
 from custos_spl.interfaces.metrics_query import (
     MetricRange,
@@ -199,9 +199,7 @@ class MetricsQueryConformanceTests(AdapterConformanceBase):
         )
 
         # Query from workspace A should work
-        series_a = await adapter.query_run_metrics(
-            workspace_id, run_id, selector, range_query
-        )
+        series_a = await adapter.query_run_metrics(workspace_id, run_id, selector, range_query)
         assert isinstance(series_a.samples, tuple)
 
         # Query from workspace B for same run should return empty or raise

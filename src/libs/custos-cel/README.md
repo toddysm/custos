@@ -374,7 +374,9 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 # (exporters omitted — wire OTLP / Console / etc. as fits your deployment)
 trace.set_tracer_provider(TracerProvider())
 trace.get_tracer_provider().add_span_processor(BatchSpanProcessor(my_exporter))
-metrics.set_meter_provider(MeterProvider(metric_readers=[PeriodicExportingMetricReader(my_metric_exporter)]))
+metrics.set_meter_provider(
+    MeterProvider(metric_readers=[PeriodicExportingMetricReader(my_metric_exporter)])
+)
 
 import custos_cel  # picks up the providers above
 ```

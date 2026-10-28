@@ -11,6 +11,7 @@ import os
 import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import ClassVar
 
 import aioboto3
 import aiofiles
@@ -26,6 +27,8 @@ class S3ArtifactAdapter:
 
     Stores artifacts in S3, content-addressed by SHA256 digest.
     """
+
+    SCHEMA_REVISION: ClassVar[int] = 1
 
     def __init__(
         self,
