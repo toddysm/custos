@@ -163,6 +163,11 @@ def create_app(
     effective_workflow_verifier = workflow_caller_verifier
     workflow_namespace = os.environ.get(ENV_WORKFLOW_NAMESPACE)
     workflow_app_id = os.environ.get(ENV_WORKFLOW_APP_ID, _DEFAULT_WORKFLOW_APP_ID)
+    workflow_target = os.environ.get(ENV_WORKFLOW_ENDPOINT, _DEFAULT_WORKFLOW_APP_ID)
+    if ENV_WORKFLOW_APP_ID in os.environ:
+        workflow_target = workflow_app_id
+        if workflow_namespace:
+            workflow_target += "." + workflow_namespace
     if (
         effective_workflow_verifier is None
         and effective_token is not None
@@ -237,10 +242,7 @@ def create_app(
 
             endpoint = read_dapr_endpoint(
                 os.environ,
-                app_id=os.environ.get(
-                    ENV_WORKFLOW_APP_ID,
-                    os.environ.get(ENV_WORKFLOW_ENDPOINT, _DEFAULT_WORKFLOW_APP_ID),
-                ),
+                app_id=workflow_target,
             )
             enabled = os.environ.get("TRIGGER_DURABLE_DISPATCH_ENABLED", "false").strip().lower()
             if enabled not in {"true", "false"}:

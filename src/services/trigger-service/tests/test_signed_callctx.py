@@ -529,9 +529,11 @@ async def test_gateway_minting_authorized_permission_reaches_trigger(signing: Si
     assert auth.sign_calls[0].permissions == [TRIGGER_ADMIN_PERMISSION]
 
 
+@pytest.mark.parametrize("namespace", [None, "custos", "other"])
 def test_dispatch_factory_prefers_explicit_app_id_over_http_address(
     metadata_store: InMemoryTriggerMetadataStore,
     monkeypatch: pytest.MonkeyPatch,
+    namespace: str | None,
 ) -> None:
     """The shipped chart's legacy HTTP address cannot become a Dapr invocation target."""
     from collections.abc import Mapping
@@ -550,8 +552,13 @@ def test_dispatch_factory_prefers_explicit_app_id_over_http_address(
     monkeypatch.setattr(clients, "read_dapr_endpoint", capture)
     monkeypatch.setenv("TRIGGER_WF_ENDPOINT", "http://workflow-service:8080")
     monkeypatch.setenv("TRIGGER_WORKFLOW_APP_ID", "workflow-service")
+    if namespace is None:
+        monkeypatch.delenv("TRIGGER_WORKFLOW_NAMESPACE", raising=False)
+    else:
+        monkeypatch.setenv("TRIGGER_WORKFLOW_NAMESPACE", namespace)
     with TestClient(
         create_app(authz_endpoint="", providers=Providers(metadata_store=metadata_store))
     ):
         pass
-    assert targets == ["workflow-service"]
+    expected = "workflow-service" + ("." + namespace if namespace else "")
+    assert targets == [expected]

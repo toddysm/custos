@@ -294,6 +294,8 @@ required (the deployment pin is stable **1.18.9**); older runtimes do not
 authenticate caller headers. Resume calls require `dapr-caller-app-id` and
 `dapr-caller-namespace` to match `TRIGGER_WORKFLOW_APP_ID` and
 `TRIGGER_WORKFLOW_NAMESPACE`. These are identities, not HTTP addresses.
+For outbound invocation, the explicit app ID is qualified with the configured
+namespace; namespace qualification is not part of the authenticated app-ID header.
 The app authenticates the sidecar before trusting either header. Missing
 configuration returns `503 mesh_unavailable`; invalid tokens return
 `401 mesh_unauthenticated`, and a different caller returns `403 mesh_caller_denied`.
