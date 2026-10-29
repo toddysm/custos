@@ -14,7 +14,7 @@ from collections.abc import Callable, Generator, Mapping
 from datetime import datetime, timedelta
 from typing import Any
 
-from custos_spl.errors import BackendUnavailable
+from custos_spl.errors import BackendUnavailable, ImmutableViolation
 from custos_spl.ids import WorkspaceId
 from custos_spl.interfaces.delivery import (
     DeliveryStateProvider,
@@ -166,13 +166,17 @@ class ResumeActivityHandler:
             return {"subscriptionId": response.ts_subscription_id}
         if operation == "ack":
             key = body["deliveryKey"]
-            await self.provider.acknowledge_delivery(
-                WorkspaceId(workspace),
-                key,
-                body["requestHash"],
-                resume_result(key),
-            )
-            return None
+            try:
+                await self.provider.acknowledge_delivery(
+                    WorkspaceId(workspace),
+                    key,
+                    body["requestHash"],
+                    resume_result(key),
+                )
+            except ImmutableViolation:
+                logger.warning("Rejected a resume acknowledgement with no matching receipt")
+                return {"status": "rejected"}
+            return {"status": "acknowledged"}
         if operation == "cancel":
             cancellation = CancelResumeSubscriptionRequest(
                 body["runId"],
@@ -212,15 +216,25 @@ def build_resume_activity(
 
 def _activity(ctx: WorkflowContext, body: Mapping[str, Any]) -> Generator[Any, Any, Any]:
     """Retry transient durable effects with durable timers, not thread sleeps or inline I/O."""
-    attempts = 1 if body["operation"] == "register" else 5
-    for attempt in range(attempts):
+    operation = body["operation"]
+    attempts = (
+        None if operation in {"ack", "cancel", "delete"} else 1 if operation == "register" else 5
+    )
+    attempt = 0
+    while True:
         try:
-            return (yield ctx.call_activity(RESUME_EFFECT_ACTIVITY, input=dict(body)))
-        except (TaskFailedError, BackendUnavailable, OSError):
-            if attempt == attempts - 1:
+            result = yield ctx.call_activity(RESUME_EFFECT_ACTIVITY, input=dict(body))
+            if attempt:
+                ctx.set_custom_status(f"resume.{operation}.recovered")
+            return result
+        except (TaskFailedError, BackendUnavailable, OSError) as exc:
+            attempt += 1
+            if attempts is not None and attempt >= attempts:
                 raise
-            yield ctx.create_timer(timedelta(seconds=2**attempt))
-    raise AssertionError("unreachable resume activity retry state")
+            ctx.set_custom_status(f"resume.{operation}.pending")
+            if not ctx.is_replaying:
+                logger.warning("Durable resume %s pending after %s", operation, type(exc).__name__)
+            yield ctx.create_timer(timedelta(seconds=min(2 ** min(attempt - 1, 6), 60)))
 
 
 def drive_durable_resume(
@@ -236,6 +250,7 @@ def drive_durable_resume(
     pending: Exception | None = None
     workspace, run_id = step.workspace_id, str(step.run_id)
     registration_failures = 0
+    active_mirror: ResumeSubscriptionMirror | None = None
     while True:
         try:
             if pending is None:
@@ -253,6 +268,7 @@ def drive_durable_resume(
                     ctx, {**base, "operation": "persist", "mirror": token.mirror.to_dict()}
                 )
                 sent = ResumeSubscriptionMirror.from_dict(wire)
+                active_mirror = sent
             elif isinstance(token, RegisterResumeSubscriptionCall):
                 request = token.request
                 wire = yield from _activity(
@@ -284,8 +300,28 @@ def drive_durable_resume(
                     if combine is not None
                     else when_any([event, timer])
                 )
-                if winner is not event or ctx.current_utc_datetime >= token.expires_at:
+                if winner is not event:
                     gen.close()
+                    if active_mirror is None:
+                        raise RuntimeError("expired durable wait has no mirror identity")
+                    yield from _activity(
+                        ctx,
+                        {
+                            **base,
+                            "operation": "cancel",
+                            "runId": run_id,
+                            "stepId": step_id,
+                            "eventKey": token.event_key,
+                        },
+                    )
+                    yield from _activity(
+                        ctx,
+                        {
+                            **base,
+                            "operation": "delete",
+                            "mirrorId": active_mirror.mirror_id,
+                        },
+                    )
                     return StepFailed(
                         envelope={
                             **ResumeWaitExpiredError(
@@ -313,10 +349,12 @@ def drive_durable_resume(
                 )
                 if key != wire.get("deliveryKey") or fingerprint != wire.get("requestHash"):
                     raise ValueError("resume envelope does not match this wait")
-                yield from _activity(
+                acknowledged = yield from _activity(
                     ctx,
                     {**base, "operation": "ack", "deliveryKey": key, "requestHash": fingerprint},
                 )
+                if acknowledged != {"status": "acknowledged"}:
+                    raise ValueError("resume receipt rejected the acknowledgement")
                 sent = wire["payload"]
             elif isinstance(token, CancelResumeSubscriptionCall):
                 yield from _activity(

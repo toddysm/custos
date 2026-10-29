@@ -19,12 +19,18 @@ from uuid import uuid4
 
 from custos_spl.errors import ImmutableViolation, LeaseBusy, LeaseExpired
 from custos_spl.ids import WorkspaceId
-from custos_spl.interfaces.dead_letters import DeadLetterData, DeadLetterEntry, json_value
+from custos_spl.interfaces.dead_letters import (
+    DeadLetterData,
+    DeadLetterEntry,
+    DispatchAttempt,
+    json_value,
+)
 from custos_spl.interfaces.metadata_store import Run
 from custos_spl.pagination import Cursor, Page
 
 DELIVERY_SCHEMA_REVISION = 8
 MAX_DELIVERY_RETENTION_SECONDS = 31_536_600
+RESUME_CHANNEL_PREFIX = "custos.resume.v2."
 DeliveryNamespace = Literal["trigger", "workflow-start", "workflow-resume"]
 
 
@@ -44,7 +50,7 @@ def delivery_identity(*parts: str) -> str:
 
 def resume_channel(workspace_id: str, run_id: str, step_id: str, event_name: str) -> str:
     """Give each logical wait a distinct lowercase channel in Dapr's case-insensitive namespace."""
-    return "custos.resume.v2." + delivery_identity(workspace_id, run_id, step_id, event_name)
+    return RESUME_CHANNEL_PREFIX + delivery_identity(workspace_id, run_id, step_id, event_name)
 
 
 def delivery_fingerprint(value: Mapping[str, object]) -> str:
@@ -68,8 +74,45 @@ def resume_identity(
 
 
 def resume_result(key: str) -> str:
-    """Share one acceptance identity between the producer and durable consumer."""
-    return delivery_result(json.dumps({"deliveryKey": key, "accepted": True}))
+    """Identify a durable consumer result, distinct from runtime inbox submission."""
+    return delivery_result(json.dumps({"deliveryKey": key, "consumed": True}))
+
+
+def encode_delivery_request(data: DeadLetterData) -> str:
+    """Persist validated replay inputs without inventing dispatch-attempt history."""
+    return json.dumps(
+        {
+            "schema_version": data.schema_version,
+            "workspace_id": data.workspace_id,
+            "entry_id": data.entry_id,
+            "subscription_id": data.subscription_id,
+            "idempotency_key": data.idempotency_key,
+            "event": json_value(data.event),
+            "target": json_value(data.target),
+            "retention_seconds": data.retention_seconds,
+            "max_replay_attempts": data.max_replay_attempts,
+        },
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+
+
+def decode_delivery_request(raw: str, now: datetime) -> DeadLetterData:
+    """Materialize a capture template; actual failure history is supplied after an attempt."""
+    value = json.loads(raw)
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version",
+        "workspace_id",
+        "entry_id",
+        "subscription_id",
+        "idempotency_key",
+        "event",
+        "target",
+        "retention_seconds",
+        "max_replay_attempts",
+    }:
+        raise ValueError("invalid delivery request snapshot")
+    return DeadLetterData(**value, history=(DispatchAttempt(now, "configuration"),))
 
 
 def validate_delivery_key(workspace_id: WorkspaceId, namespace: str, key: str) -> None:
@@ -121,6 +164,8 @@ class DeliveryReceipt:
     token: str | None
     lease_until: datetime | None
     result_json: str | None = None
+    request_json: str | None = None
+    submitted_at: datetime | None = None
 
     @property
     def completed(self) -> bool:
@@ -137,12 +182,29 @@ def reserve_delivery(
     retain_until: datetime,
     now: datetime,
     lease_seconds: int,
+    request_json: str | None = None,
 ) -> DeliveryReceipt:
     """Reserve or recover a pending receipt without erasing fingerprints or completed outcomes."""
     validate_delivery_key(workspace_id, namespace, key)
     if re.fullmatch(r"[a-f0-9]{64}", request_hash) is None:
         raise ValueError("delivery request hash must be SHA-256")
     now, until = delivery_instant(now), delivery_instant(retain_until)
+    if request_json is not None:
+        if namespace != "trigger":
+            raise ValueError("request snapshots belong to Trigger producer receipts")
+        if current is not None and current.epoch > 0:
+            request_hash = current.request_hash
+            if not current.completed and current.request_json is None:
+                raise ImmutableViolation("pending delivery has no original request available")
+            request_json = current.request_json
+        if request_json is not None:
+            original = decode_delivery_request(request_json, now)
+            if original.workspace_id != workspace_id or original.idempotency_key != key:
+                raise ValueError("delivery request snapshot has a different scope or key")
+            if delivery_fingerprint({"target": json_value(original.target)}) != request_hash:
+                raise ImmutableViolation("delivery snapshot fingerprint does not match")
+            until = max(until, now + timedelta(seconds=original.retention_seconds + 600))
+            request_json = encode_delivery_request(original)
     if not now < until <= now + timedelta(seconds=MAX_DELIVERY_RETENTION_SECONDS):
         raise ValueError("delivery retention is expired or exceeds the supported horizon")
     if type(lease_seconds) is not int or not 1 <= lease_seconds <= 300:
@@ -164,6 +226,12 @@ def reserve_delivery(
         current.epoch + 1 if current else 1,
         uuid4().hex,
         min(until, now + timedelta(seconds=lease_seconds)),
+        request_json=request_json
+        if request_json is not None
+        else current.request_json
+        if current
+        else None,
+        submitted_at=current.submitted_at if current else None,
     )
 
 
@@ -285,12 +353,26 @@ class DeliveryStateProvider(Protocol):
         retain_until: datetime,
         *,
         lease_seconds: int = 300,
+        request: DeadLetterData | None = None,
     ) -> DeliveryReceipt:
         """Claim/recover pending work, or return an equal-input completed result.
 
         Equal-input contention extends the minimum retention before raising
         LeaseBusy, without renewing or granting the existing worker's lease.
         """
+        ...
+
+    async def mark_delivery_submitted(self, claim: DeliveryReceipt) -> DeliveryReceipt:
+        """Record runtime submission without claiming the wait consumed the event."""
+        ...
+
+    async def clear_expired_delivery_requests(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        limit: int | None = None,
+    ) -> int:
+        """Erase bounded expired unowned payloads while retaining identity and fencing metadata."""
         ...
 
     async def complete_delivery(self, claim: DeliveryReceipt, result_json: str) -> DeliveryReceipt:

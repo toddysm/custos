@@ -17,6 +17,7 @@ from custos_spl.interfaces.delivery import (
     WorkflowStart,
     delivery_instant,
     delivery_result,
+    encode_delivery_request,
     require_delivery,
     reserve_delivery,
     validate_delivery_key,
@@ -65,7 +66,7 @@ class MemoryDeliveryState:
         result = delivery_result(json.dumps({"deadLetterId": data.entry_id}))
         self._delivery_dead_letters[entry_key] = entry
         self._delivery_rows[key] = replace(
-            current, token=None, lease_until=None, result_json=result
+            current, token=None, lease_until=None, result_json=result, request_json=None
         )
         return entry
 
@@ -117,6 +118,7 @@ class MemoryDeliveryState:
         retain_until: datetime,
         *,
         lease_seconds: int = 300,
+        request: DeadLetterData | None = None,
     ) -> DeliveryReceipt:
         """Reserve without yielding between checking and replacing provider state."""
         identity = (workspace_id, namespace, key)
@@ -131,6 +133,7 @@ class MemoryDeliveryState:
                 retain_until,
                 self._delivery_clock(),
                 lease_seconds,
+                encode_delivery_request(request) if request is not None else None,
             )
         except LeaseBusy:
             assert current is not None
@@ -152,9 +155,53 @@ class MemoryDeliveryState:
             return current
         require_delivery(current, claim, self._delivery_clock())
         assert current is not None
-        completed = replace(current, token=None, lease_until=None, result_json=result)
+        completed = replace(
+            current, token=None, lease_until=None, result_json=result, request_json=None
+        )
         self._delivery_rows[key] = completed
         return completed
+
+    async def mark_delivery_submitted(self, claim: DeliveryReceipt) -> DeliveryReceipt:
+        """Record submission separately; only a consumer acknowledgement completes a resume."""
+        if claim.namespace != "workflow-resume":
+            raise ValueError("only resume receipts have runtime submission state")
+        key = (claim.workspace_id, claim.namespace, claim.key)
+        current = self._delivery_rows.get(key)
+        if current is not None and current.completed and current.request_hash == claim.request_hash:
+            return current
+        now = self._delivery_clock()
+        require_delivery(current, claim, now)
+        assert current is not None
+        submitted = replace(
+            current,
+            token=None,
+            lease_until=None,
+            submitted_at=current.submitted_at or delivery_instant(now),
+        )
+        self._delivery_rows[key] = submitted
+        return submitted
+
+    async def clear_expired_delivery_requests(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        limit: int | None = None,
+    ) -> int:
+        """Erase only expired snapshots without a live producer, leaving proof metadata intact."""
+        validate_delivery_key(workspace_id, "trigger", "cleanup")
+        now, size = delivery_instant(self._delivery_clock()), query_page_limit(limit)
+        keys = sorted(
+            key
+            for key, row in self._delivery_rows.items()
+            if row.workspace_id == workspace_id
+            and row.namespace == "trigger"
+            and row.request_json is not None
+            and row.retain_until <= now
+            and (row.lease_until is None or row.lease_until <= now)
+        )[:size]
+        for key in keys:
+            self._delivery_rows[key] = replace(self._delivery_rows[key], request_json=None)
+        return len(keys)
 
     async def release_delivery(self, claim: DeliveryReceipt) -> None:
         """Release only the current producer; completion is never rolled back."""

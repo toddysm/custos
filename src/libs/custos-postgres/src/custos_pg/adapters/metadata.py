@@ -72,6 +72,7 @@ from custos_spl.interfaces.delivery import (
     WorkflowStart,
     delivery_instant,
     delivery_result,
+    encode_delivery_request,
     require_delivery,
     reserve_delivery,
     validate_delivery_key,
@@ -177,6 +178,8 @@ def _delivery_receipt(row: Record) -> DeliveryReceipt:
         row["token"],
         row["lease_until"],
         row["result_json"],
+        row["request_json"],
+        row["submitted_at"],
     )
 
 
@@ -692,7 +695,7 @@ class PgMetadataAdapter:
         """Update a locked receipt, rechecking live producer time at the mutation statement."""
         changed = await conn.fetchval(
             "UPDATE custos_state.delivery_receipt SET retain_until=$4, epoch=$5, token=$6, "
-            "lease_until=$7, result_json=$8::json "
+            "lease_until=$7, result_json=$8::json, request_json=$10::json, submitted_at=$11 "
             "WHERE workspace_id=$1 AND namespace=$2 AND key=$3 "
             "AND (NOT $9::bool OR lease_until > clock_timestamp()) RETURNING key",
             receipt.workspace_id,
@@ -704,6 +707,8 @@ class PgMetadataAdapter:
             receipt.lease_until,
             receipt.result_json,
             fenced,
+            receipt.request_json,
+            receipt.submitted_at,
         )
         if changed is None:
             raise LeaseExpired("delivery claim expired before mutation")
@@ -735,6 +740,7 @@ class PgMetadataAdapter:
         retain_until: datetime,
         *,
         lease_seconds: int = 300,
+        request: DeadLetterData | None = None,
     ) -> DeliveryReceipt:
         """Atomically bind input identity and acquire or recover producer ownership."""
         validate_delivery_key(workspace_id, namespace, key)
@@ -763,6 +769,7 @@ class PgMetadataAdapter:
                     retain_until,
                     await _scheduler_now(conn),
                     lease_seconds,
+                    encode_delivery_request(request) if request is not None else None,
                 )
             except LeaseBusy as exc:
                 assert current is not None
@@ -786,9 +793,64 @@ class PgMetadataAdapter:
                 return current
             require_delivery(current, claim, await _scheduler_now(conn))
             assert current is not None
-            completed = replace(current, token=None, lease_until=None, result_json=result)
+            completed = replace(
+                current, token=None, lease_until=None, result_json=result, request_json=None
+            )
             await self._write_delivery(conn, completed, fenced=True)
             return completed
+
+    async def mark_delivery_submitted(self, claim: DeliveryReceipt) -> DeliveryReceipt:
+        """Persist submission without prematurely marking the durable consumer complete."""
+        if claim.namespace != "workflow-resume":
+            raise ValueError("only resume receipts have runtime submission state")
+        async with self._delivery_transaction() as conn:
+            current = await self._locked_delivery(
+                conn, claim.workspace_id, claim.namespace, claim.key
+            )
+            if (
+                current is not None
+                and current.completed
+                and current.request_hash == claim.request_hash
+            ):
+                return current
+            now = await _scheduler_now(conn)
+            require_delivery(current, claim, now)
+            assert current is not None
+            submitted = replace(
+                current,
+                token=None,
+                lease_until=None,
+                submitted_at=current.submitted_at or now,
+            )
+            await self._write_delivery(conn, submitted, fenced=True)
+            return submitted
+
+    async def clear_expired_delivery_requests(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        limit: int | None = None,
+    ) -> int:
+        """Erase expired payloads without stealing ownership or deleting receipt identities."""
+        validate_delivery_key(workspace_id, "trigger", "cleanup")
+        size = query_page_limit(limit)
+        async with self._delivery_transaction() as conn:
+            rows = await conn.fetch(
+                "WITH candidates AS (SELECT workspace_id,namespace,key "
+                "FROM custos_state.delivery_receipt WHERE workspace_id=$1 AND namespace='trigger' "
+                "AND request_json IS NOT NULL AND retain_until<=clock_timestamp() "
+                "AND (lease_until IS NULL OR lease_until<=clock_timestamp()) "
+                'ORDER BY key COLLATE "C" LIMIT $2 FOR UPDATE SKIP LOCKED) '
+                "UPDATE custos_state.delivery_receipt AS receipt SET request_json=NULL "
+                "FROM candidates WHERE receipt.workspace_id=candidates.workspace_id "
+                "AND receipt.namespace=candidates.namespace AND receipt.key=candidates.key "
+                "AND receipt.retain_until<=clock_timestamp() "
+                "AND (receipt.lease_until IS NULL OR receipt.lease_until<=clock_timestamp()) "
+                "RETURNING receipt.key",
+                workspace_id,
+                size,
+            )
+            return len(rows)
 
     async def release_delivery(self, claim: DeliveryReceipt) -> None:
         """Release only current live authority; never erase identity or a completed result."""
@@ -840,7 +902,9 @@ class PgMetadataAdapter:
             result = delivery_result(json.dumps({"deadLetterId": data.entry_id}))
             await self._write_delivery(
                 conn,
-                replace(current, token=None, lease_until=None, result_json=result),
+                replace(
+                    current, token=None, lease_until=None, result_json=result, request_json=None
+                ),
                 fenced=True,
             )
             return entry

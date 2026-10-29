@@ -23,7 +23,6 @@ from custos_spl.interfaces.delivery import (
     delivery_fingerprint,
     resume_channel,
     resume_identity,
-    resume_result,
 )
 from custos_spl.interfaces.metadata_store import Run
 from grpc import RpcError
@@ -269,6 +268,8 @@ class TriggerDeliveryController:
             ws, run_id=run_id, step_id=step_id, limit=2
         )
         if len(mirrors.items) != 1:
+            if await self._completed_resume(ws, key, fingerprint, retain_until):
+                return
             if await self.store.get_run(workspace_id, RunId(run_id)) is None:
                 raise RunNotFoundError(
                     "resume target does not exist in this workspace", run_id=run_id
@@ -285,6 +286,8 @@ class TriggerDeliveryController:
             or mirror.event_key != event_name
             or mirror.expires_at <= await self.provider.delivery_now()
         ):
+            if await self._completed_resume(ws, key, fingerprint, retain_until):
+                return
             raise RunStateConflictError(
                 "replay_unsafe: wait is expired or does not match the delivery", run_id=run_id
             )
@@ -350,4 +353,20 @@ class TriggerDeliveryController:
                 run_id=run_id,
                 cause=type(exc).__name__,
             ) from exc
-        await self.provider.complete_delivery(claim, resume_result(key))
+        await self.provider.mark_delivery_submitted(claim)
+
+    async def _completed_resume(
+        self,
+        workspace_id: WorkspaceId,
+        key: str,
+        fingerprint: str,
+        retain_until: datetime,
+    ) -> bool:
+        """Close the read/mirror-cleanup race without accepting a mismatched fingerprint."""
+        completed = await self.provider.get_delivery(workspace_id, "workflow-resume", key)
+        if completed is None or not completed.completed:
+            return False
+        await self.provider.reserve_delivery(
+            workspace_id, "workflow-resume", key, fingerprint, retain_until
+        )
+        return True

@@ -95,6 +95,11 @@ serialization protocol, including compatibility with older decoded inputs.
 Durable waits report `step.resume_wait_expired` at their persisted deadline and
 `step.resume_delivery_failed` when an event cannot be validated or durably
 acknowledged. Both preserve the standard structured step-error envelope.
+Transient acknowledgement failures do not terminate a wait after consumption:
+the worker retries through durable timers with a capped 60-second backoff and
+an observable pending status. Submission and consumer completion are distinct
+receipt states. Timeout executes durable cancellation/deletion instead of relying
+on the legacy in-memory sweeper.
 
 ## The `waitFor:` schema
 

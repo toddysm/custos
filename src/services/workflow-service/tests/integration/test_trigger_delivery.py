@@ -578,6 +578,16 @@ async def test_versioned_internal_rpc_uses_durable_path_and_checks_scope(harness
             assert repeated.json() == started.json()
             assert catalog.calls == 1 and len(registrations.register_calls) == 1
             run_id = started.json()["runId"]
+            forged_channel = await http.post(
+                f"/internal/runs/{run_id}/steps/first:raiseEvent",
+                json={
+                    "workspaceId": str(WS),
+                    "eventName": resume_channel(str(WS), run_id, "first", "ready"),
+                    "payload": {"deliveryProtocol": 2},
+                    "idempotencyKey": "forged",
+                },
+            )
+            assert forged_channel.status_code == 409
             resumed = await http.post(
                 f"/internal/runs/{run_id}/steps/first:raiseEvent",
                 json={
@@ -597,5 +607,128 @@ async def test_versioned_internal_rpc_uses_durable_path_and_checks_scope(harness
             assert forbidden.status_code == 403
             legacy.start_run.assert_not_awaited()
             legacy.raise_external_event.assert_not_awaited()
+    finally:
+        await runtime.shutdown()
+
+
+async def test_consumed_event_retries_acknowledgement_through_long_outage(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An outage longer than the old retry budget cannot drop an already consumed payload."""
+    runtime, client, registrations = await setup_runtime(harness)
+    controller = TriggerDeliveryController(
+        harness.delivery,
+        InProcessRunStore(harness.metadata),
+        client,
+        InMemoryActivityTypeRegistry({}),
+        InMemoryLifecycleEventPublisher(),
+    )
+    try:
+        until = await harness.delivery.delivery_now() + timedelta(days=30)
+        ref = await controller.start(str(WS), version(), {}, "ack-outage", until)
+        original = harness.delivery.acknowledge_delivery
+
+        async def unavailable(
+            workspace_id: WorkspaceId,
+            key: str,
+            request_hash: str,
+            result_json: str,
+        ) -> DeliveryReceipt:
+            """Model a recoverable storage outage at the consumer commit boundary."""
+            raise BackendUnavailable("simulated acknowledgement storage outage")
+
+        monkeypatch.setattr(harness.delivery, "acknowledge_delivery", unavailable)
+        await controller.resume(
+            str(WS), str(ref.run_id), "first", "ready", {"v": 1}, "event", until
+        )
+        for _ in range(6):
+            await client.advance_time(timedelta(seconds=60))
+        state = await client.get_workflow_state(GetRunStateRequest(str(ref.run_id)))
+        assert state is not None and state.status.value == "running"
+        assert len(registrations.register_calls) == 1
+        key, _ = resume_identity(str(WS), str(ref.run_id), "first", "ready", "event", {"v": 1})
+        submitted = await harness.delivery.get_delivery(WS, "workflow-resume", key)
+        assert submitted is not None and submitted.submitted_at is not None
+        assert not submitted.completed
+        monkeypatch.setattr(harness.delivery, "acknowledge_delivery", original)
+        await client.advance_time(timedelta(seconds=60))
+        consumed = await harness.delivery.get_delivery(WS, "workflow-resume", key)
+        assert consumed is not None and consumed.completed
+        assert len(registrations.register_calls) == 2
+        assert [
+            m.step_id
+            for m in await DurableResumeMirrorRepository(harness.delivery, str(WS)).list_open(
+                str(ref.run_id)
+            )
+        ] == ["second"]
+    finally:
+        await runtime.shutdown()
+
+
+async def test_wait_expiry_cancels_registration_and_deletes_durable_mirror(
+    harness: Harness,
+) -> None:
+    """Timeout follows the durable cleanup path rather than relying on the legacy memory sweeper."""
+    runtime, client, registrations = await setup_runtime(harness)
+    try:
+        controller = TriggerDeliveryController(
+            harness.delivery,
+            InProcessRunStore(harness.metadata),
+            client,
+            InMemoryActivityTypeRegistry({}),
+            InMemoryLifecycleEventPublisher(),
+        )
+        until = await harness.delivery.delivery_now() + timedelta(days=30)
+        ref = await controller.start(str(WS), version(), {}, "timeout", until)
+        await client.advance_time(timedelta(hours=2))
+        state = await client.get_workflow_state(GetRunStateRequest(str(ref.run_id)))
+        assert state is not None and state.status.value == "completed"
+        output = json.loads(state.serialized_output or "{}")
+        assert output["failure_envelope"]["kind"] == "step.resume_wait_expired"
+        assert len(registrations.cancel_calls) == 1
+        assert not await DurableResumeMirrorRepository(harness.delivery, str(WS)).list_open(
+            str(ref.run_id)
+        )
+    finally:
+        await runtime.shutdown()
+
+
+async def test_completion_between_receipt_read_and_mirror_query_is_reconciled(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A concurrent consumer cannot be misclassified as unsafe missing-mirror delivery."""
+    runtime, client, _ = await setup_runtime(harness)
+    try:
+        controller = TriggerDeliveryController(
+            harness.delivery,
+            InProcessRunStore(harness.metadata),
+            client,
+            InMemoryActivityTypeRegistry({}),
+            InMemoryLifecycleEventPublisher(),
+        )
+        until = await harness.delivery.delivery_now() + timedelta(days=30)
+        ref = await controller.start(str(WS), version(), {}, "mirror-race", until)
+        key, fingerprint = resume_identity(
+            str(WS), str(ref.run_id), "first", "ready", "event", {"v": 1}
+        )
+        await harness.delivery.reserve_delivery(WS, "workflow-resume", key, fingerprint, until)
+        original = harness.delivery.query_workflow_mirrors
+
+        async def consumed_during_query(*args: object, **kwargs: object) -> object:
+            """Complete and clean up exactly between the two controller reads."""
+            await harness.delivery.acknowledge_delivery(WS, key, fingerprint, resume_result(key))
+            page = await original(WS, run_id=str(ref.run_id), step_id="first")
+            for mirror in page.items:
+                await harness.delivery.delete_workflow_mirror(WS, mirror.mirror_id)
+            return await original(WS, run_id=str(ref.run_id), step_id="first")
+
+        monkeypatch.setattr(harness.delivery, "query_workflow_mirrors", consumed_during_query)
+        await controller.resume(
+            str(WS), str(ref.run_id), "first", "ready", {"v": 1}, "event", until
+        )
+        completed = await harness.delivery.get_delivery(WS, "workflow-resume", key)
+        assert completed is not None and completed.completed
     finally:
         await runtime.shutdown()

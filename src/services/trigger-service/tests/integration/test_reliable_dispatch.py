@@ -30,7 +30,12 @@ from custos_trigger.models import ResumeRegistration, SourceType, Subscription
 from custos_trigger.pipeline.dispatch import NoopAuditSink
 from custos_trigger.pipeline.match_resume import ResumeMatch
 from custos_trigger.pipeline.match_start import StartMatch
-from custos_trigger.pipeline.reliable import ReliableDispatcher, ReliableStorage
+from custos_trigger.pipeline.reliable import (
+    FINALIZATION_MARGIN_SECONDS,
+    MAX_DISPATCH_SECONDS,
+    ReliableDispatcher,
+    ReliableStorage,
+)
 from custos_trigger.providers import InMemoryTriggerMetadataStore
 
 WS = WorkspaceId("reliable-test")
@@ -274,6 +279,101 @@ async def test_stale_failure_cannot_create_phantom_dead_letter(harness: Harness)
         if not first.done():
             first.cancel()
             await asyncio.gather(first, return_exceptions=True)
+
+
+async def test_pending_delivery_recovers_original_target_after_configuration_change(
+    harness: Harness,
+) -> None:
+    """A crash before capture cannot force redelivery to use a newly edited subscription."""
+    client = PausedFailure()
+    reliable = dispatcher(harness, client)
+    first = asyncio.create_task(reliable.dispatch_start(event(), match()))
+    await asyncio.wait_for(client.started.wait(), timeout=5)
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    key = compute_dedup_key("sub", "event")
+    pending = await harness.store.get_delivery(WS, "trigger", key)
+    assert pending is not None and pending.request_json is not None
+    assert "do-not-store" not in pending.request_json
+    assert "history" not in json.loads(pending.request_json)
+    await harness.expire_receipt(key)
+    changed = match()
+    changed.subscription.target_workflow_version_id = "edited-version"
+    changed.subscription.input_mapping = {"authorization": "must-not-replace-original"}
+    recovered = dispatcher(harness, client)
+    recovered.retention = 1
+    assert (await recovered.dispatch_start(event(), changed)).is_dispatched
+    assert client.start_run_calls[-1].workflow_version_id == "version"
+    assert client.start_run_calls[-1].inputs == {"value": 1}
+    done = await harness.store.get_delivery(WS, "trigger", key)
+    assert done is not None and done.completed and done.request_json is None
+
+
+async def test_retry_budget_reserves_time_for_capture_and_replay_finalization() -> None:
+    """Measure finalization headroom with enough retries to exhaust the former lease budget."""
+    clock = [NOW]
+    store = InMemoryTriggerMetadataStore(now=lambda: clock[0])
+
+    async def advance(seconds: float) -> None:
+        """Advance provider time rather than making a long wall-clock test."""
+        clock[0] += timedelta(seconds=seconds)
+
+    client = FakeWorkflowServiceClient(error=WorkflowClientTransportError("outage"))
+    reliable = ReliableDispatcher(
+        client,
+        store,
+        NoopAuditSink(),
+        max_retries=63,
+        sleep=advance,
+    )
+    assert (await reliable.dispatch_start(event(), match())).is_dead_lettered
+    assert (clock[0] - NOW).total_seconds() == MAX_DISPATCH_SECONDS - FINALIZATION_MARGIN_SECONDS
+    entry = (await store.query_dead_letters(WS)).items[0]
+    assert 5 < len(entry.data.history) <= 64
+    assert (await reliable.replay(str(WS), entry.data.entry_id, "operator")).is_dead_lettered
+    updated = await store.get_dead_letter(WS, entry.data.entry_id)
+    assert updated is not None and updated.replay_history[-1].outcome == "failed"
+    assert (clock[0] - NOW).total_seconds() == 2 * (
+        MAX_DISPATCH_SECONDS - FINALIZATION_MARGIN_SECONDS
+    )
+
+
+async def test_expired_orphan_snapshot_is_erased_without_rebinding_identity(
+    harness: Harness,
+) -> None:
+    """Payload retention is bounded even when a producer dies before capture or completion."""
+    client = PausedFailure()
+    reliable = dispatcher(harness, client)
+    task = asyncio.create_task(reliable.dispatch_start(event(), match()))
+    await asyncio.wait_for(client.started.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    key = compute_dedup_key("sub", "event")
+    pending = await harness.store.get_delivery(WS, "trigger", key)
+    assert pending is not None and pending.request_json is not None
+    assert await harness.store.clear_expired_delivery_requests(WS) == 0
+    if harness.pool is None:
+        harness.clock[0] = pending.retain_until
+    else:
+        async with harness.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE custos_state.delivery_receipt SET retain_until=clock_timestamp(), "
+                "token=NULL,lease_until=NULL "
+                "WHERE workspace_id=$1 AND namespace='trigger' AND key=$2",
+                WS,
+                key,
+            )
+    assert await harness.store.clear_expired_delivery_requests(WorkspaceId("other")) == 0
+    assert await harness.store.clear_expired_delivery_requests(WS, limit=1) == 1
+    assert await harness.store.clear_expired_delivery_requests(WS) == 0
+    expired = await harness.store.get_delivery(WS, "trigger", key)
+    assert expired is not None and expired.request_json is None
+    assert expired.request_hash == pending.request_hash
+    with pytest.raises(TriggerError) as unavailable:
+        await reliable.dispatch_start(event(), match())
+    assert unavailable.value.kind is TriggerErrorKind.REPLAY_UNSAFE
 
 
 @pytest.mark.integration

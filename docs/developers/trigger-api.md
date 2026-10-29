@@ -195,9 +195,17 @@ another worker succeeds.
 Initial dispatch and replay are bounded to 300 seconds; durable retry counts are
 0–63 (at most 64 recorded attempts). Workflow producer leases last 30 seconds;
 Trigger/replay claims last at most 300. Only provider time controls ownership.
+The dispatch budget is capped by the remaining lease, with 30 seconds reserved
+for durable finalization; it never consumes the entire ownership window.
 Completed receipts retain the original result, while abandoned pending claims
 can be recovered with a new token. Same-request contention can extend the minimum
 retention without renewing the current worker's lease.
+
+The original normalized event and resolved target are snapshotted atomically
+with the initial reservation, before any remote call. Recovery uses that snapshot
+even if subscription configuration changes. Terminal dispatch/capture clears the
+pending snapshot; bounded retention cleanup can erase expired orphan payloads
+without deleting identity/fencing metadata or rematching a new target.
 
 Starts use the original deterministic run ID and the runtime's atomic
 ignore-existing policy, including completed instances. Resumes use protocol-2
@@ -206,6 +214,11 @@ acknowledgement. Retrying an uncertain send therefore cannot satisfy a later
 same-name wait. Run inputs persist the protocol choice and compiled graph before
 scheduling. Start lifecycle events reuse the original persisted timestamp so
 republishing after an uncertain acknowledgement keeps their normalized identity.
+Runtime submission is recorded separately from consumer completion. After an
+event has been consumed, its acknowledgement and cleanup remain recoverable with
+durable, capped-backoff retries rather than discarding the payload after a short
+storage outage. Expired waits explicitly cancel their registrations and remove
+their durable mirrors.
 
 Replay uses the stored target, resolved inputs and original key; it does not
 rematch changed subscriptions. Legacy or missing targets are inspection/discard

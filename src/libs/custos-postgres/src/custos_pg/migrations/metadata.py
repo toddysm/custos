@@ -458,9 +458,13 @@ METADATA_REV8 = Revision(
             token TEXT,
             lease_until TIMESTAMPTZ,
             result_json JSON,
+            request_json JSON,
+            submitted_at TIMESTAMPTZ,
             PRIMARY KEY (workspace_id, namespace, key),
             CHECK ((token IS NULL) = (lease_until IS NULL)),
-            CHECK (result_json IS NULL OR token IS NULL)
+            CHECK (result_json IS NULL OR token IS NULL),
+            CHECK (request_json IS NULL OR namespace = 'trigger'),
+            CHECK (submitted_at IS NULL OR namespace = 'workflow-resume')
         )
         """,
         """

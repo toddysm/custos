@@ -25,6 +25,7 @@ from custos_spl.interfaces.dead_letters import (
 )
 from custos_spl.interfaces.delivery import (
     DeliveryStateProvider,
+    decode_delivery_request,
     delivery_fingerprint,
     delivery_identity,
 )
@@ -58,6 +59,7 @@ from custos_trigger.pipeline.match_start import StartMatch
 
 logger = logging.getLogger(__name__)
 MAX_DISPATCH_SECONDS = 300
+FINALIZATION_MARGIN_SECONDS = 30
 
 
 def validate_dispatch_limits(
@@ -191,13 +193,28 @@ class ReliableDispatcher:
         data: DeadLetterData,
         until: datetime,
         history: list[DispatchAttempt],
+        *,
+        claim_deadline: datetime,
     ) -> RunRef | None:
         """Bound total elapsed time and attempts; record only safe failure classifications."""
         try:
-            async with asyncio.timeout(MAX_DISPATCH_SECONDS):
+            now = await self.store.delivery_now()
+            budget = min(
+                MAX_DISPATCH_SECONDS,
+                (claim_deadline - now).total_seconds() - FINALIZATION_MARGIN_SECONDS,
+            )
+            if budget <= 0:
+                raise TimeoutError("ownership must be finalized before dispatch")
+            async with asyncio.timeout(budget):
                 for attempt in range(self.max_retries + 1):
+                    remaining = (
+                        claim_deadline - await self.store.delivery_now()
+                    ).total_seconds() - FINALIZATION_MARGIN_SECONDS
+                    if remaining <= 0:
+                        raise TimeoutError("ownership must be finalized before dispatch")
                     try:
-                        return await self._send(data, until)
+                        async with asyncio.timeout(remaining):
+                            return await self._send(data, until)
                     except WorkflowClientError as exc:
                         history.append(
                             DispatchAttempt(
@@ -214,7 +231,7 @@ class ReliableDispatcher:
                         )
                         if not exc.retryable or attempt == self.max_retries:
                             raise
-                        await self.sleep(min(0.5 * (2**attempt), 30))
+                        await self.sleep(min(0.5 * (2**attempt), 30, remaining))
         except TimeoutError as exc:
             history.append(DispatchAttempt(await self.store.delivery_now(), "transient"))
             raise WorkflowClientTransportError(
@@ -244,17 +261,28 @@ class ReliableDispatcher:
         key = compute_dedup_key(subscription_id, event.event_id)
         try:
             now = await self.store.delivery_now()
-            data = DeadLetterData(
-                workspace_id=WorkspaceId(workspace),
-                entry_id="dl_" + delivery_identity(workspace, key),
-                subscription_id=subscription_id,
-                idempotency_key=key,
-                event=event.model_dump(by_alias=True, exclude={"raw"}),
-                target=target,
-                history=(DispatchAttempt(now, "configuration"),),
-                retention_seconds=self.retention,
-                max_replay_attempts=self.max_replays,
-            )
+            prior = await self.store.get_delivery(WorkspaceId(workspace), "trigger", key)
+            if prior is not None and prior.completed:
+                await self.audit.emit(AUDIT_DEDUPED, workspace_id=workspace, attributes=attributes)
+                return DispatchOutcome(DispatchStatus.DUPLICATE)
+            if prior is not None:
+                if prior.request_json is None:
+                    raise TriggerError(
+                        TriggerErrorKind.REPLAY_UNSAFE, "original pending request is unavailable"
+                    )
+                data = decode_delivery_request(prior.request_json, now)
+            else:
+                data = DeadLetterData(
+                    workspace_id=WorkspaceId(workspace),
+                    entry_id="dl_" + delivery_identity(workspace, key),
+                    subscription_id=subscription_id,
+                    idempotency_key=key,
+                    event=event.model_dump(by_alias=True, exclude={"raw"}),
+                    target=target,
+                    history=(DispatchAttempt(now, "configuration"),),
+                    retention_seconds=self.retention,
+                    max_replay_attempts=self.max_replays,
+                )
             fingerprint = delivery_fingerprint({"target": json_value(data.target)})
             claim = await self.store.reserve_delivery(
                 data.workspace_id,
@@ -262,10 +290,16 @@ class ReliableDispatcher:
                 key,
                 fingerprint,
                 now + timedelta(seconds=self.retention + 2 * MAX_DISPATCH_SECONDS),
+                request=data,
             )
             if claim.completed:
                 await self.audit.emit(AUDIT_DEDUPED, workspace_id=workspace, attributes=attributes)
                 return DispatchOutcome(DispatchStatus.DUPLICATE)
+            if claim.request_json is None or claim.lease_until is None:
+                raise RuntimeError("producer reservation has no original request or live lease")
+            data = decode_delivery_request(claim.request_json, await self.store.delivery_now())
+            target = data.target
+            attributes["kind"] = target["kind"]
             await self.audit.emit(AUDIT_MATCHED, workspace_id=workspace, attributes=attributes)
             existing = await self.store.get_dead_letter(data.workspace_id, data.entry_id)
             if existing is not None:
@@ -287,7 +321,9 @@ class ReliableDispatcher:
                 )
             else:
                 try:
-                    ref = await self._attempts(data, claim.retain_until, history)
+                    ref = await self._attempts(
+                        data, claim.retain_until, history, claim_deadline=claim.lease_until
+                    )
                 except WorkflowClientError as exc:
                     failure = exc
                 else:
@@ -346,7 +382,10 @@ class ReliableDispatcher:
             history: list[DispatchAttempt] = []
             try:
                 ref = await self._attempts(
-                    owned.data, owned.expires_at + timedelta(seconds=MAX_DISPATCH_SECONDS), history
+                    owned.data,
+                    owned.expires_at + timedelta(seconds=MAX_DISPATCH_SECONDS),
+                    history,
+                    claim_deadline=owned.claim.expires_at,
                 )
             except WorkflowClientError as exc:
                 await self.store.finish_dead_letter(owned.claim, failure=history[-1])

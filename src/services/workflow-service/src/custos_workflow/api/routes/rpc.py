@@ -93,6 +93,7 @@ from custos_spl.errors import (
     LeaseExpired,
     MigrationRequired,
 )
+from custos_spl.interfaces.delivery import RESUME_CHANNEL_PREFIX
 from fastapi import APIRouter, Body, Depends, Header, Path, Request, Response
 
 from custos_workflow.api.dependencies import (
@@ -346,8 +347,10 @@ async def raise_external_event(
       ``cancelled``) → ``workflow.run_state_conflict`` (409).
     * Runtime failure → ``workflow.runtime_unavailable`` (503).
     """
+    _delivery_scope(_ctx, body.workspace_id)
+    if body.delivery_protocol == 1 and body.event_name.startswith(RESUME_CHANNEL_PREFIX):
+        raise RunStateConflictError("reserved resume channels require versioned delivery")
     if body.delivery_protocol == 2:
-        _delivery_scope(_ctx, body.workspace_id)
         if delivery is None:
             raise WorkflowRuntimeUnavailableError("version-2 Trigger delivery is not enabled")
         assert body.idempotency_key is not None and body.retain_until is not None

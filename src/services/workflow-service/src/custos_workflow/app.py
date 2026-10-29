@@ -53,6 +53,7 @@ from custos_workflow.providers import (
     load_run_components,
     open_metadata_store,
 )
+from custos_workflow.runs.errors import WorkflowRuntimeUnavailableError
 from custos_workflow.runs.orchestrator import WORKFLOW_NAME, make_run_orchestrator
 from custos_workflow.steps import StepCoordinator
 from custos_workflow.steps.activity_step import ActivityStepHandler
@@ -150,6 +151,11 @@ def create_app(
         app.state.ready_detail = "workflow-service has not finished startup"
         components, metadata_pool, metadata_detail = await _resolve_run_components(run_components)
         runtime = components.workflow_runtime
+        if components.trigger_delivery_controller is not None and metadata_detail is not None:
+            await _shutdown_components(components, metadata_pool, worker_shutdown_timeout_s)
+            raise WorkflowRuntimeUnavailableError(
+                "durable delivery cannot start with a failed metadata backend"
+            )
 
         # Register the WF-IMPL-035 ``run_orchestrator`` under the
         # canonical :data:`WORKFLOW_NAME`. WF-IMPL-057 wires the
@@ -202,25 +208,31 @@ def create_app(
         runtime.register_workflow(orchestrator_fn, name=WORKFLOW_NAME)
 
         if components.trigger_delivery_controller is not None:
+            from custos_spl.errors import SPLError
+
             from custos_workflow.steps.resume.durable import (
                 RESUME_EFFECT_ACTIVITY,
                 ResumeActivityHandler,
                 build_resume_activity,
             )
 
-            if components.durable_resume_client is None:
-                raise ValueError("durable resume client is not configured")
-            if not isinstance(runtime, WorkflowActivityRegistrar):
-                raise ValueError("durable resume requires activity registration support")
-            provider = components.trigger_delivery_controller.provider
-            await provider.check_delivery_ready()
-            runtime.register_activity(
-                build_resume_activity(
-                    ResumeActivityHandler(provider, components.durable_resume_client),
-                    asyncio.get_running_loop(),
-                ),
-                name=RESUME_EFFECT_ACTIVITY,
-            )
+            try:
+                if components.durable_resume_client is None:
+                    raise ValueError("durable resume client is not configured")
+                if not isinstance(runtime, WorkflowActivityRegistrar):
+                    raise ValueError("durable resume requires activity registration support")
+                provider = components.trigger_delivery_controller.provider
+                await provider.check_delivery_ready()
+                runtime.register_activity(
+                    build_resume_activity(
+                        ResumeActivityHandler(provider, components.durable_resume_client),
+                        asyncio.get_running_loop(),
+                    ),
+                    name=RESUME_EFFECT_ACTIVITY,
+                )
+            except (SPLError, ValueError, asyncio.CancelledError):
+                await _shutdown_components(components, metadata_pool, worker_shutdown_timeout_s)
+                raise
 
         try:
             await runtime.start()
