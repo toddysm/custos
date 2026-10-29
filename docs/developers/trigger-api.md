@@ -289,9 +289,12 @@ and GET for subscription discovery. There is no blanket webhook-prefix bypass.
 
 Configure Dapr's [app API token authentication](https://docs.dapr.io/operations/security/app-api-token/)
 and supply the same secret to Trigger through `APP_API_TOKEN`. Requests must
-carry the sidecar's `dapr-api-token`; resume calls additionally require its
-`dapr-caller-app-id` to match `TRIGGER_WF_ENDPOINT` (a Dapr app ID, not an HTTP URL).
-The app authenticates the sidecar before trusting that caller header. Missing
+carry the sidecar's `dapr-api-token`. Dapr **>=1.18.6 with mutual TLS** is
+required (the deployment pin is stable **1.18.9**); older runtimes do not
+authenticate caller headers. Resume calls require `dapr-caller-app-id` and
+`dapr-caller-namespace` to match `TRIGGER_WORKFLOW_APP_ID` and
+`TRIGGER_WORKFLOW_NAMESPACE`. These are identities, not HTTP addresses.
+The app authenticates the sidecar before trusting either header. Missing
 configuration returns `503 mesh_unavailable`; invalid tokens return
 `401 mesh_unauthenticated`, and a different caller returns `403 mesh_caller_denied`.
 Discovery and broker-delivery callbacks reject service-invocation caller headers;
@@ -630,8 +633,8 @@ Their selector must be nonblank; the reserved `_resume` workspace is forbidden.
 workspace require a Workflow-service authenticator configured by
 [`create_app`](../../src/services/trigger-service/src/custos_trigger/app.py).
 It must verify the Workflow principal on every transport, including direct
-app-port calls. Production constructs it from `APP_API_TOKEN` and the Workflow
-app ID; missing mesh configuration fails before tenant state access.
+app-port calls. Production constructs it from `APP_API_TOKEN` and the explicit
+Workflow app ID and namespace; missing configuration fails before tenant access.
 The development shim still has no implicit verifier for scoped resume operations
 and returns `503 trigger.source_unavailable` unless one is explicitly supplied.
 Enabling the rollout flag alone does not open these RPCs; forged call-context or
@@ -957,7 +960,9 @@ The service is configured by environment variables (design § Configuration):
 | `TRIGGER_PUBSUB_COMPONENT` | `custos-pubsub` | Dapr pub/sub component name |
 | `TRIGGER_NORMALIZED_TOPIC` | `custos.triggers.normalized` | Normalized-event topic |
 | `TRIGGER_WORKFLOW_EVENTS_TOPIC` | `custos.workflow.events` | Internal lifecycle-event topic |
-| `TRIGGER_WF_ENDPOINT` | _(required)_ | Dapr app-id of the Workflow Service |
+| `TRIGGER_WF_ENDPOINT` | legacy address | Retained for compatibility; an explicit Dapr app ID takes precedence for dispatch |
+| `TRIGGER_WORKFLOW_APP_ID` | `workflow-service` | Expected authenticated Workflow app ID; also the explicit Dapr dispatch target |
+| `TRIGGER_WORKFLOW_NAMESPACE` | unset (chart: release namespace) | Required authenticated caller namespace; never inferred from an HTTP URL |
 | `TRIGGER_CONNECTOR_ENDPOINT` | _(required)_ | Dapr app-id of the Connector Service |
 | `TRIGGER_METADATA_STORE` | _(required)_ | SPL metadata-store DSN (secret) |
 | `TRIGGER_AUTHZ_ENDPOINT` | empty (development only) | Auth Service base URL for signed-context public keys |

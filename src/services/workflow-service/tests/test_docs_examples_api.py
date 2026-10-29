@@ -111,6 +111,7 @@ _DOCUMENTED_ENDPOINTS: Final[frozenset[tuple[str, str, int]]] = frozenset(
         ("GET", "/v1/workspaces/{ws}/runs/{run_id}/steps/{step_id}/logs", 501),
         # Internal RPC surface.
         ("POST", "/internal/runs:start", 202),
+        ("POST", "/internal/runs:raiseEvent", 202),
         ("POST", "/internal/runs/{run_id}:cancel", 202),
         ("POST", "/internal/runs/{run_id}/steps/{step_id}:raiseEvent", 202),
     }

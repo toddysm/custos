@@ -103,18 +103,22 @@ def _require_sidecar_token(request: Request, token: str | None) -> None:
 
 
 class DaprWorkflowCallerVerifier:
-    """Require the trusted sidecar hop and its overwritten Workflow caller application ID."""
+    """Verify sidecar-authenticated app/namespace metadata from Dapr >=1.18.6 with mTLS."""
 
-    def __init__(self, token: str, app_id: str = "workflow-service") -> None:
+    def __init__(self, token: str, app_id: str = "workflow-service", *, namespace: str) -> None:
         """Bind deployment-owned credentials, never a caller-supplied identity assertion."""
-        if not token.strip() or not app_id.strip():
-            raise ValueError("sidecar token and Workflow app ID must be nonempty")
-        self._token, self._app_id = token, app_id
+        if not token.strip() or not app_id.strip() or not namespace.strip():
+            raise ValueError("sidecar token and Workflow app ID/namespace must be nonempty")
+        if "://" in app_id or "/" in app_id:
+            raise ValueError("Workflow app ID must not be an HTTP endpoint")
+        self._token, self._app_id, self._namespace = token, app_id, namespace
 
     async def __call__(self, request: Request) -> None:
         """Reject direct app-port spoofing and other authenticated mesh applications."""
         _require_sidecar_token(request, self._token)
-        if request.headers.getlist("dapr-caller-app-id") != [self._app_id]:
+        if request.headers.getlist("dapr-caller-app-id") != [
+            self._app_id
+        ] or request.headers.getlist("dapr-caller-namespace") != [self._namespace]:
             raise CallContextError(403, "mesh_caller_denied", "Workflow service identity required")
 
 
@@ -186,6 +190,8 @@ class CallContextMiddleware(BaseHTTPMiddleware):
         verifier: Optional shared verifier override for hermetic key-source tests.
         app_api_token: Token shared only with the local Dapr sidecar.
         workflow_caller_verifier: Trusted Workflow authenticator for exact resume routes.
+        workflow_app_id: Expected authenticated Dapr caller ID, not an HTTP endpoint.
+        workflow_namespace: Required authenticated caller namespace for the default verifier.
 
     Raises:
         DevShimDisabledInProductionError: When constructed with the dev shim
@@ -201,6 +207,8 @@ class CallContextMiddleware(BaseHTTPMiddleware):
         verifier: CallContextVerifier | None = None,
         app_api_token: str | None = None,
         workflow_caller_verifier: WorkflowCallerVerifier | None = None,
+        workflow_app_id: str = "workflow-service",
+        workflow_namespace: str | None = None,
     ) -> None:
         """Configure independent user and mesh trust without making network calls."""
         super().__init__(app)
@@ -211,8 +219,16 @@ class CallContextMiddleware(BaseHTTPMiddleware):
             )
         self._app_api_token = app_api_token
         self._workflow_caller_verifier = workflow_caller_verifier
-        if self._workflow_caller_verifier is None and app_api_token is not None:
-            self._workflow_caller_verifier = DaprWorkflowCallerVerifier(app_api_token)
+        if (
+            self._workflow_caller_verifier is None
+            and app_api_token is not None
+            and workflow_namespace is not None
+        ):
+            self._workflow_caller_verifier = DaprWorkflowCallerVerifier(
+                app_api_token,
+                workflow_app_id,
+                namespace=workflow_namespace,
+            )
         self._dev_shim_active = self._verifier is None
         if self._dev_shim_active and environment.strip().lower() == "production":
             raise DevShimDisabledInProductionError(
@@ -295,7 +311,9 @@ class CallContextMiddleware(BaseHTTPMiddleware):
         if workflow:
             raise CallContextError(503, "mesh_unavailable", "Workflow authentication unavailable")
         _require_sidecar_token(request, self._app_api_token)
-        if request.headers.getlist("dapr-caller-app-id"):
+        if request.headers.getlist("dapr-caller-app-id") or request.headers.getlist(
+            "dapr-caller-namespace"
+        ):
             raise CallContextError(
                 403,
                 "mesh_caller_denied",

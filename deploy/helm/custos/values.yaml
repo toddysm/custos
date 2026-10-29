@@ -192,7 +192,9 @@ dapr:
   install: true
   global:
     registry: ghcr.io/dapr
-    tag: "1.14.0"
+    tag: "1.18.9"
+    mtls:
+      enabled: true
     # Control-plane high availability — flipped on by the HA profile overlays.
     ha:
       enabled: false
@@ -270,10 +272,8 @@ dapr:
         passwordKey: redis-password
       # Durable messaging on Postgres, sharing the CNPG cluster.
       #
-      # DISABLED: the pinned Dapr runtime (1.14.0, see Chart.yaml /
-      # scripts/install-prereqs.sh) ships NO Postgres pub/sub component — daprd
-      # 1.14 has no `pubsub.postgres`/`pubsub.postgresql` building block at all
-      # (only state.postgresql, bindings.postgres, configuration.postgres). With
+      # DISABLED: Redis remains the deployed pub/sub baseline. Updating the
+      # runtime does not activate or certify a different messaging backend. With
       # this enabled every service sidecar fails component init with
       # `couldn't find message bus pubsub.postgresql/v1` and CrashLoopBackOffs,
       # taking the whole control plane down. Nothing consumes this component yet

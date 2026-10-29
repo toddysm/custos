@@ -74,11 +74,14 @@ DEFAULT_RPC_TIMEOUT_SECONDS: float = 10.0
 
 #: The Workflow Service inbound method paths (Dapr invoke method segment).
 START_RUN_METHOD: str = "internal/runs:start"
+RESUME_RUN_METHOD: str = "internal/runs:raiseEvent"
 
 
 def raise_event_method(run_id: str, step_id: str) -> str:
-    """Encode opaque identifiers, including slash-addressed children, in the invoke method."""
-    return f"internal/runs/{quote(run_id, safe='')}/steps/{quote(step_id, safe='')}:raiseEvent"
+    """Address legacy runs without encoded separators forbidden by secure Dapr runtimes."""
+    if "\\" in run_id or any(part in {".", ".."} for part in run_id.split("/")):
+        raise ValueError("unsafe legacy run path; use version-2 body-addressed resume")
+    return f"internal/runs/{quote(run_id, safe='/')}/steps/{quote(step_id, safe='')}:raiseEvent"
 
 
 # --- Wire models -------------------------------------------------------------
@@ -128,6 +131,14 @@ class RaiseExternalEventRequest(_DeliveryRequest):
     event_name: str = Field(..., min_length=1)
     payload: dict[str, Any] = Field(default_factory=dict)
     idempotency_key: str | None = None
+
+
+class RoutedResumeRequest(RaiseExternalEventRequest):
+    """Version-2 transport envelope preserving opaque target identities in JSON."""
+
+    delivery_protocol: StrictInt = Field(default=2, ge=2, le=2)
+    run_id: str = Field(min_length=1)
+    step_id: str = Field(min_length=1)
 
 
 class RunRef(WireModel):
@@ -305,6 +316,16 @@ class DaprWorkflowServiceClient:
     async def raise_external_event(
         self, run_id: str, step_id: str, request: RaiseExternalEventRequest
     ) -> None:
+        if request.delivery_protocol == 2:
+            routed = RoutedResumeRequest.model_validate(
+                {**request.model_dump(), "run_id": run_id, "step_id": step_id},
+            )
+            await self._post(
+                build_invoke_url(self.endpoint, RESUME_RUN_METHOD),
+                routed,
+                what="RaiseExternalEvent",
+            )
+            return
         url = build_invoke_url(self.endpoint, raise_event_method(run_id, step_id))
         await self._post(url, request, what="RaiseExternalEvent")
 

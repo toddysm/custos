@@ -42,7 +42,7 @@ set -euo pipefail
 
 # --- Pinned versions (keep in sync with deploy/helm/custos/Chart.yaml and
 #     deploy/offline/images.txt) ---------------------------------------------
-DAPR_VERSION="1.14.0"
+DAPR_VERSION="1.18.9"
 ENVOY_GATEWAY_VERSION="1.8.1"
 CERT_MANAGER_VERSION="v1.20.2"
 PROMETHEUS_VERSION="29.10.0"
@@ -120,6 +120,7 @@ if [[ "$INSTALL_DAPR" == "true" ]]; then
   helm_repo_add dapr https://dapr.github.io/helm-charts/
   helm upgrade --install dapr dapr/dapr \
     --version "$DAPR_VERSION" \
+    --set global.mtls.enabled=true \
     --namespace dapr-system --create-namespace \
     ${REGISTRY:+--set global.registry="$(img dapr)"} \
     $WAIT_FLAG

@@ -170,6 +170,8 @@ async def test_production_mesh_authentication_precedes_tenant_storage(
     tracked = AsyncMock(wraps=read)
     monkeypatch.setattr(store, "get_resume_subscription", tracked)
     monkeypatch.setenv("TRIGGER_WF_ENDPOINT", "workflow-service")
+    monkeypatch.setenv("TRIGGER_WORKFLOW_APP_ID", "workflow-service")
+    monkeypatch.setenv("TRIGGER_WORKFLOW_NAMESPACE", "custos")
     token = "fixture-only-sidecar-token"
     app = create_app(
         authz_endpoint="http://auth.invalid",
@@ -203,7 +205,11 @@ async def test_production_mesh_authentication_precedes_tenant_storage(
         registered = await client.post(
             "/RegisterResumeSubscription",
             json=body,
-            headers={"dapr-api-token": token, "dapr-caller-app-id": "workflow-service"},
+            headers={
+                "dapr-api-token": token,
+                "dapr-caller-app-id": "workflow-service",
+                "dapr-caller-namespace": "custos",
+            },
         )
         assert registered.status_code == 200 and tracked.await_count > 0
         persisted = await read(WS, compute_resume_id("run", "wait", "ready"))

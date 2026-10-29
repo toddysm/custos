@@ -76,7 +76,8 @@ async def mint_call_context(request: Request) -> MintedCallContext:
 
     Reads the :class:`AuthorizedCaller` the authz dependency bound to
     ``request.state`` and the ingress correlation id, asks Auth Service to sign a
-    context for ``(principal, workspace, "api-gateway")``, and binds both the
+    context for the principal, workspace and exactly the authorized route
+    permission (never caller-supplied grants), and binds both the
     :class:`MintedCallContext` and the outbound metadata map to ``request.state``
     so the downstream router can attach them.
 
@@ -101,6 +102,7 @@ async def mint_call_context(request: Request) -> MintedCallContext:
                 principal_id=caller.principal_id,
                 caller_component=CALLER_COMPONENT,
                 workspace_id=caller.workspace_id,
+                permissions=[caller.permission],
             )
         )
     except AuthServiceClientError as exc:

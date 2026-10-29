@@ -106,6 +106,7 @@ from custos_workflow.api.models import (
     InternalCancelRunRequest,
     InternalStartRunRequest,
     RaiseExternalEventRequest,
+    RoutedResumeRequest,
     RunRefResponse,
 )
 from custos_workflow.api.routes.runs import (
@@ -365,6 +366,7 @@ async def raise_external_event(
                 body.retain_until,
             )
         return Response(status_code=202)
+
     await controller.raise_external_event(
         workspace_id=body.workspace_id,
         run_id=RunId(run_id),
@@ -374,3 +376,21 @@ async def raise_external_event(
         idempotency_key=body.idempotency_key,
     )
     return Response(status_code=202)
+
+
+@router.post("/internal/runs:raiseEvent", status_code=202)
+async def raise_routed_resume(
+    body: Annotated[RoutedResumeRequest, Body(...)],
+    controller: Annotated[RunController, Depends(get_run_controller)],
+    ctx: Annotated[CallContext, Depends(get_call_context)],
+    delivery: Annotated[TriggerDeliveryController | None, Depends(_delivery_controller)],
+) -> Response:
+    """Keep arbitrary child identities out of security-sensitive Dapr method paths."""
+    return await raise_external_event(
+        body,
+        controller,
+        ctx,
+        delivery,
+        run_id=body.run_id,
+        step_id=body.step_id,
+    )

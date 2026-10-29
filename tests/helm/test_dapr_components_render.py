@@ -6,10 +6,9 @@ trigger-service and observability-audit-service consumers. Everything is gated
 on ``dapr.install`` and individually toggleable. Secret-backed metadata must be
 resolved through a Dapr secret store rather than inlined.
 
-The Postgres ``custos-pubsub-durable`` broker is **disabled by default**: the
-pinned Dapr runtime (1.14.0) ships no ``pubsub.postgresql`` building block, so
-rendering it would crash every sidecar at startup. It stays off until the
-out-of-band Dapr is bumped to a release that provides it.
+The Postgres ``custos-pubsub-durable`` broker remains **disabled by default**.
+The secure Dapr upgrade does not switch the certified Redis messaging baseline
+or activate a different broker.
 """
 
 from __future__ import annotations
@@ -27,9 +26,8 @@ UMBRELLA = REPO_ROOT / "deploy" / "helm" / "custos"
 ALL_PROFILES = ("connected-eval", "connected-ha", "airgapped-eval", "airgapped-ha")
 
 # Component names the umbrella must render by default, keyed by Dapr type.
-# The Postgres ``custos-pubsub-durable`` broker is intentionally absent: Dapr
-# 1.14.0 has no ``pubsub.postgresql`` building block, so it is disabled by
-# default (see module docstring).
+# The Postgres ``custos-pubsub-durable`` broker is intentionally disabled;
+# a runtime upgrade alone does not activate a different transport.
 EXPECTED_COMPONENTS = {
     "custos-statestore": "state.postgresql",
     "custos-secretstore": "secretstores.kubernetes",
@@ -122,9 +120,8 @@ def test_pubsub_uses_redis_only_by_default(
 ) -> None:
     """Pub/sub renders the Redis fan-out broker; the Postgres durable broker is off.
 
-    Dapr 1.14.0 has no ``pubsub.postgresql`` building block, so the durable
-    ``custos-pubsub-durable`` Component is disabled by default — rendering it
-    would crash every sidecar at startup.
+    Runtime upgrades must not implicitly activate the separate
+    ``custos-pubsub-durable`` Component.
     """
     docs = rendered[profile]
     pubsub_types = {

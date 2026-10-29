@@ -37,6 +37,8 @@ sibling-service endpoints from § Dependencies:
 | `TRIGGER_NORMALIZED_TOPIC` | `custos.triggers.normalized` | `config.normalizedTopic` |
 | `TRIGGER_WORKFLOW_EVENTS_TOPIC` | `custos.workflow.events` | `config.workflowEventsTopic` |
 | `TRIGGER_WF_ENDPOINT` | `http://workflow-service:8080` | `workflow.endpoint` |
+| `TRIGGER_WORKFLOW_APP_ID` | `workflow-service` | `workflow.appId` (authenticated identity and Dapr dispatch target) |
+| `TRIGGER_WORKFLOW_NAMESPACE` | release namespace | `workflow.namespace` (empty selects `.Release.Namespace`) |
 | `TRIGGER_CONNECTOR_ENDPOINT` | `http://connector-service:8080` | `connector.endpoint` |
 
 Secret env (ExternalSecret → Secret → `envFrom`), disabled by default:

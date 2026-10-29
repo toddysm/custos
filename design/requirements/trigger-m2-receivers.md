@@ -299,6 +299,22 @@ implementation [#1009](https://github.com/toddysm/custos/issues/1009) /
 [#1011](https://github.com/toddysm/custos/issues/1011), including spoofed-header,
 rotation, wrong-signature and non-webhook-route regression tests.
 
+**Owner-approved runtime-security amendment (2026-10-29):** production mesh
+caller identity requires Dapr 1.18.6 or newer with mutual transport
+authentication. Pin the verified stable 1.18.9 patch across prerequisite
+installation, hosted deployment tests and offline images. Authenticate the
+sidecar-to-app hop before checking both the authenticated caller app ID and
+namespace; configure those independently of sibling HTTP endpoint addresses.
+Gateway-minted contexts carry only the permission actually authorized for the
+route, not caller-supplied grants.
+
+Newer Dapr rejects encoded slash/backslash/dot method names. Preserve opaque
+root/child identities in version-2 resume request bodies on a fixed internal
+method, retaining existing public and legacy request formats. Move these
+runtime/security prerequisites and compatibility regressions into #1015;
+#1017 still owns activation, remaining deployment controls and lifecycle
+wiring, and #1018 still owns complete deployed recovery certification.
+
 #### D03 - One polling owner, publish before cursor commit
 
 **Recommendation:** Connector Service keeps its existing per-instance

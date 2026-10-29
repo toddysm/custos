@@ -13,8 +13,12 @@ import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from custos_callctx import CallContextVerifier, JwksCache
+from custos_gateway.middleware.auth import AuthorizedCaller
+from custos_gateway.middleware.auth import require_permission as gateway_permission
+from custos_gateway.middleware.callctx_mint import MintedCallContext, mint_call_context
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
+from starlette.responses import JSONResponse
 
 from custos_trigger.app import create_app
 from custos_trigger.clients import FakeWorkflowServiceClient
@@ -92,6 +96,7 @@ def app_for(signing: Signing, *, token: str | None = TOKEN) -> FastAPI:
         environment="production",
         verifier=signing.verifier,
         app_api_token=token,
+        workflow_namespace="custos",
     )
     app.add_exception_handler(CallContextError, call_context_error_handler)
 
@@ -260,7 +265,14 @@ def test_mesh_resume_requires_sidecar_and_workflow_identity(
     """A forged caller header or a different authenticated service never reaches resume handlers."""
     app = app_for(signing)
     with TestClient(app) as client:
-        result = client.post(path, headers={**headers, CALLCTX_HEADER: signing.token()})
+        result = client.post(
+            path,
+            headers={
+                **headers,
+                CALLCTX_HEADER: signing.token(),
+                "dapr-caller-namespace": "custos",
+            },
+        )
     assert result.status_code == status
     assert app.state.entered == (["mesh"] if status == 200 else [])
 
@@ -354,10 +366,30 @@ def test_duplicate_mesh_credentials_never_select_a_trusted_value(signing: Signin
                 ("dapr-api-token", TOKEN),
                 ("dapr-caller-app-id", "workflow-service"),
                 ("dapr-caller-app-id", "other-service"),
+                ("dapr-caller-namespace", "custos"),
             ],
         )
     assert token.status_code == 401 and caller.status_code == 403
     assert not app.state.entered
+
+
+@pytest.mark.parametrize("namespaces", [[], ["other"], ["custos", "other"]])
+def test_workflow_namespace_is_required_and_unambiguous(
+    signing: Signing,
+    namespaces: list[str],
+) -> None:
+    """A same-name app in another namespace cannot inherit Workflow authority."""
+    app = app_for(signing)
+    with TestClient(app) as client:
+        result = client.post(
+            "/RegisterResumeSubscription",
+            headers=[
+                ("dapr-api-token", TOKEN),
+                ("dapr-caller-app-id", "workflow-service"),
+                *(("dapr-caller-namespace", namespace) for namespace in namespaces),
+            ],
+        )
+    assert result.status_code == 403 and not app.state.entered
 
 
 def test_factory_wires_real_verifiers_before_scoped_resume_reads(
@@ -367,7 +399,9 @@ def test_factory_wires_real_verifiers_before_scoped_resume_reads(
 ) -> None:
     """Production composition authenticates the sidecar before any tenant resume lookup."""
     monkeypatch.setenv("APP_API_TOKEN", TOKEN)
-    monkeypatch.setenv("TRIGGER_WF_ENDPOINT", "workflow-service")
+    monkeypatch.setenv("TRIGGER_WF_ENDPOINT", "http://workflow-service:8080")
+    monkeypatch.setenv("TRIGGER_WORKFLOW_APP_ID", "workflow-service")
+    monkeypatch.setenv("TRIGGER_WORKFLOW_NAMESPACE", "custos")
     reads = AsyncMock(wraps=metadata_store.get_resume_subscription)
     monkeypatch.setattr(metadata_store, "get_resume_subscription", reads)
     app = create_app(
@@ -396,7 +430,11 @@ def test_factory_wires_real_verifiers_before_scoped_resume_reads(
         registered = client.post(
             "/RegisterResumeSubscription",
             json=body,
-            headers={"dapr-api-token": TOKEN, "dapr-caller-app-id": "workflow-service"},
+            headers={
+                "dapr-api-token": TOKEN,
+                "dapr-caller-app-id": "workflow-service",
+                "dapr-caller-namespace": "custos",
+            },
         )
         assert registered.status_code == 200 and reads.await_count > 0
         headers = {CALLCTX_HEADER: signing.token({"permissions": ["trigger:subscriptions:read"]})}
@@ -414,3 +452,106 @@ def test_factory_wires_real_verifiers_before_scoped_resume_reads(
             ).status_code
             == 403
         )
+
+
+async def test_gateway_minting_authorized_permission_reaches_trigger(signing: Signing) -> None:
+    """Run Gateway authorization/minting into actual Trigger signature and permission checks."""
+    from custos_gateway.clients.auth import (
+        CallctxSignRequest,
+        CallctxSignResponse,
+        FakeAuthServiceClient,
+        VerifyAndAuthorizeResponse,
+    )
+    from custos_gateway.middleware.auth import (
+        AUTH_CLIENT_STATE_ATTR,
+    )
+    from custos_gateway.middleware.correlation import CorrelationIdMiddleware
+
+    class SigningAuth(FakeAuthServiceClient):
+        """Sign exactly the real Gateway request, not a prepopulated permission fixture."""
+
+        async def callctx_sign(self, request: CallctxSignRequest) -> CallctxSignResponse:
+            """Record and sign the permission selected by Gateway authorization."""
+            self.sign_calls.append(request)
+            now = int(time.time())
+            token = signing.token(
+                {
+                    "actingPrincipalId": request.principal_id,
+                    "workspaceId": request.workspace_id,
+                    "callerComponent": request.caller_component,
+                    "permissions": request.permissions,
+                }
+            )
+            return CallctxSignResponse(
+                token=token, kid="test-key", jti="test", iat=now, exp=now + 300
+            )
+
+    auth = SigningAuth(
+        decision=VerifyAndAuthorizeResponse(
+            principal_id="operator",
+            allowed=True,
+            reason="allow",
+            audit_event_id="audit",
+        )
+    )
+    trigger = app_for(signing)
+    gateway = FastAPI()
+    gateway.add_middleware(CorrelationIdMiddleware)
+    setattr(gateway.state, AUTH_CLIENT_STATE_ATTR, auth)
+
+    @gateway.get("/v1/workspaces/{workspaceId}/admin")
+    async def proxy(
+        _caller: Annotated[AuthorizedCaller, Depends(gateway_permission(TRIGGER_ADMIN_PERMISSION))],
+        minted: Annotated[MintedCallContext, Depends(mint_call_context)],
+    ) -> JSONResponse:
+        """Forward freshly minted metadata into the downstream production verifier."""
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=trigger),
+            base_url="http://trigger",
+        ) as downstream:
+            response = await downstream.get(
+                f"/v1/workspaces/{WORKSPACE}/admin",
+                headers=dict(minted.metadata),
+            )
+        return JSONResponse(response.json(), status_code=response.status_code)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=gateway),
+        base_url="http://gateway",
+    ) as client:
+        response = await client.get(
+            f"/v1/workspaces/{WORKSPACE}/admin",
+            headers={"Authorization": "Bearer fixture-only-token", CALLCTX_HEADER: "forged"},
+        )
+    assert response.status_code == 200, response.text
+    assert trigger.state.entered == [WORKSPACE]
+    assert len(auth.sign_calls) == 1
+    assert auth.sign_calls[0].permissions == [TRIGGER_ADMIN_PERMISSION]
+
+
+def test_dispatch_factory_prefers_explicit_app_id_over_http_address(
+    metadata_store: InMemoryTriggerMetadataStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shipped chart's legacy HTTP address cannot become a Dapr invocation target."""
+    from collections.abc import Mapping
+
+    import custos_trigger.clients as clients
+    from custos_trigger.clients.workflow import DaprEndpoint
+
+    original = clients.read_dapr_endpoint
+    targets: list[str] = []
+
+    def capture(env: Mapping[str, str], *, app_id: str) -> DaprEndpoint:
+        """Observe the actual composition input while retaining normal endpoint validation."""
+        targets.append(app_id)
+        return original(env, app_id=app_id)
+
+    monkeypatch.setattr(clients, "read_dapr_endpoint", capture)
+    monkeypatch.setenv("TRIGGER_WF_ENDPOINT", "http://workflow-service:8080")
+    monkeypatch.setenv("TRIGGER_WORKFLOW_APP_ID", "workflow-service")
+    with TestClient(
+        create_app(authz_endpoint="", providers=Providers(metadata_store=metadata_store))
+    ):
+        pass
+    assert targets == ["workflow-service"]

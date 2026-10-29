@@ -182,7 +182,9 @@ jobs:
 
       - name: Install Workflow client for contract-test type checking
         working-directory: ${{ github.workspace }}
-        run: pip install -e src/services/workflow-service
+        run: |
+          pip install -e src/services/workflow-service
+          pip install -e src/services/api-gateway
 
       - name: Install package and dev dependencies
         run: pip install -e ".[dev]"
@@ -241,7 +243,9 @@ jobs:
 
       - name: Install Workflow client for cross-service contract tests
         working-directory: ${{ github.workspace }}
-        run: pip install -e src/services/workflow-service
+        run: |
+          pip install -e src/services/workflow-service
+          pip install -e src/services/api-gateway
 
       - name: Install package and dev dependencies
         run: pip install -e ".[dev]"

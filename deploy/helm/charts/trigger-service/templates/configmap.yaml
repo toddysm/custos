@@ -23,4 +23,6 @@ data:
   TRIGGER_WORKFLOW_EVENTS_TOPIC: {{ .Values.config.workflowEventsTopic | quote }}
   # Sibling-service endpoints (design.md § Dependencies).
   TRIGGER_WF_ENDPOINT: {{ .Values.workflow.endpoint | quote }}
+  TRIGGER_WORKFLOW_APP_ID: {{ .Values.workflow.appId | quote }}
+  TRIGGER_WORKFLOW_NAMESPACE: {{ default .Release.Namespace .Values.workflow.namespace | quote }}
   TRIGGER_CONNECTOR_ENDPOINT: {{ .Values.connector.endpoint | quote }}

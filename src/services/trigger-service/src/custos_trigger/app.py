@@ -18,7 +18,8 @@ call-context middleware:
   active; when set, production call-context validation against the Auth
   Service's public signing keys is required.
 - ``APP_API_TOKEN`` authenticates sidecar-to-app requests independently of
-  user call contexts; exact resume routes also require the Workflow app identity.
+  user contexts; resume routes require explicit Workflow app/namespace identity
+  from Dapr >=1.18.6 with mutual TLS.
 - ``ENVIRONMENT`` (default ``development``) — ``production`` with an empty
   authz endpoint refuses to boot (the dev shim is forbidden in production).
 """
@@ -56,8 +57,10 @@ from custos_trigger.settings import (
     ENV_METADATA_STORE,
     ENV_PUBSUB_COMPONENT,
     ENV_RESUME_DEFAULT_TTL_SECONDS,
+    ENV_WORKFLOW_APP_ID,
     ENV_WORKFLOW_ENDPOINT,
     ENV_WORKFLOW_EVENTS_TOPIC,
+    ENV_WORKFLOW_NAMESPACE,
     read_receiver_configuration_enabled,
 )
 from custos_trigger.stores import (
@@ -136,7 +139,7 @@ def create_app(
             after every subscription writer has been upgraded.
         workflow_caller_verifier: Authenticator for the Workflow service principal,
             including direct app-port calls. Defaults to sidecar-token verification
-            plus the configured Workflow app ID when an app token is available.
+            plus explicit Workflow app ID/namespace when both token and namespace are configured.
         call_context_verifier: Optional shared verifier with an injected public-key source.
         app_api_token: Sidecar-to-app secret; defaults to ``APP_API_TOKEN``. Never
             sent to callers or used as an end-user identity.
@@ -158,10 +161,17 @@ def create_app(
         app_api_token if app_api_token is not None else os.environ.get(ENV_APP_API_TOKEN)
     )
     effective_workflow_verifier = workflow_caller_verifier
-    if effective_workflow_verifier is None and effective_token is not None:
+    workflow_namespace = os.environ.get(ENV_WORKFLOW_NAMESPACE)
+    workflow_app_id = os.environ.get(ENV_WORKFLOW_APP_ID, _DEFAULT_WORKFLOW_APP_ID)
+    if (
+        effective_workflow_verifier is None
+        and effective_token is not None
+        and workflow_namespace is not None
+    ):
         effective_workflow_verifier = DaprWorkflowCallerVerifier(
             effective_token,
-            os.environ.get(ENV_WORKFLOW_ENDPOINT, _DEFAULT_WORKFLOW_APP_ID),
+            workflow_app_id,
+            namespace=workflow_namespace,
         )
 
     @asynccontextmanager
@@ -227,7 +237,10 @@ def create_app(
 
             endpoint = read_dapr_endpoint(
                 os.environ,
-                app_id=os.environ.get(ENV_WORKFLOW_ENDPOINT, _DEFAULT_WORKFLOW_APP_ID),
+                app_id=os.environ.get(
+                    ENV_WORKFLOW_APP_ID,
+                    os.environ.get(ENV_WORKFLOW_ENDPOINT, _DEFAULT_WORKFLOW_APP_ID),
+                ),
             )
             enabled = os.environ.get("TRIGGER_DURABLE_DISPATCH_ENABLED", "false").strip().lower()
             if enabled not in {"true", "false"}:
@@ -312,6 +325,8 @@ def create_app(
         verifier=call_context_verifier,
         app_api_token=effective_token,
         workflow_caller_verifier=effective_workflow_verifier,
+        workflow_app_id=workflow_app_id,
+        workflow_namespace=workflow_namespace,
     )
     # Pair the middleware with its exception handler so the dependency-side
     # 4xx responses (get_call_context / require_permission) emit the same

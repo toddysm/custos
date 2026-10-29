@@ -719,8 +719,10 @@ async def test_versioned_internal_rpc_uses_durable_path_and_checks_scope(
                 )
                 assert forged_channel.status_code == 409
             resumed = await http.post(
-                f"/internal/runs/{route_id}/steps/first:raiseEvent",
+                "/internal/runs:raiseEvent",
                 json={
+                    "runId": run_id,
+                    "stepId": "first",
                     "workspaceId": str(WS),
                     "eventName": "ready",
                     "payload": {"v": 1},
@@ -730,6 +732,21 @@ async def test_versioned_internal_rpc_uses_durable_path_and_checks_scope(
                 },
             )
             assert resumed.status_code == 202
+            assert (
+                await http.post(
+                    "/internal/runs:raiseEvent",
+                    json={
+                        "workspaceId": "other",
+                        "runId": run_id,
+                        "stepId": "first",
+                        "eventName": "ready",
+                        "payload": {"v": 1},
+                        "idempotencyKey": "http-event",
+                        "deliveryProtocol": 2,
+                        "retainUntil": until,
+                    },
+                )
+            ).status_code == 403
             assert len(registrations.register_calls) == (3 if child_wait else 2)
             assert registrations.register_calls[-1].run_id == run_id
             forbidden = await http.post(

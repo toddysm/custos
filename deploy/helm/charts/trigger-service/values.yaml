@@ -125,6 +125,10 @@ config:
 # services are reached through a different address (e.g. via a sidecar /
 # out-of-cluster proxy).
 workflow:
+  # Authenticated Dapr identity, separate from the legacy HTTP address.
+  appId: workflow-service
+  # Empty selects this Helm release's namespace.
+  namespace: ""
   # Dispatch target for StartRun / RaiseExternalEvent (design § Dependencies).
   endpoint: http://workflow-service:8080
 connector:

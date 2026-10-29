@@ -68,8 +68,10 @@ ENV_WORKFLOW_EVENTS_TOPIC: Final[str] = "TRIGGER_WORKFLOW_EVENTS_TOPIC"
 
 # --- Dependencies (design.md § Dependencies) ---------------------------------
 
-#: Required. Dapr application ID of the Workflow Service, not an HTTP URL.
+#: Legacy Workflow address; explicit TRIGGER_WORKFLOW_APP_ID takes precedence.
 ENV_WORKFLOW_ENDPOINT: Final[str] = "TRIGGER_WF_ENDPOINT"
+ENV_WORKFLOW_APP_ID: Final[str] = "TRIGGER_WORKFLOW_APP_ID"
+ENV_WORKFLOW_NAMESPACE: Final[str] = "TRIGGER_WORKFLOW_NAMESPACE"
 
 #: Required. In-cluster endpoint of the Connector Service.
 ENV_CONNECTOR_ENDPOINT: Final[str] = "TRIGGER_CONNECTOR_ENDPOINT"
@@ -131,6 +133,8 @@ class Settings:
     receiver_configuration_enabled: bool = False
     scheduler_leader_renew_seconds: int = DEFAULT_SCHEDULER_LEADER_RENEW_SECONDS
     app_api_token: str | None = field(default=None, repr=False)
+    workflow_app_id: str = "workflow-service"
+    workflow_namespace: str | None = None
 
     def __post_init__(self) -> None:
         """Reject unusable ownership timing or an explicitly blank mesh credential."""
@@ -240,6 +244,8 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         metadata_store_dsn=_require(ENV_METADATA_STORE, src),
         authz_endpoint=src.get(ENV_AUTHZ_ENDPOINT, "").strip(),
         app_api_token=src.get(ENV_APP_API_TOKEN),
+        workflow_app_id=src.get(ENV_WORKFLOW_APP_ID, "workflow-service"),
+        workflow_namespace=src.get(ENV_WORKFLOW_NAMESPACE),
         environment=src.get(ENV_ENVIRONMENT, "").strip() or DEFAULT_ENVIRONMENT,
     )
 
@@ -272,8 +278,10 @@ __all__ = [
     "ENV_SCHEDULER_LEADER_LEASE_SECONDS",
     "ENV_SCHEDULER_LEADER_RENEW_SECONDS",
     "ENV_WEBHOOK_BASE_URL",
+    "ENV_WORKFLOW_APP_ID",
     "ENV_WORKFLOW_ENDPOINT",
     "ENV_WORKFLOW_EVENTS_TOPIC",
+    "ENV_WORKFLOW_NAMESPACE",
     "Settings",
     "SettingsError",
     "load_settings",
