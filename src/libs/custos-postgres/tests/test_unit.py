@@ -72,6 +72,7 @@ def test_dead_letter_migration_and_capability() -> None:
     assert "PRIMARY KEY (workspace_id, entry_id)" in statements
     assert "DROP " not in statements and "ALTER " not in statements
     assert "dead_letter_by_claim_expiry" in statements
+    assert "payload JSON NOT NULL" in statements
     assert isinstance(
         PgMetadataAdapter(lazy=LazyPool("postgresql://noop")), DeadLetterStoreProvider
     )

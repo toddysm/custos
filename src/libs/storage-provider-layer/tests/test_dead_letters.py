@@ -84,6 +84,8 @@ def test_roundtrip_and_deep_immutability(data: DeadLetterData) -> None:
         "headers",
         "raw",
         "x-custos-call-context",
+        "X-Custos-Callctx",
+        "token",
         "X-Hub-Signature-256",
     ],
 )

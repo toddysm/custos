@@ -142,12 +142,18 @@ Normalizers must still keep application values credential-free: arbitrary
 strings cannot reliably be identified as secrets. Failure history stores a
 closed classification (`transient`, `permanent`, `configuration`, `unsafe`) and
 optional HTTP status, not arbitrary exception text.
+The denylist includes the canonical `x-custos-callctx` signed-context header and
+Connector Service credential material (`username`/`token`), including nested
+copies in resolved inputs.
 
 Limits are enforced before persistence: 256 KiB of encoded JSON per event or
 target, nesting depth 32, identifiers 512 UTF-8 bytes, and 1–64 original dispatch
 attempts. Retention defaults to 30 days (configurable from 1 second to 365 days);
 operator attempts default to 3 (bounded to 1–100). Stored inputs are immutable,
 so replay does not rematch a changed subscription or generate a new key.
+PostgreSQL stores the bounded snapshot as JSON, not JSONB: it preserves exponent
+notation and numeric types so accepted captures remain readable within the same
+size bound through replay and retention cleanup.
 
 Queries are workspace-scoped, ordered by entry ID and filterable by subscription,
 status and inclusive creation-time bounds. Pages default to 50, cap at 200, and

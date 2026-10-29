@@ -29,6 +29,8 @@ the shared revision-4 minimum remain unchanged.
 
 REV7 adds optional versioned dead-letter captures and fenced replay state.
 Only dead-letter consumers require it; existing metadata contracts are unchanged.
+Its JSON column preserves accepted numeric representations: JSONB expansion of
+exponent numbers could exceed the payload bound on subsequent reads.
 """
 
 from __future__ import annotations
@@ -392,7 +394,7 @@ METADATA_REV7 = Revision(
             created_at TIMESTAMPTZ NOT NULL,
             expires_at TIMESTAMPTZ NOT NULL,
             claim_expires_at TIMESTAMPTZ,
-            payload JSONB NOT NULL,
+            payload JSON NOT NULL,
             PRIMARY KEY (workspace_id, entry_id),
             CHECK (expires_at > created_at),
             CHECK ((status = 'replaying') = (claim_expires_at IS NOT NULL))

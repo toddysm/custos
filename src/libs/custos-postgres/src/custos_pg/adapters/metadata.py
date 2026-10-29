@@ -563,7 +563,7 @@ class PgMetadataAdapter:
             await conn.execute(
                 "INSERT INTO custos_state.dead_letter "
                 "(workspace_id, entry_id, subscription_id, schema_version, status, "
-                "created_at, expires_at, payload) VALUES ($1,$2,$3,1,'pending',$4,$5,$6::jsonb)",
+                "created_at, expires_at, payload) VALUES ($1,$2,$3,1,'pending',$4,$5,$6::json)",
                 data.workspace_id,
                 data.entry_id,
                 data.subscription_id,
@@ -648,7 +648,7 @@ class PgMetadataAdapter:
     ) -> None:
         """Keep indexed state and payload atomic, rechecking time at the mutation statement."""
         updated = await conn.fetchval(
-            "UPDATE custos_state.dead_letter SET status=$3, payload=$4::jsonb, claim_expires_at=$5 "
+            "UPDATE custos_state.dead_letter SET status=$3, payload=$4::json, claim_expires_at=$5 "
             "WHERE workspace_id=$1 AND entry_id=$2 "
             "AND (NOT $6::bool OR (expires_at > clock_timestamp() AND $5 > clock_timestamp())) "
             "AND (NOT $7::bool OR claim_expires_at > clock_timestamp()) RETURNING entry_id",

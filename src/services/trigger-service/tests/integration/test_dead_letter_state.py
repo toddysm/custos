@@ -26,11 +26,13 @@ from custos_spl.interfaces.dead_letters import (
     DeadLetterFilter,
     DeadLetterStoreProvider,
     DispatchAttempt,
+    JsonValue,
     encode_dead_letter,
 )
 from custos_spl.pagination import Cursor
 
 from custos_trigger.events import NormalizedEvent
+from custos_trigger.middleware.callctx import CALLCTX_HEADER
 from custos_trigger.providers import InMemoryTriggerMetadataStore
 
 WS = WorkspaceId("dead-letter-test")
@@ -71,7 +73,7 @@ class Harness:
         async with self.pool.acquire() as conn:
             await conn.execute(
                 "UPDATE custos_state.dead_letter "
-                "SET payload=$3::jsonb, expires_at=$4, claim_expires_at=$5 "
+                "SET payload=$3::json, expires_at=$4, claim_expires_at=$5 "
                 "WHERE workspace_id=$1 AND entry_id=$2",
                 entry.data.workspace_id,
                 entry.data.entry_id,
@@ -190,6 +192,55 @@ async def test_filtered_pages_and_cursor_scope(harness: Harness) -> None:
         await harness.store.query_dead_letters(WS, cursor=Cursor("invalid"))
     with pytest.raises(ValueError):
         await harness.store.query_dead_letters(WS, limit=0)
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        {CALLCTX_HEADER: "signed-private-context"},
+        {"username": "registry-user", "token": "private-registry-token"},
+    ],
+)
+async def test_production_credential_shapes_rejected(
+    harness: Harness, secret: dict[str, str]
+) -> None:
+    """Reject the actual signed-context header and Connector resolver material in mapped inputs."""
+    data = capture()
+    with pytest.raises(ValueError, match="private transport"):
+        await harness.store.put_dead_letter(
+            replace(data, target={**data.target, "inputs": {"connection": secret}})
+        )
+    assert not (await harness.store.query_dead_letters(WS)).items
+
+
+async def test_exponent_numbers_survive_all_storage_transitions(harness: Harness) -> None:
+    """Preserve accepted numeric representation through PostgreSQL, including retention cleanup."""
+    data = capture()
+    numbers: dict[str, JsonValue] = {
+        "large": [1e308] * 900,
+        "small": 5e-324,
+        "whole": 1.0,
+        "negativeZero": -0.0,
+    }
+    entry = await harness.store.put_dead_letter(
+        replace(
+            data,
+            event={**data.event, "data": numbers},
+            target={**data.target, "inputs": numbers},
+            retention_seconds=1,
+        )
+    )
+    loaded = await harness.store.get_dead_letter(WS, "entry")
+    assert loaded is not None
+    assert loaded == entry
+    assert encode_dead_letter(loaded) == encode_dead_letter(entry)
+    assert (await harness.store.query_dead_letters(WS)).items == (entry,)
+    claimed = await harness.store.claim_dead_letter(WS, "entry", "worker")
+    assert claimed.claim is not None
+    finished = await harness.store.finish_dead_letter(claimed.claim, result_id="run")
+    assert finished.data == entry.data
+    await harness.expire(finished, retention=True)
+    assert await harness.store.delete_expired_dead_letter(WS, "entry")
 
 
 async def test_competing_claims_and_discard(harness: Harness) -> None:

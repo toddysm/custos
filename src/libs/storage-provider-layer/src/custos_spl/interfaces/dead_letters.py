@@ -59,11 +59,13 @@ _PRIVATE_KEYS = frozenset(
         "clientsecret",
         "password",
         "credentials",
+        "token",
         "accesstoken",
         "refreshtoken",
         "apikey",
         "xapikey",
         "xcustoscallcontext",
+        "xcustoscallctx",
         "callcontext",
     }
 )
