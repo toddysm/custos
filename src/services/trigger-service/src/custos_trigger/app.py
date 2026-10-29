@@ -4,9 +4,9 @@
 ``/readyz`` probes, the call-context middleware (with dev shim), and a
 lifespan hook that marks the app ready once startup completes.
 
-The factory is import-safe — no socket connections, no env-dependent failures
-at construction time. All side-effecting work belongs in the FastAPI lifespan
-context. The lifespan binds the SPL provider bundle + domain store adapters
+The factory is import-safe and validates authentication configuration without
+opening sockets. Resource-owning work belongs in the FastAPI lifespan context.
+The lifespan binds the SPL provider bundle + domain store adapters
 (TS-IMPL-008) onto ``app.state``; the REST/RPC surface across TS-IMPL-015..018
 grows in place atop them without changing the factory's import-safety contract.
 
@@ -16,8 +16,10 @@ call-context middleware:
 
 - ``TRIGGER_AUTHZ_ENDPOINT`` (default empty) — when empty the dev shim is
   active; when set, production call-context validation against the Auth
-  Service (COMP-002) is required and currently surfaces a
-  :class:`NotImplementedError` until that integration lands.
+  Service's public signing keys is required.
+- ``APP_API_TOKEN`` authenticates sidecar-to-app requests independently of
+  user contexts; resume routes require explicit Workflow app/namespace identity
+  from Dapr >=1.18.6 with mutual TLS.
 - ``ENVIRONMENT`` (default ``development``) — ``production`` with an empty
   authz endpoint refuses to boot (the dev shim is forbidden in production).
 """
@@ -38,6 +40,7 @@ from custos_trigger.health import router as health_router
 from custos_trigger.middleware import (
     CallContextError,
     CallContextMiddleware,
+    DaprWorkflowCallerVerifier,
     call_context_error_handler,
 )
 from custos_trigger.providers import Providers, load_providers
@@ -48,13 +51,16 @@ from custos_trigger.settings import (
     DEFAULT_PUBSUB_COMPONENT,
     DEFAULT_RESUME_DEFAULT_TTL_SECONDS,
     DEFAULT_WORKFLOW_EVENTS_TOPIC,
+    ENV_APP_API_TOKEN,
     ENV_DISPATCH_MAX_RETRIES,
     ENV_FANOUT_MAX_DEPTH,
     ENV_METADATA_STORE,
     ENV_PUBSUB_COMPONENT,
     ENV_RESUME_DEFAULT_TTL_SECONDS,
+    ENV_WORKFLOW_APP_ID,
     ENV_WORKFLOW_ENDPOINT,
     ENV_WORKFLOW_EVENTS_TOPIC,
+    ENV_WORKFLOW_NAMESPACE,
     read_receiver_configuration_enabled,
 )
 from custos_trigger.stores import (
@@ -65,6 +71,7 @@ from custos_trigger.stores import (
 
 if TYPE_CHECKING:
     import httpx
+    from custos_callctx import CallContextVerifier
     from fastapi import FastAPI
 
     from custos_trigger.pipeline.dispatch import AuditSink, Dispatcher
@@ -97,6 +104,8 @@ def create_app(
     audit_sink: AuditSink | None = None,
     receiver_configuration_enabled: bool | None = None,
     workflow_caller_verifier: WorkflowCallerVerifier | None = None,
+    call_context_verifier: CallContextVerifier | None = None,
+    app_api_token: str | None = None,
 ) -> FastAPI:
     """Build and return the Trigger Service FastAPI application.
 
@@ -129,9 +138,11 @@ def create_app(
             ``TRIGGER_RECEIVER_CONFIGURATION_ENABLED`` when omitted. Enable only
             after every subscription writer has been upgraded.
         workflow_caller_verifier: Authenticator for the Workflow service principal,
-            including direct app-port calls. Scoped resume operations fail closed
-            when absent. Production wiring belongs to TS-IMPL-032; this factory
-            supplies no unauthenticated fallback.
+            including direct app-port calls. Defaults to sidecar-token verification
+            plus explicit Workflow app ID/namespace when both token and namespace are configured.
+        call_context_verifier: Optional shared verifier with an injected public-key source.
+        app_api_token: Sidecar-to-app secret; defaults to ``APP_API_TOKEN``. Never
+            sent to callers or used as an end-user identity.
 
     The factory is import-safe: no DSN lookups, no socket connections. All
     side-effecting work happens inside the FastAPI lifespan context.
@@ -146,6 +157,27 @@ def create_app(
     effective_env = (
         environment if environment is not None else os.environ.get("ENVIRONMENT", "development")
     )
+    effective_token = (
+        app_api_token if app_api_token is not None else os.environ.get(ENV_APP_API_TOKEN)
+    )
+    effective_workflow_verifier = workflow_caller_verifier
+    workflow_namespace = os.environ.get(ENV_WORKFLOW_NAMESPACE)
+    workflow_app_id = os.environ.get(ENV_WORKFLOW_APP_ID, _DEFAULT_WORKFLOW_APP_ID)
+    workflow_target = os.environ.get(ENV_WORKFLOW_ENDPOINT, _DEFAULT_WORKFLOW_APP_ID)
+    if ENV_WORKFLOW_APP_ID in os.environ:
+        workflow_target = workflow_app_id
+        if workflow_namespace:
+            workflow_target += "." + workflow_namespace
+    if (
+        effective_workflow_verifier is None
+        and effective_token is not None
+        and workflow_namespace is not None
+    ):
+        effective_workflow_verifier = DaprWorkflowCallerVerifier(
+            effective_token,
+            workflow_app_id,
+            namespace=workflow_namespace,
+        )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -154,7 +186,7 @@ def create_app(
             if receiver_configuration_enabled is not None
             else read_receiver_configuration_enabled(os.environ)
         )
-        app.state.workflow_caller_verifier = workflow_caller_verifier
+        app.state.workflow_caller_verifier = effective_workflow_verifier
         # Bind the SPL providers (in-memory by default, Postgres when
         # TRIGGER_METADATA_STORE is a DSN) and the domain store adapters
         # the REST/RPC surface (TS-IMPL-015..018) drives. The provider
@@ -210,7 +242,7 @@ def create_app(
 
             endpoint = read_dapr_endpoint(
                 os.environ,
-                app_id=os.environ.get(ENV_WORKFLOW_ENDPOINT, _DEFAULT_WORKFLOW_APP_ID),
+                app_id=workflow_target,
             )
             enabled = os.environ.get("TRIGGER_DURABLE_DISPATCH_ENABLED", "false").strip().lower()
             if enabled not in {"true", "false"}:
@@ -292,6 +324,11 @@ def create_app(
         CallContextMiddleware,
         authz_endpoint=effective_authz,
         environment=effective_env,
+        verifier=call_context_verifier,
+        app_api_token=effective_token,
+        workflow_caller_verifier=effective_workflow_verifier,
+        workflow_app_id=workflow_app_id,
+        workflow_namespace=workflow_namespace,
     )
     # Pair the middleware with its exception handler so the dependency-side
     # 4xx responses (get_call_context / require_permission) emit the same

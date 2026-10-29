@@ -79,8 +79,8 @@ __all__ = [
 ]
 
 #: Dapr method paths the Workflow Service invokes. The call-context middleware
-#: bypass set (``custos_trigger.middleware.callctx._BYPASS_PATHS``) must list
-#: these verbatim — internal Dapr invokes carry no call-context header.
+#: Workflow-authenticated route set must list their exact POST paths:
+#: internal Dapr invokes carry no user call-context header.
 REGISTER_RESUME_PATH: Final[str] = "/RegisterResumeSubscription"
 CANCEL_RESUME_PATH: Final[str] = "/CancelResumeSubscription"
 

@@ -21,6 +21,12 @@ variant of the same flow.
 
 ## 1. Prerequisites
 
+The prerequisite installer and deployment smoke tests pin Dapr **1.18.9** with
+mutual TLS enabled. Production caller authentication requires **1.18.6 or
+newer**; upgrade pre-existing older control planes and restart their sidecars
+before enabling the new Trigger mesh authentication. A control-plane upgrade
+alone does not replace already-running sidecars. Do not disable mutual TLS.
+
 Install on your workstation:
 
 | Tool | Version | Notes |

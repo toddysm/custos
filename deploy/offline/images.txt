@@ -36,12 +36,12 @@ ghcr.io/toddysm/custos/custos-bootstrap:dev
 ghcr.io/toddysm/custos/connector-sidecar:dev
 
 # --- Dapr (control plane + runtime-injected sidecar) -----------------------
-ghcr.io/dapr/injector:1.14.0
-ghcr.io/dapr/operator:1.14.0
-ghcr.io/dapr/placement:1.14.0
-ghcr.io/dapr/scheduler:1.14.0
-ghcr.io/dapr/sentry:1.14.0
-ghcr.io/dapr/daprd:1.14.0
+ghcr.io/dapr/injector:1.18.9
+ghcr.io/dapr/operator:1.18.9
+ghcr.io/dapr/placement:1.18.9
+ghcr.io/dapr/scheduler:1.18.9
+ghcr.io/dapr/sentry:1.18.9
+ghcr.io/dapr/daprd:1.18.9
 
 # --- Install tooling (Dapr injector-readiness gate hook, issue #847) --------
 # Standalone kubectl image the umbrella's pre-install hook Job uses to wait

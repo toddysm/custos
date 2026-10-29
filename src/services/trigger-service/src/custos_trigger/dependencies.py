@@ -60,6 +60,8 @@ async def require_workflow_caller(
     request: Request, verifier: WorkflowCallerVerifier | None
 ) -> None:
     """Fail closed before scoped state access until authenticated Workflow access is wired."""
+    if getattr(request.state, "workflow_caller_verified", False) is True:
+        return
     if verifier is None:
         raise TriggerError(
             TriggerErrorKind.SOURCE_UNAVAILABLE,

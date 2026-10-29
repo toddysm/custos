@@ -83,6 +83,7 @@ def test_authenticated_request_mints_one_context() -> None:
     assert sign.principal_id == "sa_1"
     assert sign.workspace_id == "ws_42"
     assert sign.caller_component == CALLER_COMPONENT
+    assert sign.permissions == ["things:write"]
     assert body["token"] == "token-fake"
     assert body["state_is_minted"] is True
 

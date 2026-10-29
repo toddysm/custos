@@ -77,6 +77,7 @@ __all__ = [
     "InternalStartRunRequest",
     "PageRefResponse",
     "RaiseExternalEventRequest",
+    "RoutedResumeRequest",
     "RunListQuery",
     "RunListResponse",
     "RunRefResponse",
@@ -477,6 +478,22 @@ class RaiseExternalEventRequest(_DeliveryRequest):
             "(workspaceId, runId, stepId, eventName, idempotencyKey) ledger."
         ),
     )
+
+
+class RoutedResumeRequest(RaiseExternalEventRequest):
+    """Version-2 resume with opaque target identifiers in the body, not the Dapr method."""
+
+    delivery_protocol: StrictInt = Field(default=2, ge=2, le=2)
+    run_id: str = Field(min_length=1)
+    step_id: str = Field(min_length=1)
+
+    @field_validator("run_id", "step_id", mode="plain")
+    @classmethod
+    def preserve_opaque_identity(cls, value: object) -> str:
+        """Validate without normalizing identifiers into another runtime target."""
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("resume target identifiers must be nonblank strings")
+        return value
 
 
 # ---------------------------------------------------------------------------

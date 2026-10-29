@@ -39,7 +39,7 @@ design gate [#1004](https://github.com/toddysm/custos/issues/1004).
 | TS-IMPL-029 | [#1012](https://github.com/toddysm/custos/issues/1012) | Existing polling/cursor reuse plus durable operator-pause and shared due-time control; resume-only demand and publish-failure recovery | 023, 028 |
 | TS-IMPL-030 | [#1013](https://github.com/toddysm/custos/issues/1013) | Durable dead-letter storage and fenced expiring replay claims; pagination and sanitized persistence | - |
 | TS-IMPL-031 | [#1014](https://github.com/toddysm/custos/issues/1014) | Durable failure/replay and downstream idempotency; durable Workflow waits/mirrors and versioned step-scoped consumer protection; no duplicate effect across restart and retention | 022, 030 |
-| TS-IMPL-032 | [#1015](https://github.com/toddysm/custos/issues/1015) | Production signed call-context verification and trigger:admin; forged/expired/wrong-workspace rejection | - |
+| TS-IMPL-032 | [#1015](https://github.com/toddysm/custos/issues/1015) | Production signed call-context verification and trigger:admin; secure Dapr 1.18.9 baseline, authenticated caller app/namespace, Gateway permission propagation and opaque child-resume transport compatibility | - |
 | TS-IMPL-033 | [#1016](https://github.com/toddysm/custos/issues/1016) | Protected recovery endpoints and retention; route-collision/concurrent-replay/expiry tests | 031, 032 |
 | TS-IMPL-034 | [#1017](https://github.com/toddysm/custos/issues/1017) | Activation/readiness/deployment wiring, durable audit and operational signals; consume the durable wait prerequisite from 031; four-profile rendering and safe rollback | 025, 027, 028, 029, 033 |
 | TS-IMPL-035 | [#1018](https://github.com/toddysm/custos/issues/1018) | Deployed receiver-to-Workflow failure/recovery and legacy regression coverage in hosted CI | 034 |
@@ -50,6 +50,12 @@ design gate [#1004](https://github.com/toddysm/custos/issues/1004).
 The owner approved moving durable wait execution and consumer-side replay
 protection from 034 into 031 on 2026-10-29. Public request formats remain valid;
 the protocol is persisted per run, and unsafe legacy replay fails explicitly.
+
+The owner also approved the runtime-security adjustment on 2026-10-29:
+032 raises the Dapr minimum to 1.18.6 (pinning stable 1.18.9), updates all
+installation/deployment references, and makes child resume transport compatible
+with secure method-path validation. This prerequisite does not remove 034's
+activation/control-plane responsibilities or 035's deployed certification gate.
 
 One valid sequential order is:
 

@@ -6,9 +6,9 @@
 # api-gateway reference image (DEPLOY-IMPL-001): the build context is the
 # **repository root** so the builder can install the in-repo ``custos-*`` path
 # libraries the service declares (``custos-spl`` = ``storage-provider-layer``;
-# ``custos-postgres``; ``custos-cel``) before building the service wheel, then
-# the runtime stage installs everything offline into a venv and runs as a
-# non-root user.
+# ``custos-postgres``; ``custos-cel``; ``custos-callctx``) before building the
+# service wheel, then the runtime stage installs everything offline into a venv
+# and runs as a non-root user.
 #
 # Provenance OCI manifest annotations are stamped by the publish workflow
 # (DEPLOY-IMPL-006), not as mutable LABELs here.
@@ -30,17 +30,19 @@ WORKDIR /build
 RUN pip install --upgrade pip==24.2 build==1.2.2
 
 # In-repo path libs (per pyproject.toml: custos-spl + custos-postgres +
-# custos-cel) and the service sources. ``custos-postgres`` depends on
-# ``custos-spl``; all three are built as wheels below.
+# custos-cel + custos-callctx) and the service sources. ``custos-postgres``
+# depends on ``custos-spl``; all four are built as wheels below.
 COPY src/libs/storage-provider-layer/ ./libs/storage-provider-layer/
 COPY src/libs/custos-postgres/ ./libs/custos-postgres/
 COPY src/libs/custos-cel/ ./libs/custos-cel/
+COPY src/libs/custos-callctx/ ./libs/custos-callctx/
 COPY src/services/trigger-service/ ./services/trigger-service/
 
 RUN pip wheel --no-deps --wheel-dir /wheels \
         ./libs/storage-provider-layer \
         ./libs/custos-postgres \
-        ./libs/custos-cel
+        ./libs/custos-cel \
+        ./libs/custos-callctx
 
 RUN pip wheel --wheel-dir /wheels --find-links /wheels \
         ./services/trigger-service

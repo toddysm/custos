@@ -41,8 +41,15 @@ deployed durable wait execution remain part of
 New receiver writes are default-off until every writer has been upgraded:
 `TRIGGER_RECEIVER_CONFIGURATION_ENABLED=true` is an explicit rollout acknowledgment.
 Scoped resume operations additionally require a configured Workflow caller
-authenticator; production wiring remains
-[#1015](https://github.com/toddysm/custos/issues/1015). The default app fails closed.
+authenticator. Production verifies signed user contexts using
+`TRIGGER_AUTHZ_ENDPOINT` plus its `/.well-known/jwks.json` endpoint. Mesh routes
+independently require `APP_API_TOKEN`; resume routes also check the Workflow
+Dapr app ID and namespace (`TRIGGER_WORKFLOW_APP_ID` and
+`TRIGGER_WORKFLOW_NAMESPACE`), independently of legacy endpoint addresses.
+Dapr >=1.18.6 with mutual TLS is required; the deployment pin is stable 1.18.9.
+Missing or forged mesh credentials fail
+before tenant state access. Deployment secret, access-control and network-policy
+activation remain part of [#1017](https://github.com/toddysm/custos/issues/1017).
 
 ## Layout
 
@@ -63,7 +70,9 @@ From this directory (`src/services/trigger-service`):
 pip install -e ../../libs/storage-provider-layer[dev]
 pip install -e ../../libs/custos-postgres[dev]
 pip install -e ../../libs/custos-cel[dev]
+pip install -e ../../libs/custos-callctx[dev]
 pip install -e ../workflow-service
+pip install -e ../api-gateway
 pip install -e ".[dev]"
 
 ruff format . && ruff check . && mypy src tests

@@ -313,12 +313,15 @@ is no longer carried in the URL, every Internal RPC body promotes
 | Method | Path | Body | Success | Description |
 |---|---|---|---|---|
 | `POST` | `/internal/runs:start` | `InternalStartRunRequest` | 202 `RunRefResponse` | Internal RPC: start a workflow run. Same idempotency contract as the public REST surface. |
+| `POST` | `/internal/runs:raiseEvent` | `RoutedResumeRequest` | 202 (empty body) | Version-2 resume; opaque `runId` and `stepId` travel in the body alongside the existing versioned fields. |
 | `POST` | `/internal/runs/{run_id}:cancel` | `InternalCancelRunRequest` | 202 `RunRefResponse` | Internal RPC: request cancellation. |
 | `POST` | `/internal/runs/{run_id}/steps/{step_id}:raiseEvent` | `RaiseExternalEventRequest` | 202 (empty body) | Internal RPC: deliver an external event into a running workflow's `wait_for_external_event` step. |
 
-For `RaiseExternalEvent`, `run_id` is opaque and can contain child-address
-slashes, such as `parent/invoke/workflow`. Percent-encode the identifier when
-building the URL; the receiver preserves the decoded child identity.
+Version-2 Trigger delivery uses the fixed `runs:raiseEvent` method with target
+IDs in its body. This preserves opaque child addresses without encoded
+separators, backslashes or dot segments in Dapr's security-sensitive method path.
+Existing path-addressed requests remain accepted; legacy child slashes remain
+literal path separators. The secure Dapr runtime rejects encoded separators.
 
 ### `InternalStartRunRequest`
 

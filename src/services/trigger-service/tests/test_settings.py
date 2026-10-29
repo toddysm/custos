@@ -53,6 +53,16 @@ def test_defaults_applied_when_only_required_set() -> None:
     assert settings.is_production is False
 
 
+def test_mesh_credential_is_preserved_but_not_in_settings_repr() -> None:
+    """Load the exact sidecar token without exposing it through dataclass diagnostics."""
+    token = "fixture-only-sidecar-token"
+    settings = load_settings(_env(APP_API_TOKEN=token))
+    assert settings.app_api_token == token
+    assert token not in repr(settings)
+    with pytest.raises(SettingsError, match="APP_API_TOKEN"):
+        load_settings(_env(APP_API_TOKEN=" "))
+
+
 @pytest.mark.parametrize(
     ("env_var", "raw", "attr", "expected"),
     [

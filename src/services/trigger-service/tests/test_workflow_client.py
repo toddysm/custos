@@ -107,7 +107,7 @@ async def test_raise_event_preserves_opaque_child_id_in_url() -> None:
         """Check encoded transport bytes rather than the URL library's decoded display path."""
         assert request.url.raw_path == (
             b"/v1.0/invoke/workflow-service/method/"
-            b"internal/runs/parent%2Finvoke%2Fworkflow%3F%23/steps/wait:raiseEvent"
+            b"internal/runs/parent/invoke/workflow%3F%23/steps/wait:raiseEvent"
         )
         assert request.url.query == b""
         return httpx.Response(202)
@@ -117,11 +117,53 @@ async def test_raise_event_preserves_opaque_child_id_in_url() -> None:
         await client.raise_external_event("parent/invoke/workflow?#", "wait", _raise_request())
 
 
+async def test_versioned_resume_uses_fixed_method_and_opaque_body_ids() -> None:
+    """Secure Dapr never has to decode a target identifier into its invocation method."""
+    import json
+    from datetime import UTC, datetime, timedelta
+
+    run_id = " parent/invoke/workflow%2F?\\# "
+    step_id = " step/with%2Echaracters "
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        """Validate actual transport bytes and both ends of the versioned schema."""
+        from custos_workflow.api.models import RoutedResumeRequest
+
+        assert (
+            request.url.raw_path == b"/v1.0/invoke/workflow-service/method/internal/runs:raiseEvent"
+        )
+        body = RoutedResumeRequest.model_validate(json.loads(request.content))
+        assert (body.run_id, body.step_id) == (run_id, step_id)
+        assert body.delivery_protocol == 2 and body.event_name == " ready "
+        return httpx.Response(202)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = DaprWorkflowServiceClient(http_client=http, endpoint=_ENDPOINT)
+        await client.raise_external_event(
+            run_id,
+            step_id,
+            RaiseExternalEventRequest(
+                workspace_id="ws-one",
+                event_name=" ready ",
+                delivery_protocol=2,
+                idempotency_key="key",
+                retain_until=datetime.now(UTC) + timedelta(days=1),
+            ),
+        )
+
+
 def test_read_dapr_endpoint_defaults() -> None:
     endpoint = read_dapr_endpoint({}, app_id="workflow-service")
     assert endpoint == DaprEndpoint(
         host=DEFAULT_DAPR_HTTP_HOST, http_port=DEFAULT_DAPR_HTTP_PORT, app_id="workflow-service"
     )
+
+
+@pytest.mark.parametrize("run_id", ["../run", "parent/../run", "parent\\run"])
+def test_legacy_resume_rejects_ambiguous_path_targets(run_id: str) -> None:
+    """Do not normalize an unsupported legacy address into a different run."""
+    with pytest.raises(ValueError, match="version-2"):
+        raise_event_method(run_id, "wait")
 
 
 def test_read_dapr_endpoint_overrides() -> None:

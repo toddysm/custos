@@ -70,7 +70,7 @@ dependencies:
   #
   # Install these out-of-band BEFORE `helm install custos` (see
   # scripts/install-prereqs.sh and docs/users/evaluation/local-cluster.md):
-  #   - dapr                     (https://dapr.github.io/helm-charts/, 1.14.0)
+  #   - dapr                     (https://dapr.github.io/helm-charts/, 1.18.9; mTLS required)
   #   - gateway-helm / Envoy GW  (oci://docker.io/envoyproxy, 1.8.1)
   #   - cert-manager             (https://charts.jetstack.io, v1.20.2)
   #   - prometheus               (prometheus-community, 29.10.0)

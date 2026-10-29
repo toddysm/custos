@@ -1,4 +1,4 @@
-"""Durable failure/replay contracts against memory and production PostgreSQL."""
+"""Authenticated admission and durable delivery contracts on memory and production PostgreSQL."""
 
 from __future__ import annotations
 
@@ -147,6 +147,73 @@ def dispatcher(
     return ReliableDispatcher(
         client, harness.store, NoopAuditSink(), max_retries=retries, sleep=no_sleep
     )
+
+
+async def test_production_mesh_authentication_precedes_tenant_storage(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production composition denies forged callers before reads on either metadata backend."""
+    from unittest.mock import AsyncMock
+
+    import httpx
+
+    from custos_trigger.api.routes.rpc import compute_resume_id
+    from custos_trigger.app import create_app
+    from custos_trigger.dedup import Deduplicator
+    from custos_trigger.pipeline.dispatch import Dispatcher
+    from custos_trigger.providers import Providers
+
+    store = harness.store
+    assert isinstance(store, (InMemoryTriggerMetadataStore, PgMetadataAdapter))
+    read = store.get_resume_subscription
+    tracked = AsyncMock(wraps=read)
+    monkeypatch.setattr(store, "get_resume_subscription", tracked)
+    monkeypatch.setenv("TRIGGER_WF_ENDPOINT", "workflow-service")
+    monkeypatch.setenv("TRIGGER_WORKFLOW_APP_ID", "workflow-service")
+    monkeypatch.setenv("TRIGGER_WORKFLOW_NAMESPACE", "custos")
+    token = "fixture-only-sidecar-token"
+    app = create_app(
+        authz_endpoint="http://auth.invalid",
+        environment="production",
+        app_api_token=token,
+        providers=Providers(metadata_store=store),
+        dispatcher=Dispatcher(FakeWorkflowServiceClient(), Deduplicator(store)),
+        receiver_configuration_enabled=True,
+    )
+    body = {
+        "workspaceId": str(WS),
+        "runId": "run",
+        "stepId": "wait",
+        "eventKey": "ready",
+        "deliveryProtocol": 2,
+    }
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://trigger",
+        ) as client,
+    ):
+        for headers, status in (
+            ({"dapr-caller-app-id": "workflow-service"}, 401),
+            ({"dapr-api-token": token, "dapr-caller-app-id": "untrusted-service"}, 403),
+        ):
+            denied = await client.post("/RegisterResumeSubscription", json=body, headers=headers)
+            assert denied.status_code == status
+            tracked.assert_not_awaited()
+        registered = await client.post(
+            "/RegisterResumeSubscription",
+            json=body,
+            headers={
+                "dapr-api-token": token,
+                "dapr-caller-app-id": "workflow-service",
+                "dapr-caller-namespace": "custos",
+            },
+        )
+        assert registered.status_code == 200 and tracked.await_count > 0
+        persisted = await read(WS, compute_resume_id("run", "wait", "ready"))
+        assert persisted is not None and persisted.payload["deliveryProtocol"] == 2
 
 
 async def test_failure_is_captured_before_ack_and_replays_original_target(harness: Harness) -> None:

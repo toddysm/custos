@@ -119,6 +119,7 @@ _AUTHOR_PERMS: Final[tuple[str, ...]] = (
 _OPERATOR_PERMS: Final[tuple[str, ...]] = (
     *_AUTHOR_PERMS,
     "admin:connector",
+    "trigger:admin",
     "trigger:subscriptions:read",
     "trigger:subscriptions:write",
     "trigger:subscriptions:delete",

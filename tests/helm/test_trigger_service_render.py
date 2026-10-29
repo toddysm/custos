@@ -26,9 +26,7 @@ EVAL_PROFILES = ("connected-eval", "airgapped-eval")
 ALL_PROFILES = HA_PROFILES + EVAL_PROFILES
 
 
-def _find(
-    docs: list[dict[str, Any]], kind: str, name: str
-) -> dict[str, Any] | None:
+def _find(docs: list[dict[str, Any]], kind: str, name: str) -> dict[str, Any] | None:
     for doc in docs:
         if doc.get("kind") == kind and doc.get("metadata", {}).get("name") == name:
             return doc
@@ -57,6 +55,8 @@ def test_configmap_has_documented_defaults(
     # In-cluster sibling-service endpoint defaults must match the Service
     # names emitted by the corresponding subcharts.
     assert data["TRIGGER_WF_ENDPOINT"] == "http://workflow-service:8080"
+    assert data["TRIGGER_WORKFLOW_APP_ID"] == "workflow-service"
+    assert data["TRIGGER_WORKFLOW_NAMESPACE"] == "default"
     assert data["TRIGGER_CONNECTOR_ENDPOINT"] == "http://connector-service:8080"
 
 
@@ -151,7 +151,9 @@ def test_service_renders_with_expected_port(
     assert svc is not None, f"trigger-service Service missing in {profile}"
     ports = svc["spec"]["ports"]
     assert any(
-        p.get("port") == 8080 and p.get("name") == "http" and p.get("targetPort") == "http"
+        p.get("port") == 8080
+        and p.get("name") == "http"
+        and p.get("targetPort") == "http"
         for p in ports
     ), f"{profile}: trigger-service Service must expose name=http port=8080"
 
@@ -185,9 +187,7 @@ def test_ha_profiles_inherit_ha_replica_count(
         f"{profile}: trigger-service Deployment must not set static replicas "
         "when the HPA is active"
     )
-    hpa = _find(
-        rendered[profile], "HorizontalPodAutoscaler", "custos-trigger-service"
-    )
+    hpa = _find(rendered[profile], "HorizontalPodAutoscaler", "custos-trigger-service")
     assert hpa is not None
     assert hpa["spec"]["minReplicas"] == 3, (
         f"{profile}: expected trigger-service HPA floor of 3"
