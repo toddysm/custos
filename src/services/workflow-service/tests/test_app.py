@@ -603,8 +603,8 @@ def test_lifespan_swallows_workflow_client_close_errors(
 
 
 def _route_paths(app: FastAPI) -> set[str]:
-    """Return the set of HTTP route ``path`` templates on ``app``."""
-    return {route.path for route in app.routes if hasattr(route, "path")}
+    """Return wire path templates without Starlette's internal converter annotations."""
+    return {route.path_format for route in app.routes if hasattr(route, "path_format")}
 
 
 def test_create_app_mounts_public_run_routes(fake_run_components: RunComponents) -> None:

@@ -118,7 +118,7 @@ _DOCUMENTED_ENDPOINTS: Final[frozenset[tuple[str, str, int]]] = frozenset(
 
 
 def _live_routes() -> frozenset[tuple[str, str, int]]:
-    """Reflect the assembled app's route table to ``(method, path, status)``.
+    """Reflect wire routes to ``(method, path, status)`` without internal converters.
 
     Uses ``create_app(require_call_context=False)`` so the app
     assembles without standing up any real backend; the route
@@ -142,7 +142,7 @@ def _live_routes() -> frozenset[tuple[str, str, int]]:
             # guard meaningful.
             if method == "HEAD":
                 continue
-            out.add((method, route.path, route.status_code or 200))
+            out.add((method, route.path_format, route.status_code or 200))
     return frozenset(out)
 
 

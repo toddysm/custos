@@ -316,6 +316,10 @@ is no longer carried in the URL, every Internal RPC body promotes
 | `POST` | `/internal/runs/{run_id}:cancel` | `InternalCancelRunRequest` | 202 `RunRefResponse` | Internal RPC: request cancellation. |
 | `POST` | `/internal/runs/{run_id}/steps/{step_id}:raiseEvent` | `RaiseExternalEventRequest` | 202 (empty body) | Internal RPC: deliver an external event into a running workflow's `wait_for_external_event` step. |
 
+For `RaiseExternalEvent`, `run_id` is opaque and can contain child-address
+slashes, such as `parent/invoke/workflow`. Percent-encode the identifier when
+building the URL; the receiver preserves the decoded child identity.
+
 ### `InternalStartRunRequest`
 
 ```json
