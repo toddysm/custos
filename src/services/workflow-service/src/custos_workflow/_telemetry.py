@@ -673,6 +673,8 @@ _STEP_EXECUTE_OUTCOMES: Final[Mapping[str, str]] = {
     "step.resume_registration_failed": "resume_registration_failed",
     "step.resume_subscription_divergent": "resume_subscription_divergent",
     "step.resume_mirror_persist_error": "resume_mirror_persist_error",
+    "step.resume_wait_expired": "resume_wait_expired",
+    "step.resume_delivery_failed": "resume_delivery_failed",
 }
 
 # Build-time check: the outcome map keys MUST equal the locked

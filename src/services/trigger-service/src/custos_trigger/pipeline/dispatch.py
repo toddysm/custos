@@ -43,7 +43,10 @@ import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from custos_trigger.pipeline.reliable import ReliableDispatcher
 
 from custos_trigger.clients.workflow import (
     RaiseExternalEventRequest,
@@ -168,6 +171,7 @@ class Dispatcher:
         audit: AuditSink | None = None,
         backoff_base_seconds: float = DEFAULT_BACKOFF_BASE_SECONDS,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        reliable: ReliableDispatcher | None = None,
     ) -> None:
         self._client = client
         self._dedup = deduplicator
@@ -176,11 +180,14 @@ class Dispatcher:
         self._audit: AuditSink = audit if audit is not None else NoopAuditSink()
         self._backoff_base_seconds = backoff_base_seconds
         self._sleep = sleep
+        self.reliable = reliable
 
     async def dispatch_start(
         self, event: NormalizedEvent, match: StartMatch, *, depth: int = 0
     ) -> DispatchOutcome:
         """Dispatch a start match as a Workflow Service ``StartRun``."""
+        if self.reliable is not None:
+            return await self.reliable.dispatch_start(event, match, depth=depth)
         sub = match.subscription
         await self._audit.emit(
             AUDIT_MATCHED,
@@ -252,6 +259,10 @@ class Dispatcher:
         workspace of its own, so the tenant context comes from the receiver.
         """
         reg = match.registration
+        if self.reliable is not None:
+            return await self.reliable.dispatch_resume(
+                event, match, workspace_id=workspace_id, depth=depth
+            )
         await self._audit.emit(
             AUDIT_MATCHED,
             workspace_id=workspace_id,

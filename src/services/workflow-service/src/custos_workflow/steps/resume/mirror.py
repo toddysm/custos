@@ -125,10 +125,17 @@ class ResumeSubscriptionMirror:
     selector: str | None = None
     workspace_id: str | None = None
     source: ResumeSource | None = None
+    delivery_protocol: int = 1
 
     def __post_init__(self) -> None:
         """Validate mirror identity, timestamps and the optional external association."""
-        validate_resume_context(self.workspace_id, self.source, self.selector)
+        validate_resume_context(
+            self.workspace_id, self.source, self.selector, delivery_protocol=self.delivery_protocol
+        )
+        if type(self.delivery_protocol) is not int or self.delivery_protocol not in (1, 2):
+            raise ValueError("unsupported resume delivery protocol")
+        if self.delivery_protocol == 2 and self.workspace_id is None:
+            raise ValueError("version-2 mirror requires workspace")
         if not self.mirror_id:
             raise ValueError("ResumeSubscriptionMirror.mirror_id must be a non-empty string")
         if not self.run_id:
@@ -177,8 +184,11 @@ class ResumeSubscriptionMirror:
             "registeredAt": self.registered_at.astimezone(UTC).isoformat(),
             "expiresAt": self.expires_at.astimezone(UTC).isoformat(),
         }
-        if self.source is not None:
+        if self.workspace_id is not None:
             wire["workspaceId"] = self.workspace_id
+        if self.delivery_protocol != 1:
+            wire["deliveryProtocol"] = self.delivery_protocol
+        if self.source is not None:
             wire["source"] = self.source.to_wire()
         return wire
 
@@ -214,6 +224,7 @@ class ResumeSubscriptionMirror:
             expires_at=_parse_iso8601_utc(data["expiresAt"]),
             selector=data.get("selector"),
             workspace_id=data.get("workspaceId"),
+            delivery_protocol=data.get("deliveryProtocol", 1),
             source=ResumeSource.from_wire(data["source"])
             if data.get("source") is not None
             else None,
@@ -301,7 +312,9 @@ class InMemoryResumeSubscriptionMirrorRepository:
         async with self._lock:
             existing = self._rows.get(mirror.mirror_id)
             if existing is not None and (
-                existing.workspace_id != mirror.workspace_id or existing.source != mirror.source
+                existing.workspace_id != mirror.workspace_id
+                or existing.source != mirror.source
+                or existing.delivery_protocol != mirror.delivery_protocol
             ):
                 raise ValueError("resume mirror source association cannot be rebound")
             self._rows[mirror.mirror_id] = mirror

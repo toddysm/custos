@@ -129,10 +129,17 @@ class RegisterResumeSubscriptionRequest:
     selector: str | None = None
     workspace_id: str | None = None
     source: ResumeSource | None = None
+    delivery_protocol: int = 1
 
     def __post_init__(self) -> None:
         """Validate resolved values and require tenant/selective context for external waits."""
-        validate_resume_context(self.workspace_id, self.source, self.selector)
+        validate_resume_context(
+            self.workspace_id, self.source, self.selector, delivery_protocol=self.delivery_protocol
+        )
+        if type(self.delivery_protocol) is not int or self.delivery_protocol not in (1, 2):
+            raise ValueError("unsupported resume delivery protocol")
+        if self.delivery_protocol == 2 and self.workspace_id is None:
+            raise ValueError("version-2 resume registration requires workspace")
         if not self.run_id:
             raise ValueError("RegisterResumeSubscriptionRequest.run_id must be a non-empty string")
         if not self.step_id:
@@ -366,8 +373,11 @@ def _register_request_to_wire(request: RegisterResumeSubscriptionRequest) -> Map
         "selector": request.selector,
         "ttl": request.ttl,
     }
-    if request.source is not None:
+    if request.workspace_id is not None:
         wire["workspaceId"] = request.workspace_id
+    if request.delivery_protocol != 1:
+        wire["deliveryProtocol"] = request.delivery_protocol
+    if request.source is not None:
         wire["source"] = request.source.to_wire()
     return wire
 

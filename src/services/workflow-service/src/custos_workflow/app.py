@@ -49,6 +49,7 @@ from custos_workflow.providers import (
     ENV_TS_ENDPOINT,
     MetadataStorePool,
     RunComponents,
+    WorkflowActivityRegistrar,
     load_run_components,
     open_metadata_store,
 )
@@ -199,6 +200,27 @@ def create_app(
             resume_handler=components.resume_handler,
         )
         runtime.register_workflow(orchestrator_fn, name=WORKFLOW_NAME)
+
+        if components.trigger_delivery_controller is not None:
+            from custos_workflow.steps.resume.durable import (
+                RESUME_EFFECT_ACTIVITY,
+                ResumeActivityHandler,
+                build_resume_activity,
+            )
+
+            if components.durable_resume_client is None:
+                raise ValueError("durable resume client is not configured")
+            if not isinstance(runtime, WorkflowActivityRegistrar):
+                raise ValueError("durable resume requires activity registration support")
+            provider = components.trigger_delivery_controller.provider
+            await provider.check_delivery_ready()
+            runtime.register_activity(
+                build_resume_activity(
+                    ResumeActivityHandler(provider, components.durable_resume_client),
+                    asyncio.get_running_loop(),
+                ),
+                name=RESUME_EFFECT_ACTIVITY,
+            )
 
         try:
             await runtime.start()

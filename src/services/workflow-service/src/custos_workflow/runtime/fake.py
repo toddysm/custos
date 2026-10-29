@@ -34,11 +34,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from collections import deque
 from collections.abc import Callable, Generator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, TypeVar
 from uuid import uuid4
 
 from custos_workflow.runtime._common import (
@@ -88,6 +89,7 @@ FakeWorkflowFn = Callable[["FakeWorkflowContext", Any], Generator[Any, Any, Any]
 
 #: An activity callable: ``(ctx, input) -> result``.
 FakeActivityFn = Callable[["FakeActivityContext", Any], Any]
+_Result = TypeVar("_Result")
 
 
 # Internal task tokens yielded by FakeWorkflowContext.* — analogous to
@@ -367,6 +369,8 @@ class _InstanceState:
     next_result: Any = None
     pending_exception: BaseException | None = None
     waiting_for_event: str | None = None
+    waiting_for_race: _WhenAnyTask | None = None
+    waiting_for_timer: _TimerTask | None = None
     pending_events: dict[str, deque[Any]] = field(default_factory=dict)
     # Sub-Orchestration (WF-IMPL-084): monotonic counter used to
     # derive deterministic child instance ids, plus the ordered log
@@ -438,6 +442,8 @@ class FakeWorkflowRuntime:
         self._registered_activity_order: list[str] = []
         self._instances: dict[str, _InstanceState] = {}
         self._started = False
+        self._requires_async_bridge = False
+        self._bridge_lock = threading.RLock()
         # Mirrors :attr:`custos_workflow.runtime.WorkflowRuntime._worker_ready`
         # so the FastAPI lifespan (WF-IMPL-043) can swap the fake in
         # for the real runtime without touching readiness wiring.
@@ -481,6 +487,8 @@ class FakeWorkflowRuntime:
         if key not in self._activities:
             self._registered_activity_order.append(key)
         self._activities[key] = fn
+        if getattr(fn, "requires_async_bridge", False):
+            self._requires_async_bridge = True
 
     @property
     def registered_activities(self) -> tuple[str, ...]:
@@ -706,6 +714,9 @@ class FakeWorkflowRuntime:
                 return
 
             if isinstance(task, _TimerTask):
+                if self._requires_async_bridge and task.fire_at > self.now:
+                    state.waiting_for_timer = task
+                    return
                 state.history.append(
                     HistoryEvent(kind="timer_fired", detail={"fire_at": task.fire_at})
                 )
@@ -741,6 +752,9 @@ class FakeWorkflowRuntime:
             if isinstance(task, _WhenAnyTask):
                 winner = next((t for t in task.tasks if self._task_ready(state, t)), None)
                 if winner is None:
+                    if self._requires_async_bridge:
+                        state.waiting_for_race = task
+                        return
                     self._fail_instance(
                         state,
                         "when_any has no ready task; the fake runtime cannot block "
@@ -858,7 +872,9 @@ class FakeWorkflowRuntime:
 
         if isinstance(token, _ExternalEventTask):
             return bool(state.pending_events.get(token.event_name))
-        if isinstance(token, _ActivityTask | _ChildWorkflowTask | _TimerTask):
+        if isinstance(token, _TimerTask):
+            return not self._requires_async_bridge or token.fire_at <= self.now
+        if isinstance(token, _ActivityTask | _ChildWorkflowTask):
             return True
         raise TypeError(  # pragma: no cover - defensive; combinators only see known tokens
             f"unsupported task type in fan-in combinator: {type(token).__name__}"
@@ -1090,6 +1106,37 @@ class FakeWorkflowRuntime:
         # Either we're suspended or no one's waiting for this event yet:
         # buffer for FIFO delivery on the next wait.
         state.pending_events.setdefault(event_name, deque()).append(data)
+        self._wake_pending(state)
+
+    def _wake_pending(self, state: _InstanceState) -> None:
+        """Resume loop-bridged workflows only when an event or actual timer deadline is ready."""
+        if state.status is not RunStatus.RUNNING:
+            return
+        if state.waiting_for_race is not None:
+            winner = next(
+                (task for task in state.waiting_for_race.tasks if self._task_ready(state, task)),
+                None,
+            )
+            if winner is not None:
+                state.waiting_for_race = None
+                self._commit_task(state, winner)
+                state.next_result = winner
+                self._drive(state)
+        elif state.waiting_for_timer is not None and state.waiting_for_timer.fire_at <= self.now:
+            timer, state.waiting_for_timer = state.waiting_for_timer, None
+            self._commit_task(state, timer)
+            state.next_result = None
+            self._drive(state)
+
+    def _advance_time(self, delta: timedelta) -> None:
+        """Advance the deterministic clock for real wait/timer races without sleeping."""
+        if delta < timedelta(0):
+            raise ValueError("fake workflow clock cannot move backwards")
+        self.now += delta
+        for state in tuple(self._instances.values()):
+            if state.ctx is not None:
+                state.ctx._now = self.now
+            self._wake_pending(state)
 
     def _terminate(self, instance_id: str, output: Any) -> None:
         state = self.instance(instance_id)
@@ -1114,6 +1161,9 @@ class FakeWorkflowRuntime:
         state.status = RunStatus.RUNNING
         state.last_updated_at = self.now
         state.history.append(HistoryEvent(kind="resumed"))
+        if state.waiting_for_race is not None or state.waiting_for_timer is not None:
+            self._wake_pending(state)
+            return
         # If the instance was paused while waiting on an external event
         # and a matching event was buffered while suspended, deliver it
         # now. Otherwise the generator is logically still waiting; leave
@@ -1159,6 +1209,8 @@ def _to_serialized(value: Any) -> str | None:
 
     if value is None:
         return None
+    if callable(getattr(value, "model_dump", None)):
+        return json.dumps(value.model_dump(mode="json"), sort_keys=True)
     return json.dumps(value, default=str, sort_keys=True)
 
 
@@ -1173,38 +1225,53 @@ class FakeWorkflowClient:
     def __init__(self, *, runtime: FakeWorkflowRuntime) -> None:
         self._runtime = runtime
 
+    async def _invoke(self, operation: Callable[[], _Result]) -> _Result:
+        """Mirror worker-thread activity execution only when a loop-bound bridge is registered."""
+        if self._runtime._requires_async_bridge:
+
+            def threaded() -> _Result:
+                """Serialize fake actor mutations without blocking the application's async loop."""
+                with self._runtime._bridge_lock:
+                    return operation()
+
+            return await asyncio.to_thread(threaded)
+        await asyncio.sleep(0)
+        return operation()
+
     async def schedule_new_workflow(self, request: ScheduleWorkflowRequest) -> str:
         # Tiny ``await asyncio.sleep(0)`` keeps the coroutine schedulable so
         # tests that depend on cooperative-yield ordering behave the same
         # as against the real :func:`asyncio.to_thread` wrapper.
-        await asyncio.sleep(0)
-        return self._runtime._schedule(request)
+        return await self._invoke(lambda: self._runtime._schedule(request))
 
     async def get_workflow_state(self, request: GetRunStateRequest) -> RunState | None:
         # ``fetch_payloads`` is honoured by the real adapter; the fake
         # always returns full payloads because no extra round-trip cost
         # exists in-process.
-        await asyncio.sleep(0)
-        return self._runtime._snapshot(request.instance_id)
+        return await self._invoke(lambda: self._runtime._snapshot(request.instance_id))
 
     async def terminate_workflow(self, request: TerminateRunRequest) -> None:
         # ``recursive`` has no effect in the fake (there are no child
         # instances yet); preserved on the request for API parity.
-        await asyncio.sleep(0)
-        self._runtime._terminate(request.instance_id, request.output)
+        await self._invoke(lambda: self._runtime._terminate(request.instance_id, request.output))
 
     async def pause_workflow(self, request: PauseRunRequest) -> None:
-        await asyncio.sleep(0)
-        self._runtime._pause(request.instance_id)
+        await self._invoke(lambda: self._runtime._pause(request.instance_id))
 
     async def resume_workflow(self, request: ResumeRunRequest) -> None:
-        await asyncio.sleep(0)
-        self._runtime._resume(request.instance_id)
+        await self._invoke(lambda: self._runtime._resume(request.instance_id))
 
     async def raise_workflow_event(self, request: RaiseRunEventRequest) -> None:
-        await asyncio.sleep(0)
-        self._runtime._raise_event(request.instance_id, request.event_name, request.data)
+        await self._invoke(
+            lambda: self._runtime._raise_event(
+                request.instance_id, request.event_name, request.data
+            )
+        )
 
     async def aclose(self) -> None:
         # No resources to release in the fake; provided for API symmetry.
         await asyncio.sleep(0)
+
+    async def advance_time(self, delta: timedelta) -> None:
+        """Advance explicit timers on the worker thread so loop-owned effects remain safe."""
+        await self._invoke(lambda: self._runtime._advance_time(delta))

@@ -21,6 +21,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Literal, TypeVar, cast
 
+from custos_spl.delivery_memory import MemoryDeliveryState
 from custos_spl.errors import ImmutableViolation, LeaseExpired
 from custos_spl.ids import SubscriptionId, WorkspaceId
 from custos_spl.interfaces.connector_instance_store import ConnectorReferenceReader
@@ -117,7 +118,7 @@ def is_memory_dsn(dsn: str) -> bool:
     return lowered == "" or lowered in _MEMORY_DSN_SENTINELS or lowered.startswith("memory://")
 
 
-class InMemoryTriggerMetadataStore:
+class InMemoryTriggerMetadataStore(MemoryDeliveryState):
     """In-process :class:`TriggerMetadataStore` for local dev + tests.
 
     Implements the eight Trigger-Service write methods of
@@ -134,6 +135,7 @@ class InMemoryTriggerMetadataStore:
     """
 
     def __init__(self, *, now: Callable[[], datetime] | None = None) -> None:
+        super().__init__(now=now)
         self._now = now if now is not None else _utcnow
         self._subscriptions: dict[tuple[str, str], SplSubscription] = {}
         self._selectors: dict[tuple[str, str], list[SplSubscriptionSelector]] = {}
@@ -142,7 +144,7 @@ class InMemoryTriggerMetadataStore:
         self._schedules: dict[tuple[str, str], SplSchedule] = {}
         self._scheduler_leases: dict[str, SchedulerLease] = {}
         self._pending_fires: dict[tuple[str, str], PendingScheduleFire] = {}
-        self._dead_letters: dict[tuple[str, str], DeadLetterEntry] = {}
+        self._dead_letters: dict[tuple[str, str], DeadLetterEntry] = self._delivery_dead_letters
 
     async def check_dead_letters_ready(self) -> None:
         """Memory state is ready at construction, without implying restart durability."""
@@ -616,6 +618,8 @@ class InMemoryTriggerMetadataStore:
         existing = self._resume.get(key)
         if existing is not None and (
             existing.payload.get("source") != resume.payload.get("source")
+            or existing.payload.get("deliveryProtocol", 1)
+            != resume.payload.get("deliveryProtocol", 1)
             or existing.expires_at.astimezone(UTC) > as_of.astimezone(UTC)
         ):
             return existing

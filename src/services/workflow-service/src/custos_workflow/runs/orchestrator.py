@@ -69,7 +69,7 @@ from __future__ import annotations
 import copy
 from collections.abc import Callable, Generator, Mapping
 from dataclasses import dataclass, field
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import TYPE_CHECKING, Any, Final, cast, get_args
 
 import custos_cel
@@ -158,7 +158,7 @@ WORKFLOW_NAME: Final[str] = "custos.workflow.run"
 class RunInput:
     """Inputs the ``run_orchestrator`` workflow consumes.
 
-    All five fields are required-by-shape; ``inputs`` and
+    The five original fields retain their shape; ``inputs`` and
     ``idempotency_key`` carry sensible defaults so tests that don't
     care about either can construct a minimal instance.
 
@@ -175,6 +175,8 @@ class RunInput:
         idempotency_key: Optional client-supplied de-duplication
             key; surfaced in audit envelopes downstream. Empty
             string when not supplied.
+        delivery_protocol: Persisted execution contract. Version 1 preserves
+            legacy behavior; version 2 drives scoped durable waits.
     """
 
     workspace_id: str
@@ -182,28 +184,48 @@ class RunInput:
     compiled_graph_json: str
     inputs: Mapping[str, Any] = field(default_factory=dict)
     idempotency_key: str = ""
+    delivery_protocol: int = 1
+
+    def __post_init__(self) -> None:
+        """Never reinterpret an unknown persisted delivery protocol during runtime replay."""
+        if type(self.delivery_protocol) is not int or self.delivery_protocol not in (1, 2):
+            raise ValueError("unsupported workflow delivery protocol")
 
     def to_dict(self) -> dict[str, Any]:
         """Render to a JSON-serializable dict for the Dapr boundary."""
 
-        return {
+        result: dict[str, Any] = {
             "workspace_id": self.workspace_id,
             "workflow_version_id": self.workflow_version_id,
             "compiled_graph_json": self.compiled_graph_json,
             "inputs": dict(self.inputs),
             "idempotency_key": self.idempotency_key,
         }
+        if self.delivery_protocol != 1:
+            result["delivery_protocol"] = self.delivery_protocol
+        return result
+
+    def model_dump(self, *, mode: str = "json") -> dict[str, Any]:
+        """Use Dapr's supported model protocol rather than automatic dataclass reconstruction."""
+        return self.to_dict()
 
     @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> RunInput:
-        """Reconstruct from a JSON-decoded mapping."""
+    def model_validate(cls, payload: Mapping[str, Any]) -> RunInput:
+        """Rehydrate plain runtime input through the existing version-aware parser."""
+        return cls.from_dict(payload)
 
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any] | SimpleNamespace) -> RunInput:
+        """Reconstruct from a JSON-decoded mapping."""
+        if isinstance(payload, SimpleNamespace):
+            payload = vars(payload)
         return cls(
             workspace_id=str(payload["workspace_id"]),
             workflow_version_id=str(payload["workflow_version_id"]),
             compiled_graph_json=str(payload["compiled_graph_json"]),
             inputs=dict(payload.get("inputs") or {}),
             idempotency_key=str(payload.get("idempotency_key") or ""),
+            delivery_protocol=payload.get("delivery_protocol", 1),
         )
 
 
@@ -244,6 +266,30 @@ class RunOutput:
     failure_envelope: Mapping[str, Any] | None = None
     waiting_step: str | None = None
     waiting_reason: str | None = None
+
+    def model_dump(self, *, mode: str = "json") -> dict[str, Any]:
+        """Serialize immutable mappings through Dapr's model protocol, not dataclass deep-copy."""
+        return self.to_dict()
+
+    @classmethod
+    def model_validate(cls, payload: Mapping[str, Any]) -> RunOutput:
+        """Rehydrate a valid runtime outcome while preserving the original field names."""
+        if payload.get("status") not in {"succeeded", "failed", "waiting"}:
+            raise ValueError("invalid workflow outcome status")
+        outputs = payload.get("outputs")
+        if not isinstance(outputs, Mapping) or any(
+            not isinstance(key, str) or not isinstance(value, Mapping)
+            for key, value in outputs.items()
+        ):
+            raise ValueError("workflow outputs must map step identifiers to objects")
+        return cls(
+            status=payload["status"],
+            outputs=outputs,
+            failed_step=payload.get("failed_step"),
+            failure_envelope=payload.get("failure_envelope"),
+            waiting_step=payload.get("waiting_step"),
+            waiting_reason=payload.get("waiting_reason"),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """Render to a JSON-serializable dict for the Dapr boundary."""
@@ -455,7 +501,7 @@ def make_run_orchestrator(
         # this wrapper only emits ``outcome=ok`` samples; a buggy
         # reconciler that does raise still surfaces on the
         # ``internal_error`` outcome via the shared error path.
-        if on_replay is not None:
+        if on_replay is not None and run_input.delivery_protocol == 1:
             with observe_run_replay():
                 on_replay(_step_ctx(ctx, run_input, output_bag, clock), graph)
 
@@ -542,12 +588,19 @@ def make_run_orchestrator(
                 # ``waitFor:`` node reached without a ``resume_handler``
                 # wired falls through to the generic dispatcher, which
                 # raises ``step.kind_not_implemented``.
-                result = _dispatch_resume_subscription(
-                    resume_handler,
-                    _step_ctx(ctx, run_input, output_bag, clock),
-                    graph,
-                    step_id,
-                )
+                if run_input.delivery_protocol == 2:
+                    from custos_workflow.steps.resume.durable import drive_durable_resume
+
+                    result = yield from drive_durable_resume(
+                        resume_handler, _step_ctx(ctx, run_input, output_bag, clock), graph, step_id
+                    )
+                else:
+                    result = _dispatch_resume_subscription(
+                        resume_handler,
+                        _step_ctx(ctx, run_input, output_bag, clock),
+                        graph,
+                        step_id,
+                    )
             elif node.kind is StepKind.ACTIVITY and activity_handler is not None:
                 # WF-IMPL-074 yield protocol: drive the activity
                 # handler's generator via ``yield from`` so every
@@ -834,6 +887,7 @@ def _step_ctx(
         workflow_context=ctx,
         outputs=MappingProxyType(snapshot),
         clock=clock,
+        delivery_protocol=run_input.delivery_protocol,
     )
 
 

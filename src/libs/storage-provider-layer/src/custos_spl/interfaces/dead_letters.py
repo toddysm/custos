@@ -243,10 +243,19 @@ class DeadLetterData:
             if kind == "start"
             else {"kind", "runId", "stepId", "eventName", "payload"}
         )
-        if kind not in ("start", "resume") or set(target) != required:
+        if kind not in ("start", "resume") or set(target) - {"deliveryProtocol"} != required:
             raise ValueError("resolved target must be an exact start or resume RPC shape")
+        protocol = target.get("deliveryProtocol", 1)
+        if type(protocol) is not int or protocol not in (1, 2):
+            raise ValueError("unsupported target delivery protocol")
         for key in required - {"kind", "inputs", "payload"}:
             value = target[key]
+            if (
+                key == "workflowVersionId"
+                and value is None
+                and self.history[-1].code == "configuration"
+            ):
+                continue
             if not isinstance(value, str):
                 raise ValueError("resolved target identifiers must be strings")
             _identifier(value)

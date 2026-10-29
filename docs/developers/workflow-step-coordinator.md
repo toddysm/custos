@@ -451,6 +451,8 @@ without extending the locked set.
 | `step.resume_registration_failed` | `ResumeRegistrationFailedError` | The Resume Subscription Manager's `RegisterResumeSubscription` RPC stayed unreachable after `WF_REGISTER_SUB_MAX_RETRIES` (default 5). Carries the `event_key`, `max_retries`, and last `cause`. | `StepFailed` envelope mapped to `class: retryable` so the workflow-level policy decides. |
 | `step.resume_subscription_divergent` | `ResumeSubscriptionDivergentError` | On Dapr replay the `waitFor.selector` diverged from the value persisted in the original `ResumeSubscriptionMirror`; the original wins. Carries the `event_key`, `original_selector`, and `replay_selector`. | `StepFailed` envelope; retry driver is not consulted (deterministic-replay bug). |
 | `step.resume_mirror_persist_error` | `ResumeMirrorPersistError` | The `MetadataStoreProvider` write that mirrors a resume subscription (persisted before the TS call) could not be issued. Carries the `event_key` and `cause`. | `StepFailed` envelope; retry driver is not consulted (structural failure). |
+| `step.resume_wait_expired` | `ResumeWaitExpiredError` | A version-2 durable wait reached its persisted deadline before valid consumption. | `StepFailed` with `class: permanent`; no late event is bound as output. |
+| `step.resume_delivery_failed` | `ResumeDeliveryFailedError` | A version-2 event could not be validated or durably acknowledged as this wait's input. | `StepFailed` with `class: retryable`; the step does not proceed on unacknowledged input. |
 
 Every entry inflates a stable `to_dict()` envelope keyed on the
 common base — `{kind, message, run_id?, step_id?, attempt?}` —

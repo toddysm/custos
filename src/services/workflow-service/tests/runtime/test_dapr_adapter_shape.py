@@ -128,6 +128,31 @@ async def test_get_workflow_state_returns_none_when_sdk_returns_none() -> None:
     inner.get_workflow_state.assert_called_once_with("missing", fetch_payloads=True)
 
 
+async def test_versioned_start_preserves_existing_instances_in_every_status() -> None:
+    """Verify the actual SDK policy object includes completed instances, not only active ones."""
+    from dapr.ext.workflow._durabletask.client import (
+        OrchestrationIdReuseAction,
+        OrchestrationStatus,
+        WorkflowIdReusePolicy,
+    )
+
+    inner = MagicMock()
+    inner.schedule_new_workflow.return_value = "stable-id"
+    client = WorkflowClient(client=inner)
+    assert (
+        await client.schedule_new_workflow(
+            ScheduleWorkflowRequest(
+                workflow="workflow", instance_id="stable-id", preserve_existing=True
+            )
+        )
+        == "stable-id"
+    )
+    policy = inner.schedule_new_workflow.call_args.kwargs["reuse_id_policy"]
+    assert isinstance(policy, WorkflowIdReusePolicy)
+    assert policy.action is OrchestrationIdReuseAction.IGNORE
+    assert set(policy.operation_status) == set(OrchestrationStatus)
+
+
 async def test_get_workflow_state_maps_dapr_state_to_run_state() -> None:
     state = MagicMock()
     state.instance_id = "inst-7"

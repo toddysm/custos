@@ -111,6 +111,40 @@ def _headers(workspace: str = "ws_demo") -> dict[str, str]:
     }
 
 
+async def test_versioned_internal_wait_is_scoped_and_persisted(
+    client: TestClient,
+    metadata_store: InMemoryTriggerMetadataStore,
+) -> None:
+    """A trusted versioned internal wait retains its workspace without an external source."""
+    response = client.post(
+        "/RegisterResumeSubscription",
+        json={**_TRIPLE, "workspaceId": "ws_demo", "deliveryProtocol": 2, "ttl": "PT1H"},
+    )
+    assert response.status_code == 200
+    identifier = response.json()["subscriptionId"]
+    row = await metadata_store.get_resume_subscription(WorkspaceId("ws_demo"), identifier)
+    assert row is not None and row.payload["deliveryProtocol"] == 2
+    assert await metadata_store.get_resume_subscription(WorkspaceId("_resume"), identifier) is None
+
+
+def test_versioned_internal_wait_still_requires_workflow_identity(
+    metadata_store: InMemoryTriggerMetadataStore,
+) -> None:
+    """Protocol selection never substitutes for authenticating the Workflow service principal."""
+    app = create_app(
+        authz_endpoint="",
+        providers=Providers(metadata_store=metadata_store),
+        receiver_configuration_enabled=True,
+    )
+    with TestClient(app) as opened:
+        response = opened.post(
+            "/RegisterResumeSubscription",
+            json={**_TRIPLE, "workspaceId": "ws_demo", "deliveryProtocol": 2},
+            headers={"dapr-caller-app-id": "workflow-service"},
+        )
+    assert response.status_code == 503
+
+
 def _external(workspace: str = "ws_demo", connector: str = "registry") -> dict[str, object]:
     """Build an external wait with a selective expression and explicit delivery demand."""
     return {

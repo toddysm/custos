@@ -38,14 +38,18 @@ design gate [#1004](https://github.com/toddysm/custos/issues/1004).
 | TS-IMPL-028 | [#1010](https://github.com/toddysm/custos/issues/1010) | Shared connector-envelope adapter and vendor-push delivery; source-scoped resume correlation without payload run/step IDs | 022, 023, 026 |
 | TS-IMPL-029 | [#1012](https://github.com/toddysm/custos/issues/1012) | Existing polling/cursor reuse plus durable operator-pause and shared due-time control; resume-only demand and publish-failure recovery | 023, 028 |
 | TS-IMPL-030 | [#1013](https://github.com/toddysm/custos/issues/1013) | Durable dead-letter storage and fenced expiring replay claims; pagination and sanitized persistence | - |
-| TS-IMPL-031 | [#1014](https://github.com/toddysm/custos/issues/1014) | Durable failure/replay and downstream idempotency across restart and retention horizon; no duplicate effect | 022, 030 |
+| TS-IMPL-031 | [#1014](https://github.com/toddysm/custos/issues/1014) | Durable failure/replay and downstream idempotency; durable Workflow waits/mirrors and versioned step-scoped consumer protection; no duplicate effect across restart and retention | 022, 030 |
 | TS-IMPL-032 | [#1015](https://github.com/toddysm/custos/issues/1015) | Production signed call-context verification and trigger:admin; forged/expired/wrong-workspace rejection | - |
 | TS-IMPL-033 | [#1016](https://github.com/toddysm/custos/issues/1016) | Protected recovery endpoints and retention; route-collision/concurrent-replay/expiry tests | 031, 032 |
-| TS-IMPL-034 | [#1017](https://github.com/toddysm/custos/issues/1017) | Runtime/deployment wiring, durable audit and operational signals; four-profile rendering and safe rollback | 025, 027, 028, 029, 033 |
+| TS-IMPL-034 | [#1017](https://github.com/toddysm/custos/issues/1017) | Activation/readiness/deployment wiring, durable audit and operational signals; consume the durable wait prerequisite from 031; four-profile rendering and safe rollback | 025, 027, 028, 029, 033 |
 | TS-IMPL-035 | [#1018](https://github.com/toddysm/custos/issues/1018) | Deployed receiver-to-Workflow failure/recovery and legacy regression coverage in hosted CI | 034 |
 | TS-IMPL-036 | [#1019](https://github.com/toddysm/custos/issues/1019) | Developer/operator setup, recovery and migration documentation; checked links/examples | 035 |
 
 ## Execution order and overlap
+
+The owner approved moving durable wait execution and consumer-side replay
+protection from 034 into 031 on 2026-10-29. Public request formats remain valid;
+the protocol is persisted per run, and unsafe legacy replay fails explicitly.
 
 One valid sequential order is:
 
