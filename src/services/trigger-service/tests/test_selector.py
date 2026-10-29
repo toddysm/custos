@@ -153,6 +153,18 @@ def test_evaluate_reads_event_data() -> None:
     assert evaluator.evaluate(compiled, _event(data={"status": "failed"})) is False
 
 
+@pytest.mark.parametrize(
+    "source_type", [SourceType.MANUAL, SourceType.SCHEDULED, SourceType.INTERNAL]
+)
+def test_source_type_uses_declared_string_primitive(source_type: SourceType) -> None:
+    """The runtime binding uses the same string type advertised by its envelope schema."""
+    evaluator = SelectorEvaluator()
+    incoming = _event(source_type=source_type)
+    assert evaluator.matches(
+        f"event.source.type == '{source_type.value}'", incoming, subscription_id="source"
+    )
+
+
 def test_evaluate_accepts_plain_mapping() -> None:
     evaluator = SelectorEvaluator()
     compiled = evaluator.compile('event.kind == "workflow.completed"', subscription_id="sub-1")

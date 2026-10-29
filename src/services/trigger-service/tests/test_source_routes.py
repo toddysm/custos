@@ -230,6 +230,40 @@ async def test_selector_validation_uses_merged_source_and_preserves_failed_chang
     assert after is not None and not after.enabled
 
 
+@pytest.mark.parametrize("count", [None, 0])
+def test_manual_fire_retains_scheduled_selector_schema(
+    client: TestClient, count: int | None
+) -> None:
+    """Manual transport keeps numeric authoring types without fabricating a scheduled event."""
+    created = client.post(
+        _PATH,
+        json={
+            "sourceType": "scheduled",
+            "workflowId": "wf",
+            "targetWorkflowVersionId": "version",
+            "sourceConfig": {"intervalSeconds": 30},
+            "selector": (
+                "event.source.type == 'manual' && event.kind == 'manual.fire' "
+                "&& event.data.skippedCount + 1 > 0"
+            ),
+        },
+        headers=_headers(),
+    )
+    assert created.status_code == 201, created.text
+    path = f"{_PATH}/{created.json()['subscriptionId']}:fire"
+    payload = {"inputs": {} if count is None else {"skippedCount": count}}
+    assert client.post(path, json=payload, headers=_headers()).status_code == 403
+    context = json.loads(_headers()[CALLCTX_HEADER])
+    context["permissions"].append("trigger:subscriptions:fire")
+    fired = client.post(path, json=payload, headers={CALLCTX_HEADER: json.dumps(context)})
+    if count is None:
+        assert fired.status_code == 409, fired.text
+        assert fired.json()["code"] == "trigger.api.subscription_not_fireable"
+    else:
+        assert fired.status_code == 200, fired.text
+        assert fired.json()["runId"] == "run-fake"
+
+
 @pytest.mark.parametrize("kind", ["webhook", "vendor-push", "pull"])
 def test_connector_configuration_round_trip(client: TestClient, kind: str) -> None:
     """All connector-backed receiver tags persist the same validated reference contract."""

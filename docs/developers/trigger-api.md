@@ -160,6 +160,9 @@ as integers, including create/patch validation. For example,
 `${{ event.data.skippedCount + 1 }}` yields the number of coalesced occurrences.
 Changing a subscription's source revalidates its retained or replacement selector
 against the resulting source schema; invalid transitions leave stored state unchanged.
+An authorized manual `:fire` uses that same subscription schema for selector
+evaluation, while retaining `manual.fire` identity and requiring caller-supplied
+matching inputs. It does not fabricate a scheduled occurrence.
 Invalid mappings and nesting beyond 64 levels fail explicitly before dispatch.
 If a valid schedule plan expires before its fenced write, including during a
 database lock wait, it is deferred as a retryable conflict. Later rows in the

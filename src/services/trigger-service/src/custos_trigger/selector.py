@@ -249,9 +249,9 @@ def desugar_legacy_selector(*, field: str, match_type: SelectorMatchType, value:
 
 
 def _event_to_mapping(event: NormalizedEvent | Mapping[str, Any]) -> Mapping[str, Any]:
-    """Render an event as the camelCase mapping the ``event`` root resolves."""
+    """Render typed envelopes using their JSON wire primitives, including source enum strings."""
     if isinstance(event, NormalizedEvent):
-        return event.model_dump(by_alias=True)
+        return event.model_dump(mode="json", by_alias=True)
     return event
 
 
