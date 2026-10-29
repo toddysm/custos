@@ -208,14 +208,6 @@ async def patch_subscription(
     # when present.
     fields_set = body.model_fields_set
 
-    if "selector" in fields_set and body.selector is not None:
-        _validate_selector(
-            evaluator,
-            body.selector,
-            subscription_id=subscription_id,
-            source_type=existing.source_type,
-        )
-
     # Configuration and state are committed together after validating the merged request.
     blob_updates: dict[str, object] = {}
     if "selector" in fields_set:
@@ -236,6 +228,13 @@ async def patch_subscription(
         merged.source_config,
         required=merged.state is SubscriptionState.ACTIVE,
     )
+    if "selector" in fields_set or merged.source_type != existing.source_type:
+        _validate_selector(
+            evaluator,
+            merged.selector,
+            subscription_id=subscription_id,
+            source_type=merged.source_type,
+        )
     if not blob_updates and (body.state is None or body.state is existing.state):
         return existing
     source_changed = (

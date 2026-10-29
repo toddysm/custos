@@ -158,6 +158,8 @@ clock. Replay captures the resolved inputs, not templates to be rematched later.
 Scheduled selectors and mappings type `skippedCount` and `subscriptionRevision`
 as integers, including create/patch validation. For example,
 `${{ event.data.skippedCount + 1 }}` yields the number of coalesced occurrences.
+Changing a subscription's source revalidates its retained or replacement selector
+against the resulting source schema; invalid transitions leave stored state unchanged.
 Invalid mappings and nesting beyond 64 levels fail explicitly before dispatch.
 The producer and consumer recheck eligibility/revision: paused, expired, missing
 or reconfigured associations are suppressed rather than rebound to a new target.

@@ -185,6 +185,51 @@ def test_scheduled_selector_numeric_bindings_on_create_and_patch(client: TestCli
     assert client.get(path, headers=_headers()).json()["selector"] == selector
 
 
+@pytest.mark.parametrize("replacement", [None, "event.kind == 'manual.fired'"])
+async def test_selector_validation_uses_merged_source_and_preserves_failed_changes(
+    client: TestClient,
+    metadata_store: InMemoryTriggerMetadataStore,
+    replacement: str | None,
+) -> None:
+    """Source transitions validate retained or replaced selectors before any persisted mutation."""
+    created = client.post(
+        _PATH, json={"sourceType": "manual", "workflowId": "wf"}, headers=_headers()
+    )
+    assert created.status_code == 201
+    identifier = created.json()["subscriptionId"]
+    path = f"{_PATH}/{identifier}"
+    scheduled = client.patch(
+        path,
+        json={
+            "sourceType": "scheduled",
+            "sourceConfig": {"intervalSeconds": 30},
+            "selector": "event.data.skippedCount + 1 > 0",
+        },
+        headers=_headers(),
+    )
+    assert scheduled.status_code == 200, scheduled.text
+    before = await metadata_store.get_schedule(WorkspaceId("ws_demo"), identifier)
+    assert before is not None and before.enabled
+    rejected = client.patch(
+        path,
+        json={"sourceType": "manual", "sourceConfig": None},
+        headers=_headers(),
+    )
+    assert rejected.status_code == 422, rejected.text
+    assert client.get(path, headers=_headers()).json() == scheduled.json()
+    assert await metadata_store.get_schedule(WorkspaceId("ws_demo"), identifier) == before
+    changed = client.patch(
+        path,
+        json={"sourceType": "manual", "sourceConfig": None, "selector": replacement},
+        headers=_headers(),
+    )
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["sourceType"] == "manual"
+    assert changed.json()["selector"] == replacement
+    after = await metadata_store.get_schedule(WorkspaceId("ws_demo"), identifier)
+    assert after is not None and not after.enabled
+
+
 @pytest.mark.parametrize("kind", ["webhook", "vendor-push", "pull"])
 def test_connector_configuration_round_trip(client: TestClient, kind: str) -> None:
     """All connector-backed receiver tags persist the same validated reference contract."""
