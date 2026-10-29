@@ -100,6 +100,8 @@ the worker retries through durable timers with a capped 60-second backoff and
 an observable pending status. Submission and consumer completion are distinct
 receipt states. Timeout and rejected envelopes execute durable
 cancellation/deletion instead of relying on the legacy in-memory sweeper.
+Exhausted setup retries also clean up possibly accepted mirror writes and
+registrations before completing the failed step.
 The opaque `custos.resume.v2.` event-channel namespace is reserved
 case-insensitively; legacy direct delivery cannot inject an event into it.
 

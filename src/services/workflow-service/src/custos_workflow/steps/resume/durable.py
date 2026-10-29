@@ -286,11 +286,14 @@ def drive_durable_resume(
                 error, pending = pending, None
                 token = gen.throw(error)
         except StopIteration as stop:
+            if isinstance(stop.value, StepFailed) and active_mirror is not None:
+                yield from _cleanup_wait(ctx, active_mirror)
             return stop.value  # type: ignore[no-any-return]
         sent = None
         try:
             base: dict[str, Any] = {"workspaceId": workspace}
             if isinstance(token, PersistMirrorCall):
+                active_mirror = token.mirror
                 wire = yield from _activity(
                     ctx, {**base, "operation": "persist", "mirror": token.mirror.to_dict()}
                 )

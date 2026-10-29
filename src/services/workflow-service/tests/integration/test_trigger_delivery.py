@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 from asyncpg.pool import Pool
@@ -33,7 +34,11 @@ from custos_spl.interfaces.delivery import (
 from custos_spl.interfaces.metadata_store import MetadataStoreProvider, Run
 
 from custos_workflow.bindings.registry import InMemoryActivityTypeRegistry
-from custos_workflow.clients.trigger import FakeTriggerServiceClient
+from custos_workflow.clients.trigger import (
+    FakeTriggerServiceClient,
+    RegisterResumeSubscriptionRequest,
+    RegisterResumeSubscriptionResponse,
+)
 from custos_workflow.document import WorkflowDocument
 from custos_workflow.providers import _InProcessMetadataStoreProvider
 from custos_workflow.runs.controller import InMemoryLifecycleEventPublisher, WorkflowVersion
@@ -58,6 +63,8 @@ from custos_workflow.steps.resume.durable import (
     ResumeActivityHandler,
     build_resume_activity,
 )
+from custos_workflow.steps.resume.handler import PENDING_TS_SUBSCRIPTION_ID
+from custos_workflow.steps.resume.mirror import ResumeSubscriptionMirror
 
 WS = WorkspaceId("delivery-test")
 
@@ -364,6 +371,103 @@ async def test_start_ack_loss_recovers_original_runtime_and_snapshot(harness: Ha
         )
         assert len(mirrors) == 1 and mirrors[0].step_id == "first"
         assert mirrors[0].delivery_protocol == 2
+    finally:
+        await runtime.shutdown()
+
+
+async def test_run_lists_do_not_hydrate_durable_graphs(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Listing stays metadata-only; an individual read still recovers its durable graph."""
+    runtime, client, _ = await setup_runtime(harness)
+    try:
+        store = InProcessRunStore(harness.metadata, delivery_provider=harness.delivery)
+        controller = TriggerDeliveryController(
+            harness.delivery,
+            store,
+            client,
+            InMemoryActivityTypeRegistry({}),
+            InMemoryLifecycleEventPublisher(),
+        )
+        until = await harness.delivery.delivery_now() + timedelta(days=30)
+        ref = await controller.start(str(WS), version(), {}, "list", until)
+        snapshots = AsyncMock(wraps=harness.delivery.get_workflow_start)
+        monkeypatch.setattr(harness.delivery, "get_workflow_start", snapshots)
+        for _ in range(2):
+            page = await store.list_runs(str(WS))
+            assert [r.run_id for r in page.items] == [ref.run_id]
+            assert page.items[0].compiled_graph is None
+        snapshots.assert_not_awaited()
+        record = await store.get_run(str(WS), ref.run_id)
+        assert record is not None and record.compiled_graph is not None
+        snapshots.assert_awaited_once()
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.parametrize("stage", ["register", "persist-initial", "persist-registered"])
+async def test_wait_setup_failure_cleans_uncertain_effects(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+) -> None:
+    """Accepted effects with lost acknowledgements are cleaned before setup failure completes."""
+    runtime, client, trigger = await setup_runtime(harness)
+    original_register = trigger.register_resume_subscription
+    original_put = harness.delivery.put_workflow_mirror
+
+    async def lost_registration_ack(
+        _client: FakeTriggerServiceClient,
+        request: RegisterResumeSubscriptionRequest,
+    ) -> RegisterResumeSubscriptionResponse:
+        """Accept registration but lose every transport response."""
+        original_register(request)
+        raise OSError("simulated registration acknowledgement loss")
+
+    async def lost_mirror_ack(mirror: WorkflowMirror) -> None:
+        """Fail after committing the selected phase of mirror persistence."""
+        await original_put(mirror)
+        decoded = ResumeSubscriptionMirror.from_json(mirror.payload_json)
+        if stage == "persist-initial" or (
+            stage == "persist-registered"
+            and decoded.ts_subscription_id != PENDING_TS_SUBSCRIPTION_ID
+        ):
+            raise BackendUnavailable("simulated mirror acknowledgement loss")
+
+    if stage == "register":
+        monkeypatch.setattr(
+            FakeTriggerServiceClient,
+            "register_resume_subscription",
+            lost_registration_ack,
+        )
+    else:
+        monkeypatch.setattr(harness.delivery, "put_workflow_mirror", lost_mirror_ack)
+    try:
+        controller = TriggerDeliveryController(
+            harness.delivery,
+            InProcessRunStore(harness.metadata),
+            client,
+            InMemoryActivityTypeRegistry({}),
+            InMemoryLifecycleEventPublisher(),
+        )
+        until = await harness.delivery.delivery_now() + timedelta(days=30)
+        ref = await controller.start(str(WS), version(), {}, stage, until)
+        for _ in range(8):
+            await client.advance_time(timedelta(seconds=60))
+        state = await client.get_workflow_state(GetRunStateRequest(str(ref.run_id)))
+        assert state is not None and state.status.value == "completed"
+        output = json.loads(state.serialized_output or "{}")
+        assert output["failure_envelope"]["kind"] == (
+            "step.resume_registration_failed"
+            if stage == "register"
+            else "step.resume_mirror_persist_error"
+        )
+        assert len(trigger.cancel_calls) == 1
+        assert not trigger.subscriptions
+        assert not await DurableResumeMirrorRepository(harness.delivery, str(WS)).list_open(
+            str(ref.run_id)
+        )
     finally:
         await runtime.shutdown()
 

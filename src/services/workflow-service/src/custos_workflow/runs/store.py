@@ -348,6 +348,9 @@ class InProcessRunStore:
         intentionally not surfaced here: WF-IMPL-038 will add the
         :class:`RunFilter` builder + per-status query parameters
         once the HTTP surface lands.
+
+        Durable graphs are hydrated only for individual reads, not for
+        metadata listings that expose run references.
         """
 
         spl_page = await self._provider.list_runs(
@@ -357,6 +360,6 @@ class InProcessRunStore:
             limit=limit,
         )
         return Page(
-            items=tuple([await self._record(r) for r in spl_page.items]),
+            items=tuple(self._to_record(r) for r in spl_page.items),
             next_cursor=spl_page.next_cursor,
         )
