@@ -1,11 +1,12 @@
 """Event-root input templates resolve to detached JSON before durable dispatch capture."""
 
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 
 from custos_trigger.events import EventSource, NormalizedEvent
-from custos_trigger.input_mapping import resolve_input_mapping
+from custos_trigger.input_mapping import resolve_input_mapping, validate_input_mapping
 from custos_trigger.models import SourceType
 from custos_trigger.selector import SelectorEvaluator
 from custos_trigger.source_config import SourceConfigurationError
@@ -69,3 +70,36 @@ def test_mapping_failures_are_explicit(value: str) -> None:
             evaluator=SelectorEvaluator(),
             subscription_id="schedule",
         )
+
+
+@pytest.mark.parametrize("depth", [64, 65])
+@pytest.mark.parametrize("authoring", [False, True])
+def test_mapping_depth_boundary_is_shared(depth: int, authoring: bool) -> None:
+    """Authoring and resolution both allow depth 64 and explicitly reject depth 65."""
+    mapping: dict[str, Any] = {"value": "literal"}
+    for _ in range(depth - 1):
+        mapping = {"nested": mapping}
+    evaluator = SelectorEvaluator()
+
+    def apply() -> None:
+        """Exercise the selected public mapping operation over the same authored tree."""
+        if authoring:
+            validate_input_mapping(
+                mapping,
+                evaluator=evaluator,
+                subscription_id="schedule",
+                source_type=SourceType.SCHEDULED,
+            )
+        else:
+            assert (
+                resolve_input_mapping(
+                    mapping, event(), evaluator=evaluator, subscription_id="schedule"
+                )
+                == mapping
+            )
+
+    if depth == 65:
+        with pytest.raises(SourceConfigurationError):
+            apply()
+    else:
+        apply()

@@ -162,8 +162,13 @@ Changing a subscription's source revalidates its retained or replacement selecto
 against the resulting source schema; invalid transitions leave stored state unchanged.
 An authorized manual `:fire` uses that same subscription schema for selector
 evaluation, while retaining `manual.fire` identity and requiring caller-supplied
-matching inputs. It does not fabricate a scheduled occurrence.
-Invalid mappings and nesting beyond 64 levels fail explicitly before dispatch.
+matching inputs. Scheduled mappings also resolve against those manual inputs
+before dispatch; only mapped values become Workflow inputs, not the entire fire payload.
+It does not fabricate a scheduled occurrence.
+Scheduled mapping placeholders are parsed and type-checked on create, mapping
+patches, source transitions and explicit activation. Invalid templates and
+nesting beyond 64 levels return 422 without persisting partial changes.
+Event-dependent resolution failures still surface explicitly before dispatch.
 If a valid schedule plan expires before its fenced write, including during a
 database lock wait, it is deferred as a retryable conflict. Later rows in the
 bounded page still run; the unchanged due row is replanned in a subsequent cycle.

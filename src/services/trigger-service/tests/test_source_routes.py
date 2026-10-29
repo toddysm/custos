@@ -75,17 +75,24 @@ def audit() -> Audit:
 
 
 @pytest.fixture
+def workflow() -> FakeWorkflowServiceClient:
+    """Record accepted dispatch inputs independently for each route test."""
+    return FakeWorkflowServiceClient()
+
+
+@pytest.fixture
 def client(
     metadata_store: InMemoryTriggerMetadataStore,
     references: References,
     audit: Audit,
+    workflow: FakeWorkflowServiceClient,
     workflow_auth: tuple[WorkflowCallerVerifier, dict[str, str]],
 ) -> Iterator[TestClient]:
     """Run real route validation and persistence over injected local collaborators."""
     app = create_app(
         authz_endpoint="",
         providers=Providers(metadata_store=metadata_store, connector_references=references),
-        dispatcher=Dispatcher(FakeWorkflowServiceClient(), Deduplicator(metadata_store)),
+        dispatcher=Dispatcher(workflow, Deduplicator(metadata_store)),
         audit_sink=audit,
         receiver_configuration_enabled=True,
         workflow_caller_verifier=workflow_auth[0],
@@ -232,7 +239,7 @@ async def test_selector_validation_uses_merged_source_and_preserves_failed_chang
 
 @pytest.mark.parametrize("count", [None, 0])
 def test_manual_fire_retains_scheduled_selector_schema(
-    client: TestClient, count: int | None
+    client: TestClient, workflow: FakeWorkflowServiceClient, count: int | None
 ) -> None:
     """Manual transport keeps numeric authoring types without fabricating a scheduled event."""
     created = client.post(
@@ -242,6 +249,10 @@ def test_manual_fire_retains_scheduled_selector_schema(
             "workflowId": "wf",
             "targetWorkflowVersionId": "version",
             "sourceConfig": {"intervalSeconds": 30},
+            "inputMapping": {
+                "count": "${{ event.data.skippedCount + 1 }}",
+                "source": "${{ event.source.type }}",
+            },
             "selector": (
                 "event.source.type == 'manual' && event.kind == 'manual.fire' "
                 "&& event.data.skippedCount + 1 > 0"
@@ -259,9 +270,14 @@ def test_manual_fire_retains_scheduled_selector_schema(
     if count is None:
         assert fired.status_code == 409, fired.text
         assert fired.json()["code"] == "trigger.api.subscription_not_fireable"
+        assert not workflow.start_run_calls
     else:
         assert fired.status_code == 200, fired.text
         assert fired.json()["runId"] == "run-fake"
+        assert workflow.start_run_calls[0].inputs == {
+            "count": 1,
+            "source": "manual",
+        }
 
 
 @pytest.mark.parametrize("kind", ["webhook", "vendor-push", "pull"])
@@ -281,6 +297,72 @@ def test_connector_configuration_round_trip(client: TestClient, kind: str) -> No
     assert all(body["sourceConfig"][key] == value for key, value in config.items())
     assert "storeRevision" not in body and "_revision" not in body
     assert client.get(f"{_PATH}/{body['subscriptionId']}", headers=_headers()).json() == body
+
+
+@pytest.mark.parametrize(
+    "expression",
+    ["${{ event.data.skippedCount + 'one' }}", "${{ missing.value }}", "${{ event.data"],
+)
+async def test_invalid_scheduled_mapping_never_persists(
+    client: TestClient,
+    metadata_store: InMemoryTriggerMetadataStore,
+    expression: str,
+) -> None:
+    """Create and nested mapping patches fail before changing subscription or schedule state."""
+    valid = {
+        "sourceType": "scheduled",
+        "workflowId": "wf",
+        "sourceConfig": {"intervalSeconds": 30},
+        "inputMapping": {"count": "${{ event.data.skippedCount + 1 }}"},
+    }
+    invalid = {"nested": [{"value": expression}]}
+    rejected = client.post(_PATH, json={**valid, "inputMapping": invalid}, headers=_headers())
+    assert rejected.status_code == 422, rejected.text
+    assert not (await metadata_store.query_subscriptions(WorkspaceId("ws_demo"))).items
+    created = client.post(_PATH, json=valid, headers=_headers())
+    assert created.status_code == 201, created.text
+    identifier = created.json()["subscriptionId"]
+    before = await metadata_store.get_schedule(WorkspaceId("ws_demo"), identifier)
+    rejected = client.patch(
+        f"{_PATH}/{identifier}", json={"inputMapping": invalid}, headers=_headers()
+    )
+    assert rejected.status_code == 422, rejected.text
+    assert client.get(f"{_PATH}/{identifier}", headers=_headers()).json() == created.json()
+    assert await metadata_store.get_schedule(WorkspaceId("ws_demo"), identifier) == before
+
+
+def test_source_transition_validates_retained_or_replacement_mapping(client: TestClient) -> None:
+    """Source changes use the resulting mapping schema and compile without event-time evaluation."""
+    created = client.post(
+        _PATH,
+        json={
+            "sourceType": "manual",
+            "workflowId": "wf",
+            "inputMapping": {"count": "${{ event.data.skippedCount + 'one' }}"},
+        },
+        headers=_headers(),
+    )
+    assert created.status_code == 201
+    path = f"{_PATH}/{created.json()['subscriptionId']}"
+    scheduled = {"sourceType": "scheduled", "sourceConfig": {"intervalSeconds": 30}}
+    assert client.patch(path, json=scheduled, headers=_headers()).status_code == 422
+    assert client.get(path, headers=_headers()).json() == created.json()
+    changed = client.patch(
+        path,
+        json={
+            **scheduled,
+            "inputMapping": {"count": "${{ event.data.skippedCount + 1 }}"},
+        },
+        headers=_headers(),
+    )
+    assert changed.status_code == 200, changed.text
+    manual = {"sourceType": "manual", "sourceConfig": None}
+    assert client.patch(path, json=manual, headers=_headers()).status_code == 422
+    assert client.get(path, headers=_headers()).json() == changed.json()
+    assert (
+        client.patch(path, json={**manual, "inputMapping": {}}, headers=_headers()).status_code
+        == 200
+    )
 
 
 @pytest.mark.parametrize(
