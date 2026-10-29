@@ -51,6 +51,7 @@ linear `Classify → Match → Dedup → Dispatch` pipeline.
 - [Declarative trigger YAML (M2)](#declarative-trigger-yaml-m2)
 - [Configuration](#configuration)
 - [Provider-backed reads](#provider-backed-reads)
+- [Dead-letter storage capability](#dead-letter-storage-capability)
 - [Deferred to M2](#deferred-to-m2)
 
 ---
@@ -121,6 +122,56 @@ scheduler fencing APIs. The scheduled receiver/publication loop remains
 [#1008](https://github.com/toddysm/custos/issues/1008); production lifecycle,
 readiness and deployment enablement remain
 [#1017](https://github.com/toddysm/custos/issues/1017).
+
+## Dead-letter storage capability
+
+The optional
+[`DeadLetterStoreProvider`](../../src/libs/storage-provider-layer/src/custos_spl/interfaces/dead_letters.py)
+persists failed-dispatch inputs and fenced replay state. PostgreSQL metadata
+revision 7 is additive; the shared metadata minimum remains revision 4.
+`check_dead_letters_ready` rejects missing migrations or unavailable storage.
+The memory provider has the same contracts but is not restart-durable.
+
+Each version-1 capture holds the workspace, entry/subscription identity,
+original idempotency key, normalized event **without `raw`**, resolved start or
+resume remote procedure call (RPC) target, and safe dispatch-failure history.
+Do not pass transport headers, raw bodies, authentication, signatures or signing
+material. Unknown envelope/target fields and known credential fields, including
+nested mapped copies, are rejected rather than silently changing replay inputs.
+Normalizers must still keep application values credential-free: arbitrary
+strings cannot reliably be identified as secrets. Failure history stores a
+closed classification (`transient`, `permanent`, `configuration`, `unsafe`) and
+optional HTTP status, not arbitrary exception text.
+
+Limits are enforced before persistence: 256 KiB of encoded JSON per event or
+target, nesting depth 32, identifiers 512 UTF-8 bytes, and 1–64 original dispatch
+attempts. Retention defaults to 30 days (configurable from 1 second to 365 days);
+operator attempts default to 3 (bounded to 1–100). Stored inputs are immutable,
+so replay does not rematch a changed subscription or generate a new key.
+
+Queries are workspace-scoped, ordered by entry ID and filterable by subscription,
+status and inclusive creation-time bounds. Pages default to 50, cap at 200, and
+reject cursors reused with a different workspace or filter.
+
+Claiming atomically consumes an attempt and returns a fresh token and increasing
+epoch. Claims default to 60 seconds, are bounded to 300 seconds, and cannot be
+renewed. Another active claimant receives `LeaseBusy`; stale completion receives
+`LeaseExpired`. Expired claims are recoverable with an `interrupted` history
+entry, and the final failed/interrupted attempt becomes `discarded`. Successful
+completion records `replayed` and an optional result identity.
+
+Provider time is authoritative, including after database lock waits. No claim
+starts at or after retention expiry. A previously acquired live claim can finish
+past retention; discard and retention deletion cannot steal it. Terminal entries
+remain inspectable until retention deletion. The deletion primitive does **not**
+emit audit events: callers must arrange durable expiration audit before removal.
+
+This is storage infrastructure, not an enabled replay feature. Dispatch capture,
+remote replay and durable downstream idempotency remain
+[#1014](https://github.com/toddysm/custos/issues/1014); authorized administration
+and audited retention cleanup remain
+[#1016](https://github.com/toddysm/custos/issues/1016). The current dispatcher’s
+`dead_lettered` outcome does not yet invoke this storage.
 
 ## Authentication and call context
 

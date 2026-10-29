@@ -560,6 +560,16 @@ Because the secret lives with the `ConnectorInstance`, rotation is a Connector-S
 
 ## Dead-Letter Handling & Replay
 
+**Implementation boundary:** the optional `DeadLetterStoreProvider` now supplies
+versioned captures, indexed queries and fenced replay claims in PostgreSQL
+metadata revision 7, with memory parity. The dispatcher is not connected yet:
+durable failure capture and downstream replay safety belong to
+[#1014](https://github.com/toddysm/custos/issues/1014); administrative routes,
+expiration auditing and cleanup orchestration belong to
+[#1016](https://github.com/toddysm/custos/issues/1016). The behavior below is the
+target design, amended by approved
+[D05](../../requirements/trigger-m2-receivers.md#d05---durable-replay-and-downstream-idempotency).
+
 When the Dispatcher exhausts `TRIGGER_DISPATCH_MAX_RETRIES` against the Workflow
 Service (or hits a non-retryable dispatch error), the event is **not dropped** —
 it is written to a durable **dead-letter store** for operator inspection and
@@ -573,13 +583,16 @@ Dead-lettered dispatches are persisted as `DeadLetterEntry` rows through the
 already holds `Subscription` / `Schedule` / `DedupKey` / `ResumeSubscription`. No
 new infrastructure (no separate broker DLQ), and the rows are directly queryable,
 which is exactly what the replay UX needs. Each entry stores the full
-`NormalizedEvent` envelope, the resolved match (`subscriptionId`, `matchKind`
+`NormalizedEvent` envelope without raw transport headers/body, the resolved match (`subscriptionId`, `matchKind`
 start/resume, target ref), the reused `idempotencyKey`, the attempt count, the
-last error, and status.
+safe error classification, and status. Arbitrary exception text and credential
+fields are not retained; event and resolved-target snapshots are independently
+bounded to 256 KiB.
 
 ### Lifecycle & status
 
-`pending` → (`replaying`) → `replayed` | `discarded` | `expired`.
+`pending` → `replaying` → `replayed` | `pending` | `discarded`.
+Expiration is an audited removal, not a retained payload status.
 
 - **pending** — retries exhausted; awaiting operator action. Emits `trigger.deadletter.stored`.
 - **replaying** — an operator replay is in flight (short-lived; guards concurrent replays of the same entry).
@@ -605,18 +618,27 @@ Operators drive replay through workspace-scoped admin routes, all gated by a
 - `POST …/triggers/deadletter/{id}:discard` — mark it `discarded`.
 - `POST …/triggers/deadletter:replay` — bulk replay by selector.
 
-### Replay semantics (exactly-once preserved)
+### Replay semantics (durable downstream idempotency required)
 
 Replay re-runs the normal Dispatcher path with the **original `idempotencyKey`**
-(`StartRun` / `RaiseExternalEvent` are idempotent on it), so a replay can never
-double-start a run even if a prior attempt partially reached the Workflow Service.
+and resolved target. Reusing the key alone is insufficient: downstream
+start/resume deduplication must be durable across replicas and cover the full
+replay and in-flight completion horizon, as required by approved D05.
 On dispatch **success** the entry moves to `replayed` and the dedup key is committed
 (it was intentionally *not* committed at failure time — see § Failure Modes); on
 **failure** the attempt count increments, a `trigger.deadletter.replay_failed` event
 is emitted, and the entry stays `pending` until `TRIGGER_DEADLETTER_MAX_REPLAY_ATTEMPTS`
 pins it to `discarded`. Because replay reuses the idempotency key, it is safe against
 the dedup store: resume replays that target an already-completed step are absorbed by
-the Workflow Service exactly as an ordinary duplicate would be.
+the Workflow Service only once that durable downstream contract is implemented.
+
+Replay claims consume an operator attempt before a remote effect. Abandoned
+claims retain an `interrupted` history entry; the next claim increments the epoch
+and changes the token. An expired worker cannot overwrite the new owner's result.
+Claims are non-renewable and bounded to 300 seconds (default 60). No new claim
+starts after retention, while an existing live claim prevents discard/deletion
+and may finish beyond retention. Database time after row-lock acquisition governs
+these transitions.
 
 ## Configuration
 
