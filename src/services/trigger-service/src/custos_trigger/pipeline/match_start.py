@@ -49,12 +49,16 @@ class StartMatcher:
         return matches
 
     def _selector_matches(self, sub: Subscription, event: NormalizedEvent) -> bool:
+        """Use the subscription's authored schema even for an explicitly manual fire."""
         if not sub.selector:
             # No selector = unconditional: the subscription fires on every event
             # the caller routed to it.
             return True
         try:
-            return self._evaluator.matches(sub.selector, event, subscription_id=sub.subscription_id)
+            compiled = self._evaluator.compile(
+                sub.selector, subscription_id=sub.subscription_id, source_type=sub.source_type
+            )
+            return self._evaluator.evaluate(compiled, event)
         except SelectorTypeError:
             # A non-bool selector result is a no-match (audited downstream).
             return False

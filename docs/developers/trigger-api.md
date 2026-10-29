@@ -95,9 +95,10 @@ The optional
 [`SchedulerStateProvider`](../../src/libs/storage-provider-layer/src/custos_spl/interfaces/scheduler.py)
 capability provides deployment-scoped acquire/renew/release, database-time scans,
 fenced due-fire advancement, and bounded workspace/deployment recovery pages.
-PostgreSQL metadata revision 6 adds lease and pending-fire tables; the general
-metadata schema minimum remains revision 4. Scheduler readiness explicitly
-requires revision 6 and fails rather than falling back to unfenced writes.
+PostgreSQL metadata revision 6 adds lease and pending-fire tables; revision 9
+adds durable coalescing counts and distinct suppression settlement. The general
+metadata schema minimum remains revision 4. Scheduler readiness requires
+revision 9 and fails rather than falling back to unfenced writes.
 
 [`SchedulerLeadership`](../../src/services/trigger-service/src/custos_trigger/scheduler.py)
 is a scan-loop collaborator, not a background worker. Call `poll` at least as
@@ -118,9 +119,75 @@ stable event identity rather than lose an event.
 
 Use the same deployment ID for replicas of one logical scheduler and a distinct
 holder ID per process. Generic legacy schedule maintenance methods are not
-scheduler fencing APIs. The scheduled receiver/publication loop remains
-[#1008](https://github.com/toddysm/custos/issues/1008); production lifecycle,
-readiness and deployment enablement remain
+scheduler fencing APIs. The scheduled receiver below consumes this capability; production lifecycle,
+workspace discovery, readiness and deployment enablement remain
+[#1017](https://github.com/toddysm/custos/issues/1017).
+
+### Scheduled receiver and recovery
+
+[`ScheduledReceiver`](../../src/services/trigger-service/src/custos_trigger/receivers/scheduled.py)
+is a workspace-bound scan collaborator. Share deployment leadership across
+replicas, supply an acknowledged normalized-event publisher and an audit sink,
+then call `tick()`. It does not start a background worker at import or app startup.
+One tick handles at most one pending page and one due page (default 50 rows each,
+maximum 200); it renews provider authority before external effects.
+Due pages retain a fixed-cutoff cursor cycle across ticks, so continuously due
+early IDs cannot starve the later pages.
+Unmanaged or corrupt due configuration raises an explicit error rather than
+silently advancing or dispatching an unprovable target.
+
+Intervals retain their creation-time UTC anchor. Five-field cron uses the
+configured IANA zone, skips nonexistent local times and includes both repeated
+hour instants. Recovery coalesces to the most recent due occurrence. Exact skipped
+counts are persisted with the occurrence and included in its coalescing audit;
+long cron counting yields and refreshes leadership in bounded chunks rather
+than publishing a backlog.
+
+`cron.tick` events retain the pending row's stable ID and planned UTC timestamp.
+`process_scheduled_event()` uses the existing classifier, selector matcher and
+dispatcher but first checks scoped canonical occurrence proof, its derived ID
+and immutable event fields. Fresh caller-supplied IDs or changed planned
+timestamps cannot manufacture another fire. It then selects only the event's
+originating subscription. Unrelated
+unconditional cron subscriptions cannot fire from another schedule's event.
+Input mappings resolve through the shared CEL sandbox into a copied subscription
+before dispatch. Whole placeholders retain their JSON value; mixed strings
+interpolate and nested containers are resolved without modifying stored
+configuration. The occurrence timestamp supplies the deterministic expression
+clock. Replay captures the resolved inputs, not templates to be rematched later.
+Scheduled selectors and mappings type `skippedCount` and `subscriptionRevision`
+as integers, including create/patch validation. For example,
+`${{ event.data.skippedCount + 1 }}` yields the number of coalesced occurrences.
+Changing a subscription's source revalidates its retained or replacement selector
+against the resulting source schema; invalid transitions leave stored state unchanged.
+An authorized manual `:fire` uses that same subscription schema for selector
+evaluation, while retaining `manual.fire` identity and requiring caller-supplied
+matching inputs. Scheduled mappings also resolve against those manual inputs
+before dispatch; only mapped values become Workflow inputs, not the entire fire payload.
+It does not fabricate a scheduled occurrence.
+Scheduled mapping placeholders are parsed and type-checked on create, mapping
+patches, source transitions and explicit activation. Invalid templates and
+nesting beyond 64 levels return 422 without persisting partial changes.
+Event-dependent resolution failures still surface explicitly before dispatch.
+If a valid schedule plan expires before its fenced write, including during a
+database lock wait, it is deferred as a retryable conflict. Later rows in the
+bounded page still run; the unchanged due row is replanned in a subsequent cycle.
+Candidates changed between the due-page and subscription reads are deferred before
+planning, avoiding mixed old-due/new-configuration calculations. The advancement
+transaction still fences changes occurring after that check.
+The producer and consumer recheck eligibility/revision: paused, expired, missing
+or reconfigured associations are suppressed rather than rebound to a new target.
+Already accepted downstream effects are not undone by a later pause.
+
+Publication failure leaves the occurrence pending and does not roll back its
+already committed next-fire advancement. A new leader retries the original
+event; durable dispatch receipts prevent a duplicate Workflow effect. Suppressed
+pending rows record `discarded_at` and a bounded reason, not `delivered_at`.
+Canonical occurrence rows remain readable after producer acknowledgement;
+broker acknowledgement alone is not permission to erase proof before durable
+consumer completion. Missing proof fails closed.
+Broker adapter wiring and worker/retention activation remain separately gated
+by [#1010](https://github.com/toddysm/custos/issues/1010) and
 [#1017](https://github.com/toddysm/custos/issues/1017).
 
 ## Dead-letter storage capability

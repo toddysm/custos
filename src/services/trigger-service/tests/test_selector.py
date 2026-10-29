@@ -75,6 +75,35 @@ def test_compile_cache_is_keyed_by_subscription() -> None:
     assert first is not second
 
 
+def test_scheduled_schema_is_typed_and_cache_isolated() -> None:
+    """Canonical integer fields support arithmetic without changing other source schemas."""
+    evaluator = SelectorEvaluator()
+    expression = "event.data.skippedCount"
+    generic = evaluator.compile(expression, subscription_id="same")
+    scheduled = evaluator.compile(
+        expression, subscription_id="same", source_type=SourceType.SCHEDULED
+    )
+    assert generic is not scheduled
+    assert scheduled is evaluator.compile(
+        expression, subscription_id="same", source_type=SourceType.SCHEDULED
+    )
+    incoming = _event(
+        source_type=SourceType.SCHEDULED,
+        data={"skippedCount": 2, "subscriptionRevision": 3},
+    )
+    arithmetic = "event.data.skippedCount + 1 == event.data.subscriptionRevision"
+    assert evaluator.matches(arithmetic, incoming, subscription_id="same")
+    assert evaluator.matches(arithmetic, incoming.model_dump(by_alias=True), subscription_id="same")
+    with pytest.raises(SelectorInvalidError):
+        evaluator.compile(arithmetic, subscription_id="same")
+    with pytest.raises(SelectorInvalidError):
+        evaluator.compile(
+            "event.data.skippedCount + 'one'",
+            subscription_id="same",
+            source_type=SourceType.SCHEDULED,
+        )
+
+
 def test_compile_rejects_syntax_error() -> None:
     evaluator = SelectorEvaluator()
     with pytest.raises(SelectorInvalidError) as excinfo:
@@ -122,6 +151,18 @@ def test_evaluate_reads_event_data() -> None:
     compiled = evaluator.compile('event.data.status == "succeeded"', subscription_id="sub-1")
     assert evaluator.evaluate(compiled, _event(data={"status": "succeeded"})) is True
     assert evaluator.evaluate(compiled, _event(data={"status": "failed"})) is False
+
+
+@pytest.mark.parametrize(
+    "source_type", [SourceType.MANUAL, SourceType.SCHEDULED, SourceType.INTERNAL]
+)
+def test_source_type_uses_declared_string_primitive(source_type: SourceType) -> None:
+    """The runtime binding uses the same string type advertised by its envelope schema."""
+    evaluator = SelectorEvaluator()
+    incoming = _event(source_type=source_type)
+    assert evaluator.matches(
+        f"event.source.type == '{source_type.value}'", incoming, subscription_id="source"
+    )
 
 
 def test_evaluate_accepts_plain_mapping() -> None:

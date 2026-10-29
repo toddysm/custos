@@ -43,11 +43,13 @@ from custos_trigger.dependencies import (
     get_subscription_store,
 )
 from custos_trigger.errors import TriggerError, TriggerErrorKind
+from custos_trigger.input_mapping import resolve_input_mapping, validate_input_mapping
 from custos_trigger.middleware import CallContext, require_permission
 from custos_trigger.middleware import ensure_workspace as _ensure_workspace
 from custos_trigger.models import (
     ManualFireRequest,
     ManualFireResult,
+    SourceType,
     Subscription,
     SubscriptionCreate,
     SubscriptionKind,
@@ -56,7 +58,7 @@ from custos_trigger.models import (
 )
 from custos_trigger.normalize import normalize_manual_fire
 from custos_trigger.pipeline.dispatch import Dispatcher
-from custos_trigger.pipeline.match_start import StartMatcher
+from custos_trigger.pipeline.match_start import StartMatch, StartMatcher
 from custos_trigger.providers import Providers
 from custos_trigger.selector import SelectorEvaluator
 from custos_trigger.source_config import (
@@ -91,16 +93,20 @@ def _now() -> datetime:
 
 
 def _validate_selector(
-    evaluator: SelectorEvaluator, selector: str | None, *, subscription_id: str
+    evaluator: SelectorEvaluator,
+    selector: str | None,
+    *,
+    subscription_id: str,
+    source_type: SourceType,
 ) -> None:
-    """Compile ``selector`` to reject a malformed expression at author time.
+    """Compile against the subscription's source schema at author time.
 
     A :class:`~custos_trigger.selector.SelectorInvalidError` is a
     :class:`TriggerError` (kind ``trigger.selector_invalid``) and propagates to
     the Problem+JSON handler as a 422.
     """
     if selector:
-        evaluator.compile(selector, subscription_id=subscription_id)
+        evaluator.compile(selector, subscription_id=subscription_id, source_type=source_type)
 
 
 def _not_found(subscription_id: str) -> TriggerError:
@@ -131,7 +137,16 @@ async def create_subscription(
     if body.source_type.value not in ("manual", "internal"):
         require_receiver_configuration(receiver_enabled)
     subscription_id = uuid.uuid4().hex
-    _validate_selector(evaluator, body.selector, subscription_id=subscription_id)
+    _validate_selector(
+        evaluator, body.selector, subscription_id=subscription_id, source_type=body.source_type
+    )
+    if body.source_type is SourceType.SCHEDULED:
+        validate_input_mapping(
+            body.input_mapping,
+            evaluator=evaluator,
+            subscription_id=subscription_id,
+            source_type=body.source_type,
+        )
     if body.source_config is not None and body.source_config.connector_instance_id is not None:
         await validate_connector_reference(
             providers.connector_references, workspace_id, body.source_config.connector_instance_id
@@ -201,9 +216,6 @@ async def patch_subscription(
     # when present.
     fields_set = body.model_fields_set
 
-    if "selector" in fields_set and body.selector is not None:
-        _validate_selector(evaluator, body.selector, subscription_id=subscription_id)
-
     # Configuration and state are committed together after validating the merged request.
     blob_updates: dict[str, object] = {}
     if "selector" in fields_set:
@@ -224,6 +236,28 @@ async def patch_subscription(
         merged.source_config,
         required=merged.state is SubscriptionState.ACTIVE,
     )
+    if "selector" in fields_set or merged.source_type != existing.source_type:
+        _validate_selector(
+            evaluator,
+            merged.selector,
+            subscription_id=subscription_id,
+            source_type=merged.source_type,
+        )
+    source_type_changed = merged.source_type != existing.source_type
+    if (
+        merged.source_type is SourceType.SCHEDULED
+        and (
+            "input_mapping" in fields_set
+            or source_type_changed
+            or body.state is SubscriptionState.ACTIVE
+        )
+    ) or (source_type_changed and existing.source_type is SourceType.SCHEDULED):
+        validate_input_mapping(
+            merged.input_mapping,
+            evaluator=evaluator,
+            subscription_id=subscription_id,
+            source_type=merged.source_type,
+        )
     if not blob_updates and (body.state is None or body.state is existing.state):
         return existing
     source_changed = (
@@ -313,7 +347,22 @@ async def fire_subscription(
             extras=extras,
         )
 
-    outcome = await dispatcher.dispatch_start(event, matches[0])
+    match = matches[0]
+    if subscription.source_type is SourceType.SCHEDULED:
+        match = StartMatch(
+            subscription.model_copy(
+                update={
+                    "input_mapping": resolve_input_mapping(
+                        subscription.input_mapping,
+                        event,
+                        evaluator=evaluator,
+                        subscription_id=subscription_id,
+                        source_type=subscription.source_type,
+                    )
+                }
+            )
+        )
+    outcome = await dispatcher.dispatch_start(event, match)
     if outcome.is_dispatched and outcome.run_ref is not None:
         return ManualFireResult(run_id=outcome.run_ref.run_id)
     if outcome.is_duplicate:

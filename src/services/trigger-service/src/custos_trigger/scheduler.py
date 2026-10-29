@@ -73,14 +73,14 @@ class SchedulerLeadership:
         )
         self._renew_at = started + delay
 
-    async def poll(self) -> SchedulerLease | None:
-        """Acquire or renew once, allowing first-scan takeover after expiry."""
+    async def poll(self, *, force_renew: bool = False) -> SchedulerLease | None:
+        """Acquire/renew, optionally checking provider authority before an external effect."""
         async with self._lock:
             if not self._ready:
                 await self.check_ready()
             started = self._monotonic()
             try:
-                if self._lease is not None and started >= self._renew_at:
+                if self._lease is not None and (force_renew or started >= self._renew_at):
                     try:
                         self._lease = await self._provider.renew_scheduler_lease(
                             self._lease, ttl_seconds=self._lease_seconds

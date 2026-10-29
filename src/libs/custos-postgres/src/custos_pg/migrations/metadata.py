@@ -34,6 +34,10 @@ exponent numbers could exceed the payload bound on subsequent reads.
 
 REV8 adds fenced delivery receipts, atomic versioned runtime inputs and
 workspace-scoped resume mirrors. It leaves the general revision-4 minimum intact.
+
+REV9 retains exact coalescing counts and distinguishes suppressed schedule
+occurrences from published ones. Scheduler consumers require it; unrelated
+metadata consumers retain their existing minimum.
 """
 
 from __future__ import annotations
@@ -501,6 +505,45 @@ METADATA_REV8 = Revision(
 )
 
 
+METADATA_REV9 = Revision(
+    number=9,
+    statements=(
+        """
+        ALTER TABLE custos_state.pending_schedule_fire
+            ADD COLUMN IF NOT EXISTS skipped_count BIGINT NOT NULL DEFAULT 0
+                CHECK (skipped_count >= 0),
+            ADD COLUMN IF NOT EXISTS discarded_at TIMESTAMPTZ,
+            ADD COLUMN IF NOT EXISTS discard_reason TEXT
+                CHECK (discard_reason IN ('inactive', 'changed', 'missing'))
+        """,
+        """
+        DO $migration$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname='pending_schedule_fire_settlement'
+                AND conrelid='custos_state.pending_schedule_fire'::regclass
+            ) THEN
+                ALTER TABLE custos_state.pending_schedule_fire
+                    ADD CONSTRAINT pending_schedule_fire_settlement
+                    CHECK (
+                        (discarded_at IS NULL) = (discard_reason IS NULL)
+                        AND NOT (discarded_at IS NOT NULL AND delivered_at IS NOT NULL)
+                    );
+            END IF;
+        END;
+        $migration$
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS pending_schedule_fire_pending
+            ON custos_state.pending_schedule_fire
+                (workspace_id, deployment_id, fire_id COLLATE "C")
+            WHERE delivered_at IS NULL AND discarded_at IS NULL
+        """,
+    ),
+)
+
+
 __all__ = [
     "METADATA_REV1",
     "METADATA_REV2",
@@ -510,4 +553,5 @@ __all__ = [
     "METADATA_REV6",
     "METADATA_REV7",
     "METADATA_REV8",
+    "METADATA_REV9",
 ]
