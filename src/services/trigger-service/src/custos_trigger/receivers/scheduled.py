@@ -1,0 +1,335 @@
+"""Fenced scheduled occurrences, bounded scans and shared-pipeline delivery.
+
+The receiver is a workspace-bound collaborator, not an automatically started
+worker. Persisted occurrences survive producer death; retries retain the exact
+event identity. Broker/lifecycle activation is composed separately.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Protocol, runtime_checkable
+
+from custos_spl.errors import ImmutableViolation, LeaseExpired, QueryUnsupported
+from custos_spl.ids import WorkspaceId
+from custos_spl.interfaces.scheduler import (
+    PendingScheduleFire,
+    SchedulerLease,
+    SchedulerStateProvider,
+    utc_instant,
+)
+from custos_spl.interfaces.trigger_queries import TriggerQueryProvider
+from custos_spl.pagination import query_page_limit
+
+from custos_trigger.events import EventSource, NormalizedEvent
+from custos_trigger.models import SourceType, Subscription, SubscriptionKind, SubscriptionState
+from custos_trigger.pipeline.classify import classify
+from custos_trigger.pipeline.dispatch import AuditSink, Dispatcher, DispatchOutcome
+from custos_trigger.pipeline.match_resume import resume_key_from_event
+from custos_trigger.pipeline.match_start import StartMatcher
+from custos_trigger.scheduler import SchedulerLeadership
+from custos_trigger.selector import SelectorEvaluator
+from custos_trigger.source_config import (
+    SourceConfig,
+    SourceConfigurationError,
+    next_schedule_fire,
+    validate_source_config,
+)
+from custos_trigger.stores.base import TriggerMetadataStore
+from custos_trigger.stores.subscriptions import SubscriptionStore
+
+logger = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class ScheduledStorage(
+    TriggerMetadataStore, TriggerQueryProvider, SchedulerStateProvider, Protocol
+):
+    """The existing query/write/fencing capabilities required by a scheduled receiver."""
+
+
+@dataclass(frozen=True)
+class SchedulePlan:
+    """One coalesced occurrence plus the first future fire and exact skipped count."""
+
+    planned_at: datetime
+    next_at: datetime
+    skipped_count: int
+
+
+async def plan_schedule(
+    config: SourceConfig,
+    *,
+    anchor: datetime,
+    due: datetime,
+    now: datetime,
+    heartbeat: Callable[[], Awaitable[datetime]],
+) -> SchedulePlan:
+    """Coalesce without replaying a backlog; long cron counts yield and renew ownership."""
+    validate_source_config("scheduled", config)
+    due, now, anchor = map(utc_instant, (due, now, anchor))
+    if due > now:
+        raise SourceConfigurationError("schedule is not due")
+    if config.interval_seconds is not None:
+        interval = timedelta(seconds=config.interval_seconds)
+        if (due - anchor) % interval:
+            raise SourceConfigurationError(
+                "stored interval occurrence is not aligned to its anchor"
+            )
+        skipped = (now - due) // interval
+        planned = due + skipped * interval
+        return SchedulePlan(planned, next_schedule_fire(config, anchor=anchor, after=now), skipped)
+    if next_schedule_fire(config, anchor=anchor, after=due - timedelta(microseconds=1)) != due:
+        raise SourceConfigurationError("stored cron occurrence does not match its configuration")
+    planned, skipped = due, 0
+    following = next_schedule_fire(config, anchor=anchor, after=planned)
+    while following <= now:
+        planned, skipped = following, skipped + 1
+        following = next_schedule_fire(config, anchor=anchor, after=planned)
+        if skipped % 128 == 0:
+            await asyncio.sleep(0)
+            now = utc_instant(await heartbeat())
+    return SchedulePlan(planned, following, skipped)
+
+
+def scheduled_event(fire: PendingScheduleFire) -> NormalizedEvent:
+    """Normalize only immutable occurrence data, preserving identity across recovery and retries."""
+    instant = utc_instant(fire.planned_fire_at).isoformat(timespec="microseconds")
+    return NormalizedEvent(
+        event_id=fire.fire_id,
+        kind="cron.tick",
+        source=EventSource(
+            type=SourceType.SCHEDULED,
+            subscription_id=fire.schedule_id,
+            occurred_at=instant,
+        ),
+        subject=fire.schedule_id,
+        data={
+            "workspace": str(fire.workspace_id),
+            "scheduleId": fire.schedule_id,
+            "subscriptionRevision": fire.subscription_revision,
+            "plannedFireAt": instant,
+            "skippedCount": fire.skipped_count,
+        },
+    )
+
+
+def _suppression(subscription: Subscription | None, revision: int) -> str | None:
+    """A changed or inactive association cannot rebind a previously planned occurrence."""
+    if subscription is None:
+        return "missing"
+    if subscription.state is not SubscriptionState.ACTIVE:
+        return "inactive"
+    if (
+        subscription.kind is not SubscriptionKind.START
+        or subscription.source_type is not SourceType.SCHEDULED
+        or subscription.source_config is None
+        or subscription.store_revision != revision
+    ):
+        return "changed"
+    return None
+
+
+async def process_scheduled_event(
+    event: NormalizedEvent,
+    *,
+    subscription_store: SubscriptionStore,
+    evaluator: SelectorEvaluator,
+    dispatcher: Dispatcher,
+    audit: AuditSink,
+) -> DispatchOutcome | None:
+    """Route a scheduled occurrence only to its own eligible subscription, never every cron row."""
+    workspace = event.data.get("workspace")
+    revision = event.data.get("subscriptionRevision")
+    identifier = event.source.subscription_id
+    if (
+        event.source.type is not SourceType.SCHEDULED
+        or event.kind != "cron.tick"
+        or not isinstance(workspace, str)
+        or not workspace.strip()
+        or not identifier
+        or event.data.get("scheduleId") != identifier
+        or type(revision) is not int
+        or revision < 0
+    ):
+        logger.error("Invalid scheduled event association: %s", event.event_id)
+        raise SourceConfigurationError("scheduled event has no valid scoped association")
+    subscription = await subscription_store.get(workspace, identifier)
+    reason = _suppression(subscription, revision)
+    if reason is not None:
+        await audit.emit(
+            "trigger.schedule.suppressed",
+            workspace_id=workspace,
+            attributes={"eventId": event.event_id, "subscriptionId": identifier, "reason": reason},
+        )
+        return None
+    assert subscription is not None
+    classification = classify(event)
+    if classification.to_resume and resume_key_from_event(event) is not None:
+        logger.error("Scheduled event carries unsupported resume routing: %s", event.event_id)
+        raise SourceConfigurationError("scheduled source cannot inject resume routing identifiers")
+    matches = (
+        StartMatcher(evaluator).match(event, [subscription]) if classification.to_start else []
+    )
+    if not matches:
+        await audit.emit(
+            "trigger.schedule.filtered",
+            workspace_id=workspace,
+            attributes={"eventId": event.event_id, "subscriptionId": identifier},
+        )
+        return None
+    return await dispatcher.dispatch_start(event, matches[0])
+
+
+@dataclass(frozen=True)
+class ScheduledScan:
+    """Observable bounded scan result; standby is distinct from a successful publication."""
+
+    leader: bool
+    planned: int = 0
+    published: int = 0
+    suppressed: int = 0
+
+
+class ScheduledReceiver:
+    """Plan and recover one workspace's bounded batch using shared deployment leadership."""
+
+    def __init__(
+        self,
+        provider: object,
+        *,
+        workspace_id: str,
+        leadership: SchedulerLeadership,
+        publish: Callable[[NormalizedEvent], Awaitable[None]],
+        audit: AuditSink,
+        page_size: int = 50,
+    ) -> None:
+        """Bind explicit scope, publication acknowledgement and storage capabilities."""
+        if not workspace_id.strip():
+            raise ValueError("scheduled receiver requires a workspace")
+        if not isinstance(provider, ScheduledStorage):
+            raise QueryUnsupported(
+                "scheduled receiver requires query, mutation and fencing capabilities"
+            )
+        self.store = provider
+        self.workspace = WorkspaceId(workspace_id)
+        self.leadership, self.publish, self.audit = leadership, publish, audit
+        self.page_size = query_page_limit(page_size)
+        self.subscriptions = SubscriptionStore(provider)
+        self._lease: SchedulerLease | None = None
+        self._lock = asyncio.Lock()
+
+    async def _heartbeat(self) -> datetime:
+        """Refresh provider authority before side effects and during cooperative cron counting."""
+        self._lease = await self.leadership.poll(force_renew=True)
+        if self._lease is None:
+            raise LeaseExpired("scheduled receiver lost deployment leadership")
+        return await self.store.scheduler_now()
+
+    async def tick(self) -> ScheduledScan:
+        """Recover one pending page, then plan one due page; failed publication stays pending."""
+        async with self._lock:
+            self._lease = await self.leadership.poll(force_renew=True)
+            if self._lease is None:
+                return ScheduledScan(leader=False)
+            published, suppressed = await self._recover()
+            now = await self._heartbeat()
+            page = await self.store.query_due_schedules(
+                self.workspace,
+                due_at=now,
+                limit=self.page_size,
+            )
+            planned = 0
+            for schedule in page.items:
+                subscription = await self.subscriptions.get(
+                    str(self.workspace),
+                    schedule.schedule_id,
+                )
+                if subscription is None or subscription.source_config is None:
+                    logger.error(
+                        "Due schedule has no managed configuration: %s", schedule.schedule_id
+                    )
+                    raise SourceConfigurationError("due schedule has no managed configuration")
+                if _suppression(subscription, subscription.store_revision) is not None:
+                    continue
+                now = await self._heartbeat()
+                plan = await plan_schedule(
+                    subscription.source_config,
+                    anchor=subscription.created_at,
+                    due=schedule.next_fire_at,
+                    now=now,
+                    heartbeat=self._heartbeat,
+                )
+                assert self._lease is not None
+                try:
+                    fire = await self.store.advance_schedule(
+                        self.workspace,
+                        schedule.schedule_id,
+                        self._lease,
+                        expected_next_fire_at=schedule.next_fire_at,
+                        expected_revision=subscription.store_revision,
+                        planned_fire_at=plan.planned_at,
+                        next_fire_at=plan.next_at,
+                        skipped_count=plan.skipped_count,
+                    )
+                except ImmutableViolation:
+                    logger.info("Schedule changed during planning: %s", schedule.schedule_id)
+                    continue
+                planned += 1
+                accepted = await self._publish(fire)
+                published += int(accepted)
+                suppressed += int(not accepted)
+            return ScheduledScan(True, planned, published, suppressed)
+
+    async def _recover(self) -> tuple[int, int]:
+        """Retry durable pending occurrences with their original event identities and counts."""
+        assert self._lease is not None
+        page = await self.store.query_pending_schedule_fires(
+            self.workspace,
+            self._lease.deployment_id,
+            limit=self.page_size,
+        )
+        published = suppressed = 0
+        for fire in page.items:
+            accepted = await self._publish(fire)
+            published += int(accepted)
+            suppressed += int(not accepted)
+        return published, suppressed
+
+    async def _publish(self, fire: PendingScheduleFire) -> bool:
+        """Settle ineligible work separately; acknowledge eligible work only after publication."""
+        await self._heartbeat()
+        subscription = await self.subscriptions.get(str(self.workspace), fire.schedule_id)
+        reason = _suppression(subscription, fire.subscription_revision)
+        assert self._lease is not None
+        attributes = {
+            "eventId": fire.fire_id,
+            "subscriptionId": fire.schedule_id,
+            "skippedCount": fire.skipped_count,
+        }
+        if reason is not None:
+            await self.audit.emit(
+                "trigger.schedule.suppressed",
+                workspace_id=str(self.workspace),
+                attributes={**attributes, "reason": reason},
+            )
+            await self.store.discard_schedule_fire(
+                self.workspace,
+                fire.fire_id,
+                self._lease,
+                reason=reason,
+            )
+            return False
+        if fire.skipped_count:
+            await self.audit.emit(
+                "trigger.schedule.coalesced",
+                workspace_id=str(self.workspace),
+                attributes=attributes,
+            )
+        await self.publish(scheduled_event(fire))
+        await self.store.acknowledge_schedule_fire(self.workspace, fire.fire_id, self._lease)
+        return True

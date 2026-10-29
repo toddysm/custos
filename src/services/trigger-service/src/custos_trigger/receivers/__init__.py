@@ -7,8 +7,9 @@ and drives it through classify -> match -> dispatch. The internal receiver
 Pub/Sub topic so a completing workflow can both chain a downstream workflow
 (start match) and resume a parent waiting on it (resume match).
 
-Other receivers (scheduler, generic webhook, vendor push) are deferred to M2
-(see the component design's *Out of scope* section).
+The scheduled receiver supplies fenced pending-fire publication and scoped
+pipeline consumption. Its worker/broker activation is composed separately.
+Generic webhook and vendor-push receiver wiring follows in M2.
 """
 
 from __future__ import annotations
@@ -21,12 +22,22 @@ from custos_trigger.receivers.internal import (
     build_internal_event_router,
     process_workflow_event,
 )
+from custos_trigger.receivers.scheduled import (
+    ScheduledReceiver,
+    ScheduledScan,
+    process_scheduled_event,
+    scheduled_event,
+)
 
 __all__ = [
     "DAPR_SUBSCRIBE_PATH",
     "INTERNAL_EVENTS_PATH",
     "DeliveryStatus",
     "InternalEventOutcome",
+    "ScheduledReceiver",
+    "ScheduledScan",
     "build_internal_event_router",
+    "process_scheduled_event",
     "process_workflow_event",
+    "scheduled_event",
 ]

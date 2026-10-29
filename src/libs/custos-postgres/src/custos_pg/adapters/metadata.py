@@ -116,6 +116,7 @@ from custos_spl.interfaces.scheduler import (
     prepare_schedule_fire,
     require_scheduler_lease,
     utc_instant,
+    validate_schedule_discard,
 )
 from custos_spl.interfaces.trigger_queries import SubscriptionSnapshot, prepare_subscription_write
 from custos_spl.middleware.transactions import bind_handle, check_handle
@@ -136,6 +137,7 @@ from custos_pg.migrations.metadata import (
     METADATA_REV6,
     METADATA_REV7,
     METADATA_REV8,
+    METADATA_REV9,
 )
 from custos_pg.pool import LazyPool, read_dsn_from_env
 from custos_pg.revisions import ensure_ledger, read_declared, record_revision
@@ -216,6 +218,9 @@ def _pending_fire(row: Record) -> PendingScheduleFire:
         planned_fire_at=row["planned_fire_at"],
         created_at=row["created_at"],
         delivered_at=row["delivered_at"],
+        skipped_count=row["skipped_count"],
+        discarded_at=row["discarded_at"],
+        discard_reason=row["discard_reason"],
     )
 
 
@@ -564,6 +569,7 @@ class PgMetadataAdapter:
                 METADATA_REV6,
                 METADATA_REV7,
                 METADATA_REV8,
+                METADATA_REV9,
             ):
                 if rev.number in already:
                     continue
@@ -1348,6 +1354,7 @@ class PgMetadataAdapter:
         expected_revision: int,
         planned_fire_at: datetime,
         next_fire_at: datetime,
+        skipped_count: int = 0,
     ) -> PendingScheduleFire:
         """Commit a durable pending fire and next-fire advancement under one live fence."""
         async with self._scheduler_transaction() as conn:
@@ -1384,12 +1391,13 @@ class PgMetadataAdapter:
                 planned_fire_at=planned_fire_at,
                 next_fire_at=next_fire_at,
                 now=now,
+                skipped_count=skipped_count,
             )
             await conn.execute(
                 "INSERT INTO custos_state.pending_schedule_fire "
                 "(workspace_id, fire_id, schedule_id, workflow_id, deployment_id, epoch, "
-                "subscription_revision, planned_fire_at, created_at) "
-                "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+                "subscription_revision, planned_fire_at, created_at, skipped_count) "
+                "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
                 workspace_id,
                 pending.fire_id,
                 schedule_id,
@@ -1399,6 +1407,7 @@ class PgMetadataAdapter:
                 expected_revision,
                 pending.planned_fire_at,
                 now,
+                skipped_count,
             )
             updated = await conn.fetchval(
                 "UPDATE custos_state.schedule SET next_fire_at=$3 "
@@ -1440,6 +1449,7 @@ class PgMetadataAdapter:
             rows = await conn.fetch(
                 "SELECT * FROM custos_state.pending_schedule_fire "
                 "WHERE workspace_id=$1 AND deployment_id=$2 AND delivered_at IS NULL "
+                "AND discarded_at IS NULL "
                 'AND ($3::text IS NULL OR fire_id COLLATE "C" > $3) '
                 'ORDER BY fire_id COLLATE "C" LIMIT $4',
                 workspace_id,
@@ -1474,6 +1484,7 @@ class PgMetadataAdapter:
                 "UPDATE custos_state.pending_schedule_fire "
                 "SET delivered_at=COALESCE(delivered_at, clock_timestamp()) "
                 "WHERE workspace_id=$1 AND fire_id=$2 AND deployment_id=$3 "
+                "AND discarded_at IS NULL "
                 "AND EXISTS(SELECT 1 FROM custos_state.scheduler_lease "
                 "WHERE deployment_id=$3 AND holder_id=$4 AND epoch=$5 "
                 "AND expires_at > clock_timestamp()) RETURNING fire_id",
@@ -1488,6 +1499,53 @@ class PgMetadataAdapter:
                     _scheduler_lease(row, now) if row else None, lease, await _scheduler_now(conn)
                 )
                 raise ImmutableViolation("pending fire is absent from this workspace/deployment")
+
+    async def discard_schedule_fire(
+        self,
+        workspace_id: WorkspaceId,
+        fire_id: str,
+        lease: SchedulerLease,
+        *,
+        reason: str,
+    ) -> None:
+        """Settle an ineligible occurrence without misreporting publication or stealing a lease."""
+        validate_schedule_discard(reason)
+        async with self._scheduler_transaction() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM custos_state.scheduler_lease WHERE deployment_id=$1 FOR UPDATE",
+                lease.deployment_id,
+            )
+            await conn.fetchrow(
+                "SELECT fire_id FROM custos_state.pending_schedule_fire "
+                "WHERE workspace_id=$1 AND fire_id=$2 AND deployment_id=$3 FOR UPDATE",
+                workspace_id,
+                fire_id,
+                lease.deployment_id,
+            )
+            now = await _scheduler_now(conn)
+            require_scheduler_lease(_scheduler_lease(row, now) if row else None, lease, now)
+            updated = await conn.fetchval(
+                "UPDATE custos_state.pending_schedule_fire "
+                "SET discarded_at=COALESCE(discarded_at,clock_timestamp()), "
+                "discard_reason=COALESCE(discard_reason,$6) "
+                "WHERE workspace_id=$1 AND fire_id=$2 AND deployment_id=$3 "
+                "AND delivered_at IS NULL AND EXISTS ("
+                "SELECT 1 FROM custos_state.scheduler_lease WHERE deployment_id=$3 "
+                "AND holder_id=$4 AND epoch=$5 AND expires_at>clock_timestamp()) RETURNING fire_id",
+                workspace_id,
+                fire_id,
+                lease.deployment_id,
+                lease.holder_id,
+                lease.epoch,
+                reason,
+            )
+            if updated is None:
+                require_scheduler_lease(
+                    _scheduler_lease(row, now) if row else None,
+                    lease,
+                    await _scheduler_now(conn),
+                )
+                raise ImmutableViolation("pending fire is absent or already published")
 
     # ----- Runtime execution state -----
 

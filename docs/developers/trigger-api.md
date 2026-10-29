@@ -95,9 +95,10 @@ The optional
 [`SchedulerStateProvider`](../../src/libs/storage-provider-layer/src/custos_spl/interfaces/scheduler.py)
 capability provides deployment-scoped acquire/renew/release, database-time scans,
 fenced due-fire advancement, and bounded workspace/deployment recovery pages.
-PostgreSQL metadata revision 6 adds lease and pending-fire tables; the general
-metadata schema minimum remains revision 4. Scheduler readiness explicitly
-requires revision 6 and fails rather than falling back to unfenced writes.
+PostgreSQL metadata revision 6 adds lease and pending-fire tables; revision 9
+adds durable coalescing counts and distinct suppression settlement. The general
+metadata schema minimum remains revision 4. Scheduler readiness requires
+revision 9 and fails rather than falling back to unfenced writes.
 
 [`SchedulerLeadership`](../../src/services/trigger-service/src/custos_trigger/scheduler.py)
 is a scan-loop collaborator, not a background worker. Call `poll` at least as
@@ -118,9 +119,42 @@ stable event identity rather than lose an event.
 
 Use the same deployment ID for replicas of one logical scheduler and a distinct
 holder ID per process. Generic legacy schedule maintenance methods are not
-scheduler fencing APIs. The scheduled receiver/publication loop remains
-[#1008](https://github.com/toddysm/custos/issues/1008); production lifecycle,
-readiness and deployment enablement remain
+scheduler fencing APIs. The scheduled receiver below consumes this capability; production lifecycle,
+workspace discovery, readiness and deployment enablement remain
+[#1017](https://github.com/toddysm/custos/issues/1017).
+
+### Scheduled receiver and recovery
+
+[`ScheduledReceiver`](../../src/services/trigger-service/src/custos_trigger/receivers/scheduled.py)
+is a workspace-bound scan collaborator. Share deployment leadership across
+replicas, supply an acknowledged normalized-event publisher and an audit sink,
+then call `tick()`. It does not start a background worker at import or app startup.
+One tick handles at most one pending page and one due page (default 50 rows each,
+maximum 200); it renews provider authority before external effects.
+Unmanaged or corrupt due configuration raises an explicit error rather than
+silently advancing or dispatching an unprovable target.
+
+Intervals retain their creation-time UTC anchor. Five-field cron uses the
+configured IANA zone, skips nonexistent local times and includes both repeated
+hour instants. Recovery coalesces to the most recent due occurrence. Exact skipped
+counts are persisted with the occurrence and included in its coalescing audit;
+long cron counting yields and refreshes leadership in bounded chunks rather
+than publishing a backlog.
+
+`cron.tick` events retain the pending row's stable ID and planned UTC timestamp.
+`process_scheduled_event()` uses the existing classifier, selector matcher and
+dispatcher but selects only the event's originating subscription. Unrelated
+unconditional cron subscriptions cannot fire from another schedule's event.
+The producer and consumer recheck eligibility/revision: paused, expired, missing
+or reconfigured associations are suppressed rather than rebound to a new target.
+Already accepted downstream effects are not undone by a later pause.
+
+Publication failure leaves the occurrence pending and does not roll back its
+already committed next-fire advancement. A new leader retries the original
+event; durable dispatch receipts prevent a duplicate Workflow effect. Suppressed
+pending rows record `discarded_at` and a bounded reason, not `delivered_at`.
+Broker adapter wiring and worker/retention activation remain separately gated
+by [#1010](https://github.com/toddysm/custos/issues/1010) and
 [#1017](https://github.com/toddysm/custos/issues/1017).
 
 ## Dead-letter storage capability

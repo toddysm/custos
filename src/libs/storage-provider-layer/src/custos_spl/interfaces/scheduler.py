@@ -19,7 +19,7 @@ from custos_spl.interfaces.metadata_store import Schedule
 from custos_spl.interfaces.trigger_queries import SubscriptionSnapshot
 from custos_spl.pagination import Cursor, Page
 
-SCHEDULER_SCHEMA_REVISION = 6
+SCHEDULER_SCHEMA_REVISION = 9
 
 
 def utc_instant(value: datetime) -> datetime:
@@ -27,6 +27,12 @@ def utc_instant(value: datetime) -> datetime:
     if value.utcoffset() is None:
         raise ValueError("scheduler timestamps must be timezone-aware")
     return value.astimezone(UTC)
+
+
+def validate_schedule_discard(reason: str) -> None:
+    """Keep retained suppression reasons bounded and free of arbitrary transport data."""
+    if reason not in ("inactive", "changed", "missing"):
+        raise ValueError("unsupported pending schedule suppression reason")
 
 
 def lease_duration(deployment_id: str, holder_id: str, seconds: int) -> timedelta:
@@ -86,6 +92,9 @@ class PendingScheduleFire:
     planned_fire_at: datetime
     created_at: datetime
     delivered_at: datetime | None = None
+    skipped_count: int = 0
+    discarded_at: datetime | None = None
+    discard_reason: str | None = None
 
 
 def require_scheduler_lease(
@@ -114,6 +123,7 @@ def prepare_schedule_fire(
     planned_fire_at: datetime,
     next_fire_at: datetime,
     now: datetime,
+    skipped_count: int = 0,
 ) -> PendingScheduleFire:
     """Validate the fenced due occurrence before either schedule or outbox changes."""
     require_scheduler_lease(current_lease, token, now)
@@ -121,6 +131,8 @@ def prepare_schedule_fire(
     planned, following, clock = map(utc_instant, (planned_fire_at, next_fire_at, now))
     if type(expected_revision) is not int or expected_revision < 0:
         raise ValueError("expected_revision must be a non-negative integer")
+    if type(skipped_count) is not int or not 0 <= skipped_count < 2**63:
+        raise ValueError("skipped_count must be a non-negative signed-64-bit integer")
     if not due <= planned <= clock < following:
         raise ValueError("planned fire must be due and next fire must follow provider time")
     if subscription is None or subscription.selector is None or schedule is None:
@@ -154,6 +166,7 @@ def prepare_schedule_fire(
         subscription_revision=expected_revision,
         planned_fire_at=planned,
         created_at=clock,
+        skipped_count=skipped_count,
     )
 
 
@@ -199,6 +212,7 @@ class SchedulerStateProvider(Protocol):
         expected_revision: int,
         planned_fire_at: datetime,
         next_fire_at: datetime,
+        skipped_count: int = 0,
     ) -> PendingScheduleFire:
         """Atomically persist one pending occurrence and advance a due managed schedule.
 
@@ -222,4 +236,15 @@ class SchedulerStateProvider(Protocol):
         self, workspace_id: WorkspaceId, fire_id: str, lease: SchedulerLease
     ) -> None:
         """Record acknowledgment under a live fence, including recovery of an older epoch."""
+        ...
+
+    async def discard_schedule_fire(
+        self,
+        workspace_id: WorkspaceId,
+        fire_id: str,
+        lease: SchedulerLease,
+        *,
+        reason: str,
+    ) -> None:
+        """Settle an ineligible occurrence under a live fence without reporting publication."""
         ...

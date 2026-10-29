@@ -64,6 +64,7 @@ from custos_spl.interfaces.scheduler import (
     prepare_schedule_fire,
     require_scheduler_lease,
     utc_instant,
+    validate_schedule_discard,
 )
 from custos_spl.interfaces.trigger_queries import SubscriptionSnapshot, prepare_subscription_write
 from custos_spl.pagination import (
@@ -319,6 +320,7 @@ class InMemoryTriggerMetadataStore(MemoryDeliveryState):
         expected_revision: int,
         planned_fire_at: datetime,
         next_fire_at: datetime,
+        skipped_count: int = 0,
     ) -> PendingScheduleFire:
         """Validate all state before publishing either the pending occurrence or advancement."""
         key = (str(workspace_id), schedule_id)
@@ -337,6 +339,7 @@ class InMemoryTriggerMetadataStore(MemoryDeliveryState):
             planned_fire_at=planned_fire_at,
             next_fire_at=next_fire_at,
             now=self._now(),
+            skipped_count=skipped_count,
         )
         pending_key = (str(workspace_id), pending.fire_id)
         if pending_key in self._pending_fires:
@@ -362,6 +365,7 @@ class InMemoryTriggerMetadataStore(MemoryDeliveryState):
             if row.workspace_id == workspace_id
             and row.deployment_id == deployment_id
             and row.delivered_at is None
+            and row.discarded_at is None
         ]
         return _query_page(
             rows,
@@ -381,8 +385,29 @@ class InMemoryTriggerMetadataStore(MemoryDeliveryState):
         row = self._pending_fires.get(key)
         if row is None or row.deployment_id != lease.deployment_id:
             raise ImmutableViolation("pending fire is absent from this workspace/deployment")
+        if row.discarded_at is not None:
+            raise ImmutableViolation("pending fire has been suppressed")
         if row.delivered_at is None:
             self._pending_fires[key] = replace(row, delivered_at=now)
+
+    async def discard_schedule_fire(
+        self,
+        workspace_id: WorkspaceId,
+        fire_id: str,
+        lease: SchedulerLease,
+        *,
+        reason: str,
+    ) -> None:
+        """Persist suppression under the current fence, leaving an already published fire intact."""
+        validate_schedule_discard(reason)
+        now = utc_instant(self._now())
+        require_scheduler_lease(self._scheduler_leases.get(lease.deployment_id), lease, now)
+        key = (str(workspace_id), fire_id)
+        row = self._pending_fires.get(key)
+        if row is None or row.deployment_id != lease.deployment_id or row.delivered_at is not None:
+            raise ImmutableViolation("pending fire is absent or already published")
+        if row.discarded_at is None:
+            self._pending_fires[key] = replace(row, discarded_at=now, discard_reason=reason)
 
     # ----- Subscriptions -----
 
