@@ -104,6 +104,9 @@ Exhausted setup retries also clean up possibly accepted mirror writes and
 registrations before completing the failed step.
 The opaque `custos.resume.v2.` event-channel namespace is reserved
 case-insensitively; legacy direct delivery cannot inject an event into it.
+Resume transport percent-encodes opaque run identifiers, and the receiving route
+accepts slash-addressed child runs such as `parent/invoke/workflow` without
+changing their runtime identity.
 
 ## The `waitFor:` schema
 

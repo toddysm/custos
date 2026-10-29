@@ -695,7 +695,7 @@ def test_rpc_router_exposes_expected_paths() -> None:
     assert ("/internal/runs:start", frozenset({"POST"})) in paths
     assert ("/internal/runs/{run_id}:cancel", frozenset({"POST"})) in paths
     assert (
-        "/internal/runs/{run_id}/steps/{step_id}:raiseEvent",
+        "/internal/runs/{run_id:path}/steps/{step_id}:raiseEvent",
         frozenset({"POST"}),
     ) in paths
 

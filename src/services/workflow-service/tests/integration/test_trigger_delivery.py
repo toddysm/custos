@@ -14,6 +14,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import cast
 from unittest.mock import AsyncMock
+from urllib.parse import quote
 
 import pytest
 from asyncpg.pool import Pool
@@ -616,8 +617,12 @@ def test_protocol_two_preserves_exact_event_name_and_legacy_wire() -> None:
 NOW_FOR_WIRE = datetime(2026, 11, 29, tzinfo=UTC)
 
 
-async def test_versioned_internal_rpc_uses_durable_path_and_checks_scope(harness: Harness) -> None:
-    """Exercise the actual RPC handlers and wire models, not only direct controller methods."""
+@pytest.mark.parametrize("child_wait", [False, True])
+async def test_versioned_internal_rpc_uses_durable_path_and_checks_scope(
+    harness: Harness,
+    child_wait: bool,
+) -> None:
+    """Exercise actual RPC handlers for root and slash-addressed child durable waits."""
     from unittest.mock import AsyncMock
 
     import httpx
@@ -628,6 +633,11 @@ async def test_versioned_internal_rpc_uses_durable_path_and_checks_scope(harness
     from custos_workflow.api.routes.rpc import _delivery_controller, router
     from custos_workflow.call_context import CallContext
     from custos_workflow.runs.controller import RunController
+    from custos_workflow.runs.orchestrator import RunInput
+    from custos_workflow.steps.sub_orchestration.ids import (
+        WORKFLOW_ITERATION_KEY,
+        child_instance_id,
+    )
     from custos_workflow.validator import InMemoryIdempotencyLedger, StartRunValidator
 
     class Catalog:
@@ -682,10 +692,24 @@ async def test_versioned_internal_rpc_uses_durable_path_and_checks_scope(harness
             assert repeated.json() == started.json()
             assert catalog.calls == 1 and len(registrations.register_calls) == 1
             run_id = started.json()["runId"]
+            if child_wait:
+                parent = await runtime_client.get_workflow_state(GetRunStateRequest(run_id))
+                assert parent is not None and parent.serialized_input is not None
+                child_input = RunInput.from_dict(json.loads(parent.serialized_input))
+                run_id = child_instance_id(run_id, "invoke", WORKFLOW_ITERATION_KEY)
+                await runtime_client.schedule_new_workflow(
+                    ScheduleWorkflowRequest(
+                        workflow=WORKFLOW_NAME,
+                        instance_id=run_id,
+                        input=child_input.to_dict(),
+                    )
+                )
+                assert "/" in run_id
+            route_id = quote(run_id, safe="")
             channel = resume_channel(str(WS), run_id, "first", "ready")
             for name in (channel, channel.upper()):
                 forged_channel = await http.post(
-                    f"/internal/runs/{run_id}/steps/first:raiseEvent",
+                    f"/internal/runs/{route_id}/steps/first:raiseEvent",
                     json={
                         "workspaceId": str(WS),
                         "eventName": name,
@@ -695,7 +719,7 @@ async def test_versioned_internal_rpc_uses_durable_path_and_checks_scope(harness
                 )
                 assert forged_channel.status_code == 409
             resumed = await http.post(
-                f"/internal/runs/{run_id}/steps/first:raiseEvent",
+                f"/internal/runs/{route_id}/steps/first:raiseEvent",
                 json={
                     "workspaceId": str(WS),
                     "eventName": "ready",
@@ -706,7 +730,8 @@ async def test_versioned_internal_rpc_uses_durable_path_and_checks_scope(harness
                 },
             )
             assert resumed.status_code == 202
-            assert len(registrations.register_calls) == 2
+            assert len(registrations.register_calls) == (3 if child_wait else 2)
+            assert registrations.register_calls[-1].run_id == run_id
             forbidden = await http.post(
                 "/internal/runs:start", json={**body, "workspaceId": "other"}
             )

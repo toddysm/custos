@@ -100,6 +100,23 @@ def test_raise_event_method() -> None:
     assert raise_event_method("run-1", "step-1") == ("internal/runs/run-1/steps/step-1:raiseEvent")
 
 
+async def test_raise_event_preserves_opaque_child_id_in_url() -> None:
+    """Child slashes and reserved URL characters remain data in the outbound method address."""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        """Check encoded transport bytes rather than the URL library's decoded display path."""
+        assert request.url.raw_path == (
+            b"/v1.0/invoke/workflow-service/method/"
+            b"internal/runs/parent%2Finvoke%2Fworkflow%3F%23/steps/wait:raiseEvent"
+        )
+        assert request.url.query == b""
+        return httpx.Response(202)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = DaprWorkflowServiceClient(http_client=http, endpoint=_ENDPOINT)
+        await client.raise_external_event("parent/invoke/workflow?#", "wait", _raise_request())
+
+
 def test_read_dapr_endpoint_defaults() -> None:
     endpoint = read_dapr_endpoint({}, app_id="workflow-service")
     assert endpoint == DaprEndpoint(

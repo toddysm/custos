@@ -26,6 +26,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol, Self, runtime_checkable
+from urllib.parse import quote
 
 import httpx
 from pydantic import (
@@ -76,8 +77,8 @@ START_RUN_METHOD: str = "internal/runs:start"
 
 
 def raise_event_method(run_id: str, step_id: str) -> str:
-    """Return the Dapr invoke method for raising an event on a waiting step."""
-    return f"internal/runs/{run_id}/steps/{step_id}:raiseEvent"
+    """Encode opaque identifiers, including slash-addressed children, in the invoke method."""
+    return f"internal/runs/{quote(run_id, safe='')}/steps/{quote(step_id, safe='')}:raiseEvent"
 
 
 # --- Wire models -------------------------------------------------------------

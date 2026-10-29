@@ -293,7 +293,7 @@ async def cancel_run(
 
 
 @router.post(
-    "/internal/runs/{run_id}/steps/{step_id}:raiseEvent",
+    "/internal/runs/{run_id:path}/steps/{step_id}:raiseEvent",
     status_code=202,
     summary="Internal RPC: deliver an external event into a running workflow.",
 )
@@ -306,7 +306,7 @@ async def raise_external_event(
         str,
         Path(
             min_length=1,
-            description="The opaque run identifier returned by `StartRun`.",
+            description="Opaque root or slash-addressed child run identifier.",
         ),
     ],
     step_id: Annotated[

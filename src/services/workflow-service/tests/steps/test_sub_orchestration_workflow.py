@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -184,7 +185,9 @@ def _drive_to_when_all(gen: Generator[Any, Any, dict[str, dict[str, Any]]]) -> A
 # ---------------------------------------------------------------------------
 
 
-def test_spawns_single_child_with_deterministic_id() -> None:
+@pytest.mark.parametrize("delivery_protocol", [1, 2])
+def test_spawns_single_child_with_deterministic_id(delivery_protocol: int) -> None:
+    """Preserve the parent's delivery contract alongside its deterministic child address."""
     ctx = _StubContext()
     graph = _workflow_graph(
         with_block={"name": "${{ inputs.who }}"},
@@ -192,7 +195,10 @@ def test_spawns_single_child_with_deterministic_id() -> None:
             "with.name": _with_call_site("inputs.who", key="name", inputs_schema=_INPUTS_SCHEMA)
         },
     )
-    step_ctx = _ctx(inputs={"who": "ada"}, workflow_context=ctx)
+    step_ctx = replace(
+        _ctx(inputs={"who": "ada"}, workflow_context=ctx),
+        delivery_protocol=delivery_protocol,
+    )
 
     gen = SubOrchestrationManager().run_sub_workflow(step_ctx, graph, _STEP_ID, _child_graph())
     token = _drive_to_when_all(gen)
@@ -205,6 +211,7 @@ def test_spawns_single_child_with_deterministic_id() -> None:
     decoded = RunInput.from_dict(call["input"])
     assert decoded.workflow_version_id == _REF
     assert decoded.workspace_id == "ws-1"
+    assert decoded.delivery_protocol == delivery_protocol
     # The with: block flows through as the child run's inputs.* namespace.
     assert decoded.inputs == {"name": "ada"}
 
