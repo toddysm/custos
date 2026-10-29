@@ -348,7 +348,7 @@ async def raise_external_event(
     * Runtime failure → ``workflow.runtime_unavailable`` (503).
     """
     _delivery_scope(_ctx, body.workspace_id)
-    if body.delivery_protocol == 1 and body.event_name.startswith(RESUME_CHANNEL_PREFIX):
+    if body.delivery_protocol == 1 and body.event_name.casefold().startswith(RESUME_CHANNEL_PREFIX):
         raise RunStateConflictError("reserved resume channels require versioned delivery")
     if body.delivery_protocol == 2:
         if delivery is None:

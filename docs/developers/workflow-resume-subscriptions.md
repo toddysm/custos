@@ -98,8 +98,10 @@ acknowledged. Both preserve the standard structured step-error envelope.
 Transient acknowledgement failures do not terminate a wait after consumption:
 the worker retries through durable timers with a capped 60-second backoff and
 an observable pending status. Submission and consumer completion are distinct
-receipt states. Timeout executes durable cancellation/deletion instead of relying
-on the legacy in-memory sweeper.
+receipt states. Timeout and rejected envelopes execute durable
+cancellation/deletion instead of relying on the legacy in-memory sweeper.
+The opaque `custos.resume.v2.` event-channel namespace is reserved
+case-insensitively; legacy direct delivery cannot inject an event into it.
 
 ## The `waitFor:` schema
 

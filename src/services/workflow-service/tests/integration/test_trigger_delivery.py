@@ -578,16 +578,18 @@ async def test_versioned_internal_rpc_uses_durable_path_and_checks_scope(harness
             assert repeated.json() == started.json()
             assert catalog.calls == 1 and len(registrations.register_calls) == 1
             run_id = started.json()["runId"]
-            forged_channel = await http.post(
-                f"/internal/runs/{run_id}/steps/first:raiseEvent",
-                json={
-                    "workspaceId": str(WS),
-                    "eventName": resume_channel(str(WS), run_id, "first", "ready"),
-                    "payload": {"deliveryProtocol": 2},
-                    "idempotencyKey": "forged",
-                },
-            )
-            assert forged_channel.status_code == 409
+            channel = resume_channel(str(WS), run_id, "first", "ready")
+            for name in (channel, channel.upper()):
+                forged_channel = await http.post(
+                    f"/internal/runs/{run_id}/steps/first:raiseEvent",
+                    json={
+                        "workspaceId": str(WS),
+                        "eventName": name,
+                        "payload": {"deliveryProtocol": 2},
+                        "idempotencyKey": "forged",
+                    },
+                )
+                assert forged_channel.status_code == 409
             resumed = await http.post(
                 f"/internal/runs/{run_id}/steps/first:raiseEvent",
                 json={
@@ -666,10 +668,12 @@ async def test_consumed_event_retries_acknowledgement_through_long_outage(
         await runtime.shutdown()
 
 
-async def test_wait_expiry_cancels_registration_and_deletes_durable_mirror(
+@pytest.mark.parametrize("reason", ["timeout", "malformed", "unregistered"])
+async def test_terminal_wait_cancels_registration_and_deletes_durable_mirror(
     harness: Harness,
+    reason: str,
 ) -> None:
-    """Timeout follows the durable cleanup path rather than relying on the legacy memory sweeper."""
+    """Every terminal wait path cleans up without relying on the legacy memory sweeper."""
     runtime, client, registrations = await setup_runtime(harness)
     try:
         controller = TriggerDeliveryController(
@@ -680,12 +684,38 @@ async def test_wait_expiry_cancels_registration_and_deletes_durable_mirror(
             InMemoryLifecycleEventPublisher(),
         )
         until = await harness.delivery.delivery_now() + timedelta(days=30)
-        ref = await controller.start(str(WS), version(), {}, "timeout", until)
-        await client.advance_time(timedelta(hours=2))
+        ref = await controller.start(str(WS), version(), {}, reason, until)
+        if reason == "timeout":
+            await client.advance_time(timedelta(hours=2))
+        else:
+            key, fingerprint = resume_identity(
+                str(WS),
+                str(ref.run_id),
+                "first",
+                "ready",
+                "missing",
+                {},
+            )
+            envelope = {
+                "deliveryProtocol": 2,
+                "deliveryKey": key,
+                "requestHash": fingerprint,
+                "idempotencyKey": "missing",
+                "payload": {},
+            }
+            await client.raise_workflow_event(
+                RaiseRunEventRequest(
+                    instance_id=str(ref.run_id),
+                    event_name=resume_channel(str(WS), str(ref.run_id), "first", "ready"),
+                    data=envelope if reason == "unregistered" else {},
+                )
+            )
         state = await client.get_workflow_state(GetRunStateRequest(str(ref.run_id)))
         assert state is not None and state.status.value == "completed"
         output = json.loads(state.serialized_output or "{}")
-        assert output["failure_envelope"]["kind"] == "step.resume_wait_expired"
+        assert output["failure_envelope"]["kind"] == (
+            "step.resume_wait_expired" if reason == "timeout" else "step.resume_delivery_failed"
+        )
         assert len(registrations.cancel_calls) == 1
         assert not await DurableResumeMirrorRepository(harness.delivery, str(WS)).list_open(
             str(ref.run_id)

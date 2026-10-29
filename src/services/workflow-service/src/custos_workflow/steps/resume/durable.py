@@ -237,6 +237,33 @@ def _activity(ctx: WorkflowContext, body: Mapping[str, Any]) -> Generator[Any, A
             yield ctx.create_timer(timedelta(seconds=min(2 ** min(attempt - 1, 6), 60)))
 
 
+def _cleanup_wait(
+    ctx: WorkflowContext,
+    mirror: ResumeSubscriptionMirror | None,
+) -> Generator[Any, Any, None]:
+    """Finish terminal wait cleanup through recoverable activities before returning failure."""
+    if mirror is None:
+        raise RuntimeError("terminal durable wait has no mirror identity")
+    yield from _activity(
+        ctx,
+        {
+            "workspaceId": mirror.workspace_id,
+            "operation": "cancel",
+            "runId": mirror.run_id,
+            "stepId": mirror.step_id,
+            "eventKey": mirror.event_key,
+        },
+    )
+    yield from _activity(
+        ctx,
+        {
+            "workspaceId": mirror.workspace_id,
+            "operation": "delete",
+            "mirrorId": mirror.mirror_id,
+        },
+    )
+
+
 def drive_durable_resume(
     handler: WaitForStepHandler,
     step: StepExecutionContext,
@@ -302,26 +329,7 @@ def drive_durable_resume(
                 )
                 if winner is not event:
                     gen.close()
-                    if active_mirror is None:
-                        raise RuntimeError("expired durable wait has no mirror identity")
-                    yield from _activity(
-                        ctx,
-                        {
-                            **base,
-                            "operation": "cancel",
-                            "runId": run_id,
-                            "stepId": step_id,
-                            "eventKey": token.event_key,
-                        },
-                    )
-                    yield from _activity(
-                        ctx,
-                        {
-                            **base,
-                            "operation": "delete",
-                            "mirrorId": active_mirror.mirror_id,
-                        },
-                    )
+                    yield from _cleanup_wait(ctx, active_mirror)
                     return StepFailed(
                         envelope={
                             **ResumeWaitExpiredError(
@@ -381,6 +389,7 @@ def drive_durable_resume(
                 registration_failures += 1
             if isinstance(token, WaitForExternalEventCall):
                 gen.close()
+                yield from _cleanup_wait(ctx, active_mirror)
                 return StepFailed(
                     envelope={
                         **ResumeDeliveryFailedError(
