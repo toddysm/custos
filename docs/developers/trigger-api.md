@@ -131,6 +131,8 @@ replicas, supply an acknowledged normalized-event publisher and an audit sink,
 then call `tick()`. It does not start a background worker at import or app startup.
 One tick handles at most one pending page and one due page (default 50 rows each,
 maximum 200); it renews provider authority before external effects.
+Due pages retain a fixed-cutoff cursor cycle across ticks, so continuously due
+early IDs cannot starve the later pages.
 Unmanaged or corrupt due configuration raises an explicit error rather than
 silently advancing or dispatching an unprovable target.
 
@@ -143,8 +145,17 @@ than publishing a backlog.
 
 `cron.tick` events retain the pending row's stable ID and planned UTC timestamp.
 `process_scheduled_event()` uses the existing classifier, selector matcher and
-dispatcher but selects only the event's originating subscription. Unrelated
+dispatcher but first checks scoped canonical occurrence proof, its derived ID
+and immutable event fields. Fresh caller-supplied IDs or changed planned
+timestamps cannot manufacture another fire. It then selects only the event's
+originating subscription. Unrelated
 unconditional cron subscriptions cannot fire from another schedule's event.
+Input mappings resolve through the shared CEL sandbox into a copied subscription
+before dispatch. Whole placeholders retain their JSON value; mixed strings
+interpolate and nested containers are resolved without modifying stored
+configuration. The occurrence timestamp supplies the deterministic expression
+clock. Replay captures the resolved inputs, not templates to be rematched later.
+Invalid mappings and nesting beyond 64 levels fail explicitly before dispatch.
 The producer and consumer recheck eligibility/revision: paused, expired, missing
 or reconfigured associations are suppressed rather than rebound to a new target.
 Already accepted downstream effects are not undone by a later pause.
@@ -153,6 +164,9 @@ Publication failure leaves the occurrence pending and does not roll back its
 already committed next-fire advancement. A new leader retries the original
 event; durable dispatch receipts prevent a duplicate Workflow effect. Suppressed
 pending rows record `discarded_at` and a bounded reason, not `delivered_at`.
+Canonical occurrence rows remain readable after producer acknowledgement;
+broker acknowledgement alone is not permission to erase proof before durable
+consumer completion. Missing proof fails closed.
 Broker adapter wiring and worker/retention activation remain separately gated
 by [#1010](https://github.com/toddysm/custos/issues/1010) and
 [#1017](https://github.com/toddysm/custos/issues/1017).

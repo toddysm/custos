@@ -1433,6 +1433,21 @@ class PgMetadataAdapter:
                 raise ImmutableViolation("provider time moved outside the planned-fire window")
             return pending
 
+    async def get_schedule_fire(
+        self,
+        workspace_id: WorkspaceId,
+        fire_id: str,
+    ) -> PendingScheduleFire | None:
+        """Read scoped occurrence proof without filtering its settlement state."""
+        async with self._scheduler_transaction() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM custos_state.pending_schedule_fire "
+                "WHERE workspace_id=$1 AND fire_id=$2",
+                workspace_id,
+                fire_id,
+            )
+            return _pending_fire(row) if row is not None else None
+
     async def query_pending_schedule_fires(
         self,
         workspace_id: WorkspaceId,

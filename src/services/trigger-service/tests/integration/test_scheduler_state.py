@@ -95,6 +95,7 @@ async def _due(
     workspace: WorkspaceId = _WS,
     *,
     interval_seconds: int = 30,
+    input_mapping: dict[str, Any] | None = None,
 ) -> Subscription:
     """Create real managed state and set an explicitly due instant through the maintenance API."""
     now = await harness.store.scheduler_now()
@@ -107,6 +108,7 @@ async def _due(
             source_type=SourceType.SCHEDULED,
             source_config=SourceConfig(interval_seconds=interval_seconds),
             target_workflow_version_id="version",
+            input_mapping=input_mapping or {},
             created_at=now - timedelta(seconds=2 * interval_seconds),
             updated_at=now,
         )
@@ -323,6 +325,40 @@ async def test_receiver_bounds_one_hundred_due_schedules(harness: Harness) -> No
     assert len({event.event_id for event in events}) == 101
 
 
+async def test_continuously_due_prefix_cannot_starve_later_pages(harness: Harness) -> None:
+    """A fixed-cutoff cursor reaches the tail even when earlier IDs are already due again."""
+    for identifier in ("a", "b", "c"):
+        await _due(harness, identifier, interval_seconds=1)
+    events: list[NormalizedEvent] = []
+
+    async def publish(event: NormalizedEvent) -> None:
+        """Acknowledge each occurrence for exact per-page accounting."""
+        events.append(event)
+
+    receiver = ScheduledReceiver(
+        harness.store,
+        workspace_id=str(_WS),
+        page_size=2,
+        leadership=SchedulerLeadership(harness.store, deployment_id="fair", holder_id="a"),
+        publish=publish,
+        audit=NoopAuditSink(),
+    )
+    assert (await receiver.tick()).published == 2
+    prefix = await harness.store.get_schedule(_WS, "b")
+    assert prefix is not None
+    if harness.pool is None:
+        harness.clock[0] = prefix.next_fire_at
+    else:
+        async with asyncio.timeout(5):
+            while await harness.store.scheduler_now() < prefix.next_fire_at:
+                await asyncio.sleep(0.01)
+    second = await receiver.tick()
+    assert second.published == 1
+    assert [event.source.subscription_id for event in events] == ["a", "b", "c"]
+    assert (await receiver.tick()).published == 2
+    assert [event.source.subscription_id for event in events[-2:]] == ["a", "b"]
+
+
 async def test_reconfigured_pending_fire_is_discarded_not_rebound(harness: Harness) -> None:
     """A pending occurrence cannot adopt a new target or input mapping after producer death."""
     subscription = await _due(harness, interval_seconds=3600)
@@ -484,7 +520,12 @@ async def test_recovered_publication_does_not_duplicate_workflow_effect(harness:
         reliable=ReliableDispatcher(workflow, harness.store, audit),
     )
     subscriptions = SubscriptionStore(harness.store)
-    await _due(harness, interval_seconds=3600)
+    mapping = {
+        "planned": "${{ event.data.plannedFireAt }}",
+        "skipped": "${{ event.data.skippedCount }}",
+        "label": "schedule-${{ event.subject }}",
+    }
+    await _due(harness, interval_seconds=3600, input_mapping=mapping)
     await _due(harness, "other", interval_seconds=3600)
     await harness.store.update_schedule_next_fire(
         _WS,
@@ -500,6 +541,7 @@ async def test_recovered_publication_does_not_duplicate_workflow_effect(harness:
         outcome = await process_scheduled_event(
             event,
             subscription_store=subscriptions,
+            provider=harness.store,
             evaluator=SelectorEvaluator(),
             dispatcher=dispatcher,
             audit=audit,
@@ -536,8 +578,150 @@ async def test_recovered_publication_does_not_duplicate_workflow_effect(harness:
         state = await client.get_workflow_state(GetRunStateRequest(str(run_id)))
         assert state is not None and state.status.value == "completed"
         assert json.loads(state.serialized_output or "{}")["status"] == "succeeded"
+        assert json.loads(state.serialized_input or "{}")["inputs"] == {
+            "planned": events[0].data["plannedFireAt"],
+            "skipped": 1,
+            "label": "schedule-schedule",
+        }
+        stored = await subscriptions.get(str(_WS), "schedule")
+        assert stored is not None and stored.input_mapping == mapping
     finally:
         await runtime.shutdown()
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["event_id", "plannedFireAt", "occurredAt", "workspace", "revision", "skippedCount"],
+)
+async def test_consumer_rejects_unproven_or_mutated_occurrences(
+    harness: Harness,
+    field: str,
+) -> None:
+    """Fresh dedup IDs or changed timestamps cannot manufacture an extra scheduled effect."""
+    from custos_trigger.clients import FakeWorkflowServiceClient
+    from custos_trigger.dedup import Deduplicator
+    from custos_trigger.pipeline.dispatch import Dispatcher
+    from custos_trigger.receivers.scheduled import process_scheduled_event, scheduled_event
+    from custos_trigger.selector import SelectorEvaluator
+    from custos_trigger.source_config import SourceConfigurationError
+
+    subscription = await _due(harness)
+    lease = await harness.store.acquire_scheduler_lease("proof", "a", ttl_seconds=30)
+    assert lease is not None
+    fire = await _advance(harness, subscription, lease)
+    event = scheduled_event(fire)
+    if field == "event_id":
+        event.event_id = "invented-id"
+    elif field == "occurredAt":
+        event.source.occurred_at = "2099-01-01T00:00:00+00:00"
+    elif field == "plannedFireAt":
+        event.data["plannedFireAt"] = "2099-01-01T00:00:00+00:00"
+    elif field == "workspace":
+        event.data["workspace"] = "foreign"
+    elif field == "revision":
+        event.data["subscriptionRevision"] = fire.subscription_revision + 1
+    else:
+        event.data["skippedCount"] = 999
+    client = FakeWorkflowServiceClient()
+    with pytest.raises(SourceConfigurationError, match="canonical occurrence"):
+        await process_scheduled_event(
+            event,
+            subscription_store=SubscriptionStore(harness.store),
+            provider=harness.store,
+            evaluator=SelectorEvaluator(),
+            dispatcher=Dispatcher(client, Deduplicator(harness.store)),
+            audit=NoopAuditSink(),
+        )
+    assert not client.start_run_calls and not client.raise_event_calls
+
+
+@pytest.mark.parametrize("suppressed", [False, True])
+async def test_consumer_retains_proof_after_producer_settlement(
+    harness: Harness,
+    suppressed: bool,
+) -> None:
+    """Broker acknowledgement must not erase proof needed by a later consumer or redelivery."""
+    from custos_trigger.clients import FakeWorkflowServiceClient
+    from custos_trigger.dedup import Deduplicator
+    from custos_trigger.pipeline.dispatch import Dispatcher
+    from custos_trigger.receivers.scheduled import process_scheduled_event, scheduled_event
+    from custos_trigger.selector import SelectorEvaluator
+
+    subscription = await _due(harness)
+    lease = await harness.store.acquire_scheduler_lease("settled-proof", "a", ttl_seconds=30)
+    assert lease is not None
+    fire = await _advance(harness, subscription, lease)
+    if suppressed:
+        await harness.store.discard_schedule_fire(_WS, fire.fire_id, lease, reason="changed")
+    else:
+        await harness.store.acknowledge_schedule_fire(_WS, fire.fire_id, lease)
+    assert not (await harness.store.query_pending_schedule_fires(_WS, "settled-proof")).items
+    assert await harness.store.get_schedule_fire(_WS, fire.fire_id) is not None
+    assert await harness.store.get_schedule_fire(WorkspaceId("foreign"), fire.fire_id) is None
+    client = FakeWorkflowServiceClient()
+    outcome = await process_scheduled_event(
+        scheduled_event(fire),
+        subscription_store=SubscriptionStore(harness.store),
+        provider=harness.store,
+        evaluator=SelectorEvaluator(),
+        dispatcher=Dispatcher(client, Deduplicator(harness.store)),
+        audit=NoopAuditSink(),
+    )
+    if suppressed:
+        assert outcome is None and not client.start_run_calls
+    else:
+        assert outcome is not None and outcome.is_dispatched
+        assert len(client.start_run_calls) == 1
+
+
+async def test_resolved_mapping_is_captured_and_replayed_without_rematching(
+    harness: Harness,
+) -> None:
+    """Durable replay stores concrete Workflow inputs while authored configuration stays intact."""
+    from custos_spl.interfaces.dead_letters import json_value
+
+    from custos_trigger.clients.workflow import (
+        FakeWorkflowServiceClient,
+        WorkflowClientTransportError,
+    )
+    from custos_trigger.dedup import Deduplicator
+    from custos_trigger.pipeline.dispatch import Dispatcher
+    from custos_trigger.pipeline.reliable import ReliableDispatcher, ReliableStorage
+    from custos_trigger.receivers.scheduled import process_scheduled_event, scheduled_event
+    from custos_trigger.selector import SelectorEvaluator
+
+    mapping = {"planned": "${{ event.data.plannedFireAt }}", "nested": ["${{ event.subject }}", 3]}
+    subscription = await _due(harness, input_mapping=mapping)
+    lease = await harness.store.acquire_scheduler_lease("mapped", "a", ttl_seconds=30)
+    assert lease is not None
+    fire = await _advance(harness, subscription, lease)
+    event = scheduled_event(fire)
+    assert isinstance(harness.store, ReliableStorage)
+    client = FakeWorkflowServiceClient(error=WorkflowClientTransportError("unavailable"))
+    audit = NoopAuditSink()
+    reliable = ReliableDispatcher(client, harness.store, audit, max_retries=0)
+    store = SubscriptionStore(harness.store)
+    outcome = await process_scheduled_event(
+        event,
+        subscription_store=store,
+        provider=harness.store,
+        evaluator=SelectorEvaluator(),
+        dispatcher=Dispatcher(client, Deduplicator(harness.store), reliable=reliable),
+        audit=audit,
+    )
+    assert outcome is not None and outcome.is_dead_lettered
+    expected = {"planned": event.data["plannedFireAt"], "nested": ["schedule", 3]}
+    capture = (await harness.store.query_dead_letters(_WS)).items[0]
+    assert json_value(capture.data.target["inputs"]) == expected
+    stored = await store.get(str(_WS), "schedule")
+    assert stored is not None and stored.input_mapping == mapping
+    await store.update(
+        stored.model_copy(update={"input_mapping": {"different": 4}}),
+        expected_revision=stored.store_revision,
+    )
+    client.error = None
+    assert (await reliable.replay(str(_WS), capture.data.entry_id, "operator")).is_dispatched
+    assert client.start_run_calls[-1].inputs == expected
 
 
 async def test_competing_acquisition_and_stable_renewal(harness: Harness) -> None:

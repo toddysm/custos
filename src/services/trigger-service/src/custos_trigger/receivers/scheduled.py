@@ -20,17 +20,19 @@ from custos_spl.interfaces.scheduler import (
     PendingScheduleFire,
     SchedulerLease,
     SchedulerStateProvider,
+    schedule_fire_id,
     utc_instant,
 )
 from custos_spl.interfaces.trigger_queries import TriggerQueryProvider
-from custos_spl.pagination import query_page_limit
+from custos_spl.pagination import Cursor, query_page_limit
 
 from custos_trigger.events import EventSource, NormalizedEvent
+from custos_trigger.input_mapping import resolve_input_mapping
 from custos_trigger.models import SourceType, Subscription, SubscriptionKind, SubscriptionState
 from custos_trigger.pipeline.classify import classify
 from custos_trigger.pipeline.dispatch import AuditSink, Dispatcher, DispatchOutcome
 from custos_trigger.pipeline.match_resume import resume_key_from_event
-from custos_trigger.pipeline.match_start import StartMatcher
+from custos_trigger.pipeline.match_start import StartMatch, StartMatcher
 from custos_trigger.scheduler import SchedulerLeadership
 from custos_trigger.selector import SelectorEvaluator
 from custos_trigger.source_config import (
@@ -138,6 +140,7 @@ async def process_scheduled_event(
     event: NormalizedEvent,
     *,
     subscription_store: SubscriptionStore,
+    provider: SchedulerStateProvider,
     evaluator: SelectorEvaluator,
     dispatcher: Dispatcher,
     audit: AuditSink,
@@ -158,6 +161,29 @@ async def process_scheduled_event(
     ):
         logger.error("Invalid scheduled event association: %s", event.event_id)
         raise SourceConfigurationError("scheduled event has no valid scoped association")
+    if resume_key_from_event(event) is not None:
+        logger.error("Scheduled event carries unsupported resume routing: %s", event.event_id)
+        raise SourceConfigurationError("scheduled source cannot inject resume routing identifiers")
+    fire = await provider.get_schedule_fire(WorkspaceId(workspace), event.event_id)
+    if (
+        fire is None
+        or fire.fire_id != schedule_fire_id(fire.schedule_id, fire.planned_fire_at)
+        or event.model_dump(exclude={"raw"}) != scheduled_event(fire).model_dump(exclude={"raw"})
+    ):
+        logger.error("Unproven scheduled occurrence: %s", event.event_id)
+        raise SourceConfigurationError("scheduled event does not match canonical occurrence proof")
+    if fire.discarded_at is not None:
+        await audit.emit(
+            "trigger.schedule.suppressed",
+            workspace_id=workspace,
+            attributes={
+                "eventId": event.event_id,
+                "subscriptionId": identifier,
+                "reason": fire.discard_reason,
+            },
+        )
+        return None
+    event = scheduled_event(fire)
     subscription = await subscription_store.get(workspace, identifier)
     reason = _suppression(subscription, revision)
     if reason is not None:
@@ -169,9 +195,6 @@ async def process_scheduled_event(
         return None
     assert subscription is not None
     classification = classify(event)
-    if classification.to_resume and resume_key_from_event(event) is not None:
-        logger.error("Scheduled event carries unsupported resume routing: %s", event.event_id)
-        raise SourceConfigurationError("scheduled source cannot inject resume routing identifiers")
     matches = (
         StartMatcher(evaluator).match(event, [subscription]) if classification.to_start else []
     )
@@ -182,7 +205,17 @@ async def process_scheduled_event(
             attributes={"eventId": event.event_id, "subscriptionId": identifier},
         )
         return None
-    return await dispatcher.dispatch_start(event, matches[0])
+    resolved = subscription.model_copy(
+        update={
+            "input_mapping": resolve_input_mapping(
+                subscription.input_mapping,
+                event,
+                evaluator=evaluator,
+                subscription_id=subscription.subscription_id,
+            ),
+        }
+    )
+    return await dispatcher.dispatch_start(event, StartMatch(resolved))
 
 
 @dataclass(frozen=True)
@@ -222,6 +255,8 @@ class ScheduledReceiver:
         self.subscriptions = SubscriptionStore(provider)
         self._lease: SchedulerLease | None = None
         self._lock = asyncio.Lock()
+        self._due_cutoff: datetime | None = None
+        self._due_cursor: Cursor | None = None
 
     async def _heartbeat(self) -> datetime:
         """Refresh provider authority before side effects and during cooperative cron counting."""
@@ -238,9 +273,12 @@ class ScheduledReceiver:
                 return ScheduledScan(leader=False)
             published, suppressed = await self._recover()
             now = await self._heartbeat()
+            if self._due_cutoff is None:
+                self._due_cutoff = now
             page = await self.store.query_due_schedules(
                 self.workspace,
-                due_at=now,
+                due_at=self._due_cutoff,
+                cursor=self._due_cursor,
                 limit=self.page_size,
             )
             planned = 0
@@ -283,6 +321,9 @@ class ScheduledReceiver:
                 accepted = await self._publish(fire)
                 published += int(accepted)
                 suppressed += int(not accepted)
+            self._due_cursor = page.next_cursor
+            if self._due_cursor is None:
+                self._due_cutoff = None
             return ScheduledScan(True, planned, published, suppressed)
 
     async def _recover(self) -> tuple[int, int]:

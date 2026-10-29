@@ -35,6 +35,17 @@ def validate_schedule_discard(reason: str) -> None:
         raise ValueError("unsupported pending schedule suppression reason")
 
 
+def schedule_fire_id(schedule_id: str, planned_fire_at: datetime) -> str:
+    """Derive the stable scoped occurrence key used by both producer and consumer validation."""
+    if not isinstance(schedule_id, str) or not schedule_id.strip():
+        raise ValueError("schedule identity must be nonblank")
+    identity = json.dumps(
+        [schedule_id, utc_instant(planned_fire_at).isoformat(timespec="microseconds")],
+        separators=(",", ":"),
+    ).encode()
+    return "sched_" + hashlib.sha256(identity).hexdigest()
+
+
 def lease_duration(deployment_id: str, holder_id: str, seconds: int) -> timedelta:
     """Validate identities and a representable positive lease duration before backend access."""
     if (
@@ -152,13 +163,9 @@ def prepare_schedule_fire(
         or not isinstance(blob.get("sourceConfig"), dict)
     ):
         raise ImmutableViolation("schedule eligibility or configuration changed before advancement")
-    identity = json.dumps(
-        [schedule.schedule_id, planned.isoformat(timespec="microseconds")],
-        separators=(",", ":"),
-    ).encode()
     return PendingScheduleFire(
         workspace_id=workspace_id,
-        fire_id="sched_" + hashlib.sha256(identity).hexdigest(),
+        fire_id=schedule_fire_id(schedule.schedule_id, planned),
         schedule_id=schedule.schedule_id,
         workflow_id=str(schedule.workflow_id),
         deployment_id=token.deployment_id,
@@ -230,6 +237,14 @@ class SchedulerStateProvider(Protocol):
         limit: int | None = None,
     ) -> Page[PendingScheduleFire]:
         """Return a bounded workspace/deployment-bound page of undelivered occurrences."""
+        ...
+
+    async def get_schedule_fire(
+        self,
+        workspace_id: WorkspaceId,
+        fire_id: str,
+    ) -> PendingScheduleFire | None:
+        """Read canonical occurrence proof, including published or suppressed rows."""
         ...
 
     async def acknowledge_schedule_fire(

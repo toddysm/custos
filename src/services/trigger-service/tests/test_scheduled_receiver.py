@@ -141,7 +141,6 @@ async def test_consumer_rechecks_eligibility_and_never_routes_unrelated_work(rea
     from typing import Any
 
     from custos_spl.ids import WorkspaceId
-    from custos_spl.interfaces.scheduler import PendingScheduleFire
 
     from custos_trigger.clients import FakeWorkflowServiceClient
     from custos_trigger.dedup import Deduplicator
@@ -168,19 +167,19 @@ async def test_consumer_rechecks_eligibility_and_never_routes_unrelated_work(rea
             selector="false" if reason == "filtered" else None,
         )
     )
-    event = scheduled_event(
-        PendingScheduleFire(
-            WorkspaceId("ws"),
-            "fire",
-            "schedule",
-            "workflow",
-            "deployment",
-            1,
-            subscription.store_revision,
-            now,
-            now,
-        )
+    lease = await provider.acquire_scheduler_lease("deployment", "worker", ttl_seconds=30)
+    assert lease is not None
+    await provider.update_schedule_next_fire(WorkspaceId("ws"), "schedule", now)
+    fire = await provider.advance_schedule(
+        WorkspaceId("ws"),
+        "schedule",
+        lease,
+        expected_next_fire_at=now,
+        expected_revision=subscription.store_revision,
+        planned_fire_at=now,
+        next_fire_at=now + timedelta(seconds=30),
     )
+    event = scheduled_event(fire)
     if reason in ("paused", "expired"):
         await store.set_state("ws", "schedule", SubscriptionState(reason))
     elif reason == "changed":
@@ -189,7 +188,7 @@ async def test_consumer_rechecks_eligibility_and_never_routes_unrelated_work(rea
             expected_revision=subscription.store_revision,
         )
     elif reason == "missing":
-        event.data["workspace"] = "other"
+        provider._subscriptions.pop(("ws", "schedule"))
     elif reason == "resume":
         event.data.update(runId="unrelated-run", stepId="wait")
 
@@ -215,6 +214,7 @@ async def test_consumer_rechecks_eligibility_and_never_routes_unrelated_work(rea
             await process_scheduled_event(
                 event,
                 subscription_store=store,
+                provider=provider,
                 evaluator=SelectorEvaluator(),
                 dispatcher=dispatcher,
                 audit=Audit(),
@@ -224,6 +224,7 @@ async def test_consumer_rechecks_eligibility_and_never_routes_unrelated_work(rea
             await process_scheduled_event(
                 event,
                 subscription_store=store,
+                provider=provider,
                 evaluator=SelectorEvaluator(),
                 dispatcher=dispatcher,
                 audit=Audit(),

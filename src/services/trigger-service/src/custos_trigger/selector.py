@@ -317,18 +317,8 @@ class SelectorEvaluator:
         an event field this event omits) is a no-match (``False``). A well-typed
         non-bool result raises :class:`SelectorTypeError`.
         """
-        active_clock: Clock = clock if clock is not None else FixedClock(datetime.now(UTC))
-        scope = BindingScope(
-            run=_PLACEHOLDER_RUN,
-            workflow=_PLACEHOLDER_WORKFLOW,
-            now=active_clock.now,
-            event=_event_to_mapping(event),
-        )
-
         try:
-            result = cel_evaluate(
-                compiled.typed_ast, scope, active_clock, timeout_ms=self._timeout_ms
-            )
+            result = self.evaluate_value(compiled, event, clock=clock)
         except EvalTimeoutError:
             return False
         except (EvalError, UnboundNameError):
@@ -345,6 +335,23 @@ class SelectorEvaluator:
                 },
             )
         return result
+
+    def evaluate_value(
+        self,
+        compiled: CompiledSelector,
+        event: NormalizedEvent | Mapping[str, Any],
+        *,
+        clock: Clock | None = None,
+    ) -> Any:
+        """Evaluate the same event sandbox for mappings, preserving values and explicit errors."""
+        active_clock: Clock = clock if clock is not None else FixedClock(datetime.now(UTC))
+        scope = BindingScope(
+            run=_PLACEHOLDER_RUN,
+            workflow=_PLACEHOLDER_WORKFLOW,
+            now=active_clock.now,
+            event=_event_to_mapping(event),
+        )
+        return cel_evaluate(compiled.typed_ast, scope, active_clock, timeout_ms=self._timeout_ms)
 
     def matches(
         self,

@@ -350,6 +350,14 @@ class InMemoryTriggerMetadataStore(MemoryDeliveryState):
         self._schedules[key] = replace(schedule, next_fire_at=utc_instant(next_fire_at))
         return pending
 
+    async def get_schedule_fire(
+        self,
+        workspace_id: WorkspaceId,
+        fire_id: str,
+    ) -> PendingScheduleFire | None:
+        """Read retained occurrence proof without exposing another workspace's records."""
+        return self._pending_fires.get((str(workspace_id), fire_id))
+
     async def query_pending_schedule_fires(
         self,
         workspace_id: WorkspaceId,
