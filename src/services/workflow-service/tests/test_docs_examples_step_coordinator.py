@@ -372,6 +372,8 @@ _DOCUMENTED_STEP_KINDS: Final[frozenset[str]] = frozenset(
         "step.resume_registration_failed",
         "step.resume_subscription_divergent",
         "step.resume_mirror_persist_error",
+        "step.resume_wait_expired",
+        "step.resume_delivery_failed",
     }
 )
 

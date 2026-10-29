@@ -32,6 +32,7 @@ import json
 from collections.abc import Awaitable, Callable, Mapping
 from collections.abc import Set as AbstractSet
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
@@ -62,6 +63,20 @@ from custos_spl.interfaces.dead_letters import (
     finish_replay,
     new_dead_letter,
     recover_replay,
+)
+from custos_spl.interfaces.delivery import (
+    DELIVERY_SCHEMA_REVISION,
+    DeliveryNamespace,
+    DeliveryReceipt,
+    WorkflowMirror,
+    WorkflowStart,
+    delivery_instant,
+    delivery_result,
+    encode_delivery_request,
+    require_delivery,
+    reserve_delivery,
+    validate_delivery_key,
+    validate_failure_capture,
 )
 from custos_spl.interfaces.metadata_store import (
     ArtifactUse,
@@ -120,6 +135,7 @@ from custos_pg.migrations.metadata import (
     METADATA_REV5,
     METADATA_REV6,
     METADATA_REV7,
+    METADATA_REV8,
 )
 from custos_pg.pool import LazyPool, read_dsn_from_env
 from custos_pg.revisions import ensure_ledger, read_declared, record_revision
@@ -148,6 +164,36 @@ LEFT JOIN LATERAL (
 """
 
 T = TypeVar("T")
+
+
+def _delivery_receipt(row: Record) -> DeliveryReceipt:
+    """Decode durable receipt state; pending rows never masquerade as completed results."""
+    return DeliveryReceipt(
+        WorkspaceId(row["workspace_id"]),
+        row["namespace"],
+        row["key"],
+        row["request_hash"],
+        row["retain_until"],
+        row["epoch"],
+        row["token"],
+        row["lease_until"],
+        row["result_json"],
+        row["request_json"],
+        row["submitted_at"],
+    )
+
+
+def _workflow_mirror(row: Record) -> WorkflowMirror:
+    """Decode a workspace-bound mirror snapshot without exposing another tenant's rows."""
+    return WorkflowMirror(
+        WorkspaceId(row["workspace_id"]),
+        row["mirror_id"],
+        row["run_id"],
+        row["step_id"],
+        row["identity_hash"],
+        row["expires_at"],
+        row["payload"],
+    )
 
 
 def _scheduler_lease(row: Record, observed_at: datetime) -> SchedulerLease:
@@ -497,8 +543,8 @@ class PgMetadataAdapter:
     async def apply_pending(self) -> list[str]:
         """Apply revisions in scope for this adapter slice.
 
-        Revisions 1-4 define the shared minimum. Revisions 5-7 add optional
-        trigger query, scheduler and dead-letter capabilities without raising it.
+        Revisions 1-4 define the shared minimum. Revisions 5-8 add optional
+        trigger query, scheduler, dead-letter and durable-delivery capabilities.
         """
         summaries: list[str] = []
         pool = await self._pool_ref()
@@ -517,6 +563,7 @@ class PgMetadataAdapter:
                 METADATA_REV5,
                 METADATA_REV6,
                 METADATA_REV7,
+                METADATA_REV8,
             ):
                 if rev.number in already:
                     continue
@@ -528,6 +575,433 @@ class PgMetadataAdapter:
                 )
         await self.refresh_declared()
         return summaries
+
+    @asynccontextmanager
+    async def _delivery_transaction(self) -> AsyncIterator[Connection]:
+        """Rollback partial delivery writes and preserve concrete backend error causes."""
+        try:
+            pool = await self._pool_ref()
+            async with pool.acquire() as conn, conn.transaction():
+                yield conn
+        except (OSError, InterfaceError, PostgresError) as exc:
+            raise BackendUnavailable("delivery storage operation failed", cause=exc) from exc
+
+    async def check_delivery_ready(self) -> None:
+        """Require the additive receipt/mirror revision for opted-in durable consumers."""
+        async with self._delivery_transaction() as conn:
+            try:
+                exists = await conn.fetchval(
+                    "SELECT EXISTS(SELECT 1 FROM custos_meta.adapter_revisions "
+                    "WHERE interface_name=$1 AND revision=$2)",
+                    INTERFACE_NAME,
+                    DELIVERY_SCHEMA_REVISION,
+                )
+            except UndefinedTableError as exc:
+                raise MigrationRequired([(INTERFACE_NAME, DELIVERY_SCHEMA_REVISION)]) from exc
+            if not exists:
+                raise MigrationRequired([(INTERFACE_NAME, DELIVERY_SCHEMA_REVISION)])
+
+    async def delivery_now(self) -> datetime:
+        """Return authoritative database time for retention planning."""
+        async with self._delivery_transaction() as conn:
+            return await _scheduler_now(conn)
+
+    async def put_workflow_start(self, run: Run, start: WorkflowStart) -> WorkflowStart:
+        """Commit Run and protocol atomically; never adopt an unversioned legacy run."""
+        if run.workspace_id != start.workspace_id or run.run_id != start.run_id:
+            raise ValueError("workflow start scope does not match Run")
+        async with self._delivery_transaction() as conn:
+            inserted = await conn.fetchval(
+                "INSERT INTO custos_state.run "
+                "(workspace_id,run_id,workflow_id,workflow_version,status,reason,"
+                "started_at,updated_at) "
+                "VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING RETURNING run_id",
+                run.workspace_id,
+                run.run_id,
+                run.workflow_id,
+                run.workflow_version,
+                run.status,
+                run.reason,
+                run.started_at,
+                run.updated_at,
+            )
+            if inserted is not None:
+                await conn.execute(
+                    "INSERT INTO custos_state.workflow_delivery_start "
+                    "(workspace_id,run_id,request_hash,input_json) VALUES ($1,$2,$3,$4::json)",
+                    start.workspace_id,
+                    start.run_id,
+                    start.request_hash,
+                    start.input_json,
+                )
+                return start
+            row = await conn.fetchrow(
+                "SELECT * FROM custos_state.workflow_delivery_start "
+                "WHERE workspace_id=$1 AND run_id=$2",
+                start.workspace_id,
+                start.run_id,
+            )
+            if row is None:
+                raise ImmutableViolation(
+                    "replay_unsafe: existing run has no versioned start snapshot"
+                )
+            if row["request_hash"] != start.request_hash:
+                raise ImmutableViolation("workflow start input is immutable")
+            return WorkflowStart(
+                start.workspace_id, start.run_id, row["request_hash"], row["input_json"]
+            )
+
+    async def get_workflow_start(
+        self, workspace_id: WorkspaceId, run_id: str
+    ) -> WorkflowStart | None:
+        """Read immutable runtime input separately from the mutable receipt lifecycle."""
+        async with self._delivery_transaction() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM custos_state.workflow_delivery_start "
+                "WHERE workspace_id=$1 AND run_id=$2",
+                workspace_id,
+                run_id,
+            )
+            return (
+                WorkflowStart(workspace_id, run_id, row["request_hash"], row["input_json"])
+                if row
+                else None
+            )
+
+    async def _locked_delivery(
+        self,
+        conn: Connection,
+        workspace_id: WorkspaceId,
+        namespace: DeliveryNamespace,
+        key: str,
+    ) -> DeliveryReceipt | None:
+        """Serialize receipt transitions before sampling provider time."""
+        row = await conn.fetchrow(
+            "SELECT * FROM custos_state.delivery_receipt "
+            "WHERE workspace_id=$1 AND namespace=$2 AND key=$3 FOR UPDATE",
+            workspace_id,
+            namespace,
+            key,
+        )
+        return _delivery_receipt(row) if row is not None else None
+
+    async def _write_delivery(
+        self,
+        conn: Connection,
+        receipt: DeliveryReceipt,
+        *,
+        fenced: bool = False,
+    ) -> None:
+        """Update a locked receipt, rechecking live producer time at the mutation statement."""
+        changed = await conn.fetchval(
+            "UPDATE custos_state.delivery_receipt SET retain_until=$4, epoch=$5, token=$6, "
+            "lease_until=$7, result_json=$8::json, request_json=$10::json, submitted_at=$11 "
+            "WHERE workspace_id=$1 AND namespace=$2 AND key=$3 "
+            "AND (NOT $9::bool OR lease_until > clock_timestamp()) RETURNING key",
+            receipt.workspace_id,
+            receipt.namespace,
+            receipt.key,
+            receipt.retain_until,
+            receipt.epoch,
+            receipt.token,
+            receipt.lease_until,
+            receipt.result_json,
+            fenced,
+            receipt.request_json,
+            receipt.submitted_at,
+        )
+        if changed is None:
+            raise LeaseExpired("delivery claim expired before mutation")
+
+    async def get_delivery(
+        self,
+        workspace_id: WorkspaceId,
+        namespace: DeliveryNamespace,
+        key: str,
+    ) -> DeliveryReceipt | None:
+        """Read a scoped receipt without interpreting pending work as a successful effect."""
+        validate_delivery_key(workspace_id, namespace, key)
+        async with self._delivery_transaction() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM custos_state.delivery_receipt "
+                "WHERE workspace_id=$1 AND namespace=$2 AND key=$3",
+                workspace_id,
+                namespace,
+                key,
+            )
+            return _delivery_receipt(row) if row is not None else None
+
+    async def reserve_delivery(
+        self,
+        workspace_id: WorkspaceId,
+        namespace: DeliveryNamespace,
+        key: str,
+        request_hash: str,
+        retain_until: datetime,
+        *,
+        lease_seconds: int = 300,
+        request: DeadLetterData | None = None,
+    ) -> DeliveryReceipt:
+        """Atomically bind input identity and acquire or recover producer ownership."""
+        validate_delivery_key(workspace_id, namespace, key)
+        retain_until = delivery_instant(retain_until)
+        busy: LeaseBusy | None = None
+        async with self._delivery_transaction() as conn:
+            await conn.execute(
+                "INSERT INTO custos_state.delivery_receipt "
+                "(workspace_id,namespace,key,request_hash,retain_until,epoch) "
+                "VALUES ($1,$2,$3,$4,$5,0) "
+                "ON CONFLICT DO NOTHING",
+                workspace_id,
+                namespace,
+                key,
+                request_hash,
+                retain_until,
+            )
+            current = await self._locked_delivery(conn, workspace_id, namespace, key)
+            try:
+                row = reserve_delivery(
+                    current,
+                    workspace_id,
+                    namespace,
+                    key,
+                    request_hash,
+                    retain_until,
+                    await _scheduler_now(conn),
+                    lease_seconds,
+                    encode_delivery_request(request) if request is not None else None,
+                )
+            except LeaseBusy as exc:
+                assert current is not None
+                row = replace(current, retain_until=max(current.retain_until, retain_until))
+                busy = exc
+            await self._write_delivery(conn, row)
+        if busy is not None:
+            raise busy
+        return row
+
+    async def complete_delivery(self, claim: DeliveryReceipt, result_json: str) -> DeliveryReceipt:
+        """Finish a current producer or read an identical consumer-committed result."""
+        result = delivery_result(result_json)
+        async with self._delivery_transaction() as conn:
+            current = await self._locked_delivery(
+                conn, claim.workspace_id, claim.namespace, claim.key
+            )
+            if current is not None and current.completed:
+                if current.request_hash != claim.request_hash or current.result_json != result:
+                    raise ImmutableViolation("delivery result is immutable")
+                return current
+            require_delivery(current, claim, await _scheduler_now(conn))
+            assert current is not None
+            completed = replace(
+                current, token=None, lease_until=None, result_json=result, request_json=None
+            )
+            await self._write_delivery(conn, completed, fenced=True)
+            return completed
+
+    async def mark_delivery_submitted(self, claim: DeliveryReceipt) -> DeliveryReceipt:
+        """Persist submission without prematurely marking the durable consumer complete."""
+        if claim.namespace != "workflow-resume":
+            raise ValueError("only resume receipts have runtime submission state")
+        async with self._delivery_transaction() as conn:
+            current = await self._locked_delivery(
+                conn, claim.workspace_id, claim.namespace, claim.key
+            )
+            if (
+                current is not None
+                and current.completed
+                and current.request_hash == claim.request_hash
+            ):
+                return current
+            now = await _scheduler_now(conn)
+            require_delivery(current, claim, now)
+            assert current is not None
+            submitted = replace(
+                current,
+                token=None,
+                lease_until=None,
+                submitted_at=current.submitted_at or now,
+            )
+            await self._write_delivery(conn, submitted, fenced=True)
+            return submitted
+
+    async def clear_expired_delivery_requests(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        limit: int | None = None,
+    ) -> int:
+        """Erase expired payloads without stealing ownership or deleting receipt identities."""
+        validate_delivery_key(workspace_id, "trigger", "cleanup")
+        size = query_page_limit(limit)
+        async with self._delivery_transaction() as conn:
+            rows = await conn.fetch(
+                "WITH candidates AS (SELECT workspace_id,namespace,key "
+                "FROM custos_state.delivery_receipt WHERE workspace_id=$1 AND namespace='trigger' "
+                "AND request_json IS NOT NULL AND retain_until<=clock_timestamp() "
+                "AND (lease_until IS NULL OR lease_until<=clock_timestamp()) "
+                'ORDER BY key COLLATE "C" LIMIT $2 FOR UPDATE SKIP LOCKED) '
+                "UPDATE custos_state.delivery_receipt AS receipt SET request_json=NULL "
+                "FROM candidates WHERE receipt.workspace_id=candidates.workspace_id "
+                "AND receipt.namespace=candidates.namespace AND receipt.key=candidates.key "
+                "AND receipt.retain_until<=clock_timestamp() "
+                "AND (receipt.lease_until IS NULL OR receipt.lease_until<=clock_timestamp()) "
+                "RETURNING receipt.key",
+                workspace_id,
+                size,
+            )
+            return len(rows)
+
+    async def release_delivery(self, claim: DeliveryReceipt) -> None:
+        """Release only current live authority; never erase identity or a completed result."""
+        async with self._delivery_transaction() as conn:
+            current = await self._locked_delivery(
+                conn, claim.workspace_id, claim.namespace, claim.key
+            )
+            require_delivery(current, claim, await _scheduler_now(conn))
+            assert current is not None
+            await self._write_delivery(
+                conn, replace(current, token=None, lease_until=None), fenced=True
+            )
+
+    async def capture_failed_delivery(
+        self,
+        claim: DeliveryReceipt,
+        data: DeadLetterData,
+    ) -> DeadLetterEntry:
+        """Commit capture and acknowledgement in one transaction, fencing again after lock waits."""
+        validate_failure_capture(claim, data)
+        async with self._delivery_transaction() as conn:
+            current = await self._locked_delivery(
+                conn, claim.workspace_id, claim.namespace, claim.key
+            )
+            now = await _scheduler_now(conn)
+            require_delivery(current, claim, now)
+            assert current is not None
+            entry = await self._locked_dead_letter(conn, data.workspace_id, data.entry_id)
+            if entry is not None:
+                if (
+                    entry.data.idempotency_key != data.idempotency_key
+                    or entry.data.target != data.target
+                ):
+                    raise ImmutableViolation("failure capture identity is already bound")
+            else:
+                entry = new_dead_letter(data, await _scheduler_now(conn))
+                await conn.execute(
+                    "INSERT INTO custos_state.dead_letter "
+                    "(workspace_id,entry_id,subscription_id,schema_version,status,"
+                    "created_at,expires_at,payload) "
+                    "VALUES ($1,$2,$3,1,'pending',$4,$5,$6::json)",
+                    data.workspace_id,
+                    data.entry_id,
+                    data.subscription_id,
+                    entry.created_at,
+                    entry.expires_at,
+                    encode_dead_letter(entry),
+                )
+            result = delivery_result(json.dumps({"deadLetterId": data.entry_id}))
+            await self._write_delivery(
+                conn,
+                replace(
+                    current, token=None, lease_until=None, result_json=result, request_json=None
+                ),
+                fenced=True,
+            )
+            return entry
+
+    async def acknowledge_delivery(
+        self,
+        workspace_id: WorkspaceId,
+        key: str,
+        request_hash: str,
+        result_json: str,
+    ) -> DeliveryReceipt:
+        """Let the durable resume consumer close the send/commit crash window."""
+        result = delivery_result(result_json)
+        async with self._delivery_transaction() as conn:
+            current = await self._locked_delivery(conn, workspace_id, "workflow-resume", key)
+            if current is None or current.request_hash != request_hash:
+                raise ImmutableViolation(
+                    "resume acknowledgement does not match an accepted request"
+                )
+            if current.completed and current.result_json != result:
+                raise ImmutableViolation("delivery result is immutable")
+            completed = replace(current, token=None, lease_until=None, result_json=result)
+            await self._write_delivery(conn, completed)
+            return completed
+
+    async def put_workflow_mirror(self, mirror: WorkflowMirror) -> None:
+        """Upsert retry metadata without rebinding the original run/step/source association."""
+        async with self._delivery_transaction() as conn:
+            changed = await conn.fetchval(
+                "INSERT INTO custos_state.workflow_resume_mirror "
+                "(workspace_id,mirror_id,run_id,step_id,identity_hash,expires_at,payload) "
+                "VALUES ($1,$2,$3,$4,$5,$6,$7::json) ON CONFLICT (workspace_id,mirror_id) "
+                "DO UPDATE SET expires_at=EXCLUDED.expires_at,payload=EXCLUDED.payload "
+                "WHERE workflow_resume_mirror.identity_hash=EXCLUDED.identity_hash "
+                "RETURNING mirror_id",
+                mirror.workspace_id,
+                mirror.mirror_id,
+                mirror.run_id,
+                mirror.step_id,
+                mirror.identity_hash,
+                mirror.expires_at,
+                mirror.payload_json,
+            )
+            if changed is None:
+                raise ImmutableViolation("workflow mirror association cannot be rebound")
+
+    async def query_workflow_mirrors(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        run_id: str | None = None,
+        step_id: str | None = None,
+        expired_before: datetime | None = None,
+        cursor: Cursor | None = None,
+        limit: int | None = None,
+    ) -> Page[WorkflowMirror]:
+        """Page workspace-bound mirrors using indexed run/step/expiry filters."""
+        cutoff = delivery_instant(expired_before) if expired_before else None
+        scope = (
+            "workflow-mirrors",
+            workspace_id,
+            run_id,
+            step_id,
+            cutoff.isoformat() if cutoff else None,
+        )
+        after, size = decode_query_cursor(cursor, scope), query_page_limit(limit)
+        async with self._delivery_transaction() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM custos_state.workflow_resume_mirror WHERE workspace_id=$1 "
+                "AND ($2::text IS NULL OR run_id=$2) AND ($3::text IS NULL OR step_id=$3) "
+                "AND ($4::timestamptz IS NULL OR expires_at<=$4) "
+                'AND ($5::text IS NULL OR mirror_id COLLATE "C">$5) '
+                'ORDER BY mirror_id COLLATE "C" LIMIT $6',
+                workspace_id,
+                run_id,
+                step_id,
+                cutoff,
+                after,
+                size + 1,
+            )
+            values = [_workflow_mirror(row) for row in rows]
+            return Page(
+                values[:size],
+                encode_query_cursor(scope, values[size - 1].mirror_id)
+                if len(values) > size
+                else None,
+            )
+
+    async def delete_workflow_mirror(self, workspace_id: WorkspaceId, mirror_id: str) -> None:
+        """Delete a scoped mirror idempotently after consumer cleanup."""
+        async with self._delivery_transaction() as conn:
+            await conn.execute(
+                "DELETE FROM custos_state.workflow_resume_mirror "
+                "WHERE workspace_id=$1 AND mirror_id=$2",
+                workspace_id,
+                mirror_id,
+            )
 
     @asynccontextmanager
     async def _dead_letter_transaction(self) -> AsyncIterator[Connection]:
@@ -1275,18 +1749,26 @@ class PgMetadataAdapter:
                     run_id = CASE WHEN stored.expires_at <= $7 AND
                         NULLIF(stored.payload->'source', 'null'::jsonb) IS NOT DISTINCT FROM
                         NULLIF(EXCLUDED.payload->'source', 'null'::jsonb)
+                        AND COALESCE(stored.payload->>'deliveryProtocol','1') =
+                            COALESCE(EXCLUDED.payload->>'deliveryProtocol','1')
                         THEN EXCLUDED.run_id ELSE stored.run_id END,
                     step_id = CASE WHEN stored.expires_at <= $7 AND
                         NULLIF(stored.payload->'source', 'null'::jsonb) IS NOT DISTINCT FROM
                         NULLIF(EXCLUDED.payload->'source', 'null'::jsonb)
+                        AND COALESCE(stored.payload->>'deliveryProtocol','1') =
+                            COALESCE(EXCLUDED.payload->>'deliveryProtocol','1')
                         THEN EXCLUDED.step_id ELSE stored.step_id END,
                     expires_at = CASE WHEN stored.expires_at <= $7 AND
                         NULLIF(stored.payload->'source', 'null'::jsonb) IS NOT DISTINCT FROM
                         NULLIF(EXCLUDED.payload->'source', 'null'::jsonb)
+                        AND COALESCE(stored.payload->>'deliveryProtocol','1') =
+                            COALESCE(EXCLUDED.payload->>'deliveryProtocol','1')
                         THEN EXCLUDED.expires_at ELSE stored.expires_at END,
                     payload = CASE WHEN stored.expires_at <= $7 AND
                         NULLIF(stored.payload->'source', 'null'::jsonb) IS NOT DISTINCT FROM
                         NULLIF(EXCLUDED.payload->'source', 'null'::jsonb)
+                        AND COALESCE(stored.payload->>'deliveryProtocol','1') =
+                            COALESCE(EXCLUDED.payload->>'deliveryProtocol','1')
                         THEN EXCLUDED.payload ELSE stored.payload END
                 RETURNING workspace_id, resume_id, run_id, step_id, expires_at, payload
                 """,

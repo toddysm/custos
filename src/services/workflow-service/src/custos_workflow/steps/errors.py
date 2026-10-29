@@ -77,9 +77,11 @@ __all__ = [
     "ApprovalTimeoutError",
     "ConnectorBindError",
     "LoopExpansionError",
+    "ResumeDeliveryFailedError",
     "ResumeMirrorPersistError",
     "ResumeRegistrationFailedError",
     "ResumeSubscriptionDivergentError",
+    "ResumeWaitExpiredError",
     "RetryBudgetExhaustedError",
     "StepCoordinatorError",
     "StepKindNotImplementedError",
@@ -792,6 +794,18 @@ class ResumeMirrorPersistError(StepCoordinatorError):
 # ---------------------------------------------------------------------------
 
 
+class ResumeWaitExpiredError(StepCoordinatorError):
+    """A durable wait reached its persisted deadline before valid consumption."""
+
+    KIND: Final[str] = "step.resume_wait_expired"  # type: ignore[misc]
+
+
+class ResumeDeliveryFailedError(StepCoordinatorError):
+    """A received event could not be validated or durably acknowledged as this wait's input."""
+
+    KIND: Final[str] = "step.resume_delivery_failed"  # type: ignore[misc]
+
+
 #: The closed set of ``step.*`` ``kind`` strings published by this
 #: taxonomy. The WF-IMPL-058 OTel error counter asserts that its
 #: ``kind`` label set matches this frozenset at build time, so
@@ -811,5 +825,7 @@ LOCKED_STEP_KINDS: Final[frozenset[str]] = frozenset(
         ResumeRegistrationFailedError.KIND,
         ResumeSubscriptionDivergentError.KIND,
         ResumeMirrorPersistError.KIND,
+        ResumeWaitExpiredError.KIND,
+        ResumeDeliveryFailedError.KIND,
     }
 )

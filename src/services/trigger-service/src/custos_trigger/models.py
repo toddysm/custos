@@ -39,7 +39,7 @@ from custos_spl.interfaces.metadata_store import (
     SubscriptionSelector as SplSubscriptionSelector,
 )
 from custos_spl.interfaces.trigger_source import validate_resume_context
-from pydantic import Field, model_validator
+from pydantic import Field, StrictInt, model_validator
 
 from custos_trigger._wire import WireModel
 from custos_trigger.source_config import (
@@ -176,11 +176,16 @@ class RegisterResumeRequest(WireModel):
     ttl: str | None = None
     workspace_id: str | None = Field(default=None, min_length=1)
     source: ResumeSourceWire | None = None
+    delivery_protocol: StrictInt = Field(default=1, ge=1, le=2)
 
     @model_validator(mode="after")
     def validate_source_association(self) -> Self:
         """External waits require a workspace and an explicit, nonblank event selector."""
-        _validate_resume_source(self.workspace_id, self.source, self.selector)
+        _validate_resume_source(
+            self.workspace_id, self.source, self.selector, self.delivery_protocol
+        )
+        if self.delivery_protocol == 2 and self.workspace_id is None:
+            raise SourceConfigurationError("version-2 resume requires workspaceId")
         return self
 
 
@@ -260,20 +265,33 @@ class ResumeRegistration(WireModel):
     selector: str | None = None
     workspace_id: str | None = Field(default=None, min_length=1)
     source: ResumeSourceWire | None = None
+    delivery_protocol: StrictInt = Field(default=1, ge=1, le=2)
 
     @model_validator(mode="after")
     def validate_source_association(self) -> Self:
         """Apply the same persisted-association invariants as the registration request."""
-        _validate_resume_source(self.workspace_id, self.source, self.selector)
+        _validate_resume_source(
+            self.workspace_id, self.source, self.selector, self.delivery_protocol
+        )
+        if self.delivery_protocol == 2 and self.workspace_id is None:
+            raise SourceConfigurationError("version-2 resume requires workspaceId")
         return self
 
 
 def _validate_resume_source(
-    workspace_id: str | None, source: ResumeSourceWire | None, selector: str | None
+    workspace_id: str | None,
+    source: ResumeSourceWire | None,
+    selector: str | None,
+    delivery_protocol: int = 1,
 ) -> None:
     """Keep legacy waits unchanged and require a scoped, selective external association."""
     try:
-        validate_resume_context(workspace_id, source.to_source() if source else None, selector)
+        validate_resume_context(
+            workspace_id,
+            source.to_source() if source else None,
+            selector,
+            delivery_protocol=delivery_protocol,
+        )
     except ValueError as exc:
         raise SourceConfigurationError(str(exc)) from exc
 
@@ -373,6 +391,10 @@ def to_spl_resume_subscription(
         _PAYLOAD_EVENT_KEY: reg.event_key,
         _PAYLOAD_SELECTOR: reg.selector,
     }
+    if reg.delivery_protocol != 1:
+        if reg.workspace_id != workspace_id:
+            raise ValueError("resume delivery workspace does not match storage partition")
+        payload["deliveryProtocol"] = reg.delivery_protocol
     if reg.source is not None:
         if reg.workspace_id != workspace_id:
             raise ValueError("resume source workspace does not match the storage partition")
@@ -396,7 +418,10 @@ def resume_registration_from_spl(row: SplResumeSubscription) -> ResumeRegistrati
         event_key=str(payload.get(_PAYLOAD_EVENT_KEY, "")),
         selector=payload.get(_PAYLOAD_SELECTOR),
         source=payload.get("source"),
-        workspace_id=str(row.workspace_id) if payload.get("source") is not None else None,
+        workspace_id=str(row.workspace_id)
+        if payload.get("source") is not None or payload.get("deliveryProtocol", 1) == 2
+        else None,
+        delivery_protocol=payload.get("deliveryProtocol", 1),
     )
 
 

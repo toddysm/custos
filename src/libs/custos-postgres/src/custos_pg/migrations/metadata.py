@@ -31,6 +31,9 @@ REV7 adds optional versioned dead-letter captures and fenced replay state.
 Only dead-letter consumers require it; existing metadata contracts are unchanged.
 Its JSON column preserves accepted numeric representations: JSONB expansion of
 exponent numbers could exceed the payload bound on subsequent reads.
+
+REV8 adds fenced delivery receipts, atomic versioned runtime inputs and
+workspace-scoped resume mirrors. It leaves the general revision-4 minimum intact.
 """
 
 from __future__ import annotations
@@ -429,6 +432,75 @@ METADATA_REV7 = Revision(
 )
 
 
+METADATA_REV8 = Revision(
+    number=8,
+    statements=(
+        """
+        CREATE TABLE IF NOT EXISTS custos_state.workflow_delivery_start (
+            workspace_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            request_hash TEXT NOT NULL,
+            input_json JSON NOT NULL,
+            PRIMARY KEY (workspace_id, run_id),
+            FOREIGN KEY (workspace_id, run_id)
+                REFERENCES custos_state.run (workspace_id, run_id)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS custos_state.delivery_receipt (
+            workspace_id TEXT NOT NULL,
+            namespace TEXT NOT NULL
+                CHECK (namespace IN ('trigger', 'workflow-start', 'workflow-resume')),
+            key TEXT NOT NULL,
+            request_hash TEXT NOT NULL,
+            retain_until TIMESTAMPTZ NOT NULL,
+            epoch BIGINT NOT NULL CHECK (epoch >= 0),
+            token TEXT,
+            lease_until TIMESTAMPTZ,
+            result_json JSON,
+            request_json JSON,
+            submitted_at TIMESTAMPTZ,
+            PRIMARY KEY (workspace_id, namespace, key),
+            CHECK ((token IS NULL) = (lease_until IS NULL)),
+            CHECK (result_json IS NULL OR token IS NULL),
+            CHECK (request_json IS NULL OR namespace = 'trigger'),
+            CHECK (submitted_at IS NULL OR namespace = 'workflow-resume')
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS delivery_receipt_by_expiry
+            ON custos_state.delivery_receipt (workspace_id, retain_until)
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS custos_state.workflow_resume_mirror (
+            workspace_id TEXT NOT NULL,
+            mirror_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            step_id TEXT NOT NULL,
+            identity_hash TEXT NOT NULL,
+            expires_at TIMESTAMPTZ NOT NULL,
+            payload JSON NOT NULL,
+            PRIMARY KEY (workspace_id, mirror_id)
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS workflow_mirror_by_run
+            ON custos_state.workflow_resume_mirror
+                (workspace_id, run_id, step_id, mirror_id COLLATE "C")
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS workflow_mirror_by_expiry
+            ON custos_state.workflow_resume_mirror
+                (workspace_id, expires_at, mirror_id COLLATE "C")
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS workflow_mirror_by_id
+            ON custos_state.workflow_resume_mirror (workspace_id, mirror_id COLLATE "C")
+        """,
+    ),
+)
+
+
 __all__ = [
     "METADATA_REV1",
     "METADATA_REV2",
@@ -437,4 +509,5 @@ __all__ = [
     "METADATA_REV5",
     "METADATA_REV6",
     "METADATA_REV7",
+    "METADATA_REV8",
 ]

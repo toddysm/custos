@@ -37,10 +37,12 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Protocol, cast, runtime_checkable
 
 import httpx
+from custos_spl.delivery_memory import MemoryDeliveryState
 from custos_spl.errors import ImmutableViolation
 from custos_spl.ids import PrincipalId as SplPrincipalId
 from custos_spl.ids import RunId as SplRunId
 from custos_spl.ids import WorkspaceId as SplWorkspaceId
+from custos_spl.interfaces.delivery import DeliveryStateProvider
 from custos_spl.interfaces.metadata_store import (
     ExistingCompleted,
     ExistingInFlight,
@@ -90,6 +92,7 @@ from custos_workflow.runs.events import (
 )
 from custos_workflow.runs.replay import NoopReplayReconciler, ReplayReconciler
 from custos_workflow.runs.store import InProcessRunStore, RunStore
+from custos_workflow.runs.trigger_delivery import TriggerDeliveryController
 from custos_workflow.runtime import FakeWorkflowRuntime, WorkflowClient, WorkflowRuntime
 from custos_workflow.steps.resume import (
     DEFAULT_RESUME_SUB_SWEEP_INTERVAL_SECONDS,
@@ -376,6 +379,15 @@ class WorkflowRuntimeProtocol(Protocol):
 # ---------------------------------------------------------------------------
 
 
+@runtime_checkable
+class WorkflowActivityRegistrar(Protocol):
+    """Optional activity registration required only when durable delivery is enabled."""
+
+    def register_activity(self, fn: Any, *, name: str | None = None) -> None:
+        """Register a durable I/O bridge before worker startup."""
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class _SystemClock:
     """Wall-clock :class:`~custos_cel.clock.Clock` for the Run Controller.
@@ -422,7 +434,7 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-class _InProcessMetadataStoreProvider:
+class _InProcessMetadataStoreProvider(MemoryDeliveryState):
     """In-memory subset of :class:`MetadataStoreProvider` for dev / tests.
 
     Implements the four Run-row methods
@@ -442,8 +454,9 @@ class _InProcessMetadataStoreProvider:
     """
 
     def __init__(self, *, now: Callable[[], datetime] | None = None) -> None:
+        super().__init__(now=now)
         # Key: ``(workspace_id, run_id)``. Value: persisted Run row.
-        self._runs: dict[tuple[str, str], SplRun] = {}
+        self._runs: dict[tuple[str, str], SplRun] = self._delivery_run_rows
         # Key: ``(workspace_id, principal_id, route, idempotency_key)``.
         # Value: the gateway idempotency row (WF-IMPL-117).
         self._idem: dict[tuple[str, str, str, str], IdempotencyRecord] = {}
@@ -765,6 +778,8 @@ class RunComponents:
         default_factory=lambda: WaitForStepHandler(InMemoryResumeSubscriptionMirrorRepository())
     )
     resume_sweep_interval_seconds: float = DEFAULT_RESUME_SUB_SWEEP_INTERVAL_SECONDS
+    trigger_delivery_controller: TriggerDeliveryController | None = None
+    durable_resume_client: TriggerServiceClient | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1421,6 +1436,19 @@ def load_run_components(
         shutdown.
     """
     resolved_env: Mapping[str, str] = env if env is not None else os.environ
+    enabled = resolved_env.get("WF_TRIGGER_DELIVERY_ENABLED", "false").strip().lower()
+    if enabled not in {"true", "false"}:
+        raise ValueError("WF_TRIGGER_DELIVERY_ENABLED must be true or false")
+    metadata_store_provider: MetadataStoreProvider = (
+        metadata_store if metadata_store is not None else _in_memory_metadata_store()
+    )
+    delivery_provider: DeliveryStateProvider | None = None
+    if enabled == "true":
+        if not isinstance(metadata_store_provider, DeliveryStateProvider):
+            raise ValueError("durable Trigger delivery requires the revision-8 provider capability")
+        if not resolved_env.get(ENV_TS_ENDPOINT, "").strip():
+            raise ValueError("durable Trigger delivery requires the Trigger Service endpoint")
+        delivery_provider = metadata_store_provider
 
     # Decide upfront whether *any* lifespan-owned Dapr HTTP client
     # consumer is active. Building a shared ``httpx.AsyncClient``
@@ -1446,7 +1474,7 @@ def load_run_components(
     # Service endpoint is set and the caller did not inject a
     # pre-built reconciler (the override path supplies its own
     # trigger client / fake, so no socket pool is needed).
-    need_http_for_trigger = replay_reconciler is None and bool(
+    need_http_for_trigger = (replay_reconciler is None or enabled == "true") and bool(
         resolved_env.get(ENV_TS_ENDPOINT, "").strip()
     )
     # WF-IMPL-114: the production DaprCatalogClient shares the same
@@ -1590,6 +1618,13 @@ def load_run_components(
     # NotImplementedError). The Dapr trigger client is built only on
     # the production branch so the override path never trips the
     # defensive "endpoint set but no shared client" guard.
+    durable_resume_client = (
+        _build_trigger_client(
+            env=resolved_env, http_client=dapr_http_client, timeout_seconds=timeout_seconds
+        )
+        if need_http_for_trigger
+        else None
+    )
     reconciler: ReplayReconciler
     if replay_reconciler is not None:
         reconciler = replay_reconciler
@@ -1624,14 +1659,12 @@ def load_run_components(
     # in-memory provider for the sidecar-free dev / test path. WF-IMPL-116
     # threads this same provider behind the ``InProcessRunStore`` seam so
     # ``Run`` rows persist to ``custos_state.run`` in production and survive
-    # process restarts / HA failover. (The compiled-graph side-map inside
-    # ``InProcessRunStore`` remains process-local until a future SPL revision
-    # exposes a durable compiled-graph column — that is the deferred WF-IMPL-033
-    # concern, not this task.)
-    metadata_store_provider: MetadataStoreProvider = (
-        metadata_store if metadata_store is not None else _in_memory_metadata_store()
+    # process restarts / HA failover. Version-2 starts additionally hydrate their
+    # compiled graph from the atomic runtime-input snapshot. Legacy rows retain
+    # the existing process-local graph behavior.
+    store: RunStore = InProcessRunStore(
+        metadata_store_provider, delivery_provider=delivery_provider
     )
-    store: RunStore = InProcessRunStore(metadata_store_provider)
     controller = RunController(
         catalog=catalog_client,
         store=store,
@@ -1660,6 +1693,11 @@ def load_run_components(
         else DurableIdempotencyLedger(metadata_store_provider, ttl=idempotency_ttl)
     )
     validator = StartRunValidator(catalog=catalog_client, ledger=ledger)
+    delivery_controller = None
+    if delivery_provider is not None:
+        delivery_controller = TriggerDeliveryController(
+            delivery_provider, store, workflow_client, registry, publisher
+        )
     return RunComponents(
         workflow_runtime=runtime,
         workflow_client=workflow_client,
@@ -1680,4 +1718,6 @@ def load_run_components(
         approval_default_timeout=_resolve_approval_default_timeout(resolved_env),
         resume_handler=resume_handler,
         resume_sweep_interval_seconds=_resolve_resume_sub_sweep_interval(resolved_env),
+        trigger_delivery_controller=delivery_controller,
+        durable_resume_client=durable_resume_client,
     )

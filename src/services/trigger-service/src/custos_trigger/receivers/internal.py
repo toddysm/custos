@@ -226,7 +226,11 @@ async def _dispatch_resumes(
     if key is None:
         return []
     resume_id = compute_resume_id(key.run_id, key.step_id, key.event_key)
-    stored = await resume_store.get(RESUME_WORKSPACE, resume_id)
+    stored = await resume_store.get(workspace, resume_id)
+    if stored is not None and stored.registration.source is not None:
+        return []
+    if stored is None:
+        stored = await resume_store.get(RESUME_WORKSPACE, resume_id)
     if stored is None:
         return []
     if stored.expires_at <= now():

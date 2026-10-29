@@ -208,21 +208,64 @@ def create_app(
             from custos_trigger.dedup import Deduplicator
             from custos_trigger.pipeline.dispatch import Dispatcher as _Dispatcher
 
-            owned_http_client = httpx.AsyncClient()
             endpoint = read_dapr_endpoint(
                 os.environ,
                 app_id=os.environ.get(ENV_WORKFLOW_ENDPOINT, _DEFAULT_WORKFLOW_APP_ID),
             )
+            enabled = os.environ.get("TRIGGER_DURABLE_DISPATCH_ENABLED", "false").strip().lower()
+            if enabled not in {"true", "false"}:
+                raise ValueError("TRIGGER_DURABLE_DISPATCH_ENABLED must be true or false")
+            from custos_trigger.pipeline.reliable import (
+                ReliableDispatcher,
+                ReliableStorage,
+                validate_dispatch_limits,
+            )
+
+            reliable_store: ReliableStorage | None = None
+            retries = _env_int(os.environ, ENV_DISPATCH_MAX_RETRIES, DEFAULT_DISPATCH_MAX_RETRIES)
+            depth = _env_int(os.environ, ENV_FANOUT_MAX_DEPTH, DEFAULT_FANOUT_MAX_DEPTH)
+            retention, replay_limit = 2_592_000, 3
+            if enabled == "true":
+                if not app.state.receiver_configuration_enabled:
+                    raise ValueError(
+                        "durable dispatch requires the upgraded-writer configuration gate"
+                    )
+                if app.state.workflow_caller_verifier is None:
+                    raise ValueError(
+                        "durable dispatch requires an authenticated Workflow caller verifier"
+                    )
+                if not isinstance(metadata_store, ReliableStorage):
+                    raise ValueError(
+                        "durable dispatch requires receipt and dead-letter capabilities"
+                    )
+                retention = _env_int(os.environ, "TRIGGER_DEADLETTER_RETENTION_SECONDS", retention)
+                replay_limit = _env_int(
+                    os.environ, "TRIGGER_DEADLETTER_MAX_REPLAY_ATTEMPTS", replay_limit
+                )
+                validate_dispatch_limits(retries, depth, retention, replay_limit)
+                await metadata_store.check_delivery_ready()
+                await metadata_store.check_dead_letters_ready()
+                reliable_store = metadata_store
+            owned_http_client = httpx.AsyncClient()
+            workflow_client = DaprWorkflowServiceClient(owned_http_client, endpoint)
+            reliable = None
+            if reliable_store is not None:
+                reliable = ReliableDispatcher(
+                    workflow_client,
+                    reliable_store,
+                    effective_audit,
+                    max_retries=retries,
+                    max_fanout_depth=depth,
+                    retention_seconds=retention,
+                    max_replay_attempts=replay_limit,
+                )
             app.state.dispatcher = _Dispatcher(
-                DaprWorkflowServiceClient(owned_http_client, endpoint),
+                workflow_client,
                 Deduplicator(metadata_store),
-                max_retries=_env_int(
-                    os.environ, ENV_DISPATCH_MAX_RETRIES, DEFAULT_DISPATCH_MAX_RETRIES
-                ),
-                max_fanout_depth=_env_int(
-                    os.environ, ENV_FANOUT_MAX_DEPTH, DEFAULT_FANOUT_MAX_DEPTH
-                ),
+                max_retries=retries,
+                max_fanout_depth=depth,
                 audit=effective_audit,
+                reliable=reliable,
             )
 
         app.state.ready = True

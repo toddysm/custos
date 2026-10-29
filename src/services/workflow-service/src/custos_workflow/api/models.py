@@ -37,9 +37,21 @@ runtime client.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Final
+from typing import Any, Final, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    StrictInt,
+    ValidationInfo,
+    ValidatorFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 from pydantic.alias_generators import to_camel
 
 from custos_workflow.runs.model import RunStatus
@@ -318,7 +330,34 @@ class CancelRunRequest(_CamelModel):
 # ---------------------------------------------------------------------------
 
 
-class InternalStartRunRequest(StartRunRequest):
+class _DeliveryRequest(_CamelModel):
+    """Optional internal-only delivery protocol; public request formats remain unchanged."""
+
+    delivery_protocol: StrictInt = Field(default=1, ge=1, le=2)
+    retain_until: AwareDatetime | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_delivery(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """Preserve the exact legacy envelope when version 2 was not selected."""
+        wire: dict[str, Any] = handler(self)
+        if self.delivery_protocol == 1:
+            for key in ("deliveryProtocol", "delivery_protocol", "retainUntil", "retain_until"):
+                wire.pop(key, None)
+        return wire
+
+    @model_validator(mode="after")
+    def validate_delivery(self) -> Self:
+        """Version 2 requires an original key and an aware recovery horizon."""
+        if self.delivery_protocol == 2 and (
+            not getattr(self, "idempotency_key", None) or self.retain_until is None
+        ):
+            raise ValueError("version-2 delivery requires idempotencyKey and retainUntil")
+        if self.delivery_protocol == 1 and self.retain_until is not None:
+            raise ValueError("retainUntil requires deliveryProtocol 2")
+        return self
+
+
+class InternalStartRunRequest(StartRunRequest, _DeliveryRequest):
     """Request body for ``POST /internal/runs:start``.
 
     The Internal RPC surface ships under a flat ``/internal/`` prefix
@@ -373,7 +412,7 @@ class InternalCancelRunRequest(CancelRunRequest):
     )
 
 
-class RaiseExternalEventRequest(_CamelModel):
+class RaiseExternalEventRequest(_DeliveryRequest):
     """Internal-RPC body for the Trigger Service `RaiseExternalEvent` bridge.
 
     Mirrors the design.md § Internal RPC table:
@@ -395,6 +434,22 @@ class RaiseExternalEventRequest(_CamelModel):
     ``{ws}`` path segment so the Helm chart / mesh can pin
     mTLS-only access to a single path stem.
     """
+
+    @field_validator("event_name", mode="wrap")
+    @classmethod
+    def preserve_versioned_event_name(
+        cls,
+        value: Any,
+        handler: ValidatorFunctionWrapHandler,
+        info: ValidationInfo,
+    ) -> str:
+        """Keep version-2 channel identity exact and legacy whitespace behavior unchanged."""
+        if info.data.get("delivery_protocol", 1) == 2:
+            if not isinstance(value, str) or not value.strip() or len(value.encode()) > 512:
+                raise ValueError("version-2 eventName must be nonblank and at most 512 bytes")
+            return value
+        validated: str = handler(value)
+        return validated
 
     workspace_id: str = Field(
         min_length=1,

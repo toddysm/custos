@@ -51,7 +51,7 @@ dependencies = [
     # confined to custos_workflow.runtime.dapr so the rest of the
     # service can be exercised under FakeWorkflowRuntime / -Client
     # without a live sidecar.
-    "dapr-ext-workflow>=1.17,<2",
+    "dapr-ext-workflow>=1.18,<1.19",
     # httpx — used by custos_workflow.runs.events.DaprPubSubLifecyclePublisher
     # (WF-IMPL-041, #393) to POST envelopes against the Dapr sidecar's
     # /v1.0/publish/{pubsub}/{topic} HTTP API. Same pattern as
@@ -76,6 +76,7 @@ dev = [
     "ruff>=0.4",
     "mypy>=1.10",
     "types-PyYAML>=6.0",
+    "types-grpcio>=1.0",
     # Stubs for the runtime jsonschema dependency added in WF-IMPL-063
     # for inputs JSON-Schema validation. The matching upstream version
     # (4.21+) is pinned in `dependencies` above.

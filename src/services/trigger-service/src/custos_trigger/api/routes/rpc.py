@@ -114,7 +114,7 @@ async def _reject_source_rebinding(
     resume_id: str,
 ) -> None:
     """Audit and reject a different source while leaving the persisted association untouched."""
-    if original.source == body.source:
+    if original.source == body.source and original.delivery_protocol == body.delivery_protocol:
         return
     await audit.emit(
         AUDIT_RESUME_DIVERGENT,
@@ -240,7 +240,7 @@ async def register_resume_subscription(
     path (including an idempotent replay) so a malformed expression is rejected
     (422) rather than silently never matching.
     """
-    if body.source is not None:
+    if body.source is not None or body.delivery_protocol == 2:
         await require_workflow_caller(request, workflow_verifier)
         require_receiver_configuration(receiver_enabled)
     if body.selector:
@@ -278,6 +278,7 @@ async def register_resume_subscription(
                 selector=body.selector,
                 workspace_id=body.workspace_id,
                 source=body.source,
+                delivery_protocol=body.delivery_protocol,
             ),
             workspace_id=workspace_id,
             resume_id=resume_id,

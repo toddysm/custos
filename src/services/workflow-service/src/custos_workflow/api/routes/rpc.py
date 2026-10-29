@@ -82,12 +82,23 @@ The Internal RPC routes do NOT introduce any new ``code`` values.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends, Header, Path, Response
+from custos_spl.errors import (
+    BackendUnavailable,
+    ImmutableViolation,
+    LeaseBusy,
+    LeaseExpired,
+    MigrationRequired,
+)
+from custos_spl.interfaces.delivery import RESUME_CHANNEL_PREFIX
+from fastapi import APIRouter, Body, Depends, Header, Path, Request, Response
 
 from custos_workflow.api.dependencies import (
     get_call_context,
+    get_run_components,
     get_run_controller,
     get_validator,
 )
@@ -103,12 +114,45 @@ from custos_workflow.api.routes.runs import (
 )
 from custos_workflow.call_context import CallContext
 from custos_workflow.runs.controller import RunController
+from custos_workflow.runs.errors import RunStateConflictError, WorkflowRuntimeUnavailableError
 from custos_workflow.runs.ids import RunId
+from custos_workflow.runs.trigger_delivery import TriggerDeliveryController
 from custos_workflow.validator import StartRunValidator
+from custos_workflow.validator.errors import WorkspaceUnauthorizedError
 
 __all__ = ["router"]
 
 router = APIRouter(tags=["internal-rpc"])
+
+
+def _delivery_controller(request: Request) -> TriggerDeliveryController | None:
+    """Resolve the opt-in controller without changing the legacy RPC dependency contract."""
+    if getattr(request.app.state, "run_components", None) is None:
+        return None
+    return get_run_components(request).trigger_delivery_controller
+
+
+def _delivery_scope(ctx: CallContext, workspace_id: str) -> None:
+    """Authorize scope before looking up an original receipt or runtime instance."""
+    if ctx.workspace is not None and ctx.workspace != workspace_id:
+        raise WorkspaceUnauthorizedError(
+            "delivery workspace does not match call context",
+            workspace_id=workspace_id,
+            principal=ctx.principal,
+        )
+
+
+@contextmanager
+def _delivery_errors() -> Iterator[None]:
+    """Map explicit storage/ownership failures through the existing Workflow error envelope."""
+    try:
+        yield
+    except (ImmutableViolation, ValueError) as exc:
+        raise RunStateConflictError(str(exc)) from exc
+    except (BackendUnavailable, LeaseBusy, LeaseExpired, MigrationRequired) as exc:
+        raise WorkflowRuntimeUnavailableError(
+            "durable delivery is temporarily unavailable", cause=type(exc).__name__
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +171,7 @@ async def start_run(
     validator: Annotated[StartRunValidator, Depends(get_validator)],
     controller: Annotated[RunController, Depends(get_run_controller)],
     ctx: Annotated[CallContext, Depends(get_call_context)],
+    delivery: Annotated[TriggerDeliveryController | None, Depends(_delivery_controller)],
     idempotency_key_header: Annotated[
         str | None,
         Header(
@@ -150,6 +195,36 @@ async def start_run(
         body_key=body.idempotency_key,
         header_key=idempotency_key_header,
     )
+    if body.delivery_protocol == 2:
+        _delivery_scope(ctx, body.workspace_id)
+        if delivery is None:
+            raise WorkflowRuntimeUnavailableError("version-2 Trigger delivery is not enabled")
+        assert effective_key is not None and body.retain_until is not None
+        with _delivery_errors():
+            prior = await delivery.lookup_start(
+                body.workspace_id,
+                body.workflow_version_id,
+                body.inputs,
+                effective_key,
+                body.retain_until,
+            )
+            if prior is not None:
+                return ref_response_from_ref(prior)
+            validated = await validator.validate_start_run(
+                workspace_id=body.workspace_id,
+                workflow_version_id=body.workflow_version_id,
+                inputs=body.inputs,
+                idempotency_key=effective_key,
+                call_context=ctx,
+            )
+            ref = await delivery.start(
+                body.workspace_id,
+                validated.workflow_version,
+                validated.inputs,
+                effective_key,
+                body.retain_until,
+            )
+            return ref_response_from_ref(ref)
     validated = await validator.validate_start_run(
         workspace_id=body.workspace_id,
         workflow_version_id=body.workflow_version_id,
@@ -218,7 +293,7 @@ async def cancel_run(
 
 
 @router.post(
-    "/internal/runs/{run_id}/steps/{step_id}:raiseEvent",
+    "/internal/runs/{run_id:path}/steps/{step_id}:raiseEvent",
     status_code=202,
     summary="Internal RPC: deliver an external event into a running workflow.",
 )
@@ -226,11 +301,12 @@ async def raise_external_event(
     body: Annotated[RaiseExternalEventRequest, Body(...)],
     controller: Annotated[RunController, Depends(get_run_controller)],
     _ctx: Annotated[CallContext, Depends(get_call_context)],
+    delivery: Annotated[TriggerDeliveryController | None, Depends(_delivery_controller)],
     run_id: Annotated[
         str,
         Path(
             min_length=1,
-            description="The opaque run identifier returned by `StartRun`.",
+            description="Opaque root or slash-addressed child run identifier.",
         ),
     ],
     step_id: Annotated[
@@ -271,6 +347,24 @@ async def raise_external_event(
       ``cancelled``) → ``workflow.run_state_conflict`` (409).
     * Runtime failure → ``workflow.runtime_unavailable`` (503).
     """
+    _delivery_scope(_ctx, body.workspace_id)
+    if body.delivery_protocol == 1 and body.event_name.casefold().startswith(RESUME_CHANNEL_PREFIX):
+        raise RunStateConflictError("reserved resume channels require versioned delivery")
+    if body.delivery_protocol == 2:
+        if delivery is None:
+            raise WorkflowRuntimeUnavailableError("version-2 Trigger delivery is not enabled")
+        assert body.idempotency_key is not None and body.retain_until is not None
+        with _delivery_errors():
+            await delivery.resume(
+                body.workspace_id,
+                run_id,
+                step_id,
+                body.event_name,
+                body.payload,
+                body.idempotency_key,
+                body.retain_until,
+            )
+        return Response(status_code=202)
     await controller.raise_external_event(
         workspace_id=body.workspace_id,
         run_id=RunId(run_id),

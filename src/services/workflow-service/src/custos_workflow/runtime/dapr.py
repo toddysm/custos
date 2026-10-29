@@ -462,6 +462,24 @@ class WorkflowClient:
         client = self._ensure_client()
 
         def _call() -> str:
+            if request.preserve_existing:
+                from dapr.ext.workflow._durabletask.client import (
+                    OrchestrationIdReuseAction,
+                    OrchestrationStatus,
+                    WorkflowIdReusePolicy,
+                )
+
+                policy = WorkflowIdReusePolicy(
+                    action=OrchestrationIdReuseAction.IGNORE,
+                    operation_status=list(OrchestrationStatus),
+                )
+                return client.schedule_new_workflow(
+                    request.workflow,
+                    input=request.input,
+                    instance_id=request.instance_id,
+                    start_at=request.start_at,
+                    reuse_id_policy=policy,
+                )
             return client.schedule_new_workflow(
                 request.workflow,  # type: ignore[arg-type, unused-ignore]
                 input=request.input,

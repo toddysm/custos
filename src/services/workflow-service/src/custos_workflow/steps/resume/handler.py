@@ -83,7 +83,7 @@ import inspect
 from collections.abc import Generator, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Final
 
@@ -217,6 +217,7 @@ class WaitForExternalEventCall:
     """
 
     event_key: str
+    expires_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,8 +316,13 @@ class WaitForStepHandler:
         ctx: StepExecutionContext,
         graph: ExecutionGraph,
         step_id: str,
+        *,
+        delivery_protocol: int = 1,
     ) -> Generator[ResumeCall, object, StepResult]:
         """Drive the ``waitFor:`` lifecycle, yielding :data:`ResumeCall` effects.
+
+        ``delivery_protocol=2`` scopes internal as well as external waits to the
+        run's workspace; the durable driver owns all I/O and channel selection.
 
         Sequence (each ``yield`` is resolved by the driver):
 
@@ -397,9 +403,13 @@ class WaitForStepHandler:
             if wait_for_step.wait_for.source is not None
             else None
         )
-        source_workspace = ctx.workspace_id if source is not None else None
+        source_workspace = (
+            ctx.workspace_id if source is not None or delivery_protocol == 2 else None
+        )
         try:
-            validate_resume_context(source_workspace, source, selector)
+            validate_resume_context(
+                source_workspace, source, selector, delivery_protocol=delivery_protocol
+            )
         except ValueError as exc:
             source_failure = WithInputResolutionError(
                 str(exc), run_id=run_id_str, step_id=step_id, binding_name="source"
@@ -431,6 +441,7 @@ class WaitForStepHandler:
             selector=selector,
             workspace_id=source_workspace,
             source=source,
+            delivery_protocol=delivery_protocol,
         )
         try:
             yield PersistMirrorCall(mirror=pending_mirror)
@@ -455,6 +466,7 @@ class WaitForStepHandler:
             selector=selector,
             workspace_id=source_workspace,
             source=source,
+            delivery_protocol=delivery_protocol,
         )
         attempt = 1
         while True:
@@ -502,6 +514,7 @@ class WaitForStepHandler:
             selector=selector,
             workspace_id=source_workspace,
             source=source,
+            delivery_protocol=delivery_protocol,
         )
         try:
             yield PersistMirrorCall(mirror=registered_mirror)
@@ -517,7 +530,7 @@ class WaitForStepHandler:
             return StepFailed(envelope=MappingProxyType(persist_error.to_dict()))
 
         # 5. Suspend on the resume event.
-        resume_payload = yield WaitForExternalEventCall(event_key=event_key)
+        resume_payload = yield WaitForExternalEventCall(event_key=event_key, expires_at=expires_at)
 
         # 6. Cancel the subscription (idempotent) and delete the mirror.
         #    Cleanup runs AFTER the resume payload has been received, so a

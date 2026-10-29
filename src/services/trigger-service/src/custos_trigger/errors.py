@@ -49,6 +49,8 @@ class TriggerErrorKind(StrEnum):
     SOURCE_NOT_FOUND = "trigger.source_not_found"
     SOURCE_UNAVAILABLE = "trigger.source_unavailable"
     SUBSCRIPTION_CONFLICT = "trigger.subscription_conflict"
+    REPLAY_UNSAFE = "trigger.replay_unsafe"
+    DISPATCH_UNAVAILABLE = "trigger.dispatch_unavailable"
 
 
 #: The locked set of ``trigger.*`` kind strings. Adding or removing a member of

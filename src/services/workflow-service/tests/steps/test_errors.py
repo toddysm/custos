@@ -53,6 +53,8 @@ def test_locked_step_kinds_pins_published_strings() -> None:
                 "step.resume_registration_failed",
                 "step.resume_subscription_divergent",
                 "step.resume_mirror_persist_error",
+                "step.resume_wait_expired",
+                "step.resume_delivery_failed",
             }
         )
         == LOCKED_STEP_KINDS

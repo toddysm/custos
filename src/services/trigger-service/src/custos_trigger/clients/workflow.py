@@ -25,10 +25,18 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, Self, runtime_checkable
+from urllib.parse import quote
 
 import httpx
-from pydantic import Field
+from pydantic import (
+    AwareDatetime,
+    Field,
+    SerializerFunctionWrapHandler,
+    StrictInt,
+    model_serializer,
+    model_validator,
+)
 
 from custos_trigger._wire import WireModel
 
@@ -48,6 +56,7 @@ __all__ = [
     "StartRunRequest",
     "WorkflowClientDecodeError",
     "WorkflowClientError",
+    "WorkflowClientReplayUnsafeError",
     "WorkflowClientStatusError",
     "WorkflowClientTransportError",
     "WorkflowServiceClient",
@@ -68,14 +77,39 @@ START_RUN_METHOD: str = "internal/runs:start"
 
 
 def raise_event_method(run_id: str, step_id: str) -> str:
-    """Return the Dapr invoke method for raising an event on a waiting step."""
-    return f"internal/runs/{run_id}/steps/{step_id}:raiseEvent"
+    """Encode opaque identifiers, including slash-addressed children, in the invoke method."""
+    return f"internal/runs/{quote(run_id, safe='')}/steps/{quote(step_id, safe='')}:raiseEvent"
 
 
 # --- Wire models -------------------------------------------------------------
 
 
-class StartRunRequest(WireModel):
+class _DeliveryRequest(WireModel):
+    """Opt-in versioned delivery fields; legacy requests omit them on the wire."""
+
+    delivery_protocol: StrictInt = Field(default=1, ge=1, le=2)
+    retain_until: AwareDatetime | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_delivery(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """Keep protocol-1 JSON byte-shape compatible with the original internal request."""
+        wire: dict[str, Any] = handler(self)
+        if self.delivery_protocol == 1:
+            for key in ("deliveryProtocol", "delivery_protocol", "retainUntil", "retain_until"):
+                wire.pop(key, None)
+        return wire
+
+    @model_validator(mode="after")
+    def validate_delivery(self) -> Self:
+        """A durable delivery requires a stable key and explicit recovery horizon."""
+        if self.delivery_protocol == 2 and (
+            self.retain_until is None or not getattr(self, "idempotency_key", None)
+        ):
+            raise ValueError("version-2 delivery requires an idempotency key and retention horizon")
+        return self
+
+
+class StartRunRequest(_DeliveryRequest):
     """Body of ``POST /internal/runs:start`` (WF ``InternalStartRunRequest``)."""
 
     workspace_id: str = Field(..., min_length=1)
@@ -84,7 +118,7 @@ class StartRunRequest(WireModel):
     idempotency_key: str | None = None
 
 
-class RaiseExternalEventRequest(WireModel):
+class RaiseExternalEventRequest(_DeliveryRequest):
     """Body of ``…:raiseEvent`` (WF ``RaiseExternalEventRequest``).
 
     ``run_id`` / ``step_id`` are carried in the URL path, not the body.
@@ -147,6 +181,14 @@ class WorkflowClientDecodeError(WorkflowClientError):
 
     def __init__(self, message: str) -> None:
         super().__init__(message, retryable=False)
+
+
+class WorkflowClientReplayUnsafeError(WorkflowClientStatusError):
+    """The versioned workflow endpoint rejected the original target or identity as unsafe."""
+
+    def __init__(self) -> None:
+        """Classify unsafe replay without retaining a potentially sensitive response body."""
+        super().__init__("workflow delivery cannot be safely replayed", status_code=409)
 
 
 # --- Endpoint ----------------------------------------------------------------
@@ -269,7 +311,13 @@ class DaprWorkflowServiceClient:
     async def _post(
         self, url: str, request: StartRunRequest | RaiseExternalEventRequest, *, what: str
     ) -> httpx.Response:
-        wire = request.model_dump(by_alias=True)
+        wire = request.model_dump(
+            by_alias=True,
+            mode="json",
+            exclude={"delivery_protocol", "retain_until"}
+            if request.delivery_protocol == 1
+            else set(),
+        )
         headers = {"Content-Type": "application/json"}
         if request.idempotency_key:
             # Mirror the RFC fallback the WF route honours; the body field is
@@ -283,6 +331,8 @@ class DaprWorkflowServiceClient:
         except httpx.HTTPError as exc:
             raise WorkflowClientTransportError(f"{what} transport failure: {exc!r}") from exc
         if response.status_code // 100 != 2:
+            if request.delivery_protocol == 2 and response.status_code == 409:
+                raise WorkflowClientReplayUnsafeError()
             preview = response.text[:200] if response.text else ""
             raise WorkflowClientStatusError(
                 f"{what} returned HTTP {response.status_code}: {preview!r}",

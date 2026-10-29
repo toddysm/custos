@@ -34,12 +34,15 @@ serialization concerns.
 
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
 
 from custos_spl.errors import ImmutableViolation
 from custos_spl.ids import RunId as SplRunId
 from custos_spl.ids import WorkflowId as SplWorkflowId
 from custos_spl.ids import WorkspaceId as SplWorkspaceId
+from custos_spl.interfaces.delivery import DeliveryStateProvider
 from custos_spl.interfaces.metadata_store import (
     MetadataStoreProvider,
 )
@@ -141,8 +144,15 @@ class InProcessRunStore:
     graph.
     """
 
-    def __init__(self, provider: MetadataStoreProvider) -> None:
+    def __init__(
+        self,
+        provider: MetadataStoreProvider,
+        *,
+        delivery_provider: DeliveryStateProvider | None = None,
+    ) -> None:
+        """Bind optional durable input hydration without requiring revision 8 for legacy stores."""
         self._provider: MetadataStoreProvider = provider
+        self._delivery_provider = delivery_provider
         # Side-map for the compiled-graph JSON envelope. Stored as
         # the WF-IMPL-018 byte-stable ``to_json()`` output so the
         # serialization round-trip is exercised on every read —
@@ -181,6 +191,27 @@ class InProcessRunStore:
             updated_at=spl.updated_at,
             compiled_graph=graph,
         )
+
+    async def _record(self, spl: SplRun) -> RunRecord:
+        """Recover versioned graphs after restart from the atomic runtime-input snapshot."""
+        record = self._to_record(spl)
+        if record.compiled_graph is not None or self._delivery_provider is None:
+            return record
+        try:
+            saved = await self._delivery_provider.get_workflow_start(
+                spl.workspace_id, str(spl.run_id)
+            )
+            if saved is None:
+                return record
+            payload = json.loads(saved.input_json)
+            graph = from_json(payload["compiled_graph_json"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RunStateCorruptError(
+                "durable workflow input cannot be rehydrated",
+                run_id=record.run_id,
+                cause=type(exc).__name__,
+            ) from exc
+        return replace(record, compiled_graph=graph)
 
     def _load_graph(
         self,
@@ -291,7 +322,7 @@ class InProcessRunStore:
             status.value,
             reason,
         )
-        return self._to_record(spl)
+        return await self._record(spl)
 
     async def get_run(self, workspace_id: str, run_id: RunId) -> RunRecord | None:
         """Return the row or ``None`` when absent."""
@@ -302,7 +333,7 @@ class InProcessRunStore:
         )
         if spl is None:
             return None
-        return self._to_record(spl)
+        return await self._record(spl)
 
     async def list_runs(
         self,
@@ -317,6 +348,9 @@ class InProcessRunStore:
         intentionally not surfaced here: WF-IMPL-038 will add the
         :class:`RunFilter` builder + per-status query parameters
         once the HTTP surface lands.
+
+        Durable graphs are hydrated only for individual reads, not for
+        metadata listings that expose run references.
         """
 
         spl_page = await self._provider.list_runs(

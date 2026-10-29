@@ -433,6 +433,18 @@ If that safety cannot be demonstrated for an entry, replay returns an explicit
 another run. Safe replay across the approved retention window is an acceptance
 criterion, not something satisfied solely by returning this error.
 
+**Approved adjustment, 2026-10-29:** TS-IMPL-031 also owns durable Workflow
+wait execution, persisted resume mirrors and consumer-side replay protection.
+These are prerequisites for demonstrating safe resume replay, not deferred
+TS-IMPL-034 integration. Resume delivery uses a versioned, step-scoped contract:
+duplicate delivery for one wait must not satisfy a later wait with the same
+user-facing event name. Persist the protocol choice so replay/restart does not
+silently reinterpret an existing run. Preserve existing public request formats;
+legacy entries without a provably safe handoff fail replay explicitly rather
+than being silently migrated. TS-IMPL-034 retains activation, readiness,
+deployment, operational signals and rollout/rollback wiring. The remaining
+delivery order and D01-D05 requirements are unchanged.
+
 Public administrative dedup clearing remains out of scope. Internal reservation
 rollback must be ownership-checked; suppressing a failure until key expiry is
 not a successful replay implementation. This narrowly coupled Workflow change

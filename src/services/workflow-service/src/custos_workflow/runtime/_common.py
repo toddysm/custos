@@ -90,6 +90,7 @@ class ScheduleWorkflowRequest:
     input: Any = None
     instance_id: str | None = None
     start_at: datetime | None = None
+    preserve_existing: bool = False
 
 
 @dataclass(frozen=True)

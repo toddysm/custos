@@ -59,17 +59,54 @@ All four share one `ResumeSubscriptionMirrorRepository` and one
 `TriggerServiceClient` instance, wired together in
 [`providers.py`](../../src/services/workflow-service/src/custos_workflow/providers.py).
 
-> **Status.** Trigger registration/persistence and the asynchronous Dapr client
-> are implemented, including scoped external-source contracts. Production
-> Workflow wait execution is still incomplete: the orchestrator currently closes
-> the handler after its first effect, and provider wiring uses an in-memory
-> mirror repository. The subsystem drivers are exercised in
-> [`tests/integration/test_resume_subscription_end_to_end.py`](../../src/services/workflow-service/tests/integration/test_resume_subscription_end_to_end.py);
-> this is not evidence that deployed durable wait execution is complete.
-> Scoped Trigger registration also fails closed until an authenticated Workflow
-> caller verifier is wired and the default-off receiver rollout gate is enabled.
-> These prerequisites are described in the
-> [Trigger contract](trigger-api.md#receiver-configuration).
+> **Status.** Legacy protocol-1 execution retains its previous placeholder behavior.
+> The opt-in version-2 path drives the complete durable wait lifecycle through
+> [`durable.py`](../../src/services/workflow-service/src/custos_workflow/steps/resume/durable.py):
+> mirror persistence, authenticated registration, durable suspension, receipt
+> acknowledgement, cancellation and cleanup. Mirrors and immutable runtime inputs
+> use PostgreSQL metadata revision 8 rather than process-local maps.
+> `WF_TRIGGER_DELIVERY_ENABLED` defaults to `false`. Scoped registration still
+> fails closed until the Workflow caller verifier and upgraded-writer gate are
+> configured. Production activation and deployed-runtime certification remain
+> the rollout/integration items; component tests are not a deployed certification.
+> See the [durable dispatch contract](trigger-api.md#durable-dispatch-and-replay-opt-in).
+
+The chosen delivery protocol is persisted in each run's input. Version-2
+registrations carry an explicit workspace even for internal events; a live or
+expired registration cannot be rebound to another protocol. Resume channel names
+bind workspace/run/step/event identity, so a delayed duplicate cannot consume a
+later wait with the same user-facing event name. The consumer verifies and
+acknowledges the original receipt before binding payload outputs.
+
+New internal requests opt into `deliveryProtocol: 2` with their original
+`idempotencyKey` and an aware `retainUntil` timestamp. Protocol-1 envelopes omit
+these fields and keep their original serialization/normalization. A version-2
+event name preserves its exact resolved whitespace and case. Legacy runs are
+not automatically migrated; unsafe replay is refused explicitly.
+
+The worker activity bridge executes pooled asynchronous clients on their owning
+application event loop rather than creating a new loop in each worker thread.
+The tested Dapr Python SDK range is 1.18.x: the supported `reuse_id_policy`
+parameter uses policy types from that SDK's bundled durable-task module, which
+is not re-exported publicly. The minor-version bound and adapter tests protect
+this dependency seam. Runtime input/output models use the SDK's model
+serialization protocol, including compatibility with older decoded inputs.
+
+Durable waits report `step.resume_wait_expired` at their persisted deadline and
+`step.resume_delivery_failed` when an event cannot be validated or durably
+acknowledged. Both preserve the standard structured step-error envelope.
+Transient acknowledgement failures do not terminate a wait after consumption:
+the worker retries through durable timers with a capped 60-second backoff and
+an observable pending status. Submission and consumer completion are distinct
+receipt states. Timeout and rejected envelopes execute durable
+cancellation/deletion instead of relying on the legacy in-memory sweeper.
+Exhausted setup retries also clean up possibly accepted mirror writes and
+registrations before completing the failed step.
+The opaque `custos.resume.v2.` event-channel namespace is reserved
+case-insensitively; legacy direct delivery cannot inject an event into it.
+Resume transport percent-encodes opaque run identifiers, and the receiving route
+accepts slash-addressed child runs such as `parent/invoke/workflow` without
+changing their runtime identity.
 
 ## The `waitFor:` schema
 

@@ -172,12 +172,72 @@ past retention; discard and retention deletion cannot steal it. Terminal entries
 remain inspectable until retention deletion. The deletion primitive does **not**
 emit audit events: callers must arrange durable expiration audit before removal.
 
-This is storage infrastructure, not an enabled replay feature. Dispatch capture,
-remote replay and durable downstream idempotency remain
-[#1014](https://github.com/toddysm/custos/issues/1014); authorized administration
-and audited retention cleanup remain
-[#1016](https://github.com/toddysm/custos/issues/1016). The current dispatcher’s
-`dead_lettered` outcome does not yet invoke this storage.
+### Durable dispatch and replay (opt-in)
+
+`TRIGGER_DURABLE_DISPATCH_ENABLED=true` selects the durable dispatcher. It
+requires the upgraded-writer configuration gate, an authenticated Workflow caller
+verifier, and metadata revision 8. `WF_TRIGGER_DELIVERY_ENABLED=true` selects the
+matching Workflow endpoint/worker capability. Both flags default to `false`;
+production authentication, activation and operations remain
+[#1015](https://github.com/toddysm/custos/issues/1015) and
+[#1017](https://github.com/toddysm/custos/issues/1017). Do not enable the new
+receivers until those prerequisites are deployed.
+
+The optional
+[`DeliveryStateProvider`](../../src/libs/storage-provider-layer/src/custos_spl/interfaces/delivery.py)
+adds receipt fencing, atomic Run/runtime-input snapshots and durable resume
+mirrors. The general metadata minimum remains revision 4. In-flight reservations
+return a retryable failure, not duplicate success. Failure capture and completion
+of the producer receipt commit in one transaction, so neither storage failure nor
+a stale worker can acknowledge uncaptured work or create a phantom failure after
+another worker succeeds.
+
+Initial dispatch and replay are bounded to 300 seconds; durable retry counts are
+0–63 (at most 64 recorded attempts). Workflow producer leases last 30 seconds;
+Trigger/replay claims last at most 300. Only provider time controls ownership.
+The dispatch budget is capped by the remaining lease, with 30 seconds reserved
+for durable finalization; it never consumes the entire ownership window.
+Completed receipts retain the original result, while abandoned pending claims
+can be recovered with a new token. Same-request contention can extend the minimum
+retention without renewing the current worker's lease.
+If the final permitted replay is abandoned, the next replay request persists its
+`interrupted` history and `discarded` state, then returns `trigger.replay_unsafe`
+without issuing another downstream call. It does not leave a retryable `replaying`
+row after the attempt limit is exhausted.
+
+The original normalized event and resolved target are snapshotted atomically
+with the initial reservation, before any remote call. Recovery uses that snapshot
+even if subscription configuration changes. Terminal dispatch/capture clears the
+pending snapshot; bounded retention cleanup can erase expired orphan payloads
+without deleting identity/fencing metadata or rematching a new target.
+
+Starts use the original deterministic run ID and the runtime's atomic
+ignore-existing policy, including completed instances. Resumes use protocol-2
+channels bound to workspace, run, step and event name, plus durable consumer
+acknowledgement. Retrying an uncertain send therefore cannot satisfy a later
+same-name wait. Run inputs persist the protocol choice and compiled graph before
+scheduling. Start lifecycle events reuse the original persisted timestamp so
+republishing after an uncertain acknowledgement keeps their normalized identity.
+Runtime submission is recorded separately from consumer completion. After an
+event has been consumed, its acknowledgement and cleanup remain recoverable with
+durable, capped-backoff retries rather than discarding the payload after a short
+storage outage. Expired waits explicitly cancel their registrations and remove
+their durable mirrors.
+
+Replay uses the stored target, resolved inputs and original key; it does not
+rematch changed subscriptions. Legacy or missing targets are inspection/discard
+only when safety cannot be established: replay returns
+`409 trigger.replay_unsafe`. In durable mode, unversioned resume registrations
+are captured as unsafe without issuing a blind legacy delivery. Keep legacy
+mode until old waits are drained; never silently upgrade their runtime history.
+Existing public request formats and the default legacy path remain valid.
+
+The receipt horizon covers dead-letter retention plus bounded in-flight work.
+It is a **minimum**, not an independent purge timer: dead-letter cleanup must not
+remove downstream receipts or runtime-input snapshots. Do not purge Dapr history
+or unresolved delivery records while recovery remains possible. Authorized
+administration and audited payload retention cleanup remain
+[#1016](https://github.com/toddysm/custos/issues/1016).
 
 ## Authentication and call context
 
@@ -450,6 +510,8 @@ Validation, dispatch, dedup, and resource errors are returned as
 | `trigger.source_not_found` | 404 | No connector reference in the trusted workspace |
 | `trigger.source_unavailable` | 503 | Rollout gate closed, scoped authentication unconfigured, or reference validation unavailable |
 | `trigger.subscription_conflict` | 409 | Concurrent update or forbidden transition out of terminal `expired` state |
+| `trigger.replay_unsafe` | 409 | The original target lacks a provably safe versioned replay contract |
+| `trigger.dispatch_unavailable` | 503 | Durable storage or current delivery ownership is unavailable; delivery was not acknowledged |
 | `trigger.resume_divergent` | 409 | Attempt to rebind an existing resume key to a different source |
 | `trigger.api.bad_request` | 400 | Malformed request or workspace mismatch |
 | `trigger.api.subscription_not_fireable` | 409 | Subscription inactive or selector miss |
@@ -857,6 +919,9 @@ The service is configured by environment variables (design § Configuration):
 | `TRIGGER_SCHEDULER_LEADER_LEASE_SECONDS` | `30` | Scheduler leader lease (M2) |
 | `TRIGGER_SCHEDULER_LEADER_RENEW_SECONDS` | `10` | Positive renewal cadence strictly shorter than the lease; epochs remain stable during renewal |
 | `TRIGGER_RECEIVER_CONFIGURATION_ENABLED` | `false` | Acknowledge that all writers are upgraded before enabling managed receiver writes; does not bypass scoped RPC authentication |
+| `TRIGGER_DURABLE_DISPATCH_ENABLED` | `false` | Enable revision-8 receipts, atomic failed-dispatch capture and versioned replay after all prerequisites are ready |
+| `TRIGGER_DEADLETTER_RETENTION_SECONDS` | `2592000` | Captured-payload retention; 1 second to 365 days |
+| `TRIGGER_DEADLETTER_MAX_REPLAY_ATTEMPTS` | `3` | Bounded operator attempts, including interrupted attempts; 1–100 |
 | `TRIGGER_PUBSUB_COMPONENT` | `custos-pubsub` | Dapr pub/sub component name |
 | `TRIGGER_NORMALIZED_TOPIC` | `custos.triggers.normalized` | Normalized-event topic |
 | `TRIGGER_WORKFLOW_EVENTS_TOPIC` | `custos.workflow.events` | Internal lifecycle-event topic |

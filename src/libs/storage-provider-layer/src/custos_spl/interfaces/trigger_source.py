@@ -135,11 +135,21 @@ class ResumeSource:
 
 
 def validate_resume_context(
-    workspace_id: str | None, source: ResumeSource | None, selector: str | None
+    workspace_id: str | None,
+    source: ResumeSource | None,
+    selector: str | None,
+    *,
+    delivery_protocol: int = 1,
 ) -> None:
-    """Keep legacy waits unscoped and require selective, tenant-scoped external waits."""
+    """Keep legacy waits unscoped; protocol-2 internal waits are explicitly tenant-scoped."""
+    if type(delivery_protocol) is not int or delivery_protocol not in (1, 2):
+        raise ValueError("unsupported resume delivery protocol")
+    if delivery_protocol == 2 and (
+        not isinstance(workspace_id, str) or not workspace_id.strip() or workspace_id == "_resume"
+    ):
+        raise ValueError("version-2 wait requires a non-reserved workspaceId")
     if source is None:
-        if workspace_id is not None:
+        if workspace_id is not None and delivery_protocol == 1:
             raise ValueError("workspaceId requires a source association")
         return
     if not isinstance(source, ResumeSource):

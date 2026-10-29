@@ -386,6 +386,7 @@ class SubOrchestrationManager:
             workflow_version_id=node.step_source.workflow,
             compiled_graph_json=to_json(child_graph),
             inputs=child_inputs,
+            delivery_protocol=ctx.delivery_protocol,
         )
         task = ctx.workflow_context.call_child_workflow(
             WORKFLOW_NAME,

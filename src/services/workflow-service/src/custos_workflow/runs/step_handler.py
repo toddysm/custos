@@ -206,6 +206,7 @@ class StepExecutionContext:
     workflow_context: WorkflowContext
     outputs: Mapping[str, Mapping[str, Any]]
     clock: Clock
+    delivery_protocol: int = 1
 
 
 # ---------------------------------------------------------------------------

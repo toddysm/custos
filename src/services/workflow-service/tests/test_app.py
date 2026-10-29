@@ -603,8 +603,8 @@ def test_lifespan_swallows_workflow_client_close_errors(
 
 
 def _route_paths(app: FastAPI) -> set[str]:
-    """Return the set of HTTP route ``path`` templates on ``app``."""
-    return {route.path for route in app.routes if hasattr(route, "path")}
+    """Return wire path templates without Starlette's internal converter annotations."""
+    return {route.path_format for route in app.routes if hasattr(route, "path_format")}
 
 
 def test_create_app_mounts_public_run_routes(fake_run_components: RunComponents) -> None:
@@ -882,6 +882,44 @@ def test_lifespan_stays_503_when_metadata_store_unavailable(
         assert body["status"] == "not_ready"
         assert body["detail"] == detail
         assert app.state.ready is False
+
+
+def test_durable_worker_never_starts_on_backend_failure_memory_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Readiness degradation must not permit durable activities to run against fallback RAM."""
+    from custos_spl.interfaces.delivery import DeliveryStateProvider
+
+    import custos_workflow.app as app_module
+    from custos_workflow.bindings.registry import InMemoryActivityTypeRegistry
+    from custos_workflow.runs.errors import WorkflowRuntimeUnavailableError
+    from custos_workflow.runs.trigger_delivery import TriggerDeliveryController
+
+    runtime = _RecordingFakeRuntime()
+    components = _components_with(runtime)
+    assert isinstance(components.metadata_store, DeliveryStateProvider)
+    components.trigger_delivery_controller = TriggerDeliveryController(
+        components.metadata_store,
+        components.run_store,
+        components.workflow_client,
+        InMemoryActivityTypeRegistry({}),
+        components.lifecycle_publisher,
+    )
+    pool = _FakeMetadataPool()
+
+    async def unavailable(injected: Any) -> Any:
+        """Return the same explicit fallback signal as a failed configured PostgreSQL connection."""
+        return components, pool, "metadata store unavailable"
+
+    monkeypatch.setattr(app_module, "_resolve_run_components", unavailable)
+    with (
+        pytest.raises(WorkflowRuntimeUnavailableError),
+        TestClient(create_app(require_call_context=False)),
+    ):
+        pass
+    assert "start" not in runtime.calls
+    assert "register_workflow" not in runtime.calls
+    assert pool.closed == 1
 
 
 @pytest.mark.asyncio
