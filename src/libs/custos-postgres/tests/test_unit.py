@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 import pytest
 from custos_spl.interfaces.auth_store import AuthStoreProvider
 from custos_spl.interfaces.catalog_store import CatalogStoreProvider
+from custos_spl.interfaces.dead_letters import DeadLetterStoreProvider
 from custos_spl.interfaces.definition_store import DefinitionStoreProvider
 from custos_spl.interfaces.metadata_store import (
     MetadataStoreProvider,
@@ -50,6 +51,7 @@ from custos_pg.migrations.metadata import (
     METADATA_REV3,
     METADATA_REV5,
     METADATA_REV6,
+    METADATA_REV7,
 )
 from custos_pg.pool import DSN_ENV_VAR, LazyPool, read_dsn_from_env
 
@@ -61,6 +63,20 @@ def test_scheduler_migration_is_additive() -> None:
     assert "scheduler_lease" in statements and "pending_schedule_fire" in statements
     assert "UNIQUE (workspace_id, schedule_id, planned_fire_at)" in statements
     assert "DROP " not in statements and "ALTER " not in statements
+
+
+def test_dead_letter_migration_and_capability() -> None:
+    """Dead-letter storage is optional and additive, with scoped expiry and filtering indexes."""
+    assert METADATA_REV7.number == 7
+    statements = " ".join(METADATA_REV7.statements)
+    assert "PRIMARY KEY (workspace_id, entry_id)" in statements
+    assert "DROP " not in statements and "ALTER " not in statements
+    assert "dead_letter_by_claim_expiry" in statements
+    assert "payload JSON NOT NULL" in statements
+    assert isinstance(
+        PgMetadataAdapter(lazy=LazyPool("postgresql://noop")), DeadLetterStoreProvider
+    )
+    assert PgMetadataAdapter.SCHEMA_REVISION == 4
 
 
 # ----- Protocol conformance -----

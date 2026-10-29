@@ -26,6 +26,11 @@ row shape; revision-4 readers and writers remain compatible.
 REV6 adds deployment-scoped scheduler fencing and durable pending occurrences.
 Only scheduler consumers require this revision; existing metadata shapes and
 the shared revision-4 minimum remain unchanged.
+
+REV7 adds optional versioned dead-letter captures and fenced replay state.
+Only dead-letter consumers require it; existing metadata contracts are unchanged.
+Its JSON column preserves accepted numeric representations: JSONB expansion of
+exponent numbers could exceed the payload bound on subsequent reads.
 """
 
 from __future__ import annotations
@@ -375,6 +380,54 @@ METADATA_REV6 = Revision(
     ),
 )
 
+METADATA_REV7 = Revision(
+    number=7,
+    statements=(
+        """
+        CREATE TABLE IF NOT EXISTS custos_state.dead_letter (
+            workspace_id TEXT NOT NULL,
+            entry_id TEXT NOT NULL,
+            subscription_id TEXT NOT NULL,
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            status TEXT NOT NULL
+                CHECK (status IN ('pending', 'replaying', 'replayed', 'discarded')),
+            created_at TIMESTAMPTZ NOT NULL,
+            expires_at TIMESTAMPTZ NOT NULL,
+            claim_expires_at TIMESTAMPTZ,
+            payload JSON NOT NULL,
+            PRIMARY KEY (workspace_id, entry_id),
+            CHECK (expires_at > created_at),
+            CHECK ((status = 'replaying') = (claim_expires_at IS NOT NULL))
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS dead_letter_by_id
+            ON custos_state.dead_letter (workspace_id, entry_id COLLATE "C")
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS dead_letter_by_subscription
+            ON custos_state.dead_letter (workspace_id, subscription_id, entry_id COLLATE "C")
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS dead_letter_by_status
+            ON custos_state.dead_letter (workspace_id, status, entry_id COLLATE "C")
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS dead_letter_by_created
+            ON custos_state.dead_letter (workspace_id, created_at, entry_id COLLATE "C")
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS dead_letter_by_expiry
+            ON custos_state.dead_letter (workspace_id, expires_at, entry_id COLLATE "C")
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS dead_letter_by_claim_expiry
+            ON custos_state.dead_letter (workspace_id, claim_expires_at)
+            WHERE status = 'replaying'
+        """,
+    ),
+)
+
 
 __all__ = [
     "METADATA_REV1",
@@ -383,4 +436,5 @@ __all__ = [
     "METADATA_REV4",
     "METADATA_REV5",
     "METADATA_REV6",
+    "METADATA_REV7",
 ]

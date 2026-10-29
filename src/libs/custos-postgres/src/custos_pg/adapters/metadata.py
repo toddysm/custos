@@ -48,6 +48,21 @@ from custos_spl.errors import (
     QueryUnsupported,
 )
 from custos_spl.ids import WorkspaceId
+from custos_spl.interfaces.dead_letters import (
+    DEAD_LETTER_SCHEMA_REVISION,
+    DeadLetterData,
+    DeadLetterEntry,
+    DeadLetterFilter,
+    DispatchAttempt,
+    ReplayClaim,
+    claim_replay,
+    decode_dead_letter,
+    discard_dead_letter,
+    encode_dead_letter,
+    finish_replay,
+    new_dead_letter,
+    recover_replay,
+)
 from custos_spl.interfaces.metadata_store import (
     ArtifactUse,
     AuditEvent,
@@ -104,6 +119,7 @@ from custos_pg.migrations.metadata import (
     METADATA_REV4,
     METADATA_REV5,
     METADATA_REV6,
+    METADATA_REV7,
 )
 from custos_pg.pool import LazyPool, read_dsn_from_env
 from custos_pg.revisions import ensure_ledger, read_declared, record_revision
@@ -481,8 +497,8 @@ class PgMetadataAdapter:
     async def apply_pending(self) -> list[str]:
         """Apply revisions in scope for this adapter slice.
 
-        Revisions 1-4 define the shared minimum. Revisions 5-6 add trigger
-        query indexes and optional fenced scheduler state without raising it.
+        Revisions 1-4 define the shared minimum. Revisions 5-7 add optional
+        trigger query, scheduler and dead-letter capabilities without raising it.
         """
         summaries: list[str] = []
         pool = await self._pool_ref()
@@ -500,6 +516,7 @@ class PgMetadataAdapter:
                 METADATA_REV4,
                 METADATA_REV5,
                 METADATA_REV6,
+                METADATA_REV7,
             ):
                 if rev.number in already:
                     continue
@@ -511,6 +528,218 @@ class PgMetadataAdapter:
                 )
         await self.refresh_declared()
         return summaries
+
+    @asynccontextmanager
+    async def _dead_letter_transaction(self) -> AsyncIterator[Connection]:
+        """Rollback partial writes and expose backend failures rather than empty results."""
+        try:
+            pool = await self._pool_ref()
+            async with pool.acquire() as conn, conn.transaction():
+                yield conn
+        except UniqueViolationError as exc:
+            raise ImmutableViolation("dead-letter entry already exists") from exc
+        except (OSError, InterfaceError, PostgresError) as exc:
+            raise BackendUnavailable("dead-letter storage operation failed", cause=exc) from exc
+
+    async def check_dead_letters_ready(self) -> None:
+        """Require only this optional capability's additive metadata revision."""
+        async with self._dead_letter_transaction() as conn:
+            try:
+                exists = await conn.fetchval(
+                    "SELECT EXISTS(SELECT 1 FROM custos_meta.adapter_revisions "
+                    "WHERE interface_name=$1 AND revision=$2)",
+                    INTERFACE_NAME,
+                    DEAD_LETTER_SCHEMA_REVISION,
+                )
+            except UndefinedTableError as exc:
+                raise MigrationRequired([(INTERFACE_NAME, DEAD_LETTER_SCHEMA_REVISION)]) from exc
+            if not exists:
+                raise MigrationRequired([(INTERFACE_NAME, DEAD_LETTER_SCHEMA_REVISION)])
+
+    async def put_dead_letter(self, data: DeadLetterData) -> DeadLetterEntry:
+        """Append immutable replay inputs using database-time retention."""
+        async with self._dead_letter_transaction() as conn:
+            entry = new_dead_letter(data, await _scheduler_now(conn))
+            await conn.execute(
+                "INSERT INTO custos_state.dead_letter "
+                "(workspace_id, entry_id, subscription_id, schema_version, status, "
+                "created_at, expires_at, payload) VALUES ($1,$2,$3,1,'pending',$4,$5,$6::json)",
+                data.workspace_id,
+                data.entry_id,
+                data.subscription_id,
+                entry.created_at,
+                entry.expires_at,
+                encode_dead_letter(entry),
+            )
+            return entry
+
+    async def get_dead_letter(
+        self, workspace_id: WorkspaceId, entry_id: str
+    ) -> DeadLetterEntry | None:
+        """Read only one tenant's immutable capture and replay state."""
+        async with self._dead_letter_transaction() as conn:
+            payload = await conn.fetchval(
+                "SELECT payload::text FROM custos_state.dead_letter "
+                "WHERE workspace_id=$1 AND entry_id=$2",
+                workspace_id,
+                entry_id,
+            )
+            return decode_dead_letter(payload) if payload is not None else None
+
+    async def query_dead_letters(
+        self,
+        workspace_id: WorkspaceId,
+        filters: DeadLetterFilter | None = None,
+        *,
+        cursor: Cursor | None = None,
+        limit: int | None = None,
+    ) -> Page[DeadLetterEntry]:
+        """Use scoped identifier keysets with optional indexed status/subscription/time filters."""
+        filters = filters if filters is not None else DeadLetterFilter()
+        scope, size = filters.scope(workspace_id), query_page_limit(limit)
+        after = decode_query_cursor(cursor, scope)
+        async with self._dead_letter_transaction() as conn:
+            rows = await conn.fetch(
+                "SELECT payload::text FROM custos_state.dead_letter WHERE workspace_id=$1 "
+                "AND ($2::text IS NULL OR subscription_id=$2) "
+                "AND ($3::text IS NULL OR status=$3) "
+                "AND ($4::timestamptz IS NULL OR created_at >= $4) "
+                "AND ($5::timestamptz IS NULL OR created_at <= $5) "
+                'AND ($6::text IS NULL OR entry_id COLLATE "C" > $6) '
+                'ORDER BY entry_id COLLATE "C" LIMIT $7',
+                workspace_id,
+                filters.subscription_id,
+                filters.status,
+                filters.since,
+                filters.until,
+                after,
+                size + 1,
+            )
+            entries = [decode_dead_letter(row["payload"]) for row in rows]
+            cursor = (
+                encode_query_cursor(scope, entries[size - 1].data.entry_id)
+                if len(entries) > size
+                else None
+            )
+            return Page(entries[:size], cursor)
+
+    async def _locked_dead_letter(
+        self,
+        conn: Connection,
+        workspace_id: WorkspaceId,
+        entry_id: str,
+    ) -> DeadLetterEntry | None:
+        """Lock before reading provider time so blocked workers cannot reuse pre-lock authority."""
+        payload = await conn.fetchval(
+            "SELECT payload::text FROM custos_state.dead_letter "
+            "WHERE workspace_id=$1 AND entry_id=$2 FOR UPDATE",
+            workspace_id,
+            entry_id,
+        )
+        return decode_dead_letter(payload) if payload is not None else None
+
+    async def _write_dead_letter(
+        self,
+        conn: Connection,
+        entry: DeadLetterEntry,
+        *,
+        claiming: bool = False,
+        finishing: bool = False,
+    ) -> None:
+        """Keep indexed state and payload atomic, rechecking time at the mutation statement."""
+        updated = await conn.fetchval(
+            "UPDATE custos_state.dead_letter SET status=$3, payload=$4::json, claim_expires_at=$5 "
+            "WHERE workspace_id=$1 AND entry_id=$2 "
+            "AND (NOT $6::bool OR (expires_at > clock_timestamp() AND $5 > clock_timestamp())) "
+            "AND (NOT $7::bool OR claim_expires_at > clock_timestamp()) RETURNING entry_id",
+            entry.data.workspace_id,
+            entry.data.entry_id,
+            entry.status,
+            encode_dead_letter(entry),
+            entry.claim.expires_at if entry.claim else None,
+            claiming,
+            finishing,
+        )
+        if updated is None:
+            raise LeaseExpired("dead-letter retention or claim expired before mutation")
+
+    async def claim_dead_letter(
+        self,
+        workspace_id: WorkspaceId,
+        entry_id: str,
+        worker_id: str,
+        *,
+        ttl_seconds: int = 60,
+    ) -> DeadLetterEntry:
+        """Consume a bounded attempt under the row lock and mint a fresh, fenced claim token."""
+        async with self._dead_letter_transaction() as conn:
+            current = await self._locked_dead_letter(conn, workspace_id, entry_id)
+            if current is None:
+                raise ImmutableViolation("dead-letter entry does not exist")
+            entry = claim_replay(current, worker_id, ttl_seconds, await _scheduler_now(conn))
+            await self._write_dead_letter(conn, entry, claiming=True)
+            return entry
+
+    async def finish_dead_letter(
+        self,
+        claim: ReplayClaim,
+        *,
+        failure: DispatchAttempt | None = None,
+        result_id: str | None = None,
+    ) -> DeadLetterEntry:
+        """Finish using authoritative token/epoch/expiry; retention cannot steal a live claim."""
+        async with self._dead_letter_transaction() as conn:
+            current = await self._locked_dead_letter(conn, claim.workspace_id, claim.entry_id)
+            if current is None:
+                raise LeaseExpired("replay claim no longer exists")
+            entry = finish_replay(
+                current, claim, await _scheduler_now(conn), failure=failure, result_id=result_id
+            )
+            await self._write_dead_letter(conn, entry, finishing=True)
+            return entry
+
+    async def recover_dead_letter(
+        self, workspace_id: WorkspaceId, entry_id: str
+    ) -> DeadLetterEntry:
+        """Persist interrupted history even when an abandoned final attempt exhausts the limit."""
+        async with self._dead_letter_transaction() as conn:
+            current = await self._locked_dead_letter(conn, workspace_id, entry_id)
+            if current is None:
+                raise ImmutableViolation("dead-letter entry does not exist")
+            entry = recover_replay(current, await _scheduler_now(conn))
+            if entry != current:
+                await self._write_dead_letter(conn, entry)
+            return entry
+
+    async def discard_dead_letter(
+        self, workspace_id: WorkspaceId, entry_id: str
+    ) -> DeadLetterEntry:
+        """Serialize operator discard against replay acquisition/completion."""
+        async with self._dead_letter_transaction() as conn:
+            current = await self._locked_dead_letter(conn, workspace_id, entry_id)
+            if current is None:
+                raise ImmutableViolation("dead-letter entry does not exist")
+            entry = discard_dead_letter(current, await _scheduler_now(conn))
+            await self._write_dead_letter(conn, entry)
+            return entry
+
+    async def delete_expired_dead_letter(self, workspace_id: WorkspaceId, entry_id: str) -> bool:
+        """Recheck retention and live claims after locking; deletion never races a live owner."""
+        async with self._dead_letter_transaction() as conn:
+            current = await self._locked_dead_letter(conn, workspace_id, entry_id)
+            now = await _scheduler_now(conn)
+            if (
+                current is None
+                or current.expires_at > now
+                or (current.claim and current.claim.expires_at > now)
+            ):
+                return False
+            await conn.execute(
+                "DELETE FROM custos_state.dead_letter WHERE workspace_id=$1 AND entry_id=$2",
+                workspace_id,
+                entry_id,
+            )
+            return True
 
     @asynccontextmanager
     async def _scheduler_transaction(self) -> AsyncIterator[Connection]:

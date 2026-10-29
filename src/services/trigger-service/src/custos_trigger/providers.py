@@ -21,9 +21,21 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Literal, TypeVar, cast
 
-from custos_spl.errors import ImmutableViolation
+from custos_spl.errors import ImmutableViolation, LeaseExpired
 from custos_spl.ids import SubscriptionId, WorkspaceId
 from custos_spl.interfaces.connector_instance_store import ConnectorReferenceReader
+from custos_spl.interfaces.dead_letters import (
+    DeadLetterData,
+    DeadLetterEntry,
+    DeadLetterFilter,
+    DispatchAttempt,
+    ReplayClaim,
+    claim_replay,
+    discard_dead_letter,
+    finish_replay,
+    new_dead_letter,
+    recover_replay,
+)
 from custos_spl.interfaces.metadata_store import (
     DedupDuplicate,
     DedupReserved,
@@ -130,6 +142,117 @@ class InMemoryTriggerMetadataStore:
         self._schedules: dict[tuple[str, str], SplSchedule] = {}
         self._scheduler_leases: dict[str, SchedulerLease] = {}
         self._pending_fires: dict[tuple[str, str], PendingScheduleFire] = {}
+        self._dead_letters: dict[tuple[str, str], DeadLetterEntry] = {}
+
+    async def check_dead_letters_ready(self) -> None:
+        """Memory state is ready at construction, without implying restart durability."""
+
+    async def put_dead_letter(self, data: DeadLetterData) -> DeadLetterEntry:
+        """Append one deeply immutable capture, rejecting duplicate identity."""
+        key = (str(data.workspace_id), data.entry_id)
+        if key in self._dead_letters:
+            raise ImmutableViolation("dead-letter entry already exists")
+        entry = new_dead_letter(data, self._now())
+        self._dead_letters[key] = entry
+        return entry
+
+    async def get_dead_letter(
+        self, workspace_id: WorkspaceId, entry_id: str
+    ) -> DeadLetterEntry | None:
+        """Read only the requested workspace; payloads are deeply immutable."""
+        return self._dead_letters.get((str(workspace_id), entry_id))
+
+    async def query_dead_letters(
+        self,
+        workspace_id: WorkspaceId,
+        filters: DeadLetterFilter | None = None,
+        *,
+        cursor: Cursor | None = None,
+        limit: int | None = None,
+    ) -> Page[DeadLetterEntry]:
+        """Match PostgreSQL filters and identifier keyset ordering."""
+        filters = filters if filters is not None else DeadLetterFilter()
+        scope = filters.scope(workspace_id)
+        rows = [
+            row
+            for (ws, _), row in self._dead_letters.items()
+            if ws == workspace_id
+            and (
+                filters.subscription_id is None
+                or row.data.subscription_id == filters.subscription_id
+            )
+            and (filters.status is None or row.status == filters.status)
+            and (filters.since is None or row.created_at >= utc_instant(filters.since))
+            and (filters.until is None or row.created_at <= utc_instant(filters.until))
+        ]
+        return _query_page(rows, scope, cursor, limit, lambda row: row.data.entry_id)
+
+    def _dead_letter(self, workspace_id: WorkspaceId, entry_id: str) -> DeadLetterEntry:
+        """Require a scoped row for lifecycle mutations without disclosing other tenants."""
+        entry = self._dead_letters.get((str(workspace_id), entry_id))
+        if entry is None:
+            raise ImmutableViolation("dead-letter entry does not exist")
+        return entry
+
+    async def claim_dead_letter(
+        self,
+        workspace_id: WorkspaceId,
+        entry_id: str,
+        worker_id: str,
+        *,
+        ttl_seconds: int = 60,
+    ) -> DeadLetterEntry:
+        """Consume one fenced attempt without yielding between read and replacement."""
+        entry = claim_replay(
+            self._dead_letter(workspace_id, entry_id), worker_id, ttl_seconds, self._now()
+        )
+        self._dead_letters[(str(workspace_id), entry_id)] = entry
+        return entry
+
+    async def finish_dead_letter(
+        self,
+        claim: ReplayClaim,
+        *,
+        failure: DispatchAttempt | None = None,
+        result_id: str | None = None,
+    ) -> DeadLetterEntry:
+        """Reject expired/foreign tokens, including tokens predating deletion and recreation."""
+        entry = self._dead_letters.get((str(claim.workspace_id), claim.entry_id))
+        if entry is None:
+            raise LeaseExpired("replay claim no longer exists")
+        finished = finish_replay(entry, claim, self._now(), failure=failure, result_id=result_id)
+        self._dead_letters[(str(claim.workspace_id), claim.entry_id)] = finished
+        return finished
+
+    async def recover_dead_letter(
+        self, workspace_id: WorkspaceId, entry_id: str
+    ) -> DeadLetterEntry:
+        """Mark abandoned attempts interrupted; the final abandoned attempt becomes discarded."""
+        entry = recover_replay(self._dead_letter(workspace_id, entry_id), self._now())
+        self._dead_letters[(str(workspace_id), entry_id)] = entry
+        return entry
+
+    async def discard_dead_letter(
+        self, workspace_id: WorkspaceId, entry_id: str
+    ) -> DeadLetterEntry:
+        """Keep active replay and successful outcomes safe from concurrent operator discard."""
+        entry = discard_dead_letter(self._dead_letter(workspace_id, entry_id), self._now())
+        self._dead_letters[(str(workspace_id), entry_id)] = entry
+        return entry
+
+    async def delete_expired_dead_letter(self, workspace_id: WorkspaceId, entry_id: str) -> bool:
+        """Atomically delete eligible retained data, never a currently owned replay."""
+        key = (str(workspace_id), entry_id)
+        entry = self._dead_letters.get(key)
+        now = utc_instant(self._now())
+        if (
+            entry is None
+            or entry.expires_at > now
+            or (entry.claim and entry.claim.expires_at > now)
+        ):
+            return False
+        del self._dead_letters[key]
+        return True
 
     async def check_scheduler_ready(self) -> None:
         """Memory scheduler structures exist at construction; no durable backend is implied."""
