@@ -195,6 +195,35 @@ async def test_replay_claim_recovers_worker_death(harness: Harness) -> None:
     assert [attempt.outcome for attempt in recovered.replay_history] == ["interrupted", "replayed"]
 
 
+async def test_abandoned_final_replay_persists_interruption_without_another_attempt(
+    harness: Harness,
+) -> None:
+    """Exhausted recovery records the interrupted attempt instead of staying stuck replaying."""
+    client = FakeWorkflowServiceClient(error=WorkflowClientTransportError("unavailable"))
+    reliable = ReliableDispatcher(
+        client,
+        harness.store,
+        NoopAuditSink(),
+        max_retries=0,
+        max_replay_attempts=1,
+    )
+    await reliable.dispatch_start(event(), match())
+    entry = (await harness.store.query_dead_letters(WS)).items[0]
+    abandoned = await harness.store.claim_dead_letter(WS, entry.data.entry_id, "dead-worker")
+    await harness.expire_replay(abandoned)
+    client.error = None
+    for _ in range(2):
+        with pytest.raises(TriggerError) as exhausted:
+            await reliable.replay(str(WS), entry.data.entry_id, "new-worker")
+        assert exhausted.value.kind is TriggerErrorKind.REPLAY_UNSAFE
+        recovered = await harness.store.get_dead_letter(WS, entry.data.entry_id)
+        assert recovered is not None and recovered.status == "discarded"
+        assert recovered.claim is None
+        assert [attempt.outcome for attempt in recovered.replay_history] == ["interrupted"]
+        assert recovered.replay_history[0].finished_at is not None
+        assert len(client.start_run_calls) == 1
+
+
 async def test_configuration_and_legacy_targets_fail_closed(harness: Harness) -> None:
     """Keep unsafe entries inspectable without issuing a new key or attempting a blind replay."""
     client = FakeWorkflowServiceClient()

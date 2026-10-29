@@ -200,6 +200,10 @@ for durable finalization; it never consumes the entire ownership window.
 Completed receipts retain the original result, while abandoned pending claims
 can be recovered with a new token. Same-request contention can extend the minimum
 retention without renewing the current worker's lease.
+If the final permitted replay is abandoned, the next replay request persists its
+`interrupted` history and `discarded` state, then returns `trigger.replay_unsafe`
+without issuing another downstream call. It does not leave a retryable `replaying`
+row after the attempt limit is exhausted.
 
 The original normalized event and resolved target are snapshotted atomically
 with the initial reservation, before any remote call. Recovery uses that snapshot

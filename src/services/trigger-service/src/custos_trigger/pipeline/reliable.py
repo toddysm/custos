@@ -376,7 +376,19 @@ class ReliableDispatcher:
                 raise TriggerError(
                     TriggerErrorKind.REPLAY_UNSAFE, "entry has no safe versioned replay target"
                 )
-            owned = await self.store.claim_dead_letter(ws, entry_id, worker_id, ttl_seconds=300)
+            try:
+                owned = await self.store.claim_dead_letter(
+                    ws,
+                    entry_id,
+                    worker_id,
+                    ttl_seconds=300,
+                )
+            except ImmutableViolation as exc:
+                await self.store.recover_dead_letter(ws, entry_id)
+                raise TriggerError(
+                    TriggerErrorKind.REPLAY_UNSAFE,
+                    "entry is terminal or beyond its replay attempt/retention limit",
+                ) from exc
             if owned.claim is None:
                 raise RuntimeError("claimed entry has no fencing token")
             history: list[DispatchAttempt] = []
