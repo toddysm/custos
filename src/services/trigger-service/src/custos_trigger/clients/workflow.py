@@ -326,7 +326,13 @@ class DaprWorkflowServiceClient:
                 what="RaiseExternalEvent",
             )
             return
-        url = build_invoke_url(self.endpoint, raise_event_method(run_id, step_id))
+        try:
+            url = build_invoke_url(self.endpoint, raise_event_method(run_id, step_id))
+        except ValueError as exc:
+            raise WorkflowClientError(
+                "unsafe legacy resume target; use version-2 body-addressed resume",
+                retryable=False,
+            ) from exc
         await self._post(url, request, what="RaiseExternalEvent")
 
     async def _post(

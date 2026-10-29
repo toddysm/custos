@@ -13,6 +13,7 @@ from custos_trigger.clients.workflow import (
     RaiseExternalEventRequest,
     RunRef,
     StartRunRequest,
+    WorkflowClientError,
     WorkflowClientStatusError,
 )
 from custos_trigger.dedup import Deduplicator, compute_dedup_key
@@ -78,6 +79,37 @@ def _start_match(
 def _resume_match(*, resume_id: str = "res-1") -> ResumeMatch:
     reg = ResumeRegistration(run_id="run-9", step_id="step-3", event_key="workflow.completed")
     return ResumeMatch(resume_id=resume_id, registration=reg)
+
+
+async def test_unsafe_legacy_target_is_terminal_dispatch_failure() -> None:
+    """Invalid legacy paths follow the dispatcher failure contract instead of escaping as 500."""
+    import httpx
+
+    from custos_trigger.clients.workflow import DaprEndpoint, DaprWorkflowServiceClient
+
+    def reject_transport(_request: httpx.Request) -> httpx.Response:
+        """An invalid target must be rejected before any remote request."""
+        raise AssertionError("unsafe target reached transport")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(reject_transport)) as http:
+        audit = _RecordingAudit()
+        client = DaprWorkflowServiceClient(
+            http,
+            DaprEndpoint(host="127.0.0.1", http_port=3500, app_id="workflow-service"),
+        )
+        dispatcher = Dispatcher(client, Deduplicator(InMemoryTriggerMetadataStore()), audit=audit)
+        match = ResumeMatch(
+            resume_id="unsafe",
+            registration=ResumeRegistration(
+                run_id="parent/../run",
+                step_id="step",
+                event_key="workflow.completed",
+            ),
+        )
+        outcome = await dispatcher.dispatch_resume(_event(), match, workspace_id="ws-one")
+    assert outcome.status is DispatchStatus.DEAD_LETTERED
+    assert isinstance(outcome.error, WorkflowClientError) and not outcome.error.retryable
+    assert audit.names() == [AUDIT_MATCHED, AUDIT_DISPATCH_FAILED]
 
 
 @dataclass(slots=True)

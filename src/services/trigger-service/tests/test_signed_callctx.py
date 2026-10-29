@@ -348,6 +348,38 @@ def test_missing_mesh_configuration_fails_closed_but_probe_remains_public(signin
     assert app.state.entered == ["mesh"]
 
 
+@pytest.mark.parametrize("token", ["", "   "])
+def test_factory_rejects_blank_sidecar_token_without_namespace(
+    signing: Signing,
+    metadata_store: InMemoryTriggerMetadataStore,
+    monkeypatch: pytest.MonkeyPatch,
+    token: str,
+) -> None:
+    """Missing namespace configuration cannot bypass validation of an empty callback credential."""
+    monkeypatch.delenv("TRIGGER_WORKFLOW_NAMESPACE", raising=False)
+    app = create_app(
+        authz_endpoint="http://auth",
+        environment="production",
+        call_context_verifier=signing.verifier,
+        app_api_token=token,
+        providers=Providers(metadata_store=metadata_store),
+        dispatcher=Dispatcher(FakeWorkflowServiceClient(), Deduplicator(metadata_store)),
+    )
+    with TestClient(app) as client:
+        for method, path in (("GET", "/dapr/subscribe"), ("POST", "/internal/events/workflow")):
+            response = client.request(method, path, headers={"dapr-api-token": token})
+            assert response.status_code == 503
+            assert response.json()["error"]["code"] == "mesh_unavailable"
+
+
+def test_nonblank_token_comparison_preserves_exact_bytes(signing: Signing) -> None:
+    """Whitespace validation does not normalize a valid configured credential."""
+    token = " " + TOKEN + " "
+    with TestClient(app_for(signing, token=token)) as client:
+        assert client.get("/dapr/subscribe", headers={"dapr-api-token": TOKEN}).status_code == 401
+        assert client.get("/dapr/subscribe", headers={"dapr-api-token": token}).status_code == 200
+
+
 def test_duplicate_mesh_credentials_never_select_a_trusted_value(signing: Signing) -> None:
     """Reject ambiguous token and caller headers even if one of their values is valid."""
     app = app_for(signing)

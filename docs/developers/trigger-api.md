@@ -296,8 +296,9 @@ authenticate caller headers. Resume calls require `dapr-caller-app-id` and
 `TRIGGER_WORKFLOW_NAMESPACE`. These are identities, not HTTP addresses.
 For outbound invocation, the explicit app ID is qualified with the configured
 namespace; namespace qualification is not part of the authenticated app-ID header.
-The app authenticates the sidecar before trusting either header. Missing
-configuration returns `503 mesh_unavailable`; invalid tokens return
+The app authenticates the sidecar before trusting either header. Missing or
+blank token configuration returns `503 mesh_unavailable`; nonblank credentials
+are compared without normalization. Invalid tokens return
 `401 mesh_unauthenticated`, and a different caller returns `403 mesh_caller_denied`.
 Discovery and broker-delivery callbacks reject service-invocation caller headers;
 another application cannot use service invocation to masquerade as a broker callback.

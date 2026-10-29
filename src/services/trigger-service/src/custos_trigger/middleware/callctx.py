@@ -95,7 +95,7 @@ class CallContextError(Exception):
 
 def _require_sidecar_token(request: Request, token: str | None) -> None:
     """Authenticate the app-side hop before accepting sidecar-provided routing metadata."""
-    if token is None:
+    if token is None or not token.strip():
         raise CallContextError(503, "mesh_unavailable", "sidecar authentication is not configured")
     values = request.headers.getlist("dapr-api-token")
     if len(values) != 1 or not hmac.compare_digest(values[0].encode(), token.encode()):
