@@ -15,7 +15,7 @@ Lifecycle (design § Selector Language):
   :class:`~custos_cel.SchemaBindings`; a syntax error, unbound name, or type
   mismatch surfaces as :class:`SelectorInvalidError` (``trigger.selector_invalid``,
   HTTP 422) **before** the subscription is persisted. The typed AST is cached
-  in-process keyed by ``(subscriptionId, exprHash)``.
+  in-process keyed by subscription, expression hash and scheduled-schema selection.
 * **Evaluate-at-match.** :meth:`SelectorEvaluator.evaluate` builds a
   :class:`~custos_cel.BindingScope` carrying the normalized event and evaluates
   under the per-evaluation timeout budget. A non-bool result raises
@@ -52,7 +52,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -82,7 +82,7 @@ from custos_cel import (
 
 from custos_trigger.errors import TriggerError, TriggerErrorKind
 from custos_trigger.events import NormalizedEvent
-from custos_trigger.models import SelectorMatchType
+from custos_trigger.models import SelectorMatchType, SourceType
 
 __all__ = [
     "EVENT_SCHEMA_BINDINGS",
@@ -138,8 +138,8 @@ class SelectorTypeError(TriggerError):
 class CompiledSelector:
     """A parsed + type-checked selector, ready to evaluate.
 
-    Cached in-process keyed by ``(subscription_id, expr_hash)`` so the hot match
-    path skips the parse + type-check work.
+    Cached by subscription, expression hash and source schema so the hot match
+    path skips parsing without reusing an AST compiled for different payload types.
     """
 
     subscription_id: str
@@ -259,8 +259,8 @@ class SelectorEvaluator:
     """Compile-at-create + evaluate-at-match CEL selector evaluator.
 
     One instance is held per Trigger Service process; its in-process cache is
-    keyed by ``(subscription_id, expr_hash)`` so re-authoring a selector (a new
-    hash) supersedes the old entry while a stable selector stays warm.
+    keyed by subscription, expression hash and source schema so re-authoring a
+    selector or changing its schema cannot reuse an incompatible typed AST.
     """
 
     def __init__(
@@ -269,26 +269,56 @@ class SelectorEvaluator:
         bindings: SchemaBindings = EVENT_SCHEMA_BINDINGS,
         timeout_ms: int | None = None,
     ) -> None:
+        """Retain caller bindings while specializing the canonical scheduled payload types."""
         self._bindings = bindings
+        self._scheduled_bindings = replace(
+            bindings,
+            event={
+                **bindings.event,
+                "properties": {
+                    **bindings.event.get("properties", {}),
+                    "data": {
+                        "type": "object",
+                        "properties": {
+                            "workspace": {"type": "string"},
+                            "scheduleId": {"type": "string"},
+                            "subscriptionRevision": {"type": "integer"},
+                            "plannedFireAt": {"type": "string"},
+                            "skippedCount": {"type": "integer"},
+                        },
+                        "additionalProperties": {"type": "string"},
+                    },
+                },
+            },
+        )
         self._timeout_ms = timeout_ms
-        self._cache: dict[tuple[str, str], CompiledSelector] = {}
+        self._cache: dict[tuple[str, str, bool], CompiledSelector] = {}
 
-    def compile(self, expr: str, *, subscription_id: str) -> CompiledSelector:
-        """Parse + type-check ``expr`` and cache the typed AST.
+    def compile(
+        self,
+        expr: str,
+        *,
+        subscription_id: str,
+        source_type: SourceType | None = None,
+    ) -> CompiledSelector:
+        """Type-check against the selected source schema and cache the typed AST.
 
         Raises:
             SelectorInvalidError: If ``expr`` fails to parse, references an
                 unbound name, or fails type checking.
         """
         expr_hash = compute_expr_hash(expr)
-        key = (subscription_id, expr_hash)
+        scheduled = source_type is SourceType.SCHEDULED
+        key = (subscription_id, expr_hash, scheduled)
         cached = self._cache.get(key)
         if cached is not None:
             return cached
 
         try:
             ast = cel_parse(expr)
-            typed_ast = cel_type_check(ast, self._bindings)
+            typed_ast = cel_type_check(
+                ast, self._scheduled_bindings if scheduled else self._bindings
+            )
         except (ParseError, TypeCheckError, UnboundNameError) as exc:
             raise SelectorInvalidError(
                 f"selector did not compile: {exc}",
@@ -361,9 +391,16 @@ class SelectorEvaluator:
         subscription_id: str,
         clock: Clock | None = None,
     ) -> bool:
-        """Compile (cached) + evaluate ``expr`` against ``event`` in one call."""
-        compiled = self.compile(expr, subscription_id=subscription_id)
-        return self.evaluate(compiled, event, clock=clock)
+        """Compile with the event's source schema, then evaluate its boolean selector."""
+        mapping = _event_to_mapping(event)
+        source = mapping.get("source")
+        scheduled = isinstance(source, Mapping) and source.get("type") == SourceType.SCHEDULED
+        compiled = self.compile(
+            expr,
+            subscription_id=subscription_id,
+            source_type=SourceType.SCHEDULED if scheduled else None,
+        )
+        return self.evaluate(compiled, mapping, clock=clock)
 
     def clear(self) -> None:
         """Drop all cached compiled selectors."""

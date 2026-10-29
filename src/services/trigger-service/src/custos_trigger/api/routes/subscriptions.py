@@ -48,6 +48,7 @@ from custos_trigger.middleware import ensure_workspace as _ensure_workspace
 from custos_trigger.models import (
     ManualFireRequest,
     ManualFireResult,
+    SourceType,
     Subscription,
     SubscriptionCreate,
     SubscriptionKind,
@@ -91,16 +92,20 @@ def _now() -> datetime:
 
 
 def _validate_selector(
-    evaluator: SelectorEvaluator, selector: str | None, *, subscription_id: str
+    evaluator: SelectorEvaluator,
+    selector: str | None,
+    *,
+    subscription_id: str,
+    source_type: SourceType,
 ) -> None:
-    """Compile ``selector`` to reject a malformed expression at author time.
+    """Compile against the subscription's source schema at author time.
 
     A :class:`~custos_trigger.selector.SelectorInvalidError` is a
     :class:`TriggerError` (kind ``trigger.selector_invalid``) and propagates to
     the Problem+JSON handler as a 422.
     """
     if selector:
-        evaluator.compile(selector, subscription_id=subscription_id)
+        evaluator.compile(selector, subscription_id=subscription_id, source_type=source_type)
 
 
 def _not_found(subscription_id: str) -> TriggerError:
@@ -131,7 +136,9 @@ async def create_subscription(
     if body.source_type.value not in ("manual", "internal"):
         require_receiver_configuration(receiver_enabled)
     subscription_id = uuid.uuid4().hex
-    _validate_selector(evaluator, body.selector, subscription_id=subscription_id)
+    _validate_selector(
+        evaluator, body.selector, subscription_id=subscription_id, source_type=body.source_type
+    )
     if body.source_config is not None and body.source_config.connector_instance_id is not None:
         await validate_connector_reference(
             providers.connector_references, workspace_id, body.source_config.connector_instance_id
@@ -202,7 +209,12 @@ async def patch_subscription(
     fields_set = body.model_fields_set
 
     if "selector" in fields_set and body.selector is not None:
-        _validate_selector(evaluator, body.selector, subscription_id=subscription_id)
+        _validate_selector(
+            evaluator,
+            body.selector,
+            subscription_id=subscription_id,
+            source_type=existing.source_type,
+        )
 
     # Configuration and state are committed together after validating the merged request.
     blob_updates: dict[str, object] = {}

@@ -96,6 +96,7 @@ async def _due(
     *,
     interval_seconds: int = 30,
     input_mapping: dict[str, Any] | None = None,
+    selector: str | None = None,
 ) -> Subscription:
     """Create real managed state and set an explicitly due instant through the maintenance API."""
     now = await harness.store.scheduler_now()
@@ -109,6 +110,7 @@ async def _due(
             source_config=SourceConfig(interval_seconds=interval_seconds),
             target_workflow_version_id="version",
             input_mapping=input_mapping or {},
+            selector=selector,
             created_at=now - timedelta(seconds=2 * interval_seconds),
             updated_at=now,
         )
@@ -523,9 +525,15 @@ async def test_recovered_publication_does_not_duplicate_workflow_effect(harness:
     mapping = {
         "planned": "${{ event.data.plannedFireAt }}",
         "skipped": "${{ event.data.skippedCount }}",
+        "occurrences": "${{ event.data.skippedCount + 1 }}",
         "label": "schedule-${{ event.subject }}",
     }
-    await _due(harness, interval_seconds=3600, input_mapping=mapping)
+    await _due(
+        harness,
+        interval_seconds=3600,
+        input_mapping=mapping,
+        selector="event.data.skippedCount + 1 > 0",
+    )
     await _due(harness, "other", interval_seconds=3600)
     await harness.store.update_schedule_next_fire(
         _WS,
@@ -581,6 +589,7 @@ async def test_recovered_publication_does_not_duplicate_workflow_effect(harness:
         assert json.loads(state.serialized_input or "{}")["inputs"] == {
             "planned": events[0].data["plannedFireAt"],
             "skipped": 1,
+            "occurrences": 2,
             "label": "schedule-schedule",
         }
         stored = await subscriptions.get(str(_WS), "schedule")
@@ -690,7 +699,11 @@ async def test_resolved_mapping_is_captured_and_replayed_without_rematching(
     from custos_trigger.receivers.scheduled import process_scheduled_event, scheduled_event
     from custos_trigger.selector import SelectorEvaluator
 
-    mapping = {"planned": "${{ event.data.plannedFireAt }}", "nested": ["${{ event.subject }}", 3]}
+    mapping = {
+        "planned": "${{ event.data.plannedFireAt }}",
+        "nested": ["${{ event.subject }}", 3],
+        "occurrences": "${{ event.data.skippedCount + 1 }}",
+    }
     subscription = await _due(harness, input_mapping=mapping)
     lease = await harness.store.acquire_scheduler_lease("mapped", "a", ttl_seconds=30)
     assert lease is not None
@@ -710,7 +723,11 @@ async def test_resolved_mapping_is_captured_and_replayed_without_rematching(
         audit=audit,
     )
     assert outcome is not None and outcome.is_dead_lettered
-    expected = {"planned": event.data["plannedFireAt"], "nested": ["schedule", 3]}
+    expected = {
+        "planned": event.data["plannedFireAt"],
+        "nested": ["schedule", 3],
+        "occurrences": fire.skipped_count + 1,
+    }
     capture = (await harness.store.query_dead_letters(_WS)).items[0]
     assert json_value(capture.data.target["inputs"]) == expected
     stored = await store.get(str(_WS), "schedule")

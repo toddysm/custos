@@ -51,7 +51,11 @@ def resolve_input_mapping(
                 return value
             results = [
                 evaluator.evaluate_value(
-                    evaluator.compile(segment.inner.strip(), subscription_id=subscription_id),
+                    evaluator.compile(
+                        segment.inner.strip(),
+                        subscription_id=subscription_id,
+                        source_type=event.source.type,
+                    ),
                     event,
                     clock=clock,
                 )

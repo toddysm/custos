@@ -17,7 +17,13 @@ def event() -> NormalizedEvent:
         event_id="event",
         kind="cron.tick",
         source=EventSource(type=SourceType.SCHEDULED, occurred_at="2026-01-01T00:00:00+00:00"),
-        data={"number": 2, "text": "${{ not.reinterpreted }}", "nested": {"value": True}},
+        data={
+            "number": 2,
+            "skippedCount": 2,
+            "subscriptionRevision": 3,
+            "text": "${{ not.reinterpreted }}",
+            "nested": {"value": True},
+        },
     )
 
 
@@ -31,6 +37,8 @@ def test_mapping_resolves_values_interpolation_and_nested_containers() -> None:
         "data": "${{ event.data }}",
         "literal_result": "${{ event.data.text }}",
         "clock": "${{ now() }}",
+        "occurrences": "${{ event.data.skippedCount + 1 }}",
+        "revision": "revision=${{ event.data.subscriptionRevision + 1 }}",
     }
     resolved = resolve_input_mapping(
         mapping,
@@ -44,6 +52,9 @@ def test_mapping_resolves_values_interpolation_and_nested_containers() -> None:
     assert resolved["literal_result"] == "${{ not.reinterpreted }}"
     assert datetime.fromisoformat(resolved["clock"]) == datetime(2026, 1, 1, tzinfo=UTC)
     assert mapping["number"] == "${{ event.data.number }}"
+    assert resolved["occurrences"] == 3
+    assert type(resolved["occurrences"]) is int
+    assert resolved["revision"] == "revision=4"
     resolved["data"]["nested"]["value"] = False
     assert incoming.data["nested"]["value"] is True
 

@@ -160,6 +160,31 @@ def _external(workspace: str = "ws_demo", connector: str = "registry") -> dict[s
     }
 
 
+def test_scheduled_selector_numeric_bindings_on_create_and_patch(client: TestClient) -> None:
+    """Authoring accepts canonical numeric operations and still rejects mismatched types."""
+    result = client.post(
+        _PATH,
+        json={
+            "sourceType": "scheduled",
+            "workflowId": "wf",
+            "sourceConfig": {"intervalSeconds": 30},
+            "selector": "event.data.skippedCount + 1 > 0",
+        },
+        headers=_headers(),
+    )
+    assert result.status_code == 201, result.text
+    path = f"{_PATH}/{result.json()['subscriptionId']}"
+    selector = "event.data.subscriptionRevision + 1 > 0"
+    patched = client.patch(path, json={"selector": selector}, headers=_headers())
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["selector"] == selector
+    rejected = client.patch(
+        path, json={"selector": "event.data.skippedCount + 'one' == 'one'"}, headers=_headers()
+    )
+    assert rejected.status_code == 422
+    assert client.get(path, headers=_headers()).json()["selector"] == selector
+
+
 @pytest.mark.parametrize("kind", ["webhook", "vendor-push", "pull"])
 def test_connector_configuration_round_trip(client: TestClient, kind: str) -> None:
     """All connector-backed receiver tags persist the same validated reference contract."""
