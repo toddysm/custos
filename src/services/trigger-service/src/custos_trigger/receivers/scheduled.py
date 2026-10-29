@@ -315,7 +315,9 @@ class ScheduledReceiver:
                         skipped_count=plan.skipped_count,
                     )
                 except ImmutableViolation:
-                    logger.info("Schedule changed during planning: %s", schedule.schedule_id)
+                    logger.info(
+                        "Deferring changed or elapsed schedule plan: %s", schedule.schedule_id
+                    )
                     continue
                 planned += 1
                 accepted = await self._publish(fire)

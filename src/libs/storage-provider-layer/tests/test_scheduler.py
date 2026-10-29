@@ -145,3 +145,21 @@ def test_invalid_planned_fire_windows(planned: datetime, following: datetime) ->
             next_fire_at=following,
             now=_NOW,
         )
+
+
+def test_elapsed_valid_window_is_a_retryable_conflict() -> None:
+    """Time crossing a valid plan's upper bound is not malformed caller input."""
+    due = _NOW - timedelta(seconds=2)
+    with pytest.raises(ImmutableViolation, match="planned-fire window"):
+        prepare_schedule_fire(
+            _WS,
+            _lease(),
+            _lease(),
+            _snapshot(),
+            Schedule(_WS, "s", WorkflowId("wf"), "", due, True),
+            expected_next_fire_at=due,
+            expected_revision=1,
+            planned_fire_at=_NOW - timedelta(seconds=1),
+            next_fire_at=_NOW,
+            now=_NOW,
+        )

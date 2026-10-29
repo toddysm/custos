@@ -161,6 +161,9 @@ as integers, including create/patch validation. For example,
 Changing a subscription's source revalidates its retained or replacement selector
 against the resulting source schema; invalid transitions leave stored state unchanged.
 Invalid mappings and nesting beyond 64 levels fail explicitly before dispatch.
+If a valid schedule plan expires before its fenced write, including during a
+database lock wait, it is deferred as a retryable conflict. Later rows in the
+bounded page still run; the unchanged due row is replanned in a subsequent cycle.
 The producer and consumer recheck eligibility/revision: paused, expired, missing
 or reconfigured associations are suppressed rather than rebound to a new target.
 Already accepted downstream effects are not undone by a later pause.

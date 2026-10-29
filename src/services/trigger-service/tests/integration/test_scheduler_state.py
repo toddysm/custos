@@ -122,7 +122,11 @@ async def _due(
 
 
 async def _advance(
-    harness: Harness, subscription: Subscription, lease: SchedulerLease
+    harness: Harness,
+    subscription: Subscription,
+    lease: SchedulerLease,
+    *,
+    next_at: datetime | None = None,
 ) -> PendingScheduleFire:
     """Advance the captured due instant via the fenced transaction."""
     schedule = await harness.store.get_schedule(
@@ -137,7 +141,7 @@ async def _advance(
         expected_next_fire_at=schedule.next_fire_at,
         expected_revision=subscription.store_revision,
         planned_fire_at=schedule.next_fire_at,
-        next_fire_at=now + timedelta(minutes=1),
+        next_fire_at=next_at if next_at is not None else now + timedelta(minutes=1),
     )
 
 
@@ -359,6 +363,55 @@ async def test_continuously_due_prefix_cannot_starve_later_pages(harness: Harnes
     assert [event.source.subscription_id for event in events] == ["a", "b", "c"]
     assert (await receiver.tick()).published == 2
     assert [event.source.subscription_id for event in events[-2:]] == ["a", "b"]
+
+
+async def test_expired_plan_defers_without_aborting_later_schedules(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An elapsed one-second plan remains due without preventing tail processing."""
+    from custos_trigger.receivers import scheduled
+
+    await _due(harness, "a", interval_seconds=1)
+    await _due(harness, "b", interval_seconds=3600)
+    before = await harness.store.get_schedule(_WS, "a")
+    events: list[NormalizedEvent] = []
+    original = scheduled.plan_schedule
+    delayed = False
+
+    async def delayed_plan(*args: Any, **kwargs: Any) -> scheduled.SchedulePlan:
+        """Advance provider time once after computing, before the fenced write."""
+        nonlocal delayed
+        plan = await original(*args, **kwargs)
+        if not delayed:
+            delayed = True
+            if harness.pool is None:
+                harness.clock[0] = plan.next_at
+            else:
+                async with asyncio.timeout(5):
+                    while await harness.store.scheduler_now() < plan.next_at:
+                        await asyncio.sleep(0.01)
+        return plan
+
+    async def publish(event: NormalizedEvent) -> None:
+        """Record acknowledged publications for both bounded scan cycles."""
+        events.append(event)
+
+    monkeypatch.setattr(scheduled, "plan_schedule", delayed_plan)
+    receiver = ScheduledReceiver(
+        harness.store,
+        workspace_id=str(_WS),
+        leadership=SchedulerLeadership(harness.store, deployment_id="elapsed", holder_id="a"),
+        publish=publish,
+        audit=NoopAuditSink(),
+        page_size=2,
+    )
+    first = await receiver.tick()
+    assert first.planned == first.published == 1
+    assert [event.source.subscription_id for event in events] == ["b"]
+    assert await harness.store.get_schedule(_WS, "a") == before
+    assert not (await harness.store.query_pending_schedule_fires(_WS, "elapsed")).items
+    assert (await receiver.tick()).published == 1
+    assert [event.source.subscription_id for event in events] == ["b", "a"]
 
 
 async def test_reconfigured_pending_fire_is_discarded_not_rebound(harness: Harness) -> None:
@@ -937,15 +990,23 @@ async def test_pending_fire_rolls_back_if_schedule_write_fails(pg_pool: Pool) ->
 
 
 @pytest.mark.integration
-async def test_clock_is_rechecked_after_waiting_for_schedule_locks(pg_pool: Pool) -> None:
-    """A transaction begun while live must fail if its subscription lock arrives after expiry."""
+@pytest.mark.parametrize("expires", ["lease", "plan"])
+async def test_clock_is_rechecked_after_waiting_for_schedule_locks(
+    pg_pool: Pool, expires: str
+) -> None:
+    """Lock waits recheck lease and plan expiry with distinct failures and no partial writes."""
     from asyncpg import LockNotAvailableError
 
     store = PgMetadataAdapter(pool=pg_pool)
     harness = Harness(store, [], pg_pool)
     subscription = await _due(harness)
-    lease = await store.acquire_scheduler_lease("blocked", "a", ttl_seconds=2)
+    lease = await store.acquire_scheduler_lease(
+        "blocked", "a", ttl_seconds=2 if expires == "lease" else 30
+    )
     assert lease is not None
+    next_at = await store.scheduler_now() + timedelta(seconds=2 if expires == "plan" else 60)
+    deadline = lease.expires_at if expires == "lease" else next_at
+    failure = LeaseExpired if expires == "lease" else ImmutableViolation
     before = await store.get_schedule(_WS, "schedule")
     async with pg_pool.acquire() as blocker:
         transaction = blocker.transaction()
@@ -955,7 +1016,7 @@ async def test_clock_is_rechecked_after_waiting_for_schedule_locks(pg_pool: Pool
             "WHERE workspace_id=$1 AND subscription_id='schedule' FOR UPDATE",
             _WS,
         )
-        task = asyncio.create_task(_advance(harness, subscription, lease))
+        task = asyncio.create_task(_advance(harness, subscription, lease, next_at=next_at))
         try:
 
             async def waiting_with_lease_lock() -> None:
@@ -979,15 +1040,20 @@ async def test_clock_is_rechecked_after_waiting_for_schedule_locks(pg_pool: Pool
                 )
                 await clock.execute(
                     "SELECT pg_sleep(GREATEST(0, EXTRACT(EPOCH FROM "
-                    "expires_at-clock_timestamp())) + 0.02) FROM custos_state.scheduler_lease "
-                    "WHERE deployment_id='blocked'"
+                    "$1::timestamptz-clock_timestamp())) + 0.02)",
+                    deadline,
                 )
+                if expires == "plan":
+                    assert await clock.fetchval(
+                        "SELECT expires_at > clock_timestamp() FROM custos_state.scheduler_lease "
+                        "WHERE deployment_id='blocked'"
+                    )
         finally:
             await transaction.rollback()
             if not task.done():
-                with suppress(LeaseExpired):
+                with suppress(failure):
                     await asyncio.wait_for(task, timeout=5)
-        with pytest.raises(LeaseExpired):
+        with pytest.raises(failure):
             await task
     assert await store.get_schedule(_WS, "schedule") == before
     assert (await store.query_pending_schedule_fires(_WS, "blocked")).items == ()

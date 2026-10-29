@@ -136,7 +136,7 @@ def prepare_schedule_fire(
     now: datetime,
     skipped_count: int = 0,
 ) -> PendingScheduleFire:
-    """Validate the fenced due occurrence before either schedule or outbox changes."""
+    """Validate before mutation; an elapsed valid window is a retryable state conflict."""
     require_scheduler_lease(current_lease, token, now)
     due = utc_instant(expected_next_fire_at)
     planned, following, clock = map(utc_instant, (planned_fire_at, next_fire_at, now))
@@ -144,8 +144,10 @@ def prepare_schedule_fire(
         raise ValueError("expected_revision must be a non-negative integer")
     if type(skipped_count) is not int or not 0 <= skipped_count < 2**63:
         raise ValueError("skipped_count must be a non-negative signed-64-bit integer")
-    if not due <= planned <= clock < following:
-        raise ValueError("planned fire must be due and next fire must follow provider time")
+    if not due <= planned < following or planned > clock:
+        raise ValueError("planned fire must be due and next fire must follow the planned instant")
+    if following <= clock:
+        raise ImmutableViolation("provider time moved outside the planned-fire window")
     if subscription is None or subscription.selector is None or schedule is None:
         raise ImmutableViolation("managed schedule or subscription is missing")
     row, blob = subscription.subscription, subscription.selector.selector

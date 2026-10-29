@@ -344,7 +344,10 @@ class InMemoryTriggerMetadataStore(MemoryDeliveryState):
         pending_key = (str(workspace_id), pending.fire_id)
         if pending_key in self._pending_fires:
             raise ImmutableViolation("planned schedule occurrence already exists")
-        require_scheduler_lease(self._scheduler_leases.get(lease.deployment_id), lease, self._now())
+        commit_now = utc_instant(self._now())
+        require_scheduler_lease(self._scheduler_leases.get(lease.deployment_id), lease, commit_now)
+        if not pending.planned_fire_at <= commit_now < utc_instant(next_fire_at):
+            raise ImmutableViolation("provider time moved outside the planned-fire window")
         assert schedule is not None
         self._pending_fires[pending_key] = pending
         self._schedules[key] = replace(schedule, next_fire_at=utc_instant(next_fire_at))
