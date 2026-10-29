@@ -341,8 +341,9 @@ async def test_retention_and_claim_compete_at_boundary(harness: Harness) -> None
         if abandoned:
             entry = await harness.store.claim_dead_letter(WS, identifier, "old", ttl_seconds=1)
             await harness.expire(entry)
-            entry = await harness.store.get_dead_letter(WS, identifier)
-            assert entry is not None
+            persisted = await harness.store.get_dead_letter(WS, identifier)
+            assert persisted is not None
+            entry = persisted
         await harness.expire(entry, retention=True)
         results = await asyncio.gather(
             harness.store.claim_dead_letter(WS, identifier, "new"),
