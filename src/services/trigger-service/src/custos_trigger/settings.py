@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Final
 
@@ -68,7 +68,7 @@ ENV_WORKFLOW_EVENTS_TOPIC: Final[str] = "TRIGGER_WORKFLOW_EVENTS_TOPIC"
 
 # --- Dependencies (design.md § Dependencies) ---------------------------------
 
-#: Required. In-cluster endpoint of the Workflow Service.
+#: Required. Dapr application ID of the Workflow Service, not an HTTP URL.
 ENV_WORKFLOW_ENDPOINT: Final[str] = "TRIGGER_WF_ENDPOINT"
 
 #: Required. In-cluster endpoint of the Connector Service.
@@ -84,6 +84,7 @@ ENV_METADATA_STORE: Final[str] = "TRIGGER_METADATA_STORE"
 #: call-context middleware (TS-IMPL-003), which refuses to start when
 #: ``ENVIRONMENT=production``.
 ENV_AUTHZ_ENDPOINT: Final[str] = "TRIGGER_AUTHZ_ENDPOINT"
+ENV_APP_API_TOKEN: Final[str] = "APP_API_TOKEN"
 
 #: Operational env tag. The call-context dev shim refuses to run when this is
 #: ``production`` (case-insensitive).
@@ -129,9 +130,12 @@ class Settings:
     environment: str
     receiver_configuration_enabled: bool = False
     scheduler_leader_renew_seconds: int = DEFAULT_SCHEDULER_LEADER_RENEW_SECONDS
+    app_api_token: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
-        """Reject scheduler timing that cannot sustain a live lease."""
+        """Reject unusable ownership timing or an explicitly blank mesh credential."""
+        if self.app_api_token is not None and not self.app_api_token.strip():
+            raise SettingsError("APP_API_TOKEN must not be blank when configured")
         validate_scheduler_timing(
             self.scheduler_leader_lease_seconds, self.scheduler_leader_renew_seconds
         )
@@ -235,6 +239,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         connector_endpoint=_require(ENV_CONNECTOR_ENDPOINT, src),
         metadata_store_dsn=_require(ENV_METADATA_STORE, src),
         authz_endpoint=src.get(ENV_AUTHZ_ENDPOINT, "").strip(),
+        app_api_token=src.get(ENV_APP_API_TOKEN),
         environment=src.get(ENV_ENVIRONMENT, "").strip() or DEFAULT_ENVIRONMENT,
     )
 
@@ -251,6 +256,7 @@ __all__ = [
     "DEFAULT_SCHEDULER_LEADER_LEASE_SECONDS",
     "DEFAULT_SCHEDULER_LEADER_RENEW_SECONDS",
     "DEFAULT_WORKFLOW_EVENTS_TOPIC",
+    "ENV_APP_API_TOKEN",
     "ENV_AUTHZ_ENDPOINT",
     "ENV_CONNECTOR_ENDPOINT",
     "ENV_DEDUP_TTL_SECONDS",

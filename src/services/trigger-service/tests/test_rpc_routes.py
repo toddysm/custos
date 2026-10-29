@@ -26,7 +26,7 @@ from custos_trigger.api.routes.rpc import (
 from custos_trigger.app import create_app
 from custos_trigger.clients import FakeWorkflowServiceClient
 from custos_trigger.dedup import Deduplicator
-from custos_trigger.middleware.callctx import _BYPASS_PATHS
+from custos_trigger.middleware.callctx import _WORKFLOW_ROUTES
 from custos_trigger.pipeline.dispatch import Dispatcher
 from custos_trigger.providers import InMemoryTriggerMetadataStore, Providers
 from custos_trigger.settings import DEFAULT_RESUME_DEFAULT_TTL_SECONDS
@@ -134,9 +134,10 @@ def test_register_requires_no_call_context(client: TestClient) -> None:
     assert response.status_code == 200, response.text
 
 
-def test_rpc_paths_are_in_the_callctx_bypass_set() -> None:
-    assert _REGISTER in _BYPASS_PATHS
-    assert _CANCEL in _BYPASS_PATHS
+def test_rpc_paths_use_exact_workflow_authentication_routes() -> None:
+    """Resume methods select independent Workflow authentication rather than user claims."""
+    assert ("POST", _REGISTER) in _WORKFLOW_ROUTES
+    assert ("POST", _CANCEL) in _WORKFLOW_ROUTES
 
 
 # --------------------------------------------------------------------------

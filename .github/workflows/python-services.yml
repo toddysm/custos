@@ -172,12 +172,13 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install SPL + Postgres adapter + CEL library from path
+      - name: Install Trigger path dependencies
         working-directory: ${{ github.workspace }}
         run: |
           pip install -e src/libs/storage-provider-layer[dev]
           pip install -e src/libs/custos-postgres[dev]
           pip install -e src/libs/custos-cel[dev]
+          pip install -e src/libs/custos-callctx[dev]
 
       - name: Install Workflow client for contract-test type checking
         working-directory: ${{ github.workspace }}
@@ -230,12 +231,13 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install SPL + Postgres adapter + CEL library from path
+      - name: Install Trigger path dependencies
         working-directory: ${{ github.workspace }}
         run: |
           pip install -e src/libs/storage-provider-layer[dev]
           pip install -e src/libs/custos-postgres[dev]
           pip install -e src/libs/custos-cel[dev]
+          pip install -e src/libs/custos-callctx[dev]
 
       - name: Install Workflow client for cross-service contract tests
         working-directory: ${{ github.workspace }}

@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 from custos_trigger.api.routes.rpc import RESUME_WORKSPACE, compute_resume_id
 from custos_trigger.clients import FakeWorkflowServiceClient
 from custos_trigger.dedup import Deduplicator
-from custos_trigger.middleware.callctx import _BYPASS_PATHS
+from custos_trigger.middleware.callctx import _SIDECAR_ROUTES
 from custos_trigger.models import (
     ResumeRegistration,
     SourceType,
@@ -541,9 +541,10 @@ def test_delivery_drops_non_canonical_kind(
     assert fake_client.start_run_calls == []
 
 
-def test_receiver_paths_bypass_call_context() -> None:
-    assert DAPR_SUBSCRIBE_PATH in _BYPASS_PATHS
-    assert INTERNAL_EVENTS_PATH in _BYPASS_PATHS
+def test_receiver_paths_require_independent_sidecar_authentication() -> None:
+    """Only the exact control-route methods avoid signed user-context verification."""
+    assert ("GET", DAPR_SUBSCRIBE_PATH) in _SIDECAR_ROUTES
+    assert ("POST", INTERNAL_EVENTS_PATH) in _SIDECAR_ROUTES
 
 
 def test_in_memory_store_satisfies_listable(providers: Providers) -> None:

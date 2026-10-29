@@ -1,6 +1,6 @@
 # Trigger Service Public API
 
-Last Updated: 2026-10-28
+Last Updated: 2026-10-29
 
 The Trigger Service turns inbound events into workflow runs. It owns three
 surfaces:
@@ -248,6 +248,19 @@ mismatch is rejected with `403` and the call-context error code
 `read` for `GET`, `write` for `POST`/`PATCH`, `delete` for `DELETE`, and `fire`
 for the `:fire` action.
 
+Set `TRIGGER_AUTHZ_ENDPOINT` to the Auth Service base URL. Trigger uses
+`custos-callctx` to verify Ed25519 signatures against
+`/.well-known/jwks.json`, the `custos-auth` issuer, the `custos.internal`
+audience, expiry and issue time. An unsigned JSON context is accepted only by
+the explicit non-production development shim (empty authz endpoint);
+`ENVIRONMENT=production` forbids that shim. Global or blank workspace claims
+cannot administer a workspace.
+
+`trigger:admin` is a separate exact permission for dead-letter administration
+(the routes remain [#1016](https://github.com/toddysm/custos/issues/1016)).
+It is granted to the built-in workspace operator and administrator roles, not
+viewer or author roles, and does not imply any subscription permission.
+
 Call-context failures (missing or invalid context, permission denied, workspace
 mismatch) are **not** RFC 7807 documents — they use the shared call-context
 error envelope:
@@ -261,14 +274,32 @@ error envelope:
 }
 ```
 
-The call-context error codes are `callctx_missing` (`401`), `permission_denied`
-(`403`), and `workspace_mismatch` (`403`). Everything else — validation,
+The call-context error codes include `callctx_missing` / `callctx_invalid`
+(`401`), `callctx_unavailable` (`503`, public-key verification unavailable),
+`permission_denied`, `workspace_required`, and `workspace_mismatch` (`403`).
+Everything else — validation,
 dispatch, dedup — uses the [RFC 7807 taxonomy](#error-taxonomy-rfc-7807) below.
 
 The internal RPC routes (`/RegisterResumeSubscription`,
 `/CancelResumeSubscription`) and the event receiver routes (`/dapr/subscribe`,
 `/internal/events/workflow`) are invoked service-to-service over Dapr and carry
-no end-user call context, so they bypass the call-context middleware.
+no end-user call context. Only their exact method/path pairs select independent
+mesh authentication: POST for registration, cancellation and event delivery,
+and GET for subscription discovery. There is no blanket webhook-prefix bypass.
+
+Configure Dapr's [app API token authentication](https://docs.dapr.io/operations/security/app-api-token/)
+and supply the same secret to Trigger through `APP_API_TOKEN`. Requests must
+carry the sidecar's `dapr-api-token`; resume calls additionally require its
+`dapr-caller-app-id` to match `TRIGGER_WF_ENDPOINT` (a Dapr app ID, not an HTTP URL).
+The app authenticates the sidecar before trusting that caller header. Missing
+configuration returns `503 mesh_unavailable`; invalid tokens return
+`401 mesh_unauthenticated`, and a different caller returns `403 mesh_caller_denied`.
+Discovery and broker-delivery callbacks reject service-invocation caller headers;
+another application cannot use service invocation to masquerade as a broker callback.
+The shared secret must remain private to the application and its sidecar.
+Dapr mutual transport authentication, invocation allowlists, broker publishing
+restrictions and direct app-port network policy remain required deployment
+controls, wired by [#1017](https://github.com/toddysm/custos/issues/1017).
 
 ---
 
@@ -596,12 +627,13 @@ Their selector must be nonblank; the reserved `_resume` workspace is forbidden.
 ```
 
 **Scoped authentication gate:** registration and cancellation with a tenant
-workspace require an explicit Workflow-service authenticator injected into
+workspace require a Workflow-service authenticator configured by
 [`create_app`](../../src/services/trigger-service/src/custos_trigger/app.py).
 It must verify the Workflow principal on every transport, including direct
-app-port calls. The default application has no allow-all verifier and returns
-`503 trigger.source_unavailable` before tenant state access. Production
-authentication wiring remains [#1015](https://github.com/toddysm/custos/issues/1015).
+app-port calls. Production constructs it from `APP_API_TOKEN` and the Workflow
+app ID; missing mesh configuration fails before tenant state access.
+The development shim still has no implicit verifier for scoped resume operations
+and returns `503 trigger.source_unavailable` unless one is explicitly supplied.
 Enabling the rollout flag alone does not open these RPCs; forged call-context or
 `dapr-caller-app-id` headers are not trusted. Authenticated scoped cancellation
 remains possible while the rollout gate is closed.
@@ -928,6 +960,9 @@ The service is configured by environment variables (design § Configuration):
 | `TRIGGER_WF_ENDPOINT` | _(required)_ | Dapr app-id of the Workflow Service |
 | `TRIGGER_CONNECTOR_ENDPOINT` | _(required)_ | Dapr app-id of the Connector Service |
 | `TRIGGER_METADATA_STORE` | _(required)_ | SPL metadata-store DSN (secret) |
+| `TRIGGER_AUTHZ_ENDPOINT` | empty (development only) | Auth Service base URL for signed-context public keys |
+| `APP_API_TOKEN` | unset | Secret shared with the local sidecar; required for production mesh routes |
+| `ENVIRONMENT` | `development` | `production` forbids unsigned development contexts |
 
 Health and readiness probes are exposed at `/healthz` and `/readyz` on the HTTP
 port; the Dapr app-id is `trigger-service`.

@@ -27,6 +27,7 @@ classifiers = [
 #   pip install -e src/libs/storage-provider-layer[dev]
 #   pip install -e src/libs/custos-postgres[dev]
 #   pip install -e src/libs/custos-cel[dev]
+#   pip install -e src/libs/custos-callctx[dev]
 #   pip install -e src/services/workflow-service
 #   pip install -e src/services/trigger-service[dev]
 #
@@ -41,6 +42,7 @@ dependencies = [
     "custos-spl",
     "custos-postgres",
     "custos-cel",
+    "custos-callctx",
     "fastapi>=0.110,<0.137",  # pin <0.137: 0.137 made include_router lazy (_IncludedRouter), breaking app.routes introspection
     "uvicorn[standard]>=0.27,<1",
     "pydantic>=2.6,<3",
@@ -121,7 +123,7 @@ no_implicit_optional = true
 check_untyped_defs = true
 namespace_packages = true
 explicit_package_bases = true
-mypy_path = "src:../../libs/storage-provider-layer/src:../../libs/custos-postgres/src:../../libs/custos-cel/src"
+mypy_path = "src:../../libs/storage-provider-layer/src:../../libs/custos-postgres/src:../../libs/custos-cel/src:../../libs/custos-callctx/src"
 
 [[tool.mypy.overrides]]
 module = "tests.*"

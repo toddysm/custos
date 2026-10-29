@@ -45,8 +45,8 @@ field, so depth does not accumulate across the broker — that is a Workflow
 Service responsibility and is out of scope here.
 
 The receiver and its ``/dapr/subscribe`` route are *internal* control-plane
-surfaces authenticated at the Dapr mesh layer; they carry no call-context
-envelope and the call-context middleware bypasses both paths (see
+surfaces that authenticate the Dapr sidecar's app token on their exact
+method/path pairs. They carry no user call-context envelope (see
 :mod:`custos_trigger.middleware.callctx`).
 """
 

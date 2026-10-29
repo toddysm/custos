@@ -79,6 +79,14 @@ def test_platform_admin_has_empty_permission_tuple() -> None:
     assert role.permission_names == ()
 
 
+def test_trigger_admin_is_limited_to_operator_and_workspace_admin() -> None:
+    """Trigger dead-letter administration does not broaden viewer or author authority."""
+    for role in (ROLE_WORKSPACE_OPERATOR, ROLE_WORKSPACE_ADMIN):
+        assert "trigger:admin" in BUILTIN_ROLES_BY_ID[role].permission_names
+    for role in (ROLE_WORKSPACE_VIEWER, ROLE_WORKSPACE_AUTHOR):
+        assert "trigger:admin" not in BUILTIN_ROLES_BY_ID[role].permission_names
+
+
 def test_role_allowed_scopes_registry() -> None:
     assert ROLE_ALLOWED_SCOPES[ROLE_WORKSPACE_VIEWER] == frozenset({"workspace"})
     assert ROLE_ALLOWED_SCOPES[ROLE_WORKSPACE_ADMIN] == frozenset({"workspace"})

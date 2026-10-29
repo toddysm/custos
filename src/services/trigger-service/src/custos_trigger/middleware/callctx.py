@@ -1,4 +1,4 @@
-"""Call-context middleware + dev shim (TS-IMPL-003).
+"""Signed call-context verification and independently authenticated mesh routes.
 
 The API Gateway design (COMP-001) carries a signed call-context JWT in the
 ``x-custos-callctx`` header on every authenticated internal request. The
@@ -7,30 +7,29 @@ Trigger Service parses it, validates it, and exposes the result on
 CRUD surface landing in TS-IMPL-015) can authorize via
 :func:`get_call_context` and :func:`require_permission`.
 
-The full validation path is delegated to the Auth Service (COMP-002) and is
-gated behind a non-empty authz endpoint. Until that wiring lands the
-middleware activates a **dev shim** that parses an unsigned JSON header so
-the rest of the TS-IMPL-* phases can proceed; the shim refuses to start when
-``ENVIRONMENT`` is ``production`` (case-insensitive).
+The shared verifier validates signatures and claims against the Auth Service's
+public keys. An empty authz endpoint retains the unsigned development shim,
+which refuses to start in production. Mesh requests authenticate the local
+sidecar's app token before trusting its Workflow caller identity.
 
 This mirrors the catalog-service middleware (CS-IMPL-004). The audit hook
 that emits an ``auth.callctx.shim_used`` event lands with the Trigger Service
 observability + audit pipeline in TS-IMPL-019; until then the dev shim logs
 at WARNING so operators can see it is active.
 
-Note: the webhook ingress path (``POST /v1/webhooks/{connectorInstanceId}``)
-is an unauthenticated, gateway-forwarded route with no call-context — it is
-not mounted here and would be added to the bypass set by the Generic Webhook
-Receiver (TS-IMPL deferred to M2) rather than carrying a call-context header.
+No webhook prefix is exempted: future ingress must authenticate through its
+own exact route contract rather than a blanket middleware bypass.
 """
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
+from custos_callctx import CallContextVerifier, InvalidCallContextError, InvalidReason
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -39,31 +38,24 @@ from starlette.responses import JSONResponse, Response
 if TYPE_CHECKING:
     from starlette.types import ASGIApp
 
+    from custos_trigger.dependencies import WorkflowCallerVerifier
+
 #: Wire header carrying the call-context document.
 #: API Gateway design (COMP-001) pins the canonical lowercase form.
 CALLCTX_HEADER: str = "x-custos-callctx"
 
-#: Paths the middleware deliberately bypasses.
-#:
-#: ``/healthz`` + ``/readyz`` are unauthenticated probes. The two resume RPC
-#: method paths are internal Dapr service-invocation routes the Workflow
-#: Service calls (TS-IMPL-016); they are authenticated at the Dapr mesh layer
-#: (mTLS + app-id allow-list), not via the call-context envelope — the caller
-#: propagates no ``x-custos-callctx`` header — so they bypass here. The internal
-#: receiver routes (TS-IMPL-017) are Dapr Pub/Sub control-plane surfaces — the
-#: sidecar's subscription probe and topic deliveries carry no call-context
-#: header either — so they bypass too. Keep these in sync with
-#: ``custos_trigger.api.routes.rpc.REGISTER_RESUME_PATH`` / ``CANCEL_RESUME_PATH``
-#: and ``custos_trigger.receivers.internal.DAPR_SUBSCRIBE_PATH`` /
-#: ``INTERNAL_EVENTS_PATH``.
-_BYPASS_PATHS: frozenset[str] = frozenset(
+TRIGGER_ADMIN_PERMISSION = "trigger:admin"
+_PROBE_ROUTES = frozenset({("GET", "/healthz"), ("GET", "/readyz")})
+_WORKFLOW_ROUTES = frozenset(
     {
-        "/healthz",
-        "/readyz",
-        "/RegisterResumeSubscription",
-        "/CancelResumeSubscription",
-        "/dapr/subscribe",
-        "/internal/events/workflow",
+        ("POST", "/RegisterResumeSubscription"),
+        ("POST", "/CancelResumeSubscription"),
+    }
+)
+_SIDECAR_ROUTES = frozenset(
+    {
+        ("GET", "/dapr/subscribe"),
+        ("POST", "/internal/events/workflow"),
     }
 )
 
@@ -101,6 +93,31 @@ class CallContextError(Exception):
         self.detail = detail
 
 
+def _require_sidecar_token(request: Request, token: str | None) -> None:
+    """Authenticate the app-side hop before accepting sidecar-provided routing metadata."""
+    if token is None:
+        raise CallContextError(503, "mesh_unavailable", "sidecar authentication is not configured")
+    values = request.headers.getlist("dapr-api-token")
+    if len(values) != 1 or not hmac.compare_digest(values[0].encode(), token.encode()):
+        raise CallContextError(401, "mesh_unauthenticated", "invalid sidecar authentication")
+
+
+class DaprWorkflowCallerVerifier:
+    """Require the trusted sidecar hop and its overwritten Workflow caller application ID."""
+
+    def __init__(self, token: str, app_id: str = "workflow-service") -> None:
+        """Bind deployment-owned credentials, never a caller-supplied identity assertion."""
+        if not token.strip() or not app_id.strip():
+            raise ValueError("sidecar token and Workflow app ID must be nonempty")
+        self._token, self._app_id = token, app_id
+
+    async def __call__(self, request: Request) -> None:
+        """Reject direct app-port spoofing and other authenticated mesh applications."""
+        _require_sidecar_token(request, self._token)
+        if request.headers.getlist("dapr-caller-app-id") != [self._app_id]:
+            raise CallContextError(403, "mesh_caller_denied", "Workflow service identity required")
+
+
 class CallContext(BaseModel):
     """Per-request authorization context attached to ``request.state``."""
 
@@ -114,7 +131,18 @@ class CallContext(BaseModel):
     expires_at: int | None = Field(default=None, alias="exp")
 
     def has_permission(self, name: str) -> bool:
+        """Match exact grants; administration never implies subscription permissions."""
         return name in self.permissions
+
+
+def ensure_workspace(ctx: CallContext, workspace_id: str) -> None:
+    """Keep the request's authoritative persistence scope bound to its verified context."""
+    if ctx.workspace_id != workspace_id:
+        raise CallContextError(
+            status_code=403,
+            code="workspace_mismatch",
+            detail="call context workspace does not match the request path workspace",
+        )
 
 
 def _render_envelope(status_code: int, code: str, detail: str) -> JSONResponse:
@@ -150,12 +178,14 @@ class CallContextMiddleware(BaseHTTPMiddleware):
 
     Args:
         app: The downstream ASGI application (FastAPI passes itself).
-        authz_endpoint: Auth Service URL. Empty enables the dev shim;
-            non-empty surfaces a 500 with :class:`NotImplementedError`
-            until the Auth Service (COMP-002) integration is wired.
+        authz_endpoint: Auth Service base URL; its public JWKS endpoint supplies
+            verification keys. Empty enables the development shim.
         environment: Deployment environment. ``"production"`` with an empty
             ``authz_endpoint`` raises
             :class:`DevShimDisabledInProductionError` at construction.
+        verifier: Optional shared verifier override for hermetic key-source tests.
+        app_api_token: Token shared only with the local Dapr sidecar.
+        workflow_caller_verifier: Trusted Workflow authenticator for exact resume routes.
 
     Raises:
         DevShimDisabledInProductionError: When constructed with the dev shim
@@ -168,11 +198,23 @@ class CallContextMiddleware(BaseHTTPMiddleware):
         *,
         authz_endpoint: str,
         environment: str,
+        verifier: CallContextVerifier | None = None,
+        app_api_token: str | None = None,
+        workflow_caller_verifier: WorkflowCallerVerifier | None = None,
     ) -> None:
+        """Configure independent user and mesh trust without making network calls."""
         super().__init__(app)
-        self._authz_endpoint = authz_endpoint
-        self._dev_shim_active = authz_endpoint == ""
-        if self._dev_shim_active and environment.lower() == "production":
+        self._verifier = verifier
+        if self._verifier is None and authz_endpoint.strip():
+            self._verifier = CallContextVerifier(
+                jwks_url=authz_endpoint.strip().rstrip("/") + "/.well-known/jwks.json",
+            )
+        self._app_api_token = app_api_token
+        self._workflow_caller_verifier = workflow_caller_verifier
+        if self._workflow_caller_verifier is None and app_api_token is not None:
+            self._workflow_caller_verifier = DaprWorkflowCallerVerifier(app_api_token)
+        self._dev_shim_active = self._verifier is None
+        if self._dev_shim_active and environment.strip().lower() == "production":
             raise DevShimDisabledInProductionError(
                 "authz endpoint is empty but ENVIRONMENT=production; "
                 "the call-context dev shim is forbidden in production. "
@@ -185,22 +227,42 @@ class CallContextMiddleware(BaseHTTPMiddleware):
         request: Request,
         call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
-        if request.url.path in _BYPASS_PATHS:
+        """Verify the applicable trust domain before handlers can access tenant state."""
+        route = (request.method, request.url.path)
+        if route in _PROBE_ROUTES:
+            return await call_next(request)
+        if route in _WORKFLOW_ROUTES or route in _SIDECAR_ROUTES:
+            try:
+                await self._authenticate_mesh(request, workflow=route in _WORKFLOW_ROUTES)
+            except CallContextError as exc:
+                logger.warning("Rejected mesh request: %s", exc.code)
+                return _render_envelope(exc.status_code, exc.code, exc.detail)
             return await call_next(request)
 
         raw_header = request.headers.get(CALLCTX_HEADER)
         if not raw_header:
             return _render_envelope(401, "callctx_missing", f"{CALLCTX_HEADER} header is required")
 
-        if not self._dev_shim_active:
-            # The Auth Service (COMP-002) integration will replace this raise
-            # with the real path: sig-verify the JWT, parse claims, authorize.
-            raise NotImplementedError(
-                "Production call-context validation is not yet implemented; "
-                "it is delegated to the Auth Service (COMP-002). Unset the "
-                "authz endpoint to fall back to the dev shim in non-production "
-                "environments."
+        if self._verifier is not None:
+            if len(request.headers.getlist(CALLCTX_HEADER)) != 1:
+                return _render_envelope(401, "callctx_invalid", "one call context is required")
+            try:
+                verified = await self._verifier.verify(metadata=request.headers)
+            except InvalidCallContextError as exc:
+                logger.warning("Rejected signed call context: %s", exc.reason.value)
+                if exc.reason is InvalidReason.JWKS_UNAVAILABLE:
+                    return _render_envelope(503, "callctx_unavailable", "verification unavailable")
+                return _render_envelope(401, "callctx_invalid", "invalid call context")
+            if verified.workspace_id is None or not verified.workspace_id.strip():
+                return _render_envelope(403, "workspace_required", "workspace scope is required")
+            request.state.call_context = CallContext(
+                workspace_id=verified.workspace_id,
+                principal_id=verified.acting_principal_id,
+                permissions=verified.permissions,
+                iat=verified.issued_at,
+                exp=verified.expires_at,
             )
+            return await call_next(request)
 
         try:
             ctx = self._parse_dev_shim_header(raw_header)
@@ -221,8 +283,28 @@ class CallContextMiddleware(BaseHTTPMiddleware):
         )
         return await call_next(request)
 
+    async def _authenticate_mesh(self, request: Request, *, workflow: bool) -> None:
+        """Keep legacy development separate from authenticated production mesh traffic."""
+        if workflow and self._workflow_caller_verifier is not None:
+            await self._workflow_caller_verifier(request)
+            request.state.workflow_caller_verified = True
+            return
+        if self._dev_shim_active and self._app_api_token is None:
+            logger.warning("Unauthenticated mesh route enabled by the development shim")
+            return
+        if workflow:
+            raise CallContextError(503, "mesh_unavailable", "Workflow authentication unavailable")
+        _require_sidecar_token(request, self._app_api_token)
+        if request.headers.getlist("dapr-caller-app-id"):
+            raise CallContextError(
+                403,
+                "mesh_caller_denied",
+                "direct sidecar callback required",
+            )
+
     @staticmethod
     def _parse_dev_shim_header(raw: str) -> CallContext:
+        """Parse the existing unsigned development wire shape, never a production token."""
         payload: Any = json.loads(raw)
         if not isinstance(payload, dict):
             raise ValueError("dev-shim header must decode to a JSON object")
@@ -260,6 +342,9 @@ async def get_call_context(request: Request) -> CallContext:
             f"{CALLCTX_HEADER} header is required",
         )
     assert isinstance(ctx, CallContext)
+    workspace_id = request.path_params.get("workspace_id")
+    if workspace_id is not None:
+        ensure_workspace(ctx, workspace_id)
     return ctx
 
 
@@ -269,6 +354,7 @@ def require_permission(
     """Build a FastAPI dependency that requires ``name`` on the call context."""
 
     async def _dep(request: Request) -> CallContext:
+        """Enforce workspace binding before checking the exact requested grant."""
         ctx = await get_call_context(request)
         if not ctx.has_permission(name):
             raise CallContextError(
@@ -283,11 +369,14 @@ def require_permission(
 
 __all__ = [
     "CALLCTX_HEADER",
+    "TRIGGER_ADMIN_PERMISSION",
     "CallContext",
     "CallContextError",
     "CallContextMiddleware",
+    "DaprWorkflowCallerVerifier",
     "DevShimDisabledInProductionError",
     "call_context_error_handler",
+    "ensure_workspace",
     "get_call_context",
     "require_permission",
 ]

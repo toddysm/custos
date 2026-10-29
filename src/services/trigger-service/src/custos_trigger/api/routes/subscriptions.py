@@ -43,7 +43,8 @@ from custos_trigger.dependencies import (
     get_subscription_store,
 )
 from custos_trigger.errors import TriggerError, TriggerErrorKind
-from custos_trigger.middleware import CallContext, CallContextError, require_permission
+from custos_trigger.middleware import CallContext, require_permission
+from custos_trigger.middleware import ensure_workspace as _ensure_workspace
 from custos_trigger.models import (
     ManualFireRequest,
     ManualFireResult,
@@ -108,23 +109,6 @@ def _not_found(subscription_id: str) -> TriggerError:
         "subscription not found",
         details={"subscriptionId": subscription_id},
     )
-
-
-def _ensure_workspace(ctx: CallContext, workspace_id: str) -> None:
-    """Reject a request whose path workspace differs from the call context's.
-
-    The path ``{workspace_id}`` is authoritative for persistence while the call
-    context governs RBAC; if they disagree the caller is reaching across
-    workspace boundaries. This is defense-in-depth against a mismatched path
-    (and, with the dev shim's unsigned header, the only thing stopping a caller
-    from naming an arbitrary workspace).
-    """
-    if ctx.workspace_id != workspace_id:
-        raise CallContextError(
-            status_code=403,
-            code="workspace_mismatch",
-            detail="call context workspace does not match the request path workspace",
-        )
 
 
 @router.post(

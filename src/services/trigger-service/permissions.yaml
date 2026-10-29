@@ -15,6 +15,11 @@
 #                     permission.
 
 permissions:
+  - name: trigger:admin
+    description: >-
+      Inspect, replay, discard and manage retained trigger dead letters
+      in a workspace.
+    declaredBy: trigger-service
   - name: trigger:subscriptions:read
     description: List and read trigger subscriptions in a workspace.
     declaredBy: trigger-service

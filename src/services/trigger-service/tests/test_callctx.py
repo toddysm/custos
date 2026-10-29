@@ -174,12 +174,13 @@ def test_dependency_unmounted_middleware_returns_shared_envelope() -> None:
     }
 
 
-def test_production_path_with_authz_endpoint_raises_not_implemented() -> None:
+def test_production_path_rejects_unsigned_development_context() -> None:
+    """Configuring real verification never accepts the former unsigned development wire."""
     app = _build_app(authz_endpoint="http://auth-service:8080", environment="staging")
     client = TestClient(app, raise_server_exceptions=False)
     resp = client.get("/whoami", headers={CALLCTX_HEADER: _VALID_CTX_HEADER})
-    # Starlette converts uncaught middleware exceptions to a 500 by default.
-    assert resp.status_code == 500
+    assert resp.status_code == 401
+    assert resp.json()["error"]["code"] == "callctx_invalid"
 
 
 def test_healthz_bypasses_middleware() -> None:
