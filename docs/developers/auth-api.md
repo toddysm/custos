@@ -181,6 +181,7 @@ registry is:
 | `run:cancel` | workflow-service | `workspace.author/operator/admin`, `platform.admin` |
 | `connector:read` | connector-service | `workspace.viewer/author/operator/admin`, `platform.admin` |
 | `admin:connector` | connector-service | `workspace.operator/admin`, `platform.admin` |
+| `trigger:admin` | trigger-service | `workspace.operator/admin`, `platform.admin` |
 | `trigger:subscriptions:read` | trigger-service | `workspace.operator/admin`, `platform.admin` |
 | `trigger:subscriptions:write` | trigger-service | `workspace.operator/admin`, `platform.admin` |
 | `trigger:subscriptions:delete` | trigger-service | `workspace.operator/admin`, `platform.admin` |
@@ -199,7 +200,7 @@ The live registry is exposed read-only via `GET /v1/permissions`.
 |---|---|---|
 | `role:workspace.viewer` | workspace | `catalog:workflows:read`, `catalog:templates:read`, `catalog:activity-types:read`, `catalog:connector-types:read`, `connector:read`, `audit:read`, `run:read`, `logs:read`, `metrics:read` |
 | `role:workspace.author` | workspace | viewer + `catalog:workflows:write`, `catalog:templates:write`, `catalog:activity-types:write`, `catalog:connector-types:write`, `workflow:execute`, `run:cancel` |
-| `role:workspace.operator` | workspace | author + `admin:connector`, `trigger:subscriptions:read`, `trigger:subscriptions:write`, `trigger:subscriptions:delete`, `trigger:subscriptions:fire` |
+| `role:workspace.operator` | workspace | author + `admin:connector`, `trigger:admin`, `trigger:subscriptions:read`, `trigger:subscriptions:write`, `trigger:subscriptions:delete`, `trigger:subscriptions:fire` |
 | `role:workspace.admin` | workspace | operator + `admin:role-binding`, `admin:service-account` |
 | `role:tenant.admin` | tenant | `admin:workspace`, `admin:role-binding` |
 | `role:platform.admin` | platform | **all permissions at every scope** (authorize engine short-circuits) |
