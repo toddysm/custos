@@ -414,6 +414,73 @@ async def test_expired_plan_defers_without_aborting_later_schedules(
     assert [event.source.subscription_id for event in events] == ["b", "a"]
 
 
+@pytest.mark.parametrize("change", ["interval", "source"])
+@pytest.mark.parametrize("read_new_subscription", [False, True])
+async def test_changed_candidate_does_not_mix_old_due_with_new_configuration(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+    read_new_subscription: bool,
+) -> None:
+    """Atomic configuration changes around the subscription read defer only the stale candidate."""
+    await _due(harness, "a")
+    await _due(harness, "b", interval_seconds=3600)
+    now = await harness.store.scheduler_now()
+    store = SubscriptionStore(harness.store, now=lambda: now)
+    events: list[NormalizedEvent] = []
+
+    async def publish(event: NormalizedEvent) -> None:
+        """Record successfully acknowledged unaffected occurrences."""
+        events.append(event)
+
+    receiver = ScheduledReceiver(
+        harness.store,
+        workspace_id=str(_WS),
+        leadership=SchedulerLeadership(harness.store, deployment_id="candidate", holder_id="a"),
+        publish=publish,
+        audit=NoopAuditSink(),
+        page_size=2,
+    )
+    original_get = receiver.subscriptions.get
+    changed = False
+
+    async def racing_get(workspace: str, identifier: str) -> Subscription | None:
+        """Commit a configuration edit before or after selecting the returned revision."""
+        nonlocal changed
+        subscription = await original_get(workspace, identifier)
+        if identifier == "a" and not changed:
+            changed = True
+            assert subscription is not None
+            updated = subscription.model_copy(
+                update={
+                    "source_type": SourceType.MANUAL
+                    if change == "source"
+                    else SourceType.SCHEDULED,
+                    "source_config": None
+                    if change == "source"
+                    else SourceConfig(interval_seconds=7),
+                }
+            )
+            await store.update(
+                updated, expected_revision=subscription.store_revision, reset_schedule=True
+            )
+            if read_new_subscription:
+                return await original_get(workspace, identifier)
+        return subscription
+
+    monkeypatch.setattr(receiver.subscriptions, "get", racing_get)
+    result = await receiver.tick()
+    assert result.planned == result.published == 1
+    assert [event.source.subscription_id for event in events] == ["b"]
+    current = await harness.store.get_schedule(_WS, "a")
+    assert current is not None
+    if change == "source":
+        assert not current.enabled
+    else:
+        assert current.enabled and current.next_fire_at > now
+    assert not (await harness.store.query_pending_schedule_fires(_WS, "candidate")).items
+
+
 async def test_reconfigured_pending_fire_is_discarded_not_rebound(harness: Harness) -> None:
     """A pending occurrence cannot adopt a new target or input mapping after producer death."""
     subscription = await _due(harness, interval_seconds=3600)

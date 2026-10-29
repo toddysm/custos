@@ -287,6 +287,15 @@ class ScheduledReceiver:
                     str(self.workspace),
                     schedule.schedule_id,
                 )
+                current_schedule = await self.store.get_schedule(
+                    self.workspace, schedule.schedule_id
+                )
+                if current_schedule != schedule:
+                    logger.info(
+                        "Deferring changed schedule candidate before planning: %s",
+                        schedule.schedule_id,
+                    )
+                    continue
                 if subscription is None or subscription.source_config is None:
                     logger.error(
                         "Due schedule has no managed configuration: %s", schedule.schedule_id
