@@ -73,6 +73,8 @@ invalid entries, to bound response amplification. Larger batches receive
 split batches while retaining their stable event IDs. Duplicate/private identity headers, duplicate JSON keys,
 invalid encodings and nonfinite JSON values are rejected. Raw vendor bytes are
 authenticated before vendor JSON is parsed.
+JSON nesting is bounded at 64 levels (root depth zero); deeper wrappers or verified
+vendor payloads return sanitized 400 errors before normalization or serialization.
 
 Add a `webhookVerification` entry to the instance's existing
 `credentials_authentication` map, alongside its normal activity credentials:

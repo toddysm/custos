@@ -28,6 +28,7 @@ MAX_RAW_BYTES = 1024 * 1024
 MAX_ENCODED_REQUEST_BYTES = 2 * 1024 * 1024
 MAX_HEADER_BYTES = 16 * 1024
 MAX_BATCH_EVENTS = 1000
+MAX_JSON_DEPTH = 64
 _HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _PRIVATE_HEADERS = frozenset(
     {
@@ -137,12 +138,27 @@ def _nonfinite(_value: str) -> None:
     raise ValueError("nonfinite JSON value")
 
 
+def _validate_depth(value: Any, depth: int = 0) -> None:
+    """Bound nesting without constructing a width-proportional traversal queue."""
+    if depth > MAX_JSON_DEPTH:
+        raise WebhookVerificationError(
+            400, "webhook.malformed", "webhook JSON nesting exceeds 64 levels"
+        )
+    if isinstance(value, dict):
+        for child in value.values():
+            _validate_depth(child, depth + 1)
+    elif isinstance(value, list):
+        for child in value:
+            _validate_depth(child, depth + 1)
+
+
 def parse_json(raw: bytes) -> Any:
     """Decode bounded strict UTF-8 JSON without exposing parser excerpts on failure."""
     try:
         parsed = json.loads(
             raw.decode("utf-8"), object_pairs_hook=_unique_object, parse_constant=_nonfinite
         )
+        _validate_depth(parsed)
         json.dumps(parsed, ensure_ascii=False, allow_nan=False).encode("utf-8")
         return parsed
     except (UnicodeError, ValueError, RecursionError) as exc:

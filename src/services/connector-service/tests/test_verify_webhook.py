@@ -432,6 +432,27 @@ def test_raw_and_encoded_body_boundaries(configured: Configured) -> None:
     )
 
 
+@pytest.mark.parametrize("depth", [64, 65, 300])
+def test_json_nesting_is_bounded(configured: Configured, depth: int) -> None:
+    """Signed payloads serialize at the supported boundary or fail with a sanitized error."""
+    client, _, _ = configured
+    value: object = 0
+    for _ in range(depth - 3):
+        value = {"nested": value}
+    raw = json.dumps(
+        {
+            "events": [{"eventId": "deep", "eventType": "registry.push", "value": value}],
+        }
+    ).encode()
+    response = client.post("/VerifyWebhook", json=envelope(raw), headers=MESH_HEADERS)
+    if depth == 64:
+        assert response.status_code == 200
+        assert response.json()["events"][0]["event"]["payload"]["value"] == value
+    else:
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "webhook.malformed"
+
+
 def test_missing_credentials_and_unavailable_resolver_fail_closed(configured: Configured) -> None:
     """Neither absence nor resolver failure becomes a verification success or leaked detail."""
     client, resolver, _ = configured
