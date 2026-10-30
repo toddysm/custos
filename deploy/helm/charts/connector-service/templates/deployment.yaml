@@ -20,6 +20,9 @@ spec:
         {{- include "svc.daprAnnotations" . | nindent 8 }}
     spec:
       serviceAccountName: {{ include "svc.fullname" . }}
+      {{- if .Values.hookRuntime.enabled }}
+      automountServiceAccountToken: true
+      {{- end }}
       {{- with (.Values.global).imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}

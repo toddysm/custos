@@ -87,6 +87,7 @@ jobs:
               - "src/services/trigger-service/**"
             connector-service:
               - "src/services/connector-service/**"
+              - "src/tools/connector-hook-bridge/**"
             activity-runtime-manager:
               - "src/services/activity-runtime-manager/**"
             catalog-service:

@@ -157,6 +157,8 @@ pattern.
 
 ### Invocation
 
+Development uses Docker:
+
 ```
 docker run --rm -i <image_ref> <hook>
 ```
@@ -171,8 +173,20 @@ docker run --rm -i <image_ref> <hook>
 
 The platform writes a single JSON request envelope to stdin and
 reads a single JSON response envelope from stdout. No streaming, no
-keep-alive, no out-of-band stderr semantics — stderr is captured
-for human debugging but never parsed.
+keep-alive, no out-of-band stderr semantics. Production Kubernetes execution
+preserves the image's original entrypoint and replaces its default arguments
+with the hook. It does not require Python or a shell in the plugin image.
+The image's environment and working directory remain effective.
+
+Requests and combined stdout/stderr are each limited to 4 MiB; execution is
+limited to 300 seconds. Kubernetes execution uses a non-root, read-only-root
+sandbox with a private temporary memory volume. Do not rely on root privileges,
+host mounts, a service-account token, or writable image directories.
+
+Private stderr is never parsed or forwarded to controller logs or audit records.
+Nonzero exits retain the numeric status, not stdout/stderr diagnostics. Test
+plugins locally when raw diagnostic output is needed; do not print credentials.
+See [Kubernetes hook operation](connector-hook-runtime.md) for deployment and recovery.
 
 ### Request envelope
 
@@ -257,7 +271,8 @@ If the persisted cursor encoding doesn't match what the plugin
 expects, the plugin MUST raise `cursor-encoding-mismatch` with the
 mismatched encodings in `error.data` — see the `oci-registry`
 sample's `_listen` for the canonical pattern. The Connector Service
-uses this signal to gate cursor reset workflows.
+uses the error category to gate cursor reset workflows. Plugin-provided
+diagnostic encodings are not copied into controller errors or audit payloads.
 
 **Input — push mode:** `{"mode": "push"}`. The plugin returns a
 receiver endpoint the upstream can POST events to.
@@ -309,6 +324,9 @@ stderr.
 ```
 
 The runtime treats unknown codes as `unknown-plugin-error`.
+It retains the closed error category but replaces plugin-provided `detail` and
+discards `data` at the controller boundary. Both fields may contain credentials
+or private upstream responses and are not an operator logging channel.
 
 | Code | Meaning | Who raises it |
 |---|---|---|

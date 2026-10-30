@@ -35,6 +35,23 @@ resources: {}
 # ExternalSecret); this list is for ad-hoc overrides only.
 env: []
 
+hookRuntime:
+  enabled: false
+  # Required when enabled; must differ from the controller namespace.
+  namespace: ""
+  # Digest-pinned Connector Service image containing the static bridge.
+  helperImage: ""
+  registryUrl: ""
+  serviceAccount: connector-hook
+  architecture: amd64
+  runtimeClass: ""
+  imagePullSecrets: []
+  # Explicit NetworkPolicy egress rules for plugin upstreams and DNS.
+  sandboxEgress: []
+  # Explicit controller allowances for the Kubernetes API and registry.
+  # Applied when the existing service NetworkPolicy is enabled.
+  controllerEgress: []
+
 dapr:
   enabled: true
   appPort: 8080

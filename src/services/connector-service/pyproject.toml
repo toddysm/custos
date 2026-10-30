@@ -46,6 +46,7 @@ dependencies = [
     "pyyaml>=6.0,<7",
     "jsonschema>=4.21,<5",
     "httpx>=0.27,<1",
+    "kubernetes_asyncio>=31,<32",
     "opentelemetry-api>=1.20,<2",
     # CONN-IMPL-029 (Phase K) — the connector-service exposes its own
     # ``/metrics`` endpoint per the issue acceptance criteria. The SDK
@@ -174,8 +175,8 @@ module = "tests.*"
 disallow_untyped_defs = false
 
 [[tool.mypy.overrides]]
-# asyncpg ships no PEP 561 marker; treat as untyped at the boundary.
-module = ["asyncpg", "asyncpg.*", "testcontainers", "testcontainers.*"]
+# Database and generated Kubernetes clients have untyped SDK boundaries.
+module = ["asyncpg", "asyncpg.*", "testcontainers", "testcontainers.*", "kubernetes_asyncio.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
