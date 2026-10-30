@@ -20,7 +20,7 @@ import asyncio
 import logging
 import os
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, suppress
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from typing import TYPE_CHECKING
 
 import httpx
@@ -77,20 +77,22 @@ def create_app(
             :class:`~custos_gateway.settings.SettingsError` for missing required
             vars. Tests inject a settings instance to avoid touching the
             environment.
-        auth_client: Lifespan-owned Auth Service client (the test-injection
-            seam). When ``None`` (production) the lifespan builds a Dapr-backed
+        auth_client: Caller-owned Auth Service client override. When ``None``
+            (production) the lifespan builds a Dapr-backed
             :class:`DaprAuthServiceClient` over the owned ``httpx`` client.
             Either way the bound client drives the startup permission check
             (AGW-IMPL-008): every route's declared permission is validated
             against the Auth Service registry before readiness flips, refusing
             to boot on any undeclared permission. Tests inject a fake.
-        downstream_router: Lifespan-owned :class:`DownstreamRouter`. When ``None``
+        downstream_router: Caller-owned :class:`DownstreamRouter` override. When ``None``
             (production) the factory builds an owned :class:`httpx.AsyncClient`
             and a Dapr-targeted router during startup and closes the client on
             shutdown. Tests inject a fake router so no socket is opened.
         metadata_store: SPL metadata-store provider backing write-path
-            idempotency. ``None`` (the M1 default) skips idempotency reservation;
-            tests inject a fake store to exercise the replay/complete paths.
+            idempotency. Injected stores remain caller-owned. Otherwise a configured
+            metadata DSN creates a lifespan-owned PostgreSQL provider and checks
+            its schema before readiness. Without either, ordinary writes retain
+            legacy behavior and recovery writes fail closed.
         device_code_store: Backing store for the device-code flow. ``None`` (the
             M1 default) leaves the device-code routes returning ``503`` until the
             store is wired.
@@ -109,76 +111,78 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         owned_client: httpx.AsyncClient | None = None
-        converge_task: asyncio.Task[None] | None = None
+        app.state.ready = False
+        async with AsyncExitStack() as stack:
 
-        def owned_http_client() -> httpx.AsyncClient:
-            # Lazily build a single httpx client shared by the downstream router
-            # and the Dapr-backed Auth client (both talk to the local sidecar),
-            # closed once on shutdown.
-            nonlocal owned_client
-            if owned_client is None:
-                owned_client = httpx.AsyncClient()
-            return owned_client
+            def owned_http_client() -> httpx.AsyncClient:
+                """Share one owned transport, including cleanup after partial startup."""
+                nonlocal owned_client
+                if owned_client is None:
+                    owned_client = httpx.AsyncClient()
+                    stack.push_async_callback(owned_client.aclose)
+                return owned_client
 
-        if downstream_router is not None:
-            router = downstream_router
-        else:
-            router = DownstreamRouter(
-                http_client=owned_http_client(),
-                host=effective_settings.dapr_http_host,
-                http_port=effective_settings.dapr_http_port,
-            )
-        setattr(app.state, DOWNSTREAM_ROUTER_STATE_ATTR, router)
-        setattr(
-            app.state,
-            RATE_LIMITER_STATE_ATTR,
-            rate_limiter
-            if rate_limiter is not None
-            else RateLimiter.from_settings(effective_settings),
-        )
-        setattr(app.state, METADATA_STORE_STATE_ATTR, metadata_store)
-        setattr(app.state, DEVICE_CODE_STORE_STATE_ATTR, device_code_store)
-
-        # The lifespan owns the Auth Service client: tests inject a fake while
-        # production builds a Dapr-backed client over the owned httpx client. The
-        # startup cross-check then refuses to become ready unless every route's
-        # declared permission is known to the Auth Service.
-        effective_auth_client = (
-            auth_client
-            if auth_client is not None
-            else DaprAuthServiceClient(
-                http_client=owned_http_client(),
-                endpoint=read_dapr_endpoint(os.environ),
-            )
-        )
-        setattr(app.state, AUTH_CLIENT_STATE_ATTR, effective_auth_client)
-        # Resilient to dependency start order (issue #815): a transient
-        # Auth Service / Dapr-sidecar outage at boot must not crash the process.
-        # Attempt the cross-check once; on a transient failure stay not-ready and
-        # converge in the background until the registry becomes reachable.
-        outcome = await run_startup_permission_check(app=app, client=effective_auth_client)
-        if outcome is StartupCheckOutcome.TRANSIENT_FAILURE:
-            converge_task = asyncio.create_task(
-                converge_route_permissions(
-                    app=app,
-                    client=effective_auth_client,
-                    initial_backoff_seconds=(
-                        effective_settings.startup_permission_check_initial_backoff_seconds
-                    ),
-                    max_backoff_seconds=(
-                        effective_settings.startup_permission_check_max_backoff_seconds
-                    ),
+            try:
+                router = (
+                    downstream_router
+                    if downstream_router is not None
+                    else DownstreamRouter(
+                        http_client=owned_http_client(),
+                        host=effective_settings.dapr_http_host,
+                        http_port=effective_settings.dapr_http_port,
+                    )
                 )
-            )
-        try:
-            yield
-        finally:
-            if converge_task is not None:
-                converge_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await converge_task
-            if owned_client is not None:
-                await owned_client.aclose()
+                setattr(app.state, DOWNSTREAM_ROUTER_STATE_ATTR, router)
+                setattr(
+                    app.state,
+                    RATE_LIMITER_STATE_ATTR,
+                    rate_limiter
+                    if rate_limiter is not None
+                    else RateLimiter.from_settings(effective_settings),
+                )
+                store = metadata_store
+                if store is None and effective_settings.metadata_store_dsn:
+                    from custos_pg import PgMetadataAdapter
+                    from custos_pg.pool import LazyPool
+                    from custos_spl.errors import MigrationRequired
+                    from custos_spl.interfaces.metadata_store import MetadataStoreProvider
+
+                    pool = LazyPool(effective_settings.metadata_store_dsn)
+                    stack.push_async_callback(pool.aclose)
+                    adapter = PgMetadataAdapter(lazy=pool)
+                    await adapter.refresh_declared()
+                    interface, revision = (
+                        MetadataStoreProvider.__name__,
+                        MetadataStoreProvider.SCHEMA_REVISION,
+                    )
+                    if revision not in adapter.declared_revisions.get(interface, frozenset()):
+                        raise MigrationRequired([(interface, revision)])
+                    store = adapter
+                setattr(app.state, METADATA_STORE_STATE_ATTR, store)
+                setattr(app.state, DEVICE_CODE_STORE_STATE_ATTR, device_code_store)
+                effective_auth_client = (
+                    auth_client
+                    if auth_client is not None
+                    else DaprAuthServiceClient(
+                        http_client=owned_http_client(),
+                        endpoint=read_dapr_endpoint(os.environ),
+                    )
+                )
+                setattr(app.state, AUTH_CLIENT_STATE_ATTR, effective_auth_client)
+                outcome = await run_startup_permission_check(app=app, client=effective_auth_client)
+                if outcome is StartupCheckOutcome.TRANSIENT_FAILURE:
+                    task = asyncio.create_task(
+                        converge_route_permissions(
+                            app=app,
+                            client=effective_auth_client,
+                            initial_backoff_seconds=effective_settings.startup_permission_check_initial_backoff_seconds,
+                            max_backoff_seconds=effective_settings.startup_permission_check_max_backoff_seconds,
+                        )
+                    )
+                    stack.push_async_callback(_stop_convergence, task)
+                yield
+            finally:
+                app.state.ready = False
 
     app = FastAPI(
         title="Custos API Gateway",
@@ -215,3 +219,10 @@ def create_app(
 
 
 __all__ = ["create_app"]
+
+
+async def _stop_convergence(task: asyncio.Task[None]) -> None:
+    """Cancel the owned startup worker before its HTTP client is closed."""
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task

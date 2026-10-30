@@ -44,6 +44,19 @@ def test_defaults_match_design_configuration_table() -> None:
     assert settings.oidc_default_issuer == ""
     assert settings.device_code_enabled is False
     assert settings.is_production is False
+    assert settings.metadata_store_dsn == ""
+
+
+def test_metadata_dsn_is_optional_and_not_rendered_in_settings() -> None:
+    """The configured data source is parsed without exposing it through dataclass repr."""
+    settings = load_settings(
+        minimal_gateway_env()
+        | {
+            "CUSTOS_GATEWAY_METADATA_STORE": " postgresql://unused ",
+        }
+    )
+    assert settings.metadata_store_dsn == "postgresql://unused"
+    assert "postgresql://unused" not in repr(settings)
 
 
 def test_parses_required_and_overridden_values() -> None:

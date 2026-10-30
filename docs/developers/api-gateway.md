@@ -323,6 +323,12 @@ unchanged. Bulk continuation uses a filter-bound cursor and a new key for each
 page; retry the same page with its original key. See the
 [recovery contract](trigger-api.md#dead-letter-administration).
 
+`CUSTOS_GATEWAY_METADATA_STORE` configures the production PostgreSQL provider.
+The lifespan verifies metadata revision 4 before readiness, without running
+migrations. A failed connection/schema check cannot select a volatile fallback.
+Owned clients and pools close on partial startup and shutdown; injected stores
+and transports remain caller-owned.
+
 Single-permission **management** routes (service accounts, tokens, role bindings)
 are in the M1 registry. Auth-management routes that authorize on an OR of two
 permissions, or on authentication alone, are deferred. Internal Dapr RPC routes
@@ -394,6 +400,7 @@ Dapr sidecar coordinates used to reach downstream components and the Auth Servic
 | `CUSTOS_GATEWAY_RATE_LIMIT_WORKSPACE_WRITES_RPS` | `200` | Per-workspace write rate (rps) |
 | `CUSTOS_GATEWAY_RATE_LIMIT_WORKSPACE_WRITES_BURST` | `400` | Per-workspace write burst |
 | `CUSTOS_GATEWAY_IDEMPOTENCY_TTL` | `24h` | Idempotency-record lifetime |
+| `CUSTOS_GATEWAY_METADATA_STORE` | _(empty)_ | PostgreSQL data-source name for durable request-key binding; required for production recovery writes. Supply through a Secret. |
 | `CUSTOS_GATEWAY_DEVICE_CODE_TTL` | `15m` | Device-code session lifetime |
 | `CUSTOS_GATEWAY_DEVICE_CODE_POLL_INTERVAL` | `5s` | Device-code poll-interval hint returned to the CLI |
 | `CUSTOS_GATEWAY_OIDC_DEFAULT_ISSUER` | _(empty)_ | Default OIDC issuer; empty disables the device-code flow |

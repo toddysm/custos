@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Final
 
 # --- § Configuration knobs (design.md § Configuration) -----------------------
@@ -91,6 +91,7 @@ ENV_DAPR_HTTP_PORT: Final[str] = "DAPR_HTTP_PORT"
 
 #: Operational environment tag. Default ``development``.
 ENV_ENVIRONMENT: Final[str] = "ENVIRONMENT"
+ENV_METADATA_STORE: Final[str] = "CUSTOS_GATEWAY_METADATA_STORE"
 
 # --- Defaults (design.md § Configuration) ------------------------------------
 
@@ -147,6 +148,7 @@ class Settings:
     dapr_http_host: str
     dapr_http_port: int
     environment: str
+    metadata_store_dsn: str = field(default="", repr=False)
 
     @property
     def is_production(self) -> bool:
@@ -271,6 +273,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         dapr_http_host=_opt_str(ENV_DAPR_HTTP_HOST, src, DEFAULT_DAPR_HTTP_HOST),
         dapr_http_port=_opt_positive_int(ENV_DAPR_HTTP_PORT, src, DEFAULT_DAPR_HTTP_PORT),
         environment=_opt_str(ENV_ENVIRONMENT, src, DEFAULT_ENVIRONMENT),
+        metadata_store_dsn=_opt_str(ENV_METADATA_STORE, src, ""),
     )
 
 
@@ -291,6 +294,7 @@ __all__ = [
     "DEFAULT_STARTUP_PERMISSION_CHECK_INITIAL_BACKOFF_SECONDS",
     "DEFAULT_STARTUP_PERMISSION_CHECK_MAX_BACKOFF_SECONDS",
     "ENV_CORS_ALLOWED_ORIGINS",
+    "ENV_METADATA_STORE",
     "ENV_TLS_CERT_REF",
     "ENV_TLS_KEY_REF",
     "Settings",
