@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock
 
@@ -19,7 +20,12 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from custos_connector import create_app
-from custos_connector.identity import IdentityResolverError
+from custos_connector.identity import (
+    AzureKeyVaultResolver,
+    HttpResponse,
+    IdentityResolverError,
+    IdentityResolverRegistry,
+)
 from custos_connector.listen.verification import (
     MAX_BATCH_EVENTS,
     MAX_ENCODED_REQUEST_BYTES,
@@ -38,6 +44,7 @@ from tests._webhook import (
     settings,
     signature,
 )
+from tests.test_identity_resolvers import _StubHttp
 
 Configured = tuple[TestClient, RotatingResolver, Providers]
 
@@ -252,6 +259,49 @@ def test_bearer_is_only_private_verification_material() -> None:
         assert client.post("/VerifyWebhook", json=body, headers=MESH_HEADERS).status_code == 401
         body["headers"]["Authorization"] = "Bearer unit-next"
         assert client.post("/VerifyWebhook", json=body, headers=MESH_HEADERS).status_code == 200
+
+
+@pytest.mark.parametrize("scheme", ["hmac-sha256", "bearer"])
+def test_real_key_vault_resolver_cannot_refresh_an_expired_secret(scheme: str) -> None:
+    """Repeated forced reads of expired upstream material never create an acceptance window."""
+    http = _StubHttp(
+        responses=[
+            HttpResponse(
+                200,
+                body=json.dumps(
+                    {
+                        "value": "unit-key-a",
+                        "attributes": {"exp": int(datetime.now(UTC).timestamp()) - 60},
+                    }
+                ).encode(),
+            )
+        ]
+    )
+
+    async def token(_audience: str) -> str:
+        """Supply a test token to the actual Key Vault resolver."""
+        return "unit-upstream-token"
+
+    providers = replace(
+        memory_providers(RotatingResolver()),
+        identity_registry=IdentityResolverRegistry(
+            resolvers=[
+                AzureKeyVaultResolver(http=http, token_provider=token),
+            ]
+        ),
+    )
+    with TestClient(create_app(settings=settings(), providers=providers)) as client:
+        assert client.portal is not None
+        client.portal.call(seed, providers, "a", scheme)
+        headers = {"authorization": "Bearer unit-key-a"} if scheme == "bearer" else None
+        for _ in range(2):
+            response = client.post(
+                "/VerifyWebhook", json=envelope(headers=headers), headers=MESH_HEADERS
+            )
+            assert response.status_code == 503
+            assert response.json()["error"]["code"] == "webhook.verifier_unavailable"
+            assert "unit-key-a" not in response.text
+    assert len(http.requests) == 2
 
 
 @pytest.mark.parametrize(

@@ -102,6 +102,8 @@ old registry cache entries so secret rotation needs no Trigger change.
 Fresh reads also bypass cache-miss serialization and do not replace cached
 binding credentials; upstream clients retain their configured request timeouts.
 Missing or unavailable material fails closed; no alternate scheme is inferred from headers.
+Azure Key Vault's enabled, not-before and expiry attributes are enforced before
+material is returned; forced refresh never extends an expired secret's lifetime.
 Vendor timestamp canonicalization and non-SHA256 signature schemes are not
 implemented by these built-in verifiers.
 

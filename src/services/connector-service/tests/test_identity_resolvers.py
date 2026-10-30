@@ -231,7 +231,75 @@ class TestAzureKeyVaultResolver:
             context=_context(),
         )
         assert identity.expires_at is not None
-        assert identity.expires_at > _FIXED_NOW
+        assert identity.expires_at == datetime.fromtimestamp(future_unix, tz=UTC)
+
+    @pytest.mark.parametrize(
+        "attributes",
+        [
+            {"exp": int(_FIXED_NOW.timestamp())},
+            {"exp": int(_FIXED_NOW.timestamp()) - 1},
+            {"exp": 0},
+            {"exp": True},
+            {"exp": "invalid"},
+            {"exp": 10**30},
+            {"nbf": int(_FIXED_NOW.timestamp()) + 1},
+            {"enabled": False},
+            {"enabled": "true"},
+        ],
+    )
+    async def test_invalid_validity_never_returns_material(
+        self, attributes: dict[str, Any]
+    ) -> None:
+        """Expired, disabled, future or malformed validity cannot become a fresh credential."""
+        http = _StubHttp(
+            responses=[
+                HttpResponse(
+                    200,
+                    body=_json_body({"value": "unit-secret", "attributes": attributes}),
+                )
+            ]
+        )
+
+        async def token(_audience: str) -> str:
+            """Supply only test transport authentication."""
+            return "unit-token"
+
+        resolver = AzureKeyVaultResolver(http=http, token_provider=token)
+        with pytest.raises(IdentityResolverError):
+            await resolver.resolve(
+                credentials_authentication={"vaultUri": "https://v", "secretName": "foo"},
+                context=_context(),
+            )
+
+    async def test_optional_validity_keeps_nonexpiring_secrets_compatible(self) -> None:
+        """Absent/null expiry and a reached not-before boundary retain no-expiry semantics."""
+        http = _StubHttp(
+            responses=[
+                HttpResponse(
+                    200,
+                    body=_json_body(
+                        {
+                            "value": "unit-secret",
+                            "attributes": {
+                                "exp": None,
+                                "nbf": int(_FIXED_NOW.timestamp()),
+                                "enabled": True,
+                            },
+                        }
+                    ),
+                )
+            ]
+        )
+
+        async def token(_audience: str) -> str:
+            """Supply only test transport authentication."""
+            return "unit-token"
+
+        resolved = await AzureKeyVaultResolver(http=http, token_provider=token).resolve(
+            credentials_authentication={"vaultUri": "https://v", "secretName": "foo"},
+            context=_context(),
+        )
+        assert resolved.expires_at is None
 
 
 # ---------------------------------------------------------------------------
