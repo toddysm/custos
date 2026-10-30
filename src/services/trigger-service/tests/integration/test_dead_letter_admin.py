@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import timedelta
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import httpx
@@ -185,6 +186,44 @@ async def test_pages_bind_filters_and_workspace(harness: Harness) -> None:
             await admin.list(workspace, filters, cursor=first.next_cursor.token)
     with pytest.raises(DeadLetterAdminError, match="not found"):
         await admin.inspect("other", "a")
+
+
+async def test_dispatcher_does_not_duplicate_provider_owned_lifecycle_audits(
+    harness: Harness,
+) -> None:
+    """A forwarding audit sink receives pipeline events, never duplicate lifecycle writes."""
+    from tests.integration.test_reliable_dispatch import event, match
+
+    forwarded: list[str] = []
+
+    class ForwardingSink:
+        """Model a configured durable forwarding destination without silently deduplicating."""
+
+        async def emit(
+            self,
+            event_name: str,
+            *,
+            workspace_id: str,
+            attributes: Mapping[str, Any],
+        ) -> None:
+            """Record every event sent by the dispatcher, including unwanted duplicates."""
+            forwarded.append(event_name)
+
+    client = FakeWorkflowServiceClient(error=WorkflowClientTransportError("upstream unavailable"))
+    assert isinstance(harness.store, ReliableStorage)
+    reliable = ReliableDispatcher(client, harness.store, ForwardingSink(), max_retries=0)
+    original = match()
+    original.subscription.workspace_id = str(WS)
+    assert (await reliable.dispatch_start(event(), original)).is_dead_lettered
+    entry = (await harness.store.query_dead_letters(WS)).items[0]
+    assert (await reliable.replay(str(WS), entry.data.entry_id, "operator")).is_dead_lettered
+    client.error = None
+    assert (await reliable.replay(str(WS), entry.data.entry_id, "operator")).is_dispatched
+    assert forwarded
+    assert not any(name.startswith("trigger.deadletter.") for name in forwarded)
+    lifecycle = await audits(harness)
+    for outcome in ("stored", "replay_failed", "replayed"):
+        assert lifecycle.count("trigger.deadletter." + outcome) == 1
 
 
 @pytest.mark.parametrize("audit_failure", [False, True])
@@ -437,7 +476,9 @@ async def test_retention_covers_all_statuses_without_deleting_live_replay(
         await harness.expire(entry, retention=True)
     if status == "replaying":
         assert (await admin.sweep(str(WS))).expired == 0
-        await harness.expire(entry)
+        retained = await harness.store.get_dead_letter(WS, "entry")
+        assert retained is not None
+        await harness.expire(retained)
     assert (await admin.sweep(str(WS))).expired == 1
     assert await harness.store.get_dead_letter(WS, "entry") is None
     assert (await audits(harness)).count("trigger.deadletter.expired") == 1

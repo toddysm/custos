@@ -549,7 +549,9 @@ in the **same transaction** as the state change. Audit failure rolls back the
 mutation. Events retain safe entry/subscription/source identifiers and optional
 discard reasons, not normalized payloads or credentials; do not put secrets in
 operator reasons. Interrupted replay recovery is audited, including exhausted
-attempts becoming discarded.
+attempts becoming discarded. Storage is the sole lifecycle-audit writer; the
+dispatcher does not emit a second copy through its configurable audit sink.
+Pipeline events continue through that sink.
 
 Retention starts at capture and uses `TRIGGER_DEADLETTER_RETENTION_SECONDS`
 (default 30 days). The bounded, workspace-paged sweeper handles every status

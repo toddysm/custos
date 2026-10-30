@@ -369,11 +369,6 @@ class ReliableDispatcher:
             await self.audit.emit(
                 AUDIT_DISPATCH_FAILED, workspace_id=workspace, attributes=attributes
             )
-            await self.audit.emit(
-                "trigger.deadletter.stored",
-                workspace_id=workspace,
-                attributes={**attributes, "entryId": data.entry_id},
-            )
             return DispatchOutcome(DispatchStatus.DEAD_LETTERED, error=failure)
         except SPLError as exc:
             logger.error("Durable dispatch storage/ownership failed: %s", type(exc).__name__)
@@ -432,18 +427,8 @@ class ReliableDispatcher:
                     raise TriggerError(
                         TriggerErrorKind.REPLAY_UNSAFE, "workflow rejected this replay identity"
                     ) from exc
-                await self.audit.emit(
-                    "trigger.deadletter.replay_failed",
-                    workspace_id=workspace_id,
-                    attributes={"entryId": entry_id},
-                )
                 return DispatchOutcome(DispatchStatus.DEAD_LETTERED, error=exc)
             await self.store.finish_dead_letter(owned.claim, result_id=ref.run_id if ref else None)
-            await self.audit.emit(
-                "trigger.deadletter.replayed",
-                workspace_id=workspace_id,
-                attributes={"entryId": entry_id},
-            )
             return DispatchOutcome(DispatchStatus.DISPATCHED, run_ref=ref)
         except SPLError as exc:
             logger.error("Durable replay storage/ownership failed: %s", type(exc).__name__)
