@@ -129,6 +129,24 @@ _KEY = IdempotencyKey(
 # --- is_idempotent_method ----------------------------------------------------
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("completed", [False, True])
+async def test_recovery_reconciles_bound_inflight_or_completed_requests(completed: bool) -> None:
+    """Recovery never returns a stale conflict snapshot or waits on HTTP-only ownership."""
+    outcome: ReserveIdempotencyResult = (
+        ExistingCompleted(_record(status="completed"), {"status_code": 409})
+        if completed
+        else ExistingInFlight(_record())
+    )
+    store = _FakeStore(outcome=outcome)
+    coordinator = IdempotencyCoordinator(store=store, ttl_seconds=60)
+    assert isinstance(await coordinator.reserve(_KEY, "hash", reconcile=True), ProceedReservation)
+    store.outcome = KeyReuse(_record("different"))
+    with pytest.raises(GatewayError) as conflict:
+        await coordinator.reserve(_KEY, "hash", reconcile=True)
+    assert conflict.value.code == GatewayErrorCode.IDEMPOTENCY_KEY_REUSE
+
+
 @pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE", "post", "Patch"])
 def test_write_methods_are_idempotent(method: str) -> None:
     assert is_idempotent_method(method) is True

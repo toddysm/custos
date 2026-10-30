@@ -650,9 +650,10 @@ def _make_forwarder(spec: RouteSpec) -> Callable[[Request], Awaitable[Response]]
                 allow = _apply_rate_limit(request, caller, spec)
 
                 coordinator, key = _idempotency_context(request, spec, caller)
+                recovery = _is_recovery_write(spec)
                 if coordinator is not None and key is not None:
                     outcome = await coordinator.reserve(
-                        key, _request_hash(request, spec, caller, body)
+                        key, _request_hash(request, spec, caller, body), reconcile=recovery
                     )
                     if isinstance(outcome, ReplayReservation):
                         record_idempotency_replay(route=spec.path, method=spec.method)
@@ -663,7 +664,7 @@ def _make_forwarder(spec: RouteSpec) -> Callable[[Request], Awaitable[Response]]
                         return response
 
                 reply = await _invoke_downstream(request, spec, body)
-                if coordinator is not None and key is not None:
+                if coordinator is not None and key is not None and not recovery:
                     await coordinator.complete(key, response_snapshot(reply))
                 response = _with_rate_limit_headers(shaped_response(reply), allow)
                 telemetry.set_status(response.status_code)
@@ -720,11 +721,26 @@ def _idempotency_context(
     return coordinator, key
 
 
+def _is_recovery_write(spec: RouteSpec) -> bool:
+    """Only these commands delegate effect deduplication to durable per-entry replay claims."""
+    return (
+        spec.app_id == TRIGGER_APP_ID
+        and spec.required_permission == "trigger:admin"
+        and spec.method == "POST"
+        and spec.path
+        in {
+            "/v1/workspaces/{workspaceId}/triggers/deadletter/{entryId}:replay",
+            "/v1/workspaces/{workspaceId}/triggers/deadletter/{entryId}:discard",
+            "/v1/workspaces/{workspaceId}/triggers/deadletter:replay",
+        }
+    )
+
+
 def _request_hash(request: Request, spec: RouteSpec, caller: AuthorizedCaller, body: bytes) -> str:
     """Fingerprint the request for idempotency key-reuse detection."""
     return compute_request_hash(
         method=request.method,
-        route=spec.path,
+        route=request.url.path if _is_recovery_write(spec) else spec.path,
         workspace_id=caller.workspace_id,
         headers=request.headers,
         body=body,
@@ -758,13 +774,7 @@ async def _invoke_downstream(request: Request, spec: RouteSpec, body: bytes) -> 
                 method_path=method_path,
                 headers=headers,
                 body=body or None,
-                read_timeout=(
-                    70.0
-                    if spec.app_id == TRIGGER_APP_ID
-                    and spec.required_permission == "trigger:admin"
-                    and spec.method == "POST"
-                    else None
-                ),
+                read_timeout=(70.0 if _is_recovery_write(spec) else None),
             )
         )
 

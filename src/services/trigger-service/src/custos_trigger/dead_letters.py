@@ -32,10 +32,18 @@ class DeadLetterAdminError(Exception):
     """A closed, safe administration error rendered by the standard problem-details handler."""
 
     def __init__(
-        self, outcome: Literal["not_found", "conflict", "invalid", "unavailable"], detail: str
+        self,
+        outcome: Literal[
+            "not_found", "conflict", "invalid", "unavailable", "in_progress", "unsafe"
+        ],
+        detail: str,
     ) -> None:
         """Retain the public error category without exposing backend or plugin text."""
-        self.code = "trigger.deadletter." + outcome
+        self.code = (
+            "trigger.replay_" + outcome
+            if outcome in ("in_progress", "unsafe")
+            else "trigger.deadletter." + outcome
+        )
         self.detail = detail
         super().__init__(detail)
 
@@ -46,7 +54,12 @@ async def _operation() -> AsyncIterator[None]:
     try:
         async with asyncio.timeout(ADMIN_TIMEOUT_SECONDS):
             yield
-    except (LeaseBusy, ImmutableViolation) as exc:
+    except LeaseBusy as exc:
+        logger.info("Dead-letter replay already in progress")
+        raise DeadLetterAdminError(
+            "in_progress", "Another worker owns this replay. Retry after the replay lease expires."
+        ) from exc
+    except ImmutableViolation as exc:
         logger.info("Dead-letter mutation conflicted: %s", type(exc).__name__)
         raise DeadLetterAdminError("conflict", "Entry changed or is actively replaying.") from exc
     except (SPLError, TimeoutError) as exc:
@@ -131,11 +144,18 @@ class DeadLetterAdmin:
         try:
             outcome = await self.dispatcher.replay(workspace, entry_id, actor)
         except TriggerError as exc:
+            if exc.kind == TriggerErrorKind.SUBSCRIPTION_NOT_FOUND:
+                raise DeadLetterAdminError("not_found", "Dead-letter entry not found.") from exc
+            if exc.kind == TriggerErrorKind.REPLAY_IN_PROGRESS:
+                raise DeadLetterAdminError(
+                    "in_progress",
+                    "Another worker owns this replay. Retry after the replay lease expires.",
+                ) from exc
             if exc.kind == TriggerErrorKind.REPLAY_UNSAFE:
                 current = await self._entry(workspace, entry_id)
                 if current.status == "replayed":
                     return "replayed"
-                raise DeadLetterAdminError("conflict", "Entry cannot be safely replayed.") from exc
+                raise DeadLetterAdminError("unsafe", "Entry cannot be safely replayed.") from exc
             if exc.kind == TriggerErrorKind.DISPATCH_UNAVAILABLE:
                 raise DeadLetterAdminError(
                     "unavailable", "Replay could not complete safely; inspect before retrying."
@@ -161,12 +181,18 @@ class DeadLetterAdmin:
             )
 
     async def bulk_replay(
-        self, workspace: str, filters: DeadLetterFilter, actor: str, *, limit: int = 50
-    ) -> tuple[int, int]:
+        self,
+        workspace: str,
+        filters: DeadLetterFilter,
+        actor: str,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> tuple[int, int, Cursor | None]:
         """Bound selection, concurrency and total time; cancel and await owned work on failure."""
         _validate_query(workspace, filters, limit)
         async with _operation():
-            page = await self.store.query_dead_letters(WorkspaceId(workspace), filters, limit=limit)
+            page = await self.list(workspace, filters, cursor=cursor, limit=limit)
             semaphore = asyncio.Semaphore(BULK_CONCURRENCY)
 
             async def replay_one(entry: DeadLetterEntry) -> bool:
@@ -180,6 +206,8 @@ class DeadLetterAdmin:
                         if exc.code not in (
                             "trigger.deadletter.conflict",
                             "trigger.deadletter.not_found",
+                            "trigger.replay_in_progress",
+                            "trigger.replay_unsafe",
                         ):
                             raise
                         logger.info("Bulk replay rejected entry: %s", exc.code)
@@ -194,7 +222,7 @@ class DeadLetterAdmin:
                         task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
             accepted = sum(results)
-            return accepted, len(results) - accepted
+            return accepted, len(results) - accepted, page.next_cursor
 
     async def sweep(
         self, workspace: str, *, cursor: str | None = None, limit: int = 100

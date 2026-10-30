@@ -13,7 +13,8 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from custos_spl.errors import BackendUnavailable
-from custos_spl.interfaces.dead_letters import DeadLetterFilter
+from custos_spl.ids import WorkspaceId
+from custos_spl.interfaces.dead_letters import DeadLetterEntry, DeadLetterFilter
 from fastapi import Depends, FastAPI, Request
 
 from custos_trigger.app import create_app
@@ -81,6 +82,26 @@ async def audits(harness: Harness) -> list[str]:
         return [row["event_type"] for row in rows]
 
 
+async def audit_payloads(harness: Harness, outcome: str) -> list[dict[str, Any]]:
+    """Inspect precisely the payload delivered to outbox consumers after entry deletion."""
+    event_type = "trigger.deadletter." + outcome
+    if harness.pool is None:
+        assert isinstance(harness.store, InMemoryTriggerMetadataStore)
+        return [
+            dict(event.payload)
+            for event in harness.store.dead_letter_audits
+            if event.event_type == event_type
+        ]
+    async with harness.pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT payload::text FROM custos_state.audit_outbox "
+            "WHERE workspace_id=$1 AND event_type=$2 ORDER BY id",
+            WS,
+            event_type,
+        )
+        return [json.loads(row["payload"]) for row in rows]
+
+
 async def test_protected_routes_replay_original_target_and_idempotent_outcomes(
     harness: Harness,
 ) -> None:
@@ -142,6 +163,12 @@ async def test_protected_routes_replay_original_target_and_idempotent_outcomes(
         assert client.start_run_calls[0].inputs == {"v": 1}
         assert client.start_run_calls[0].idempotency_key == "original-key"
         assert (await http.post(BASE + "/entry:discard", headers=HEADERS)).status_code == 409
+        invalid_reason = await http.post(
+            BASE + "/discard:discard", headers=HEADERS, json={"reason": "invalid\x00reason"}
+        )
+        assert invalid_reason.status_code == 422
+        unchanged = await harness.store.get_dead_letter(WS, "discard")
+        assert unchanged is not None and unchanged.status == "pending"
         for _ in range(2):
             assert (
                 await http.post(
@@ -160,11 +187,26 @@ async def test_protected_routes_replay_original_target_and_idempotent_outcomes(
             await http.post(BASE + ":replay", headers=HEADERS, json={"unexpected": True})
         ).status_code == 422
         bulk = await http.post(BASE + ":replay", headers=HEADERS, json={})
-        assert bulk.status_code == 200 and bulk.json() == {"accepted": 1, "rejected": 1}
+        assert bulk.status_code == 200 and bulk.json() == {
+            "accepted": 1,
+            "rejected": 1,
+            "nextCursor": None,
+        }
     events = await audits(harness)
     assert events.count("trigger.deadletter.stored") == 2
     assert events.count("trigger.deadletter.replayed") == 1
     assert events.count("trigger.deadletter.discarded") == 1
+    discarded = await audit_payloads(harness, "discarded")
+    assert discarded == [
+        {
+            "schemaVersion": 1,
+            "sourceType": "manual",
+            "entryId": "discard",
+            "subscriptionId": "sub",
+            "actor": "operator",
+            "reason": "operator cleanup",
+        }
+    ]
 
 
 async def test_pages_bind_filters_and_workspace(harness: Harness) -> None:
@@ -266,10 +308,12 @@ async def test_failure_capture_audit_and_receipt_acknowledgement_are_atomic(
 
 async def test_gateway_forwards_scoped_recovery_to_real_trigger_handlers(harness: Harness) -> None:
     """Exercise Gateway forwarding and Trigger recovery against both storage backends."""
+    from custos_gateway.errors import register_exception_handlers as gateway_errors
     from custos_gateway.middleware.auth import AUTH_STATE_ATTR, AuthorizedCaller
     from custos_gateway.middleware.callctx_mint import OUTBOUND_METADATA_STATE_ATTR
     from custos_gateway.router import DownstreamRouter
     from custos_gateway.routes.registry import M1_ROUTE_REGISTRY, _make_forwarder
+    from custos_gateway.settings import load_settings as gateway_settings
 
     client = FakeWorkflowServiceClient()
     admin = administration(harness, client)
@@ -277,6 +321,7 @@ async def test_gateway_forwards_scoped_recovery_to_real_trigger_handlers(harness
     await harness.store.put_dead_letter(
         replace(data, target={**data.target, "deliveryProtocol": 2})
     )
+    held = await harness.store.claim_dead_letter(WS, "entry", "old-operator", ttl_seconds=300)
     store = cast(TriggerMetadataStore, harness.store)
     trigger = create_app(
         authz_endpoint="",
@@ -284,6 +329,17 @@ async def test_gateway_forwards_scoped_recovery_to_real_trigger_handlers(harness
         dispatcher=Dispatcher(client, Deduplicator(store), reliable=admin.dispatcher),
     )
     gateway = FastAPI()
+    gateway_errors(gateway)
+    if harness.pool is not None:
+        gateway.state.metadata_store = harness.store
+        gateway.state.settings = gateway_settings(
+            {
+                "CUSTOS_GATEWAY_TLS_CERT_REF": "secretref://tls/cert",
+                "CUSTOS_GATEWAY_TLS_KEY_REF": "secretref://tls/key",
+                "CUSTOS_GATEWAY_CORS_ALLOWED_ORIGINS": '["https://ui.custos.example"]',
+            }
+        )
+    unavailable = False
 
     async def authorized(request: Request) -> None:
         """Bind the same already-authorized context used by Gateway's tested forwarding seam."""
@@ -317,6 +373,8 @@ async def test_gateway_forwards_scoped_recovery_to_real_trigger_handlers(harness
 
         async def sidecar(request: httpx.Request) -> httpx.Response:
             """Pass actual serialized bytes and scope to the owning Trigger HTTP endpoint."""
+            if unavailable:
+                return httpx.Response(503)
             path = request.url.path.removeprefix("/v1.0/invoke/trigger-service/method")
             return await downstream.request(
                 request.method,
@@ -336,11 +394,21 @@ async def test_gateway_forwards_scoped_recovery_to_real_trigger_handlers(harness
                 assert (
                     listing.status_code == 200 and listing.json()["items"][0]["entryId"] == "entry"
                 )
+                headers = {"content-type": "application/json", "idempotency-key": "same-key"}
+                conflict = await http.post(BASE + "/entry:replay", headers=headers)
+                assert conflict.status_code == 409
+                assert conflict.json()["code"] == "trigger.replay_in_progress"
+                unavailable = True
+                assert (await http.post(BASE + "/entry:replay", headers=headers)).status_code == 503
+                unavailable = False
+                await harness.expire(held)
                 for _ in range(2):
-                    response = await http.post(
-                        BASE + "/entry:replay", headers={"content-type": "application/json"}
-                    )
+                    response = await http.post(BASE + "/entry:replay", headers=headers)
                     assert response.status_code == 200 and response.json() == {"status": "replayed"}
+                if harness.pool is not None:
+                    changed = await http.post(BASE + "/other:replay", headers=headers)
+                    assert changed.status_code == 409
+                    assert changed.json()["code"] == "idempotency-key-reuse"
     assert len(client.start_run_calls) == 1
     assert (await audits(harness)).count("trigger.deadletter.replayed") == 1
 
@@ -415,11 +483,11 @@ async def test_concurrent_replay_and_discard_conflict(harness: Harness) -> None:
             await started.wait()
             with pytest.raises(DeadLetterAdminError) as conflict:
                 await admin.replay(str(WS), "entry", "another")
-            assert conflict.value.code == "trigger.deadletter.conflict"
+            assert conflict.value.code == "trigger.replay_in_progress"
             with pytest.raises(DeadLetterAdminError) as conflict:
                 await admin.discard(str(WS), "entry", "another")
-            assert conflict.value.code == "trigger.deadletter.conflict"
-            assert await admin.bulk_replay(str(WS), DeadLetterFilter(), "another") == (0, 1)
+            assert conflict.value.code == "trigger.replay_in_progress"
+            assert await admin.bulk_replay(str(WS), DeadLetterFilter(), "another") == (0, 1, None)
             release.set()
             assert await task == "replayed"
     finally:
@@ -448,7 +516,7 @@ async def test_replay_failure_and_terminal_attempt_are_durably_audited(harness: 
     )
     with pytest.raises(DeadLetterAdminError) as conflict:
         await admin.replay(str(WS), "unsafe", "operator")
-    assert conflict.value.code == "trigger.deadletter.conflict"
+    assert conflict.value.code == "trigger.replay_unsafe"
     assert (await audits(harness)).count("trigger.deadletter.replay_failed") == 2
 
 
@@ -483,6 +551,54 @@ async def test_retention_covers_all_statuses_without_deleting_live_replay(
     assert await harness.store.get_dead_letter(WS, "entry") is None
     assert (await audits(harness)).count("trigger.deadletter.expired") == 1
     assert (await admin.sweep(str(WS))).expired == 0
+
+
+@pytest.mark.parametrize("final_attempt", [False, True])
+async def test_expiration_audits_interrupted_attempt_before_erasing_history(
+    harness: Harness,
+    final_attempt: bool,
+) -> None:
+    """The outbox keeps the original operator, interruption and terminal transition after purge."""
+    await harness.store.put_dead_letter(
+        replace(capture(), max_replay_attempts=1 if final_attempt else 3)
+    )
+    entry = await harness.store.claim_dead_letter(WS, "entry", "original-operator", ttl_seconds=1)
+    await harness.expire(entry)
+    expired = await harness.store.get_dead_letter(WS, "entry")
+    assert expired is not None
+    await harness.expire(expired, retention=True)
+    assert await harness.store.delete_expired_dead_letter(WS, "entry")
+    assert await harness.store.get_dead_letter(WS, "entry") is None
+    failed = await audit_payloads(harness, "replay_failed")
+    assert len(failed) == 1
+    assert failed[0] == {
+        "schemaVersion": 1,
+        "sourceType": "manual",
+        "entryId": "entry",
+        "subscriptionId": "sub",
+        "actor": "trigger-service",
+        "attempt": 1,
+        "outcome": "interrupted",
+        "attemptOperator": "original-operator",
+    }
+    assert len(await audit_payloads(harness, "discarded")) == int(final_attempt)
+    expiration = (await audit_payloads(harness, "expired"))[0]
+    assert expiration["entryId"] == "entry" and expiration["actor"] == "trigger-service"
+    assert expiration["previousStatus"] == ("discarded" if final_attempt else "pending")
+    assert not await harness.store.delete_expired_dead_letter(WS, "entry")
+    assert len(await audit_payloads(harness, "replay_failed")) == 1
+
+
+async def test_reclaim_keeps_original_attempt_operator_separate_from_recoverer(
+    harness: Harness,
+) -> None:
+    """Reclaim by another operator does not rewrite who initiated the interrupted attempt."""
+    await harness.store.put_dead_letter(capture())
+    entry = await harness.store.claim_dead_letter(WS, "entry", "operator-a", ttl_seconds=1)
+    await harness.expire(entry)
+    await harness.store.claim_dead_letter(WS, "entry", "operator-b")
+    payload = (await audit_payloads(harness, "replay_failed"))[0]
+    assert payload["actor"] == "operator-b" and payload["attemptOperator"] == "operator-a"
 
 
 @pytest.mark.parametrize("operation", ["expire", "discard", "finish", "store"])
@@ -563,14 +679,106 @@ async def test_bulk_selection_and_concurrency_are_bounded(harness: Harness) -> N
             )
         )
     async with asyncio.timeout(15):
-        assert await admin.bulk_replay(str(WS), DeadLetterFilter(), "operator", limit=100) == (
-            100,
-            0,
+        accepted, rejected, cursor = await admin.bulk_replay(
+            str(WS), DeadLetterFilter(), "operator", limit=100
         )
+        assert (accepted, rejected) == (100, 0) and cursor is not None
     assert len(client.start_run_calls) == 100 and peak == 8 and active == 0
     assert (await admin.inspect(str(WS), "entry-100")).status == "pending"
+    assert await admin.bulk_replay(
+        str(WS), DeadLetterFilter(), "operator", cursor=cursor.token, limit=100
+    ) == (1, 0, None)
     with pytest.raises(DeadLetterAdminError):
         await admin.bulk_replay(str(WS), DeadLetterFilter(), "operator", limit=101)
+
+
+@pytest.mark.parametrize("pending_only", [False, True])
+async def test_bulk_cursor_advances_past_unsafe_entries(
+    harness: Harness, pending_only: bool
+) -> None:
+    """A rejected first entry cannot starve the rest of a stable filtered backlog."""
+    client = FakeWorkflowServiceClient()
+    admin = administration(harness, client)
+    unsafe = capture("a-unsafe")
+    await harness.store.put_dead_letter(unsafe)
+    await harness.store.put_dead_letter(
+        replace(capture("z-safe"), target={**unsafe.target, "deliveryProtocol": 2})
+    )
+    filters = DeadLetterFilter(status="pending" if pending_only else None)
+    accepted, rejected, cursor = await admin.bulk_replay(str(WS), filters, "operator", limit=1)
+    assert (accepted, rejected) == (0, 1) and cursor is not None
+    assert await admin.bulk_replay(str(WS), filters, "operator", cursor=cursor.token, limit=1) == (
+        1,
+        0,
+        None,
+    )
+    with pytest.raises(DeadLetterAdminError) as invalid:
+        await admin.bulk_replay(
+            str(WS), DeadLetterFilter(status="replayed"), "operator", cursor=cursor.token, limit=1
+        )
+    assert invalid.value.code == "trigger.deadletter.invalid"
+    assert len(client.start_run_calls) == 1
+
+
+@pytest.mark.parametrize("boundary", ["lookup", "claim"])
+async def test_bulk_rejects_entries_deleted_during_replay(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+) -> None:
+    """Retention racing either dispatcher boundary rejects only the vanished entry."""
+    admin = administration(harness, FakeWorkflowServiceClient())
+    data = capture("a-gone")
+    await harness.store.put_dead_letter(
+        replace(data, target={**data.target, "deliveryProtocol": 2})
+    )
+    await harness.store.put_dead_letter(
+        replace(capture("z-live"), target={**data.target, "deliveryProtocol": 2})
+    )
+    original_get = harness.store.get_dead_letter
+    original_claim = harness.store.claim_dead_letter
+    reads = 0
+
+    async def erase() -> None:
+        """Expire and remove the actual persisted entry, not a mocked missing response."""
+        entry = await original_get(WS, "a-gone")
+        assert entry is not None
+        if harness.pool is None:
+            assert isinstance(harness.store, InMemoryTriggerMetadataStore)
+            harness.store._dead_letters[(str(WS), "a-gone")] = replace(
+                entry, expires_at=harness.clock[0]
+            )
+        else:
+            await harness.expire(entry, retention=True)
+        assert await harness.store.delete_expired_dead_letter(WS, "a-gone")
+
+    async def read(workspace: WorkspaceId, identifier: str) -> DeadLetterEntry | None:
+        """Delete between the admin and dispatcher reads of the selected entry."""
+        nonlocal reads
+        if identifier == "a-gone":
+            reads += 1
+            if reads == 2:
+                await erase()
+        return await original_get(workspace, identifier)
+
+    async def claim(
+        workspace: WorkspaceId,
+        identifier: str,
+        actor: str,
+        *,
+        ttl_seconds: int = 60,
+    ) -> DeadLetterEntry:
+        """Delete after both reads but before acquiring replay ownership."""
+        if identifier == "a-gone":
+            await erase()
+        return await original_claim(workspace, identifier, actor, ttl_seconds=ttl_seconds)
+
+    monkeypatch.setattr(
+        harness.store,
+        "get_dead_letter" if boundary == "lookup" else "claim_dead_letter",
+        read if boundary == "lookup" else claim,
+    )
+    assert await admin.bulk_replay(str(WS), DeadLetterFilter(), "operator") == (1, 1, None)
 
 
 async def test_request_deadline_retains_recoverable_claims_and_awaits_children(
@@ -587,7 +795,7 @@ async def test_request_deadline_retains_recoverable_claims_and_awaits_children(
         """Capture the real command deadline rather than waiting on a timing heuristic."""
         nonlocal deadline
         timeout = actual_timeout(delay)
-        if delay == 60:
+        if delay == 60 and deadline is None:
             deadline = timeout
         return timeout
 

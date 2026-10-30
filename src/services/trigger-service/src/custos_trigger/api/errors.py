@@ -80,6 +80,7 @@ LOCKED_API_KIND_TO_STATUS: Final[dict[str, int]] = {
     "trigger.source_unavailable": 503,
     "trigger.subscription_conflict": 409,
     "trigger.replay_unsafe": 409,
+    "trigger.replay_in_progress": 409,
     "trigger.dispatch_unavailable": 503,
     # Route-local API kinds
     API_BAD_REQUEST: 400,
@@ -104,6 +105,7 @@ LOCKED_API_KINDS: Final[frozenset[str]] = frozenset(LOCKED_API_KIND_TO_STATUS)
 #: Short, English-only human-readable title per kind.
 _TITLE_FOR_KIND: Final[dict[str, str]] = {
     "trigger.replay_unsafe": "Replay safety cannot be established",
+    "trigger.replay_in_progress": "Replay already in progress",
     "trigger.dispatch_unavailable": "Durable dispatch is temporarily unavailable",
     "trigger.subscription_not_found": "Subscription not found",
     "trigger.selector_invalid": "Selector failed to compile",

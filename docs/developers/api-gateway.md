@@ -308,6 +308,15 @@ class; reads bill the `read` class and bypass idempotency. The
 workflow/template *publish* routes raise the body cap to 5 MiB; every other route
 uses the 1 MiB default.
 
+Dead-letter recovery writes are a deliberate idempotency exception: the key binds
+the concrete entry path and body, but identical retries always reconcile with
+Trigger's durable per-entry claims instead of replaying an HTTP snapshot.
+This keeps temporary 409/503 outcomes retryable while rejecting the same key on
+a different entry or body. Successful entry replay/discard remains idempotent in
+Trigger. Bulk continuation uses a filter-bound cursor and a new key for each
+page; retry the same page with its original key. See the
+[recovery contract](trigger-api.md#dead-letter-administration).
+
 Single-permission **management** routes (service accounts, tokens, role bindings)
 are in the M1 registry. Auth-management routes that authorize on an OR of two
 permissions, or on authentication alone, are deferred. Internal Dapr RPC routes

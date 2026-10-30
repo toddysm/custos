@@ -485,7 +485,14 @@ These routes require `trigger:admin` and enabled durable dispatch
 (`TRIGGER_DURABLE_DISPATCH_ENABLED=true`). Disabled durable dispatch returns
 503 rather than falling back to volatile replay. Gateway forwards the routes
 with its normal authentication, idempotency and rate-limit controls; write
-requests should provide an `Idempotency-Key`. Static recovery routes precede
+requests should provide an `Idempotency-Key`. For recovery writes, Gateway binds
+that key to the **concrete entry path and body**, but does not cache responses
+or block identical retries behind an in-progress HTTP reservation. Durable
+per-entry claims and downstream identity, not a Gateway response snapshot,
+prevent duplicate effects. The same key on another entry/body returns
+`409 idempotency-key-reuse`; retries after contention/outage can reconcile
+current state with the original key. Unrelated Gateway writes keep their
+existing reserve/replay/complete behavior. Static recovery routes precede
 dynamic subscription identifiers in both services. Gateway write requests also
 require `Content-Type: application/json`, including bodyless replay commands.
 
@@ -497,7 +504,7 @@ Base: `/v1/workspaces/{workspaceId}/triggers/deadletter`.
 | `GET /{entryId}` | None | Version-one entry with original event, target, key and bounded attempt history |
 | `POST /{entryId}:replay` | No body | `{status}`: persisted `replayed`, `pending` or `discarded` |
 | `POST /{entryId}:discard` | Optional `{"reason":"operator decision"}` | 204, including already-discarded entries |
-| `POST :replay` | Optional filter fields and `limit` in a JSON object | `{accepted, rejected}` |
+| `POST :replay` | Optional filter fields, `cursor` and `limit` in a JSON object | `{accepted, rejected, nextCursor}` |
 
 Pages default to 50 and cap at 100. `status` accepts `pending`, `replaying`,
 `replayed`, or `discarded`; `expired` is an audited removal, not a retained
@@ -511,8 +518,10 @@ credentials.
 
 Replay uses the stored target without rematching a changed subscription.
 Repeating a successful replay returns `{"status":"replayed"}` without another
-Workflow call. A live concurrent claim or unsafe/terminal target returns
-`409 trigger.deadletter.conflict`; an already-replayed entry cannot be discarded.
+Workflow call. A live concurrent claim returns `409 trigger.replay_in_progress`;
+retry after its lease expires. An unsafe or terminal replay target instead
+returns `409 trigger.replay_unsafe`; waiting alone cannot establish replay safety.
+An already-replayed entry cannot be discarded (`409 trigger.deadletter.conflict`).
 A failed replay reports the persisted pending/discarded status, not success.
 Missing or cross-workspace entries return 404. Missing identity returns 401,
 insufficient permission or a mismatched path workspace returns 403, invalid
@@ -522,6 +531,9 @@ Bulk replay selects at most 100 entries and executes no more than eight at once.
 `accepted` counts completed or already-completed replays; `rejected` counts
 per-entry conflicts, vanished entries and failed attempts. A provider outage
 fails the request explicitly instead of counting entries as successful.
+Continue with `nextCursor` and the same filters to progress beyond completed or
+unsafe entries at the front of a backlog. Use a new idempotency key for each page
+because its request body changes; reuse that page's key for retries.
 Single and bulk commands have a 60-second total deadline. Gateway allows a
 70-second response-read budget for these recovery writes; other routes keep
 their existing timeout. On timeout, owned tasks are cancelled and awaited and
@@ -541,15 +553,21 @@ Content-Type: application/json
 ```
 
 An active replay instead returns a problem-details response with
-`code: "trigger.deadletter.conflict"` and HTTP status 409.
+`code: "trigger.replay_in_progress"` and HTTP status 409.
 
 Storage commits lifecycle events `trigger.deadletter.stored`, `.replayed`,
 `.replay_failed`, `.discarded`, and `.expired` through the durable audit/outbox
 in the **same transaction** as the state change. Audit failure rolls back the
-mutation. Events retain safe entry/subscription/source identifiers and optional
+mutation. Outbox-visible payloads retain the entry/subscription/source identifiers,
+the actor performing the transition, and an `attemptOperator` for completed or
+interrupted replay attempts, separately from any operator reclaiming them.
+They retain optional
 discard reasons, not normalized payloads or credentials; do not put secrets in
 operator reasons. Interrupted replay recovery is audited, including exhausted
-attempts becoming discarded. Storage is the sole lifecycle-audit writer; the
+attempts becoming discarded. Expiration first audits an abandoned replay and any
+exhausted-attempt discard, then expiration, in the same transaction before
+erasing history. NUL-containing or invalid-Unicode reasons are rejected with 422
+before persistence. Storage is the sole lifecycle-audit writer; the
 dispatcher does not emit a second copy through its configurable audit sink.
 Pipeline events continue through that sink.
 

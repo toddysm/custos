@@ -403,10 +403,17 @@ class ReliableDispatcher:
                 )
             except LeaseBusy as exc:
                 raise TriggerError(
-                    TriggerErrorKind.REPLAY_UNSAFE, "entry already has an active replay"
+                    TriggerErrorKind.REPLAY_IN_PROGRESS, "entry already has an active replay"
                 ) from exc
             except ImmutableViolation as exc:
-                await self.store.recover_dead_letter(ws, entry_id)
+                try:
+                    await self.store.recover_dead_letter(ws, entry_id)
+                except ImmutableViolation as missing:
+                    if await self.store.get_dead_letter(ws, entry_id) is None:
+                        raise TriggerError(
+                            TriggerErrorKind.SUBSCRIPTION_NOT_FOUND, "dead-letter entry not found"
+                        ) from missing
+                    raise
                 raise TriggerError(
                     TriggerErrorKind.REPLAY_UNSAFE,
                     "entry is terminal or beyond its replay attempt/retention limit",

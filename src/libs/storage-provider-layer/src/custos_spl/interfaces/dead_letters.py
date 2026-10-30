@@ -449,6 +449,25 @@ def discard_dead_letter(entry: DeadLetterEntry, now: datetime) -> DeadLetterEntr
     return replace(entry, status="discarded")
 
 
+def validate_discard_reason(reason: str | None) -> str | None:
+    """Reject unbounded or PostgreSQL-invalid operator text before any audited mutation."""
+    if reason is not None:
+        if (
+            not isinstance(reason, str)
+            or not reason.strip()
+            or len(reason) > 1024
+            or "\x00" in reason
+        ):
+            raise ValueError(
+                "discard reason must be nonblank, NUL-free and at most 1024 characters"
+            )
+        try:
+            reason.encode("utf-8")
+        except UnicodeError as exc:
+            raise ValueError("discard reason must be valid Unicode") from exc
+    return reason
+
+
 def dead_letter_transition_audits(
     before: DeadLetterEntry | None,
     after: DeadLetterEntry | None,
@@ -459,10 +478,7 @@ def dead_letter_transition_audits(
 ) -> tuple[AuditEvent, ...]:
     """Prepare payload-free lifecycle audits for the same transaction as the state change."""
     validate_dispatch_identifier(actor)
-    if reason is not None and (
-        not isinstance(reason, str) or not reason.strip() or len(reason) > 1024
-    ):
-        raise ValueError("discard reason must be nonblank and at most 1024 characters")
+    validate_discard_reason(reason)
     entry = after if after is not None else before
     if entry is None:
         raise ValueError("a dead-letter transition requires an entry")
@@ -471,20 +487,25 @@ def dead_letter_transition_audits(
     events: list[tuple[str, Mapping[str, Any]]] = []
     if before is None:
         events.append(("stored", {}))
-    elif after is None:
-        events.append(("expired", {"previousStatus": before.status}))
     else:
-        for index, attempt in enumerate(after.replay_history):
+        terminal = recover_replay(before, now) if after is None else after
+        for index, attempt in enumerate(terminal.replay_history):
             previous = before.replay_history[index] if index < len(before.replay_history) else None
             if attempt != previous and attempt.outcome in ("failed", "interrupted", "replayed"):
                 events.append(
                     (
                         "replayed" if attempt.outcome == "replayed" else "replay_failed",
-                        {"attempt": attempt.epoch, "outcome": attempt.outcome},
+                        {
+                            "attempt": attempt.epoch,
+                            "outcome": attempt.outcome,
+                            "attemptOperator": attempt.worker_id,
+                        },
                     )
                 )
-        if after.status == "discarded" and before.status != "discarded":
+        if terminal.status == "discarded" and before.status != "discarded":
             events.append(("discarded", {"reason": reason}))
+        if after is None:
+            events.append(("expired", {"previousStatus": terminal.status}))
     return tuple(
         AuditEvent(
             workspace_id=entry.data.workspace_id,
@@ -492,7 +513,14 @@ def dead_letter_transition_audits(
             event_type="trigger.deadletter." + outcome,
             actor=actor,
             subject={"entryId": entry.data.entry_id, "subscriptionId": entry.data.subscription_id},
-            payload={"schemaVersion": 1, "sourceType": source["type"], **payload},
+            payload={
+                "schemaVersion": 1,
+                "sourceType": source["type"],
+                "entryId": entry.data.entry_id,
+                "subscriptionId": entry.data.subscription_id,
+                "actor": actor,
+                **payload,
+            },
             occurred_at=_instant(now),
         )
         for outcome, payload in events

@@ -11,9 +11,10 @@ from custos_spl.interfaces.dead_letters import (
     DeadLetterFilter,
     DeadLetterStatus,
     json_value,
+    validate_discard_reason,
 )
 from fastapi import APIRouter, Depends, Path, Query, Request, Response
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from custos_trigger._wire import WireModel
 from custos_trigger.dead_letters import DeadLetterAdmin, DeadLetterAdminError
@@ -87,6 +88,7 @@ class BulkSelector(WireModel):
     since: datetime | None = None
     until: datetime | None = None
     limit: int = Field(default=50, ge=1, le=100, strict=True)
+    cursor: str | None = Field(default=None, min_length=1, max_length=8192)
 
 
 class BulkResult(WireModel):
@@ -94,12 +96,19 @@ class BulkResult(WireModel):
 
     accepted: int
     rejected: int
+    next_cursor: str | None
 
 
 class DiscardRequest(WireModel):
     """Optional bounded operator justification persisted in the atomic discard audit."""
 
     reason: str | None = Field(default=None, min_length=1, max_length=1024, pattern=r"\S")
+
+    @field_validator("reason")
+    @classmethod
+    def valid_reason(cls, value: str | None) -> str | None:
+        """Validate storage-safe text before entering an audited provider operation."""
+        return validate_discard_reason(value)
 
 
 def _admin(dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)]) -> DeadLetterAdmin:
@@ -228,13 +237,18 @@ async def bulk_replay(
 ) -> BulkResult:
     """Replay at most 100 selected entries within one bounded request deadline."""
     ensure_workspace(ctx, workspace_id)
-    accepted, rejected = await admin.bulk_replay(
+    accepted, rejected, cursor = await admin.bulk_replay(
         workspace_id,
         DeadLetterFilter(body.subscription_id, body.status, body.since, body.until),
         ctx.principal_id,
         limit=body.limit,
+        cursor=body.cursor,
     )
-    return BulkResult(accepted=accepted, rejected=rejected)
+    return BulkResult(
+        accepted=accepted,
+        rejected=rejected,
+        next_cursor=cursor.token if cursor is not None else None,
+    )
 
 
 async def dead_letter_error_handler(request: Request, exc: Exception) -> Response:
