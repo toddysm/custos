@@ -50,6 +50,7 @@ from custos_trigger.receivers.sources import (
     NORMALIZED_EVENTS_PATH,
     build_source_event_router,
 )
+from custos_trigger.receivers.webhook import DaprWebhookTransport, build_webhook_router
 from custos_trigger.settings import (
     DEFAULT_CONNECTOR_EVENTS_TOPIC,
     DEFAULT_DISPATCH_MAX_RETRIES,
@@ -59,9 +60,12 @@ from custos_trigger.settings import (
     DEFAULT_RESUME_DEFAULT_TTL_SECONDS,
     DEFAULT_WORKFLOW_EVENTS_TOPIC,
     ENV_APP_API_TOKEN,
+    ENV_CONNECTOR_APP_ID,
     ENV_CONNECTOR_EVENTS_TOPIC,
     ENV_DISPATCH_MAX_RETRIES,
     ENV_FANOUT_MAX_DEPTH,
+    ENV_GATEWAY_APP_ID,
+    ENV_GATEWAY_NAMESPACE,
     ENV_METADATA_STORE,
     ENV_NORMALIZED_TOPIC,
     ENV_PUBSUB_COMPONENT,
@@ -72,6 +76,7 @@ from custos_trigger.settings import (
     ENV_WORKFLOW_NAMESPACE,
     read_receiver_configuration_enabled,
     read_source_receivers_enabled,
+    read_webhook_receiver_enabled,
 )
 from custos_trigger.stores import (
     ResumeSubscriptionStore,
@@ -117,6 +122,8 @@ def create_app(
     call_context_verifier: CallContextVerifier | None = None,
     app_api_token: str | None = None,
     source_receivers_enabled: bool | None = None,
+    webhook_receiver_enabled: bool | None = None,
+    webhook_transport: DaprWebhookTransport | None = None,
 ) -> FastAPI:
     """Build and return the Trigger Service FastAPI application.
 
@@ -155,6 +162,10 @@ def create_app(
         app_api_token: Sidecar-to-app secret; defaults to ``APP_API_TOKEN``. Never
             sent to callers or used as an end-user identity.
         source_receivers_enabled: Default-off broker callback activation, separate from authoring.
+        webhook_receiver_enabled: Default-off verified ingress, requiring source consumption
+            and an explicit authenticated Gateway identity.
+        webhook_transport: Injected verifier/publisher transport. Its HTTP client remains
+            caller-owned; the default transport shares the lifespan-owned client.
 
     The factory is import-safe: no DSN lookups, no socket connections. All
     side-effecting work happens inside the FastAPI lifespan context.
@@ -177,6 +188,24 @@ def create_app(
         if source_receivers_enabled is not None
         else read_source_receivers_enabled(os.environ)
     )
+    effective_webhooks = (
+        webhook_receiver_enabled
+        if webhook_receiver_enabled is not None
+        else read_webhook_receiver_enabled(os.environ)
+    )
+    gateway_app_id = os.environ.get(ENV_GATEWAY_APP_ID, "api-gateway")
+    gateway_namespace = os.environ.get(ENV_GATEWAY_NAMESPACE)
+    if effective_webhooks and (
+        not effective_sources
+        or not effective_token
+        or not effective_token.strip()
+        or not gateway_namespace
+        or not gateway_namespace.strip()
+        or not gateway_app_id.strip()
+        or "://" in gateway_app_id
+        or "/" in gateway_app_id
+    ):
+        raise ValueError("webhook ingress requires source receivers and authenticated Gateway")
     workflow_topic = (
         os.environ.get(ENV_WORKFLOW_EVENTS_TOPIC, "").strip() or DEFAULT_WORKFLOW_EVENTS_TOPIC
     )
@@ -356,9 +385,30 @@ def create_app(
                 reliable=reliable,
             )
 
-        app.state.ready = True
-        logger.info("trigger-service is ready")
         try:
+            if effective_webhooks:
+                if webhook_transport is not None:
+                    app.state.webhook_transport = webhook_transport
+                else:
+                    import httpx
+
+                    from custos_trigger.clients import read_dapr_endpoint
+
+                    if owned_http_client is None:
+                        owned_http_client = httpx.AsyncClient()
+                    app.state.webhook_transport = DaprWebhookTransport(
+                        owned_http_client,
+                        read_dapr_endpoint(
+                            os.environ,
+                            app_id=os.environ.get(ENV_CONNECTOR_APP_ID, "connector-service"),
+                        ),
+                        pubsub=os.environ.get(ENV_PUBSUB_COMPONENT, "").strip()
+                        or DEFAULT_PUBSUB_COMPONENT,
+                        topic=normalized_topic,
+                        api_token=os.environ.get("DAPR_API_TOKEN"),
+                    )
+            app.state.ready = True
+            logger.info("trigger-service is ready")
             yield
         finally:
             if owned_http_client is not None:
@@ -385,6 +435,8 @@ def create_app(
         workflow_caller_verifier=effective_workflow_verifier,
         workflow_app_id=workflow_app_id,
         workflow_namespace=workflow_namespace,
+        gateway_app_id=gateway_app_id,
+        gateway_namespace=gateway_namespace,
     )
     # Pair the middleware with its exception handler so the dependency-side
     # 4xx responses (get_call_context / require_permission) emit the same
@@ -399,6 +451,7 @@ def create_app(
     app.include_router(subscriptions_router)
     app.include_router(resume_rpc_router)
     app.include_router(build_source_event_router(enabled=effective_sources))
+    app.include_router(build_webhook_router(enabled=effective_webhooks))
     # The internal-event receiver subscribes to the Workflow Service's lifecycle
     # topic via Dapr's programmatic subscription route (``GET /dapr/subscribe``).
     # Both the pub/sub component and topic are config-driven so air-gapped /

@@ -1,28 +1,9 @@
-"""Anonymous webhook pass-through for the Custos API Gateway (AGW-IMPL-014).
+"""Bounded scoped webhook ingress; external credentials are verification data only.
 
-``POST /v1/webhooks/{connectorInstanceId}`` is the gateway's single *anonymous*
-ingress (see ``design/components/api-gateway/design.md`` § "Webhook ingress").
-Unlike every other route, it carries no bearer, resolves no workspace and mints
-no call context: the request is anonymous at the gateway boundary and signature
-verification belongs to Trigger Service and the per-connector plugin, not the
-gateway. The gateway's job is narrow and mechanical:
-
-1. Enforce a 1 MiB body-size cap (the body is never inspected or altered).
-2. Forward the request to Trigger Service over Dapr — body verbatim, headers
-   minus ``Authorization`` (and the hop-by-hop / framing headers the Dapr client
-   re-derives), plus the caller's source IP appended to ``X-Forwarded-For``.
-3. Generate / propagate a correlation id so the anonymous hop is still traceable.
-
-An unknown ``{connectorInstanceId}`` is not the gateway's concern: it forwards
-the request and Trigger Service surfaces ``404 webhook-route-not-found``, which
-passes back through the response shaper unchanged (a downstream ``4xx`` is a raw
-pass-through; only a downstream ``5xx`` or transport error is masked as
-``503 downstream-unavailable``).
-
-Scope boundary (M1): this module declares the route and its forwarding. The
-correlation-id ingress middleware and the ``app.state`` downstream-router binding
-are assembled by :func:`custos_gateway.app.create_app` (AGW-IMPL-016); when this
-route runs standalone (no ingress middleware) it mints its own correlation id.
+The Gateway forwards exact raw bytes to Trigger over Dapr without authenticating
+an end user or minting a call context. Only the canonical workspace/connector
+route tunnels Authorization into a private verification header. Connector owns
+signature verification; ambiguous legacy ingress fails closed without forwarding.
 """
 
 from __future__ import annotations
@@ -31,8 +12,14 @@ from typing import TYPE_CHECKING, Final
 
 from custos_callctx import CALLCTX_HEADER
 from fastapi import APIRouter, Request, Response
+from starlette.routing import compile_path
 
-from custos_gateway.errors import CORRELATION_ID_HEADER, correlation_id_of
+from custos_gateway.errors import (
+    CORRELATION_ID_HEADER,
+    GatewayError,
+    GatewayErrorCode,
+    correlation_id_of,
+)
 from custos_gateway.middleware.auth import WEBHOOK_BYPASS_PREFIX
 from custos_gateway.middleware.correlation import new_correlation_id
 from custos_gateway.middleware.validate import enforce_body_size
@@ -54,9 +41,14 @@ __all__ = [
     "forward_headers",
 ]
 
-#: The single anonymous webhook ingress path. ``{connectorInstanceId}`` is
-#: opaque to the gateway and forwarded verbatim to Trigger Service.
-WEBHOOK_PATH: Final[str] = "/v1/webhooks/{connectorInstanceId}"
+WEBHOOK_PATH: Final[str] = (
+    "/v1/webhooks/workspaces/{workspaceId}/connectors/{connectorInstanceId}/events"
+)
+LEGACY_WEBHOOK_PATH: Final[str] = "/v1/webhooks/{connectorInstanceId}"
+WEBHOOK_AUTHORIZATION_HEADER: Final[str] = "x-custos-webhook-authorization"
+#: Trigger bounds the complete handoff to 60 seconds; retain 10 seconds for transport.
+WEBHOOK_READ_TIMEOUT_SECONDS: Final[float] = 70.0
+_SCOPED_PATH = compile_path(WEBHOOK_PATH)[0]
 
 #: Gateway-enforced body-size cap for webhook ingress (1 MiB). The design allows
 #: per-connector-type advice to tune this downstream, but the cap itself is
@@ -67,16 +59,12 @@ WEBHOOK_BODY_MAX_BYTES: Final[int] = DEFAULT_BODY_MAX_BYTES_DEFAULT
 FORWARDED_FOR_HEADER: Final[str] = "x-forwarded-for"
 
 #: Inbound headers the gateway never forwards on the anonymous webhook hop.
-#: ``authorization`` and any caller-supplied ``x-custos-callctx`` are dropped
-#: because the request is anonymous at the boundary — a caller-supplied bearer or
-#: call context is meaningless downstream and forwarding one would let a caller
-#: smuggle/replay an authenticated context onto a route the gateway intentionally
-#: leaves unauthenticated. ``host`` plus the hop-by-hop / framing headers are
-#: re-derived by the Dapr client for the sidecar hop.
+#: Never forward user-supplied platform identity or the private transport header.
 STRIPPED_INBOUND_HEADERS: Final[frozenset[str]] = HOP_BY_HOP_HEADERS | {
     "authorization",
     "host",
     CALLCTX_HEADER.lower(),
+    WEBHOOK_AUTHORIZATION_HEADER,
 }
 
 
@@ -87,13 +75,25 @@ def forward_headers(
 
     Copies every inbound header except :data:`STRIPPED_INBOUND_HEADERS`, appends
     ``source_ip`` to the ``X-Forwarded-For`` chain, and stamps the resolved
-    correlation id. ``Authorization`` is always dropped (anonymous hop).
+    correlation id. Only the exact scoped POST tunnels the external credential;
+    it never becomes a Custos identity or an ambient Authorization header.
     """
     headers: dict[str, str] = {
         name: value
         for name, value in request.headers.items()
-        if name.lower() not in STRIPPED_INBOUND_HEADERS
+        if name.lower() not in STRIPPED_INBOUND_HEADERS and not name.lower().startswith("dapr-")
     }
+    if request.scope.get("method") == "POST" and _SCOPED_PATH.fullmatch(
+        request.scope.get("path", "")
+    ):
+        credentials = request.headers.getlist("authorization")
+        if len(credentials) > 1:
+            raise GatewayError(
+                GatewayErrorCode.INVALID_TOKEN,
+                detail="Ambiguous webhook verification credential.",
+            )
+        if credentials:
+            headers[WEBHOOK_AUTHORIZATION_HEADER] = credentials[0]
     if source_ip:
         existing = request.headers.get(FORWARDED_FOR_HEADER)
         headers[FORWARDED_FOR_HEADER] = f"{existing}, {source_ip}" if existing else source_ip
@@ -110,8 +110,11 @@ def build_webhook_forwarder() -> Callable[[Request], Awaitable[Response]]:
     """
 
     async def _forward(request: Request) -> Response:
-        body = await request.body()
-        enforce_body_size(len(body), WEBHOOK_BODY_MAX_BYTES)
+        """Stop reading oversized streams before buffering or forwarding their remaining bytes."""
+        body = bytearray()
+        async for chunk in request.stream():
+            enforce_body_size(len(body) + len(chunk), WEBHOOK_BODY_MAX_BYTES)
+            body.extend(chunk)
 
         downstream = get_downstream_router(request)
         correlation_id = correlation_id_of(request) or new_correlation_id()
@@ -128,7 +131,8 @@ def build_webhook_forwarder() -> Callable[[Request], Awaitable[Response]]:
                 http_method=request.method,
                 method_path=method_path,
                 headers=headers,
-                body=body or None,
+                body=bytes(body) if body else None,
+                read_timeout=WEBHOOK_READ_TIMEOUT_SECONDS,
             )
         )
         return shaped_response(reply)
@@ -156,5 +160,20 @@ def build_webhook_router() -> APIRouter:
         build_webhook_forwarder(),
         methods=["POST"],
         name="webhook-passthrough",
+        openapi_extra={
+            "parameters": [
+                {"name": name, "in": "path", "required": True, "schema": {"type": "string"}}
+                for name in ("workspaceId", "connectorInstanceId")
+            ]
+        },
     )
+
+    @router.post(LEGACY_WEBHOOK_PATH, include_in_schema=False)
+    async def reject_legacy() -> Response:
+        """Reject ambiguous workspace-free routing without inspecting the body or forwarding."""
+        raise GatewayError(
+            GatewayErrorCode.WEBHOOK_ROUTE_NOT_FOUND,
+            detail="Use the workspace-scoped connector webhook URL.",
+        )
+
     return router

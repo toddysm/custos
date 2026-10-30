@@ -53,6 +53,10 @@ ENV_SCHEDULER_LEADER_RENEW_SECONDS: Final[str] = "TRIGGER_SCHEDULER_LEADER_RENEW
 #: Enable only after every subscription writer uses atomic receiver mutations.
 ENV_RECEIVER_CONFIGURATION_ENABLED: Final[str] = "TRIGGER_RECEIVER_CONFIGURATION_ENABLED"
 ENV_SOURCE_RECEIVERS_ENABLED: Final[str] = "TRIGGER_SOURCE_RECEIVERS_ENABLED"
+ENV_WEBHOOK_RECEIVER_ENABLED: Final[str] = "TRIGGER_WEBHOOK_RECEIVER_ENABLED"
+ENV_GATEWAY_APP_ID: Final[str] = "TRIGGER_GATEWAY_APP_ID"
+ENV_GATEWAY_NAMESPACE: Final[str] = "TRIGGER_GATEWAY_NAMESPACE"
+ENV_CONNECTOR_APP_ID: Final[str] = "TRIGGER_CONNECTOR_APP_ID"
 ENV_CONNECTOR_EVENTS_TOPIC: Final[str] = "TRIGGER_CONNECTOR_EVENTS_TOPIC"
 
 # --- Dapr Pub/Sub transport (chart § Dapr Pub/Sub subscriptions) -------------
@@ -140,6 +144,10 @@ class Settings:
     workflow_namespace: str | None = None
     source_receivers_enabled: bool = False
     connector_events_topic: str = DEFAULT_CONNECTOR_EVENTS_TOPIC
+    webhook_receiver_enabled: bool = False
+    gateway_app_id: str = "api-gateway"
+    gateway_namespace: str | None = None
+    connector_app_id: str = "connector-service"
 
     def __post_init__(self) -> None:
         """Reject unusable ownership timing or an explicitly blank mesh credential."""
@@ -208,6 +216,11 @@ def read_source_receivers_enabled(env: Mapping[str, str]) -> bool:
     return _read_gate(env, ENV_SOURCE_RECEIVERS_ENABLED)
 
 
+def read_webhook_receiver_enabled(env: Mapping[str, str]) -> bool:
+    """Keep public verification and handoff disabled until explicitly configured."""
+    return _read_gate(env, ENV_WEBHOOK_RECEIVER_ENABLED)
+
+
 def _read_gate(env: Mapping[str, str], name: str) -> bool:
     """Parse an explicit boolean gate without success-shaped invalid-value defaults."""
     raw = env.get(name, "").strip().lower()
@@ -230,6 +243,10 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
     return Settings(
         receiver_configuration_enabled=read_receiver_configuration_enabled(src),
         source_receivers_enabled=read_source_receivers_enabled(src),
+        webhook_receiver_enabled=read_webhook_receiver_enabled(src),
+        gateway_app_id=src.get(ENV_GATEWAY_APP_ID, "api-gateway"),
+        gateway_namespace=src.get(ENV_GATEWAY_NAMESPACE),
+        connector_app_id=src.get(ENV_CONNECTOR_APP_ID, "connector-service"),
         connector_events_topic=src.get(ENV_CONNECTOR_EVENTS_TOPIC, "").strip()
         or DEFAULT_CONNECTOR_EVENTS_TOPIC,
         webhook_base_url=_require(ENV_WEBHOOK_BASE_URL, src),
@@ -283,12 +300,15 @@ __all__ = [
     "DEFAULT_WORKFLOW_EVENTS_TOPIC",
     "ENV_APP_API_TOKEN",
     "ENV_AUTHZ_ENDPOINT",
+    "ENV_CONNECTOR_APP_ID",
     "ENV_CONNECTOR_ENDPOINT",
     "ENV_CONNECTOR_EVENTS_TOPIC",
     "ENV_DEDUP_TTL_SECONDS",
     "ENV_DISPATCH_MAX_RETRIES",
     "ENV_ENVIRONMENT",
     "ENV_FANOUT_MAX_DEPTH",
+    "ENV_GATEWAY_APP_ID",
+    "ENV_GATEWAY_NAMESPACE",
     "ENV_METADATA_STORE",
     "ENV_NORMALIZED_TOPIC",
     "ENV_POLLER_DEFAULT_INTERVAL_SECONDS",
@@ -299,6 +319,7 @@ __all__ = [
     "ENV_SCHEDULER_LEADER_RENEW_SECONDS",
     "ENV_SOURCE_RECEIVERS_ENABLED",
     "ENV_WEBHOOK_BASE_URL",
+    "ENV_WEBHOOK_RECEIVER_ENABLED",
     "ENV_WORKFLOW_APP_ID",
     "ENV_WORKFLOW_ENDPOINT",
     "ENV_WORKFLOW_EVENTS_TOPIC",
@@ -308,5 +329,6 @@ __all__ = [
     "load_settings",
     "read_receiver_configuration_enabled",
     "read_source_receivers_enabled",
+    "read_webhook_receiver_enabled",
     "validate_scheduler_timing",
 ]
