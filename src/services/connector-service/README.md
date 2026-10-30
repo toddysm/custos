@@ -43,7 +43,7 @@ following `CONN_*` environment variables.
 |---|---|---|---|
 | `CONN_CATALOG_STORE` | Yes | — | `CatalogStoreProvider` binding (Postgres DSN in v1). Used for the `ConnectorTypeVersion` registry. |
 | `CONN_METADATA_STORE` | Yes | — | `MetadataStoreProvider` binding (Postgres DSN in v1). Used for `ConnectorInstance`, leases, and pull cursors. |
-| `CONN_AUTHZ_ENDPOINT` | Yes (prod) | — | AuthN/AuthZ Service endpoint. Empty switches the call-context middleware to a dev-shim and refuses to start when `ENVIRONMENT=production`. |
+| `CONN_AUTHZ_ENDPOINT` | Yes (prod) | — | Auth Service base URL; public keys at `/.well-known/jwks.json` verify signed contexts. Invalid contexts return 401 and unavailable verification returns 503. Empty enables the dev shim, forbidden in production. |
 | `CONN_CATALOG_ENDPOINT` | Yes | — | Catalog Service endpoint for `ResolveConnectorTypeRef` lookups. |
 | `CONN_OCI_REFERRERS_TIMEOUT_MS` | No | `5000` | OCI Referrers API per-request timeout. |
 | `CONN_PUBLISH_MAX_BODY_MB` | No | `4` | Maximum ConnectorManifest size at registry write. |
