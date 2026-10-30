@@ -183,11 +183,18 @@ class Dispatcher:
         self.reliable = reliable
 
     async def dispatch_start(
-        self, event: NormalizedEvent, match: StartMatch, *, depth: int = 0
+        self,
+        event: NormalizedEvent,
+        match: StartMatch,
+        *,
+        depth: int = 0,
+        prepare_inputs: Callable[[], dict[str, Any]] | None = None,
     ) -> DispatchOutcome:
-        """Dispatch a start match as a Workflow Service ``StartRun``."""
+        """Check durable recovery before optionally preparing new start inputs."""
         if self.reliable is not None:
-            return await self.reliable.dispatch_start(event, match, depth=depth)
+            return await self.reliable.dispatch_start(
+                event, match, depth=depth, prepare_inputs=prepare_inputs
+            )
         sub = match.subscription
         await self._audit.emit(
             AUDIT_MATCHED,
@@ -223,7 +230,7 @@ class Dispatcher:
         request = StartRunRequest(
             workspace_id=sub.workspace_id,
             workflow_version_id=version,
-            inputs=dict(sub.input_mapping),
+            inputs=prepare_inputs() if prepare_inputs is not None else dict(sub.input_mapping),
             idempotency_key=idempotency_key,
         )
 

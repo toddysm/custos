@@ -12,7 +12,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from custos_spl.errors import ImmutableViolation, LeaseExpired, QueryUnsupported
 from custos_spl.ids import WorkspaceId
@@ -209,17 +209,19 @@ async def process_scheduled_event(
             attributes={"eventId": event.event_id, "subscriptionId": identifier},
         )
         return None
-    resolved = subscription.model_copy(
-        update={
-            "input_mapping": resolve_input_mapping(
-                subscription.input_mapping,
-                event,
-                evaluator=evaluator,
-                subscription_id=subscription.subscription_id,
-            ),
-        }
+
+    def prepare_inputs() -> dict[str, Any]:
+        """Resolve new occurrence inputs only after durable receipt recovery."""
+        return resolve_input_mapping(
+            subscription.input_mapping,
+            event,
+            evaluator=evaluator,
+            subscription_id=subscription.subscription_id,
+        )
+
+    return await dispatcher.dispatch_start(
+        event, StartMatch(subscription), prepare_inputs=prepare_inputs
     )
-    return await dispatcher.dispatch_start(event, StartMatch(resolved))
 
 
 @dataclass(frozen=True)

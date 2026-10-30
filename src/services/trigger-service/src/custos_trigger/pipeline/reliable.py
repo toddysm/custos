@@ -138,6 +138,7 @@ class ReliableDispatcher:
         match: StartMatch,
         *,
         depth: int = 0,
+        prepare_inputs: Callable[[], dict[str, Any]] | None = None,
     ) -> DispatchOutcome:
         """Dispatch a resolved start target without consulting mutable configuration on replay."""
         sub = match.subscription
@@ -147,6 +148,7 @@ class ReliableDispatcher:
             sub.subscription_id,
             build_start_target(sub),
             depth,
+            prepare_inputs=prepare_inputs,
         )
 
     async def dispatch_resume(
@@ -258,6 +260,8 @@ class ReliableDispatcher:
         subscription_id: str,
         target: Mapping[str, Any],
         depth: int,
+        *,
+        prepare_inputs: Callable[[], dict[str, Any]] | None = None,
     ) -> DispatchOutcome:
         """Never acknowledge pending work, failed capture or lost ownership as success."""
         attributes = {
@@ -284,6 +288,8 @@ class ReliableDispatcher:
                     )
                 data = decode_delivery_request(prior.request_json, now)
             else:
+                if prepare_inputs is not None:
+                    target = {**target, "inputs": prepare_inputs()}
                 try:
                     data = DeadLetterData(
                         workspace_id=WorkspaceId(workspace),

@@ -193,6 +193,9 @@ durable-dispatch validation retains its 256-KiB object/depth/privacy limits.
 Resolved start and resume targets are preflighted as complete RPC objects,
 including their routing fields and wrappers; invalid target configuration retries
 rather than surfacing an unstructured serialization failure.
+Existing durable receipts are checked before input preparation or new-target
+validation. Changed mappings cannot block duplicate detection or replace an
+already accepted pending target.
 
 Activation requires the upgraded-writer gate, durable dispatch capabilities and
 schema readiness (including scheduler revision 9), the sidecar app token and

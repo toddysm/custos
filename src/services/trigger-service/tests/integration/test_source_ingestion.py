@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import timedelta
 from typing import Any, Literal, cast
 from unittest.mock import AsyncMock
 
@@ -10,14 +11,22 @@ import pytest
 from custos_pg import PgMetadataAdapter
 from custos_spl.errors import BackendUnavailable
 from custos_spl.ids import SubscriptionId, WorkspaceId
-from custos_spl.interfaces.dead_letters import json_value
+from custos_spl.interfaces.dead_letters import (
+    MAX_PAYLOAD_BYTES,
+    DeadLetterData,
+    DispatchAttempt,
+    json_value,
+)
+from custos_spl.interfaces.delivery import delivery_fingerprint, delivery_identity
 from custos_spl.interfaces.trigger_queries import SubscriptionSnapshot
 
 from custos_trigger.clients import FakeWorkflowServiceClient
 from custos_trigger.clients.workflow import WorkflowClientTransportError
+from custos_trigger.dedup import compute_dispatch_key
 from custos_trigger.errors import TriggerError
 from custos_trigger.models import ResumeRegistration, SourceType
 from custos_trigger.pipeline.dispatch import NoopAuditSink
+from custos_trigger.pipeline.reliable import build_start_target
 from custos_trigger.providers import InMemoryTriggerMetadataStore
 from custos_trigger.receivers.sources import (
     SOURCE_PAGE_SIZE,
@@ -173,6 +182,54 @@ async def test_connector_rebinding_does_not_alias_prior_event_ids(
     assert len(client.start_run_calls) == 2
     assert client.start_run_calls[0].idempotency_key != client.start_run_calls[1].idempotency_key
     assert client.start_run_calls[1].inputs["label"] == "ref-other"
+
+
+@pytest.mark.parametrize("completed", [False, True])
+@pytest.mark.parametrize("mapping_failure", ["unretainable", "unresolvable"])
+async def test_existing_receipts_precede_changed_mapping_preparation(
+    source_store: SourceStorage, completed: bool, mapping_failure: str
+) -> None:
+    """Accepted targets recover or deduplicate without evaluating a newly broken mapping."""
+    sub = await start(source_store, "recover")
+    client = FakeWorkflowServiceClient()
+    expected = {"amount": 7, "label": "ref-same"}
+    if completed:
+        await consume(source_store, client)
+    else:
+        event = adapt_connector_event(connector_event()).event
+        key = compute_dispatch_key(sub.subscription_id, event)
+        now = await source_store.delivery_now()
+        data = DeadLetterData(
+            workspace_id=WorkspaceId(WS),
+            entry_id="dl_" + delivery_identity(WS, key),
+            subscription_id=sub.subscription_id,
+            idempotency_key=key,
+            event=event.model_dump(mode="json", by_alias=True, exclude={"raw"}),
+            target=build_start_target(sub.model_copy(update={"input_mapping": expected})),
+            history=(DispatchAttempt(now, "configuration"),),
+        )
+        claim = await source_store.reserve_delivery(
+            WorkspaceId(WS),
+            "trigger",
+            key,
+            delivery_fingerprint({"target": json_value(data.target)}),
+            now + timedelta(hours=1),
+            request=data,
+        )
+        await source_store.release_delivery(claim)
+    invalid_mapping = (
+        {"oversized": "x" * MAX_PAYLOAD_BYTES}
+        if mapping_failure == "unretainable"
+        else {"missing": "${{ event.data.absent }}"}
+    )
+    await SubscriptionStore(source_store).update(
+        sub.model_copy(update={"input_mapping": invalid_mapping}),
+        expected_revision=sub.store_revision,
+    )
+    await consume(source_store, client)
+    await consume(source_store, client)
+    assert len(client.start_run_calls) == 1
+    assert client.start_run_calls[0].inputs == expected
 
 
 async def test_active_revision_conflict_retries_instead_of_losing_delivery(
