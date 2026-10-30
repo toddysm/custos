@@ -566,8 +566,9 @@ metadata revision 7, with memory parity. The opt-in reliable dispatcher and
 versioned Workflow consumer add atomic capture, receipts, immutable runtime
 inputs and durable mirrors in revision 8, following the approved #1014
 adjustment. Both new execution flags remain default-off. Administrative routes,
-expiration auditing and cleanup orchestration belong to
-[#1016](https://github.com/toddysm/custos/issues/1016). The behavior below is the
+atomic lifecycle audit/outbox writes and a bounded workspace-paged retention
+collaborator are implemented by [#1016](https://github.com/toddysm/custos/issues/1016).
+Periodic activation and workspace discovery remain #1017. The behavior below is the
 target design, amended by approved
 [D05](../../requirements/trigger-m2-receivers.md#d05---durable-replay-and-downstream-idempotency).
 

@@ -410,8 +410,9 @@ completion records `replayed` and an optional result identity.
 Provider time is authoritative, including after database lock waits. No claim
 starts at or after retention expiry. A previously acquired live claim can finish
 past retention; discard and retention deletion cannot steal it. Terminal entries
-remain inspectable until retention deletion. The deletion primitive does **not**
-emit audit events: callers must arrange durable expiration audit before removal.
+remain inspectable until retention deletion. The deletion primitive atomically
+appends the expiration audit/outbox event before removal; audit failure rolls
+back deletion.
 
 ### Durable dispatch and replay (opt-in)
 
@@ -476,9 +477,87 @@ Existing public request formats and the default legacy path remain valid.
 The receipt horizon covers dead-letter retention plus bounded in-flight work.
 It is a **minimum**, not an independent purge timer: dead-letter cleanup must not
 remove downstream receipts or runtime-input snapshots. Do not purge Dapr history
-or unresolved delivery records while recovery remains possible. Authorized
-administration and audited payload retention cleanup remain
-[#1016](https://github.com/toddysm/custos/issues/1016).
+or unresolved delivery records while recovery remains possible.
+
+### Dead-letter administration
+
+These routes require `trigger:admin` and enabled durable dispatch
+(`TRIGGER_DURABLE_DISPATCH_ENABLED=true`). Disabled durable dispatch returns
+503 rather than falling back to volatile replay. Gateway forwards the routes
+with its normal authentication, idempotency and rate-limit controls; write
+requests should provide an `Idempotency-Key`. Static recovery routes precede
+dynamic subscription identifiers in both services. Gateway write requests also
+require `Content-Type: application/json`, including bodyless replay commands.
+
+Base: `/v1/workspaces/{workspaceId}/triggers/deadletter`.
+
+| Method and suffix | Request | Response |
+|---|---|---|
+| `GET` collection | Optional `subscriptionId`, `status`, aware `since`/`until`, `cursor`, `limit` | `{items, nextCursor}` |
+| `GET /{entryId}` | None | Version-one entry with original event, target, key and bounded attempt history |
+| `POST /{entryId}:replay` | No body | `{status}`: persisted `replayed`, `pending` or `discarded` |
+| `POST /{entryId}:discard` | Optional `{"reason":"operator decision"}` | 204, including already-discarded entries |
+| `POST :replay` | Optional filter fields and `limit` in a JSON object | `{accepted, rejected}` |
+
+Pages default to 50 and cap at 100. `status` accepts `pending`, `replaying`,
+`replayed`, or `discarded`; `expired` is an audited removal, not a retained
+status. Date filters are inclusive and must have a timezone. Cursors bind the
+workspace and every filter: continue with identical filters, and do not parse
+or modify the token. Entry responses include `schemaVersion: 1`, `workspaceId`,
+`entryId`, `subscriptionId`, `idempotencyKey`, `event`, `target`, `history`,
+`replayHistory`, `status`, `createdAt`, `expiresAt`, `resultId`, and
+`claimExpiresAt`; they never expose the live claim token or original transport
+credentials.
+
+Replay uses the stored target without rematching a changed subscription.
+Repeating a successful replay returns `{"status":"replayed"}` without another
+Workflow call. A live concurrent claim or unsafe/terminal target returns
+`409 trigger.deadletter.conflict`; an already-replayed entry cannot be discarded.
+A failed replay reports the persisted pending/discarded status, not success.
+Missing or cross-workspace entries return 404. Missing identity returns 401,
+insufficient permission or a mismatched path workspace returns 403, invalid
+filters/bodies return 422, and unavailable storage returns 503.
+
+Bulk replay selects at most 100 entries and executes no more than eight at once.
+`accepted` counts completed or already-completed replays; `rejected` counts
+per-entry conflicts, vanished entries and failed attempts. A provider outage
+fails the request explicitly instead of counting entries as successful.
+Single and bulk commands have a 60-second total deadline. Gateway allows a
+70-second response-read budget for these recovery writes; other routes keep
+their existing timeout. On timeout, owned tasks are cancelled and awaited and
+the request returns 503. Some effects may already be durable: inspect entries
+before retrying. Unfinished claims remain fenced until their bounded lease
+expires, then recover with interrupted history and the original idempotency key.
+
+```http
+POST /v1/workspaces/team-a/triggers/deadletter/dl-42:replay
+Idempotency-Key: recovery-dl-42
+Content-Type: application/json
+
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"status":"replayed"}
+```
+
+An active replay instead returns a problem-details response with
+`code: "trigger.deadletter.conflict"` and HTTP status 409.
+
+Storage commits lifecycle events `trigger.deadletter.stored`, `.replayed`,
+`.replay_failed`, `.discarded`, and `.expired` through the durable audit/outbox
+in the **same transaction** as the state change. Audit failure rolls back the
+mutation. Events retain safe entry/subscription/source identifiers and optional
+discard reasons, not normalized payloads or credentials; do not put secrets in
+operator reasons. Interrupted replay recovery is audited, including exhausted
+attempts becoming discarded.
+
+Retention starts at capture and uses `TRIGGER_DEADLETTER_RETENTION_SECONDS`
+(default 30 days). The bounded, workspace-paged sweeper handles every status
+but never removes a live replay claim. Expiration audit and payload deletion
+are atomic; repeated sweeps emit no duplicate expiration event. This cleanup
+does not purge downstream receipts or runtime snapshots. Production periodic
+sweep scheduling and workspace discovery are wired by
+[#1017](https://github.com/toddysm/custos/issues/1017).
 
 ## Authentication and call context
 

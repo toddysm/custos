@@ -58,6 +58,7 @@ from custos_spl.interfaces.dead_letters import (
     DispatchAttempt,
     ReplayClaim,
     claim_replay,
+    dead_letter_transition_audits,
     decode_dead_letter,
     discard_dead_letter,
     encode_dead_letter,
@@ -947,6 +948,7 @@ class PgMetadataAdapter:
                     entry.expires_at,
                     encode_dead_letter(entry),
                 )
+                await self._audit_dead_letter_transition(conn, None, entry)
             result = delivery_result(json.dumps({"deadLetterId": data.entry_id}))
             await self._write_delivery(
                 conn,
@@ -1093,6 +1095,7 @@ class PgMetadataAdapter:
                 entry.expires_at,
                 encode_dead_letter(entry),
             )
+            await self._audit_dead_letter_transition(conn, None, entry)
             return entry
 
     async def get_dead_letter(
@@ -1160,6 +1163,27 @@ class PgMetadataAdapter:
         )
         return decode_dead_letter(payload) if payload is not None else None
 
+    async def _audit_dead_letter_transition(
+        self,
+        conn: Connection,
+        before: DeadLetterEntry | None,
+        after: DeadLetterEntry | None,
+        *,
+        actor: str = "trigger-service",
+        reason: str | None = None,
+    ) -> None:
+        """Append lifecycle audit/outbox entries inside the caller's state transaction."""
+        events = dead_letter_transition_audits(
+            before, after, await _scheduler_now(conn), actor=actor, reason=reason
+        )
+        handle = PgTransactionHandle(conn)
+        bind_handle(handle, self)
+        try:
+            for event in events:
+                await self.append_audit(event.workspace_id, event, tx=handle)
+        finally:
+            handle._mark_closed()
+
     async def _write_dead_letter(
         self,
         conn: Connection,
@@ -1200,6 +1224,7 @@ class PgMetadataAdapter:
                 raise ImmutableViolation("dead-letter entry does not exist")
             entry = claim_replay(current, worker_id, ttl_seconds, await _scheduler_now(conn))
             await self._write_dead_letter(conn, entry, claiming=True)
+            await self._audit_dead_letter_transition(conn, current, entry, actor=worker_id)
             return entry
 
     async def finish_dead_letter(
@@ -1218,6 +1243,9 @@ class PgMetadataAdapter:
                 current, claim, await _scheduler_now(conn), failure=failure, result_id=result_id
             )
             await self._write_dead_letter(conn, entry, finishing=True)
+            await self._audit_dead_letter_transition(
+                conn, current, entry, actor=current.replay_history[-1].worker_id
+            )
             return entry
 
     async def recover_dead_letter(
@@ -1231,10 +1259,16 @@ class PgMetadataAdapter:
             entry = recover_replay(current, await _scheduler_now(conn))
             if entry != current:
                 await self._write_dead_letter(conn, entry)
+                await self._audit_dead_letter_transition(conn, current, entry)
             return entry
 
     async def discard_dead_letter(
-        self, workspace_id: WorkspaceId, entry_id: str
+        self,
+        workspace_id: WorkspaceId,
+        entry_id: str,
+        *,
+        actor: str = "trigger-service",
+        reason: str | None = None,
     ) -> DeadLetterEntry:
         """Serialize operator discard against replay acquisition/completion."""
         async with self._dead_letter_transaction() as conn:
@@ -1243,6 +1277,9 @@ class PgMetadataAdapter:
                 raise ImmutableViolation("dead-letter entry does not exist")
             entry = discard_dead_letter(current, await _scheduler_now(conn))
             await self._write_dead_letter(conn, entry)
+            await self._audit_dead_letter_transition(
+                conn, current, entry, actor=actor, reason=reason
+            )
             return entry
 
     async def delete_expired_dead_letter(self, workspace_id: WorkspaceId, entry_id: str) -> bool:
@@ -1256,6 +1293,7 @@ class PgMetadataAdapter:
                 or (current.claim and current.claim.expires_at > now)
             ):
                 return False
+            await self._audit_dead_letter_transition(conn, current, None)
             await conn.execute(
                 "DELETE FROM custos_state.dead_letter WHERE workspace_id=$1 AND entry_id=$2",
                 workspace_id,

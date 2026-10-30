@@ -275,7 +275,7 @@ Routes are grouped by the owning downstream component (its Dapr app-id):
 | Auth Service | `custos-auth` | Service accounts, tokens, role bindings |
 | Catalog Service | `catalog-service` | Workflows, templates, activity-types, connector-types |
 | Workflow Service | `workflow-service` | Run lifecycle (start, read, cancel, steps) |
-| Trigger Service | `trigger-service` | Trigger subscription CRUD + manual fire |
+| Trigger Service | `trigger-service` | Trigger subscription CRUD, manual fire and dead-letter administration |
 | Connector Service | `connector-service` | Connector instance lifecycle + lease admin |
 | Observability & Audit | `observability-audit-service` | Logs, metrics, audit reads |
 
@@ -290,7 +290,7 @@ the registry enforces across all routes:
 - `workflow:execute`
 - `run:read`, `run:cancel`
 - `trigger:subscriptions:read`, `trigger:subscriptions:write`,
-  `trigger:subscriptions:delete`, `trigger:subscriptions:fire`
+  `trigger:subscriptions:delete`, `trigger:subscriptions:fire`, `trigger:admin`
 - `connector:read`
 - `logs:read`, `metrics:read`, `audit:read`
 

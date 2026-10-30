@@ -15,7 +15,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any, Protocol, runtime_checkable
 
-from custos_spl.errors import ImmutableViolation, SPLError
+from custos_spl.errors import ImmutableViolation, LeaseBusy, SPLError
 from custos_spl.ids import WorkspaceId
 from custos_spl.interfaces.dead_letters import (
     DeadLetterData,
@@ -406,6 +406,10 @@ class ReliableDispatcher:
                     worker_id,
                     ttl_seconds=300,
                 )
+            except LeaseBusy as exc:
+                raise TriggerError(
+                    TriggerErrorKind.REPLAY_UNSAFE, "entry already has an active replay"
+                ) from exc
             except ImmutableViolation as exc:
                 await self.store.recover_dead_letter(ws, entry_id)
                 raise TriggerError(

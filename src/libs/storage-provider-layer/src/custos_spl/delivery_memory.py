@@ -9,7 +9,12 @@ from datetime import UTC, datetime
 
 from custos_spl.errors import ImmutableViolation, LeaseBusy
 from custos_spl.ids import WorkspaceId
-from custos_spl.interfaces.dead_letters import DeadLetterData, DeadLetterEntry, new_dead_letter
+from custos_spl.interfaces.dead_letters import (
+    DeadLetterData,
+    DeadLetterEntry,
+    dead_letter_transition_audits,
+    new_dead_letter,
+)
 from custos_spl.interfaces.delivery import (
     DeliveryNamespace,
     DeliveryReceipt,
@@ -23,7 +28,7 @@ from custos_spl.interfaces.delivery import (
     validate_delivery_key,
     validate_failure_capture,
 )
-from custos_spl.interfaces.metadata_store import Run
+from custos_spl.interfaces.metadata_store import AuditEvent, Run
 from custos_spl.pagination import (
     Cursor,
     Page,
@@ -44,6 +49,12 @@ class MemoryDeliveryState:
         self._delivery_run_rows: dict[tuple[str, str], Run] = {}
         self._workflow_starts: dict[tuple[str, str], WorkflowStart] = {}
         self._delivery_dead_letters: dict[tuple[str, str], DeadLetterEntry] = {}
+        self._dead_letter_audits: list[AuditEvent] = []
+
+    @property
+    def dead_letter_audits(self) -> tuple[AuditEvent, ...]:
+        """Expose development-backend lifecycle evidence without mutable list ownership."""
+        return tuple(self._dead_letter_audits)
 
     async def capture_failed_delivery(
         self, claim: DeliveryReceipt, data: DeadLetterData
@@ -64,6 +75,8 @@ class MemoryDeliveryState:
             raise ImmutableViolation("failure capture identity is already bound")
         entry = existing if existing is not None else new_dead_letter(data, now)
         result = delivery_result(json.dumps({"deadLetterId": data.entry_id}))
+        audits = dead_letter_transition_audits(existing, entry, now)
+        self._dead_letter_audits.extend(audits)
         self._delivery_dead_letters[entry_key] = entry
         self._delivery_rows[key] = replace(
             current, token=None, lease_until=None, result_json=result, request_json=None

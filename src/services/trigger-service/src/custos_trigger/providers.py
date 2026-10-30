@@ -32,6 +32,7 @@ from custos_spl.interfaces.dead_letters import (
     DispatchAttempt,
     ReplayClaim,
     claim_replay,
+    dead_letter_transition_audits,
     discard_dead_letter,
     finish_replay,
     new_dead_letter,
@@ -156,6 +157,7 @@ class InMemoryTriggerMetadataStore(MemoryDeliveryState):
         if key in self._dead_letters:
             raise ImmutableViolation("dead-letter entry already exists")
         entry = new_dead_letter(data, self._now())
+        self._dead_letter_audits.extend(dead_letter_transition_audits(None, entry, self._now()))
         self._dead_letters[key] = entry
         return entry
 
@@ -206,8 +208,11 @@ class InMemoryTriggerMetadataStore(MemoryDeliveryState):
         ttl_seconds: int = 60,
     ) -> DeadLetterEntry:
         """Consume one fenced attempt without yielding between read and replacement."""
-        entry = claim_replay(
-            self._dead_letter(workspace_id, entry_id), worker_id, ttl_seconds, self._now()
+        previous = self._dead_letter(workspace_id, entry_id)
+        now = self._now()
+        entry = claim_replay(previous, worker_id, ttl_seconds, now)
+        self._dead_letter_audits.extend(
+            dead_letter_transition_audits(previous, entry, now, actor=worker_id)
         )
         self._dead_letters[(str(workspace_id), entry_id)] = entry
         return entry
@@ -224,6 +229,11 @@ class InMemoryTriggerMetadataStore(MemoryDeliveryState):
         if entry is None:
             raise LeaseExpired("replay claim no longer exists")
         finished = finish_replay(entry, claim, self._now(), failure=failure, result_id=result_id)
+        self._dead_letter_audits.extend(
+            dead_letter_transition_audits(
+                entry, finished, self._now(), actor=entry.replay_history[-1].worker_id
+            )
+        )
         self._dead_letters[(str(claim.workspace_id), claim.entry_id)] = finished
         return finished
 
@@ -231,15 +241,26 @@ class InMemoryTriggerMetadataStore(MemoryDeliveryState):
         self, workspace_id: WorkspaceId, entry_id: str
     ) -> DeadLetterEntry:
         """Mark abandoned attempts interrupted; the final abandoned attempt becomes discarded."""
-        entry = recover_replay(self._dead_letter(workspace_id, entry_id), self._now())
+        previous = self._dead_letter(workspace_id, entry_id)
+        entry = recover_replay(previous, self._now())
+        self._dead_letter_audits.extend(dead_letter_transition_audits(previous, entry, self._now()))
         self._dead_letters[(str(workspace_id), entry_id)] = entry
         return entry
 
     async def discard_dead_letter(
-        self, workspace_id: WorkspaceId, entry_id: str
+        self,
+        workspace_id: WorkspaceId,
+        entry_id: str,
+        *,
+        actor: str = "trigger-service",
+        reason: str | None = None,
     ) -> DeadLetterEntry:
         """Keep active replay and successful outcomes safe from concurrent operator discard."""
-        entry = discard_dead_letter(self._dead_letter(workspace_id, entry_id), self._now())
+        previous = self._dead_letter(workspace_id, entry_id)
+        entry = discard_dead_letter(previous, self._now())
+        self._dead_letter_audits.extend(
+            dead_letter_transition_audits(previous, entry, self._now(), actor=actor, reason=reason)
+        )
         self._dead_letters[(str(workspace_id), entry_id)] = entry
         return entry
 
@@ -254,6 +275,7 @@ class InMemoryTriggerMetadataStore(MemoryDeliveryState):
             or (entry.claim and entry.claim.expires_at > now)
         ):
             return False
+        self._dead_letter_audits.extend(dead_letter_transition_audits(entry, None, now))
         del self._dead_letters[key]
         return True
 

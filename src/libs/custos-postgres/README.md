@@ -36,6 +36,14 @@ Drain old pollers, apply migrations, explicitly confirm operator intent, then
 enable durable polling on all replicas. See the
 [Connector operating contract](../../services/connector-service/README.md#durable-pull-controls-and-demand).
 
+### Audited dead-letter lifecycle
+
+Dead-letter lifecycle mutations also append their safe audit event and outbox
+record in the same transaction. Capture, replay completion/failure, interrupted
+claim recovery, operator discard and expiration cannot commit without their
+required audit. Expiration locks the entry, rechecks retention/live ownership,
+then audits and removes the payload without deleting downstream receipts.
+
 ## Entry points
 
 This package registers two adapters under the `custos_spl.adapters`

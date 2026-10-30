@@ -51,6 +51,15 @@ Missing or forged mesh credentials fail
 before tenant state access. Deployment secret, access-control and network-policy
 activation remain part of [#1017](https://github.com/toddysm/custos/issues/1017).
 
+Dead-letter administration exposes workspace-scoped list, inspect, replay,
+discard and bounded bulk replay under `/v1/workspaces/{workspaceId}/triggers/deadletter`.
+Every route requires `trigger:admin` and enabled durable dispatch. Storage
+commits lifecycle audit/outbox events atomically with capture, replay completion,
+discard and expiration. The paged retention collaborator preserves live replay
+claims; automatic workspace discovery and periodic sweeping remain #1017.
+See the [administration contract](../../../docs/developers/trigger-api.md#dead-letter-administration)
+for limits, error codes, original-target replay and timeout recovery.
+
 ## Layout
 
 ```

@@ -53,6 +53,7 @@ EXPECTED_PERMISSIONS = {
     "trigger:subscriptions:read",
     "trigger:subscriptions:delete",
     "trigger:subscriptions:fire",
+    "trigger:admin",
     "admin:connector",
     "connector:read",
     "audit:read",
@@ -233,6 +234,17 @@ def test_audit_leases_precedes_audit_event_lookup() -> None:
     leases = paths.index(("GET", "/v1/workspaces/{workspaceId}/audit/leases"))
     event = paths.index(("GET", "/v1/workspaces/{workspaceId}/audit/{eventId}"))
     assert leases < event
+
+
+def test_dead_letter_routes_precede_subscription_lookup() -> None:
+    """Static recovery names cannot be mistaken for dynamic subscription identifiers."""
+    paths = [(spec.method, spec.path) for spec in M1_ROUTE_REGISTRY]
+    collection = paths.index(("GET", "/v1/workspaces/{workspaceId}/triggers/deadletter"))
+    subscription = paths.index(("GET", "/v1/workspaces/{workspaceId}/triggers/{subscriptionId}"))
+    assert collection < subscription
+    recovery = [spec for spec in M1_ROUTE_REGISTRY if "/deadletter" in spec.path]
+    assert len(recovery) == 5
+    assert all(spec.required_permission == "trigger:admin" for spec in recovery)
 
 
 # --- derived attributes ------------------------------------------------------
@@ -445,6 +457,34 @@ def test_forwarder_carries_query_string() -> None:
     assert str(captured["url"]).endswith(
         "/v1.0/invoke/workflow-service/method/v1/workspaces/ws-1/runs?status=running&limit=10"
     )
+
+
+@pytest.mark.parametrize("suffix", [":replay", "/entry:replay", "/entry:discard"])
+def test_dead_letter_mutations_allow_bounded_recovery_deadline(suffix: str) -> None:
+    """Only recovery writes extend read waiting beyond Trigger's 60-second command budget."""
+    captured: list[dict[str, float | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Observe actual HTTPX timeout extensions on the forwarded request."""
+        captured.append(request.extensions["timeout"])
+        return httpx.Response(200, json={"status": "replayed"})
+
+    path = "/v1/workspaces/{workspaceId}/triggers/deadletter" + suffix
+    template = path.replace("/entry:", "/{entryId}:")
+    spec = _spec("POST", template)
+    app = FastAPI()
+    register_exception_handlers(app)
+    app.add_api_route(
+        template,
+        registry._make_forwarder(spec),
+        methods=["POST"],
+        dependencies=[Depends(_stamp_auth)],
+    )
+    app.state.downstream_router = _router_with(httpx.MockTransport(handler))
+    with TestClient(app) as client:
+        response = client.post(path.replace("{workspaceId}", "ws-1"), json={})
+    assert response.status_code == 200
+    assert captured == [{"connect": 10.0, "read": 70.0, "write": 10.0, "pool": 10.0}]
 
 
 def test_forwarder_returns_503_when_router_unbound() -> None:

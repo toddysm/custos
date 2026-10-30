@@ -92,6 +92,10 @@ LOCKED_API_KIND_TO_STATUS: Final[dict[str, int]] = {
     "trigger.webhook.too_large": 413,
     "trigger.webhook.unavailable": 503,
     "webhook-route-not-found": 404,
+    "trigger.deadletter.not_found": 404,
+    "trigger.deadletter.conflict": 409,
+    "trigger.deadletter.invalid": 422,
+    "trigger.deadletter.unavailable": 503,
 }
 
 #: Frozen view for fast membership tests.
@@ -122,6 +126,10 @@ _TITLE_FOR_KIND: Final[dict[str, str]] = {
     "trigger.webhook.too_large": "Webhook resource limit exceeded",
     "trigger.webhook.unavailable": "Webhook handoff is unavailable",
     "webhook-route-not-found": "Webhook route not found",
+    "trigger.deadletter.not_found": "Dead-letter entry not found",
+    "trigger.deadletter.conflict": "Dead-letter operation conflicts with current state",
+    "trigger.deadletter.invalid": "Invalid dead-letter query",
+    "trigger.deadletter.unavailable": "Dead-letter administration unavailable",
 }
 
 
@@ -221,6 +229,8 @@ async def _validation_error_handler(request: Request, exc: Exception) -> JSONRes
         detail = f"{loc}: {first.get('msg', 'invalid request')}".lstrip(": ")
     else:
         detail = "invalid request"
+    if "dead-letters" in getattr(request.scope.get("route"), "tags", ()):
+        return problem_response(request, kind="trigger.deadletter.invalid", detail=detail)
     source_fields = {"sourceConfig", "source_config", "source", "workspaceId", "workspace_id"}
     source_error = bool(errors) and all(
         isinstance(error.get("ctx", {}).get("error"), SourceConfigurationError)

@@ -390,6 +390,37 @@ M1_ROUTE_REGISTRY: Final[tuple[RouteSpec, ...]] = (
         WORKFLOW_APP_ID,
         "run:read",
     ),
+    # Static recovery routes precede dynamic subscription identifiers.
+    _route(
+        "GET",
+        "/v1/workspaces/{workspaceId}/triggers/deadletter",
+        TRIGGER_APP_ID,
+        "trigger:admin",
+    ),
+    _route(
+        "GET",
+        "/v1/workspaces/{workspaceId}/triggers/deadletter/{entryId}",
+        TRIGGER_APP_ID,
+        "trigger:admin",
+    ),
+    _route(
+        "POST",
+        "/v1/workspaces/{workspaceId}/triggers/deadletter/{entryId}:replay",
+        TRIGGER_APP_ID,
+        "trigger:admin",
+    ),
+    _route(
+        "POST",
+        "/v1/workspaces/{workspaceId}/triggers/deadletter/{entryId}:discard",
+        TRIGGER_APP_ID,
+        "trigger:admin",
+    ),
+    _route(
+        "POST",
+        "/v1/workspaces/{workspaceId}/triggers/deadletter:replay",
+        TRIGGER_APP_ID,
+        "trigger:admin",
+    ),
     # --- Trigger Service (trigger-service): subscription CRUD + manual fire.
     _route(
         "POST",
@@ -727,6 +758,13 @@ async def _invoke_downstream(request: Request, spec: RouteSpec, body: bytes) -> 
                 method_path=method_path,
                 headers=headers,
                 body=body or None,
+                read_timeout=(
+                    70.0
+                    if spec.app_id == TRIGGER_APP_ID
+                    and spec.required_permission == "trigger:admin"
+                    and spec.method == "POST"
+                    else None
+                ),
             )
         )
 

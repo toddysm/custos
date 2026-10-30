@@ -19,6 +19,7 @@ from uuid import uuid4
 
 from custos_spl.errors import ImmutableViolation, LeaseBusy, LeaseExpired
 from custos_spl.ids import WorkspaceId
+from custos_spl.interfaces.metadata_store import AuditEvent
 from custos_spl.pagination import Cursor, Page
 
 DEAD_LETTER_SCHEMA_REVISION = 7
@@ -448,6 +449,56 @@ def discard_dead_letter(entry: DeadLetterEntry, now: datetime) -> DeadLetterEntr
     return replace(entry, status="discarded")
 
 
+def dead_letter_transition_audits(
+    before: DeadLetterEntry | None,
+    after: DeadLetterEntry | None,
+    now: datetime,
+    *,
+    actor: str = "trigger-service",
+    reason: str | None = None,
+) -> tuple[AuditEvent, ...]:
+    """Prepare payload-free lifecycle audits for the same transaction as the state change."""
+    validate_dispatch_identifier(actor)
+    if reason is not None and (
+        not isinstance(reason, str) or not reason.strip() or len(reason) > 1024
+    ):
+        raise ValueError("discard reason must be nonblank and at most 1024 characters")
+    entry = after if after is not None else before
+    if entry is None:
+        raise ValueError("a dead-letter transition requires an entry")
+    source = entry.data.event["source"]
+    assert isinstance(source, Mapping)
+    events: list[tuple[str, Mapping[str, Any]]] = []
+    if before is None:
+        events.append(("stored", {}))
+    elif after is None:
+        events.append(("expired", {"previousStatus": before.status}))
+    else:
+        for index, attempt in enumerate(after.replay_history):
+            previous = before.replay_history[index] if index < len(before.replay_history) else None
+            if attempt != previous and attempt.outcome in ("failed", "interrupted", "replayed"):
+                events.append(
+                    (
+                        "replayed" if attempt.outcome == "replayed" else "replay_failed",
+                        {"attempt": attempt.epoch, "outcome": attempt.outcome},
+                    )
+                )
+        if after.status == "discarded" and before.status != "discarded":
+            events.append(("discarded", {"reason": reason}))
+    return tuple(
+        AuditEvent(
+            workspace_id=entry.data.workspace_id,
+            event_id=uuid4().hex,
+            event_type="trigger.deadletter." + outcome,
+            actor=actor,
+            subject={"entryId": entry.data.entry_id, "subscriptionId": entry.data.subscription_id},
+            payload={"schemaVersion": 1, "sourceType": source["type"], **payload},
+            occurred_at=_instant(now),
+        )
+        for outcome, payload in events
+    )
+
+
 def encode_dead_letter(entry: DeadLetterEntry) -> str:
     """Serialize version-1 storage state, never arbitrary errors or private transport frames."""
     data = entry.data
@@ -560,7 +611,7 @@ class DeadLetterStoreProvider(Protocol):
         ...
 
     async def put_dead_letter(self, data: DeadLetterData) -> DeadLetterEntry:
-        """Append a capture; duplicate workspace/entry identity raises ImmutableViolation."""
+        """Atomically append capture/audit; duplicate identity raises ImmutableViolation."""
         ...
 
     async def get_dead_letter(
@@ -598,7 +649,7 @@ class DeadLetterStoreProvider(Protocol):
         failure: DispatchAttempt | None = None,
         result_id: str | None = None,
     ) -> DeadLetterEntry:
-        """Finish a live owned claim; stale claims raise LeaseExpired without changing state."""
+        """Atomically audit and finish a live claim; stale ownership raises LeaseExpired."""
         ...
 
     async def recover_dead_letter(
@@ -606,19 +657,22 @@ class DeadLetterStoreProvider(Protocol):
         workspace_id: WorkspaceId,
         entry_id: str,
     ) -> DeadLetterEntry:
-        """Recover expired claims, including final attempts; active claims remain unchanged."""
+        """Audit interrupted claims and final-attempt discard; active claims remain unchanged."""
         ...
 
     async def discard_dead_letter(
         self,
         workspace_id: WorkspaceId,
         entry_id: str,
+        *,
+        actor: str = "trigger-service",
+        reason: str | None = None,
     ) -> DeadLetterEntry:
-        """Discard non-successful work, rejecting an active claim with LeaseBusy."""
+        """Atomically audit discard, rejecting live claims and preserving successful replay."""
         ...
 
     async def delete_expired_dead_letter(self, workspace_id: WorkspaceId, entry_id: str) -> bool:
-        """Delete only beyond retention with no live claim; caller owns durable expiration audit.
+        """Atomically audit and delete beyond retention with no live claim.
 
         Return False for absent, unexpired or actively claimed rows. This is an
         eligibility result, never a backend-failure fallback.
