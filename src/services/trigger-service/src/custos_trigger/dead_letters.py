@@ -17,6 +17,7 @@ from custos_spl.interfaces.bulk_replay import (
     BulkReplayExpired,
     BulkReplayItem,
     BulkReplayStoreProvider,
+    bulk_entry_identity,
     require_bulk_entry,
 )
 from custos_spl.interfaces.dead_letters import (
@@ -153,6 +154,7 @@ class DeadLetterAdmin:
     ) -> Literal["pending", "discarded", "replayed"]:
         """Replay the original target, reconciling successful concurrent/repeated requests."""
         entry = await self._entry(workspace, entry_id)
+        identity = bulk_entry_identity(entry)
         if bulk is not None:
             try:
                 require_bulk_entry(bulk, entry, actor)
@@ -169,6 +171,7 @@ class DeadLetterAdmin:
                 actor,
                 bulk_id=bulk.command_id if bulk else None,
                 bulk_token=bulk.token if bulk else None,
+                expected_identity=identity,
             )
         except TriggerError as exc:
             if exc.kind == TriggerErrorKind.SUBSCRIPTION_NOT_FOUND:
@@ -180,6 +183,8 @@ class DeadLetterAdmin:
                 ) from exc
             if exc.kind == TriggerErrorKind.REPLAY_UNSAFE:
                 current = await self._entry(workspace, entry_id)
+                if bulk_entry_identity(current) != identity:
+                    raise DeadLetterAdminError("unsafe", "Selected entry was replaced.") from exc
                 if current.status == "replayed":
                     return "replayed"
                 raise DeadLetterAdminError("unsafe", "Entry cannot be safely replayed.") from exc

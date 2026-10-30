@@ -48,6 +48,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final, cast
 
+from custos_spl.errors import SPLError
 from fastapi import APIRouter, Depends, Request, Response
 
 from custos_gateway._telemetry import (
@@ -57,7 +58,7 @@ from custos_gateway._telemetry import (
     request_telemetry,
 )
 from custos_gateway.clients.auth import AUTH_APP_ID
-from custos_gateway.errors import GatewayError
+from custos_gateway.errors import GatewayError, GatewayErrorCode
 from custos_gateway.middleware.auth import (
     AUTH_STATE_ATTR,
     AuthorizedCaller,
@@ -651,10 +652,23 @@ def _make_forwarder(spec: RouteSpec) -> Callable[[Request], Awaitable[Response]]
 
                 coordinator, key = _idempotency_context(request, spec, caller)
                 recovery = _is_recovery_write(spec)
-                if coordinator is not None and key is not None:
-                    outcome = await coordinator.reserve(
-                        key, _request_hash(request, spec, caller, body), reconcile=recovery
+                if recovery and (coordinator is None or key is None):
+                    raise GatewayError(
+                        GatewayErrorCode.DOWNSTREAM_UNAVAILABLE,
+                        detail="Recovery requires configured durable request-key binding.",
                     )
+                if coordinator is not None and key is not None:
+                    try:
+                        outcome = await coordinator.reserve(
+                            key, _request_hash(request, spec, caller, body), reconcile=recovery
+                        )
+                    except SPLError as exc:
+                        if not recovery:
+                            raise
+                        raise GatewayError(
+                            GatewayErrorCode.DOWNSTREAM_UNAVAILABLE,
+                            detail="Durable recovery request-key binding is unavailable.",
+                        ) from exc
                     if isinstance(outcome, ReplayReservation):
                         record_idempotency_replay(route=spec.path, method=spec.method)
                         response = _with_rate_limit_headers(

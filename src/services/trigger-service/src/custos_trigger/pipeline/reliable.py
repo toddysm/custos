@@ -17,6 +17,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from custos_spl.errors import ImmutableViolation, LeaseBusy, SPLError
 from custos_spl.ids import WorkspaceId
+from custos_spl.interfaces.bulk_replay import bulk_entry_identity
 from custos_spl.interfaces.dead_letters import (
     DeadLetterData,
     DeadLetterStoreProvider,
@@ -34,6 +35,7 @@ from custos_trigger.clients.workflow import (
     RaiseExternalEventRequest,
     RunRef,
     StartRunRequest,
+    WorkflowClientAcknowledgementPending,
     WorkflowClientError,
     WorkflowClientReplayUnsafeError,
     WorkflowClientStatusError,
@@ -229,6 +231,8 @@ class ReliableDispatcher:
                     try:
                         async with asyncio.timeout(remaining):
                             return await self._send(data, until)
+                    except WorkflowClientAcknowledgementPending:
+                        raise
                     except WorkflowClientError as exc:
                         history.append(
                             DispatchAttempt(
@@ -347,6 +351,12 @@ class ReliableDispatcher:
                     ref = await self._attempts(
                         data, claim.retain_until, history, claim_deadline=claim.lease_until
                     )
+                except WorkflowClientAcknowledgementPending as exc:
+                    await self.store.release_delivery(claim)
+                    logger.info("Resume submission is awaiting durable consumer acknowledgement")
+                    raise TriggerError(
+                        TriggerErrorKind.DISPATCH_UNAVAILABLE, "delivery acknowledgement is pending"
+                    ) from exc
                 except WorkflowClientError as exc:
                     failure = exc
                 else:
@@ -386,6 +396,7 @@ class ReliableDispatcher:
         *,
         bulk_id: str | None = None,
         bulk_token: str | None = None,
+        expected_identity: str | None = None,
     ) -> DispatchOutcome:
         """Replay a claimed capture against its original downstream key and exact target."""
         ws = WorkspaceId(workspace_id)
@@ -395,6 +406,9 @@ class ReliableDispatcher:
                 raise TriggerError(
                     TriggerErrorKind.SUBSCRIPTION_NOT_FOUND, "dead-letter entry not found"
                 )
+            identity = bulk_entry_identity(entry)
+            if expected_identity is not None and identity != expected_identity:
+                raise TriggerError(TriggerErrorKind.REPLAY_UNSAFE, "dead-letter generation changed")
             target = entry.data.target
             if target.get("deliveryProtocol", 1) != 2 or (
                 target["kind"] == "start" and target.get("workflowVersionId") is None
@@ -410,6 +424,7 @@ class ReliableDispatcher:
                     ttl_seconds=300,
                     bulk_id=bulk_id,
                     bulk_token=bulk_token,
+                    expected_identity=identity,
                 )
             except LeaseBusy as exc:
                 raise TriggerError(
@@ -438,7 +453,26 @@ class ReliableDispatcher:
                     history,
                     claim_deadline=owned.claim.expires_at,
                 )
+            except WorkflowClientAcknowledgementPending as exc:
+                await self.store.defer_dead_letter(owned.claim)
+                logger.info("Resume replay is awaiting durable consumer acknowledgement")
+                raise TriggerError(
+                    TriggerErrorKind.DISPATCH_UNAVAILABLE, "replay acknowledgement is pending"
+                ) from exc
             except WorkflowClientError as exc:
+                if (
+                    owned.claim.awaiting_ack
+                    and not isinstance(exc, WorkflowClientReplayUnsafeError)
+                    and (exc.retryable or owned.replay_history[-1].pending_since is not None)
+                ):
+                    await self.store.defer_dead_letter(owned.claim)
+                    logger.warning(
+                        "Resume acknowledgement reconciliation is unavailable: %s",
+                        type(exc).__name__,
+                    )
+                    raise TriggerError(
+                        TriggerErrorKind.DISPATCH_UNAVAILABLE, "replay acknowledgement is pending"
+                    ) from exc
                 finished = await self.store.finish_dead_letter(owned.claim, failure=history[-1])
                 if isinstance(exc, WorkflowClientReplayUnsafeError):
                     raise TriggerError(

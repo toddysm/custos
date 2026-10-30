@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 
+import httpx
 import pytest
 from asyncpg import Connection
 from custos_pg import PgMetadataAdapter
@@ -15,7 +16,7 @@ from custos_spl.interfaces.delivery import delivery_identity
 
 from custos_trigger.clients import FakeWorkflowServiceClient
 from custos_trigger.clients.workflow import RunRef, StartRunRequest
-from custos_trigger.dead_letters import DeadLetterAdminError
+from custos_trigger.dead_letters import DeadLetterAdmin, DeadLetterAdminError
 from tests.integration import test_dead_letter_state as state_tests
 from tests.integration.test_dead_letter_admin import administration, audits
 from tests.integration.test_dead_letter_state import WS, Harness, capture
@@ -82,6 +83,46 @@ async def test_lost_bulk_response_reuses_original_selection_and_counts(harness: 
         str(WS), filters, "operator", limit=1, cursor=first[2].token, request_key="two"
     ) == (1, 0, None)
     assert len(client.start_run_calls) == 2
+
+
+async def test_bulk_pending_acknowledgement_can_resume_with_one_attempt(harness: Harness) -> None:
+    """Pending acknowledgement leaves bulk progress unfinished, not permanently rejected."""
+    from custos_trigger.clients.workflow import DaprEndpoint, DaprWorkflowServiceClient
+    from custos_trigger.pipeline.dispatch import NoopAuditSink
+    from custos_trigger.pipeline.reliable import ReliableDispatcher, ReliableStorage
+
+    data = capture("resume", resume=True)
+    await harness.store.put_dead_letter(
+        replace(
+            data,
+            max_replay_attempts=1,
+            target={**data.target, "deliveryProtocol": 2},
+        )
+    )
+    responses = iter((202, 204))
+    assert isinstance(harness.store, ReliableStorage)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(next(responses)))
+    ) as http:
+        client = DaprWorkflowServiceClient(
+            http, DaprEndpoint(host="127.0.0.1", http_port=3500, app_id="workflow-service")
+        )
+        admin = DeadLetterAdmin(
+            ReliableDispatcher(client, harness.store, NoopAuditSink(), max_retries=0)
+        )
+        with pytest.raises(DeadLetterAdminError):
+            await admin.bulk_replay(str(WS), DeadLetterFilter(), "operator", request_key="pending")
+        command = await commands(harness).get_bulk_replay(
+            WS, delivery_identity(str(WS), "operator", "pending")
+        )
+        assert command is not None and command.items is not None
+        assert command.items[0].accepted is None
+        await expire_coordinator(harness, command)
+        assert await admin.bulk_replay(
+            str(WS), DeadLetterFilter(), "operator", request_key="pending"
+        ) == (1, 0, None)
+    entry = await harness.store.get_dead_letter(WS, "resume")
+    assert entry is not None and entry.status == "replayed" and len(entry.replay_history) == 1
 
 
 async def test_partial_bulk_restart_preserves_progress_and_ignores_new_entries(

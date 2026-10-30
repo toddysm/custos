@@ -20,7 +20,7 @@ from uuid import uuid4
 from custos_spl.errors import ImmutableViolation, LeaseBusy, LeaseExpired
 from custos_spl.ids import WorkspaceId
 from custos_spl.interfaces.metadata_store import AuditEvent
-from custos_spl.pagination import Cursor, Page
+from custos_spl.pagination import Cursor, Page, decode_query_cursor
 
 DEAD_LETTER_SCHEMA_REVISION = 12
 MAX_PAYLOAD_BYTES = 262_144
@@ -40,7 +40,7 @@ JsonValue: TypeAlias = (
 )
 DeadLetterStatus: TypeAlias = Literal["pending", "replaying", "replayed", "discarded"]
 FailureCode: TypeAlias = Literal["transient", "permanent", "configuration", "unsafe"]
-ReplayOutcome: TypeAlias = Literal["replaying", "replayed", "failed", "interrupted"]
+ReplayOutcome: TypeAlias = Literal["replaying", "replayed", "failed", "interrupted", "awaiting_ack"]
 _STATUSES = ("pending", "replaying", "replayed", "discarded")
 _FAILURES = ("transient", "permanent", "configuration", "unsafe")
 _PRIVATE_KEYS = frozenset(
@@ -275,7 +275,7 @@ class DeadLetterData:
 
 @dataclass(frozen=True, slots=True)
 class ReplayAttempt:
-    """A consumed operator attempt; interrupted claims remain visible and count toward the limit."""
+    """A logical attempt; acknowledgement probes reuse one slot without burning failure budget."""
 
     epoch: int
     worker_id: str
@@ -283,11 +283,12 @@ class ReplayAttempt:
     outcome: ReplayOutcome = "replaying"
     finished_at: datetime | None = None
     failure: DispatchAttempt | None = None
+    pending_since: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class ReplayClaim:
-    """Opaque claim identity; callers cannot extend authority by editing its expiry."""
+    """Opaque authority with fresh tokens for probes sharing a logical attempt epoch."""
 
     workspace_id: WorkspaceId
     entry_id: str
@@ -296,6 +297,8 @@ class ReplayClaim:
     expires_at: datetime
     observed_at: datetime
     bulk_id: str | None = None
+    worker_id: str | None = None
+    awaiting_ack: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,6 +344,17 @@ class DeadLetterFilter:
         )
 
 
+def decode_dead_letter_cursor(
+    cursor: Cursor | None,
+    scope: tuple[str | None, ...],
+) -> str | None:
+    """Validate decoded entry keys before either backend compares or binds them as text."""
+    identifier = decode_query_cursor(cursor, scope)
+    if identifier is not None:
+        validate_dispatch_identifier(identifier)
+    return identifier
+
+
 def new_dead_letter(data: DeadLetterData, now: datetime) -> DeadLetterEntry:
     """Start retention at durable capture time, not the original event's untrusted timestamp."""
     now = _instant(now)
@@ -348,10 +362,21 @@ def new_dead_letter(data: DeadLetterData, now: datetime) -> DeadLetterEntry:
 
 
 def recover_replay(entry: DeadLetterEntry, now: datetime) -> DeadLetterEntry:
-    """Recover an expired claim without erasing its consumed attempt or changing retention."""
+    """Recover ownership while leaving unconfirmed version-2 resumes acknowledgement-pending."""
     now = _instant(now)
     if entry.claim is None or entry.claim.expires_at > now:
         return entry
+    if entry.claim.awaiting_ack:
+        last = replace(
+            entry.replay_history[-1],
+            outcome="awaiting_ack",
+            finished_at=None,
+            failure=None,
+            pending_since=entry.replay_history[-1].pending_since or now,
+        )
+        return replace(
+            entry, claim=None, status="pending", replay_history=(*entry.replay_history[:-1], last)
+        )
     last = replace(entry.replay_history[-1], outcome="interrupted", finished_at=now)
     status: DeadLetterStatus = (
         "discarded" if len(entry.replay_history) >= entry.data.max_replay_attempts else "pending"
@@ -369,7 +394,7 @@ def claim_replay(
     *,
     bulk_id: str | None = None,
 ) -> DeadLetterEntry:
-    """Consume one attempt; active contenders raise LeaseBusy, ineligible rows conflict."""
+    """Claim or reconcile one logical attempt; active contenders and ineligible rows conflict."""
     validate_dispatch_identifier(worker_id)
     if bulk_id is not None:
         validate_dispatch_identifier(bulk_id)
@@ -381,7 +406,12 @@ def claim_replay(
         raise LeaseBusy("dead-letter entry is already being replayed")
     if entry.status != "pending" or entry.expires_at <= now:
         raise ImmutableViolation("dead-letter entry is terminal or beyond retention")
-    epoch = len(entry.replay_history) + 1
+    pending = (
+        entry.replay_history[-1]
+        if entry.replay_history and entry.replay_history[-1].outcome == "awaiting_ack"
+        else None
+    )
+    epoch = pending.epoch if pending else len(entry.replay_history) + 1
     claim = ReplayClaim(
         entry.data.workspace_id,
         entry.data.entry_id,
@@ -390,10 +420,19 @@ def claim_replay(
         now + timedelta(seconds=ttl_seconds),
         now,
         bulk_id,
+        worker_id,
+        entry.data.target["kind"] == "resume" and entry.data.target.get("deliveryProtocol", 1) == 2,
     )
-    attempt = ReplayAttempt(epoch, worker_id, now)
+    attempt = (
+        replace(pending, outcome="replaying") if pending else ReplayAttempt(epoch, worker_id, now)
+    )
     return replace(
-        entry, status="replaying", claim=claim, replay_history=(*entry.replay_history, attempt)
+        entry,
+        status="replaying",
+        claim=claim,
+        replay_history=(*entry.replay_history[:-1], attempt)
+        if pending
+        else (*entry.replay_history, attempt),
     )
 
 
@@ -408,9 +447,28 @@ def require_replay(entry: DeadLetterEntry | None, claim: ReplayClaim, now: datet
         or entry.claim.token != claim.token
         or entry.claim.epoch != claim.epoch
         or entry.claim.bulk_id != claim.bulk_id
+        or entry.claim.worker_id != claim.worker_id
+        or entry.claim.awaiting_ack != claim.awaiting_ack
         or entry.claim.expires_at <= _instant(now)
     ):
         raise LeaseExpired("replay claim expired or is no longer owned")
+
+
+def defer_replay(entry: DeadLetterEntry, claim: ReplayClaim, now: datetime) -> DeadLetterEntry:
+    """Keep one unacknowledged resume attempt recoverable without spending its failure budget."""
+    require_replay(entry, claim, now)
+    if not claim.awaiting_ack:
+        raise ValueError("only version-2 resume delivery can await consumer acknowledgement")
+    pending = replace(
+        entry.replay_history[-1],
+        outcome="awaiting_ack",
+        finished_at=None,
+        failure=None,
+        pending_since=entry.replay_history[-1].pending_since or _instant(now),
+    )
+    return replace(
+        entry, status="pending", claim=None, replay_history=(*entry.replay_history[:-1], pending)
+    )
 
 
 def finish_replay(
@@ -501,7 +559,24 @@ def dead_letter_transition_audits(
         terminal = recover_replay(before, now) if after is None else after
         for index, attempt in enumerate(terminal.replay_history):
             previous = before.replay_history[index] if index < len(before.replay_history) else None
-            if attempt != previous and attempt.outcome in ("failed", "interrupted", "replayed"):
+            if attempt.pending_since is not None and (
+                previous is None or previous.pending_since is None
+            ):
+                events.append(
+                    (
+                        "replay_pending",
+                        {
+                            "attempt": attempt.epoch,
+                            "outcome": "awaiting_ack",
+                            "attemptOperator": attempt.worker_id,
+                        },
+                    )
+                )
+            if attempt != previous and attempt.outcome in (
+                "failed",
+                "interrupted",
+                "replayed",
+            ):
                 events.append(
                     (
                         "replayed" if attempt.outcome == "replayed" else "replay_failed",
@@ -568,6 +643,8 @@ def encode_dead_letter(entry: DeadLetterEntry) -> str:
                 "expires_at": claim.expires_at.isoformat(),
                 "observed_at": claim.observed_at.isoformat(),
                 **({"bulk_id": claim.bulk_id} if claim.bulk_id is not None else {}),
+                **({"worker_id": claim.worker_id} if claim.worker_id is not None else {}),
+                **({"awaiting_ack": True} if claim.awaiting_ack else {}),
             }
             if claim
             else None,
@@ -579,6 +656,11 @@ def encode_dead_letter(entry: DeadLetterEntry) -> str:
                     "outcome": value.outcome,
                     "finished_at": value.finished_at.isoformat() if value.finished_at else None,
                     "failure": failure(value.failure) if value.failure else None,
+                    **(
+                        {"pending_since": value.pending_since.isoformat()}
+                        if value.pending_since is not None
+                        else {}
+                    ),
                 }
                 for value in entry.replay_history
             ],
@@ -625,6 +707,8 @@ def decode_dead_letter(payload: str) -> DeadLetterEntry:
             datetime.fromisoformat(claim["expires_at"]),
             datetime.fromisoformat(claim["observed_at"]),
             claim.get("bulk_id"),
+            claim.get("worker_id"),
+            claim.get("awaiting_ack", False),
         )
         if claim
         else None,
@@ -636,6 +720,9 @@ def decode_dead_letter(payload: str) -> DeadLetterEntry:
                 item["outcome"],
                 datetime.fromisoformat(item["finished_at"]) if item["finished_at"] else None,
                 failure(item["failure"]) if item["failure"] else None,
+                datetime.fromisoformat(item["pending_since"])
+                if item.get("pending_since")
+                else None,
             )
             for item in value["replay_history"]
         ),
@@ -680,6 +767,7 @@ class DeadLetterStoreProvider(Protocol):
         ttl_seconds: int = 60,
         bulk_id: str | None = None,
         bulk_token: str | None = None,
+        expected_identity: str | None = None,
     ) -> DeadLetterEntry:
         """Claim pending/abandoned work atomically; consume an attempt before any remote effect."""
         ...
@@ -692,6 +780,10 @@ class DeadLetterStoreProvider(Protocol):
         result_id: str | None = None,
     ) -> DeadLetterEntry:
         """Atomically audit and finish a live claim; stale ownership raises LeaseExpired."""
+        ...
+
+    async def defer_dead_letter(self, claim: ReplayClaim) -> DeadLetterEntry:
+        """Release an unacknowledged resume claim without exhausting its failure budget."""
         ...
 
     async def recover_dead_letter(

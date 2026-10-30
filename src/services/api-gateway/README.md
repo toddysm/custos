@@ -78,6 +78,8 @@ path/body but do not cache outcomes: identical retries reconcile the authoritati
 per-entry claim after contention or outage. Divergent key reuse still conflicts.
 Other writes retain response-snapshot idempotency. See the
 [recovery contract](../../../docs/developers/trigger-api.md#dead-letter-administration).
+Recovery writes fail closed with 503 when the Gateway metadata binding store is
+absent or unavailable; they never fall back to unbound forwarding.
 
 The anonymous Webhook
 Pass-through ([webhook.py](src/custos_gateway/routes/webhook.py) mounts

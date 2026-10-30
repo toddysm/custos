@@ -47,6 +47,7 @@ class ReplayView(WireModel):
     finished_at: datetime | None
     outcome: str
     failure: FailureView | None
+    pending_since: datetime | None
 
 
 class EntryView(WireModel):
@@ -143,6 +144,7 @@ def _view(entry: DeadLetterEntry) -> EntryView:
                 started_at=attempt.started_at,
                 finished_at=attempt.finished_at,
                 outcome=attempt.outcome,
+                pending_since=attempt.pending_since,
                 failure=(
                     FailureView(
                         at=attempt.failure.at,

@@ -219,6 +219,55 @@ def test_recovery_retries_reconcile_after_conflict_and_outage(
     assert len({call[4] for call in store.reserve_calls}) == 1
 
 
+@pytest.mark.parametrize("suffix", ["/entry:replay", "/entry:discard", ":replay"])
+def test_recovery_without_key_binding_fails_before_forwarding(
+    settings: Settings, suffix: str
+) -> None:
+    """Unconfigured recovery cannot silently bypass durable request-key isolation."""
+    router, calls = _recording_router(status_code=200)
+    app = create_app(settings=settings, auth_client=_auth_client(), downstream_router=router)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/workspaces/ws-1/triggers/deadletter" + suffix,
+            json={},
+            headers={**AUTH_HEADERS, "idempotency-key": "same"},
+        )
+    assert response.status_code == 503 and not calls
+    assert response.json()["code"] == "downstream-unavailable"
+
+
+def test_recovery_binding_outage_fails_closed(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A configured but unavailable store is not permission to bypass request identity."""
+    from unittest.mock import AsyncMock
+
+    from custos_spl.errors import BackendUnavailable
+
+    store = _BindingStore()
+    monkeypatch.setattr(
+        _BindingStore,
+        "reserve_idempotency_record",
+        AsyncMock(side_effect=BackendUnavailable("private database detail")),
+    )
+    router, calls = _recording_router(status_code=200)
+    app = create_app(
+        settings=settings,
+        auth_client=_auth_client(),
+        downstream_router=router,
+        metadata_store=store,
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/workspaces/ws-1/triggers/deadletter:replay",
+            json={},
+            headers={**AUTH_HEADERS, "idempotency-key": "same"},
+        )
+    assert response.status_code == 503 and not calls
+    assert "private" not in response.text
+
+
 def test_write_pipeline_forwards_and_records_each_stage(settings: Settings) -> None:
     auth = _auth_client()
     router, calls = _recording_router()

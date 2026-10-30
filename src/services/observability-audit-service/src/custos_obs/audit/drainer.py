@@ -30,7 +30,8 @@ import contextlib
 import logging
 from typing import TYPE_CHECKING, Protocol
 
-from custos_spl.errors import QueryUnsupported
+from custos_spl.errors import MigrationRequired, QueryUnsupported
+from custos_spl.interfaces.metadata_store import AuditOutboxReadiness
 
 if TYPE_CHECKING:
     from custos_spl.interfaces.metadata_store import (
@@ -118,6 +119,11 @@ class AuditOutboxDrainer:
         subscribes to notifications (``listen`` mode, when supported) or polls.
         Falls back to polling if ``listen`` is requested but unsupported.
         """
+        await self.check_ready()
+        await self._run_prepared()
+
+    async def _run_prepared(self) -> None:
+        """Run the already-preflighted lifecycle with normal transient-cycle recovery."""
         await self._drain_guarded()
         if self._mode == "listen":
             await self._run_listen()
@@ -174,13 +180,25 @@ class AuditOutboxDrainer:
                 logger.info("audit outbox drained %d row(s) up to cursor %d", drained, self._cursor)
         except asyncio.CancelledError:
             raise
+        except MigrationRequired:
+            logger.exception("audit outbox requires migration; stopping the drain")
+            raise
         except Exception:
             logger.exception("audit outbox drain cycle failed; will retry")
 
-    def start(self) -> None:
-        """Launch the drain loop as a background task (idempotent)."""
+    async def check_ready(self) -> None:
+        """Check backend-specific draining prerequisites before accepting startup."""
+        if isinstance(self._store, AuditOutboxReadiness):
+            await self._store.check_audit_outbox_ready()
+        else:
+            await self._store.stream_audit_outbox(self._cursor, 1)
+
+    async def start(self) -> None:
+        """Preflight migrations, then launch the drain loop (idempotent)."""
         if self._task is None:
-            self._task = asyncio.create_task(self.run(), name="audit-outbox-drainer")
+            await self.check_ready()
+            if self._task is None:
+                self._task = asyncio.create_task(self._run_prepared(), name="audit-outbox-drainer")
 
     async def stop(self) -> None:
         """Cancel and await the drain loop (idempotent)."""

@@ -81,11 +81,17 @@ class LazyPool:
         self._init = init
         self._pool: Pool | None = None
         self._lock = asyncio.Lock()
+        self._closed = False
 
     async def get(self) -> Pool:
+        """Create at most one owned pool, rejecting use after its lifecycle has ended."""
+        if self._closed:
+            raise RuntimeError("lazy pool is closed")
         if self._pool is not None:
             return self._pool
         async with self._lock:
+            if self._closed:
+                raise RuntimeError("lazy pool is closed")
             if self._pool is None:
                 self._pool = await asyncpg.create_pool(
                     dsn=self._dsn,
@@ -95,6 +101,16 @@ class LazyPool:
                 )
                 assert self._pool is not None
         return self._pool
+
+    async def aclose(self) -> None:
+        """Close only the pool this wrapper created, without opening one during teardown."""
+        async with self._lock:
+            if self._closed and self._pool is None:
+                return
+            self._closed = True
+            if self._pool is not None:
+                await self._pool.close()
+                self._pool = None
 
 
 __all__ = ["DSN_ENV_VAR", "ConnectionInit", "LazyPool", "read_dsn_from_env"]

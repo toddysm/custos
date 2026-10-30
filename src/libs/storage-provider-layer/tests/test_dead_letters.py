@@ -18,13 +18,16 @@ from custos_spl.interfaces.dead_letters import (
     DeadLetterFilter,
     DispatchAttempt,
     claim_replay,
+    dead_letter_transition_audits,
     decode_dead_letter,
+    defer_replay,
     discard_dead_letter,
     encode_dead_letter,
     finish_replay,
     json_value,
     new_dead_letter,
     recover_replay,
+    require_replay,
 )
 
 NOW = datetime(2026, 10, 29, tzinfo=UTC)
@@ -66,6 +69,47 @@ def test_roundtrip_and_deep_immutability(data: DeadLetterData) -> None:
     assert claimed.claim is not None
     finished = finish_replay(claimed, claimed.claim, NOW, result_id="run")
     assert decode_dead_letter(encode_dead_letter(finished)) == finished
+
+
+def test_acknowledgement_reconciliation_reuses_budget_but_not_authority(
+    data: DeadLetterData,
+) -> None:
+    """A one-attempt resume survives delayed acknowledgement and expired reconciliation owners."""
+    data = replace(
+        data,
+        max_replay_attempts=1,
+        target={
+            "kind": "resume",
+            "runId": "run",
+            "stepId": "step",
+            "eventName": "ready",
+            "payload": {},
+            "deliveryProtocol": 2,
+        },
+    )
+    initial = claim_replay(new_dead_letter(data, NOW), "operator-a", 10, NOW)
+    assert initial.claim is not None
+    reclaimed = claim_replay(initial, "operator-b", 10, NOW + timedelta(seconds=10))
+    transitions = dead_letter_transition_audits(
+        initial, reclaimed, NOW + timedelta(seconds=10), actor="operator-b"
+    )
+    assert [event.event_type for event in transitions] == ["trigger.deadletter.replay_pending"]
+    pending = defer_replay(initial, initial.claim, NOW + timedelta(seconds=1))
+    repeated = claim_replay(pending, "operator-b", 10, NOW + timedelta(seconds=2))
+    assert repeated.claim is not None and repeated.claim.token != initial.claim.token
+    assert repeated.claim.epoch == initial.claim.epoch == 1
+    assert repeated.claim.worker_id == "operator-b"
+    assert repeated.replay_history[0].worker_id == "operator-a"
+    assert decode_dead_letter(encode_dead_letter(repeated)) == repeated
+    with pytest.raises(LeaseExpired):
+        require_replay(repeated, initial.claim, NOW + timedelta(seconds=3))
+    recovered = recover_replay(repeated, NOW + timedelta(seconds=12))
+    assert recovered.status == "pending" and recovered.replay_history[0].outcome == "awaiting_ack"
+    assert len(recovered.replay_history) == 1
+    final = claim_replay(recovered, "operator-b", 10, NOW + timedelta(seconds=13))
+    assert final.claim is not None
+    completed = finish_replay(final, final.claim, NOW + timedelta(seconds=14))
+    assert completed.status == "replayed" and len(completed.replay_history) == 1
 
 
 @pytest.mark.parametrize(

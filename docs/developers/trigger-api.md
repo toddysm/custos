@@ -374,8 +374,11 @@ per-entry command association and is now required by this capability.
 The shared metadata minimum remains revision 4.
 `check_dead_letters_ready` rejects missing migrations or unavailable storage.
 The memory provider has the same contracts but is not restart-durable.
-Apply revision 12 and upgrade the outbox drainer and participating services
-before enabling recovery; an older drainer does not participate in its fence.
+Every upgraded outbox consumer requires revision 12, even when durable Trigger
+is disabled; this is separate from the general metadata minimum of 4.
+Apply it before upgrading consumers. `await AuditOutboxDrainer.start()` checks
+the prerequisite before launching its background task. An older drainer does
+not participate in the fence.
 
 Each version-1 capture holds the workspace, entry/subscription identity,
 original idempotency key, normalized event **without `raw`**, resolved start or
@@ -507,6 +510,9 @@ current state with the original key. Unrelated Gateway writes keep their
 existing reserve/replay/complete behavior. Static recovery routes precede
 dynamic subscription identifiers in both services. Gateway write requests also
 require `Content-Type: application/json`, including bodyless replay commands.
+Recovery writes fail with 503 before forwarding when Gateway's metadata
+request-key binding store is unconfigured or unavailable. Reads and unrelated
+writes retain their existing behavior. Production store wiring remains #1017.
 
 Base: `/v1/workspaces/{workspaceId}/triggers/deadletter`.
 
@@ -535,8 +541,19 @@ retry after its lease expires. An unsafe or terminal replay target instead
 returns `409 trigger.replay_unsafe`; waiting alone cannot establish replay safety.
 An already-replayed entry cannot be discarded (`409 trigger.deadletter.conflict`).
 A failed replay reports the persisted pending/discarded status, not success.
+Version-2 resumes awaiting consumer acknowledgement, including transport
+uncertainty, instead remain recoverable and return 503. They reuse one logical
+attempt with fresh ownership tokens; acknowledgement probes and expired probe
+owners do not exhaust the terminal failure budget, even when its limit is one.
+History exposes `awaiting_ack` and `pendingSince`, preserving the original
+attempt operator separately from a later reconciler. Definitive unsafe outcomes
+or permanent errors before any pending-delivery state still consume the budget;
+retention and explicit
+operator discard remain available.
 That status belongs to this attempt even if another operator immediately claims
 the entry afterward. Deletion racing discard is reported as 404, not contention.
+Every claim and success reconciliation checks the inspected entry generation,
+so deletion/recreation of the same ID cannot retarget or falsely satisfy replay.
 Missing or cross-workspace entries return 404. Missing identity returns 401,
 insufficient permission or a mismatched path workspace returns 403, invalid
 filters/bodies return 422, and unavailable storage returns 503.
@@ -598,6 +615,8 @@ erasing history. NUL-containing or invalid-Unicode reasons are rejected with 422
 before persistence. Storage is the sole lifecycle-audit writer; the
 dispatcher does not emit a second copy through its configurable audit sink.
 Pipeline events continue through that sink.
+The first acknowledgement-pending transition emits `.replay_pending`; repeated
+probes do not create an unbounded attempt history or repeat that transition audit.
 Revision 12 fences outbox ID allocation and draining with shared/exclusive
 transaction advisory locks. The reader waits for active allocators before sampling
 a fresh committed prefix, so a later ID committing first cannot hide an earlier

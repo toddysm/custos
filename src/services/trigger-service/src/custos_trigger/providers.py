@@ -26,6 +26,7 @@ from custos_spl.errors import ImmutableViolation, LeaseBusy, LeaseExpired
 from custos_spl.ids import SubscriptionId, WorkspaceId
 from custos_spl.interfaces.bulk_replay import (
     BulkReplayCommand,
+    bulk_entry_identity,
     bulk_request_hash,
     finish_bulk_item,
     require_bulk_entry,
@@ -41,6 +42,8 @@ from custos_spl.interfaces.dead_letters import (
     ReplayClaim,
     claim_replay,
     dead_letter_transition_audits,
+    decode_dead_letter_cursor,
+    defer_replay,
     discard_dead_letter,
     finish_replay,
     new_dead_letter,
@@ -301,6 +304,7 @@ class InMemoryTriggerMetadataStore(MemoryDeliveryState):
         """Build a bounded page synchronously for atomic in-memory command selection."""
         filters = filters if filters is not None else DeadLetterFilter()
         scope = filters.scope(workspace_id)
+        decode_dead_letter_cursor(cursor, scope)
         rows = [
             row
             for (ws, _), row in self._dead_letters.items()
@@ -331,9 +335,12 @@ class InMemoryTriggerMetadataStore(MemoryDeliveryState):
         ttl_seconds: int = 60,
         bulk_id: str | None = None,
         bulk_token: str | None = None,
+        expected_identity: str | None = None,
     ) -> DeadLetterEntry:
         """Consume one fenced attempt without yielding between read and replacement."""
         previous = self._dead_letter(workspace_id, entry_id)
+        if expected_identity is not None and bulk_entry_identity(previous) != expected_identity:
+            raise ImmutableViolation("dead-letter generation changed before replay claim")
         now = self._now()
         if bulk_id is not None:
             command = self._bulk_replays.get((workspace_id, bulk_id))
@@ -362,13 +369,33 @@ class InMemoryTriggerMetadataStore(MemoryDeliveryState):
         bulk = self._finished_bulk_item(claim, failure is None)
         self._dead_letter_audits.extend(
             dead_letter_transition_audits(
-                entry, finished, self._now(), actor=entry.replay_history[-1].worker_id
+                entry,
+                finished,
+                self._now(),
+                actor=claim.worker_id or entry.replay_history[-1].worker_id,
             )
         )
         self._dead_letters[(str(claim.workspace_id), claim.entry_id)] = finished
         if bulk is not None:
             self._bulk_replays[(bulk.workspace_id, bulk.command_id)] = bulk
         return finished
+
+    async def defer_dead_letter(self, claim: ReplayClaim) -> DeadLetterEntry:
+        """Publish acknowledgement uncertainty atomically without completing bulk progress."""
+        entry = self._dead_letters.get((str(claim.workspace_id), claim.entry_id))
+        if entry is None:
+            raise LeaseExpired("replay claim no longer exists")
+        pending = defer_replay(entry, claim, self._now())
+        self._dead_letter_audits.extend(
+            dead_letter_transition_audits(
+                entry,
+                pending,
+                self._now(),
+                actor=claim.worker_id or entry.replay_history[-1].worker_id,
+            )
+        )
+        self._dead_letters[(str(claim.workspace_id), claim.entry_id)] = pending
+        return pending
 
     async def recover_dead_letter(
         self, workspace_id: WorkspaceId, entry_id: str

@@ -54,6 +54,7 @@ __all__ = [
     "RaiseExternalEventRequest",
     "RunRef",
     "StartRunRequest",
+    "WorkflowClientAcknowledgementPending",
     "WorkflowClientDecodeError",
     "WorkflowClientError",
     "WorkflowClientReplayUnsafeError",
@@ -172,6 +173,14 @@ class WorkflowClientTransportError(WorkflowClientError):
 
     def __init__(self, message: str) -> None:
         super().__init__(message, retryable=True)
+
+
+class WorkflowClientAcknowledgementPending(WorkflowClientError):
+    """Submission is unresolved, not a failed replay attempt or proof of consumer delivery."""
+
+    def __init__(self) -> None:
+        """Keep the original delivery identity eligible for acknowledgement reconciliation."""
+        super().__init__("resume submission is awaiting durable acknowledgement", retryable=True)
 
 
 class WorkflowClientStatusError(WorkflowClientError):
@@ -326,10 +335,10 @@ class DaprWorkflowServiceClient:
                 routed,
                 what="RaiseExternalEvent",
             )
+            if response.status_code == 202:
+                raise WorkflowClientAcknowledgementPending()
             if response.status_code != 204:
-                raise WorkflowClientTransportError(
-                    "resume submission has not been acknowledged by its durable consumer"
-                )
+                raise WorkflowClientDecodeError("version-2 resume requires a 202 or 204 response")
             return
         try:
             url = build_invoke_url(self.endpoint, raise_event_method(run_id, step_id))

@@ -29,6 +29,7 @@ from custos_gateway.routes.registry import (
 from custos_gateway.settings import (
     DEFAULT_BODY_MAX_BYTES_DEFAULT,
     DEFAULT_BODY_MAX_BYTES_PUBLISH,
+    Settings,
 )
 from custos_gateway.startup import collect_required_permissions
 
@@ -460,7 +461,10 @@ def test_forwarder_carries_query_string() -> None:
 
 
 @pytest.mark.parametrize("suffix", [":replay", "/entry:replay", "/entry:discard"])
-def test_dead_letter_mutations_allow_bounded_recovery_deadline(suffix: str) -> None:
+def test_dead_letter_mutations_allow_bounded_recovery_deadline(
+    suffix: str,
+    settings: Settings,
+) -> None:
     """Only recovery writes extend read waiting beyond Trigger's 60-second command budget."""
     captured: list[dict[str, float | None]] = []
 
@@ -474,6 +478,10 @@ def test_dead_letter_mutations_allow_bounded_recovery_deadline(suffix: str) -> N
     spec = _spec("POST", template)
     app = FastAPI()
     register_exception_handlers(app)
+    from tests.test_pipeline import _BindingStore
+
+    app.state.settings = settings
+    app.state.metadata_store = _BindingStore()
     app.add_api_route(
         template,
         registry._make_forwarder(spec),

@@ -53,6 +53,7 @@ from custos_spl.ids import ConnectorInstanceId, WorkspaceId
 from custos_spl.interfaces.bulk_replay import (
     BulkReplayCommand,
     BulkReplayItem,
+    bulk_entry_identity,
     bulk_request_hash,
     encode_bulk_selection,
     finish_bulk_item,
@@ -70,6 +71,8 @@ from custos_spl.interfaces.dead_letters import (
     claim_replay,
     dead_letter_transition_audits,
     decode_dead_letter,
+    decode_dead_letter_cursor,
+    defer_replay,
     discard_dead_letter,
     encode_dead_letter,
     finish_replay,
@@ -1171,7 +1174,7 @@ class PgMetadataAdapter:
         """Read a bounded selection on the caller's transaction for atomic command creation."""
         filters = filters if filters is not None else DeadLetterFilter()
         scope, size = filters.scope(workspace_id), query_page_limit(limit)
-        after = decode_query_cursor(cursor, scope)
+        after = decode_dead_letter_cursor(cursor, scope)
         rows = await conn.fetch(
             "SELECT payload::text FROM custos_state.dead_letter WHERE workspace_id=$1 "
             "AND ($2::text IS NULL OR subscription_id=$2) "
@@ -1423,12 +1426,15 @@ class PgMetadataAdapter:
         ttl_seconds: int = 60,
         bulk_id: str | None = None,
         bulk_token: str | None = None,
+        expected_identity: str | None = None,
     ) -> DeadLetterEntry:
         """Consume a bounded attempt under the row lock and mint a fresh, fenced claim token."""
         async with self._dead_letter_transaction() as conn:
             current = await self._locked_dead_letter(conn, workspace_id, entry_id)
             if current is None:
                 raise ImmutableViolation("dead-letter entry does not exist")
+            if expected_identity is not None and bulk_entry_identity(current) != expected_identity:
+                raise ImmutableViolation("dead-letter generation changed before replay claim")
             if bulk_id is not None:
                 command = await self._bulk_replay_row(conn, workspace_id, bulk_id)
                 require_bulk_owner(command, bulk_token, await _scheduler_now(conn))
@@ -1459,7 +1465,20 @@ class PgMetadataAdapter:
             await self._write_dead_letter(conn, entry, finishing=True)
             await self._finish_bulk_item(conn, claim, failure is None)
             await self._audit_dead_letter_transition(
-                conn, current, entry, actor=current.replay_history[-1].worker_id
+                conn, current, entry, actor=claim.worker_id or current.replay_history[-1].worker_id
+            )
+            return entry
+
+    async def defer_dead_letter(self, claim: ReplayClaim) -> DeadLetterEntry:
+        """Persist acknowledgement uncertainty without completing the entry or its bulk item."""
+        async with self._dead_letter_transaction() as conn:
+            current = await self._locked_dead_letter(conn, claim.workspace_id, claim.entry_id)
+            if current is None:
+                raise LeaseExpired("replay claim no longer exists")
+            entry = defer_replay(current, claim, await _scheduler_now(conn))
+            await self._write_dead_letter(conn, entry, finishing=True)
+            await self._audit_dead_letter_transition(
+                conn, current, entry, actor=claim.worker_id or current.replay_history[-1].worker_id
             )
             return entry
 
@@ -3646,6 +3665,29 @@ class PgMetadataAdapter:
             next_cursor=next_cursor,
         )
 
+    async def _check_audit_outbox_ready(self, conn: Connection) -> None:
+        """Require the outbox fence without raising the general metadata minimum."""
+        try:
+            ready = await conn.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM custos_meta.adapter_revisions "
+                "WHERE interface_name=$1 AND revision=$2)",
+                INTERFACE_NAME,
+                METADATA_REV12.number,
+            )
+        except UndefinedTableError as exc:
+            raise MigrationRequired([(INTERFACE_NAME, METADATA_REV12.number)]) from exc
+        if not ready:
+            raise MigrationRequired([(INTERFACE_NAME, METADATA_REV12.number)])
+
+    async def check_audit_outbox_ready(self) -> None:
+        """Expose revision12 as an explicit preflight for every outbox consumer."""
+        try:
+            pool = await self._pool_ref()
+            async with pool.acquire() as conn:
+                await self._check_audit_outbox_ready(conn)
+        except (OSError, InterfaceError, PostgresError) as exc:
+            raise BackendUnavailable("audit outbox readiness unavailable", cause=exc) from exc
+
     async def stream_audit_outbox(self, cursor: int, batch_size: int) -> AuditOutboxBatch:
         """Stream audit outbox rows for drain.
 
@@ -3660,14 +3702,7 @@ class PgMetadataAdapter:
                 await conn.execute(
                     "SELECT pg_advisory_xact_lock($1::bigint)", AUDIT_OUTBOX_LOCK_KEY
                 )
-                ready = await conn.fetchval(
-                    "SELECT EXISTS(SELECT 1 FROM custos_meta.adapter_revisions "
-                    "WHERE interface_name=$1 AND revision=$2)",
-                    INTERFACE_NAME,
-                    METADATA_REV12.number,
-                )
-                if not ready:
-                    raise MigrationRequired([(INTERFACE_NAME, METADATA_REV12.number)])
+                await self._check_audit_outbox_ready(conn)
                 rows = await conn.fetch(
                     "SELECT id, workspace_id, event_id, event_type, payload, "
                     "enqueued_at "

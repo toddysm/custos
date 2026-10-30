@@ -16,6 +16,7 @@ from custos_trigger.clients.workflow import (
     RunRef,
     StartRunRequest,
     WorkflowClientDecodeError,
+    WorkflowClientError,
     WorkflowClientStatusError,
     WorkflowClientTransportError,
     WorkflowServiceClient,
@@ -158,7 +159,7 @@ async def test_version_two_resume_requires_consumer_acknowledgement(status: int)
     from datetime import UTC, datetime, timedelta
 
     client = _client(httpx.MockTransport(lambda request: httpx.Response(status)))
-    with pytest.raises(WorkflowClientTransportError) as pending:
+    with pytest.raises(WorkflowClientError) as pending:
         await client.raise_external_event(
             "run",
             "wait",
@@ -170,7 +171,7 @@ async def test_version_two_resume_requires_consumer_acknowledgement(status: int)
                 retain_until=datetime.now(UTC) + timedelta(days=1),
             ),
         )
-    assert pending.value.retryable
+    assert pending.value.retryable is (status == 202)
 
 
 def test_read_dapr_endpoint_defaults() -> None:

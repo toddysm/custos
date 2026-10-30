@@ -56,6 +56,9 @@ The internal sequence remains `CACHE 1`; callers must not allocate explicit
 outbox IDs or reconfigure its allocator.
 This needs no table mutation privilege for readers. Reader lock acquisition is
 bounded to five seconds and fails explicitly; retry without advancing the cursor.
+Outbox consumers must preflight `check_audit_outbox_ready()` and require revision
+12 independently of any Trigger enablement flag; ordinary metadata consumers
+retain the general revision-4 minimum.
 
 ## Entry points
 

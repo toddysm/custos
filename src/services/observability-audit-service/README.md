@@ -38,6 +38,18 @@ and developer docs at
 Tracking issue: [#692](https://github.com/toddysm/custos/issues/692)
 (`OBS-IMPL-000`).
 
+## Outbox consumer startup
+
+Outbox consumers using the PostgreSQL metadata adapter require metadata revision
+12 independently of the general revision-4 minimum and of Trigger enablement.
+Apply migrations before starting the upgraded consumer. Lifecycle integrations
+must now `await drainer.start()`: it checks backend readiness before launching
+the task, and migration failures propagate rather than leaving a ready-looking
+consumer repeatedly failing in the background. Direct `run()` calls also preflight.
+The application lifespan also performs this check before `/readyz` can succeed.
+Its explicitly owned deferred metadata pool closes on failed startup or shutdown;
+injected provider bundles remain caller-owned.
+
 ## Layout
 
 ```

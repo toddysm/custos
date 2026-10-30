@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from typing import cast
 
 import pytest
-from custos_spl.errors import QueryUnsupported
+from custos_spl.errors import MigrationRequired, QueryUnsupported
 from custos_spl.ids import WorkspaceId
 from custos_spl.interfaces.metadata_store import (
     AuditOutboxBatch,
@@ -206,7 +206,7 @@ async def test_poll_mode_drains_initial_backlog_then_keeps_polling() -> None:
     handler = RecordingHandler()
     drainer = _drainer(store, handler, mode="poll", poll_interval_s=0.01)
 
-    drainer.start()
+    await drainer.start()
     try:
         await asyncio.wait_for(handler.drained_event.wait(), timeout=2)
     finally:
@@ -224,7 +224,7 @@ async def test_listen_mode_drains_on_notification() -> None:
     handler = RecordingHandler()
     drainer = _drainer(store, handler, mode="listen")
 
-    drainer.start()
+    await drainer.start()
     try:
         # Append a row, then notify; the drainer should pick it up.
         store.rows.append(_row(1))
@@ -242,7 +242,7 @@ async def test_listen_unsupported_falls_back_to_polling() -> None:
     handler = RecordingHandler()
     drainer = _drainer(store, handler, mode="listen", poll_interval_s=0.01)
 
-    drainer.start()
+    await drainer.start()
     try:
         await asyncio.wait_for(handler.drained_event.wait(), timeout=2)
     finally:
@@ -256,7 +256,7 @@ async def test_listen_stream_ending_falls_through_to_polling() -> None:
     handler = RecordingHandler()
     drainer = _drainer(store, handler, mode="listen", poll_interval_s=0.01)
 
-    drainer.start()
+    await drainer.start()
     try:
         # Let the startup catch-up drain run against an empty outbox, then end
         # the listen generator. A row that arrives only afterwards must still be
@@ -287,7 +287,7 @@ async def test_poll_loop_survives_a_failing_cycle() -> None:
 
     drainer = _drainer(store, flaky, mode="poll", poll_interval_s=0.01)
 
-    drainer.start()
+    await drainer.start()
     try:
         await asyncio.wait_for(handler.drained_event.wait(), timeout=2)
     finally:
@@ -321,10 +321,73 @@ async def test_start_is_idempotent_and_stop_without_start_is_noop() -> None:
     # stop() before any start() must be a clean no-op.
     await drainer.stop()
 
-    drainer.start()
+    await drainer.start()
     first = drainer._task
-    drainer.start()  # second start must not replace the running task
+    await drainer.start()  # second start must not replace the running task
     assert drainer._task is first
 
     await drainer.stop()
     assert drainer._task is None
+
+
+async def test_consumer_specific_migration_gate_precedes_task_launch() -> None:
+    """A general metadata-ready installation cannot silently launch an incompatible drain."""
+
+    class CheckedStore(FakeOutboxStore):
+        """Model a backend whose outbox needs a newer optional revision than ordinary metadata."""
+
+        ready = False
+        checks = 0
+
+        async def check_audit_outbox_ready(self) -> None:
+            """Reject startup until the outbox allocator/drainer migration is applied."""
+            self.checks += 1
+            if not self.ready:
+                raise MigrationRequired([("MetadataStoreProvider", 12)])
+
+    store = CheckedStore([1])
+    handler = RecordingHandler()
+    drainer = _drainer(store, handler)
+    with pytest.raises(MigrationRequired):
+        await drainer.start()
+    assert drainer._task is None and store.stream_calls == 0
+    with pytest.raises(MigrationRequired):
+        await drainer.run()
+    store.ready = True
+    await drainer.start()
+    try:
+        await asyncio.wait_for(handler.drained_event.wait(), timeout=2)
+    finally:
+        await drainer.stop()
+    assert drainer.cursor == 1
+    assert store.checks == 3
+
+
+async def test_direct_run_preflights_and_drains() -> None:
+    """Direct lifecycle owners receive the same prerequisite checks and drain behavior."""
+    handler = RecordingHandler()
+    drainer = _drainer(FakeOutboxStore([1]), handler)
+    task = asyncio.create_task(drainer.run())
+    try:
+        await asyncio.wait_for(handler.drained_event.wait(), timeout=2)
+        assert drainer.cursor == 1
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+async def test_migration_loss_is_not_swallowed_as_a_transient_cycle() -> None:
+    """Persistent schema failure reaches lifecycle supervision without advancing the cursor."""
+
+    class BehindStore(FakeOutboxStore):
+        """Fail the actual read after a backend loses its required outbox revision."""
+
+        async def stream_audit_outbox(self, cursor: int, batch_size: int) -> AuditOutboxBatch:
+            """Surface migration prerequisites rather than returning an empty batch."""
+            raise MigrationRequired([("MetadataStoreProvider", 12)])
+
+    drainer = _drainer(BehindStore([1]), RecordingHandler())
+    with pytest.raises(MigrationRequired):
+        await drainer._drain_guarded()
+    assert drainer.cursor == 0

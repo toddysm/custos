@@ -696,11 +696,21 @@ class MetadataStoreProvider(Protocol):
         ...
 
 
+@runtime_checkable
+class AuditOutboxReadiness(Protocol):
+    """Optional consumer-specific startup gate, independent of the general metadata minimum."""
+
+    async def check_audit_outbox_ready(self) -> None:
+        """Fail startup when the backend cannot guarantee commit-safe outbox draining."""
+        ...
+
+
 __all__ = [
     "ArtifactUse",
     "AuditEvent",
     "AuditFilter",
     "AuditOutboxBatch",
+    "AuditOutboxReadiness",
     "AuditOutboxRow",
     "ConnectorCursor",
     "DedupDuplicate",

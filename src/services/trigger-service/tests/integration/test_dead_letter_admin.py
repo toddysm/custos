@@ -21,6 +21,7 @@ from custos_spl.interfaces.dead_letters import (
     ReplayClaim,
 )
 from custos_spl.interfaces.metadata_store import AuditEvent, AuditOutboxBatch, TransactionHandle
+from custos_spl.pagination import encode_query_cursor
 from fastapi import Depends, FastAPI, Request
 
 from custos_trigger.app import create_app
@@ -234,6 +235,149 @@ async def test_pages_bind_filters_and_workspace(harness: Harness) -> None:
             await admin.list(workspace, filters, cursor=first.next_cursor.token)
     with pytest.raises(DeadLetterAdminError, match="not found"):
         await admin.inspect("other", "a")
+
+
+@pytest.mark.parametrize("protocol", [1, 2])
+@pytest.mark.parametrize("boundary", ["lookup", "claim"])
+async def test_single_replay_never_sends_a_replacement_generation(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    protocol: int,
+    boundary: str,
+) -> None:
+    """A recreated ID cannot retarget a replay or bypass its versioned-protocol check."""
+    client = FakeWorkflowServiceClient()
+    admin = administration(harness, client)
+    original = capture()
+    await harness.store.put_dead_letter(
+        replace(original, target={**original.target, "deliveryProtocol": 2})
+    )
+    get = harness.store.get_dead_letter
+    claim = harness.store.claim_dead_letter
+    reads = 0
+
+    async def replace_entry() -> None:
+        """Erase the actual inspected row and install a different immutable target."""
+        entry = await get(WS, "entry")
+        assert entry is not None
+        if harness.pool is None:
+            assert isinstance(harness.store, InMemoryTriggerMetadataStore)
+            harness.store._dead_letters[(str(WS), "entry")] = replace(
+                entry, expires_at=harness.clock[0]
+            )
+        else:
+            await harness.expire(entry, retention=True)
+        assert await harness.store.delete_expired_dead_letter(WS, "entry")
+        await harness.store.put_dead_letter(
+            replace(
+                original,
+                idempotency_key="replacement",
+                target={
+                    **original.target,
+                    "workflowVersionId": "replacement",
+                    "deliveryProtocol": protocol,
+                },
+            )
+        )
+
+    async def read_then_replace(workspace: WorkspaceId, identifier: str) -> DeadLetterEntry | None:
+        """Replace between administration inspection and the dispatcher's inspection."""
+        nonlocal reads
+        reads += 1
+        if reads == 2:
+            await replace_entry()
+        return await get(workspace, identifier)
+
+    async def replace_then_claim(
+        workspace: WorkspaceId,
+        identifier: str,
+        actor: str,
+        *,
+        ttl_seconds: int = 60,
+        bulk_id: str | None = None,
+        bulk_token: str | None = None,
+        expected_identity: str | None = None,
+    ) -> DeadLetterEntry:
+        """Replace between protocol validation and the atomic claim check."""
+        await replace_entry()
+        return await claim(
+            workspace,
+            identifier,
+            actor,
+            ttl_seconds=ttl_seconds,
+            bulk_id=bulk_id,
+            bulk_token=bulk_token,
+            expected_identity=expected_identity,
+        )
+
+    monkeypatch.setattr(
+        harness.store,
+        "get_dead_letter" if boundary == "lookup" else "claim_dead_letter",
+        read_then_replace if boundary == "lookup" else replace_then_claim,
+    )
+    with pytest.raises(DeadLetterAdminError) as unsafe:
+        await admin.replay(str(WS), "entry", "operator")
+    assert unsafe.value.code == "trigger.replay_unsafe"
+    assert not client.start_run_calls
+
+
+async def test_bulk_does_not_count_an_already_replayed_replacement(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A replacement's completed status is not proof that the frozen selection was delivered."""
+    client = FakeWorkflowServiceClient()
+    admin = administration(harness, client)
+    data = capture()
+    await harness.store.put_dead_letter(
+        replace(data, target={**data.target, "deliveryProtocol": 2})
+    )
+    claim = harness.store.claim_dead_letter
+
+    async def replace_then_claim(
+        workspace: WorkspaceId,
+        identifier: str,
+        actor: str,
+        *,
+        ttl_seconds: int = 60,
+        bulk_id: str | None = None,
+        bulk_token: str | None = None,
+        expected_identity: str | None = None,
+    ) -> DeadLetterEntry:
+        """Install and complete another generation after the original selection was validated."""
+        entry = await harness.store.get_dead_letter(workspace, identifier)
+        assert entry is not None
+        if harness.pool is None:
+            assert isinstance(harness.store, InMemoryTriggerMetadataStore)
+            harness.store._dead_letters[(str(workspace), identifier)] = replace(
+                entry, expires_at=harness.clock[0]
+            )
+        else:
+            await harness.expire(entry, retention=True)
+        assert await harness.store.delete_expired_dead_letter(workspace, identifier)
+        await harness.store.put_dead_letter(
+            replace(
+                data,
+                idempotency_key="new-key",
+                target={**data.target, "workflowVersionId": "new-version", "deliveryProtocol": 2},
+            )
+        )
+        replacement = await claim(workspace, identifier, "another")
+        assert replacement.claim is not None
+        await harness.store.finish_dead_letter(replacement.claim, result_id="replacement-run")
+        return await claim(
+            workspace,
+            identifier,
+            actor,
+            ttl_seconds=ttl_seconds,
+            bulk_id=bulk_id,
+            bulk_token=bulk_token,
+            expected_identity=expected_identity,
+        )
+
+    monkeypatch.setattr(harness.store, "claim_dead_letter", replace_then_claim)
+    assert await admin.bulk_replay(str(WS), DeadLetterFilter(), "operator") == (0, 1, None)
+    assert not client.start_run_calls
 
 
 async def test_failed_replay_returns_its_own_committed_status(
@@ -465,6 +609,7 @@ async def test_gateway_forwards_scoped_recovery_to_real_trigger_handlers(harness
     from custos_gateway.router import DownstreamRouter
     from custos_gateway.routes.registry import M1_ROUTE_REGISTRY, _make_forwarder
     from custos_gateway.settings import load_settings as gateway_settings
+    from custos_workflow.providers import _InProcessMetadataStoreProvider
 
     client = FakeWorkflowServiceClient()
     admin = administration(harness, client)
@@ -481,15 +626,16 @@ async def test_gateway_forwards_scoped_recovery_to_real_trigger_handlers(harness
     )
     gateway = FastAPI()
     gateway_errors(gateway)
-    if harness.pool is not None:
-        gateway.state.metadata_store = harness.store
-        gateway.state.settings = gateway_settings(
-            {
-                "CUSTOS_GATEWAY_TLS_CERT_REF": "secretref://tls/cert",
-                "CUSTOS_GATEWAY_TLS_KEY_REF": "secretref://tls/key",
-                "CUSTOS_GATEWAY_CORS_ALLOWED_ORIGINS": '["https://ui.custos.example"]',
-            }
-        )
+    gateway.state.metadata_store = (
+        harness.store if harness.pool is not None else _InProcessMetadataStoreProvider()
+    )
+    gateway.state.settings = gateway_settings(
+        {
+            "CUSTOS_GATEWAY_TLS_CERT_REF": "secretref://tls/cert",
+            "CUSTOS_GATEWAY_TLS_KEY_REF": "secretref://tls/key",
+            "CUSTOS_GATEWAY_CORS_ALLOWED_ORIGINS": '["https://ui.custos.example"]',
+        }
+    )
     unavailable = False
 
     async def authorized(request: Request) -> None:
@@ -556,10 +702,9 @@ async def test_gateway_forwards_scoped_recovery_to_real_trigger_handlers(harness
                 for _ in range(2):
                     response = await http.post(BASE + "/entry:replay", headers=headers)
                     assert response.status_code == 200 and response.json() == {"status": "replayed"}
-                if harness.pool is not None:
-                    changed = await http.post(BASE + "/other:replay", headers=headers)
-                    assert changed.status_code == 409
-                    assert changed.json()["code"] == "idempotency-key-reuse"
+                changed = await http.post(BASE + "/other:replay", headers=headers)
+                assert changed.status_code == 409
+                assert changed.json()["code"] == "idempotency-key-reuse"
                 for identifier in ("bulk-a", "bulk-b"):
                     await harness.store.put_dead_letter(
                         replace(
@@ -711,13 +856,87 @@ async def test_unacknowledged_resume_is_not_finalized_as_replayed(harness: Harne
         admin = DeadLetterAdmin(
             ReliableDispatcher(client, harness.store, NoopAuditSink(), max_retries=0)
         )
-        assert await admin.replay(str(WS), "entry", "operator") == "pending"
+        with pytest.raises(DeadLetterAdminError) as waiting:
+            await admin.replay(str(WS), "entry", "operator")
+        assert waiting.value.code == "trigger.deadletter.unavailable"
         with pytest.raises(DeadLetterAdminError) as terminal:
             await admin.replay(str(WS), "entry", "operator")
         assert terminal.value.code == "trigger.replay_unsafe"
     retained = await harness.store.get_dead_letter(WS, "entry")
     assert retained is not None and retained.status == "pending"
     assert "trigger.deadletter.replayed" not in await audits(harness)
+
+
+@pytest.mark.parametrize("statuses", [(202, 202), (202, 503), (503, 202), (202, 403)])
+async def test_pending_acknowledgement_does_not_exhaust_one_attempt_budget(
+    harness: Harness,
+    statuses: tuple[int, int],
+) -> None:
+    """Unacknowledged submissions reconcile one logical attempt until consumption is proven."""
+    from custos_trigger.clients.workflow import DaprEndpoint, DaprWorkflowServiceClient
+    from custos_trigger.dead_letters import DeadLetterAdmin
+
+    responses = iter((*statuses, 204))
+    data = capture(resume=True)
+    await harness.store.put_dead_letter(
+        replace(
+            data,
+            max_replay_attempts=1,
+            target={**data.target, "deliveryProtocol": 2},
+        )
+    )
+    assert isinstance(harness.store, ReliableStorage)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(next(responses)))
+    ) as http:
+        client = DaprWorkflowServiceClient(
+            http, DaprEndpoint(host="127.0.0.1", http_port=3500, app_id="workflow-service")
+        )
+        admin = DeadLetterAdmin(
+            ReliableDispatcher(client, harness.store, NoopAuditSink(), max_retries=0)
+        )
+        for actor in ("operator-a", "operator-b"):
+            with pytest.raises(DeadLetterAdminError):
+                await admin.replay(str(WS), "entry", actor)
+            pending = await harness.store.get_dead_letter(WS, "entry")
+            assert pending is not None and pending.status == "pending" and pending.claim is None
+            assert len(pending.replay_history) == 1
+            assert pending.replay_history[0].outcome == "awaiting_ack"
+            assert pending.replay_history[0].worker_id == "operator-a"
+        assert await admin.replay(str(WS), "entry", "operator-b") == "replayed"
+    events = await audits(harness)
+    assert events.count("trigger.deadletter.replay_pending") == 1
+    assert "trigger.deadletter.replay_failed" not in events
+    assert "trigger.deadletter.discarded" not in events
+    final = (await audit_payloads(harness, "replayed"))[0]
+    assert final["actor"] == "operator-b" and final["attemptOperator"] == "operator-a"
+
+
+@pytest.mark.parametrize("key", ["nul\x00entry", "\ud800"])
+async def test_decoded_cursor_text_is_rejected_consistently(harness: Harness, key: str) -> None:
+    """Valid scope binding cannot make an invalid PostgreSQL identifier a valid pagination key."""
+    workflow = FakeWorkflowServiceClient()
+    admin = administration(harness, workflow)
+    store = cast(TriggerMetadataStore, harness.store)
+    app = create_app(
+        authz_endpoint="",
+        providers=Providers(store),
+        dispatcher=Dispatcher(workflow, Deduplicator(store), reliable=admin.dispatcher),
+    )
+    token = encode_query_cursor(DeadLetterFilter().scope(WS), key).token
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://trigger",
+        ) as client,
+    ):
+        for response in (
+            await client.get(BASE, headers=HEADERS, params={"cursor": token}),
+            await client.post(BASE + ":replay", headers=HEADERS, json={"cursor": token}),
+        ):
+            assert response.status_code == 422
+            assert response.json()["code"] == "trigger.deadletter.invalid"
 
 
 @pytest.mark.parametrize("status", ["pending", "replayed", "discarded", "replaying"])
@@ -969,6 +1188,7 @@ async def test_bulk_rejects_entries_deleted_during_replay(
         ttl_seconds: int = 60,
         bulk_id: str | None = None,
         bulk_token: str | None = None,
+        expected_identity: str | None = None,
     ) -> DeadLetterEntry:
         """Delete after both reads but before acquiring replay ownership."""
         if identifier == "a-gone":
@@ -980,6 +1200,7 @@ async def test_bulk_rejects_entries_deleted_during_replay(
             ttl_seconds=ttl_seconds,
             bulk_id=bulk_id,
             bulk_token=bulk_token,
+            expected_identity=expected_identity,
         )
 
     monkeypatch.setattr(

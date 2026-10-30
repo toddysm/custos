@@ -455,10 +455,13 @@ async def test_postgres_migration_readiness_indexes_and_outage(pg_dsn: str) -> N
             await adapter.check_dead_letters_ready()
         with pytest.raises(MigrationRequired):
             await adapter.stream_audit_outbox(0, 100)
+        with pytest.raises(MigrationRequired):
+            await adapter.check_audit_outbox_ready()
         await adapter.apply_pending()
         assert adapter.SCHEMA_REVISION == 4
         assert await adapter.apply_pending() == []
         await adapter.check_dead_letters_ready()
+        await adapter.check_audit_outbox_ready()
     finally:
         await pool.close()
     with pytest.raises(BackendUnavailable):

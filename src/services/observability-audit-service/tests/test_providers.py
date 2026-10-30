@@ -130,11 +130,13 @@ def test_load_providers_wires_noop_without_backend_urls() -> None:
 # --- aclose_providers --------------------------------------------------------
 
 
-async def test_aclose_providers_is_a_noop() -> None:
-    # At this phase no provider holds a persistent resource (per-request HTTP;
-    # the pg pool is reclaimed at process exit), so closing must not raise.
+async def test_aclose_providers_does_not_open_an_unused_pool() -> None:
+    """Unopened deferred resources can be closed without connecting to a backend."""
     providers = load_providers(_backend_settings())
     await aclose_providers(providers)
+    assert providers.owned_metadata_pool is not None
+    with pytest.raises(RuntimeError, match="closed"):
+        await providers.owned_metadata_pool.get()
 
 
 # --- NoopLogQueryAdapter behaviour ------------------------------------------
