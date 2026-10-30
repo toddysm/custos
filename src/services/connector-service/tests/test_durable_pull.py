@@ -7,8 +7,8 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import timedelta
-from typing import Any, NoReturn
-from unittest.mock import AsyncMock
+from typing import Any, NoReturn, cast
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -23,6 +23,7 @@ from custos_connector.audit import EVENT_PULL_LOOP_PAUSED
 from custos_connector.cursor.service import CursorInstanceUnavailable
 from custos_connector.providers import wire_durable_pull_runtime
 from custos_connector.runtime import (
+    DockerCliHookRunner,
     HookRunResult,
     PluginCleanupFailed,
     PluginInvoker,
@@ -694,6 +695,82 @@ async def test_expired_tick_with_failed_cleanup_does_not_cancel_other_instances(
     assert control is not None and control.invocation_id is not None
     clock.advance(10)
     assert (await scheduler.tick_once()).outcomes[0].status == "ticked"
+
+
+@pytest.mark.parametrize("phase", ["spawn", "cleanup", "cleanup_io"])
+async def test_cancelled_owned_runtime_task_retains_invocation_fence(
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    """Independent runtime-task cancellation does not confirm container termination."""
+    clock = PullClock()
+    providers, metadata, fixture_runner, _ = memory_runtime(clock)
+    await seed_instance(providers)
+    start_demand(metadata)
+    result = fixture_runner._result
+    assert result is not None
+    owned: asyncio.Future[asyncio.Task[Any]] = asyncio.Future()
+    process, cleanup = Mock(spec=asyncio.subprocess.Process), Mock(spec=asyncio.subprocess.Process)
+    process.returncode, cleanup.returncode = 0, None
+    process.communicate = AsyncMock(return_value=(result.stdout, result.stderr))
+
+    async def interrupted_cleanup() -> tuple[bytes, bytes]:
+        """Expose the actual cleanup task before it confirms container termination."""
+        task = asyncio.current_task()
+        assert task is not None
+        owned.set_result(task)
+        return await asyncio.Future[tuple[bytes, bytes]]()
+
+    def kill_cleanup() -> None:
+        """Reap only the mocked removal command, without claiming a container outcome."""
+        cleanup.returncode = -9
+
+    async def spawn(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        """Expose either the subprocess-creation task or the pending removal command."""
+        if args[1] == "run":
+            if phase == "spawn":
+                task = asyncio.current_task()
+                assert task is not None
+                owned.set_result(task)
+                return await asyncio.Future[asyncio.subprocess.Process]()
+            return cast(asyncio.subprocess.Process, process)
+        return cast(asyncio.subprocess.Process, cleanup)
+
+    cleanup.communicate = AsyncMock(side_effect=interrupted_cleanup)
+    cleanup.kill = Mock(side_effect=kill_cleanup)
+    cleanup.wait = (
+        AsyncMock(side_effect=OSError("cleanup wait failed"))
+        if phase == "cleanup_io"
+        else AsyncMock(return_value=-9)
+    )
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    runtime = wire_durable_pull_runtime(
+        providers, settings(), plugin_invoker=PluginInvoker(DockerCliHookRunner())
+    )
+    assert runtime.cursor_service is not None and runtime.pull_demand_reconciler is not None
+    await runtime.pull_demand_reconciler.reconcile(WS)
+    tick = asyncio.create_task(runtime.cursor_service.tick(WS, INSTANCE))
+    try:
+        async with asyncio.timeout(2):
+            owned_task = await owned
+            owned_task.cancel()
+            outcomes = await asyncio.gather(tick, return_exceptions=True)
+        assert isinstance(outcomes[0], PluginCleanupFailed)
+        control = await metadata.get_pull_control(WorkspaceId(WS), ConnectorInstanceId(INSTANCE))
+        cursor = await metadata.read_cursor(WS, INSTANCE)
+        assert control is not None and cursor is not None
+        assert control.invocation_id is not None and control.invocation_id == cursor.lease_holder
+        clock.advance(61)
+        with pytest.raises(PullTickBlocked, match="invocation_unconfirmed"):
+            await metadata.acquire_pull_tick(
+                WorkspaceId(WS), ConnectorInstanceId(INSTANCE), "new-worker", ttl_seconds=60
+            )
+    finally:
+        if not tick.done():
+            tick.cancel()
+        if owned.done() and not owned.cancelled() and not owned.result().done():
+            owned.result().cancel()
+        await asyncio.gather(tick, return_exceptions=True)
 
 
 async def test_explicit_recovery_is_scoped_confirmed_and_generation_checked() -> None:

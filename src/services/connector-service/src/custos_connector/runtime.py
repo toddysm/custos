@@ -163,15 +163,23 @@ DOCKER_CLEANUP_TIMEOUT_SECONDS = 5
 _TaskResult = TypeVar("_TaskResult")
 
 
-async def _finish_owned_task(task: asyncio.Task[_TaskResult]) -> tuple[_TaskResult, bool]:
-    """Finish owned process cleanup despite repeated cancellation, without losing its result."""
+async def _finish_owned_task(
+    task: asyncio.Task[_TaskResult], container_name: str
+) -> tuple[_TaskResult, bool]:
+    """Wait through caller cancellation; cancelled owned tasks cannot confirm termination."""
     interrupted = False
     while not task.done():
         try:
             await asyncio.shield(task)
         except asyncio.CancelledError:
             interrupted = True
-    return task.result(), interrupted
+    try:
+        return task.result(), interrupted
+    except asyncio.CancelledError as exc:
+        failure = PluginCleanupFailed(container_name)
+        caller = asyncio.current_task()
+        failure.cancellation_requested = caller is not None and caller.cancelling() > 0
+        raise failure from exc
 
 
 class PluginProtocolError(PluginRuntimeError):
@@ -264,7 +272,7 @@ class DockerCliHookRunner:
             proc = await asyncio.shield(spawning)
         except asyncio.CancelledError as cancelled:
             try:
-                proc, _ = await _finish_owned_task(spawning)
+                proc, _ = await _finish_owned_task(spawning, container_name)
             except OSError:
                 raise cancelled from None
             await self._finish_invocation(proc, container_name)
@@ -289,11 +297,16 @@ class DockerCliHookRunner:
         """Do not propagate cancellation until the CLI and its container are accounted for."""
         cleanup = asyncio.create_task(self._cleanup_invocation(proc, container_name, communication))
         try:
-            _, interrupted = await _finish_owned_task(cleanup)
-        except PluginCleanupFailed as failure:
+            _, interrupted = await _finish_owned_task(cleanup, container_name)
+        except (PluginCleanupFailed, OSError) as exc:
+            failure = (
+                exc if isinstance(exc, PluginCleanupFailed) else PluginCleanupFailed(container_name)
+            )
             caller = asyncio.current_task()
             failure.cancellation_requested = caller is not None and caller.cancelling() > 0
-            raise
+            if failure is exc:
+                raise
+            raise failure from exc
         if interrupted:
             raise asyncio.CancelledError()
 

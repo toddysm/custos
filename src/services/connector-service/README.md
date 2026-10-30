@@ -188,6 +188,8 @@ owner cannot clear a recovered or replaced invocation.
 An expired tick deadline with failed cleanup fails only that instance, retaining
 its fence; it does not cancel polling for unrelated instances. Actual caller
 cancellation still propagates.
+Cancellation of an internal spawn/cleanup task or an unconfirmed cleanup
+operating-system error retains the fence; neither is proof of termination.
 
 For recovery, inspect `GET /v1/workspaces/{ws}/connectors/{id}/cursor` with
 `connector:read`. Its durable-mode `pullControl` object includes `invocationId`,
