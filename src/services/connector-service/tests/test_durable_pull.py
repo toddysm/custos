@@ -435,6 +435,25 @@ async def test_refresh_batches_registered_keys(monkeypatch: pytest.MonkeyPatch) 
     assert [len(call.args[1]) for call in read.await_args_list] == [100, 100, 5]
 
 
+async def test_reconciliation_pages_instance_eligibility(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two hundred five controls require three eligibility pages, not 205 point lookups."""
+    providers, metadata, _, _ = memory_runtime(PullClock())
+    for index in range(205):
+        identifier = f"instance-{index:03}"
+        await seed_instance(providers, identifier=identifier)
+        await metadata.set_pull_native_demand(
+            WorkspaceId(WS), ConnectorInstanceId(identifier), interval_seconds=10, actor="fixture"
+        )
+    instances = providers.instance_store
+    paged = AsyncMock(wraps=instances.list_connector_instances)
+    point = AsyncMock(side_effect=AssertionError("per-instance eligibility reads are forbidden"))
+    monkeypatch.setattr(instances, "list_connector_instances", paged)
+    monkeypatch.setattr(instances, "get_connector_instance", point)
+    assert providers.pull_demand_reconciler is not None
+    assert await providers.pull_demand_reconciler.reconcile(WS) == 205
+    assert paged.await_count == 3 and point.await_count == 0
+
+
 async def test_old_unavailable_result_cannot_remove_new_activation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 
-from custos_spl.ids import ConnectorInstanceId, WorkspaceId
-from custos_spl.interfaces.connector_instance_store import ConnectorInstanceStoreProvider
+from custos_spl.ids import WorkspaceId
+from custos_spl.interfaces.connector_instance_store import (
+    ConnectorInstanceFilter,
+    ConnectorInstanceStoreProvider,
+)
 from custos_spl.interfaces.pull_control import ConnectorPullControlProvider, pull_interval
 
 from custos_connector.scheduler.pull_loop import PullLoopScheduler
@@ -40,15 +43,29 @@ class PullDemandReconciler:
                 default_interval_seconds=self._default_interval,
                 minimum_interval_seconds=self._scheduler.minimum_interval_seconds,
             )
+            eligible: set[str] = set()
+            instance_cursor = None
+            while True:
+                instances = await self._instances.list_connector_instances(
+                    workspace,
+                    filter=ConnectorInstanceFilter(enabled=True),
+                    cursor=instance_cursor,
+                    limit=100,
+                )
+                eligible.update(
+                    str(instance.instance_id)
+                    for instance in instances.items
+                    if instance.status == "active"
+                )
+                instance_cursor = instances.next_cursor
+                if instance_cursor is None:
+                    break
             seen: set[str] = set()
             cursor = None
             while True:
                 page = await self._controls.query_pull_controls(workspace, cursor=cursor, limit=100)
                 for control in page.items:
-                    instance = await self._instances.get_connector_instance(
-                        workspace, ConnectorInstanceId(control.instance_id)
-                    )
-                    if instance is None or not instance.enabled or instance.status != "active":
+                    if str(control.instance_id) not in eligible:
                         continue
                     seen.add(str(control.instance_id))
                     self._scheduler.apply_pull_control(control, clear_halt=True)

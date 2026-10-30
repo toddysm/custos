@@ -8,8 +8,12 @@ catalog precedent uses the same pattern (see
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock
 
 import pytest
+from custos_spl.errors import BackendUnavailable
+from custos_spl.ids import WorkspaceId
+from custos_spl.interfaces.connector_instance_store import ConnectorInstance
 
 from custos_connector.audit import (
     EVENT_HEALTH_CHECK_COMPLETED,
@@ -54,12 +58,15 @@ def _build_service() -> tuple[
 
 def _build_service_with_invoker(
     invoker: _FakePluginInvoker,
+    *,
+    durable_pull: bool = False,
 ) -> tuple[
     InstanceService,
     FakeConnectorInstanceAdapter,
     FakeCatalogAdapter,
     FakeMetadataAdapter,
 ]:
+    """Build the existing fixture with optional durable policy initialization."""
     catalog = FakeCatalogAdapter()
     instances = FakeConnectorInstanceAdapter()
     metadata = FakeMetadataAdapter()
@@ -69,6 +76,7 @@ def _build_service_with_invoker(
         metadata_store=metadata,  # type: ignore[arg-type]
         plugin_invoker=invoker,  # type: ignore[arg-type]
         health_cache_ttl_seconds=60,
+        pull_control=metadata if durable_pull else None,
     )
     return service, instances, catalog, metadata
 
@@ -177,6 +185,53 @@ async def test_create_persists_row_and_emits_audit() -> None:
     assert event.event_type == EVENT_INSTANCE_CREATED
     assert event.actor == "user:alice"
     assert event.subject["instance_id"] == str(row.instance_id)
+
+
+async def test_durable_policy_exists_before_instance_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The actual create branch initializes policy before an instance becomes visible."""
+    service, instances, catalog, metadata = _build_service_with_invoker(
+        _FakePluginInvoker(), durable_pull=True
+    )
+    await _register_type(catalog, "http", "1.0.0")
+    put = instances.put_connector_instance
+    observed: list[str] = []
+
+    async def verify_order(
+        workspace_id: WorkspaceId,
+        instance: ConnectorInstance,
+    ) -> ConnectorInstance:
+        """Observe policy at the persistence boundary, not by initializing it in the fixture."""
+        control = await metadata.get_pull_control(workspace_id, instance.instance_id)
+        assert control is not None and not control.operator_paused
+        assert control.effective_interval_seconds is None
+        observed.append(str(instance.instance_id))
+        return await put(workspace_id, instance)
+
+    monkeypatch.setattr(instances, "put_connector_instance", verify_order)
+    row = await service.create("ws-1", type="http", version="1.0.0", actor="creator")
+    assert observed == [str(row.instance_id)]
+
+
+async def test_initialization_failure_never_exposes_an_instance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed policy write prevents instance persistence and its successful-create audit."""
+    service, instances, catalog, metadata = _build_service_with_invoker(
+        _FakePluginInvoker(), durable_pull=True
+    )
+    await _register_type(catalog, "http", "1.0.0")
+    put = AsyncMock(wraps=instances.put_connector_instance)
+    monkeypatch.setattr(instances, "put_connector_instance", put)
+    monkeypatch.setattr(
+        metadata,
+        "initialize_pull_control",
+        AsyncMock(side_effect=BackendUnavailable("unavailable")),
+    )
+    with pytest.raises(BackendUnavailable):
+        await service.create("ws-1", type="http", version="1.0.0", actor="creator")
+    assert put.await_count == 0
+    assert not (await instances.list_connector_instances(WorkspaceId("ws-1"))).items
+    assert not metadata.append_audit_calls
 
 
 async def test_create_rejects_unknown_connector_type() -> None:
