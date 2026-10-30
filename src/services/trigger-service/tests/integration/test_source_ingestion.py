@@ -553,11 +553,11 @@ async def test_reconciliation_progress_skips_slow_prefix_and_reaches_later_selec
     from custos_trigger.pipeline import reliable as reliable_module
 
     assert reliable_module.SOURCE_RECONCILE_TARGET_LIMIT == 32
-    assert reliable_module.SOURCE_RECONCILE_PROBE_SECONDS == 5
+    assert reliable_module.MAX_DISPATCH_SECONDS == 300
     monkeypatch.setattr(
         reliable_module,
-        "SOURCE_RECONCILE_PROBE_SECONDS",
-        1 if isinstance(source_store, PgMetadataAdapter) else 0.01,
+        "MAX_DISPATCH_SECONDS",
+        3 if isinstance(source_store, PgMetadataAdapter) else 0.05,
     )
     cancelled = 0
 
@@ -610,7 +610,7 @@ async def test_reconciliation_progress_skips_slow_prefix_and_reaches_later_selec
     cursor = None
     settled, pending = 0, 0
     async with asyncio.timeout(30):
-        for _ in range(6):
+        for _ in range(12):
             report = await reliable.reconcile_pending(WS, cursor=cursor, limit=1)
             assert report.settled_targets + report.pending_targets <= 32
             settled += report.settled_targets
@@ -680,6 +680,63 @@ async def test_reconciliation_overall_deadline_returns_unfinished_progress(
         await reliable.reconcile_pending("other", cursor=report.next_cursor)
     receipt = await source_store.get_delivery(WorkspaceId(WS), "trigger", data.idempotency_key)
     assert receipt is not None and not receipt.completed
+
+
+async def test_reconciliation_allows_a_valid_six_second_workflow_response(
+    source_store: SourceStorage,
+) -> None:
+    """A valid response within the real client's timeout must settle its producer."""
+    import httpx
+
+    from custos_trigger.clients.workflow import (
+        DEFAULT_RPC_TIMEOUT_SECONDS,
+        DaprEndpoint,
+        DaprWorkflowServiceClient,
+    )
+    from custos_trigger.pipeline.reliable import ReliableDispatcher
+
+    assert DEFAULT_RPC_TIMEOUT_SECONDS == 10
+
+    async def workflow(request: httpx.Request) -> httpx.Response:
+        """Return genuine consumer acknowledgement after the former five-second cutoff."""
+        assert request.extensions["timeout"]["read"] == 10
+        await asyncio.sleep(6)
+        return httpx.Response(204)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(workflow)) as transport:
+        client = DaprWorkflowServiceClient(
+            transport, DaprEndpoint(host="127.0.0.1", http_port=3500, app_id="workflow-service")
+        )
+        reliable = ReliableDispatcher(client, source_store, NoopAuditSink(), max_retries=0)
+        event = adapt_connector_event(connector_event()).event
+        data = await reliable.prepare_request(
+            event,
+            WS,
+            "wait",
+            {
+                "kind": "resume",
+                "runId": "run",
+                "stepId": "step",
+                "eventName": "ready",
+                "payload": {},
+                "deliveryProtocol": 2,
+            },
+        )
+        assert data is not None
+        await source_store.put_source_delivery(
+            SourceDeliverySelection(
+                WorkspaceId(WS),
+                "slow-valid",
+                "a" * 64,
+                await source_store.delivery_now() + timedelta(hours=1),
+                (encode_delivery_request(data),),
+            )
+        )
+        report = await reliable.reconcile_pending(WS)
+        assert report.settled_targets == 1 and report.pending_targets == 0
+        assert not report.deadline_exhausted
+        receipt = await source_store.get_delivery(WorkspaceId(WS), "trigger", data.idempotency_key)
+        assert receipt is not None and receipt.completed and receipt.token is None
 
 
 async def test_downstream_failure_is_durably_captured_before_ack(

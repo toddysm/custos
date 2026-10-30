@@ -297,8 +297,10 @@ payloads that fit. It does not fetch a large unreturned tail before applying
 the budget.
 [`ReliableDispatcher.reconcile_pending`](../../src/services/trigger-service/src/custos_trigger/pipeline/reliable.py)
 recovers a bounded page without a broker retry, current wait or subscription.
-It probes at most 32 targets per call, with five seconds per probe and 15 seconds
-for discovery. Its opaque continuation includes the position within a selection;
+It probes at most 32 targets per call, with 15 seconds for discovery. Probes use
+the normal Workflow client and durable-dispatch timeout budgets rather than a
+shorter reconciliation-specific timeout (the default Workflow RPC timeout is
+10 seconds). Its opaque continuation includes the position within a selection;
 pass it back to this method, not to the storage query. Delayed targets remain
 pending but cannot force every call to revisit the same prefix. A 300-second
 overall deadline after work starts returns `deadline_exhausted=true` with

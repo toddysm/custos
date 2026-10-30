@@ -81,7 +81,6 @@ logger = logging.getLogger(__name__)
 MAX_DISPATCH_SECONDS = 300
 FINALIZATION_MARGIN_SECONDS = 30
 SOURCE_RECONCILE_TARGET_LIMIT = 32
-SOURCE_RECONCILE_PROBE_SECONDS = 5
 SOURCE_RECONCILE_QUERY_SECONDS = 15
 
 
@@ -391,8 +390,7 @@ class ReliableDispatcher:
                         progress = _source_progress_cursor(workspace, selection.key, index + 1)
                         in_flight = True
                         try:
-                            async with asyncio.timeout(SOURCE_RECONCILE_PROBE_SECONDS):
-                                await self._dispatch_snapshot(workspace, requests[index])
+                            await self._dispatch_snapshot(workspace, requests[index])
                         except TriggerError as exc:
                             if exc.kind != TriggerErrorKind.DISPATCH_UNAVAILABLE:
                                 raise
