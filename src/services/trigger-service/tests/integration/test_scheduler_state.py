@@ -672,7 +672,7 @@ async def test_recovered_publication_does_not_duplicate_workflow_effect(harness:
         """Run the actual matching/durable dispatch path, then lose the first acknowledgement."""
         nonlocal uncertain
         await ingest_source_event(
-            ScopedEvent(workspace_id=str(_WS), event=event),
+            ScopedEvent(schema_version="1", workspace_id=str(_WS), event=event),
             subscriptions=subscriptions,
             resumes=ResumeSubscriptionStore(harness.store),
             scheduler=harness.store,

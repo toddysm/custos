@@ -172,6 +172,22 @@ def test_private_normalized_route_uses_same_durable_path(source_client: SourceCl
     assert len(workflow.start_run_calls) == 1
 
 
+@pytest.mark.parametrize("version", [None, "2", 1])
+def test_normalized_wrapper_requires_explicit_supported_version(
+    source_client: SourceClient, version: object
+) -> None:
+    """Unversioned, unknown and wrongly typed transport wrappers never dispatch."""
+    client, _, workflow = source_client
+    wire = adapt_connector_event(connector_event()).model_dump(mode="json", by_alias=True)
+    if version is None:
+        wire.pop("schemaVersion")
+    else:
+        wire["schemaVersion"] = version
+    response = client.post(NORMALIZED_EVENTS_PATH, json={"data": wire}, headers=HEADERS)
+    assert response.json() == {"status": "DROP"}
+    assert not workflow.start_run_calls and not workflow.raise_event_calls
+
+
 def test_discovery_is_repeatable_and_disabled_by_default(source_client: SourceClient) -> None:
     """Dapr can rebuild registrations after restart; existing default discovery stays unchanged."""
     client, _, _ = source_client

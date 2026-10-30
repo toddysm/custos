@@ -140,6 +140,8 @@ is renamed on the producer's wire surface.
 
 Tenant routing is separate from business payload fields. The normalized topic
 uses this private wrapper, without changing the existing normalized event model:
+the wrapper must explicitly declare supported `schemaVersion: "1"`; missing,
+unknown or wrongly typed versions are dropped.
 
 ```json
 {

@@ -62,7 +62,7 @@ class SourceEventRejected(ValueError):
 class ScopedEvent(WireModel):
     """Private broker routing context; the unchanged normalized event remains nested."""
 
-    schema_version: Literal["1"] = "1"
+    schema_version: Literal["1"]
     workspace_id: str = Field(min_length=1)
     event: NormalizedEvent
 
@@ -125,6 +125,7 @@ def adapt_connector_event(payload: object, *, source_type: SourceType | None = N
         ):
             raise ValueError("source and delivery mode disagree")
         scoped = ScopedEvent(
+            schema_version="1",
             workspace_id=envelope.source.workspace_id,
             event=NormalizedEvent(
                 event_id=envelope.event_id,
