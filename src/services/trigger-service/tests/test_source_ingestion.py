@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from custos_spl.errors import BackendUnavailable
+from custos_spl.ids import WorkspaceId
 from custos_spl.interfaces.dead_letters import MAX_PAYLOAD_BYTES, snapshot_dispatch_object
 from fastapi.testclient import TestClient
 
@@ -16,8 +17,9 @@ from custos_trigger.app import create_app
 from custos_trigger.clients import FakeWorkflowServiceClient
 from custos_trigger.clients.workflow import WorkflowClientTransportError
 from custos_trigger.dependencies import WorkflowCallerVerifier
-from custos_trigger.models import SourceType, SubscriptionState
+from custos_trigger.models import SourceType, Subscription, SubscriptionState
 from custos_trigger.providers import InMemoryTriggerMetadataStore, Providers
+from custos_trigger.receivers.scheduled import scheduled_event
 from custos_trigger.receivers.sources import (
     CONNECTOR_EVENTS_PATH,
     NORMALIZED_EVENTS_PATH,
@@ -29,6 +31,7 @@ from custos_trigger.settings import (
     SettingsError,
     read_source_receivers_enabled,
 )
+from custos_trigger.source_config import SourceConfig
 from custos_trigger.stores import SubscriptionStore
 from tests._source_helpers import NOW, SourceStorage, connector_event, dispatcher, resume, start
 
@@ -171,6 +174,57 @@ def test_complete_wrapped_target_is_checked_before_dispatch(
 
     client.portal.call(replace_mapping)
     response = client.post(CONNECTOR_EVENTS_PATH, json={"data": connector_event()}, headers=HEADERS)
+    assert response.status_code == 200 and response.json() == {"status": "RETRY"}
+    assert not workflow.start_run_calls
+
+
+def test_scheduled_target_overflow_is_also_a_configuration_retry(
+    source_client: SourceClient,
+) -> None:
+    """Every source path preserves explicit retry semantics for an unretainable resolved target."""
+    from datetime import timedelta
+
+    client, store, workflow = source_client
+    assert client.portal is not None
+
+    async def occurrence() -> dict[str, object]:
+        """Create canonical fenced proof with a mapping that exceeds the capture target budget."""
+        now = await store.scheduler_now()
+        sub = await SubscriptionStore(store).create(
+            Subscription(
+                workspace_id="source-a",
+                subscription_id="schedule",
+                workflow_id="workflow",
+                target_workflow_version_id="version",
+                source_type=SourceType.SCHEDULED,
+                source_config=SourceConfig(interval_seconds=1),
+                input_mapping={"oversized": "x" * MAX_PAYLOAD_BYTES},
+                created_at=now - timedelta(seconds=2),
+                updated_at=now,
+            )
+        )
+        due = now - timedelta(seconds=1)
+        await store.update_schedule_next_fire(WorkspaceId("source-a"), "schedule", due)
+        lease = await store.acquire_scheduler_lease("source-target", "owner", ttl_seconds=30)
+        assert lease is not None
+        fire = await store.advance_schedule(
+            WorkspaceId("source-a"),
+            "schedule",
+            lease,
+            expected_next_fire_at=due,
+            expected_revision=sub.store_revision,
+            planned_fire_at=due,
+            next_fire_at=now + timedelta(seconds=1),
+        )
+        return {
+            "schemaVersion": "1",
+            "workspaceId": "source-a",
+            "event": scheduled_event(fire).model_dump(mode="json", by_alias=True),
+        }
+
+    response = client.post(
+        NORMALIZED_EVENTS_PATH, json={"data": client.portal.call(occurrence)}, headers=HEADERS
+    )
     assert response.status_code == 200 and response.json() == {"status": "RETRY"}
     assert not workflow.start_run_calls
 

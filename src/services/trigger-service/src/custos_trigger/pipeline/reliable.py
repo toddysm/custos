@@ -57,6 +57,7 @@ from custos_trigger.pipeline.dispatch import (
 )
 from custos_trigger.pipeline.match_resume import ResumeMatch
 from custos_trigger.pipeline.match_start import StartMatch
+from custos_trigger.source_config import SourceConfigurationError
 
 logger = logging.getLogger(__name__)
 MAX_DISPATCH_SECONDS = 300
@@ -283,17 +284,22 @@ class ReliableDispatcher:
                     )
                 data = decode_delivery_request(prior.request_json, now)
             else:
-                data = DeadLetterData(
-                    workspace_id=WorkspaceId(workspace),
-                    entry_id="dl_" + delivery_identity(workspace, key),
-                    subscription_id=subscription_id,
-                    idempotency_key=key,
-                    event=event.model_dump(by_alias=True, exclude={"raw"}),
-                    target=target,
-                    history=(DispatchAttempt(now, "configuration"),),
-                    retention_seconds=self.retention,
-                    max_replay_attempts=self.max_replays,
-                )
+                try:
+                    data = DeadLetterData(
+                        workspace_id=WorkspaceId(workspace),
+                        entry_id="dl_" + delivery_identity(workspace, key),
+                        subscription_id=subscription_id,
+                        idempotency_key=key,
+                        event=event.model_dump(by_alias=True, exclude={"raw"}),
+                        target=target,
+                        history=(DispatchAttempt(now, "configuration"),),
+                        retention_seconds=self.retention,
+                        max_replay_attempts=self.max_replays,
+                    )
+                except (ValueError, UnicodeError) as exc:
+                    raise SourceConfigurationError(
+                        "dispatch snapshot cannot be retained; correct its configuration"
+                    ) from exc
             fingerprint = delivery_fingerprint({"target": json_value(data.target)})
             claim = await self.store.reserve_delivery(
                 data.workspace_id,
