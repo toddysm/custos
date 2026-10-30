@@ -281,6 +281,39 @@ def test_manual_fire_retains_scheduled_selector_schema(
 
 
 @pytest.mark.parametrize("kind", ["webhook", "vendor-push", "pull"])
+def test_connector_mapping_validation_and_manual_fire(
+    client: TestClient, workflow: FakeWorkflowServiceClient, kind: str
+) -> None:
+    """Event-driven mappings validate at authoring and resolve consistently for explicit fires."""
+    config: dict[str, object] = {"connectorInstanceId": "registry"}
+    if kind == "pull":
+        config["pollIntervalSeconds"] = 10
+    body = {
+        "sourceType": kind,
+        "workflowId": "wf",
+        "targetWorkflowVersionId": "version",
+        "sourceConfig": config,
+        "selector": "event.data.route == 'match'",
+        "inputMapping": {"amount": "${{ event.data.amount }}"},
+    }
+    bad = client.post(
+        _PATH, json={**body, "inputMapping": {"bad": "${{ unbound.value }}"}}, headers=_headers()
+    )
+    assert bad.status_code == 422
+    created = client.post(_PATH, json=body, headers=_headers())
+    assert created.status_code == 201
+    context = json.loads(_headers()[CALLCTX_HEADER])
+    context["permissions"].append("trigger:subscriptions:fire")
+    fired = client.post(
+        f"{_PATH}/{created.json()['subscriptionId']}:fire",
+        json={"inputs": {"route": "match", "amount": 7}},
+        headers={CALLCTX_HEADER: json.dumps(context)},
+    )
+    assert fired.status_code == 200
+    assert workflow.start_run_calls[0].inputs == {"amount": 7}
+
+
+@pytest.mark.parametrize("kind", ["webhook", "vendor-push", "pull"])
 def test_connector_configuration_round_trip(client: TestClient, kind: str) -> None:
     """All connector-backed receiver tags persist the same validated reference contract."""
     config: dict[str, object] = {"connectorInstanceId": "registry"}

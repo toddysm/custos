@@ -62,6 +62,9 @@ _SIDECAR_ROUTES = frozenset(
         ("POST", "/internal/events/workflow"),
     }
 )
+_SOURCE_ROUTES = frozenset(
+    {("POST", "/internal/events/connectors"), ("POST", "/internal/events/normalized")}
+)
 
 logger = logging.getLogger(__name__)
 
@@ -259,9 +262,13 @@ class CallContextMiddleware(BaseHTTPMiddleware):
         route = (request.method, request.url.path)
         if route in _PROBE_ROUTES:
             return await call_next(request)
-        if route in _WORKFLOW_ROUTES or route in _SIDECAR_ROUTES:
+        if route in _WORKFLOW_ROUTES or route in _SIDECAR_ROUTES or route in _SOURCE_ROUTES:
             try:
-                await self._authenticate_mesh(request, workflow=route in _WORKFLOW_ROUTES)
+                await self._authenticate_mesh(
+                    request,
+                    workflow=route in _WORKFLOW_ROUTES,
+                    allow_dev_shim=route not in _SOURCE_ROUTES,
+                )
             except CallContextError as exc:
                 logger.warning("Rejected mesh request: %s", exc.code)
                 return _render_envelope(exc.status_code, exc.code, exc.detail)
@@ -311,13 +318,15 @@ class CallContextMiddleware(BaseHTTPMiddleware):
         )
         return await call_next(request)
 
-    async def _authenticate_mesh(self, request: Request, *, workflow: bool) -> None:
+    async def _authenticate_mesh(
+        self, request: Request, *, workflow: bool, allow_dev_shim: bool = True
+    ) -> None:
         """Keep legacy development separate from authenticated production mesh traffic."""
         if workflow and self._workflow_caller_verifier is not None:
             await self._workflow_caller_verifier(request)
             request.state.workflow_caller_verified = True
             return
-        if self._dev_shim_active and self._app_api_token is None:
+        if allow_dev_shim and self._dev_shim_active and self._app_api_token is None:
             logger.warning("Unauthenticated mesh route enabled by the development shim")
             return
         if workflow:

@@ -254,7 +254,12 @@ SubscriptionStoreDep = Annotated[SubscriptionStore, Depends(get_subscription_sto
 ResumeStoreDep = Annotated[ResumeSubscriptionStore, Depends(get_resume_subscription_store)]
 
 
-def build_internal_event_router(*, pubsub_component: str, workflow_events_topic: str) -> APIRouter:
+def build_internal_event_router(
+    *,
+    pubsub_component: str,
+    workflow_events_topic: str,
+    source_topics: tuple[tuple[str, str], ...] = (),
+) -> APIRouter:
     """Build the internal-event router bound to a ``(pubsub, topic)`` pair.
 
     The router is a factory (rather than a module singleton) because the
@@ -266,14 +271,18 @@ def build_internal_event_router(*, pubsub_component: str, workflow_events_topic:
 
     @router.get(DAPR_SUBSCRIBE_PATH)
     async def dapr_subscribe() -> list[dict[str, Any]]:
-        """Declare the workflow-events subscription to the Dapr sidecar."""
+        """Declare stable configured subscriptions on every sidecar restart."""
         return [
             {
                 "pubsubname": pubsub_component,
                 "topic": workflow_events_topic,
                 "route": INTERNAL_EVENTS_PATH,
                 "metadata": {},
-            }
+            },
+            *(
+                {"pubsubname": pubsub_component, "topic": topic, "route": route, "metadata": {}}
+                for topic, route in source_topics
+            ),
         ]
 
     @router.post(INTERNAL_EVENTS_PATH)

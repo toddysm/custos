@@ -40,7 +40,7 @@ from custos_trigger.clients.workflow import (
     WorkflowClientTransportError,
     WorkflowServiceClient,
 )
-from custos_trigger.dedup import compute_dedup_key
+from custos_trigger.dedup import compute_dispatch_key
 from custos_trigger.errors import TriggerError, TriggerErrorKind
 from custos_trigger.events import NormalizedEvent
 from custos_trigger.pipeline.dispatch import (
@@ -258,7 +258,7 @@ class ReliableDispatcher:
                 AUDIT_LOOP_DETECTED, workspace_id=workspace, attributes=attributes
             )
             return DispatchOutcome(DispatchStatus.LOOP_REJECTED)
-        key = compute_dedup_key(subscription_id, event.event_id)
+        key = compute_dispatch_key(subscription_id, event)
         try:
             now = await self.store.delivery_now()
             prior = await self.store.get_delivery(WorkspaceId(workspace), "trigger", key)

@@ -4,6 +4,8 @@ The Trigger Service deduplicates inbound events on
 ``hash(subscriptionId, source.eventId)`` so a replayed event — Dapr's
 at-least-once redelivery, a connector cursor rewind, a vendor double-push —
 never starts a duplicate run (design ``§ Pipeline``, ``§ Failure Modes``).
+Durable connector deliveries additionally scope producer IDs by connector
+instance, while keeping the same identity across push/pull transports.
 
 The dedup window is backed by the SPL ``put_dedup_key`` reserve-or-read
 primitive: the first event for a key **reserves** it (returns
@@ -29,13 +31,17 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from custos_spl.ids import WorkspaceId
 from custos_spl.interfaces.metadata_store import DedupDuplicate, DedupReserved
 
+from custos_trigger.models import SourceType
 from custos_trigger.settings import DEFAULT_DEDUP_TTL_SECONDS
 from custos_trigger.stores.base import TriggerMetadataStore
+
+if TYPE_CHECKING:
+    from custos_trigger.events import NormalizedEvent
 
 __all__ = [
     "DEDUP_KEY_PREFIX",
@@ -43,6 +49,7 @@ __all__ = [
     "DedupReservation",
     "Deduplicator",
     "compute_dedup_key",
+    "compute_dispatch_key",
 ]
 
 #: Namespacing prefix stamped onto every dedup key so the rows are
@@ -59,12 +66,27 @@ def compute_dedup_key(subscription_id: str, event_id: str) -> str:
     SHA-256 — deterministic across replicas and restarts, which is what makes
     the dedup window correct under at-least-once redelivery.
     """
+    return f"{DEDUP_KEY_PREFIX}:{_digest((subscription_id, event_id))}"
+
+
+def _digest(parts: tuple[str, ...]) -> str:
+    """Hash unambiguous length-prefixed identity components."""
     digest = hashlib.sha256()
-    for part in (subscription_id, event_id):
+    for part in parts:
         encoded = part.encode("utf-8")
         digest.update(f"{len(encoded)}:".encode("ascii"))
         digest.update(encoded)
-    return f"{DEDUP_KEY_PREFIX}:{digest.hexdigest()}"
+    return digest.hexdigest()
+
+
+def compute_dispatch_key(subscription_id: str, event: NormalizedEvent) -> str:
+    """Scope connector IDs without rewriting event IDs or splitting push/pull duplicates."""
+    if event.source.type in (SourceType.WEBHOOK, SourceType.VENDOR_PUSH, SourceType.PULL):
+        connector = event.source.connector_instance_id
+        if not connector:
+            raise ValueError("connector delivery identity requires its instance")
+        return "trigger.connector.v1:" + _digest((subscription_id, connector, event.event_id))
+    return compute_dedup_key(subscription_id, event.event_id)
 
 
 class DedupDecision(StrEnum):

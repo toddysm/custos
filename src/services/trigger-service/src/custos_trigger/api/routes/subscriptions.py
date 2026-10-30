@@ -43,7 +43,11 @@ from custos_trigger.dependencies import (
     get_subscription_store,
 )
 from custos_trigger.errors import TriggerError, TriggerErrorKind
-from custos_trigger.input_mapping import resolve_input_mapping, validate_input_mapping
+from custos_trigger.input_mapping import (
+    EVENT_MAPPED_SOURCES,
+    resolve_input_mapping,
+    validate_input_mapping,
+)
 from custos_trigger.middleware import CallContext, require_permission
 from custos_trigger.middleware import ensure_workspace as _ensure_workspace
 from custos_trigger.models import (
@@ -140,7 +144,7 @@ async def create_subscription(
     _validate_selector(
         evaluator, body.selector, subscription_id=subscription_id, source_type=body.source_type
     )
-    if body.source_type is SourceType.SCHEDULED:
+    if body.source_type in EVENT_MAPPED_SOURCES:
         validate_input_mapping(
             body.input_mapping,
             evaluator=evaluator,
@@ -245,13 +249,13 @@ async def patch_subscription(
         )
     source_type_changed = merged.source_type != existing.source_type
     if (
-        merged.source_type is SourceType.SCHEDULED
+        merged.source_type in EVENT_MAPPED_SOURCES
         and (
             "input_mapping" in fields_set
             or source_type_changed
             or body.state is SubscriptionState.ACTIVE
         )
-    ) or (source_type_changed and existing.source_type is SourceType.SCHEDULED):
+    ) or (source_type_changed and existing.source_type in EVENT_MAPPED_SOURCES):
         validate_input_mapping(
             merged.input_mapping,
             evaluator=evaluator,
@@ -348,7 +352,7 @@ async def fire_subscription(
         )
 
     match = matches[0]
-    if subscription.source_type is SourceType.SCHEDULED:
+    if subscription.source_type in EVENT_MAPPED_SOURCES:
         match = StartMatch(
             subscription.model_copy(
                 update={

@@ -123,6 +123,78 @@ scheduler fencing APIs. The scheduled receiver below consumes this capability; p
 workspace discovery, readiness and deployment enablement remain
 [#1017](https://github.com/toddysm/custos/issues/1017).
 
+### Shared source ingestion and broker callbacks
+
+The default-off `TRIGGER_SOURCE_RECEIVERS_ENABLED` gate activates two authenticated
+callbacks: `POST /internal/events/connectors` for the unchanged version-one
+Connector envelope, and `POST /internal/events/normalized` for private scoped
+normalized events. `GET /dapr/subscribe` declares these alongside the existing
+workflow subscription when enabled; declarations are reconstructed on restart.
+
+The Connector adapter maps `eventType` to `kind`, `payload` to `data`,
+`source.instanceId` to `source.connectorInstanceId`, and `receivedAt` to
+`occurredAt`, retaining the exact producer event ID. Push publications become
+`vendor-push`; pull publications become `pull`. The verified generic webhook
+producer can explicitly select `webhook` for push envelopes. No producer field
+is renamed on the producer's wire surface.
+
+Tenant routing is separate from business payload fields. The normalized topic
+uses this private wrapper, without changing the existing normalized event model:
+
+```json
+{
+  "schemaVersion": "1",
+  "workspaceId": "team-a",
+  "event": {
+    "schemaVersion": "1",
+    "eventId": "evt-1",
+    "kind": "registry.push",
+    "source": {
+      "type": "webhook",
+      "connectorInstanceId": "registry-a",
+      "occurredAt": "2026-10-30T00:00:00Z"
+    },
+    "data": {"repository": "example"}
+  }
+}
+```
+
+`data.workspace`, `data.runId` and `data.stepId` remain ordinary untrusted business
+values. They never select a workspace or resume target. Source-associated waits
+are queried by the trusted workspace, connector and delivery mode before checking
+their stored event key and selector; delivery uses the stored run/step pair.
+Resume-only sources work without start subscriptions or payload routing IDs.
+
+Start and resume candidates are processed in bounded 100-row pages. Start inputs
+resolve into copied subscriptions; stored mappings are not mutated. Eligible
+starts and waits can both receive the same event, while durable receipts suppress
+redelivery effects. Connector delivery keys include the subscription and connector
+instance, without changing the producer event ID; rebinding an instance cannot
+alias another source's IDs, and a wait accepting both push and pull still
+deduplicates the same logical event across modes. The same ingestion collaborator routes scheduled events
+through canonical occurrence proof and the originating schedule only.
+
+Callbacks return `SUCCESS` only after successful/duplicate delivery or committed
+dead-letter capture. Storage, ownership and configuration failures request `RETRY`.
+Malformed or unretainable source data returns `DROP`; raw transport, credential
+fields, nonfinite JSON, invalid identifiers and oversized capture objects are
+rejected before dispatch. The HTTP delivery body is capped at 512 KiB; the shared
+durable-dispatch validation retains its 256-KiB object/depth/privacy limits.
+
+Activation requires the upgraded-writer gate, durable dispatch capabilities and
+schema readiness (including scheduler revision 9), the sidecar app token and
+authenticated Workflow caller configuration. New callbacks never use the
+development authentication bypass. Direct service-invocation caller headers are
+rejected: these endpoints are sidecar broker callbacks, not public invocation APIs.
+
+`TRIGGER_CONNECTOR_EVENTS_TOPIC` defaults to `custos.connector.events`;
+`TRIGGER_NORMALIZED_TOPIC` retains `custos.triggers.normalized`. Both use
+`TRIGGER_PUBSUB_COMPONENT`. Match the Connector publisher's component/topic and
+restrict broker publishing to the intended service identities before activation.
+Production worker/publisher wiring, broker access controls and independent pending
+intent reconciliation remain #1017; full deployed resilience certification remains
+#1018. This collaborator does not start a scheduler or poll loop automatically.
+
 ### Scheduled receiver and recovery
 
 [`ScheduledReceiver`](../../src/services/trigger-service/src/custos_trigger/receivers/scheduled.py)
@@ -165,7 +237,7 @@ evaluation, while retaining `manual.fire` identity and requiring caller-supplied
 matching inputs. Scheduled mappings also resolve against those manual inputs
 before dispatch; only mapped values become Workflow inputs, not the entire fire payload.
 It does not fabricate a scheduled occurrence.
-Scheduled mapping placeholders are parsed and type-checked on create, mapping
+Scheduled and connector-source mapping placeholders are parsed and type-checked on create, mapping
 patches, source transitions and explicit activation. Invalid templates and
 nesting beyond 64 levels return 422 without persisting partial changes.
 Event-dependent resolution failures still surface explicitly before dispatch.

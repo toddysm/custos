@@ -78,7 +78,7 @@ def _instant(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
-def _identifier(value: str) -> None:
+def validate_dispatch_identifier(value: str) -> None:
     """Bound identifiers and reject blank, non-Unicode and database-invalid strings."""
     if not isinstance(value, str) or not value.strip() or "\0" in value:
         raise ValueError("dead-letter identifiers must be nonblank strings without NUL")
@@ -127,7 +127,7 @@ def json_value(value: JsonValue) -> object:
     return value
 
 
-def _object(value: Mapping[str, object]) -> Mapping[str, JsonValue]:
+def snapshot_dispatch_object(value: Mapping[str, object]) -> Mapping[str, JsonValue]:
     """Validate, size-bound and deeply freeze one JSON object."""
     frozen = _freeze(value)
     if not isinstance(frozen, Mapping):
@@ -185,7 +185,7 @@ class DeadLetterData:
             self.subscription_id,
             self.idempotency_key,
         ):
-            _identifier(identifier)
+            validate_dispatch_identifier(identifier)
         if type(self.schema_version) is not int or self.schema_version != 1:
             raise ValueError("unsupported dead-letter schema version")
         if type(self.retention_seconds) is not int or not 0 < self.retention_seconds <= 31_536_000:
@@ -200,7 +200,7 @@ class DeadLetterData:
         if not all(isinstance(attempt, DispatchAttempt) for attempt in self.history):
             raise ValueError("invalid dispatch attempt history")
         object.__setattr__(self, "history", tuple(self.history))
-        event, target = _object(self.event), _object(self.target)
+        event, target = snapshot_dispatch_object(self.event), snapshot_dispatch_object(self.target)
         if set(event) - {"schemaVersion", "eventId", "source", "kind", "subject", "data"}:
             raise ValueError("unsupported persisted event field")
         if event.get("schemaVersion") != "1":
@@ -209,7 +209,7 @@ class DeadLetterData:
             value = event.get(key)
             if not isinstance(value, str):
                 raise ValueError("event requires eventId and kind")
-            _identifier(value)
+            validate_dispatch_identifier(value)
         source = event.get("source")
         if not isinstance(source, Mapping) or set(source) - {
             "type",
@@ -258,7 +258,7 @@ class DeadLetterData:
                 continue
             if not isinstance(value, str):
                 raise ValueError("resolved target identifiers must be strings")
-            _identifier(value)
+            validate_dispatch_identifier(value)
         if not isinstance(target.get("inputs" if kind == "start" else "payload"), Mapping):
             raise ValueError("resolved RPC data must be an object")
         object.__setattr__(self, "event", event)
@@ -313,9 +313,9 @@ class DeadLetterFilter:
 
     def scope(self, workspace_id: WorkspaceId) -> tuple[str | None, ...]:
         """Validate filters and produce a canonical query-cursor scope."""
-        _identifier(workspace_id)
+        validate_dispatch_identifier(workspace_id)
         if self.subscription_id is not None:
-            _identifier(self.subscription_id)
+            validate_dispatch_identifier(self.subscription_id)
         if self.status is not None and self.status not in _STATUSES:
             raise ValueError("invalid dead-letter status")
         since = _instant(self.since) if self.since is not None else None
@@ -356,7 +356,7 @@ def claim_replay(
     entry: DeadLetterEntry, worker_id: str, ttl_seconds: int, now: datetime
 ) -> DeadLetterEntry:
     """Consume one attempt; active contenders raise LeaseBusy, ineligible rows conflict."""
-    _identifier(worker_id)
+    validate_dispatch_identifier(worker_id)
     now = _instant(now)
     if type(ttl_seconds) is not int or not 0 < ttl_seconds <= MAX_CLAIM_SECONDS:
         raise ValueError("replay claim duration must be 1..300 seconds")
@@ -408,7 +408,7 @@ def finish_replay(
     if failure is not None and result_id is not None:
         raise ValueError("failed replay cannot carry a successful result")
     if result_id is not None:
-        _identifier(result_id)
+        validate_dispatch_identifier(result_id)
     status: DeadLetterStatus = "replayed"
     if failure is not None:
         status = (

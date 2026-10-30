@@ -47,6 +47,10 @@ from custos_trigger.stores.subscriptions import SubscriptionStore
 logger = logging.getLogger(__name__)
 
 
+class ScheduledOccurrenceError(SourceConfigurationError):
+    """A permanent invalid occurrence, distinct from retryable subscription configuration."""
+
+
 @runtime_checkable
 class ScheduledStorage(
     TriggerMetadataStore, TriggerQueryProvider, SchedulerStateProvider, Protocol
@@ -160,10 +164,10 @@ async def process_scheduled_event(
         or revision < 0
     ):
         logger.error("Invalid scheduled event association: %s", event.event_id)
-        raise SourceConfigurationError("scheduled event has no valid scoped association")
+        raise ScheduledOccurrenceError("scheduled event has no valid scoped association")
     if resume_key_from_event(event) is not None:
         logger.error("Scheduled event carries unsupported resume routing: %s", event.event_id)
-        raise SourceConfigurationError("scheduled source cannot inject resume routing identifiers")
+        raise ScheduledOccurrenceError("scheduled source cannot inject resume routing identifiers")
     fire = await provider.get_schedule_fire(WorkspaceId(workspace), event.event_id)
     if (
         fire is None
@@ -171,7 +175,7 @@ async def process_scheduled_event(
         or event.model_dump(exclude={"raw"}) != scheduled_event(fire).model_dump(exclude={"raw"})
     ):
         logger.error("Unproven scheduled occurrence: %s", event.event_id)
-        raise SourceConfigurationError("scheduled event does not match canonical occurrence proof")
+        raise ScheduledOccurrenceError("scheduled event does not match canonical occurrence proof")
     if fire.discarded_at is not None:
         await audit.emit(
             "trigger.schedule.suppressed",

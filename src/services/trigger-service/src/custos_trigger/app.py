@@ -45,16 +45,25 @@ from custos_trigger.middleware import (
 )
 from custos_trigger.providers import Providers, load_providers
 from custos_trigger.receivers import build_internal_event_router
+from custos_trigger.receivers.sources import (
+    CONNECTOR_EVENTS_PATH,
+    NORMALIZED_EVENTS_PATH,
+    build_source_event_router,
+)
 from custos_trigger.settings import (
+    DEFAULT_CONNECTOR_EVENTS_TOPIC,
     DEFAULT_DISPATCH_MAX_RETRIES,
     DEFAULT_FANOUT_MAX_DEPTH,
+    DEFAULT_NORMALIZED_TOPIC,
     DEFAULT_PUBSUB_COMPONENT,
     DEFAULT_RESUME_DEFAULT_TTL_SECONDS,
     DEFAULT_WORKFLOW_EVENTS_TOPIC,
     ENV_APP_API_TOKEN,
+    ENV_CONNECTOR_EVENTS_TOPIC,
     ENV_DISPATCH_MAX_RETRIES,
     ENV_FANOUT_MAX_DEPTH,
     ENV_METADATA_STORE,
+    ENV_NORMALIZED_TOPIC,
     ENV_PUBSUB_COMPONENT,
     ENV_RESUME_DEFAULT_TTL_SECONDS,
     ENV_WORKFLOW_APP_ID,
@@ -62,6 +71,7 @@ from custos_trigger.settings import (
     ENV_WORKFLOW_EVENTS_TOPIC,
     ENV_WORKFLOW_NAMESPACE,
     read_receiver_configuration_enabled,
+    read_source_receivers_enabled,
 )
 from custos_trigger.stores import (
     ResumeSubscriptionStore,
@@ -106,6 +116,7 @@ def create_app(
     workflow_caller_verifier: WorkflowCallerVerifier | None = None,
     call_context_verifier: CallContextVerifier | None = None,
     app_api_token: str | None = None,
+    source_receivers_enabled: bool | None = None,
 ) -> FastAPI:
     """Build and return the Trigger Service FastAPI application.
 
@@ -143,6 +154,7 @@ def create_app(
         call_context_verifier: Optional shared verifier with an injected public-key source.
         app_api_token: Sidecar-to-app secret; defaults to ``APP_API_TOKEN``. Never
             sent to callers or used as an end-user identity.
+        source_receivers_enabled: Default-off broker callback activation, separate from authoring.
 
     The factory is import-safe: no DSN lookups, no socket connections. All
     side-effecting work happens inside the FastAPI lifespan context.
@@ -160,6 +172,20 @@ def create_app(
     effective_token = (
         app_api_token if app_api_token is not None else os.environ.get(ENV_APP_API_TOKEN)
     )
+    effective_sources = (
+        source_receivers_enabled
+        if source_receivers_enabled is not None
+        else read_source_receivers_enabled(os.environ)
+    )
+    workflow_topic = (
+        os.environ.get(ENV_WORKFLOW_EVENTS_TOPIC, "").strip() or DEFAULT_WORKFLOW_EVENTS_TOPIC
+    )
+    connector_topic = (
+        os.environ.get(ENV_CONNECTOR_EVENTS_TOPIC, "").strip() or DEFAULT_CONNECTOR_EVENTS_TOPIC
+    )
+    normalized_topic = os.environ.get(ENV_NORMALIZED_TOPIC, "").strip() or DEFAULT_NORMALIZED_TOPIC
+    if effective_sources and len({workflow_topic, connector_topic, normalized_topic}) != 3:
+        raise ValueError("workflow, connector and normalized topics must be distinct")
     effective_workflow_verifier = workflow_caller_verifier
     workflow_namespace = os.environ.get(ENV_WORKFLOW_NAMESPACE)
     workflow_app_id = os.environ.get(ENV_WORKFLOW_APP_ID, _DEFAULT_WORKFLOW_APP_ID)
@@ -187,6 +213,7 @@ def create_app(
             else read_receiver_configuration_enabled(os.environ)
         )
         app.state.workflow_caller_verifier = effective_workflow_verifier
+        app.state.source_receivers_enabled = effective_sources
         # Bind the SPL providers (in-memory by default, Postgres when
         # TRIGGER_METADATA_STORE is a DSN) and the domain store adapters
         # the REST/RPC surface (TS-IMPL-015..018) drives. The provider
@@ -227,6 +254,31 @@ def create_app(
         # is injected (tests) we use it as-is and own no transport; otherwise we
         # build one over an httpx client reaching the Workflow Service through
         # Dapr and close it at shutdown.
+        if effective_sources:
+            from custos_spl.interfaces.scheduler import SchedulerStateProvider
+            from custos_spl.interfaces.trigger_queries import TriggerQueryProvider
+
+            from custos_trigger.pipeline.reliable import ReliableStorage
+
+            if (
+                not app.state.receiver_configuration_enabled
+                or not effective_token
+                or not effective_token.strip()
+                or effective_workflow_verifier is None
+                or not isinstance(metadata_store, ReliableStorage)
+                or not isinstance(metadata_store, TriggerQueryProvider)
+                or not isinstance(metadata_store, SchedulerStateProvider)
+            ):
+                raise ValueError("source receivers require authenticated upgraded durable storage")
+            if dispatcher is not None:
+                if dispatcher.reliable is None:
+                    raise ValueError("source receivers require durable dispatch")
+            elif os.environ.get("TRIGGER_DURABLE_DISPATCH_ENABLED", "").strip().lower() != "true":
+                raise ValueError("source receivers require durable dispatch")
+            await metadata_store.check_delivery_ready()
+            await metadata_store.check_dead_letters_ready()
+            await metadata_store.check_scheduler_ready()
+
         owned_http_client: httpx.AsyncClient | None = None
         if dispatcher is not None:
             app.state.dispatcher = dispatcher
@@ -342,6 +394,7 @@ def create_app(
     app.include_router(health_router)
     app.include_router(subscriptions_router)
     app.include_router(resume_rpc_router)
+    app.include_router(build_source_event_router(enabled=effective_sources))
     # The internal-event receiver subscribes to the Workflow Service's lifecycle
     # topic via Dapr's programmatic subscription route (``GET /dapr/subscribe``).
     # Both the pub/sub component and topic are config-driven so air-gapped /
@@ -351,9 +404,20 @@ def create_app(
             pubsub_component=(
                 os.environ.get(ENV_PUBSUB_COMPONENT, "").strip() or DEFAULT_PUBSUB_COMPONENT
             ),
-            workflow_events_topic=(
-                os.environ.get(ENV_WORKFLOW_EVENTS_TOPIC, "").strip()
-                or DEFAULT_WORKFLOW_EVENTS_TOPIC
+            workflow_events_topic=workflow_topic,
+            source_topics=(
+                (
+                    (
+                        connector_topic,
+                        CONNECTOR_EVENTS_PATH,
+                    ),
+                    (
+                        normalized_topic,
+                        NORMALIZED_EVENTS_PATH,
+                    ),
+                )
+                if effective_sources
+                else ()
             ),
         )
     )
