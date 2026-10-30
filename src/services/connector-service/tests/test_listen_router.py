@@ -74,6 +74,8 @@ _VERSION = "1.0.0"
 class _FakeScheduler:
     """Minimal :class:`PullLoopScheduler` stand-in for push router tests."""
 
+    pull_control_provider: None = None
+
     def register(
         self,
         workspace_id: str,

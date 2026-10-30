@@ -36,19 +36,22 @@ the required connector-service schema revisions have been applied.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Protocol, cast
 
 import httpx
 from custos_spl import MigrationRequired
+from custos_spl.ids import WorkspaceId
 from custos_spl.interfaces.catalog_store import CatalogStoreProvider
 from custos_spl.interfaces.connector_instance_store import (
+    ConnectorInstance,
     ConnectorInstanceStoreProvider,
 )
 from custos_spl.interfaces.lease_store import LeaseStoreProvider
 from custos_spl.interfaces.metadata_store import MetadataStoreProvider
+from custos_spl.interfaces.pull_control import ConnectorPullControlProvider, pull_interval
 
 from custos_connector.binding import BindForStepService
 from custos_connector.cursor import CursorService
@@ -68,11 +71,13 @@ from custos_connector.listen.publisher import (
     DaprPubSubEventPublisher,
     EventPublisher,
     NoOpEventPublisher,
+    PublisherBridge,
 )
 from custos_connector.loader import Loader
 from custos_connector.loader.identity import IdentityCategory
 from custos_connector.runtime import DockerCliHookRunner, PluginInvoker
 from custos_connector.scheduler import PullLoopScheduler
+from custos_connector.scheduler.demand import PullDemandReconciler
 from custos_connector.settings import DEFAULT_DAPR_SECRET_STORE, Settings
 from custos_connector.sidecar_admin import (
     InMemorySidecarRegistry,
@@ -210,6 +215,8 @@ class Providers:
     #: registration time (CONN-REG). The lifespan hook closes it on
     #: shutdown. ``None`` whenever the registration surface is disabled.
     registration_registry_client: httpx.AsyncClient | None = field(default=None)
+    pull_control: ConnectorPullControlProvider | None = field(default=None)
+    pull_demand_reconciler: PullDemandReconciler | None = field(default=None)
 
 
 def load_registration_registry_client(settings: Settings) -> httpx.AsyncClient | None:
@@ -239,10 +246,14 @@ def load_registration_registry_client(settings: Settings) -> httpx.AsyncClient |
 def load_providers(settings: Settings) -> Providers:
     """Construct the SPL providers from the parsed settings.
 
+    Durable mode assembles polling collaborators but never starts their loops.
     Imports the Postgres adapter classes lazily so this module can be
     imported by unit tests that monkey-patch :func:`load_providers` and
     never need the asyncpg-backed implementation on the import path.
     """
+    if settings.durable_pull_enabled:
+        pull_interval(settings.pull_loop_min_interval_sec)
+        pull_interval(settings.pull_default_interval_sec)
     # Imported here so that test suites injecting fakes can avoid the
     # asyncpg dependency entirely.
     from custos_pg import (
@@ -303,7 +314,7 @@ def load_providers(settings: Settings) -> Providers:
         if registration_registry_client is not None
         else None
     )
-    return Providers(
+    providers = Providers(
         catalog_store=typed_catalog,
         instance_store=typed_instances,
         lease_store=typed_lease,
@@ -334,6 +345,80 @@ def load_providers(settings: Settings) -> Providers:
         dapr_http_client=dapr_http_client,
         loader=loader,
         registration_registry_client=registration_registry_client,
+    )
+    return (
+        wire_durable_pull_runtime(providers, settings)
+        if settings.durable_pull_enabled
+        else providers
+    )
+
+
+def wire_durable_pull_runtime(
+    providers: Providers,
+    settings: Settings,
+    *,
+    plugin_invoker: PluginInvoker | None = None,
+) -> Providers:
+    """Assemble collaborators without starting another timer or performing network operations."""
+    metadata = providers.metadata_store
+    if not isinstance(metadata, ConnectorPullControlProvider):
+        raise ValueError("durable pull requires policy/demand/lease storage capabilities")
+    publisher = providers.event_publisher
+    if publisher is None or isinstance(publisher, NoOpEventPublisher):
+        raise ValueError("durable pull requires acknowledged event publication")
+    invoker = plugin_invoker if plugin_invoker is not None else PluginInvoker(DockerCliHookRunner())
+    backoff_cap = max(300, settings.pull_loop_min_interval_sec)
+
+    async def publish(
+        workspace: WorkspaceId,
+        instance: ConnectorInstance,
+        events: Sequence[Mapping[str, object]],
+    ) -> None:
+        """Invoke the bridge only after the synchronous collaborator assembly has completed."""
+        await bridge(workspace, instance, events)
+
+    cursor = CursorService(
+        metadata_store=metadata,
+        catalog_store=providers.catalog_store,
+        instance_store=providers.instance_store,
+        plugin_invoker=invoker,
+        publisher=publish,
+        pull_control=metadata,
+        backoff_cap_seconds=backoff_cap,
+    )
+    scheduler = PullLoopScheduler(
+        cursor_service=cursor,
+        min_interval_seconds=settings.pull_loop_min_interval_sec,
+        pull_control=metadata,
+        backoff_cap_seconds=backoff_cap,
+    )
+    manager = ListenManager(catalog_store=providers.catalog_store, scheduler=scheduler)
+    bridge = PublisherBridge(
+        normalizer_selector=manager.get_normalizer_for_instance,
+        publisher=publisher,
+        metadata_store=metadata,
+        actor="connector-service:listen",
+    )
+    return replace(
+        providers,
+        cursor_service=cursor,
+        pull_loop_scheduler=scheduler,
+        listen_manager=manager,
+        pull_control=metadata,
+        pull_demand_reconciler=PullDemandReconciler(
+            controls=metadata,
+            instances=providers.instance_store,
+            scheduler=scheduler,
+            default_interval_seconds=settings.pull_default_interval_sec,
+        ),
+        instance_service=InstanceService(
+            instance_store=providers.instance_store,
+            catalog_store=providers.catalog_store,
+            metadata_store=metadata,
+            plugin_invoker=invoker,
+            health_cache_ttl_seconds=settings.health_cache_ttl_s,
+            pull_control=metadata,
+        ),
     )
 
 
@@ -509,7 +594,8 @@ async def verify_schema_revisions(providers: Providers) -> None:
     ``ConnectorInstanceStoreProvider`` for workspace-scoped connector
     instance rows, and ``MetadataStoreProvider`` for cursors and the
     audit outbox. Revisions owned by sibling services are deliberately
-    out of scope so this service can start independently.
+    out of scope so this service can start independently. A bound durable-pull
+    authority additionally checks its optional revision-ten readiness.
 
     Raises:
         custos_spl.MigrationRequired: when any adapter's ledger is behind
@@ -540,6 +626,8 @@ async def verify_schema_revisions(providers: Providers) -> None:
     )
     if gaps:
         raise MigrationRequired(gaps)
+    if providers.pull_control is not None:
+        await providers.pull_control.check_pull_control_ready()
 
 
 def schema_gate_explainer(error: MigrationRequired) -> str:

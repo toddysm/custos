@@ -51,10 +51,12 @@ following `CONN_*` environment variables.
 | `CONN_SIDECAR_MTLS_ISSUER` | Yes (prod) | — | Issuer name for the sidecar control-channel mTLS certs. |
 | `CONN_LEASE_MAX_CONCURRENT` | No | `16` | Per-step concurrent-lease cap. |
 | `CONN_PULL_LOOP_MIN_INTERVAL_SEC` | No | `10` | Minimum interval between pull-loop ticks. |
+| `CONN_DURABLE_PULL_ENABLED` | No | `false` | Wire durable policy, shared due-time/cursor ownership and private demand reconciliation; requires acknowledged publication and authenticated Trigger identity. |
+| `CONN_PULL_DEFAULT_INTERVAL_SEC` | No | `60` | Default for pull starts/waits without an explicit interval. Keep aligned with Trigger's `TRIGGER_POLLER_DEFAULT_INTERVAL_SECONDS`. |
 | `ENVIRONMENT` | No | `development` | Operational env tag. The dev-shim refuses to start when this is `production` (case-insensitive). |
-| `APP_API_TOKEN` | For `VerifyWebhook` | unset | Token shared only with the local Dapr sidecar; empty/blank fails closed. |
-| `CONN_TRIGGER_APP_ID` | For `VerifyWebhook` | `trigger-service` | Exact authenticated caller application ID, not an HTTP endpoint. |
-| `CONN_TRIGGER_NAMESPACE` | For `VerifyWebhook` | unset | Exact authenticated caller namespace; required independently of application ID. |
+| `APP_API_TOKEN` | For private Trigger RPCs | unset | Token shared only with the local Dapr sidecar; empty/blank fails closed. |
+| `CONN_TRIGGER_APP_ID` | For private Trigger RPCs | `trigger-service` | Exact authenticated caller application ID, not an HTTP endpoint. |
+| `CONN_TRIGGER_NAMESPACE` | For private Trigger RPCs | unset | Exact authenticated caller namespace; required independently of application ID. |
 
 ## Private webhook verification
 
@@ -125,10 +127,69 @@ wrappers or verified whole payloads (including empty batches); 413 for limits;
 independently 401/403/503. Credentials, signatures and raw transport headers are
 not copied into normalized envelopes or rejection metadata.
 
-This adds a verification seam, not public gateway routing or automatic receiver
-activation. Those remain [#1011](https://github.com/toddysm/custos/issues/1011)
-and [#1017](https://github.com/toddysm/custos/issues/1017); full deployed
+Scoped Gateway/Trigger routing landed in
+[#1011](https://github.com/toddysm/custos/issues/1011). Automatic production
+activation remains [#1017](https://github.com/toddysm/custos/issues/1017); deployed
 certification remains [#1018](https://github.com/toddysm/custos/issues/1018).
+
+## Durable pull controls and demand
+
+`CONN_DURABLE_PULL_ENABLED=true` assembles the existing single `PullLoopScheduler`,
+`CursorService`, `ListenManager` and acknowledged publisher bridge with the
+optional `ConnectorPullControlProvider`. It requires metadata revision **10**;
+the shared metadata minimum stays **4**. A no-op publisher cannot be used in this
+mode. The flag is default-off: legacy embedded collaborators retain their former
+behavior until explicitly upgraded.
+
+Controls persist operator pause, revision, next eligible time, update actor/time,
+shared consecutive failures and separate native/Trigger interval contributions.
+Demand is the union of active pull-start subscriptions and unexpired associated
+pull waits, plus explicit Connector listen registrations. The shortest requested
+interval wins subject to the Connector floor. Native deactivation removes only
+its own contribution; it never deletes another subscription's or wait's demand.
+Subscription pause, deletion, cancellation and expiry likewise cannot clear an
+operator pause. Reconciliation rebuilds bounded pages of local registrations
+and excludes disabled/inactive instances.
+
+In durable mode, `POST .../pull-loop:pause` and `POST .../pull-loop:resume` commit
+policy and the existing audit/outbox event **atomically before acknowledgment**,
+including without a local registration. Resume records intent; it does not
+shorten a reserved interval. New server-generated instance IDs initialize policy
+before the instance becomes visible. Existing policy is never overwritten by
+initialization.
+
+Stop/drain legacy pollers before migration and enable durable mode consistently
+across replicas. Revision 10 marks known legacy instances paused. Missing legacy
+controls also remain blocked; reconciliation never guesses that an active
+subscription means the operator intended polling to resume. Operators must
+explicitly confirm resume through the protected admin endpoint.
+
+Each upstream call requires one atomic storage operation checking pause, demand,
+database time and cursor ownership. A fresh opaque token fences every attempt,
+including re-acquisition by the same process. Successful publication/commit
+releases ownership but retains the shared interval reservation. Failure keeps
+the previous cursor and persists capped exponential backoff; another replica
+cannot bypass either reservation. Interval changes apply to future reservations.
+The complete plugin/publication/commit path is bounded inside the lease, with
+five seconds reserved for failure finalization.
+
+Private `POST /ReconcilePullDemand` accepts
+`{"schemaVersion":"1","workspaceId":"team-a"}` and returns
+`{"schemaVersion":"1","registered":N}`. It accepts only the authenticated Trigger
+app/namespace after local sidecar-token verification, including in development.
+Connector reads current stored intent after serialization; callers cannot supply
+an arbitrary interval list or clear pause. The count includes paused advisory
+registrations and is not a promise that upstream polling has started. Commands
+are bounded to 16 KiB and 60 seconds; Trigger's client allows a 70-second total
+budget. Invalid commands return 400, oversized commands 413, unavailable
+storage/reconciliation 503, and mesh failures 401/403/503.
+
+These are default-off collaborators and an authenticated command seam, not a
+second upstream timer. Production lifecycle/workspace discovery, invoking
+reconciliation on restart and intent changes, and remaining production
+call-context wiring stay in [#1017](https://github.com/toddysm/custos/issues/1017).
+Deployment and resilience certification stay in
+[#1018](https://github.com/toddysm/custos/issues/1018).
 
 Process bind:
 

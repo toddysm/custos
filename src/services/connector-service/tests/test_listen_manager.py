@@ -59,6 +59,8 @@ class _FakeScheduler:
     """
 
     def __init__(self) -> None:
+        """Select legacy polling semantics for this compatibility fixture."""
+        self.pull_control_provider: None = None
         self.registered: list[tuple[str, str]] = []
         self.unregistered: list[tuple[str, str]] = []
         self._live: set[tuple[str, str]] = set()

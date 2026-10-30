@@ -222,8 +222,11 @@ class CallContextMiddleware(BaseHTTPMiddleware):
         request: Request,
         call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
-        """Authenticate VerifyWebhook independently; forwarded credentials never become identity."""
-        if (request.method, request.url.path) == ("POST", "/VerifyWebhook"):
+        """Authenticate exact Trigger RPCs independently of user and development contexts."""
+        if request.method == "POST" and request.url.path in {
+            "/VerifyWebhook",
+            "/ReconcilePullDemand",
+        }:
             try:
                 require_service_caller(
                     request.headers,
@@ -232,9 +235,10 @@ class CallContextMiddleware(BaseHTTPMiddleware):
                     namespace=self._trigger_namespace,
                 )
             except MeshAuthenticationError as exc:
-                logger.warning("Rejected webhook verifier caller: %s", exc.code)
+                logger.warning("Rejected private Trigger caller: %s", exc.code)
                 return _error(exc.status_code, exc.code, exc.detail)
-            request.state.webhook_caller_verified = True
+            request.state.trigger_caller_verified = True
+            request.state.webhook_caller_verified = request.url.path == "/VerifyWebhook"
             return await call_next(request)
         if request.url.path in _BYPASS_PATHS:
             return await call_next(request)

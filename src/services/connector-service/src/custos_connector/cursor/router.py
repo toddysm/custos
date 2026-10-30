@@ -40,8 +40,10 @@ context, matching the lease router's pattern.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, cast
 
+from custos_spl.errors import SPLError
 from custos_spl.ids import ConnectorInstanceId, WorkspaceId
 from custos_spl.interfaces.connector_instance_store import ConnectorInstanceStoreProvider
 from custos_spl.interfaces.metadata_store import MetadataStoreProvider
@@ -50,9 +52,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.responses import JSONResponse, Response
 
 from custos_connector.audit import (
+    EVENT_PULL_LOOP_PAUSED,
+    EVENT_PULL_LOOP_RESUMED,
     audit_cursor_rewound,
     audit_pull_loop_paused,
     audit_pull_loop_resumed,
+    build_audit_event,
 )
 from custos_connector.cursor.service import (
     UNINITIALIZED_PERSISTED_CURSOR,
@@ -72,6 +77,7 @@ if TYPE_CHECKING:
 
 #: Common path prefix. Mounted in :func:`custos_connector.create_app`.
 router = APIRouter(prefix="/v1", tags=["cursor-admin"])
+logger = logging.getLogger(__name__)
 
 
 #: The HTTP error code returned by every admin handler when the
@@ -474,6 +480,50 @@ async def rewind_cursor(
     return JSONResponse(status_code=200, content=_envelope_to_redacted_wire(after))
 
 
+async def _persist_pull_pause(
+    request: Request,
+    ctx: CallContext,
+    ws: str,
+    instance_id: str,
+    *,
+    paused: bool,
+    reason: str | None = None,
+) -> JSONResponse | None:
+    """Use atomic policy/audit in durable mode; None selects explicit legacy compatibility."""
+    providers = cast("Providers", request.app.state.providers)
+    controls = providers.pull_control
+    if controls is None:
+        return None
+    scheduler = providers.pull_loop_scheduler
+    try:
+        if scheduler is not None and scheduler.pull_control_provider is not controls:
+            raise ValueError("scheduler and operator policy use different authorities")
+        await controls.check_pull_control_ready()
+        event = build_audit_event(
+            workspace_id=ws,
+            event_type=EVENT_PULL_LOOP_PAUSED if paused else EVENT_PULL_LOOP_RESUMED,
+            actor=ctx.principal_id,
+            subject={"instance_id": instance_id},
+            payload={"reason": reason} if paused else {},
+        )
+        control = await controls.set_pull_paused(
+            WorkspaceId(ws),
+            ConnectorInstanceId(instance_id),
+            paused=paused,
+            audit=event,
+        )
+    except (SPLError, ValueError) as exc:
+        logger.error("Durable pull policy mutation failed: %s", type(exc).__name__)
+        return _error_response(
+            status_code=503,
+            code="connector.pull_control_unavailable",
+            detail="Pull policy and audit could not be committed; retry the operation.",
+        )
+    if scheduler is not None:
+        scheduler.apply_pull_control(control, clear_halt=not paused)
+    return JSONResponse(status_code=200, content={"status": "paused" if paused else "resumed"})
+
+
 @router.post("/workspaces/{ws}/connectors/{instance_id}/pull-loop:pause")
 async def pause_pull_loop(
     request: Request,
@@ -483,6 +533,9 @@ async def pause_pull_loop(
     body: _PullLoopPauseWire | None = None,
 ) -> Response:
     """Pause the pull-loop for a connector instance.
+
+    Durable mode commits intent and audit before acknowledging, including
+    without a local registration. Legacy mode retains process-local semantics.
 
     Idempotent: pausing an already-paused (or never-registered)
     instance still emits a fresh ``connector.pull-loop.paused``
@@ -496,6 +549,11 @@ async def pause_pull_loop(
     mismatch = _workspace_mismatch_response(ctx, ws)
     if mismatch is not None:
         return mismatch
+    persisted = await _persist_pull_pause(
+        request, ctx, ws, instance_id, paused=True, reason=body.reason if body else None
+    )
+    if persisted is not None:
+        return persisted
     scheduler = _resolve_pull_loop_scheduler(request)
     scheduler.pause(ws, instance_id)
     metadata_store = _resolve_metadata_store(request)
@@ -519,6 +577,9 @@ async def resume_pull_loop(
 ) -> Response:
     """Resume the pull-loop for a connector instance.
 
+    Durable mode commits intent and audit without shortening a reserved
+    interval; legacy mode retains its former process-local behavior.
+
     Idempotent: resuming an already-running (or never-registered)
     instance still emits a fresh ``connector.pull-loop.resumed``
     audit event. Clears the in-memory ``halted`` flag — operators
@@ -532,6 +593,9 @@ async def resume_pull_loop(
     mismatch = _workspace_mismatch_response(ctx, ws)
     if mismatch is not None:
         return mismatch
+    persisted = await _persist_pull_pause(request, ctx, ws, instance_id, paused=False)
+    if persisted is not None:
+        return persisted
     scheduler = _resolve_pull_loop_scheduler(request)
     scheduler.resume(ws, instance_id)
     metadata_store = _resolve_metadata_store(request)

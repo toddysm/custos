@@ -108,6 +108,8 @@ ENV_ENVIRONMENT: Final[str] = "ENVIRONMENT"
 ENV_APP_API_TOKEN: Final[str] = "APP_API_TOKEN"
 ENV_TRIGGER_APP_ID: Final[str] = "CONN_TRIGGER_APP_ID"
 ENV_TRIGGER_NAMESPACE: Final[str] = "CONN_TRIGGER_NAMESPACE"
+ENV_DURABLE_PULL_ENABLED: Final[str] = "CONN_DURABLE_PULL_ENABLED"
+ENV_PULL_DEFAULT_INTERVAL_SEC: Final[str] = "CONN_PULL_DEFAULT_INTERVAL_SEC"
 
 DEFAULT_OCI_REFERRERS_TIMEOUT_MS: Final[int] = 5000
 DEFAULT_PUBLISH_MAX_BODY_MB: Final[int] = 4
@@ -166,6 +168,28 @@ class Settings:
     app_api_token: str | None = field(default=None, repr=False)
     trigger_app_id: str = "trigger-service"
     trigger_namespace: str | None = None
+    durable_pull_enabled: bool = False
+    pull_default_interval_sec: int = 60
+
+    def __post_init__(self) -> None:
+        """Fail closed before creating resources for an incomplete durable-polling deployment."""
+        if type(self.durable_pull_enabled) is not bool:
+            raise SettingsError("CONN_DURABLE_PULL_ENABLED must be a boolean")
+        if self.pull_default_interval_sec < PULL_LOOP_HARD_FLOOR_SEC:
+            raise SettingsError("pull default interval is below the configured hard floor")
+        if self.durable_pull_enabled and (
+            not self.dapr_pubsub_enabled
+            or not self.app_api_token
+            or not self.app_api_token.strip()
+            or not self.trigger_namespace
+            or not self.trigger_namespace.strip()
+            or not self.trigger_app_id.strip()
+            or "://" in self.trigger_app_id
+            or "/" in self.trigger_app_id
+        ):
+            raise SettingsError(
+                "durable pull requires acknowledged publishing and Trigger identity"
+            )
 
     @property
     def use_callctx_dev_shim(self) -> bool:
@@ -214,6 +238,16 @@ def _opt_int(name: str, env: dict[str, str], default: int, *, minimum: int | Non
     return value
 
 
+def _durable_pull_enabled(env: dict[str, str]) -> bool:
+    """Parse the default-off compatibility gate without accepting unknown values."""
+    value = env.get(ENV_DURABLE_PULL_ENABLED, "").strip().lower()
+    if value in ("", "false", "0"):
+        return False
+    if value in ("true", "1"):
+        return True
+    raise SettingsError("CONN_DURABLE_PULL_ENABLED must be true or false")
+
+
 def load_settings(env: dict[str, str] | None = None) -> Settings:
     """Parse a :class:`Settings` from the supplied env mapping (default ``os.environ``).
 
@@ -254,6 +288,10 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         app_api_token=src.get(ENV_APP_API_TOKEN),
         trigger_app_id=src.get(ENV_TRIGGER_APP_ID, "trigger-service").strip(),
         trigger_namespace=src.get(ENV_TRIGGER_NAMESPACE, "").strip() or None,
+        durable_pull_enabled=_durable_pull_enabled(src),
+        pull_default_interval_sec=_opt_int(
+            ENV_PULL_DEFAULT_INTERVAL_SEC, src, 60, minimum=PULL_LOOP_HARD_FLOOR_SEC
+        ),
         environment=src.get(ENV_ENVIRONMENT, "development").strip() or "development",
     )
 
@@ -278,12 +316,14 @@ __all__ = [
     "ENV_DAPR_HTTP_ENDPOINT",
     "ENV_DAPR_PUBSUB_NAME",
     "ENV_DAPR_SECRET_STORE",
+    "ENV_DURABLE_PULL_ENABLED",
     "ENV_ENVIRONMENT",
     "ENV_HEALTH_CACHE_TTL_S",
     "ENV_LEASE_MAX_CONCURRENT",
     "ENV_METADATA_STORE",
     "ENV_OCI_REFERRERS_TIMEOUT_MS",
     "ENV_PUBLISH_MAX_BODY_MB",
+    "ENV_PULL_DEFAULT_INTERVAL_SEC",
     "ENV_PULL_LOOP_MIN_INTERVAL_SEC",
     "ENV_SIDECAR_DEFAULT_TTL",
     "ENV_SIDECAR_MTLS_ISSUER",

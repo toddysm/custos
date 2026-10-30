@@ -36,6 +36,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
+from uuid import uuid4
 
 from asyncpg import InterfaceError, PostgresError, UndefinedTableError, UniqueViolationError
 from custos_spl.errors import (
@@ -48,7 +49,7 @@ from custos_spl.errors import (
     NotReserved,
     QueryUnsupported,
 )
-from custos_spl.ids import WorkspaceId
+from custos_spl.ids import ConnectorInstanceId, WorkspaceId
 from custos_spl.interfaces.dead_letters import (
     DEAD_LETTER_SCHEMA_REVISION,
     DeadLetterData,
@@ -63,6 +64,7 @@ from custos_spl.interfaces.dead_letters import (
     finish_replay,
     new_dead_letter,
     recover_replay,
+    validate_dispatch_identifier,
 )
 from custos_spl.interfaces.delivery import (
     DELIVERY_SCHEMA_REVISION,
@@ -108,6 +110,19 @@ from custos_spl.interfaces.metadata_store import (
     SubscriptionSelector,
     TransactionHandle,
 )
+from custos_spl.interfaces.pull_control import (
+    MAX_PULL_LEASE_SECONDS,
+    PULL_CONTROL_SCHEMA_REVISION,
+    ConnectorPullControl,
+    PullLease,
+    collect_pull_demand,
+    effective_pull_interval,
+    pull_deadline,
+    pull_interval,
+    require_pull_lease,
+    require_pull_ready,
+    validate_pause_audit,
+)
 from custos_spl.interfaces.scheduler import (
     SCHEDULER_SCHEMA_REVISION,
     PendingScheduleFire,
@@ -138,6 +153,7 @@ from custos_pg.migrations.metadata import (
     METADATA_REV7,
     METADATA_REV8,
     METADATA_REV9,
+    METADATA_REV10,
 )
 from custos_pg.pool import LazyPool, read_dsn_from_env
 from custos_pg.revisions import ensure_ledger, read_declared, record_revision
@@ -202,6 +218,24 @@ def _scheduler_lease(row: Record, observed_at: datetime) -> SchedulerLease:
     """Decode authoritative lease state with a fresh provider-time observation."""
     return SchedulerLease(
         row["deployment_id"], row["holder_id"], row["epoch"], row["expires_at"], observed_at
+    )
+
+
+def _row_to_pull_control(row: Record) -> ConnectorPullControl:
+    """Validate a versioned database policy before exposing it to polling callers."""
+    return ConnectorPullControl(
+        workspace_id=WorkspaceId(row["workspace_id"]),
+        instance_id=ConnectorInstanceId(row["instance_id"]),
+        operator_paused=row["operator_paused"],
+        revision=row["revision"],
+        next_eligible_at=row["next_eligible_at"],
+        updated_at=row["updated_at"],
+        updated_by=row["updated_by"],
+        effective_interval_seconds=row["effective_interval_seconds"],
+        consecutive_failures=row["consecutive_failures"],
+        schema_version=row["schema_version"],
+        native_interval_seconds=row["native_interval_seconds"],
+        trigger_interval_seconds=row["trigger_interval_seconds"],
     )
 
 
@@ -548,8 +582,8 @@ class PgMetadataAdapter:
     async def apply_pending(self) -> list[str]:
         """Apply revisions in scope for this adapter slice.
 
-        Revisions 1-4 define the shared minimum. Revisions 5-8 add optional
-        trigger query, scheduler, dead-letter and durable-delivery capabilities.
+        Revisions 1-4 define the shared minimum. Later revisions add optional
+        query, scheduler, delivery and durable Connector polling capabilities.
         """
         summaries: list[str] = []
         pool = await self._pool_ref()
@@ -570,6 +604,7 @@ class PgMetadataAdapter:
                 METADATA_REV7,
                 METADATA_REV8,
                 METADATA_REV9,
+                METADATA_REV10,
             ):
                 if rev.number in already:
                     continue
@@ -2233,6 +2268,453 @@ class PgMetadataAdapter:
         if row is None:
             raise ValueError(f"unknown schedule: {workspace_id!r}/{schedule_id!r}")
         return _row_to_schedule(row)
+
+    # ----- Durable Connector polling -----
+
+    @asynccontextmanager
+    async def _pull_transaction(self) -> AsyncIterator[Connection]:
+        """Rollback partial policy/cursor/audit changes and classify backend failures."""
+        try:
+            pool = await self._pool_ref()
+            async with pool.acquire() as conn, conn.transaction():
+                yield conn
+        except UndefinedTableError as exc:
+            raise MigrationRequired([(INTERFACE_NAME, PULL_CONTROL_SCHEMA_REVISION)]) from exc
+        except UniqueViolationError as exc:
+            raise ImmutableViolation("pull-control identity already exists") from exc
+        except (OSError, InterfaceError, PostgresError) as exc:
+            raise BackendUnavailable("pull-control storage operation failed", cause=exc) from exc
+
+    async def check_pull_control_ready(self) -> None:
+        """Require revision ten without raising the shared metadata minimum."""
+        async with self._pull_transaction() as conn:
+            exists = await conn.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM custos_meta.adapter_revisions "
+                "WHERE interface_name=$1 AND revision=$2)",
+                INTERFACE_NAME,
+                PULL_CONTROL_SCHEMA_REVISION,
+            )
+            if not exists:
+                raise MigrationRequired([(INTERFACE_NAME, PULL_CONTROL_SCHEMA_REVISION)])
+
+    async def pull_now(self) -> datetime:
+        """Return database time for shared scheduler eligibility."""
+        async with self._pull_transaction() as conn:
+            return await _scheduler_now(conn)
+
+    async def get_pull_control(
+        self,
+        workspace_id: WorkspaceId,
+        instance_id: ConnectorInstanceId,
+    ) -> ConnectorPullControl | None:
+        """Read exact scoped intent; missing legacy policy is not permission to run."""
+        validate_dispatch_identifier(workspace_id)
+        validate_dispatch_identifier(instance_id)
+        async with self._pull_transaction() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM custos_state.connector_pull_control "
+                "WHERE workspace_id=$1 AND instance_id=$2",
+                workspace_id,
+                instance_id,
+            )
+            return _row_to_pull_control(row) if row is not None else None
+
+    async def _locked_pull_control(
+        self,
+        conn: Connection,
+        workspace_id: str,
+        instance_id: str,
+    ) -> ConnectorPullControl | None:
+        """Serialize policy changes before acquiring the associated cursor row lock."""
+        row = await conn.fetchrow(
+            "SELECT * FROM custos_state.connector_pull_control "
+            "WHERE workspace_id=$1 AND instance_id=$2 FOR UPDATE",
+            workspace_id,
+            instance_id,
+        )
+        return _row_to_pull_control(row) if row is not None else None
+
+    async def _ensure_pull_control(
+        self,
+        conn: Connection,
+        workspace_id: WorkspaceId,
+        instance_id: ConnectorInstanceId,
+        *,
+        actor: str,
+        paused: bool,
+    ) -> ConnectorPullControl:
+        """Initialize only absence; a racing operator's existing policy always survives."""
+        for value in (workspace_id, instance_id, actor):
+            validate_dispatch_identifier(value)
+        now = await _scheduler_now(conn)
+        await conn.execute(
+            "INSERT INTO custos_state.connector_pull_control "
+            "(workspace_id,instance_id,operator_paused,revision,"
+            "next_eligible_at,updated_at,updated_by) "
+            "VALUES ($1,$2,$3,1,$4,$4,$5) ON CONFLICT DO NOTHING",
+            workspace_id,
+            instance_id,
+            paused,
+            now,
+            actor,
+        )
+        current = await self._locked_pull_control(conn, workspace_id, instance_id)
+        if current is None:
+            raise ImmutableViolation("pull control disappeared during initialization")
+        return current
+
+    async def _save_pull_control(self, conn: Connection, control: ConnectorPullControl) -> None:
+        """Write a previously locked, validated policy without crossing workspace scope."""
+        revision = await conn.fetchval(
+            "UPDATE custos_state.connector_pull_control SET operator_paused=$3, revision=$4, "
+            "next_eligible_at=$5, updated_at=$6, updated_by=$7, effective_interval_seconds=$8, "
+            "consecutive_failures=$9,native_interval_seconds=$10,trigger_interval_seconds=$11 "
+            "WHERE workspace_id=$1 AND instance_id=$2 RETURNING revision",
+            control.workspace_id,
+            control.instance_id,
+            control.operator_paused,
+            control.revision,
+            control.next_eligible_at,
+            control.updated_at,
+            control.updated_by,
+            control.effective_interval_seconds,
+            control.consecutive_failures,
+            control.native_interval_seconds,
+            control.trigger_interval_seconds,
+        )
+        if revision is None:
+            raise ImmutableViolation("locked pull control disappeared")
+
+    async def initialize_pull_control(
+        self,
+        workspace_id: WorkspaceId,
+        instance_id: ConnectorInstanceId,
+        *,
+        actor: str,
+    ) -> ConnectorPullControl:
+        """Initialize a server-generated new identity without clearing existing policy."""
+        async with self._pull_transaction() as conn:
+            return await self._ensure_pull_control(
+                conn, workspace_id, instance_id, actor=actor, paused=False
+            )
+
+    async def set_pull_paused(
+        self,
+        workspace_id: WorkspaceId,
+        instance_id: ConnectorInstanceId,
+        *,
+        paused: bool,
+        audit: AuditEvent,
+    ) -> ConnectorPullControl:
+        """Commit operator intent and its existing audit/outbox contract in one transaction."""
+        validate_pause_audit(workspace_id, instance_id, paused, audit)
+        async with self._pull_transaction() as conn:
+            current = await self._ensure_pull_control(
+                conn, workspace_id, instance_id, actor=audit.actor, paused=True
+            )
+            updated = replace(
+                current,
+                operator_paused=paused,
+                revision=current.revision + 1,
+                updated_at=await _scheduler_now(conn),
+                updated_by=audit.actor,
+                consecutive_failures=current.consecutive_failures if paused else 0,
+            )
+            handle = PgTransactionHandle(conn)
+            bind_handle(handle, self)
+            try:
+                await self.append_audit(workspace_id, audit, tx=handle)
+            finally:
+                handle._mark_closed()
+            await self._save_pull_control(conn, updated)
+            return updated
+
+    async def reconcile_pull_demand(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        default_interval_seconds: int,
+        minimum_interval_seconds: int,
+    ) -> None:
+        """Read one current intent snapshot after serialization, never a caller's stale demand."""
+        validate_dispatch_identifier(workspace_id)
+        pull_interval(default_interval_seconds)
+        pull_interval(minimum_interval_seconds)
+        async with self._pull_transaction() as conn:
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtext('custos.pull-demand'), hashtext($1))",
+                workspace_id,
+            )
+            now = await _scheduler_now(conn)
+            rows = await conn.fetch(
+                "SELECT 'start' AS kind, latest.selector->'sourceConfig' AS source "
+                "FROM custos_state.subscription s JOIN LATERAL "
+                "(SELECT selector FROM custos_state.subscription_selector ss "
+                "WHERE ss.workspace_id=s.workspace_id AND ss.subscription_id=s.subscription_id "
+                "ORDER BY seq DESC LIMIT 1) latest ON TRUE "
+                "WHERE s.workspace_id=$1 AND s.state='active' "
+                "AND latest.selector->>'sourceType'='pull' "
+                "UNION ALL SELECT 'resume', payload->'source' "
+                "FROM custos_state.resume_subscription WHERE workspace_id=$1 AND expires_at>$2 "
+                "AND (payload->'source'->'deliveryModes') ? 'pull'",
+                workspace_id,
+                now,
+            )
+            demand = collect_pull_demand(
+                (_json_payload(row["source"]) for row in rows if row["kind"] == "start"),
+                (_json_payload(row["source"]) for row in rows if row["kind"] == "resume"),
+                default_interval_seconds=default_interval_seconds,
+                minimum_interval_seconds=minimum_interval_seconds,
+            )
+            controls = await conn.fetch(
+                "SELECT * FROM custos_state.connector_pull_control WHERE workspace_id=$1 "
+                'ORDER BY instance_id COLLATE "C" FOR UPDATE',
+                workspace_id,
+            )
+            current = {row["instance_id"]: _row_to_pull_control(row) for row in controls}
+            for identifier in sorted(set(current) | set(demand)):
+                control = current.get(identifier)
+                if control is None:
+                    control = await self._ensure_pull_control(
+                        conn,
+                        workspace_id,
+                        ConnectorInstanceId(identifier),
+                        actor="trigger-service",
+                        paused=True,
+                    )
+                interval = demand.get(identifier)
+                native = (
+                    max(control.native_interval_seconds, minimum_interval_seconds)
+                    if control.native_interval_seconds is not None
+                    else None
+                )
+                if (
+                    control.trigger_interval_seconds != interval
+                    or control.native_interval_seconds != native
+                ):
+                    await self._save_pull_control(
+                        conn,
+                        replace(
+                            control,
+                            trigger_interval_seconds=interval,
+                            native_interval_seconds=native,
+                            effective_interval_seconds=effective_pull_interval(native, interval),
+                            revision=control.revision + 1,
+                            updated_at=now,
+                            updated_by="trigger-service",
+                        ),
+                    )
+
+    async def set_pull_native_demand(
+        self,
+        workspace_id: WorkspaceId,
+        instance_id: ConnectorInstanceId,
+        *,
+        interval_seconds: int | None,
+        actor: str,
+    ) -> ConnectorPullControl:
+        """Persist native listening independently of Trigger demand and operator pause."""
+        if interval_seconds is not None:
+            pull_interval(interval_seconds)
+        async with self._pull_transaction() as conn:
+            current = await self._ensure_pull_control(
+                conn, workspace_id, instance_id, actor=actor, paused=True
+            )
+            updated = replace(
+                current,
+                native_interval_seconds=interval_seconds,
+                effective_interval_seconds=effective_pull_interval(
+                    interval_seconds, current.trigger_interval_seconds
+                ),
+                revision=current.revision + 1,
+                updated_at=await _scheduler_now(conn),
+                updated_by=actor,
+            )
+            await self._save_pull_control(conn, updated)
+            return updated
+
+    async def query_pull_controls(
+        self,
+        workspace_id: WorkspaceId,
+        *,
+        cursor: Cursor | None = None,
+        limit: int | None = None,
+    ) -> Page[ConnectorPullControl]:
+        """Page active demand using scoped C-collation keysets, including paused instances."""
+        validate_dispatch_identifier(workspace_id)
+        size = query_page_limit(limit)
+        scope = ("pull-controls", workspace_id)
+        after = decode_query_cursor(cursor, scope)
+        async with self._pull_transaction() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM custos_state.connector_pull_control WHERE workspace_id=$1 "
+                "AND effective_interval_seconds IS NOT NULL "
+                'AND ($2::text IS NULL OR instance_id COLLATE "C">$2) '
+                'ORDER BY instance_id COLLATE "C" LIMIT $3',
+                workspace_id,
+                after,
+                size + 1,
+            )
+        selected = [_row_to_pull_control(row) for row in rows[:size]]
+        return Page(
+            selected,
+            encode_query_cursor(scope, selected[-1].instance_id) if len(rows) > size else None,
+        )
+
+    async def acquire_pull_tick(
+        self,
+        workspace_id: WorkspaceId,
+        instance_id: ConnectorInstanceId,
+        holder_id: str,
+        *,
+        ttl_seconds: int,
+    ) -> tuple[ConnectorCursor, PullLease]:
+        """Reserve shared due time and unique cursor ownership under database-time row locks."""
+        for value in (workspace_id, instance_id, holder_id):
+            validate_dispatch_identifier(value)
+        if type(ttl_seconds) is not int or not 1 <= ttl_seconds <= MAX_PULL_LEASE_SECONDS:
+            raise ValueError("pull lease duration must be from 1 to 300 seconds")
+        async with self._pull_transaction() as conn:
+            control = await self._locked_pull_control(conn, workspace_id, instance_id)
+            require_pull_ready(control, await _scheduler_now(conn))
+            assert control is not None
+            await conn.execute(
+                "INSERT INTO custos_state.connector_cursor "
+                "(workspace_id,instance_id,value,advanced_at) VALUES ($1,$2,'',clock_timestamp()) "
+                "ON CONFLICT DO NOTHING",
+                workspace_id,
+                instance_id,
+            )
+            row = await conn.fetchrow(
+                "SELECT * FROM custos_state.connector_cursor "
+                "WHERE workspace_id=$1 AND instance_id=$2 FOR UPDATE",
+                workspace_id,
+                instance_id,
+            )
+            assert row is not None
+            now = await _scheduler_now(conn)
+            interval = require_pull_ready(control, now)
+            if (
+                row["lease_holder"] is not None
+                and row["lease_expires_at"] is not None
+                and row["lease_expires_at"] > now
+            ):
+                raise LeaseBusy("pull cursor already has live ownership")
+            lease = PullLease(
+                workspace_id,
+                instance_id,
+                holder_id,
+                "pull:" + uuid4().hex,
+                pull_deadline(now, ttl_seconds),
+                interval,
+            )
+            updated = replace(
+                control,
+                next_eligible_at=pull_deadline(now, interval),
+                revision=control.revision + 1,
+                updated_at=now,
+                updated_by=holder_id,
+            )
+            await self._save_pull_control(conn, updated)
+            row = await conn.fetchrow(
+                "UPDATE custos_state.connector_cursor SET lease_holder=$3,lease_expires_at=$4 "
+                "WHERE workspace_id=$1 AND instance_id=$2 RETURNING *",
+                workspace_id,
+                instance_id,
+                lease.token,
+                lease.expires_at,
+            )
+            assert row is not None
+            return _row_to_cursor(row), lease
+
+    async def _owned_pull_tick(
+        self,
+        conn: Connection,
+        workspace_id: WorkspaceId,
+        lease: PullLease,
+    ) -> tuple[ConnectorPullControl, ConnectorCursor, datetime]:
+        """Lock policy before cursor consistently, then validate the exact live token."""
+        if not isinstance(lease, PullLease) or lease.workspace_id != workspace_id:
+            raise LeaseExpired("foreign pull cursor lease")
+        control = await self._locked_pull_control(conn, workspace_id, lease.instance_id)
+        row = await conn.fetchrow(
+            "SELECT * FROM custos_state.connector_cursor "
+            "WHERE workspace_id=$1 AND instance_id=$2 FOR UPDATE",
+            workspace_id,
+            lease.instance_id,
+        )
+        now = await _scheduler_now(conn)
+        cursor = _row_to_cursor(row) if row is not None else None
+        require_pull_lease(workspace_id, lease, cursor, now)
+        if control is None or cursor is None:
+            raise LeaseExpired("pull ownership policy disappeared")
+        return control, cursor, now
+
+    async def commit_pull_tick(
+        self,
+        workspace_id: WorkspaceId,
+        lease: PullLease,
+        new_value: str,
+        new_advanced_at: datetime,
+    ) -> ConnectorCursor:
+        """Commit acknowledged cursor progress without clearing the reserved polling interval."""
+        instant = utc_instant(new_advanced_at)
+        async with self._pull_transaction() as conn:
+            control, _, now = await self._owned_pull_tick(conn, workspace_id, lease)
+            await self._save_pull_control(
+                conn,
+                replace(
+                    control,
+                    consecutive_failures=0,
+                    revision=control.revision + 1,
+                    updated_at=now,
+                    updated_by=lease.holder_id,
+                ),
+            )
+            row = await conn.fetchrow(
+                "UPDATE custos_state.connector_cursor SET value=$3,advanced_at=$4,"
+                "lease_holder=NULL,lease_expires_at=NULL "
+                "WHERE workspace_id=$1 AND instance_id=$2 RETURNING *",
+                workspace_id,
+                lease.instance_id,
+                new_value,
+                instant,
+            )
+            assert row is not None
+            return _row_to_cursor(row)
+
+    async def fail_pull_tick(
+        self,
+        workspace_id: WorkspaceId,
+        lease: PullLease,
+        *,
+        backoff_cap_seconds: int,
+    ) -> None:
+        """Persist shared backoff and release ownership without advancing the cursor."""
+        cap = pull_interval(backoff_cap_seconds)
+        async with self._pull_transaction() as conn:
+            control, _, now = await self._owned_pull_tick(conn, workspace_id, lease)
+            failures = min(30, control.consecutive_failures + 1)
+            delay = max(
+                lease.interval_seconds, min(cap, lease.interval_seconds * 2 ** (failures - 1))
+            )
+            await self._save_pull_control(
+                conn,
+                replace(
+                    control,
+                    consecutive_failures=failures,
+                    revision=control.revision + 1,
+                    next_eligible_at=max(control.next_eligible_at, pull_deadline(now, delay)),
+                    updated_at=now,
+                    updated_by=lease.holder_id,
+                ),
+            )
+            await conn.execute(
+                "UPDATE custos_state.connector_cursor SET lease_holder=NULL,lease_expires_at=NULL "
+                "WHERE workspace_id=$1 AND instance_id=$2",
+                workspace_id,
+                lease.instance_id,
+            )
 
     # ----- Connector pull cursors -----
 

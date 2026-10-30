@@ -23,6 +23,7 @@ from custos_spl.interfaces.metadata_store import (
     MetadataStoreProvider,
     TransactionHandle,
 )
+from custos_spl.interfaces.pull_control import ConnectorPullControlProvider
 from custos_spl.interfaces.trigger_queries import TriggerQueryProvider
 from custos_spl.migrations.runner import MigrationCapable
 
@@ -52,8 +53,24 @@ from custos_pg.migrations.metadata import (
     METADATA_REV5,
     METADATA_REV6,
     METADATA_REV7,
+    METADATA_REV10,
 )
 from custos_pg.pool import DSN_ENV_VAR, LazyPool, read_dsn_from_env
+
+
+def test_pull_control_migration_is_optional_and_fail_closed() -> None:
+    """Revision ten preserves rev4 consumers and marks unknown legacy policy paused."""
+    assert METADATA_REV10.number == 10
+    statements = " ".join(METADATA_REV10.statements)
+    assert "PRIMARY KEY (workspace_id, instance_id)" in statements
+    assert "migration:10:unconfirmed" in statements
+    assert "native_interval_seconds" in statements
+    assert "trigger_interval_seconds" in statements
+    assert "DROP " not in statements and "ALTER " not in statements
+    assert PgMetadataAdapter.SCHEMA_REVISION == 4
+    assert isinstance(
+        PgMetadataAdapter(lazy=LazyPool("postgresql://noop")), ConnectorPullControlProvider
+    )
 
 
 def test_scheduler_migration_is_additive() -> None:

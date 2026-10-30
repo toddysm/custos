@@ -48,6 +48,7 @@ from custos_spl.interfaces.metadata_store import (
     MetadataStoreProvider,
 )
 from custos_spl.pagination import Cursor, Page
+from custos_spl.pull_memory import MemoryPullControl
 
 from custos_connector.binding import BindForStepService
 from custos_connector.identity import IdentityResolverRegistry
@@ -218,7 +219,7 @@ class FakeCursorLeaseHandle(LeaseHandle):
     holder_id: str
 
 
-class FakeMetadataAdapter:
+class FakeMetadataAdapter(MemoryPullControl):
     """In-memory ``MetadataStoreProvider`` for wiring tests.
 
     Covers the migration surface, the ``append_audit`` recorder
@@ -235,6 +236,7 @@ class FakeMetadataAdapter:
         applied_revisions: AbstractSet[int] | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
+        """Share cursor/audit containers with durable policy and intent projections."""
         self._applied: set[int] = set(
             {1, 2, 3, 4} if applied_revisions is None else applied_revisions,
         )
@@ -245,6 +247,38 @@ class FakeMetadataAdapter:
         self._clock: Callable[[], datetime] = (
             clock if clock is not None else lambda: datetime.now(UTC)
         )
+        self.pull_subscriptions: dict[tuple[str, str], tuple[str, Mapping[str, object]]] = {}
+        self.pull_resumes: dict[tuple[str, str], tuple[datetime, Mapping[str, object]]] = {}
+        MemoryPullControl.__init__(
+            self,
+            now=self._clock,
+            cursor_rows=self._cursor_rows,
+            audit_rows=self.append_audit_calls,
+            demand_reader=self._project_pull_sources,
+        )
+
+    def _project_pull_sources(
+        self,
+        workspace_id: WorkspaceId,
+        now: datetime,
+    ) -> tuple[list[object], list[object]]:
+        """Project only active starts and unexpired associated pull waits for this workspace."""
+        starts = [
+            selector.get("sourceConfig")
+            for (workspace, _), (state, selector) in self.pull_subscriptions.items()
+            if workspace == workspace_id
+            and state == "active"
+            and selector.get("sourceType") == "pull"
+        ]
+        resumes: list[object] = []
+        for (workspace, _), (expires_at, payload) in self.pull_resumes.items():
+            source = payload.get("source")
+            if workspace != workspace_id or expires_at <= now or not isinstance(source, Mapping):
+                continue
+            modes = source.get("deliveryModes")
+            if isinstance(modes, (list, tuple)) and "pull" in modes:
+                resumes.append(source)
+        return starts, resumes
 
     @property
     def declared_revisions(self) -> Mapping[str, AbstractSet[int]]:

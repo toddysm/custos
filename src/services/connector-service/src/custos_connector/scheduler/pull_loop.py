@@ -15,6 +15,10 @@ explicitly — see § v1 instance discovery model in the package
 docstring). Its only job is: decide which registered instance
 should tick next, and call :meth:`CursorService.tick`.
 
+With an explicit pull-control provider, registry state is advisory: each pass
+refreshes persisted policy and uses storage time, while CursorService atomically
+checks the same authority before the only upstream call.
+
 Concurrency model
 -----------------
 
@@ -42,7 +46,14 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
 from custos_spl import LeaseBusy
+from custos_spl.ids import ConnectorInstanceId, WorkspaceId
+from custos_spl.interfaces.pull_control import (
+    ConnectorPullControl,
+    ConnectorPullControlProvider,
+    PullTickBlocked,
+)
 
+from custos_connector._telemetry import CURSOR_LAG_REGISTRY
 from custos_connector.cursor.service import (
     CursorHalted,
     CursorInstanceUnavailable,
@@ -137,6 +148,8 @@ class TickOutcome:
     #: (the instance is no longer a valid tick target — actually removed
     #: from the registry), or ``"failed"`` (generic exception; backoff
     #: applied).
+    #: Durable policy skips report ``unconfirmed``, ``paused``, ``not_due`` or
+    #: ``no_demand`` without invoking the upstream plugin.
     status: str
     event_count: int | None = None
     error: BaseException | None = None
@@ -180,7 +193,9 @@ class PullLoopScheduler:
         max_concurrent_ticks: int = DEFAULT_MAX_CONCURRENT_TICKS,
         scan_interval_seconds: float = DEFAULT_SCAN_INTERVAL_SECONDS,
         clock: Callable[[], datetime] | None = None,
+        pull_control: ConnectorPullControlProvider | None = None,
     ) -> None:
+        """Bind one polling owner, requiring identical cursor/policy authorities in durable mode."""
         if min_interval_seconds < PULL_LOOP_HARD_FLOOR_SEC:
             raise ValueError(
                 f"min_interval_seconds must be >= {PULL_LOOP_HARD_FLOOR_SEC} "
@@ -201,6 +216,9 @@ class PullLoopScheduler:
                 f"scan_interval_seconds must be positive (got {scan_interval_seconds!r})"
             )
         self._cursor = cursor_service
+        if pull_control is not None and cursor_service.pull_control_provider is not pull_control:
+            raise ValueError("scheduler and cursor service must share the pull-control provider")
+        self._pull_control = pull_control
         self._min_interval = min_interval_seconds
         self._backoff_cap = backoff_cap_seconds
         self._scan_interval = scan_interval_seconds
@@ -208,6 +226,58 @@ class PullLoopScheduler:
         self._clock = clock if clock is not None else lambda: datetime.now(UTC)
         self._schedules: dict[tuple[str, str], InstanceSchedule] = {}
         self._stop_event: asyncio.Event | None = None
+
+    @property
+    def minimum_interval_seconds(self) -> int:
+        """Expose the configured floor for registration reconciliation."""
+        return self._min_interval
+
+    @property
+    def pull_control_provider(self) -> ConnectorPullControlProvider | None:
+        """Expose the authority used by the sole scheduler and its cursor service."""
+        return self._pull_control
+
+    def apply_pull_control(
+        self, control: ConnectorPullControl, *, clear_halt: bool = False
+    ) -> None:
+        """Project persisted policy into the local registry without changing durable intent."""
+        if self._pull_control is None:
+            raise ValueError("durable pull-control projection requires a bound provider")
+        workspace, instance = str(control.workspace_id), str(control.instance_id)
+        if control.effective_interval_seconds is None:
+            self.unregister(workspace, instance)
+            return
+        if control.effective_interval_seconds < self._min_interval:
+            raise ValueError("pull demand requires reconciliation with the configured floor")
+        schedule = self.register(
+            workspace, instance, interval_seconds=control.effective_interval_seconds
+        )
+        schedule.interval_seconds = control.effective_interval_seconds
+        schedule.next_earliest_tick_at = control.next_eligible_at
+        schedule.paused = control.operator_paused
+        schedule.consecutive_failures = control.consecutive_failures
+        if clear_halt:
+            schedule.halted, schedule.halt_reason = False, None
+
+    async def _refresh_pull_controls(self) -> None:
+        """Observe remote pause/resume and due changes before the no-await in-flight reservation."""
+        if self._pull_control is None:
+            return
+        for workspace, instance in list(self._schedules):
+            control = await self._pull_control.get_pull_control(
+                WorkspaceId(workspace), ConnectorInstanceId(instance)
+            )
+            if control is None:
+                _LOGGER.warning("Pull policy requires confirmation for %s/%s", workspace, instance)
+                self.pause(workspace, instance)
+            else:
+                self.apply_pull_control(control)
+
+    async def _storage_now(self) -> datetime:
+        """Use storage time for durable eligibility and preserve the legacy injected clock."""
+        return (
+            await self._pull_control.pull_now() if self._pull_control is not None else self._clock()
+        )
 
     # ------------------------------------------------------------------
     # Registry API
@@ -253,8 +323,11 @@ class PullLoopScheduler:
         return schedule
 
     def unregister(self, workspace_id: str, instance_id: str) -> bool:
-        """Drop an instance from the rotation. Returns ``True`` if it was registered."""
-        return self._schedules.pop((workspace_id, instance_id), None) is not None
+        """Drop local demand and its lag series; return whether a registration existed."""
+        removed = self._schedules.pop((workspace_id, instance_id), None) is not None
+        if removed:
+            CURSOR_LAG_REGISTRY.forget(workspace_id=workspace_id, instance_id=instance_id)
+        return removed
 
     def pause(self, workspace_id: str, instance_id: str) -> None:
         """Stop scheduling ticks for an instance without dropping its state.
@@ -317,7 +390,8 @@ class PullLoopScheduler:
         task before returning, so callers can drive the scheduler
         synchronously from a test.
         """
-        started_at = self._clock()
+        await self._refresh_pull_controls()
+        started_at = await self._storage_now()
         eligible: list[InstanceSchedule] = []
         skipped = 0
         for sched in list(self._schedules.values()):
@@ -329,7 +403,7 @@ class PullLoopScheduler:
         if not eligible:
             return SchedulerPassResult(
                 started_at=started_at,
-                finished_at=self._clock(),
+                finished_at=await self._storage_now(),
                 eligible=0,
                 skipped=skipped,
             )
@@ -344,7 +418,7 @@ class PullLoopScheduler:
         )
         return SchedulerPassResult(
             started_at=started_at,
-            finished_at=self._clock(),
+            finished_at=await self._storage_now(),
             eligible=len(eligible),
             skipped=skipped,
             outcomes=tuple(outcomes),
@@ -357,11 +431,29 @@ class PullLoopScheduler:
                 return await self._run_tick(sched)
         finally:
             sched.in_flight = False
+            if (sched.workspace_id, sched.instance_id) not in self._schedules:
+                CURSOR_LAG_REGISTRY.forget(
+                    workspace_id=sched.workspace_id, instance_id=sched.instance_id
+                )
 
     async def _run_tick(self, sched: InstanceSchedule) -> TickOutcome:
         """Execute one cursor tick and update the per-instance schedule."""
         try:
             result: TickResult = await self._cursor.tick(sched.workspace_id, sched.instance_id)
+        except PullTickBlocked as exc:
+            _LOGGER.log(
+                logging.WARNING if exc.reason == "unconfirmed" else logging.DEBUG,
+                "skip pull tick for %s/%s: %s",
+                sched.workspace_id,
+                sched.instance_id,
+                exc.reason,
+            )
+            return TickOutcome(
+                workspace_id=sched.workspace_id,
+                instance_id=sched.instance_id,
+                status=exc.reason,
+                error=exc,
+            )
         except LeaseBusy as exc:
             # Another replica owns the cursor lease. Treat as a
             # benign skip — schedule the next attempt at now+interval
@@ -412,7 +504,7 @@ class PullLoopScheduler:
                 sched.instance_id,
                 exc.reason,
             )
-            self._schedules.pop((sched.workspace_id, sched.instance_id), None)
+            self.unregister(sched.workspace_id, sched.instance_id)
             return TickOutcome(
                 workspace_id=sched.workspace_id,
                 instance_id=sched.instance_id,
