@@ -112,6 +112,7 @@
             "type": "array"
           },
           "receivedCount": {
+            "maximum": 1000.0,
             "minimum": 1.0,
             "title": "Receivedcount",
             "type": "integer"

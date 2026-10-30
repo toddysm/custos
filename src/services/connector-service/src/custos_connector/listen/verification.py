@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 MAX_RAW_BYTES = 1024 * 1024
 MAX_ENCODED_REQUEST_BYTES = 2 * 1024 * 1024
 MAX_HEADER_BYTES = 16 * 1024
+MAX_BATCH_EVENTS = 1000
 _HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _PRIVATE_HEADERS = frozenset(
     {
@@ -78,7 +79,7 @@ class VerifyWebhookResponse(BaseModel):
     """A complete indexed partition of a verified, structurally valid batch."""
 
     schema_version: Literal["1"] = Field(default="1", alias="schemaVersion")
-    received_count: int = Field(alias="receivedCount", ge=1)
+    received_count: int = Field(alias="receivedCount", ge=1, le=MAX_BATCH_EVENTS)
     events: list[VerifiedWebhookEvent]
     rejections: list[RejectedWebhookEvent]
 
@@ -315,6 +316,10 @@ class WebhookVerificationService:
         if not isinstance(batch, list) or not batch:
             raise WebhookVerificationError(
                 400, "webhook.malformed", "a nonempty event batch is required"
+            )
+        if len(batch) > MAX_BATCH_EVENTS:
+            raise WebhookVerificationError(
+                413, "webhook.too_large", "webhook batch exceeds 1000 events"
             )
         normalizer = EventNormalizer(produced_event_types=produced)
         accepted: list[VerifiedWebhookEvent] = []

@@ -67,7 +67,10 @@ resolution may emit the registry's existing audit/telemetry records.
 The request contains `schemaVersion: "1"`, `workspaceId`, `connectorInstanceId`,
 `bodyBase64` and `headers`. The encoded request is capped at two MiB, decoded
 vendor bytes at one MiB, and normalized header names/values plus `": "`/CRLF
-overhead at 16 KiB. Duplicate/private identity headers, duplicate JSON keys,
+overhead at 16 KiB. Verified batches are limited to **1,000 events**, including
+invalid entries, to bound response amplification. Larger batches receive
+413 `webhook.too_large` before per-index results are constructed; senders must
+split batches while retaining their stable event IDs. Duplicate/private identity headers, duplicate JSON keys,
 invalid encodings and nonfinite JSON values are rejected. Raw vendor bytes are
 authenticated before vendor JSON is parsed.
 

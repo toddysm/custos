@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 from custos_connector import create_app
 from custos_connector.identity import IdentityResolverError
 from custos_connector.listen.verification import (
+    MAX_BATCH_EVENTS,
     MAX_ENCODED_REQUEST_BYTES,
     MAX_HEADER_BYTES,
     MAX_RAW_BYTES,
@@ -155,6 +156,46 @@ def test_all_invalid_batch_is_still_an_indexed_success(configured: Configured) -
             {"index": 1, "code": "missing-event-type"},
         ],
     }
+
+
+@pytest.mark.parametrize("valid", [False, True])
+def test_batch_count_boundary_preserves_complete_partition(
+    configured: Configured, valid: bool
+) -> None:
+    """Exactly 1,000 verified entries produce exactly 1,000 indexed results."""
+    client, _, _ = configured
+    entries = [
+        {"eventId": str(index), "eventType": "registry.push"} if valid else 0
+        for index in range(MAX_BATCH_EVENTS)
+    ]
+    response = client.post(
+        "/VerifyWebhook",
+        json=envelope(json.dumps({"events": entries}).encode()),
+        headers=MESH_HEADERS,
+    )
+    assert response.status_code == 200
+    result = response.json()
+    assert result["receivedCount"] == MAX_BATCH_EVENTS
+    partition = result["events"] if valid else result["rejections"]
+    assert [item["index"] for item in partition] == list(range(MAX_BATCH_EVENTS))
+    assert not result["rejections" if valid else "events"]
+
+
+def test_batch_overflow_is_rejected_before_result_construction(
+    configured: Configured, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A signed 1,001-entry batch cannot allocate per-event result models."""
+    from custos_connector.listen import verification
+
+    client, _, _ = configured
+    normalize = MagicMock(side_effect=AssertionError("oversized batch reached normalization"))
+    monkeypatch.setattr(verification, "EventNormalizer", normalize)
+    raw = json.dumps({"events": [0] * (MAX_BATCH_EVENTS + 1)}).encode()
+    assert len(raw) < MAX_RAW_BYTES
+    response = client.post("/VerifyWebhook", json=envelope(raw), headers=MESH_HEADERS)
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "webhook.too_large"
+    normalize.assert_not_called()
 
 
 def test_rotation_does_not_accept_previously_cached_material(configured: Configured) -> None:
