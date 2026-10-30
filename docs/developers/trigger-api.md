@@ -137,6 +137,10 @@ The Connector adapter maps `eventType` to `kind`, `payload` to `data`,
 `vendor-push`; pull publications become `pull`. The verified generic webhook
 producer can explicitly select `webhook` for push envelopes. No producer field
 is renamed on the producer's wire surface.
+Vendor token syntax accepts the Connector contract's hyphens and numeric-leading
+noninitial segments (for example `type-a.event` and `vendor.2d`), while preserving
+existing underscore event names. Platform-owned domains still require exact
+canonical membership.
 
 Tenant routing is separate from business payload fields. The normalized topic
 uses this private wrapper, without changing the existing normalized event model:

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterator
 from copy import deepcopy
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -80,6 +82,26 @@ def test_adapter_preserves_producer_contract_and_business_payload() -> None:
         is SourceType.WEBHOOK
     )
     assert adapt_connector_event(connector_event(mode="pull")).event.source.type is SourceType.PULL
+
+
+@pytest.mark.parametrize("kind", ["type-a.event", "vendor.2d", "vendor.image-ready", "vendor.a.0"])
+def test_connector_schema_tokens_dispatch_without_renaming(
+    source_client: SourceClient, kind: str
+) -> None:
+    """Actual producer-schema vendor tokens survive adaptation and broker delivery unchanged."""
+    schema_path = Path(__file__).resolve().parents[4] / (
+        "src/services/connector-service/src/custos_connector/manifest/_schemas/"
+        "connector-manifest.v1.schema.json"
+    )
+    pattern = json.loads(schema_path.read_text())["$defs"]["eventType"]["pattern"]
+    assert re.fullmatch(pattern, kind)
+    body = connector_event()
+    body["eventType"] = kind
+    assert adapt_connector_event(body).event.kind == kind
+    client, _, workflow = source_client
+    response = client.post(CONNECTOR_EVENTS_PATH, json={"data": body}, headers=HEADERS)
+    assert response.json() == {"status": "SUCCESS"}
+    assert len(workflow.start_run_calls) == 1
 
 
 @pytest.mark.parametrize(
