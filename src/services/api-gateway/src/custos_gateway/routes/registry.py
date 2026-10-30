@@ -663,7 +663,16 @@ def _make_forwarder(spec: RouteSpec) -> Callable[[Request], Awaitable[Response]]
                         telemetry.set_status(response.status_code)
                         return response
 
-                reply = await _invoke_downstream(request, spec, body)
+                recovery_key = (
+                    (
+                        key.idempotency_key
+                        if key is not None
+                        else resolve_idempotency_key(request.headers.get(IDEMPOTENCY_KEY_HEADER))
+                    )
+                    if recovery
+                    else None
+                )
+                reply = await _invoke_downstream(request, spec, body, recovery_key=recovery_key)
                 if coordinator is not None and key is not None and not recovery:
                     await coordinator.complete(key, response_snapshot(reply))
                 response = _with_rate_limit_headers(shaped_response(reply), allow)
@@ -747,7 +756,13 @@ def _request_hash(request: Request, spec: RouteSpec, caller: AuthorizedCaller, b
     )
 
 
-async def _invoke_downstream(request: Request, spec: RouteSpec, body: bytes) -> DownstreamResponse:
+async def _invoke_downstream(
+    request: Request,
+    spec: RouteSpec,
+    body: bytes,
+    *,
+    recovery_key: str | None = None,
+) -> DownstreamResponse:
     """Forward the minted request to ``spec.app_id`` over Dapr.
 
     The forwarded headers carry the outbound metadata staged by the call-context
@@ -763,6 +778,8 @@ async def _invoke_downstream(request: Request, spec: RouteSpec, body: bytes) -> 
     content_type = request.headers.get("content-type")
     if content_type is not None:
         headers["content-type"] = content_type
+    if recovery_key is not None:
+        headers[IDEMPOTENCY_KEY_HEADER] = recovery_key
     method_path = request.url.path.lstrip("/")
     if request.url.query:
         method_path = f"{method_path}?{request.url.query}"

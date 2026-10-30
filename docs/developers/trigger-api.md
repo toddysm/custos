@@ -369,9 +369,13 @@ by [#1010](https://github.com/toddysm/custos/issues/1010) and
 The optional
 [`DeadLetterStoreProvider`](../../src/libs/storage-provider-layer/src/custos_spl/interfaces/dead_letters.py)
 persists failed-dispatch inputs and fenced replay state. PostgreSQL metadata
-revision 7 is additive; the shared metadata minimum remains revision 4.
+revision 7 introduced captures; revision 12 adds durable bulk commands and
+per-entry command association and is now required by this capability.
+The shared metadata minimum remains revision 4.
 `check_dead_letters_ready` rejects missing migrations or unavailable storage.
 The memory provider has the same contracts but is not restart-durable.
+Apply revision 12 and upgrade the outbox drainer and participating services
+before enabling recovery; an older drainer does not participate in its fence.
 
 Each version-1 capture holds the workspace, entry/subscription identity,
 original idempotency key, normalized event **without `raw`**, resolved start or
@@ -418,7 +422,8 @@ back deletion.
 
 `TRIGGER_DURABLE_DISPATCH_ENABLED=true` selects the durable dispatcher. It
 requires the upgraded-writer configuration gate, an authenticated Workflow caller
-verifier, and metadata revision 8. `WF_TRIGGER_DELIVERY_ENABLED=true` selects the
+verifier, metadata revision 8 for delivery receipts and revision 12 for current
+dead-letter administration. `WF_TRIGGER_DELIVERY_ENABLED=true` selects the
 matching Workflow endpoint/worker capability. Both flags default to `false`;
 production authentication, activation and operations remain
 [#1015](https://github.com/toddysm/custos/issues/1015) and
@@ -433,6 +438,13 @@ return a retryable failure, not duplicate success. Failure capture and completio
 of the producer receipt commit in one transaction, so neither storage failure nor
 a stale worker can acknowledge uncaptured work or create a phantom failure after
 another worker succeeds.
+
+Version-2 Workflow resume replies distinguish submission from consumption:
+202 means accepted but not yet acknowledged by the durable consumer; 204 proves
+consumption. Trigger treats 202 as retryable, never as completed replay. A
+terminal run without acknowledgement is unsafe (409). Upgrade Workflow before
+enabling the updated Trigger client; legacy version-1 asynchronous 202 behavior
+is unchanged.
 
 Initial dispatch and replay are bounded to 300 seconds; durable retry counts are
 0–63 (at most 64 recorded attempts). Workflow producer leases last 30 seconds;
@@ -523,6 +535,8 @@ retry after its lease expires. An unsafe or terminal replay target instead
 returns `409 trigger.replay_unsafe`; waiting alone cannot establish replay safety.
 An already-replayed entry cannot be discarded (`409 trigger.deadletter.conflict`).
 A failed replay reports the persisted pending/discarded status, not success.
+That status belongs to this attempt even if another operator immediately claims
+the entry afterward. Deletion racing discard is reported as 404, not contention.
 Missing or cross-workspace entries return 404. Missing identity returns 401,
 insufficient permission or a mismatched path workspace returns 403, invalid
 filters/bodies return 422, and unavailable storage returns 503.
@@ -534,6 +548,20 @@ fails the request explicitly instead of counting entries as successful.
 Continue with `nextCursor` and the same filters to progress beyond completed or
 unsafe entries at the front of a backlog. Use a new idempotency key for each page
 because its request body changes; reuse that page's key for retries.
+Trigger persists the original selected entry IDs/generations, continuation and
+per-entry results under `(workspace, operator, Idempotency-Key)` before any
+effect. Replay completion and its command progress commit atomically.
+Repeating a completed command returns the same counts/cursor even after statuses
+change; recovering a partial command skips completed work and never selects
+newly matching entries. A new operation or retry of entries rejected by a
+completed command requires a new key. If omitted, a key is generated and echoed
+in the response, but clients must supply their own key to recover a lost response.
+
+Coordinator leases last at most 300 seconds. A failed/interrupted command can
+return 409 until its durable coordinator/entry ownership expires; this is not
+a stale Gateway cache. Selection/progress payloads expire after the configured
+dead-letter retention, excluding live related claims. Minimal identity
+tombstones remain so an expired key cannot silently select different work.
 Single and bulk commands have a 60-second total deadline. Gateway allows a
 70-second response-read budget for these recovery writes; other routes keep
 their existing timeout. On timeout, owned tasks are cancelled and awaited and
@@ -570,6 +598,12 @@ erasing history. NUL-containing or invalid-Unicode reasons are rejected with 422
 before persistence. Storage is the sole lifecycle-audit writer; the
 dispatcher does not emit a second copy through its configurable audit sink.
 Pipeline events continue through that sink.
+Revision 12 fences outbox ID allocation and draining with shared/exclusive
+transaction advisory locks. The reader waits for active allocators before sampling
+a fresh committed prefix, so a later ID committing first cannot hide an earlier
+event. Reader lock acquisition is bounded to five seconds; contention fails
+explicitly and the drainer retries without advancing. Read-only outbox access
+does not require table mutation privileges.
 
 Retention starts at capture and uses `TRIGGER_DEADLETTER_RETENTION_SECONDS`
 (default 30 days). The bounded, workspace-paged sweeper handles every status

@@ -378,7 +378,15 @@ class ReliableDispatcher:
                 details={"subscriptionId": subscription_id, "eventId": event.event_id},
             ) from exc
 
-    async def replay(self, workspace_id: str, entry_id: str, worker_id: str) -> DispatchOutcome:
+    async def replay(
+        self,
+        workspace_id: str,
+        entry_id: str,
+        worker_id: str,
+        *,
+        bulk_id: str | None = None,
+        bulk_token: str | None = None,
+    ) -> DispatchOutcome:
         """Replay a claimed capture against its original downstream key and exact target."""
         ws = WorkspaceId(workspace_id)
         try:
@@ -400,6 +408,8 @@ class ReliableDispatcher:
                     entry_id,
                     worker_id,
                     ttl_seconds=300,
+                    bulk_id=bulk_id,
+                    bulk_token=bulk_token,
                 )
             except LeaseBusy as exc:
                 raise TriggerError(
@@ -429,14 +439,17 @@ class ReliableDispatcher:
                     claim_deadline=owned.claim.expires_at,
                 )
             except WorkflowClientError as exc:
-                await self.store.finish_dead_letter(owned.claim, failure=history[-1])
+                finished = await self.store.finish_dead_letter(owned.claim, failure=history[-1])
                 if isinstance(exc, WorkflowClientReplayUnsafeError):
                     raise TriggerError(
                         TriggerErrorKind.REPLAY_UNSAFE, "workflow rejected this replay identity"
                     ) from exc
-                return DispatchOutcome(DispatchStatus.DEAD_LETTERED, error=exc)
+                assert finished.status in ("pending", "discarded")
+                return DispatchOutcome(
+                    DispatchStatus.DEAD_LETTERED, error=exc, replay_status=finished.status
+                )
             await self.store.finish_dead_letter(owned.claim, result_id=ref.run_id if ref else None)
-            return DispatchOutcome(DispatchStatus.DISPATCHED, run_ref=ref)
+            return DispatchOutcome(DispatchStatus.DISPATCHED, run_ref=ref, replay_status="replayed")
         except SPLError as exc:
             logger.error("Durable replay storage/ownership failed: %s", type(exc).__name__)
             raise TriggerError(

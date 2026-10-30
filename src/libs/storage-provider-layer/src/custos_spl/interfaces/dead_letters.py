@@ -22,7 +22,7 @@ from custos_spl.ids import WorkspaceId
 from custos_spl.interfaces.metadata_store import AuditEvent
 from custos_spl.pagination import Cursor, Page
 
-DEAD_LETTER_SCHEMA_REVISION = 7
+DEAD_LETTER_SCHEMA_REVISION = 12
 MAX_PAYLOAD_BYTES = 262_144
 MAX_INITIAL_ATTEMPTS = 64
 MAX_REPLAY_ATTEMPTS = 100
@@ -295,6 +295,7 @@ class ReplayClaim:
     epoch: int
     expires_at: datetime
     observed_at: datetime
+    bulk_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -361,10 +362,17 @@ def recover_replay(entry: DeadLetterEntry, now: datetime) -> DeadLetterEntry:
 
 
 def claim_replay(
-    entry: DeadLetterEntry, worker_id: str, ttl_seconds: int, now: datetime
+    entry: DeadLetterEntry,
+    worker_id: str,
+    ttl_seconds: int,
+    now: datetime,
+    *,
+    bulk_id: str | None = None,
 ) -> DeadLetterEntry:
     """Consume one attempt; active contenders raise LeaseBusy, ineligible rows conflict."""
     validate_dispatch_identifier(worker_id)
+    if bulk_id is not None:
+        validate_dispatch_identifier(bulk_id)
     now = _instant(now)
     if type(ttl_seconds) is not int or not 0 < ttl_seconds <= MAX_CLAIM_SECONDS:
         raise ValueError("replay claim duration must be 1..300 seconds")
@@ -381,6 +389,7 @@ def claim_replay(
         epoch,
         now + timedelta(seconds=ttl_seconds),
         now,
+        bulk_id,
     )
     attempt = ReplayAttempt(epoch, worker_id, now)
     return replace(
@@ -398,6 +407,7 @@ def require_replay(entry: DeadLetterEntry | None, claim: ReplayClaim, now: datet
         or entry.data.entry_id != claim.entry_id
         or entry.claim.token != claim.token
         or entry.claim.epoch != claim.epoch
+        or entry.claim.bulk_id != claim.bulk_id
         or entry.claim.expires_at <= _instant(now)
     ):
         raise LeaseExpired("replay claim expired or is no longer owned")
@@ -557,6 +567,7 @@ def encode_dead_letter(entry: DeadLetterEntry) -> str:
                 "epoch": claim.epoch,
                 "expires_at": claim.expires_at.isoformat(),
                 "observed_at": claim.observed_at.isoformat(),
+                **({"bulk_id": claim.bulk_id} if claim.bulk_id is not None else {}),
             }
             if claim
             else None,
@@ -613,6 +624,7 @@ def decode_dead_letter(payload: str) -> DeadLetterEntry:
             claim["epoch"],
             datetime.fromisoformat(claim["expires_at"]),
             datetime.fromisoformat(claim["observed_at"]),
+            claim.get("bulk_id"),
         )
         if claim
         else None,
@@ -635,7 +647,7 @@ class DeadLetterStoreProvider(Protocol):
     """Optional metadata capability; no worker, authorization or Workflow RPC is implied."""
 
     async def check_dead_letters_ready(self) -> None:
-        """Require revision 7 without changing the general metadata revision-4 minimum."""
+        """Require revision 12 without changing the general metadata revision-4 minimum."""
         ...
 
     async def put_dead_letter(self, data: DeadLetterData) -> DeadLetterEntry:
@@ -666,6 +678,8 @@ class DeadLetterStoreProvider(Protocol):
         worker_id: str,
         *,
         ttl_seconds: int = 60,
+        bulk_id: str | None = None,
+        bulk_token: str | None = None,
     ) -> DeadLetterEntry:
         """Claim pending/abandoned work atomically; consume an attempt before any remote effect."""
         ...

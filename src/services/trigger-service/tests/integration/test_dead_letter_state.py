@@ -449,10 +449,12 @@ async def test_postgres_migration_readiness_indexes_and_outage(pg_dsn: str) -> N
             } <= {row["indexname"] for row in indexes}
             await conn.execute(
                 "DELETE FROM custos_meta.adapter_revisions "
-                "WHERE interface_name='MetadataStoreProvider' AND revision=7"
+                "WHERE interface_name='MetadataStoreProvider' AND revision=12"
             )
         with pytest.raises(MigrationRequired):
             await adapter.check_dead_letters_ready()
+        with pytest.raises(MigrationRequired):
+            await adapter.stream_audit_outbox(0, 100)
         await adapter.apply_pending()
         assert adapter.SCHEMA_REVISION == 4
         assert await adapter.apply_pending() == []

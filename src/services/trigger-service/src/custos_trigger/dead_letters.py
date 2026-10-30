@@ -8,15 +8,23 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Literal
+from uuid import uuid4
 
 from custos_spl.errors import ImmutableViolation, LeaseBusy, SPLError
 from custos_spl.ids import WorkspaceId
+from custos_spl.interfaces.bulk_replay import (
+    BulkReplayCommand,
+    BulkReplayExpired,
+    BulkReplayItem,
+    BulkReplayStoreProvider,
+    require_bulk_entry,
+)
 from custos_spl.interfaces.dead_letters import (
     DeadLetterEntry,
     DeadLetterFilter,
-    DeadLetterStatus,
     validate_dispatch_identifier,
 )
+from custos_spl.interfaces.delivery import delivery_identity
 from custos_spl.pagination import Cursor, Page
 
 from custos_trigger.errors import TriggerError, TriggerErrorKind
@@ -136,13 +144,32 @@ class DeadLetterAdmin:
                 logger.info("Invalid dead-letter pagination cursor")
                 raise DeadLetterAdminError("invalid", "Invalid pagination cursor.") from exc
 
-    async def _replay(self, workspace: str, entry_id: str, actor: str) -> DeadLetterStatus:
+    async def _replay(
+        self,
+        workspace: str,
+        entry_id: str,
+        actor: str,
+        bulk: BulkReplayCommand | None = None,
+    ) -> Literal["pending", "discarded", "replayed"]:
         """Replay the original target, reconciling successful concurrent/repeated requests."""
         entry = await self._entry(workspace, entry_id)
+        if bulk is not None:
+            try:
+                require_bulk_entry(bulk, entry, actor)
+            except ImmutableViolation as exc:
+                raise DeadLetterAdminError(
+                    "unsafe", "Selected entry changed or was replaced."
+                ) from exc
         if entry.status == "replayed":
             return "replayed"
         try:
-            outcome = await self.dispatcher.replay(workspace, entry_id, actor)
+            outcome = await self.dispatcher.replay(
+                workspace,
+                entry_id,
+                actor,
+                bulk_id=bulk.command_id if bulk else None,
+                bulk_token=bulk.token if bulk else None,
+            )
         except TriggerError as exc:
             if exc.kind == TriggerErrorKind.SUBSCRIPTION_NOT_FOUND:
                 raise DeadLetterAdminError("not_found", "Dead-letter entry not found.") from exc
@@ -161,11 +188,16 @@ class DeadLetterAdmin:
                     "unavailable", "Replay could not complete safely; inspect before retrying."
                 ) from exc
             raise
-        if outcome.is_dispatched:
-            return "replayed"
-        return (await self._entry(workspace, entry_id)).status
+        if outcome.replay_status is None:
+            raise RuntimeError("replay completed without its committed attempt status")
+        return outcome.replay_status
 
-    async def replay(self, workspace: str, entry_id: str, actor: str) -> DeadLetterStatus:
+    async def replay(
+        self,
+        workspace: str,
+        entry_id: str,
+        actor: str,
+    ) -> Literal["pending", "discarded", "replayed"]:
         """Bound a single replay, acknowledging success only after durable completion."""
         async with _operation():
             return await self._replay(workspace, entry_id, actor)
@@ -176,9 +208,13 @@ class DeadLetterAdmin:
         """Atomically audit discard; repeated discard is idempotent and active replay conflicts."""
         async with _operation():
             await self._entry(workspace, entry_id)
-            await self.store.discard_dead_letter(
-                WorkspaceId(workspace), entry_id, actor=actor, reason=reason
-            )
+            try:
+                await self.store.discard_dead_letter(
+                    WorkspaceId(workspace), entry_id, actor=actor, reason=reason
+                )
+            except ImmutableViolation:
+                await self._entry(workspace, entry_id)
+                raise
 
     async def bulk_replay(
         self,
@@ -188,19 +224,49 @@ class DeadLetterAdmin:
         *,
         cursor: str | None = None,
         limit: int = 50,
+        request_key: str | None = None,
     ) -> tuple[int, int, Cursor | None]:
-        """Bound selection, concurrency and total time; cancel and await owned work on failure."""
+        """Recover one persisted selection/progress record, never rerun filters for a retry."""
         _validate_query(workspace, filters, limit)
+        key = request_key if request_key is not None else uuid4().hex
+        try:
+            validate_dispatch_identifier(key)
+        except ValueError as exc:
+            raise DeadLetterAdminError("invalid", "Invalid bulk idempotency key.") from exc
+        store = self.store
+        if not isinstance(store, BulkReplayStoreProvider):
+            raise DeadLetterAdminError(
+                "unavailable", "Durable bulk command storage is unavailable."
+            )
         async with _operation():
-            page = await self.list(workspace, filters, cursor=cursor, limit=limit)
+            try:
+                command = await store.begin_bulk_replay(
+                    WorkspaceId(workspace),
+                    delivery_identity(workspace, actor, key),
+                    actor,
+                    filters,
+                    cursor=Cursor(cursor) if cursor is not None else None,
+                    limit=limit,
+                    retention_seconds=self.dispatcher.retention,
+                )
+            except BulkReplayExpired as exc:
+                raise DeadLetterAdminError(
+                    "unsafe", "Bulk command has expired; use a new idempotency key."
+                ) from exc
+            except ValueError as exc:
+                raise DeadLetterAdminError("invalid", "Invalid bulk selection or cursor.") from exc
+            assert command.items is not None
             semaphore = asyncio.Semaphore(BULK_CONCURRENCY)
 
-            async def replay_one(entry: DeadLetterEntry) -> bool:
-                """Count safe completion; classify per-entry conflicts without hiding outages."""
+            async def replay_one(item: BulkReplayItem) -> None:
+                """Complete selected unfinished work; replay finish commits progress atomically."""
+                if item.accepted is not None:
+                    return
                 async with semaphore:
                     try:
-                        return (
-                            await self._replay(workspace, entry.data.entry_id, actor) == "replayed"
+                        accepted = (
+                            await self._replay(workspace, item.entry_id, actor, command)
+                            == "replayed"
                         )
                     except DeadLetterAdminError as exc:
                         if exc.code not in (
@@ -211,18 +277,26 @@ class DeadLetterAdmin:
                         ):
                             raise
                         logger.info("Bulk replay rejected entry: %s", exc.code)
-                        return False
+                        accepted = False
+                    await store.record_bulk_replay_result(command, item.entry_id, accepted)
 
-            tasks = [asyncio.create_task(replay_one(entry)) for entry in page.items]
+            tasks = [asyncio.create_task(replay_one(item)) for item in command.items]
             try:
-                results = await asyncio.gather(*tasks)
+                await asyncio.gather(*tasks)
             finally:
                 for task in tasks:
                     if not task.done():
                         task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
-            accepted = sum(results)
-            return accepted, len(results) - accepted, page.next_cursor
+            completed = await store.get_bulk_replay(command.workspace_id, command.command_id)
+            if completed is None or not completed.completed or completed.items is None:
+                raise RuntimeError("bulk command finished without durable per-entry results")
+            accepted = sum(item.accepted is True for item in completed.items)
+            return (
+                accepted,
+                len(completed.items) - accepted,
+                Cursor(completed.next_cursor) if completed.next_cursor is not None else None,
+            )
 
     async def sweep(
         self, workspace: str, *, cursor: str | None = None, limit: int = 100
@@ -235,4 +309,6 @@ class DeadLetterAdmin:
                 expired += await self.store.delete_expired_dead_letter(
                     WorkspaceId(workspace), entry.data.entry_id
                 )
+            if isinstance(self.store, BulkReplayStoreProvider):
+                await self.store.purge_bulk_replay_selections(WorkspaceId(workspace), limit=limit)
             return RetentionPage(len(page.items), expired, page.next_cursor)

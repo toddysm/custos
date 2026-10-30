@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from typing import Annotated, Any, Literal
+from uuid import uuid4
 
 from custos_spl.interfaces.dead_letters import (
     DeadLetterEntry,
@@ -13,7 +14,7 @@ from custos_spl.interfaces.dead_letters import (
     json_value,
     validate_discard_reason,
 )
-from fastapi import APIRouter, Depends, Path, Query, Request, Response
+from fastapi import APIRouter, Depends, Header, Path, Query, Request, Response
 from pydantic import Field, field_validator
 
 from custos_trigger._wire import WireModel
@@ -77,7 +78,7 @@ class PageView(WireModel):
 class ReplayResult(WireModel):
     """Persisted lifecycle status following an idempotent replay operation."""
 
-    status: DeadLetterStatus
+    status: Literal["replayed", "pending", "discarded"]
 
 
 class BulkSelector(WireModel):
@@ -234,16 +235,21 @@ async def bulk_replay(
     ctx: AdminContext,
     admin: AdminDep,
     body: BulkSelector,
+    response: Response,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=512)] = None,
 ) -> BulkResult:
     """Replay at most 100 selected entries within one bounded request deadline."""
     ensure_workspace(ctx, workspace_id)
+    key = idempotency_key if idempotency_key is not None else uuid4().hex
     accepted, rejected, cursor = await admin.bulk_replay(
         workspace_id,
         DeadLetterFilter(body.subscription_id, body.status, body.since, body.until),
         ctx.principal_id,
         limit=body.limit,
         cursor=body.cursor,
+        request_key=key,
     )
+    response.headers["Idempotency-Key"] = key
     return BulkResult(
         accepted=accepted,
         rejected=rejected,

@@ -731,7 +731,7 @@ async def test_versioned_internal_rpc_uses_durable_path_and_checks_scope(
                     "retainUntil": until,
                 },
             )
-            assert resumed.status_code == 202
+            assert resumed.status_code == 204
             assert (
                 await http.post(
                     "/internal/runs:raiseEvent",
@@ -755,6 +755,50 @@ async def test_versioned_internal_rpc_uses_durable_path_and_checks_scope(
             assert forbidden.status_code == 403
             legacy.start_run.assert_not_awaited()
             legacy.raise_external_event.assert_not_awaited()
+    finally:
+        await runtime.shutdown()
+
+
+async def test_terminal_race_after_state_check_never_acknowledges_dropped_resume(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runtime inbox acceptance after termination is not durable consumer acknowledgement."""
+    from custos_workflow.runs.errors import RunStateConflictError
+    from custos_workflow.runtime import TerminateRunRequest
+
+    runtime, client, _ = await setup_runtime(harness)
+    controller = TriggerDeliveryController(
+        harness.delivery,
+        InProcessRunStore(harness.metadata),
+        client,
+        InMemoryActivityTypeRegistry({}),
+        InMemoryLifecycleEventPublisher(),
+    )
+    try:
+        until = await harness.delivery.delivery_now() + timedelta(days=30)
+        ref = await controller.start(str(WS), version(), {}, "terminal-race", until)
+
+        async def terminate_then_accept(request: RaiseRunEventRequest) -> None:
+            """End the actual runtime between the controller's state check and submission."""
+            await client.terminate_workflow(TerminateRunRequest(instance_id=request.instance_id))
+
+        monkeypatch.setattr(client, "raise_workflow_event", terminate_then_accept)
+        assert (
+            await controller.resume(
+                str(WS), str(ref.run_id), "first", "ready", {"v": 1}, "event", until
+            )
+            is False
+        )
+        key, _ = resume_identity(str(WS), str(ref.run_id), "first", "ready", "event", {"v": 1})
+        submitted = await harness.delivery.get_delivery(WS, "workflow-resume", key)
+        assert (
+            submitted is not None and submitted.submitted_at is not None and not submitted.completed
+        )
+        with pytest.raises(RunStateConflictError):
+            await controller.resume(
+                str(WS), str(ref.run_id), "first", "ready", {"v": 1}, "event", until
+            )
     finally:
         await runtime.shutdown()
 
@@ -787,8 +831,11 @@ async def test_consumed_event_retries_acknowledgement_through_long_outage(
             raise BackendUnavailable("simulated acknowledgement storage outage")
 
         monkeypatch.setattr(harness.delivery, "acknowledge_delivery", unavailable)
-        await controller.resume(
-            str(WS), str(ref.run_id), "first", "ready", {"v": 1}, "event", until
+        assert (
+            await controller.resume(
+                str(WS), str(ref.run_id), "first", "ready", {"v": 1}, "event", until
+            )
+            is False
         )
         for _ in range(6):
             await client.advance_time(timedelta(seconds=60))
@@ -803,6 +850,12 @@ async def test_consumed_event_retries_acknowledgement_through_long_outage(
         await client.advance_time(timedelta(seconds=60))
         consumed = await harness.delivery.get_delivery(WS, "workflow-resume", key)
         assert consumed is not None and consumed.completed
+        assert (
+            await controller.resume(
+                str(WS), str(ref.run_id), "first", "ready", {"v": 1}, "event", until
+            )
+            is True
+        )
         assert len(registrations.register_calls) == 2
         assert [
             m.step_id

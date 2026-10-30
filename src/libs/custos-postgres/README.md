@@ -43,6 +43,19 @@ record in the same transaction. Capture, replay completion/failure, interrupted
 claim recovery, operator discard and expiration cannot commit without their
 required audit. Expiration locks the entry, rechecks retention/live ownership,
 then audits and removes the payload without deleting downstream receipts.
+Metadata revision **12** adds bulk-command selections/progress and per-entry
+command association. Replay completion, its audit and command progress commit
+together; retries cannot reselect another page. Expired selection payloads are
+erased without live related claims, retaining identity tombstones.
+
+Revision 12 also makes the outbox's default ID allocator acquire a shared
+transaction advisory fence before allocating a sequence value. Readers acquire
+the corresponding exclusive fence and use a fresh committed snapshot, waiting
+for earlier allocators so commit-order inversions cannot lose events.
+The internal sequence remains `CACHE 1`; callers must not allocate explicit
+outbox IDs or reconfigure its allocator.
+This needs no table mutation privilege for readers. Reader lock acquisition is
+bounded to five seconds and fails explicitly; retry without advancing the cursor.
 
 ## Entry points
 

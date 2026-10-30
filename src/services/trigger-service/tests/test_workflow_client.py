@@ -135,7 +135,7 @@ async def test_versioned_resume_uses_fixed_method_and_opaque_body_ids() -> None:
         body = RoutedResumeRequest.model_validate(json.loads(request.content))
         assert (body.run_id, body.step_id) == (run_id, step_id)
         assert body.delivery_protocol == 2 and body.event_name == " ready "
-        return httpx.Response(202)
+        return httpx.Response(204)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         client = DaprWorkflowServiceClient(http_client=http, endpoint=_ENDPOINT)
@@ -150,6 +150,27 @@ async def test_versioned_resume_uses_fixed_method_and_opaque_body_ids() -> None:
                 retain_until=datetime.now(UTC) + timedelta(days=1),
             ),
         )
+
+
+@pytest.mark.parametrize("status", [200, 202])
+async def test_version_two_resume_requires_consumer_acknowledgement(status: int) -> None:
+    """Submission or an unspecified success cannot finalize durable replay."""
+    from datetime import UTC, datetime, timedelta
+
+    client = _client(httpx.MockTransport(lambda request: httpx.Response(status)))
+    with pytest.raises(WorkflowClientTransportError) as pending:
+        await client.raise_external_event(
+            "run",
+            "wait",
+            RaiseExternalEventRequest(
+                workspace_id="ws",
+                event_name="ready",
+                delivery_protocol=2,
+                idempotency_key="key",
+                retain_until=datetime.now(UTC) + timedelta(days=1),
+            ),
+        )
+    assert pending.value.retryable
 
 
 def test_read_dapr_endpoint_defaults() -> None:

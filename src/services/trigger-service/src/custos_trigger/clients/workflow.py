@@ -278,7 +278,7 @@ class WorkflowServiceClient(Protocol):
     async def raise_external_event(
         self, run_id: str, step_id: str, request: RaiseExternalEventRequest
     ) -> None:
-        """Deliver an external event to a waiting step (WF 202, empty body)."""
+        """Return after version-1 submission or proven version-2 consumer acknowledgement."""
         ...
 
 
@@ -316,15 +316,20 @@ class DaprWorkflowServiceClient:
     async def raise_external_event(
         self, run_id: str, step_id: str, request: RaiseExternalEventRequest
     ) -> None:
+        """Require version-2 consumer acknowledgement, preserving legacy submission semantics."""
         if request.delivery_protocol == 2:
             routed = RoutedResumeRequest.model_validate(
                 {**request.model_dump(), "run_id": run_id, "step_id": step_id},
             )
-            await self._post(
+            response = await self._post(
                 build_invoke_url(self.endpoint, RESUME_RUN_METHOD),
                 routed,
                 what="RaiseExternalEvent",
             )
+            if response.status_code != 204:
+                raise WorkflowClientTransportError(
+                    "resume submission has not been acknowledged by its durable consumer"
+                )
             return
         try:
             url = build_invoke_url(self.endpoint, raise_event_method(run_id, step_id))
