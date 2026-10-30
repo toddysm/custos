@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
@@ -299,8 +300,9 @@ class IdentityResolverRegistry:
             lease_ttl_seconds: The lease TTL the caller will request
                 from the Lease Manager; passed into the resolver
                 context.
-            force_refresh: Bypass both cache checks for request-scoped webhook verification,
-                so an accepted old value cannot outlive rotation at the credential source.
+            force_refresh: Perform an independent fresh read without cache reads/writes or
+                cache-miss serialization. Webhook rotation must not reuse stale material or
+                queue a burst of independent reads behind one slow upstream lookup.
 
         Raises:
             IdentityResolverError: On any resolver-side failure. The
@@ -333,19 +335,19 @@ class IdentityResolverRegistry:
         # Cache check (lock-free read is fine; staleness only causes a
         # second resolve, never a wrong return).
         now = self._clock()
-        cached = self._cache.get(cache_key)
-        if not force_refresh and cached is not None and cached.expires_at > now:
+        cached = None if force_refresh else self._cache.get(cache_key)
+        if cached is not None and cached.expires_at > now:
             return cached.value
 
-        key_lock = await self._acquire_key_lock(cache_key)
+        key_lock = None if force_refresh else await self._acquire_key_lock(cache_key)
         try:
-            async with key_lock.lock:
+            async with key_lock.lock if key_lock is not None else nullcontext():
                 # Re-check inside the per-key lock so concurrent callers
                 # for the *same* key collapse onto a single upstream
                 # call. Callers for different keys never block here.
                 now = self._clock()
-                cached = self._cache.get(cache_key)
-                if not force_refresh and cached is not None and cached.expires_at > now:
+                cached = None if force_refresh else self._cache.get(cache_key)
+                if cached is not None and cached.expires_at > now:
                     return cached.value
 
                 context = IdentityResolverContext(
@@ -400,12 +402,13 @@ class IdentityResolverRegistry:
                     )
                     raise category_mismatch
 
-                cache_expiry = self._cache_expiry(
-                    resolved=resolved,
-                    lease_ttl_seconds=lease_ttl_seconds,
-                    now=now,
-                )
-                self._cache[cache_key] = _CacheEntry(value=resolved, expires_at=cache_expiry)
+                if not force_refresh:
+                    cache_expiry = self._cache_expiry(
+                        resolved=resolved,
+                        lease_ttl_seconds=lease_ttl_seconds,
+                        now=now,
+                    )
+                    self._cache[cache_key] = _CacheEntry(value=resolved, expires_at=cache_expiry)
 
                 await self._emit_resolved_rate_limited(
                     workspace_id=workspace_id,
@@ -416,7 +419,8 @@ class IdentityResolverRegistry:
                 )
                 return resolved
         finally:
-            await self._release_key_lock(cache_key)
+            if key_lock is not None:
+                await self._release_key_lock(cache_key)
 
     # ------------------------------------------------------------------
     # Internals

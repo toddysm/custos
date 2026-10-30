@@ -1,4 +1,4 @@
-"""Credential-free connector lookup SQL and explicit backend-error translation."""
+"""Connector reference/catalog reads and explicit backend-error translation."""
 
 from unittest.mock import AsyncMock, MagicMock
 
@@ -8,7 +8,7 @@ from asyncpg.pool import Pool
 from custos_spl.errors import BackendUnavailable
 from custos_spl.ids import ConnectorInstanceId, WorkspaceId
 
-from custos_pg import PgConnectorInstanceAdapter
+from custos_pg import PgCatalogAdapter, PgConnectorInstanceAdapter
 
 
 def _adapter(result: object) -> tuple[PgConnectorInstanceAdapter, AsyncMock]:
@@ -51,4 +51,33 @@ async def test_reference_backend_errors_are_explicit(failure: Exception) -> None
     connection.fetchval.side_effect = failure
     with pytest.raises(BackendUnavailable) as raised:
         await adapter.has_connector_instance(WorkspaceId("ws"), ConnectorInstanceId("id"))
+    assert raised.value.__cause__ is failure
+
+
+@pytest.mark.parametrize("stage", ["pool", "acquire", "query"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        TimeoutError("slow"),
+        OSError("offline"),
+        InterfaceError("closed"),
+        PostgresError("unavailable"),
+    ],
+)
+async def test_catalog_read_outages_are_translated(
+    stage: str, failure: Exception, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pool and query failures retain a safe provider error with causal context."""
+    connection = AsyncMock()
+    pool = MagicMock(spec=Pool)
+    pool.acquire.return_value.__aenter__.return_value = connection
+    adapter = PgCatalogAdapter(pool=pool)
+    if stage == "pool":
+        monkeypatch.setattr(adapter, "_pool_ref", AsyncMock(side_effect=failure))
+    elif stage == "acquire":
+        pool.acquire.return_value.__aenter__.side_effect = failure
+    else:
+        connection.fetchrow.side_effect = failure
+    with pytest.raises(BackendUnavailable, match="connector catalog lookup failed") as raised:
+        await adapter.get_connector_type_version("registry", "1")
     assert raised.value.__cause__ is failure

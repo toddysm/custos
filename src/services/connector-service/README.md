@@ -95,8 +95,10 @@ uses `sha256=<hex>` over the exact raw body; the default header is
 `x-custos-signature`. `scheme: "bearer"` instead compares the external
 `headers.authorization` bearer using a constant-time comparison. It is not a
 Custos identity. Both modes resolve fresh material on each verification, bypassing
-old registry cache entries so secret rotation needs no Trigger change. Missing
-or unavailable material fails closed; no alternate scheme is inferred from headers.
+old registry cache entries so secret rotation needs no Trigger change.
+Fresh reads also bypass cache-miss serialization and do not replace cached
+binding credentials; upstream clients retain their configured request timeouts.
+Missing or unavailable material fails closed; no alternate scheme is inferred from headers.
 Vendor timestamp canonicalization and non-SHA256 signature schemes are not
 implemented by these built-in verifiers.
 

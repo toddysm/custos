@@ -5,10 +5,16 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from dataclasses import replace
+from typing import cast
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from asyncpg.pool import Pool
+from custos_pg import PgCatalogAdapter
 from custos_spl.errors import BackendUnavailable
 from custos_spl.ids import ConnectorInstanceId, WorkspaceId
+from custos_spl.interfaces.catalog_store import CatalogStoreProvider
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from custos_connector import create_app
@@ -424,6 +430,43 @@ def test_missing_catalog_is_not_reported_as_an_unknown_pair(
     monkeypatch.setattr(providers.catalog_store, "get_connector_type_version", missing)
     assert client.post("/VerifyWebhook", json=envelope(), headers=MESH_HEADERS).status_code == 503
     assert not resolver.calls
+
+
+@pytest.mark.parametrize("stage", ["acquire", "query"])
+def test_catalog_adapter_timeout_has_sanitized_503(configured: Configured, stage: str) -> None:
+    """The actual PostgreSQL adapter translates timeouts before the HTTP error boundary."""
+    client, resolver, providers = configured
+    connection = AsyncMock()
+    pool = MagicMock(spec=Pool)
+    pool.acquire.return_value.__aenter__.return_value = connection
+    if stage == "acquire":
+        pool.acquire.return_value.__aenter__.side_effect = TimeoutError("private database detail")
+    else:
+        connection.fetchrow.side_effect = TimeoutError("private database detail")
+    cast(FastAPI, client.app).state.providers = replace(
+        providers, catalog_store=cast(CatalogStoreProvider, PgCatalogAdapter(pool=pool))
+    )
+    response = client.post("/VerifyWebhook", json=envelope(), headers=MESH_HEADERS)
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "webhook.verifier_unavailable"
+    assert "private database detail" not in response.text
+    assert not resolver.calls
+
+
+@pytest.mark.parametrize("field", ["workspaceId", "connectorInstanceId"])
+def test_nul_identifiers_are_rejected_before_provider_access(
+    configured: Configured, monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    """JSON-escaped NULs cannot reach PostgreSQL text parameters."""
+    client, _, providers = configured
+    lookup = AsyncMock(side_effect=AssertionError("invalid scope reached storage"))
+    monkeypatch.setattr(providers.instance_store, "get_connector_instance", lookup)
+    response = client.post(
+        "/VerifyWebhook", json={**envelope(), field: "invalid\x00identifier"}, headers=MESH_HEADERS
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "webhook.malformed"
+    lookup.assert_not_awaited()
 
 
 @pytest.mark.parametrize(

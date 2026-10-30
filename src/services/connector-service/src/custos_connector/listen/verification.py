@@ -247,9 +247,14 @@ class WebhookVerificationService:
         self, *, workspace_id: str, instance_id: str, body: bytes, headers: Mapping[str, str]
     ) -> VerifyWebhookResponse:
         """Partition all indices, or fail the whole unauthenticated or malformed batch."""
-        if not workspace_id.strip() or not instance_id.strip():
+        if (
+            not workspace_id.strip()
+            or not instance_id.strip()
+            or "\x00" in workspace_id
+            or "\x00" in instance_id
+        ):
             raise WebhookVerificationError(
-                400, "webhook.malformed", "verification scope is required"
+                400, "webhook.malformed", "verification scope is invalid"
             )
         if len(body) > MAX_RAW_BYTES:
             raise WebhookVerificationError(
