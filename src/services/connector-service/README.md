@@ -163,8 +163,9 @@ across replicas. Revision 10 marks known legacy instances paused. Missing legacy
 controls also remain blocked; reconciliation never guesses that an active
 subscription means the operator intended polling to resume. Revision 11 fences
 existing cursor holders, even expired ones, with an unknown legacy executor
-locator. Operators must
-explicitly confirm resume through the protected admin endpoint.
+locator. It creates paused fenced controls for holders without existing controls,
+including deployments with a separate instance store. Operators must explicitly
+confirm resume through the protected admin endpoint.
 
 Each upstream call requires one atomic storage operation checking pause, demand,
 database time and cursor ownership. A fresh opaque token fences every attempt,
@@ -184,6 +185,9 @@ blocking new polling **beyond lease and due-time expiry**. Ordinary resume,
 registration changes and reconciliation never clear that fence. A verified
 stopped owner can finalize its matching attempt even after lease expiry; a stale
 owner cannot clear a recovered or replaced invocation.
+An expired tick deadline with failed cleanup fails only that instance, retaining
+its fence; it does not cancel polling for unrelated instances. Actual caller
+cancellation still propagates.
 
 For recovery, inspect `GET /v1/workspaces/{ws}/connectors/{id}/cursor` with
 `connector:read`. Its durable-mode `pullControl` object includes `invocationId`,

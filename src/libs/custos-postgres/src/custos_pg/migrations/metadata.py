@@ -608,14 +608,19 @@ METADATA_REV11 = Revision(
                 CHECK (invocation_owner IS NULL OR length(invocation_owner) > 0)
         """,
         """
-        UPDATE custos_state.connector_pull_control p
-        SET invocation_id='legacy:' || encode(sha256(convert_to(c.lease_holder,'UTF8')),'hex'),
-            invocation_owner='legacy:unknown',
-            revision=p.revision+1, updated_at=clock_timestamp(),
-            updated_by='migration:11:unconfirmed'
-        FROM custos_state.connector_cursor c
-        WHERE p.workspace_id=c.workspace_id AND p.instance_id=c.instance_id
-          AND c.lease_holder IS NOT NULL AND p.invocation_id IS NULL
+        INSERT INTO custos_state.connector_pull_control AS p
+            (workspace_id, instance_id, operator_paused, revision,
+             next_eligible_at, updated_at, updated_by, invocation_id, invocation_owner)
+        SELECT c.workspace_id, c.instance_id, TRUE, 1, clock_timestamp(),
+               clock_timestamp(), 'migration:11:unconfirmed',
+               'legacy:' || encode(sha256(convert_to(c.lease_holder,'UTF8')),'hex'),
+               'legacy:unknown'
+        FROM custos_state.connector_cursor c WHERE c.lease_holder IS NOT NULL
+        ON CONFLICT (workspace_id, instance_id) DO UPDATE
+        SET invocation_id=EXCLUDED.invocation_id, invocation_owner=EXCLUDED.invocation_owner,
+            revision=p.revision+1, updated_at=EXCLUDED.updated_at,
+            updated_by=EXCLUDED.updated_by
+        WHERE p.invocation_id IS NULL
         """,
     ),
 )

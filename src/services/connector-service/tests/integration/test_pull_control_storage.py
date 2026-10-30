@@ -339,10 +339,12 @@ async def test_invocation_fence_survives_failed_pause_and_expired_ownership(
 
 
 @pytest.mark.parametrize("expired", [False, True])
+@pytest.mark.parametrize("missing_control", [False, True])
 async def test_revision_eleven_fences_existing_unconfirmed_claims(
     pull_store: PgMetadataAdapter,
     pg_dsn: str,
     expired: bool,
+    missing_control: bool,
 ) -> None:
     """Upgrade conservatively fences old claims without inventing a container locator."""
     await pull_store.initialize_pull_control(WS, INSTANCE, actor="creator")
@@ -364,6 +366,13 @@ async def test_revision_eleven_fences_existing_unconfirmed_claims(
             WS,
             INSTANCE,
         )
+        if missing_control:
+            await connection.execute(
+                "DELETE FROM custos_state.connector_pull_control "
+                "WHERE workspace_id=$1 AND instance_id=$2",
+                WS,
+                INSTANCE,
+            )
         await connection.execute(
             "DELETE FROM custos_meta.adapter_revisions "
             "WHERE interface_name='MetadataStoreProvider' AND revision=11"
@@ -376,6 +385,23 @@ async def test_revision_eleven_fences_existing_unconfirmed_claims(
     assert control.invocation_id.startswith("legacy:")
     assert lease.token not in control.invocation_id
     assert control.invocation_owner == "legacy:unknown"
+    if missing_control:
+        assert control.operator_paused
+    await pull_store.set_pull_native_demand(WS, INSTANCE, interval_seconds=10, actor="connector")
+    await pull_store.set_pull_paused(
+        WS,
+        INSTANCE,
+        paused=False,
+        audit=build_audit_event(
+            workspace_id=WS,
+            event_type=EVENT_PULL_LOOP_RESUMED,
+            actor="operator",
+            subject={"instance_id": INSTANCE},
+            payload={},
+        ),
+    )
+    with pytest.raises(PullTickBlocked, match="invocation_unconfirmed"):
+        await pull_store.acquire_pull_tick(WS, INSTANCE, "new-worker", ttl_seconds=30)
 
 
 async def test_confirmed_late_cleanup_releases_only_the_expired_attempt(

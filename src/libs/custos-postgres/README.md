@@ -27,6 +27,8 @@ executor identity. Claims persist it atomically before launching a hook; lease
 expiry alone cannot clear it. Confirmed completion or audited, identity-checked
 operator recovery clears it. Existing cursor holders, including expired ones,
 receive conservative legacy fences with unknown executor/container locators.
+Cursor holders lacking controls receive paused, fenced controls even when the
+instance store is separate or they were created after revision 10.
 Ordinary pause/resume and reconciliation preserve these fences.
 
 Known legacy instances are migrated paused; absent policy also fails closed.

@@ -558,7 +558,8 @@ async def test_remaining_lease_budget_reaches_plugin_runner(
     assert 0 < plugin.calls[0]["timeout_seconds"] <= 50
 
 
-async def test_cancellation_retains_cursor_until_invocation_stops() -> None:
+@pytest.mark.parametrize("cleanup_failure", [False, True])
+async def test_cancellation_retains_cursor_until_invocation_stops(cleanup_failure: bool) -> None:
     """Ownership cannot be released while the runner is still completing cancellation."""
     clock = PullClock()
     providers, metadata, _, _ = memory_runtime(clock)
@@ -588,9 +589,13 @@ async def test_cancellation_retains_cursor_until_invocation_stops() -> None:
             try:
                 await asyncio.Event().wait()
                 raise AssertionError("unexpected invocation completion")
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as exc:
                 cleaning.set()
                 await allow_cleanup.wait()
+                if cleanup_failure:
+                    failure = PluginCleanupFailed("unit-owned-container")
+                    failure.cancellation_requested = True
+                    raise failure from exc
                 stopped.set()
                 raise
 
@@ -611,14 +616,84 @@ async def test_cancellation_retains_cursor_until_invocation_stops() -> None:
         with pytest.raises(asyncio.CancelledError):
             await task
         cursor = await metadata.read_cursor(WS, INSTANCE)
-        assert stopped.is_set() and cursor is not None and cursor.lease_holder is None
+        assert stopped.is_set() is not cleanup_failure
+        assert cursor is not None and (cursor.lease_holder is not None) is cleanup_failure
         control = await metadata.get_pull_control(WorkspaceId(WS), ConnectorInstanceId(INSTANCE))
-        assert control is not None and control.invocation_id is None
+        assert control is not None and (control.invocation_id is not None) is cleanup_failure
     finally:
         allow_cleanup.set()
         if not task.done():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_expired_tick_with_failed_cleanup_does_not_cancel_other_instances(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A consumed timeout cancellation cannot escape as scheduler shutdown."""
+    clock = PullClock()
+    providers, metadata, plugin, _ = memory_runtime(clock)
+    await seed_instance(providers)
+    await seed_instance(providers, identifier="healthy")
+    for identifier in (INSTANCE, "healthy"):
+        await metadata.set_pull_native_demand(
+            WorkspaceId(WS), ConnectorInstanceId(identifier), interval_seconds=10, actor="test"
+        )
+    actual_timeout = asyncio.timeout
+    deadlines: dict[asyncio.Task[Any], asyncio.Timeout] = {}
+    run = plugin.run
+
+    def capture_timeout(delay: float | None) -> asyncio.Timeout:
+        """Retain the real tick deadline so the hook can expire it without sleeping."""
+        deadline = actual_timeout(delay)
+        task = asyncio.current_task()
+        if task is not None and delay is not None and delay > 5:
+            deadlines[task] = deadline
+        return deadline
+
+    async def fail_after_timeout(
+        *,
+        image_ref: str,
+        hook: str,
+        payload: Mapping[str, Any],
+        timeout_seconds: float,
+        invocation_id: str | None = None,
+    ) -> HookRunResult:
+        """Model failed owned cleanup while a real timeout cancellation is pending."""
+        control = await metadata.get_pull_control(WorkspaceId(WS), ConnectorInstanceId(INSTANCE))
+        if control is not None and invocation_id == control.invocation_id:
+            task = asyncio.current_task()
+            assert task is not None
+            deadlines[task].reschedule(asyncio.get_running_loop().time())
+            try:
+                await asyncio.Future[None]()
+            except asyncio.CancelledError as exc:
+                assert task.cancelling() > 0
+                failure = PluginCleanupFailed("unit-owned-container")
+                failure.cancellation_requested = True
+                raise failure from exc
+        return await run(
+            image_ref=image_ref,
+            hook=hook,
+            payload=payload,
+            timeout_seconds=timeout_seconds,
+            invocation_id=invocation_id,
+        )
+
+    monkeypatch.setattr(asyncio, "timeout", capture_timeout)
+    monkeypatch.setattr(plugin, "run", fail_after_timeout)
+    scheduler, reconciler = providers.pull_loop_scheduler, providers.pull_demand_reconciler
+    assert scheduler is not None and reconciler is not None
+    await reconciler.reconcile(WS)
+    result = await scheduler.tick_once()
+    assert {outcome.instance_id: outcome.status for outcome in result.outcomes} == {
+        INSTANCE: "failed",
+        "healthy": "ticked",
+    }
+    control = await metadata.get_pull_control(WorkspaceId(WS), ConnectorInstanceId(INSTANCE))
+    assert control is not None and control.invocation_id is not None
+    clock.advance(10)
+    assert (await scheduler.tick_once()).outcomes[0].status == "ticked"
 
 
 async def test_explicit_recovery_is_scoped_confirmed_and_generation_checked() -> None:

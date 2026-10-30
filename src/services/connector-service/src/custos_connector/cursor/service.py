@@ -520,7 +520,9 @@ class CursorService:
                     await self._block_uncertain_invocation(ws, lease, exc)
                 else:
                     _LOGGER.error("Plugin cleanup unconfirmed; cursor lease retained")
-                if exc.cancellation_requested:
+                # The enclosing timeout may already have consumed its cancellation.
+                task = asyncio.current_task()
+                if exc.cancellation_requested and task is not None and task.cancelling() > 0:
                     raise asyncio.CancelledError() from exc
                 raise
             except BaseException:
