@@ -61,6 +61,8 @@ Mode-specific and shared dual-mode resume selections bind atomically within
 one event budget. A workspace-scoped keyset query discovers unfinished
 selections even before producer receipts exist. Receipt cleanup and source
 acceptance share a workspace lock, preserving unfinished accepted requests.
+Pending-selection pages fetch only keys and UTF-8 byte lengths first, then load
+at most 20 MiB of payloads. Selection count alone is not a memory bound.
 
 Gateway idempotency operations classify connection, pool and driver failures as
 `BackendUnavailable`; recovery routes return the documented 503 without forwarding.

@@ -14,6 +14,7 @@ from custos_spl.pagination import Cursor, Page
 
 MAX_SOURCE_TARGETS = 1000
 MAX_SOURCE_SELECTION_BYTES = 8 * 1024 * 1024
+MAX_SOURCE_PAGE_BYTES = 20 * 1024 * 1024
 
 
 class SourceSelectionLimitError(ValueError):
@@ -39,6 +40,8 @@ class SourceDeliverySelection:
             raise ValueError("source request identity must be SHA-256")
         if self.requests is None:
             return
+        if not isinstance(self.requests, tuple):
+            raise ValueError("source requests must be an immutable tuple")
         if len(self.requests) > MAX_SOURCE_TARGETS:
             raise SourceSelectionLimitError("source selection exceeds target limit")
         if sum(len(raw.encode("utf-8")) for raw in self.requests) > MAX_SOURCE_SELECTION_BYTES:
@@ -91,7 +94,7 @@ class SourceDeliveryStoreProvider(Protocol):
     async def query_pending_source_deliveries(
         self, workspace_id: WorkspaceId, *, cursor: Cursor | None = None, limit: int | None = None
     ) -> Page[SourceDeliverySelection]:
-        """Page unfinished selections, including expired plans and targets not yet started."""
+        """Page unfinished selections within count and 20-MiB encoded-payload limits."""
         ...
 
     async def purge_source_delivery_selections(

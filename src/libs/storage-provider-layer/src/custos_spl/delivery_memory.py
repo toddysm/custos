@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 
-from custos_spl.errors import ImmutableViolation, LeaseBusy
+from custos_spl.errors import BackendUnavailable, ImmutableViolation, LeaseBusy
 from custos_spl.ids import WorkspaceId
 from custos_spl.interfaces.dead_letters import (
     DeadLetterData,
@@ -31,7 +31,11 @@ from custos_spl.interfaces.delivery import (
     validate_failure_capture,
 )
 from custos_spl.interfaces.metadata_store import AuditEvent, Run
-from custos_spl.interfaces.source_delivery import SourceDeliverySelection, validate_source_batch
+from custos_spl.interfaces.source_delivery import (
+    MAX_SOURCE_PAGE_BYTES,
+    SourceDeliverySelection,
+    validate_source_batch,
+)
 from custos_spl.pagination import (
     Cursor,
     Page,
@@ -114,15 +118,19 @@ class MemoryDeliveryState:
         if after is not None:
             validate_dispatch_identifier(after)
         size = query_page_limit(limit)
-        items = [
-            item
-            for (workspace, key), item in sorted(self._source_deliveries.items())
-            if workspace == workspace_id and key > (after or "") and self._source_pending(item)
-        ][: size + 1]
-        return Page(
-            items[:size],
-            encode_query_cursor(scope, items[size - 1].key) if len(items) > size else None,
-        )
+        items: list[SourceDeliverySelection] = []
+        used = 0
+        for (workspace, key), item in sorted(self._source_deliveries.items()):
+            if workspace != workspace_id or key <= (after or "") or not self._source_pending(item):
+                continue
+            encoded = len(json.dumps(item.requests, ensure_ascii=False).encode("utf-8"))
+            if encoded > MAX_SOURCE_PAGE_BYTES:
+                raise BackendUnavailable("source selection exceeds encoded page budget")
+            if len(items) == size or used + encoded > MAX_SOURCE_PAGE_BYTES:
+                return Page(items, encode_query_cursor(scope, items[-1].key))
+            items.append(item)
+            used += encoded
+        return Page(items, None)
 
     async def purge_source_delivery_selections(
         self, workspace_id: WorkspaceId, *, limit: int = 100

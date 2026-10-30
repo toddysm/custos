@@ -23,6 +23,7 @@ from custos_spl.interfaces.dead_letters import (
     DeadLetterStoreProvider,
     DispatchAttempt,
     json_value,
+    validate_dispatch_identifier,
 )
 from custos_spl.interfaces.delivery import (
     DeliveryStateProvider,
@@ -38,7 +39,13 @@ from custos_spl.interfaces.source_delivery import (
     SourceDeliveryStoreProvider,
     SourceSelectionLimitError,
 )
-from custos_spl.pagination import Cursor
+from custos_spl.pagination import (
+    Cursor,
+    Page,
+    decode_query_cursor,
+    encode_query_cursor,
+    query_page_limit,
+)
 
 from custos_trigger.clients.workflow import (
     RaiseExternalEventRequest,
@@ -73,6 +80,9 @@ from custos_trigger.source_config import SourceConfigurationError
 logger = logging.getLogger(__name__)
 MAX_DISPATCH_SECONDS = 300
 FINALIZATION_MARGIN_SECONDS = 30
+SOURCE_RECONCILE_TARGET_LIMIT = 32
+SOURCE_RECONCILE_PROBE_SECONDS = 5
+SOURCE_RECONCILE_QUERY_SECONDS = 15
 
 
 def build_start_target(subscription: Subscription) -> dict[str, Any]:
@@ -124,12 +134,33 @@ class ReliableStorage(
 
 @dataclass(frozen=True)
 class SourceReconciliationPage:
-    """Bounded reconciliation evidence; pending targets are explicitly not acknowledged."""
+    """Partial scan progress; advancing continuation never acknowledges pending targets."""
 
     selections: int
     settled_targets: int
     pending_targets: int
     next_cursor: Cursor | None
+    deadline_exhausted: bool = False
+
+
+def _source_progress_cursor(workspace: str, key: str, index: int | None = None) -> Cursor:
+    """Encode an opaque workspace-bound position within, or after, an immutable selection."""
+    return encode_query_cursor(("source-reconcile", workspace), json.dumps([key, index]))
+
+
+def _source_progress(workspace: str, cursor: Cursor | None) -> tuple[str, int | None] | None:
+    """Reject malformed or cross-workspace continuation before any dispatch."""
+    raw = decode_query_cursor(cursor, ("source-reconcile", workspace))
+    if raw is None:
+        return None
+    value = json.loads(raw)
+    if not isinstance(value, list) or len(value) != 2:
+        raise ValueError("invalid source reconciliation cursor")
+    key, index = value
+    validate_dispatch_identifier(key)
+    if index is not None and (type(index) is not int or not 0 <= index <= MAX_SOURCE_TARGETS):
+        raise ValueError("invalid source reconciliation target position")
+    return key, index
 
 
 def _source_fingerprint(event: NormalizedEvent, *, shared: bool = False) -> str:
@@ -301,26 +332,92 @@ class ReliableDispatcher:
     async def reconcile_pending(
         self, workspace: str, *, cursor: Cursor | None = None, limit: int = 50
     ) -> SourceReconciliationPage:
-        """Recover one bounded page without broker retry; report unfinished targets explicitly."""
-        settled, pending = 0, 0
+        """Probe at most 32 targets with resumable progress and bounded per-target time."""
+        query_page_limit(limit)
+        validate_dispatch_identifier(workspace)
+        try:
+            position = _source_progress(workspace, cursor)
+        except ValueError:
+            logger.warning("Invalid source reconciliation cursor")
+            raise
+        settled, pending, examined, probes = 0, 0, 0, 0
+        progress: Cursor | None = cursor
+        in_flight = False
         try:
             async with asyncio.timeout(MAX_DISPATCH_SECONDS):
-                page = await self.store.query_pending_source_deliveries(
-                    WorkspaceId(workspace), cursor=cursor, limit=limit
-                )
+                following: Cursor | None
+                async with asyncio.timeout(SOURCE_RECONCILE_QUERY_SECONDS):
+                    if position is not None and position[1] is not None:
+                        current = await self.store.get_source_delivery(
+                            WorkspaceId(workspace), position[0]
+                        )
+                        if current is None:
+                            raise ImmutableViolation("source selection no longer exists")
+                        page = Page([current], None)
+                        following = _source_progress_cursor(workspace, position[0])
+                    else:
+                        page = await self.store.query_pending_source_deliveries(
+                            WorkspaceId(workspace),
+                            cursor=encode_query_cursor(
+                                ("pending-source-delivery", workspace),
+                                position[0],
+                            )
+                            if position
+                            else None,
+                            limit=limit,
+                        )
+                        after = decode_query_cursor(
+                            page.next_cursor, ("pending-source-delivery", workspace)
+                        )
+                        following = _source_progress_cursor(workspace, after) if after else None
                 for selection in page.items:
-                    for raw in selection.requests or ():
+                    requests = selection.requests or ()
+                    start = (
+                        position[1] or 0
+                        if position is not None and position[0] == selection.key
+                        else 0
+                    )
+                    if selection.requests is not None and start > len(requests):
+                        raise ValueError("source reconciliation cursor exceeds selection")
+                    examined += 1
+                    for index in range(start, len(requests)):
+                        if probes == SOURCE_RECONCILE_TARGET_LIMIT:
+                            return SourceReconciliationPage(
+                                examined,
+                                settled,
+                                pending,
+                                _source_progress_cursor(workspace, selection.key, index),
+                            )
+                        progress = _source_progress_cursor(workspace, selection.key, index + 1)
+                        in_flight = True
                         try:
-                            await self._dispatch_snapshot(workspace, raw)
+                            async with asyncio.timeout(SOURCE_RECONCILE_PROBE_SECONDS):
+                                await self._dispatch_snapshot(workspace, requests[index])
                         except TriggerError as exc:
                             if exc.kind != TriggerErrorKind.DISPATCH_UNAVAILABLE:
                                 raise
                             logger.warning("Source target remains pending during reconciliation")
                             pending += 1
+                        except (SPLError, TimeoutError) as exc:
+                            logger.warning("Source probe remains pending: %s", type(exc).__name__)
+                            pending += 1
                         else:
                             settled += 1
-                return SourceReconciliationPage(len(page.items), settled, pending, page.next_cursor)
-        except (SPLError, TimeoutError) as exc:
+                        in_flight = False
+                        probes += 1
+                    progress = _source_progress_cursor(workspace, selection.key)
+                return SourceReconciliationPage(examined, settled, pending, following)
+        except TimeoutError as exc:
+            if probes or in_flight:
+                logger.warning("Source reconciliation deadline reached; progress is resumable")
+                return SourceReconciliationPage(
+                    examined, settled, pending + int(in_flight), progress, True
+                )
+            logger.error("Source reconciliation query did not finish before its deadline")
+            raise TriggerError(
+                TriggerErrorKind.DISPATCH_UNAVAILABLE, "source reconciliation did not complete"
+            ) from exc
+        except SPLError as exc:
             logger.error("Source reconciliation unavailable: %s", type(exc).__name__)
             raise TriggerError(
                 TriggerErrorKind.DISPATCH_UNAVAILABLE, "source reconciliation did not complete"

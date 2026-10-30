@@ -291,12 +291,20 @@ conflict.
 
 [`SourceDeliveryStoreProvider`](../../src/libs/storage-provider-layer/src/custos_spl/interfaces/source_delivery.py)
 provides workspace-bound pending-selection pages, including accepted targets
-whose producer receipt does not yet exist.
+whose producer receipt does not yet exist. Pages also cap encoded payload bytes
+at 20 MiB: PostgreSQL first reads keys and byte lengths, then fetches only the
+payloads that fit. It does not fetch a large unreturned tail before applying
+the budget.
 [`ReliableDispatcher.reconcile_pending`](../../src/services/trigger-service/src/custos_trigger/pipeline/reliable.py)
 recovers a bounded page without a broker retry, current wait or subscription.
-It reports settled and pending target counts plus continuation; one pending
-target does not prevent other targets in the page from being attempted. Each
-call is bounded to 300 seconds. Periodic activation remains #1017.
+It probes at most 32 targets per call, with five seconds per probe and 15 seconds
+for discovery. Its opaque continuation includes the position within a selection;
+pass it back to this method, not to the storage query. Delayed targets remain
+pending but cannot force every call to revisit the same prefix. A 300-second
+overall deadline after work starts returns `deadline_exhausted=true` with
+progress; discovery failure before work starts raises an unavailable error.
+`next_cursor=None` ends a scan pass, not outstanding work: retry pending targets
+on the next pass. Periodic activation remains #1017.
 
 Callbacks return `SUCCESS` only after successful/duplicate delivery or committed
 dead-letter capture. Storage, ownership and configuration failures request `RETRY`.

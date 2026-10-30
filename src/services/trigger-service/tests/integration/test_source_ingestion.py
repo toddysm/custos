@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import replace
 from datetime import timedelta
@@ -23,8 +24,9 @@ from custos_spl.interfaces.delivery import (
     decode_delivery_request,
     delivery_fingerprint,
     delivery_identity,
+    encode_delivery_request,
 )
-from custos_spl.interfaces.source_delivery import SourceDeliverySelection
+from custos_spl.interfaces.source_delivery import MAX_SOURCE_PAGE_BYTES, SourceDeliverySelection
 from custos_spl.interfaces.trigger_queries import SubscriptionSnapshot
 from custos_spl.pagination import Cursor, Page
 
@@ -52,6 +54,7 @@ from custos_trigger.selector import SelectorEvaluator
 from custos_trigger.source_config import SourceConfig
 from custos_trigger.stores import ResumeSubscriptionStore, SubscriptionStore
 from tests._source_helpers import NOW, WS, SourceStorage, connector_event, dispatcher, resume, start
+from tests.integration.test_dead_letter_state import capture
 
 
 @pytest.fixture(params=["memory", pytest.param("postgres", marks=pytest.mark.integration)])
@@ -477,6 +480,206 @@ async def test_reconciliation_failure_is_not_an_empty_success(
         await reliable.reconcile_pending(WS)
     assert not client.start_run_calls and not client.raise_event_calls
     assert cancelled.is_set() == (failure == "timeout")
+
+
+async def test_pending_pages_bound_fetched_payload_bytes(
+    source_store: SourceStorage,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Large valid selections are paged by encoded bytes without fetching an oversized tail."""
+    data = capture(workspace=WorkspaceId(WS))
+    data = replace(
+        data,
+        event={**data.event, "data": {"padding": "x" * 180_000}},
+        target={**data.target, "inputs": {"padding": "x" * 180_000}},
+    )
+    now = await source_store.delivery_now()
+    total = 0
+    for batch in range(3):
+        requests = tuple(
+            encode_delivery_request(
+                replace(
+                    data,
+                    entry_id=f"dl-{batch}-{index}",
+                    subscription_id=f"sub-{batch}-{index}",
+                    idempotency_key=f"key-{batch}-{index}",
+                )
+            )
+            for index in range(23)
+        )
+        total += len(json.dumps(requests, ensure_ascii=False).encode("utf-8"))
+        await source_store.put_source_delivery(
+            SourceDeliverySelection(
+                WorkspaceId(WS),
+                f"bytes-{batch}",
+                "a" * 64,
+                now + timedelta(hours=1),
+                requests,
+            )
+        )
+    assert total > MAX_SOURCE_PAGE_BYTES
+    reads = None
+    if isinstance(source_store, PgMetadataAdapter):
+        reads = AsyncMock(wraps=source_store._source_delivery_row)
+        monkeypatch.setattr(source_store, "_source_delivery_row", reads)
+    cursor = None
+    seen: list[str] = []
+    for _ in range(3):
+        page = await source_store.query_pending_source_deliveries(
+            WorkspaceId(WS), cursor=cursor, limit=200
+        )
+        encoded = sum(
+            len(json.dumps(item.requests, ensure_ascii=False).encode("utf-8"))
+            for item in page.items
+        )
+        assert 0 < encoded <= MAX_SOURCE_PAGE_BYTES
+        if reads is not None:
+            assert [call.args[2] for call in reads.await_args_list] == [
+                item.key for item in page.items
+            ]
+            reads.reset_mock()
+        seen.extend(item.key for item in page.items)
+        cursor = page.next_cursor
+        if cursor is None:
+            break
+    assert cursor is None and seen == ["bytes-0", "bytes-1", "bytes-2"]
+
+
+async def test_reconciliation_progress_skips_slow_prefix_and_reaches_later_selections(
+    source_store: SourceStorage,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Target continuations prevent slow prefixes from starving later selections."""
+    from custos_trigger.pipeline import reliable as reliable_module
+
+    assert reliable_module.SOURCE_RECONCILE_TARGET_LIMIT == 32
+    assert reliable_module.SOURCE_RECONCILE_PROBE_SECONDS == 5
+    monkeypatch.setattr(
+        reliable_module,
+        "SOURCE_RECONCILE_PROBE_SECONDS",
+        1 if isinstance(source_store, PgMetadataAdapter) else 0.01,
+    )
+    cancelled = 0
+
+    class DelayedClient(FakeWorkflowServiceClient):
+        """Only the first two targets stall; later targets must still get their turn."""
+
+        async def raise_external_event(
+            self, run_id: str, step_id: str, request: RaiseExternalEventRequest
+        ) -> None:
+            """Record the send and observe actual timeout cancellation."""
+            nonlocal cancelled
+            await super().raise_external_event(run_id, step_id, request)
+            if run_id in {"run-0", "run-1"}:
+                try:
+                    await asyncio.sleep(60)
+                finally:
+                    cancelled += 1
+
+    client = DelayedClient()
+    reliable = dispatcher(source_store, client).reliable
+    assert reliable is not None
+    event = adapt_connector_event(connector_event()).event
+    for batch in range(2):
+        requests: list[str] = []
+        for index in range(batch * 33, (batch + 1) * 33):
+            data = await reliable.prepare_request(
+                event,
+                WS,
+                f"wait-{index}",
+                {
+                    "kind": "resume",
+                    "runId": f"run-{index}",
+                    "stepId": "step",
+                    "eventName": "ready",
+                    "payload": {},
+                    "deliveryProtocol": 2,
+                },
+            )
+            assert data is not None
+            requests.append(encode_delivery_request(data))
+        await source_store.put_source_delivery(
+            SourceDeliverySelection(
+                WorkspaceId(WS),
+                f"plan-{batch}",
+                "a" * 64,
+                await source_store.delivery_now() + timedelta(hours=1),
+                tuple(requests),
+            )
+        )
+    cursor = None
+    settled, pending = 0, 0
+    async with asyncio.timeout(30):
+        for _ in range(6):
+            report = await reliable.reconcile_pending(WS, cursor=cursor, limit=1)
+            assert report.settled_targets + report.pending_targets <= 32
+            settled += report.settled_targets
+            pending += report.pending_targets
+            cursor = report.next_cursor
+            if cursor is None:
+                break
+    assert cursor is None and settled == 64 and pending == 2 and cancelled == 2
+    assert len(client.raise_event_calls) == 66
+    unfinished = await source_store.query_pending_source_deliveries(WorkspaceId(WS))
+    assert [item.key for item in unfinished.items] == ["plan-0"]
+
+
+async def test_reconciliation_overall_deadline_returns_unfinished_progress(
+    source_store: SourceStorage,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deadline exhaustion reports pending work and a resumable target position."""
+    from custos_trigger.pipeline import reliable as reliable_module
+
+    class SlowClient(FakeWorkflowServiceClient):
+        """Hold an accepted request beyond the overall deadline."""
+
+        async def raise_external_event(
+            self, run_id: str, step_id: str, request: RaiseExternalEventRequest
+        ) -> None:
+            """Delay actual completion so the outer deadline must preserve progress."""
+            await super().raise_external_event(run_id, step_id, request)
+            await asyncio.sleep(60)
+
+    client = SlowClient()
+    reliable = dispatcher(source_store, client).reliable
+    assert reliable is not None
+    event = adapt_connector_event(connector_event()).event
+    data = await reliable.prepare_request(
+        event,
+        WS,
+        "wait",
+        {
+            "kind": "resume",
+            "runId": "run",
+            "stepId": "step",
+            "eventName": "ready",
+            "payload": {},
+            "deliveryProtocol": 2,
+        },
+    )
+    assert data is not None
+    await source_store.put_source_delivery(
+        SourceDeliverySelection(
+            WorkspaceId(WS),
+            "deadline",
+            "a" * 64,
+            await source_store.delivery_now() + timedelta(hours=1),
+            (encode_delivery_request(data),),
+        )
+    )
+    monkeypatch.setattr(
+        reliable_module,
+        "MAX_DISPATCH_SECONDS",
+        0.5 if isinstance(source_store, PgMetadataAdapter) else 0.05,
+    )
+    report = await reliable.reconcile_pending(WS)
+    assert report.deadline_exhausted and report.pending_targets == 1
+    assert report.settled_targets == 0 and report.next_cursor is not None
+    with pytest.raises(ValueError):
+        await reliable.reconcile_pending("other", cursor=report.next_cursor)
+    receipt = await source_store.get_delivery(WorkspaceId(WS), "trigger", data.idempotency_key)
+    assert receipt is not None and not receipt.completed
 
 
 async def test_downstream_failure_is_durably_captured_before_ack(

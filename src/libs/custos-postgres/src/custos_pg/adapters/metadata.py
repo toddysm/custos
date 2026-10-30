@@ -151,7 +151,11 @@ from custos_spl.interfaces.scheduler import (
     utc_instant,
     validate_schedule_discard,
 )
-from custos_spl.interfaces.source_delivery import SourceDeliverySelection, validate_source_batch
+from custos_spl.interfaces.source_delivery import (
+    MAX_SOURCE_PAGE_BYTES,
+    SourceDeliverySelection,
+    validate_source_batch,
+)
 from custos_spl.interfaces.trigger_queries import SubscriptionSnapshot, prepare_subscription_write
 from custos_spl.middleware.transactions import bind_handle, check_handle
 from custos_spl.pagination import (
@@ -1543,7 +1547,7 @@ class PgMetadataAdapter:
         size = query_page_limit(limit)
         async with self._dead_letter_transaction() as conn:
             rows = await conn.fetch(
-                "SELECT s.key,s.request_hash,s.expires_at,s.payload::text "
+                "SELECT s.key,octet_length(convert_to(s.payload::text,'UTF8')) AS payload_bytes "
                 "FROM custos_state.source_delivery_selection s "
                 'WHERE s.workspace_id=$1 AND s.key COLLATE "C">$2 AND s.payload IS NOT NULL '
                 "AND EXISTS(SELECT 1 FROM unnest(s.delivery_keys) AS selected(key) "
@@ -1554,20 +1558,29 @@ class PgMetadataAdapter:
                 after or "",
                 size + 1,
             )
-        items = [
-            SourceDeliverySelection(
-                workspace_id,
-                row["key"],
-                row["request_hash"],
-                row["expires_at"],
-                tuple(json.loads(row["payload"])),
-            )
-            for row in rows
-        ]
-        return Page(
-            items[:size],
-            encode_query_cursor(scope, items[size - 1].key) if len(items) > size else None,
-        )
+            items: list[SourceDeliverySelection] = []
+            used = 0
+            inspected: str | None = None
+            more = False
+            for row in rows:
+                encoded = int(row["payload_bytes"])
+                if encoded > MAX_SOURCE_PAGE_BYTES:
+                    raise BackendUnavailable("source selection exceeds encoded page budget")
+                if len(items) == size or used + encoded > MAX_SOURCE_PAGE_BYTES:
+                    more = True
+                    break
+                inspected = row["key"]
+                selection = await self._source_delivery_row(conn, workspace_id, inspected)
+                if selection is None:
+                    raise BackendUnavailable("source selection disappeared during discovery")
+                if selection.requests is not None:
+                    items.append(selection)
+                    used += encoded
+            more = more or len(rows) == size + 1
+            if more:
+                assert inspected is not None
+                return Page(items, encode_query_cursor(scope, inspected))
+            return Page(items, None)
 
     async def purge_source_delivery_selections(
         self, workspace_id: WorkspaceId, *, limit: int = 100
