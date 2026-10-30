@@ -7,14 +7,21 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 
-from custos_spl.errors import ImmutableViolation, LeaseBusy
+from custos_spl.errors import BackendUnavailable, ImmutableViolation, LeaseBusy
 from custos_spl.ids import WorkspaceId
-from custos_spl.interfaces.dead_letters import DeadLetterData, DeadLetterEntry, new_dead_letter
+from custos_spl.interfaces.dead_letters import (
+    DeadLetterData,
+    DeadLetterEntry,
+    dead_letter_transition_audits,
+    new_dead_letter,
+    validate_dispatch_identifier,
+)
 from custos_spl.interfaces.delivery import (
     DeliveryNamespace,
     DeliveryReceipt,
     WorkflowMirror,
     WorkflowStart,
+    decode_delivery_request,
     delivery_instant,
     delivery_result,
     encode_delivery_request,
@@ -23,7 +30,12 @@ from custos_spl.interfaces.delivery import (
     validate_delivery_key,
     validate_failure_capture,
 )
-from custos_spl.interfaces.metadata_store import Run
+from custos_spl.interfaces.metadata_store import AuditEvent, Run
+from custos_spl.interfaces.source_delivery import (
+    MAX_SOURCE_PAGE_BYTES,
+    SourceDeliverySelection,
+    validate_source_batch,
+)
 from custos_spl.pagination import (
     Cursor,
     Page,
@@ -44,6 +56,105 @@ class MemoryDeliveryState:
         self._delivery_run_rows: dict[tuple[str, str], Run] = {}
         self._workflow_starts: dict[tuple[str, str], WorkflowStart] = {}
         self._delivery_dead_letters: dict[tuple[str, str], DeadLetterEntry] = {}
+        self._dead_letter_audits: list[AuditEvent] = []
+        self._source_deliveries: dict[tuple[str, str], SourceDeliverySelection] = {}
+
+    async def get_source_delivery(
+        self, workspace_id: WorkspaceId, key: str
+    ) -> SourceDeliverySelection | None:
+        """Return accepted targets, including completed payload-free identities."""
+        return self._source_deliveries.get((workspace_id, key))
+
+    async def put_source_delivery(
+        self, selection: SourceDeliverySelection
+    ) -> SourceDeliverySelection:
+        """Bind one original selection using the same atomic batch contract."""
+        return (await self.put_source_deliveries((selection,)))[0]
+
+    async def put_source_deliveries(
+        self, selections: tuple[SourceDeliverySelection, ...]
+    ) -> tuple[SourceDeliverySelection, ...]:
+        """Validate both routing arms before publishing state; retain prior accepted intent."""
+        validate_source_batch(selections)
+        accepted: list[SourceDeliverySelection] = []
+        for selection in selections:
+            current = self._source_deliveries.get((selection.workspace_id, selection.key))
+            if current is not None:
+                if current.request_hash != selection.request_hash:
+                    raise ImmutableViolation("source event identity is bound to another request")
+                accepted.append(current)
+                continue
+            if selection.requests is None:
+                raise ValueError("new source selection requires retained requests")
+            for raw in selection.requests:
+                data = decode_delivery_request(raw, self._delivery_clock())
+                row = self._delivery_rows.get(
+                    (selection.workspace_id, "trigger", data.idempotency_key)
+                )
+                if row is not None and not row.completed and row.request_json is None:
+                    raise ImmutableViolation("pending delivery lost its original request")
+            accepted.append(selection)
+        result = tuple(accepted)
+        validate_source_batch(result)
+        self._source_deliveries.update({(item.workspace_id, item.key): item for item in result})
+        return result
+
+    def _source_pending(self, selection: SourceDeliverySelection) -> bool:
+        """A missing producer receipt is unfinished work, not an implicitly completed target."""
+        for raw in selection.requests or ():
+            key = decode_delivery_request(raw, self._delivery_clock()).idempotency_key
+            receipt = self._delivery_rows.get((selection.workspace_id, "trigger", key))
+            if receipt is None or not receipt.completed:
+                return True
+        return False
+
+    async def query_pending_source_deliveries(
+        self, workspace_id: WorkspaceId, *, cursor: Cursor | None = None, limit: int | None = None
+    ) -> Page[SourceDeliverySelection]:
+        """Discover bounded accepted work without needing its event ID, subscriptions or waits."""
+        validate_dispatch_identifier(workspace_id)
+        scope = ("pending-source-delivery", workspace_id)
+        after = decode_query_cursor(cursor, scope)
+        if after is not None:
+            validate_dispatch_identifier(after)
+        size = query_page_limit(limit)
+        items: list[SourceDeliverySelection] = []
+        used = 0
+        for (workspace, key), item in sorted(self._source_deliveries.items()):
+            if workspace != workspace_id or key <= (after or "") or not self._source_pending(item):
+                continue
+            encoded = len(json.dumps(item.requests, ensure_ascii=False).encode("utf-8"))
+            if encoded > MAX_SOURCE_PAGE_BYTES:
+                raise BackendUnavailable("source selection exceeds encoded page budget")
+            if len(items) == size or used + encoded > MAX_SOURCE_PAGE_BYTES:
+                return Page(items, encode_query_cursor(scope, items[-1].key))
+            items.append(item)
+            used += encoded
+        return Page(items, None)
+
+    async def purge_source_delivery_selections(
+        self, workspace_id: WorkspaceId, *, limit: int = 100
+    ) -> int:
+        """Remove expired snapshots only after every immutable producer receipt is completed."""
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("source cleanup limit must be 1..100")
+        erased = 0
+        now = self._delivery_clock()
+        for key, selection in sorted(self._source_deliveries.items()):
+            if key[0] != workspace_id or selection.requests is None or selection.expires_at > now:
+                continue
+            if self._source_pending(selection):
+                continue
+            self._source_deliveries[key] = replace(selection, requests=None)
+            erased += 1
+            if erased == limit:
+                break
+        return erased
+
+    @property
+    def dead_letter_audits(self) -> tuple[AuditEvent, ...]:
+        """Expose development-backend lifecycle evidence without mutable list ownership."""
+        return tuple(self._dead_letter_audits)
 
     async def capture_failed_delivery(
         self, claim: DeliveryReceipt, data: DeadLetterData
@@ -64,6 +175,8 @@ class MemoryDeliveryState:
             raise ImmutableViolation("failure capture identity is already bound")
         entry = existing if existing is not None else new_dead_letter(data, now)
         result = delivery_result(json.dumps({"deadLetterId": data.entry_id}))
+        audits = dead_letter_transition_audits(existing, entry, now)
+        self._dead_letter_audits.extend(audits)
         self._delivery_dead_letters[entry_key] = entry
         self._delivery_rows[key] = replace(
             current, token=None, lease_until=None, result_json=result, request_json=None
@@ -187,15 +300,22 @@ class MemoryDeliveryState:
         *,
         limit: int | None = None,
     ) -> int:
-        """Erase only expired snapshots without a live producer, leaving proof metadata intact."""
+        """Erase expired unowned snapshots unless a pending source selection still needs them."""
         validate_delivery_key(workspace_id, "trigger", "cleanup")
         now, size = delivery_instant(self._delivery_clock()), query_page_limit(limit)
+        protected = {
+            decode_delivery_request(raw, now).idempotency_key
+            for selection in self._source_deliveries.values()
+            if selection.workspace_id == workspace_id
+            for raw in selection.requests or ()
+        }
         keys = sorted(
             key
             for key, row in self._delivery_rows.items()
             if row.workspace_id == workspace_id
             and row.namespace == "trigger"
             and row.request_json is not None
+            and (row.completed or row.key not in protected)
             and row.retain_until <= now
             and (row.lease_until is None or row.lease_until <= now)
         )[:size]

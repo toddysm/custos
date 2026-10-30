@@ -54,6 +54,7 @@ __all__ = [
     "RaiseExternalEventRequest",
     "RunRef",
     "StartRunRequest",
+    "WorkflowClientAcknowledgementPending",
     "WorkflowClientDecodeError",
     "WorkflowClientError",
     "WorkflowClientReplayUnsafeError",
@@ -174,6 +175,14 @@ class WorkflowClientTransportError(WorkflowClientError):
         super().__init__(message, retryable=True)
 
 
+class WorkflowClientAcknowledgementPending(WorkflowClientError):
+    """Submission is unresolved, not a failed replay attempt or proof of consumer delivery."""
+
+    def __init__(self) -> None:
+        """Keep the original delivery identity eligible for acknowledgement reconciliation."""
+        super().__init__("resume submission is awaiting durable acknowledgement", retryable=True)
+
+
 class WorkflowClientStatusError(WorkflowClientError):
     """The Workflow Service returned a non-2xx response.
 
@@ -278,7 +287,7 @@ class WorkflowServiceClient(Protocol):
     async def raise_external_event(
         self, run_id: str, step_id: str, request: RaiseExternalEventRequest
     ) -> None:
-        """Deliver an external event to a waiting step (WF 202, empty body)."""
+        """Return after version-1 submission or proven version-2 consumer acknowledgement."""
         ...
 
 
@@ -316,15 +325,20 @@ class DaprWorkflowServiceClient:
     async def raise_external_event(
         self, run_id: str, step_id: str, request: RaiseExternalEventRequest
     ) -> None:
+        """Require version-2 consumer acknowledgement, preserving legacy submission semantics."""
         if request.delivery_protocol == 2:
             routed = RoutedResumeRequest.model_validate(
                 {**request.model_dump(), "run_id": run_id, "step_id": step_id},
             )
-            await self._post(
+            response = await self._post(
                 build_invoke_url(self.endpoint, RESUME_RUN_METHOD),
                 routed,
                 what="RaiseExternalEvent",
             )
+            if response.status_code == 202:
+                raise WorkflowClientAcknowledgementPending()
+            if response.status_code != 204:
+                raise WorkflowClientDecodeError("version-2 resume requires a 202 or 204 response")
             return
         try:
             url = build_invoke_url(self.endpoint, raise_event_method(run_id, step_id))

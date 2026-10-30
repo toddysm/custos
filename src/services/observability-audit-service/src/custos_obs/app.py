@@ -21,6 +21,8 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
+from custos_spl.interfaces.metadata_store import AuditOutboxReadiness
+
 from custos_obs._version import __version__
 from custos_obs.health import router as health_router
 
@@ -108,6 +110,9 @@ def create_app(
                 providers if providers is not None else load_providers(effective_settings)
             )
             app.state.providers = local_providers
+            metadata = local_providers.metadata_store
+            if isinstance(metadata, AuditOutboxReadiness):
+                await metadata.check_audit_outbox_ready()
             # Background workers (drainer, retention, alerting) attach here in later phases.
             app.state.ready = True
             logger.info("observability-audit-service ready")

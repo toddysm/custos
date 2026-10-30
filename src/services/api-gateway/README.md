@@ -68,7 +68,20 @@ each carrying its owning Dapr `app_id`, `requiredPermission`,
 `build_registry_router()` mounts each one with its `require_permission`
 dependency, so every declared permission participates in the startup registry
 cross-check, plus a thin pass-through endpoint that forwards to the owning
-component via the downstream router and shapes the reply), the anonymous Webhook
+component via the downstream router and shapes the reply).
+The M2 dead-letter routes under `/v1/workspaces/{workspaceId}/triggers/deadletter`
+require `trigger:admin`, retain rate-limit controls, and
+precede dynamic subscription routes. Recovery writes have a 70-second read
+timeout for Trigger's bounded 60-second command; connection/write/pool timeouts
+and unrelated routes are unchanged. Their idempotency keys bind the concrete
+path/body but do not cache outcomes: identical retries reconcile the authoritative
+per-entry claim after contention or outage. Divergent key reuse still conflicts.
+Other writes retain response-snapshot idempotency. See the
+[recovery contract](../../../docs/developers/trigger-api.md#dead-letter-administration).
+Recovery writes fail closed with 503 when the Gateway metadata binding store is
+absent or unavailable; they never fall back to unbound forwarding.
+
+The anonymous Webhook
 Pass-through ([webhook.py](src/custos_gateway/routes/webhook.py) mounts
 `POST /v1/webhooks/workspaces/{workspaceId}/connectors/{connectorInstanceId}/events`
 without platform authentication or a minted call context).

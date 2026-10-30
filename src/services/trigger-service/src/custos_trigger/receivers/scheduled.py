@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Protocol, runtime_checkable
 
 from custos_spl.errors import ImmutableViolation, LeaseExpired, QueryUnsupported
 from custos_spl.ids import WorkspaceId
+from custos_spl.interfaces.dead_letters import DeadLetterData
 from custos_spl.interfaces.scheduler import (
     PendingScheduleFire,
     SchedulerLease,
@@ -33,6 +34,7 @@ from custos_trigger.pipeline.classify import classify
 from custos_trigger.pipeline.dispatch import AuditSink, Dispatcher, DispatchOutcome
 from custos_trigger.pipeline.match_resume import resume_key_from_event
 from custos_trigger.pipeline.match_start import StartMatch, StartMatcher
+from custos_trigger.pipeline.reliable import build_start_target
 from custos_trigger.scheduler import SchedulerLeadership
 from custos_trigger.selector import SelectorEvaluator
 from custos_trigger.source_config import (
@@ -176,6 +178,59 @@ async def process_scheduled_event(
     ):
         logger.error("Unproven scheduled occurrence: %s", event.event_id)
         raise ScheduledOccurrenceError("scheduled event does not match canonical occurrence proof")
+    event = scheduled_event(fire)
+    reliable = dispatcher.reliable
+
+    def prepare_inputs(subscription: Subscription) -> dict[str, Any]:
+        """Resolve a new occurrence only after previously accepted intent has been recovered."""
+        return resolve_input_mapping(
+            subscription.input_mapping,
+            event,
+            evaluator=evaluator,
+            subscription_id=subscription.subscription_id,
+        )
+
+    if reliable is not None:
+
+        async def select() -> AsyncIterator[DeadLetterData]:
+            """Persist the original scheduled target before attempting its downstream effect."""
+            subscription = await _match_scheduled(
+                event, workspace, fire, subscription_store, evaluator, audit
+            )
+            if subscription is not None:
+                request = await reliable.prepare_request(
+                    event,
+                    workspace,
+                    identifier,
+                    build_start_target(subscription),
+                    prepare_inputs=lambda: prepare_inputs(subscription),
+                )
+                if request is not None:
+                    yield request
+
+        outcomes = await reliable.dispatch_event(event, workspace, select)
+        return outcomes[0][1] if outcomes else None
+    subscription = await _match_scheduled(
+        event, workspace, fire, subscription_store, evaluator, audit
+    )
+    if subscription is None:
+        return None
+    return await dispatcher.dispatch_start(
+        event, StartMatch(subscription), prepare_inputs=lambda: prepare_inputs(subscription)
+    )
+
+
+async def _match_scheduled(
+    event: NormalizedEvent,
+    workspace: str,
+    fire: PendingScheduleFire,
+    subscription_store: SubscriptionStore,
+    evaluator: SelectorEvaluator,
+    audit: AuditSink,
+) -> Subscription | None:
+    """Validate current intent only when there is no persisted source selection to recover."""
+    identifier = event.source.subscription_id
+    assert identifier is not None
     if fire.discarded_at is not None:
         await audit.emit(
             "trigger.schedule.suppressed",
@@ -187,9 +242,8 @@ async def process_scheduled_event(
             },
         )
         return None
-    event = scheduled_event(fire)
     subscription = await subscription_store.get(workspace, identifier)
-    reason = _suppression(subscription, revision)
+    reason = _suppression(subscription, fire.subscription_revision)
     if reason is not None:
         await audit.emit(
             "trigger.schedule.suppressed",
@@ -210,18 +264,7 @@ async def process_scheduled_event(
         )
         return None
 
-    def prepare_inputs() -> dict[str, Any]:
-        """Resolve new occurrence inputs only after durable receipt recovery."""
-        return resolve_input_mapping(
-            subscription.input_mapping,
-            event,
-            evaluator=evaluator,
-            subscription_id=subscription.subscription_id,
-        )
-
-    return await dispatcher.dispatch_start(
-        event, StartMatch(subscription), prepare_inputs=prepare_inputs
-    )
+    return subscription
 
 
 @dataclass(frozen=True)

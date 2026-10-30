@@ -43,6 +43,14 @@ REV10 adds optional durable pull controls. Known legacy instances start paused;
 missing legacy controls also fail closed. General metadata consumers remain at rev4.
 
 REV11 persists invocation uncertainty independently of lease expiry.
+
+REV12 persists stable bulk-replay selection/progress and per-entry command
+association. The optional dead-letter capability requires it; the general
+metadata minimum remains revision 4. A shared advisory fence in the outbox ID
+allocator permits commit-safe draining without granting readers mutation privileges.
+
+REV13 retains single-entry recovery key/generation bindings and immutable
+source-event target selections independently of mutable subscriptions.
 """
 
 from __future__ import annotations
@@ -626,7 +634,92 @@ METADATA_REV11 = Revision(
 )
 
 
+AUDIT_OUTBOX_LOCK_KEY = 0x4355535441554431
+
+
+METADATA_REV12 = Revision(
+    number=12,
+    statements=(
+        """
+        CREATE TABLE IF NOT EXISTS custos_state.bulk_replay_command (
+            workspace_id TEXT NOT NULL,
+            command_id TEXT NOT NULL,
+            request_hash TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            expires_at TIMESTAMPTZ NOT NULL,
+            lease_token TEXT,
+            lease_until TIMESTAMPTZ,
+            payload JSONB,
+            PRIMARY KEY (workspace_id, command_id)
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS bulk_replay_command_expiration
+            ON custos_state.bulk_replay_command (workspace_id, expires_at, command_id)
+            WHERE payload IS NOT NULL
+        """,
+        """
+        ALTER TABLE custos_state.dead_letter ADD COLUMN IF NOT EXISTS bulk_command_id TEXT
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS dead_letter_bulk_claim
+            ON custos_state.dead_letter (workspace_id, bulk_command_id, claim_expires_at)
+            WHERE bulk_command_id IS NOT NULL
+        """,
+        """
+        ALTER SEQUENCE custos_state.audit_outbox_id_seq CACHE 1
+        """,
+        f"""
+        CREATE OR REPLACE FUNCTION custos_state.next_audit_outbox_id()
+        RETURNS BIGINT LANGUAGE plpgsql SET search_path = pg_catalog AS $outbox$
+        BEGIN
+            PERFORM pg_advisory_xact_lock_shared({AUDIT_OUTBOX_LOCK_KEY}::bigint);
+            RETURN nextval('custos_state.audit_outbox_id_seq'::regclass);
+        END;
+        $outbox$
+        """,
+        """
+        ALTER TABLE custos_state.audit_outbox ALTER COLUMN id
+            SET DEFAULT custos_state.next_audit_outbox_id()
+        """,
+    ),
+)
+
+
+METADATA_REV13 = Revision(
+    number=13,
+    statements=(
+        """
+        CREATE TABLE IF NOT EXISTS custos_state.dead_letter_command (
+            workspace_id TEXT NOT NULL,
+            command_id TEXT NOT NULL,
+            request_hash TEXT NOT NULL,
+            entry_identity TEXT NOT NULL,
+            PRIMARY KEY (workspace_id, command_id)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS custos_state.source_delivery_selection (
+            workspace_id TEXT NOT NULL,
+            key TEXT NOT NULL,
+            request_hash TEXT NOT NULL,
+            expires_at TIMESTAMPTZ NOT NULL,
+            delivery_keys TEXT[] NOT NULL,
+            payload JSON,
+            PRIMARY KEY (workspace_id, key)
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS source_delivery_selection_expiration
+            ON custos_state.source_delivery_selection (workspace_id, expires_at, key)
+            WHERE payload IS NOT NULL
+        """,
+    ),
+)
+
+
 __all__ = [
+    "AUDIT_OUTBOX_LOCK_KEY",
     "METADATA_REV1",
     "METADATA_REV2",
     "METADATA_REV3",
@@ -638,4 +731,6 @@ __all__ = [
     "METADATA_REV9",
     "METADATA_REV10",
     "METADATA_REV11",
+    "METADATA_REV12",
+    "METADATA_REV13",
 ]

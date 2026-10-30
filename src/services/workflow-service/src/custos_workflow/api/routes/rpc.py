@@ -296,6 +296,7 @@ async def cancel_run(
 @router.post(
     "/internal/runs/{run_id:path}/steps/{step_id}:raiseEvent",
     status_code=202,
+    responses={204: {"description": "Version-2 delivery acknowledged by the durable consumer."}},
     summary="Internal RPC: deliver an external event into a running workflow.",
 )
 async def raise_external_event(
@@ -330,7 +331,8 @@ async def raise_external_event(
     ``{ws}`` path segment). The route returns ``202 Accepted``
     with an empty body: the workflow's
     ``wait_for_external_event`` step resumes asynchronously
-    inside Dapr.
+    inside Dapr. Version-2 requests instead return 204 only when the durable
+    consumer receipt proves consumption; 202 means submission remains unacknowledged.
 
     Idempotency on this surface is keyed by
     ``(workspaceId, runId, stepId, eventName, idempotencyKey)``
@@ -356,7 +358,7 @@ async def raise_external_event(
             raise WorkflowRuntimeUnavailableError("version-2 Trigger delivery is not enabled")
         assert body.idempotency_key is not None and body.retain_until is not None
         with _delivery_errors():
-            await delivery.resume(
+            consumed = await delivery.resume(
                 body.workspace_id,
                 run_id,
                 step_id,
@@ -365,7 +367,7 @@ async def raise_external_event(
                 body.idempotency_key,
                 body.retain_until,
             )
-        return Response(status_code=202)
+        return Response(status_code=204 if consumed else 202)
 
     await controller.raise_external_event(
         workspace_id=body.workspace_id,
@@ -378,7 +380,11 @@ async def raise_external_event(
     return Response(status_code=202)
 
 
-@router.post("/internal/runs:raiseEvent", status_code=202)
+@router.post(
+    "/internal/runs:raiseEvent",
+    status_code=202,
+    responses={204: {"description": "Version-2 delivery acknowledged by the durable consumer."}},
+)
 async def raise_routed_resume(
     body: Annotated[RoutedResumeRequest, Body(...)],
     controller: Annotated[RunController, Depends(get_run_controller)],

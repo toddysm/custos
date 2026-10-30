@@ -67,6 +67,11 @@ follow-ups: full Observability Client integration (audit-event sink wiring +
 log-stream delegation for `GET …/steps/{stepId}/logs`) and the cross-component
 workflow event taxonomy (TODO-001).
 
+Version-2 Trigger resumes return 202 for submission without durable consumer
+acknowledgement and 204 only when the matching consumer receipt proves delivery.
+A terminal run without that receipt remains unsafe; submission alone is not
+replay success. Legacy version-1 asynchronous 202 behavior is unchanged.
+
 ## Configuration
 
 Per [`design/components/workflow-service/design.md`](../../../design/components/workflow-service/design.md) § Configuration:

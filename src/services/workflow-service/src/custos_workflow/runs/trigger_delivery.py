@@ -251,8 +251,8 @@ class TriggerDeliveryController:
         payload: Mapping[str, Any],
         idempotency_key: str,
         retain_until: datetime,
-    ) -> None:
-        """Deliver an immutable event to a versioned wait, never a legacy name-only channel."""
+    ) -> bool:
+        """Submit to a versioned wait; return True only for durable consumer acknowledgement."""
         await self.provider.check_delivery_ready()
         ws = WorkspaceId(workspace_id)
         key, fingerprint = resume_identity(
@@ -263,13 +263,13 @@ class TriggerDeliveryController:
             await self.provider.reserve_delivery(
                 ws, "workflow-resume", key, fingerprint, retain_until
             )
-            return
+            return True
         mirrors = await self.provider.query_workflow_mirrors(
             ws, run_id=run_id, step_id=step_id, limit=2
         )
         if len(mirrors.items) != 1:
             if await self._completed_resume(ws, key, fingerprint, retain_until):
-                return
+                return True
             if await self.store.get_run(workspace_id, RunId(run_id)) is None:
                 raise RunNotFoundError(
                     "resume target does not exist in this workspace", run_id=run_id
@@ -287,7 +287,7 @@ class TriggerDeliveryController:
             or mirror.expires_at <= await self.provider.delivery_now()
         ):
             if await self._completed_resume(ws, key, fingerprint, retain_until):
-                return
+                return True
             raise RunStateConflictError(
                 "replay_unsafe: wait is expired or does not match the delivery", run_id=run_id
             )
@@ -310,7 +310,7 @@ class TriggerDeliveryController:
                 await self.provider.reserve_delivery(
                     ws, "workflow-resume", key, fingerprint, retain_until
                 )
-                return
+                return True
             raise RunStateConflictError(
                 "resume runtime is terminal without acknowledgement", run_id=run_id
             )
@@ -318,7 +318,7 @@ class TriggerDeliveryController:
             ws, "workflow-resume", key, fingerprint, retain_until, lease_seconds=30
         )
         if claim.completed:
-            return
+            return True
         run = await self.store.get_run(workspace_id, RunId(run_id))
         if run is not None and run.status in TERMINAL_STATUSES:
             await self.provider.release_delivery(claim)
@@ -346,7 +346,7 @@ class TriggerDeliveryController:
         except (OSError, TimeoutError, RpcError) as exc:
             completed = await self.provider.get_delivery(ws, "workflow-resume", key)
             if completed is not None and completed.completed:
-                return
+                return True
             await self.provider.release_delivery(claim)
             raise WorkflowRuntimeUnavailableError(
                 "resume delivery is uncertain; retry the same delivery",
@@ -354,6 +354,7 @@ class TriggerDeliveryController:
                 cause=type(exc).__name__,
             ) from exc
         await self.provider.mark_delivery_submitted(claim)
+        return await self._completed_resume(ws, key, fingerprint, retain_until)
 
     async def _completed_resume(
         self,

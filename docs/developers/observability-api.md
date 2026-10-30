@@ -469,6 +469,16 @@ unchanged block is a silent no-op.
 
 ## Configuration reference
 
+PostgreSQL audit-outbox consumers require metadata revision 12 even when Trigger's
+durable execution is disabled. Run the normal metadata migrations before
+upgrading the consumer. The general metadata minimum remains revision 4 for
+unrelated operations; outbox readiness is checked separately.
+Lifecycle integrations must `await AuditOutboxDrainer.start()` before declaring
+readiness. Its preflight raises on missing migrations, and persistent migration
+loss is not swallowed as a transient polling failure.
+The application readiness hook checks this prerequisite independently and
+closes its owned metadata pool if startup fails or the service shuts down.
+
 The service is configured exclusively through `CUSTOS_*` environment variables
 (plus the shared `ENVIRONMENT` tag). Conditional variables fail fast at startup,
 naming the offending variable.

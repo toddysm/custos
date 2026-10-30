@@ -25,6 +25,11 @@ Reads (`GET`/`HEAD`/`OPTIONS`) skip the coordinator entirely
 (:func:`is_idempotent_method`). The coordinator owns no orchestration — the
 request router (AGW-IMPL-016) calls :func:`compute_request_hash` +
 :meth:`reserve` before forwarding and :meth:`complete` afterwards.
+
+Dead-letter recovery commands use explicit reconciliation mode: keep the
+key/hash binding but delegate effect deduplication to durable downstream claims.
+They neither cache HTTP outcomes nor leave identical retries blocked behind an
+HTTP-only reservation. Ordinary writes retain the original behavior.
 """
 
 from __future__ import annotations
@@ -223,15 +228,19 @@ class IdempotencyCoordinator:
     ttl_seconds: int
     retry_after_seconds: int = DEFAULT_RETRY_AFTER_SECONDS
 
-    async def reserve(self, key: IdempotencyKey, request_hash: str) -> ReservationOutcome:
+    async def reserve(
+        self, key: IdempotencyKey, request_hash: str, *, reconcile: bool = False
+    ) -> ReservationOutcome:
         """Atomically reserve-or-read ``key`` against ``request_hash``.
 
         Returns a :class:`ProceedReservation` when the row is newly reserved or a
         :class:`ReplayReservation` when an identical request already completed.
+        Recovery commands may set ``reconcile`` to bind key reuse without caching
+        responses: their authoritative downstream claims enforce effect deduplication.
 
         Raises:
             GatewayError: ``idempotency-in-flight`` (409 + ``Retry-After``) when
-                an identical request is still in progress; ``idempotency-key-reuse``
+                an identical ordinary request is still in progress; ``idempotency-key-reuse``
                 (409) when the key is reused with a different request hash.
         """
         result = await self.store.reserve_idempotency_record(
@@ -243,6 +252,8 @@ class IdempotencyCoordinator:
             self.ttl_seconds,
         )
         if isinstance(result, IdemReserved):
+            return ProceedReservation(key=key, request_hash=request_hash)
+        if reconcile and isinstance(result, (ExistingCompleted, ExistingInFlight)):
             return ProceedReservation(key=key, request_hash=request_hash)
         if isinstance(result, ExistingCompleted):
             return ReplayReservation(response_snapshot=result.response_snapshot)

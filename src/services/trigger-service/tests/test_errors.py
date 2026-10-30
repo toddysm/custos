@@ -27,6 +27,7 @@ _EXPECTED_KINDS: dict[str, str] = {
     "SOURCE_UNAVAILABLE": "trigger.source_unavailable",
     "SUBSCRIPTION_CONFLICT": "trigger.subscription_conflict",
     "REPLAY_UNSAFE": "trigger.replay_unsafe",
+    "REPLAY_IN_PROGRESS": "trigger.replay_in_progress",
     "DISPATCH_UNAVAILABLE": "trigger.dispatch_unavailable",
 }
 

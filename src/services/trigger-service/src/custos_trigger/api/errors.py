@@ -80,6 +80,7 @@ LOCKED_API_KIND_TO_STATUS: Final[dict[str, int]] = {
     "trigger.source_unavailable": 503,
     "trigger.subscription_conflict": 409,
     "trigger.replay_unsafe": 409,
+    "trigger.replay_in_progress": 409,
     "trigger.dispatch_unavailable": 503,
     # Route-local API kinds
     API_BAD_REQUEST: 400,
@@ -92,6 +93,10 @@ LOCKED_API_KIND_TO_STATUS: Final[dict[str, int]] = {
     "trigger.webhook.too_large": 413,
     "trigger.webhook.unavailable": 503,
     "webhook-route-not-found": 404,
+    "trigger.deadletter.not_found": 404,
+    "trigger.deadletter.conflict": 409,
+    "trigger.deadletter.invalid": 422,
+    "trigger.deadletter.unavailable": 503,
 }
 
 #: Frozen view for fast membership tests.
@@ -100,6 +105,7 @@ LOCKED_API_KINDS: Final[frozenset[str]] = frozenset(LOCKED_API_KIND_TO_STATUS)
 #: Short, English-only human-readable title per kind.
 _TITLE_FOR_KIND: Final[dict[str, str]] = {
     "trigger.replay_unsafe": "Replay safety cannot be established",
+    "trigger.replay_in_progress": "Replay already in progress",
     "trigger.dispatch_unavailable": "Durable dispatch is temporarily unavailable",
     "trigger.subscription_not_found": "Subscription not found",
     "trigger.selector_invalid": "Selector failed to compile",
@@ -122,6 +128,10 @@ _TITLE_FOR_KIND: Final[dict[str, str]] = {
     "trigger.webhook.too_large": "Webhook resource limit exceeded",
     "trigger.webhook.unavailable": "Webhook handoff is unavailable",
     "webhook-route-not-found": "Webhook route not found",
+    "trigger.deadletter.not_found": "Dead-letter entry not found",
+    "trigger.deadletter.conflict": "Dead-letter operation conflicts with current state",
+    "trigger.deadletter.invalid": "Invalid dead-letter query",
+    "trigger.deadletter.unavailable": "Dead-letter administration unavailable",
 }
 
 
@@ -221,6 +231,8 @@ async def _validation_error_handler(request: Request, exc: Exception) -> JSONRes
         detail = f"{loc}: {first.get('msg', 'invalid request')}".lstrip(": ")
     else:
         detail = "invalid request"
+    if "dead-letters" in getattr(request.scope.get("route"), "tags", ()):
+        return problem_response(request, kind="trigger.deadletter.invalid", detail=detail)
     source_fields = {"sourceConfig", "source_config", "source", "workspaceId", "workspace_id"}
     source_error = bool(errors) and all(
         isinstance(error.get("ctx", {}).get("error"), SourceConfigurationError)

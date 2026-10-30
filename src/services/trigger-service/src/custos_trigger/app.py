@@ -35,6 +35,9 @@ from typing import TYPE_CHECKING
 from custos_trigger._version import __version__
 from custos_trigger.api import register_exception_handlers
 from custos_trigger.api.routes import resume_rpc_router, subscriptions_router
+from custos_trigger.api.routes.dead_letters import dead_letter_error_handler
+from custos_trigger.api.routes.dead_letters import router as dead_letters_router
+from custos_trigger.dead_letters import DeadLetterAdminError
 from custos_trigger.dependencies import WorkflowCallerVerifier
 from custos_trigger.health import router as health_router
 from custos_trigger.middleware import (
@@ -446,8 +449,10 @@ def create_app(
     # Route-level failures (domain TriggerError + request validation) surface
     # through the RFC 7807 Problem+JSON envelope.
     register_exception_handlers(app)
+    app.add_exception_handler(DeadLetterAdminError, dead_letter_error_handler)
 
     app.include_router(health_router)
+    app.include_router(dead_letters_router)
     app.include_router(subscriptions_router)
     app.include_router(resume_rpc_router)
     app.include_router(build_source_event_router(enabled=effective_sources))

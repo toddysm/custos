@@ -27,6 +27,8 @@ The codes mirror design ``§ Failure Modes`` and the audit-event taxonomy:
 * ``trigger.source_not_found`` — no connector exists in the trusted workspace.
 * ``trigger.source_unavailable`` — scoped reference validation is unavailable.
 * ``trigger.subscription_conflict`` — an atomic configuration write lost a race.
+* ``trigger.replay_in_progress`` — another worker holds a live replay claim.
+* ``trigger.replay_unsafe`` — waiting alone cannot establish safe replay of this target.
 """
 
 from __future__ import annotations
@@ -50,6 +52,7 @@ class TriggerErrorKind(StrEnum):
     SOURCE_UNAVAILABLE = "trigger.source_unavailable"
     SUBSCRIPTION_CONFLICT = "trigger.subscription_conflict"
     REPLAY_UNSAFE = "trigger.replay_unsafe"
+    REPLAY_IN_PROGRESS = "trigger.replay_in_progress"
     DISPATCH_UNAVAILABLE = "trigger.dispatch_unavailable"
 
 

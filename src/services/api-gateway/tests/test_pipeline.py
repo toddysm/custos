@@ -10,15 +10,18 @@ stage is skipped when it does not apply or its backing resource is unbound.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
 import httpx
+import pytest
 from custos_spl import (
     ExistingCompleted,
+    ExistingInFlight,
     IdempotencyRecord,
     IdemReserved,
+    KeyReuse,
     PrincipalId,
     ReserveIdempotencyResult,
     WorkspaceId,
@@ -123,6 +126,146 @@ class _FakeStore:
     ) -> IdempotencyRecord:
         self.complete_calls.append(response_snapshot)
         return _record(status="completed")
+
+
+@dataclass(slots=True)
+class _BindingStore(_FakeStore):
+    """Keep actual key/hash bindings so route-collision tests exercise reuse rejection."""
+
+    bindings: dict[tuple[str, str, str, str], IdempotencyRecord] = field(default_factory=dict)
+
+    async def reserve_idempotency_record(
+        self,
+        workspace_id: WorkspaceId,
+        principal_id: PrincipalId,
+        route: str,
+        idempotency_key: str,
+        request_hash: str,
+        ttl_seconds: int,
+    ) -> ReserveIdempotencyResult:
+        """Bind the first request, reject divergent reuse and expose identical retries."""
+        key = (workspace_id, principal_id, route, idempotency_key)
+        current = self.bindings.get(key)
+        self.reserve_calls.append((*key, request_hash, ttl_seconds))
+        if current is not None:
+            return (
+                ExistingInFlight(current)
+                if current.request_hash == request_hash
+                else KeyReuse(current)
+            )
+        record = replace(
+            _record(),
+            workspace_id=workspace_id,
+            principal_id=principal_id,
+            route=route,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+        )
+        self.bindings[key] = record
+        return IdemReserved(record)
+
+
+@pytest.mark.parametrize("action", ["replay", "discard"])
+def test_recovery_key_cannot_alias_another_entry(settings: Settings, action: str) -> None:
+    """A reused key on another concrete entry conflicts instead of returning cached success."""
+    router, calls = _recording_router(status_code=200)
+    store = _BindingStore()
+    app = create_app(
+        settings=settings,
+        auth_client=_auth_client(),
+        downstream_router=router,
+        metadata_store=store,
+    )
+    headers = {**AUTH_HEADERS, "content-type": "application/json", "idempotency-key": "same-key"}
+    with TestClient(app) as client:
+        first = client.post(f"/v1/workspaces/ws-1/triggers/deadletter/a:{action}", headers=headers)
+        second = client.post(f"/v1/workspaces/ws-1/triggers/deadletter/b:{action}", headers=headers)
+    assert first.status_code == 200 and second.status_code == 409
+    assert second.json()["code"] == "idempotency-key-reuse"
+    assert len(calls) == 1 and not store.complete_calls
+    assert store.reserve_calls[0][4] != store.reserve_calls[1][4]
+
+
+@pytest.mark.parametrize("suffix", ["/entry:replay", "/entry:discard", ":replay"])
+def test_recovery_retries_reconcile_after_conflict_and_outage(
+    settings: Settings, suffix: str
+) -> None:
+    """Transient responses never trap the operator behind a gateway snapshot or reservation."""
+    statuses = iter((409, 503, 200))
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Model a live claim, unavailable dependency, then successful durable recovery."""
+        calls.append(request)
+        return httpx.Response(next(statuses), json={"status": "replayed"})
+
+    store = _BindingStore()
+    router = DownstreamRouter(http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    app = create_app(
+        settings=settings,
+        auth_client=_auth_client(),
+        downstream_router=router,
+        metadata_store=store,
+    )
+    headers = {**AUTH_HEADERS, "content-type": "application/json", "idempotency-key": "same-key"}
+    with TestClient(app) as client:
+        assert [
+            client.post(
+                "/v1/workspaces/ws-1/triggers/deadletter" + suffix, headers=headers, content=b"{}"
+            ).status_code
+            for _ in range(3)
+        ] == [409, 503, 200]
+    assert len(calls) == 3 and not store.complete_calls
+    assert len({call[4] for call in store.reserve_calls}) == 1
+
+
+@pytest.mark.parametrize("suffix", ["/entry:replay", "/entry:discard", ":replay"])
+def test_recovery_without_key_binding_fails_before_forwarding(
+    settings: Settings, suffix: str
+) -> None:
+    """Unconfigured recovery cannot silently bypass durable request-key isolation."""
+    router, calls = _recording_router(status_code=200)
+    app = create_app(settings=settings, auth_client=_auth_client(), downstream_router=router)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/workspaces/ws-1/triggers/deadletter" + suffix,
+            json={},
+            headers={**AUTH_HEADERS, "idempotency-key": "same"},
+        )
+    assert response.status_code == 503 and not calls
+    assert response.json()["code"] == "downstream-unavailable"
+
+
+def test_recovery_binding_outage_fails_closed(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A configured but unavailable store is not permission to bypass request identity."""
+    from unittest.mock import AsyncMock
+
+    from custos_spl.errors import BackendUnavailable
+
+    store = _BindingStore()
+    monkeypatch.setattr(
+        _BindingStore,
+        "reserve_idempotency_record",
+        AsyncMock(side_effect=BackendUnavailable("private database detail")),
+    )
+    router, calls = _recording_router(status_code=200)
+    app = create_app(
+        settings=settings,
+        auth_client=_auth_client(),
+        downstream_router=router,
+        metadata_store=store,
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/workspaces/ws-1/triggers/deadletter:replay",
+            json={},
+            headers={**AUTH_HEADERS, "idempotency-key": "same"},
+        )
+    assert response.status_code == 503 and not calls
+    assert "private" not in response.text
 
 
 def test_write_pipeline_forwards_and_records_each_stage(settings: Settings) -> None:

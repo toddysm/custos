@@ -53,12 +53,13 @@ method/path pairs. They carry no user call-context envelope (see
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated, Any, Final
 
+from custos_spl.interfaces.dead_letters import DeadLetterData
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.responses import JSONResponse
@@ -80,6 +81,8 @@ from custos_trigger.pipeline import (
     resume_key_from_event,
 )
 from custos_trigger.pipeline.dispatch import Dispatcher, DispatchOutcome
+from custos_trigger.pipeline.match_resume import ResumeMatch
+from custos_trigger.pipeline.reliable import build_resume_target, build_start_target
 from custos_trigger.selector import SelectorEvaluator
 from custos_trigger.stores import ResumeSubscriptionStore, SubscriptionStore
 from custos_trigger.taxonomy import InvalidKindError
@@ -178,6 +181,47 @@ async def process_workflow_event(
         return InternalEventOutcome()
 
     classification = classify(event)
+    reliable = dispatcher.reliable
+    if reliable is not None:
+
+        async def select() -> AsyncIterator[DeadLetterData]:
+            """Freeze both routing arms before the first durable dispatch can become uncertain."""
+            if classification.to_start:
+                candidates = [
+                    sub
+                    for sub in await subscription_store.list_in_workspace(workspace)
+                    if sub.source_type is event.source.type
+                ]
+                for match in StartMatcher(evaluator).match(event, candidates):
+                    sub = match.subscription
+                    request = await reliable.prepare_request(
+                        event, workspace, sub.subscription_id, build_start_target(sub)
+                    )
+                    if request is not None:
+                        yield request
+            if classification.to_resume:
+                matches = await _resume_matches(
+                    event,
+                    workspace=workspace,
+                    evaluator=evaluator,
+                    resume_store=resume_store,
+                    now=clock,
+                )
+                for resume_match in matches:
+                    request = await reliable.prepare_request(
+                        event,
+                        workspace,
+                        resume_match.resume_id,
+                        build_resume_target(event, resume_match),
+                    )
+                    if request is not None:
+                        yield request
+
+        outcomes = await reliable.dispatch_event(event, workspace, select)
+        return InternalEventOutcome(
+            start=tuple(outcome for kind, outcome in outcomes if kind == "start"),
+            resume=tuple(outcome for kind, outcome in outcomes if kind == "resume"),
+        )
     start_outcomes: list[DispatchOutcome] = []
     resume_outcomes: list[DispatchOutcome] = []
 
@@ -222,6 +266,24 @@ async def _dispatch_resumes(
     now: Callable[[], datetime],
 ) -> list[DispatchOutcome]:
     """Point-read the deterministic resume candidate and dispatch any match."""
+    matches = await _resume_matches(
+        event, workspace=workspace, evaluator=evaluator, resume_store=resume_store, now=now
+    )
+    return [
+        await dispatcher.dispatch_resume(event, match, workspace_id=workspace, depth=_INBOUND_DEPTH)
+        for match in matches
+    ]
+
+
+async def _resume_matches(
+    event: NormalizedEvent,
+    *,
+    workspace: str,
+    evaluator: SelectorEvaluator,
+    resume_store: ResumeSubscriptionStore,
+    now: Callable[[], datetime],
+) -> list[ResumeMatch]:
+    """Resolve the original deterministic wait without causing a remote effect."""
     key = resume_key_from_event(event)
     if key is None:
         return []
@@ -237,10 +299,7 @@ async def _dispatch_resumes(
         logger.debug("resume %s lapsed before internal event %s arrived", resume_id, event.event_id)
         return []
     candidate = ResumeCandidate(resume_id=resume_id, registration=stored.registration)
-    return [
-        await dispatcher.dispatch_resume(event, match, workspace_id=workspace, depth=_INBOUND_DEPTH)
-        for match in ResumeMatcher(evaluator).match(event, [candidate])
-    ]
+    return ResumeMatcher(evaluator).match(event, [candidate])
 
 
 def _ack(status: DeliveryStatus) -> JSONResponse:

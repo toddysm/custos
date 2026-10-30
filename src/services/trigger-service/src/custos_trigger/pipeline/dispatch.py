@@ -43,7 +43,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from custos_trigger.pipeline.reliable import ReliableDispatcher
@@ -134,12 +134,14 @@ class DispatchOutcome:
     """The result of dispatching one match.
 
     ``run_ref`` is populated only on a successful **start** dispatch; ``error``
-    carries the failure that caused a dead-letter.
+    carries the failure that caused a dead-letter. ``replay_status`` is the
+    status committed by this attempt, not a later read of another operator's work.
     """
 
     status: DispatchStatus
     run_ref: RunRef | None = None
     error: Exception | None = None
+    replay_status: Literal["replayed", "pending", "discarded"] | None = None
 
     @property
     def is_dispatched(self) -> bool:

@@ -7,6 +7,12 @@ the runtime in place without regressing the deployment-probe contract.
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
+import pytest
+from custos_pg import PgMetadataAdapter
+from custos_pg.pool import LazyPool
+from custos_spl.errors import MigrationRequired
 from fastapi.testclient import TestClient
 
 import custos_obs
@@ -15,9 +21,8 @@ from custos_obs.providers import Providers
 from custos_obs.settings import Settings, load_settings
 
 # A fully ``noop`` configuration whose providers wire without touching a
-# backend: the metadata pool is deferred (no socket until first query) and the
-# log/metrics providers are noop adapters. Lets the lifespan boot under
-# ``TestClient`` with no Postgres/Loki/Prometheus reachable.
+# backend: constructors are lazy and log/metrics adapters are noop. Lifespan
+# tests explicitly mock the required metadata preflight.
 _NOOP_ENV = {
     "CUSTOS_LOG_QUERY_PROVIDER": "noop",
     "CUSTOS_LOGS_EXTERNAL_URL": "https://logs.example.com",
@@ -65,7 +70,10 @@ def test_readyz_is_not_ready_before_lifespan_runs() -> None:
     assert "observability-audit-service" in body["detail"]
 
 
-def test_readyz_becomes_ready_inside_lifespan() -> None:
+def test_readyz_becomes_ready_inside_lifespan(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Readiness is exposed only after the actual metadata consumer prerequisite is checked."""
+    preflight = AsyncMock()
+    monkeypatch.setattr(PgMetadataAdapter, "check_audit_outbox_ready", preflight)
     app = create_app(settings=_noop_settings())
     with TestClient(app) as client:  # context-manager runs the lifespan
         resp = client.get("/readyz")
@@ -74,9 +82,12 @@ def test_readyz_becomes_ready_inside_lifespan() -> None:
         # The lifespan stashes the resolved settings + provider bundle.
         assert app.state.settings.log_query_provider == "noop"
         assert isinstance(app.state.providers, Providers)
+        preflight.assert_awaited_once()
 
 
-def test_readyz_resets_after_lifespan_shutdown() -> None:
+def test_readyz_resets_after_lifespan_shutdown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A verified consumer becomes unready again when its owned lifespan ends."""
+    monkeypatch.setattr(PgMetadataAdapter, "check_audit_outbox_ready", AsyncMock())
     app = create_app(settings=_noop_settings())
     with TestClient(app):
         pass
@@ -84,6 +95,23 @@ def test_readyz_resets_after_lifespan_shutdown() -> None:
     client = TestClient(app)
     resp = client.get("/readyz")
     assert resp.status_code == 503
+
+
+def test_outbox_migration_is_required_before_app_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Revision4 alone cannot mark an upgraded outbox-consuming service ready."""
+    monkeypatch.setenv("TRIGGER_DURABLE_DISPATCH_ENABLED", "false")
+    preflight = AsyncMock(side_effect=MigrationRequired([("MetadataStoreProvider", 12)]))
+    cleanup = AsyncMock()
+    monkeypatch.setattr(PgMetadataAdapter, "check_audit_outbox_ready", preflight)
+    monkeypatch.setattr(LazyPool, "aclose", cleanup)
+    app = create_app(settings=_noop_settings())
+    with pytest.raises(MigrationRequired), TestClient(app):
+        pass
+    assert PgMetadataAdapter.SCHEMA_REVISION == 4 and app.state.ready is False
+    preflight.assert_awaited_once()
+    cleanup.assert_awaited_once()
 
 
 def test_create_app_builds_verifier_when_jwks_url_configured() -> None:

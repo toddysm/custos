@@ -267,6 +267,47 @@ alias another source's IDs, and a wait accepting both push and pull still
 deduplicates the same logical event across modes. The same ingestion collaborator routes scheduled events
 through canonical occurrence proof and the originating schedule only.
 
+With durable dispatch enabled, all broker receivers persist the complete original
+target selection before sending any request. Redelivery reads that selection
+before consulting current subscriptions or waits: removing a wait cannot lose
+pending delivery, and adding a wait cannot redirect an older event. Selection is
+bounded to 1,000 targets and 8 MiB of encoded request snapshots; exceeding either
+limit requests retry without sending any target. Empty selections are retained
+too. Expired selection payloads are removed only after every selected producer
+receipt is complete; payload-free identities still prevent later rematching.
+Pending selections must remain discoverable for independent reconciliation.
+Receipt cleanup also preserves their unfinished producer snapshots, including
+after the normal receipt horizon. Selection acceptance and receipt cleanup are
+serialized; cleanup cannot erase a newly accepted plan's pending requests.
+
+Dual-mode resume waits share their first accepted selection across push and pull.
+Start subscriptions and single-mode waits keep their mode-specific selection.
+Both arms commit atomically before effects and share the 1,000-target/8-MiB
+budget. A newly registered dual-mode wait cannot receive an older event through
+another transport. Connector publication timestamps (`receivedAt`, normalized
+as `source.occurredAt`) are excluded from retry identity, but the original
+timestamp and selected request remain stored. Changed business payloads still
+conflict.
+
+[`SourceDeliveryStoreProvider`](../../src/libs/storage-provider-layer/src/custos_spl/interfaces/source_delivery.py)
+provides workspace-bound pending-selection pages, including accepted targets
+whose producer receipt does not yet exist. Pages also cap encoded payload bytes
+at 20 MiB: PostgreSQL first reads keys and byte lengths, then fetches only the
+payloads that fit. It does not fetch a large unreturned tail before applying
+the budget.
+[`ReliableDispatcher.reconcile_pending`](../../src/services/trigger-service/src/custos_trigger/pipeline/reliable.py)
+recovers a bounded page without a broker retry, current wait or subscription.
+It probes at most 32 targets per call, with 15 seconds for discovery. Probes use
+the normal Workflow client and durable-dispatch timeout budgets rather than a
+shorter reconciliation-specific timeout (the default Workflow RPC timeout is
+10 seconds). Its opaque continuation includes the position within a selection;
+pass it back to this method, not to the storage query. Delayed targets remain
+pending but cannot force every call to revisit the same prefix. A 300-second
+overall deadline after work starts returns `deadline_exhausted=true` with
+progress; discovery failure before work starts raises an unavailable error.
+`next_cursor=None` ends a scan pass, not outstanding work: retry pending targets
+on the next pass. Periodic activation remains #1017.
+
 Callbacks return `SUCCESS` only after successful/duplicate delivery or committed
 dead-letter capture. Storage, ownership and configuration failures request `RETRY`.
 An active subscription revision changing between selection and dispatch also
@@ -369,9 +410,17 @@ by [#1010](https://github.com/toddysm/custos/issues/1010) and
 The optional
 [`DeadLetterStoreProvider`](../../src/libs/storage-provider-layer/src/custos_spl/interfaces/dead_letters.py)
 persists failed-dispatch inputs and fenced replay state. PostgreSQL metadata
-revision 7 is additive; the shared metadata minimum remains revision 4.
+revision 7 introduced captures; revision 12 adds durable bulk commands and
+per-entry command association. Revision 13 adds single-command generation
+bindings and frozen source selections and is now required by this capability.
+The shared metadata minimum remains revision 4.
 `check_dead_letters_ready` rejects missing migrations or unavailable storage.
 The memory provider has the same contracts but is not restart-durable.
+Every upgraded outbox consumer requires revision 12, even when durable Trigger
+is disabled; this is separate from the general metadata minimum of 4.
+Apply it before upgrading consumers. `await AuditOutboxDrainer.start()` checks
+the prerequisite before launching its background task. An older drainer does
+not participate in the fence.
 
 Each version-1 capture holds the workspace, entry/subscription identity,
 original idempotency key, normalized event **without `raw`**, resolved start or
@@ -400,8 +449,9 @@ Queries are workspace-scoped, ordered by entry ID and filterable by subscription
 status and inclusive creation-time bounds. Pages default to 50, cap at 200, and
 reject cursors reused with a different workspace or filter.
 
-Claiming atomically consumes an attempt and returns a fresh token and increasing
-epoch. Claims default to 60 seconds, are bounded to 300 seconds, and cannot be
+Claiming a new logical attempt consumes budget and increases its epoch.
+Acknowledgement-pending probes retain that logical attempt but always receive
+a fresh fencing token. Claims default to 60 seconds, are bounded to 300 seconds, and cannot be
 renewed. Another active claimant receives `LeaseBusy`; stale completion receives
 `LeaseExpired`. Expired claims are recoverable with an `interrupted` history
 entry, and the final failed/interrupted attempt becomes `discarded`. Successful
@@ -410,14 +460,16 @@ completion records `replayed` and an optional result identity.
 Provider time is authoritative, including after database lock waits. No claim
 starts at or after retention expiry. A previously acquired live claim can finish
 past retention; discard and retention deletion cannot steal it. Terminal entries
-remain inspectable until retention deletion. The deletion primitive does **not**
-emit audit events: callers must arrange durable expiration audit before removal.
+remain inspectable until retention deletion. The deletion primitive atomically
+appends the expiration audit/outbox event before removal; audit failure rolls
+back deletion.
 
 ### Durable dispatch and replay (opt-in)
 
 `TRIGGER_DURABLE_DISPATCH_ENABLED=true` selects the durable dispatcher. It
 requires the upgraded-writer configuration gate, an authenticated Workflow caller
-verifier, and metadata revision 8. `WF_TRIGGER_DELIVERY_ENABLED=true` selects the
+verifier, metadata revision 8 for delivery receipts and revision 13 for current
+dead-letter administration. `WF_TRIGGER_DELIVERY_ENABLED=true` selects the
 matching Workflow endpoint/worker capability. Both flags default to `false`;
 production authentication, activation and operations remain
 [#1015](https://github.com/toddysm/custos/issues/1015) and
@@ -432,6 +484,13 @@ return a retryable failure, not duplicate success. Failure capture and completio
 of the producer receipt commit in one transaction, so neither storage failure nor
 a stale worker can acknowledge uncaptured work or create a phantom failure after
 another worker succeeds.
+
+Version-2 Workflow resume replies distinguish submission from consumption:
+202 means accepted but not yet acknowledged by the durable consumer; 204 proves
+consumption. Trigger treats 202 as retryable, never as completed replay. A
+terminal run without acknowledgement is unsafe (409). Upgrade Workflow before
+enabling the updated Trigger client; legacy version-1 asynchronous 202 behavior
+is unchanged.
 
 Initial dispatch and replay are bounded to 300 seconds; durable retry counts are
 0–63 (at most 64 recorded attempts). Workflow producer leases last 30 seconds;
@@ -476,9 +535,157 @@ Existing public request formats and the default legacy path remain valid.
 The receipt horizon covers dead-letter retention plus bounded in-flight work.
 It is a **minimum**, not an independent purge timer: dead-letter cleanup must not
 remove downstream receipts or runtime-input snapshots. Do not purge Dapr history
-or unresolved delivery records while recovery remains possible. Authorized
-administration and audited payload retention cleanup remain
-[#1016](https://github.com/toddysm/custos/issues/1016).
+or unresolved delivery records while recovery remains possible.
+
+### Dead-letter administration
+
+These routes require `trigger:admin` and enabled durable dispatch
+(`TRIGGER_DURABLE_DISPATCH_ENABLED=true`). Disabled durable dispatch returns
+503 rather than falling back to volatile replay. Gateway forwards the routes
+with its normal authentication, idempotency and rate-limit controls; write
+requests should provide an `Idempotency-Key`. For recovery writes, Gateway binds
+that key to the **concrete entry path and body**, but does not cache responses
+or block identical retries behind an in-progress HTTP reservation. Durable
+per-entry claims and downstream identity, not a Gateway response snapshot,
+prevent duplicate effects. The same key on another entry/body returns
+`409 idempotency-key-reuse`; retries after contention/outage can reconcile
+current state with the original key. Unrelated Gateway writes keep their
+existing reserve/replay/complete behavior. Static recovery routes precede
+dynamic subscription identifiers in both services. Gateway write requests also
+require `Content-Type: application/json`, including bodyless replay commands.
+Recovery writes fail with 503 before forwarding when Gateway's metadata
+request-key binding store is unconfigured or unavailable. Reads and unrelated
+writes retain their existing behavior. Production store wiring remains #1017.
+
+Trigger also binds every single-entry key to the inspected entry generation,
+operation and discard reason, and echoes the effective key in successful responses.
+These payload-free bindings survive entry retention. Retrying an old key against
+a deleted/recreated ID returns 409 instead of mutating the replacement; a new
+operation requires a new key. Claim, discard and abandoned-attempt recovery all
+check the inspected generation under the provider's atomic mutation boundary.
+
+Base: `/v1/workspaces/{workspaceId}/triggers/deadletter`.
+
+| Method and suffix | Request | Response |
+|---|---|---|
+| `GET` collection | Optional `subscriptionId`, `status`, aware `since`/`until`, `cursor`, `limit` | `{items, nextCursor}` |
+| `GET /{entryId}` | None | Version-one entry with original event, target, key and bounded attempt history |
+| `POST /{entryId}:replay` | No body | `{status}`: persisted `replayed`, `pending` or `discarded` |
+| `POST /{entryId}:discard` | Optional `{"reason":"operator decision"}` | 204, including already-discarded entries |
+| `POST :replay` | Optional filter fields, `cursor` and `limit` in a JSON object | `{accepted, rejected, nextCursor}` |
+
+Pages default to 50 and cap at 100. `status` accepts `pending`, `replaying`,
+`replayed`, or `discarded`; `expired` is an audited removal, not a retained
+status. Date filters are inclusive and must have a timezone. Cursors bind the
+workspace and every filter: continue with identical filters, and do not parse
+or modify the token. Entry responses include `schemaVersion: 1`, `workspaceId`,
+`entryId`, `subscriptionId`, `idempotencyKey`, `event`, `target`, `history`,
+`replayHistory`, `status`, `createdAt`, `expiresAt`, `resultId`, and
+`claimExpiresAt`; they never expose the live claim token or original transport
+credentials.
+
+Replay uses the stored target without rematching a changed subscription.
+Repeating a successful replay returns `{"status":"replayed"}` without another
+Workflow call. A live concurrent claim returns `409 trigger.replay_in_progress`;
+retry after its lease expires. An unsafe or terminal replay target instead
+returns `409 trigger.replay_unsafe`; waiting alone cannot establish replay safety.
+An already-replayed entry cannot be discarded (`409 trigger.deadletter.conflict`).
+A failed replay reports the persisted pending/discarded status, not success.
+Version-2 resumes awaiting consumer acknowledgement, including transport
+uncertainty, instead remain recoverable and return 503. They reuse one logical
+attempt with fresh ownership tokens; acknowledgement probes and expired probe
+owners do not exhaust the terminal failure budget, even when its limit is one.
+History exposes `awaiting_ack` and `pendingSince`, preserving the original
+attempt operator separately from a later reconciler. Definitive unsafe outcomes
+or permanent errors before any pending-delivery state still consume the budget;
+retention and explicit
+operator discard remain available.
+That status belongs to this attempt even if another operator immediately claims
+the entry afterward. Deletion racing discard is reported as 404, not contention.
+Every claim and success reconciliation checks the inspected entry generation,
+so deletion/recreation of the same ID cannot retarget or falsely satisfy replay.
+Missing or cross-workspace entries return 404. Missing identity returns 401,
+insufficient permission or a mismatched path workspace returns 403, invalid
+filters/bodies return 422, and unavailable storage returns 503.
+
+Bulk replay selects at most 100 entries and executes no more than eight at once.
+`accepted` counts completed or already-completed replays; `rejected` counts
+per-entry conflicts, vanished entries and failed attempts. A provider outage
+fails the request explicitly instead of counting entries as successful.
+Continue with `nextCursor` and the same filters to progress beyond completed or
+unsafe entries at the front of a backlog. Use a new idempotency key for each page
+because its request body changes; reuse that page's key for retries.
+Trigger persists the original selected entry IDs/generations, continuation and
+per-entry results under `(workspace, operator, Idempotency-Key)` before any
+effect. Replay completion and its command progress commit atomically.
+Repeating a completed command returns the same counts/cursor even after statuses
+change; recovering a partial command skips completed work and never selects
+newly matching entries. A new operation or retry of entries rejected by a
+completed command requires a new key. If omitted, a key is generated and echoed
+in the response, but clients must supply their own key to recover a lost response.
+
+Coordinator leases last at most 300 seconds. A failed/interrupted command can
+return 409 until its durable coordinator/entry ownership expires; this is not
+a stale Gateway cache. Selection/progress payloads expire after the configured
+dead-letter retention, excluding live related claims. Minimal identity
+tombstones remain so an expired key cannot silently select different work.
+Single and bulk commands have a 60-second total deadline. Gateway allows a
+70-second response-read budget for these recovery writes; other routes keep
+their existing timeout. On timeout, owned tasks are cancelled and awaited and
+the request returns 503. Some effects may already be durable: inspect entries
+before retrying. Unfinished claims remain fenced until their bounded lease
+expires, then recover with interrupted history and the original idempotency key.
+
+```http
+POST /v1/workspaces/team-a/triggers/deadletter/dl-42:replay
+Idempotency-Key: recovery-dl-42
+Content-Type: application/json
+
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"status":"replayed"}
+```
+
+An active replay instead returns a problem-details response with
+`code: "trigger.replay_in_progress"` and HTTP status 409.
+
+Storage commits lifecycle events `trigger.deadletter.stored`, `.replayed`,
+`.replay_failed`, `.discarded`, and `.expired` through the durable audit/outbox
+in the **same transaction** as the state change. Audit failure rolls back the
+mutation. Outbox-visible payloads retain the entry/subscription/source identifiers,
+the actor performing the transition, and an `attemptOperator` for completed or
+interrupted replay attempts, separately from any operator reclaiming them.
+They retain optional
+discard reasons, not normalized payloads or credentials; do not put secrets in
+operator reasons. Interrupted replay recovery is audited, including exhausted
+attempts becoming discarded. Expiration first audits an abandoned replay and any
+exhausted-attempt discard, then expiration, in the same transaction before
+erasing history. NUL-containing or invalid-Unicode reasons are rejected with 422
+before persistence. Storage is the sole lifecycle-audit writer; the
+dispatcher does not emit a second copy through its configurable audit sink.
+Pipeline events continue through that sink.
+The first acknowledgement-pending transition emits `.replay_pending`; repeated
+probes do not create an unbounded attempt history or repeat that transition audit.
+Revision 12 fences outbox ID allocation and draining with shared/exclusive
+transaction advisory locks. The reader waits for active allocators before sampling
+a fresh committed prefix, so a later ID committing first cannot hide an earlier
+event. Reader lock acquisition is bounded to five seconds; contention fails
+explicitly and the drainer retries without advancing. Read-only outbox access
+does not require table mutation privileges.
+
+Retention starts at capture and uses `TRIGGER_DEADLETTER_RETENTION_SECONDS`
+(default 30 days). The bounded, workspace-paged sweeper handles every status
+but never removes a live replay claim. Expiration audit and payload deletion
+are atomic; repeated sweeps emit no duplicate expiration event. This cleanup
+does not purge downstream receipts or runtime snapshots. Production periodic
+sweep scheduling and workspace discovery are wired by
+[#1017](https://github.com/toddysm/custos/issues/1017).
+Each workspace sweep also purges a bounded page of completed, expired source
+selections, even when no dead letters remain. Unfinished source plans are
+preserved; `source_selections_expired` reports their cleanup separately.
+Accepted scheduled selections are recovered before applying a later fire
+suppression, while never-accepted discarded occurrences remain suppressed.
 
 ## Authentication and call context
 

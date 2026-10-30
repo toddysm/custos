@@ -275,7 +275,7 @@ Routes are grouped by the owning downstream component (its Dapr app-id):
 | Auth Service | `custos-auth` | Service accounts, tokens, role bindings |
 | Catalog Service | `catalog-service` | Workflows, templates, activity-types, connector-types |
 | Workflow Service | `workflow-service` | Run lifecycle (start, read, cancel, steps) |
-| Trigger Service | `trigger-service` | Trigger subscription CRUD + manual fire |
+| Trigger Service | `trigger-service` | Trigger subscription CRUD, manual fire and dead-letter administration |
 | Connector Service | `connector-service` | Connector instance lifecycle + lease admin |
 | Observability & Audit | `observability-audit-service` | Logs, metrics, audit reads |
 
@@ -290,7 +290,7 @@ the registry enforces across all routes:
 - `workflow:execute`
 - `run:read`, `run:cancel`
 - `trigger:subscriptions:read`, `trigger:subscriptions:write`,
-  `trigger:subscriptions:delete`, `trigger:subscriptions:fire`
+  `trigger:subscriptions:delete`, `trigger:subscriptions:fire`, `trigger:admin`
 - `connector:read`
 - `logs:read`, `metrics:read`, `audit:read`
 
@@ -307,6 +307,21 @@ Write methods default to requiring an idempotency key and the `write` rate
 class; reads bill the `read` class and bypass idempotency. The
 workflow/template *publish* routes raise the body cap to 5 MiB; every other route
 uses the 1 MiB default.
+
+Dead-letter recovery writes are a deliberate idempotency exception: the key binds
+the concrete entry path and body, but identical retries always reconcile with
+Trigger's durable per-entry claims instead of replaying an HTTP snapshot.
+This keeps temporary 409/503 outcomes retryable while rejecting the same key on
+a different entry or body. Successful entry replay/discard remains idempotent in
+Trigger.
+Trigger additionally retains each single-entry key's original generation;
+payload deletion and ID recreation cannot rebind the operation. Successful
+responses echo the effective key. These writes require a configured metadata
+binding store:
+absence or outage returns 503 before forwarding. Ordinary write behavior is
+unchanged. Bulk continuation uses a filter-bound cursor and a new key for each
+page; retry the same page with its original key. See the
+[recovery contract](trigger-api.md#dead-letter-administration).
 
 Single-permission **management** routes (service accounts, tokens, role bindings)
 are in the M1 registry. Auth-management routes that authorize on an OR of two
