@@ -50,6 +50,10 @@ def _admission_matches(actual: Mapping[str, Any], expected: Mapping[str, Any]) -
             return False
     if spec.get("ephemeralContainers") or spec.get("volumes") != wanted["volumes"]:
         return False
+    if any(spec.get(key) for key in ("hostAliases", "dnsConfig", "hostname", "subdomain")):
+        return False
+    if spec.get("dnsPolicy", "ClusterFirst") != "ClusterFirst":
+        return False
     if spec.get("securityContext") != wanted["securityContext"]:
         return False
     for group in ("containers", "initContainers"):
@@ -59,7 +63,28 @@ def _admission_matches(actual: Mapping[str, Any], expected: Mapping[str, Any]) -
         for current, target in zip(observed, desired, strict=True):
             if not isinstance(current, dict):
                 return False
-            if any(current.get(key) for key in ("env", "envFrom", "args", "lifecycle")):
+            defaults: dict[str, Any] = {
+                "args": [],
+                "env": [],
+                "envFrom": [],
+                "ports": [],
+                "volumeDevices": [],
+                "workingDir": "",
+                "stdin": False,
+                "stdinOnce": False,
+                "tty": False,
+                "terminationMessagePath": "/dev/termination-log",
+                "terminationMessagePolicy": "File",
+            }
+            if set(current) - (set(target) | set(defaults) | {"imagePullPolicy"}):
+                return False
+            if any(current.get(key, value) != value for key, value in defaults.items()):
+                return False
+            if current.get("imagePullPolicy", "IfNotPresent") not in {
+                "Always",
+                "IfNotPresent",
+                "Never",
+            }:
                 return False
             for key in ("name", "image", "command", "securityContext", "resources"):
                 if current.get(key) != target[key]:

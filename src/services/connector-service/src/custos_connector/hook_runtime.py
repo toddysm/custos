@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Mapping
 from typing import Any
 
@@ -12,7 +13,9 @@ from custos_connector.hook_images import RegistryHookImageResolver
 from custos_connector.hook_kubernetes_transport import KubernetesHookTransport
 from custos_connector.hook_sandbox import HookSandboxSettings
 from custos_connector.kubernetes_hooks import KubernetesHookRunner
-from custos_connector.runtime import HookRunResult, _finish_owned_task
+from custos_connector.runtime import HookRunResult, PluginCleanupFailed, _finish_owned_task
+
+logger = logging.getLogger(__name__)
 
 
 class InClusterHookRunner:
@@ -73,6 +76,7 @@ class InClusterHookRunner:
     ) -> HookRunResult:
         """Close the invocation's API session only after owned execution cleanup has settled."""
         api = client.ApiClient(self.configuration)
+        pending_failure: PluginCleanupFailed | None = None
         try:
             runner = KubernetesHookRunner(
                 KubernetesHookTransport(
@@ -88,10 +92,26 @@ class InClusterHookRunner:
                 timeout_seconds=timeout_seconds,
                 invocation_id=invocation_id,
             )
+        except PluginCleanupFailed as failure:
+            pending_failure = failure
+            raise
         finally:
-            _, interrupted = await _finish_owned_task(
-                asyncio.create_task(api.close()),
+            outcomes, interrupted = await _finish_owned_task(
+                asyncio.gather(api.close(), return_exceptions=True),
                 invocation_id or "hook-api-session",
             )
-            if interrupted:
+            close_failure = outcomes[0]
+            if pending_failure is not None:
+                caller = asyncio.current_task()
+                pending_failure.cancellation_requested |= (
+                    interrupted
+                    or isinstance(close_failure, asyncio.CancelledError)
+                    or (caller is not None and caller.cancelling() > 0)
+                )
+            if isinstance(close_failure, BaseException):
+                logger.error("Hook API client cleanup failed: %s", type(close_failure).__name__)
+                if pending_failure is not None:
+                    raise pending_failure from close_failure
+                raise close_failure
+            if interrupted and pending_failure is None:
                 raise asyncio.CancelledError()

@@ -68,7 +68,22 @@ def transport_for(pod: dict[str, Any]) -> tuple[KubernetesHookTransport, SimpleN
 
 
 @pytest.mark.parametrize(
-    "mutation", ["privileged", "image", "host", "extra-container", "env", "volume"]
+    "mutation",
+    [
+        "privileged",
+        "image",
+        "host",
+        "extra-container",
+        "env",
+        "volume",
+        "working-dir",
+        "probe",
+        "sidecar",
+        "ports",
+        "dns",
+        "termination-path",
+        "unknown",
+    ],
 )
 def test_changed_admission_is_not_executable(mutation: str) -> None:
     """Admission cannot add privileges, payload channels or an autonomous replacement command."""
@@ -85,9 +100,40 @@ def test_changed_admission_is_not_executable(mutation: str) -> None:
         pod["spec"]["containers"].append({"name": "unexpected"})
     elif mutation == "env":
         pod["spec"]["containers"][0]["env"] = [{"name": "PRIVATE", "value": "forbidden"}]
-    else:
+    elif mutation == "volume":
         pod["spec"]["volumes"].append({"name": "host", "hostPath": {"path": "/"}})
+    elif mutation == "working-dir":
+        pod["spec"]["containers"][0]["workingDir"] = "/injected"
+    elif mutation == "probe":
+        pod["spec"]["containers"][0]["livenessProbe"] = {"exec": {"command": ["/injected"]}}
+    elif mutation == "sidecar":
+        pod["spec"]["initContainers"][0]["restartPolicy"] = "Always"
+    elif mutation == "ports":
+        pod["spec"]["containers"][0]["ports"] = [{"containerPort": 8080, "hostPort": 8080}]
+    elif mutation == "dns":
+        pod["spec"]["hostAliases"] = [{"ip": "192.0.2.1", "hostnames": ["upstream.example"]}]
+    elif mutation == "termination-path":
+        pod["spec"]["containers"][0]["terminationMessagePath"] = "/custos/io/private"
+    else:
+        pod["spec"]["containers"][0]["futureExecutionField"] = "unexpected"
     assert not _admission_matches(pod, plan)
+
+
+def test_defaulted_container_fields_preserve_admission() -> None:
+    """Normal API defaults remain valid without allowing injected execution fields."""
+    plan = manifest()
+    pod = observed(plan)
+    for container in pod["spec"]["containers"] + pod["spec"]["initContainers"]:
+        container.update(
+            {
+                "imagePullPolicy": "IfNotPresent",
+                "terminationMessagePath": "/dev/termination-log",
+                "terminationMessagePolicy": "File",
+                "stdin": False,
+                "tty": False,
+            }
+        )
+    assert _admission_matches(pod, plan)
 
 
 async def test_uid_preconditions_and_owned_finalizer_removal() -> None:

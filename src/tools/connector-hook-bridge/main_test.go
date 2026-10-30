@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -40,6 +41,10 @@ func TestHookProcess(t *testing.T) {
 		os.Exit(7)
 	case "timeout":
 		time.Sleep(time.Minute)
+	case "signal":
+		if err := syscall.Kill(os.Getpid(), syscall.SIGKILL); err != nil {
+			os.Exit(85)
+		}
 	case "overflow":
 		if _, err := os.Stdout.Write(bytes.Repeat([]byte("x"), maxOutputBytes+1)); err != nil {
 			os.Exit(83)
@@ -48,6 +53,14 @@ func TestHookProcess(t *testing.T) {
 		os.Exit(84)
 	}
 	os.Exit(0)
+}
+
+// TestSignaledHookUsesContainerExitStatus preserves Docker's 128+signal convention.
+func TestSignaledHookUsesContainerExitStatus(t *testing.T) {
+	reply := runHook(requestFor(t, "signal"))
+	if reply.Status != "completed" || reply.ExitCode != 137 {
+		t.Fatalf("signal exit was not preserved: status=%s exit=%d", reply.Status, reply.ExitCode)
+	}
 }
 
 // requestFor uses a real test executable without depending on a plugin shell.

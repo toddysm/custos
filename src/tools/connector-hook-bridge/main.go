@@ -175,8 +175,12 @@ func runHook(request bridgeRequest) bridgeReply {
 	if err != nil && !errors.As(err, &exit) {
 		return bridgeReply{Status: "execution-failed", ExitCode: -1}
 	}
+	exitCode := cmd.ProcessState.ExitCode()
+	if status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+		exitCode = 128 + int(status.Signal())
+	}
 	return bridgeReply{
-		Status: "completed", ExitCode: cmd.ProcessState.ExitCode(),
+		Status: "completed", ExitCode: exitCode,
 		Stdout: stdout.buffer.Bytes(), Stderr: stderr.buffer.Bytes(),
 	}
 }

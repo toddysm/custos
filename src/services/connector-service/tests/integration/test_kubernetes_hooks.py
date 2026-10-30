@@ -120,9 +120,11 @@ async def runtime(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Runtime]:
     ).stdout.strip()
     credentials.cert_file = None
     credentials.key_file = None
-    credentials.api_key = {"authorization": token}
-    credentials.api_key_prefix = {"authorization": "Bearer"}
+    credentials.api_key = {"BearerToken": token}
+    credentials.api_key_prefix = {"BearerToken": "Bearer"}
     credentials.refresh_api_key_hook = None
+    if "BearerToken" not in credentials.auth_settings():
+        raise RuntimeError("SDK did not bind the scoped controller credential")
     observed: list[object] = []
     logs: list[str] = []
     effects: list[bytes] = []
@@ -155,7 +157,7 @@ async def runtime(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Runtime]:
     server = web.AppRunner(application)
     await server.setup()
     listener = socket.socket()
-    listener.bind(("0.0.0.0", 0))
+    listener.bind((os.environ["CUSTOS_HOOK_EFFECT_HOST"], 0))
     listener.listen()
     listener.setblocking(False)
     port = listener.getsockname()[1]
@@ -194,13 +196,13 @@ async def runtime(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Runtime]:
             await core.delete_namespace(controller_namespace)
 
 
-async def assert_clean(runtime: Runtime, secret: str) -> None:
+async def assert_clean(runtime: Runtime, canary: str) -> None:
     """Verify removal and absence of private data in admitted objects and Pod logs."""
     pods = await runtime.api.list_namespaced_pod(runtime.namespace)
     assert not pods.items
     assert runtime.documents and runtime.logs
-    assert secret not in json.dumps(runtime.documents)
-    assert all(secret not in text for text in runtime.logs)
+    assert canary not in json.dumps(runtime.documents)
+    assert all(canary not in text for text in runtime.logs)
 
 
 @pytest.mark.parametrize("mode,exit_code", [("echo", 0), ("exit", 7)])
@@ -208,37 +210,37 @@ async def test_real_private_reply_and_exit_status(
     runtime: Runtime, mode: str, exit_code: int
 ) -> None:
     """Preserve the original entrypoint, private payload and plugin exit status."""
-    secret = "private-" + uuid4().hex
+    canary = "synthetic-canary-" + uuid4().hex
     reply = await runtime.runner.run(
         image_ref=runtime.plugin,
         hook="health",
-        payload={"mode": mode, "secret": secret},
+        payload={"mode": mode, "canary": canary},
         timeout_seconds=60,
     )
     assert reply.exit_code == exit_code
-    assert json.loads(reply.stdout) == {"hook": "health", "echo": secret}
-    assert reply.stderr.strip() == secret.encode()
-    await assert_clean(runtime, secret)
+    assert json.loads(reply.stdout) == {"hook": "health", "echo": canary}
+    assert reply.stderr.strip() == canary.encode()
+    await assert_clean(runtime, canary)
 
 
 async def test_real_output_overflow_is_bounded_and_stopped(runtime: Runtime) -> None:
     """Overflow must fail after the actual owned sandbox is stopped and removed."""
-    secret = "private-" + uuid4().hex
+    canary = "synthetic-canary-" + uuid4().hex
     with pytest.raises(PluginInvocationFailed):
         await runtime.runner.run(
             image_ref=runtime.plugin,
             hook="listen",
-            payload={"mode": "overflow", "secret": secret},
+            payload={"mode": "overflow", "canary": canary},
             timeout_seconds=60,
         )
-    await assert_clean(runtime, secret)
+    await assert_clean(runtime, canary)
 
 
 async def test_collision_has_one_effect_and_cancellation_owns_cleanup(runtime: Runtime) -> None:
     """An API creation collision cannot execute a second poll or kill the first invocation."""
-    secret = "private-" + uuid4().hex
+    canary = "synthetic-canary-" + uuid4().hex
     invocation = uuid4().hex
-    payload = {"mode": "wait", "secret": secret, "effectUrl": runtime.effect_url}
+    payload = {"mode": "wait", "canary": canary, "effectUrl": runtime.effect_url}
     first = asyncio.create_task(
         runtime.runner.run(
             image_ref=runtime.plugin,
@@ -270,18 +272,18 @@ async def test_collision_has_one_effect_and_cancellation_owns_cleanup(runtime: R
             first.cancel()
         await asyncio.gather(first, return_exceptions=True)
     assert len(runtime.effects) == 1
-    await assert_clean(runtime, secret)
+    await assert_clean(runtime, canary)
 
 
 async def test_actual_execution_timeout_retains_cleanup_ownership(runtime: Runtime) -> None:
     """A timed-out hook is not reported stopped until the real Pod terminal state is observed."""
-    secret = "private-" + uuid4().hex
+    canary = "synthetic-canary-" + uuid4().hex
     with pytest.raises(TimeoutError):
         await runtime.runner.run(
             image_ref=runtime.plugin,
             hook="listen",
-            payload={"mode": "wait", "secret": secret, "effectUrl": runtime.effect_url},
+            payload={"mode": "wait", "canary": canary, "effectUrl": runtime.effect_url},
             timeout_seconds=15,
         )
     assert len(runtime.effects) == 1
-    await assert_clean(runtime, secret)
+    await assert_clean(runtime, canary)

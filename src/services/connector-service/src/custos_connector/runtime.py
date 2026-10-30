@@ -162,7 +162,7 @@ _TaskResult = TypeVar("_TaskResult")
 
 
 async def _finish_owned_task(
-    task: asyncio.Task[_TaskResult], container_name: str
+    task: asyncio.Future[_TaskResult], container_name: str
 ) -> tuple[_TaskResult, bool]:
     """Wait through caller cancellation; cancelled owned tasks cannot confirm termination."""
     interrupted = False

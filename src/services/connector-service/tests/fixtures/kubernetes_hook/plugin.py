@@ -1,4 +1,4 @@
-"""One-shot Kubernetes fixture: an observable upstream effect and private bounded output."""
+"""One-shot fixture emitting synthetic canaries, never real credentials."""
 
 import json
 import sys
@@ -25,8 +25,8 @@ def main() -> None:
     if mode == "overflow":
         sys.stdout.write("x" * (4 * 1024 * 1024 + 1))
         return
-    print(body["secret"], file=sys.stderr)
-    print(json.dumps({"hook": sys.argv[1], "echo": body["secret"]}), flush=True)
+    print(body["canary"], file=sys.stderr)
+    print(json.dumps({"hook": sys.argv[1], "echo": body["canary"]}), flush=True)
     sys.exit(7 if mode == "exit" else 0)
 
 
