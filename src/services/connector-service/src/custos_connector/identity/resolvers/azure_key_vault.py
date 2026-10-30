@@ -20,7 +20,7 @@ imports.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, ClassVar
 
 from custos_connector.identity.errors import (
@@ -85,6 +85,7 @@ class AzureKeyVaultResolver:
         credentials_authentication: Mapping[str, Any],
         context: IdentityResolverContext,
     ) -> ResolvedIdentity:
+        """Resolve currently valid material without extending upstream validity timestamps."""
         vault_uri = _require_str(credentials_authentication, "vaultUri")
         secret_name = _require_str(credentials_authentication, "secretName")
         audience = _optional_str(credentials_authentication, "audience", DEFAULT_BEARER_AUDIENCE)
@@ -170,7 +171,7 @@ class AzureKeyVaultResolver:
             )
 
         now = context.now()
-        expires_at = _maybe_parse_attribute_expiry(body, now=now)
+        expires_at = _validate_secret_attributes(body, now=now)
         return ResolvedIdentity.build(
             authentication_type=self.authentication_type,
             category=self.category,
@@ -211,30 +212,59 @@ def _optional_str(payload: Mapping[str, Any], field: str, default: str) -> str:
     return value
 
 
-def _maybe_parse_attribute_expiry(
+def _validate_secret_attributes(
     body: Mapping[str, Any],
     *,
     now: datetime,
 ) -> datetime | None:
-    """Honour Key Vault's optional ``attributes.exp`` (Unix seconds).
-
-    The Key Vault payload nests secret-level attributes under
-    ``attributes``. When ``exp`` is present we use it; otherwise we
-    return ``None`` and let the registry fall back to the lease TTL.
-    """
+    """Enforce enabled/nbf/exp; retrieval permission alone does not establish key validity."""
     attrs = body.get("attributes")
-    if not isinstance(attrs, dict):
+    if attrs is None:
         return None
-    exp = attrs.get("exp")
-    if not isinstance(exp, int) or exp <= 0:
-        return None
-    # ``exp`` is documented as seconds-since-epoch. Clamp to "now or
-    # later" so a misconfigured KV that returns a past expiry doesn't
-    # cause negative TTLs downstream.
-    candidate = datetime.fromtimestamp(exp, tz=now.tzinfo)
-    if candidate <= now:
-        return now + timedelta(seconds=1)
-    return candidate
+    if not isinstance(attrs, Mapping):
+        raise IdentityResolverError(
+            "Key Vault attributes must be an object",
+            code=IdentityResolverErrorCode.INVALID_UPSTREAM_RESPONSE,
+        )
+    enabled = attrs.get("enabled")
+    if enabled is not None and type(enabled) is not bool:
+        raise IdentityResolverError(
+            "Key Vault enabled attribute must be boolean",
+            code=IdentityResolverErrorCode.INVALID_UPSTREAM_RESPONSE,
+        )
+    if enabled is False:
+        raise IdentityResolverError(
+            "Key Vault secret is disabled", code=IdentityResolverErrorCode.UPSTREAM_REJECTED
+        )
+    bounds: dict[str, datetime] = {}
+    for field in ("nbf", "exp"):
+        value = attrs.get(field)
+        if value is None:
+            continue
+        if type(value) is not int:
+            raise IdentityResolverError(
+                "Key Vault validity attribute must be Unix seconds",
+                code=IdentityResolverErrorCode.INVALID_UPSTREAM_RESPONSE,
+                data={"field": field},
+            )
+        try:
+            bounds[field] = datetime.fromtimestamp(value, tz=now.tzinfo)
+        except (ValueError, OverflowError, OSError) as exc:
+            raise IdentityResolverError(
+                "Key Vault validity attribute is outside the supported time range",
+                code=IdentityResolverErrorCode.INVALID_UPSTREAM_RESPONSE,
+                data={"field": field},
+            ) from exc
+    if "nbf" in bounds and now < bounds["nbf"]:
+        raise IdentityResolverError(
+            "Key Vault secret is not yet valid", code=IdentityResolverErrorCode.UPSTREAM_REJECTED
+        )
+    expiry = bounds.get("exp")
+    if expiry is not None and expiry <= now:
+        raise IdentityResolverError(
+            "Key Vault secret has expired", code=IdentityResolverErrorCode.UPSTREAM_REJECTED
+        )
+    return expiry
 
 
 __all__ = [

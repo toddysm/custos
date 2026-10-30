@@ -14,6 +14,32 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "RejectedWebhookEvent": {
+        "description": "The entire public rejection surface: original index and a closed reason code.",
+        "properties": {
+          "code": {
+            "enum": [
+              "missing-event-id",
+              "missing-event-type",
+              "unknown-event-type",
+              "malformed"
+            ],
+            "title": "Code",
+            "type": "string"
+          },
+          "index": {
+            "minimum": 0.0,
+            "title": "Index",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "index",
+          "code"
+        ],
+        "title": "RejectedWebhookEvent",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -52,6 +78,65 @@
           "type"
         ],
         "title": "ValidationError",
+        "type": "object"
+      },
+      "VerifiedWebhookEvent": {
+        "description": "An existing canonical connector envelope retaining its original batch position.",
+        "properties": {
+          "event": {
+            "additionalProperties": true,
+            "title": "Event",
+            "type": "object"
+          },
+          "index": {
+            "minimum": 0.0,
+            "title": "Index",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "index",
+          "event"
+        ],
+        "title": "VerifiedWebhookEvent",
+        "type": "object"
+      },
+      "VerifyWebhookResponse": {
+        "description": "A complete indexed partition of a verified, structurally valid batch.",
+        "properties": {
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/VerifiedWebhookEvent"
+            },
+            "title": "Events",
+            "type": "array"
+          },
+          "receivedCount": {
+            "maximum": 1000.0,
+            "minimum": 1.0,
+            "title": "Receivedcount",
+            "type": "integer"
+          },
+          "rejections": {
+            "items": {
+              "$ref": "#/components/schemas/RejectedWebhookEvent"
+            },
+            "title": "Rejections",
+            "type": "array"
+          },
+          "schemaVersion": {
+            "const": "1",
+            "default": "1",
+            "title": "Schemaversion",
+            "type": "string"
+          }
+        },
+        "required": [
+          "receivedCount",
+          "events",
+          "rejections"
+        ],
+        "title": "VerifyWebhookResponse",
         "type": "object"
       },
       "_BindForStepResponseWire": {
@@ -853,6 +938,78 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/VerifyWebhook": {
+      "post": {
+        "description": "Verify one bounded request from the permitted mesh service without publishing anything.",
+        "operationId": "verify_webhook_VerifyWebhook_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Version-one private request; credentials are verification data, never platform identity.",
+                "properties": {
+                  "bodyBase64": {
+                    "title": "Bodybase64",
+                    "type": "string"
+                  },
+                  "connectorInstanceId": {
+                    "maxLength": 256,
+                    "minLength": 1,
+                    "title": "Connectorinstanceid",
+                    "type": "string"
+                  },
+                  "headers": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "title": "Headers",
+                    "type": "object"
+                  },
+                  "schemaVersion": {
+                    "const": "1",
+                    "title": "Schemaversion",
+                    "type": "string"
+                  },
+                  "workspaceId": {
+                    "maxLength": 256,
+                    "minLength": 1,
+                    "title": "Workspaceid",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "schemaVersion",
+                  "workspaceId",
+                  "connectorInstanceId",
+                  "bodyBase64",
+                  "headers"
+                ],
+                "title": "VerifyWebhookRequest",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VerifyWebhookResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Verify Webhook",
+        "tags": [
+          "webhook-verification"
+        ]
+      }
+    },
     "/internal/v1/bind-for-step": {
       "post": {
         "description": "Resolve every connector slot a step references.\n\nIdempotent on ``(workspace_id, run_id, step_id, attempt)`` \u2014 see\n:class:`BindForStepService` for the cache semantics and the M1\ndurability caveat.",

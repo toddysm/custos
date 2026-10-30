@@ -351,6 +351,38 @@ class _GatedResolver:
 
 
 class TestConcurrency:
+    async def test_forced_reads_do_not_serialize_or_replace_cached_binding(self) -> None:
+        """Fresh same-key reads overlap while ordinary reads retain existing cache semantics."""
+        resolver = _GatedResolver()
+        registry = IdentityResolverRegistry(resolvers=[resolver])
+
+        async def resolve(force: bool) -> ResolvedIdentity:
+            """Use one identical reference for both ordinary and request-scoped reads."""
+            return await registry.resolve(
+                workspace_id="ws",
+                actor="test",
+                instance_id="instance",
+                authentication_type="azure-key-vault",
+                credentials_authentication={"vaultUri": "https://v.example", "secretName": "same"},
+                lease_ttl_seconds=0 if force else 600,
+                force_refresh=force,
+            )
+
+        resolver.gate.set()
+        cached = await resolve(False)
+        resolver.gate.clear()
+        tasks = [asyncio.create_task(resolve(True)) for _ in range(2)]
+        try:
+            async with asyncio.timeout(1):
+                while resolver.calls_started < 3:
+                    await asyncio.sleep(0)
+            assert resolver.concurrent_peak == 2
+        finally:
+            resolver.gate.set()
+            await asyncio.gather(*tasks)
+        assert await resolve(False) is cached
+        assert resolver.calls_started == resolver.calls_completed == 3
+
     @pytest.mark.asyncio
     async def test_unrelated_cache_misses_run_in_parallel(self) -> None:
         # Two concurrent resolves for *different* cache keys must not

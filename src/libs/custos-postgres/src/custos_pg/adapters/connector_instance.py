@@ -257,8 +257,9 @@ class PgConnectorInstanceAdapter:
         workspace_id: WorkspaceId,
         instance_id: ConnectorInstanceId,
     ) -> ConnectorInstance | None:
-        pool = await self._pool_ref()
+        """Read an exact pair and translate pool/query outages to provider errors."""
         try:
+            pool = await self._pool_ref()
             async with pool.acquire() as conn:
                 row = await conn.fetchrow(
                     "SELECT workspace_id, instance_id, type, version, name, "
@@ -270,8 +271,8 @@ class PgConnectorInstanceAdapter:
                     str(workspace_id),
                     str(instance_id),
                 )
-        except Exception as exc:
-            raise self._classify(exc) from exc
+        except (OSError, InterfaceError, PostgresError) as exc:
+            raise BackendUnavailable("connector instance lookup failed") from exc
         if row is None:
             return None
         return _row_to_instance(row)

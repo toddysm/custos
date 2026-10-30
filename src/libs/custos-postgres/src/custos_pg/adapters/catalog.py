@@ -25,6 +25,7 @@ from datetime import datetime
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
+from asyncpg import InterfaceError, PostgresError
 from custos_spl.errors import BackendUnavailable, ConflictDigest
 from custos_spl.interfaces.catalog_store import ActivityTypeVersion, ConnectorTypeVersion
 from custos_spl.pagination import Cursor, Page
@@ -364,17 +365,21 @@ class PgCatalogAdapter:
         type: str,
         version: str,
     ) -> ConnectorTypeVersion | None:
-        pool = await self._pool_ref()
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT v.type, v.version, v.digest, v.image_ref, v.normalized_manifest, "
-                "v.published_at, c.deprecated "
-                "FROM catalog.connector_type_version v "
-                "JOIN catalog.connector_type c ON c.type = v.type "
-                "WHERE v.type = $1 AND v.version = $2",
-                type,
-                version,
-            )
+        """Read an immutable version and translate pool/query outages to provider errors."""
+        try:
+            pool = await self._pool_ref()
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT v.type, v.version, v.digest, v.image_ref, v.normalized_manifest, "
+                    "v.published_at, c.deprecated "
+                    "FROM catalog.connector_type_version v "
+                    "JOIN catalog.connector_type c ON c.type = v.type "
+                    "WHERE v.type = $1 AND v.version = $2",
+                    type,
+                    version,
+                )
+        except (OSError, InterfaceError, PostgresError) as exc:
+            raise BackendUnavailable("connector catalog lookup failed") from exc
         if row is None:
             return None
         return _row_to_connector(row, bool(row["deprecated"]))

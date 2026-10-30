@@ -207,8 +207,7 @@ class HmacSignatureVerifier:
             return False
         if not header_value.startswith(SIGNATURE_ALG_PREFIX_SHA256):
             _LOGGER.warning(
-                "webhook rejected: unsupported signature algorithm header=%r instance=%s",
-                header_value[:32],
+                "webhook rejected: unsupported signature algorithm instance=%s",
                 instance_id,
             )
             return False

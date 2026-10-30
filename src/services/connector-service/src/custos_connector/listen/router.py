@@ -211,9 +211,9 @@ async def _read_body_with_cap(request: Request, *, max_bytes: int) -> bytes | No
 
     buffered = bytearray()
     async for chunk in request.stream():
-        buffered.extend(chunk)
-        if len(buffered) > max_bytes:
+        if len(buffered) + len(chunk) > max_bytes:
             return None
+        buffered.extend(chunk)
     return bytes(buffered)
 
 

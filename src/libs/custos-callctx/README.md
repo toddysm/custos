@@ -38,3 +38,13 @@ except InvalidCallContextError as exc:
     # and renders a 401 to the caller.
     ...
 ```
+
+## Authenticated service callers
+
+`custos_callctx.mesh` supplies framework-independent, duplicate-preserving
+sidecar-token and service-caller checks. `require_service_caller()` first
+authenticates the local app hop, then compares the exact configured caller
+application ID and namespace. Missing configuration fails closed.
+These checks require Dapr 1.18.6 or newer with mutual Transport Layer Security;
+older caller headers are not an authenticated identity. They do not authenticate
+end users or turn forwarded webhook credentials into Custos permissions.

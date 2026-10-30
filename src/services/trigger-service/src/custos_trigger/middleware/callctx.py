@@ -23,13 +23,17 @@ own exact route contract rather than a blanket middleware bypass.
 
 from __future__ import annotations
 
-import hmac
 import json
 import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from custos_callctx import CallContextVerifier, InvalidCallContextError, InvalidReason
+from custos_callctx.mesh import (
+    MeshAuthenticationError,
+    require_service_caller,
+    require_sidecar_token,
+)
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -95,11 +99,10 @@ class CallContextError(Exception):
 
 def _require_sidecar_token(request: Request, token: str | None) -> None:
     """Authenticate the app-side hop before accepting sidecar-provided routing metadata."""
-    if token is None or not token.strip():
-        raise CallContextError(503, "mesh_unavailable", "sidecar authentication is not configured")
-    values = request.headers.getlist("dapr-api-token")
-    if len(values) != 1 or not hmac.compare_digest(values[0].encode(), token.encode()):
-        raise CallContextError(401, "mesh_unauthenticated", "invalid sidecar authentication")
+    try:
+        require_sidecar_token(request.headers, token)
+    except MeshAuthenticationError as exc:
+        raise CallContextError(exc.status_code, exc.code, exc.detail) from exc
 
 
 class DaprWorkflowCallerVerifier:
@@ -115,11 +118,20 @@ class DaprWorkflowCallerVerifier:
 
     async def __call__(self, request: Request) -> None:
         """Reject direct app-port spoofing and other authenticated mesh applications."""
-        _require_sidecar_token(request, self._token)
-        if request.headers.getlist("dapr-caller-app-id") != [
-            self._app_id
-        ] or request.headers.getlist("dapr-caller-namespace") != [self._namespace]:
-            raise CallContextError(403, "mesh_caller_denied", "Workflow service identity required")
+        try:
+            require_service_caller(
+                request.headers,
+                token=self._token,
+                app_id=self._app_id,
+                namespace=self._namespace,
+            )
+        except MeshAuthenticationError as exc:
+            detail = (
+                "Workflow service identity required"
+                if exc.code == "mesh_caller_denied"
+                else exc.detail
+            )
+            raise CallContextError(exc.status_code, exc.code, detail) from exc
 
 
 class CallContext(BaseModel):

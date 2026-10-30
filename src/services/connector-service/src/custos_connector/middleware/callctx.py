@@ -14,6 +14,10 @@ activates a **dev shim** that parses an unsigned JSON header so the rest
 of Phases B-K can proceed; the shim refuses to start when ``ENVIRONMENT``
 is ``production`` (case-insensitive).
 
+The exact ``POST /VerifyWebhook`` route instead authenticates the sidecar
+token and permitted Trigger app/namespace independently. It never uses the
+development shim or external webhook credentials as a platform identity.
+
 Audit hook
 ----------
 
@@ -31,6 +35,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
+from custos_callctx.mesh import MeshAuthenticationError, require_service_caller
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -178,6 +183,9 @@ class CallContextMiddleware(BaseHTTPMiddleware):
         environment: Value of ``ENVIRONMENT``. ``"production"`` with an
             empty ``authz_endpoint`` raises
             :class:`DevShimDisabledInProductionError` at construction.
+        app_api_token: Token shared only with the local Dapr sidecar.
+        trigger_app_id: Expected authenticated caller of the private verifier.
+        trigger_namespace: Expected authenticated caller namespace, independently required.
 
     Raises:
         DevShimDisabledInProductionError: When constructed with the dev
@@ -190,8 +198,15 @@ class CallContextMiddleware(BaseHTTPMiddleware):
         *,
         authz_endpoint: str,
         environment: str,
+        app_api_token: str | None = None,
+        trigger_app_id: str = "trigger-service",
+        trigger_namespace: str | None = None,
     ) -> None:
+        """Configure user context separately from exact, authenticated verifier service traffic."""
         super().__init__(app)
+        self._app_api_token = app_api_token
+        self._trigger_app_id = trigger_app_id
+        self._trigger_namespace = trigger_namespace
         self._authz_endpoint = authz_endpoint
         self._dev_shim_active = authz_endpoint == ""
         if self._dev_shim_active and environment.lower() == "production":
@@ -207,6 +222,20 @@ class CallContextMiddleware(BaseHTTPMiddleware):
         request: Request,
         call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
+        """Authenticate VerifyWebhook independently; forwarded credentials never become identity."""
+        if (request.method, request.url.path) == ("POST", "/VerifyWebhook"):
+            try:
+                require_service_caller(
+                    request.headers,
+                    token=self._app_api_token,
+                    app_id=self._trigger_app_id,
+                    namespace=self._trigger_namespace,
+                )
+            except MeshAuthenticationError as exc:
+                logger.warning("Rejected webhook verifier caller: %s", exc.code)
+                return _error(exc.status_code, exc.code, exc.detail)
+            request.state.webhook_caller_verified = True
+            return await call_next(request)
         if request.url.path in _BYPASS_PATHS:
             return await call_next(request)
         if any(request.url.path.startswith(prefix) for prefix in _BYPASS_PREFIXES):
