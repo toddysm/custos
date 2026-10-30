@@ -48,6 +48,7 @@ from custos_spl.interfaces.dead_letters import (
     finish_replay,
     new_dead_letter,
     recover_replay,
+    validate_dispatch_identifier,
 )
 from custos_spl.interfaces.metadata_store import (
     DedupDuplicate,
@@ -159,6 +160,7 @@ class InMemoryTriggerMetadataStore(MemoryDeliveryState):
         self._pending_fires: dict[tuple[str, str], PendingScheduleFire] = {}
         self._dead_letters: dict[tuple[str, str], DeadLetterEntry] = self._delivery_dead_letters
         self._bulk_replays: dict[tuple[str, str], BulkReplayCommand] = {}
+        self._dead_letter_commands: dict[tuple[str, str], tuple[str, str]] = {}
 
     async def begin_bulk_replay(
         self,
@@ -326,6 +328,18 @@ class InMemoryTriggerMetadataStore(MemoryDeliveryState):
             raise ImmutableViolation("dead-letter entry does not exist")
         return entry
 
+    async def bind_dead_letter_command(
+        self, workspace_id: WorkspaceId, command_id: str, request_hash: str, entry_identity: str
+    ) -> None:
+        """Retain a key's first request/generation without keeping business payloads."""
+        for value in (workspace_id, command_id, request_hash, entry_identity):
+            validate_dispatch_identifier(value)
+        binding = self._dead_letter_commands.setdefault(
+            (workspace_id, command_id), (request_hash, entry_identity)
+        )
+        if binding != (request_hash, entry_identity):
+            raise ImmutableViolation("recovery key is bound to another request or generation")
+
     async def claim_dead_letter(
         self,
         workspace_id: WorkspaceId,
@@ -398,10 +412,12 @@ class InMemoryTriggerMetadataStore(MemoryDeliveryState):
         return pending
 
     async def recover_dead_letter(
-        self, workspace_id: WorkspaceId, entry_id: str
+        self, workspace_id: WorkspaceId, entry_id: str, *, expected_identity: str | None = None
     ) -> DeadLetterEntry:
-        """Mark abandoned attempts interrupted; the final abandoned attempt becomes discarded."""
+        """Recover an abandoned attempt only in the inspected immutable generation."""
         previous = self._dead_letter(workspace_id, entry_id)
+        if expected_identity is not None and bulk_entry_identity(previous) != expected_identity:
+            raise ImmutableViolation("dead-letter generation changed before recovery")
         entry = recover_replay(previous, self._now())
         bulk = (
             self._finished_bulk_item(previous.claim, False)
@@ -421,9 +437,12 @@ class InMemoryTriggerMetadataStore(MemoryDeliveryState):
         *,
         actor: str = "trigger-service",
         reason: str | None = None,
+        expected_identity: str | None = None,
     ) -> DeadLetterEntry:
         """Keep active replay and successful outcomes safe from concurrent operator discard."""
         previous = self._dead_letter(workspace_id, entry_id)
+        if expected_identity is not None and bulk_entry_identity(previous) != expected_identity:
+            raise ImmutableViolation("dead-letter generation changed before discard")
         entry = discard_dead_letter(previous, self._now())
         bulk = self._finished_bulk_item(previous.claim, False) if previous.claim else None
         self._dead_letter_audits.extend(

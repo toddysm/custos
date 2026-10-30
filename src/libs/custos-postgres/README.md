@@ -47,6 +47,16 @@ Metadata revision **12** adds bulk-command selections/progress and per-entry
 command association. Replay completion, its audit and command progress commit
 together; retries cannot reselect another page. Expired selection payloads are
 erased without live related claims, retaining identity tombstones.
+Cleanup rechecks live claims in a fresh statement after locking the command;
+it cannot rely on its candidate-query snapshot.
+
+Revision **13** is the current dead-letter capability prerequisite. It retains
+single-command request/generation hashes independently of entry payload deletion.
+It also persists complete source target selections before any dispatch, so
+redelivery cannot lose removed waits or select newly registered targets. Source
+payloads are erased only after expiry and completion of every selected producer
+receipt; unresolved selections remain recovery evidence. These additions leave
+the general metadata minimum at 4 and the outbox-consumer prerequisite at 12.
 
 Revision 12 also makes the outbox's default ID allocator acquire a shared
 transaction advisory fence before allocating a sequence value. Readers acquire

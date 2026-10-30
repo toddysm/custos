@@ -211,10 +211,15 @@ async def replay_entry(
     entry_id: EntryPath,
     ctx: AdminContext,
     admin: AdminDep,
+    response: Response,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=512)] = None,
 ) -> ReplayResult:
     """Replay once under durable ownership; active or unsafe attempts return a conflict."""
     ensure_workspace(ctx, workspace_id)
-    return ReplayResult(status=await admin.replay(workspace_id, entry_id, ctx.principal_id))
+    key = idempotency_key if idempotency_key is not None else uuid4().hex
+    status = await admin.replay(workspace_id, entry_id, ctx.principal_id, request_key=key)
+    response.headers["Idempotency-Key"] = key
+    return ReplayResult(status=status)
 
 
 @router.post("/deadletter/{entry_id}:discard", status_code=204)
@@ -224,11 +229,15 @@ async def discard_entry(
     ctx: AdminContext,
     admin: AdminDep,
     body: DiscardRequest | None = None,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=512)] = None,
 ) -> Response:
     """Discard and audit atomically, accepting an already-discarded entry idempotently."""
     ensure_workspace(ctx, workspace_id)
-    await admin.discard(workspace_id, entry_id, ctx.principal_id, body.reason if body else None)
-    return Response(status_code=204)
+    key = idempotency_key if idempotency_key is not None else uuid4().hex
+    await admin.discard(
+        workspace_id, entry_id, ctx.principal_id, body.reason if body else None, request_key=key
+    )
+    return Response(status_code=204, headers={"Idempotency-Key": key})
 
 
 @router.post("/deadletter:replay", response_model=BulkResult)

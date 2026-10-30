@@ -907,6 +907,15 @@ async def test_resolved_mapping_is_captured_and_replayed_without_rematching(
         stored.model_copy(update={"input_mapping": {"different": 4}}),
         expected_revision=stored.store_revision,
     )
+    redelivery = await process_scheduled_event(
+        event,
+        subscription_store=store,
+        provider=harness.store,
+        evaluator=SelectorEvaluator(),
+        dispatcher=Dispatcher(client, Deduplicator(harness.store), reliable=reliable),
+        audit=audit,
+    )
+    assert redelivery is not None and redelivery.is_duplicate
     client.error = None
     assert (await reliable.replay(str(_WS), capture.data.entry_id, "operator")).is_dispatched
     assert client.start_run_calls[-1].inputs == expected

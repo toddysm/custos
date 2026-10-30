@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Any, Literal
 
 from custos_cel import FixedClock
 from custos_spl.errors import SPLError
 from custos_spl.interfaces.dead_letters import (
+    DeadLetterData,
     snapshot_dispatch_object,
     validate_dispatch_identifier,
 )
@@ -43,6 +45,11 @@ from custos_trigger.pipeline.classify import classify
 from custos_trigger.pipeline.dispatch import AuditSink, Dispatcher
 from custos_trigger.pipeline.match_resume import ResumeMatch
 from custos_trigger.pipeline.match_start import StartMatcher
+from custos_trigger.pipeline.reliable import (
+    ReliableDispatcher,
+    build_resume_target,
+    build_start_target,
+)
 from custos_trigger.receivers.internal import DeliveryStatus
 from custos_trigger.receivers.scheduled import ScheduledOccurrenceError, process_scheduled_event
 from custos_trigger.selector import SelectorEvaluator, SelectorTypeError
@@ -174,6 +181,29 @@ async def ingest_source_event(
             audit=audit,
         )
         return
+    await reliable.dispatch_event(
+        event,
+        workspace,
+        lambda: _select_source_targets(
+            scoped,
+            reliable=reliable,
+            evaluator=evaluator,
+            subscriptions=subscriptions,
+            resumes=resumes,
+        ),
+    )
+
+
+async def _select_source_targets(
+    scoped: ScopedEvent,
+    *,
+    reliable: ReliableDispatcher,
+    evaluator: SelectorEvaluator,
+    subscriptions: SubscriptionStore,
+    resumes: ResumeSubscriptionStore,
+) -> AsyncIterator[DeadLetterData]:
+    """Prepare all original targets without dispatch; the complete selection commits together."""
+    event, workspace = scoped.event, scoped.workspace_id
     connector = event.source.connector_instance_id
     assert connector is not None
     delivery_mode: Literal["push", "pull"] = (
@@ -217,7 +247,15 @@ async def ingest_source_event(
                         source_type=subscription.source_type,
                     )
 
-                await dispatcher.dispatch_start(event, match, prepare_inputs=prepare_inputs)
+                request = await reliable.prepare_request(
+                    event,
+                    workspace,
+                    sub.subscription_id,
+                    build_start_target(sub),
+                    prepare_inputs=prepare_inputs,
+                )
+                if request is not None:
+                    yield request
             cursor = page.next_cursor
             if cursor is None:
                 break
@@ -261,7 +299,11 @@ async def ingest_source_event(
                     matched = False
                 if matched:
                     resume_match = ResumeMatch(row.resume_id, reg)
-                    await dispatcher.dispatch_resume(event, resume_match, workspace_id=workspace)
+                    request = await reliable.prepare_request(
+                        event, workspace, row.resume_id, build_resume_target(event, resume_match)
+                    )
+                    if request is not None:
+                        yield request
             cursor = resume_page.next_cursor
             if cursor is None:
                 break

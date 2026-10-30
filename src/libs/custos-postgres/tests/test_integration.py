@@ -400,7 +400,7 @@ async def test_metadata_fully_satisfied_after_trigger_query_indexes(pg_pool: Poo
     adapter = PgMetadataAdapter(pool=pg_pool)
     await adapter.apply_pending()
     assert adapter.declared_revisions["MetadataStoreProvider"] == frozenset(
-        {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
+        {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}
     )
 
 

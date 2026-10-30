@@ -372,7 +372,7 @@ class DeliveryStateProvider(Protocol):
         *,
         limit: int | None = None,
     ) -> int:
-        """Erase bounded expired unowned payloads while retaining identity and fencing metadata."""
+        """Erase expired unowned payloads, preserving pending requests in retained source plans."""
         ...
 
     async def complete_delivery(self, claim: DeliveryReceipt, result_json: str) -> DeliveryReceipt:

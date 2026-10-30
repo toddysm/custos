@@ -267,6 +267,19 @@ alias another source's IDs, and a wait accepting both push and pull still
 deduplicates the same logical event across modes. The same ingestion collaborator routes scheduled events
 through canonical occurrence proof and the originating schedule only.
 
+With durable dispatch enabled, all broker receivers persist the complete original
+target selection before sending any request. Redelivery reads that selection
+before consulting current subscriptions or waits: removing a wait cannot lose
+pending delivery, and adding a wait cannot redirect an older event. Selection is
+bounded to 1,000 targets and 8 MiB of encoded request snapshots; exceeding either
+limit requests retry without sending any target. Empty selections are retained
+too. Expired selection payloads are removed only after every selected producer
+receipt is complete; payload-free identities still prevent later rematching.
+Pending selections must remain discoverable for independent reconciliation.
+Receipt cleanup also preserves their unfinished producer snapshots, including
+after the normal receipt horizon. Selection acceptance and receipt cleanup are
+serialized; cleanup cannot erase a newly accepted plan's pending requests.
+
 Callbacks return `SUCCESS` only after successful/duplicate delivery or committed
 dead-letter capture. Storage, ownership and configuration failures request `RETRY`.
 An active subscription revision changing between selection and dispatch also
@@ -370,7 +383,8 @@ The optional
 [`DeadLetterStoreProvider`](../../src/libs/storage-provider-layer/src/custos_spl/interfaces/dead_letters.py)
 persists failed-dispatch inputs and fenced replay state. PostgreSQL metadata
 revision 7 introduced captures; revision 12 adds durable bulk commands and
-per-entry command association and is now required by this capability.
+per-entry command association. Revision 13 adds single-command generation
+bindings and frozen source selections and is now required by this capability.
 The shared metadata minimum remains revision 4.
 `check_dead_letters_ready` rejects missing migrations or unavailable storage.
 The memory provider has the same contracts but is not restart-durable.
@@ -407,8 +421,9 @@ Queries are workspace-scoped, ordered by entry ID and filterable by subscription
 status and inclusive creation-time bounds. Pages default to 50, cap at 200, and
 reject cursors reused with a different workspace or filter.
 
-Claiming atomically consumes an attempt and returns a fresh token and increasing
-epoch. Claims default to 60 seconds, are bounded to 300 seconds, and cannot be
+Claiming a new logical attempt consumes budget and increases its epoch.
+Acknowledgement-pending probes retain that logical attempt but always receive
+a fresh fencing token. Claims default to 60 seconds, are bounded to 300 seconds, and cannot be
 renewed. Another active claimant receives `LeaseBusy`; stale completion receives
 `LeaseExpired`. Expired claims are recoverable with an `interrupted` history
 entry, and the final failed/interrupted attempt becomes `discarded`. Successful
@@ -425,7 +440,7 @@ back deletion.
 
 `TRIGGER_DURABLE_DISPATCH_ENABLED=true` selects the durable dispatcher. It
 requires the upgraded-writer configuration gate, an authenticated Workflow caller
-verifier, metadata revision 8 for delivery receipts and revision 12 for current
+verifier, metadata revision 8 for delivery receipts and revision 13 for current
 dead-letter administration. `WF_TRIGGER_DELIVERY_ENABLED=true` selects the
 matching Workflow endpoint/worker capability. Both flags default to `false`;
 production authentication, activation and operations remain
@@ -513,6 +528,13 @@ require `Content-Type: application/json`, including bodyless replay commands.
 Recovery writes fail with 503 before forwarding when Gateway's metadata
 request-key binding store is unconfigured or unavailable. Reads and unrelated
 writes retain their existing behavior. Production store wiring remains #1017.
+
+Trigger also binds every single-entry key to the inspected entry generation,
+operation and discard reason, and echoes the effective key in successful responses.
+These payload-free bindings survive entry retention. Retrying an old key against
+a deleted/recreated ID returns 409 instead of mutating the replacement; a new
+operation requires a new key. Claim, discard and abandoned-attempt recovery all
+check the inspected generation under the provider's atomic mutation boundary.
 
 Base: `/v1/workspaces/{workspaceId}/triggers/deadletter`.
 

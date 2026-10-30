@@ -29,6 +29,12 @@ from custos_spl.interfaces.dead_letters import (
     recover_replay,
     require_replay,
 )
+from custos_spl.interfaces.delivery import encode_delivery_request
+from custos_spl.interfaces.source_delivery import (
+    MAX_SOURCE_SELECTION_BYTES,
+    MAX_SOURCE_TARGETS,
+    SourceDeliverySelection,
+)
 
 NOW = datetime(2026, 10, 29, tzinfo=UTC)
 
@@ -51,6 +57,30 @@ def data() -> DeadLetterData:
         target={"kind": "start", "workflowVersionId": "wf-v1", "inputs": {}},
         history=(DispatchAttempt(NOW, "transient", 503),),
     )
+
+
+def test_source_selection_validates_scope_bounds_and_immutable_requests(
+    data: DeadLetterData,
+) -> None:
+    """Source intent is complete, bounded and scoped before a provider can accept it."""
+    raw = encode_delivery_request(data)
+    selection = SourceDeliverySelection(data.workspace_id, "source", "a" * 64, NOW, (raw,))
+    assert selection.requests == (raw,)
+    assert replace(selection, requests=None).requests is None
+    boundary = tuple(
+        encode_delivery_request(replace(data, idempotency_key=f"key-{index}"))
+        for index in range(MAX_SOURCE_TARGETS)
+    )
+    assert len(replace(selection, requests=boundary).requests or ()) == 1000
+    for changed in (
+        {"request_hash": "invalid"},
+        {"workspace_id": WorkspaceId("other")},
+        {"requests": (raw, raw)},
+        {"requests": (raw,) * (MAX_SOURCE_TARGETS + 1)},
+        {"requests": ("x" * (MAX_SOURCE_SELECTION_BYTES + 1),)},
+    ):
+        with pytest.raises(ValueError):
+            replace(selection, **changed)
 
 
 def test_roundtrip_and_deep_immutability(data: DeadLetterData) -> None:

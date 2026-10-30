@@ -22,7 +22,7 @@ from custos_spl.ids import WorkspaceId
 from custos_spl.interfaces.metadata_store import AuditEvent
 from custos_spl.pagination import Cursor, Page, decode_query_cursor
 
-DEAD_LETTER_SCHEMA_REVISION = 12
+DEAD_LETTER_SCHEMA_REVISION = 13
 MAX_PAYLOAD_BYTES = 262_144
 MAX_INITIAL_ATTEMPTS = 64
 MAX_REPLAY_ATTEMPTS = 100
@@ -734,7 +734,13 @@ class DeadLetterStoreProvider(Protocol):
     """Optional metadata capability; no worker, authorization or Workflow RPC is implied."""
 
     async def check_dead_letters_ready(self) -> None:
-        """Require revision 12 without changing the general metadata revision-4 minimum."""
+        """Require revision 13 without changing the general metadata revision-4 minimum."""
+        ...
+
+    async def bind_dead_letter_command(
+        self, workspace_id: WorkspaceId, command_id: str, request_hash: str, entry_identity: str
+    ) -> None:
+        """Permanently bind a recovery key to its request and generation, retaining only hashes."""
         ...
 
     async def put_dead_letter(self, data: DeadLetterData) -> DeadLetterEntry:
@@ -769,7 +775,7 @@ class DeadLetterStoreProvider(Protocol):
         bulk_token: str | None = None,
         expected_identity: str | None = None,
     ) -> DeadLetterEntry:
-        """Claim pending/abandoned work atomically; consume an attempt before any remote effect."""
+        """Claim atomically with a fresh token; pending-ack probes reuse their logical attempt."""
         ...
 
     async def finish_dead_letter(
@@ -790,8 +796,10 @@ class DeadLetterStoreProvider(Protocol):
         self,
         workspace_id: WorkspaceId,
         entry_id: str,
+        *,
+        expected_identity: str | None = None,
     ) -> DeadLetterEntry:
-        """Audit interrupted claims and final-attempt discard; active claims remain unchanged."""
+        """Recover only the expected generation; active claims remain unchanged."""
         ...
 
     async def discard_dead_letter(
@@ -801,8 +809,9 @@ class DeadLetterStoreProvider(Protocol):
         *,
         actor: str = "trigger-service",
         reason: str | None = None,
+        expected_identity: str | None = None,
     ) -> DeadLetterEntry:
-        """Atomically audit discard, rejecting live claims and preserving successful replay."""
+        """Atomically audit discard, rejecting replaced generations and live/successful replay."""
         ...
 
     async def delete_expired_dead_letter(self, workspace_id: WorkspaceId, entry_id: str) -> bool:

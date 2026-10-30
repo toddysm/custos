@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import timedelta
 from typing import Any, Literal, cast
 from unittest.mock import AsyncMock
@@ -17,17 +18,27 @@ from custos_spl.interfaces.dead_letters import (
     DispatchAttempt,
     json_value,
 )
-from custos_spl.interfaces.delivery import delivery_fingerprint, delivery_identity
+from custos_spl.interfaces.delivery import (
+    decode_delivery_request,
+    delivery_fingerprint,
+    delivery_identity,
+)
 from custos_spl.interfaces.trigger_queries import SubscriptionSnapshot
 
 from custos_trigger.clients import FakeWorkflowServiceClient
-from custos_trigger.clients.workflow import WorkflowClientTransportError
+from custos_trigger.clients.workflow import (
+    RaiseExternalEventRequest,
+    WorkflowClientAcknowledgementPending,
+    WorkflowClientTransportError,
+)
 from custos_trigger.dedup import compute_dispatch_key
 from custos_trigger.errors import TriggerError
-from custos_trigger.models import ResumeRegistration, SourceType
+from custos_trigger.models import ResumeRegistration, SourceType, Subscription
+from custos_trigger.normalize import normalize_workflow_event
 from custos_trigger.pipeline.dispatch import NoopAuditSink
 from custos_trigger.pipeline.reliable import build_start_target
 from custos_trigger.providers import InMemoryTriggerMetadataStore
+from custos_trigger.receivers.internal import process_workflow_event
 from custos_trigger.receivers.sources import (
     SOURCE_PAGE_SIZE,
     adapt_connector_event,
@@ -82,6 +93,20 @@ async def consume(
         audit=NoopAuditSink(),
         scheduler=store,
     )
+
+
+class PendingResumeClient(FakeWorkflowServiceClient):
+    """Record uncertain resume sends until the test simulates consumer recovery."""
+
+    pending = True
+
+    async def raise_external_event(
+        self, run_id: str, step_id: str, request: RaiseExternalEventRequest
+    ) -> None:
+        """Persist the test observation while withholding durable consumption acknowledgement."""
+        await super().raise_external_event(run_id, step_id, request)
+        if self.pending:
+            raise WorkflowClientAcknowledgementPending()
 
 
 @pytest.mark.parametrize("mode", ["push", "pull"])
@@ -146,6 +171,181 @@ async def test_resume_only_source_needs_no_payload_routing_ids(
     assert (run, step, request.workspace_id) == ("stored-only", "stored-step", WS)
     assert request.payload == body["payload"]
     assert request.event_name == "image-ready"
+
+
+async def test_redelivery_recovers_original_selection_after_waits_change(
+    source_store: SourceStorage,
+) -> None:
+    """Pending acknowledgement cannot lose other selected waits or deliver to a newly added wait."""
+    identifiers = [
+        await resume(source_store, "original-one"),
+        await resume(source_store, "original-two"),
+    ]
+
+    client = PendingResumeClient()
+    with pytest.raises(TriggerError, match="acknowledgement is pending"):
+        await consume(source_store, client)
+    assert len(client.raise_event_calls) == 1
+    for identifier in identifiers:
+        await ResumeSubscriptionStore(source_store).cancel(WS, identifier)
+    await resume(source_store, "new-wait")
+    client.pending = False
+    await consume(source_store, client)
+    assert {run for run, _, _ in client.raise_event_calls} == {"original-one", "original-two"}
+    assert len(client.raise_event_calls) == 3
+    await consume(source_store, client)
+    assert len(client.raise_event_calls) == 3
+
+
+async def test_source_selection_retention_requires_all_receipts_completed(
+    source_store: SourceStorage,
+) -> None:
+    """Even expired plans retain pending targets; completed tombstones prevent future rematching."""
+    await resume(source_store, "original")
+    client = PendingResumeClient()
+    with pytest.raises(TriggerError):
+        await consume(source_store, client)
+    event = adapt_connector_event(connector_event()).event
+    key = delivery_identity(
+        event.source.type.value, compute_dispatch_key("source-selection-v1", event)
+    )
+    selection = await source_store.get_source_delivery(WorkspaceId(WS), key)
+    assert selection is not None and selection.requests is not None
+    receipt_key = decode_delivery_request(
+        selection.requests[0], selection.expires_at
+    ).idempotency_key
+    if isinstance(source_store, InMemoryTriggerMetadataStore):
+        source_store._source_deliveries[(WS, key)] = replace(selection, expires_at=NOW)
+        row_key = (WS, "trigger", receipt_key)
+        source_store._delivery_rows[row_key] = replace(
+            source_store._delivery_rows[row_key], retain_until=NOW
+        )
+    else:
+        assert isinstance(source_store, PgMetadataAdapter)
+        pool = await source_store._pool_ref()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE custos_state.source_delivery_selection SET expires_at=clock_timestamp() "
+                "WHERE workspace_id=$1 AND key=$2",
+                WS,
+                key,
+            )
+            await conn.execute(
+                "UPDATE custos_state.delivery_receipt SET retain_until=clock_timestamp() "
+                "WHERE workspace_id=$1 AND namespace='trigger' AND key=$2",
+                WS,
+                receipt_key,
+            )
+    assert await source_store.clear_expired_delivery_requests(WorkspaceId(WS)) == 0
+    assert await source_store.purge_source_delivery_selections(WorkspaceId(WS)) == 0
+    client.pending = False
+    await consume(source_store, client)
+    assert await source_store.purge_source_delivery_selections(WorkspaceId(WS)) == 1
+    tombstone = await source_store.get_source_delivery(WorkspaceId(WS), key)
+    assert tombstone is not None and tombstone.requests is None
+    assert tombstone.request_hash == selection.request_hash
+    await resume(source_store, "late")
+    await consume(source_store, client)
+    assert len(client.raise_event_calls) == 2
+    changed = connector_event()
+    changed["payload"]["amount"] = 99
+    with pytest.raises(TriggerError, match="selection is not acknowledged"):
+        await consume(source_store, client, payload=changed)
+    assert len(client.raise_event_calls) == 2
+
+
+async def test_source_selection_failure_precedes_every_effect(
+    source_store: SourceStorage,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed plan commit cannot dispatch even the first selected target."""
+    await start(source_store, "first")
+    await resume(source_store, "second")
+    monkeypatch.setattr(
+        source_store, "put_source_delivery", AsyncMock(side_effect=BackendUnavailable("offline"))
+    )
+    client = FakeWorkflowServiceClient()
+    with pytest.raises(TriggerError, match="selection is not acknowledged"):
+        await consume(source_store, client)
+    assert not client.start_run_calls and not client.raise_event_calls
+
+
+async def test_internal_redelivery_uses_the_same_accepted_target_selection(
+    source_store: SourceStorage,
+) -> None:
+    """Durable internal callbacks cannot lose a removed wait or select a late start target."""
+    from custos_trigger.api.routes.rpc import compute_resume_id
+
+    now = await source_store.delivery_now()
+    event = normalize_workflow_event(
+        {
+            "workflowVersionId": "source-version",
+            "workspace": WS,
+            "runId": "original",
+            "stepId": "step",
+            "occurredAt": now.isoformat(),
+            "status": "succeeded",
+        }
+    )
+    registration = ResumeRegistration(
+        workspace_id=WS,
+        run_id="original",
+        step_id="step",
+        event_key=event.kind,
+        delivery_protocol=2,
+    )
+    identifier = compute_resume_id("original", "step", event.kind)
+    resumes = ResumeSubscriptionStore(source_store)
+    subscriptions = SubscriptionStore(source_store)
+    await resumes.register(
+        registration, workspace_id=WS, resume_id=identifier, expires_at=now + timedelta(hours=1)
+    )
+    first = Subscription(
+        workspace_id=WS,
+        subscription_id="first",
+        workflow_id="workflow",
+        target_workflow_version_id="target",
+        source_type=SourceType.INTERNAL,
+        selector="true",
+        input_mapping={},
+        created_at=now,
+        updated_at=now,
+    )
+    await subscriptions.create(first)
+    client = PendingResumeClient()
+
+    async def internal() -> None:
+        """Create a fresh dispatcher for each delivery, using only persisted accepted intent."""
+        await process_workflow_event(
+            event,
+            dispatcher=dispatcher(source_store, client),
+            evaluator=SelectorEvaluator(),
+            subscription_store=subscriptions,
+            resume_store=resumes,
+            now=lambda: now,
+        )
+
+    with pytest.raises(TriggerError, match="acknowledgement is pending"):
+        await internal()
+    await resumes.cancel(WS, identifier)
+    await subscriptions.create(first.model_copy(update={"subscription_id": "late"}))
+    client.pending = False
+    await internal()
+    assert len(client.start_run_calls) == 1
+    assert len(client.raise_event_calls) == 2
+    assert {run for run, _, _ in client.raise_event_calls} == {"original"}
+
+
+async def test_empty_source_selection_does_not_match_late_registrations(
+    source_store: SourceStorage,
+) -> None:
+    """An acknowledged no-match event stays a no-match after source intent changes."""
+    client = FakeWorkflowServiceClient()
+    await consume(source_store, client)
+    await start(source_store, "late")
+    await resume(source_store, "late")
+    await consume(source_store, client)
+    assert not client.start_run_calls and not client.raise_event_calls
 
 
 async def test_downstream_failure_is_durably_captured_before_ack(

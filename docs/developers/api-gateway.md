@@ -313,7 +313,11 @@ the concrete entry path and body, but identical retries always reconcile with
 Trigger's durable per-entry claims instead of replaying an HTTP snapshot.
 This keeps temporary 409/503 outcomes retryable while rejecting the same key on
 a different entry or body. Successful entry replay/discard remains idempotent in
-Trigger. These recovery writes require a configured metadata binding store:
+Trigger.
+Trigger additionally retains each single-entry key's original generation;
+payload deletion and ID recreation cannot rebind the operation. Successful
+responses echo the effective key. These writes require a configured metadata
+binding store:
 absence or outage returns 503 before forwarding. Ordinary write behavior is
 unchanged. Bulk continuation uses a filter-bound cursor and a new key for each
 page; retry the same page with its original key. See the

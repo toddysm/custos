@@ -86,6 +86,7 @@ from custos_spl.interfaces.delivery import (
     DeliveryReceipt,
     WorkflowMirror,
     WorkflowStart,
+    decode_delivery_request,
     delivery_instant,
     delivery_result,
     encode_delivery_request,
@@ -150,6 +151,7 @@ from custos_spl.interfaces.scheduler import (
     utc_instant,
     validate_schedule_discard,
 )
+from custos_spl.interfaces.source_delivery import SourceDeliverySelection
 from custos_spl.interfaces.trigger_queries import SubscriptionSnapshot, prepare_subscription_write
 from custos_spl.middleware.transactions import bind_handle, check_handle
 from custos_spl.pagination import (
@@ -174,6 +176,7 @@ from custos_pg.migrations.metadata import (
     METADATA_REV10,
     METADATA_REV11,
     METADATA_REV12,
+    METADATA_REV13,
 )
 from custos_pg.pool import LazyPool, read_dsn_from_env
 from custos_pg.revisions import ensure_ledger, read_declared, record_revision
@@ -650,6 +653,7 @@ class PgMetadataAdapter:
                 METADATA_REV10,
                 METADATA_REV11,
                 METADATA_REV12,
+                METADATA_REV13,
             ):
                 if rev.number in already:
                     continue
@@ -917,16 +921,30 @@ class PgMetadataAdapter:
         *,
         limit: int | None = None,
     ) -> int:
-        """Erase expired payloads without stealing ownership or deleting receipt identities."""
+        """Erase expired unowned payloads without losing accepted source-selection recovery."""
         validate_delivery_key(workspace_id, "trigger", "cleanup")
         size = query_page_limit(limit)
         async with self._delivery_transaction() as conn:
+            await self._lock_source_selections(conn, workspace_id)
+            has_selections = await conn.fetchval(
+                "SELECT to_regclass('custos_state.source_delivery_selection') IS NOT NULL"
+            )
+            protection = (
+                "AND (result_json IS NOT NULL OR NOT EXISTS ("
+                "SELECT 1 FROM custos_state.source_delivery_selection s "
+                "WHERE s.workspace_id=d.workspace_id AND s.payload IS NOT NULL "
+                "AND d.key=ANY(s.delivery_keys))) "
+                if has_selections
+                else ""
+            )
             rows = await conn.fetch(
                 "WITH candidates AS (SELECT workspace_id,namespace,key "
-                "FROM custos_state.delivery_receipt WHERE workspace_id=$1 AND namespace='trigger' "
+                "FROM custos_state.delivery_receipt d "
+                "WHERE workspace_id=$1 AND namespace='trigger' "
                 "AND request_json IS NOT NULL AND retain_until<=clock_timestamp() "
                 "AND (lease_until IS NULL OR lease_until<=clock_timestamp()) "
-                'ORDER BY key COLLATE "C" LIMIT $2 FOR UPDATE SKIP LOCKED) '
+                + protection
+                + 'ORDER BY key COLLATE "C" LIMIT $2 FOR UPDATE SKIP LOCKED) '
                 "UPDATE custos_state.delivery_receipt AS receipt SET request_json=NULL "
                 "FROM candidates WHERE receipt.workspace_id=candidates.workspace_id "
                 "AND receipt.namespace=candidates.namespace AND receipt.key=candidates.key "
@@ -1344,15 +1362,21 @@ class PgMetadataAdapter:
                 workspace_id,
                 limit,
             )
+            erased = 0
             for row in rows:
-                await conn.execute(
-                    "UPDATE custos_state.bulk_replay_command "
+                updated = await conn.fetchval(
+                    "UPDATE custos_state.bulk_replay_command c "
                     "SET payload=NULL,lease_token=NULL,lease_until=NULL "
-                    "WHERE workspace_id=$1 AND command_id=$2",
+                    "WHERE c.workspace_id=$1 AND c.command_id=$2 AND c.payload IS NOT NULL "
+                    "AND c.expires_at<=clock_timestamp() "
+                    "AND NOT EXISTS(SELECT 1 FROM custos_state.dead_letter d "
+                    "WHERE d.workspace_id=c.workspace_id AND d.bulk_command_id=c.command_id "
+                    "AND d.claim_expires_at>clock_timestamp()) RETURNING command_id",
                     workspace_id,
                     row["command_id"],
                 )
-            return len(rows)
+                erased += updated is not None
+            return erased
 
     async def _locked_dead_letter(
         self,
@@ -1416,6 +1440,141 @@ class PgMetadataAdapter:
         )
         if updated is None:
             raise LeaseExpired("dead-letter retention or claim expired before mutation")
+
+    @staticmethod
+    async def _lock_source_selections(conn: Connection, workspace_id: WorkspaceId) -> None:
+        """Serialize source acceptance with receipt cleanup before either reads its snapshot."""
+        await conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+            json.dumps(["source-selection", workspace_id]),
+        )
+
+    async def _source_delivery_row(
+        self, conn: Connection, workspace_id: WorkspaceId, key: str
+    ) -> SourceDeliverySelection | None:
+        """Decode a committed selection without interpreting a missing payload as new intent."""
+        row = await conn.fetchrow(
+            "SELECT request_hash,expires_at,payload::text "
+            "FROM custos_state.source_delivery_selection "
+            "WHERE workspace_id=$1 AND key=$2",
+            workspace_id,
+            key,
+        )
+        if row is None:
+            return None
+        return SourceDeliverySelection(
+            workspace_id,
+            key,
+            row["request_hash"],
+            row["expires_at"],
+            tuple(json.loads(row["payload"])) if row["payload"] is not None else None,
+        )
+
+    async def get_source_delivery(
+        self, workspace_id: WorkspaceId, key: str
+    ) -> SourceDeliverySelection | None:
+        """Read the first accepted event targets independently of current registration state."""
+        async with self._dead_letter_transaction() as conn:
+            return await self._source_delivery_row(conn, workspace_id, key)
+
+    async def put_source_delivery(
+        self, selection: SourceDeliverySelection
+    ) -> SourceDeliverySelection:
+        """Resolve concurrent planners through a unique key before any remote effects."""
+        if selection.requests is None:
+            raise ValueError("new source selection requires retained requests")
+        keys = [
+            decode_delivery_request(raw, selection.expires_at).idempotency_key
+            for raw in selection.requests
+        ]
+        async with self._dead_letter_transaction() as conn:
+            await self._lock_source_selections(conn, selection.workspace_id)
+            current = await self._source_delivery_row(conn, selection.workspace_id, selection.key)
+            if current is not None:
+                if current.request_hash != selection.request_hash:
+                    raise ImmutableViolation("source event identity is bound to another request")
+                return current
+            missing = await conn.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM custos_state.delivery_receipt "
+                "WHERE workspace_id=$1 AND namespace='trigger' AND key=ANY($2::text[]) "
+                "AND result_json IS NULL AND request_json IS NULL)",
+                selection.workspace_id,
+                keys,
+            )
+            if missing:
+                raise ImmutableViolation("pending delivery lost its original request")
+            await conn.execute(
+                "INSERT INTO custos_state.source_delivery_selection "
+                "(workspace_id,key,request_hash,expires_at,delivery_keys,payload) "
+                "VALUES($1,$2,$3,$4,$5,$6::json) ON CONFLICT(workspace_id,key) DO NOTHING",
+                selection.workspace_id,
+                selection.key,
+                selection.request_hash,
+                selection.expires_at,
+                keys,
+                json.dumps(selection.requests, ensure_ascii=False),
+            )
+            current = await self._source_delivery_row(conn, selection.workspace_id, selection.key)
+            if current is None or current.request_hash != selection.request_hash:
+                raise ImmutableViolation("source event identity is bound to another request")
+            return current
+
+    async def purge_source_delivery_selections(
+        self, workspace_id: WorkspaceId, *, limit: int = 100
+    ) -> int:
+        """Retain incomplete source plans even past expiry; completed receipt state is monotonic."""
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("source cleanup limit must be 1..100")
+        async with self._dead_letter_transaction() as conn:
+            rows = await conn.fetch(
+                "SELECT s.key FROM custos_state.source_delivery_selection s "
+                "WHERE s.workspace_id=$1 AND s.expires_at<=clock_timestamp() "
+                "AND s.payload IS NOT NULL AND NOT EXISTS ("
+                "SELECT 1 FROM unnest(s.delivery_keys) AS selected(key) "
+                "LEFT JOIN custos_state.delivery_receipt d "
+                "ON d.workspace_id=s.workspace_id AND d.namespace='trigger' AND d.key=selected.key "
+                "WHERE d.result_json IS NULL) "
+                "ORDER BY s.key LIMIT $2 FOR UPDATE OF s SKIP LOCKED",
+                workspace_id,
+                limit,
+            )
+            for row in rows:
+                await conn.execute(
+                    "UPDATE custos_state.source_delivery_selection "
+                    "SET payload=NULL,delivery_keys='{}' "
+                    "WHERE workspace_id=$1 AND key=$2",
+                    workspace_id,
+                    row["key"],
+                )
+            return len(rows)
+
+    async def bind_dead_letter_command(
+        self, workspace_id: WorkspaceId, command_id: str, request_hash: str, entry_identity: str
+    ) -> None:
+        """Preserve the first request/generation binding through payload expiry and recreation."""
+        for value in (workspace_id, command_id, request_hash, entry_identity):
+            validate_dispatch_identifier(value)
+        async with self._dead_letter_transaction() as conn:
+            await conn.execute(
+                "INSERT INTO custos_state.dead_letter_command "
+                "(workspace_id,command_id,request_hash,entry_identity) VALUES($1,$2,$3,$4) "
+                "ON CONFLICT(workspace_id,command_id) DO NOTHING",
+                workspace_id,
+                command_id,
+                request_hash,
+                entry_identity,
+            )
+            row = await conn.fetchrow(
+                "SELECT request_hash,entry_identity FROM custos_state.dead_letter_command "
+                "WHERE workspace_id=$1 AND command_id=$2",
+                workspace_id,
+                command_id,
+            )
+            if row is None or (row["request_hash"], row["entry_identity"]) != (
+                request_hash,
+                entry_identity,
+            ):
+                raise ImmutableViolation("recovery key is bound to another request or generation")
 
     async def claim_dead_letter(
         self,
@@ -1483,13 +1642,15 @@ class PgMetadataAdapter:
             return entry
 
     async def recover_dead_letter(
-        self, workspace_id: WorkspaceId, entry_id: str
+        self, workspace_id: WorkspaceId, entry_id: str, *, expected_identity: str | None = None
     ) -> DeadLetterEntry:
-        """Persist interrupted history even when an abandoned final attempt exhausts the limit."""
+        """Recover only the inspected generation, checking its identity under the row lock."""
         async with self._dead_letter_transaction() as conn:
             current = await self._locked_dead_letter(conn, workspace_id, entry_id)
             if current is None:
                 raise ImmutableViolation("dead-letter entry does not exist")
+            if expected_identity is not None and bulk_entry_identity(current) != expected_identity:
+                raise ImmutableViolation("dead-letter generation changed before recovery")
             entry = recover_replay(current, await _scheduler_now(conn))
             if entry != current:
                 await self._write_dead_letter(conn, entry)
@@ -1505,12 +1666,15 @@ class PgMetadataAdapter:
         *,
         actor: str = "trigger-service",
         reason: str | None = None,
+        expected_identity: str | None = None,
     ) -> DeadLetterEntry:
         """Serialize operator discard against replay acquisition/completion."""
         async with self._dead_letter_transaction() as conn:
             current = await self._locked_dead_letter(conn, workspace_id, entry_id)
             if current is None:
                 raise ImmutableViolation("dead-letter entry does not exist")
+            if expected_identity is not None and bulk_entry_identity(current) != expected_identity:
+                raise ImmutableViolation("dead-letter generation changed before discard")
             entry = discard_dead_letter(current, await _scheduler_now(conn))
             await self._write_dead_letter(conn, entry)
             if current.claim is not None:

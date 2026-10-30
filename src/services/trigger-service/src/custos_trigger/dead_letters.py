@@ -25,7 +25,7 @@ from custos_spl.interfaces.dead_letters import (
     DeadLetterFilter,
     validate_dispatch_identifier,
 )
-from custos_spl.interfaces.delivery import delivery_identity
+from custos_spl.interfaces.delivery import delivery_fingerprint, delivery_identity
 from custos_spl.pagination import Cursor, Page
 
 from custos_trigger.errors import TriggerError, TriggerErrorKind
@@ -145,16 +145,44 @@ class DeadLetterAdmin:
                 logger.info("Invalid dead-letter pagination cursor")
                 raise DeadLetterAdminError("invalid", "Invalid pagination cursor.") from exc
 
+    async def _bind_command(
+        self,
+        entry: DeadLetterEntry,
+        actor: str,
+        request_key: str | None,
+        operation: Literal["replay", "discard"],
+        reason: str | None = None,
+    ) -> None:
+        """Bind single-entry retries before effects, including already-terminal responses."""
+        key = request_key if request_key is not None else uuid4().hex
+        try:
+            validate_dispatch_identifier(key)
+        except ValueError as exc:
+            logger.info("Invalid recovery idempotency key")
+            raise DeadLetterAdminError("invalid", "Invalid recovery idempotency key.") from exc
+        await self.store.bind_dead_letter_command(
+            entry.data.workspace_id,
+            delivery_identity(entry.data.workspace_id, actor, key),
+            delivery_fingerprint(
+                {"operation": operation, "entryId": entry.data.entry_id, "reason": reason}
+            ),
+            bulk_entry_identity(entry),
+        )
+
     async def _replay(
         self,
         workspace: str,
         entry_id: str,
         actor: str,
         bulk: BulkReplayCommand | None = None,
+        *,
+        request_key: str | None = None,
     ) -> Literal["pending", "discarded", "replayed"]:
         """Replay the original target, reconciling successful concurrent/repeated requests."""
         entry = await self._entry(workspace, entry_id)
         identity = bulk_entry_identity(entry)
+        if bulk is None:
+            await self._bind_command(entry, actor, request_key, "replay")
         if bulk is not None:
             try:
                 require_bulk_entry(bulk, entry, actor)
@@ -202,20 +230,33 @@ class DeadLetterAdmin:
         workspace: str,
         entry_id: str,
         actor: str,
+        *,
+        request_key: str | None = None,
     ) -> Literal["pending", "discarded", "replayed"]:
         """Bound a single replay, acknowledging success only after durable completion."""
         async with _operation():
-            return await self._replay(workspace, entry_id, actor)
+            return await self._replay(workspace, entry_id, actor, request_key=request_key)
 
     async def discard(
-        self, workspace: str, entry_id: str, actor: str, reason: str | None = None
+        self,
+        workspace: str,
+        entry_id: str,
+        actor: str,
+        reason: str | None = None,
+        *,
+        request_key: str | None = None,
     ) -> None:
         """Atomically audit discard; repeated discard is idempotent and active replay conflicts."""
         async with _operation():
-            await self._entry(workspace, entry_id)
+            entry = await self._entry(workspace, entry_id)
+            await self._bind_command(entry, actor, request_key, "discard", reason)
             try:
                 await self.store.discard_dead_letter(
-                    WorkspaceId(workspace), entry_id, actor=actor, reason=reason
+                    WorkspaceId(workspace),
+                    entry_id,
+                    actor=actor,
+                    reason=reason,
+                    expected_identity=bulk_entry_identity(entry),
                 )
             except ImmutableViolation:
                 await self._entry(workspace, entry_id)

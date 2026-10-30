@@ -48,6 +48,9 @@ REV12 persists stable bulk-replay selection/progress and per-entry command
 association. The optional dead-letter capability requires it; the general
 metadata minimum remains revision 4. A shared advisory fence in the outbox ID
 allocator permits commit-safe draining without granting readers mutation privileges.
+
+REV13 retains single-entry recovery key/generation bindings and immutable
+source-event target selections independently of mutable subscriptions.
 """
 
 from __future__ import annotations
@@ -683,6 +686,38 @@ METADATA_REV12 = Revision(
 )
 
 
+METADATA_REV13 = Revision(
+    number=13,
+    statements=(
+        """
+        CREATE TABLE IF NOT EXISTS custos_state.dead_letter_command (
+            workspace_id TEXT NOT NULL,
+            command_id TEXT NOT NULL,
+            request_hash TEXT NOT NULL,
+            entry_identity TEXT NOT NULL,
+            PRIMARY KEY (workspace_id, command_id)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS custos_state.source_delivery_selection (
+            workspace_id TEXT NOT NULL,
+            key TEXT NOT NULL,
+            request_hash TEXT NOT NULL,
+            expires_at TIMESTAMPTZ NOT NULL,
+            delivery_keys TEXT[] NOT NULL,
+            payload JSON,
+            PRIMARY KEY (workspace_id, key)
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS source_delivery_selection_expiration
+            ON custos_state.source_delivery_selection (workspace_id, expires_at, key)
+            WHERE payload IS NOT NULL
+        """,
+    ),
+)
+
+
 __all__ = [
     "AUDIT_OUTBOX_LOCK_KEY",
     "METADATA_REV1",
@@ -697,4 +732,5 @@ __all__ = [
     "METADATA_REV10",
     "METADATA_REV11",
     "METADATA_REV12",
+    "METADATA_REV13",
 ]

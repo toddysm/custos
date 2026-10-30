@@ -20,6 +20,7 @@ from custos_spl.interfaces.delivery import (
     DeliveryReceipt,
     WorkflowMirror,
     WorkflowStart,
+    decode_delivery_request,
     delivery_instant,
     delivery_result,
     encode_delivery_request,
@@ -29,6 +30,7 @@ from custos_spl.interfaces.delivery import (
     validate_failure_capture,
 )
 from custos_spl.interfaces.metadata_store import AuditEvent, Run
+from custos_spl.interfaces.source_delivery import SourceDeliverySelection
 from custos_spl.pagination import (
     Cursor,
     Page,
@@ -50,6 +52,59 @@ class MemoryDeliveryState:
         self._workflow_starts: dict[tuple[str, str], WorkflowStart] = {}
         self._delivery_dead_letters: dict[tuple[str, str], DeadLetterEntry] = {}
         self._dead_letter_audits: list[AuditEvent] = []
+        self._source_deliveries: dict[tuple[str, str], SourceDeliverySelection] = {}
+
+    async def get_source_delivery(
+        self, workspace_id: WorkspaceId, key: str
+    ) -> SourceDeliverySelection | None:
+        """Return accepted targets, including completed payload-free identities."""
+        return self._source_deliveries.get((workspace_id, key))
+
+    async def put_source_delivery(
+        self, selection: SourceDeliverySelection
+    ) -> SourceDeliverySelection:
+        """Publish the complete first selection without yielding or replacing concurrent intent."""
+        if selection.requests is None:
+            raise ValueError("new source selection requires retained requests")
+        current = self._source_deliveries.get((selection.workspace_id, selection.key))
+        if current is None:
+            for raw in selection.requests:
+                data = decode_delivery_request(raw, self._delivery_clock())
+                row = self._delivery_rows.get(
+                    (selection.workspace_id, "trigger", data.idempotency_key)
+                )
+                if row is not None and not row.completed and row.request_json is None:
+                    raise ImmutableViolation("pending delivery lost its original request")
+            self._source_deliveries[(selection.workspace_id, selection.key)] = selection
+            return selection
+        if current.request_hash != selection.request_hash:
+            raise ImmutableViolation("source event identity is bound to another request")
+        return current
+
+    async def purge_source_delivery_selections(
+        self, workspace_id: WorkspaceId, *, limit: int = 100
+    ) -> int:
+        """Remove expired snapshots only after every immutable producer receipt is completed."""
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("source cleanup limit must be 1..100")
+        erased = 0
+        now = self._delivery_clock()
+        for key, selection in sorted(self._source_deliveries.items()):
+            if key[0] != workspace_id or selection.requests is None or selection.expires_at > now:
+                continue
+            receipts = [
+                self._delivery_rows.get(
+                    (workspace_id, "trigger", decode_delivery_request(raw, now).idempotency_key)
+                )
+                for raw in selection.requests
+            ]
+            if not all(row is not None and row.completed for row in receipts):
+                continue
+            self._source_deliveries[key] = replace(selection, requests=None)
+            erased += 1
+            if erased == limit:
+                break
+        return erased
 
     @property
     def dead_letter_audits(self) -> tuple[AuditEvent, ...]:
@@ -200,15 +255,22 @@ class MemoryDeliveryState:
         *,
         limit: int | None = None,
     ) -> int:
-        """Erase only expired snapshots without a live producer, leaving proof metadata intact."""
+        """Erase expired unowned snapshots unless a pending source selection still needs them."""
         validate_delivery_key(workspace_id, "trigger", "cleanup")
         now, size = delivery_instant(self._delivery_clock()), query_page_limit(limit)
+        protected = {
+            decode_delivery_request(raw, now).idempotency_key
+            for selection in self._source_deliveries.values()
+            if selection.workspace_id == workspace_id
+            for raw in selection.requests or ()
+        }
         keys = sorted(
             key
             for key, row in self._delivery_rows.items()
             if row.workspace_id == workspace_id
             and row.namespace == "trigger"
             and row.request_json is not None
+            and (row.completed or row.key not in protected)
             and row.retain_until <= now
             and (row.lease_until is None or row.lease_until <= now)
         )[:size]

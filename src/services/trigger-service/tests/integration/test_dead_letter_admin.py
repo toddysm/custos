@@ -380,6 +380,139 @@ async def test_bulk_does_not_count_an_already_replayed_replacement(
     assert not client.start_run_calls
 
 
+@pytest.mark.parametrize("operation", ["discard", "replay"])
+async def test_recovery_mutations_preserve_replacement_generation(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    """Neither operator discard nor exhausted-claim recovery may mutate a recreated ID."""
+    client = FakeWorkflowServiceClient()
+    admin = administration(harness, client)
+    data = capture()
+    data = replace(data, target={**data.target, "deliveryProtocol": 2})
+    await harness.store.put_dead_letter(data)
+    claim = harness.store.claim_dead_letter
+    discard = harness.store.discard_dead_letter
+    replacement: DeadLetterEntry | None = None
+
+    async def recreate() -> None:
+        """Replace the inspected entry; replay recovery also encounters an expired final claim."""
+        nonlocal replacement
+        entry = await harness.store.get_dead_letter(WS, "entry")
+        assert entry is not None
+        if harness.pool is None:
+            assert isinstance(harness.store, InMemoryTriggerMetadataStore)
+            harness.store._dead_letters[(str(WS), "entry")] = replace(
+                entry, expires_at=harness.clock[0]
+            )
+        else:
+            await harness.expire(entry, retention=True)
+        assert await harness.store.delete_expired_dead_letter(WS, "entry")
+        await harness.store.put_dead_letter(
+            replace(data, idempotency_key="replacement", max_replay_attempts=1)
+        )
+        if operation == "replay":
+            await harness.expire(await claim(WS, "entry", "another"))
+        replacement = await harness.store.get_dead_letter(WS, "entry")
+
+    async def replace_then_discard(
+        workspace: WorkspaceId,
+        identifier: str,
+        *,
+        actor: str = "trigger-service",
+        reason: str | None = None,
+        expected_identity: str | None = None,
+    ) -> DeadLetterEntry:
+        """Recreate at the boundary between inspection and locked operator mutation."""
+        await recreate()
+        return await discard(
+            workspace, identifier, actor=actor, reason=reason, expected_identity=expected_identity
+        )
+
+    async def replace_then_claim(
+        workspace: WorkspaceId,
+        identifier: str,
+        actor: str,
+        *,
+        ttl_seconds: int = 60,
+        bulk_id: str | None = None,
+        bulk_token: str | None = None,
+        expected_identity: str | None = None,
+    ) -> DeadLetterEntry:
+        """A generation failure must not recover the replacement's expired claim afterward."""
+        await recreate()
+        return await claim(
+            workspace,
+            identifier,
+            actor,
+            ttl_seconds=ttl_seconds,
+            bulk_id=bulk_id,
+            bulk_token=bulk_token,
+            expected_identity=expected_identity,
+        )
+
+    monkeypatch.setattr(
+        harness.store,
+        "discard_dead_letter" if operation == "discard" else "claim_dead_letter",
+        replace_then_discard if operation == "discard" else replace_then_claim,
+    )
+    with pytest.raises(DeadLetterAdminError):
+        if operation == "discard":
+            await admin.discard(str(WS), "entry", "operator")
+        else:
+            await admin.replay(str(WS), "entry", "operator")
+    assert replacement is not None
+    assert await harness.store.get_dead_letter(WS, "entry") == replacement
+    assert not client.start_run_calls
+
+
+@pytest.mark.parametrize("operation", ["discard", "replay"])
+async def test_single_http_key_cannot_rebind_after_entry_recreation(
+    harness: Harness, operation: str
+) -> None:
+    """A retained key cannot act on a replacement after retention removes the original success."""
+    client = FakeWorkflowServiceClient()
+    admin = administration(harness, client)
+    data = capture()
+    data = replace(data, target={**data.target, "deliveryProtocol": 2})
+    await harness.store.put_dead_letter(data)
+    store = cast(TriggerMetadataStore, harness.store)
+    app = create_app(
+        authz_endpoint="",
+        providers=Providers(store),
+        dispatcher=Dispatcher(client, Deduplicator(store), reliable=admin.dispatcher),
+    )
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://trigger"
+        ) as http,
+    ):
+        headers = {**HEADERS, "Idempotency-Key": "original-operation"}
+        first = await http.post(BASE + "/entry:" + operation, headers=headers)
+        assert first.status_code == (204 if operation == "discard" else 200)
+        assert first.headers["Idempotency-Key"] == "original-operation"
+        assert (await http.post(BASE + "/entry:" + operation, headers=headers)).status_code == (
+            first.status_code
+        )
+        entry = await harness.store.get_dead_letter(WS, "entry")
+        assert entry is not None
+        await harness.expire(entry, retention=True)
+        assert await harness.store.delete_expired_dead_letter(WS, "entry")
+        replacement = await harness.store.put_dead_letter(
+            replace(data, idempotency_key="replacement")
+        )
+        assert (await http.post(BASE + "/entry:" + operation, headers=headers)).status_code == 409
+        assert await harness.store.get_dead_letter(WS, "entry") == replacement
+        assert len(client.start_run_calls) == (0 if operation == "discard" else 1)
+        fresh = await http.post(
+            BASE + "/entry:" + operation,
+            headers={**HEADERS, "Idempotency-Key": "new-operation"},
+        )
+        assert fresh.status_code == first.status_code
+
+
 async def test_failed_replay_returns_its_own_committed_status(
     harness: Harness,
     monkeypatch: pytest.MonkeyPatch,
@@ -425,11 +558,14 @@ async def test_discard_returns_not_found_after_concurrent_retention(
         *,
         actor: str = "trigger-service",
         reason: str | None = None,
+        expected_identity: str | None = None,
     ) -> DeadLetterEntry:
         """Remove the persisted row before the actual provider tries to mutate it."""
         await harness.expire(entry, retention=True)
         assert await harness.store.delete_expired_dead_letter(workspace, identifier)
-        return await discard(workspace, identifier, actor=actor, reason=reason)
+        return await discard(
+            workspace, identifier, actor=actor, reason=reason, expected_identity=expected_identity
+        )
 
     monkeypatch.setattr(harness.store, "discard_dead_letter", delete_then_discard)
     with pytest.raises(DeadLetterAdminError) as absent:

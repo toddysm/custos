@@ -10,10 +10,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import replace
 from datetime import datetime, timedelta
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from custos_spl.errors import ImmutableViolation, LeaseBusy, SPLError
 from custos_spl.ids import WorkspaceId
@@ -29,6 +29,13 @@ from custos_spl.interfaces.delivery import (
     decode_delivery_request,
     delivery_fingerprint,
     delivery_identity,
+    encode_delivery_request,
+)
+from custos_spl.interfaces.source_delivery import (
+    MAX_SOURCE_SELECTION_BYTES,
+    MAX_SOURCE_TARGETS,
+    SourceDeliverySelection,
+    SourceDeliveryStoreProvider,
 )
 
 from custos_trigger.clients.workflow import (
@@ -107,8 +114,10 @@ def validate_dispatch_limits(
 
 
 @runtime_checkable
-class ReliableStorage(DeliveryStateProvider, DeadLetterStoreProvider, Protocol):
-    """The two optional capabilities required before durable dispatch can be enabled."""
+class ReliableStorage(
+    DeliveryStateProvider, DeadLetterStoreProvider, SourceDeliveryStoreProvider, Protocol
+):
+    """Receipt, immutable source-selection and dead-letter capabilities for durable dispatch."""
 
 
 class ReliableDispatcher:
@@ -133,6 +142,116 @@ class ReliableDispatcher:
         self.client, self.store, self.audit = client, store, audit
         self.max_retries, self.max_depth = max_retries, max_fanout_depth
         self.retention, self.max_replays, self.sleep = retention_seconds, max_replay_attempts, sleep
+
+    def _snapshot(
+        self,
+        event: NormalizedEvent,
+        workspace: str,
+        subscription_id: str,
+        target: Mapping[str, Any],
+        now: datetime,
+    ) -> DeadLetterData:
+        """Validate one original target without performing any external side effect."""
+        key = compute_dispatch_key(subscription_id, event)
+        try:
+            return DeadLetterData(
+                workspace_id=WorkspaceId(workspace),
+                entry_id="dl_" + delivery_identity(workspace, key),
+                subscription_id=subscription_id,
+                idempotency_key=key,
+                event=event.model_dump(by_alias=True, exclude={"raw"}),
+                target=target,
+                history=(DispatchAttempt(now, "configuration"),),
+                retention_seconds=self.retention,
+                max_replay_attempts=self.max_replays,
+            )
+        except (ValueError, UnicodeError) as exc:
+            raise SourceConfigurationError(
+                "dispatch snapshot cannot be retained; correct its configuration"
+            ) from exc
+
+    async def prepare_request(
+        self,
+        event: NormalizedEvent,
+        workspace: str,
+        subscription_id: str,
+        target: Mapping[str, Any],
+        *,
+        prepare_inputs: Callable[[], dict[str, Any]] | None = None,
+    ) -> DeadLetterData | None:
+        """Recover existing producer intent before evaluating a new mapping for selection."""
+        now = await self.store.delivery_now()
+        prior = await self.store.get_delivery(
+            WorkspaceId(workspace), "trigger", compute_dispatch_key(subscription_id, event)
+        )
+        if prior is not None:
+            if prior.completed:
+                return None
+            if prior.request_json is None:
+                raise TriggerError(
+                    TriggerErrorKind.REPLAY_UNSAFE, "original pending request is unavailable"
+                )
+            return decode_delivery_request(prior.request_json, now)
+        if prepare_inputs is not None:
+            target = {**target, "inputs": prepare_inputs()}
+        return self._snapshot(event, workspace, subscription_id, target, now)
+
+    async def dispatch_event(
+        self,
+        event: NormalizedEvent,
+        workspace: str,
+        select: Callable[[], AsyncIterator[DeadLetterData]],
+    ) -> tuple[tuple[Literal["start", "resume"], DispatchOutcome], ...]:
+        """Persist the entire bounded selection before effects; retries never rematch intent."""
+        key = delivery_identity(
+            event.source.type.value, compute_dispatch_key("source-selection-v1", event)
+        )
+        fingerprint = delivery_fingerprint(
+            event.model_dump(mode="json", by_alias=True, exclude={"raw"})
+        )
+        try:
+            selection = await self.store.get_source_delivery(WorkspaceId(workspace), key)
+            if selection is None:
+                requests: list[str] = []
+                size = 0
+                async for data in select():
+                    raw = encode_delivery_request(data)
+                    size += len(raw.encode("utf-8"))
+                    if len(requests) >= MAX_SOURCE_TARGETS or size > MAX_SOURCE_SELECTION_BYTES:
+                        raise SourceConfigurationError(
+                            "source selection exceeds its bounded limits"
+                        )
+                    requests.append(raw)
+                selection = await self.store.put_source_delivery(
+                    SourceDeliverySelection(
+                        WorkspaceId(workspace),
+                        key,
+                        fingerprint,
+                        await self.store.delivery_now() + timedelta(seconds=self.retention),
+                        tuple(requests),
+                    )
+                )
+            if selection.request_hash != fingerprint:
+                raise ImmutableViolation("source event identity is bound to another request")
+            outcomes: list[tuple[Literal["start", "resume"], DispatchOutcome]] = []
+            for raw in selection.requests or ():
+                data = decode_delivery_request(raw, await self.store.delivery_now())
+                original = NormalizedEvent.model_validate(json_value(data.event))
+                outcome = await self._dispatch(
+                    original,
+                    workspace,
+                    data.subscription_id,
+                    data.target,
+                    0,
+                    snapshot=data,
+                )
+                outcomes.append(("start" if data.target["kind"] == "start" else "resume", outcome))
+            return tuple(outcomes)
+        except SPLError as exc:
+            logger.error("Source selection persistence failed: %s", type(exc).__name__)
+            raise TriggerError(
+                TriggerErrorKind.DISPATCH_UNAVAILABLE, "source selection is not acknowledged"
+            ) from exc
 
     async def dispatch_start(
         self,
@@ -266,6 +385,7 @@ class ReliableDispatcher:
         depth: int,
         *,
         prepare_inputs: Callable[[], dict[str, Any]] | None = None,
+        snapshot: DeadLetterData | None = None,
     ) -> DispatchOutcome:
         """Never acknowledge pending work, failed capture or lost ownership as success."""
         attributes = {
@@ -294,22 +414,11 @@ class ReliableDispatcher:
             else:
                 if prepare_inputs is not None:
                     target = {**target, "inputs": prepare_inputs()}
-                try:
-                    data = DeadLetterData(
-                        workspace_id=WorkspaceId(workspace),
-                        entry_id="dl_" + delivery_identity(workspace, key),
-                        subscription_id=subscription_id,
-                        idempotency_key=key,
-                        event=event.model_dump(by_alias=True, exclude={"raw"}),
-                        target=target,
-                        history=(DispatchAttempt(now, "configuration"),),
-                        retention_seconds=self.retention,
-                        max_replay_attempts=self.max_replays,
-                    )
-                except (ValueError, UnicodeError) as exc:
-                    raise SourceConfigurationError(
-                        "dispatch snapshot cannot be retained; correct its configuration"
-                    ) from exc
+                data = (
+                    snapshot
+                    if snapshot is not None
+                    else self._snapshot(event, workspace, subscription_id, target, now)
+                )
             fingerprint = delivery_fingerprint({"target": json_value(data.target)})
             claim = await self.store.reserve_delivery(
                 data.workspace_id,
@@ -432,13 +541,15 @@ class ReliableDispatcher:
                 ) from exc
             except ImmutableViolation as exc:
                 try:
-                    await self.store.recover_dead_letter(ws, entry_id)
+                    await self.store.recover_dead_letter(ws, entry_id, expected_identity=identity)
                 except ImmutableViolation as missing:
                     if await self.store.get_dead_letter(ws, entry_id) is None:
                         raise TriggerError(
                             TriggerErrorKind.SUBSCRIPTION_NOT_FOUND, "dead-letter entry not found"
                         ) from missing
-                    raise
+                    raise TriggerError(
+                        TriggerErrorKind.REPLAY_UNSAFE, "dead-letter generation changed"
+                    ) from missing
                 raise TriggerError(
                     TriggerErrorKind.REPLAY_UNSAFE,
                     "entry is terminal or beyond its replay attempt/retention limit",

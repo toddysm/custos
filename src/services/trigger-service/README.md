@@ -57,7 +57,11 @@ Every route requires `trigger:admin` and enabled durable dispatch. Storage
 commits lifecycle audit/outbox events atomically with capture, replay completion,
 discard and expiration. Metadata revision 12 persists bulk selection/progress;
 the same operator/key resumes that original command rather than selecting new
-pending entries. Version-2 resumes require Workflow's 204 consumer acknowledgement;
+pending entries. Current administration requires revision 13, which retains
+single-entry request/generation bindings and freezes broker target selections
+before effects. A retry cannot mutate a recreated entry or rematch newly added
+waits; pending targets remain recoverable after their registrations disappear.
+Version-2 resumes require Workflow's 204 consumer acknowledgement;
 202 submission alone never marks replay successful. The paged retention collaborator preserves live replay
 claims; automatic workspace discovery and periodic sweeping remain #1017.
 See the [administration contract](../../../docs/developers/trigger-api.md#dead-letter-administration)

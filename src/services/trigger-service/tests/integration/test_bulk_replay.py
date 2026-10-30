@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
 
+import asyncpg
 import httpx
 import pytest
 from asyncpg import Connection
@@ -266,3 +269,97 @@ async def test_bulk_selection_retention_preserves_live_claims_and_identity(
     assert tombstone.request_hash == command.request_hash and tombstone.actor == command.actor
     with pytest.raises(ImmutableViolation):
         await store.begin_bulk_replay(WS, "retained", "operator", DeadLetterFilter())
+
+
+@pytest.mark.integration
+async def test_bulk_cleanup_rechecks_claim_committed_after_statement_snapshot(
+    pg_dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A claim commits after cleanup's snapshot but before its command lock is acquired."""
+    barrier = 103400033
+
+    class PausedCleanupConnection(asyncpg.Connection):  # type: ignore[misc]
+        """Pause the candidate SELECT after its PostgreSQL MVCC snapshot has been acquired."""
+
+        async def fetch(
+            self,
+            query: str,
+            *args: object,
+            timeout: float | None = None,
+            record_class: type[asyncpg.Record] | None = None,
+        ) -> list[asyncpg.Record]:
+            """Insert only a test barrier; keep the provider's candidate and update SQL intact."""
+            if "FOR UPDATE OF c SKIP LOCKED" in query:
+                query = query.replace("clock_timestamp()", "custos_state.cleanup_barrier()", 1)
+            return list(
+                await super().fetch(query, *args, timeout=timeout, record_class=record_class)
+            )
+
+    pool = await asyncpg.create_pool(
+        pg_dsn, min_size=1, max_size=1, connection_class=PausedCleanupConnection
+    )
+    assert pool is not None
+    writer = await asyncpg.connect(pg_dsn)
+    control = await asyncpg.connect(pg_dsn)
+    cleanup: asyncio.Task[int] | None = None
+    try:
+        store = PgMetadataAdapter(pool=pool)
+        await store.apply_pending()
+        await control.execute(
+            f"""CREATE FUNCTION custos_state.cleanup_barrier() RETURNS TIMESTAMPTZ
+            LANGUAGE plpgsql AS $$
+            BEGIN
+                PERFORM pg_advisory_lock({barrier});
+                PERFORM pg_advisory_unlock({barrier});
+                RETURN clock_timestamp();
+            END; $$"""
+        )
+        await control.execute("SELECT pg_advisory_lock($1)", barrier)
+        data = capture("race")
+        await store.put_dead_letter(replace(data, target={**data.target, "deliveryProtocol": 2}))
+        command = await store.begin_bulk_replay(
+            WS, "snapshot-race", "operator", DeadLetterFilter(), retention_seconds=2
+        )
+        async with pool.acquire() as conn:
+            cleanup_pid = conn.get_server_pid()
+
+        @asynccontextmanager
+        async def owned_transaction() -> AsyncIterator[Connection]:
+            """Keep the real claim transaction open until the cleanup SELECT has its snapshot."""
+            yield writer
+
+        claimer = PgMetadataAdapter(pool=pool)
+        monkeypatch.setattr(claimer, "_dead_letter_transaction", owned_transaction)
+        async with writer.transaction():
+            await claimer.claim_dead_letter(
+                WS,
+                "race",
+                "operator",
+                ttl_seconds=300,
+                bulk_id=command.command_id,
+                bulk_token=command.token,
+            )
+            now = await control.fetchval("SELECT clock_timestamp()")
+            await asyncio.sleep(max(0, (command.expires_at - now).total_seconds()) + 0.02)
+            cleanup = asyncio.create_task(store.purge_bulk_replay_selections(WS))
+            async with asyncio.timeout(5):
+                while not await control.fetchval(
+                    "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=$1 "
+                    "AND locktype='advisory' AND NOT granted)",
+                    cleanup_pid,
+                ):
+                    await asyncio.sleep(0.01)
+        await control.execute("SELECT pg_advisory_unlock($1)", barrier)
+        assert await cleanup == 0
+        retained = await store.get_bulk_replay(WS, command.command_id)
+        assert retained is not None and retained.items is not None
+    finally:
+        if cleanup is not None and not cleanup.done():
+            cleanup.cancel()
+            with suppress(asyncio.CancelledError):
+                await cleanup
+        await control.execute("SELECT pg_advisory_unlock($1)", barrier)
+        await control.execute("DROP FUNCTION IF EXISTS custos_state.cleanup_barrier()")
+        await control.close()
+        await writer.close()
+        await pool.close()
