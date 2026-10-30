@@ -70,6 +70,7 @@ from custos_connector.providers import (
 from custos_connector.settings import Settings, load_settings
 
 if TYPE_CHECKING:
+    from custos_callctx import CallContextVerifier
     from fastapi import FastAPI
 
 __all__ = ["__version__", "create_app"]
@@ -82,6 +83,7 @@ def create_app(
     *,
     settings: Settings | None = None,
     providers: Providers | None = None,
+    call_context_verifier: CallContextVerifier | None = None,
 ) -> FastAPI:
     """Build and return the Connector Service FastAPI application.
 
@@ -92,6 +94,7 @@ def create_app(
         providers: Pre-built :class:`Providers` (used by tests to inject
             in-memory fakes). When ``None``, the lifespan hook constructs
             the real Postgres adapters from the settings DSNs.
+        call_context_verifier: Optional signed-context verifier with an injected public-key source.
 
     The factory is import-safe: no DSN lookups, no socket connections.
     All side-effecting work happens inside the FastAPI lifespan context.
@@ -219,6 +222,7 @@ def create_app(
         app_api_token=effective_settings.app_api_token,
         trigger_app_id=effective_settings.trigger_app_id,
         trigger_namespace=effective_settings.trigger_namespace,
+        verifier=call_context_verifier,
     )
     # Pair the middleware with its exception handler so the dependency-side
     # 4xx responses (get_call_context / require_permission) emit the same
