@@ -40,19 +40,25 @@ context, matching the lease router's pattern.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, cast
 
+from custos_spl.errors import ImmutableViolation, LeaseBusy, SPLError
 from custos_spl.ids import ConnectorInstanceId, WorkspaceId
 from custos_spl.interfaces.connector_instance_store import ConnectorInstanceStoreProvider
+from custos_spl.interfaces.dead_letters import validate_dispatch_identifier
 from custos_spl.interfaces.metadata_store import MetadataStoreProvider
 from fastapi import APIRouter, Depends, Path, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
 from starlette.responses import JSONResponse, Response
 
 from custos_connector.audit import (
+    EVENT_PULL_LOOP_PAUSED,
+    EVENT_PULL_LOOP_RESUMED,
     audit_cursor_rewound,
     audit_pull_loop_paused,
     audit_pull_loop_resumed,
+    build_audit_event,
 )
 from custos_connector.cursor.service import (
     UNINITIALIZED_PERSISTED_CURSOR,
@@ -65,6 +71,7 @@ from custos_connector.cursor.service import (
 )
 from custos_connector.middleware import CallContext, require_permission
 from custos_connector.permissions import ADMIN_CONNECTOR, CONNECTOR_READ
+from custos_connector.runtime import invocation_container_name
 from custos_connector.scheduler import PullLoopScheduler
 
 if TYPE_CHECKING:
@@ -72,6 +79,7 @@ if TYPE_CHECKING:
 
 #: Common path prefix. Mounted in :func:`custos_connector.create_app`.
 router = APIRouter(prefix="/v1", tags=["cursor-admin"])
+logger = logging.getLogger(__name__)
 
 
 #: The HTTP error code returned by every admin handler when the
@@ -133,6 +141,29 @@ class _PullLoopPauseWire(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reason: str | None = Field(default=None, min_length=1)
+
+
+class _PullLoopRecoveryWire(BaseModel):
+    """Explicit operator attestation for one observed, expired invocation."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    invocation_id: str = Field(alias="invocationId", min_length=1, max_length=512)
+    confirmed_stopped: StrictBool = Field(alias="confirmedStopped")
+    reason: str = Field(min_length=1, max_length=1024, pattern=r"\S")
+
+    @field_validator("invocation_id")
+    @classmethod
+    def valid_invocation(cls, value: str) -> str:
+        """Reject ambiguous or unbounded invocation identifiers."""
+        validate_dispatch_identifier(value)
+        return value
+
+    @model_validator(mode="after")
+    def confirmed(self) -> _PullLoopRecoveryWire:
+        """Recovery is never inferred from an ordinary resume request."""
+        if not self.confirmed_stopped:
+            raise ValueError("confirm that the previous invocation and executor cannot resume")
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +379,35 @@ async def read_cursor(
                 "(connector has never ticked)"
             ),
         )
-    return JSONResponse(status_code=200, content=_envelope_to_redacted_wire(envelope))
+    content = _envelope_to_redacted_wire(envelope)
+    controls = cast("Providers", request.app.state.providers).pull_control
+    if controls is not None:
+        try:
+            control = await controls.get_pull_control(
+                WorkspaceId(ws), ConnectorInstanceId(instance_id)
+            )
+        except (SPLError, ValueError) as exc:
+            logger.error("Pull recovery inspection failed: %s", type(exc).__name__)
+            return _error_response(
+                status_code=503,
+                code="connector.pull_control_unavailable",
+                detail="Pull recovery state is unavailable.",
+            )
+        if control is not None:
+            invocation = control.invocation_id
+            content["pullControl"] = {
+                "invocationId": invocation,
+                "invocationOwner": control.invocation_owner,
+                "containerName": (
+                    invocation_container_name(invocation)
+                    if invocation is not None and not invocation.startswith("legacy:")
+                    else None
+                ),
+                "operatorPaused": control.operator_paused,
+                "nextEligibleAt": control.next_eligible_at.isoformat(),
+                "revision": control.revision,
+            }
+    return JSONResponse(status_code=200, content=content)
 
 
 @router.post("/workspaces/{ws}/connectors/{instance_id}/cursor:rewind")
@@ -474,6 +533,79 @@ async def rewind_cursor(
     return JSONResponse(status_code=200, content=_envelope_to_redacted_wire(after))
 
 
+async def _persist_pull_pause(
+    request: Request,
+    ctx: CallContext,
+    ws: str,
+    instance_id: str,
+    *,
+    paused: bool,
+    reason: str | None = None,
+    recovery: _PullLoopRecoveryWire | None = None,
+) -> JSONResponse | None:
+    """Use atomic policy/audit in durable mode; None selects explicit legacy compatibility."""
+    providers = cast("Providers", request.app.state.providers)
+    controls = providers.pull_control
+    if controls is None:
+        if recovery is not None:
+            logger.warning("Explicit recovery requires durable pull controls")
+            return _error_response(
+                status_code=503,
+                code="connector.pull_control_unavailable",
+                detail="Durable invocation recovery is unavailable.",
+            )
+        return None
+    scheduler = providers.pull_loop_scheduler
+    try:
+        if scheduler is not None and scheduler.pull_control_provider is not controls:
+            raise ValueError("scheduler and operator policy use different authorities")
+        await controls.check_pull_control_ready()
+        event = build_audit_event(
+            workspace_id=ws,
+            event_type=EVENT_PULL_LOOP_PAUSED if paused else EVENT_PULL_LOOP_RESUMED,
+            actor=ctx.principal_id,
+            subject={"instance_id": instance_id},
+            payload=(
+                recovery.model_dump(by_alias=True)
+                if recovery is not None
+                else {"reason": reason}
+                if paused
+                else {}
+            ),
+        )
+        if recovery is not None:
+            control = await controls.recover_pull_invocation(
+                WorkspaceId(ws),
+                ConnectorInstanceId(instance_id),
+                invocation_id=recovery.invocation_id,
+                audit=event,
+            )
+        else:
+            control = await controls.set_pull_paused(
+                WorkspaceId(ws),
+                ConnectorInstanceId(instance_id),
+                paused=paused,
+                audit=event,
+            )
+    except (ImmutableViolation, LeaseBusy) as exc:
+        logger.warning("Pull recovery conflicts with current invocation: %s", type(exc).__name__)
+        return _error_response(
+            status_code=409,
+            code="connector.pull_recovery_conflict",
+            detail="Invocation changed or still has a live owner; inspect the cursor again.",
+        )
+    except (SPLError, ValueError) as exc:
+        logger.error("Durable pull policy mutation failed: %s", type(exc).__name__)
+        return _error_response(
+            status_code=503,
+            code="connector.pull_control_unavailable",
+            detail="Pull policy and audit could not be committed; retry the operation.",
+        )
+    if scheduler is not None:
+        scheduler.apply_pull_control(control, clear_halt=not paused)
+    return JSONResponse(status_code=200, content={"status": "paused" if paused else "resumed"})
+
+
 @router.post("/workspaces/{ws}/connectors/{instance_id}/pull-loop:pause")
 async def pause_pull_loop(
     request: Request,
@@ -483,6 +615,9 @@ async def pause_pull_loop(
     body: _PullLoopPauseWire | None = None,
 ) -> Response:
     """Pause the pull-loop for a connector instance.
+
+    Durable mode commits intent and audit before acknowledging, including
+    without a local registration. Legacy mode retains process-local semantics.
 
     Idempotent: pausing an already-paused (or never-registered)
     instance still emits a fresh ``connector.pull-loop.paused``
@@ -496,6 +631,11 @@ async def pause_pull_loop(
     mismatch = _workspace_mismatch_response(ctx, ws)
     if mismatch is not None:
         return mismatch
+    persisted = await _persist_pull_pause(
+        request, ctx, ws, instance_id, paused=True, reason=body.reason if body else None
+    )
+    if persisted is not None:
+        return persisted
     scheduler = _resolve_pull_loop_scheduler(request)
     scheduler.pause(ws, instance_id)
     metadata_store = _resolve_metadata_store(request)
@@ -516,8 +656,15 @@ async def resume_pull_loop(
     ctx: Annotated[CallContext, Depends(require_permission(ADMIN_CONNECTOR))],
     ws: Annotated[str, Path(min_length=1)],
     instance_id: Annotated[str, Path(min_length=1)],
+    body: _PullLoopRecoveryWire | None = None,
 ) -> Response:
     """Resume the pull-loop for a connector instance.
+
+    Durable mode commits intent and audit without shortening a reserved
+    interval; legacy mode retains its former process-local behavior.
+    Ordinary resume does not clear an invocation fence. Explicit recovery
+    requires the observed invocation ID, confirmed termination and a reason;
+    live ownership and stale confirmations return 409.
 
     Idempotent: resuming an already-running (or never-registered)
     instance still emits a fresh ``connector.pull-loop.resumed``
@@ -532,6 +679,11 @@ async def resume_pull_loop(
     mismatch = _workspace_mismatch_response(ctx, ws)
     if mismatch is not None:
         return mismatch
+    persisted = await _persist_pull_pause(
+        request, ctx, ws, instance_id, paused=False, recovery=body
+    )
+    if persisted is not None:
+        return persisted
     scheduler = _resolve_pull_loop_scheduler(request)
     scheduler.resume(ws, instance_id)
     metadata_store = _resolve_metadata_store(request)

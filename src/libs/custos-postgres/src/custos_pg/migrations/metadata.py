@@ -38,6 +38,11 @@ workspace-scoped resume mirrors. It leaves the general revision-4 minimum intact
 REV9 retains exact coalescing counts and distinguishes suppressed schedule
 occurrences from published ones. Scheduler consumers require it; unrelated
 metadata consumers retain their existing minimum.
+
+REV10 adds optional durable pull controls. Known legacy instances start paused;
+missing legacy controls also fail closed. General metadata consumers remain at rev4.
+
+REV11 persists invocation uncertainty independently of lease expiry.
 """
 
 from __future__ import annotations
@@ -544,6 +549,83 @@ METADATA_REV9 = Revision(
 )
 
 
+METADATA_REV10 = Revision(
+    number=10,
+    statements=(
+        """
+        CREATE TABLE IF NOT EXISTS custos_state.connector_pull_control (
+            workspace_id TEXT NOT NULL,
+            instance_id TEXT NOT NULL,
+            schema_version INTEGER NOT NULL DEFAULT 1 CHECK (schema_version = 1),
+            operator_paused BOOLEAN NOT NULL,
+            revision BIGINT NOT NULL CHECK (revision > 0),
+            next_eligible_at TIMESTAMPTZ NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL,
+            updated_by TEXT NOT NULL,
+            effective_interval_seconds BIGINT
+                CHECK (effective_interval_seconds >= 10),
+            native_interval_seconds BIGINT CHECK (native_interval_seconds >= 10),
+            trigger_interval_seconds BIGINT CHECK (trigger_interval_seconds >= 10),
+            consecutive_failures INTEGER NOT NULL DEFAULT 0
+                CHECK (consecutive_failures BETWEEN 0 AND 30),
+            CHECK (effective_interval_seconds IS NOT DISTINCT FROM
+                LEAST(native_interval_seconds, trigger_interval_seconds)),
+            PRIMARY KEY (workspace_id, instance_id)
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS connector_pull_control_demand
+            ON custos_state.connector_pull_control (workspace_id, instance_id COLLATE "C")
+            WHERE effective_interval_seconds IS NOT NULL
+        """,
+        """
+        DO $migration$
+        BEGIN
+            IF to_regclass('connector_instance.connector_instance') IS NOT NULL THEN
+                INSERT INTO custos_state.connector_pull_control
+                    (workspace_id, instance_id, operator_paused, revision,
+                     next_eligible_at, updated_at, updated_by)
+                SELECT workspace_id, instance_id, TRUE, 1, clock_timestamp(),
+                       clock_timestamp(), 'migration:10:unconfirmed'
+                FROM connector_instance.connector_instance
+                ON CONFLICT DO NOTHING;
+            END IF;
+        END;
+        $migration$
+        """,
+    ),
+)
+
+
+METADATA_REV11 = Revision(
+    number=11,
+    statements=(
+        """
+        ALTER TABLE custos_state.connector_pull_control
+            ADD COLUMN IF NOT EXISTS invocation_id TEXT
+                CHECK (invocation_id IS NULL OR length(invocation_id) > 0),
+            ADD COLUMN IF NOT EXISTS invocation_owner TEXT
+                CHECK (invocation_owner IS NULL OR length(invocation_owner) > 0)
+        """,
+        """
+        INSERT INTO custos_state.connector_pull_control AS p
+            (workspace_id, instance_id, operator_paused, revision,
+             next_eligible_at, updated_at, updated_by, invocation_id, invocation_owner)
+        SELECT c.workspace_id, c.instance_id, TRUE, 1, clock_timestamp(),
+               clock_timestamp(), 'migration:11:unconfirmed',
+               'legacy:' || encode(sha256(convert_to(c.lease_holder,'UTF8')),'hex'),
+               'legacy:unknown'
+        FROM custos_state.connector_cursor c WHERE c.lease_holder IS NOT NULL
+        ON CONFLICT (workspace_id, instance_id) DO UPDATE
+        SET invocation_id=EXCLUDED.invocation_id, invocation_owner=EXCLUDED.invocation_owner,
+            revision=p.revision+1, updated_at=EXCLUDED.updated_at,
+            updated_by=EXCLUDED.updated_by
+        WHERE p.invocation_id IS NULL
+        """,
+    ),
+)
+
+
 __all__ = [
     "METADATA_REV1",
     "METADATA_REV2",
@@ -554,4 +636,6 @@ __all__ = [
     "METADATA_REV7",
     "METADATA_REV8",
     "METADATA_REV9",
+    "METADATA_REV10",
+    "METADATA_REV11",
 ]

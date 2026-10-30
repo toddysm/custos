@@ -20,8 +20,8 @@ linear `Classify → Match → Dedup → Dispatch` pipeline.
 > **Milestone note.** M1 ships the REST surface, the internal RPC contract, the
 > `custos.workflow.events` receiver, CEL selectors, dedup, and dispatch. The
 > M2 foundations now include durable scheduled/source delivery and the
-> [verified webhook handoff](#verified-webhook-ingress) below. Polling integration,
-> production lifecycle activation and deployed receiver certification remain
+> [verified webhook handoff](#verified-webhook-ingress) and durable polling
+> collaborators below. Production lifecycle activation and deployed receiver certification remain
 > separate work; default-off collaborators are not a deployed-capability claim.
 
 > **Doc-as-contract.** Every fenced `json`, `yaml`, and `cel` block in this
@@ -31,6 +31,40 @@ linear `Classify → Match → Dedup → Dispatch` pipeline.
 > so the examples cannot drift from the code.
 
 ---
+
+## Polling intent and shared controls
+
+Trigger owns `pull` subscription and source-associated wait intent; Connector
+retains the single upstream timer and cursor for each workspace/instance.
+Active starts and unexpired pull waits contribute their requested
+`pollIntervalSeconds`, with a default of 60 seconds. Resume-only demand requires
+no start subscription. The shortest interval wins, subject to Connector's floor.
+Cancellation, expiry, subscription pause and deletion remove only their own
+contribution. Explicit Connector listeners can share the same poller.
+
+The [private command client](../../src/services/trigger-service/src/custos_trigger/clients/pull_demand.py)
+sends only `{"schemaVersion":"1","workspaceId":"..."}` to Connector
+`POST /ReconcilePullDemand`. Connector reads current stored intent after
+serialization; an old caller snapshot cannot overwrite newer configuration.
+The response's `registered` count includes paused advisory registrations and
+does not promise upstream execution.
+
+Enable the Connector's default-off `CONN_DURABLE_PULL_ENABLED` only after
+metadata revision 11 and the disabled-rollout/operator-confirmation procedure.
+Unconfirmed Connector invocations stay fenced beyond lease expiry; ordinary
+resume cannot clear the fence. Follow the Connector recovery procedure to verify
+termination of the invocation and its executor before audited recovery.
+Keep `CONN_PULL_DEFAULT_INTERVAL_SEC` aligned with
+`TRIGGER_POLLER_DEFAULT_INTERVAL_SECONDS`. Operator pause is persisted and audited
+independently of subscription demand. Unknown legacy intent stays paused until
+explicit operator resume. Interval reservations and shared capped backoff survive
+cursor release, registration changes and restarts; a batch never advances its
+cursor before every valid publication acknowledges.
+
+See [Connector controls and migration](../../src/services/connector-service/README.md#durable-pull-controls-and-demand).
+These collaborators do not start a second timer. Automatic lifecycle,
+workspace discovery and invoking reconciliation on restart/intent changes remain
+the runtime-activation work item, followed by deployed resilience certification.
 
 ## Verified webhook ingress
 
@@ -1188,7 +1222,7 @@ port; the Dapr app-id is `trigger-service`.
 
 The following list records historical M1 gaps, not current M2 completion.
 The scheduled/source, webhook, read-query and durable-delivery foundations
-described above have since landed; production activation, polling, administration
+described above have since landed; production activation, administration
 and final documentation are tracked separately in #988.
 
 - **Cron scheduler** (`scheduled` triggers) — requires a leader-election

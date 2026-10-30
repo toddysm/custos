@@ -77,7 +77,7 @@ async def backend(query_dsn: str | None) -> AsyncIterator[QueryStore]:
         adapter = PgMetadataAdapter(pool=pool)
         await adapter.apply_pending()
         assert adapter.declared_revisions["MetadataStoreProvider"] == frozenset(
-            {1, 2, 3, 4, 5, 6, 7, 8, 9}
+            {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}
         )
         yield adapter
     finally:

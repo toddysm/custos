@@ -1,9 +1,13 @@
+"""Plugin protocol and owned runtime execution/termination contracts."""
+
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from custos_spl.ids import ConnectorInstanceId, WorkspaceId
@@ -24,6 +28,7 @@ from custos_connector.runtime import (
     PluginInvoker,
     PluginProtocolError,
     UpstreamUnreachable,
+    invocation_container_name,
 )
 
 
@@ -86,19 +91,125 @@ class _FakeRunner:
         hook: str,
         payload: Mapping[str, Any],
         timeout_seconds: float,
+        invocation_id: str | None = None,
     ) -> HookRunResult:
+        """Record the optional execution identity independently of the vendor payload."""
         self.calls.append(
             {
                 "image_ref": image_ref,
                 "hook": hook,
                 "payload": payload,
                 "timeout_seconds": timeout_seconds,
+                **({"invocation_id": invocation_id} if invocation_id is not None else {}),
             }
         )
         if self._exc is not None:
             raise self._exc
         assert self._result is not None
         return self._result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", [False, True])
+@pytest.mark.parametrize("invocation_id", [None, "pull:owned-attempt"])
+async def test_docker_runner_waits_for_container_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    cancel: bool,
+    invocation_id: str | None,
+) -> None:
+    """Timeout and repeated cancellation cannot finish before owned container cleanup."""
+    from custos_connector.runtime import DockerCliHookRunner
+
+    started, terminated, cleanup_started, cleanup_allowed = (
+        asyncio.Event(),
+        asyncio.Event(),
+        asyncio.Event(),
+        asyncio.Event(),
+    )
+    commands: list[tuple[object, ...]] = []
+    process, cleanup = Mock(spec=asyncio.subprocess.Process), Mock(spec=asyncio.subprocess.Process)
+    process.returncode = None
+    cleanup.returncode = 0
+
+    async def communicate(_body: bytes | None = None) -> tuple[bytes, bytes]:
+        """Keep pipe readers alive until the owned CLI is killed."""
+        started.set()
+        await terminated.wait()
+        return b"", b""
+
+    def kill() -> None:
+        """Model a completed specific-process kill, never a process-name sweep."""
+        process.returncode = -9
+        terminated.set()
+
+    async def remove() -> tuple[bytes, bytes]:
+        """Hold actual-invocation cleanup until the test permits it to finish."""
+        cleanup_started.set()
+        await cleanup_allowed.wait()
+        return b"", b""
+
+    async def spawn(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        """Record separately owned invocation and cleanup commands."""
+        commands.append(args)
+        return cast(asyncio.subprocess.Process, process if args[1] == "run" else cleanup)
+
+    process.communicate = AsyncMock(side_effect=communicate)
+    process.kill = Mock(side_effect=kill)
+    process.wait = AsyncMock(return_value=-9)
+    cleanup.communicate = AsyncMock(side_effect=remove)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    task = asyncio.create_task(
+        DockerCliHookRunner().run(
+            image_ref="unit-image",
+            hook="listen",
+            payload={},
+            timeout_seconds=30 if cancel else 0.01,
+            invocation_id=invocation_id,
+        )
+    )
+    try:
+        async with asyncio.timeout(2):
+            await started.wait()
+            if cancel:
+                task.cancel()
+            await cleanup_started.wait()
+        if cancel:
+            task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        cleanup_allowed.set()
+        with pytest.raises(asyncio.CancelledError if cancel else TimeoutError):
+            await task
+    finally:
+        cleanup_allowed.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    process.kill.assert_called_once()
+    process.wait.assert_awaited_once()
+    name = commands[0][commands[0].index("--name") + 1]
+    if invocation_id is not None:
+        assert name == invocation_container_name(invocation_id)
+    assert commands[1] == ("docker", "rm", "--force", name)
+
+
+@pytest.mark.parametrize("argument", ["--name", "--name=foreign", "--"])
+def test_docker_options_cannot_replace_owned_container_name(argument: str) -> None:
+    """Cleanup must never target another container or lose the invocation's own identity."""
+    from custos_connector.runtime import DockerCliHookRunner
+
+    with pytest.raises(ValueError, match="owned container"):
+        DockerCliHookRunner(extra_run_args=(argument,))
+
+
+def test_docker_options_are_snapshotted() -> None:
+    """Later caller mutations cannot bypass the ownership validation."""
+    from custos_connector.runtime import DockerCliHookRunner
+
+    options = ["--network", "none"]
+    runner = DockerCliHookRunner(extra_run_args=options)
+    options.append("--name=foreign")
+    assert runner.extra_run_args == ("--network", "none")
 
 
 @pytest.mark.asyncio

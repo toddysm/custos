@@ -58,6 +58,7 @@ from custos_spl.interfaces.connector_instance_store import (
     ConnectorInstanceFilter,
     ConnectorInstanceStoreProvider,
 )
+from custos_spl.interfaces.pull_control import ConnectorPullControlProvider
 
 from custos_connector.audit import (
     audit_health_check_completed,
@@ -219,10 +220,13 @@ class InstanceService:
         metadata_store: MetadataStoreProvider,
         plugin_invoker: PluginInvoker | None = None,
         health_cache_ttl_seconds: int = _DEFAULT_HEALTH_CACHE_TTL_SECONDS,
+        pull_control: ConnectorPullControlProvider | None = None,
     ) -> None:
+        """Bind instance persistence and optional initialization of new durable pull identities."""
         self._instances = instance_store
         self._catalog = catalog_store
         self._metadata = metadata_store
+        self._pull_control = pull_control
         self._runtime = (
             plugin_invoker if plugin_invoker is not None else PluginInvoker(DockerCliHookRunner())
         )
@@ -252,6 +256,10 @@ class InstanceService:
         Generates the ``instance_id`` server-side (UUIDv4) so callers
         never pick IDs — this matches the platform convention for
         run/workflow IDs.
+
+        Durable mode initializes policy before exposing the new instance.
+        A failed instance write can leave only an inert control without demand;
+        initialization never clears an existing operator pause.
 
         Operator-supplied config (``target_config``,
         ``credentials_authentication``, ``used_capabilities``) is
@@ -311,6 +319,10 @@ class InstanceService:
             created_at=now,
             updated_at=now,
         )
+        if self._pull_control is not None:
+            await self._pull_control.initialize_pull_control(
+                WorkspaceId(workspace_id), instance.instance_id, actor=actor
+            )
         stored = await self._instances.put_connector_instance(WorkspaceId(workspace_id), instance)
 
         # 5. Best-effort audit (failures logged + counted, never

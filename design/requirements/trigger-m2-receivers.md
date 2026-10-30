@@ -350,8 +350,22 @@ cursor commit may release the cursor lease, but must not clear that interval
 reservation. Failure/backoff updates the same shared next-eligible state;
 another replica cannot immediately poll after the first releases its lease.
 Interval changes apply to future reservations without shortening an existing
-reservation. A crashed tick leaves the cursor unchanged and can retry when
-both its lease and shared due-time conditions allow it.
+reservation.
+
+**Owner-approved recovery amendment (2026-10-30):** the initial atomic claim
+also persists an invocation fence before upstream work can begin. Lease expiry
+alone never clears that fence. A crashed or unconfirmed invocation leaves the
+cursor unchanged and blocks subsequent polls until termination is verified or
+an operator explicitly confirms recovery. Ordinary confirmed completion clears
+the matching fence without shortening the interval reservation.
+
+Recovery must name the observed invocation and be audited atomically; stale
+confirmations cannot clear a newer invocation, and an unexpired owner cannot be
+replaced by recovery. Ordinary pause/resume and demand reconciliation do not
+clear an invocation fence. Operator confirmation means the previous invocation
+and executor cannot resume, not merely that a container was absent momentarily.
+This intentionally trades automatic retry after an unclean crash for
+fail-closed prevention of overlapping invocations.
 
 Legacy instances require an explicit control-state migration during disabled
 rollout. If prior operator-pause intent cannot be established, leave polling

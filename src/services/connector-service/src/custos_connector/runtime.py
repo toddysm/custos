@@ -23,13 +23,17 @@ v1's concrete runner is :class:`DockerCliHookRunner`, which shells out to
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import math
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Any, Final, Protocol
+from typing import Any, Final, Protocol, TypeVar
+from uuid import uuid4
 
 from custos_spl.interfaces.catalog_store import ConnectorTypeVersion
 from custos_spl.interfaces.connector_instance_store import ConnectorInstance
@@ -142,6 +146,42 @@ class PluginInvocationFailed(PluginRuntimeError):
     code = PluginErrorCode.INVOCATION_FAILED
 
 
+class PluginCleanupFailed(PluginInvocationFailed):
+    """The owned invocation could not be confirmed stopped; polling must fail closed."""
+
+    def __init__(self, container_name: str) -> None:
+        """Retain only a generated resource name, never plugin output or credentials."""
+        self.container_name = container_name
+        self.cancellation_requested = False
+        super().__init__(
+            "plugin invocation cleanup could not be confirmed",
+            data={"containerName": container_name},
+        )
+
+
+DOCKER_CLEANUP_TIMEOUT_SECONDS = 5
+_TaskResult = TypeVar("_TaskResult")
+
+
+async def _finish_owned_task(
+    task: asyncio.Task[_TaskResult], container_name: str
+) -> tuple[_TaskResult, bool]:
+    """Wait through caller cancellation; cancelled owned tasks cannot confirm termination."""
+    interrupted = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            interrupted = True
+    try:
+        return task.result(), interrupted
+    except asyncio.CancelledError as exc:
+        failure = PluginCleanupFailed(container_name)
+        caller = asyncio.current_task()
+        failure.cancellation_requested = caller is not None and caller.cancelling() > 0
+        raise failure from exc
+
+
 class PluginProtocolError(PluginRuntimeError):
     code = PluginErrorCode.INVALID_RESPONSE
 
@@ -154,7 +194,17 @@ class HookRunner(Protocol):
         hook: str,
         payload: Mapping[str, Any],
         timeout_seconds: float,
-    ) -> HookRunResult: ...
+        invocation_id: str | None = None,
+    ) -> HookRunResult:
+        """Return or raise only after termination, or raise PluginCleanupFailed if unconfirmed."""
+        ...
+
+
+def invocation_container_name(invocation_id: str) -> str:
+    """Derive an operator-visible locator without exposing the opaque fencing token."""
+    if not invocation_id or invocation_id.startswith("legacy:"):
+        raise ValueError("a current invocation identity is required")
+    return "custos-hook-" + hashlib.sha256(invocation_id.encode("utf-8")).hexdigest()[:32]
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,11 +213,26 @@ class DockerCliHookRunner:
 
     The plugin image is expected to treat the first argv token after the
     image reference as the hook name and to exchange a single JSON document
-    over stdin/stdout.
+    over stdin/stdout. A generated container name binds cleanup to this one
+    invocation. Cancellation never detaches cleanup from the calling operation.
     """
 
     binary: str = "docker"
     extra_run_args: Sequence[str] = ()
+
+    def __post_init__(self) -> None:
+        """Snapshot trusted run options without permitting a container-ownership override."""
+        if isinstance(self.extra_run_args, (str, bytes)):
+            raise ValueError("Docker run options must be a sequence of arguments")
+        arguments = tuple(self.extra_run_args)
+        if any(
+            not isinstance(argument, str)
+            or argument in ("--", "--name")
+            or argument.startswith("--name=")
+            for argument in arguments
+        ):
+            raise ValueError("Docker run options cannot override owned container naming")
+        object.__setattr__(self, "extra_run_args", arguments)
 
     async def run(
         self,
@@ -176,31 +241,114 @@ class DockerCliHookRunner:
         hook: str,
         payload: Mapping[str, Any],
         timeout_seconds: float,
+        invocation_id: str | None = None,
     ) -> HookRunResult:
-        proc = await asyncio.create_subprocess_exec(
-            self.binary,
-            "run",
-            "--rm",
-            "-i",
-            *self.extra_run_args,
-            image_ref,
-            hook,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        """Own both the CLI process and named container until confirmed cleanup."""
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("plugin timeout must be positive and finite")
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(body), timeout_seconds)
-        except TimeoutError as exc:
-            proc.kill()
-            await proc.wait()
-            raise TimeoutError(f"plugin hook {hook!r} timed out after {timeout_seconds}s") from exc
-        return HookRunResult(
-            exit_code=int(proc.returncode or 0),
-            stdout=stdout,
-            stderr=stderr,
+        container_name = (
+            invocation_container_name(invocation_id)
+            if invocation_id is not None
+            else "custos-hook-" + uuid4().hex
         )
+        spawning = asyncio.create_task(
+            asyncio.create_subprocess_exec(
+                self.binary,
+                "run",
+                "--rm",
+                "-i",
+                "--name",
+                container_name,
+                *self.extra_run_args,
+                image_ref,
+                hook,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        )
+        try:
+            proc = await asyncio.shield(spawning)
+        except asyncio.CancelledError as cancelled:
+            try:
+                proc, _ = await _finish_owned_task(spawning, container_name)
+            except OSError:
+                raise cancelled from None
+            await self._finish_invocation(proc, container_name)
+            raise
+        communication = asyncio.create_task(proc.communicate(body))
+        try:
+            stdout, stderr = await asyncio.wait_for(asyncio.shield(communication), timeout_seconds)
+        except TimeoutError as exc:
+            raise TimeoutError(f"plugin hook {hook!r} timed out after {timeout_seconds}s") from exc
+        finally:
+            await self._finish_invocation(proc, container_name, communication)
+        if proc.returncode is None:
+            raise PluginInvocationFailed("plugin process did not finish")
+        return HookRunResult(exit_code=proc.returncode, stdout=stdout, stderr=stderr)
+
+    async def _finish_invocation(
+        self,
+        proc: asyncio.subprocess.Process,
+        container_name: str,
+        communication: asyncio.Task[tuple[bytes, bytes]] | None = None,
+    ) -> None:
+        """Do not propagate cancellation until the CLI and its container are accounted for."""
+        cleanup = asyncio.create_task(self._cleanup_invocation(proc, container_name, communication))
+        try:
+            _, interrupted = await _finish_owned_task(cleanup, container_name)
+        except (PluginCleanupFailed, OSError) as exc:
+            failure = (
+                exc if isinstance(exc, PluginCleanupFailed) else PluginCleanupFailed(container_name)
+            )
+            caller = asyncio.current_task()
+            failure.cancellation_requested = caller is not None and caller.cancelling() > 0
+            if failure is exc:
+                raise
+            raise failure from exc
+        if interrupted:
+            raise asyncio.CancelledError()
+
+    async def _cleanup_invocation(
+        self,
+        proc: asyncio.subprocess.Process,
+        container_name: str,
+        communication: asyncio.Task[tuple[bytes, bytes]] | None,
+    ) -> None:
+        """Stop the owned CLI before force-removing its unique container, with bounded cleanup."""
+        cleanup: asyncio.subprocess.Process | None = None
+        try:
+            async with asyncio.timeout(DOCKER_CLEANUP_TIMEOUT_SECONDS):
+                if proc.returncode is None:
+                    with suppress(ProcessLookupError):
+                        proc.kill()
+                    await proc.wait()
+                cleanup = await asyncio.create_subprocess_exec(
+                    self.binary,
+                    "rm",
+                    "--force",
+                    container_name,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _, stderr = await cleanup.communicate()
+                absent = (
+                    b"no such container" in stderr.lower() and container_name.encode() in stderr
+                )
+                if cleanup.returncode != 0 and not absent:
+                    raise PluginCleanupFailed(container_name)
+        except (OSError, TimeoutError) as exc:
+            raise PluginCleanupFailed(container_name) from exc
+        finally:
+            if cleanup is not None and cleanup.returncode is None:
+                with suppress(ProcessLookupError):
+                    cleanup.kill()
+                await cleanup.wait()
+            if communication is not None:
+                if not communication.done():
+                    communication.cancel()
+                await asyncio.gather(communication, return_exceptions=True)
 
 
 class PluginInvoker:
@@ -258,7 +406,10 @@ class PluginInvoker:
         instance: ConnectorInstance,
         mode: ListenMode,
         cursor: CursorEnvelope | None,
+        timeout_seconds: float | None = None,
+        invocation_id: str | None = None,
     ) -> ListenResult:
+        """Invoke listening within an optional caller-owned deadline."""
         result = await self._invoke(
             connector=connector,
             instance=instance,
@@ -267,6 +418,8 @@ class PluginInvoker:
                 "mode": str(mode),
                 "cursor": _serialize_cursor(cursor),
             },
+            timeout_seconds=timeout_seconds,
+            invocation_id=invocation_id,
         )
         raw_events = result.get("events", ())
         if not isinstance(raw_events, list):
@@ -339,7 +492,15 @@ class PluginInvoker:
         instance: ConnectorInstance,
         hook: str,
         hook_input: Mapping[str, Any],
+        timeout_seconds: float | None = None,
+        invocation_id: str | None = None,
     ) -> Mapping[str, Any]:
+        """Invoke a bounded hook, allowing a caller's ownership budget to shorten its timeout."""
+        timeout = self._timeout_seconds
+        if timeout_seconds is not None:
+            if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+                raise ValueError("plugin timeout override must be positive and finite")
+            timeout = min(timeout, timeout_seconds)
         payload = {
             "apiVersion": _WIRE_API_VERSION,
             "hook": hook,
@@ -367,12 +528,21 @@ class PluginInvoker:
             "input": dict(hook_input),
         }
         try:
-            completed = await self._runner.run(
-                image_ref=connector.image_ref,
-                hook=hook,
-                payload=payload,
-                timeout_seconds=self._timeout_seconds,
-            )
+            if invocation_id is None:
+                completed = await self._runner.run(
+                    image_ref=connector.image_ref,
+                    hook=hook,
+                    payload=payload,
+                    timeout_seconds=timeout,
+                )
+            else:
+                completed = await self._runner.run(
+                    image_ref=connector.image_ref,
+                    hook=hook,
+                    payload=payload,
+                    timeout_seconds=timeout,
+                    invocation_id=invocation_id,
+                )
         except TimeoutError as exc:
             raise PluginHookTimeout(str(exc), data={"hook": hook}) from exc
         except OSError as exc:
@@ -525,6 +695,7 @@ def _parse_cursor(payload: Mapping[str, Any]) -> CursorEnvelope:
 
 __all__ = [
     "DEFAULT_HOOK_TIMEOUT_SECONDS",
+    "DOCKER_CLEANUP_TIMEOUT_SECONDS",
     "ConnectorContext",
     "CursorEncodingMismatch",
     "CursorEnvelope",
@@ -535,6 +706,7 @@ __all__ = [
     "HookRunner",
     "ListenMode",
     "ListenResult",
+    "PluginCleanupFailed",
     "PluginErrorCode",
     "PluginHookTimeout",
     "PluginInvocationFailed",
@@ -543,4 +715,5 @@ __all__ = [
     "PluginRuntimeError",
     "UpstreamUnauthorized",
     "UpstreamUnreachable",
+    "invocation_container_name",
 ]

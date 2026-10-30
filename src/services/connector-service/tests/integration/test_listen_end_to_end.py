@@ -68,6 +68,8 @@ class _FakeScheduler:
     of the contract under test without spinning up the real loop."""
 
     def __init__(self) -> None:
+        """Select legacy polling semantics for the listen-path fixture."""
+        self.pull_control_provider: None = None
         self.registered: list[tuple[str, str]] = []
         self.unregistered: list[tuple[str, str]] = []
 

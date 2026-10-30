@@ -54,6 +54,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
+from custos_spl.ids import ConnectorInstanceId, WorkspaceId
+
 from custos_connector._telemetry import CURSOR_LAG_REGISTRY
 from custos_connector.listen.normalizer import (
     DELIVERY_MODE_PULL,
@@ -215,8 +217,8 @@ class ListenManager:
     async def activate(self, instance: ConnectorInstance) -> ActivationResult:
         """Wire up the listen path for ``instance``.
 
-        Idempotent: re-activating an instance returns the cached
-        :class:`ActivationResult` without re-touching the scheduler.
+        Legacy reactivation returns the cached result. Durable mode first
+        restores explicit native demand without clearing an operator pause.
 
         Steps:
 
@@ -245,6 +247,11 @@ class ListenManager:
         async with self._lock:
             cached = self._activations.get(key)
             if cached is not None:
+                if (
+                    DELIVERY_MODE_PULL in cached.modes
+                    and self._scheduler.pull_control_provider is not None
+                ):
+                    await self._register_pull(workspace_id, instance_id)
                 return cached
 
             type_version = await self._catalog_store.get_connector_type_version(
@@ -275,7 +282,7 @@ class ListenManager:
 
             registered_modes: list[str] = []
             if DELIVERY_MODE_PULL in delivery_modes:
-                self._scheduler.register(workspace_id, instance_id)
+                await self._register_pull(workspace_id, instance_id)
                 registered_modes.append(DELIVERY_MODE_PULL)
             if DELIVERY_MODE_PUSH in delivery_modes:
                 self._push_registry[key] = PushRegistration(
@@ -309,24 +316,22 @@ class ListenManager:
         and was unwound; ``False`` when the instance was unknown
         (idempotent — callers do not need to track activation state).
 
-        Tears down both the scheduler registration (if any) and the
-        push registry entry (if any) regardless of which modes the
-        instance was registered under, so a manifest change that
-        flips a delivery mode does not leak the old registration.
+        Durable mode removes only native pull demand; active Trigger starts
+        or waits keep their shared poller. Push registration is still removed.
+        Operator pause is independent and can only be cleared explicitly.
         """
         key = (workspace_id, instance_id)
         async with self._lock:
+            scheduler_dropped = await self._unregister_pull(workspace_id, instance_id)
             previous = self._activations.pop(key, None)
             push_entry = self._push_registry.pop(key, None)
-            scheduler_dropped = self._scheduler.unregister(workspace_id, instance_id)
             if push_entry is not None:
                 push_entry.active = False
-            # Phase K (CONN-IMPL-029): drop the cursor-lag series for
-            # this instance so the observable gauge stops reporting an
-            # ever-growing stale lag after deactivation. ``forget`` is
-            # idempotent — when the registry has no entry for the
-            # (workspace, instance) pair it is a no-op.
-            CURSOR_LAG_REGISTRY.forget(workspace_id=workspace_id, instance_id=instance_id)
+            if (
+                self._scheduler.pull_control_provider is None
+                or key not in self._scheduler.schedules()
+            ):
+                CURSOR_LAG_REGISTRY.forget(workspace_id=workspace_id, instance_id=instance_id)
             unwound = previous is not None or push_entry is not None or scheduler_dropped
             if unwound:
                 _LOGGER.info(
@@ -337,6 +342,33 @@ class ListenManager:
                     push_entry is not None,
                 )
             return unwound
+
+    async def _register_pull(self, workspace_id: str, instance_id: str) -> None:
+        """Persist native listening before exposing its local registration."""
+        controls = self._scheduler.pull_control_provider
+        if controls is None:
+            self._scheduler.register(workspace_id, instance_id)
+            return
+        control = await controls.set_pull_native_demand(
+            WorkspaceId(workspace_id),
+            ConnectorInstanceId(instance_id),
+            interval_seconds=self._scheduler.minimum_interval_seconds,
+            actor="connector-service",
+        )
+        self._scheduler.apply_pull_control(control)
+
+    async def _unregister_pull(self, workspace_id: str, instance_id: str) -> bool:
+        """Remove native intent without clearing other demand or local state on failure."""
+        controls = self._scheduler.pull_control_provider
+        if controls is None:
+            return self._scheduler.unregister(workspace_id, instance_id)
+        workspace, identifier = WorkspaceId(workspace_id), ConnectorInstanceId(instance_id)
+        previous = await controls.get_pull_control(workspace, identifier)
+        control = await controls.set_pull_native_demand(
+            workspace, identifier, interval_seconds=None, actor="connector-service"
+        )
+        self._scheduler.apply_pull_control(control)
+        return previous is not None and previous.native_interval_seconds is not None
 
     def get_push_registration(self, workspace_id: str, instance_id: str) -> PushRegistration | None:
         """Return the live push registration, or ``None`` if not registered.

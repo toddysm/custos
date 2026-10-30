@@ -14,6 +14,28 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "ReconcilePullDemandResponse": {
+        "additionalProperties": false,
+        "description": "Version-one local registration count, including operator-paused demand.",
+        "properties": {
+          "registered": {
+            "minimum": 0.0,
+            "title": "Registered",
+            "type": "integer"
+          },
+          "schemaVersion": {
+            "const": "1",
+            "default": "1",
+            "title": "Schemaversion",
+            "type": "string"
+          }
+        },
+        "required": [
+          "registered"
+        ],
+        "title": "ReconcilePullDemandResponse",
+        "type": "object"
+      },
       "RejectedWebhookEvent": {
         "description": "The entire public rejection surface: original index and a closed reason code.",
         "properties": {
@@ -585,6 +607,36 @@
         "title": "_PullLoopPauseWire",
         "type": "object"
       },
+      "_PullLoopRecoveryWire": {
+        "additionalProperties": false,
+        "description": "Explicit operator attestation for one observed, expired invocation.",
+        "properties": {
+          "confirmedStopped": {
+            "title": "Confirmedstopped",
+            "type": "boolean"
+          },
+          "invocationId": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Invocationid",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "pattern": "\\S",
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "invocationId",
+          "confirmedStopped",
+          "reason"
+        ],
+        "title": "_PullLoopRecoveryWire",
+        "type": "object"
+      },
       "_RefreshWire": {
         "additionalProperties": false,
         "description": "Wire shape of the ``refresh`` request body.",
@@ -938,6 +990,58 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/ReconcilePullDemand": {
+      "post": {
+        "description": "Refresh one workspace's registrations without clearing operator pause or starting a timer.",
+        "operationId": "reconcile_pull_demand_ReconcilePullDemand_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Version-one command; demand itself is read from storage, never supplied by a caller.",
+                "properties": {
+                  "schemaVersion": {
+                    "const": "1",
+                    "title": "Schemaversion",
+                    "type": "string"
+                  },
+                  "workspaceId": {
+                    "maxLength": 512,
+                    "minLength": 1,
+                    "title": "Workspaceid",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "schemaVersion",
+                  "workspaceId"
+                ],
+                "title": "ReconcilePullDemandRequest",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReconcilePullDemandResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Reconcile Pull Demand",
+        "tags": [
+          "pull-demand"
+        ]
+      }
+    },
     "/VerifyWebhook": {
       "post": {
         "description": "Verify one bounded request from the permitted mesh service without publishing anything.",
@@ -2273,7 +2377,7 @@
     },
     "/v1/workspaces/{ws}/connectors/{instance_id}/pull-loop:pause": {
       "post": {
-        "description": "Pause the pull-loop for a connector instance.\n\nIdempotent: pausing an already-paused (or never-registered)\ninstance still emits a fresh ``connector.pull-loop.paused``\naudit event so the operator action is recorded. Any in-flight\ntick completes; the scheduler refuses to dispatch a new tick\nuntil :func:`resume_pull_loop` is called.\n\nCursor state and consecutive-failure count are preserved across\nthe pause/resume cycle so the loop picks up where it left off.",
+        "description": "Pause the pull-loop for a connector instance.\n\nDurable mode commits intent and audit before acknowledging, including\nwithout a local registration. Legacy mode retains process-local semantics.\n\nIdempotent: pausing an already-paused (or never-registered)\ninstance still emits a fresh ``connector.pull-loop.paused``\naudit event so the operator action is recorded. Any in-flight\ntick completes; the scheduler refuses to dispatch a new tick\nuntil :func:`resume_pull_loop` is called.\n\nCursor state and consecutive-failure count are preserved across\nthe pause/resume cycle so the loop picks up where it left off.",
         "operationId": "pause_pull_loop_v1_workspaces__ws__connectors__instance_id__pull_loop_pause_post",
         "parameters": [
           {
@@ -2342,7 +2446,7 @@
     },
     "/v1/workspaces/{ws}/connectors/{instance_id}/pull-loop:resume": {
       "post": {
-        "description": "Resume the pull-loop for a connector instance.\n\nIdempotent: resuming an already-running (or never-registered)\ninstance still emits a fresh ``connector.pull-loop.resumed``\naudit event. Clears the in-memory ``halted`` flag \u2014 operators\nare expected to also clear the durable ``status`` flip via\n:func:`rewind_cursor` when the halt was triggered by a cursor\nmigration. If ``status`` is still a halt sentinel on the next\ntick, the cursor service will refuse the tick with\n:class:`CursorInstanceUnavailable` and the scheduler will drop\nthe instance from the rotation again.",
+        "description": "Resume the pull-loop for a connector instance.\n\nDurable mode commits intent and audit without shortening a reserved\ninterval; legacy mode retains its former process-local behavior.\nOrdinary resume does not clear an invocation fence. Explicit recovery\nrequires the observed invocation ID, confirmed termination and a reason;\nlive ownership and stale confirmations return 409.\n\nIdempotent: resuming an already-running (or never-registered)\ninstance still emits a fresh ``connector.pull-loop.resumed``\naudit event. Clears the in-memory ``halted`` flag \u2014 operators\nare expected to also clear the durable ``status`` flip via\n:func:`rewind_cursor` when the halt was triggered by a cursor\nmigration. If ``status`` is still a halt sentinel on the next\ntick, the cursor service will refuse the tick with\n:class:`CursorInstanceUnavailable` and the scheduler will drop\nthe instance from the rotation again.",
         "operationId": "resume_pull_loop_v1_workspaces__ws__connectors__instance_id__pull_loop_resume_post",
         "parameters": [
           {
@@ -2366,6 +2470,23 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/_PullLoopRecoveryWire"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "content": {

@@ -254,6 +254,26 @@ EVENT_AUTHZ_DECISION: Final[str] = "authz.decision"
 # ---------------------------------------------------------------------------
 
 
+def build_audit_event(
+    *,
+    workspace_id: str,
+    event_type: str,
+    actor: str,
+    subject: Mapping[str, Any],
+    payload: Mapping[str, Any],
+) -> AuditEvent:
+    """Construct the canonical event for either best-effort or transaction-required writes."""
+    return AuditEvent(
+        workspace_id=WorkspaceId(workspace_id),
+        event_id=str(uuid4()),
+        event_type=event_type,
+        actor=actor,
+        subject=dict(subject),
+        payload=dict(payload),
+        occurred_at=datetime.now(UTC),
+    )
+
+
 async def _emit(
     metadata_store: MetadataStoreProvider,
     *,
@@ -271,14 +291,12 @@ async def _emit(
     Cancellation / process-control signals propagate.
     """
     ws_id = WorkspaceId(workspace_id)
-    event = AuditEvent(
-        workspace_id=ws_id,
-        event_id=str(uuid4()),
+    event = build_audit_event(
+        workspace_id=workspace_id,
         event_type=event_type,
         actor=actor,
-        subject=dict(subject),
-        payload=dict(payload),
-        occurred_at=datetime.now(UTC),
+        subject=subject,
+        payload=payload,
     )
     try:
         await metadata_store.append_audit(ws_id, event)
@@ -1637,6 +1655,7 @@ __all__ = [
     "audit_pull_loop_resumed",
     "audit_registration_accepted",
     "audit_registration_rejected",
+    "build_audit_event",
     "emit_event",
     "logger",
 ]

@@ -48,6 +48,7 @@ from custos_connector.api import (
     subscribe_router,
     validate_router,
 )
+from custos_connector.api.pull_demand import router as pull_demand_router
 from custos_connector.api.verify_webhook import router as verify_webhook_router
 from custos_connector.binding import binding_router
 from custos_connector.cursor.router import router as cursor_admin_router
@@ -106,6 +107,12 @@ def create_app(
     install_otel_providers()
 
     effective_settings = settings if settings is not None else load_settings()
+    if (
+        effective_settings.durable_pull_enabled
+        and providers is not None
+        and providers.pull_control is None
+    ):
+        raise ValueError("durable pull mode requires a bound control provider")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -229,6 +236,7 @@ def create_app(
     app.include_router(cursor_admin_router)
     app.include_router(listen_router)
     app.include_router(verify_webhook_router)
+    app.include_router(pull_demand_router)
     # CONN-IMPL-027 (Phase J) — ValidateConnector + SubscribeEvents
     # internal RPCs (service-to-service preflight + Pub/Sub metadata
     # discovery for the Trigger Service).
