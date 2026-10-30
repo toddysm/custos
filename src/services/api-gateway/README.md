@@ -80,7 +80,10 @@ with 401; signatures and verification credentials are never retained in normaliz
 events. Unknown scoped pairs return `404 webhook-route-not-found`; the old
 `POST /v1/webhooks/{connectorInstanceId}` now returns that error without forwarding.
 Migrate webhook senders to the scoped URL. Correlation and source-IP forwarding
-remain unchanged. Also included is the Device-Code Session Manager M1 stub
+remain unchanged. The scoped route uses a 70-second response-read timeout, exceeding Trigger's
+60-second handoff deadline by 10 seconds. Other routes and connection/write/pool
+timeouts retain their existing budgets.
+Also included is the Device-Code Session Manager M1 stub
 (`routes/devicecode.py` mounts the three auth-bootstrap routes `POST
 /v1/auth/login/device`, `POST /v1/auth/login/device/{deviceCode}/poll`, and `GET
 /v1/auth/login/device/{userCode}` — anonymous, no `require_permission`, no call

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 import httpx
@@ -12,13 +13,14 @@ from starlette.types import Message
 
 from custos_gateway.errors import GatewayError, register_exception_handlers
 from custos_gateway.middleware.auth import WEBHOOK_BYPASS_PREFIX
-from custos_gateway.router import DownstreamRouter
+from custos_gateway.router import DownstreamCall, DownstreamRouter
 from custos_gateway.routes.webhook import (
     FORWARDED_FOR_HEADER,
     STRIPPED_INBOUND_HEADERS,
     WEBHOOK_AUTHORIZATION_HEADER,
     WEBHOOK_BODY_MAX_BYTES,
     WEBHOOK_PATH,
+    WEBHOOK_READ_TIMEOUT_SECONDS,
     build_webhook_forwarder,
     build_webhook_router,
     forward_headers,
@@ -320,3 +322,78 @@ def test_duplicate_external_authorization_is_rejected() -> None:
         headers=[("authorization", "first"), ("authorization", "second")],
     )
     assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_webhook_waits_beyond_standard_timeout_on_real_http() -> None:
+    """A real delayed socket response succeeds only for the webhook-specific read budget."""
+    tasks: set[asyncio.Task[None]] = set()
+    body = b'{"accepted":1,"rejected":0}'
+
+    async def delayed(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        """Serve after the standard timeout; HTTPX, not MockTransport, enforces each deadline."""
+        try:
+            headers = await reader.readuntil(b"\r\n\r\n")
+            length = next(
+                (
+                    int(line.split(b":", 1)[1])
+                    for line in headers.split(b"\r\n")
+                    if line.lower().startswith(b"content-length:")
+                ),
+                0,
+            )
+            await reader.readexactly(length)
+            await asyncio.sleep(11)
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
+                + str(len(body)).encode()
+                + b"\r\nConnection: close\r\n\r\n"
+                + body
+            )
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    def accept(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        """Keep all test-owned connections available for deterministic shutdown."""
+        tasks.add(asyncio.create_task(delayed(reader, writer)))
+
+    server = await asyncio.start_server(accept, "127.0.0.1", 0)
+    try:
+        port = server.sockets[0].getsockname()[1]
+        async with httpx.AsyncClient() as downstream_http:
+            router = DownstreamRouter(http_client=downstream_http, http_port=port)
+            assert router.timeout == 10 and WEBHOOK_READ_TIMEOUT_SECONDS == 70
+            app = FastAPI()
+            register_exception_handlers(app)
+            app.include_router(build_webhook_router())
+            app.state.downstream_router = router
+
+            async def standard_call() -> None:
+                """The unchanged ordinary-route budget still rejects the same delayed response."""
+                with pytest.raises(GatewayError) as error:
+                    await router.invoke(
+                        DownstreamCall(
+                            app_id="trigger-service",
+                            http_method="POST",
+                            method_path="standard",
+                            body=b"{}",
+                        )
+                    )
+                assert isinstance(error.value.__cause__, httpx.ReadTimeout)
+
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://gateway"
+            ) as public:
+                response, _ = await asyncio.gather(
+                    public.post(SCOPED_URL, content=b"{}"), standard_call()
+                )
+                assert response.status_code == 200 and response.content == body
+            await asyncio.gather(*tasks)
+    finally:
+        server.close()
+        await server.wait_closed()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)

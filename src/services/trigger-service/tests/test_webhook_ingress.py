@@ -10,6 +10,7 @@ from typing import Any
 
 import httpx
 import pytest
+from custos_gateway.routes.webhook import WEBHOOK_READ_TIMEOUT_SECONDS
 from fastapi.testclient import TestClient
 
 from custos_trigger.app import create_app
@@ -20,6 +21,7 @@ from custos_trigger.providers import InMemoryTriggerMetadataStore, Providers
 from custos_trigger.receivers.webhook import (
     MAX_HEADER_BYTES,
     MAX_RAW_BYTES,
+    MAX_REQUEST_SECONDS,
     MAX_RESPONSE_BYTES,
     DaprWebhookTransport,
     VerifiedBatch,
@@ -296,6 +298,7 @@ def test_gate_is_explicit_and_requires_source_consumption() -> None:
         read_webhook_receiver_enabled({"TRIGGER_WEBHOOK_RECEIVER_ENABLED": "invalid"})
     with pytest.raises(ValueError, match="authenticated Gateway"):
         create_app(webhook_receiver_enabled=True, source_receivers_enabled=False)
+    assert WEBHOOK_READ_TIMEOUT_SECONDS >= MAX_REQUEST_SECONDS + 10
 
 
 @pytest.mark.parametrize("indices", [[0, 0], [1, 0], [0, 2]])

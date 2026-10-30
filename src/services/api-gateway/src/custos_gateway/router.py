@@ -113,7 +113,8 @@ class DownstreamCall:
     (e.g. ``v1/workspaces/{ws}/runs``). ``headers`` already includes the
     forwarded ``x-custos-callctx`` and ``x-correlation-id`` plus any
     content-type; ``body`` is the raw request body (``None`` for bodyless
-    methods).
+    methods). ``read_timeout`` can extend response waiting for a bounded
+    long-running route without changing connection, write or pool timeouts.
     """
 
     app_id: str
@@ -121,6 +122,7 @@ class DownstreamCall:
     method_path: str
     headers: Mapping[str, str] = field(default_factory=dict)
     body: bytes | None = None
+    read_timeout: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,7 +157,8 @@ class DownstreamRouter:
         """Forward ``call`` to its owning component and shape the reply.
 
         Returns the raw downstream response (body + status + end-to-end headers)
-        for any non-server-error status.
+        for any non-server-error status. A per-call read override preserves the
+        router's connection, write and pool budgets and does not mutate other calls.
 
         Raises:
             GatewayError: ``downstream-unavailable`` (503) when the sidecar
@@ -171,7 +174,11 @@ class DownstreamRouter:
                 url,
                 content=call.body,
                 headers=dict(call.headers),
-                timeout=self.timeout,
+                timeout=(
+                    httpx.Timeout(self.timeout, read=call.read_timeout)
+                    if call.read_timeout is not None
+                    else self.timeout
+                ),
             )
         except httpx.HTTPError as exc:
             logger.warning("downstream %r unreachable via Dapr sidecar: %r", call.app_id, exc)

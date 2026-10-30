@@ -46,6 +46,8 @@ WEBHOOK_PATH: Final[str] = (
 )
 LEGACY_WEBHOOK_PATH: Final[str] = "/v1/webhooks/{connectorInstanceId}"
 WEBHOOK_AUTHORIZATION_HEADER: Final[str] = "x-custos-webhook-authorization"
+#: Trigger bounds the complete handoff to 60 seconds; retain 10 seconds for transport.
+WEBHOOK_READ_TIMEOUT_SECONDS: Final[float] = 70.0
 _SCOPED_PATH = compile_path(WEBHOOK_PATH)[0]
 
 #: Gateway-enforced body-size cap for webhook ingress (1 MiB). The design allows
@@ -130,6 +132,7 @@ def build_webhook_forwarder() -> Callable[[Request], Awaitable[Response]]:
                 method_path=method_path,
                 headers=headers,
                 body=bytes(body) if body else None,
+                read_timeout=WEBHOOK_READ_TIMEOUT_SECONDS,
             )
         )
         return shaped_response(reply)

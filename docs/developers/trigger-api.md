@@ -73,7 +73,11 @@ deduplicates previously accepted events per workspace, connector and subscriptio
 
 Limits include 16 KiB verification headers, 1,000 indexed events, 2 MiB private
 verifier responses, the existing normalized snapshot limits, and a 60-second
-overall Trigger request deadline. Rejected domain failures use Trigger Problem
+overall Trigger request deadline. Gateway uses a webhook-only 70-second
+response-read timeout, retaining
+a 10-second transport margin; connection/write/pool and ordinary-route timeouts
+remain unchanged. Deployment ingress proxies and sender deadlines must allow
+this complete budget. Rejected domain failures use Trigger Problem
 Details; the Gateway preserves downstream 4xx responses and masks downstream
 5xx/transport errors as its existing `503 downstream-unavailable`.
 
