@@ -110,11 +110,10 @@ _SECURITY_SCHEMES: Final[dict[str, dict[str, str]]] = {
         "description": (
             "Sentinel scheme marking the webhook ingress as anonymous at the "
             "gateway boundary. The gateway authenticates nothing on this route "
-            "and forwards the request verbatim — it does not read or verify any "
-            "header. The named header is a placeholder for the connector-defined "
-            "signature (e.g. an HMAC) that Trigger Service and the owning "
-            "connector plugin verify downstream; no gateway bearer or "
-            "``Authorization`` credential applies here."
+            "and forwards the raw body unchanged. The named header represents "
+            "connector-owned signature verification. On this scoped route only, "
+            "an external Authorization value is transported privately for "
+            "verification, never as Custos authentication or a call context."
         ),
     },
 }

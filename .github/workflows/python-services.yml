@@ -185,6 +185,7 @@ jobs:
         run: |
           pip install -e src/services/workflow-service
           pip install -e src/services/api-gateway
+          pip install -e src/services/connector-service
 
       - name: Install package and dev dependencies
         run: pip install -e ".[dev]"
@@ -246,6 +247,7 @@ jobs:
         run: |
           pip install -e src/services/workflow-service
           pip install -e src/services/api-gateway
+          pip install -e src/services/connector-service
 
       - name: Install package and dev dependencies
         run: pip install -e ".[dev]"

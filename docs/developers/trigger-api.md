@@ -1,6 +1,6 @@
 # Trigger Service Public API
 
-Last Updated: 2026-10-29
+Last Updated: 2026-10-30
 
 The Trigger Service turns inbound events into workflow runs. It owns three
 surfaces:
@@ -11,7 +11,7 @@ surfaces:
    *resume* waits (`waitFor:` steps).
 3. An **internal event receiver** that consumes the platform's
    `custos.workflow.events` stream and drives both start subscriptions and
-   resume waits.
+   resume waits, plus default-off scoped source consumption and verified webhook ingress.
 
 Every event — whatever its origin — is normalized into a single
 [`NormalizedEvent`](#normalizedevent-envelope) envelope and run through the
@@ -19,16 +19,63 @@ linear `Classify → Match → Dedup → Dispatch` pipeline.
 
 > **Milestone note.** M1 ships the REST surface, the internal RPC contract, the
 > `custos.workflow.events` receiver, CEL selectors, dedup, and dispatch. The
-> connector-driven receivers (webhook, vendor-push, pull/poller), the cron
-> scheduler, and the declarative `spec.triggers:` YAML parser are
-> [deferred to M2](#deferred-to-m2). Where this document describes a deferred
-> surface it says so explicitly.
+> M2 foundations now include durable scheduled/source delivery and the
+> [verified webhook handoff](#verified-webhook-ingress) below. Polling integration,
+> production lifecycle activation and deployed receiver certification remain
+> separate work; default-off collaborators are not a deployed-capability claim.
 
 > **Doc-as-contract.** Every fenced `json`, `yaml`, and `cel` block in this
 > guide is parsed and validated against the real models, the CEL compiler, and
 > the canonical taxonomy by
 > [`tests/test_docs_examples.py`](../../src/services/trigger-service/tests/test_docs_examples.py),
 > so the examples cannot drift from the code.
+
+---
+
+## Verified webhook ingress
+
+Send vendor requests through the Gateway to
+`POST /v1/webhooks/workspaces/{workspaceId}/connectors/{connectorInstanceId}/events`.
+The workspace/instance pair is authoritative; payload fields and caller-supplied
+context never select the tenant. Migrate from the old workspace-free URL, which
+now returns 404 `webhook-route-not-found` without forwarding.
+
+The Gateway preserves raw bytes and applies a **1 MiB** cap while reading the
+stream, independent of Content-Length. It strips incoming platform/private/Dapr
+headers. On this exact route only, external Authorization travels as
+`x-custos-webhook-authorization`, never as platform authentication. Trigger
+requires the local sidecar token and exact Gateway app/namespace, even in
+development, and translates that value only into the private Connector
+`VerifyWebhook` request. Connector owns fresh credential resolution and signature
+verification. No raw body, signature or bearer is retained in normalized events.
+
+Enable `TRIGGER_WEBHOOK_RECEIVER_ENABLED=true` only with
+`TRIGGER_SOURCE_RECEIVERS_ENABLED=true`, the existing durable-source readiness
+gates, `APP_API_TOKEN`, and `TRIGGER_GATEWAY_NAMESPACE`. The Gateway app defaults
+to `api-gateway` (`TRIGGER_GATEWAY_APP_ID`); the verifier defaults to
+`connector-service` (`TRIGGER_CONNECTOR_APP_ID`, an app ID, not an HTTP URL).
+Outbound transport uses the local Dapr HTTP endpoint and optional
+`DAPR_API_TOKEN`, independently of the incoming app token. Publisher destination
+is the configured normalized topic/pubsub component; owned clients close during
+lifespan shutdown. Production deployment wiring and broker authorization remain
+the runtime-activation work item.
+
+Success is `200 {"accepted":N,"rejected":M}` only after every valid normalized
+event has a completed publication acknowledgment. It does not mean workflows
+have finished. Verifier and canonical-adapter rejections retain original indices
+and allow-listed reasons in sanitized audit events. Counts cover the entire
+verified batch. Invalid signatures return 401 before publication/matching;
+unknown/inactive pairs return 404; malformed whole payloads return 400.
+All-invalid verified batches return 400 `trigger.webhook.no_valid_events`.
+Verification/publication failures return 503 without partial-success counts:
+retry the whole request with stable producer event IDs. Durable consumption
+deduplicates previously accepted events per workspace, connector and subscription.
+
+Limits include 16 KiB verification headers, 1,000 indexed events, 2 MiB private
+verifier responses, the existing normalized snapshot limits, and a 60-second
+overall Trigger request deadline. Rejected domain failures use Trigger Problem
+Details; the Gateway preserves downstream 4xx responses and masks downstream
+5xx/transport errors as its existing `503 downstream-unavailable`.
 
 ---
 
@@ -1135,8 +1182,10 @@ port; the Dapr app-id is `trigger-service`.
 
 ## Deferred to M2
 
-The following are designed and reserved in the SPL v1 schema but not implemented
-in M1:
+The following list records historical M1 gaps, not current M2 completion.
+The scheduled/source, webhook, read-query and durable-delivery foundations
+described above have since landed; production activation, polling, administration
+and final documentation are tracked separately in #988.
 
 - **Cron scheduler** (`scheduled` triggers) — requires a leader-election
   mechanism (design TODO-003).

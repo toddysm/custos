@@ -89,11 +89,17 @@ def test_registry_operations_reflect_registry_attributes(
 def test_webhook_operation_uses_webhook_scheme(
     settings: Settings, auth_client: FakeAuthServiceClient
 ) -> None:
+    """Advertise both required scope parameters without implying platform authentication."""
     by_key = {(m, p): op for m, p, op in _operations(_spec(settings, auth_client))}
     operation = by_key[("POST", WEBHOOK_PATH)]
     assert operation["security"] == [{WEBHOOK_SCHEME_NAME: []}]
     assert operation[X_REQUIRED_PERMISSION_EXTENSION] is None
     assert operation[X_IDEMPOTENT_EXTENSION] is False
+    assert {
+        parameter["name"]
+        for parameter in operation["parameters"]
+        if parameter["in"] == "path" and parameter["required"]
+    } == {"workspaceId", "connectorInstanceId"}
 
 
 def test_device_code_route_is_anonymous(

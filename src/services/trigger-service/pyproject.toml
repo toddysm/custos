@@ -56,6 +56,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "custos-api-gateway",
+    "custos-connector-service",
     "custos-workflow-service",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

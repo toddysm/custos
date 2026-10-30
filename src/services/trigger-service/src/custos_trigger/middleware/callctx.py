@@ -38,6 +38,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
+from starlette.routing import compile_path
 
 if TYPE_CHECKING:
     from starlette.types import ASGIApp
@@ -47,6 +48,8 @@ if TYPE_CHECKING:
 #: Wire header carrying the call-context document.
 #: API Gateway design (COMP-001) pins the canonical lowercase form.
 CALLCTX_HEADER: str = "x-custos-callctx"
+WEBHOOK_PATH = "/v1/webhooks/workspaces/{workspaceId}/connectors/{connectorInstanceId}/events"
+_WEBHOOK_ROUTE = compile_path(WEBHOOK_PATH)[0]
 
 TRIGGER_ADMIN_PERMISSION = "trigger:admin"
 _PROBE_ROUTES = frozenset({("GET", "/healthz"), ("GET", "/readyz")})
@@ -224,6 +227,8 @@ class CallContextMiddleware(BaseHTTPMiddleware):
         workflow_caller_verifier: WorkflowCallerVerifier | None = None,
         workflow_app_id: str = "workflow-service",
         workflow_namespace: str | None = None,
+        gateway_app_id: str = "api-gateway",
+        gateway_namespace: str | None = None,
     ) -> None:
         """Configure independent user and mesh trust without making network calls."""
         super().__init__(app)
@@ -233,6 +238,7 @@ class CallContextMiddleware(BaseHTTPMiddleware):
                 jwks_url=authz_endpoint.strip().rstrip("/") + "/.well-known/jwks.json",
             )
         self._app_api_token = app_api_token
+        self._gateway_app_id, self._gateway_namespace = gateway_app_id, gateway_namespace
         self._workflow_caller_verifier = workflow_caller_verifier
         if (
             self._workflow_caller_verifier is None
@@ -261,6 +267,19 @@ class CallContextMiddleware(BaseHTTPMiddleware):
         """Verify the applicable trust domain before handlers can access tenant state."""
         route = (request.method, request.url.path)
         if route in _PROBE_ROUTES:
+            return await call_next(request)
+        if request.method == "POST" and _WEBHOOK_ROUTE.fullmatch(request.url.path):
+            try:
+                require_service_caller(
+                    request.headers,
+                    token=self._app_api_token,
+                    app_id=self._gateway_app_id,
+                    namespace=self._gateway_namespace,
+                )
+            except MeshAuthenticationError as exc:
+                logger.warning("Rejected webhook caller: %s", exc.code)
+                return _render_envelope(exc.status_code, exc.code, exc.detail)
+            request.state.webhook_caller_verified = True
             return await call_next(request)
         if route in _WORKFLOW_ROUTES or route in _SIDECAR_ROUTES or route in _SOURCE_ROUTES:
             try:

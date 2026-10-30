@@ -69,14 +69,18 @@ each carrying its owning Dapr `app_id`, `requiredPermission`,
 dependency, so every declared permission participates in the startup registry
 cross-check, plus a thin pass-through endpoint that forwards to the owning
 component via the downstream router and shapes the reply), the anonymous Webhook
-Pass-through (`routes/webhook.py` mounts `POST /v1/webhooks/{connectorInstanceId}`
-with no `require_permission` dependency — the gateway's single anonymous ingress —
-enforcing a 1 MB body cap `413 body-too-large`, stripping `Authorization` (and the
-hop-by-hop / framing headers), appending the caller's source IP to
-`X-Forwarded-For`, generating/propagating an `x-correlation-id`, and forwarding
-the untouched body to Trigger Service via the downstream router without minting a
-call context — an unknown `{connectorInstanceId}` surfaces the downstream
-`404 webhook-route-not-found` raw), the Device-Code Session Manager M1 stub
+Pass-through ([webhook.py](src/custos_gateway/routes/webhook.py) mounts
+`POST /v1/webhooks/workspaces/{workspaceId}/connectors/{connectorInstanceId}/events`
+without platform authentication or a minted call context).
+It enforces a one-MiB limit while streaming, preserves raw bytes, removes forged
+context/private/Dapr headers, and copies external `Authorization` only into
+`x-custos-webhook-authorization` for Connector-owned verification through Trigger.
+The credential is never a Custos identity. Duplicate Authorization fields fail
+with 401; signatures and verification credentials are never retained in normalized
+events. Unknown scoped pairs return `404 webhook-route-not-found`; the old
+`POST /v1/webhooks/{connectorInstanceId}` now returns that error without forwarding.
+Migrate webhook senders to the scoped URL. Correlation and source-IP forwarding
+remain unchanged. Also included is the Device-Code Session Manager M1 stub
 (`routes/devicecode.py` mounts the three auth-bootstrap routes `POST
 /v1/auth/login/device`, `POST /v1/auth/login/device/{deviceCode}/poll`, and `GET
 /v1/auth/login/device/{userCode}` — anonymous, no `require_permission`, no call
@@ -145,7 +149,7 @@ src/custos_gateway/
     __init__.py    # route registry package re-exports
     _forwarding.py # shared downstream-router lookup + response shaper
     registry.py    # declarative M1 RouteSpec table + registry router factory
-    webhook.py     # anonymous POST /v1/webhooks/{connectorInstanceId} forward
+    webhook.py     # scoped anonymous webhook forwarding; legacy URLs fail closed
     devicecode.py  # auth-bootstrap /v1/auth/login/device* routes (M1 503 stub)
   middleware/
     __init__.py    # cross-cutting middleware package

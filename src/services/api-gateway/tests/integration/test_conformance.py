@@ -10,7 +10,7 @@ against the in-process harness (stub downstream + fake Auth + in-memory SPL stor
 * **rate-limit** — token-bucket denial 429 with budget headers;
 * **validation** — oversized body 413, unsupported media type 415;
 * **routing** — the forward targets the correct downstream app-id;
-* **webhook** — anonymous forward to the Trigger Service with credentials stripped;
+* **webhook** — anonymous scoped forwarding with verification-only credential transport;
 * **device-code** — the M1 503 stub while OIDC is disabled.
 """
 
@@ -325,14 +325,17 @@ def test_routing_targets_correct_downstream(settings: Settings) -> None:
 # --- webhook -----------------------------------------------------------------
 
 
-def test_webhook_forwards_anonymously_and_strips_credentials(settings: Settings) -> None:
+def test_webhook_forwards_anonymously_with_verification_only_credentials(
+    settings: Settings,
+) -> None:
+    """No platform authentication occurs; external authorization is private verification data."""
     auth = HarnessAuth()
     downstream, recorder = build_downstream(status_code=202, headers={}, body=b"")
     app = build_gateway(settings, auth=auth, downstream=downstream)
 
     with TestClient(app) as client:
         response = client.post(
-            "/v1/webhooks/inst-1",
+            "/v1/webhooks/workspaces/team-a/connectors/inst-1/events",
             content=b'{"event":"x"}',
             headers={
                 "content-type": "application/json",
@@ -352,6 +355,7 @@ def test_webhook_forwards_anonymously_and_strips_credentials(settings: Settings)
     assert "/invoke/trigger-service/method/" in str(forwarded.url)
     assert "authorization" not in forwarded.headers
     assert "x-custos-callctx" not in forwarded.headers
+    assert forwarded.headers["x-custos-webhook-authorization"]
 
 
 # --- device-code (M1 503 stub) -----------------------------------------------

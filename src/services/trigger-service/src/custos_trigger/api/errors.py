@@ -86,6 +86,12 @@ LOCKED_API_KIND_TO_STATUS: Final[dict[str, int]] = {
     API_SUBSCRIPTION_NOT_FIREABLE: 409,
     API_SUBSCRIPTION_READ_UNSUPPORTED: 501,
     API_RESUME_READ_UNSUPPORTED: 501,
+    "trigger.webhook.no_valid_events": 400,
+    "trigger.webhook.invalid_signature": 401,
+    "trigger.webhook.malformed": 400,
+    "trigger.webhook.too_large": 413,
+    "trigger.webhook.unavailable": 503,
+    "webhook-route-not-found": 404,
 }
 
 #: Frozen view for fast membership tests.
@@ -110,6 +116,12 @@ _TITLE_FOR_KIND: Final[dict[str, str]] = {
     API_SUBSCRIPTION_NOT_FIREABLE: "Subscription is not fireable",
     API_SUBSCRIPTION_READ_UNSUPPORTED: "Subscription read is not supported by this backend",
     API_RESUME_READ_UNSUPPORTED: "Resume read is not supported by this backend",
+    "trigger.webhook.no_valid_events": "No valid webhook events",
+    "trigger.webhook.invalid_signature": "Webhook verification failed",
+    "trigger.webhook.malformed": "Malformed webhook",
+    "trigger.webhook.too_large": "Webhook resource limit exceeded",
+    "trigger.webhook.unavailable": "Webhook handoff is unavailable",
+    "webhook-route-not-found": "Webhook route not found",
 }
 
 
