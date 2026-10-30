@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterable, MutableMapping
+from collections.abc import Callable, Iterable, MutableMapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -18,6 +18,7 @@ from custos_spl.interfaces.pull_control import (
     PullLease,
     collect_pull_demand,
     effective_pull_interval,
+    pull_control_keys,
     pull_deadline,
     pull_interval,
     require_pull_lease,
@@ -95,6 +96,19 @@ class MemoryPullControl:
             now,
             now,
             actor,
+        )
+
+    async def read_pull_controls(
+        self,
+        workspace_id: WorkspaceId,
+        instance_ids: Sequence[ConnectorInstanceId],
+    ) -> tuple[ConnectorPullControl, ...]:
+        """Return one current scoped batch, including inactive policy tombstones."""
+        identifiers = pull_control_keys(workspace_id, instance_ids)
+        return tuple(
+            self._pull_controls[(workspace_id, identifier)]
+            for identifier in identifiers
+            if (workspace_id, identifier) in self._pull_controls
         )
 
     async def initialize_pull_control(

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Literal, Protocol, runtime_checkable
@@ -21,6 +21,21 @@ from custos_spl.pagination import Cursor, Page
 
 PULL_CONTROL_SCHEMA_REVISION = 10
 MAX_PULL_LEASE_SECONDS = 300
+MAX_PULL_CONTROL_KEYS = 200
+
+
+def pull_control_keys(
+    workspace_id: str, identifiers: Sequence[ConnectorInstanceId]
+) -> tuple[str, ...]:
+    """Validate a bounded unique key batch before either backend reads policy."""
+    validate_dispatch_identifier(workspace_id)
+    if isinstance(identifiers, (str, bytes)) or not 1 <= len(identifiers) <= MAX_PULL_CONTROL_KEYS:
+        raise ValueError("pull-control reads require between 1 and 200 identifiers")
+    for identifier in identifiers:
+        validate_dispatch_identifier(identifier)
+    if len(set(identifiers)) != len(identifiers):
+        raise ValueError("pull-control identifiers must be unique")
+    return tuple(sorted(identifiers))
 
 
 def pull_interval(value: object) -> int:
@@ -247,6 +262,14 @@ class ConnectorPullControlProvider(Protocol):
         instance_id: ConnectorInstanceId,
     ) -> ConnectorPullControl | None:
         """Read persisted policy; None means operator intent is unconfirmed."""
+        ...
+
+    async def read_pull_controls(
+        self,
+        workspace_id: WorkspaceId,
+        instance_ids: Sequence[ConnectorInstanceId],
+    ) -> tuple[ConnectorPullControl, ...]:
+        """Read up to 200 scoped controls, including no-demand rows; omit missing keys."""
         ...
 
     async def initialize_pull_control(

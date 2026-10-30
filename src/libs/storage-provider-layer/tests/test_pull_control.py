@@ -243,6 +243,24 @@ async def test_query_cursors_are_workspace_scoped() -> None:
     with pytest.raises(ValueError):
         await store.query_pull_controls(WorkspaceId("b"), cursor=first.next_cursor)
     assert await store.pull_now() == NOW
+    rows = await store.read_pull_controls(
+        WS, [ConnectorInstanceId("c"), ConnectorInstanceId("a"), ConnectorInstanceId("missing")]
+    )
+    assert [row.instance_id for row in rows] == ["a", "c"]
+    with pytest.raises(ValueError):
+        await store.read_pull_controls(WS, [])
+    with pytest.raises(ValueError):
+        await store.read_pull_controls(WS, [INSTANCE, INSTANCE])
+    assert (
+        await store.read_pull_controls(
+            WS, [ConnectorInstanceId(f"missing-{index}") for index in range(200)]
+        )
+        == ()
+    )
+    with pytest.raises(ValueError):
+        await store.read_pull_controls(
+            WS, [ConnectorInstanceId(f"missing-{index}") for index in range(201)]
+        )
 
 
 def test_timestamp_overflow_is_configuration_error() -> None:

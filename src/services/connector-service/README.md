@@ -171,7 +171,20 @@ releases ownership but retains the shared interval reservation. Failure keeps
 the previous cursor and persists capped exponential backoff; another replica
 cannot bypass either reservation. Interval changes apply to future reservations.
 The complete plugin/publication/commit path is bounded inside the lease, with
-five seconds reserved for failure finalization.
+five seconds reserved for container cleanup and another five for failure
+finalization. The remaining budget reaches the plugin runner. Each Docker
+invocation has a uniquely owned container; timeout and cancellation wait for
+the tracked CLI and container cleanup before ownership is released. If cleanup
+cannot be confirmed, durable mode records a safety pause first. If that pause
+cannot be persisted, it retains the lease and reports a critical failure rather
+than releasing ownership. Verify the reported container has stopped before
+explicit operator resume.
+
+Local projections retain applied policy revisions after removal and fence
+enumeration cleanup with registration generations. An older refresh cannot
+delete a newer native activation. Each scheduler pass reads registered controls
+in workspace/key batches of at most 100, rather than one transaction per instance;
+the final per-tick admission remains atomic in storage.
 
 Private `POST /ReconcilePullDemand` accepts
 `{"schemaVersion":"1","workspaceId":"team-a"}` and returns

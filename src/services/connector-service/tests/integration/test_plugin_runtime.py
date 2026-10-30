@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import os
 import shutil
 import subprocess
 from collections.abc import Iterator
@@ -68,6 +70,8 @@ def _instance(*, host: str = "registry.example.com") -> ConnectorInstance:
 @pytest.fixture(scope="module")
 def stub_plugin_image() -> Iterator[str]:
     if shutil.which("docker") is None:
+        if os.environ.get("CI") == "true":
+            pytest.fail("Docker is required for hosted hook-lifecycle validation")
         pytest.skip("docker CLI not available")
 
     fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "plugin_runtime_stub"
@@ -79,6 +83,8 @@ def stub_plugin_image() -> Iterator[str]:
         check=False,
     )
     if build.returncode != 0:
+        if os.environ.get("CI") == "true":
+            pytest.fail(f"runtime stub build failed: {build.stderr.strip()}")
         pytest.skip(f"could not build runtime stub image: {build.stderr.strip()}")
 
     try:
@@ -90,6 +96,66 @@ def stub_plugin_image() -> Iterator[str]:
             text=True,
             check=False,
         )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_real_container_stops_before_runner_returns(
+    stub_plugin_image: str,
+    cancel: bool,
+) -> None:
+    """Interrupt a running hook, then verify its actual owned container is gone."""
+    label = "custos.hook-test=" + uuid4().hex
+
+    async def containers(*, running: bool = False) -> list[str]:
+        """Inspect only this test's uniquely labelled resources."""
+        args = ["docker", "ps", "-aq", "--filter", "label=" + label]
+        if running:
+            args += ["--filter", "status=running"]
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        assert proc.returncode == 0, stderr.decode("utf-8", "replace")
+        return stdout.decode().split()
+
+    runner = DockerCliHookRunner(extra_run_args=("--label", label, "--entrypoint", "sleep"))
+    task = asyncio.create_task(
+        runner.run(
+            image_ref=stub_plugin_image,
+            hook="30",
+            payload={},
+            timeout_seconds=30 if cancel else 5,
+        )
+    )
+    try:
+        async with asyncio.timeout(10):
+            while not await containers(running=True):
+                assert not task.done(), "hook ended before a running container was observed"
+                await asyncio.sleep(0.05)
+        if cancel:
+            task.cancel()
+        with pytest.raises(asyncio.CancelledError if cancel else TimeoutError):
+            await task
+        assert not await containers()
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        for identifier in await containers():
+            proc = await asyncio.create_subprocess_exec(
+                "docker",
+                "rm",
+                "--force",
+                identifier,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
+            assert proc.returncode == 0
 
 
 @pytest.mark.integration

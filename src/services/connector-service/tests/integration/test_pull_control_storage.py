@@ -221,3 +221,8 @@ async def test_pull_control_pages_are_scoped(pull_store: PgMetadataAdapter) -> N
     assert [row.instance_id for row in second.items] == ["c"] and second.next_cursor is None
     with pytest.raises(ValueError):
         await pull_store.query_pull_controls(WorkspaceId("other"), cursor=first.next_cursor)
+    rows = await pull_store.read_pull_controls(
+        WS, [ConnectorInstanceId("c"), ConnectorInstanceId("a"), ConnectorInstanceId("missing")]
+    )
+    assert [row.instance_id for row in rows] == ["a", "c"]
+    assert all(row.workspace_id == WS for row in rows)

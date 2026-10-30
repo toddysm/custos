@@ -64,15 +64,20 @@ from custos_spl.interfaces.pull_control import (
 
 from custos_connector._telemetry import CURSOR_LAG_REGISTRY, observe_pull_tick
 from custos_connector.audit import (
+    EVENT_PULL_LOOP_PAUSED,
     audit_cursor_advanced,
     audit_cursor_encoding_mismatch,
     audit_cursor_expired,
+    build_audit_event,
 )
 from custos_connector.runtime import (
+    DOCKER_CLEANUP_TIMEOUT_SECONDS,
     CursorEncodingMismatch,
     CursorEnvelope,
     CursorExpired,
     ListenMode,
+    ListenResult,
+    PluginCleanupFailed,
 )
 
 if TYPE_CHECKING:
@@ -337,7 +342,9 @@ class CursorService:
         if lease_ttl_seconds <= 0:
             raise ValueError(f"lease_ttl_seconds must be positive (got {lease_ttl_seconds!r})")
         if pull_control is not None and not (
-            PULL_FINALIZATION_SECONDS < lease_ttl_seconds <= MAX_PULL_LEASE_SECONDS
+            PULL_FINALIZATION_SECONDS + DOCKER_CLEANUP_TIMEOUT_SECONDS
+            < lease_ttl_seconds
+            <= MAX_PULL_LEASE_SECONDS
         ):
             raise ValueError("durable pull leases require a finalization margin and at most 300s")
         self._pull_control = pull_control
@@ -469,11 +476,13 @@ class CursorService:
 
             try:
                 budget = None
+                hook_budget = None
                 if isinstance(lease, PullLease) and self._pull_control is not None:
                     budget = (
                         lease.expires_at - await self._pull_control.pull_now()
                     ).total_seconds() - PULL_FINALIZATION_SECONDS
-                    if budget <= 0:
+                    hook_budget = budget - DOCKER_CLEANUP_TIMEOUT_SECONDS
+                    if hook_budget <= 0:
                         raise TimeoutError("pull ownership has no remaining dispatch budget")
                 async with asyncio.timeout(budget):
                     listen_result = await self._call_plugin(
@@ -484,6 +493,7 @@ class CursorService:
                         row_before=row_before,
                         lease=lease,
                         workspace_id=workspace_id,
+                        timeout_seconds=hook_budget,
                     )
                     await self._publisher(ws, instance, listen_result.events)
                     new_persisted = _resolve_committed_value(
@@ -505,6 +515,14 @@ class CursorService:
                 raise
             except CursorHalted:
                 # Already handled (audit + halt + release) inside ``_call_plugin``.
+                raise
+            except PluginCleanupFailed as exc:
+                if isinstance(lease, PullLease):
+                    await self._block_uncertain_invocation(ws, lease, exc)
+                else:
+                    _LOGGER.error("Plugin cleanup unconfirmed; cursor lease retained")
+                if exc.cancellation_requested:
+                    raise asyncio.CancelledError() from exc
                 raise
             except BaseException:
                 await self._release_lease_quietly(ws, lease)
@@ -583,7 +601,8 @@ class CursorService:
         row_before: ConnectorCursor,
         lease: LeaseHandle,
         workspace_id: str,
-    ) -> Any:
+        timeout_seconds: float | None = None,
+    ) -> ListenResult:
         """Invoke ``listen(mode=pull, ...)`` and translate halt errors.
 
         Returns the plugin's :class:`ListenResult` on success. On the
@@ -597,6 +616,14 @@ class CursorService:
             advanced_at=envelope_before.advanced_at,
         )
         try:
+            if timeout_seconds is not None:
+                return await self._invoker.listen(
+                    connector=type_version,
+                    instance=instance,
+                    mode=ListenMode.PULL,
+                    cursor=plugin_envelope,
+                    timeout_seconds=timeout_seconds,
+                )
             return await self._invoker.listen(
                 connector=type_version,
                 instance=instance,
@@ -688,6 +715,44 @@ class CursorService:
                 status,
                 exc_info=True,
             )
+
+    async def _block_uncertain_invocation(
+        self,
+        workspace_id: WorkspaceId,
+        lease: PullLease,
+        failure: PluginCleanupFailed,
+    ) -> None:
+        """Persist a safety pause before releasing ownership of an unconfirmed invocation."""
+        if self._pull_control is None:
+            raise RuntimeError("uncertain durable invocation has no control provider")
+        event = build_audit_event(
+            workspace_id=workspace_id,
+            event_type=EVENT_PULL_LOOP_PAUSED,
+            actor=self._actor,
+            subject={"instance_id": str(lease.instance_id)},
+            payload={
+                "reason": "plugin-cleanup-unconfirmed",
+                "containerName": failure.container_name,
+            },
+        )
+        try:
+            async with asyncio.timeout(PULL_FINALIZATION_SECONDS):
+                await self._pull_control.set_pull_paused(
+                    workspace_id,
+                    lease.instance_id,
+                    paused=True,
+                    audit=event,
+                )
+        except (SPLError, ValueError, TimeoutError) as exc:
+            _LOGGER.critical(
+                "Unconfirmed plugin cleanup: safety pause failed; cursor lease retained (%s)",
+                type(exc).__name__,
+            )
+            return
+        _LOGGER.error(
+            "Polling paused pending operator verification of container %s", failure.container_name
+        )
+        await self._release_lease_quietly(workspace_id, lease)
 
     async def _release_lease_quietly(
         self,

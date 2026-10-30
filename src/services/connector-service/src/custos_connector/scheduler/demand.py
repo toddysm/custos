@@ -33,6 +33,7 @@ class PullDemandReconciler:
         """Apply current intent, preserve native listeners, and remove absent local demand."""
         async with self._lock:
             workspace = WorkspaceId(workspace_id)
+            before = self._scheduler.registration_snapshot(workspace_id)
             await self._controls.check_pull_control_ready()
             await self._controls.reconcile_pull_demand(
                 workspace,
@@ -54,7 +55,9 @@ class PullDemandReconciler:
                 cursor = page.next_cursor
                 if cursor is None:
                     break
-            for scope, identifier in self._scheduler.schedules():
-                if scope == workspace_id and identifier not in seen:
-                    self._scheduler.unregister(scope, identifier)
+            for identifier, generation in before.items():
+                if identifier not in seen:
+                    self._scheduler.unregister(
+                        workspace_id, identifier, expected_generation=generation
+                    )
             return len(seen)

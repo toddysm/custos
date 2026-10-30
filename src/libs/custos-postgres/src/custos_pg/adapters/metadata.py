@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import base64
 import json
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -117,6 +117,7 @@ from custos_spl.interfaces.pull_control import (
     PullLease,
     collect_pull_demand,
     effective_pull_interval,
+    pull_control_keys,
     pull_deadline,
     pull_interval,
     require_pull_lease,
@@ -2333,6 +2334,23 @@ class PgMetadataAdapter:
             instance_id,
         )
         return _row_to_pull_control(row) if row is not None else None
+
+    async def read_pull_controls(
+        self,
+        workspace_id: WorkspaceId,
+        instance_ids: Sequence[ConnectorInstanceId],
+    ) -> tuple[ConnectorPullControl, ...]:
+        """Read a bounded batch in one transaction, including paused and no-demand rows."""
+        identifiers = pull_control_keys(workspace_id, instance_ids)
+        async with self._pull_transaction() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM custos_state.connector_pull_control "
+                "WHERE workspace_id=$1 AND instance_id=ANY($2::text[]) "
+                'ORDER BY instance_id COLLATE "C"',
+                workspace_id,
+                list(identifiers),
+            )
+        return tuple(_row_to_pull_control(row) for row in rows)
 
     async def _ensure_pull_control(
         self,
