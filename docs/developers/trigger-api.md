@@ -50,7 +50,10 @@ The response's `registered` count includes paused advisory registrations and
 does not promise upstream execution.
 
 Enable the Connector's default-off `CONN_DURABLE_PULL_ENABLED` only after
-metadata revision 10 and the disabled-rollout/operator-confirmation procedure.
+metadata revision 11 and the disabled-rollout/operator-confirmation procedure.
+Unconfirmed Connector invocations stay fenced beyond lease expiry; ordinary
+resume cannot clear the fence. Follow the Connector recovery procedure to verify
+termination of the invocation and its executor before audited recovery.
 Keep `CONN_PULL_DEFAULT_INTERVAL_SEC` aligned with
 `TRIGGER_POLLER_DEFAULT_INTERVAL_SECONDS`. Operator pause is persisted and audited
 independently of subscription demand. Unknown legacy intent stays paused until

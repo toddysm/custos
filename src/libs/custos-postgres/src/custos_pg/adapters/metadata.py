@@ -120,6 +120,8 @@ from custos_spl.interfaces.pull_control import (
     pull_control_keys,
     pull_deadline,
     pull_interval,
+    recover_pull_invocation,
+    require_pull_invocation,
     require_pull_lease,
     require_pull_ready,
     validate_pause_audit,
@@ -155,6 +157,7 @@ from custos_pg.migrations.metadata import (
     METADATA_REV8,
     METADATA_REV9,
     METADATA_REV10,
+    METADATA_REV11,
 )
 from custos_pg.pool import LazyPool, read_dsn_from_env
 from custos_pg.revisions import ensure_ledger, read_declared, record_revision
@@ -237,6 +240,8 @@ def _row_to_pull_control(row: Record) -> ConnectorPullControl:
         schema_version=row["schema_version"],
         native_interval_seconds=row["native_interval_seconds"],
         trigger_interval_seconds=row["trigger_interval_seconds"],
+        invocation_id=row["invocation_id"],
+        invocation_owner=row["invocation_owner"],
     )
 
 
@@ -606,6 +611,7 @@ class PgMetadataAdapter:
                 METADATA_REV8,
                 METADATA_REV9,
                 METADATA_REV10,
+                METADATA_REV11,
             ):
                 if rev.number in already:
                     continue
@@ -2287,7 +2293,7 @@ class PgMetadataAdapter:
             raise BackendUnavailable("pull-control storage operation failed", cause=exc) from exc
 
     async def check_pull_control_ready(self) -> None:
-        """Require revision ten without raising the shared metadata minimum."""
+        """Require the invocation-fence revision without raising the shared minimum."""
         async with self._pull_transaction() as conn:
             exists = await conn.fetchval(
                 "SELECT EXISTS(SELECT 1 FROM custos_meta.adapter_revisions "
@@ -2386,7 +2392,8 @@ class PgMetadataAdapter:
         revision = await conn.fetchval(
             "UPDATE custos_state.connector_pull_control SET operator_paused=$3, revision=$4, "
             "next_eligible_at=$5, updated_at=$6, updated_by=$7, effective_interval_seconds=$8, "
-            "consecutive_failures=$9,native_interval_seconds=$10,trigger_interval_seconds=$11 "
+            "consecutive_failures=$9,native_interval_seconds=$10,trigger_interval_seconds=$11, "
+            "invocation_id=$12,invocation_owner=$13 "
             "WHERE workspace_id=$1 AND instance_id=$2 RETURNING revision",
             control.workspace_id,
             control.instance_id,
@@ -2399,6 +2406,8 @@ class PgMetadataAdapter:
             control.consecutive_failures,
             control.native_interval_seconds,
             control.trigger_interval_seconds,
+            control.invocation_id,
+            control.invocation_owner,
         )
         if revision is None:
             raise ImmutableViolation("locked pull control disappeared")
@@ -2629,6 +2638,8 @@ class PgMetadataAdapter:
             updated = replace(
                 control,
                 next_eligible_at=pull_deadline(now, interval),
+                invocation_id=lease.token,
+                invocation_owner=holder_id,
                 revision=control.revision + 1,
                 updated_at=now,
                 updated_by=holder_id,
@@ -2650,6 +2661,8 @@ class PgMetadataAdapter:
         conn: Connection,
         workspace_id: WorkspaceId,
         lease: PullLease,
+        *,
+        allow_expired: bool = False,
     ) -> tuple[ConnectorPullControl, ConnectorCursor, datetime]:
         """Lock policy before cursor consistently, then validate the exact live token."""
         if not isinstance(lease, PullLease) or lease.workspace_id != workspace_id:
@@ -2663,7 +2676,8 @@ class PgMetadataAdapter:
         )
         now = await _scheduler_now(conn)
         cursor = _row_to_cursor(row) if row is not None else None
-        require_pull_lease(workspace_id, lease, cursor, now)
+        require_pull_lease(workspace_id, lease, cursor, now, allow_expired=allow_expired)
+        require_pull_invocation(control, lease)
         if control is None or cursor is None:
             raise LeaseExpired("pull ownership policy disappeared")
         return control, cursor, now
@@ -2683,6 +2697,8 @@ class PgMetadataAdapter:
                 conn,
                 replace(
                     control,
+                    invocation_id=None,
+                    invocation_owner=None,
                     consecutive_failures=0,
                     revision=control.revision + 1,
                     updated_at=now,
@@ -2711,7 +2727,9 @@ class PgMetadataAdapter:
         """Persist shared backoff and release ownership without advancing the cursor."""
         cap = pull_interval(backoff_cap_seconds)
         async with self._pull_transaction() as conn:
-            control, _, now = await self._owned_pull_tick(conn, workspace_id, lease)
+            control, _, now = await self._owned_pull_tick(
+                conn, workspace_id, lease, allow_expired=True
+            )
             failures = min(30, control.consecutive_failures + 1)
             delay = max(
                 lease.interval_seconds, min(cap, lease.interval_seconds * 2 ** (failures - 1))
@@ -2720,6 +2738,8 @@ class PgMetadataAdapter:
                 conn,
                 replace(
                     control,
+                    invocation_id=None,
+                    invocation_owner=None,
                     consecutive_failures=failures,
                     revision=control.revision + 1,
                     next_eligible_at=max(control.next_eligible_at, pull_deadline(now, delay)),
@@ -2733,6 +2753,47 @@ class PgMetadataAdapter:
                 workspace_id,
                 lease.instance_id,
             )
+
+    async def recover_pull_invocation(
+        self,
+        workspace_id: WorkspaceId,
+        instance_id: ConnectorInstanceId,
+        *,
+        invocation_id: str,
+        audit: AuditEvent,
+    ) -> ConnectorPullControl:
+        """Recover only the confirmed expired invocation and commit its audit atomically."""
+        async with self._pull_transaction() as conn:
+            control = await self._locked_pull_control(conn, workspace_id, instance_id)
+            row = await conn.fetchrow(
+                "SELECT * FROM custos_state.connector_cursor "
+                "WHERE workspace_id=$1 AND instance_id=$2 FOR UPDATE",
+                workspace_id,
+                instance_id,
+            )
+            updated = recover_pull_invocation(
+                control,
+                _row_to_cursor(row) if row is not None else None,
+                workspace_id,
+                instance_id,
+                invocation_id,
+                audit,
+                await _scheduler_now(conn),
+            )
+            handle = PgTransactionHandle(conn)
+            bind_handle(handle, self)
+            try:
+                await self.append_audit(workspace_id, audit, tx=handle)
+            finally:
+                handle._mark_closed()
+            await self._save_pull_control(conn, updated)
+            await conn.execute(
+                "UPDATE custos_state.connector_cursor SET lease_holder=NULL,lease_expires_at=NULL "
+                "WHERE workspace_id=$1 AND instance_id=$2",
+                workspace_id,
+                instance_id,
+            )
+            return updated
 
     # ----- Connector pull cursors -----
 

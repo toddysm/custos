@@ -1,3 +1,5 @@
+"""Plugin protocol and owned runtime execution/termination contracts."""
+
 from __future__ import annotations
 
 import asyncio
@@ -26,6 +28,7 @@ from custos_connector.runtime import (
     PluginInvoker,
     PluginProtocolError,
     UpstreamUnreachable,
+    invocation_container_name,
 )
 
 
@@ -88,13 +91,16 @@ class _FakeRunner:
         hook: str,
         payload: Mapping[str, Any],
         timeout_seconds: float,
+        invocation_id: str | None = None,
     ) -> HookRunResult:
+        """Record the optional execution identity independently of the vendor payload."""
         self.calls.append(
             {
                 "image_ref": image_ref,
                 "hook": hook,
                 "payload": payload,
                 "timeout_seconds": timeout_seconds,
+                **({"invocation_id": invocation_id} if invocation_id is not None else {}),
             }
         )
         if self._exc is not None:
@@ -105,9 +111,11 @@ class _FakeRunner:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancel", [False, True])
+@pytest.mark.parametrize("invocation_id", [None, "pull:owned-attempt"])
 async def test_docker_runner_waits_for_container_cleanup(
     monkeypatch: pytest.MonkeyPatch,
     cancel: bool,
+    invocation_id: str | None,
 ) -> None:
     """Timeout and repeated cancellation cannot finish before owned container cleanup."""
     from custos_connector.runtime import DockerCliHookRunner
@@ -156,6 +164,7 @@ async def test_docker_runner_waits_for_container_cleanup(
             hook="listen",
             payload={},
             timeout_seconds=30 if cancel else 0.01,
+            invocation_id=invocation_id,
         )
     )
     try:
@@ -179,6 +188,8 @@ async def test_docker_runner_waits_for_container_cleanup(
     process.kill.assert_called_once()
     process.wait.assert_awaited_once()
     name = commands[0][commands[0].index("--name") + 1]
+    if invocation_id is not None:
+        assert name == invocation_container_name(invocation_id)
     assert commands[1] == ("docker", "rm", "--force", name)
 
 

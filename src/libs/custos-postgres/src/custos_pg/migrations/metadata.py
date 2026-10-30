@@ -41,6 +41,8 @@ metadata consumers retain their existing minimum.
 
 REV10 adds optional durable pull controls. Known legacy instances start paused;
 missing legacy controls also fail closed. General metadata consumers remain at rev4.
+
+REV11 persists invocation uncertainty independently of lease expiry.
 """
 
 from __future__ import annotations
@@ -595,6 +597,30 @@ METADATA_REV10 = Revision(
 )
 
 
+METADATA_REV11 = Revision(
+    number=11,
+    statements=(
+        """
+        ALTER TABLE custos_state.connector_pull_control
+            ADD COLUMN IF NOT EXISTS invocation_id TEXT
+                CHECK (invocation_id IS NULL OR length(invocation_id) > 0),
+            ADD COLUMN IF NOT EXISTS invocation_owner TEXT
+                CHECK (invocation_owner IS NULL OR length(invocation_owner) > 0)
+        """,
+        """
+        UPDATE custos_state.connector_pull_control p
+        SET invocation_id='legacy:' || encode(sha256(convert_to(c.lease_holder,'UTF8')),'hex'),
+            invocation_owner='legacy:unknown',
+            revision=p.revision+1, updated_at=clock_timestamp(),
+            updated_by='migration:11:unconfirmed'
+        FROM custos_state.connector_cursor c
+        WHERE p.workspace_id=c.workspace_id AND p.instance_id=c.instance_id
+          AND c.lease_holder IS NOT NULL AND p.invocation_id IS NULL
+        """,
+    ),
+)
+
+
 __all__ = [
     "METADATA_REV1",
     "METADATA_REV2",
@@ -606,4 +632,5 @@ __all__ = [
     "METADATA_REV8",
     "METADATA_REV9",
     "METADATA_REV10",
+    "METADATA_REV11",
 ]

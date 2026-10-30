@@ -595,7 +595,7 @@ async def verify_schema_revisions(providers: Providers) -> None:
     instance rows, and ``MetadataStoreProvider`` for cursors and the
     audit outbox. Revisions owned by sibling services are deliberately
     out of scope so this service can start independently. A bound durable-pull
-    authority additionally checks its optional revision-ten readiness.
+    authority additionally checks its optional revision-eleven readiness.
 
     Raises:
         custos_spl.MigrationRequired: when any adapter's ledger is behind

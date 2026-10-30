@@ -22,6 +22,13 @@ with a fresh cursor ownership token. Commit and failure paths retain shared
 interval/backoff reservations. Demand comes from current stored starts/waits and
 explicit Connector registrations; reconciliation never clears operator pause.
 
+Revision **11**, required by durable polling, adds the pre-invocation fence and
+executor identity. Claims persist it atomically before launching a hook; lease
+expiry alone cannot clear it. Confirmed completion or audited, identity-checked
+operator recovery clears it. Existing cursor holders, including expired ones,
+receive conservative legacy fences with unknown executor/container locators.
+Ordinary pause/resume and reconciliation preserve these fences.
+
 Known legacy instances are migrated paused; absent policy also fails closed.
 Drain old pollers, apply migrations, explicitly confirm operator intent, then
 enable durable polling on all replicas. See the

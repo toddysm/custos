@@ -62,6 +62,7 @@ class PullRunner:
         hook: str,
         payload: Mapping[str, Any],
         timeout_seconds: float,
+        invocation_id: str | None = None,
     ) -> HookRunResult:
         """Emit the same two logical source events and next cursor on every failed-batch retry."""
         self.calls += 1

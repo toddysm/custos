@@ -23,6 +23,7 @@ v1's concrete runner is :class:`DockerCliHookRunner`, which shells out to
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 from collections.abc import Mapping, Sequence
@@ -185,7 +186,17 @@ class HookRunner(Protocol):
         hook: str,
         payload: Mapping[str, Any],
         timeout_seconds: float,
-    ) -> HookRunResult: ...
+        invocation_id: str | None = None,
+    ) -> HookRunResult:
+        """Return or raise only after termination, or raise PluginCleanupFailed if unconfirmed."""
+        ...
+
+
+def invocation_container_name(invocation_id: str) -> str:
+    """Derive an operator-visible locator without exposing the opaque fencing token."""
+    if not invocation_id or invocation_id.startswith("legacy:"):
+        raise ValueError("a current invocation identity is required")
+    return "custos-hook-" + hashlib.sha256(invocation_id.encode("utf-8")).hexdigest()[:32]
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,12 +233,17 @@ class DockerCliHookRunner:
         hook: str,
         payload: Mapping[str, Any],
         timeout_seconds: float,
+        invocation_id: str | None = None,
     ) -> HookRunResult:
         """Own both the CLI process and named container until confirmed cleanup."""
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ValueError("plugin timeout must be positive and finite")
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        container_name = "custos-hook-" + uuid4().hex
+        container_name = (
+            invocation_container_name(invocation_id)
+            if invocation_id is not None
+            else "custos-hook-" + uuid4().hex
+        )
         spawning = asyncio.create_task(
             asyncio.create_subprocess_exec(
                 self.binary,
@@ -378,6 +394,7 @@ class PluginInvoker:
         mode: ListenMode,
         cursor: CursorEnvelope | None,
         timeout_seconds: float | None = None,
+        invocation_id: str | None = None,
     ) -> ListenResult:
         """Invoke listening within an optional caller-owned deadline."""
         result = await self._invoke(
@@ -389,6 +406,7 @@ class PluginInvoker:
                 "cursor": _serialize_cursor(cursor),
             },
             timeout_seconds=timeout_seconds,
+            invocation_id=invocation_id,
         )
         raw_events = result.get("events", ())
         if not isinstance(raw_events, list):
@@ -462,6 +480,7 @@ class PluginInvoker:
         hook: str,
         hook_input: Mapping[str, Any],
         timeout_seconds: float | None = None,
+        invocation_id: str | None = None,
     ) -> Mapping[str, Any]:
         """Invoke a bounded hook, allowing a caller's ownership budget to shorten its timeout."""
         timeout = self._timeout_seconds
@@ -496,12 +515,21 @@ class PluginInvoker:
             "input": dict(hook_input),
         }
         try:
-            completed = await self._runner.run(
-                image_ref=connector.image_ref,
-                hook=hook,
-                payload=payload,
-                timeout_seconds=timeout,
-            )
+            if invocation_id is None:
+                completed = await self._runner.run(
+                    image_ref=connector.image_ref,
+                    hook=hook,
+                    payload=payload,
+                    timeout_seconds=timeout,
+                )
+            else:
+                completed = await self._runner.run(
+                    image_ref=connector.image_ref,
+                    hook=hook,
+                    payload=payload,
+                    timeout_seconds=timeout,
+                    invocation_id=invocation_id,
+                )
         except TimeoutError as exc:
             raise PluginHookTimeout(str(exc), data={"hook": hook}) from exc
         except OSError as exc:
@@ -674,4 +702,5 @@ __all__ = [
     "PluginRuntimeError",
     "UpstreamUnauthorized",
     "UpstreamUnreachable",
+    "invocation_container_name",
 ]

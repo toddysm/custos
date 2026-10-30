@@ -21,6 +21,8 @@ from custos_spl.interfaces.pull_control import (
     pull_control_keys,
     pull_deadline,
     pull_interval,
+    recover_pull_invocation,
+    require_pull_invocation,
     require_pull_lease,
     require_pull_ready,
     validate_pause_audit,
@@ -307,6 +309,8 @@ class MemoryPullControl:
         updated = replace(
             control,
             next_eligible_at=pull_deadline(now, interval),
+            invocation_id=lease.token,
+            invocation_owner=holder_id,
             revision=control.revision + 1,
             updated_at=now,
             updated_by=holder_id,
@@ -343,8 +347,11 @@ class MemoryPullControl:
             lease_expires_at=None,
         )
         control = self._pull_controls[key]
+        require_pull_invocation(control, lease)
         updated = replace(
             control,
+            invocation_id=None,
+            invocation_owner=None,
             consecutive_failures=0,
             revision=control.revision + 1,
             updated_at=now,
@@ -365,13 +372,16 @@ class MemoryPullControl:
         now = utc_instant(self._pull_now())
         key = (workspace_id, lease.instance_id)
         row = self._pull_cursor_rows.get(key)
-        require_pull_lease(workspace_id, lease, row, now)
+        require_pull_lease(workspace_id, lease, row, now, allow_expired=True)
         assert row is not None
         current = self._pull_controls[key]
+        require_pull_invocation(current, lease)
         failures = min(30, current.consecutive_failures + 1)
         delay = max(lease.interval_seconds, min(cap, lease.interval_seconds * 2 ** (failures - 1)))
         updated = replace(
             current,
+            invocation_id=None,
+            invocation_owner=None,
             consecutive_failures=failures,
             revision=current.revision + 1,
             next_eligible_at=max(current.next_eligible_at, pull_deadline(now, delay)),
@@ -380,3 +390,39 @@ class MemoryPullControl:
         )
         self._pull_controls[key] = updated
         self._pull_cursor_rows[key] = replace(row, lease_holder=None, lease_expires_at=None)
+
+    async def recover_pull_invocation(
+        self,
+        workspace_id: WorkspaceId,
+        instance_id: ConnectorInstanceId,
+        *,
+        invocation_id: str,
+        audit: AuditEvent,
+    ) -> ConnectorPullControl:
+        """Audit and recover one expired invocation without shortening its reservation."""
+        key = (workspace_id, instance_id)
+        cursor = self._pull_cursor_rows.get(key)
+        updated = recover_pull_invocation(
+            self._pull_controls.get(key),
+            cursor,
+            workspace_id,
+            instance_id,
+            invocation_id,
+            audit,
+            self._pull_now(),
+        )
+        if any(
+            ws == workspace_id and event.event_id == audit.event_id
+            for ws, event in self._pull_audit_rows
+        ):
+            raise ImmutableViolation("pull recovery audit already exists")
+        captured = replace(
+            audit,
+            subject=json.loads(json.dumps(dict(audit.subject), allow_nan=False)),
+            payload=json.loads(json.dumps(dict(audit.payload), allow_nan=False)),
+        )
+        self._pull_audit_rows.append((workspace_id, captured))
+        self._pull_controls[key] = updated
+        if cursor is not None:
+            self._pull_cursor_rows[key] = replace(cursor, lease_holder=None, lease_expires_at=None)
+        return updated

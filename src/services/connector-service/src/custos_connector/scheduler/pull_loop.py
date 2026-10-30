@@ -265,7 +265,7 @@ class PullLoopScheduler:
         self._control_revisions[key] = control.revision
         schedule.interval_seconds = control.effective_interval_seconds
         schedule.next_earliest_tick_at = control.next_eligible_at
-        schedule.paused = control.operator_paused
+        schedule.paused = control.operator_paused or control.invocation_id is not None
         schedule.consecutive_failures = control.consecutive_failures
         if clear_halt:
             schedule.halted, schedule.halt_reason = False, None

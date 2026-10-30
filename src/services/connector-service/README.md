@@ -136,7 +136,7 @@ certification remains [#1018](https://github.com/toddysm/custos/issues/1018).
 
 `CONN_DURABLE_PULL_ENABLED=true` assembles the existing single `PullLoopScheduler`,
 `CursorService`, `ListenManager` and acknowledged publisher bridge with the
-optional `ConnectorPullControlProvider`. It requires metadata revision **10**;
+optional `ConnectorPullControlProvider`. It requires metadata revision **11**;
 the shared metadata minimum stays **4**. A no-op publisher cannot be used in this
 mode. The flag is default-off: legacy embedded collaborators retain their former
 behavior until explicitly upgraded.
@@ -161,12 +161,15 @@ initialization.
 Stop/drain legacy pollers before migration and enable durable mode consistently
 across replicas. Revision 10 marks known legacy instances paused. Missing legacy
 controls also remain blocked; reconciliation never guesses that an active
-subscription means the operator intended polling to resume. Operators must
+subscription means the operator intended polling to resume. Revision 11 fences
+existing cursor holders, even expired ones, with an unknown legacy executor
+locator. Operators must
 explicitly confirm resume through the protected admin endpoint.
 
 Each upstream call requires one atomic storage operation checking pause, demand,
 database time and cursor ownership. A fresh opaque token fences every attempt,
-including re-acquisition by the same process. Successful publication/commit
+including re-acquisition by the same process. The operation also persists an
+invocation fence and owner **before** starting the plugin. Successful publication/commit
 releases ownership but retains the shared interval reservation. Failure keeps
 the previous cursor and persists capped exponential backoff; another replica
 cannot bypass either reservation. Interval changes apply to future reservations.
@@ -175,10 +178,40 @@ five seconds reserved for container cleanup and another five for failure
 finalization. The remaining budget reaches the plugin runner. Each Docker
 invocation has a uniquely owned container; timeout and cancellation wait for
 the tracked CLI and container cleanup before ownership is released. If cleanup
-cannot be confirmed, durable mode records a safety pause first. If that pause
-cannot be persisted, it retains the lease and reports a critical failure rather
-than releasing ownership. Verify the reported container has stopped before
-explicit operator resume.
+cannot be confirmed, durable mode attempts an audited safety pause and reports
+failures explicitly. The pre-existing invocation fence remains in either case,
+blocking new polling **beyond lease and due-time expiry**. Ordinary resume,
+registration changes and reconciliation never clear that fence. A verified
+stopped owner can finalize its matching attempt even after lease expiry; a stale
+owner cannot clear a recovered or replaced invocation.
+
+For recovery, inspect `GET /v1/workspaces/{ws}/connectors/{id}/cursor` with
+`connector:read`. Its durable-mode `pullControl` object includes `invocationId`,
+`invocationOwner`, `containerName`, `operatorPaused`, `nextEligibleAt` and `revision`.
+Locate the named container on that executor. Stop/drain the **old executor as well
+as the invocation**, proving neither can resume or launch late; a momentarily
+absent container is insufficient. Legacy fences have `containerName: null` and
+`invocationOwner: "legacy:unknown"`: drain all possible legacy owners instead of
+guessing a container name.
+
+After ownership expires, an `admin:connector` operator can send the observed ID to
+`POST /v1/workspaces/{ws}/connectors/{id}/pull-loop:resume`:
+
+```json
+{
+  "invocationId": "pull:observed-attempt-token",
+  "confirmedStopped": true,
+  "reason": "Previous executor drained and invocation termination verified"
+}
+```
+
+Recovery commits confirmation/audit, fence removal and resume atomically without
+advancing the cursor or shortening its reservation. A live owner or stale ID
+returns 409; malformed or incomplete confirmation returns 422; unavailable storage
+returns 503 without recovery. Reinspect after a conflict. A bodyless resume only
+changes ordinary pause intent; it is **not** invocation recovery. Unclean crashes
+therefore fail closed until termination is confirmed, rather than automatically
+retrying after lease expiry.
 
 Local projections retain applied policy revisions after removal and fence
 enumeration cleanup with registration generations. An older refresh cannot

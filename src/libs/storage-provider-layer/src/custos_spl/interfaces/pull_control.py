@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Literal, Protocol, runtime_checkable
 
-from custos_spl.errors import LeaseBusy, LeaseExpired, WorkspaceMismatch
+from custos_spl.errors import ImmutableViolation, LeaseBusy, LeaseExpired, WorkspaceMismatch
 from custos_spl.ids import ConnectorInstanceId, WorkspaceId
 from custos_spl.interfaces.dead_letters import validate_dispatch_identifier
 from custos_spl.interfaces.metadata_store import AuditEvent, ConnectorCursor, LeaseHandle
@@ -19,7 +19,7 @@ from custos_spl.interfaces.trigger_source import (
 from custos_spl.interfaces.trigger_source import ResumeSource
 from custos_spl.pagination import Cursor, Page
 
-PULL_CONTROL_SCHEMA_REVISION = 10
+PULL_CONTROL_SCHEMA_REVISION = 11
 MAX_PULL_LEASE_SECONDS = 300
 MAX_PULL_CONTROL_KEYS = 200
 
@@ -83,6 +83,8 @@ class ConnectorPullControl:
     schema_version: int = 1
     native_interval_seconds: int | None = None
     trigger_interval_seconds: int | None = None
+    invocation_id: str | None = None
+    invocation_owner: str | None = None
 
     def __post_init__(self) -> None:
         """Reject ambiguous versions, scopes, counters and timestamps at the provider boundary."""
@@ -100,6 +102,12 @@ class ConnectorPullControl:
             raise ValueError("invalid pull control version or policy")
         utc_instant(self.next_eligible_at)
         utc_instant(self.updated_at)
+        if self.invocation_id is not None:
+            validate_dispatch_identifier(self.invocation_id)
+        if self.invocation_owner is not None:
+            validate_dispatch_identifier(self.invocation_owner)
+        if (self.invocation_id is None) != (self.invocation_owner is None):
+            raise ValueError("invocation fence and owner must be paired")
         if self.effective_interval_seconds is not None:
             pull_interval(self.effective_interval_seconds)
         if self.effective_interval_seconds != effective_pull_interval(
@@ -132,7 +140,7 @@ class PullTickBlocked(LeaseBusy):
 
     def __init__(
         self,
-        reason: Literal["unconfirmed", "paused", "not_due", "no_demand"],
+        reason: Literal["unconfirmed", "paused", "not_due", "no_demand", "invocation_unconfirmed"],
     ) -> None:
         """Keep the reason closed and safe for operational logging."""
         super().__init__(f"pull tick blocked: {reason}")
@@ -143,6 +151,8 @@ def require_pull_ready(control: ConnectorPullControl | None, now: datetime) -> i
     """Return the authoritative effective interval only when policy and due time permit a tick."""
     if control is None:
         raise PullTickBlocked("unconfirmed")
+    if control.invocation_id is not None:
+        raise PullTickBlocked("invocation_unconfirmed")
     if control.operator_paused:
         raise PullTickBlocked("paused")
     if control.effective_interval_seconds is None:
@@ -157,6 +167,8 @@ def require_pull_lease(
     lease: PullLease,
     row: ConnectorCursor | None,
     now: datetime,
+    *,
+    allow_expired: bool = False,
 ) -> None:
     """Reject stale, foreign or expired cursor ownership before commit or shared backoff."""
     if (
@@ -166,9 +178,69 @@ def require_pull_lease(
         or row.instance_id != lease.instance_id
         or row.lease_holder != lease.token
         or row.lease_expires_at is None
-        or row.lease_expires_at <= utc_instant(now)
+        or (not allow_expired and row.lease_expires_at <= utc_instant(now))
     ):
         raise LeaseExpired("pull cursor ownership expired or changed")
+
+
+def require_pull_invocation(control: ConnectorPullControl | None, lease: PullLease) -> None:
+    """Only the invocation that installed the fence may confirm its termination."""
+    if (
+        control is None
+        or control.invocation_id != lease.token
+        or control.workspace_id != lease.workspace_id
+        or control.instance_id != lease.instance_id
+        or control.invocation_owner != lease.holder_id
+    ):
+        raise LeaseExpired("pull invocation fence changed or was recovered")
+
+
+def recover_pull_invocation(
+    control: ConnectorPullControl | None,
+    cursor: ConnectorCursor | None,
+    workspace_id: str,
+    instance_id: str,
+    invocation_id: str,
+    audit: AuditEvent,
+    now: datetime,
+) -> ConnectorPullControl:
+    """Validate explicit recovery and prepare its exact, auditable state transition."""
+    validate_pause_audit(workspace_id, instance_id, False, audit)
+    validate_dispatch_identifier(invocation_id)
+    reason = audit.payload.get("reason")
+    if (
+        audit.payload.get("invocationId") != invocation_id
+        or audit.payload.get("confirmedStopped") is not True
+        or not isinstance(reason, str)
+        or not reason.strip()
+        or len(reason) > 1024
+    ):
+        raise ValueError("recovery requires matching confirmation and a bounded reason")
+    if control is None or control.invocation_id != invocation_id:
+        raise ImmutableViolation("invocation changed; inspect the current cursor before recovery")
+    if control.workspace_id != workspace_id or control.instance_id != instance_id:
+        raise WorkspaceMismatch("pull recovery control scope differs")
+    if cursor is not None and (
+        cursor.workspace_id != workspace_id or cursor.instance_id != instance_id
+    ):
+        raise WorkspaceMismatch("pull recovery cursor scope differs")
+    if (
+        cursor is not None
+        and cursor.lease_holder is not None
+        and cursor.lease_expires_at is not None
+        and cursor.lease_expires_at > utc_instant(now)
+    ):
+        raise LeaseBusy("a live pull owner cannot be replaced by recovery")
+    return replace(
+        control,
+        invocation_id=None,
+        invocation_owner=None,
+        operator_paused=False,
+        consecutive_failures=0,
+        revision=control.revision + 1,
+        updated_at=utc_instant(now),
+        updated_by=audit.actor,
+    )
 
 
 def validate_pause_audit(
@@ -356,5 +428,20 @@ class ConnectorPullControlProvider(Protocol):
         *,
         backoff_cap_seconds: int,
     ) -> None:
-        """Atomically extend capped shared backoff and release only the still-owned cursor lease."""
+        """Confirm termination, preserve the cursor and clear only the matching invocation.
+
+        The caller must have verified termination (or never started the hook).
+        An expired matching owner may finalize; a replaced/recovered owner may not.
+        """
+        ...
+
+    async def recover_pull_invocation(
+        self,
+        workspace_id: WorkspaceId,
+        instance_id: ConnectorInstanceId,
+        *,
+        invocation_id: str,
+        audit: AuditEvent,
+    ) -> ConnectorPullControl:
+        """Atomically audit explicit recovery of the observed invocation after lease expiry."""
         ...

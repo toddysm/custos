@@ -472,9 +472,8 @@ class CursorService:
                 row_before, lease = await self._metadata.acquire_cursor_lease(
                     ws, inst_id, self._holder_id, self._lease_ttl_seconds
                 )
-            envelope_before = _row_to_envelope_record(row_before, encoding)
-
             try:
+                envelope_before = _row_to_envelope_record(row_before, encoding)
                 budget = None
                 hook_budget = None
                 if isinstance(lease, PullLease) and self._pull_control is not None:
@@ -623,6 +622,7 @@ class CursorService:
                     mode=ListenMode.PULL,
                     cursor=plugin_envelope,
                     timeout_seconds=timeout_seconds,
+                    invocation_id=lease.token if isinstance(lease, PullLease) else None,
                 )
             return await self._invoker.listen(
                 connector=type_version,
@@ -722,7 +722,7 @@ class CursorService:
         lease: PullLease,
         failure: PluginCleanupFailed,
     ) -> None:
-        """Persist a safety pause before releasing ownership of an unconfirmed invocation."""
+        """Record a safety pause without clearing the already-persisted invocation fence."""
         if self._pull_control is None:
             raise RuntimeError("uncertain durable invocation has no control provider")
         event = build_audit_event(
@@ -745,14 +745,13 @@ class CursorService:
                 )
         except (SPLError, ValueError, TimeoutError) as exc:
             _LOGGER.critical(
-                "Unconfirmed plugin cleanup: safety pause failed; cursor lease retained (%s)",
+                "Unconfirmed plugin cleanup: safety pause failed; invocation fence retained (%s)",
                 type(exc).__name__,
             )
             return
         _LOGGER.error(
             "Polling paused pending operator verification of container %s", failure.container_name
         )
-        await self._release_lease_quietly(workspace_id, lease)
 
     async def _release_lease_quietly(
         self,
@@ -774,7 +773,7 @@ class CursorService:
                         workspace_id, lease, backoff_cap_seconds=self._backoff_cap
                     )
             except LeaseExpired:
-                _LOGGER.info("Pull cleanup skipped: cursor ownership already expired or changed")
+                _LOGGER.info("Pull cleanup skipped: cursor ownership or invocation fence changed")
             except (SPLError, TimeoutError) as exc:
                 _LOGGER.error("Pull backoff/lease cleanup failed: %s", type(exc).__name__)
             return

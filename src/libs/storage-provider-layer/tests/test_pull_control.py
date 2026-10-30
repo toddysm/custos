@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
 
-from custos_spl.errors import ImmutableViolation, LeaseExpired, QueryUnsupported
+from custos_spl.errors import ImmutableViolation, LeaseBusy, LeaseExpired, QueryUnsupported
 from custos_spl.ids import ConnectorInstanceId, WorkspaceId
 from custos_spl.interfaces.metadata_store import AuditEvent
 from custos_spl.interfaces.pull_control import (
@@ -267,3 +268,72 @@ def test_timestamp_overflow_is_configuration_error() -> None:
     """Reject timestamp overflow before acquiring cursor ownership."""
     with pytest.raises(ValueError, match="timestamp"):
         pull_deadline(datetime.max.replace(tzinfo=UTC), 10)
+
+
+async def test_invocation_survives_expiry_and_only_matching_recovery_clears_it() -> None:
+    """Lease expiry, resume and reconciliation cannot authorize an overlapping invocation."""
+    now = [NOW]
+    store = MemoryPullControl(
+        now=lambda: now[0],
+        demand_reader=lambda ws, instant: ([{"connectorInstanceId": INSTANCE}], []),
+    )
+    await store.initialize_pull_control(WS, INSTANCE, actor="creator")
+    await store.reconcile_pull_demand(WS, default_interval_seconds=60, minimum_interval_seconds=10)
+    _, lease = await store.acquire_pull_tick(WS, INSTANCE, "worker-a", ttl_seconds=30)
+    control = await store.get_pull_control(WS, INSTANCE)
+    assert control is not None and control.invocation_id == lease.token
+    assert control.invocation_owner == "worker-a"
+    recovery = replace(
+        audit(False),
+        payload={
+            "invocationId": lease.token,
+            "confirmedStopped": True,
+            "reason": "executor stopped",
+        },
+    )
+    with pytest.raises(LeaseBusy):
+        await store.recover_pull_invocation(WS, INSTANCE, invocation_id=lease.token, audit=recovery)
+    now[0] += timedelta(seconds=31)
+    resumed = audit(False)
+    await store.set_pull_paused(WS, INSTANCE, paused=False, audit=resumed)
+    await store.reconcile_pull_demand(WS, default_interval_seconds=10, minimum_interval_seconds=10)
+    with pytest.raises(PullTickBlocked, match="invocation_unconfirmed"):
+        await store.acquire_pull_tick(WS, INSTANCE, "worker-b", ttl_seconds=30)
+    with pytest.raises(ImmutableViolation):
+        await store.recover_pull_invocation(
+            WS,
+            INSTANCE,
+            invocation_id=lease.token,
+            audit=replace(recovery, event_id=resumed.event_id),
+        )
+    unchanged = await store.get_pull_control(WS, INSTANCE)
+    assert unchanged is not None and unchanged.invocation_id == lease.token
+    recovered = await store.recover_pull_invocation(
+        WS, INSTANCE, invocation_id=lease.token, audit=recovery
+    )
+    assert recovered.invocation_id is None and recovered.invocation_owner is None
+    assert recovered.next_eligible_at == control.next_eligible_at
+    with pytest.raises(PullTickBlocked, match="not_due"):
+        await store.acquire_pull_tick(WS, INSTANCE, "worker-b", ttl_seconds=30)
+    now[0] += timedelta(seconds=30)
+    _, newer = await store.acquire_pull_tick(WS, INSTANCE, "worker-b", ttl_seconds=30)
+    with pytest.raises(ImmutableViolation):
+        await store.recover_pull_invocation(WS, INSTANCE, invocation_id=lease.token, audit=recovery)
+    with pytest.raises(LeaseExpired):
+        await store.fail_pull_tick(WS, lease, backoff_cap_seconds=300)
+    current = await store.get_pull_control(WS, INSTANCE)
+    assert current is not None and current.invocation_id == newer.token
+
+
+async def test_confirmed_termination_can_finalize_an_expired_matching_owner() -> None:
+    """Verified late cleanup releases only its own fence and preserves backoff."""
+    now = [NOW]
+    store = MemoryPullControl(now=lambda: now[0])
+    await store.initialize_pull_control(WS, INSTANCE, actor="creator")
+    await store.set_pull_native_demand(WS, INSTANCE, interval_seconds=10, actor="connector")
+    _, lease = await store.acquire_pull_tick(WS, INSTANCE, "worker", ttl_seconds=1)
+    now[0] += timedelta(seconds=2)
+    await store.fail_pull_tick(WS, lease, backoff_cap_seconds=300)
+    control = await store.get_pull_control(WS, INSTANCE)
+    assert control is not None and control.invocation_id is None
+    assert control.next_eligible_at == now[0] + timedelta(seconds=10)

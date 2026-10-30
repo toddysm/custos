@@ -14,7 +14,7 @@ import httpx
 import pytest
 from custos_spl.errors import BackendUnavailable
 from custos_spl.ids import ConnectorInstanceId, WorkspaceId
-from custos_spl.interfaces.pull_control import ConnectorPullControl
+from custos_spl.interfaces.pull_control import ConnectorPullControl, PullTickBlocked
 from custos_spl.pagination import Cursor, Page
 
 from custos_connector import create_app
@@ -22,7 +22,12 @@ from custos_connector._telemetry import CURSOR_LAG_REGISTRY
 from custos_connector.audit import EVENT_PULL_LOOP_PAUSED
 from custos_connector.cursor.service import CursorInstanceUnavailable
 from custos_connector.providers import wire_durable_pull_runtime
-from custos_connector.runtime import PluginCleanupFailed, PluginInvoker
+from custos_connector.runtime import (
+    HookRunResult,
+    PluginCleanupFailed,
+    PluginInvoker,
+    invocation_container_name,
+)
 from custos_connector.settings import SettingsError, load_settings
 from tests._pull import (
     INSTANCE,
@@ -487,7 +492,8 @@ async def test_unconfirmed_cleanup_blocks_or_retains_ownership(
     pause_failure: bool,
 ) -> None:
     """An unconfirmed invocation is never followed by an unguarded ownership release."""
-    providers, metadata, plugin, _ = memory_runtime(PullClock())
+    clock = PullClock()
+    providers, metadata, plugin, _ = memory_runtime(clock)
     await seed_instance(providers)
     start_demand(metadata)
     monkeypatch.setattr(plugin, "_exc", PluginCleanupFailed("unit-owned-container"))
@@ -504,14 +510,45 @@ async def test_unconfirmed_cleanup_blocks_or_retains_ownership(
     cursor = await metadata.read_cursor(WS, INSTANCE)
     assert control is not None and cursor is not None
     assert control.operator_paused is not pause_failure
-    assert (cursor.lease_holder is not None) is pause_failure
+    assert cursor.lease_holder is not None and control.invocation_id == cursor.lease_holder
+    clock.advance(61)
+    with pytest.raises(PullTickBlocked, match="invocation_unconfirmed"):
+        await metadata.acquire_pull_tick(
+            WorkspaceId(WS), ConnectorInstanceId(INSTANCE), "new-replica", ttl_seconds=60
+        )
+    assert len(plugin.calls) == 1
 
 
-async def test_remaining_lease_budget_reaches_plugin_runner() -> None:
-    """A long configured hook timeout is shortened before invoking the runner."""
+async def test_remaining_lease_budget_reaches_plugin_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Persist the fence and bound the hook before any upstream invocation."""
     providers, metadata, plugin, _ = memory_runtime(PullClock())
     await seed_instance(providers)
     start_demand(metadata)
+    run = plugin.run
+
+    async def observe_claim(
+        *,
+        image_ref: str,
+        hook: str,
+        payload: Mapping[str, Any],
+        timeout_seconds: float,
+        invocation_id: str | None = None,
+    ) -> HookRunResult:
+        """Inspect durable state at the actual runner boundary."""
+        control = await metadata.get_pull_control(WorkspaceId(WS), ConnectorInstanceId(INSTANCE))
+        assert control is not None and invocation_id is not None
+        assert control.invocation_id == invocation_id
+        return await run(
+            image_ref=image_ref,
+            hook=hook,
+            payload=payload,
+            timeout_seconds=timeout_seconds,
+            invocation_id=invocation_id,
+        )
+
+    monkeypatch.setattr(plugin, "run", observe_claim)
     runtime = wire_durable_pull_runtime(
         providers, settings(), plugin_invoker=PluginInvoker(plugin, timeout_seconds=120)
     )
@@ -544,6 +581,7 @@ async def test_cancellation_retains_cursor_until_invocation_stops() -> None:
             hook: str,
             payload: Mapping[str, Any],
             timeout_seconds: float,
+            invocation_id: str | None = None,
         ) -> NoReturn:
             """Do not propagate cancellation until the invocation has actually stopped."""
             started.set()
@@ -574,8 +612,82 @@ async def test_cancellation_retains_cursor_until_invocation_stops() -> None:
             await task
         cursor = await metadata.read_cursor(WS, INSTANCE)
         assert stopped.is_set() and cursor is not None and cursor.lease_holder is None
+        control = await metadata.get_pull_control(WorkspaceId(WS), ConnectorInstanceId(INSTANCE))
+        assert control is not None and control.invocation_id is None
     finally:
         allow_cleanup.set()
         if not task.done():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_explicit_recovery_is_scoped_confirmed_and_generation_checked() -> None:
+    """The existing admin endpoint exposes and recovers only the observed expired invocation."""
+    clock = PullClock()
+    providers, metadata, _, _ = memory_runtime(clock)
+    await seed_instance(providers)
+    start_demand(metadata)
+    assert providers.pull_demand_reconciler is not None
+    await providers.pull_demand_reconciler.reconcile(WS)
+    _, lease = await metadata.acquire_pull_tick(
+        WorkspaceId(WS), ConnectorInstanceId(INSTANCE), "old-executor", ttl_seconds=30
+    )
+    app = create_app(settings=settings(), providers=providers)
+    context = {
+        "x-custos-callctx": json.dumps(
+            {
+                "workspace_id": WS,
+                "principal_id": "operator",
+                "permissions": ["admin:connector", "connector:read"],
+            }
+        )
+    }
+    recovery = {
+        "invocationId": lease.token,
+        "confirmedStopped": True,
+        "reason": "old executor terminated",
+    }
+    prefix = f"/v1/workspaces/{WS}/connectors/{INSTANCE}"
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://connector",
+        ) as client,
+    ):
+        response = await client.get(prefix + "/cursor", headers=context)
+        assert response.status_code == 200
+        assert (await client.post(prefix + "/pull-loop:resume", json=recovery)).status_code == 401
+        assert (
+            await client.post(
+                prefix.replace(WS, "other") + "/pull-loop:resume", json=recovery, headers=context
+            )
+        ).status_code == 403
+        assert response.json()["pullControl"]["containerName"] == invocation_container_name(
+            lease.token
+        )
+        assert response.json()["pullControl"]["invocationOwner"] == "old-executor"
+        assert (
+            await client.post(prefix + "/pull-loop:resume", json=recovery, headers=context)
+        ).status_code == 409
+        clock.advance(31)
+        assert (await client.post(prefix + "/pull-loop:resume", headers=context)).status_code == 200
+        with pytest.raises(PullTickBlocked, match="invocation_unconfirmed"):
+            await metadata.acquire_pull_tick(
+                WorkspaceId(WS), ConnectorInstanceId(INSTANCE), "new-executor", ttl_seconds=30
+            )
+        for invalid in ({**recovery, "confirmedStopped": False}, {"invocationId": lease.token}):
+            assert (
+                await client.post(prefix + "/pull-loop:resume", json=invalid, headers=context)
+            ).status_code == 422
+        assert (
+            await client.post(prefix + "/pull-loop:resume", json=recovery, headers=context)
+        ).status_code == 200
+        _, newer = await metadata.acquire_pull_tick(
+            WorkspaceId(WS), ConnectorInstanceId(INSTANCE), "new-executor", ttl_seconds=30
+        )
+        assert (
+            await client.post(prefix + "/pull-loop:resume", json=recovery, headers=context)
+        ).status_code == 409
+        current = await metadata.get_pull_control(WorkspaceId(WS), ConnectorInstanceId(INSTANCE))
+        assert current is not None and current.invocation_id == newer.token

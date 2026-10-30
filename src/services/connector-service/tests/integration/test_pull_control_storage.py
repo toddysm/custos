@@ -9,7 +9,7 @@ from datetime import timedelta
 import asyncpg
 import pytest
 from custos_pg import PgMetadataAdapter
-from custos_spl.errors import ImmutableViolation, LeaseExpired
+from custos_spl.errors import ImmutableViolation, LeaseBusy, LeaseExpired
 from custos_spl.ids import (
     ConnectorInstanceId,
     RunId,
@@ -226,3 +226,184 @@ async def test_pull_control_pages_are_scoped(pull_store: PgMetadataAdapter) -> N
     )
     assert [row.instance_id for row in rows] == ["a", "c"]
     assert all(row.workspace_id == WS for row in rows)
+
+
+async def test_invocation_fence_survives_failed_pause_and_expired_ownership(
+    pull_store: PgMetadataAdapter,
+    pg_dsn: str,
+) -> None:
+    """A fresh adapter cannot poll after both ownership clocks expire while cleanup is unknown."""
+    await pull_store.initialize_pull_control(WS, INSTANCE, actor="creator")
+    await pull_store.set_pull_native_demand(WS, INSTANCE, interval_seconds=10, actor="connector")
+    _, lease = await pull_store.acquire_pull_tick(WS, INSTANCE, "worker-a", ttl_seconds=30)
+    event = build_audit_event(
+        workspace_id=WS,
+        event_type=EVENT_PULL_LOOP_PAUSED,
+        actor="operator",
+        subject={"instance_id": INSTANCE},
+        payload={},
+    )
+    await pull_store.append_audit(WS, event)
+    with pytest.raises(ImmutableViolation):
+        await pull_store.set_pull_paused(WS, INSTANCE, paused=True, audit=event)
+    recovery = build_audit_event(
+        workspace_id=WS,
+        event_type=EVENT_PULL_LOOP_RESUMED,
+        actor="operator",
+        subject={"instance_id": INSTANCE},
+        payload={
+            "invocationId": lease.token,
+            "confirmedStopped": True,
+            "reason": "executor stopped",
+        },
+    )
+    with pytest.raises(LeaseBusy):
+        await pull_store.recover_pull_invocation(
+            WS, INSTANCE, invocation_id=lease.token, audit=recovery
+        )
+    connection = await asyncpg.connect(pg_dsn)
+    try:
+        await connection.execute(
+            "UPDATE custos_state.connector_cursor SET lease_expires_at="
+            "clock_timestamp()-interval '1 second' WHERE workspace_id=$1 AND instance_id=$2",
+            WS,
+            INSTANCE,
+        )
+        await connection.execute(
+            "UPDATE custos_state.connector_pull_control SET next_eligible_at="
+            "clock_timestamp()-interval '1 second' WHERE workspace_id=$1 AND instance_id=$2",
+            WS,
+            INSTANCE,
+        )
+    finally:
+        await connection.close()
+    await pull_store.set_pull_paused(
+        WS,
+        INSTANCE,
+        paused=False,
+        audit=build_audit_event(
+            workspace_id=WS,
+            event_type=EVENT_PULL_LOOP_RESUMED,
+            actor="operator",
+            subject={"instance_id": INSTANCE},
+            payload={},
+        ),
+    )
+    async with asyncpg.create_pool(dsn=pg_dsn, min_size=1, max_size=2) as pool:
+        fresh = PgMetadataAdapter(pool=pool)
+        await fresh.check_pull_control_ready()
+        with pytest.raises(PullTickBlocked, match="invocation_unconfirmed"):
+            await fresh.acquire_pull_tick(WS, INSTANCE, "worker-b", ttl_seconds=30)
+    control = await pull_store.get_pull_control(WS, INSTANCE)
+    assert control is not None and control.invocation_id == lease.token
+    assert not control.operator_paused
+    before = await pull_store.read_cursor(WS, INSTANCE)
+    with pytest.raises(ImmutableViolation):
+        await pull_store.recover_pull_invocation(
+            WS,
+            INSTANCE,
+            invocation_id=lease.token,
+            audit=replace(recovery, event_id=event.event_id),
+        )
+    assert await pull_store.get_pull_control(WS, INSTANCE) == control
+    recovered = await pull_store.recover_pull_invocation(
+        WS, INSTANCE, invocation_id=lease.token, audit=recovery
+    )
+    assert recovered.invocation_id is None
+    assert recovered.next_eligible_at == control.next_eligible_at
+    after = await pull_store.read_cursor(WS, INSTANCE)
+    assert before is not None and after is not None
+    assert before.value == after.value and before.advanced_at == after.advanced_at
+    connection = await asyncpg.connect(pg_dsn)
+    try:
+        counts = await connection.fetchrow(
+            "SELECT (SELECT count(*) FROM custos_state.audit_event "
+            "WHERE workspace_id=$1 AND event_id=$2), "
+            "(SELECT count(*) FROM custos_state.audit_outbox "
+            "WHERE workspace_id=$1 AND event_id=$2)",
+            WS,
+            recovery.event_id,
+        )
+        assert counts is not None and tuple(counts) == (1, 1)
+    finally:
+        await connection.close()
+    _, newer = await pull_store.acquire_pull_tick(WS, INSTANCE, "worker-b", ttl_seconds=30)
+    with pytest.raises(ImmutableViolation):
+        await pull_store.recover_pull_invocation(
+            WS, INSTANCE, invocation_id=lease.token, audit=recovery
+        )
+    with pytest.raises(LeaseExpired):
+        await pull_store.fail_pull_tick(WS, lease, backoff_cap_seconds=300)
+    current = await pull_store.get_pull_control(WS, INSTANCE)
+    assert current is not None and current.invocation_id == newer.token
+
+
+@pytest.mark.parametrize("expired", [False, True])
+async def test_revision_eleven_fences_existing_unconfirmed_claims(
+    pull_store: PgMetadataAdapter,
+    pg_dsn: str,
+    expired: bool,
+) -> None:
+    """Upgrade conservatively fences old claims without inventing a container locator."""
+    await pull_store.initialize_pull_control(WS, INSTANCE, actor="creator")
+    await pull_store.set_pull_native_demand(WS, INSTANCE, interval_seconds=10, actor="connector")
+    _, lease = await pull_store.acquire_pull_tick(WS, INSTANCE, "legacy-worker", ttl_seconds=30)
+    connection = await asyncpg.connect(pg_dsn)
+    try:
+        if expired:
+            await connection.execute(
+                "UPDATE custos_state.connector_cursor SET lease_expires_at="
+                "clock_timestamp()-interval '1 second' WHERE workspace_id=$1 AND instance_id=$2",
+                WS,
+                INSTANCE,
+            )
+        await connection.execute(
+            "UPDATE custos_state.connector_pull_control "
+            "SET invocation_id=NULL,invocation_owner=NULL "
+            "WHERE workspace_id=$1 AND instance_id=$2",
+            WS,
+            INSTANCE,
+        )
+        await connection.execute(
+            "DELETE FROM custos_meta.adapter_revisions "
+            "WHERE interface_name='MetadataStoreProvider' AND revision=11"
+        )
+    finally:
+        await connection.close()
+    await pull_store.apply_pending()
+    control = await pull_store.get_pull_control(WS, INSTANCE)
+    assert control is not None and control.invocation_id is not None
+    assert control.invocation_id.startswith("legacy:")
+    assert lease.token not in control.invocation_id
+    assert control.invocation_owner == "legacy:unknown"
+
+
+async def test_confirmed_late_cleanup_releases_only_the_expired_attempt(
+    pull_store: PgMetadataAdapter,
+    pg_dsn: str,
+) -> None:
+    """Late confirmed termination releases its fence but cannot commit expired cursor progress."""
+    await pull_store.initialize_pull_control(WS, INSTANCE, actor="creator")
+    await pull_store.set_pull_native_demand(WS, INSTANCE, interval_seconds=60, actor="connector")
+    before, lease = await pull_store.acquire_pull_tick(WS, INSTANCE, "worker", ttl_seconds=30)
+    connection = await asyncpg.connect(pg_dsn)
+    try:
+        await connection.execute(
+            "UPDATE custos_state.connector_cursor SET lease_expires_at="
+            "clock_timestamp()-interval '1 second' WHERE workspace_id=$1 AND instance_id=$2",
+            WS,
+            INSTANCE,
+        )
+    finally:
+        await connection.close()
+    with pytest.raises(LeaseExpired):
+        await pull_store.commit_pull_tick(WS, lease, '"uncommitted"', await pull_store.pull_now())
+    await pull_store.fail_pull_tick(WS, lease, backoff_cap_seconds=300)
+    after = await pull_store.read_cursor(WS, INSTANCE)
+    control = await pull_store.get_pull_control(WS, INSTANCE)
+    assert after is not None and after.value == before.value and after.lease_holder is None
+    assert (
+        control is not None and control.invocation_id is None and control.consecutive_failures == 1
+    )
+    with pytest.raises(PullTickBlocked, match="not_due"):
+        await pull_store.acquire_pull_tick(WS, INSTANCE, "worker-b", ttl_seconds=30)
