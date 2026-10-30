@@ -43,9 +43,9 @@ __all__ = [
 ]
 
 #: Shape rule for every ``kind`` string: lowercase, at least one dot, the first
-#: segment is the **domain**. Domain segments are ``[a-z][a-z0-9]*``; event
-#: segments additionally allow underscores (e.g. ``step.retry_scheduled``).
-KIND_PATTERN: Final[str] = r"^[a-z][a-z0-9]*(\.[a-z][a-z0-9_]*)+$"
+#: segment is the **domain**. Accept Connector's hyphens and numeric-leading
+#: noninitial segments while preserving existing underscore event names.
+KIND_PATTERN: Final[str] = r"^[a-z][a-z0-9-]*(?:\.[a-z0-9][a-z0-9_-]*)+$"
 
 _KIND_RE: Final[re.Pattern[str]] = re.compile(KIND_PATTERN)
 

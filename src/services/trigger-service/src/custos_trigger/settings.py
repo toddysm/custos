@@ -52,6 +52,8 @@ ENV_SCHEDULER_LEADER_RENEW_SECONDS: Final[str] = "TRIGGER_SCHEDULER_LEADER_RENEW
 
 #: Enable only after every subscription writer uses atomic receiver mutations.
 ENV_RECEIVER_CONFIGURATION_ENABLED: Final[str] = "TRIGGER_RECEIVER_CONFIGURATION_ENABLED"
+ENV_SOURCE_RECEIVERS_ENABLED: Final[str] = "TRIGGER_SOURCE_RECEIVERS_ENABLED"
+ENV_CONNECTOR_EVENTS_TOPIC: Final[str] = "TRIGGER_CONNECTOR_EVENTS_TOPIC"
 
 # --- Dapr Pub/Sub transport (chart § Dapr Pub/Sub subscriptions) -------------
 
@@ -104,6 +106,7 @@ DEFAULT_SCHEDULER_LEADER_RENEW_SECONDS: Final[int] = 10
 DEFAULT_PUBSUB_COMPONENT: Final[str] = "custos-pubsub"
 DEFAULT_NORMALIZED_TOPIC: Final[str] = "custos.triggers.normalized"
 DEFAULT_WORKFLOW_EVENTS_TOPIC: Final[str] = "custos.workflow.events"
+DEFAULT_CONNECTOR_EVENTS_TOPIC: Final[str] = "custos.connector.events"
 DEFAULT_ENVIRONMENT: Final[str] = "development"
 
 
@@ -135,6 +138,8 @@ class Settings:
     app_api_token: str | None = field(default=None, repr=False)
     workflow_app_id: str = "workflow-service"
     workflow_namespace: str | None = None
+    source_receivers_enabled: bool = False
+    connector_events_topic: str = DEFAULT_CONNECTOR_EVENTS_TOPIC
 
     def __post_init__(self) -> None:
         """Reject unusable ownership timing or an explicitly blank mesh credential."""
@@ -195,12 +200,22 @@ def _opt_non_negative_int(name: str, env: dict[str, str], default: int) -> int:
 
 def read_receiver_configuration_enabled(env: Mapping[str, str]) -> bool:
     """Parse the default-off rollout gate; malformed values never enable receiver writes."""
-    raw = env.get(ENV_RECEIVER_CONFIGURATION_ENABLED, "").strip().lower()
+    return _read_gate(env, ENV_RECEIVER_CONFIGURATION_ENABLED)
+
+
+def read_source_receivers_enabled(env: Mapping[str, str]) -> bool:
+    """Keep broker consumption independent of configuration authoring and default off."""
+    return _read_gate(env, ENV_SOURCE_RECEIVERS_ENABLED)
+
+
+def _read_gate(env: Mapping[str, str], name: str) -> bool:
+    """Parse an explicit boolean gate without success-shaped invalid-value defaults."""
+    raw = env.get(name, "").strip().lower()
     if raw in ("", "false", "0"):
         return False
     if raw in ("true", "1"):
         return True
-    raise SettingsError(f"{ENV_RECEIVER_CONFIGURATION_ENABLED} must be true or false")
+    raise SettingsError(f"{name} must be true or false")
 
 
 def load_settings(env: dict[str, str] | None = None) -> Settings:
@@ -214,6 +229,9 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
     src: dict[str, str] = dict(os.environ if env is None else env)
     return Settings(
         receiver_configuration_enabled=read_receiver_configuration_enabled(src),
+        source_receivers_enabled=read_source_receivers_enabled(src),
+        connector_events_topic=src.get(ENV_CONNECTOR_EVENTS_TOPIC, "").strip()
+        or DEFAULT_CONNECTOR_EVENTS_TOPIC,
         webhook_base_url=_require(ENV_WEBHOOK_BASE_URL, src),
         dedup_ttl_seconds=_opt_non_negative_int(
             ENV_DEDUP_TTL_SECONDS, src, DEFAULT_DEDUP_TTL_SECONDS
@@ -251,6 +269,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
 
 
 __all__ = [
+    "DEFAULT_CONNECTOR_EVENTS_TOPIC",
     "DEFAULT_DEDUP_TTL_SECONDS",
     "DEFAULT_DISPATCH_MAX_RETRIES",
     "DEFAULT_ENVIRONMENT",
@@ -265,6 +284,7 @@ __all__ = [
     "ENV_APP_API_TOKEN",
     "ENV_AUTHZ_ENDPOINT",
     "ENV_CONNECTOR_ENDPOINT",
+    "ENV_CONNECTOR_EVENTS_TOPIC",
     "ENV_DEDUP_TTL_SECONDS",
     "ENV_DISPATCH_MAX_RETRIES",
     "ENV_ENVIRONMENT",
@@ -277,6 +297,7 @@ __all__ = [
     "ENV_RESUME_DEFAULT_TTL_SECONDS",
     "ENV_SCHEDULER_LEADER_LEASE_SECONDS",
     "ENV_SCHEDULER_LEADER_RENEW_SECONDS",
+    "ENV_SOURCE_RECEIVERS_ENABLED",
     "ENV_WEBHOOK_BASE_URL",
     "ENV_WORKFLOW_APP_ID",
     "ENV_WORKFLOW_ENDPOINT",
@@ -286,5 +307,6 @@ __all__ = [
     "SettingsError",
     "load_settings",
     "read_receiver_configuration_enabled",
+    "read_source_receivers_enabled",
     "validate_scheduler_timing",
 ]

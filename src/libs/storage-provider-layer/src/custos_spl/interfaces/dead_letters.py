@@ -78,7 +78,7 @@ def _instant(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
-def _identifier(value: str) -> None:
+def validate_dispatch_identifier(value: str) -> None:
     """Bound identifiers and reject blank, non-Unicode and database-invalid strings."""
     if not isinstance(value, str) or not value.strip() or "\0" in value:
         raise ValueError("dead-letter identifiers must be nonblank strings without NUL")
@@ -127,7 +127,7 @@ def json_value(value: JsonValue) -> object:
     return value
 
 
-def _object(value: Mapping[str, object]) -> Mapping[str, JsonValue]:
+def snapshot_dispatch_object(value: Mapping[str, object]) -> Mapping[str, JsonValue]:
     """Validate, size-bound and deeply freeze one JSON object."""
     frozen = _freeze(value)
     if not isinstance(frozen, Mapping):
@@ -135,6 +135,34 @@ def _object(value: Mapping[str, object]) -> Mapping[str, JsonValue]:
     if len(json.dumps(json_value(frozen), ensure_ascii=False).encode("utf-8")) > MAX_PAYLOAD_BYTES:
         raise ValueError("dead-letter object exceeds 256 KiB")
     return frozen
+
+
+def validate_dispatch_target(
+    value: Mapping[str, object], *, allow_unresolved_version: bool = False
+) -> Mapping[str, JsonValue]:
+    """Validate the complete wrapped RPC target, including size, depth and identifiers."""
+    target = snapshot_dispatch_object(value)
+    kind = target.get("kind")
+    required = (
+        {"kind", "workflowVersionId", "inputs"}
+        if kind == "start"
+        else {"kind", "runId", "stepId", "eventName", "payload"}
+    )
+    if kind not in ("start", "resume") or set(target) - {"deliveryProtocol"} != required:
+        raise ValueError("resolved target must be an exact start or resume RPC shape")
+    protocol = target.get("deliveryProtocol", 1)
+    if type(protocol) is not int or protocol not in (1, 2):
+        raise ValueError("unsupported target delivery protocol")
+    for key in required - {"kind", "inputs", "payload"}:
+        item = target[key]
+        if key == "workflowVersionId" and item is None and allow_unresolved_version:
+            continue
+        if not isinstance(item, str):
+            raise ValueError("resolved target identifiers must be strings")
+        validate_dispatch_identifier(item)
+    if not isinstance(target.get("inputs" if kind == "start" else "payload"), Mapping):
+        raise ValueError("resolved RPC data must be an object")
+    return target
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,7 +213,7 @@ class DeadLetterData:
             self.subscription_id,
             self.idempotency_key,
         ):
-            _identifier(identifier)
+            validate_dispatch_identifier(identifier)
         if type(self.schema_version) is not int or self.schema_version != 1:
             raise ValueError("unsupported dead-letter schema version")
         if type(self.retention_seconds) is not int or not 0 < self.retention_seconds <= 31_536_000:
@@ -200,7 +228,10 @@ class DeadLetterData:
         if not all(isinstance(attempt, DispatchAttempt) for attempt in self.history):
             raise ValueError("invalid dispatch attempt history")
         object.__setattr__(self, "history", tuple(self.history))
-        event, target = _object(self.event), _object(self.target)
+        event = snapshot_dispatch_object(self.event)
+        target = validate_dispatch_target(
+            self.target, allow_unresolved_version=self.history[-1].code == "configuration"
+        )
         if set(event) - {"schemaVersion", "eventId", "source", "kind", "subject", "data"}:
             raise ValueError("unsupported persisted event field")
         if event.get("schemaVersion") != "1":
@@ -209,7 +240,7 @@ class DeadLetterData:
             value = event.get(key)
             if not isinstance(value, str):
                 raise ValueError("event requires eventId and kind")
-            _identifier(value)
+            validate_dispatch_identifier(value)
         source = event.get("source")
         if not isinstance(source, Mapping) or set(source) - {
             "type",
@@ -237,30 +268,6 @@ class DeadLetterData:
             event.get("subject", ""), str
         ):
             raise ValueError("normalized event requires object data and string subject")
-        kind = target.get("kind")
-        required = (
-            {"kind", "workflowVersionId", "inputs"}
-            if kind == "start"
-            else {"kind", "runId", "stepId", "eventName", "payload"}
-        )
-        if kind not in ("start", "resume") or set(target) - {"deliveryProtocol"} != required:
-            raise ValueError("resolved target must be an exact start or resume RPC shape")
-        protocol = target.get("deliveryProtocol", 1)
-        if type(protocol) is not int or protocol not in (1, 2):
-            raise ValueError("unsupported target delivery protocol")
-        for key in required - {"kind", "inputs", "payload"}:
-            value = target[key]
-            if (
-                key == "workflowVersionId"
-                and value is None
-                and self.history[-1].code == "configuration"
-            ):
-                continue
-            if not isinstance(value, str):
-                raise ValueError("resolved target identifiers must be strings")
-            _identifier(value)
-        if not isinstance(target.get("inputs" if kind == "start" else "payload"), Mapping):
-            raise ValueError("resolved RPC data must be an object")
         object.__setattr__(self, "event", event)
         object.__setattr__(self, "target", target)
 
@@ -313,9 +320,9 @@ class DeadLetterFilter:
 
     def scope(self, workspace_id: WorkspaceId) -> tuple[str | None, ...]:
         """Validate filters and produce a canonical query-cursor scope."""
-        _identifier(workspace_id)
+        validate_dispatch_identifier(workspace_id)
         if self.subscription_id is not None:
-            _identifier(self.subscription_id)
+            validate_dispatch_identifier(self.subscription_id)
         if self.status is not None and self.status not in _STATUSES:
             raise ValueError("invalid dead-letter status")
         since = _instant(self.since) if self.since is not None else None
@@ -356,7 +363,7 @@ def claim_replay(
     entry: DeadLetterEntry, worker_id: str, ttl_seconds: int, now: datetime
 ) -> DeadLetterEntry:
     """Consume one attempt; active contenders raise LeaseBusy, ineligible rows conflict."""
-    _identifier(worker_id)
+    validate_dispatch_identifier(worker_id)
     now = _instant(now)
     if type(ttl_seconds) is not int or not 0 < ttl_seconds <= MAX_CLAIM_SECONDS:
         raise ValueError("replay claim duration must be 1..300 seconds")
@@ -408,7 +415,7 @@ def finish_replay(
     if failure is not None and result_id is not None:
         raise ValueError("failed replay cannot carry a successful result")
     if result_id is not None:
-        _identifier(result_id)
+        validate_dispatch_identifier(result_id)
     status: DeadLetterStatus = "replayed"
     if failure is not None:
         status = (

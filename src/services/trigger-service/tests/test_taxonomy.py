@@ -168,6 +168,10 @@ def test_kind_domain_extracts_first_segment() -> None:
         "acr.image_pushed",
         "vendor.some_event",
         "ghcr.image.pushed",  # nested vendor namespace
+        "type-a.event",
+        "vendor.2d",
+        "vendor.image-ready",
+        "work-flow.completed",
     ],
 )
 def test_validate_kind_accepts_vendor_shape(kind: str) -> None:
@@ -191,7 +195,7 @@ def test_validate_kind_accepts_vendor_shape(kind: str) -> None:
         ".completed",  # empty domain
         "work flow.completed",  # space
         "workflow..completed",  # empty middle segment
-        "work-flow.completed",  # hyphen in domain
+        "work_flow.completed",  # underscore in domain is not a producer token
         "workflow.completed!",  # punctuation
     ],
 )
@@ -215,6 +219,8 @@ def test_validate_kind_rejects_malformed(kind: str) -> None:
         "manual.fired",  # near-miss of manual.fire
         "step.done",  # not a real step kind
         "pr.reopened",  # not enumerated
+        "workflow.2done",
+        "step.retry-scheduled",
     ],
 )
 def test_validate_kind_rejects_platform_domain_collision(kind: str) -> None:
@@ -237,4 +243,4 @@ def test_validate_kind_message_includes_kind() -> None:
 
 
 def test_kind_pattern_is_the_documented_regex() -> None:
-    assert KIND_PATTERN == r"^[a-z][a-z0-9]*(\.[a-z][a-z0-9_]*)+$"
+    assert KIND_PATTERN == r"^[a-z][a-z0-9-]*(?:\.[a-z0-9][a-z0-9_-]*)+$"

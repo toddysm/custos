@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Path, Request, Response, status
 from fastapi.responses import JSONResponse
@@ -43,7 +43,11 @@ from custos_trigger.dependencies import (
     get_subscription_store,
 )
 from custos_trigger.errors import TriggerError, TriggerErrorKind
-from custos_trigger.input_mapping import resolve_input_mapping, validate_input_mapping
+from custos_trigger.input_mapping import (
+    EVENT_MAPPED_SOURCES,
+    resolve_input_mapping,
+    validate_input_mapping,
+)
 from custos_trigger.middleware import CallContext, require_permission
 from custos_trigger.middleware import ensure_workspace as _ensure_workspace
 from custos_trigger.models import (
@@ -58,7 +62,7 @@ from custos_trigger.models import (
 )
 from custos_trigger.normalize import normalize_manual_fire
 from custos_trigger.pipeline.dispatch import Dispatcher
-from custos_trigger.pipeline.match_start import StartMatch, StartMatcher
+from custos_trigger.pipeline.match_start import StartMatcher
 from custos_trigger.providers import Providers
 from custos_trigger.selector import SelectorEvaluator
 from custos_trigger.source_config import (
@@ -140,7 +144,7 @@ async def create_subscription(
     _validate_selector(
         evaluator, body.selector, subscription_id=subscription_id, source_type=body.source_type
     )
-    if body.source_type is SourceType.SCHEDULED:
+    if body.source_type in EVENT_MAPPED_SOURCES:
         validate_input_mapping(
             body.input_mapping,
             evaluator=evaluator,
@@ -245,13 +249,13 @@ async def patch_subscription(
         )
     source_type_changed = merged.source_type != existing.source_type
     if (
-        merged.source_type is SourceType.SCHEDULED
+        merged.source_type in EVENT_MAPPED_SOURCES
         and (
             "input_mapping" in fields_set
             or source_type_changed
             or body.state is SubscriptionState.ACTIVE
         )
-    ) or (source_type_changed and existing.source_type is SourceType.SCHEDULED):
+    ) or (source_type_changed and existing.source_type in EVENT_MAPPED_SOURCES):
         validate_input_mapping(
             merged.input_mapping,
             evaluator=evaluator,
@@ -348,21 +352,22 @@ async def fire_subscription(
         )
 
     match = matches[0]
-    if subscription.source_type is SourceType.SCHEDULED:
-        match = StartMatch(
-            subscription.model_copy(
-                update={
-                    "input_mapping": resolve_input_mapping(
-                        subscription.input_mapping,
-                        event,
-                        evaluator=evaluator,
-                        subscription_id=subscription_id,
-                        source_type=subscription.source_type,
-                    )
-                }
-            )
+
+    def prepare_inputs() -> dict[str, Any]:
+        """Resolve new event-driven inputs after any accepted delivery is recovered."""
+        return resolve_input_mapping(
+            subscription.input_mapping,
+            event,
+            evaluator=evaluator,
+            subscription_id=subscription_id,
+            source_type=subscription.source_type,
         )
-    outcome = await dispatcher.dispatch_start(event, match)
+
+    outcome = await dispatcher.dispatch_start(
+        event,
+        match,
+        prepare_inputs=prepare_inputs if subscription.source_type in EVENT_MAPPED_SOURCES else None,
+    )
     if outcome.is_dispatched and outcome.run_ref is not None:
         return ManualFireResult(run_id=outcome.run_ref.run_id)
     if outcome.is_duplicate:

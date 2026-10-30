@@ -40,9 +40,10 @@ from custos_trigger.clients.workflow import (
     WorkflowClientTransportError,
     WorkflowServiceClient,
 )
-from custos_trigger.dedup import compute_dedup_key
+from custos_trigger.dedup import compute_dispatch_key
 from custos_trigger.errors import TriggerError, TriggerErrorKind
 from custos_trigger.events import NormalizedEvent
+from custos_trigger.models import Subscription
 from custos_trigger.pipeline.dispatch import (
     AUDIT_DEDUPED,
     AUDIT_DISPATCH_FAILED,
@@ -56,10 +57,34 @@ from custos_trigger.pipeline.dispatch import (
 )
 from custos_trigger.pipeline.match_resume import ResumeMatch
 from custos_trigger.pipeline.match_start import StartMatch
+from custos_trigger.source_config import SourceConfigurationError
 
 logger = logging.getLogger(__name__)
 MAX_DISPATCH_SECONDS = 300
 FINALIZATION_MARGIN_SECONDS = 30
+
+
+def build_start_target(subscription: Subscription) -> dict[str, Any]:
+    """Build the same complete target for source preflight and durable start capture."""
+    return {
+        "kind": "start",
+        "workflowVersionId": subscription.target_workflow_version_id,
+        "inputs": subscription.input_mapping,
+        "deliveryProtocol": 2,
+    }
+
+
+def build_resume_target(event: NormalizedEvent, match: ResumeMatch) -> dict[str, Any]:
+    """Build the stored signal destination and event payload for preflight and capture."""
+    reg = match.registration
+    return {
+        "kind": "resume",
+        "runId": reg.run_id,
+        "stepId": reg.step_id,
+        "eventName": reg.event_key,
+        "payload": event.data,
+        "deliveryProtocol": reg.delivery_protocol,
+    }
 
 
 def validate_dispatch_limits(
@@ -113,6 +138,7 @@ class ReliableDispatcher:
         match: StartMatch,
         *,
         depth: int = 0,
+        prepare_inputs: Callable[[], dict[str, Any]] | None = None,
     ) -> DispatchOutcome:
         """Dispatch a resolved start target without consulting mutable configuration on replay."""
         sub = match.subscription
@@ -120,13 +146,9 @@ class ReliableDispatcher:
             event,
             sub.workspace_id,
             sub.subscription_id,
-            {
-                "kind": "start",
-                "workflowVersionId": sub.target_workflow_version_id,
-                "inputs": sub.input_mapping,
-                "deliveryProtocol": 2,
-            },
+            build_start_target(sub),
             depth,
+            prepare_inputs=prepare_inputs,
         )
 
     async def dispatch_resume(
@@ -138,19 +160,11 @@ class ReliableDispatcher:
         depth: int = 0,
     ) -> DispatchOutcome:
         """Preserve the wait's persisted protocol, including explicit unsafe legacy replay."""
-        reg = match.registration
         return await self._dispatch(
             event,
             workspace_id,
             match.resume_id,
-            {
-                "kind": "resume",
-                "runId": reg.run_id,
-                "stepId": reg.step_id,
-                "eventName": reg.event_key,
-                "payload": event.data,
-                "deliveryProtocol": reg.delivery_protocol,
-            },
+            build_resume_target(event, match),
             depth,
         )
 
@@ -246,6 +260,8 @@ class ReliableDispatcher:
         subscription_id: str,
         target: Mapping[str, Any],
         depth: int,
+        *,
+        prepare_inputs: Callable[[], dict[str, Any]] | None = None,
     ) -> DispatchOutcome:
         """Never acknowledge pending work, failed capture or lost ownership as success."""
         attributes = {
@@ -258,7 +274,7 @@ class ReliableDispatcher:
                 AUDIT_LOOP_DETECTED, workspace_id=workspace, attributes=attributes
             )
             return DispatchOutcome(DispatchStatus.LOOP_REJECTED)
-        key = compute_dedup_key(subscription_id, event.event_id)
+        key = compute_dispatch_key(subscription_id, event)
         try:
             now = await self.store.delivery_now()
             prior = await self.store.get_delivery(WorkspaceId(workspace), "trigger", key)
@@ -272,17 +288,24 @@ class ReliableDispatcher:
                     )
                 data = decode_delivery_request(prior.request_json, now)
             else:
-                data = DeadLetterData(
-                    workspace_id=WorkspaceId(workspace),
-                    entry_id="dl_" + delivery_identity(workspace, key),
-                    subscription_id=subscription_id,
-                    idempotency_key=key,
-                    event=event.model_dump(by_alias=True, exclude={"raw"}),
-                    target=target,
-                    history=(DispatchAttempt(now, "configuration"),),
-                    retention_seconds=self.retention,
-                    max_replay_attempts=self.max_replays,
-                )
+                if prepare_inputs is not None:
+                    target = {**target, "inputs": prepare_inputs()}
+                try:
+                    data = DeadLetterData(
+                        workspace_id=WorkspaceId(workspace),
+                        entry_id="dl_" + delivery_identity(workspace, key),
+                        subscription_id=subscription_id,
+                        idempotency_key=key,
+                        event=event.model_dump(by_alias=True, exclude={"raw"}),
+                        target=target,
+                        history=(DispatchAttempt(now, "configuration"),),
+                        retention_seconds=self.retention,
+                        max_replay_attempts=self.max_replays,
+                    )
+                except (ValueError, UnicodeError) as exc:
+                    raise SourceConfigurationError(
+                        "dispatch snapshot cannot be retained; correct its configuration"
+                    ) from exc
             fingerprint = delivery_fingerprint({"target": json_value(data.target)})
             claim = await self.store.reserve_delivery(
                 data.workspace_id,

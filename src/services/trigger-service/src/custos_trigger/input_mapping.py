@@ -19,6 +19,9 @@ from custos_trigger.source_config import SourceConfigurationError
 
 logger = logging.getLogger(__name__)
 _JSON_MAPPING = TypeAdapter(dict[str, Any])
+EVENT_MAPPED_SOURCES = frozenset(
+    {SourceType.SCHEDULED, SourceType.WEBHOOK, SourceType.VENDOR_PUSH, SourceType.PULL}
+)
 
 
 def _transform_strings(value: Any, transform: Callable[[str], Any], depth: int = 0) -> Any:

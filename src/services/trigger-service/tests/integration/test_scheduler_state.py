@@ -553,11 +553,16 @@ async def test_recovered_publication_does_not_duplicate_workflow_effect(harness:
     from custos_workflow.runtime.fake import FakeWorkflowClient, FakeWorkflowRuntime
 
     from custos_trigger.clients.workflow import RaiseExternalEventRequest, RunRef, StartRunRequest
-    from custos_trigger.dedup import Deduplicator, compute_dedup_key
+    from custos_trigger.dedup import Deduplicator, compute_dedup_key, compute_dispatch_key
     from custos_trigger.pipeline.dispatch import Dispatcher
     from custos_trigger.pipeline.reliable import ReliableDispatcher, ReliableStorage
-    from custos_trigger.receivers.scheduled import process_scheduled_event
+    from custos_trigger.receivers.sources import (
+        ScopedEvent,
+        adapt_connector_event,
+        ingest_source_event,
+    )
     from custos_trigger.selector import SelectorEvaluator
+    from custos_trigger.stores import ResumeSubscriptionStore
 
     runtime = FakeWorkflowRuntime(now=await harness.store.scheduler_now())
     runtime.register_workflow(make_run_orchestrator(NoopStepHandler()), name=WORKFLOW_NAME)
@@ -666,15 +671,15 @@ async def test_recovered_publication_does_not_duplicate_workflow_effect(harness:
     async def publish(event: NormalizedEvent) -> None:
         """Run the actual matching/durable dispatch path, then lose the first acknowledgement."""
         nonlocal uncertain
-        outcome = await process_scheduled_event(
-            event,
-            subscription_store=subscriptions,
-            provider=harness.store,
+        await ingest_source_event(
+            ScopedEvent(schema_version="1", workspace_id=str(_WS), event=event),
+            subscriptions=subscriptions,
+            resumes=ResumeSubscriptionStore(harness.store),
+            scheduler=harness.store,
             evaluator=SelectorEvaluator(),
             dispatcher=dispatcher,
             audit=audit,
         )
-        assert outcome is not None and (outcome.is_dispatched or outcome.is_duplicate)
         events.append(event)
         if uncertain:
             uncertain = False
@@ -714,6 +719,52 @@ async def test_recovered_publication_does_not_duplicate_workflow_effect(harness:
         }
         stored = await subscriptions.get(str(_WS), "schedule")
         assert stored is not None and stored.input_mapping == mapping
+        now = await harness.store.scheduler_now()
+        await subscriptions.create(
+            Subscription(
+                workspace_id=str(_WS),
+                subscription_id="connector-start",
+                workflow_id="workflow",
+                target_workflow_version_id="version",
+                source_type=SourceType.VENDOR_PUSH,
+                source_config=SourceConfig(connector_instance_id="connector"),
+                input_mapping={"amount": "${{ event.data.amount }}"},
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        scoped = adapt_connector_event(
+            {
+                "schemaVersion": "1",
+                "eventId": "connector-event",
+                "eventType": "registry.push",
+                "source": {
+                    "workspaceId": str(_WS),
+                    "instanceId": "connector",
+                    "deliveryMode": "push",
+                    "receivedAt": now.isoformat(),
+                },
+                "payload": {"amount": 7},
+            }
+        )
+        for _ in range(2):
+            await ingest_source_event(
+                scoped,
+                subscriptions=subscriptions,
+                resumes=ResumeSubscriptionStore(harness.store),
+                scheduler=harness.store,
+                evaluator=SelectorEvaluator(),
+                dispatcher=dispatcher,
+                audit=audit,
+            )
+        assert client.schedule_calls == 2
+        connector_run = derive_run_id(
+            str(_WS), compute_dispatch_key("connector-start", scoped.event)
+        )
+        connector_state = await client.get_workflow_state(GetRunStateRequest(str(connector_run)))
+        assert connector_state is not None and connector_state.status.value == "completed"
+        assert json.loads(connector_state.serialized_input or "{}")["inputs"] == {"amount": 7}
+        assert scoped.event.event_id == "connector-event"
     finally:
         await runtime.shutdown()
 

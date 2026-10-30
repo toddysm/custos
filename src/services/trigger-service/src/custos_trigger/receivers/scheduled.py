@@ -12,7 +12,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from custos_spl.errors import ImmutableViolation, LeaseExpired, QueryUnsupported
 from custos_spl.ids import WorkspaceId
@@ -45,6 +45,10 @@ from custos_trigger.stores.base import TriggerMetadataStore
 from custos_trigger.stores.subscriptions import SubscriptionStore
 
 logger = logging.getLogger(__name__)
+
+
+class ScheduledOccurrenceError(SourceConfigurationError):
+    """A permanent invalid occurrence, distinct from retryable subscription configuration."""
 
 
 @runtime_checkable
@@ -160,10 +164,10 @@ async def process_scheduled_event(
         or revision < 0
     ):
         logger.error("Invalid scheduled event association: %s", event.event_id)
-        raise SourceConfigurationError("scheduled event has no valid scoped association")
+        raise ScheduledOccurrenceError("scheduled event has no valid scoped association")
     if resume_key_from_event(event) is not None:
         logger.error("Scheduled event carries unsupported resume routing: %s", event.event_id)
-        raise SourceConfigurationError("scheduled source cannot inject resume routing identifiers")
+        raise ScheduledOccurrenceError("scheduled source cannot inject resume routing identifiers")
     fire = await provider.get_schedule_fire(WorkspaceId(workspace), event.event_id)
     if (
         fire is None
@@ -171,7 +175,7 @@ async def process_scheduled_event(
         or event.model_dump(exclude={"raw"}) != scheduled_event(fire).model_dump(exclude={"raw"})
     ):
         logger.error("Unproven scheduled occurrence: %s", event.event_id)
-        raise SourceConfigurationError("scheduled event does not match canonical occurrence proof")
+        raise ScheduledOccurrenceError("scheduled event does not match canonical occurrence proof")
     if fire.discarded_at is not None:
         await audit.emit(
             "trigger.schedule.suppressed",
@@ -205,17 +209,19 @@ async def process_scheduled_event(
             attributes={"eventId": event.event_id, "subscriptionId": identifier},
         )
         return None
-    resolved = subscription.model_copy(
-        update={
-            "input_mapping": resolve_input_mapping(
-                subscription.input_mapping,
-                event,
-                evaluator=evaluator,
-                subscription_id=subscription.subscription_id,
-            ),
-        }
+
+    def prepare_inputs() -> dict[str, Any]:
+        """Resolve new occurrence inputs only after durable receipt recovery."""
+        return resolve_input_mapping(
+            subscription.input_mapping,
+            event,
+            evaluator=evaluator,
+            subscription_id=subscription.subscription_id,
+        )
+
+    return await dispatcher.dispatch_start(
+        event, StartMatch(subscription), prepare_inputs=prepare_inputs
     )
-    return await dispatcher.dispatch_start(event, StartMatch(resolved))
 
 
 @dataclass(frozen=True)
