@@ -257,6 +257,43 @@ def test_source_activation_requires_security_and_durable_dependencies() -> None:
         pass
 
 
+def test_production_source_activation_rejects_volatile_storage(
+    workflow_auth: tuple[WorkflowCallerVerifier, dict[str, str]],
+) -> None:
+    """Protocol parity does not make development memory restart-durable in production."""
+    store = InMemoryTriggerMetadataStore(now=lambda: NOW)
+    assert isinstance(store, SourceStorage)
+    with (
+        pytest.raises(ValueError, match="restart-durable"),
+        TestClient(
+            create_app(
+                authz_endpoint="https://auth.example",
+                environment="production",
+                providers=Providers(metadata_store=store),
+                dispatcher=dispatcher(store, FakeWorkflowServiceClient()),
+                receiver_configuration_enabled=True,
+                source_receivers_enabled=True,
+                app_api_token=HEADERS["dapr-api-token"],
+                workflow_caller_verifier=workflow_auth[0],
+            )
+        ),
+    ):
+        pass
+
+
+@pytest.mark.parametrize("length", [512, 513])
+def test_event_kind_capture_boundary_is_checked_before_effects(
+    source_client: SourceClient, length: int
+) -> None:
+    """Taxonomy-valid vendor names still obey the durable capture identifier limit."""
+    client, _, workflow = source_client
+    body = connector_event()
+    body["eventType"] = "vendor." + "a" * (length - len("vendor."))
+    response = client.post(CONNECTOR_EVENTS_PATH, json={"data": body}, headers=HEADERS)
+    assert response.json() == {"status": "SUCCESS" if length == 512 else "DROP"}
+    assert len(workflow.start_run_calls) == (1 if length == 512 else 0)
+
+
 def test_source_topics_cannot_alias(monkeypatch: pytest.MonkeyPatch) -> None:
     """Different producer contracts cannot be silently registered on the same topic."""
     monkeypatch.setenv("TRIGGER_NORMALIZED_TOPIC", "custos.connector.events")

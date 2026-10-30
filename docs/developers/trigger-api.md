@@ -164,7 +164,9 @@ unknown or wrongly typed versions are dropped.
 `data.workspace`, `data.runId` and `data.stepId` remain ordinary untrusted business
 values. They never select a workspace or resume target. Source-associated waits
 are queried by the trusted workspace, connector and delivery mode before checking
-their stored event key and selector; delivery uses the stored run/step pair.
+their selector; delivery uses the stored run/step pair and event key. The stored
+event key names the Workflow signal (for example `image-ready`), and need not equal
+the producer kind (for example `registry.push`).
 Resume-only sources work without start subscriptions or payload routing IDs.
 
 Start and resume candidates are processed in bounded 100-row pages. Start inputs
@@ -178,6 +180,8 @@ through canonical occurrence proof and the originating schedule only.
 
 Callbacks return `SUCCESS` only after successful/duplicate delivery or committed
 dead-letter capture. Storage, ownership and configuration failures request `RETRY`.
+An active subscription revision changing between selection and dispatch also
+requests retry; deleted or inactive candidates can be skipped.
 Malformed or unretainable source data returns `DROP`; raw transport, credential
 fields, nonfinite JSON, invalid identifiers and oversized capture objects are
 rejected before dispatch. The HTTP delivery body is capped at 512 KiB; the shared
@@ -185,7 +189,8 @@ durable-dispatch validation retains its 256-KiB object/depth/privacy limits.
 
 Activation requires the upgraded-writer gate, durable dispatch capabilities and
 schema readiness (including scheduler revision 9), the sidecar app token and
-authenticated Workflow caller configuration. New callbacks never use the
+authenticated Workflow caller configuration. The in-memory backend is rejected
+for production source consumption. New callbacks never use the
 development authentication bypass. Direct service-invocation caller headers are
 rejected: these endpoints are sidecar broker callbacks, not public invocation APIs.
 

@@ -93,6 +93,7 @@ async def resume(
     mode: Literal["push", "pull"] = "push",
     connector: str = "same",
     expired: bool = False,
+    event_key: str = "registry.push",
 ) -> str:
     """Persist a source-associated version-two wait whose routing IDs never come from the event."""
     now = await store.delivery_now()
@@ -100,7 +101,7 @@ async def resume(
         {
             "runId": identifier,
             "stepId": "stored-step",
-            "eventKey": "registry.push",
+            "eventKey": event_key,
             "workspaceId": workspace,
             "deliveryProtocol": 2,
             "selector": "event.data.route == 'match'",
@@ -111,7 +112,7 @@ async def resume(
             },
         }
     )
-    key = compute_resume_id(identifier, "stored-step", "registry.push")
+    key = compute_resume_id(identifier, "stored-step", event_key)
     await ResumeSubscriptionStore(store).register(
         registration,
         workspace_id=workspace,

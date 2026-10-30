@@ -9,8 +9,9 @@ from unittest.mock import AsyncMock
 import pytest
 from custos_pg import PgMetadataAdapter
 from custos_spl.errors import BackendUnavailable
-from custos_spl.ids import WorkspaceId
+from custos_spl.ids import SubscriptionId, WorkspaceId
 from custos_spl.interfaces.dead_letters import json_value
+from custos_spl.interfaces.trigger_queries import SubscriptionSnapshot
 
 from custos_trigger.clients import FakeWorkflowServiceClient
 from custos_trigger.clients.workflow import WorkflowClientTransportError
@@ -125,7 +126,7 @@ async def test_resume_only_source_needs_no_payload_routing_ids(
     source_store: SourceStorage, mode: Literal["push", "pull"]
 ) -> None:
     """Source waits work without start subscriptions or supplied run/step fields."""
-    await resume(source_store, "stored-only", mode=mode)
+    await resume(source_store, "stored-only", mode=mode, event_key="image-ready")
     body = connector_event(mode=mode)
     body["payload"] = {"route": "match", "amount": 7}
     client = FakeWorkflowServiceClient()
@@ -135,6 +136,7 @@ async def test_resume_only_source_needs_no_payload_routing_ids(
     run, step, request = client.raise_event_calls[0]
     assert (run, step, request.workspace_id) == ("stored-only", "stored-step", WS)
     assert request.payload == body["payload"]
+    assert request.event_name == "image-ready"
 
 
 async def test_downstream_failure_is_durably_captured_before_ack(
@@ -171,6 +173,37 @@ async def test_connector_rebinding_does_not_alias_prior_event_ids(
     assert len(client.start_run_calls) == 2
     assert client.start_run_calls[0].idempotency_key != client.start_run_calls[1].idempotency_key
     assert client.start_run_calls[1].inputs["label"] == "ref-other"
+
+
+async def test_active_revision_conflict_retries_instead_of_losing_delivery(
+    source_store: SourceStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A mapping change after candidate selection cannot become a successful skipped delivery."""
+    subscription = await start(source_store, "changed")
+    original = source_store.get_subscription
+    changed = False
+
+    async def racing_get(
+        workspace_id: WorkspaceId, subscription_id: SubscriptionId
+    ) -> SubscriptionSnapshot | None:
+        """Commit a real metadata edit immediately before the final candidate read."""
+        nonlocal changed
+        if not changed and subscription_id == "changed":
+            changed = True
+            await SubscriptionStore(source_store).update(
+                subscription.model_copy(update={"input_mapping": {"amount": 99}}),
+                expected_revision=subscription.store_revision,
+            )
+        return await original(workspace_id, subscription_id)
+
+    monkeypatch.setattr(source_store, "get_subscription", racing_get)
+    client = FakeWorkflowServiceClient()
+    with pytest.raises(TriggerError, match="changed before delivery"):
+        await consume(source_store, client)
+    assert not client.start_run_calls
+    await consume(source_store, client)
+    assert len(client.start_run_calls) == 1
+    assert client.start_run_calls[0].inputs == {"amount": 99}
 
 
 async def test_same_connector_event_across_modes_resumes_once(source_store: SourceStorage) -> None:

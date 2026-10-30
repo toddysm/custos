@@ -43,7 +43,7 @@ from custos_trigger.middleware import (
     DaprWorkflowCallerVerifier,
     call_context_error_handler,
 )
-from custos_trigger.providers import Providers, load_providers
+from custos_trigger.providers import InMemoryTriggerMetadataStore, Providers, load_providers
 from custos_trigger.receivers import build_internal_event_router
 from custos_trigger.receivers.sources import (
     CONNECTOR_EVENTS_PATH,
@@ -260,6 +260,10 @@ def create_app(
 
             from custos_trigger.pipeline.reliable import ReliableStorage
 
+            if effective_env.strip().lower() == "production" and isinstance(
+                metadata_store, InMemoryTriggerMetadataStore
+            ):
+                raise ValueError("production source receivers require restart-durable storage")
             if (
                 not app.state.receiver_configuration_enabled
                 or not effective_token

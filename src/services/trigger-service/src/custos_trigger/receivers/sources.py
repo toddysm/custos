@@ -94,6 +94,7 @@ def _validate_scoped_event(scoped: ScopedEvent) -> None:
     try:
         validate_dispatch_identifier(scoped.workspace_id)
         validate_dispatch_identifier(event.event_id)
+        validate_dispatch_identifier(event.kind)
         if datetime.fromisoformat(event.source.occurred_at).utcoffset() is None:
             raise ValueError("unqualified occurrence time")
         if event.raw.body or event.raw.headers:
@@ -195,13 +196,15 @@ async def ingest_source_event(
             for match in StartMatcher(evaluator).match(event, candidates):
                 sub = match.subscription
                 current = await subscriptions.get(workspace, sub.subscription_id)
-                if (
-                    current is None
-                    or current.state is not SubscriptionState.ACTIVE
-                    or current.store_revision != sub.store_revision
-                ):
-                    logger.info("Deferring changed source subscription: %s", sub.subscription_id)
+                if current is None or current.state is not SubscriptionState.ACTIVE:
+                    logger.info("Skipping inactive source subscription: %s", sub.subscription_id)
                     continue
+                if current.store_revision != sub.store_revision:
+                    raise TriggerError(
+                        TriggerErrorKind.DISPATCH_UNAVAILABLE,
+                        "active source subscription changed before delivery; retry it",
+                        details={"subscriptionId": sub.subscription_id},
+                    )
                 mapped = resolve_input_mapping(
                     sub.input_mapping,
                     event,
@@ -236,8 +239,6 @@ async def ingest_source_event(
             )
             for row in resume_page.items:
                 reg = resume_registration_from_spl(row)
-                if reg.event_key != event.kind:
-                    continue
                 current_resume = await resumes.get(workspace, row.resume_id)
                 if (
                     current_resume is None
