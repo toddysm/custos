@@ -1,5 +1,9 @@
 # Connections API Reference: Custos
 
+For the scoped, service-only `POST /VerifyWebhook` contract, credential references,
+raw-byte limits, rotation and indexed batch results, see
+[private webhook verification](../../src/services/connector-service/README.md#private-webhook-verification). Reference: Custos
+
 Last Updated: 2026-06-26
 
 This document describes the **Connector Manifest v1** contract. A connector manifest declares everything Custos needs to know about a connector type: what it targets, how it authenticates, what data-plane operations it supports, and what events it produces.

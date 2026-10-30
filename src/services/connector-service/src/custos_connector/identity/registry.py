@@ -274,6 +274,7 @@ class IdentityResolverRegistry:
         authentication_type: str,
         credentials_authentication: Mapping[str, Any],
         lease_ttl_seconds: int,
+        force_refresh: bool = False,
     ) -> ResolvedIdentity:
         """Resolve an identity, hitting the cache first.
 
@@ -298,6 +299,8 @@ class IdentityResolverRegistry:
             lease_ttl_seconds: The lease TTL the caller will request
                 from the Lease Manager; passed into the resolver
                 context.
+            force_refresh: Bypass both cache checks for request-scoped webhook verification,
+                so an accepted old value cannot outlive rotation at the credential source.
 
         Raises:
             IdentityResolverError: On any resolver-side failure. The
@@ -331,7 +334,7 @@ class IdentityResolverRegistry:
         # second resolve, never a wrong return).
         now = self._clock()
         cached = self._cache.get(cache_key)
-        if cached is not None and cached.expires_at > now:
+        if not force_refresh and cached is not None and cached.expires_at > now:
             return cached.value
 
         key_lock = await self._acquire_key_lock(cache_key)
@@ -342,7 +345,7 @@ class IdentityResolverRegistry:
                 # call. Callers for different keys never block here.
                 now = self._clock()
                 cached = self._cache.get(cache_key)
-                if cached is not None and cached.expires_at > now:
+                if not force_refresh and cached is not None and cached.expires_at > now:
                     return cached.value
 
                 context = IdentityResolverContext(

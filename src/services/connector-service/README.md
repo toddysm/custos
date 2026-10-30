@@ -52,6 +52,74 @@ following `CONN_*` environment variables.
 | `CONN_LEASE_MAX_CONCURRENT` | No | `16` | Per-step concurrent-lease cap. |
 | `CONN_PULL_LOOP_MIN_INTERVAL_SEC` | No | `10` | Minimum interval between pull-loop ticks. |
 | `ENVIRONMENT` | No | `development` | Operational env tag. The dev-shim refuses to start when this is `production` (case-insensitive). |
+| `APP_API_TOKEN` | For `VerifyWebhook` | unset | Token shared only with the local Dapr sidecar; empty/blank fails closed. |
+| `CONN_TRIGGER_APP_ID` | For `VerifyWebhook` | `trigger-service` | Exact authenticated caller application ID, not an HTTP endpoint. |
+| `CONN_TRIGGER_NAMESPACE` | For `VerifyWebhook` | unset | Exact authenticated caller namespace; required independently of application ID. |
+
+## Private webhook verification
+
+`POST /VerifyWebhook` implements the version-one internal contract for the exact
+workspace/connector-instance pair. It requires the authenticated Trigger service
+through Dapr 1.18.6+ with mutual Transport Layer Security, even in development.
+It does not publish events, dispatch workflows or advance cursors. Credential
+resolution may emit the registry's existing audit/telemetry records.
+
+The request contains `schemaVersion: "1"`, `workspaceId`, `connectorInstanceId`,
+`bodyBase64` and `headers`. The encoded request is capped at two MiB, decoded
+vendor bytes at one MiB, and normalized header names/values plus `": "`/CRLF
+overhead at 16 KiB. Duplicate/private identity headers, duplicate JSON keys,
+invalid encodings and nonfinite JSON values are rejected. Raw vendor bytes are
+authenticated before vendor JSON is parsed.
+
+Add a `webhookVerification` entry to the instance's existing
+`credentials_authentication` map, alongside its normal activity credentials:
+
+```json
+{
+  "webhookVerification": {
+    "scheme": "hmac-sha256",
+    "authenticationType": "azure-key-vault",
+    "authentication": {
+      "vaultUri": "https://example.vault.azure.net",
+      "secretName": "registry-webhook"
+    },
+    "materialKey": "secret",
+    "signatureHeader": "x-hub-signature-256"
+  }
+}
+```
+
+The referenced existing identity resolver returns the material selected by
+`materialKey`. Store only references here, never a signing value. HMAC-SHA256
+uses `sha256=<hex>` over the exact raw body; the default header is
+`x-custos-signature`. `scheme: "bearer"` instead compares the external
+`headers.authorization` bearer using a constant-time comparison. It is not a
+Custos identity. Both modes resolve fresh material on each verification, bypassing
+old registry cache entries so secret rotation needs no Trigger change. Missing
+or unavailable material fails closed; no alternate scheme is inferred from headers.
+Vendor timestamp canonicalization and non-SHA256 signature schemes are not
+implemented by these built-in verifiers.
+
+The caller supplies a vendor batch `{"events":[...]}` whose event types are in
+the instance's immutable connector manifest. Success returns `schemaVersion`,
+`receivedCount`, `events: [{"index":0,"event":{...}}]` and
+`rejections: [{"index":1,"code":"missing-event-id"}]`. Every original index
+occurs exactly once and valid events retain input order. Rejections contain
+only an index and one of `missing-event-id`, `missing-event-type`,
+`unknown-event-type`, or `malformed`. Even an all-invalid verified batch returns
+this complete partition.
+
+Failures use the existing `{"error":{"code","detail"}}` envelope: 401 for invalid
+or missing signatures; 404 for unknown/inactive/non-push pairs; 400 for malformed
+wrappers or verified whole payloads (including empty batches); 413 for limits;
+503 for unavailable configuration, credentials or storage. Mesh failures are
+independently 401/403/503. Credentials, signatures and raw transport headers are
+not copied into normalized envelopes or rejection metadata.
+
+This adds a verification seam, not public gateway routing or automatic receiver
+activation. Those remain [#1011](https://github.com/toddysm/custos/issues/1011)
+and [#1017](https://github.com/toddysm/custos/issues/1017); full deployed
+certification remains [#1018](https://github.com/toddysm/custos/issues/1018).
 
 Process bind:
 

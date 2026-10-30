@@ -48,6 +48,7 @@ from custos_connector.api import (
     subscribe_router,
     validate_router,
 )
+from custos_connector.api.verify_webhook import router as verify_webhook_router
 from custos_connector.binding import binding_router
 from custos_connector.cursor.router import router as cursor_admin_router
 from custos_connector.health import router as health_router
@@ -204,6 +205,9 @@ def create_app(
         CallContextMiddleware,
         authz_endpoint=effective_settings.authz_endpoint,
         environment=effective_settings.environment,
+        app_api_token=effective_settings.app_api_token,
+        trigger_app_id=effective_settings.trigger_app_id,
+        trigger_namespace=effective_settings.trigger_namespace,
     )
     # Pair the middleware with its exception handler so the dependency-side
     # 4xx responses (get_call_context / require_permission) emit the same
@@ -224,6 +228,7 @@ def create_app(
     app.include_router(lease_router)
     app.include_router(cursor_admin_router)
     app.include_router(listen_router)
+    app.include_router(verify_webhook_router)
     # CONN-IMPL-027 (Phase J) — ValidateConnector + SubscribeEvents
     # internal RPCs (service-to-service preflight + Pub/Sub metadata
     # discovery for the Trigger Service).

@@ -13,7 +13,7 @@ or asyncpg.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Final
 
 #: Required. DSN that resolves the ``CatalogStoreProvider`` adapter.
@@ -105,6 +105,9 @@ ENV_CONNECTOR_REGISTRY_TOKEN: Final[str] = "CONN_CONNECTOR_REGISTRY_TOKEN"
 #: Operational env tag. The call-context dev shim refuses to run when this
 #: is ``production`` (case-insensitive).
 ENV_ENVIRONMENT: Final[str] = "ENVIRONMENT"
+ENV_APP_API_TOKEN: Final[str] = "APP_API_TOKEN"
+ENV_TRIGGER_APP_ID: Final[str] = "CONN_TRIGGER_APP_ID"
+ENV_TRIGGER_NAMESPACE: Final[str] = "CONN_TRIGGER_NAMESPACE"
 
 DEFAULT_OCI_REFERRERS_TIMEOUT_MS: Final[int] = 5000
 DEFAULT_PUBLISH_MAX_BODY_MB: Final[int] = 4
@@ -160,6 +163,9 @@ class Settings:
     #: Optional static bearer for private connector-image pulls
     #: (CONN-REG). ``None`` means anonymous pulls.
     connector_registry_token: str | None = None
+    app_api_token: str | None = field(default=None, repr=False)
+    trigger_app_id: str = "trigger-service"
+    trigger_namespace: str | None = None
 
     @property
     def use_callctx_dev_shim(self) -> bool:
@@ -245,6 +251,9 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         dapr_secret_store=src.get(ENV_DAPR_SECRET_STORE, "").strip() or DEFAULT_DAPR_SECRET_STORE,
         connector_registry_url=src.get(ENV_CONNECTOR_REGISTRY_URL, "").strip(),
         connector_registry_token=src.get(ENV_CONNECTOR_REGISTRY_TOKEN, "").strip() or None,
+        app_api_token=src.get(ENV_APP_API_TOKEN),
+        trigger_app_id=src.get(ENV_TRIGGER_APP_ID, "trigger-service").strip(),
+        trigger_namespace=src.get(ENV_TRIGGER_NAMESPACE, "").strip() or None,
         environment=src.get(ENV_ENVIRONMENT, "development").strip() or "development",
     )
 
@@ -259,6 +268,7 @@ __all__ = [
     "DEFAULT_PUBLISH_MAX_BODY_MB",
     "DEFAULT_PULL_LOOP_MIN_INTERVAL_SEC",
     "DEFAULT_SIDECAR_DEFAULT_TTL",
+    "ENV_APP_API_TOKEN",
     "ENV_AUTHZ_ENDPOINT",
     "ENV_CATALOG_ENDPOINT",
     "ENV_CATALOG_STORE",
@@ -277,6 +287,8 @@ __all__ = [
     "ENV_PULL_LOOP_MIN_INTERVAL_SEC",
     "ENV_SIDECAR_DEFAULT_TTL",
     "ENV_SIDECAR_MTLS_ISSUER",
+    "ENV_TRIGGER_APP_ID",
+    "ENV_TRIGGER_NAMESPACE",
     "PULL_LOOP_HARD_FLOOR_SEC",
     "Settings",
     "SettingsError",
