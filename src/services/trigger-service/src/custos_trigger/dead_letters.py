@@ -96,6 +96,7 @@ class RetentionPage:
     examined: int
     expired: int
     next_cursor: Cursor | None
+    source_selections_expired: int = 0
 
 
 class DeadLetterAdmin:
@@ -357,4 +358,7 @@ class DeadLetterAdmin:
                 )
             if isinstance(self.store, BulkReplayStoreProvider):
                 await self.store.purge_bulk_replay_selections(WorkspaceId(workspace), limit=limit)
-            return RetentionPage(len(page.items), expired, page.next_cursor)
+            sources = await self.store.purge_source_delivery_selections(
+                WorkspaceId(workspace), limit=limit
+            )
+            return RetentionPage(len(page.items), expired, page.next_cursor, sources)

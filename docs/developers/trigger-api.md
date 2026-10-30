@@ -280,6 +280,24 @@ Receipt cleanup also preserves their unfinished producer snapshots, including
 after the normal receipt horizon. Selection acceptance and receipt cleanup are
 serialized; cleanup cannot erase a newly accepted plan's pending requests.
 
+Dual-mode resume waits share their first accepted selection across push and pull.
+Start subscriptions and single-mode waits keep their mode-specific selection.
+Both arms commit atomically before effects and share the 1,000-target/8-MiB
+budget. A newly registered dual-mode wait cannot receive an older event through
+another transport. Connector publication timestamps (`receivedAt`, normalized
+as `source.occurredAt`) are excluded from retry identity, but the original
+timestamp and selected request remain stored. Changed business payloads still
+conflict.
+
+[`SourceDeliveryStoreProvider`](../../src/libs/storage-provider-layer/src/custos_spl/interfaces/source_delivery.py)
+provides workspace-bound pending-selection pages, including accepted targets
+whose producer receipt does not yet exist.
+[`ReliableDispatcher.reconcile_pending`](../../src/services/trigger-service/src/custos_trigger/pipeline/reliable.py)
+recovers a bounded page without a broker retry, current wait or subscription.
+It reports settled and pending target counts plus continuation; one pending
+target does not prevent other targets in the page from being attempted. Each
+call is bounded to 300 seconds. Periodic activation remains #1017.
+
 Callbacks return `SUCCESS` only after successful/duplicate delivery or committed
 dead-letter capture. Storage, ownership and configuration failures request `RETRY`.
 An active subscription revision changing between selection and dispatch also
@@ -653,6 +671,11 @@ are atomic; repeated sweeps emit no duplicate expiration event. This cleanup
 does not purge downstream receipts or runtime snapshots. Production periodic
 sweep scheduling and workspace discovery are wired by
 [#1017](https://github.com/toddysm/custos/issues/1017).
+Each workspace sweep also purges a bounded page of completed, expired source
+selections, even when no dead letters remain. Unfinished source plans are
+preserved; `source_selections_expired` reports their cleanup separately.
+Accepted scheduled selections are recovered before applying a later fire
+suppression, while never-accepted discarded occurrences remain suppressed.
 
 ## Authentication and call context
 

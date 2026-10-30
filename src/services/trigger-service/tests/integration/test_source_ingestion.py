@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+import asyncio
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import replace
 from datetime import timedelta
 from typing import Any, Literal, cast
@@ -10,7 +11,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from custos_pg import PgMetadataAdapter
-from custos_spl.errors import BackendUnavailable
+from custos_spl.errors import BackendUnavailable, ImmutableViolation
 from custos_spl.ids import SubscriptionId, WorkspaceId
 from custos_spl.interfaces.dead_letters import (
     MAX_PAYLOAD_BYTES,
@@ -23,7 +24,9 @@ from custos_spl.interfaces.delivery import (
     delivery_fingerprint,
     delivery_identity,
 )
+from custos_spl.interfaces.source_delivery import SourceDeliverySelection
 from custos_spl.interfaces.trigger_queries import SubscriptionSnapshot
+from custos_spl.pagination import Cursor, Page
 
 from custos_trigger.clients import FakeWorkflowServiceClient
 from custos_trigger.clients.workflow import (
@@ -31,6 +34,7 @@ from custos_trigger.clients.workflow import (
     WorkflowClientAcknowledgementPending,
     WorkflowClientTransportError,
 )
+from custos_trigger.dead_letters import DeadLetterAdmin
 from custos_trigger.dedup import compute_dispatch_key
 from custos_trigger.errors import TriggerError
 from custos_trigger.models import ResumeRegistration, SourceType, Subscription
@@ -240,7 +244,10 @@ async def test_source_selection_retention_requires_all_receipts_completed(
     assert await source_store.purge_source_delivery_selections(WorkspaceId(WS)) == 0
     client.pending = False
     await consume(source_store, client)
-    assert await source_store.purge_source_delivery_selections(WorkspaceId(WS)) == 1
+    reliable = dispatcher(source_store, client).reliable
+    assert reliable is not None
+    swept = await DeadLetterAdmin(reliable).sweep(WS)
+    assert swept.expired == 0 and swept.source_selections_expired == 1
     tombstone = await source_store.get_source_delivery(WorkspaceId(WS), key)
     assert tombstone is not None and tombstone.requests is None
     assert tombstone.request_hash == selection.request_hash
@@ -262,7 +269,7 @@ async def test_source_selection_failure_precedes_every_effect(
     await start(source_store, "first")
     await resume(source_store, "second")
     monkeypatch.setattr(
-        source_store, "put_source_delivery", AsyncMock(side_effect=BackendUnavailable("offline"))
+        source_store, "put_source_deliveries", AsyncMock(side_effect=BackendUnavailable("offline"))
     )
     client = FakeWorkflowServiceClient()
     with pytest.raises(TriggerError, match="selection is not acknowledged"):
@@ -346,6 +353,130 @@ async def test_empty_source_selection_does_not_match_late_registrations(
     await resume(source_store, "late")
     await consume(source_store, client)
     assert not client.start_run_calls and not client.raise_event_calls
+
+
+@pytest.mark.parametrize("mode", ["push", "pull"])
+async def test_publication_time_changes_recover_the_original_snapshot(
+    source_store: SourceStorage,
+    mode: Literal["push", "pull"],
+) -> None:
+    """A new receivedAt cannot replace the original event snapshot or selected target."""
+    await resume(source_store, "original", mode=mode)
+    client = PendingResumeClient()
+    original = connector_event(mode=mode)
+    with pytest.raises(TriggerError):
+        await consume(source_store, client, mode, original)
+    repeated = connector_event(mode=mode)
+    repeated["source"]["receivedAt"] = (NOW + timedelta(minutes=5)).isoformat()
+    client.pending = False
+    await consume(source_store, client, mode, repeated)
+    assert len(client.raise_event_calls) == 2
+    event = adapt_connector_event(original).event
+    key = delivery_identity(
+        event.source.type.value, compute_dispatch_key("source-selection-v1", event)
+    )
+    selection = await source_store.get_source_delivery(WorkspaceId(WS), key)
+    assert selection is not None and selection.requests
+    saved = decode_delivery_request(selection.requests[0], selection.expires_at)
+    saved_source = saved.event["source"]
+    assert isinstance(saved_source, Mapping)
+    assert saved_source["occurredAt"] == event.source.occurred_at
+
+
+async def test_source_batch_binding_is_atomic(source_store: SourceStorage) -> None:
+    """A conflicting shared arm rolls back a new mode-specific arm before either can dispatch."""
+    now = await source_store.delivery_now()
+    prior = SourceDeliverySelection(WorkspaceId(WS), "shared", "a" * 64, now, ())
+    await source_store.put_source_delivery(prior)
+    first = replace(prior, key="new-mode")
+    with pytest.raises(ImmutableViolation):
+        await source_store.put_source_deliveries((first, replace(prior, request_hash="b" * 64)))
+    assert await source_store.get_source_delivery(WorkspaceId(WS), "new-mode") is None
+    assert await source_store.get_source_delivery(WorkspaceId(WS), "shared") == prior
+
+
+async def test_pending_selections_are_discoverable_and_reconciled_without_broker(
+    source_store: SourceStorage,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Discover unstarted work, retain failures, and recover targets after wait removal."""
+    identifiers = [await resume(source_store, name) for name in ("first", "second")]
+    client = PendingResumeClient()
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            source_store, "reserve_delivery", AsyncMock(side_effect=BackendUnavailable("offline"))
+        )
+        for event_id in ("one", "two"):
+            with pytest.raises(TriggerError):
+                await consume(source_store, client, payload=connector_event(event_id=event_id))
+    assert not client.raise_event_calls
+    for identifier in identifiers:
+        await ResumeSubscriptionStore(source_store).cancel(WS, identifier)
+    await resume(source_store, "late")
+    page = await source_store.query_pending_source_deliveries(WorkspaceId(WS), limit=1)
+    assert len(page.items) == 1 and page.next_cursor is not None
+    with pytest.raises(ValueError):
+        await source_store.query_pending_source_deliveries(
+            WorkspaceId("other"), cursor=page.next_cursor, limit=1
+        )
+    assert not (await source_store.query_pending_source_deliveries(WorkspaceId("other"))).items
+    reliable = dispatcher(source_store, client).reliable
+    assert reliable is not None
+    pending = await reliable.reconcile_pending(WS, limit=1)
+    assert pending.selections == 1 and pending.pending_targets == 2 and pending.settled_targets == 0
+    client.pending = False
+    cursor = None
+    settled = 0
+    while True:
+        result = await reliable.reconcile_pending(WS, cursor=cursor, limit=1)
+        assert result.pending_targets == 0
+        settled += result.settled_targets
+        cursor = result.next_cursor
+        if cursor is None:
+            break
+    assert settled == 4 and len(client.raise_event_calls) == 6
+    assert {run for run, _, _ in client.raise_event_calls} == {"first", "second"}
+    assert not (await source_store.query_pending_source_deliveries(WorkspaceId(WS))).items
+
+
+@pytest.mark.parametrize("failure", ["backend", "timeout"])
+async def test_reconciliation_failure_is_not_an_empty_success(
+    source_store: SourceStorage,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    """Discovery failures and actual deadline cancellation remain explicit retryable failures."""
+    cancelled = asyncio.Event()
+
+    async def stalled(
+        workspace_id: WorkspaceId,
+        *,
+        cursor: Cursor | None = None,
+        limit: int | None = None,
+    ) -> Page[SourceDeliverySelection]:
+        """Block until the reconciler's real timeout cancels its pending query."""
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+        raise AssertionError("query should have been cancelled")
+
+    if failure == "backend":
+        monkeypatch.setattr(
+            source_store,
+            "query_pending_source_deliveries",
+            AsyncMock(side_effect=BackendUnavailable("private backend details")),
+        )
+    else:
+        monkeypatch.setattr("custos_trigger.pipeline.reliable.MAX_DISPATCH_SECONDS", 0.01)
+        monkeypatch.setattr(source_store, "query_pending_source_deliveries", stalled)
+    client = FakeWorkflowServiceClient()
+    reliable = dispatcher(source_store, client).reliable
+    assert reliable is not None
+    with pytest.raises(TriggerError, match="reconciliation did not complete"):
+        await reliable.reconcile_pending(WS)
+    assert not client.start_run_calls and not client.raise_event_calls
+    assert cancelled.is_set() == (failure == "timeout")
 
 
 async def test_downstream_failure_is_durably_captured_before_ack(
@@ -492,6 +623,56 @@ async def test_same_connector_event_across_modes_resumes_once(source_store: Sour
     await consume(source_store, client, "push")
     await consume(source_store, client, "pull")
     assert len(client.raise_event_calls) == 1
+
+
+@pytest.mark.parametrize("first_mode", ["push", "pull"])
+async def test_dual_mode_wait_selection_is_shared_without_merging_mode_specific_intent(
+    source_store: SourceStorage,
+    first_mode: Literal["push", "pull"],
+) -> None:
+    """Late dual-mode waits cannot receive an old event; mode-specific starts/waits still work."""
+
+    async def dual(identifier: str) -> None:
+        """Register one wait that explicitly accepts either delivery mode."""
+        registration = ResumeRegistration.model_validate(
+            {
+                "workspaceId": WS,
+                "runId": identifier,
+                "stepId": "stored-step",
+                "eventKey": "registry.push",
+                "deliveryProtocol": 2,
+                "selector": "event.data.route == 'match'",
+                "source": {
+                    "connectorInstanceId": "same",
+                    "deliveryModes": ["push", "pull"],
+                    "pollIntervalSeconds": 10,
+                },
+            }
+        )
+        await ResumeSubscriptionStore(source_store).register(
+            registration,
+            workspace_id=WS,
+            resume_id=identifier,
+            expires_at=await source_store.delivery_now() + timedelta(hours=1),
+        )
+
+    await dual("original-dual")
+    await resume(source_store, "push-only", mode="push")
+    await resume(source_store, "pull-only", mode="pull")
+    await start(source_store, "push-start", source=SourceType.VENDOR_PUSH)
+    await start(source_store, "pull-start", source=SourceType.PULL)
+    client = FakeWorkflowServiceClient()
+    await consume(source_store, client, first_mode)
+    await dual("late-dual")
+    second_mode: Literal["push", "pull"] = "pull" if first_mode == "push" else "push"
+    await consume(source_store, client, second_mode)
+    assert len(client.start_run_calls) == 2
+    assert len(client.raise_event_calls) == 3
+    assert {run for run, _, _ in client.raise_event_calls} == {
+        "original-dual",
+        "push-only",
+        "pull-only",
+    }
 
 
 async def test_failed_capture_remains_unacknowledged(

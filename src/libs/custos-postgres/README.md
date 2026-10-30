@@ -57,6 +57,15 @@ redelivery cannot lose removed waits or select newly registered targets. Source
 payloads are erased only after expiry and completion of every selected producer
 receipt; unresolved selections remain recovery evidence. These additions leave
 the general metadata minimum at 4 and the outbox-consumer prerequisite at 12.
+Mode-specific and shared dual-mode resume selections bind atomically within
+one event budget. A workspace-scoped keyset query discovers unfinished
+selections even before producer receipts exist. Receipt cleanup and source
+acceptance share a workspace lock, preserving unfinished accepted requests.
+
+Gateway idempotency operations classify connection, pool and driver failures as
+`BackendUnavailable`; recovery routes return the documented 503 without forwarding.
+Reservation and follow-up read share a transaction, preventing expiry cleanup
+from removing the binding between those statements.
 
 Revision 12 also makes the outbox's default ID allocator acquire a shared
 transaction advisory fence before allocating a sequence value. Readers acquire

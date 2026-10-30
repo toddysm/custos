@@ -34,6 +34,7 @@ from custos_spl.interfaces.source_delivery import (
     MAX_SOURCE_SELECTION_BYTES,
     MAX_SOURCE_TARGETS,
     SourceDeliverySelection,
+    validate_source_batch,
 )
 
 NOW = datetime(2026, 10, 29, tzinfo=UTC)
@@ -81,6 +82,26 @@ def test_source_selection_validates_scope_bounds_and_immutable_requests(
     ):
         with pytest.raises(ValueError):
             replace(selection, **changed)
+
+
+def test_source_batch_has_one_shared_budget_and_scope(data: DeadLetterData) -> None:
+    """Splitting routing arms cannot bypass the target cap or publish a foreign workspace."""
+    requests = tuple(
+        encode_delivery_request(replace(data, idempotency_key=f"key-{index}"))
+        for index in range(600)
+    )
+    first = SourceDeliverySelection(data.workspace_id, "mode", "a" * 64, NOW, requests[:500])
+    shared = replace(first, key="shared")
+    validate_source_batch((first, shared))
+    for batch in (
+        (),
+        (first, shared, replace(first, key="third")),
+        (first, first),
+        (first, replace(shared, workspace_id=WorkspaceId("other"), requests=())),
+        (replace(first, requests=requests), replace(shared, requests=requests)),
+    ):
+        with pytest.raises(ValueError):
+            validate_source_batch(batch)
 
 
 def test_roundtrip_and_deep_immutability(data: DeadLetterData) -> None:

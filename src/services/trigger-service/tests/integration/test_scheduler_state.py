@@ -907,6 +907,7 @@ async def test_resolved_mapping_is_captured_and_replayed_without_rematching(
         stored.model_copy(update={"input_mapping": {"different": 4}}),
         expected_revision=stored.store_revision,
     )
+    await harness.store.discard_schedule_fire(_WS, fire.fire_id, lease, reason="changed")
     redelivery = await process_scheduled_event(
         event,
         subscription_store=store,

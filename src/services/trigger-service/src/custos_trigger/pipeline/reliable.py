@@ -11,7 +11,7 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any, Literal, Protocol, runtime_checkable
 
@@ -36,7 +36,9 @@ from custos_spl.interfaces.source_delivery import (
     MAX_SOURCE_TARGETS,
     SourceDeliverySelection,
     SourceDeliveryStoreProvider,
+    SourceSelectionLimitError,
 )
+from custos_spl.pagination import Cursor
 
 from custos_trigger.clients.workflow import (
     RaiseExternalEventRequest,
@@ -52,7 +54,7 @@ from custos_trigger.clients.workflow import (
 from custos_trigger.dedup import compute_dispatch_key
 from custos_trigger.errors import TriggerError, TriggerErrorKind
 from custos_trigger.events import NormalizedEvent
-from custos_trigger.models import Subscription
+from custos_trigger.models import SourceType, Subscription
 from custos_trigger.pipeline.dispatch import (
     AUDIT_DEDUPED,
     AUDIT_DISPATCH_FAILED,
@@ -118,6 +120,34 @@ class ReliableStorage(
     DeliveryStateProvider, DeadLetterStoreProvider, SourceDeliveryStoreProvider, Protocol
 ):
     """Receipt, immutable source-selection and dead-letter capabilities for durable dispatch."""
+
+
+@dataclass(frozen=True)
+class SourceReconciliationPage:
+    """Bounded reconciliation evidence; pending targets are explicitly not acknowledged."""
+
+    selections: int
+    settled_targets: int
+    pending_targets: int
+    next_cursor: Cursor | None
+
+
+def _source_fingerprint(event: NormalizedEvent, *, shared: bool = False) -> str:
+    """Ignore publication time, retaining stable fields and original Connector snapshots."""
+    connector = event.source.type in (SourceType.VENDOR_PUSH, SourceType.PULL, SourceType.WEBHOOK)
+    source = event.source.model_dump(
+        mode="json", by_alias=True, exclude={"occurred_at"} if connector else set()
+    )
+    if shared:
+        if not connector:
+            raise ValueError("shared resume selection requires a Connector source")
+        source["type"] = "connector"
+    return delivery_fingerprint(
+        {
+            **event.model_dump(mode="json", by_alias=True, exclude={"raw", "source"}),
+            "source": source,
+        }
+    )
 
 
 class ReliableDispatcher:
@@ -201,56 +231,99 @@ class ReliableDispatcher:
         event: NormalizedEvent,
         workspace: str,
         select: Callable[[], AsyncIterator[DeadLetterData]],
+        *,
+        shared_resumes: Callable[[], AsyncIterator[DeadLetterData]] | None = None,
     ) -> tuple[tuple[Literal["start", "resume"], DispatchOutcome], ...]:
         """Persist the entire bounded selection before effects; retries never rematch intent."""
         key = delivery_identity(
             event.source.type.value, compute_dispatch_key("source-selection-v1", event)
         )
-        fingerprint = delivery_fingerprint(
-            event.model_dump(mode="json", by_alias=True, exclude={"raw"})
-        )
+        groups = [(key, _source_fingerprint(event), select)]
+        if shared_resumes is not None:
+            groups.append(
+                (
+                    delivery_identity(
+                        "shared-resumes", compute_dispatch_key("source-selection-v1", event)
+                    ),
+                    _source_fingerprint(event, shared=True),
+                    shared_resumes,
+                )
+            )
         try:
-            selection = await self.store.get_source_delivery(WorkspaceId(workspace), key)
-            if selection is None:
-                requests: list[str] = []
-                size = 0
-                async for data in select():
-                    raw = encode_delivery_request(data)
-                    size += len(raw.encode("utf-8"))
-                    if len(requests) >= MAX_SOURCE_TARGETS or size > MAX_SOURCE_SELECTION_BYTES:
-                        raise SourceConfigurationError(
-                            "source selection exceeds its bounded limits"
-                        )
-                    requests.append(raw)
-                selection = await self.store.put_source_delivery(
-                    SourceDeliverySelection(
+            candidates: list[SourceDeliverySelection] = []
+            for key, fingerprint, builder in groups:
+                selection = await self.store.get_source_delivery(WorkspaceId(workspace), key)
+                if selection is None:
+                    requests: list[str] = []
+                    size = 0
+                    async for data in builder():
+                        raw = encode_delivery_request(data)
+                        size += len(raw.encode("utf-8"))
+                        if len(requests) >= MAX_SOURCE_TARGETS or size > MAX_SOURCE_SELECTION_BYTES:
+                            raise SourceSelectionLimitError("source selection exceeds its limits")
+                        requests.append(raw)
+                    selection = SourceDeliverySelection(
                         WorkspaceId(workspace),
                         key,
                         fingerprint,
                         await self.store.delivery_now() + timedelta(seconds=self.retention),
                         tuple(requests),
                     )
-                )
-            if selection.request_hash != fingerprint:
-                raise ImmutableViolation("source event identity is bound to another request")
+                if selection.request_hash != fingerprint:
+                    raise ImmutableViolation("source event identity is bound to another request")
+                candidates.append(selection)
+            selections = await self.store.put_source_deliveries(tuple(candidates))
             outcomes: list[tuple[Literal["start", "resume"], DispatchOutcome]] = []
-            for raw in selection.requests or ():
-                data = decode_delivery_request(raw, await self.store.delivery_now())
-                original = NormalizedEvent.model_validate(json_value(data.event))
-                outcome = await self._dispatch(
-                    original,
-                    workspace,
-                    data.subscription_id,
-                    data.target,
-                    0,
-                    snapshot=data,
-                )
-                outcomes.append(("start" if data.target["kind"] == "start" else "resume", outcome))
+            for selection in selections:
+                for raw in selection.requests or ():
+                    outcomes.append(await self._dispatch_snapshot(workspace, raw))
             return tuple(outcomes)
+        except SourceSelectionLimitError as exc:
+            logger.warning("Source selection exceeds its bounded limits")
+            raise SourceConfigurationError("source selection exceeds its bounded limits") from exc
         except SPLError as exc:
             logger.error("Source selection persistence failed: %s", type(exc).__name__)
             raise TriggerError(
                 TriggerErrorKind.DISPATCH_UNAVAILABLE, "source selection is not acknowledged"
+            ) from exc
+
+    async def _dispatch_snapshot(
+        self, workspace: str, raw: str
+    ) -> tuple[Literal["start", "resume"], DispatchOutcome]:
+        """Drive only the accepted immutable target through the existing receipt authority."""
+        data = decode_delivery_request(raw, await self.store.delivery_now())
+        original = NormalizedEvent.model_validate(json_value(data.event))
+        outcome = await self._dispatch(
+            original, workspace, data.subscription_id, data.target, 0, snapshot=data
+        )
+        return "start" if data.target["kind"] == "start" else "resume", outcome
+
+    async def reconcile_pending(
+        self, workspace: str, *, cursor: Cursor | None = None, limit: int = 50
+    ) -> SourceReconciliationPage:
+        """Recover one bounded page without broker retry; report unfinished targets explicitly."""
+        settled, pending = 0, 0
+        try:
+            async with asyncio.timeout(MAX_DISPATCH_SECONDS):
+                page = await self.store.query_pending_source_deliveries(
+                    WorkspaceId(workspace), cursor=cursor, limit=limit
+                )
+                for selection in page.items:
+                    for raw in selection.requests or ():
+                        try:
+                            await self._dispatch_snapshot(workspace, raw)
+                        except TriggerError as exc:
+                            if exc.kind != TriggerErrorKind.DISPATCH_UNAVAILABLE:
+                                raise
+                            logger.warning("Source target remains pending during reconciliation")
+                            pending += 1
+                        else:
+                            settled += 1
+                return SourceReconciliationPage(len(page.items), settled, pending, page.next_cursor)
+        except (SPLError, TimeoutError) as exc:
+            logger.error("Source reconciliation unavailable: %s", type(exc).__name__)
+            raise TriggerError(
+                TriggerErrorKind.DISPATCH_UNAVAILABLE, "source reconciliation did not complete"
             ) from exc
 
     async def dispatch_start(

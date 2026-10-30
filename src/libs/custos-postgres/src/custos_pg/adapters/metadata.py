@@ -151,7 +151,7 @@ from custos_spl.interfaces.scheduler import (
     utc_instant,
     validate_schedule_discard,
 )
-from custos_spl.interfaces.source_delivery import SourceDeliverySelection
+from custos_spl.interfaces.source_delivery import SourceDeliverySelection, validate_source_batch
 from custos_spl.interfaces.trigger_queries import SubscriptionSnapshot, prepare_subscription_write
 from custos_spl.middleware.transactions import bind_handle, check_handle
 from custos_spl.pagination import (
@@ -1480,44 +1480,94 @@ class PgMetadataAdapter:
     async def put_source_delivery(
         self, selection: SourceDeliverySelection
     ) -> SourceDeliverySelection:
-        """Resolve concurrent planners through a unique key before any remote effects."""
+        """Bind one original selection using the same atomic batch contract."""
+        return (await self.put_source_deliveries((selection,)))[0]
+
+    async def put_source_deliveries(
+        self, selections: tuple[SourceDeliverySelection, ...]
+    ) -> tuple[SourceDeliverySelection, ...]:
+        """Commit mode-specific and shared arms together before either can produce effects."""
+        validate_source_batch(selections)
+        async with self._dead_letter_transaction() as conn:
+            await self._lock_source_selections(conn, selections[0].workspace_id)
+            accepted = tuple([await self._put_source_selection(conn, item) for item in selections])
+            validate_source_batch(accepted)
+            return accepted
+
+    async def _put_source_selection(
+        self, conn: Connection, selection: SourceDeliverySelection
+    ) -> SourceDeliverySelection:
+        """Bind one arm while the caller owns the workspace acceptance/cleanup lock."""
+        current = await self._source_delivery_row(conn, selection.workspace_id, selection.key)
+        if current is not None:
+            if current.request_hash != selection.request_hash:
+                raise ImmutableViolation("source event identity is bound to another request")
+            return current
         if selection.requests is None:
             raise ValueError("new source selection requires retained requests")
         keys = [
             decode_delivery_request(raw, selection.expires_at).idempotency_key
             for raw in selection.requests
         ]
+        missing = await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM custos_state.delivery_receipt "
+            "WHERE workspace_id=$1 AND namespace='trigger' AND key=ANY($2::text[]) "
+            "AND result_json IS NULL AND request_json IS NULL)",
+            selection.workspace_id,
+            keys,
+        )
+        if missing:
+            raise ImmutableViolation("pending delivery lost its original request")
+        await conn.execute(
+            "INSERT INTO custos_state.source_delivery_selection "
+            "(workspace_id,key,request_hash,expires_at,delivery_keys,payload) "
+            "VALUES($1,$2,$3,$4,$5,$6::json)",
+            selection.workspace_id,
+            selection.key,
+            selection.request_hash,
+            selection.expires_at,
+            keys,
+            json.dumps(selection.requests, ensure_ascii=False),
+        )
+        return selection
+
+    async def query_pending_source_deliveries(
+        self, workspace_id: WorkspaceId, *, cursor: Cursor | None = None, limit: int | None = None
+    ) -> Page[SourceDeliverySelection]:
+        """Page original accepted work even when its registrations and producer rows are gone."""
+        validate_dispatch_identifier(workspace_id)
+        scope = ("pending-source-delivery", workspace_id)
+        after = decode_query_cursor(cursor, scope)
+        if after is not None:
+            validate_dispatch_identifier(after)
+        size = query_page_limit(limit)
         async with self._dead_letter_transaction() as conn:
-            await self._lock_source_selections(conn, selection.workspace_id)
-            current = await self._source_delivery_row(conn, selection.workspace_id, selection.key)
-            if current is not None:
-                if current.request_hash != selection.request_hash:
-                    raise ImmutableViolation("source event identity is bound to another request")
-                return current
-            missing = await conn.fetchval(
-                "SELECT EXISTS(SELECT 1 FROM custos_state.delivery_receipt "
-                "WHERE workspace_id=$1 AND namespace='trigger' AND key=ANY($2::text[]) "
-                "AND result_json IS NULL AND request_json IS NULL)",
-                selection.workspace_id,
-                keys,
+            rows = await conn.fetch(
+                "SELECT s.key,s.request_hash,s.expires_at,s.payload::text "
+                "FROM custos_state.source_delivery_selection s "
+                'WHERE s.workspace_id=$1 AND s.key COLLATE "C">$2 AND s.payload IS NOT NULL '
+                "AND EXISTS(SELECT 1 FROM unnest(s.delivery_keys) AS selected(key) "
+                "LEFT JOIN custos_state.delivery_receipt d ON d.workspace_id=s.workspace_id "
+                "AND d.namespace='trigger' AND d.key=selected.key WHERE d.result_json IS NULL) "
+                'ORDER BY s.key COLLATE "C" LIMIT $3',
+                workspace_id,
+                after or "",
+                size + 1,
             )
-            if missing:
-                raise ImmutableViolation("pending delivery lost its original request")
-            await conn.execute(
-                "INSERT INTO custos_state.source_delivery_selection "
-                "(workspace_id,key,request_hash,expires_at,delivery_keys,payload) "
-                "VALUES($1,$2,$3,$4,$5,$6::json) ON CONFLICT(workspace_id,key) DO NOTHING",
-                selection.workspace_id,
-                selection.key,
-                selection.request_hash,
-                selection.expires_at,
-                keys,
-                json.dumps(selection.requests, ensure_ascii=False),
+        items = [
+            SourceDeliverySelection(
+                workspace_id,
+                row["key"],
+                row["request_hash"],
+                row["expires_at"],
+                tuple(json.loads(row["payload"])),
             )
-            current = await self._source_delivery_row(conn, selection.workspace_id, selection.key)
-            if current is None or current.request_hash != selection.request_hash:
-                raise ImmutableViolation("source event identity is bound to another request")
-            return current
+            for row in rows
+        ]
+        return Page(
+            items[:size],
+            encode_query_cursor(scope, items[size - 1].key) if len(items) > size else None,
+        )
 
     async def purge_source_delivery_selections(
         self, workspace_id: WorkspaceId, *, limit: int = 100
@@ -3496,6 +3546,16 @@ class PgMetadataAdapter:
 
     # ----- Gateway short-lived state (#128) -----
 
+    @asynccontextmanager
+    async def _idempotency_transaction(self) -> AsyncIterator[Connection]:
+        """Classify pool/driver failures and hold reservation locks through the follow-up read."""
+        try:
+            pool = await self._pool_ref()
+            async with pool.acquire() as conn, conn.transaction():
+                yield conn
+        except (OSError, InterfaceError, PostgresError) as exc:
+            raise BackendUnavailable("idempotency storage operation failed", cause=exc) from exc
+
     async def reserve_idempotency_record(
         self,
         workspace_id: str,
@@ -3511,11 +3571,10 @@ class PgMetadataAdapter:
         - `IdemReserved` if the key was not present (caller should perform work).
         - `ExistingCompleted` if an identical hash is already done (return snapshot).
         - `ExistingInFlight` if an identical hash is still in progress (retry).
-        - `KeyReuse` if the key exists with a different hash (422 response).
+        - `KeyReuse` if the key exists with a different hash.
         """
         expires_at = datetime.now(UTC) + timedelta(seconds=ttl_seconds)
-        pool = await self._pool_ref()
-        async with pool.acquire() as conn:
+        async with self._idempotency_transaction() as conn:
             # Try to insert a fresh record; if it exists, reclaim it only if expired.
             row = await conn.fetchrow(
                 "INSERT INTO custos_state.idempotency_record "
@@ -3576,8 +3635,8 @@ class PgMetadataAdapter:
         idempotency_key: str,
         response_snapshot: Mapping[str, Any],
     ) -> IdempotencyRecord:
-        pool = await self._pool_ref()
-        async with pool.acquire() as conn:
+        """Commit a response snapshot, surfacing backend outages through the SPL error contract."""
+        async with self._idempotency_transaction() as conn:
             row = await conn.fetchrow(
                 "UPDATE custos_state.idempotency_record "
                 "SET status = 'completed', response_snapshot = $5::jsonb "
@@ -3600,8 +3659,8 @@ class PgMetadataAdapter:
         return _row_to_idempotency_record(row)
 
     async def delete_expired_idempotency_records(self, before: datetime) -> int:
-        pool = await self._pool_ref()
-        async with pool.acquire() as conn:
+        """Remove only expired bindings; reservation transactions protect concurrent readback."""
+        async with self._idempotency_transaction() as conn:
             result = await conn.execute(
                 "DELETE FROM custos_state.idempotency_record WHERE expires_at <= $1",
                 before,

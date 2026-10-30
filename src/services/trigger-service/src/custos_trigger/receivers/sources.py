@@ -190,6 +190,15 @@ async def ingest_source_event(
             evaluator=evaluator,
             subscriptions=subscriptions,
             resumes=resumes,
+            shared_resumes=False,
+        ),
+        shared_resumes=lambda: _select_source_targets(
+            scoped,
+            reliable=reliable,
+            evaluator=evaluator,
+            subscriptions=subscriptions,
+            resumes=resumes,
+            shared_resumes=True,
         ),
     )
 
@@ -201,6 +210,7 @@ async def _select_source_targets(
     evaluator: SelectorEvaluator,
     subscriptions: SubscriptionStore,
     resumes: ResumeSubscriptionStore,
+    shared_resumes: bool,
 ) -> AsyncIterator[DeadLetterData]:
     """Prepare all original targets without dispatch; the complete selection commits together."""
     event, workspace = scoped.event, scoped.workspace_id
@@ -210,7 +220,7 @@ async def _select_source_targets(
         "pull" if event.source.type is SourceType.PULL else "push"
     )
     classification = classify(event)
-    if classification.to_start:
+    if classification.to_start and not shared_resumes:
         cursor: Cursor | None = None
         while True:
             page = await subscriptions.query(
@@ -287,6 +297,11 @@ async def _select_source_targets(
                     or reg.source.connector_instance_id != connector
                     or delivery_mode not in reg.source.delivery_modes
                 ):
+                    continue
+                dual_mode = (
+                    "push" in reg.source.delivery_modes and "pull" in reg.source.delivery_modes
+                )
+                if dual_mode != shared_resumes:
                     continue
                 try:
                     matched = evaluator.matches(

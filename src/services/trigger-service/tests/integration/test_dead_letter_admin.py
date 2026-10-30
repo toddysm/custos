@@ -737,7 +737,10 @@ async def test_failure_capture_audit_and_receipt_acknowledgement_are_atomic(
     assert (await audits(harness)).count("trigger.deadletter.stored") == int(not audit_failure)
 
 
-async def test_gateway_forwards_scoped_recovery_to_real_trigger_handlers(harness: Harness) -> None:
+async def test_gateway_forwards_scoped_recovery_to_real_trigger_handlers(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Exercise Gateway forwarding and Trigger recovery against both storage backends."""
     from custos_gateway.errors import register_exception_handlers as gateway_errors
     from custos_gateway.middleware.auth import AUTH_STATE_ATTR, AuthorizedCaller
@@ -745,6 +748,8 @@ async def test_gateway_forwards_scoped_recovery_to_real_trigger_handlers(harness
     from custos_gateway.router import DownstreamRouter
     from custos_gateway.routes.registry import M1_ROUTE_REGISTRY, _make_forwarder
     from custos_gateway.settings import load_settings as gateway_settings
+    from custos_pg import PgMetadataAdapter
+    from custos_pg.pool import LazyPool
     from custos_workflow.providers import _InProcessMetadataStoreProvider
 
     client = FakeWorkflowServiceClient()
@@ -861,6 +866,21 @@ async def test_gateway_forwards_scoped_recovery_to_real_trigger_handlers(harness
                 assert repeated.headers["idempotency-key"] == "bulk-request"
                 unselected = await harness.store.get_dead_letter(WS, "bulk-b")
                 assert unselected is not None and unselected.status == "pending"
+                broken = PgMetadataAdapter(lazy=LazyPool("postgresql://unused"))
+                monkeypatch.setattr(
+                    broken,
+                    "_pool_ref",
+                    AsyncMock(side_effect=ConnectionRefusedError("private backend details")),
+                )
+                gateway.state.metadata_store = broken
+                forward = AsyncMock(side_effect=AssertionError("unbound recovery was forwarded"))
+                monkeypatch.setattr("custos_gateway.routes.registry._invoke_downstream", forward)
+                for suffix in ("/entry:replay", "/entry:discard", ":replay"):
+                    denied = await http.post(BASE + suffix, headers=headers, json={})
+                    assert denied.status_code == 503
+                    assert denied.json()["code"] == "downstream-unavailable"
+                    assert "private backend details" not in denied.text
+                forward.assert_not_awaited()
     assert len(client.start_run_calls) == 2
     assert (await audits(harness)).count("trigger.deadletter.replayed") == 2
 

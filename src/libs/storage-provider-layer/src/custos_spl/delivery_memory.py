@@ -14,6 +14,7 @@ from custos_spl.interfaces.dead_letters import (
     DeadLetterEntry,
     dead_letter_transition_audits,
     new_dead_letter,
+    validate_dispatch_identifier,
 )
 from custos_spl.interfaces.delivery import (
     DeliveryNamespace,
@@ -30,7 +31,7 @@ from custos_spl.interfaces.delivery import (
     validate_failure_capture,
 )
 from custos_spl.interfaces.metadata_store import AuditEvent, Run
-from custos_spl.interfaces.source_delivery import SourceDeliverySelection
+from custos_spl.interfaces.source_delivery import SourceDeliverySelection, validate_source_batch
 from custos_spl.pagination import (
     Cursor,
     Page,
@@ -63,11 +64,24 @@ class MemoryDeliveryState:
     async def put_source_delivery(
         self, selection: SourceDeliverySelection
     ) -> SourceDeliverySelection:
-        """Publish the complete first selection without yielding or replacing concurrent intent."""
-        if selection.requests is None:
-            raise ValueError("new source selection requires retained requests")
-        current = self._source_deliveries.get((selection.workspace_id, selection.key))
-        if current is None:
+        """Bind one original selection using the same atomic batch contract."""
+        return (await self.put_source_deliveries((selection,)))[0]
+
+    async def put_source_deliveries(
+        self, selections: tuple[SourceDeliverySelection, ...]
+    ) -> tuple[SourceDeliverySelection, ...]:
+        """Validate both routing arms before publishing state; retain prior accepted intent."""
+        validate_source_batch(selections)
+        accepted: list[SourceDeliverySelection] = []
+        for selection in selections:
+            current = self._source_deliveries.get((selection.workspace_id, selection.key))
+            if current is not None:
+                if current.request_hash != selection.request_hash:
+                    raise ImmutableViolation("source event identity is bound to another request")
+                accepted.append(current)
+                continue
+            if selection.requests is None:
+                raise ValueError("new source selection requires retained requests")
             for raw in selection.requests:
                 data = decode_delivery_request(raw, self._delivery_clock())
                 row = self._delivery_rows.get(
@@ -75,11 +89,40 @@ class MemoryDeliveryState:
                 )
                 if row is not None and not row.completed and row.request_json is None:
                     raise ImmutableViolation("pending delivery lost its original request")
-            self._source_deliveries[(selection.workspace_id, selection.key)] = selection
-            return selection
-        if current.request_hash != selection.request_hash:
-            raise ImmutableViolation("source event identity is bound to another request")
-        return current
+            accepted.append(selection)
+        result = tuple(accepted)
+        validate_source_batch(result)
+        self._source_deliveries.update({(item.workspace_id, item.key): item for item in result})
+        return result
+
+    def _source_pending(self, selection: SourceDeliverySelection) -> bool:
+        """A missing producer receipt is unfinished work, not an implicitly completed target."""
+        for raw in selection.requests or ():
+            key = decode_delivery_request(raw, self._delivery_clock()).idempotency_key
+            receipt = self._delivery_rows.get((selection.workspace_id, "trigger", key))
+            if receipt is None or not receipt.completed:
+                return True
+        return False
+
+    async def query_pending_source_deliveries(
+        self, workspace_id: WorkspaceId, *, cursor: Cursor | None = None, limit: int | None = None
+    ) -> Page[SourceDeliverySelection]:
+        """Discover bounded accepted work without needing its event ID, subscriptions or waits."""
+        validate_dispatch_identifier(workspace_id)
+        scope = ("pending-source-delivery", workspace_id)
+        after = decode_query_cursor(cursor, scope)
+        if after is not None:
+            validate_dispatch_identifier(after)
+        size = query_page_limit(limit)
+        items = [
+            item
+            for (workspace, key), item in sorted(self._source_deliveries.items())
+            if workspace == workspace_id and key > (after or "") and self._source_pending(item)
+        ][: size + 1]
+        return Page(
+            items[:size],
+            encode_query_cursor(scope, items[size - 1].key) if len(items) > size else None,
+        )
 
     async def purge_source_delivery_selections(
         self, workspace_id: WorkspaceId, *, limit: int = 100
@@ -92,13 +135,7 @@ class MemoryDeliveryState:
         for key, selection in sorted(self._source_deliveries.items()):
             if key[0] != workspace_id or selection.requests is None or selection.expires_at > now:
                 continue
-            receipts = [
-                self._delivery_rows.get(
-                    (workspace_id, "trigger", decode_delivery_request(raw, now).idempotency_key)
-                )
-                for raw in selection.requests
-            ]
-            if not all(row is not None and row.completed for row in receipts):
+            if self._source_pending(selection):
                 continue
             self._source_deliveries[key] = replace(selection, requests=None)
             erased += 1

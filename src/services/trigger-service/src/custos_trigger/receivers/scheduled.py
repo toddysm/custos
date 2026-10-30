@@ -178,17 +178,6 @@ async def process_scheduled_event(
     ):
         logger.error("Unproven scheduled occurrence: %s", event.event_id)
         raise ScheduledOccurrenceError("scheduled event does not match canonical occurrence proof")
-    if fire.discarded_at is not None:
-        await audit.emit(
-            "trigger.schedule.suppressed",
-            workspace_id=workspace,
-            attributes={
-                "eventId": event.event_id,
-                "subscriptionId": identifier,
-                "reason": fire.discard_reason,
-            },
-        )
-        return None
     event = scheduled_event(fire)
     reliable = dispatcher.reliable
 
@@ -206,7 +195,7 @@ async def process_scheduled_event(
         async def select() -> AsyncIterator[DeadLetterData]:
             """Persist the original scheduled target before attempting its downstream effect."""
             subscription = await _match_scheduled(
-                event, workspace, revision, subscription_store, evaluator, audit
+                event, workspace, fire, subscription_store, evaluator, audit
             )
             if subscription is not None:
                 request = await reliable.prepare_request(
@@ -222,7 +211,7 @@ async def process_scheduled_event(
         outcomes = await reliable.dispatch_event(event, workspace, select)
         return outcomes[0][1] if outcomes else None
     subscription = await _match_scheduled(
-        event, workspace, revision, subscription_store, evaluator, audit
+        event, workspace, fire, subscription_store, evaluator, audit
     )
     if subscription is None:
         return None
@@ -234,7 +223,7 @@ async def process_scheduled_event(
 async def _match_scheduled(
     event: NormalizedEvent,
     workspace: str,
-    revision: int,
+    fire: PendingScheduleFire,
     subscription_store: SubscriptionStore,
     evaluator: SelectorEvaluator,
     audit: AuditSink,
@@ -242,8 +231,19 @@ async def _match_scheduled(
     """Validate current intent only when there is no persisted source selection to recover."""
     identifier = event.source.subscription_id
     assert identifier is not None
+    if fire.discarded_at is not None:
+        await audit.emit(
+            "trigger.schedule.suppressed",
+            workspace_id=workspace,
+            attributes={
+                "eventId": event.event_id,
+                "subscriptionId": identifier,
+                "reason": fire.discard_reason,
+            },
+        )
+        return None
     subscription = await subscription_store.get(workspace, identifier)
-    reason = _suppression(subscription, revision)
+    reason = _suppression(subscription, fire.subscription_revision)
     if reason is not None:
         await audit.emit(
             "trigger.schedule.suppressed",
