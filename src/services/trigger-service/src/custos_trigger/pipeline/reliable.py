@@ -43,6 +43,7 @@ from custos_trigger.clients.workflow import (
 from custos_trigger.dedup import compute_dispatch_key
 from custos_trigger.errors import TriggerError, TriggerErrorKind
 from custos_trigger.events import NormalizedEvent
+from custos_trigger.models import Subscription
 from custos_trigger.pipeline.dispatch import (
     AUDIT_DEDUPED,
     AUDIT_DISPATCH_FAILED,
@@ -60,6 +61,29 @@ from custos_trigger.pipeline.match_start import StartMatch
 logger = logging.getLogger(__name__)
 MAX_DISPATCH_SECONDS = 300
 FINALIZATION_MARGIN_SECONDS = 30
+
+
+def build_start_target(subscription: Subscription) -> dict[str, Any]:
+    """Build the same complete target for source preflight and durable start capture."""
+    return {
+        "kind": "start",
+        "workflowVersionId": subscription.target_workflow_version_id,
+        "inputs": subscription.input_mapping,
+        "deliveryProtocol": 2,
+    }
+
+
+def build_resume_target(event: NormalizedEvent, match: ResumeMatch) -> dict[str, Any]:
+    """Build the stored signal destination and event payload for preflight and capture."""
+    reg = match.registration
+    return {
+        "kind": "resume",
+        "runId": reg.run_id,
+        "stepId": reg.step_id,
+        "eventName": reg.event_key,
+        "payload": event.data,
+        "deliveryProtocol": reg.delivery_protocol,
+    }
 
 
 def validate_dispatch_limits(
@@ -120,12 +144,7 @@ class ReliableDispatcher:
             event,
             sub.workspace_id,
             sub.subscription_id,
-            {
-                "kind": "start",
-                "workflowVersionId": sub.target_workflow_version_id,
-                "inputs": sub.input_mapping,
-                "deliveryProtocol": 2,
-            },
+            build_start_target(sub),
             depth,
         )
 
@@ -138,19 +157,11 @@ class ReliableDispatcher:
         depth: int = 0,
     ) -> DispatchOutcome:
         """Preserve the wait's persisted protocol, including explicit unsafe legacy replay."""
-        reg = match.registration
         return await self._dispatch(
             event,
             workspace_id,
             match.resume_id,
-            {
-                "kind": "resume",
-                "runId": reg.run_id,
-                "stepId": reg.step_id,
-                "eventName": reg.event_key,
-                "payload": event.data,
-                "deliveryProtocol": reg.delivery_protocol,
-            },
+            build_resume_target(event, match),
             depth,
         )
 

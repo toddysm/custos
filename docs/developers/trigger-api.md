@@ -186,6 +186,9 @@ Malformed or unretainable source data returns `DROP`; raw transport, credential
 fields, nonfinite JSON, invalid identifiers and oversized capture objects are
 rejected before dispatch. The HTTP delivery body is capped at 512 KiB; the shared
 durable-dispatch validation retains its 256-KiB object/depth/privacy limits.
+Resolved start and resume targets are preflighted as complete RPC objects,
+including their routing fields and wrappers; invalid target configuration retries
+rather than surfacing an unstructured serialization failure.
 
 Activation requires the upgraded-writer gate, durable dispatch capabilities and
 schema readiness (including scheduler revision 9), the sidecar app token and

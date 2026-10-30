@@ -2,19 +2,21 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from copy import deepcopy
 from unittest.mock import AsyncMock
 
 import pytest
 from custos_spl.errors import BackendUnavailable
+from custos_spl.interfaces.dead_letters import MAX_PAYLOAD_BYTES, snapshot_dispatch_object
 from fastapi.testclient import TestClient
 
 from custos_trigger.app import create_app
 from custos_trigger.clients import FakeWorkflowServiceClient
 from custos_trigger.clients.workflow import WorkflowClientTransportError
 from custos_trigger.dependencies import WorkflowCallerVerifier
-from custos_trigger.models import SourceType
+from custos_trigger.models import SourceType, SubscriptionState
 from custos_trigger.providers import InMemoryTriggerMetadataStore, Providers
 from custos_trigger.receivers.sources import (
     CONNECTOR_EVENTS_PATH,
@@ -27,7 +29,8 @@ from custos_trigger.settings import (
     SettingsError,
     read_source_receivers_enabled,
 )
-from tests._source_helpers import NOW, SourceStorage, connector_event, dispatcher, start
+from custos_trigger.stores import SubscriptionStore
+from tests._source_helpers import NOW, SourceStorage, connector_event, dispatcher, resume, start
 
 HEADERS = {"dapr-api-token": "unit-source-sidecar"}
 SourceClient = tuple[TestClient, InMemoryTriggerMetadataStore, FakeWorkflowServiceClient]
@@ -141,6 +144,37 @@ def test_failed_capture_is_a_broker_retry(
     capture.assert_awaited_once()
 
 
+@pytest.mark.parametrize("boundary", ["size", "depth"])
+def test_complete_wrapped_target_is_checked_before_dispatch(
+    source_client: SourceClient, boundary: str
+) -> None:
+    """Inputs alone may fit while the complete target cannot be captured; this must retry."""
+    client, store, workflow = source_client
+    if boundary == "size":
+        empty_size = len(json.dumps({"value": ""}, ensure_ascii=False).encode())
+        mapping: dict[str, object] = {"value": "x" * (MAX_PAYLOAD_BYTES - empty_size)}
+    else:
+        mapping = {"value": 0}
+        for _ in range(31):
+            mapping = {"nested": mapping}
+    snapshot_dispatch_object(mapping)
+    assert client.portal is not None
+
+    async def replace_mapping() -> None:
+        """Seed a persisted mapping that needs full-target preflight on consumption."""
+        subscriptions = SubscriptionStore(store)
+        sub = await subscriptions.get("source-a", "start")
+        assert sub is not None
+        await subscriptions.update(
+            sub.model_copy(update={"input_mapping": mapping}), expected_revision=sub.store_revision
+        )
+
+    client.portal.call(replace_mapping)
+    response = client.post(CONNECTOR_EVENTS_PATH, json={"data": connector_event()}, headers=HEADERS)
+    assert response.status_code == 200 and response.json() == {"status": "RETRY"}
+    assert not workflow.start_run_calls
+
+
 def test_poison_drop_and_untrusted_callback_rejection(source_client: SourceClient) -> None:
     """Invalid source data is dropped, but direct app-port spoofing never reaches processing."""
     client, _, workflow = source_client
@@ -157,6 +191,23 @@ def test_poison_drop_and_untrusted_callback_rejection(source_client: SourceClien
         "status": "DROP"
     }
     assert not workflow.start_run_calls
+
+
+def test_complete_resume_target_is_checked_before_dispatch(source_client: SourceClient) -> None:
+    """Unretainable stored signal identifiers retry without a resume effect or raw 500."""
+    client, store, workflow = source_client
+    assert client.portal is not None
+    assert isinstance(store, SourceStorage)
+
+    async def seed_wait() -> None:
+        """Create a source wait whose signal exceeds the capture identifier bound."""
+        await SubscriptionStore(store).set_state("source-a", "start", SubscriptionState.PAUSED)
+        await resume(store, "stored-run", event_key="x" * 513)
+
+    client.portal.call(seed_wait)
+    response = client.post(CONNECTOR_EVENTS_PATH, json={"data": connector_event()}, headers=HEADERS)
+    assert response.status_code == 200 and response.json() == {"status": "RETRY"}
+    assert not workflow.start_run_calls and not workflow.raise_event_calls
 
 
 def test_private_normalized_route_uses_same_durable_path(source_client: SourceClient) -> None:

@@ -12,6 +12,7 @@ from custos_spl.errors import SPLError
 from custos_spl.interfaces.dead_letters import (
     snapshot_dispatch_object,
     validate_dispatch_identifier,
+    validate_dispatch_target,
 )
 from custos_spl.interfaces.scheduler import SchedulerStateProvider
 from custos_spl.pagination import Cursor
@@ -42,6 +43,7 @@ from custos_trigger.pipeline.classify import classify
 from custos_trigger.pipeline.dispatch import AuditSink, Dispatcher
 from custos_trigger.pipeline.match_resume import ResumeMatch
 from custos_trigger.pipeline.match_start import StartMatch, StartMatcher
+from custos_trigger.pipeline.reliable import build_resume_target, build_start_target
 from custos_trigger.receivers.internal import DeliveryStatus
 from custos_trigger.receivers.scheduled import ScheduledOccurrenceError, process_scheduled_event
 from custos_trigger.selector import SelectorEvaluator, SelectorTypeError
@@ -212,15 +214,16 @@ async def ingest_source_event(
                     subscription_id=sub.subscription_id,
                     source_type=sub.source_type,
                 )
+                resolved = sub.model_copy(update={"input_mapping": mapped})
                 try:
-                    snapshot_dispatch_object(mapped)
+                    validate_dispatch_target(
+                        build_start_target(resolved), allow_unresolved_version=True
+                    )
                 except (ValueError, UnicodeError) as exc:
                     raise SourceConfigurationError(
                         "mapped source inputs cannot be retained"
                     ) from exc
-                await dispatcher.dispatch_start(
-                    event, StartMatch(sub.model_copy(update={"input_mapping": mapped}))
-                )
+                await dispatcher.dispatch_start(event, StartMatch(resolved))
             cursor = page.next_cursor
             if cursor is None:
                 break
@@ -263,9 +266,14 @@ async def ingest_source_event(
                 except SelectorTypeError:
                     matched = False
                 if matched:
-                    await dispatcher.dispatch_resume(
-                        event, ResumeMatch(row.resume_id, reg), workspace_id=workspace
-                    )
+                    resume_match = ResumeMatch(row.resume_id, reg)
+                    try:
+                        validate_dispatch_target(build_resume_target(event, resume_match))
+                    except (ValueError, UnicodeError) as exc:
+                        raise SourceConfigurationError(
+                            "resolved source wait target cannot be retained"
+                        ) from exc
+                    await dispatcher.dispatch_resume(event, resume_match, workspace_id=workspace)
             cursor = resume_page.next_cursor
             if cursor is None:
                 break

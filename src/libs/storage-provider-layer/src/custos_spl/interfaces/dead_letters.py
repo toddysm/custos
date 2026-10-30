@@ -137,6 +137,34 @@ def snapshot_dispatch_object(value: Mapping[str, object]) -> Mapping[str, JsonVa
     return frozen
 
 
+def validate_dispatch_target(
+    value: Mapping[str, object], *, allow_unresolved_version: bool = False
+) -> Mapping[str, JsonValue]:
+    """Validate the complete wrapped RPC target, including size, depth and identifiers."""
+    target = snapshot_dispatch_object(value)
+    kind = target.get("kind")
+    required = (
+        {"kind", "workflowVersionId", "inputs"}
+        if kind == "start"
+        else {"kind", "runId", "stepId", "eventName", "payload"}
+    )
+    if kind not in ("start", "resume") or set(target) - {"deliveryProtocol"} != required:
+        raise ValueError("resolved target must be an exact start or resume RPC shape")
+    protocol = target.get("deliveryProtocol", 1)
+    if type(protocol) is not int or protocol not in (1, 2):
+        raise ValueError("unsupported target delivery protocol")
+    for key in required - {"kind", "inputs", "payload"}:
+        item = target[key]
+        if key == "workflowVersionId" and item is None and allow_unresolved_version:
+            continue
+        if not isinstance(item, str):
+            raise ValueError("resolved target identifiers must be strings")
+        validate_dispatch_identifier(item)
+    if not isinstance(target.get("inputs" if kind == "start" else "payload"), Mapping):
+        raise ValueError("resolved RPC data must be an object")
+    return target
+
+
 @dataclass(frozen=True, slots=True)
 class DispatchAttempt:
     """One failed original RPC attempt, with a safe classification rather than exception text."""
@@ -200,7 +228,10 @@ class DeadLetterData:
         if not all(isinstance(attempt, DispatchAttempt) for attempt in self.history):
             raise ValueError("invalid dispatch attempt history")
         object.__setattr__(self, "history", tuple(self.history))
-        event, target = snapshot_dispatch_object(self.event), snapshot_dispatch_object(self.target)
+        event = snapshot_dispatch_object(self.event)
+        target = validate_dispatch_target(
+            self.target, allow_unresolved_version=self.history[-1].code == "configuration"
+        )
         if set(event) - {"schemaVersion", "eventId", "source", "kind", "subject", "data"}:
             raise ValueError("unsupported persisted event field")
         if event.get("schemaVersion") != "1":
@@ -237,30 +268,6 @@ class DeadLetterData:
             event.get("subject", ""), str
         ):
             raise ValueError("normalized event requires object data and string subject")
-        kind = target.get("kind")
-        required = (
-            {"kind", "workflowVersionId", "inputs"}
-            if kind == "start"
-            else {"kind", "runId", "stepId", "eventName", "payload"}
-        )
-        if kind not in ("start", "resume") or set(target) - {"deliveryProtocol"} != required:
-            raise ValueError("resolved target must be an exact start or resume RPC shape")
-        protocol = target.get("deliveryProtocol", 1)
-        if type(protocol) is not int or protocol not in (1, 2):
-            raise ValueError("unsupported target delivery protocol")
-        for key in required - {"kind", "inputs", "payload"}:
-            value = target[key]
-            if (
-                key == "workflowVersionId"
-                and value is None
-                and self.history[-1].code == "configuration"
-            ):
-                continue
-            if not isinstance(value, str):
-                raise ValueError("resolved target identifiers must be strings")
-            validate_dispatch_identifier(value)
-        if not isinstance(target.get("inputs" if kind == "start" else "payload"), Mapping):
-            raise ValueError("resolved RPC data must be an object")
         object.__setattr__(self, "event", event)
         object.__setattr__(self, "target", target)
 
