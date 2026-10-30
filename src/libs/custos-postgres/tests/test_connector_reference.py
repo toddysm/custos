@@ -54,6 +54,7 @@ async def test_reference_backend_errors_are_explicit(failure: Exception) -> None
     assert raised.value.__cause__ is failure
 
 
+@pytest.mark.parametrize("provider", ["catalog", "instance"])
 @pytest.mark.parametrize("stage", ["pool", "acquire", "query"])
 @pytest.mark.parametrize(
     "failure",
@@ -64,20 +65,27 @@ async def test_reference_backend_errors_are_explicit(failure: Exception) -> None
         PostgresError("unavailable"),
     ],
 )
-async def test_catalog_read_outages_are_translated(
-    stage: str, failure: Exception, monkeypatch: pytest.MonkeyPatch
+async def test_connector_read_outages_are_translated(
+    provider: str, stage: str, failure: Exception, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Pool and query failures retain a safe provider error with causal context."""
     connection = AsyncMock()
     pool = MagicMock(spec=Pool)
     pool.acquire.return_value.__aenter__.return_value = connection
-    adapter = PgCatalogAdapter(pool=pool)
+    adapter = (
+        PgCatalogAdapter(pool=pool)
+        if provider == "catalog"
+        else PgConnectorInstanceAdapter(pool=pool)
+    )
     if stage == "pool":
         monkeypatch.setattr(adapter, "_pool_ref", AsyncMock(side_effect=failure))
     elif stage == "acquire":
         pool.acquire.return_value.__aenter__.side_effect = failure
     else:
         connection.fetchrow.side_effect = failure
-    with pytest.raises(BackendUnavailable, match="connector catalog lookup failed") as raised:
-        await adapter.get_connector_type_version("registry", "1")
+    with pytest.raises(BackendUnavailable, match=f"connector {provider} lookup failed") as raised:
+        if isinstance(adapter, PgCatalogAdapter):
+            await adapter.get_connector_type_version("registry", "1")
+        else:
+            await adapter.get_connector_instance(WorkspaceId("ws"), ConnectorInstanceId("id"))
     assert raised.value.__cause__ is failure

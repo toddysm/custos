@@ -10,10 +10,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from asyncpg.pool import Pool
-from custos_pg import PgCatalogAdapter
+from custos_pg import PgCatalogAdapter, PgConnectorInstanceAdapter
 from custos_spl.errors import BackendUnavailable
 from custos_spl.ids import ConnectorInstanceId, WorkspaceId
 from custos_spl.interfaces.catalog_store import CatalogStoreProvider
+from custos_spl.interfaces.connector_instance_store import ConnectorInstanceStoreProvider
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -473,8 +474,11 @@ def test_missing_catalog_is_not_reported_as_an_unknown_pair(
     assert not resolver.calls
 
 
+@pytest.mark.parametrize("provider", ["catalog", "instance"])
 @pytest.mark.parametrize("stage", ["acquire", "query"])
-def test_catalog_adapter_timeout_has_sanitized_503(configured: Configured, stage: str) -> None:
+def test_adapter_timeout_has_sanitized_503(
+    configured: Configured, stage: str, provider: str
+) -> None:
     """The actual PostgreSQL adapter translates timeouts before the HTTP error boundary."""
     client, resolver, providers = configured
     connection = AsyncMock()
@@ -484,9 +488,17 @@ def test_catalog_adapter_timeout_has_sanitized_503(configured: Configured, stage
         pool.acquire.return_value.__aenter__.side_effect = TimeoutError("private database detail")
     else:
         connection.fetchrow.side_effect = TimeoutError("private database detail")
-    cast(FastAPI, client.app).state.providers = replace(
-        providers, catalog_store=cast(CatalogStoreProvider, PgCatalogAdapter(pool=pool))
+    replacement = (
+        replace(providers, catalog_store=cast(CatalogStoreProvider, PgCatalogAdapter(pool=pool)))
+        if provider == "catalog"
+        else replace(
+            providers,
+            instance_store=cast(
+                ConnectorInstanceStoreProvider, PgConnectorInstanceAdapter(pool=pool)
+            ),
+        )
     )
+    cast(FastAPI, client.app).state.providers = replacement
     response = client.post("/VerifyWebhook", json=envelope(), headers=MESH_HEADERS)
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "webhook.verifier_unavailable"
