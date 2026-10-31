@@ -139,13 +139,46 @@ func writeReply(output io.Writer, reply bridgeReply) error {
 	return nil
 }
 
-// runHook uses a separate process group; the owning Pod must still reach a
-// verified terminal state before the controller reports cleanup confirmed.
-func runHook(request bridgeRequest) bridgeReply {
+// closePipe treats an already-closed owned descriptor as a completed close.
+func closePipe(file *os.File) error {
+	err := file.Close()
+	if errors.Is(err, os.ErrClosed) {
+		return nil
+	}
+	return err
+}
+
+// copyOutput reports pipe completion separately from the subprocess exit status.
+func copyOutput(reader *os.File, writer *boundedOutput, done chan<- error) {
+	_, err := io.Copy(writer, reader)
+	done <- err
+}
+
+// runHook uses a separate process group and independently drains both output
+// pipes. Cmd.Wait can hide ErrWaitDelay behind ExitError, so it is not IO proof.
+func runHook(request bridgeRequest) (reply bridgeReply) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(request.TimeoutMillis)*time.Millisecond)
 	defer cancel()
 	budget := &outputBudget{cancel: cancel}
 	stdout, stderr := &boundedOutput{budget: budget}, &boundedOutput{budget: budget}
+	var pipes []*os.File
+	defer func() {
+		for _, file := range pipes {
+			if err := closePipe(file); err != nil {
+				reply = bridgeReply{Status: "execution-failed", ExitCode: -1}
+			}
+		}
+	}()
+	stdoutReader, stdoutWriter, err := os.Pipe()
+	if err != nil {
+		return bridgeReply{Status: "spawn-failed", ExitCode: -1}
+	}
+	pipes = append(pipes, stdoutReader, stdoutWriter)
+	stderrReader, stderrWriter, err := os.Pipe()
+	if err != nil {
+		return bridgeReply{Status: "spawn-failed", ExitCode: -1}
+	}
+	pipes = append(pipes, stderrReader, stderrWriter)
 	cmd := exec.CommandContext(ctx, request.Argv[0], request.Argv[1:]...)
 	if errors.Is(cmd.Err, exec.ErrDot) {
 		// The verified image may intentionally resolve its entrypoint from its working directory.
@@ -156,7 +189,7 @@ func runHook(request bridgeRequest) bridgeReply {
 		cmd.Path, cmd.Err = path, nil
 	}
 	cmd.Stdin = bytes.NewReader(request.Payload)
-	cmd.Stdout, cmd.Stderr = stdout, stderr
+	cmd.Stdout, cmd.Stderr = stdoutWriter, stderrWriter
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = time.Second
 	cmd.Cancel = func() error {
@@ -166,15 +199,61 @@ func runHook(request bridgeRequest) bridgeReply {
 		}
 		return err
 	}
-	err := cmd.Run()
+	if err := cmd.Start(); err != nil {
+		return bridgeReply{Status: "spawn-failed", ExitCode: -1}
+	}
+	groupID := cmd.Process.Pid
+	copyFailed := false
+	for _, writer := range []*os.File{stdoutWriter, stderrWriter} {
+		if err := closePipe(writer); err != nil {
+			copyFailed = true
+		}
+	}
+	if copyFailed {
+		if err := cmd.Cancel(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			cancel()
+		}
+	}
+	copied := make(chan error, 2)
+	go copyOutput(stdoutReader, stdout, copied)
+	go copyOutput(stderrReader, stderr, copied)
+	err = cmd.Wait()
+	drain := time.NewTimer(time.Second)
+	defer drain.Stop()
+	incomplete := false
+	for remaining := 2; remaining > 0; {
+		select {
+		case copyErr := <-copied:
+			copyFailed = copyFailed || copyErr != nil
+			remaining--
+		case <-drain.C:
+			incomplete = true
+			if killErr := syscall.Kill(-groupID, syscall.SIGKILL); killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
+				copyFailed = true
+			}
+			for _, reader := range []*os.File{stdoutReader, stderrReader} {
+				if closeErr := closePipe(reader); closeErr != nil {
+					copyFailed = true
+				}
+			}
+			for remaining > 0 {
+				copyErr := <-copied
+				copyFailed = copyFailed || copyErr != nil
+				remaining--
+			}
+		}
+	}
 	if budget.exceeded {
 		return bridgeReply{Status: "output-limit", ExitCode: -1}
 	}
 	if ctx.Err() != nil {
 		return bridgeReply{Status: "timeout", ExitCode: -1}
 	}
-	if errors.Is(err, exec.ErrWaitDelay) {
+	if incomplete || errors.Is(err, exec.ErrWaitDelay) {
 		return bridgeReply{Status: "descendant-io", ExitCode: -1}
+	}
+	if copyFailed {
+		return bridgeReply{Status: "execution-failed", ExitCode: -1}
 	}
 	if cmd.ProcessState == nil {
 		return bridgeReply{Status: "spawn-failed", ExitCode: -1}

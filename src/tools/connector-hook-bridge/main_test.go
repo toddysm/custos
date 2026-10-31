@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -40,6 +41,21 @@ func TestHookProcess(t *testing.T) {
 		}
 		os.Exit(7)
 	case "timeout":
+		time.Sleep(time.Minute)
+	case "descendant":
+		child := exec.Command(os.Args[0], "-test.run=^TestHookProcess$", "--", "hold-output")
+		child.Stdout, child.Stderr = os.Stdout, os.Stderr
+		if err := child.Start(); err != nil {
+			os.Exit(86)
+		}
+		if err := os.WriteFile(os.Getenv("CUSTOS_TEST_DESCENDANT_PID"), []byte(strconv.Itoa(child.Process.Pid)), 0600); err != nil {
+			os.Exit(87)
+		}
+		if _, err := io.WriteString(os.Stdout, `{"ok":false,"error":{"code":"upstream-unreachable","detail":"synthetic"}}`); err != nil {
+			os.Exit(88)
+		}
+		os.Exit(7)
+	case "hold-output":
 		time.Sleep(time.Minute)
 	case "signal":
 		if err := syscall.Kill(os.Getpid(), syscall.SIGKILL); err != nil {
@@ -76,6 +92,34 @@ func TestImageEntrypointFromWorkingDirectory(t *testing.T) {
 	reply := runHook(request)
 	if reply.Status != "completed" || reply.ExitCode != 7 || !bytes.Equal(reply.Stdout, request.Payload) {
 		t.Fatalf("image working-directory lookup failed: status=%s exit=%d", reply.Status, reply.ExitCode)
+	}
+}
+
+// TestNonzeroExitCannotHideIncompleteDescendantIO observes output completion independently.
+func TestNonzeroExitCannotHideIncompleteDescendantIO(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "descendant.pid")
+	t.Setenv("CUSTOS_TEST_DESCENDANT_PID", pidFile)
+	t.Cleanup(func() {
+		raw, err := os.ReadFile(pidFile)
+		if errors.Is(err, os.ErrNotExist) {
+			return
+		}
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		pid, err := strconv.Atoi(string(raw))
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			t.Error(err)
+		}
+	})
+	reply := runHook(requestFor(t, "descendant"))
+	if reply.Status != "descendant-io" {
+		t.Fatalf("nonzero exit hid incomplete output: status=%s exit=%d", reply.Status, reply.ExitCode)
 	}
 }
 

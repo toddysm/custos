@@ -120,6 +120,10 @@ replica must not automatically repeat the invocation.
 Bridge-level timeout, output-limit or execution failures are not completed
 plugin responses: they can follow upstream effects without preserving the
 plugin result, so they retain the same fence and evidence.
+The bridge independently observes stdout/stderr drain completion; a nonzero
+process exit cannot hide a descendant holding those streams open. Incomplete
+draining is a bridge failure, and verified Pod termination stops descendants
+even if they escaped the original process group.
 The existing `plugin-cleanup-unconfirmed` audit reason is retained for
 compatibility and covers both termination uncertainty and an unknown outcome.
 Unusable fenced `listen` responses and completed results discarded during final

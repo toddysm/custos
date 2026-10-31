@@ -389,3 +389,21 @@ async def test_lost_response_retains_evidence_and_prevents_reexecution(
             )
     assert len(runtime.effects) == 1
     await assert_recovery_evidence(runtime, canary)
+
+
+async def test_nonzero_exit_with_escaped_output_retains_recovery(runtime: Runtime) -> None:
+    """Nonzero exit cannot hide a live descendant and turn truncated output into completion."""
+    canary = "synthetic-canary-" + uuid4().hex
+    invocation = uuid4().hex
+    payload = {"mode": "descendant", "canary": canary, "effectUrl": runtime.effect_url}
+    for _ in range(2):
+        with pytest.raises(PluginCleanupFailed):
+            await runtime.runner.run(
+                image_ref=runtime.plugin,
+                hook="listen",
+                payload=payload,
+                timeout_seconds=60,
+                invocation_id=invocation,
+            )
+    assert len(runtime.effects) == 1
+    await assert_recovery_evidence(runtime, canary)
