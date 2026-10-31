@@ -133,6 +133,31 @@ def test_identity_and_payload_limits_fail_closed() -> None:
         )
 
 
+def test_object_references_accept_kubernetes_subdomains() -> None:
+    """Accounts, Secrets and RuntimeClasses have different name limits from namespaces."""
+    longest = ".".join(["a" * 63, "b" * 63, "c" * 63, "d" * 61])
+    assert len(longest) == 253
+    configured = replace(
+        settings(),
+        service_account="plugin.account",
+        image_pull_secrets=("registry.pull-secret", longest),
+        runtime_class="sandbox.runtime",
+    )
+    pod = build_hook_pod(configured, HookImage(IMAGE, ()), "owned", "a" * 32, 30)
+    assert pod["spec"]["serviceAccountName"] == "plugin.account"
+    assert pod["spec"]["runtimeClassName"] == "sandbox.runtime"
+    for name in (longest + "x", "bad..name", ".bad", "bad.", "Bad", "bad.-label"):
+        with pytest.raises(ValueError):
+            replace(settings(), service_account=name)
+        with pytest.raises(ValueError):
+            replace(settings(), image_pull_secrets=(name,))
+        with pytest.raises(ValueError):
+            replace(settings(), runtime_class=name)
+    for namespace in ("namespace.with.dots", "a" * 64):
+        with pytest.raises(ValueError):
+            replace(settings(), namespace=namespace)
+
+
 def test_completed_reply_preserves_plugin_bytes_and_exit() -> None:
     """Only a complete versioned reply can supply the original plugin result."""
     reply = decode_hook_reply(
@@ -165,6 +190,10 @@ def test_completed_reply_preserves_plugin_bytes_and_exit() -> None:
         b'{"version":1,"status":"completed","exitCode":true}',
         b'{"version":1,"status":"completed","exitCode":0,"stdout":"!"}',
         b'{"version":1,"status":"completed","exitCode":0,"unknown":"secret"}',
+        b'{"version":1,"status":"unrecognized","exitCode":-1}',
+        b'{"version":1,"status":"timeout","exitCode":0}',
+        b'{"version":1,"status":"already-started","exitCode":-1}',
+        b'{"version":1,"status":"completed","exitCode":-1}',
     ],
 )
 def test_malformed_reply_never_exposes_arbitrary_details(body: bytes) -> None:

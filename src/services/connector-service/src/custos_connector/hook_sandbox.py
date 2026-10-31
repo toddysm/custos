@@ -27,7 +27,27 @@ HOOK_CONTAINER = "hook"
 BRIDGE_PATH = "/custos/bridge/runner"
 IO_PATH = "/custos/io"
 _DNS_NAME = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+_DNS_SUBDOMAIN = re.compile(
+    r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)*"
+)
 _DIGEST_IMAGE = re.compile(r"[^@\s]+@sha256:[a-f0-9]{64}")
+_FAILURE_STATUSES = {
+    "timeout",
+    "output-limit",
+    "spawn-failed",
+    "descendant-io",
+    "execution-failed",
+    "invalid-request",
+    "ownership-unavailable",
+    "already-started",
+}
+
+
+def _object_name(value: str) -> bool:
+    """Validate Kubernetes object references, not the stricter namespace-label grammar."""
+    return (
+        isinstance(value, str) and len(value) <= 253 and _DNS_SUBDOMAIN.fullmatch(value) is not None
+    )
 
 
 @dataclass(frozen=True)
@@ -70,12 +90,15 @@ class HookSandboxSettings:
         """Fail before resource creation when identity or cleanup settings are incomplete."""
         if not isinstance(self.image_pull_secrets, tuple):
             raise ValueError("hook pull-secret references must be immutable")
-        for value in (self.namespace, self.service_account, *self.image_pull_secrets):
-            if _DNS_NAME.fullmatch(value) is None:
-                raise ValueError("invalid hook sandbox namespace or identity")
+        if _DNS_NAME.fullmatch(self.namespace) is None:
+            raise ValueError("invalid hook sandbox namespace")
+        if any(
+            not _object_name(value) for value in (self.service_account, *self.image_pull_secrets)
+        ):
+            raise ValueError("invalid hook sandbox object reference")
         if _DIGEST_IMAGE.fullmatch(self.helper_image) is None:
             raise ValueError("hook helper image must be digest-pinned")
-        if self.runtime_class is not None and _DNS_NAME.fullmatch(self.runtime_class) is None:
+        if self.runtime_class is not None and not _object_name(self.runtime_class):
             raise ValueError("invalid hook runtime class")
         if not math.isfinite(self.cleanup_seconds) or not 1 <= self.cleanup_seconds <= 60:
             raise ValueError("hook cleanup budget must be 1..60 seconds")
@@ -259,7 +282,7 @@ def _unique_reply(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def decode_hook_reply(frame: bytes) -> HookRunResult:
     """Validate the bounded private response without exposing arbitrary bridge diagnostics."""
-    if len(frame) < 4:
+    if not isinstance(frame, bytes) or len(frame) < 4:
         raise PluginProtocolError("incomplete hook response")
     length = struct.unpack(">I", frame[:4])[0]
     if length != len(frame) - 4 or length > MAX_HOOK_FRAME_BYTES:
@@ -276,17 +299,26 @@ def decode_hook_reply(frame: bytes) -> HookRunResult:
             raise ValueError("invalid result shape")
         if type(result.get("version")) is not int or result["version"] != 1:
             raise ValueError("invalid result version")
-        if result.get("status") == "timeout":
-            raise TimeoutError("hook execution deadline exceeded")
-        if result.get("status") != "completed":
-            raise PluginInvocationFailed("hook bridge did not complete the invocation")
         code = result.get("exitCode")
         if type(code) is not int or not -1 <= code <= 255:
             raise ValueError("invalid exit code")
+        status = result.get("status")
+        if not isinstance(status, str) or status not in {"completed", *_FAILURE_STATUSES}:
+            raise ValueError("unknown hook outcome")
+        if status != "completed":
+            if code != -1:
+                raise ValueError("invalid failure exit code")
+            if status in {"already-started", "ownership-unavailable"}:
+                raise ValueError("hook ownership outcome is unconfirmed")
+            if status == "timeout":
+                raise TimeoutError("hook execution deadline exceeded")
+            raise PluginInvocationFailed("hook bridge did not complete the invocation")
+        if code < 0:
+            raise ValueError("invalid completed exit code")
         stdout = base64.b64decode(result.get("stdout", ""), validate=True)
         stderr = base64.b64decode(result.get("stderr", ""), validate=True)
         if len(stdout) + len(stderr) > MAX_HOOK_OUTPUT_BYTES:
             raise ValueError("hook output exceeds limit")
         return HookRunResult(code, stdout, stderr)
-    except (ValueError, TypeError, binascii.Error) as exc:
+    except (ValueError, TypeError, binascii.Error, RecursionError) as exc:
         raise PluginProtocolError("invalid hook response") from exc

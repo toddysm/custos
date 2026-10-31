@@ -261,19 +261,19 @@ async def test_uid_replacement_is_never_mutated() -> None:
 
 
 async def test_timeout_preserves_failure_until_cleanup_is_confirmed() -> None:
-    """The operation deadline cancels exec, then waits for owned termination before surfacing."""
+    """An execution deadline without a reply retains recovery evidence after owned termination."""
     transport = Transport()
     transport.stall = True
-    with pytest.raises(TimeoutError):
+    with pytest.raises(PluginCleanupFailed):
         await runner(transport).run(
             image_ref=IMAGE,
             hook="listen",
             payload={},
-            timeout_seconds=0.01,
+            timeout_seconds=0.1,
             invocation_id="fence",
         )
-    assert transport.exec_cancelled and transport.pod is None
-    assert transport.released == ["owned-uid"]
+    assert transport.exec_cancelled and transport.pod is not None and transport.pod.terminated
+    assert not transport.released
 
 
 @pytest.mark.parametrize("lose_proof", [False, True])
@@ -293,13 +293,38 @@ async def test_cancellation_waits_for_cleanup_or_reports_uncertainty(lose_proof:
     )
     await transport.started.wait()
     task.cancel()
-    if lose_proof:
-        with pytest.raises(PluginCleanupFailed) as failure:
-            await task
-        assert failure.value.cancellation_requested
-        assert not transport.released
-    else:
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        assert transport.released == ["owned-uid"]
+    with pytest.raises(PluginCleanupFailed) as failure:
+        await task
+    assert failure.value.cancellation_requested
+    assert not transport.released
+    if not lose_proof:
+        assert transport.pod is not None and transport.pod.terminated
     assert transport.exec_cancelled and task.done()
+
+
+@pytest.mark.parametrize("malformed", [False, True])
+async def test_lost_or_invalid_reply_remains_fenced_after_termination(
+    monkeypatch: pytest.MonkeyPatch,
+    malformed: bool,
+) -> None:
+    """Stopping the executor cannot turn an unknown upstream outcome into a retryable failure."""
+    transport = Transport()
+
+    async def execute(pod: HookPod, request: bytes) -> bytes:
+        """Model one effect followed by a lost or invalid private response."""
+        transport.started.set()
+        if malformed:
+            return b"invalid-frame"
+        raise OSError("synthetic response loss")
+
+    monkeypatch.setattr(transport, "execute", execute)
+    with pytest.raises(PluginCleanupFailed):
+        await runner(transport).run(
+            image_ref=IMAGE,
+            hook="listen",
+            payload={},
+            timeout_seconds=30,
+        )
+    assert transport.started.is_set()
+    assert transport.pod is not None and transport.pod.terminated
+    assert transport.stopped == ["owned-uid"] and not transport.released

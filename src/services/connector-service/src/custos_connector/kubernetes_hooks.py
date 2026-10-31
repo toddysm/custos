@@ -27,6 +27,7 @@ from custos_connector.runtime import (
     HookRunResult,
     PluginCleanupFailed,
     PluginInvocationFailed,
+    PluginProtocolError,
     _finish_owned_task,
     invocation_container_name,
 )
@@ -78,10 +79,12 @@ class KubernetesHookRunner:
                 return current
             await asyncio.sleep(0.1)
 
-    async def _cleanup(self, owned: HookPod, *, exec_possible: bool) -> None:
+    async def _cleanup(self, owned: HookPod, *, exec_possible: bool, retain_evidence: bool) -> None:
         """Classify every observed cleanup failure without losing its uncertainty fence."""
         outcomes = await asyncio.gather(
-            self._cleanup_owned(owned, exec_possible=exec_possible),
+            self._cleanup_owned(
+                owned, exec_possible=exec_possible, retain_evidence=retain_evidence
+            ),
             return_exceptions=True,
         )
         failure = outcomes[0]
@@ -91,7 +94,9 @@ class KubernetesHookRunner:
             logger.error("Hook sandbox cleanup is unconfirmed: %s", type(failure).__name__)
             raise self._uncertain(owned.name) from failure
 
-    async def _cleanup_owned(self, owned: HookPod, *, exec_possible: bool) -> None:
+    async def _cleanup_owned(
+        self, owned: HookPod, *, exec_possible: bool, retain_evidence: bool
+    ) -> None:
         """Retain the finalizer until positive termination or proof of no exec admission."""
         async with asyncio.timeout(self.settings.cleanup_seconds):
             await self.transport.stop(owned)
@@ -105,6 +110,8 @@ class KubernetesHookRunner:
                 if current.spec_verified and (current.terminated or not exec_possible):
                     break
                 await asyncio.sleep(0.1)
+            if retain_evidence:
+                return
             await self.transport.release(current)
             while True:
                 current = await self.transport.observe(owned.name)
@@ -130,6 +137,8 @@ class KubernetesHookRunner:
         owned: HookPod | None = None
         creating = False
         exec_possible = False
+        outcome_known = False
+        retain_evidence = False
         try:
             async with asyncio.timeout(timeout_seconds):
                 image = await self.resolver.resolve(image_ref)
@@ -156,19 +165,45 @@ class KubernetesHookRunner:
                 owned = candidate
                 owned = await self._runnable(owned)
                 exec_possible = True
-                response = await self.transport.execute(owned, request)
-                result = decode_hook_reply(response)
+                replies = await asyncio.gather(
+                    self.transport.execute(owned, request),
+                    return_exceptions=True,
+                )
+                response = replies[0]
+                if isinstance(response, BaseException):
+                    retain_evidence = True
+                    logger.error(
+                        "Hook execution outcome is unconfirmed: %s", type(response).__name__
+                    )
+                    raise self._uncertain(name) from None
+                try:
+                    result = decode_hook_reply(response)
+                except PluginProtocolError:
+                    retain_evidence = True
+                    raise self._uncertain(name) from None
+                except (PluginInvocationFailed, TimeoutError):
+                    outcome_known = True
+                    raise
+                outcome_known = True
         except asyncio.CancelledError as exc:
-            if creating and owned is None:
+            if creating or owned is not None:
+                retain_evidence = True
                 raise self._uncertain(name) from exc
             raise
         except (TimeoutError, OSError) as exc:
-            if creating and owned is None:
+            if creating or (exec_possible and not outcome_known):
+                retain_evidence = True
                 raise self._uncertain(name) from exc
             raise
         finally:
             if owned is not None:
-                cleanup = asyncio.create_task(self._cleanup(owned, exec_possible=exec_possible))
+                cleanup = asyncio.create_task(
+                    self._cleanup(
+                        owned,
+                        exec_possible=exec_possible,
+                        retain_evidence=retain_evidence,
+                    )
+                )
                 try:
                     _, interrupted = await _finish_owned_task(cleanup, name)
                 except PluginCleanupFailed as failure:
@@ -176,5 +211,7 @@ class KubernetesHookRunner:
                     failure.cancellation_requested = caller is not None and caller.cancelling() > 0
                     raise
                 if interrupted:
+                    if retain_evidence:
+                        raise self._uncertain(name) from None
                     raise asyncio.CancelledError()
         return result

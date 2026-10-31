@@ -29,6 +29,9 @@ sandbox service account. Self-subject access reviews use Kubernetes' standard
 authenticated-user authorization. Failed readiness prevents admission.
 Configuration and authorization checks do not certify image availability or
 upstream reachability; validate those with a deployed smoke test.
+Namespaces use Kubernetes' 63-character DNS-label rules. Service-account,
+image-pull Secret and RuntimeClass references use DNS-subdomain rules, including
+dots and names up to 253 characters.
 
 The image workflow publishes `ghcr.io/toddysm/custos/connector-hook-bridge-amd64`
 and `ghcr.io/toddysm/custos/connector-hook-bridge-arm64`, each as a single-platform
@@ -106,6 +109,16 @@ Unconfirmed cleanup raises `PluginCleanupFailed`. Durable polling remains fenced
 for audited operator recovery; do not remove finalizers or clear fences merely
 because a Pod is absent. Confirm the old invocation and executor cannot resume,
 including on an unreachable node, before authorizing recovery.
+
+An unknown exec outcome is a separate reason to retain the fence: losing a
+response after dispatch does not become safe to retry merely because the Pod
+was subsequently stopped. Malformed/lost responses and cancellation or timeout
+while awaiting an outcome retain the stopped Pod's finalizer as recovery
+evidence. Inspect possible upstream effects before authorizing audited recovery;
+remove retained Kubernetes evidence only after that recovery decision. A new
+replica must not automatically repeat the invocation.
+The existing `plugin-cleanup-unconfirmed` audit reason is retained for
+compatibility and covers both termination uncertainty and an unknown outcome.
 
 Cancellation waits for owned cleanup rather than detaching a hook. The cleanup
 budget is 30 seconds; an unresponsive backend produces an explicit uncertain

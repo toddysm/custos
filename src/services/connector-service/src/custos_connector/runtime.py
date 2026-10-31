@@ -145,14 +145,14 @@ class PluginInvocationFailed(PluginRuntimeError):
 
 
 class PluginCleanupFailed(PluginInvocationFailed):
-    """The owned invocation could not be confirmed stopped; polling must fail closed."""
+    """Owned termination or execution outcome is unconfirmed; polling must fail closed."""
 
     def __init__(self, container_name: str) -> None:
         """Retain only a generated resource name, never plugin output or credentials."""
         self.container_name = container_name
         self.cancellation_requested = False
         super().__init__(
-            "plugin invocation cleanup could not be confirmed",
+            "plugin invocation cleanup or outcome could not be confirmed",
             data={"containerName": container_name},
         )
 

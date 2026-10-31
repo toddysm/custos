@@ -81,6 +81,49 @@ async def test_redacted_plugin_mismatch_retains_trusted_migration_target() -> No
     assert not publisher.published
 
 
+async def test_lost_hook_result_keeps_durable_fence_after_verified_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new replica cannot repeat a possible upstream effect after a lost private response."""
+    from tests.test_kubernetes_hooks import IMAGE, Transport
+    from tests.test_kubernetes_hooks import runner as kubernetes_runner
+
+    clock = PullClock()
+    providers, metadata, _, publisher = memory_runtime(clock)
+    transport = Transport()
+    effects: list[str] = []
+
+    async def lose_reply(*args: object) -> NoReturn:
+        """Record an upstream effect, then lose its response."""
+        effects.append("effect")
+        transport.started.set()
+        raise OSError("synthetic response loss")
+
+    monkeypatch.setattr(transport, "execute", lose_reply)
+    providers = wire_durable_pull_runtime(
+        providers,
+        settings(),
+        plugin_invoker=PluginInvoker(kubernetes_runner(transport)),
+    )
+    await seed_instance(providers, image_ref=IMAGE)
+    start_demand(metadata)
+    assert providers.pull_demand_reconciler is not None and providers.cursor_service is not None
+    await providers.pull_demand_reconciler.reconcile(WS)
+    with pytest.raises(PluginCleanupFailed):
+        await providers.cursor_service.tick(WS, INSTANCE)
+    assert transport.pod is not None and transport.pod.terminated
+    assert not transport.released and not publisher.published
+    clock.advance(61)
+    with pytest.raises(PullTickBlocked, match="invocation_unconfirmed"):
+        await metadata.acquire_pull_tick(
+            WorkspaceId(WS),
+            ConnectorInstanceId(INSTANCE),
+            "another-replica",
+            ttl_seconds=60,
+        )
+    assert effects == ["effect"]
+
+
 @pytest.mark.parametrize("resume_only", [False, True])
 async def test_staggered_replicas_share_interval_after_fast_cursor_commit(
     resume_only: bool,

@@ -25,7 +25,7 @@ from kubernetes_asyncio import client, config
 from custos_connector.hook_images import RegistryHookImageResolver
 from custos_connector.hook_kubernetes_transport import KubernetesHookTransport
 from custos_connector.hook_runtime import InClusterHookRunner
-from custos_connector.hook_sandbox import HookPod, HookSandboxSettings
+from custos_connector.hook_sandbox import HOOK_FINALIZER, HookPod, HookSandboxSettings
 from custos_connector.runtime import PluginCleanupFailed, PluginInvocationFailed
 
 pytestmark = [
@@ -50,6 +50,7 @@ class Runtime:
     effect_url: str
     effects: list[bytes]
     effect_seen: asyncio.Event
+    inspector: Any
 
 
 @pytest_asyncio.fixture
@@ -84,6 +85,8 @@ async def runtime(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Runtime]:
             f"hookRuntime.helperImage={helper}",
             "--set",
             "hookRuntime.registryUrl=http://localhost:5001",
+            "--set",
+            "hookRuntime.serviceAccount=connector.hook",
         ],
         check=True,
         capture_output=True,
@@ -198,7 +201,7 @@ async def runtime(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Runtime]:
             runner = InClusterHookRunner(
                 credentials,
                 RegistryHookImageResolver(registry, architecture="amd64"),
-                HookSandboxSettings(namespace, helper, "connector-hook"),
+                HookSandboxSettings(namespace, helper, "connector.hook"),
             )
             await runner.check_ready()
             yield Runtime(
@@ -211,6 +214,7 @@ async def runtime(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Runtime]:
                 f"http://{effect_host}:{port}/",
                 effects,
                 effect_seen,
+                inspector,
             )
     finally:
         await server.cleanup()
@@ -237,6 +241,21 @@ async def assert_clean(runtime: Runtime, canary: str) -> None:
     assert runtime.documents and runtime.logs
     assert canary not in json.dumps(runtime.documents)
     assert all(canary not in text for text in runtime.logs)
+
+
+async def assert_recovery_evidence(runtime: Runtime, canary: str) -> None:
+    """An unknown result retains a stopped, UID-bound Pod for explicit audited recovery."""
+    pods = await runtime.api.list_namespaced_pod(runtime.namespace)
+    assert len(pods.items) == 1
+    pod = pods.items[0]
+    assert HOOK_FINALIZER in pod.metadata.finalizers
+    assert pod.status.container_statuses[0].state.terminated is not None
+    logs = await runtime.inspector.read_namespaced_pod_log(
+        pod.metadata.name,
+        runtime.namespace,
+        container="hook",
+    )
+    assert canary not in logs and canary not in json.dumps(runtime.documents)
 
 
 @pytest.mark.parametrize("mode,exit_code", [("echo", 0), ("exit", 7)])
@@ -313,20 +332,21 @@ async def test_collision_has_one_effect_and_cancellation_owns_cleanup(runtime: R
         first.cancel()
         await asyncio.sleep(0)
         first.cancel()
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(PluginCleanupFailed) as failure:
             await first
+        assert failure.value.cancellation_requested
     finally:
         if not first.done():
             first.cancel()
         await asyncio.gather(first, return_exceptions=True)
     assert len(runtime.effects) == 1
-    await assert_clean(runtime, canary)
+    await assert_recovery_evidence(runtime, canary)
 
 
 async def test_actual_execution_timeout_retains_cleanup_ownership(runtime: Runtime) -> None:
     """A timed-out hook is not reported stopped until the real Pod terminal state is observed."""
     canary = "synthetic-canary-" + uuid4().hex
-    with pytest.raises(TimeoutError):
+    with pytest.raises(PluginCleanupFailed):
         await runtime.runner.run(
             image_ref=runtime.plugin,
             hook="listen",
@@ -334,4 +354,37 @@ async def test_actual_execution_timeout_retains_cleanup_ownership(runtime: Runti
             timeout_seconds=15,
         )
     assert len(runtime.effects) == 1
-    await assert_clean(runtime, canary)
+    await assert_recovery_evidence(runtime, canary)
+
+
+async def test_lost_response_retains_evidence_and_prevents_reexecution(
+    runtime: Runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Drop a real effect's private response; verified Pod termination must not permit replay."""
+    execute = KubernetesHookTransport.execute
+
+    async def lose_response(
+        transport: KubernetesHookTransport,
+        pod: HookPod,
+        request: bytes,
+    ) -> bytes:
+        """Lose the completed transport result after the actual plugin has executed."""
+        await execute(transport, pod, request)
+        raise OSError("synthetic reply loss")
+
+    monkeypatch.setattr(KubernetesHookTransport, "execute", lose_response)
+    canary = "synthetic-canary-" + uuid4().hex
+    invocation = uuid4().hex
+    payload = {"mode": "echo", "canary": canary, "effectUrl": runtime.effect_url}
+    for _ in range(2):
+        with pytest.raises(PluginCleanupFailed):
+            await runtime.runner.run(
+                image_ref=runtime.plugin,
+                hook="listen",
+                payload=payload,
+                timeout_seconds=60,
+                invocation_id=invocation,
+            )
+    assert len(runtime.effects) == 1
+    await assert_recovery_evidence(runtime, canary)
