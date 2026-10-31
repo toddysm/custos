@@ -1,10 +1,10 @@
 # Trigger M2 receivers - product requirements and engineering design
 
-- Status: **Proposed; awaiting human approval. No implementation authorized.**
-- Planning format: full; revision 2 (review refinements; still unapproved).
+- Status: **Approved; implementation in progress under the #988 ledger.**
+- Planning format: full; revision 3 (owner-approved Kubernetes hook prerequisite).
 - Tracking: [#988](https://github.com/toddysm/custos/issues/988).
 - Design work item: [#1004](https://github.com/toddysm/custos/issues/1004).
-- Updated: 2026-10-27; baseline commit `e344ab2`.
+- Updated: 2026-10-30; original baseline commit `e344ab2`.
 - Validation: GitHub-hosted continuous integration (CI), plus Copilot review.
 - Delivery plan: [implementation-plan-m2.md](../components/trigger-service/implementation-plan-m2.md).
 
@@ -366,6 +366,45 @@ clear an invocation fence. Operator confirmation means the previous invocation
 and executor cannot resume, not merely that a container was absent momentarily.
 This intentionally trades automatic retry after an unclean crash for
 fail-closed prevention of overlapping invocations.
+
+**Owner-approved Kubernetes execution prerequisite (2026-10-30):**
+[TS-IMPL-037 / #1035](https://github.com/toddysm/custos/issues/1035) precedes
+production activation in TS-IMPL-034. The current Docker command-line hook
+runner is not a configured execution backend in the supplied Kubernetes
+deployment. Do not mount a Docker socket or introduce a privileged daemon to
+bridge this gap.
+
+Implement a Kubernetes-backed `HookRunner` using the existing sandbox
+isolation/lifecycle patterns. Connector remains the sole polling/cursor owner;
+the runner owns only one invocation's execution and cleanup. Resolve immutable
+OCI image/launch metadata and preserve the original entrypoint plus hook
+arguments and bounded JSON stdin/stdout contract. Existing plugin images must
+not acquire a Python or shell requirement.
+
+Use an explicitly owned, non-restarting sandbox with namespace-scoped least
+privilege, non-root execution, a read-only root filesystem, dropped capabilities,
+runtime-default seccomp, no host namespaces/mounts, no plugin service-account
+token and bounded ephemeral memory-backed I/O. A trusted static process bridge
+may adapt length-framed control-plane streaming to the plugin's unchanged
+stdin/stdout protocol. Request/response bytes and credentials must not appear
+in Kubernetes object specifications, environment variables, ConfigMaps, pod
+application logs, controller logs or audit payloads.
+
+Creation collisions are not permission to adopt or re-execute an old sandbox.
+Bind operations to the observed resource UID. Confirm terminal execution of
+the selected sandbox before clearing invocation uncertainty; deletion or a
+404 response alone does not establish that an executor on an unreachable node
+has stopped. Unknown creation/exec outcomes, cancellation and unavailable
+termination evidence retain the existing polling fence and surface
+`PluginCleanupFailed` for the established audited recovery path.
+
+Configure the same invoker for bind, health, listen and verification hooks.
+Kubernetes production prerequisites fail closed; explicit Docker development
+compatibility remains. TS-IMPL-037 supplies executor/configuration/deployment
+primitives and real Kubernetes contract tests; TS-IMPL-034 owns final lifecycle
+and four-profile activation. TS-IMPL-035 still owns deployed capacity and
+resilience certification. Neither the new executor nor its tests certify
+production resource limits by themselves.
 
 Legacy instances require an explicit control-state migration during disabled
 rollout. If prior operator-pause intent cannot be established, leave polling

@@ -136,13 +136,14 @@ async def seed_instance(
     workspace: str = WS,
     identifier: str = INSTANCE,
     initialize: bool = True,
+    image_ref: str = "unit",
 ) -> ConnectorInstance:
     """Create a supported pull source; optionally retain unknown legacy pause state."""
     await providers.catalog_store.put_connector_type_version(
         type="registry",
         version="1",
         digest="sha256:unit-pull",
-        image_ref="unit",
+        image_ref=image_ref,
         normalized_manifest={
             "spec": {
                 "events": {

@@ -170,9 +170,26 @@ class Settings:
     trigger_namespace: str | None = None
     durable_pull_enabled: bool = False
     pull_default_interval_sec: int = 60
+    hook_backend: str = "docker"
+    hook_namespace: str = ""
+    hook_helper_image: str = ""
+    hook_service_account: str = "connector-hook"
+    hook_runtime_class: str | None = None
+    hook_architecture: str = "amd64"
+    hook_image_pull_secrets: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        """Fail closed before creating resources for an incomplete durable-polling deployment."""
+        """Validate hook selection and durable-polling prerequisites before resource creation."""
+        if self.hook_backend not in {"docker", "kubernetes"}:
+            raise SettingsError("CONN_HOOK_BACKEND must be docker or kubernetes")
+        if self.hook_architecture not in {"amd64", "arm64"}:
+            raise SettingsError("CONN_HOOK_ARCHITECTURE must be amd64 or arm64")
+        if self.hook_backend == "kubernetes" and (
+            not self.hook_namespace or not self.hook_helper_image or not self.connector_registry_url
+        ):
+            raise SettingsError(
+                "Kubernetes hooks require a namespace, helper image and registry URL"
+            )
         if type(self.durable_pull_enabled) is not bool:
             raise SettingsError("CONN_DURABLE_PULL_ENABLED must be a boolean")
         if self.pull_default_interval_sec < PULL_LOOP_HARD_FLOOR_SEC:
@@ -285,6 +302,17 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         dapr_secret_store=src.get(ENV_DAPR_SECRET_STORE, "").strip() or DEFAULT_DAPR_SECRET_STORE,
         connector_registry_url=src.get(ENV_CONNECTOR_REGISTRY_URL, "").strip(),
         connector_registry_token=src.get(ENV_CONNECTOR_REGISTRY_TOKEN, "").strip() or None,
+        hook_backend=src.get("CONN_HOOK_BACKEND", "docker").strip(),
+        hook_namespace=src.get("CONN_HOOK_NAMESPACE", "").strip(),
+        hook_helper_image=src.get("CONN_HOOK_HELPER_IMAGE", "").strip(),
+        hook_service_account=src.get("CONN_HOOK_SERVICE_ACCOUNT", "connector-hook").strip(),
+        hook_runtime_class=src.get("CONN_HOOK_RUNTIME_CLASS", "").strip() or None,
+        hook_architecture=src.get("CONN_HOOK_ARCHITECTURE", "amd64").strip(),
+        hook_image_pull_secrets=(
+            tuple(part.strip() for part in src["CONN_HOOK_IMAGE_PULL_SECRETS"].split(","))
+            if src.get("CONN_HOOK_IMAGE_PULL_SECRETS", "").strip()
+            else ()
+        ),
         app_api_token=src.get(ENV_APP_API_TOKEN),
         trigger_app_id=src.get(ENV_TRIGGER_APP_ID, "trigger-service").strip(),
         trigger_namespace=src.get(ENV_TRIGGER_NAMESPACE, "").strip() or None,

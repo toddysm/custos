@@ -13,11 +13,9 @@ The transport is intentionally split in two layers:
 * :class:`PluginInvoker` owns the JSON wire contract and maps structured
   plugin failures onto typed Python exceptions.
 
-v1's concrete runner is :class:`DockerCliHookRunner`, which shells out to
-``docker run --rm -i <image_ref> <hook>`` and exchanges JSON over
- stdin/stdout. This keeps the runtime adapter testable and transport-
- agnostic: a future Kubernetes Job runner can implement the same
- :class:`HookRunner` Protocol without changing any caller code.
+Development uses :class:`DockerCliHookRunner`; production wiring selects the
+Kubernetes runner behind the same protocol. Both exchange one private JSON
+request/response without promoting plugin diagnostics into errors or audits.
 """
 
 from __future__ import annotations
@@ -147,15 +145,19 @@ class PluginInvocationFailed(PluginRuntimeError):
 
 
 class PluginCleanupFailed(PluginInvocationFailed):
-    """The owned invocation could not be confirmed stopped; polling must fail closed."""
+    """Owned termination or execution outcome is unconfirmed; polling must fail closed."""
 
-    def __init__(self, container_name: str) -> None:
+    def __init__(self, container_name: str, *, termination_confirmed: bool = False) -> None:
         """Retain only a generated resource name, never plugin output or credentials."""
         self.container_name = container_name
+        self.termination_confirmed = termination_confirmed
         self.cancellation_requested = False
         super().__init__(
-            "plugin invocation cleanup could not be confirmed",
-            data={"containerName": container_name},
+            "plugin invocation cleanup or outcome could not be confirmed",
+            data={
+                "containerName": container_name,
+                **({"terminationConfirmed": True} if termination_confirmed else {}),
+            },
         )
 
 
@@ -164,7 +166,7 @@ _TaskResult = TypeVar("_TaskResult")
 
 
 async def _finish_owned_task(
-    task: asyncio.Task[_TaskResult], container_name: str
+    task: asyncio.Future[_TaskResult], container_name: str
 ) -> tuple[_TaskResult, bool]:
     """Wait through caller cancellation; cancelled owned tasks cannot confirm termination."""
     interrupted = False
@@ -409,18 +411,31 @@ class PluginInvoker:
         timeout_seconds: float | None = None,
         invocation_id: str | None = None,
     ) -> ListenResult:
-        """Invoke listening within an optional caller-owned deadline."""
-        result = await self._invoke(
-            connector=connector,
-            instance=instance,
-            hook="listen",
-            hook_input={
-                "mode": str(mode),
-                "cursor": _serialize_cursor(cursor),
-            },
-            timeout_seconds=timeout_seconds,
-            invocation_id=invocation_id,
-        )
+        """Return a usable response or preserve recovery for a fenced, unprocessable result."""
+        try:
+            result = await self._invoke(
+                connector=connector,
+                instance=instance,
+                hook="listen",
+                hook_input={
+                    "mode": str(mode),
+                    "cursor": _serialize_cursor(cursor),
+                },
+                timeout_seconds=timeout_seconds,
+                invocation_id=invocation_id,
+            )
+            return self._parse_listen_result(result)
+        except PluginProtocolError:
+            if invocation_id is not None:
+                raise PluginCleanupFailed(
+                    invocation_container_name(invocation_id),
+                    termination_confirmed=True,
+                ) from None
+            raise
+
+    @staticmethod
+    def _parse_listen_result(result: Mapping[str, Any]) -> ListenResult:
+        """Validate the full listen result before its caller can publish or advance a cursor."""
         raw_events = result.get("events", ())
         if not isinstance(raw_events, list):
             raise PluginProtocolError("listen result events must be a JSON array")
@@ -467,10 +482,10 @@ class PluginInvoker:
         elif isinstance(checked_at_raw, str):
             try:
                 checked_at = datetime.fromisoformat(checked_at_raw.replace("Z", "+00:00"))
-            except ValueError as exc:
+            except ValueError:
                 raise PluginProtocolError(
                     "health result checkedAt must be an RFC3339 string"
-                ) from exc
+                ) from None
             if checked_at.tzinfo is None:
                 checked_at = checked_at.replace(tzinfo=UTC)
         else:
@@ -495,7 +510,7 @@ class PluginInvoker:
         timeout_seconds: float | None = None,
         invocation_id: str | None = None,
     ) -> Mapping[str, Any]:
-        """Invoke a bounded hook, allowing a caller's ownership budget to shorten its timeout."""
+        """Bound execution without promoting plugin diagnostics into errors or audits."""
         timeout = self._timeout_seconds
         if timeout_seconds is not None:
             if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
@@ -543,18 +558,25 @@ class PluginInvoker:
                     timeout_seconds=timeout,
                     invocation_id=invocation_id,
                 )
-        except TimeoutError as exc:
-            raise PluginHookTimeout(str(exc), data={"hook": hook}) from exc
-        except OSError as exc:
+        except PluginRuntimeError as exc:
+            raise exc from None
+        except TimeoutError:
+            raise PluginHookTimeout("plugin hook timed out", data={"hook": hook}) from None
+        except OSError:
             raise PluginInvocationFailed(
-                f"failed to start plugin image {connector.image_ref!r}: {exc}",
+                "failed to start plugin image",
                 data={"hook": hook, "image_ref": connector.image_ref},
-            ) from exc
+            ) from None
 
         try:
             body = self._decode_body(completed.stdout, hook=hook, image_ref=connector.image_ref)
         except PluginProtocolError as exc:
             if completed.exit_code != 0:
+                if invocation_id is not None:
+                    raise PluginCleanupFailed(
+                        invocation_container_name(invocation_id),
+                        termination_confirmed=True,
+                    ) from None
                 raise PluginInvocationFailed(
                     (
                         f"plugin hook {hook!r} on {connector.image_ref!r} exited with "
@@ -564,8 +586,6 @@ class PluginInvoker:
                         "hook": hook,
                         "image_ref": connector.image_ref,
                         "exit_code": completed.exit_code,
-                        "stderr": completed.stderr.decode("utf-8", "replace"),
-                        "stdout": completed.stdout.decode("utf-8", "replace"),
                     },
                 ) from exc
             raise
@@ -577,6 +597,11 @@ class PluginInvoker:
             if not isinstance(result, Mapping):
                 raise PluginProtocolError("successful plugin response must carry object result")
             if completed.exit_code != 0:
+                if invocation_id is not None:
+                    raise PluginCleanupFailed(
+                        invocation_container_name(invocation_id),
+                        termination_confirmed=True,
+                    )
                 raise PluginInvocationFailed(
                     (
                         f"plugin hook {hook!r} exited with status {completed.exit_code} "
@@ -585,7 +610,6 @@ class PluginInvoker:
                     data={
                         "hook": hook,
                         "image_ref": connector.image_ref,
-                        "stderr": completed.stderr.decode("utf-8", "replace"),
                     },
                 )
             return _freeze_mapping(result)
@@ -598,22 +622,24 @@ class PluginInvoker:
 
     @staticmethod
     def _decode_body(stdout: bytes, *, hook: str, image_ref: str) -> Mapping[str, Any]:
+        """Decode private output without including malformed bytes in exception chains."""
         if not stdout:
             raise PluginProtocolError(
                 f"plugin hook {hook!r} on {image_ref!r} returned empty stdout"
             )
         try:
             decoded = json.loads(stdout)
-        except json.JSONDecodeError as exc:
+        except (ValueError, RecursionError):
             raise PluginProtocolError(
                 f"plugin hook {hook!r} on {image_ref!r} returned invalid JSON"
-            ) from exc
+            ) from None
         if not isinstance(decoded, Mapping):
             raise PluginProtocolError("plugin response root must be a JSON object")
         return decoded
 
     @staticmethod
     def _raise_plugin_error(error: Mapping[str, Any]) -> None:
+        """Retain closed error categories, never untrusted detail/data in controller diagnostics."""
         raw_code = error.get("code")
         detail = error.get("detail")
         data = error.get("data")
@@ -624,35 +650,26 @@ class PluginInvoker:
         if data is not None and not isinstance(data, Mapping):
             raise PluginProtocolError("plugin error.data must be an object when present")
 
-        payload = data if isinstance(data, Mapping) else None
+        detail = "plugin hook reported a failure"
         match raw_code:
             case PluginErrorCode.CURSOR_EXPIRED:
-                raise CursorExpired(detail, data=payload)
+                raise CursorExpired(detail)
             case PluginErrorCode.CURSOR_ENCODING_MISMATCH:
                 raise CursorEncodingMismatch(
                     detail,
-                    persisted_encoding=(
-                        payload.get("persistedEncoding") if isinstance(payload, Mapping) else None
-                    )
-                    if isinstance(payload, Mapping)
-                    else None,
-                    plugin_encoding=(
-                        payload.get("pluginEncoding") if isinstance(payload, Mapping) else None
-                    )
-                    if isinstance(payload, Mapping)
-                    else None,
-                    data=payload,
+                    persisted_encoding=None,
+                    plugin_encoding=None,
                 )
             case PluginErrorCode.UPSTREAM_UNAUTHORIZED:
-                raise UpstreamUnauthorized(detail, data=payload)
+                raise UpstreamUnauthorized(detail)
             case PluginErrorCode.UPSTREAM_UNREACHABLE:
-                raise UpstreamUnreachable(detail, data=payload)
+                raise UpstreamUnreachable(detail)
             case PluginErrorCode.HOOK_TIMEOUT:
-                raise PluginHookTimeout(detail, data=payload)
+                raise PluginHookTimeout(detail)
             case PluginErrorCode.INVOCATION_FAILED:
-                raise PluginInvocationFailed(detail, data=payload)
+                raise PluginInvocationFailed(detail)
             case _:
-                raise PluginRuntimeError(detail, data={**dict(payload or {}), "code": raw_code})
+                raise PluginRuntimeError(detail)
 
 
 def _serialize_cursor(cursor: CursorEnvelope | None) -> Mapping[str, Any] | None:
@@ -680,10 +697,10 @@ def _parse_cursor(payload: Mapping[str, Any]) -> CursorEnvelope:
             raise PluginProtocolError("cursor advancedAt must be an RFC3339 string when present")
         try:
             advanced_at = datetime.fromisoformat(advanced_at_raw.replace("Z", "+00:00"))
-        except ValueError as exc:
+        except ValueError:
             raise PluginProtocolError(
                 "cursor advancedAt must be an RFC3339 string when present"
-            ) from exc
+            ) from None
         if advanced_at.tzinfo is None:
             advanced_at = advanced_at.replace(tzinfo=UTC)
     return CursorEnvelope(

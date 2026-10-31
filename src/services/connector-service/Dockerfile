@@ -15,6 +15,21 @@
 
 ARG PYTHON_VERSION=3.14
 
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS hook-bridge
+ARG TARGETOS
+ARG TARGETARCH
+WORKDIR /build
+COPY src/tools/connector-hook-bridge/go.mod ./
+COPY src/tools/connector-hook-bridge/main.go ./
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags="-s -w" -o /out/connector-hook-bridge .
+
+FROM scratch AS hook-runtime
+COPY --from=hook-bridge --chmod=0555 /out/connector-hook-bridge /opt/custos/bin/connector-hook-bridge
+USER 1000:1000
+HEALTHCHECK NONE
+ENTRYPOINT ["/opt/custos/bin/connector-hook-bridge"]
+
 # --------------------------------------------------------------------------- #
 # Stage 1: builder
 # --------------------------------------------------------------------------- #
@@ -64,6 +79,7 @@ RUN python -m venv /opt/custos/venv && \
     /opt/custos/venv/bin/pip install --upgrade pip==24.2
 
 COPY --from=builder /wheels /tmp/wheels
+COPY --from=hook-bridge --chmod=0555 /out/connector-hook-bridge /opt/custos/bin/connector-hook-bridge
 RUN /opt/custos/venv/bin/pip install --no-index --find-links=/tmp/wheels \
         custos-connector-service && \
     rm -rf /tmp/wheels

@@ -1,0 +1,82 @@
+{{- if .Values.hookRuntime.enabled -}}
+{{- $hooks := .Values.hookRuntime -}}
+{{- $namespace := required "hookRuntime.namespace is required" $hooks.namespace -}}
+{{- if eq $namespace .Release.Namespace -}}
+{{- fail "hookRuntime.namespace must be separate from the controller namespace" -}}
+{{- end -}}
+{{- if not (regexMatch "^[^@\\s]+@sha256:[a-f0-9]{64}$" $hooks.helperImage) -}}
+{{- fail "hookRuntime.helperImage must be digest-pinned" -}}
+{{- end -}}
+{{- if not (has $hooks.architecture (list "amd64" "arm64")) -}}
+{{- fail "hookRuntime.architecture must be amd64 or arm64" -}}
+{{- end -}}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $namespace | quote }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "svc.labels" . | nindent 4 }}
+    pod-security.kubernetes.io/enforce: restricted
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $hooks.serviceAccount | quote }}
+  namespace: {{ $namespace | quote }}
+  labels:
+    {{- include "svc.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: connector-hook-controller
+  namespace: {{ $namespace | quote }}
+  labels:
+    {{- include "svc.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "get", "list", "delete", "patch"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["get", "create"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    resourceNames: [{{ $hooks.serviceAccount | quote }}]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: connector-hook-controller
+  namespace: {{ $namespace | quote }}
+  labels:
+    {{- include "svc.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: connector-hook-controller
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "svc.fullname" . }}
+    namespace: {{ .Release.Namespace | quote }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: connector-hook-isolation
+  namespace: {{ $namespace | quote }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "svc.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    {{- toYaml $hooks.sandboxEgress | nindent 4 }}
+{{- end }}

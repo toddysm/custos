@@ -124,7 +124,7 @@ def create_app(
         try:
             await verify_schema_revisions(local_providers)
             app.state.ready = True
-            logger.info("schema-revision gate passed; connector-service is ready")
+            logger.info("schema-revision gate passed")
         except MigrationRequired as exc:
             app.state.schema_gate_error = exc
             logger.error("%s", schema_gate_explainer(exc))
@@ -157,6 +157,10 @@ def create_app(
         except Exception:  # pragma: no cover - defensive guard
             logger.exception("active-lease gauge hydration failed; continuing startup")
         try:
+            if local_providers.hook_readiness is not None:
+                app.state.ready = False
+                await local_providers.hook_readiness()
+                app.state.ready = app.state.schema_gate_error is None
             yield
         finally:
             # Release any HTTP transport the IdentityResolverRegistry owns

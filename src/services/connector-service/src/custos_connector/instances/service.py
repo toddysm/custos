@@ -568,6 +568,7 @@ class InstanceService:
         emit_invoked: bool,
         invoked_actor: str | None,
     ) -> InstanceHealthSnapshot:
+        """Refresh health using closed diagnostics for snapshots, audits and activation errors."""
         row = await self._catalog.get_connector_type_version(instance.type, instance.version)
         if row is None:
             raise ConnectorTypeNotRegistered(type=instance.type, version=instance.version)
@@ -578,11 +579,11 @@ class InstanceService:
         try:
             result: HealthResult = await self._runtime.health(connector=row, instance=instance)
             healthy = result.healthy
-            detail = result.detail
+            detail = "plugin reported healthy" if healthy else "plugin reported unhealthy"
             checked_at = result.checked_at
         except PluginRuntimeError as exc:
             healthy = False
-            detail = exc.detail
+            detail = f"plugin health check failed ({exc.code.value})"
 
         health_status = "healthy" if healthy else "unhealthy"
         await self._instances.patch_connector_instance(
