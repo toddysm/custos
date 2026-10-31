@@ -62,11 +62,30 @@ jobs:
       - name: Connect registry and build real images
         run: |
           docker network connect kind custos-hooks-registry
-          docker build -t localhost:5001/hook-helper:test -f src/services/connector-service/Dockerfile .
+          docker build -t localhost:5001/hook-service:test -f src/services/connector-service/Dockerfile .
+          docker build --platform linux/amd64 --target hook-runtime \
+            -t localhost:5001/hook-helper:test -f src/services/connector-service/Dockerfile .
+          docker build --platform linux/arm64 --target hook-runtime \
+            -t localhost:5001/hook-helper-arm64:test -f src/services/connector-service/Dockerfile .
+          test "$(docker inspect --format='{{.Architecture}}' localhost:5001/hook-helper:test)" = amd64
+          test "$(docker inspect --format='{{.Architecture}}' localhost:5001/hook-helper-arm64:test)" = arm64
+          inspection=$(docker create --platform linux/arm64 localhost:5001/hook-helper-arm64:test)
+          docker cp "$inspection:/opt/custos/bin/connector-hook-bridge" "$RUNNER_TEMP/hook-helper-arm64"
+          docker rm "$inspection"
+          python3 - <<'PY'
+          import os, struct
+          from pathlib import Path
+          binary = (Path(os.environ["RUNNER_TEMP"]) / "hook-helper-arm64").read_bytes()
+          assert binary[:4] == b"\x7fELF"
+          assert struct.unpack_from("<H", binary, 18)[0] == 183, "helper binary must be AArch64"
+          PY
           docker build -t localhost:5001/hook-plugin:test src/services/connector-service/tests/fixtures/kubernetes_hook
           docker push localhost:5001/hook-helper:test
+          docker push localhost:5001/hook-helper-arm64:test
           docker push localhost:5001/hook-plugin:test
           helper=$(docker inspect --format='{{index .RepoDigests 0}}' localhost:5001/hook-helper:test)
+          arm_helper=$(docker inspect --format='{{index .RepoDigests 0}}' localhost:5001/hook-helper-arm64:test)
+          test "$arm_helper" != "$helper"
           plugin=$(docker inspect --format='{{index .RepoDigests 0}}' localhost:5001/hook-plugin:test)
           {
             echo "CUSTOS_HOOK_HELPER_IMAGE=$helper"

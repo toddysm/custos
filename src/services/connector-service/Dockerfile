@@ -24,6 +24,12 @@ COPY src/tools/connector-hook-bridge/main.go ./
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-s -w" -o /out/connector-hook-bridge .
 
+FROM scratch AS hook-runtime
+COPY --from=hook-bridge --chmod=0555 /out/connector-hook-bridge /opt/custos/bin/connector-hook-bridge
+USER 1000:1000
+HEALTHCHECK NONE
+ENTRYPOINT ["/opt/custos/bin/connector-hook-bridge"]
+
 # --------------------------------------------------------------------------- #
 # Stage 1: builder
 # --------------------------------------------------------------------------- #

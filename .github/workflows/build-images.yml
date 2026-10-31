@@ -2,7 +2,8 @@ name: build-images
 
 # Reusable image build/publish workflow (DEPLOY-IMPL-006, 007, 008).
 #
-# Builds and pushes all ten Custos images to ``ghcr.io/<owner>/custos/<name>``,
+# Builds and pushes Custos services, jobs and architecture-specific hook helpers
+# to ``ghcr.io/<owner>/custos/<name>``,
 # stamping the agreed immutable OCI manifest annotations
 # (``org.opencontainers.image.*`` + ``vnd.custos.build.*``). The annotations are
 # applied with ``docker buildx --annotation`` so they bind to the image
@@ -155,6 +156,20 @@ jobs:
                   "context": ".",
               })
 
+          # Separate single-platform helper manifests retain the existing
+          # per-manifest annotation, SBOM and signature contract.
+          for arch in ("amd64", "arm64"):
+              table.append({
+                  "key": f"connector-hook-bridge-{arch}",
+                  "source_key": "connector-service",
+                  "title": f"connector-hook-bridge-{arch}",
+                  "image": f"custos/connector-hook-bridge-{arch}",
+                  "dockerfile": "src/services/connector-service/Dockerfile",
+                  "context": ".",
+                  "target": "hook-runtime",
+                  "platform": f"linux/{arch}",
+              })
+
           # connector-sidecar is a release image (it ships in images.txt and the
           # chart references it), but on main it is built+pushed by
           # python-services.yml gated on its mTLS/E2E integration tests. Build
@@ -174,7 +189,7 @@ jobs:
 
           selected = [
               e for e in table
-              if build_all or libs_changed or changed.get(e["key"]) == "true"
+              if build_all or libs_changed or changed.get(e.get("source_key", e["key"])) == "true"
           ]
           matrix = {"include": selected}
           print("matrix=" + json.dumps(matrix))
@@ -267,8 +282,9 @@ jobs:
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
+          target: ${{ matrix.target || '' }}
           push: true
-          platforms: linux/amd64
+          platforms: ${{ matrix.platform || 'linux/amd64' }}
           tags: ${{ steps.meta.outputs.tags }}
           # Bind the annotations to the image manifest (not just config labels).
           annotations: ${{ steps.meta.outputs.annotations }}

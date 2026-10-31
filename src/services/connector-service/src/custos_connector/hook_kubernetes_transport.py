@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import struct
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -22,6 +24,8 @@ from custos_connector.hook_sandbox import (
     HookPod,
 )
 from custos_connector.runtime import PluginCleanupFailed, PluginInvocationFailed
+
+logger = logging.getLogger(__name__)
 
 
 def _admission_matches(actual: Mapping[str, Any], expected: Mapping[str, Any]) -> bool:
@@ -190,6 +194,15 @@ class KubernetesHookTransport:
             valid,
         )
 
+    async def _create_once(self, manifest: Mapping[str, Any]) -> HookPod:
+        """Keep SDK response decoding and ownership normalization in the same classified outcome."""
+        raw = await self.api.create_namespaced_pod(
+            self.namespace,
+            dict(manifest),
+            _request_timeout=10,
+        )
+        return self._pod(raw, manifest)
+
     async def create(self, manifest: Mapping[str, Any]) -> HookPod:
         """Create once; ambiguous API acceptance and collisions never authorize adoption."""
         name = manifest["metadata"]["name"]
@@ -198,23 +211,20 @@ class KubernetesHookTransport:
         self._expected[name] = manifest
         accepted = False
         try:
-            raw = await self.api.create_namespaced_pod(
-                self.namespace,
-                dict(manifest),
-                _request_timeout=10,
+            outcomes = await asyncio.gather(
+                self._create_once(manifest),
+                return_exceptions=True,
             )
-            try:
-                pod = self._pod(raw, manifest)
-                accepted = True
-                return pod
-            except PluginInvocationFailed as exc:
-                raise PluginCleanupFailed(name) from exc
-        except ApiException as exc:
-            if exc.status in {400, 401, 403, 404, 422}:
-                raise PluginInvocationFailed("Kubernetes rejected hook sandbox creation") from exc
-            raise PluginCleanupFailed(name) from exc
-        except (aiohttp.ClientError, OSError, TimeoutError) as exc:
-            raise PluginCleanupFailed(name) from exc
+            result = outcomes[0]
+            if isinstance(result, ApiException) and result.status in {400, 401, 403, 404, 422}:
+                raise PluginInvocationFailed(
+                    "Kubernetes rejected hook sandbox creation"
+                ) from result
+            if isinstance(result, BaseException):
+                logger.error("Hook sandbox creation is unconfirmed: %s", type(result).__name__)
+                raise PluginCleanupFailed(name) from result
+            accepted = True
+            return result
         finally:
             if not accepted:
                 self._expected.pop(name, None)

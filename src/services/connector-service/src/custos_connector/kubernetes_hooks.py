@@ -79,35 +79,39 @@ class KubernetesHookRunner:
             await asyncio.sleep(0.1)
 
     async def _cleanup(self, owned: HookPod, *, exec_possible: bool) -> None:
+        """Classify every observed cleanup failure without losing its uncertainty fence."""
+        outcomes = await asyncio.gather(
+            self._cleanup_owned(owned, exec_possible=exec_possible),
+            return_exceptions=True,
+        )
+        failure = outcomes[0]
+        if isinstance(failure, PluginCleanupFailed):
+            raise failure
+        if isinstance(failure, BaseException):
+            logger.error("Hook sandbox cleanup is unconfirmed: %s", type(failure).__name__)
+            raise self._uncertain(owned.name) from failure
+
+    async def _cleanup_owned(self, owned: HookPod, *, exec_possible: bool) -> None:
         """Retain the finalizer until positive termination or proof of no exec admission."""
-        try:
-            async with asyncio.timeout(self.settings.cleanup_seconds):
-                await self.transport.stop(owned)
-                proof = False
-                while True:
-                    current = await self.transport.observe(owned.name)
-                    if current is None:
-                        if exec_possible or not owned.spec_verified:
-                            raise self._uncertain(owned.name)
-                        return
-                    self._require_owner(current, owned)
-                    if current.terminated and current.spec_verified:
-                        proof = True
-                    if proof or (not exec_possible and current.spec_verified):
-                        break
-                    await asyncio.sleep(0.1)
-                await self.transport.release(current)
-                while True:
-                    current = await self.transport.observe(owned.name)
-                    if current is None:
-                        return
-                    self._require_owner(current, owned)
-                    await asyncio.sleep(0.1)
-        except PluginCleanupFailed:
-            raise
-        except (PluginInvocationFailed, OSError, TimeoutError) as exc:
-            logger.error("Hook sandbox cleanup is unconfirmed: %s", type(exc).__name__)
-            raise self._uncertain(owned.name) from exc
+        async with asyncio.timeout(self.settings.cleanup_seconds):
+            await self.transport.stop(owned)
+            while True:
+                current = await self.transport.observe(owned.name)
+                if current is None:
+                    if exec_possible or not owned.spec_verified:
+                        raise self._uncertain(owned.name)
+                    return
+                self._require_owner(current, owned)
+                if current.spec_verified and (current.terminated or not exec_possible):
+                    break
+                await asyncio.sleep(0.1)
+            await self.transport.release(current)
+            while True:
+                current = await self.transport.observe(owned.name)
+                if current is None:
+                    return
+                self._require_owner(current, owned)
+                await asyncio.sleep(0.1)
 
     async def run(
         self,
@@ -132,7 +136,20 @@ class KubernetesHookRunner:
                 request = encode_hook_request(nonce, image, hook, payload, timeout_seconds)
                 manifest = build_hook_pod(self.settings, image, name, nonce, timeout_seconds)
                 creating = True
-                candidate = await self.transport.create(manifest)
+                outcomes = await asyncio.gather(
+                    self.transport.create(manifest),
+                    return_exceptions=True,
+                )
+                candidate = outcomes[0]
+                if isinstance(candidate, PluginInvocationFailed):
+                    raise candidate
+                if isinstance(candidate, BaseException):
+                    logger.error(
+                        "Hook creation outcome is unconfirmed: %s", type(candidate).__name__
+                    )
+                    raise self._uncertain(name) from candidate
+                if not isinstance(candidate, HookPod):
+                    raise self._uncertain(name)
                 creating = False
                 if candidate.name != name or candidate.creation_nonce != nonce or not candidate.uid:
                     raise self._uncertain(name)

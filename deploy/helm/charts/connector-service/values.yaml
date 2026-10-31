@@ -39,7 +39,7 @@ hookRuntime:
   enabled: false
   # Required when enabled; must differ from the controller namespace.
   namespace: ""
-  # Digest-pinned Connector Service image containing the static bridge.
+  # Digest-pinned connector-hook-bridge-<architecture> image.
   helperImage: ""
   registryUrl: ""
   serviceAccount: connector-hook

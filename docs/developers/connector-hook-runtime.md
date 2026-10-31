@@ -14,7 +14,7 @@ Set the following environment variables before enabling Kubernetes execution:
 |---|---|
 | `CONN_HOOK_BACKEND` | `kubernetes`; `docker` is the development default |
 | `CONN_HOOK_NAMESPACE` | Dedicated sandbox namespace |
-| `CONN_HOOK_HELPER_IMAGE` | Digest-pinned Connector Service image containing the static bridge |
+| `CONN_HOOK_HELPER_IMAGE` | Digest-pinned helper image for the selected architecture |
 | `CONN_HOOK_SERVICE_ACCOUNT` | Sandbox account, default `connector-hook`; no token is mounted |
 | `CONN_CONNECTOR_REGISTRY_URL` | Registry origin, without a path prefix |
 | `CONN_CONNECTOR_REGISTRY_TOKEN` | Optional registry bearer; inject as a secret |
@@ -29,6 +29,14 @@ sandbox service account. Self-subject access reviews use Kubernetes' standard
 authenticated-user authorization. Failed readiness prevents admission.
 Configuration and authorization checks do not certify image availability or
 upstream reachability; validate those with a deployed smoke test.
+
+The image workflow publishes `ghcr.io/toddysm/custos/connector-hook-bridge-amd64`
+and `ghcr.io/toddysm/custos/connector-hook-bridge-arm64`, each as a single-platform
+manifest with the existing annotations, software bill of materials, signature
+and provenance. Both are included in the offline inventory. Select the matching
+image and pin its digest; an AMD64 Connector Service image is not an ARM64 helper.
+A same-architecture Connector Service image also contains the bridge, but the
+minimal helper images avoid pulling the service's Python runtime into init.
 
 The Connector Helm subchart exposes these settings through `hookRuntime`.
 Set `enabled`, `namespace`, `helperImage` and `registryUrl` explicitly. The

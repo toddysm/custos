@@ -180,6 +180,21 @@ async def runtime(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Runtime]:
             httpx.AsyncClient(base_url="http://localhost:5001") as registry,
         ):
             inspector = client.CoreV1Api(observation_api)
+            await client.NetworkingV1Api(observation_api).patch_namespaced_network_policy(
+                "connector-hook-isolation",
+                namespace,
+                {
+                    "spec": {
+                        "egress": [
+                            {
+                                "to": [{"ipBlock": {"cidr": f"{effect_host}/32"}}],
+                                "ports": [{"protocol": "TCP", "port": port}],
+                            }
+                        ]
+                    }
+                },
+                _content_type="application/merge-patch+json",
+            )
             runner = InClusterHookRunner(
                 credentials,
                 RegistryHookImageResolver(registry, architecture="amd64"),
@@ -270,8 +285,22 @@ async def test_collision_has_one_effect_and_cancellation_owns_cleanup(runtime: R
         )
     )
     try:
-        async with asyncio.timeout(60):
-            await runtime.effect_seen.wait()
+        observed = asyncio.create_task(runtime.effect_seen.wait())
+        try:
+            done, _ = await asyncio.wait(
+                (first, observed),
+                timeout=60,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if first in done:
+                early = await first
+                raise AssertionError(
+                    f"fixture exited before its upstream effect (exit {early.exit_code})"
+                )
+            assert observed in done, "fixture did not reach its explicitly allowed upstream"
+        finally:
+            observed.cancel()
+            await asyncio.gather(observed, return_exceptions=True)
         with pytest.raises(PluginCleanupFailed):
             await runtime.runner.run(
                 image_ref=runtime.plugin,

@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import aiohttp
 import pytest
@@ -180,6 +180,25 @@ async def test_create_error_classification(status: int) -> None:
     api.create_namespaced_pod.side_effect = ApiException(status=status)
     expected = PluginInvocationFailed if status == 403 else PluginCleanupFailed
     with pytest.raises(expected):
+        await transport.create(manifest())
+    assert not transport._expected
+    api.delete_namespaced_pod.assert_not_awaited()
+
+
+@pytest.mark.parametrize("error_type", [ValueError, TypeError, RuntimeError, Exception])
+@pytest.mark.parametrize("normalization", [False, True])
+async def test_decode_failures_after_possible_creation_remain_uncertain(
+    error_type: type[Exception],
+    normalization: bool,
+) -> None:
+    """SDK decoding and local normalization errors cannot certify that creation was rejected."""
+    transport, api = transport_for(observed(manifest()))
+    failure = error_type("synthetic decoding failure")
+    if normalization:
+        api.api_client.sanitize_for_serialization = Mock(side_effect=failure)
+    else:
+        api.create_namespaced_pod.side_effect = failure
+    with pytest.raises(PluginCleanupFailed):
         await transport.create(manifest())
     assert not transport._expected
     api.delete_namespaced_pod.assert_not_awaited()

@@ -7,7 +7,8 @@ import json
 import struct
 from collections.abc import Mapping
 from dataclasses import replace
-from typing import Any
+from typing import Any, NoReturn
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -171,6 +172,76 @@ async def test_creation_response_loss_never_dispatches_or_adopts() -> None:
         )
     assert not transport.started.is_set() and not transport.released
     assert "private transport diagnostic" not in str(uncertain.value)
+
+
+@pytest.mark.parametrize("error_type", [ValueError, TypeError, RuntimeError, Exception])
+async def test_unknown_create_failure_cannot_release_uncertainty(
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[Exception],
+) -> None:
+    """An unclassified transport failure cannot become an ordinary retryable invocation error."""
+    transport = Transport()
+
+    async def create(manifest: Mapping[str, Any]) -> NoReturn:
+        """Model a decoder failure after the server may have accepted a resource."""
+        raise error_type("synthetic create failure")
+
+    monkeypatch.setattr(transport, "create", create)
+    with pytest.raises(PluginCleanupFailed):
+        await runner(transport).run(
+            image_ref=IMAGE,
+            hook="listen",
+            payload={},
+            timeout_seconds=30,
+        )
+    assert not transport.started.is_set()
+
+
+@pytest.mark.parametrize("response", [None, {}])
+async def test_malformed_create_result_is_not_a_confirmed_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+    response: object,
+) -> None:
+    """A malformed response cannot prove that the API did not accept the sandbox."""
+    transport = Transport()
+    monkeypatch.setattr(transport, "create", AsyncMock(return_value=response))
+    with pytest.raises(PluginCleanupFailed):
+        await runner(transport).run(
+            image_ref=IMAGE,
+            hook="listen",
+            payload={},
+            timeout_seconds=30,
+        )
+    assert not transport.started.is_set()
+
+
+@pytest.mark.parametrize("operation", ["stop", "observe", "release"])
+@pytest.mark.parametrize("error_type", [ValueError, TypeError, RuntimeError, Exception])
+async def test_all_observed_cleanup_failures_preserve_the_fence(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    error_type: type[Exception],
+) -> None:
+    """No ordinary cleanup exception may escape as evidence permitting another poll."""
+    transport = Transport()
+    observe = transport.observe
+
+    async def fail(value: HookPod | str) -> HookPod | None:
+        """Fail only during cleanup, not during the initial inert-container observation."""
+        if operation == "observe" and not transport.started.is_set():
+            assert isinstance(value, str)
+            return await observe(value)
+        raise error_type("synthetic cleanup failure")
+
+    monkeypatch.setattr(transport, operation, fail)
+    with pytest.raises(PluginCleanupFailed):
+        await runner(transport).run(
+            image_ref=IMAGE,
+            hook="listen",
+            payload={},
+            timeout_seconds=30,
+        )
+    assert not transport.released
 
 
 async def test_uid_replacement_is_never_mutated() -> None:
