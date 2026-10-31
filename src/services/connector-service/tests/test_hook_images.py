@@ -19,7 +19,21 @@ def document(value: object) -> tuple[str, bytes]:
 
 
 @pytest.mark.parametrize("architecture", ["amd64", "arm64"])
-async def test_resolves_platform_digest_and_original_entrypoint(architecture: str) -> None:
+@pytest.mark.parametrize(
+    "origin,authority",
+    [
+        ("https://registry.example", "registry.example"),
+        ("https://registry-internal", "registry-internal:443"),
+        ("https://localhost", "localhost"),
+        ("https://registry-internal:5443", "registry-internal:5443"),
+        ("http://registry-internal", "registry-internal:80"),
+    ],
+)
+async def test_resolves_platform_digest_and_original_entrypoint(
+    architecture: str,
+    origin: str,
+    authority: str,
+) -> None:
     """Verify every document while preserving ENTRYPOINT and overriding image CMD with the hook."""
     config_digest, config = document(
         {
@@ -46,20 +60,20 @@ async def test_resolves_platform_digest_and_original_entrypoint(architecture: st
 
     def registry(request: httpx.Request) -> httpx.Response:
         """Serve only the configured origin's verified objects."""
-        assert request.url.host == "registry.example"
+        assert request.url.host == httpx.URL(origin).host
         assert request.headers["accept-encoding"] == "identity"
         assert request.url.path.startswith("/v2/team/plugin/")
         body = documents[request.url.path.rsplit("/", 1)[-1]]
         return httpx.Response(200, stream=httpx.ByteStream(body))
 
     async with httpx.AsyncClient(
-        base_url="https://registry.example",
+        base_url=origin,
         transport=httpx.MockTransport(registry),
     ) as client:
         result = await RegistryHookImageResolver(client, architecture=architecture).resolve(
             "team/plugin@" + index_digest
         )
-    assert result.reference == "registry.example/team/plugin@" + image_digest
+    assert result.reference == authority + "/team/plugin@" + image_digest
     assert result.entrypoint == ("/plugin", "--safe") and result.architecture == architecture
 
 

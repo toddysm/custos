@@ -91,6 +91,9 @@ class RegistryHookImageResolver:
             authority += f":{port or 80}"
         elif port not in (None, 443):
             authority += f":{port}"
+        elif "." not in host and ":" not in host and host != "localhost":
+            # A bare single-label prefix is otherwise interpreted as a Docker Hub namespace.
+            authority += ":443"
         if not repository or any(part in {"", ".", ".."} for part in repository.split("/")):
             raise PluginInvocationFailed("invalid hook image repository")
         manifest = await self._document(repository, "manifests", digest, 1024 * 1024)

@@ -68,6 +68,10 @@ It preserves the original entrypoint, image environment and working directory;
 the hook replaces the image's default command. Metadata redirects and compressed
 metadata responses are rejected, so registry credentials cannot be redirected.
 Use a registry endpoint that serves these documents directly.
+Single-label HTTPS registry names are emitted with an explicit `:443` image
+authority so Kubernetes does not interpret them as Docker Hub namespaces.
+Configure image-pull credentials for the emitted registry authority, including
+its port when present.
 
 ## Isolation and confidential input
 
