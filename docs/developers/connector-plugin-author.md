@@ -273,6 +273,8 @@ mismatched encodings in `error.data` — see the `oci-registry`
 sample's `_listen` for the canonical pattern. The Connector Service
 uses the error category to gate cursor reset workflows. Plugin-provided
 diagnostic encodings are not copied into controller errors or audit payloads.
+The migration halt and audit retain the target encoding from the trusted
+connector catalog rather than the plugin's diagnostic fields.
 
 **Input — push mode:** `{"mode": "push"}`. The plugin returns a
 receiver endpoint the upstream can POST events to.

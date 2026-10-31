@@ -68,11 +68,9 @@ jobs:
           docker push localhost:5001/hook-plugin:test
           helper=$(docker inspect --format='{{index .RepoDigests 0}}' localhost:5001/hook-helper:test)
           plugin=$(docker inspect --format='{{index .RepoDigests 0}}' localhost:5001/hook-plugin:test)
-          host=$(docker network inspect kind --format='{{(index .IPAM.Config 0).Gateway}}')
           {
             echo "CUSTOS_HOOK_HELPER_IMAGE=$helper"
             echo "CUSTOS_HOOK_PLUGIN_IMAGE=$plugin"
-            echo "CUSTOS_HOOK_EFFECT_HOST=$host"
           } >> "$GITHUB_ENV"
       - name: Install runtime and tests
         run: |

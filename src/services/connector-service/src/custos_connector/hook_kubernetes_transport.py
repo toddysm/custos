@@ -64,7 +64,6 @@ def _admission_matches(actual: Mapping[str, Any], expected: Mapping[str, Any]) -
             if not isinstance(current, dict):
                 return False
             defaults: dict[str, Any] = {
-                "args": [],
                 "env": [],
                 "envFrom": [],
                 "ports": [],
@@ -86,7 +85,7 @@ def _admission_matches(actual: Mapping[str, Any], expected: Mapping[str, Any]) -
                 "Never",
             }:
                 return False
-            for key in ("name", "image", "command", "securityContext", "resources"):
+            for key in ("name", "image", "command", "args", "securityContext", "resources"):
                 if current.get(key) != target[key]:
                     return False
             if target["name"] == HOOK_CONTAINER:

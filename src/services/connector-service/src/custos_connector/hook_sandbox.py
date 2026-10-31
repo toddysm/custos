@@ -163,7 +163,8 @@ def build_hook_pod(
             {
                 "name": "bridge-init",
                 "image": settings.helper_image,
-                "command": ["/opt/custos/bin/connector-hook-bridge", "install", BRIDGE_PATH, nonce],
+                "command": ["/opt/custos/bin/connector-hook-bridge"],
+                "args": ["install", BRIDGE_PATH, nonce],
                 "securityContext": security,
                 "volumeMounts": [{"name": "bridge", "mountPath": "/custos/bridge"}],
                 "resources": {
@@ -176,7 +177,8 @@ def build_hook_pod(
             {
                 "name": HOOK_CONTAINER,
                 "image": image.reference,
-                "command": [BRIDGE_PATH, "wait", IO_PATH, nonce],
+                "command": [BRIDGE_PATH],
+                "args": ["wait", IO_PATH, nonce],
                 "readinessProbe": {
                     "exec": {"command": [BRIDGE_PATH, "ready", IO_PATH, nonce]},
                     "periodSeconds": 1,

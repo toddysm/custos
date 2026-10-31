@@ -59,8 +59,8 @@ def test_manifest_is_inert_hardened_and_confidential() -> None:
         assert security["seccompProfile"] == {"type": "RuntimeDefault"}
         assert "env" not in container and "envFrom" not in container
         assert container["resources"]["limits"]
-    assert spec["containers"][0]["command"] == [
-        BRIDGE_PATH,
+    assert spec["containers"][0]["command"] == [BRIDGE_PATH]
+    assert spec["containers"][0]["args"] == [
         "wait",
         "/custos/io",
         "a" * 32,

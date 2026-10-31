@@ -16,6 +16,7 @@ from custos_connector.hook_sandbox import HookSandboxSettings
 from custos_connector.providers import load_providers
 from custos_connector.runtime import HookRunResult, PluginCleanupFailed
 from custos_connector.settings import SettingsError, load_settings
+from tests.integration.test_kubernetes_hooks import _effect_host
 
 BASE = {
     "CONN_CATALOG_STORE": "postgresql://localhost/catalog",
@@ -29,6 +30,36 @@ KUBERNETES = {
     "CONN_HOOK_HELPER_IMAGE": "registry.example/helper@sha256:" + "1" * 64,
     "CONN_CONNECTOR_REGISTRY_URL": "https://registry.example",
 }
+
+
+@pytest.mark.parametrize(
+    "gateways",
+    [
+        ["fc00:f853:ccd:e793::1", "172.18.0.1"],
+        ["172.18.0.1", "fc00:f853:ccd:e793::1"],
+        ["172.18.0.1"],
+    ],
+)
+def test_effect_listener_selects_the_cluster_ip_family(gateways: list[str]) -> None:
+    """A dual-stack Docker network's first address is not necessarily usable by IPv4 Pods."""
+    assert (
+        _effect_host({"IPAM": {"Config": [{"Gateway": value} for value in gateways]}})
+        == "172.18.0.1"
+    )
+
+
+@pytest.mark.parametrize(
+    "gateways",
+    [
+        ["fc00:f853:ccd:e793::1"],
+        ["0.0.0.0"],
+        ["172.18.0.1", "172.19.0.1"],
+    ],
+)
+def test_effect_listener_rejects_missing_or_ambiguous_routes(gateways: list[str]) -> None:
+    """Do not fall back to all-interface binding or guess between multiple gateways."""
+    with pytest.raises(ValueError):
+        _effect_host({"IPAM": {"Config": [{"Gateway": value} for value in gateways]}})
 
 
 @pytest.mark.parametrize(

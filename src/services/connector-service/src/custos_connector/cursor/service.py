@@ -609,7 +609,8 @@ class CursorService:
         Returns the plugin's :class:`ListenResult` on success. On the
         two halt errors emits the audit event, flips instance status,
         releases the lease, and raises the matching
-        :class:`CursorHalted` subclass.
+        :class:`CursorHalted` subclass. Redacted encoding diagnostics are
+        reconstructed from the trusted catalog/envelope, never plugin data.
         """
         plugin_envelope = CursorEnvelope(
             encoding=envelope_before.encoding,
@@ -633,13 +634,15 @@ class CursorService:
                 cursor=plugin_envelope,
             )
         except CursorEncodingMismatch as exc:
+            persisted_encoding = exc.persisted_encoding or envelope_before.encoding
+            plugin_encoding = exc.plugin_encoding or encoding
             await audit_cursor_encoding_mismatch(
                 self._metadata,
                 workspace_id=workspace_id,
                 actor=self._actor,
                 instance_id=str(instance.instance_id),
-                persisted_encoding=exc.persisted_encoding or encoding,
-                plugin_encoding=exc.plugin_encoding,
+                persisted_encoding=persisted_encoding,
+                plugin_encoding=plugin_encoding,
                 error_detail=exc.detail,
             )
             await self._flip_instance_status(
@@ -657,8 +660,8 @@ class CursorService:
             )
             raise CursorEncodingMismatchHalt(
                 exc.detail,
-                persisted_encoding=exc.persisted_encoding or encoding,
-                plugin_encoding=exc.plugin_encoding,
+                persisted_encoding=persisted_encoding,
+                plugin_encoding=plugin_encoding,
             ) from exc
         except CursorExpired as exc:
             await audit_cursor_expired(

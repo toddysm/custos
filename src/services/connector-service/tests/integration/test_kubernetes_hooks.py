@@ -10,6 +10,7 @@ import socket
 import subprocess
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
+from ipaddress import IPv4Address, ip_address
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -58,6 +59,13 @@ async def runtime(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Runtime]:
     controller_namespace = namespace + "-controller"
     helper = os.environ["CUSTOS_HOOK_HELPER_IMAGE"]
     plugin = os.environ["CUSTOS_HOOK_PLUGIN_IMAGE"].removeprefix("localhost:5001/")
+    network = subprocess.run(
+        ["docker", "network", "inspect", "kind"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    effect_host = _effect_host(json.loads(network.stdout)[0])
     repository = Path(__file__).resolve().parents[5]
     chart = repository / "deploy/helm/charts/connector-service"
     render = subprocess.run(
@@ -95,18 +103,20 @@ async def runtime(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Runtime]:
         },
     )
     subprocess.run(
-        ["kubectl", "apply", "-f", "-"],
+        ["kubectl", "--context", "kind-custos-hooks", "apply", "-f", "-"],
         input=json.dumps({"apiVersion": "v1", "kind": "List", "items": documents}),
         check=True,
         capture_output=True,
         text=True,
     )
     admin = client.Configuration()
-    await config.load_kube_config(client_configuration=admin)
+    await config.load_kube_config(context="kind-custos-hooks", client_configuration=admin)
     credentials = copy.deepcopy(admin)
     token = subprocess.run(
         [
             "kubectl",
+            "--context",
+            "kind-custos-hooks",
             "create",
             "token",
             "hook-test-connector-service",
@@ -157,7 +167,7 @@ async def runtime(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Runtime]:
     server = web.AppRunner(application)
     await server.setup()
     listener = socket.socket()
-    listener.bind((os.environ["CUSTOS_HOOK_EFFECT_HOST"], 0))
+    listener.bind((effect_host, 0))
     listener.listen()
     listener.setblocking(False)
     port = listener.getsockname()[1]
@@ -183,7 +193,7 @@ async def runtime(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Runtime]:
                 plugin,
                 observed,
                 logs,
-                f"http://{os.environ['CUSTOS_HOOK_EFFECT_HOST']}:{port}/",
+                f"http://{effect_host}:{port}/",
                 effects,
                 effect_seen,
             )
@@ -194,6 +204,15 @@ async def runtime(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Runtime]:
             core = client.CoreV1Api(api)
             await core.delete_namespace(namespace)
             await core.delete_namespace(controller_namespace)
+
+
+def _effect_host(network: Mapping[str, Any]) -> str:
+    """Select the IPv4 gateway regardless of Docker's dual-stack IPAM ordering."""
+    gateways = [ip_address(row["Gateway"]) for row in network["IPAM"]["Config"]]
+    candidates = [address for address in gateways if isinstance(address, IPv4Address)]
+    if len(candidates) != 1 or candidates[0].is_unspecified or candidates[0].is_multicast:
+        raise ValueError("the isolated test network must have exactly one concrete IPv4 gateway")
+    return str(candidates[0])
 
 
 async def assert_clean(runtime: Runtime, canary: str) -> None:

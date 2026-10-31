@@ -5,3 +5,4 @@ ENV PYTHONDONTWRITEBYTECODE=1
 USER 1000:1000
 HEALTHCHECK NONE
 ENTRYPOINT ["python", "/app/plugin.py"]
+CMD ["image-default-must-not-run"]
