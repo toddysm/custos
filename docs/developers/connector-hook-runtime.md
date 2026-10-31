@@ -117,6 +117,9 @@ while awaiting an outcome retain the stopped Pod's finalizer as recovery
 evidence. Inspect possible upstream effects before authorizing audited recovery;
 remove retained Kubernetes evidence only after that recovery decision. A new
 replica must not automatically repeat the invocation.
+Bridge-level timeout, output-limit or execution failures are not completed
+plugin responses: they can follow upstream effects without preserving the
+plugin result, so they retain the same fence and evidence.
 The existing `plugin-cleanup-unconfirmed` audit reason is retained for
 compatibility and covers both termination uncertainty and an unknown outcome.
 Unusable fenced `listen` responses and completed results discarded during final

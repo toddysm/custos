@@ -330,6 +330,32 @@ async def test_lost_or_invalid_reply_remains_fenced_after_termination(
     assert transport.stopped == ["owned-uid"] and not transport.released
 
 
+@pytest.mark.parametrize("status", ["timeout", "output-limit", "descendant-io", "execution-failed"])
+async def test_bridge_failure_is_not_a_confirmed_plugin_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+) -> None:
+    """A bridge error can follow an upstream effect without retaining the plugin's result."""
+    transport = Transport()
+
+    async def execute(pod: HookPod, request: bytes) -> bytes:
+        """Return a real bridge-failure frame after possible plugin work."""
+        transport.started.set()
+        body = json.dumps({"version": 1, "status": status, "exitCode": -1}).encode()
+        return struct.pack(">I", len(body)) + body
+
+    monkeypatch.setattr(transport, "execute", execute)
+    with pytest.raises(PluginCleanupFailed):
+        await runner(transport).run(
+            image_ref=IMAGE,
+            hook="listen",
+            payload={},
+            timeout_seconds=30,
+        )
+    assert transport.pod is not None and transport.pod.terminated
+    assert not transport.released
+
+
 async def test_cleanup_cancellation_cannot_discard_a_reply_and_allow_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

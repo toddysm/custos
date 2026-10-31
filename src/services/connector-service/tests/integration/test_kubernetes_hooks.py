@@ -26,7 +26,7 @@ from custos_connector.hook_images import RegistryHookImageResolver
 from custos_connector.hook_kubernetes_transport import KubernetesHookTransport
 from custos_connector.hook_runtime import InClusterHookRunner
 from custos_connector.hook_sandbox import HOOK_FINALIZER, HookPod, HookSandboxSettings
-from custos_connector.runtime import PluginCleanupFailed, PluginInvocationFailed
+from custos_connector.runtime import PluginCleanupFailed
 
 pytestmark = [
     pytest.mark.integration,
@@ -277,16 +277,17 @@ async def test_real_private_reply_and_exit_status(
 
 
 async def test_real_output_overflow_is_bounded_and_stopped(runtime: Runtime) -> None:
-    """Overflow must fail after the actual owned sandbox is stopped and removed."""
+    """Overflow after an upstream effect retains evidence instead of permitting replay."""
     canary = "synthetic-canary-" + uuid4().hex
-    with pytest.raises(PluginInvocationFailed):
+    with pytest.raises(PluginCleanupFailed):
         await runtime.runner.run(
             image_ref=runtime.plugin,
             hook="listen",
-            payload={"mode": "overflow", "canary": canary},
+            payload={"mode": "overflow", "canary": canary, "effectUrl": runtime.effect_url},
             timeout_seconds=60,
         )
-    await assert_clean(runtime, canary)
+    assert len(runtime.effects) == 1
+    await assert_recovery_evidence(runtime, canary)
 
 
 async def test_collision_has_one_effect_and_cancellation_owns_cleanup(runtime: Runtime) -> None:

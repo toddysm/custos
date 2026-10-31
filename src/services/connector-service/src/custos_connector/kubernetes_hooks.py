@@ -27,7 +27,7 @@ from custos_connector.runtime import (
     HookRunResult,
     PluginCleanupFailed,
     PluginInvocationFailed,
-    PluginProtocolError,
+    PluginRuntimeError,
     _finish_owned_task,
     invocation_container_name,
 )
@@ -181,12 +181,9 @@ class KubernetesHookRunner:
                     raise self._uncertain(name) from None
                 try:
                     result = decode_hook_reply(response)
-                except PluginProtocolError:
+                except (PluginRuntimeError, TimeoutError):
                     retain_evidence = True
                     raise self._uncertain(name) from None
-                except (PluginInvocationFailed, TimeoutError):
-                    outcome_known = True
-                    raise
                 outcome_known = True
         except asyncio.CancelledError as exc:
             if creating or owned is not None:
