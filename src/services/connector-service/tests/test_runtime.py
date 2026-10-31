@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import traceback
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -24,6 +25,7 @@ from custos_connector.runtime import (
     HookRunResult,
     ListenMode,
     ListenResult,
+    PluginCleanupFailed,
     PluginHookTimeout,
     PluginInvocationFailed,
     PluginInvoker,
@@ -428,6 +430,31 @@ async def test_health_maps_upstream_unreachable() -> None:
 
     with pytest.raises(UpstreamUnreachable):
         await invoker.health(connector=_connector(), instance=_instance())
+
+
+@pytest.mark.parametrize("uncertain", [False, True])
+async def test_backend_causes_are_not_logged_through_runtime_errors(
+    caplog: pytest.LogCaptureFixture,
+    uncertain: bool,
+) -> None:
+    """The controller logging boundary retains category/ownership, not backend exception chains."""
+    marker = "private-backend-diagnostic"
+    error = PluginCleanupFailed("owned") if uncertain else PluginInvocationFailed("public failure")
+    error.__cause__ = ValueError(marker)
+    if isinstance(error, PluginCleanupFailed):
+        error.cancellation_requested = True
+    invoker = PluginInvoker(_FakeRunner(exc=error))
+    with pytest.raises(PluginRuntimeError) as failure:
+        await invoker.health(connector=_connector(), instance=_instance())
+    logging.getLogger(__name__).error(
+        "hook invocation failed",
+        exc_info=(type(failure.value), failure.value, failure.value.__traceback__),
+    )
+    assert marker not in caplog.text
+    assert marker not in "".join(traceback.format_exception(failure.value))
+    if uncertain:
+        assert isinstance(failure.value, PluginCleanupFailed)
+        assert failure.value.container_name == "owned" and failure.value.cancellation_requested
 
 
 @pytest.mark.parametrize("mode", ["structured", "unknown", "invalid-date", "nonzero"])

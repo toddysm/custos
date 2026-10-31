@@ -38,6 +38,12 @@ image and pin its digest; an AMD64 Connector Service image is not an ARM64 helpe
 A same-architecture Connector Service image also contains the bridge, but the
 minimal helper images avoid pulling the service's Python runtime into init.
 
+The Deployment hashes its ConfigMap into the Pod template, so configuration-only
+Helm upgrades roll the controller Pods instead of retaining stale environment
+values. After rotating credentials in an existing Secret, explicitly restart
+the Deployment once the Secret has synchronized; a ConfigMap checksum does not
+observe external Secret contents.
+
 The Connector Helm subchart exposes these settings through `hookRuntime`.
 Set `enabled`, `namespace`, `helperImage` and `registryUrl` explicitly. The
 namespace must differ from the controller namespace. Supply `sandboxEgress`
@@ -79,6 +85,8 @@ streams to log credentials or send them to unrelated upstream services.
 
 The controller retains numeric exit status and closed failure categories,
 not plugin diagnostics. Structured error `detail` and `data` are discarded.
+Backend exception causes are suppressed at the invocation boundary so standard
+logging and trace exception events cannot reintroduce those private diagnostics.
 Successful business results continue through their existing private consumers.
 
 ## Ownership and recovery
@@ -111,6 +119,9 @@ service images digest-pinned and compatible. Do not inject sidecars or mutate
 the sandbox execution/security contract: admission verification rejects changes.
 
 Stop new worker admission and settle or fence in-flight work before rollback.
+Also drain in-flight work before changing the sandbox namespace, architecture
+or execution configuration. An automatic controller rollout is not an unfencing
+operation and does not establish termination of an old executor.
 An older Docker-only image cannot safely continue Kubernetes invocation recovery.
 Never use a backend switch as an unfencing operation. Final receiver/profile
 activation and deployed capacity certification are separate rollout gates.

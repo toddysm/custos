@@ -14,7 +14,7 @@ from custos_connector.hook_images import RegistryHookImageResolver
 from custos_connector.hook_runtime import InClusterHookRunner
 from custos_connector.hook_sandbox import HookSandboxSettings
 from custos_connector.providers import load_providers
-from custos_connector.runtime import HookRunResult, PluginCleanupFailed
+from custos_connector.runtime import HookRunResult, PluginCleanupFailed, PluginInvocationFailed
 from custos_connector.settings import SettingsError, load_settings
 from tests.integration.test_kubernetes_hooks import _effect_host
 
@@ -211,7 +211,9 @@ async def test_invocation_api_close_is_not_detached_by_cancellation(
                     await task
                 assert failure.value is pending and failure.value.cancellation_requested
             else:
-                with pytest.raises(RuntimeError if close_error else asyncio.CancelledError):
+                with pytest.raises(
+                    PluginInvocationFailed if close_error else asyncio.CancelledError
+                ):
                     await task
             api.close.assert_awaited_once()
         finally:

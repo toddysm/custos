@@ -18,6 +18,7 @@ spec:
         {{- include "svc.selectorLabels" . | nindent 8 }}
       annotations:
         {{- include "svc.daprAnnotations" . | nindent 8 }}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum | quote }}
     spec:
       serviceAccountName: {{ include "svc.fullname" . }}
       {{- if .Values.hookRuntime.enabled }}

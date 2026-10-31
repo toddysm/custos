@@ -13,7 +13,12 @@ from custos_connector.hook_images import RegistryHookImageResolver
 from custos_connector.hook_kubernetes_transport import KubernetesHookTransport
 from custos_connector.hook_sandbox import HookSandboxSettings
 from custos_connector.kubernetes_hooks import KubernetesHookRunner
-from custos_connector.runtime import HookRunResult, PluginCleanupFailed, _finish_owned_task
+from custos_connector.runtime import (
+    HookRunResult,
+    PluginCleanupFailed,
+    PluginInvocationFailed,
+    _finish_owned_task,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +116,9 @@ class InClusterHookRunner:
             if isinstance(close_failure, BaseException):
                 logger.error("Hook API client cleanup failed: %s", type(close_failure).__name__)
                 if pending_failure is not None:
-                    raise pending_failure from close_failure
-                raise close_failure
+                    raise pending_failure from None
+                if isinstance(close_failure, asyncio.CancelledError):
+                    raise close_failure from None
+                raise PluginInvocationFailed("hook API client cleanup failed") from None
             if interrupted and pending_failure is None:
                 raise asyncio.CancelledError()

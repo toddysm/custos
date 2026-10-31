@@ -541,6 +541,8 @@ class PluginInvoker:
                     timeout_seconds=timeout,
                     invocation_id=invocation_id,
                 )
+        except PluginRuntimeError as exc:
+            raise exc from None
         except TimeoutError:
             raise PluginHookTimeout("plugin hook timed out", data={"hook": hook}) from None
         except OSError:

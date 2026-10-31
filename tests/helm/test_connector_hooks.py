@@ -96,6 +96,25 @@ def test_default_off_does_not_create_sandbox_authority() -> None:
     assert not any(row["kind"] in {"Namespace", "Role", "RoleBinding"} for row in rows)
 
 
+def test_hook_config_upgrade_changes_the_pod_template() -> None:
+    """A helper/configuration-only Helm upgrade must actually roll existing controller Pods."""
+    templates = []
+    for helper in (HELPER, "registry.example/helper@sha256:" + "2" * 64):
+        result = render(f"hookRuntime.helperImage={helper}")
+        assert result.returncode == 0, result.stderr
+        deployment = next(
+            row
+            for row in yaml.safe_load_all(result.stdout)
+            if row and row["kind"] == "Deployment"
+        )
+        templates.append(deployment["spec"]["template"])
+    assert templates[0] != templates[1]
+    assert (
+        templates[0]["metadata"]["annotations"]["checksum/config"]
+        != templates[1]["metadata"]["annotations"]["checksum/config"]
+    )
+
+
 def test_image_matrix_publishes_both_real_helper_platforms() -> None:
     """Execute the actual matrix generator and verify platform, target and offline inclusion."""
     root = CHART.parents[3]
