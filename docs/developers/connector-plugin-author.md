@@ -305,6 +305,11 @@ plugin reached the upstream and observed a degraded state. Only
 truly unrecoverable failures (no network, library bug) should produce
 an error envelope.
 
+Health `detail` and `extras` are private plugin diagnostics, not a credential-safe
+logging channel. Instance health APIs, activation failures and health audits
+summarize the result using controller-owned status categories; they do not echo
+arbitrary plugin diagnostic text.
+
 ---
 
 ## 5. Error taxonomy

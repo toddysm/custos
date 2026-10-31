@@ -91,6 +91,9 @@ not plugin diagnostics. Structured error `detail` and `data` are discarded.
 Backend exception causes are suppressed at the invocation boundary so standard
 logging and trace exception events cannot reintroduce those private diagnostics.
 Successful business results continue through their existing private consumers.
+Health diagnostic text is not copied into cached/public health snapshots,
+activation exceptions or audit events. Those surfaces report controller-owned
+healthy/unhealthy categories or a closed runtime error code instead.
 
 ## Ownership and recovery
 
