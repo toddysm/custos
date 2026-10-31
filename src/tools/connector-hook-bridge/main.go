@@ -147,6 +147,14 @@ func runHook(request bridgeRequest) bridgeReply {
 	budget := &outputBudget{cancel: cancel}
 	stdout, stderr := &boundedOutput{budget: budget}, &boundedOutput{budget: budget}
 	cmd := exec.CommandContext(ctx, request.Argv[0], request.Argv[1:]...)
+	if errors.Is(cmd.Err, exec.ErrDot) {
+		// The verified image may intentionally resolve its entrypoint from its working directory.
+		path, err := filepath.Abs(cmd.Path)
+		if err != nil {
+			return bridgeReply{Status: "spawn-failed", ExitCode: -1}
+		}
+		cmd.Path, cmd.Err = path, nil
+	}
 	cmd.Stdin = bytes.NewReader(request.Payload)
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

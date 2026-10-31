@@ -63,6 +63,22 @@ func TestSignaledHookUsesContainerExitStatus(t *testing.T) {
 	}
 }
 
+// TestImageEntrypointFromWorkingDirectory preserves an image's intentional PATH lookup.
+func TestImageEntrypointFromWorkingDirectory(t *testing.T) {
+	directory := t.TempDir()
+	if err := install(filepath.Join(directory, "plugin"), "owned"); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(directory)
+	t.Setenv("PATH", "."+string(os.PathListSeparator)+os.Getenv("PATH"))
+	request := requestFor(t, "echo")
+	request.Argv[0] = "plugin"
+	reply := runHook(request)
+	if reply.Status != "completed" || reply.ExitCode != 7 || !bytes.Equal(reply.Stdout, request.Payload) {
+		t.Fatalf("image working-directory lookup failed: status=%s exit=%d", reply.Status, reply.ExitCode)
+	}
+}
+
 // requestFor uses a real test executable without depending on a plugin shell.
 func requestFor(t *testing.T, mode string) bridgeRequest {
 	t.Helper()
