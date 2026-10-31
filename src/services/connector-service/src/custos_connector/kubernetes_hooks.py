@@ -47,9 +47,12 @@ class KubernetesHookRunner:
         """Bind explicit deployment identity without opening sockets or launching work."""
         self.transport, self.resolver, self.settings = transport, resolver, settings
 
-    def _uncertain(self, name: str) -> PluginCleanupFailed:
+    def _uncertain(self, name: str, *, termination_confirmed: bool = False) -> PluginCleanupFailed:
         """Return a safe operator locator without copying request or backend diagnostics."""
-        failure = PluginCleanupFailed(f"{self.settings.namespace}/{name}")
+        failure = PluginCleanupFailed(
+            f"{self.settings.namespace}/{name}",
+            termination_confirmed=termination_confirmed,
+        )
         caller = asyncio.current_task()
         failure.cancellation_requested = caller is not None and caller.cancelling() > 0
         return failure
@@ -211,7 +214,8 @@ class KubernetesHookRunner:
                     failure.cancellation_requested = caller is not None and caller.cancelling() > 0
                     raise
                 if interrupted:
-                    if retain_evidence:
-                        raise self._uncertain(name) from None
-                    raise asyncio.CancelledError()
+                    raise self._uncertain(
+                        name,
+                        termination_confirmed=exec_possible,
+                    ) from None
         return result

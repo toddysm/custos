@@ -147,13 +147,17 @@ class PluginInvocationFailed(PluginRuntimeError):
 class PluginCleanupFailed(PluginInvocationFailed):
     """Owned termination or execution outcome is unconfirmed; polling must fail closed."""
 
-    def __init__(self, container_name: str) -> None:
+    def __init__(self, container_name: str, *, termination_confirmed: bool = False) -> None:
         """Retain only a generated resource name, never plugin output or credentials."""
         self.container_name = container_name
+        self.termination_confirmed = termination_confirmed
         self.cancellation_requested = False
         super().__init__(
             "plugin invocation cleanup or outcome could not be confirmed",
-            data={"containerName": container_name},
+            data={
+                "containerName": container_name,
+                **({"terminationConfirmed": True} if termination_confirmed else {}),
+            },
         )
 
 
@@ -407,18 +411,31 @@ class PluginInvoker:
         timeout_seconds: float | None = None,
         invocation_id: str | None = None,
     ) -> ListenResult:
-        """Invoke listening within an optional caller-owned deadline."""
-        result = await self._invoke(
-            connector=connector,
-            instance=instance,
-            hook="listen",
-            hook_input={
-                "mode": str(mode),
-                "cursor": _serialize_cursor(cursor),
-            },
-            timeout_seconds=timeout_seconds,
-            invocation_id=invocation_id,
-        )
+        """Return a usable response or preserve recovery for a fenced, unprocessable result."""
+        try:
+            result = await self._invoke(
+                connector=connector,
+                instance=instance,
+                hook="listen",
+                hook_input={
+                    "mode": str(mode),
+                    "cursor": _serialize_cursor(cursor),
+                },
+                timeout_seconds=timeout_seconds,
+                invocation_id=invocation_id,
+            )
+            return self._parse_listen_result(result)
+        except PluginProtocolError:
+            if invocation_id is not None:
+                raise PluginCleanupFailed(
+                    invocation_container_name(invocation_id),
+                    termination_confirmed=True,
+                ) from None
+            raise
+
+    @staticmethod
+    def _parse_listen_result(result: Mapping[str, Any]) -> ListenResult:
+        """Validate the full listen result before its caller can publish or advance a cursor."""
         raw_events = result.get("events", ())
         if not isinstance(raw_events, list):
             raise PluginProtocolError("listen result events must be a JSON array")
@@ -555,6 +572,11 @@ class PluginInvoker:
             body = self._decode_body(completed.stdout, hook=hook, image_ref=connector.image_ref)
         except PluginProtocolError as exc:
             if completed.exit_code != 0:
+                if invocation_id is not None:
+                    raise PluginCleanupFailed(
+                        invocation_container_name(invocation_id),
+                        termination_confirmed=True,
+                    ) from None
                 raise PluginInvocationFailed(
                     (
                         f"plugin hook {hook!r} on {connector.image_ref!r} exited with "
@@ -575,6 +597,11 @@ class PluginInvoker:
             if not isinstance(result, Mapping):
                 raise PluginProtocolError("successful plugin response must carry object result")
             if completed.exit_code != 0:
+                if invocation_id is not None:
+                    raise PluginCleanupFailed(
+                        invocation_container_name(invocation_id),
+                        termination_confirmed=True,
+                    )
                 raise PluginInvocationFailed(
                     (
                         f"plugin hook {hook!r} exited with status {completed.exit_code} "

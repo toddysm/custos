@@ -119,6 +119,12 @@ remove retained Kubernetes evidence only after that recovery decision. A new
 replica must not automatically repeat the invocation.
 The existing `plugin-cleanup-unconfirmed` audit reason is retained for
 compatibility and covers both termination uncertainty and an unknown outcome.
+Unusable fenced `listen` responses and completed results discarded during final
+cleanup also retain recovery rather than enabling another poll. If termination
+was positively verified before that failure, the pause audit records
+`terminationConfirmed: true`; that observation does not authorize an automatic
+retry or resolve possible upstream effects. Evidence may already have been
+removed after confirmed completion, so absence still must not be used as proof.
 
 Cancellation waits for owned cleanup rather than detaching a hook. The cleanup
 budget is 30 seconds; an unresponsive backend produces an explicit uncertain

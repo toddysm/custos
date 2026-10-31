@@ -6,6 +6,7 @@ import asyncio
 import logging
 from collections.abc import Mapping
 from typing import Any
+from uuid import uuid4
 
 from kubernetes_asyncio import client
 
@@ -16,8 +17,8 @@ from custos_connector.kubernetes_hooks import KubernetesHookRunner
 from custos_connector.runtime import (
     HookRunResult,
     PluginCleanupFailed,
-    PluginInvocationFailed,
     _finish_owned_task,
+    invocation_container_name,
 )
 
 logger = logging.getLogger(__name__)
@@ -80,8 +81,11 @@ class InClusterHookRunner:
         invocation_id: str | None = None,
     ) -> HookRunResult:
         """Close the invocation's API session only after owned execution cleanup has settled."""
+        invocation_id = invocation_id or uuid4().hex
+        locator = f"{self.settings.namespace}/{invocation_container_name(invocation_id)}"
         api = client.ApiClient(self.configuration)
         pending_failure: PluginCleanupFailed | None = None
+        completed = False
         try:
             runner = KubernetesHookRunner(
                 KubernetesHookTransport(
@@ -90,20 +94,22 @@ class InClusterHookRunner:
                 self.resolver,
                 self.settings,
             )
-            return await runner.run(
+            result = await runner.run(
                 image_ref=image_ref,
                 hook=hook,
                 payload=payload,
                 timeout_seconds=timeout_seconds,
                 invocation_id=invocation_id,
             )
+            completed = True
+            return result
         except PluginCleanupFailed as failure:
             pending_failure = failure
             raise
         finally:
             outcomes, interrupted = await _finish_owned_task(
                 asyncio.gather(api.close(), return_exceptions=True),
-                invocation_id or "hook-api-session",
+                locator,
             )
             close_failure = outcomes[0]
             if pending_failure is not None:
@@ -115,10 +121,15 @@ class InClusterHookRunner:
                 )
             if isinstance(close_failure, BaseException):
                 logger.error("Hook API client cleanup failed: %s", type(close_failure).__name__)
-                if pending_failure is not None:
-                    raise pending_failure from None
-                if isinstance(close_failure, asyncio.CancelledError):
-                    raise close_failure from None
-                raise PluginInvocationFailed("hook API client cleanup failed") from None
-            if interrupted and pending_failure is None:
-                raise asyncio.CancelledError()
+            if isinstance(close_failure, BaseException) or interrupted:
+                finalization_failure = pending_failure or PluginCleanupFailed(
+                    locator,
+                    termination_confirmed=completed,
+                )
+                caller = asyncio.current_task()
+                finalization_failure.cancellation_requested |= (
+                    interrupted
+                    or isinstance(close_failure, asyncio.CancelledError)
+                    or (caller is not None and caller.cancelling() > 0)
+                )
+                raise finalization_failure from None

@@ -738,6 +738,7 @@ class CursorService:
             payload={
                 "reason": "plugin-cleanup-unconfirmed",
                 "containerName": failure.container_name,
+                **({"terminationConfirmed": True} if failure.termination_confirmed else {}),
             },
         )
         try:

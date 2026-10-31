@@ -328,3 +328,42 @@ async def test_lost_or_invalid_reply_remains_fenced_after_termination(
     assert transport.started.is_set()
     assert transport.pod is not None and transport.pod.terminated
     assert transport.stopped == ["owned-uid"] and not transport.released
+
+
+async def test_cleanup_cancellation_cannot_discard_a_reply_and_allow_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A completed process result discarded during finalization still requires recovery."""
+    transport = Transport()
+    entered, allowed = asyncio.Event(), asyncio.Event()
+    release = transport.release
+
+    async def hold_release(pod: HookPod) -> None:
+        """Keep finalization in progress until cancellation is observed."""
+        entered.set()
+        await allowed.wait()
+        await release(pod)
+
+    monkeypatch.setattr(transport, "release", hold_release)
+    task = asyncio.create_task(
+        runner(transport).run(
+            image_ref=IMAGE,
+            hook="listen",
+            payload={},
+            timeout_seconds=30,
+        )
+    )
+    try:
+        async with asyncio.timeout(2):
+            await entered.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        allowed.set()
+        with pytest.raises(PluginCleanupFailed) as failure:
+            await task
+        assert failure.value.cancellation_requested and failure.value.termination_confirmed
+    finally:
+        allowed.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

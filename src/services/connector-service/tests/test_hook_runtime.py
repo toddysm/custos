@@ -14,7 +14,7 @@ from custos_connector.hook_images import RegistryHookImageResolver
 from custos_connector.hook_runtime import InClusterHookRunner
 from custos_connector.hook_sandbox import HookSandboxSettings
 from custos_connector.providers import load_providers
-from custos_connector.runtime import HookRunResult, PluginCleanupFailed, PluginInvocationFailed
+from custos_connector.runtime import HookRunResult, PluginCleanupFailed
 from custos_connector.settings import SettingsError, load_settings
 from tests.integration.test_kubernetes_hooks import _effect_host
 
@@ -153,10 +153,12 @@ async def test_readiness_checks_authority_and_closes_its_session(
 
 @pytest.mark.parametrize("uncertain", [False, True])
 @pytest.mark.parametrize("close_error", [False, True])
+@pytest.mark.parametrize("cancel", [False, True])
 async def test_invocation_api_close_is_not_detached_by_cancellation(
     monkeypatch: pytest.MonkeyPatch,
     uncertain: bool,
     close_error: bool,
+    cancel: bool,
 ) -> None:
     """Finalization cannot replace a pending uncertainty fence with cancellation or close errors."""
     from custos_connector import hook_runtime
@@ -202,19 +204,23 @@ async def test_invocation_api_close_is_not_detached_by_cancellation(
         try:
             async with asyncio.timeout(2):
                 await started.wait()
-            task.cancel()
-            await asyncio.sleep(0)
+            if cancel:
+                task.cancel()
+                await asyncio.sleep(0)
             assert not task.done()
             allowed.set()
             if uncertain:
                 with pytest.raises(PluginCleanupFailed) as failure:
                     await task
-                assert failure.value is pending and failure.value.cancellation_requested
-            else:
-                with pytest.raises(
-                    PluginInvocationFailed if close_error else asyncio.CancelledError
-                ):
+                assert failure.value is pending
+                assert failure.value.cancellation_requested is cancel
+            elif close_error or cancel:
+                with pytest.raises(PluginCleanupFailed) as failure:
                     await task
+                assert failure.value.cancellation_requested is cancel
+                assert failure.value.termination_confirmed
+            else:
+                assert (await task).exit_code == 0
             api.close.assert_awaited_once()
         finally:
             allowed.set()

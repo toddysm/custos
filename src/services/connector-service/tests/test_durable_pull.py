@@ -124,6 +124,46 @@ async def test_lost_hook_result_keeps_durable_fence_after_verified_stop(
     assert effects == ["effect"]
 
 
+@pytest.mark.parametrize(
+    "body,exit_code",
+    [
+        ({"ok": True, "result": {"events": "invalid"}}, 0),
+        ({"ok": True, "result": {"events": [], "nextCursor": {"encoding": ""}}}, 0),
+        ({"ok": True, "result": {"events": []}}, 7),
+    ],
+)
+async def test_invalid_completed_response_preserves_the_invocation_fence(
+    body: Mapping[str, Any],
+    exit_code: int,
+) -> None:
+    """An unusable response cannot discard possible upstream effects and enable another poll."""
+    clock = PullClock()
+    providers, metadata, plugin, publisher = memory_runtime(clock)
+    await seed_instance(providers)
+    start_demand(metadata)
+    assert providers.pull_demand_reconciler is not None and providers.cursor_service is not None
+    await providers.pull_demand_reconciler.reconcile(WS)
+    plugin._result = HookRunResult(exit_code, json.dumps(body).encode(), b"")
+    with pytest.raises(PluginCleanupFailed) as failure:
+        await providers.cursor_service.tick(WS, INSTANCE)
+    assert failure.value.termination_confirmed
+    paused = [
+        event
+        for _, event in metadata.append_audit_calls
+        if event.event_type == EVENT_PULL_LOOP_PAUSED
+    ]
+    assert paused[-1].payload["terminationConfirmed"] is True
+    clock.advance(61)
+    with pytest.raises(PullTickBlocked, match="invocation_unconfirmed"):
+        await metadata.acquire_pull_tick(
+            WorkspaceId(WS),
+            ConnectorInstanceId(INSTANCE),
+            "another-replica",
+            ttl_seconds=60,
+        )
+    assert not publisher.published and len(plugin.calls) == 1
+
+
 @pytest.mark.parametrize("resume_only", [False, True])
 async def test_staggered_replicas_share_interval_after_fast_cursor_commit(
     resume_only: bool,
