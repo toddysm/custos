@@ -629,7 +629,7 @@ class PluginInvoker:
             )
         try:
             decoded = json.loads(stdout)
-        except (json.JSONDecodeError, UnicodeDecodeError):
+        except (ValueError, RecursionError):
             raise PluginProtocolError(
                 f"plugin hook {hook!r} on {image_ref!r} returned invalid JSON"
             ) from None
