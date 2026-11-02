@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import traceback
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -23,10 +25,12 @@ from custos_connector.runtime import (
     HookRunResult,
     ListenMode,
     ListenResult,
+    PluginCleanupFailed,
     PluginHookTimeout,
     PluginInvocationFailed,
     PluginInvoker,
     PluginProtocolError,
+    PluginRuntimeError,
     UpstreamUnreachable,
     invocation_container_name,
 )
@@ -279,6 +283,7 @@ async def test_listen_maps_cursor_expired_error() -> None:
 
 @pytest.mark.asyncio
 async def test_listen_maps_cursor_encoding_mismatch_error() -> None:
+    """Keep the typed failure without retaining plugin-provided diagnostic strings."""
     runner = _FakeRunner(
         result=HookRunResult(
             exit_code=0,
@@ -308,8 +313,9 @@ async def test_listen_maps_cursor_encoding_mismatch_error() -> None:
             cursor=CursorEnvelope(encoding="old-v1", value="cursor-1"),
         )
 
-    assert excinfo.value.persisted_encoding == "old-v1"
-    assert excinfo.value.plugin_encoding == "new-v2"
+    assert excinfo.value.persisted_encoding is None
+    assert excinfo.value.plugin_encoding is None
+    assert not excinfo.value.data
 
 
 @pytest.mark.asyncio
@@ -361,6 +367,7 @@ async def test_invalid_json_raises_protocol_error() -> None:
 
 @pytest.mark.asyncio
 async def test_non_zero_exit_with_empty_stdout_raises_invocation_failed() -> None:
+    """Keep exit metadata but exclude private stderr from public failures and audit data."""
     invoker = PluginInvoker(
         _FakeRunner(
             result=HookRunResult(
@@ -376,13 +383,13 @@ async def test_non_zero_exit_with_empty_stdout_raises_invocation_failed() -> Non
 
     data = excinfo.value.data or {}
     assert data.get("exit_code") == 125
-    assert "Unable to find image" in (data.get("stderr") or "")
-    assert data.get("stdout") == ""
+    assert "stderr" not in data and "stdout" not in data
     assert data.get("hook") == "health"
 
 
 @pytest.mark.asyncio
 async def test_non_zero_exit_with_invalid_stdout_raises_invocation_failed() -> None:
+    """Malformed private output must not become controller diagnostics."""
     invoker = PluginInvoker(
         _FakeRunner(
             result=HookRunResult(
@@ -398,8 +405,7 @@ async def test_non_zero_exit_with_invalid_stdout_raises_invocation_failed() -> N
 
     data = excinfo.value.data or {}
     assert data.get("exit_code") == 1
-    assert "panic" in (data.get("stdout") or "")
-    assert "goroutine" in (data.get("stderr") or "")
+    assert "stdout" not in data and "stderr" not in data
 
 
 @pytest.mark.asyncio
@@ -424,6 +430,61 @@ async def test_health_maps_upstream_unreachable() -> None:
 
     with pytest.raises(UpstreamUnreachable):
         await invoker.health(connector=_connector(), instance=_instance())
+
+
+@pytest.mark.parametrize("uncertain", [False, True])
+async def test_backend_causes_are_not_logged_through_runtime_errors(
+    caplog: pytest.LogCaptureFixture,
+    uncertain: bool,
+) -> None:
+    """The controller logging boundary retains category/ownership, not backend exception chains."""
+    marker = "private-backend-diagnostic"
+    error = PluginCleanupFailed("owned") if uncertain else PluginInvocationFailed("public failure")
+    error.__cause__ = ValueError(marker)
+    if isinstance(error, PluginCleanupFailed):
+        error.cancellation_requested = True
+    invoker = PluginInvoker(_FakeRunner(exc=error))
+    with pytest.raises(PluginRuntimeError) as failure:
+        await invoker.health(connector=_connector(), instance=_instance())
+    logging.getLogger(__name__).error(
+        "hook invocation failed",
+        exc_info=(type(failure.value), failure.value, failure.value.__traceback__),
+    )
+    assert marker not in caplog.text
+    assert marker not in "".join(traceback.format_exception(failure.value))
+    if uncertain:
+        assert isinstance(failure.value, PluginCleanupFailed)
+        assert failure.value.container_name == "owned" and failure.value.cancellation_requested
+
+
+@pytest.mark.parametrize("mode", ["structured", "unknown", "invalid-date", "nonzero"])
+async def test_private_diagnostics_do_not_enter_error_chains(mode: str) -> None:
+    """Keep categories without private detail, data, streams or timestamp-parser causes."""
+    secret = "private-upstream-credential-marker"
+    body: dict[str, Any] = {
+        "ok": False,
+        "error": {
+            "code": secret if mode == "unknown" else "upstream-unreachable",
+            "detail": secret,
+            "data": {"credential": secret},
+        },
+    }
+    if mode == "invalid-date":
+        body = {"ok": True, "result": {"healthy": True, "checkedAt": secret}}
+    invoker = PluginInvoker(
+        _FakeRunner(
+            result=HookRunResult(
+                exit_code=7 if mode == "nonzero" else 0,
+                stdout=secret.encode() if mode == "nonzero" else json.dumps(body).encode(),
+                stderr=secret.encode(),
+            )
+        )
+    )
+    with pytest.raises(PluginRuntimeError) as failure:
+        await invoker.health(connector=_connector(), instance=_instance())
+    assert secret not in str(failure.value)
+    assert secret not in repr(dict(failure.value.data))
+    assert secret not in "".join(traceback.format_exception(failure.value))
 
 
 @pytest.mark.asyncio

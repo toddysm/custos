@@ -1,0 +1,107 @@
+name: connector-hooks
+
+on:
+  pull_request:
+    paths:
+      - "src/tools/connector-hook-bridge/**"
+      - "src/services/connector-service/**"
+      - "src/libs/**"
+      - "deploy/helm/charts/connector-service/**"
+      - ".github/workflows/connector-hooks.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/tools/connector-hook-bridge/**"
+      - "src/services/connector-service/**"
+      - "deploy/helm/charts/connector-service/**"
+      - ".github/workflows/connector-hooks.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bridge:
+    name: bridge race tests and Linux cross-builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: false
+      - name: Validate bridge
+        working-directory: src/tools/connector-hook-bridge
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test -race -count=1 -timeout=60s ./...
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$RUNNER_TEMP/bridge-amd64" .
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o "$RUNNER_TEMP/bridge-arm64" .
+
+  kubernetes:
+    name: real Kubernetes hook ownership and private streams
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2
+      - name: Start isolated image registry
+        run: docker run -d --name custos-hooks-registry -p 127.0.0.1:5001:5000 registry:2.8
+      - uses: helm/kind-action@v1.10.0
+        with:
+          cluster_name: custos-hooks
+          node_image: kindest/node:v1.31.2
+          config: src/services/connector-service/tests/fixtures/kubernetes_hook/kind.yaml
+      - name: Connect registry and build real images
+        run: |
+          docker network connect kind custos-hooks-registry
+          docker build -t localhost:5001/hook-service:test -f src/services/connector-service/Dockerfile .
+          docker build --platform linux/amd64 --target hook-runtime \
+            -t localhost:5001/hook-helper:test -f src/services/connector-service/Dockerfile .
+          docker build --platform linux/arm64 --target hook-runtime \
+            -t localhost:5001/hook-helper-arm64:test -f src/services/connector-service/Dockerfile .
+          test "$(docker inspect --format='{{.Architecture}}' localhost:5001/hook-helper:test)" = amd64
+          test "$(docker inspect --format='{{.Architecture}}' localhost:5001/hook-helper-arm64:test)" = arm64
+          inspection=$(docker create --platform linux/arm64 localhost:5001/hook-helper-arm64:test)
+          docker cp "$inspection:/opt/custos/bin/connector-hook-bridge" "$RUNNER_TEMP/hook-helper-arm64"
+          docker rm "$inspection"
+          python3 - <<'PY'
+          import os, struct
+          from pathlib import Path
+          binary = (Path(os.environ["RUNNER_TEMP"]) / "hook-helper-arm64").read_bytes()
+          assert binary[:4] == b"\x7fELF"
+          assert struct.unpack_from("<H", binary, 18)[0] == 183, "helper binary must be AArch64"
+          PY
+          docker build -t localhost:5001/hook-plugin:test src/services/connector-service/tests/fixtures/kubernetes_hook
+          docker push localhost:5001/hook-helper:test
+          docker push localhost:5001/hook-helper-arm64:test
+          docker push localhost:5001/hook-plugin:test
+          helper=$(docker inspect --format='{{index .RepoDigests 0}}' localhost:5001/hook-helper:test)
+          arm_helper=$(docker inspect --format='{{index .RepoDigests 0}}' localhost:5001/hook-helper-arm64:test)
+          test "$arm_helper" != "$helper"
+          plugin=$(docker inspect --format='{{index .RepoDigests 0}}' localhost:5001/hook-plugin:test)
+          {
+            echo "CUSTOS_HOOK_HELPER_IMAGE=$helper"
+            echo "CUSTOS_HOOK_PLUGIN_IMAGE=$plugin"
+          } >> "$GITHUB_ENV"
+      - name: Install runtime and tests
+        run: |
+          pip install -e src/libs/storage-provider-layer -e src/libs/custos-postgres \
+            -e src/libs/custos-callctx -e "src/services/connector-service[dev]"
+      - name: Test actual sandbox lifecycle
+        env:
+          CUSTOS_HOOK_KUBERNETES_TEST: "1"
+        working-directory: src/services/connector-service
+        run: pytest -q tests/integration/test_kubernetes_hooks.py -m integration --no-cov
+      - name: Remove this job's cluster and registry
+        if: always()
+        run: |
+          kind delete cluster --name custos-hooks
+          docker rm -f custos-hooks-registry

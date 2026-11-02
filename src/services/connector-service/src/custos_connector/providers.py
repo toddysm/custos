@@ -36,7 +36,7 @@ the required connector-service schema revisions have been applied.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field, replace
 from typing import Protocol, cast
@@ -78,7 +78,7 @@ from custos_connector.loader.identity import IdentityCategory
 from custos_connector.runtime import DockerCliHookRunner, PluginInvoker
 from custos_connector.scheduler import PullLoopScheduler
 from custos_connector.scheduler.demand import PullDemandReconciler
-from custos_connector.settings import DEFAULT_DAPR_SECRET_STORE, Settings
+from custos_connector.settings import DEFAULT_DAPR_SECRET_STORE, Settings, SettingsError
 from custos_connector.sidecar_admin import (
     InMemorySidecarRegistry,
     SidecarAdminClient,
@@ -217,6 +217,8 @@ class Providers:
     registration_registry_client: httpx.AsyncClient | None = field(default=None)
     pull_control: ConnectorPullControlProvider | None = field(default=None)
     pull_demand_reconciler: PullDemandReconciler | None = field(default=None)
+    plugin_invoker: PluginInvoker | None = field(default=None)
+    hook_readiness: Callable[[], Awaitable[None]] | None = field(default=None)
 
 
 def load_registration_registry_client(settings: Settings) -> httpx.AsyncClient | None:
@@ -251,6 +253,24 @@ def load_providers(settings: Settings) -> Providers:
     imported by unit tests that monkey-patch :func:`load_providers` and
     never need the asyncpg-backed implementation on the import path.
     """
+    if settings.is_production and settings.hook_backend != "kubernetes":
+        raise SettingsError("production hook execution requires CONN_HOOK_BACKEND=kubernetes")
+    configuration = None
+    sandbox = None
+    if settings.hook_backend == "kubernetes":
+        from kubernetes_asyncio import client, config
+
+        from custos_connector.hook_sandbox import HookSandboxSettings
+
+        sandbox = HookSandboxSettings(
+            settings.hook_namespace,
+            settings.hook_helper_image,
+            settings.hook_service_account,
+            runtime_class=settings.hook_runtime_class,
+            image_pull_secrets=settings.hook_image_pull_secrets,
+        )
+        configuration = client.Configuration()
+        config.load_incluster_config(client_configuration=configuration)
     if settings.durable_pull_enabled:
         pull_interval(settings.pull_loop_min_interval_sec)
         pull_interval(settings.pull_default_interval_sec)
@@ -304,6 +324,25 @@ def load_providers(settings: Settings) -> Providers:
     # manifest declaring ``authenticationType: x-dapr-secret`` derives its
     # KMS category from the same registration that wired the resolver).
     registration_registry_client = load_registration_registry_client(settings)
+    hook_readiness: Callable[[], Awaitable[None]] | None = None
+    if sandbox is not None and configuration is not None:
+        from custos_connector.hook_images import RegistryHookImageResolver
+        from custos_connector.hook_runtime import InClusterHookRunner
+
+        if registration_registry_client is None:
+            raise SettingsError("Kubernetes hooks require a registry client")
+        hook_runner = InClusterHookRunner(
+            configuration,
+            RegistryHookImageResolver(
+                registration_registry_client,
+                architecture=settings.hook_architecture,
+            ),
+            sandbox,
+        )
+        invoker = PluginInvoker(hook_runner)
+        hook_readiness = hook_runner.check_ready
+    else:
+        invoker = PluginInvoker(DockerCliHookRunner())
     loader = (
         Loader(
             catalog_store=typed_catalog,
@@ -325,6 +364,7 @@ def load_providers(settings: Settings) -> Providers:
             instance_store=typed_instances,
             metadata_store=typed_metadata,
             identity_registry=identity_registry,
+            plugin_binder=invoker,
         ),
         lease_manager=load_lease_manager(
             lease_store=typed_lease,
@@ -336,6 +376,7 @@ def load_providers(settings: Settings) -> Providers:
             instance_store=typed_instances,
             metadata_store=typed_metadata,
             settings=settings,
+            plugin_invoker=invoker,
         ),
         validate_service=ValidateConnectorService(
             catalog_store=typed_catalog,
@@ -345,6 +386,8 @@ def load_providers(settings: Settings) -> Providers:
         dapr_http_client=dapr_http_client,
         loader=loader,
         registration_registry_client=registration_registry_client,
+        plugin_invoker=invoker,
+        hook_readiness=hook_readiness,
     )
     return (
         wire_durable_pull_runtime(providers, settings)
@@ -366,7 +409,11 @@ def wire_durable_pull_runtime(
     publisher = providers.event_publisher
     if publisher is None or isinstance(publisher, NoOpEventPublisher):
         raise ValueError("durable pull requires acknowledged event publication")
-    invoker = plugin_invoker if plugin_invoker is not None else PluginInvoker(DockerCliHookRunner())
+    invoker = plugin_invoker if plugin_invoker is not None else providers.plugin_invoker
+    if invoker is None:
+        if settings.hook_backend != "docker" or settings.is_production:
+            raise SettingsError("durable pull requires the configured production hook invoker")
+        invoker = PluginInvoker(DockerCliHookRunner())
     backoff_cap = max(300, settings.pull_loop_min_interval_sec)
 
     async def publish(
@@ -516,14 +563,15 @@ def load_bind_for_step_service(
 ) -> BindForStepService:
     """Build the default :class:`BindForStepService` (CONN-IMPL-016).
 
-    Wires the SPL providers + identity registry + the production
-    :class:`PluginInvoker` (backed by :class:`DockerCliHookRunner`) into
+    Wires the SPL providers, identity registry and configured
+    :class:`PluginInvoker` into
     a single :class:`BindForStepService` instance. The service is the
     only place that owns the in-memory idempotency cache, so a single
     instance per FastAPI app is correct.
 
     Tests inject a stub via ``plugin_binder`` to avoid the Docker
-    runtime; production wiring constructs the default invoker.
+    runtime; production supplies its shared invoker. The standalone default
+    remains the Docker development runner.
     """
     binder = plugin_binder if plugin_binder is not None else PluginInvoker(DockerCliHookRunner())
     return BindForStepService(
@@ -572,10 +620,12 @@ def load_instance_service(
     ``CONN_HEALTH_CACHE_TTL_S`` drives the cache window without
     needing a per-call override on the routes in
     :mod:`custos_connector.api.instances`. The plugin invoker is
-    constructed eagerly (Docker CLI hook runner by default) so the
+    supplied by production wiring (Docker is a standalone development default) so the
     instance ``:enable`` / ``/health`` / ``:force-health-check``
     routes can probe plugin liveness without a per-request bootstrap.
     """
+    if plugin_invoker is None and (settings.is_production or settings.hook_backend != "docker"):
+        raise SettingsError("instance hooks require the configured production invoker")
     invoker = plugin_invoker if plugin_invoker is not None else PluginInvoker(DockerCliHookRunner())
     return InstanceService(
         instance_store=instance_store,

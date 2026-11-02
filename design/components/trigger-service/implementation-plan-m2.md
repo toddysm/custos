@@ -1,6 +1,6 @@
 # Trigger Service M2 implementation plan
 
-Status: **Proposed; awaiting human approval.** Revision: 2. Updated: 2026-10-27.
+Status: **Approved; execution tracked in #988.** Revision: 3. Updated: 2026-10-30.
 
 Parent: [#988](https://github.com/toddysm/custos/issues/988).
 Design: [#1004](https://github.com/toddysm/custos/issues/1004) and the
@@ -16,8 +16,9 @@ No new graphical interface or duplicate connector polling engine is included.
 
 All issues below are native children of #988. Every implementation issue is
 blocked by [#1004](https://github.com/toddysm/custos/issues/1004)'s completed
-design and human approval; publication is not
-authorization to build. Testing mode is **GitHub-hosted CI**, with Copilot review
+design and human approval. The owner approved the baseline, subsequent recorded
+amendments and continuous implementation; publication alone never grants
+authorization. Testing mode is **GitHub-hosted CI**, with Copilot review
 on each pull request. One implementation item maps to one reviewed pull request.
 Only the designated owner may claim/edit an item's worktree and ledger.
 
@@ -41,7 +42,8 @@ design gate [#1004](https://github.com/toddysm/custos/issues/1004).
 | TS-IMPL-031 | [#1014](https://github.com/toddysm/custos/issues/1014) | Durable failure/replay and downstream idempotency; durable Workflow waits/mirrors and versioned step-scoped consumer protection; no duplicate effect across restart and retention | 022, 030 |
 | TS-IMPL-032 | [#1015](https://github.com/toddysm/custos/issues/1015) | Production signed call-context verification and trigger:admin; secure Dapr 1.18.9 baseline, authenticated caller app/namespace, Gateway permission propagation and opaque child-resume transport compatibility | - |
 | TS-IMPL-033 | [#1016](https://github.com/toddysm/custos/issues/1016) | Protected recovery endpoints and retention; route-collision/concurrent-replay/expiry tests | 031, 032 |
-| TS-IMPL-034 | [#1017](https://github.com/toddysm/custos/issues/1017) | Activation/readiness/deployment wiring, durable audit and operational signals; consume the durable wait prerequisite from 031; four-profile rendering and safe rollback | 025, 027, 028, 029, 033 |
+| TS-IMPL-037 | [#1035](https://github.com/toddysm/custos/issues/1035) | Kubernetes-backed connector hooks, bounded confidential I/O, immutable invocation ownership and verified termination; no privileged Docker backend | 029, 032 |
+| TS-IMPL-034 | [#1017](https://github.com/toddysm/custos/issues/1017) | Activation/readiness/deployment wiring, durable audit and operational signals; consume durable wait and Kubernetes hook prerequisites; four-profile rendering and safe rollback | 025, 027, 028, 029, 033, 037 |
 | TS-IMPL-035 | [#1018](https://github.com/toddysm/custos/issues/1018) | Deployed receiver-to-Workflow failure/recovery and legacy regression coverage in hosted CI | 034 |
 | TS-IMPL-036 | [#1019](https://github.com/toddysm/custos/issues/1019) | Developer/operator setup, recovery and migration documentation; checked links/examples | 035 |
 
@@ -59,16 +61,22 @@ activation/control-plane responsibilities or 035's deployed certification gate.
 
 One valid sequential order is:
 
-`022 -> 023 -> 024 -> 030 -> 031 -> 032 -> 025 -> 026 -> 028 -> 027 -> 029 -> 033 -> 034 -> 035 -> 036`.
+`022 -> 023 -> 024 -> 030 -> 031 -> 032 -> 025 -> 026 -> 028 -> 027 -> 029 -> 033 -> 037 -> 034 -> 035 -> 036`.
+
+The owner approved 037 on 2026-10-30 after deployment inspection found that the
+Docker-only hook runner had no execution backend in the supplied Kubernetes
+profile. The two local 034 prerequisite commits remain parked in their owned
+checkout while 037 is implemented separately from the latest default branch.
+This adds one required delivery item (16 total), not a new polling owner.
 
 This order is not a new dependency chain. For example, lease storage (024),
 verification (026), dead-letter storage (030) and authorization (032) depend only
 on the design gate; their shared-file edits still require coordination.
 Do not stack a dependent implementation on an unmerged predecessor without
 separate authorization. Proposed branches follow
-`feature/trigger-m2-receivers/<task>-<instance>`; none exists yet.
+`feature/trigger-m2-receivers/<task>-<instance>`; live ownership is in the ledger.
 
-## Decisions that must be approved
+## Approved decision baseline
 
 | Decision | Recommendation | Owner/implementation |
 |---|---|---|
@@ -79,7 +87,8 @@ separate authorization. Proposed branches follow
 | D05 | Durable fenced replay and downstream dedup over the full recovery horizon; no reliance on a volatile/24-hour key alone | [#1004](https://github.com/toddysm/custos/issues/1004) / [#1013](https://github.com/toddysm/custos/issues/1013), [#1014](https://github.com/toddysm/custos/issues/1014), [#1016](https://github.com/toddysm/custos/issues/1016) |
 
 The design document owns the exact contracts, alternatives and migration impact.
-All five decisions are proposed, not implicitly approved by filing these issues.
+All five decisions were explicitly approved; approval and amendment history
+are recorded in #988 rather than inferred from issue creation.
 
 Revision 2 incorporates the initial Codex/Copilot findings: operator pauses need
 durable intent, cursor leases alone do not enforce the polling interval across

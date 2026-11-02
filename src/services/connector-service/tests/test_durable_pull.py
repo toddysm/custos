@@ -19,8 +19,8 @@ from custos_spl.pagination import Cursor, Page
 
 from custos_connector import create_app
 from custos_connector._telemetry import CURSOR_LAG_REGISTRY
-from custos_connector.audit import EVENT_PULL_LOOP_PAUSED
-from custos_connector.cursor.service import CursorInstanceUnavailable
+from custos_connector.audit import EVENT_CURSOR_ENCODING_MISMATCH, EVENT_PULL_LOOP_PAUSED
+from custos_connector.cursor.service import CursorEncodingMismatchHalt, CursorInstanceUnavailable
 from custos_connector.providers import wire_durable_pull_runtime
 from custos_connector.runtime import (
     DockerCliHookRunner,
@@ -41,6 +41,127 @@ from tests._pull import (
     settings,
     start_demand,
 )
+
+
+async def test_redacted_plugin_mismatch_retains_trusted_migration_target() -> None:
+    """Keep operator/audit migration context without reintroducing private plugin diagnostics."""
+    providers, metadata, plugin, publisher = memory_runtime(PullClock())
+    await seed_instance(providers)
+    start_demand(metadata)
+    assert providers.pull_demand_reconciler is not None and providers.cursor_service is not None
+    await providers.pull_demand_reconciler.reconcile(WS)
+    private = "private-plugin-diagnostic"
+    plugin._result = HookRunResult(
+        0,
+        json.dumps(
+            {
+                "ok": False,
+                "error": {
+                    "code": "cursor-encoding-mismatch",
+                    "detail": private,
+                    "data": {"persistedEncoding": private, "pluginEncoding": private},
+                },
+            }
+        ).encode(),
+        private.encode(),
+    )
+    with pytest.raises(CursorEncodingMismatchHalt) as halted:
+        await providers.cursor_service.tick(WS, INSTANCE)
+    assert halted.value.plugin_encoding == "unit-v1"
+    assert halted.value.persisted_encoding == "unit-v1"
+    audits = [
+        event
+        for _, event in metadata.append_audit_calls
+        if event.event_type == EVENT_CURSOR_ENCODING_MISMATCH
+    ]
+    assert len(audits) == 1
+    assert audits[0].payload["pluginEncoding"] == "unit-v1"
+    assert private not in repr(dict(audits[0].payload))
+    assert private not in str(halted.value)
+    assert not publisher.published
+
+
+async def test_lost_hook_result_keeps_durable_fence_after_verified_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new replica cannot repeat a possible upstream effect after a lost private response."""
+    from tests.test_kubernetes_hooks import IMAGE, Transport
+    from tests.test_kubernetes_hooks import runner as kubernetes_runner
+
+    clock = PullClock()
+    providers, metadata, _, publisher = memory_runtime(clock)
+    transport = Transport()
+    effects: list[str] = []
+
+    async def lose_reply(*args: object) -> NoReturn:
+        """Record an upstream effect, then lose its response."""
+        effects.append("effect")
+        transport.started.set()
+        raise OSError("synthetic response loss")
+
+    monkeypatch.setattr(transport, "execute", lose_reply)
+    providers = wire_durable_pull_runtime(
+        providers,
+        settings(),
+        plugin_invoker=PluginInvoker(kubernetes_runner(transport)),
+    )
+    await seed_instance(providers, image_ref=IMAGE)
+    start_demand(metadata)
+    assert providers.pull_demand_reconciler is not None and providers.cursor_service is not None
+    await providers.pull_demand_reconciler.reconcile(WS)
+    with pytest.raises(PluginCleanupFailed):
+        await providers.cursor_service.tick(WS, INSTANCE)
+    assert transport.pod is not None and transport.pod.terminated
+    assert not transport.released and not publisher.published
+    clock.advance(61)
+    with pytest.raises(PullTickBlocked, match="invocation_unconfirmed"):
+        await metadata.acquire_pull_tick(
+            WorkspaceId(WS),
+            ConnectorInstanceId(INSTANCE),
+            "another-replica",
+            ttl_seconds=60,
+        )
+    assert effects == ["effect"]
+
+
+@pytest.mark.parametrize(
+    "body,exit_code",
+    [
+        ({"ok": True, "result": {"events": "invalid"}}, 0),
+        ({"ok": True, "result": {"events": [], "nextCursor": {"encoding": ""}}}, 0),
+        ({"ok": True, "result": {"events": []}}, 7),
+    ],
+)
+async def test_invalid_completed_response_preserves_the_invocation_fence(
+    body: Mapping[str, Any],
+    exit_code: int,
+) -> None:
+    """An unusable response cannot discard possible upstream effects and enable another poll."""
+    clock = PullClock()
+    providers, metadata, plugin, publisher = memory_runtime(clock)
+    await seed_instance(providers)
+    start_demand(metadata)
+    assert providers.pull_demand_reconciler is not None and providers.cursor_service is not None
+    await providers.pull_demand_reconciler.reconcile(WS)
+    plugin._result = HookRunResult(exit_code, json.dumps(body).encode(), b"")
+    with pytest.raises(PluginCleanupFailed) as failure:
+        await providers.cursor_service.tick(WS, INSTANCE)
+    assert failure.value.termination_confirmed
+    paused = [
+        event
+        for _, event in metadata.append_audit_calls
+        if event.event_type == EVENT_PULL_LOOP_PAUSED
+    ]
+    assert paused[-1].payload["terminationConfirmed"] is True
+    clock.advance(61)
+    with pytest.raises(PullTickBlocked, match="invocation_unconfirmed"):
+        await metadata.acquire_pull_tick(
+            WorkspaceId(WS),
+            ConnectorInstanceId(INSTANCE),
+            "another-replica",
+            ttl_seconds=60,
+        )
+    assert not publisher.published and len(plugin.calls) == 1
 
 
 @pytest.mark.parametrize("resume_only", [False, True])

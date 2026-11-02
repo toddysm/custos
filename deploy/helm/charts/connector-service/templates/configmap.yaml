@@ -15,3 +15,13 @@ data:
   CONN_CATALOG_ENDPOINT: {{ .Values.catalog.endpoint | quote }}
   CONN_AUTHZ_ENDPOINT: {{ .Values.auth.endpoint | quote }}
   CONN_SIDECAR_MTLS_ISSUER: {{ .Values.sidecar.mtlsIssuer | quote }}
+  {{- if .Values.hookRuntime.enabled }}
+  CONN_HOOK_BACKEND: kubernetes
+  CONN_HOOK_NAMESPACE: {{ required "hookRuntime.namespace is required" .Values.hookRuntime.namespace | quote }}
+  CONN_HOOK_HELPER_IMAGE: {{ required "hookRuntime.helperImage is required" .Values.hookRuntime.helperImage | quote }}
+  CONN_HOOK_SERVICE_ACCOUNT: {{ .Values.hookRuntime.serviceAccount | quote }}
+  CONN_HOOK_ARCHITECTURE: {{ .Values.hookRuntime.architecture | quote }}
+  CONN_HOOK_RUNTIME_CLASS: {{ .Values.hookRuntime.runtimeClass | quote }}
+  CONN_HOOK_IMAGE_PULL_SECRETS: {{ join "," .Values.hookRuntime.imagePullSecrets | quote }}
+  CONN_CONNECTOR_REGISTRY_URL: {{ required "hookRuntime.registryUrl is required" .Values.hookRuntime.registryUrl | quote }}
+  {{- end }}

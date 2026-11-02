@@ -90,6 +90,11 @@ spec:
         {{- end }}
     {{- end }}
   egress:
+    {{- if .Values.hookRuntime.enabled }}
+    {{- with .Values.hookRuntime.controllerEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- end }}
     # DNS resolution — always required.
     - to:
         - namespaceSelector:
