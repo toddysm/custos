@@ -58,7 +58,11 @@ bundle: clean
 	  fi; \
 	  file="$$(echo "$$save" | sed -E 's#[/:@]#_#g').tar"; \
 	  echo "    $$save -> images/$$file"; \
-	  docker pull -q "$$save" >/dev/null; \
+	  if [[ "$$save" == "$(CUSTOS_IMAGE_PREFIX)connector-hook-bridge-arm64:"* ]]; then \
+	    docker pull --platform linux/arm64 -q "$$save" >/dev/null; \
+	  else \
+	    docker pull -q "$$save" >/dev/null; \
+	  fi; \
 	  docker save -o "$(STAGE)/images/$$file" "$$save"; \
 	done
 

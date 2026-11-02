@@ -614,3 +614,40 @@ async def test_force_health_check_bypasses_cache_and_emits_invoked() -> None:
     event_types = [event.event_type for _ws, event in metadata.append_audit_calls]
     assert EVENT_HEALTH_CHECK_INVOKED in event_types
     assert EVENT_HEALTH_CHECK_COMPLETED in event_types
+
+
+@pytest.mark.parametrize("kind", ["healthy", "unhealthy", "error"])
+async def test_health_diagnostics_do_not_reach_audits_cache_or_activation_errors(kind: str) -> None:
+    """Plugin diagnostics may echo credentials; expose only controller-owned status categories."""
+    invoker = _FakePluginInvoker()
+    service, _instances, catalog, metadata = _build_service_with_invoker(invoker)
+    await _register_type(catalog, "http", "1.0.0")
+    created = await service.create(
+        "ws-1",
+        type="http",
+        version="1.0.0",
+        actor="user:ops",
+        enabled=False,
+    )
+    marker = "private-health-diagnostic"
+    result = (
+        UpstreamUnreachable(marker)
+        if kind == "error"
+        else _health(
+            healthy=kind == "healthy",
+            detail=marker,
+        )
+    )
+    invoker.queue(result)
+    snapshot = await service.force_health_check("ws-1", str(created.instance_id), actor="user:ops")
+    cached = await service.get_health("ws-1", str(created.instance_id))
+    assert marker not in repr(snapshot) and marker not in repr(cached)
+    assert snapshot.healthy is (kind == "healthy")
+    invoker.queue(result)
+    if kind == "healthy":
+        assert (await service.enable("ws-1", str(created.instance_id), actor="user:ops")).enabled
+    else:
+        with pytest.raises(ActivationProbeFailed) as failure:
+            await service.enable("ws-1", str(created.instance_id), actor="user:ops")
+        assert marker not in str(failure.value)
+    assert all(marker not in repr(dict(event.payload)) for _, event in metadata.append_audit_calls)
