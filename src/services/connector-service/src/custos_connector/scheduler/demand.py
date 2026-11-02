@@ -32,6 +32,10 @@ class PullDemandReconciler:
         self._default_interval = pull_interval(default_interval_seconds)
         self._lock = asyncio.Lock()
 
+    async def check_ready(self) -> None:
+        """Verify durable control storage before starting the lifespan's poll driver."""
+        await self._controls.check_pull_control_ready()
+
     async def reconcile(self, workspace_id: str) -> int:
         """Apply current intent, preserve native listeners, and remove absent local demand."""
         async with self._lock:

@@ -52,6 +52,8 @@ following `CONN_*` environment variables.
 | `CONN_LEASE_MAX_CONCURRENT` | No | `16` | Per-step concurrent-lease cap. |
 | `CONN_PULL_LOOP_MIN_INTERVAL_SEC` | No | `10` | Minimum interval between pull-loop ticks. |
 | `CONN_DURABLE_PULL_ENABLED` | No | `false` | Wire durable policy, shared due-time/cursor ownership and private demand reconciliation; requires acknowledged publication and authenticated Trigger identity. |
+| `CONN_PULL_WORKER_ENABLED` | No | `false` | Start lifespan-owned discovery and the existing poll scheduler; requires durable pull mode and receiver discovery revision 13. |
+| `CONN_RECEIVER_DRAIN_SECONDS` | No | `330` | Graceful worker drain budget (1..3600); overdue tasks are cancelled and joined before transports close. |
 | `CONN_PULL_DEFAULT_INTERVAL_SEC` | No | `60` | Default for pull starts/waits without an explicit interval. Keep aligned with Trigger's `TRIGGER_POLLER_DEFAULT_INTERVAL_SECONDS`. |
 | `ENVIRONMENT` | No | `development` | Operational env tag. The dev-shim refuses to start when this is `production` (case-insensitive). |
 | `APP_API_TOKEN` | For private Trigger RPCs | unset | Token shared only with the local Dapr sidecar; empty/blank fails closed. |
@@ -140,6 +142,20 @@ optional `ConnectorPullControlProvider`. It requires metadata revision **11**;
 the shared metadata minimum stays **4**. A no-op publisher cannot be used in this
 mode. The flag is default-off: legacy embedded collaborators retain their former
 behavior until explicitly upgraded.
+
+`CONN_PULL_WORKER_ENABLED=true` independently activates the lifespan-owned drivers.
+Storage readiness is checked before work starts. Discovery reads at most 50
+workspace IDs per page, including paused/fenced controls with no active demand.
+The same scheduler remains the only upstream poller. A failed worker makes
+readiness fail; provider outages are logged with safe error categories and retried.
+
+Shutdown stops admitting new passes and drains existing work for
+`CONN_RECEIVER_DRAIN_SECONDS`. After that budget, cancellation still waits for
+owned hook cleanup before closing HTTP clients and factory-owned pools. An
+uncertain invocation stays fenced for audited recovery; shutdown never permits
+automatic reexecution. Deployment termination grace must include both this drain
+budget and the hook cleanup budget. Disabling the worker leaves administration,
+pause state and durable demand intact.
 
 Controls persist operator pause, revision, next eligible time, update actor/time,
 shared consecutive failures and separate native/Trigger interval contributions.

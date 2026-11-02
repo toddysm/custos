@@ -63,9 +63,37 @@ before effects. A retry cannot mutate a recreated entry or rematch newly added
 waits; pending targets remain recoverable after their registrations disappear.
 Version-2 resumes require Workflow's 204 consumer acknowledgement;
 202 submission alone never marks replay successful. The paged retention collaborator preserves live replay
-claims; automatic workspace discovery and periodic sweeping remain #1017.
+claims; the default-off lifecycle drivers below run bounded periodic sweeps.
 See the [administration contract](../../../docs/developers/trigger-api.md#dead-letter-administration)
 for limits, error codes, original-target replay and timeout recovery.
+
+## Receiver worker lifecycle
+
+`TRIGGER_RECEIVER_WORKERS_ENABLED=true` activates lifespan-owned scheduled
+publication, pending-delivery reconciliation, Connector demand hints and audited
+retention. It is separate from configuration authoring, source consumption and
+durable dispatch; those prerequisites must already be enabled. Set a stable
+`TRIGGER_DEPLOYMENT_ID` shared by replicas of the same scheduler deployment.
+Receiver discovery requires metadata revision 13 and includes retained recovery
+state even when the original subscription is gone. It is an internal storage
+capability, not the unbounded Auth workspace-list API or an authorization bypass.
+
+Each driver holds at most 50 workspace IDs and one workspace's continuation.
+Scheduled due pages and within-selection delivery continuations are preserved
+between passes. A null cursor ends a scan pass, not outstanding work: subsequent
+passes revisit pending targets. Retention uses the existing audited operations,
+protects pending selections and does not erase receipt identities or schedule
+replay proofs. Runtime audit persists safe identifiers/counts rather than raw
+events, credentials or exception diagnostics; metric labels use fixed operation
+and outcome categories, not workspace IDs.
+
+`TRIGGER_RECEIVER_DRAIN_SECONDS` defaults to 330 (valid range 1..3600).
+Shutdown first stops admission, drains current passes, then cancels and joins
+overdue work before closing borrowed transports or factory-owned pools.
+Readiness becomes false during drain or when a worker fails. Disabling workers
+does not delete persisted state or disable existing manual/internal routes.
+Deployment activation and deployed resilience/capacity certification remain
+separate gates within [#988](https://github.com/toddysm/custos/issues/988).
 
 ## Layout
 

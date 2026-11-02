@@ -207,7 +207,8 @@ async def test_telemetry_sink_forwards_to_inner_sink() -> None:
     assert inner.events == ["trigger.matched", "custom.unmapped"]
     points = _counter_points()
     # Unmapped events are recorded under the "other" stage rather than dropped.
-    assert (telemetry.STAGE_OTHER, "custom.unmapped") in points
+    assert (telemetry.STAGE_OTHER, "other") in points
+    assert (telemetry.STAGE_OTHER, "custom.unmapped") not in points
 
 
 async def test_default_inner_sink_is_noop() -> None:

@@ -275,6 +275,7 @@ class ScheduledScan:
     planned: int = 0
     published: int = 0
     suppressed: int = 0
+    has_more: bool = False
 
 
 class ScheduledReceiver:
@@ -306,6 +307,7 @@ class ScheduledReceiver:
         self._lock = asyncio.Lock()
         self._due_cutoff: datetime | None = None
         self._due_cursor: Cursor | None = None
+        self._pending_more = False
 
     async def _heartbeat(self) -> datetime:
         """Refresh provider authority before side effects and during cooperative cron counting."""
@@ -384,7 +386,13 @@ class ScheduledReceiver:
             self._due_cursor = page.next_cursor
             if self._due_cursor is None:
                 self._due_cutoff = None
-            return ScheduledScan(True, planned, published, suppressed)
+            return ScheduledScan(
+                True,
+                planned,
+                published,
+                suppressed,
+                self._due_cursor is not None or self._pending_more,
+            )
 
     async def _recover(self) -> tuple[int, int]:
         """Retry durable pending occurrences with their original event identities and counts."""
@@ -394,6 +402,7 @@ class ScheduledReceiver:
             self._lease.deployment_id,
             limit=self.page_size,
         )
+        self._pending_more = page.next_cursor is not None
         published = suppressed = 0
         for fire in page.items:
             accepted = await self._publish(fire)

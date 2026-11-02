@@ -141,6 +141,10 @@ from custos_spl.interfaces.pull_control import (
     require_pull_ready,
     validate_pause_audit,
 )
+from custos_spl.interfaces.receiver_workspaces import (
+    RECEIVER_WORKSPACE_SCHEMA_REVISION,
+    RECEIVER_WORKSPACE_SCOPE,
+)
 from custos_spl.interfaces.scheduler import (
     SCHEDULER_SCHEMA_REVISION,
     PendingScheduleFire,
@@ -699,6 +703,62 @@ class PgMetadataAdapter:
         """Return authoritative database time for retention planning."""
         async with self._delivery_transaction() as conn:
             return await _scheduler_now(conn)
+
+    async def check_receiver_workspaces_ready(self) -> None:
+        """Require recovery selections without raising the shared metadata minimum."""
+        async with self._delivery_transaction() as conn:
+            try:
+                exists = await conn.fetchval(
+                    "SELECT EXISTS(SELECT 1 FROM custos_meta.adapter_revisions "
+                    "WHERE interface_name=$1 AND revision=$2)",
+                    INTERFACE_NAME,
+                    RECEIVER_WORKSPACE_SCHEMA_REVISION,
+                )
+            except UndefinedTableError as exc:
+                raise MigrationRequired(
+                    [(INTERFACE_NAME, RECEIVER_WORKSPACE_SCHEMA_REVISION)]
+                ) from exc
+            if not exists:
+                raise MigrationRequired([(INTERFACE_NAME, RECEIVER_WORKSPACE_SCHEMA_REVISION)])
+
+    async def query_receiver_workspaces(
+        self, *, cursor: Cursor | None = None, limit: int | None = None
+    ) -> Page[WorkspaceId]:
+        """Bound each table's ID projection and retain workspaces with orphaned durable work."""
+        size = query_page_limit(limit)
+        after = decode_query_cursor(cursor, RECEIVER_WORKSPACE_SCOPE)
+        tables = (
+            "subscription",
+            "resume_subscription",
+            "schedule",
+            "pending_schedule_fire",
+            "dead_letter",
+            "bulk_replay_command",
+            "source_delivery_selection",
+            "delivery_receipt",
+            "connector_pull_control",
+            "connector_cursor",
+        )
+        query = " UNION ".join(
+            '(SELECT DISTINCT workspace_id COLLATE "C" AS workspace_id '
+            f"FROM custos_state.{table} "
+            'WHERE ($1::text IS NULL OR workspace_id COLLATE "C" > $1) '
+            "ORDER BY workspace_id LIMIT $2)"
+            for table in tables
+        )
+        async with self._delivery_transaction() as conn:
+            rows = await conn.fetch(
+                f"SELECT workspace_id FROM ({query}) AS workspaces "
+                'ORDER BY workspace_id COLLATE "C" LIMIT $2',
+                after,
+                size + 1,
+            )
+        return Page(
+            (WorkspaceId(row["workspace_id"]) for row in rows[:size]),
+            encode_query_cursor(RECEIVER_WORKSPACE_SCOPE, rows[size - 1]["workspace_id"])
+            if len(rows) > size
+            else None,
+        )
 
     async def put_workflow_start(self, run: Run, start: WorkflowStart) -> WorkflowStart:
         """Commit Run and protocol atomically; never adopt an unversioned legacy run."""

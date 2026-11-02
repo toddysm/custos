@@ -29,8 +29,10 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import AsyncIterator, Mapping
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import TYPE_CHECKING
+
+from custos_spl.interfaces.receiver_workspaces import ReceiverWorkspaceProvider
 
 from custos_trigger._version import __version__
 from custos_trigger.api import register_exception_handlers
@@ -51,6 +53,7 @@ from custos_trigger.receivers import build_internal_event_router
 from custos_trigger.receivers.sources import (
     CONNECTOR_EVENTS_PATH,
     NORMALIZED_EVENTS_PATH,
+    ScopedEvent,
     build_source_event_router,
 )
 from custos_trigger.receivers.webhook import DaprWebhookTransport, build_webhook_router
@@ -77,7 +80,9 @@ from custos_trigger.settings import (
     ENV_WORKFLOW_ENDPOINT,
     ENV_WORKFLOW_EVENTS_TOPIC,
     ENV_WORKFLOW_NAMESPACE,
+    ReceiverWorkerSettings,
     read_receiver_configuration_enabled,
+    read_receiver_worker_settings,
     read_source_receivers_enabled,
     read_webhook_receiver_enabled,
 )
@@ -92,6 +97,7 @@ if TYPE_CHECKING:
     from custos_callctx import CallContextVerifier
     from fastapi import FastAPI
 
+    from custos_trigger.events import NormalizedEvent
     from custos_trigger.pipeline.dispatch import AuditSink, Dispatcher
 
 logger = logging.getLogger("custos_trigger")
@@ -127,6 +133,7 @@ def create_app(
     source_receivers_enabled: bool | None = None,
     webhook_receiver_enabled: bool | None = None,
     webhook_transport: DaprWebhookTransport | None = None,
+    receiver_worker_settings: ReceiverWorkerSettings | None = None,
 ) -> FastAPI:
     """Build and return the Trigger Service FastAPI application.
 
@@ -151,9 +158,9 @@ def create_app(
         audit_sink: Audit surface the resume RPCs (and the internally-built
             dispatcher) emit to. When ``None`` (the default) the lifespan wires
             a :class:`~custos_trigger._telemetry.TelemetryAuditSink`, which
-            records OTel pipeline counters/spans and forwards to a
-            :class:`~custos_trigger.pipeline.dispatch.NoopAuditSink`. Tests
-            inject a recording sink to assert
+            records pipeline counters/spans and persists safe audit evidence
+            when receiver workers are enabled; legacy mode retains the no-op
+            inner sink. Tests inject a recording sink to assert
             ``resume.subscription.divergent`` emission.
         receiver_configuration_enabled: Default-off compatibility gate, read from
             ``TRIGGER_RECEIVER_CONFIGURATION_ENABLED`` when omitted. Enable only
@@ -169,12 +176,18 @@ def create_app(
             and an explicit authenticated Gateway identity.
         webhook_transport: Injected verifier/publisher transport. Its HTTP client remains
             caller-owned; the default transport shares the lifespan-owned client.
+        receiver_worker_settings: Typed default-off worker activation and deployment identity.
 
     The factory is import-safe: no DSN lookups, no socket connections. All
     side-effecting work happens inside the FastAPI lifespan context.
     """
     from fastapi import FastAPI
 
+    workers_config = (
+        receiver_worker_settings
+        if receiver_worker_settings is not None
+        else read_receiver_worker_settings(os.environ)
+    )
     effective_authz = (
         authz_endpoint
         if authz_endpoint is not None
@@ -238,7 +251,9 @@ def create_app(
         )
 
     @asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    async def runtime_lifespan(app: FastAPI) -> AsyncIterator[None]:
+        app.state.ready = False
+        app.state.receiver_runtime = None
         app.state.receiver_configuration_enabled = (
             receiver_configuration_enabled
             if receiver_configuration_enabled is not None
@@ -268,12 +283,28 @@ def create_app(
 
         app.state.selector_evaluator = SelectorEvaluator()
 
-        # Audit surface the resume RPCs + dispatcher emit to. The default
-        # TelemetryAuditSink (TS-IMPL-019) records OTel pipeline
-        # counters/spans for every event and forwards to a Noop inner sink.
-        from custos_trigger._telemetry import TelemetryAuditSink
+        # Activated workers require durable audit; legacy embedded mode keeps
+        # its existing explicitly injectable/no-op audit boundary.
+        from custos_trigger._telemetry import AuditWriter, DurableAuditSink, TelemetryAuditSink
 
-        effective_audit: AuditSink = audit_sink if audit_sink is not None else TelemetryAuditSink()
+        if workers_config.enabled and (
+            not effective_sources
+            or not isinstance(metadata_store, ReceiverWorkspaceProvider)
+            or not isinstance(metadata_store, AuditWriter)
+        ):
+            raise ValueError(
+                "receiver workers require source consumption, discovery and audit storage"
+            )
+
+        effective_audit: AuditSink = (
+            audit_sink
+            if audit_sink is not None
+            else TelemetryAuditSink(
+                DurableAuditSink(metadata_store)
+                if workers_config.enabled and isinstance(metadata_store, AuditWriter)
+                else None
+            )
+        )
         app.state.audit_sink = effective_audit
 
         # Default resume-subscription TTL applied when a RegisterResumeSubscription
@@ -389,7 +420,7 @@ def create_app(
             )
 
         try:
-            if effective_webhooks:
+            if effective_webhooks or workers_config.enabled:
                 if webhook_transport is not None:
                     app.state.webhook_transport = webhook_transport
                 else:
@@ -410,12 +441,75 @@ def create_app(
                         topic=normalized_topic,
                         api_token=os.environ.get("DAPR_API_TOKEN"),
                     )
-            app.state.ready = True
-            logger.info("trigger-service is ready")
-            yield
+            async with AsyncExitStack() as workers:
+                if workers_config.enabled:
+                    import httpx
+
+                    from custos_trigger.clients import read_dapr_endpoint
+                    from custos_trigger.clients.pull_demand import DaprPullDemandClient
+                    from custos_trigger.receiver_runtime import ReceiverRuntime
+
+                    reliable = app.state.dispatcher.reliable
+                    if reliable is None or not isinstance(
+                        metadata_store, ReceiverWorkspaceProvider
+                    ):
+                        raise ValueError("receiver workers require durable dispatch and discovery")
+                    if owned_http_client is None:
+                        owned_http_client = httpx.AsyncClient()
+
+                    async def publish_schedule(event: NormalizedEvent) -> None:
+                        """Publish scheduled events through the scoped normalized broker path."""
+                        await app.state.webhook_transport.publish(
+                            ScopedEvent(
+                                schema_version="1",
+                                workspace_id=event.data["workspace"],
+                                event=event,
+                            )
+                        )
+
+                    runtime = ReceiverRuntime(
+                        metadata_store,
+                        reliable,
+                        DaprPullDemandClient(
+                            owned_http_client,
+                            read_dapr_endpoint(
+                                os.environ,
+                                app_id=os.environ.get(ENV_CONNECTOR_APP_ID, "connector-service"),
+                            ),
+                            api_token=os.environ.get("DAPR_API_TOKEN"),
+                        ),
+                        publish_schedule,
+                        effective_audit,
+                        deployment_id=workers_config.deployment_id,
+                        drain_seconds=workers_config.drain_seconds,
+                        lease_seconds=workers_config.lease_seconds,
+                        renew_seconds=workers_config.renew_seconds,
+                    )
+                    app.state.receiver_runtime = runtime
+                    workers.push_async_callback(runtime.aclose)
+                    await runtime.start()
+                app.state.ready = True
+                logger.info("trigger-service is ready")
+                try:
+                    yield
+                finally:
+                    app.state.ready = False
         finally:
+            app.state.ready = False
             if owned_http_client is not None:
                 await owned_http_client.aclose()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        """Close factory-owned storage even when schema/readiness fails before startup yields."""
+        try:
+            async with runtime_lifespan(app):
+                yield
+        finally:
+            app.state.ready = False
+            bound = getattr(app.state, "providers", None)
+            if providers is None and isinstance(bound, Providers) and bound.close is not None:
+                await bound.close()
 
     app = FastAPI(
         title="Custos Trigger Service",

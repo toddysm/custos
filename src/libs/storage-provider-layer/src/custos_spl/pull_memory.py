@@ -27,6 +27,7 @@ from custos_spl.interfaces.pull_control import (
     require_pull_ready,
     validate_pause_audit,
 )
+from custos_spl.interfaces.receiver_workspaces import receiver_workspace_page
 from custos_spl.interfaces.scheduler import utc_instant
 from custos_spl.pagination import (
     Cursor,
@@ -65,6 +66,19 @@ class MemoryPullControl:
 
     async def check_pull_control_ready(self) -> None:
         """Memory is ready at construction; this does not assert production restart durability."""
+
+    async def check_receiver_workspaces_ready(self) -> None:
+        """Expose memory-owned polling state without claiming restart durability."""
+
+    async def query_receiver_workspaces(
+        self, *, cursor: Cursor | None = None, limit: int | None = None
+    ) -> Page[WorkspaceId]:
+        """Keep paused/fenced controls and legacy cursor workspaces discoverable."""
+        return receiver_workspace_page(
+            (key[0] for rows in (self._pull_controls, self._pull_cursor_rows) for key in rows),
+            cursor=cursor,
+            limit=limit,
+        )
 
     async def pull_now(self) -> datetime:
         """Use the shared storage clock rather than a worker's local scheduling clock."""

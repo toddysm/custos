@@ -30,9 +30,10 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
+from custos_spl.interfaces.receiver_workspaces import ReceiverWorkspaceProvider
 from fastapi.exceptions import RequestValidationError
 from prometheus_client import make_asgi_app
 from starlette.requests import Request
@@ -67,6 +68,7 @@ from custos_connector.providers import (
     schema_gate_explainer,
     verify_schema_revisions,
 )
+from custos_connector.pull_runtime import PullRuntime
 from custos_connector.settings import Settings, load_settings
 
 if TYPE_CHECKING:
@@ -118,12 +120,13 @@ def create_app(
         raise ValueError("durable pull mode requires a bound control provider")
 
     @asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    async def runtime_lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.settings = effective_settings
         local_providers = providers if providers is not None else load_providers(effective_settings)
         app.state.providers = local_providers
         app.state.ready = False
         app.state.schema_gate_error = None
+        app.state.pull_runtime = None
         try:
             await verify_schema_revisions(local_providers)
             app.state.ready = True
@@ -164,8 +167,34 @@ def create_app(
                 app.state.ready = False
                 await local_providers.hook_readiness()
                 app.state.ready = app.state.schema_gate_error is None
-            yield
+            async with AsyncExitStack() as workers:
+                if effective_settings.pull_worker_enabled and app.state.ready:
+                    discovery = local_providers.metadata_store
+                    scheduler = local_providers.pull_loop_scheduler
+                    demand = local_providers.pull_demand_reconciler
+                    if (
+                        not isinstance(discovery, ReceiverWorkspaceProvider)
+                        or scheduler is None
+                        or demand is None
+                    ):
+                        raise ValueError(
+                            "durable pull requires bounded discovery and runtime wiring"
+                        )
+                    runtime = PullRuntime(
+                        discovery,
+                        scheduler,
+                        demand,
+                        drain_seconds=effective_settings.receiver_drain_seconds,
+                    )
+                    app.state.pull_runtime = runtime
+                    workers.push_async_callback(runtime.aclose)
+                    await runtime.start()
+                try:
+                    yield
+                finally:
+                    app.state.ready = False
         finally:
+            app.state.ready = False
             # Release any HTTP transport the IdentityResolverRegistry owns
             # (CONN-IMPL-015). The registry's aclose() is a no-op when no
             # transport was injected (the unit-test path), so this is safe
@@ -203,6 +232,17 @@ def create_app(
                     logger.exception(
                         "registration registry http client aclose failed during shutdown"
                     )
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        """Close factory-owned pools after worker/transport cleanup, including failed startup."""
+        try:
+            async with runtime_lifespan(app):
+                yield
+        finally:
+            bound = getattr(app.state, "providers", None)
+            if providers is None and isinstance(bound, Providers) and bound.close is not None:
+                await bound.close()
 
     app = FastAPI(
         title="Custos Connector Service",

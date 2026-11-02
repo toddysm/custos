@@ -109,7 +109,9 @@ ENV_APP_API_TOKEN: Final[str] = "APP_API_TOKEN"
 ENV_TRIGGER_APP_ID: Final[str] = "CONN_TRIGGER_APP_ID"
 ENV_TRIGGER_NAMESPACE: Final[str] = "CONN_TRIGGER_NAMESPACE"
 ENV_DURABLE_PULL_ENABLED: Final[str] = "CONN_DURABLE_PULL_ENABLED"
+ENV_PULL_WORKER_ENABLED: Final[str] = "CONN_PULL_WORKER_ENABLED"
 ENV_PULL_DEFAULT_INTERVAL_SEC: Final[str] = "CONN_PULL_DEFAULT_INTERVAL_SEC"
+ENV_RECEIVER_DRAIN_SECONDS: Final[str] = "CONN_RECEIVER_DRAIN_SECONDS"
 
 DEFAULT_OCI_REFERRERS_TIMEOUT_MS: Final[int] = 5000
 DEFAULT_PUBLISH_MAX_BODY_MB: Final[int] = 4
@@ -177,9 +179,20 @@ class Settings:
     hook_runtime_class: str | None = None
     hook_architecture: str = "amd64"
     hook_image_pull_secrets: tuple[str, ...] = ()
+    receiver_drain_seconds: int = 330
+    pull_worker_enabled: bool = False
 
     def __post_init__(self) -> None:
         """Validate hook selection and durable-polling prerequisites before resource creation."""
+        if type(self.pull_worker_enabled) is not bool:
+            raise SettingsError("CONN_PULL_WORKER_ENABLED must be a boolean")
+        if self.pull_worker_enabled and not self.durable_pull_enabled:
+            raise SettingsError("pull worker requires durable pull mode")
+        if (
+            type(self.receiver_drain_seconds) is not int
+            or not 1 <= self.receiver_drain_seconds <= 3600
+        ):
+            raise SettingsError("CONN_RECEIVER_DRAIN_SECONDS must be an integer in 1..3600")
         if self.hook_backend not in {"docker", "kubernetes"}:
             raise SettingsError("CONN_HOOK_BACKEND must be docker or kubernetes")
         if self.hook_architecture not in {"amd64", "arm64"}:
@@ -255,14 +268,14 @@ def _opt_int(name: str, env: dict[str, str], default: int, *, minimum: int | Non
     return value
 
 
-def _durable_pull_enabled(env: dict[str, str]) -> bool:
-    """Parse the default-off compatibility gate without accepting unknown values."""
-    value = env.get(ENV_DURABLE_PULL_ENABLED, "").strip().lower()
+def _read_gate(env: dict[str, str], name: str) -> bool:
+    """Parse a default-off gate without accepting unknown values."""
+    value = env.get(name, "").strip().lower()
     if value in ("", "false", "0"):
         return False
     if value in ("true", "1"):
         return True
-    raise SettingsError("CONN_DURABLE_PULL_ENABLED must be true or false")
+    raise SettingsError(f"{name} must be true or false")
 
 
 def load_settings(env: dict[str, str] | None = None) -> Settings:
@@ -316,7 +329,9 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         app_api_token=src.get(ENV_APP_API_TOKEN),
         trigger_app_id=src.get(ENV_TRIGGER_APP_ID, "trigger-service").strip(),
         trigger_namespace=src.get(ENV_TRIGGER_NAMESPACE, "").strip() or None,
-        durable_pull_enabled=_durable_pull_enabled(src),
+        durable_pull_enabled=_read_gate(src, ENV_DURABLE_PULL_ENABLED),
+        pull_worker_enabled=_read_gate(src, ENV_PULL_WORKER_ENABLED),
+        receiver_drain_seconds=_opt_int(ENV_RECEIVER_DRAIN_SECONDS, src, 330, minimum=1),
         pull_default_interval_sec=_opt_int(
             ENV_PULL_DEFAULT_INTERVAL_SEC, src, 60, minimum=PULL_LOOP_HARD_FLOOR_SEC
         ),
@@ -353,6 +368,8 @@ __all__ = [
     "ENV_PUBLISH_MAX_BODY_MB",
     "ENV_PULL_DEFAULT_INTERVAL_SEC",
     "ENV_PULL_LOOP_MIN_INTERVAL_SEC",
+    "ENV_PULL_WORKER_ENABLED",
+    "ENV_RECEIVER_DRAIN_SECONDS",
     "ENV_SIDECAR_DEFAULT_TTL",
     "ENV_SIDECAR_MTLS_ISSUER",
     "ENV_TRIGGER_APP_ID",

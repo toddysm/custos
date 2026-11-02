@@ -19,6 +19,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from custos_connector.providers import MigrationRequired, schema_gate_explainer
+from custos_connector.pull_runtime import PullRuntime
 
 router = APIRouter()
 
@@ -31,7 +32,13 @@ async def healthz() -> dict[str, str]:
 
 @router.get("/readyz", include_in_schema=False)
 async def readyz(request: Request) -> JSONResponse:
-    """Readiness probe — 503 while the schema gate is failing."""
+    """Return 503 for schema failure or a stopped/unhealthy owned receiver task."""
+    runtime = getattr(request.app.state, "pull_runtime", None)
+    if isinstance(runtime, PullRuntime) and not runtime.healthy:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not_ready", "detail": "connector receivers are not healthy"},
+        )
     if getattr(request.app.state, "ready", False):
         return JSONResponse({"status": "ready"})
     error = getattr(request.app.state, "schema_gate_error", None)
