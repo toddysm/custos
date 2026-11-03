@@ -1,7 +1,7 @@
 # Trigger M2 receivers - product requirements and engineering design
 
-- Status: **Runtime prerequisite and implementation authorized; revision-5 amendment awaiting review.**
-- Planning format: full; revision 5 (production activity startup and bootstrap prerequisite).
+- Status: **Runtime prerequisite and Connector-owned issuer extension authorized; implementation in progress.**
+- Planning format: full; revision 6 (owner-approved Connector-owned credential issuance extension).
 - Tracking: [#988](https://github.com/toddysm/custos/issues/988).
 - Design work item: [#1004](https://github.com/toddysm/custos/issues/1004).
 - Updated: 2026-11-02; original baseline commit `e344ab2`.
@@ -696,6 +696,34 @@ truthy readiness for an unwired scheduler. This prerequisite does not duplicate
 [#763](https://github.com/toddysm/custos/issues/763)'s Kata-specific certification.
 
 #### Components and flow
+
+**Owner-approved issuer extension (2026-11-02T20:56:34.079-08:00).** Within
+[#1038](https://github.com/toddysm/custos/issues/1038), Connector Service owns
+real credential issuance through its existing identity resolvers. The sidecar
+must not select `StubCredentialMinter` in production or acquire general provider
+privileges. This replaces the earlier sidecar-to-provider ownership assumption.
+
+Authorize every issuance/refresh/release for the original workspace, execution
+principal, run, step, attempt, slot and requested capability. Obtain that scope
+from durable accepted execution/binding state, not caller-asserted instance IDs
+or credential references. Expired, completed, revoked, mismatched and unresolved
+attempts fail closed. Changed instance configuration must not retarget accepted
+authority. Use fresh credential-backed service contexts from #1037 on the
+control-plane hop; sandbox bootstrap proof is limited to its own attempt and
+never becomes a workspace-wide service-account credential.
+
+Preserve actual resolver material and provider expiry. A platform lease expiry
+is an authorization window, not a claim that a static upstream credential has
+expired. Represent unknown/non-expiring provider metadata explicitly; do not
+fabricate tokens, leases, credential expiries or stringify opaque credential
+objects. Credential material is returned only through the private runtime/
+sidecar boundary; durable records and audits retain references and sanitized
+metadata, not plaintext credentials.
+
+Complete and merge #1037's scoped execution contract before final integration
+of this #1038 extension. Keep its owned worktree intact and do not copy its
+unpublished implementation into this branch. Existing hosted review and merge
+gates remain binding; the extension stays in the same #1038 work item.
 
 ```text
 External source -> Gateway scoped webhook -> Trigger -> Connector VerifyWebhook

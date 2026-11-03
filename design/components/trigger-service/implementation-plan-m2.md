@@ -1,6 +1,6 @@
 # Trigger Service M2 implementation plan
 
-Status: **Runtime prerequisite authorized; amendment awaiting review.** Revision: 5. Updated: 2026-11-02.
+Status: **Runtime prerequisite and issuer extension authorized; implementation in progress.** Revision: 6. Updated: 2026-11-02.
 
 Parent: [#988](https://github.com/toddysm/custos/issues/988).
 Design: [#1004](https://github.com/toddysm/custos/issues/1004) and the
@@ -44,7 +44,7 @@ design gate [#1004](https://github.com/toddysm/custos/issues/1004).
 | TS-IMPL-033 | [#1016](https://github.com/toddysm/custos/issues/1016) | Protected recovery endpoints and retention; route-collision/concurrent-replay/expiry tests | 031, 032 |
 | TS-IMPL-037 | [#1035](https://github.com/toddysm/custos/issues/1035) | Kubernetes-backed connector hooks, bounded confidential I/O, immutable invocation ownership and verified termination; no privileged Docker backend | 029, 032 |
 | TS-IMPL-038 | [#1037](https://github.com/toddysm/custos/issues/1037) | Explicit workspace service-account execution identity, fresh authorized signed contexts and real Workflow/Connector request/response alignment across retries/restarts/child execution | 031, 032, 037 |
-| TS-IMPL-039 | [#1038](https://github.com/toddysm/custos/issues/1038) | Production activity startup/readiness and resource ownership; actual bootstrap issuer/verifier alignment with private attempt-scoped key/token delivery | 032 |
+| TS-IMPL-039 | [#1038](https://github.com/toddysm/custos/issues/1038) | Production activity startup/readiness and resource ownership; private bootstrap delivery; real Connector-owned credential issuance with durable per-attempt authorization | 032, 038 |
 | TS-IMPL-034 | [#1017](https://github.com/toddysm/custos/issues/1017) | Activation/readiness/deployment wiring, durable audit and operational signals; consume durable wait, hook execution, execution identity and activity runtime prerequisites; four-profile rendering and safe rollback | 025, 027, 028, 029, 033, 037, 038, 039 |
 | TS-IMPL-035 | [#1018](https://github.com/toddysm/custos/issues/1018) | Deployed receiver-to-Workflow failure/recovery and legacy regression coverage in hosted CI | 034 |
 | TS-IMPL-036 | [#1019](https://github.com/toddysm/custos/issues/1019) | Developer/operator setup, recovery and migration documentation; checked links/examples | 035 |
@@ -63,7 +63,7 @@ activation/control-plane responsibilities or 035's deployed certification gate.
 
 One valid sequential order is:
 
-`022 -> 023 -> 024 -> 030 -> 031 -> 032 -> 025 -> 026 -> 028 -> 027 -> 029 -> 033 -> 037 -> 039 -> 038 -> 034 -> 035 -> 036`.
+`022 -> 023 -> 024 -> 030 -> 031 -> 032 -> 025 -> 026 -> 028 -> 027 -> 029 -> 033 -> 037 -> 038 -> 039 -> 034 -> 035 -> 036`.
 
 The owner approved 037 on 2026-10-30 after deployment inspection found that the
 Docker-only hook runner had no execution backend in the supplied Kubernetes
@@ -87,6 +87,13 @@ readiness work from main; then complete production resource assembly and private
 bootstrap alignment. 038 and the four local 034 commits stay preserved in their
 own worktrees. Both 038 and 039 precede activation; no unmerged dependency stack
 is implied. The separate revision-5 amendment pull request stays open for review.
+
+The revision-5 amendment merged through #1039 after owner approval. The owner
+subsequently approved extending 039 with real Connector Service-owned credential
+issuance, reusing identity resolvers and per-attempt authorization, on
+2026-11-02T20:56:34.079-08:00. Final 039 integration now depends on merged 038;
+its already-implemented readiness/bootstrap work remains preserved. Synthetic
+upstream credentials are not an activation fallback.
 
 This order is not a new dependency chain. For example, lease storage (024),
 verification (026), dead-letter storage (030) and authorization (032) depend only

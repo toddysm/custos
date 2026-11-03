@@ -83,6 +83,15 @@ retain the general revision-4 minimum.
 
 ## Entry points
 
+Metadata revision **15** adds optional durable activity-attempt ownership.
+Revision 14 is reserved for the separately owned #1037 execution-identity work.
+Claims bind workspace, opaque run/step coordinates, attempt, request fingerprint
+and owner generation. Pending ownership never expires into permission to rerun;
+it also fences later attempts for the same step. Completed snapshots retain the
+exact result instead of manufacturing an empty success. Activity snapshots are
+bounded to 16 MiB at the adapter boundary. The shared revision-4 baseline remains
+unchanged. Runtime startup must explicitly require this capability before use.
+
 This package registers two adapters under the `custos_spl.adapters`
 entry-point group:
 

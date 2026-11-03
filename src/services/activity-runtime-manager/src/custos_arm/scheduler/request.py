@@ -46,6 +46,7 @@ class ScheduleRequest:
     step_deadline: datetime | None = None
     override: ResourceOverride | None = None
     cluster_ceiling: ResourceOverride | None = None
+    principal_id: str | None = None
 
 
 __all__ = ["ScheduleRequest"]

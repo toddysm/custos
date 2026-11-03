@@ -405,7 +405,7 @@ async def test_replay_reconstructs_from_terminal_record(tmp_path: Path) -> None:
     result = await _scheduler(fresh_driver, repo=repo).schedule(_request())
 
     assert result.class_ is ResultClass.SUCCESS
-    assert result.outputs == {}  # outputs are not part of the persisted record
+    assert result.outputs == {"ok": True}
     assert fresh_driver.prepared == 0
 
 

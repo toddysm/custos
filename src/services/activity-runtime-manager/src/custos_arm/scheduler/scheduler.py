@@ -32,12 +32,16 @@ loop is never blocked while a sandbox runs.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from itertools import chain
 from typing import Final
+
+from custos_spl.errors import SPLError
 
 from custos_arm.config import Settings
 from custos_arm.contract import (
@@ -74,6 +78,7 @@ from custos_arm.runtime.models import SIDECAR_PRIVATE_MOUNT
 from custos_arm.runtime.oci import SYSTEM_SANDBOX_FAILURE, signal_error_code
 from custos_arm.secrets import SecretInjector, SidecarToken
 from custos_arm.store import ActivityExecution, ExecutionRepository, ExecutionState
+from custos_arm.store.execution import UnsafeExecutionError
 
 from .errors import synthesize_failure
 from .fsio import (
@@ -183,14 +188,19 @@ class ActivityScheduler:
         delivery.
         """
         key = self._key(request)
-        async with self._locks.setdefault(key, asyncio.Lock()):
-            return await self._schedule(key, request)
+        try:
+            async with self._locks.setdefault(key, asyncio.Lock()):
+                return await self._schedule(key, request)
+        except UnsafeExecutionError as exc:
+            return synthesize_failure(exc, attempt=request.step.attempt)
 
     async def _schedule(
         self, key: ExecutionKey, request: ScheduleRequest
     ) -> ActivityResultEnvelope:
         existing = await self._repo.get(*key)
         if existing is not None:
+            if self._repo.durable and existing.request_hash != self._request_hash(request):
+                raise UnsafeExecutionError("activity coordinates are bound to different inputs")
             if existing.is_terminal:
                 return self._replay(key, existing)
             return await self._reconcile(key, request)
@@ -205,6 +215,7 @@ class ActivityScheduler:
             activity_ref=request.activity_ref,
             deadline=deadline,
             started_at=started,
+            request_hash=self._request_hash(request),
         )
         await self._repo.insert(execution)
         return await self._drive(key, request)
@@ -265,6 +276,7 @@ class ActivityScheduler:
     async def _drive(self, key: ExecutionKey, request: ScheduleRequest) -> ActivityResultEnvelope:
         driver: RuntimeDriver | None = None
         handle: SandboxHandle | None = None
+        start_requested = False
         with observe_attempt(request):
             try:
                 with observe_stage(STAGE_RESOLVE):
@@ -304,10 +316,21 @@ class ActivityScheduler:
                     self._context[key] = replace(self._context[key], bootstrap=bootstrap)
                 with observe_stage(STAGE_RUN):
                     await self._ensure(key, ExecutionState.RUNNING)
+                    start_requested = True
                     await asyncio.to_thread(driver.start, handle)
                     outcome = await asyncio.to_thread(driver.await_terminal, handle, deadline)
+                    if self._repo.durable and outcome.signal.value in {"deadline", "cancelled"}:
+                        raise UnsafeExecutionError(
+                            "activity termination is unconfirmed; ownership remains fenced"
+                        )
                 return await self._finalize(key, request, resolved, driver, handle, outcome)
+            except (UnsafeExecutionError, SPLError):
+                raise
             except Exception as exc:
+                if self._repo.durable and start_requested:
+                    raise UnsafeExecutionError(
+                        "activity result is unconfirmed; ownership remains fenced"
+                    ) from None
                 envelope = synthesize_failure(exc, attempt=request.step.attempt)
                 return await self._complete(key, envelope, driver, handle)
 
@@ -346,10 +369,10 @@ class ActivityScheduler:
 
     @staticmethod
     def _reconstruct(existing: ActivityExecution) -> ActivityResultEnvelope:
+        if existing.result is not None:
+            return existing.result
         if existing.state is ExecutionState.SUCCEEDED:
-            return ActivityResultEnvelope.model_validate(
-                {"class": ResultClass.SUCCESS.value, "attempt": existing.attempt, "outputs": {}}
-            )
+            raise UnsafeExecutionError("legacy successful attempt has no retained result")
         result_class = existing.result_class or ResultClass.RETRYABLE.value
         error = ErrorEnvelope.model_validate(
             {
@@ -367,6 +390,8 @@ class ActivityScheduler:
     ) -> ActivityResultEnvelope:
         context = self._context.get(key)
         if context is None:
+            if self._repo.durable:
+                raise UnsafeExecutionError("activity ownership cannot be reconstructed safely")
             # No live sandbox to resume (e.g. lost after a restart): relaunch.
             return await self._drive(key, request)
         try:
@@ -412,8 +437,10 @@ class ActivityScheduler:
             result_class=envelope.class_.value,
             error_code=envelope.error.code if envelope.error else None,
             finished_at=self._now(),
+            result=envelope,
         )
-        self._cache[key] = envelope
+        if not self._repo.durable:
+            self._cache[key] = envelope
         context = self._context.pop(key, None)
         if context is not None and context.bootstrap is not None:
             self._injector.revoke(token=context.bootstrap)
@@ -421,6 +448,36 @@ class ActivityScheduler:
         if driver is not None and handle is not None:
             await self._safe_cleanup(driver, handle)
         return envelope
+
+    @staticmethod
+    def _request_hash(request: ScheduleRequest) -> str:
+        """Bind accepted inputs, caller and opaque contexts without persisting secret material."""
+        payload = {
+            "activity_ref": request.activity_ref,
+            "inputs": dict(request.inputs),
+            "principal_id": request.principal_id,
+            "connectors": {
+                name: ref.model_dump(mode="json") for name, ref in request.connectors.items()
+            },
+            "contexts": [
+                {
+                    "slot": context.slot_name,
+                    "type": context.connector_type,
+                    "instance": context.connector_instance_id,
+                    "lease": context.lease_id,
+                    "secrets": dict(context.secrets),
+                }
+                for context in request.connector_contexts
+            ],
+            "deadline": request.step_deadline.isoformat() if request.step_deadline else None,
+            "override": asdict(request.override) if request.override is not None else None,
+            "ceiling": asdict(request.cluster_ceiling)
+            if request.cluster_ceiling is not None
+            else None,
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+        ).hexdigest()
 
     async def _require(self, key: ExecutionKey) -> ActivityExecution:
         current = await self._repo.get(*key)

@@ -50,6 +50,13 @@ from custos_spl.errors import (
     QueryUnsupported,
 )
 from custos_spl.ids import ConnectorInstanceId, WorkspaceId
+from custos_spl.interfaces.activity_execution import (
+    ACTIVITY_EXECUTION_SCHEMA_REVISION,
+    ActivityExecutionRecord,
+    activity_execution_key,
+    activity_snapshot,
+    validate_activity_claim,
+)
 from custos_spl.interfaces.bulk_replay import (
     BulkReplayCommand,
     BulkReplayItem,
@@ -181,6 +188,7 @@ from custos_pg.migrations.metadata import (
     METADATA_REV11,
     METADATA_REV12,
     METADATA_REV13,
+    METADATA_REV15,
 )
 from custos_pg.pool import LazyPool, read_dsn_from_env
 from custos_pg.revisions import ensure_ledger, read_declared, record_revision
@@ -658,6 +666,7 @@ class PgMetadataAdapter:
                 METADATA_REV11,
                 METADATA_REV12,
                 METADATA_REV13,
+                METADATA_REV15,
             ):
                 if rev.number in already:
                     continue
@@ -699,6 +708,145 @@ class PgMetadataAdapter:
         """Return authoritative database time for retention planning."""
         async with self._delivery_transaction() as conn:
             return await _scheduler_now(conn)
+
+    async def check_activity_execution_ready(self) -> None:
+        """Require durable attempt ownership before runtime activation; never auto-migrate."""
+        async with self._delivery_transaction() as conn:
+            try:
+                exists = await conn.fetchval(
+                    "SELECT EXISTS(SELECT 1 FROM custos_meta.adapter_revisions "
+                    "WHERE interface_name=$1 AND revision=$2)",
+                    INTERFACE_NAME,
+                    ACTIVITY_EXECUTION_SCHEMA_REVISION,
+                )
+            except UndefinedTableError:
+                raise MigrationRequired(
+                    [(INTERFACE_NAME, ACTIVITY_EXECUTION_SCHEMA_REVISION)]
+                ) from None
+            if not exists:
+                raise MigrationRequired([(INTERFACE_NAME, ACTIVITY_EXECUTION_SCHEMA_REVISION)])
+
+    @staticmethod
+    def _activity_record(row: Record) -> ActivityExecutionRecord:
+        """Decode a native row without fabricating a completed result."""
+        snapshot = row["snapshot"]
+        return ActivityExecutionRecord(
+            row["workspace_id"],
+            row["run_id"],
+            row["step_id"],
+            row["attempt"],
+            row["request_hash"],
+            row["owner"],
+            snapshot if isinstance(snapshot, str) else json.dumps(snapshot),
+            row["completed"],
+        )
+
+    async def claim_activity_execution(
+        self,
+        workspace_id: str,
+        run_id: str,
+        step_id: str,
+        attempt: int,
+        request_hash: str,
+        owner: str,
+        snapshot_json: str,
+    ) -> ActivityExecutionRecord:
+        """Fence the whole step while its previous effect is pending or already succeeded."""
+        key = validate_activity_claim(workspace_id, run_id, step_id, attempt, request_hash, owner)
+        snapshot = activity_snapshot(snapshot_json)
+        lock_key = json.dumps(["activity", workspace_id, run_id, step_id])
+        async with self._delivery_transaction() as conn:
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", lock_key)
+            row = await conn.fetchrow(
+                "SELECT * FROM custos_state.activity_execution WHERE workspace_id=$1 "
+                "AND execution_key=$2 FOR UPDATE",
+                workspace_id,
+                key,
+            )
+            if row is not None:
+                if row["request_hash"] != request_hash:
+                    raise ImmutableViolation("activity coordinates are bound to different inputs")
+                return self._activity_record(row)
+            blocked = await conn.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM custos_state.activity_execution "
+                "WHERE workspace_id=$1 AND run_id=$2 AND step_id=$3 "
+                "AND (NOT completed OR snapshot->>'state'='succeeded'))",
+                workspace_id,
+                run_id,
+                step_id,
+            )
+            if blocked:
+                raise LeaseBusy("activity step has an unresolved or successful earlier attempt")
+            row = await conn.fetchrow(
+                "INSERT INTO custos_state.activity_execution "
+                "(workspace_id,execution_key,run_id,step_id,attempt,request_hash,owner,snapshot) "
+                "VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb) RETURNING *",
+                workspace_id,
+                key,
+                run_id,
+                step_id,
+                attempt,
+                request_hash,
+                owner,
+                snapshot,
+            )
+        assert row is not None
+        return self._activity_record(row)
+
+    async def read_activity_execution(
+        self,
+        workspace_id: str,
+        run_id: str,
+        step_id: str,
+        attempt: int,
+    ) -> ActivityExecutionRecord | None:
+        """Read exact durable ownership, including pending records after a process restart."""
+        if not workspace_id.strip() or "\0" in workspace_id or len(workspace_id) > 120:
+            raise ValueError("invalid activity workspace")
+        key = activity_execution_key(run_id, step_id, attempt)
+        async with self._delivery_transaction() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM custos_state.activity_execution WHERE workspace_id=$1 "
+                "AND execution_key=$2",
+                workspace_id,
+                key,
+            )
+        return None if row is None else self._activity_record(row)
+
+    async def write_activity_execution(
+        self,
+        record: ActivityExecutionRecord,
+        snapshot_json: str,
+        *,
+        completed: bool,
+    ) -> ActivityExecutionRecord:
+        """Compare owner and prior snapshot so stale writers cannot overwrite newer transitions."""
+        key = validate_activity_claim(
+            record.workspace_id,
+            record.run_id,
+            record.step_id,
+            record.attempt,
+            record.request_hash,
+            record.owner,
+        )
+        snapshot = activity_snapshot(snapshot_json)
+        async with self._delivery_transaction() as conn:
+            row = await conn.fetchrow(
+                "UPDATE custos_state.activity_execution SET snapshot=$1::jsonb,completed=$2,"
+                "updated_at=clock_timestamp() WHERE workspace_id=$3 AND execution_key=$4 "
+                "AND request_hash=$5 AND owner=$6 AND snapshot=$7::jsonb "
+                "AND NOT completed RETURNING *",
+                snapshot,
+                completed,
+                record.workspace_id,
+                key,
+                record.request_hash,
+                record.owner,
+                record.snapshot_json,
+            )
+            if row is None:
+                raise LeaseExpired("activity ownership or transition no longer matches")
+        return self._activity_record(row)
 
     async def put_workflow_start(self, run: Run, start: WorkflowStart) -> WorkflowStart:
         """Commit Run and protocol atomically; never adopt an unversioned legacy run."""

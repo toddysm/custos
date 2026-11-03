@@ -41,6 +41,10 @@ activity, and `/custos/sidecar` is mounted only by that trusted bridge and the
 sidecar, never by the activity or output collector. This is not a claim that
 the default production resource graph is complete or that in-memory execution
 tracking provides durable restart ownership.
+The new optional revision-15 activity store persists pending ownership and exact
+terminal results. Unknown owners and changed request fingerprints fail closed;
+successful replay must not fabricate empty outputs. Wiring that capability into
+the production composition root remains required before enabling execution.
 Host staging remains owner-only for bootstrap material. In the pod, ordinary
 input files receive supplemental-group read/traverse access (the bearer becomes
 `0440`) so activity images can retain their own non-root user. The private key

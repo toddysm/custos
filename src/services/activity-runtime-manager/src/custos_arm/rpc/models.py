@@ -83,7 +83,9 @@ class ScheduleActivityWire(BaseModel):
         """The canonical ``runId|stepId|attempt`` dedup key for this request."""
         return f"{self.run_id}|{self.step_id}|{self.attempt}"
 
-    def to_schedule_request(self, *, workspace_id: str) -> ScheduleRequest:
+    def to_schedule_request(
+        self, *, workspace_id: str, principal_id: str | None = None
+    ) -> ScheduleRequest:
         """Translate the wire envelope into the Scheduler's input.
 
         :param workspace_id: The tenant taken from the verified call context;
@@ -95,6 +97,7 @@ class ScheduleActivityWire(BaseModel):
         contexts = tuple(value.to_connector_context() for value in self.connector_contexts.values())
         return ScheduleRequest(
             workspace_id=workspace_id,
+            principal_id=principal_id,
             step=step,
             activity_ref=self.activity_ref,
             inputs=self.inputs,

@@ -75,7 +75,9 @@ async def schedule_activity(
             status_code=400,
             detail="Idempotency-Key header does not match the request body",
         )
-    schedule_request = body.to_schedule_request(workspace_id=call_context.workspace_id)
+    schedule_request = body.to_schedule_request(
+        workspace_id=call_context.workspace_id, principal_id=call_context.principal_id
+    )
     result = await scheduler.schedule(schedule_request)
     return JSONResponse(content=result.model_dump(by_alias=True, mode="json"))
 
