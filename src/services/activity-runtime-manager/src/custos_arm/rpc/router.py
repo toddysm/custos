@@ -72,7 +72,19 @@ def get_scheduler(request: Request) -> ActivityScheduler:
     return scheduler
 
 
-CallContextDep = Annotated[CallContext, Depends(get_call_context)]
+def require_execution_permission(
+    request: Request,
+    context: Annotated[CallContext, Depends(get_call_context)],
+) -> CallContext:
+    """Require execution authority for signed calls regardless of the request shape."""
+    if getattr(request.state, "signed_call_context", False) and not context.has_permission(
+        "workflow:execute"
+    ):
+        raise HTTPException(403, "workflow execution permission is required")
+    return context
+
+
+CallContextDep = Annotated[CallContext, Depends(require_execution_permission)]
 SchedulerDep = Annotated[ActivityScheduler, Depends(get_scheduler)]
 
 

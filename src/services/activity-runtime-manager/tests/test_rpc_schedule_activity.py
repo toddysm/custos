@@ -118,19 +118,28 @@ def test_execution_provenance_cannot_opt_out_with_a_legacy_body(
 
 
 @pytest.mark.parametrize(
-    "operation,changed_field,status",
+    "operation,changed_field,status,legacy,method,permission",
     [
-        ("activity-execute", None, 200),
-        (None, None, 403),
-        ("catalog-read", None, 403),
-        ("activity-execute", "workspaceId", 403),
-        ("activity-execute", "principalId", 403),
+        ("activity-execute", None, 200, False, "ScheduleActivity", "workflow:execute"),
+        (None, None, 403, False, "ScheduleActivity", "workflow:execute"),
+        ("catalog-read", None, 403, False, "ScheduleActivity", "catalog:workflows:read"),
+        ("activity-execute", "workspaceId", 403, False, "ScheduleActivity", "workflow:execute"),
+        ("activity-execute", "principalId", 403, False, "ScheduleActivity", "workflow:execute"),
+        (None, None, 403, True, "ScheduleActivity", "catalog:workflows:read"),
+        (None, None, 403, True, "CancelActivity", "catalog:workflows:read"),
+        (None, None, 200, True, "ScheduleActivity", "workflow:execute"),
+        (None, None, 204, True, "CancelActivity", "workflow:execute"),
     ],
 )
 def test_real_signed_execution_binding_matches_the_scheduling_identity(
-    operation: str | None, changed_field: str | None, status: int
+    operation: str | None,
+    changed_field: str | None,
+    status: int,
+    legacy: bool,
+    method: str,
+    permission: str,
 ) -> None:
-    """Verify real signatures and canonical bindings at the actual scheduling boundary."""
+    """Verify actual signed permissions and scoped identity for both runtime RPC routes."""
     key = Ed25519PrivateKey.generate()
     public = base64.urlsafe_b64encode(key.public_key().public_bytes_raw()).decode().rstrip("=")
 
@@ -164,9 +173,7 @@ def test_real_signed_execution_binding_matches_the_scheduling_identity(
         "workspaceId": "ws-1",
         "actingPrincipalId": "p-1",
         "callerComponent": "workflow-service",
-        "permissions": [
-            "catalog:workflows:read" if operation == "catalog-read" else "workflow:execute"
-        ],
+        "permissions": [permission],
     }
     if operation is not None:
         claims["executionOperation"] = operation
@@ -174,17 +181,20 @@ def test_real_signed_execution_binding_matches_the_scheduling_identity(
     if changed_field:
         identity[changed_field] = "different"
     token = jwt.encode(claims, key, algorithm="EdDSA", headers={"kid": "unit"})
+    payload = _body(executionIdentity=identity, connectorContexts={"registry": canonical_binding()})
+    if legacy:
+        payload = (
+            _body() if method == "ScheduleActivity" else {"runId": "run-1", "stepId": "step-1"}
+        )
     with TestClient(app) as client:
         response = client.post(
-            "/ScheduleActivity",
-            json=_body(
-                executionIdentity=identity,
-                connectorContexts={"registry": canonical_binding()},
-            ),
+            "/" + method,
+            json=payload,
             headers={"x-custos-callctx": token},
         )
     assert response.status_code == status, response.text
     assert len(scheduler.scheduled) == (1 if status == 200 else 0)
+    assert len(scheduler.cancelled) == (1 if status == 204 else 0)
 
 
 def test_schedule_activity_dispatches_and_returns_envelope(settings: Settings) -> None:

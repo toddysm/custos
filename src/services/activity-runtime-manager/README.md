@@ -86,7 +86,7 @@ are parsed and validated to positive `timedelta` values.
 | `ARM_METADATA_STORE` | yes | — | `MetadataStoreProvider` binding. |
 | `ARM_CATALOG_ENDPOINT` | yes | — | Catalog Service endpoint for `activityRef` resolution. |
 | `ARM_CONNECTOR_ENDPOINT` | yes | — | Connector Service endpoint for `RefreshLease`. |
-| `ARM_AUTHZ_ENDPOINT` | prod | (empty) | Auth base URL for signed-context public keys. Invalid signatures return 401; unavailable verification returns 503. Empty enables the non-production JSON development shim. |
+| `ARM_AUTHZ_ENDPOINT` | prod | (empty) | Auth base URL for signed-context public keys. Every signed scheduling or cancellation caller needs `workflow:execute`, including legacy request shapes. Invalid signatures return 401; missing permission returns 403; unavailable verification returns 503. Empty enables the non-production JSON development shim. |
 | `ARM_SANDBOX_NAMESPACE` | yes | — | Kubernetes namespace for activity `Job`s. |
 | `ARM_SIDECAR_IMAGE` | yes | — | Connector sidecar image injected into every activity Pod. |
 | `ARM_IO_BRIDGE_IMAGE` | no | `busybox:1.37.0@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028` | Image for the io-bridge input-injector init container and output-collector native sidecar; override to point at an internal mirror. |
