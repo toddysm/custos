@@ -13,13 +13,19 @@ from types import MappingProxyType
 from typing import Literal
 
 ExecutionOperation = Literal[
-    "workflow-start", "workflow-resume", "catalog-read", "connector-bind", "activity-execute"
+    "workflow-start",
+    "workflow-resume",
+    "catalog-read",
+    "catalog-activity-read",
+    "connector-bind",
+    "activity-execute",
 ]
 EXECUTION_PERMISSIONS: Mapping[str, str] = MappingProxyType(
     {
         "workflow-start": "workflow:execute",
         "workflow-resume": "workflow:execute",
         "catalog-read": "catalog:workflows:read",
+        "catalog-activity-read": "catalog:activity-types:read",
         "connector-bind": "connector:bind",
         "activity-execute": "workflow:execute",
     }

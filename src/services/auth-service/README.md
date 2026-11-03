@@ -60,7 +60,9 @@ permission from legacy assertion-based signing. `activity-execute` uses the
 workspace `workflow:execute` grant; it does not add a platform-wide service role.
 
 The explicit `role:workspace.executor` role grants `workflow:execute`,
-`catalog:workflows:read` and `connector:bind` only at workspace scope. No existing
+`catalog:workflows:read`, `catalog:activity-types:read` and `connector:bind` only
+at workspace scope. Activity metadata uses the separate `catalog-activity-read`
+operation so each exchange still issues exactly one permission. No existing
 role is widened and no service account automatically receives the role.
 Workspace administrators must provision and bind the intended execution account.
 

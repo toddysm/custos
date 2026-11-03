@@ -67,6 +67,7 @@ def test_executor_role_is_explicit_scoped_and_not_administrative() -> None:
     assert set(role.permission_names) == {
         "workflow:execute",
         "catalog:workflows:read",
+        "catalog:activity-types:read",
         "connector:bind",
     }
     for existing in (ROLE_WORKSPACE_VIEWER, ROLE_WORKSPACE_AUTHOR, ROLE_WORKSPACE_OPERATOR):

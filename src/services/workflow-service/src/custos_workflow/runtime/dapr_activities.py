@@ -484,14 +484,19 @@ def _deserialize_connector_context(
 
 
 def _serialize_slot_spec(spec: SlotSpec) -> dict[str, Any]:
-    return {
+    """Retain optional manifest kind authority across durable activity invocation."""
+    wire = {
         "name": spec.name,
         "connectorRef": spec.connector_ref,
         "capabilities": list(spec.capabilities),
     }
+    if spec.connector_kind is not None:
+        wire["connectorKind"] = spec.connector_kind
+    return wire
 
 
 def _deserialize_slot_spec(payload: Mapping[str, Any]) -> SlotSpec:
+    """Decode legacy specs and preserve a pinned connector kind when supplied."""
     from custos_workflow.clients.connector import SlotSpec as _SlotSpec
 
     missing = {"name", "connectorRef", "capabilities"} - set(payload)
@@ -507,10 +512,14 @@ def _deserialize_slot_spec(payload: Mapping[str, Any]) -> SlotSpec:
             raise ValueError(
                 f"SlotSpec.capabilities entries must be strings, got {type(cap).__name__}"
             )
+    kind = payload.get("connectorKind")
+    if kind is not None and (not isinstance(kind, str) or not kind):
+        raise ValueError("invalid SlotSpec connector kind")
     return _SlotSpec(
         name=payload["name"],
         connector_ref=payload["connectorRef"],
         capabilities=tuple(capabilities_raw),
+        connector_kind=kind,
     )
 
 

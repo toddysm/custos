@@ -201,7 +201,12 @@ BUILTIN_ROLES: Final[tuple[BuiltInRole, ...]] = (
         role_id=ROLE_WORKSPACE_EXECUTOR,
         name="workspace.executor",
         description="Execute workflows and bind connectors; no authoring or administration.",
-        permission_names=("workflow:execute", "catalog:workflows:read", "connector:bind"),
+        permission_names=(
+            "workflow:execute",
+            "catalog:workflows:read",
+            "catalog:activity-types:read",
+            "connector:bind",
+        ),
         allowed_scopes=frozenset({"workspace"}),
     ),
 )

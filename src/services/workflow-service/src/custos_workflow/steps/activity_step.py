@@ -125,6 +125,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from custos_cel.scope import BindingScope, RunInfo, StepBinding, WorkflowInfo
 
+from custos_workflow.bindings.registry import ConnectorRequirement
 from custos_workflow.clients.activity_runtime import (
     ActivityResultEnvelope,
     ActivityRuntimeClient,
@@ -369,7 +370,20 @@ class ActivityStepHandler:
         except WithInputResolutionError as exc:
             return StepFailed(envelope=MappingProxyType(exc.to_dict()))
 
-        slot_specs = _build_slot_specs(activity_step)
+        try:
+            slot_specs = _build_slot_specs(
+                activity_step,
+                node.connector_requirements,
+                require_metadata=ctx.execution_identity is not None,
+            )
+        except ValueError:
+            error = ConnectorBindError(
+                "activity connector bindings do not match authoritative requirements",
+                run_id=str(ctx.run_id),
+                step_id=step_id,
+                attempt=1,
+            )
+            return StepFailed(envelope=MappingProxyType(error.to_dict()))
         run_id_str = str(ctx.run_id)
         # Lazy import — see module-level NOTE on the
         # ``_telemetry`` ⇄ ``runs`` ⇄ ``steps`` circular import.
@@ -406,7 +420,10 @@ class ActivityStepHandler:
             )
             try:
                 with observe_step_bind_connectors(step_kind_label):
-                    bind_response = yield BindForStepCallToken(request=bind_request)
+                    if slot_specs:
+                        bind_response = yield BindForStepCallToken(request=bind_request)
+                    else:
+                        bind_response = BindForStepResponse(contexts={})
             except ConnectorBindError as exc:
                 # Bind failure short-circuits the attempt loop
                 # without scheduling, so the attempt counter
@@ -567,7 +584,12 @@ def _build_scope(
     )
 
 
-def _build_slot_specs(activity_step: ActivityStep) -> tuple[SlotSpec, ...]:
+def _build_slot_specs(
+    activity_step: ActivityStep,
+    requirements: tuple[ConnectorRequirement, ...] | None = None,
+    *,
+    require_metadata: bool = False,
+) -> tuple[SlotSpec, ...]:
     """Translate the step's connector binding into a tuple of slot specs.
 
     Three shapes are accepted (mirroring
@@ -578,8 +600,33 @@ def _build_slot_specs(activity_step: ActivityStep) -> tuple[SlotSpec, ...]:
     * ``connectors: {alias: <ref>, ...}`` — map form. Emits one
       :class:`SlotSpec` per alias, preserving the document order
       so test assertions can pin it.
-    * Neither set — connectorless activity. Emits an empty tuple.
+    * Neither set — emits an empty tuple only if no required slot is missing.
+
+    Execution-aware graphs require the Catalog snapshot. Its names, kinds and
+    capabilities, not user-supplied hints, determine the binding authority.
     """
+    if requirements is not None:
+        declared = {item.name: item for item in requirements}
+        if len(declared) != len(requirements):
+            raise ValueError("duplicate activity connector slots")
+        bindings = dict(activity_step.connectors or {})
+        if activity_step.connector is not None:
+            if len(requirements) != 1:
+                raise ValueError("singular connector requires exactly one activity slot")
+            bindings = {requirements[0].name: activity_step.connector}
+        if set(bindings) - declared.keys() or any(
+            item.required and item.name not in bindings for item in requirements
+        ):
+            raise ValueError("activity connector slots do not match the manifest")
+        slots = []
+        for name, ref in bindings.items():
+            item = declared[name]
+            if not item.capabilities or any(not cap.strip() for cap in item.capabilities):
+                raise ValueError("bound activity slot requires explicit capabilities")
+            slots.append(SlotSpec(name, ref, item.capabilities, item.type))
+        return tuple(slots)
+    if require_metadata:
+        raise ValueError("authoritative activity connector metadata is required")
     if activity_step.connector is not None:
         return (SlotSpec(name=_DEFAULT_SLOT_NAME, connector_ref=activity_step.connector),)
     if activity_step.connectors is not None:

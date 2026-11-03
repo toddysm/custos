@@ -6,19 +6,36 @@ import asyncio
 import json
 import time
 from dataclasses import replace
+from datetime import UTC, datetime
 
 import httpx
 import pytest
 from custos_callctx.execution import ExecutionBinding, ExecutionBindings, ExecutionIdentity
 from custos_callctx.execution_client import ExecutionContextClient
+from custos_cel.clock import FixedClock
+from custos_workflow.bindings.registry import ResolvedActivityTypeRegistry
 from custos_workflow.clients._dapr_invoke import DaprInvokeEndpoint
 from custos_workflow.clients._errors import OutboundRpcDecodeError
+from custos_workflow.clients.activity_runtime import (
+    ActivityResultEnvelope,
+    FakeActivityRuntimeClient,
+)
 from custos_workflow.clients.connector import (
     BindForStepRequest,
     BoundConnectorContext,
     DaprConnectorClient,
+    FakeConnectorClient,
     SlotSpec,
 )
+from custos_workflow.compiler import RunMeta
+from custos_workflow.compiler import compile as compile_workflow
+from custos_workflow.document import WorkflowDocument
+from custos_workflow.graph import ExecutionGraph
+from custos_workflow.graph.serialize import from_json, to_json
+from custos_workflow.runs import RunId, StepExecutionContext, StepSucceeded
+from custos_workflow.runtime import FakeWorkflowContext
+from custos_workflow.runtime.dapr_activities import BindForStepCallToken, ScheduleActivityCallToken
+from custos_workflow.steps.activity_step import ActivityStepHandler
 from fastapi.testclient import TestClient
 
 from custos_connector import create_app
@@ -109,7 +126,78 @@ def test_execution_binding_requires_issuance_provenance(
         assert schemas["_ExecutionBindResponseWire"]["properties"]["schemaVersion"]["const"] == "2"
 
 
-@pytest.mark.parametrize("mutation", [None, "instance", "capabilities", "slot", "schema"])
+def _compiled_producer(
+    identity: ExecutionIdentity, instance_id: str, kind: str, *, connectorless: bool
+) -> tuple[ActivityStepHandler, StepExecutionContext, ExecutionGraph]:
+    """Compile and replay authoritative manifest facts before invoking the owning step handler."""
+    ref = "test/echo@1.0.0"
+    metadata = {"namespace": "test", "type": "echo", "version": "1.0.0"}
+    registry = ResolvedActivityTypeRegistry(
+        {
+            ref: {
+                **metadata,
+                "normalizedManifest": {
+                    "metadata": metadata,
+                    "spec": {
+                        "outputs": {"schema": {"type": "object"}},
+                        "connectors": []
+                        if connectorless
+                        else [
+                            {
+                                "name": "source",
+                                "type": kind,
+                                "required": True,
+                                "capabilities": ["events.delivery"],
+                            }
+                        ],
+                    },
+                },
+            }
+        }
+    )
+    document = WorkflowDocument.model_validate(
+        {
+            "apiVersion": "custos.dev/v1",
+            "kind": "Workflow",
+            "metadata": {"name": "flow", "workspace": identity.workspace_id},
+            "spec": {
+                "steps": [
+                    {
+                        "id": "step",
+                        "activity": ref,
+                        **({} if connectorless else {"connector": instance_id}),
+                    }
+                ]
+            },
+        }
+    )
+    now = datetime.now(UTC)
+    graph = from_json(
+        to_json(
+            compile_workflow(
+                document,
+                RunMeta(identity.workspace_id, "version", "flow", "1", now),
+                registry,
+            )
+        )
+    )
+    ctx = StepExecutionContext(
+        run_id=RunId("actual-run"),
+        workspace_id=identity.workspace_id,
+        workflow_version_id="version",
+        inputs={},
+        outputs={},
+        workflow_context=FakeWorkflowContext(instance_id="actual-run", now=now),
+        clock=FixedClock(now),
+        execution_identity=identity,
+    )
+    return ActivityStepHandler(FakeActivityRuntimeClient(), FakeConnectorClient()), ctx, graph
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [None, "instance", "capabilities", "kind", "slot", "schema", "producer", "connectorless"],
+)
 async def test_real_workflow_client_uses_actual_connector_contract(
     signing: Signing, mutation: str | None
 ) -> None:
@@ -169,7 +257,11 @@ async def test_real_workflow_client_uses_actual_connector_contract(
                 "/v1.0/invoke/connector-service/method/internal/v1/bind-for-step"
             )
             wire = json.loads(request.content)
-            assert (wire["runId"], wire["stepId"], wire["attempt"]) == ("actual-run", "step", 3)
+            assert (wire["runId"], wire["stepId"], wire["attempt"]) == (
+                "actual-run",
+                "step",
+                1 if mutation == "producer" else 3,
+            )
             assert wire["contextVersion"] == 2
             response = await receiver.post(
                 "/internal/v1/bind-for-step",
@@ -188,6 +280,8 @@ async def test_real_workflow_client_uses_actual_connector_contract(
                 context["connectorInstanceId"] = "different-instance"
             elif mutation == "capabilities":
                 context["capabilities"] = ["objects.read"]
+            elif mutation == "kind":
+                context["connectorKind"] = "different-kind"
             elif mutation == "slot":
                 context["slotName"] = "different-slot"
             elif mutation == "schema":
@@ -200,12 +294,37 @@ async def test_real_workflow_client_uses_actual_connector_contract(
                 endpoint=DaprInvokeEndpoint("127.0.0.1", 3500, "connector-service"),
                 execution_context=ExecutionContextClient(http, bindings),
             )
+            if mutation in {"producer", "connectorless"}:
+                handler, ctx, graph = _compiled_producer(
+                    identity,
+                    str(instance.instance_id),
+                    instance.type,
+                    connectorless=mutation == "connectorless",
+                )
+                calls = handler.iter_calls(ctx, graph, "step")
+                token = next(calls)
+                if mutation == "producer":
+                    assert isinstance(token, BindForStepCallToken)
+                    token = calls.send(await client.bind_for_step(token.request))
+                    assert len(binder.calls) == 1
+                else:
+                    assert not binder.calls and not issued
+                assert isinstance(token, ScheduleActivityCallToken)
+                assert bool(token.request.connector_contexts) == (mutation == "producer")
+                with pytest.raises(StopIteration) as finished:
+                    calls.send(ActivityResultEnvelope("success", {}, None, 1))
+                assert isinstance(finished.value.value, StepSucceeded)
+                return
             request = BindForStepRequest(
                 step_key="logical",
                 run_id="actual-run",
                 step_id="step",
                 attempt=3,
-                slots=(SlotSpec("source", str(instance.instance_id), ("events.delivery",)),),
+                slots=(
+                    SlotSpec(
+                        "source", str(instance.instance_id), ("events.delivery",), instance.type
+                    ),
+                ),
                 execution_identity=identity,
             )
             if mutation is not None:

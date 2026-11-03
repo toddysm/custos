@@ -130,7 +130,11 @@ async def cancel_activity(
     Returns ``204`` when a live attempt is accepted for cancellation, ``404``
     when the step is unknown, and ``409`` when it has already terminated — the
     latter two are no-ops the caller collapses, per design § Internal RPC.
+    This legacy wire shape carries no pinned identity; execution grants cannot
+    use it to bypass the scoped runtime lifecycle contract.
     """
+    if call_context.execution_operation is not None:
+        raise HTTPException(403, "execution contexts cannot use legacy cancellation")
     outcome = await scheduler.cancel(
         workspace_id=call_context.workspace_id,
         run_id=body.run_id,

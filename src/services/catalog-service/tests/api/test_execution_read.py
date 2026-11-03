@@ -29,8 +29,16 @@ from tests.api.conftest import (
 
 
 @pytest.mark.parametrize(
-    "operation,workspace,status",
-    [(None, "ws-1", 403), ("catalog-read", "ws-1", 200), ("catalog-read", "ws-2", 403)],
+    "operation,workspace,status,resource",
+    [
+        (None, "ws-1", 403, "workflow"),
+        ("catalog-read", "ws-1", 200, "workflow"),
+        ("catalog-read", "ws-2", 403, "workflow"),
+        ("catalog-activity-read", "ws-1", 200, "activity"),
+        ("catalog-activity-read", "ws-2", 403, "activity"),
+        ("catalog-read", "ws-1", 403, "activity"),
+        ("catalog-activity-read", "ws-1", 403, "workflow"),
+    ],
 )
 def test_execution_read_is_credential_backed_and_workspace_scoped(
     client: TestClient,
@@ -39,6 +47,7 @@ def test_execution_read_is_credential_backed_and_workspace_scoped(
     operation: str | None,
     workspace: str,
     status: int,
+    resource: str,
 ) -> None:
     """Use the actual factory, signature verifier and read manager with narrow permissions."""
     seed_builtin_echo(stores[1])
@@ -81,19 +90,30 @@ def test_execution_read_is_credential_backed_and_workspace_scoped(
         "actingPrincipalId": "executor",
         "workspaceId": workspace,
         "callerComponent": "workflow-service",
-        "permissions": ["catalog:workflows:read"],
+        "permissions": [
+            "catalog:activity-types:read"
+            if operation == "catalog-activity-read"
+            else "catalog:workflows:read"
+        ],
     }
     if operation is not None:
         claims["executionOperation"] = operation
     token = jwt.encode(claims, key, algorithm="EdDSA", headers={"kid": "unit"})
     with TestClient(app) as signed_client:
         response = signed_client.get(
-            "/rpc/v1/workflow-versions/ws-1/orders@1", headers={"x-custos-callctx": token}
+            "/rpc/v1/workflow-versions/ws-1/orders@1"
+            if resource == "workflow"
+            else "/v1/workspaces/ws-1/activity-types/custos.builtin/echo@1.0.0",
+            headers={"x-custos-callctx": token},
         )
         assert response.status_code == status, response.text
         if status == 200:
-            assert response.json()["workspaceId"] == "ws-1"
-            assert response.json()["workflowName"] == "orders"
+            if resource == "workflow":
+                assert response.json()["workspaceId"] == "ws-1"
+                assert response.json()["workflowName"] == "orders"
+            else:
+                assert response.json()["namespace"] == "custos.builtin"
+                assert response.json()["version"] == "1.0.0"
             assert (
                 signed_client.get(
                     "/rpc/v1/connector-types/http@1", headers={"x-custos-callctx": token}

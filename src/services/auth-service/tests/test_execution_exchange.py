@@ -72,15 +72,26 @@ def body(token: str) -> dict[str, str]:
     }
 
 
+@pytest.mark.parametrize(
+    "operation,permission",
+    [
+        ("connector-bind", "connector:bind"),
+        ("catalog-activity-read", "catalog:activity-types:read"),
+    ],
+)
 def test_exchange_issues_one_verified_grant_and_a_fresh_context(
     configured: TestClient,
     fake_auth_store: FakeAuthAdapter,
+    operation: str,
+    permission: str,
 ) -> None:
     """The actual signer/verifier round trip binds scope, principal, operation and short expiry."""
     token, _ = credential(fake_auth_store)
     issued = []
     for _ in range(2):
-        response = configured.post(PATH, json=body(token), headers=HEADERS)
+        response = configured.post(
+            PATH, json={**body(token), "operation": operation}, headers=HEADERS
+        )
         assert response.status_code == 200, response.text
         signed = response.json()
         assert 0 < signed["exp"] - signed["iat"] <= 300
@@ -93,8 +104,8 @@ def test_exchange_issues_one_verified_grant_and_a_fresh_context(
         assert verified["acting_principal_id"] == SA
         assert verified["workspace_id"] == WORKSPACE
         assert verified["caller_component"] == "workflow-service"
-        assert verified["permissions"] == ["connector:bind"]
-        assert decode_claims_unverified(signed["token"])["executionOperation"] == "connector-bind"
+        assert verified["permissions"] == [permission]
+        assert decode_claims_unverified(signed["token"])["executionOperation"] == operation
         issued.append(signed["jti"])
     assert issued[0] != issued[1]
 

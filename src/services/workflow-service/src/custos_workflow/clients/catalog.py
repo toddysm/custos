@@ -76,11 +76,12 @@ Two test doubles ship alongside the adapter, mirroring the rest of
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Final
+from urllib.parse import quote
 
 import httpx
-from custos_callctx.execution import ExecutionIdentity
+from custos_callctx.execution import ExecutionIdentity, ExecutionOperation
 from custos_callctx.execution_client import ExecutionAuthorizationError, ExecutionContextClient
 
 from custos_workflow.clients._dapr_invoke import (
@@ -347,7 +348,36 @@ class DaprCatalogClient:
     async def get_execution_workflow_version(
         self, workspace_id: str, workflow_version_id: str, identity: ExecutionIdentity
     ) -> WorkflowVersion:
-        """Bind a fresh Catalog grant to the same workspace/account as the accepted run."""
+        """Snapshot pinned activity schemas/slots under fresh, separate read grants."""
+        from custos_workflow.bindings.registry import ResolvedActivityTypeRegistry
+        from custos_workflow.clients._errors import OutboundRpcDecodeError
+        from custos_workflow.document import ActivityStep
+        from custos_workflow.validator.errors import WorkspaceUnauthorizedError
+
+        if identity.workspace_id != workspace_id:
+            raise WorkspaceUnauthorizedError("execution Catalog scope does not match")
+        version = await self._get_workflow_version(
+            workspace_id,
+            workflow_version_id,
+            await self._execution_headers(identity, "catalog-read"),
+            execution=True,
+        )
+        responses: dict[str, Mapping[str, Any]] = {}
+        for step in version.document.spec.steps:
+            if isinstance(step, ActivityStep) and step.activity not in responses:
+                responses[step.activity] = await self._get_activity_metadata(
+                    step.activity, identity
+                )
+        try:
+            registry = ResolvedActivityTypeRegistry(responses)
+        except ValueError:
+            raise OutboundRpcDecodeError("invalid execution activity metadata") from None
+        return replace(version, activity_registry=registry)
+
+    async def _execution_headers(
+        self, identity: ExecutionIdentity, operation: ExecutionOperation
+    ) -> dict[str, str]:
+        """Authorize each actual Catalog read without reusing a signed context."""
         from custos_workflow.runs.errors import WorkflowRuntimeUnavailableError
         from custos_workflow.validator.errors import WorkspaceUnauthorizedError
 
@@ -355,24 +385,53 @@ class DaprCatalogClient:
             raise WorkflowRuntimeUnavailableError(
                 "execution Catalog authorization is not configured"
             )
-        if identity.workspace_id != workspace_id:
-            raise WorkspaceUnauthorizedError("execution Catalog scope does not match")
         try:
-            headers = await self.execution_context.headers(identity, "catalog-read")
+            headers = await self.execution_context.headers(identity, operation)
         except ExecutionAuthorizationError as exc:
             if exc.unavailable:
                 raise WorkflowRuntimeUnavailableError(
                     "execution authorization is unavailable"
                 ) from None
             raise WorkspaceUnauthorizedError(
-                "execution account cannot read this workflow"
+                "execution account cannot read this Catalog resource"
             ) from None
-        return await self._get_workflow_version(
-            workspace_id,
-            workflow_version_id,
-            {"Accept": "application/json", **headers},
-            execution=True,
+        return {"Accept": "application/json", **headers}
+
+    async def _get_activity_metadata(
+        self, activity_ref: str, identity: ExecutionIdentity
+    ) -> Mapping[str, Any]:
+        """Read the real Catalog activity endpoint; never expose upstream diagnostics."""
+        from custos_workflow.clients._errors import (
+            OutboundRpcDecodeError,
+            OutboundRpcStatusError,
+            OutboundRpcTransportError,
         )
+
+        method = (
+            f"v1/workspaces/{quote(identity.workspace_id, safe='')}/activity-types/"
+            f"{quote(activity_ref, safe='/@')}"
+        )
+        headers = await self._execution_headers(identity, "catalog-activity-read")
+        try:
+            response = await self.http_client.get(
+                build_invoke_url(self.endpoint, method), headers=headers, timeout=self.timeout
+            )
+        except httpx.HTTPError:
+            raise OutboundRpcTransportError(
+                "execution activity metadata transport failed"
+            ) from None
+        if response.status_code // 100 != 2:
+            raise OutboundRpcStatusError(
+                f"execution activity metadata returned HTTP {response.status_code}",
+                status_code=response.status_code,
+            )
+        try:
+            body = response.json()
+        except ValueError:
+            raise OutboundRpcDecodeError("invalid execution activity metadata") from None
+        if not isinstance(body, Mapping):
+            raise OutboundRpcDecodeError("invalid execution activity metadata")
+        return body
 
     async def _get_workflow_version(
         self,

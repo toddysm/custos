@@ -802,6 +802,7 @@ class TestSlotSpecs:
         assert refs == {"src": "registry-src", "dst": "registry-dst"}
 
     def test_connectorless_activity_emits_empty_slots(self) -> None:
+        """A connectorless activity schedules directly without an invalid empty bind RPC."""
         node = _activity_node(connector=None, connectors=None)
         graph = _graph(node)
         ctx = _ctx()
@@ -814,7 +815,8 @@ class TestSlotSpecs:
         result = handler.execute(ctx, graph, "scan")
 
         assert isinstance(result, StepSucceeded)
-        assert connector.calls[0].slots == ()
+        assert not connector.calls
+        assert activity.calls[0].connector_contexts == {}
 
 
 # ---------------------------------------------------------------------------

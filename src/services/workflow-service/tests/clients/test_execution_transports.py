@@ -22,7 +22,7 @@ from custos_workflow.clients.connector import BindForStepRequest, DaprConnectorC
 from custos_workflow.runtime.dapr_activities import _serialize_activity_result_envelope
 
 
-@pytest.mark.parametrize("kind", ["binding", "activity", "catalog"])
+@pytest.mark.parametrize("kind", ["binding", "activity", "catalog", "activity-metadata"])
 @pytest.mark.parametrize("failure", ["transport", "status", "json", "schema"])
 async def test_execution_failures_do_not_serialize_transient_authority(
     kind: str, failure: str, caplog: pytest.LogCaptureFixture
@@ -38,6 +38,7 @@ async def test_execution_failures_do_not_serialize_transient_authority(
         "binding": "connector-bind",
         "activity": "activity-execute",
         "catalog": "catalog-read",
+        "activity-metadata": "catalog-read",
     }[kind]
     captured: list[httpx.Request] = []
 
@@ -51,13 +52,32 @@ async def test_execution_failures_do_not_serialize_transient_authority(
                 "token": credential,
                 "workspaceId": "ws",
                 "principalId": "account",
-                "operation": expected_operation,
+                "operation": (
+                    "catalog-activity-read"
+                    if kind == "activity-metadata" and len(captured) > 3
+                    else expected_operation
+                ),
             }
             now = int(time.time())
             return httpx.Response(200, json={"token": token, "iat": now, "exp": now + 300})
         assert request.headers["x-custos-callctx"] == token
         assert token.encode() not in request.content
         assert credential.encode() not in request.content
+        if kind == "activity-metadata" and "/workflow-versions/" in request.url.path:
+            return httpx.Response(
+                200,
+                json={
+                    "workspaceId": "ws",
+                    "workflowName": "flow",
+                    "version": 1,
+                    "document": {
+                        "apiVersion": "custos.dev/v1",
+                        "kind": "Workflow",
+                        "metadata": {"name": "flow", "workspace": "ws"},
+                        "spec": {"steps": [{"id": "step", "activity": "test/echo@1.0.0"}]},
+                    },
+                },
+            )
         if failure == "transport":
             raise httpx.ConnectError(token + credential, request=request)
         if failure == "json":
@@ -126,7 +146,7 @@ async def test_execution_failures_do_not_serialize_transient_authority(
                     await catalog.get_execution_workflow_version("ws", "ws/flow@1", identity)
             assert failed.value.__cause__ is None
             serialized = str(failed.value)
-    assert len(captured) == 3
+    assert len(captured) == (6 if kind == "activity-metadata" else 3)
     for private in (token, credential):
         assert private not in serialized
         assert private not in caplog.text

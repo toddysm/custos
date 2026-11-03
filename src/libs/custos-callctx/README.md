@@ -51,7 +51,9 @@ RPC cannot request. Execution receivers require the matching operation as well
 as its permission; a legacy signed grant is not sufficient. The verifier rejects
 unknown operations, broader grants, missing workspace scope and lifetimes above
 300 seconds. Operations are `workflow-start`, `workflow-resume`, `catalog-read`,
-`connector-bind` and `activity-execute`.
+`catalog-activity-read`, `connector-bind` and `activity-execute`. Activity
+metadata reads carry only `catalog:activity-types:read`; workflow reads retain
+their separate `catalog:workflows:read` grant.
 
 ## Verifier usage
 

@@ -100,9 +100,9 @@ class SlotSpec:
     :attr:`capabilities` is stored as a ``tuple`` (not a ``list``
     or ``set``) so the whole spec is hashable and the caller can
     stash it in a cache key without copying. Order is preserved
-    so test assertions can pin it. An empty tuple is valid — it
-    means *bind without an explicit capability check*; the
-    connector adapter still enforces its own.
+    so test assertions can pin it. An empty tuple is retained for legacy
+    injected adapters; the real Connector requires explicit capabilities.
+    ``connector_kind`` optionally pins the kind from the activity manifest.
 
     :raises ValueError: If :attr:`name` or :attr:`connector_ref`
         is empty.
@@ -111,6 +111,7 @@ class SlotSpec:
     name: str
     connector_ref: str
     capabilities: tuple[str, ...] = ()
+    connector_kind: str | None = None
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -772,6 +773,10 @@ class DaprConnectorClient:
                         not isinstance(context, BoundConnectorContext)
                         or context.connector_instance_id != slot.connector_ref
                         or context.capabilities != slot.capabilities
+                        or (
+                            slot.connector_kind is not None
+                            and context.connector_kind != slot.connector_kind
+                        )
                     ):
                         raise OutboundRpcDecodeError(
                             "binding response changed the requested authority"

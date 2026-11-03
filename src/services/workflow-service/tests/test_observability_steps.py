@@ -280,8 +280,12 @@ def _activity_node(
     *,
     activity: str = "scanners/trivy@1",
     with_inputs: dict[str, Any] | None = None,
+    connector: str | None = None,
 ) -> ExecutionNode:
+    """Build an activity node with an explicit binding only when the scenario needs one."""
     payload: dict[str, Any] = {"id": step_id, "activity": activity}
+    if connector is not None:
+        payload["connector"] = connector
     if with_inputs is not None:
         payload["with"] = with_inputs
     # Compiler-equivalent terminal fallback routes — every
@@ -672,7 +676,7 @@ class TestBindConnectorsRaiseLabelsInternalError:
             connector_client=_StubConnectorClient(raises=RuntimeError("bind failed")),
         )
 
-        result = handler.execute(_ctx(), _graph(_activity_node()), "scan")
+        result = handler.execute(_ctx(), _graph(_activity_node(connector="instance")), "scan")
         assert isinstance(result, StepFailed)
 
         attempts = _by_name(
@@ -692,7 +696,7 @@ class TestBindConnectorsRaiseLabelsInternalError:
             activity_client=_StubActivityClient(_envelope("success")),
             connector_client=_StubConnectorClient(raises=RuntimeError("bind failed")),
         )
-        handler.execute(_ctx(), _graph(_activity_node()), "scan")
+        handler.execute(_ctx(), _graph(_activity_node(connector="instance")), "scan")
 
         samples = _by_name(
             _collect_points(),

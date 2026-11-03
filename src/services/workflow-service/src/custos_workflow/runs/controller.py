@@ -169,6 +169,8 @@ class WorkflowVersion:
             (e.g. ``v1``). Surfaced alongside ``name`` in CEL.
         document: The parsed :class:`WorkflowDocument` the compiler
             consumes.
+        activity_registry: Per-lookup authoritative Catalog activity metadata.
+            ``None`` preserves explicitly injected legacy registry behavior.
     """
 
     id: str
@@ -176,6 +178,7 @@ class WorkflowVersion:
     name: str
     version_label: str
     document: WorkflowDocument
+    activity_registry: ActivityTypeRegistry | None = None
 
 
 @runtime_checkable
@@ -758,7 +761,11 @@ class RunController:
             workflow_version_label=workflow_version.version_label,
             started_at_default=now,
         )
-        graph = compile_workflow(workflow_version.document, run_meta, self._activity_registry)
+        graph = compile_workflow(
+            workflow_version.document,
+            run_meta,
+            workflow_version.activity_registry or self._activity_registry,
+        )
 
         # ---- Gate 4: persist as queued. ------------------------------
         record = RunRecord(

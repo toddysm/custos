@@ -84,7 +84,7 @@ Per [`design/components/workflow-service/design.md`](../../../design/components/
 | `WF_TS_ENDPOINT` | Yes | — | Trigger Service service endpoint. |
 | `WF_CONNECTOR_ENDPOINT` | Yes | — | Connector Service endpoint. |
 | `WF_CATALOG_ENDPOINT` | Production | — | Catalog Service Dapr app-id (read-only `WorkflowVersion`). Activates the durable `DaprCatalogClient`; unset keeps the not-configured stub outside `ENVIRONMENT=production`. See [Durable Wiring](../../../docs/developers/workflow-durable-wiring.md). |
-| `WF_METADATA_STORE` | Production | — | libpq DSN for the durable `custos_pg` metadata store (backs the Run store + idempotency ledger). Unset keeps the in-memory store outside `ENVIRONMENT=production`. See [Durable Wiring](../../../docs/developers/workflow-durable-wiring.md). |
+| `WF_METADATA_STORE` | Production or execution identity enabled | — | libpq DSN for the durable `custos_pg` metadata store (backs the Run store + idempotency ledger). Execution mode requires a successfully opened durable backend even outside production; only explicit test bundles may inject memory storage. See [Durable Wiring](../../../docs/developers/workflow-durable-wiring.md). |
 | `WF_RUN_HISTORY_RETENTION` | No | `90d` | How long to keep terminal-run metadata before archival. |
 | `WF_RESUME_SUB_DEFAULT_TTL` | No | `PT24H` | Default TTL for `RegisterResumeSubscription` when caller does not specify. |
 | `WF_REGISTER_SUB_MAX_RETRIES` | No | `5` | Max retries when registering a resume subscription with TS before failing the wait step. |

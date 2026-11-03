@@ -175,7 +175,7 @@ class TriggerDeliveryController:
                 workflow_version_label=version.version_label,
                 started_at_default=now,
             ),
-            self.registry,
+            version.activity_registry or self.registry,
         )
         request = RunInput(
             workspace_id,
