@@ -73,6 +73,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
 )
+from custos_callctx.execution import EXECUTION_PERMISSIONS, ExecutionOperation
 
 #: JWT ``alg`` header value used for every call-context token.
 ALGORITHM: Final[str] = "EdDSA"
@@ -481,6 +482,7 @@ class CallContextSigner:
         jti: str | None = None,
         permissions: list[str] | None = None,
         audience: str | None = None,
+        execution_operation: ExecutionOperation | None = None,
     ) -> SignedContext:
         """Mint a signed call-context JWT.
 
@@ -512,6 +514,9 @@ class CallContextSigner:
                 (:data:`DEFAULT_AUDIENCE`). The API Gateway uses this
                 to target component-specific audiences such as
                 ``"custos.catalog"``; an empty string is rejected.
+            execution_operation: Internal credential-exchange provenance, never
+                accepted by the generic signing RPC. Requires one matching
+                permission, workspace scope and a lifetime of at most 300 seconds.
 
         Returns:
             A :class:`SignedContext` holding the compact JWT and its
@@ -534,6 +539,13 @@ class CallContextSigner:
         if not effective_audience:
             raise ValueError("audience must be a non-empty string")
         normalised_permissions = self._normalise_permissions(permissions)
+        if execution_operation is not None and (
+            execution_operation not in EXECUTION_PERMISSIONS
+            or normalised_permissions != [EXECUTION_PERMISSIONS[execution_operation]]
+            or not workspace_id
+            or effective_ttl > DEFAULT_TTL_SECONDS
+        ):
+            raise ValueError("execution contexts require one scoped short-lived operation grant")
         iat = int(self._clock())
         exp = iat + effective_ttl
         token_id = jti if jti is not None else str(uuid.uuid4())
@@ -549,6 +561,8 @@ class CallContextSigner:
         }
         if normalised_permissions is not None:
             payload["permissions"] = normalised_permissions
+        if execution_operation is not None:
+            payload["executionOperation"] = execution_operation
         key = await self._resolver.active_signing_key()
         token = jwt.encode(
             payload,

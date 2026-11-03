@@ -41,6 +41,7 @@ class CallContext:
     audience: str
     kid: str
     permissions: frozenset[str] = field(default_factory=frozenset)
+    execution_operation: str | None = None
 
     def has_permission(self, name: str) -> bool:
         """Return ``True`` when ``name`` is present in :attr:`permissions`.

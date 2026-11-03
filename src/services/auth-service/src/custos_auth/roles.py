@@ -1,11 +1,12 @@
 """Built-in v1 roles and scope-rule registry.
 
-Phase D / AS-IMPL-009. Six roles are seeded at every service startup:
+The baseline roles and an explicit workspace execution role are seeded at startup:
 
 * ``role:workspace.viewer``   — workspace-scope read-only.
 * ``role:workspace.author``   — viewer + workflow/template/run authoring.
 * ``role:workspace.operator`` — author + connector/trigger admin.
 * ``role:workspace.admin``    — operator + role-binding + service-account admin.
+* ``role:workspace.executor`` — explicit execution/binding grants, no administration.
 * ``role:tenant.admin``       — workspace admin + tenant-level role-binding.
 * ``role:platform.admin``     — platform short-circuit (empty permission tuple
                                 — the Phase E authorize engine treats this role
@@ -86,6 +87,7 @@ ROLE_WORKSPACE_OPERATOR: Final[RoleId] = RoleId("role:workspace.operator")
 ROLE_WORKSPACE_ADMIN: Final[RoleId] = RoleId("role:workspace.admin")
 ROLE_TENANT_ADMIN: Final[RoleId] = RoleId("role:tenant.admin")
 ROLE_PLATFORM_ADMIN: Final[RoleId] = RoleId("role:platform.admin")
+ROLE_WORKSPACE_EXECUTOR: Final[RoleId] = RoleId("role:workspace.executor")
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +197,13 @@ BUILTIN_ROLES: Final[tuple[BuiltInRole, ...]] = (
         permission_names=(),
         allowed_scopes=frozenset({"platform"}),
     ),
+    BuiltInRole(
+        role_id=ROLE_WORKSPACE_EXECUTOR,
+        name="workspace.executor",
+        description="Execute workflows and bind connectors; no authoring or administration.",
+        permission_names=("workflow:execute", "catalog:workflows:read", "connector:bind"),
+        allowed_scopes=frozenset({"workspace"}),
+    ),
 )
 
 
@@ -266,6 +275,7 @@ __all__ = [
     "ROLE_TENANT_ADMIN",
     "ROLE_WORKSPACE_ADMIN",
     "ROLE_WORKSPACE_AUTHOR",
+    "ROLE_WORKSPACE_EXECUTOR",
     "ROLE_WORKSPACE_OPERATOR",
     "ROLE_WORKSPACE_VIEWER",
     "BuiltInRole",
