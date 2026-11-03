@@ -201,6 +201,9 @@ def _schedule_request() -> ScheduleActivityRequest:
 def _bind_request() -> BindForStepRequest:
     return BindForStepRequest(
         step_key="stage1.scan",
+        run_id="run-1",
+        step_id="step-1",
+        attempt=1,
         slots=(SlotSpec(name="primary", connector_ref="primary"),),
     )
 
@@ -720,11 +723,9 @@ async def test_bind_for_step_success_records_connector_client() -> None:
     assert span.attributes is not None
     assert span.attributes["wf.client"] == "connector"
     assert span.attributes["wf.method"] == BIND_FOR_STEP_DAPR_METHOD
-    # BindForStep surfaces step_key as wf.step.id; run.id and attempt
-    # are intentionally absent (not carried on BindForStepRequest).
-    assert span.attributes["wf.step.id"] == "stage1.scan"
-    assert "wf.run.id" not in span.attributes
-    assert "wf.attempt" not in span.attributes
+    assert span.attributes["wf.step.id"] == "step-1"
+    assert span.attributes["wf.run.id"] == "run-1"
+    assert span.attributes["wf.attempt"] == 1
 
 
 @pytest.mark.asyncio

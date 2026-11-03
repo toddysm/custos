@@ -21,6 +21,7 @@ and :meth:`SecretInjector.revoke` once the attempt reaches a terminal state.
 from __future__ import annotations
 
 import asyncio
+import json
 import posixpath
 from collections.abc import Sequence
 from datetime import datetime
@@ -86,6 +87,16 @@ class SecretInjector:
 
         secret_files: list[str] = []
         for context in sorted(contexts, key=lambda c: c.slot_name):
+            if context.binding is not None:
+                relative_path = posixpath.join(SECRETS_SUBDIR, context.slot_name, "binding.json")
+                if "binding.json" in context.secrets:
+                    raise ValueError("binding.json is reserved for the canonical connector context")
+                await sink.write_secret(
+                    relative_path=relative_path,
+                    content=json.dumps(dict(context.binding), allow_nan=False).encode("utf-8"),
+                    mode=SECRET_FILE_MODE,
+                )
+                secret_files.append(relative_path)
             for key in sorted(context.secrets):
                 relative_path = posixpath.join(SECRETS_SUBDIR, context.slot_name, key)
                 await sink.write_secret(

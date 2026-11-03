@@ -75,6 +75,9 @@ def bind_url(endpoint: DaprInvokeEndpoint) -> str:
 def request_obj() -> BindForStepRequest:
     return BindForStepRequest(
         step_key="run-1/step-a",
+        run_id="run-1",
+        step_id="step-a",
+        attempt=1,
         slots=(
             SlotSpec(
                 name="registry",
@@ -89,6 +92,9 @@ def request_obj() -> BindForStepRequest:
 def multi_slot_request() -> BindForStepRequest:
     return BindForStepRequest(
         step_key="run-2/step-b",
+        run_id="run-2",
+        step_id="step-b",
+        attempt=2,
         slots=(
             SlotSpec(
                 name="registry",
@@ -183,12 +189,15 @@ class TestRequestToWire:
     def test_single_slot_round_trip(self, request_obj: BindForStepRequest) -> None:
         wire = _request_to_wire(request_obj)
         assert wire == {
+            "runId": "run-1",
+            "stepId": "step-a",
+            "attempt": 1,
             "stepKey": "run-1/step-a",
             "slots": [
                 {
                     "name": "registry",
-                    "connectorRef": "oci-registry/main",
-                    "capabilities": ["oci.pull", "oci.inspect"],
+                    "instanceId": "oci-registry/main",
+                    "requiredCapabilities": ["oci.pull", "oci.inspect"],
                 }
             ],
         }
@@ -203,7 +212,7 @@ class TestRequestToWire:
         ]
         # Capability declaration order is preserved within each slot.
         secrets_slot = next(s for s in wire["slots"] if s["name"] == "secrets")
-        assert secrets_slot["capabilities"] == [
+        assert secrets_slot["requiredCapabilities"] == [
             "secret.read",
             "secret.list",
             "secret.rotate",
@@ -214,7 +223,12 @@ class TestRequestToWire:
     ) -> None:
         wire = _request_to_wire(multi_slot_request)
         store_slot = next(s for s in wire["slots"] if s["name"] == "object-store")
-        assert store_slot["capabilities"] == []
+        assert store_slot["requiredCapabilities"] == []
+
+    def test_missing_coordinates_are_not_fabricated(self) -> None:
+        """A display step key cannot stand in for the actual runtime invocation identity."""
+        with pytest.raises(ValueError, match="execution coordinates"):
+            _request_to_wire(BindForStepRequest(step_key="display-name", slots=()))
 
 
 class TestResponseFromWire:
@@ -357,7 +371,7 @@ async def test_bind_for_step_happy_path_multi_slot_preserves_capability_order(
     assert [s["name"] for s in captured[0]["slots"]] == ["registry", "secrets", "object-store"]
     # Capability order preserved within each slot on the wire.
     secrets_slot = next(s for s in captured[0]["slots"] if s["name"] == "secrets")
-    assert secrets_slot["capabilities"] == ["secret.read", "secret.list", "secret.rotate"]
+    assert secrets_slot["requiredCapabilities"] == ["secret.read", "secret.list", "secret.rotate"]
     # All three contexts arrived in the response.
     assert set(response.contexts) == {"registry", "secrets", "object-store"}
     assert type(response.contexts) is MappingProxyType
@@ -376,7 +390,7 @@ async def test_bind_for_step_targets_connector_bind_url(
     await _drive(client, request_obj)
 
     assert captured == [bind_url]
-    assert "/v1.0/invoke/connector-service/method/BindForStep" in captured[0]
+    assert "/v1.0/invoke/connector-service/method/internal/v1/bind-for-step" in captured[0]
 
 
 async def test_bind_for_step_sends_content_type_json(
@@ -566,12 +580,15 @@ async def test_bind_for_step_posts_camelcase_envelope(
 
     assert captured == [
         {
+            "runId": "run-1",
+            "stepId": "step-a",
+            "attempt": 1,
             "stepKey": "run-1/step-a",
             "slots": [
                 {
                     "name": "registry",
-                    "connectorRef": "oci-registry/main",
-                    "capabilities": ["oci.pull", "oci.inspect"],
+                    "instanceId": "oci-registry/main",
+                    "requiredCapabilities": ["oci.pull", "oci.inspect"],
                 }
             ],
         }

@@ -43,10 +43,11 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install custos-cel library from path
+      - name: Install CEL and call-context libraries from path
         working-directory: ${{ github.workspace }}
         run: |
           pip install -e src/libs/custos-cel[dev]
+          pip install -e src/libs/custos-callctx[dev]
 
       - name: Install custos-spl + custos-postgres adapter from path
         working-directory: ${{ github.workspace }}

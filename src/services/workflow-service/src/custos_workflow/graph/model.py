@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from custos_cel import TypedAST
 
+    from custos_workflow.bindings.registry import ConnectorRequirement
     from custos_workflow.document import Step
 
 
@@ -291,6 +292,8 @@ class ExecutionNode:
             instance. Round-tripping the pydantic model uses
             ``model_dump(by_alias=True)`` so wire field names survive
             (e.g. ``forEach`` not ``for_each``).
+        connector_requirements: Pinned Catalog slot authority, or ``None`` for
+            legacy graphs without manifest facts. An empty tuple means connectorless.
     """
 
     step_id: str
@@ -300,6 +303,7 @@ class ExecutionNode:
     on_error_routes: tuple[OnErrorRoute, ...]
     call_sites: Mapping[str, TypedCallSite]
     step_source: Step
+    connector_requirements: tuple[ConnectorRequirement, ...] | None = None
 
     def __post_init__(self) -> None:
         # Freeze the call_sites mapping so callers cannot mutate the

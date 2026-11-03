@@ -38,8 +38,12 @@ import asyncio
 import logging
 import os
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import TYPE_CHECKING
+
+from custos_callctx import CallContextVerifier
+from custos_callctx.execution import ExecutionBindings, load_execution_bindings
+from custos_spl.interfaces.execution import ExecutionIdentityStoreProvider
 
 from custos_workflow._version import __version__
 from custos_workflow.call_context import CallContextMiddleware
@@ -63,6 +67,7 @@ from custos_workflow.steps.sub_orchestration import (
     SubOrchestrationManager,
     make_child_step_orchestrator,
 )
+from custos_workflow.steps.sub_orchestration.child import EXECUTION_CHILD_STEP_WORKFLOW_NAME
 from custos_workflow.validator import DurableIdempotencyLedger
 
 if TYPE_CHECKING:
@@ -104,6 +109,11 @@ def create_app(
     run_components: RunComponents | None = None,
     worker_ready_timeout_s: float = DEFAULT_WORKER_READY_TIMEOUT_S,
     worker_shutdown_timeout_s: float = DEFAULT_WORKER_SHUTDOWN_TIMEOUT_S,
+    execution_bindings: ExecutionBindings | None = None,
+    execution_verifier: CallContextVerifier | None = None,
+    app_api_token: str | None = None,
+    trigger_namespace: str | None = None,
+    trigger_app_id: str = "trigger-service",
 ) -> FastAPI:
     """Build and return the Workflow Service FastAPI application.
 
@@ -144,12 +154,50 @@ def create_app(
         if require_call_context is not None
         else _read_require_call_context_flag()
     )
+    execution_registry = (
+        execution_bindings
+        if execution_bindings is not None
+        else load_execution_bindings(os.environ)
+    )
+    effective_token = (
+        app_api_token if app_api_token is not None else os.environ.get("APP_API_TOKEN")
+    )
+    effective_namespace = trigger_namespace or os.environ.get("WF_TRIGGER_NAMESPACE")
+    if execution_registry is not None:
+        if not effective_token or not effective_token.strip() or not effective_namespace:
+            raise ValueError("execution identity requires an authenticated Trigger app/namespace")
+        if execution_verifier is None:
+            endpoint = os.environ.get("WF_AUTHZ_ENDPOINT", "").strip()
+            if not endpoint:
+                raise ValueError("execution identity requires WF_AUTHZ_ENDPOINT")
+            execution_verifier = CallContextVerifier(
+                jwks_url=endpoint.rstrip("/") + "/.well-known/jwks.json"
+            )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.ready = False
         app.state.ready_detail = "workflow-service has not finished startup"
         components, metadata_pool, metadata_detail = await _resolve_run_components(run_components)
+        if execution_registry is not None:
+            if run_components is None and (metadata_pool is None or metadata_detail is not None):
+                await _shutdown_components(components, metadata_pool, worker_shutdown_timeout_s)
+                raise WorkflowRuntimeUnavailableError(
+                    "execution identity requires an opened durable metadata backend"
+                )
+            store = components.metadata_store
+            if not isinstance(store, ExecutionIdentityStoreProvider):
+                await _shutdown_components(components, metadata_pool, worker_shutdown_timeout_s)
+                raise WorkflowRuntimeUnavailableError(
+                    "execution identity storage capability is required"
+                )
+            identity_ready = False
+            try:
+                await store.check_execution_identity_ready()
+                identity_ready = True
+            finally:
+                if not identity_ready:
+                    await _shutdown_components(components, metadata_pool, worker_shutdown_timeout_s)
         runtime = components.workflow_runtime
         if components.trigger_delivery_controller is not None and metadata_detail is not None:
             await _shutdown_components(components, metadata_pool, worker_shutdown_timeout_s)
@@ -199,6 +247,15 @@ def create_app(
             make_child_step_orchestrator(step_coordinator, activity_handler=activity_handler),
             name=CHILD_STEP_WORKFLOW_NAME,
         )
+        if execution_registry is not None:
+            runtime.register_workflow(
+                make_child_step_orchestrator(
+                    step_coordinator,
+                    activity_handler=activity_handler,
+                    execution_required=True,
+                ),
+                name=EXECUTION_CHILD_STEP_WORKFLOW_NAME,
+            )
         orchestrator_fn = make_run_orchestrator(
             step_coordinator,
             on_replay=components.replay_reconciler.on_replay,
@@ -325,7 +382,12 @@ def create_app(
     app.add_middleware(
         CallContextMiddleware,
         require_call_context=effective_require,
+        execution_verifier=execution_verifier if execution_registry is not None else None,
+        app_api_token=effective_token,
+        trigger_namespace=effective_namespace,
+        trigger_app_id=trigger_app_id,
     )
+    app.state.execution_bindings = execution_registry
     app.include_router(health_router)
 
     # WF-IMPL-069: mount the public REST + Internal RPC surface.
@@ -406,7 +468,9 @@ async def _resolve_run_components(
     WF-IMPL-115 additionally opens the durable
     :class:`~custos_spl.interfaces.metadata_store.MetadataStoreProvider`
     here (env-driven path only) and threads it onto the bundle so the
-    durable Run / idempotency sub-modules share one provider.
+    durable Run / idempotency sub-modules share one provider. A construction
+    failure closes the opened pool; successful construction transfers it to
+    the lifespan, which rejects fallback storage when execution is enabled.
     """
     if injected is not None:
         return injected, None, None
@@ -430,7 +494,11 @@ async def _resolve_run_components(
     # ``production`` deployment fails fast inside ``open_metadata_store``
     # (it never returns the in-memory provider in production).
     metadata_store, metadata_pool, metadata_detail = await open_metadata_store(os.environ)
-    components = load_run_components(metadata_store=metadata_store)
+    async with AsyncExitStack() as cleanup:
+        if metadata_pool is not None:
+            cleanup.push_async_callback(metadata_pool.aclose)
+        components = load_run_components(metadata_store=metadata_store)
+        cleanup.pop_all()
     return components, metadata_pool, metadata_detail
 
 

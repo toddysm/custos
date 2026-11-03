@@ -631,6 +631,31 @@ def test_child_step_input_defaults_apply() -> None:
     assert restored.item is None
 
 
+def test_execution_child_input_retains_pinned_protocol_and_identity() -> None:
+    """A child wait's retained input must be recognizable by durable resume validation."""
+    from custos_callctx.execution import ExecutionIdentity
+
+    identity = ExecutionIdentity("ws", "executor", "original-binding")
+    original = ChildStepInput(
+        workspace_id="ws",
+        workflow_version_id="v",
+        compiled_graph_json="{}",
+        step_id="body",
+        execution_identity=identity,
+    )
+    serialized = original.to_dict()
+    assert serialized["delivery_protocol"] == 3
+    assert serialized["execution_identity"] == identity.to_dict()
+    assert ChildStepInput.from_dict(serialized) == original
+    serialized.pop("delivery_protocol")
+    with pytest.raises(ValueError, match="protocol 3"):
+        ChildStepInput.from_dict(serialized)
+    serialized["delivery_protocol"] = 3
+    serialized.pop("execution_identity")
+    with pytest.raises(ValueError, match="pinned identity"):
+        ChildStepInput.from_dict(serialized)
+
+
 def test_child_step_input_null_loop_var_falls_back_to_default() -> None:
     """An explicit JSON ``null`` loop_var is treated as missing."""
 

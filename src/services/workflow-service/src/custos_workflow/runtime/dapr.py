@@ -354,12 +354,14 @@ class WorkflowRuntime:
 
         if self._started:
             return
-        self._register_outbound_bridge_activities()
+        self._register_outbound_bridge_activities(loop=asyncio.get_running_loop())
         runtime = self._ensure_runtime()
         await asyncio.to_thread(runtime.start)
         self._started = True
 
-    def _register_outbound_bridge_activities(self) -> None:
+    def _register_outbound_bridge_activities(
+        self, *, loop: asyncio.AbstractEventLoop | None = None
+    ) -> None:
         """Register the WF-IMPL-079 ARM + Connector bridge activities.
 
         Idempotent on the runtime side (registering the same
@@ -376,7 +378,7 @@ class WorkflowRuntime:
             and SCHEDULE_ACTIVITY_ACTIVITY_NAME not in already_registered
         ):
             self.register_activity(
-                build_arm_schedule_activity(self._activity_runtime_client),
+                build_arm_schedule_activity(self._activity_runtime_client, loop=loop),
                 name=SCHEDULE_ACTIVITY_ACTIVITY_NAME,
             )
         if (
@@ -384,7 +386,7 @@ class WorkflowRuntime:
             and BIND_FOR_STEP_ACTIVITY_NAME not in already_registered
         ):
             self.register_activity(
-                build_connector_bind_for_step_activity(self._connector_client),
+                build_connector_bind_for_step_activity(self._connector_client, loop=loop),
                 name=BIND_FOR_STEP_ACTIVITY_NAME,
             )
 

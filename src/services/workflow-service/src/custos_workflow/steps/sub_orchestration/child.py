@@ -65,6 +65,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Final, cast
 
+from custos_callctx.execution import ExecutionIdentity
 from custos_cel import DaprWorkflowClock
 
 from custos_workflow.graph.model import StepKind
@@ -96,6 +97,7 @@ __all__ = [
 #: wiring (WF-IMPL-094) registers the function the factory below
 #: returns under this name.
 CHILD_STEP_WORKFLOW_NAME: Final[str] = "custos.workflow.child_step"
+EXECUTION_CHILD_STEP_WORKFLOW_NAME: Final[str] = "custos.workflow.child_step.execution.v1"
 
 
 #: Default name the per-iteration loop item is surfaced under inside
@@ -154,11 +156,20 @@ class ChildStepInput:
     parent_outputs: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     loop_var: str = DEFAULT_LOOP_VAR
     item: Any = None
+    execution_identity: ExecutionIdentity | None = None
+
+    def __post_init__(self) -> None:
+        """A child inherits the exact parent's account within the same workspace."""
+        if (
+            self.execution_identity is not None
+            and self.execution_identity.workspace_id != self.workspace_id
+        ):
+            raise ValueError("child execution identity belongs to another workspace")
 
     def to_dict(self) -> dict[str, Any]:
         """Render to a JSON-serialisable dict for the Dapr boundary."""
 
-        return {
+        result = {
             "workspace_id": self.workspace_id,
             "workflow_version_id": self.workflow_version_id,
             "compiled_graph_json": self.compiled_graph_json,
@@ -168,10 +179,20 @@ class ChildStepInput:
             "loop_var": self.loop_var,
             "item": self.item,
         }
+        if self.execution_identity is not None:
+            result["execution_identity"] = self.execution_identity.to_dict()
+            result["delivery_protocol"] = 3
+        return result
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> ChildStepInput:
-        """Reconstruct from a JSON-decoded mapping."""
+        """Reconstruct only compatible identity/protocol pairs from durable child input."""
+
+        protocol = payload.get("delivery_protocol", 1)
+        if type(protocol) is not int or protocol not in (1, 3):
+            raise ValueError("unsupported child delivery protocol")
+        if (payload.get("execution_identity") is not None) != (protocol == 3):
+            raise ValueError("execution child input requires protocol 3 and a pinned identity")
 
         return cls(
             workspace_id=str(payload["workspace_id"]),
@@ -184,6 +205,11 @@ class ChildStepInput:
             },
             loop_var=_decode_loop_var(payload.get("loop_var", DEFAULT_LOOP_VAR)),
             item=payload.get("item"),
+            execution_identity=(
+                ExecutionIdentity.from_dict(payload["execution_identity"])
+                if payload.get("execution_identity") is not None
+                else None
+            ),
         )
 
 
@@ -245,6 +271,7 @@ def make_child_step_orchestrator(
     handler: StepHandler,
     *,
     activity_handler: ActivityStepHandler | None = None,
+    execution_required: bool = False,
 ) -> Callable[[WorkflowContext, Any], Generator[Any, Any, dict[str, Any]]]:
     """Build the child workflow function bound to a concrete handler.
 
@@ -285,6 +312,8 @@ def make_child_step_orchestrator(
 
     def run_child_step(ctx: WorkflowContext, raw: Any) -> Generator[Any, Any, dict[str, Any]]:
         child_input = raw if isinstance(raw, ChildStepInput) else ChildStepInput.from_dict(raw)
+        if execution_required and child_input.execution_identity is None:
+            raise ValueError("execution-aware child requires its original identity")
         graph = from_json(child_input.compiled_graph_json)
         clock = DaprWorkflowClock(ctx)
         step_ctx = _child_step_ctx(ctx, child_input, clock)
@@ -306,7 +335,9 @@ def make_child_step_orchestrator(
 
         return _normalise(result).to_dict()
 
-    run_child_step.__name__ = CHILD_STEP_WORKFLOW_NAME
+    run_child_step.__name__ = (
+        EXECUTION_CHILD_STEP_WORKFLOW_NAME if execution_required else CHILD_STEP_WORKFLOW_NAME
+    )
     return run_child_step
 
 
@@ -338,6 +369,8 @@ def _child_step_ctx(
         workflow_context=ctx,
         outputs=outputs_snapshot,
         clock=clock,
+        delivery_protocol=3 if child_input.execution_identity is not None else 1,
+        execution_identity=child_input.execution_identity,
     )
 
 

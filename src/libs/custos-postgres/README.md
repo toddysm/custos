@@ -64,6 +64,13 @@ acceptance share a workspace lock, preserving unfinished accepted requests.
 Pending-selection pages fetch only keys and UTF-8 byte lengths first, then load
 at most 20 MiB of payloads. Selection count alone is not a memory bound.
 
+Revision **14** adds the optional execution-identity capability. Execution-aware
+producers and registrations require `check_execution_identity_ready()` before
+acceptance. Retained references contain only workspace, principal and binding
+IDs, use delivery protocol 2, and cannot be changed or removed by an old writer,
+even after a wait expires. Legacy waits remain legacy; they are not silently
+assigned the current account. The shared revision-4 baseline is unchanged.
+
 Gateway idempotency operations classify connection, pool and driver failures as
 `BackendUnavailable`; recovery routes return the documented 503 without forwarding.
 Reservation and follow-up read share a transaction, preventing expiry cleanup

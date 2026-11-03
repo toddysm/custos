@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
+from custos_callctx.execution import ExecutionIdentity
 from custos_spl.errors import ImmutableViolation
 from custos_spl.ids import RunId as SplRunId
 from custos_spl.ids import WorkflowId, WorkspaceId
@@ -82,13 +83,13 @@ class TriggerDeliveryController:
         inputs: Mapping[str, Any],
         idempotency_key: str,
         retain_until: datetime,
+        *,
+        execution_identity: ExecutionIdentity | None = None,
     ) -> RunRef | None:
         """Recover previously validated work without Catalog, preserving legacy run identity."""
         run_id = derive_run_id(workspace_id, idempotency_key)
         row = await self.provider.get_delivery(WorkspaceId(workspace_id), "workflow-start", run_id)
-        expected = delivery_fingerprint(
-            {"workflowVersionId": workflow_version_id, "inputs": inputs}
-        )
+        expected = self._start_fingerprint(workflow_version_id, inputs, execution_identity)
         if row is not None and row.request_hash != expected:
             raise ImmutableViolation("trigger start key is bound to another request")
         if row is not None and row.completed:
@@ -116,6 +117,16 @@ class TriggerDeliveryController:
         return None
 
     @staticmethod
+    def _start_fingerprint(
+        version_id: str, inputs: Mapping[str, Any], identity: ExecutionIdentity | None
+    ) -> str:
+        """Bind accepted identity while preserving the exact legacy version-two request hash."""
+        request: dict[str, Any] = {"workflowVersionId": version_id, "inputs": inputs}
+        if identity is not None:
+            request["executionIdentity"] = identity.to_dict()
+        return delivery_fingerprint(request)
+
+    @staticmethod
     def _ref(row: DeliveryReceipt) -> RunRef:
         """Decode the stored result identity, not current mutable subscription configuration."""
         if row.result_json is None:
@@ -135,11 +146,15 @@ class TriggerDeliveryController:
         inputs: Mapping[str, Any],
         idempotency_key: str,
         retain_until: datetime,
+        *,
+        execution_identity: ExecutionIdentity | None = None,
     ) -> RunRef:
         """Recover queued/uncertain scheduling without recreating a completed runtime instance."""
         await self.provider.check_delivery_ready()
         run_id = derive_run_id(workspace_id, idempotency_key)
-        fingerprint = delivery_fingerprint({"workflowVersionId": version.id, "inputs": inputs})
+        if execution_identity is not None and execution_identity.workspace_id != workspace_id:
+            raise ImmutableViolation("execution identity workspace does not match the run")
+        fingerprint = self._start_fingerprint(version.id, inputs, execution_identity)
         claim = await self.provider.reserve_delivery(
             WorkspaceId(workspace_id),
             "workflow-start",
@@ -160,7 +175,7 @@ class TriggerDeliveryController:
                 workflow_version_label=version.version_label,
                 started_at_default=now,
             ),
-            self.registry,
+            version.activity_registry or self.registry,
         )
         request = RunInput(
             workspace_id,
@@ -168,7 +183,8 @@ class TriggerDeliveryController:
             to_json(graph),
             dict(inputs),
             idempotency_key,
-            delivery_protocol=2,
+            delivery_protocol=3 if execution_identity is not None else 2,
+            execution_identity=execution_identity,
         )
         saved = await self.provider.put_workflow_start(
             Run(
@@ -251,12 +267,22 @@ class TriggerDeliveryController:
         payload: Mapping[str, Any],
         idempotency_key: str,
         retain_until: datetime,
+        *,
+        execution_identity: ExecutionIdentity | None = None,
     ) -> bool:
         """Submit to a versioned wait; return True only for durable consumer acknowledgement."""
         await self.provider.check_delivery_ready()
         ws = WorkspaceId(workspace_id)
         key, fingerprint = resume_identity(
-            workspace_id, run_id, step_id, event_name, idempotency_key, payload
+            workspace_id,
+            run_id,
+            step_id,
+            event_name,
+            idempotency_key,
+            payload,
+            execution_identity=execution_identity.to_dict()
+            if execution_identity is not None
+            else None,
         )
         prior = await self.provider.get_delivery(ws, "workflow-resume", key)
         if prior is not None and prior.completed:
@@ -285,6 +311,7 @@ class TriggerDeliveryController:
             or mirror.delivery_protocol != 2
             or mirror.event_key != event_name
             or mirror.expires_at <= await self.provider.delivery_now()
+            or mirror.execution_identity != execution_identity
         ):
             if await self._completed_resume(ws, key, fingerprint, retain_until):
                 return True
@@ -295,7 +322,13 @@ class TriggerDeliveryController:
         original = (
             json.loads(runtime.serialized_input) if runtime and runtime.serialized_input else None
         )
-        if not isinstance(original, dict) or original.get("delivery_protocol", 1) != 2:
+        expected_protocol = 3 if execution_identity is not None else 2
+        if (
+            not isinstance(original, dict)
+            or original.get("delivery_protocol", 1) != expected_protocol
+            or original.get("execution_identity")
+            != (execution_identity.to_dict() if execution_identity is not None else None)
+        ):
             raise RunStateConflictError(
                 "replay_unsafe: run has no version-2 delivery contract",
                 run_id=run_id,

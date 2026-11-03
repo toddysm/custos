@@ -37,13 +37,53 @@ Tracking issue: [#267](https://github.com/toddysm/custos/issues/267) (AS-IMPL-00
 Design reference:
 [`design/components/auth-service/design.md`](../../../design/components/auth-service/design.md).
 
-## Local development
+## Background execution context exchange
+
+`POST /rpc/callctx.exchangeExecution` is default-off. Enable it with
+`CUSTOS_AUTH_EXECUTION_CONTEXT_ENABLED=true`, an `APP_API_TOKEN` shared only
+with the Auth sidecar, and `CUSTOS_AUTH_EXECUTION_CALLER_NAMESPACE`. The
+deployment-owned caller IDs default to `trigger-service`, `workflow-service`
+and `api-gateway`; overrides use `CUSTOS_AUTH_EXECUTION_TRIGGER_APP_ID`,
+`CUSTOS_AUTH_EXECUTION_WORKFLOW_APP_ID` and `CUSTOS_AUTH_EXECUTION_GATEWAY_APP_ID`.
+
+The request carries the service credential, expected account/workspace and one
+operation, not an asserted grant, audience or lifetime. Auth verifies the exact
+service account and current scoped permission before using its existing signer.
+The context contains one operation grant, uses the existing internal audience
+and lasts at most five minutes (or the configured shorter lifetime). An issuance
+audit record must persist before the token is returned; neither token nor bearer
+credential is included in that record.
+
+Only this credential-backed exchange can request the signed `executionOperation`
+marker. Execution receivers check that marker rather than trusting a matching
+permission from legacy assertion-based signing. `activity-execute` uses the
+workspace `workflow:execute` grant; it does not add a platform-wide service role.
+
+The explicit `role:workspace.executor` role grants `workflow:execute`,
+`catalog:workflows:read`, `catalog:activity-types:read` and `connector:bind` only
+at workspace scope. Activity metadata uses the separate `catalog-activity-read`
+operation so each exchange still issues exactly one permission. No existing
+role is widened and no service account automatically receives the role.
+Workspace administrators must provision and bind the intended execution account.
+
+When enabled, the legacy `rpc/callctx.sign` assertion-based endpoint accepts only
+the authenticated Gateway; execution workloads must use the credential-backed
+exchange. Keep Dapr mutual TLS, caller namespace checks and deployment network
+controls enabled. Disabled deployments retain the legacy behavior.
+
+Unknown/revoked/expired credentials fail with 401, denied scope/grants with 403,
+and disabled/unavailable issuance with 503. Existing authentication/authorization
+cache bounds and invalidation still apply; issued contexts remain valid until
+expiry. Do not promise instantaneous revocation or retain an old user context.
+
+## Development commands
 
 ```bash
 cd src/services/auth-service
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e ../../libs/storage-provider-layer -e ../../libs/custos-postgres \
+  -e ../../libs/custos-callctx -e ".[dev]"
 pytest -q
 ```
 

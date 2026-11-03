@@ -336,6 +336,7 @@ class _DeliveryRequest(_CamelModel):
 
     delivery_protocol: StrictInt = Field(default=1, ge=1, le=2)
     retain_until: AwareDatetime | None = None
+    execution_identity: dict[str, str] | None = None
 
     @model_serializer(mode="wrap")
     def serialize_delivery(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
@@ -344,6 +345,9 @@ class _DeliveryRequest(_CamelModel):
         if self.delivery_protocol == 1:
             for key in ("deliveryProtocol", "delivery_protocol", "retainUntil", "retain_until"):
                 wire.pop(key, None)
+        if self.execution_identity is None:
+            wire.pop("executionIdentity", None)
+            wire.pop("execution_identity", None)
         return wire
 
     @model_validator(mode="after")
@@ -355,6 +359,14 @@ class _DeliveryRequest(_CamelModel):
             raise ValueError("version-2 delivery requires idempotencyKey and retainUntil")
         if self.delivery_protocol == 1 and self.retain_until is not None:
             raise ValueError("retainUntil requires deliveryProtocol 2")
+        if self.execution_identity is not None:
+            from custos_callctx.execution import ExecutionIdentity
+
+            identity = ExecutionIdentity.from_dict(self.execution_identity)
+            if self.delivery_protocol != 2 or identity.workspace_id != getattr(
+                self, "workspace_id", None
+            ):
+                raise ValueError("execution identity requires matching scoped durable delivery")
         return self
 
 

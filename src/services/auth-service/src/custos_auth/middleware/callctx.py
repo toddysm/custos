@@ -119,6 +119,7 @@ _BYPASS_PATHS: frozenset[str] = frozenset(
         "/rpc/authn.verifyToken",
         "/rpc/authz.verifyAndAuthorize",
         "/rpc/callctx.sign",
+        "/rpc/callctx.exchangeExecution",
     }
 )
 

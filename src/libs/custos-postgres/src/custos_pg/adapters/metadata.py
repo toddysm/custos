@@ -86,6 +86,7 @@ from custos_spl.interfaces.dead_letters import (
     new_dead_letter,
     recover_replay,
     validate_dispatch_identifier,
+    validate_execution_reference,
 )
 from custos_spl.interfaces.delivery import (
     DELIVERY_SCHEMA_REVISION,
@@ -102,6 +103,7 @@ from custos_spl.interfaces.delivery import (
     validate_delivery_key,
     validate_failure_capture,
 )
+from custos_spl.interfaces.execution import EXECUTION_IDENTITY_SCHEMA_REVISION
 from custos_spl.interfaces.metadata_store import (
     ArtifactUse,
     AuditEvent,
@@ -188,6 +190,7 @@ from custos_pg.migrations.metadata import (
     METADATA_REV11,
     METADATA_REV12,
     METADATA_REV13,
+    METADATA_REV14,
     METADATA_REV15,
 )
 from custos_pg.pool import LazyPool, read_dsn_from_env
@@ -666,6 +669,7 @@ class PgMetadataAdapter:
                 METADATA_REV11,
                 METADATA_REV12,
                 METADATA_REV13,
+                METADATA_REV14,
                 METADATA_REV15,
             ):
                 if rev.number in already:
@@ -847,6 +851,22 @@ class PgMetadataAdapter:
             if row is None:
                 raise LeaseExpired("activity ownership or transition no longer matches")
         return self._activity_record(row)
+    async def check_execution_identity_ready(self) -> None:
+        """Require the additive immutable identity guard before accepting execution-aware work."""
+        async with self._delivery_transaction() as conn:
+            try:
+                exists = await conn.fetchval(
+                    "SELECT EXISTS(SELECT 1 FROM custos_meta.adapter_revisions "
+                    "WHERE interface_name=$1 AND revision=$2)",
+                    INTERFACE_NAME,
+                    EXECUTION_IDENTITY_SCHEMA_REVISION,
+                )
+            except UndefinedTableError as exc:
+                raise MigrationRequired(
+                    [(INTERFACE_NAME, EXECUTION_IDENTITY_SCHEMA_REVISION)]
+                ) from exc
+            if not exists:
+                raise MigrationRequired([(INTERFACE_NAME, EXECUTION_IDENTITY_SCHEMA_REVISION)])
 
     async def put_workflow_start(self, run: Run, start: WorkflowStart) -> WorkflowStart:
         """Commit Run and protocol atomically; never adopt an unversioned legacy run."""
@@ -2506,6 +2526,12 @@ class PgMetadataAdapter:
         """Atomically register a new/expired wait or return the unchanged live winner."""
         if as_of.utcoffset() is None:
             raise ValueError("resume registration cutoff must be timezone-aware")
+        if "executionIdentity" in resume.payload:
+            validate_execution_reference(
+                resume.payload["executionIdentity"], workspace_id=workspace_id
+            )
+            if resume.payload.get("deliveryProtocol") != 2:
+                raise ValueError("execution identity requires durable registration")
         pool = await self._pool_ref()
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -2515,24 +2541,32 @@ class PgMetadataAdapter:
                 VALUES ($1, $2, $3, $4, $5, $6::jsonb)
                 ON CONFLICT (workspace_id, resume_id) DO UPDATE SET
                     run_id = CASE WHEN stored.expires_at <= $7 AND
+                        stored.payload->'executionIdentity' IS NOT DISTINCT FROM
+                        EXCLUDED.payload->'executionIdentity' AND
                         NULLIF(stored.payload->'source', 'null'::jsonb) IS NOT DISTINCT FROM
                         NULLIF(EXCLUDED.payload->'source', 'null'::jsonb)
                         AND COALESCE(stored.payload->>'deliveryProtocol','1') =
                             COALESCE(EXCLUDED.payload->>'deliveryProtocol','1')
                         THEN EXCLUDED.run_id ELSE stored.run_id END,
                     step_id = CASE WHEN stored.expires_at <= $7 AND
+                        stored.payload->'executionIdentity' IS NOT DISTINCT FROM
+                        EXCLUDED.payload->'executionIdentity' AND
                         NULLIF(stored.payload->'source', 'null'::jsonb) IS NOT DISTINCT FROM
                         NULLIF(EXCLUDED.payload->'source', 'null'::jsonb)
                         AND COALESCE(stored.payload->>'deliveryProtocol','1') =
                             COALESCE(EXCLUDED.payload->>'deliveryProtocol','1')
                         THEN EXCLUDED.step_id ELSE stored.step_id END,
                     expires_at = CASE WHEN stored.expires_at <= $7 AND
+                        stored.payload->'executionIdentity' IS NOT DISTINCT FROM
+                        EXCLUDED.payload->'executionIdentity' AND
                         NULLIF(stored.payload->'source', 'null'::jsonb) IS NOT DISTINCT FROM
                         NULLIF(EXCLUDED.payload->'source', 'null'::jsonb)
                         AND COALESCE(stored.payload->>'deliveryProtocol','1') =
                             COALESCE(EXCLUDED.payload->>'deliveryProtocol','1')
                         THEN EXCLUDED.expires_at ELSE stored.expires_at END,
                     payload = CASE WHEN stored.expires_at <= $7 AND
+                        stored.payload->'executionIdentity' IS NOT DISTINCT FROM
+                        EXCLUDED.payload->'executionIdentity' AND
                         NULLIF(stored.payload->'source', 'null'::jsonb) IS NOT DISTINCT FROM
                         NULLIF(EXCLUDED.payload->'source', 'null'::jsonb)
                         AND COALESCE(stored.payload->>'deliveryProtocol','1') =
@@ -2820,6 +2854,12 @@ class PgMetadataAdapter:
     async def put_resume_subscription(
         self, workspace_id: str, resume: ResumeSubscription
     ) -> ResumeSubscription:
+        if "executionIdentity" in resume.payload:
+            validate_execution_reference(
+                resume.payload["executionIdentity"], workspace_id=workspace_id
+            )
+            if resume.payload.get("deliveryProtocol") != 2:
+                raise ValueError("execution identity requires durable registration")
         pool = await self._pool_ref()
         try:
             async with pool.acquire() as conn:

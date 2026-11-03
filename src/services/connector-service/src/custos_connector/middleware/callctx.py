@@ -6,13 +6,10 @@ parses it, validates it, and exposes the result on
 ``request.state.call_context`` so route handlers can authorize via
 :func:`get_call_context` and :func:`require_permission`.
 
-The full validation path lives behind ``CONN_AUTHZ_ENDPOINT``; until the
-Auth Service real-verifier wiring lands (mirrored from CS-IMPL-024 #225)
-the middleware raises :class:`NotImplementedError` whenever
-``CONN_AUTHZ_ENDPOINT`` is set. With the env var left empty the middleware
-activates a **dev shim** that parses an unsigned JSON header so the rest
-of Phases B-K can proceed; the shim refuses to start when ``ENVIRONMENT``
-is ``production`` (case-insensitive).
+``CONN_AUTHZ_ENDPOINT`` selects the shared signed-context verifier using the
+Auth Service's public signing keys. Invalid contexts fail closed; an unavailable
+key service returns 503 rather than falling back to unsigned headers. An empty
+endpoint enables the development shim, which is forbidden in production.
 
 The exact ``POST /VerifyWebhook`` route instead authenticates the sidecar
 token and permitted Trigger app/namespace independently. It never uses the
@@ -35,6 +32,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
+from custos_callctx import CallContextVerifier, InvalidCallContextError, InvalidReason
 from custos_callctx.mesh import MeshAuthenticationError, require_service_caller
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -121,7 +119,7 @@ class CallContext(BaseModel):
     Mirrors the catalog-service dev-shim shape so the cross-service test
     fixtures and operator tools stay aligned. The production
     :class:`custos_callctx.CallContext` (returned by the Auth Service
-    verifier once it lands) carries additional claims like ``jti``,
+    verifier) carries additional claims like ``jti``,
     ``iss``, ``aud``, and ``kid``; this dev-shim accepts a subset to keep
     the wire format compact for local development.
     """
@@ -134,6 +132,8 @@ class CallContext(BaseModel):
     permissions: frozenset[str] = Field(default_factory=frozenset)
     issued_at: int | None = Field(default=None, alias="iat")
     expires_at: int | None = Field(default=None, alias="exp")
+    execution_operation: str | None = None
+    caller_component: str | None = None
 
     def has_permission(self, name: str) -> bool:
         return name in self.permissions
@@ -176,16 +176,15 @@ class CallContextMiddleware(BaseHTTPMiddleware):
 
     Args:
         app: The downstream ASGI application (FastAPI passes itself).
-        authz_endpoint: Value of ``CONN_AUTHZ_ENDPOINT``. Empty enables
-            the dev shim; non-empty surfaces a 500 with
-            :class:`NotImplementedError` until the real-verifier wiring
-            lands (mirroring catalog-service CS-IMPL-024 #225).
+        authz_endpoint: Auth Service base URL supplying public verification keys.
+            Empty enables the development shim when no verifier is injected.
         environment: Value of ``ENVIRONMENT``. ``"production"`` with an
             empty ``authz_endpoint`` raises
             :class:`DevShimDisabledInProductionError` at construction.
         app_api_token: Token shared only with the local Dapr sidecar.
         trigger_app_id: Expected authenticated caller of the private verifier.
         trigger_namespace: Expected authenticated caller namespace, independently required.
+        verifier: Optional shared verifier override with a caller-provided key source.
 
     Raises:
         DevShimDisabledInProductionError: When constructed with the dev
@@ -201,15 +200,20 @@ class CallContextMiddleware(BaseHTTPMiddleware):
         app_api_token: str | None = None,
         trigger_app_id: str = "trigger-service",
         trigger_namespace: str | None = None,
+        verifier: CallContextVerifier | None = None,
     ) -> None:
         """Configure user context separately from exact, authenticated verifier service traffic."""
         super().__init__(app)
         self._app_api_token = app_api_token
         self._trigger_app_id = trigger_app_id
         self._trigger_namespace = trigger_namespace
-        self._authz_endpoint = authz_endpoint
-        self._dev_shim_active = authz_endpoint == ""
-        if self._dev_shim_active and environment.lower() == "production":
+        self._verifier = verifier
+        if self._verifier is None and authz_endpoint.strip():
+            self._verifier = CallContextVerifier(
+                jwks_url=authz_endpoint.strip().rstrip("/") + "/.well-known/jwks.json"
+            )
+        self._dev_shim_active = self._verifier is None
+        if self._dev_shim_active and environment.strip().lower() == "production":
             raise DevShimDisabledInProductionError(
                 "CONN_AUTHZ_ENDPOINT is empty but ENVIRONMENT=production; "
                 "the call-context dev shim is forbidden in production. "
@@ -249,17 +253,29 @@ class CallContextMiddleware(BaseHTTPMiddleware):
         if not raw_header:
             return _error(401, "callctx_missing", f"{CALLCTX_HEADER} header is required")
 
-        if not self._dev_shim_active:
-            # The real-verifier follow-up (mirroring catalog-service
-            # CS-IMPL-024 #225) will replace this raise with the real call
-            # to the Auth Service: sig-verify the JWT, parse claims, call
-            # /authorize.
-            raise NotImplementedError(
-                "Production call-context validation is not yet implemented "
-                "for connector-service (mirrors catalog-service CS-IMPL-024 "
-                "#225). Unset CONN_AUTHZ_ENDPOINT to fall back to the dev "
-                "shim in non-production environments."
+        if self._verifier is not None:
+            if len(request.headers.getlist(CALLCTX_HEADER)) != 1:
+                return _error(401, "callctx_invalid", "one call context is required")
+            try:
+                verified = await self._verifier.verify(metadata=request.headers)
+            except InvalidCallContextError as exc:
+                logger.warning("Rejected signed call context: %s", exc.reason.value)
+                if exc.reason is InvalidReason.JWKS_UNAVAILABLE:
+                    return _error(503, "callctx_unavailable", "verification unavailable")
+                return _error(401, "callctx_invalid", "invalid call context")
+            if verified.workspace_id is None or not verified.workspace_id.strip():
+                return _error(403, "workspace_required", "workspace scope is required")
+            request.state.call_context = CallContext(
+                workspace_id=verified.workspace_id,
+                principal_id=verified.acting_principal_id,
+                permissions=verified.permissions,
+                iat=verified.issued_at,
+                exp=verified.expires_at,
+                execution_operation=verified.execution_operation,
+                caller_component=verified.caller_component,
             )
+            request.state.signed_call_context = True
+            return await call_next(request)
 
         try:
             ctx = self._parse_dev_shim_header(raw_header)

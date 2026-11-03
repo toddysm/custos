@@ -61,6 +61,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from custos_workflow._telemetry import record_idempotency_outcome
+from custos_workflow.clients.execution import ExecutionCatalogClient
 from custos_workflow.validator.errors import (
     IdempotencyConflictError,
     WorkflowVersionNotFoundError,
@@ -231,9 +232,20 @@ class StartRunValidator:
 
         # ---- Gate 2: Catalog lookup -------------------------------------
         try:
-            workflow_version = await self._catalog.get_workflow_version(
-                workspace_id, workflow_version_id
-            )
+            if call_context is not None and call_context.execution_identity is not None:
+                if not isinstance(self._catalog, ExecutionCatalogClient):
+                    from custos_workflow.runs.errors import WorkflowRuntimeUnavailableError
+
+                    raise WorkflowRuntimeUnavailableError(
+                        "execution-aware Catalog is not configured"
+                    )
+                workflow_version = await self._catalog.get_execution_workflow_version(
+                    workspace_id, workflow_version_id, call_context.execution_identity
+                )
+            else:
+                workflow_version = await self._catalog.get_workflow_version(
+                    workspace_id, workflow_version_id
+                )
         except WorkflowVersionNotFoundError:
             raise
         except LookupError as exc:

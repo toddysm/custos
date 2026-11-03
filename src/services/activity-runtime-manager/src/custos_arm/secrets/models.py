@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Final, Protocol, runtime_checkable
+from typing import Any, Final, Protocol, runtime_checkable
 
 #: Sub-directory of ``/custos/in`` that holds materialized connector
 #: credentials. Mirrors the locked Activity Contract path
@@ -68,6 +68,9 @@ class ConnectorContext:
         from the sidecar instead of reading static files.
     :param lease_id: Connector Service lease id ARM may ``RefreshLease`` for a
         long-running step; ``None`` when ARM holds no refreshable lease.
+    :param binding: Canonical opaque plugin context, written only to the private
+        slot binding file. It is not a lease identifier.
+    :param capabilities: Capabilities resolved for this exact slot binding.
     :raises ValueError: If any identity field is empty or a secret key is empty.
     """
 
@@ -76,6 +79,8 @@ class ConnectorContext:
     connector_instance_id: str
     secrets: Mapping[str, str] = field(default_factory=dict)
     lease_id: str | None = None
+    binding: Mapping[str, Any] | None = field(default=None, repr=False)
+    capabilities: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.slot_name:

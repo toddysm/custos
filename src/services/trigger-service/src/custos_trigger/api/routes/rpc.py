@@ -34,10 +34,13 @@ names (no ``/v1/workspaces/...`` prefix).
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Final
 
+from custos_spl.errors import SPLError
+from custos_spl.interfaces.execution import ExecutionIdentityStoreProvider
 from custos_spl.interfaces.trigger_source import parse_resume_duration
 from fastapi import APIRouter, Depends, Request, Response, status
 
@@ -114,7 +117,11 @@ async def _reject_source_rebinding(
     resume_id: str,
 ) -> None:
     """Audit and reject a different source while leaving the persisted association untouched."""
-    if original.source == body.source and original.delivery_protocol == body.delivery_protocol:
+    if (
+        original.source == body.source
+        and original.delivery_protocol == body.delivery_protocol
+        and original.execution_identity == body.execution_identity
+    ):
         return
     await audit.emit(
         AUDIT_RESUME_DIVERGENT,
@@ -243,6 +250,21 @@ async def register_resume_subscription(
     if body.source is not None or body.delivery_protocol == 2:
         await require_workflow_caller(request, workflow_verifier)
         require_receiver_configuration(receiver_enabled)
+    if body.execution_identity is not None:
+        storage = providers.metadata_store
+        if not isinstance(storage, ExecutionIdentityStoreProvider):
+            raise TriggerError(
+                TriggerErrorKind.SOURCE_UNAVAILABLE, "execution identity storage is unavailable"
+            )
+        try:
+            await storage.check_execution_identity_ready()
+        except SPLError as exc:
+            logging.getLogger(__name__).warning(
+                "Execution identity storage unavailable: %s", type(exc).__name__
+            )
+            raise TriggerError(
+                TriggerErrorKind.SOURCE_UNAVAILABLE, "execution identity storage is unavailable"
+            ) from None
     if body.selector:
         # Compiled before the idempotency lookup so a malformed selector is
         # rejected on every path, replay included. Raises SelectorInvalidError
@@ -279,6 +301,7 @@ async def register_resume_subscription(
                 workspace_id=body.workspace_id,
                 source=body.source,
                 delivery_protocol=body.delivery_protocol,
+                execution_identity=body.execution_identity,
             ),
             workspace_id=workspace_id,
             resume_id=resume_id,

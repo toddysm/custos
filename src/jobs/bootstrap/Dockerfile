@@ -12,7 +12,8 @@
 # reference image (DEPLOY-IMPL-001): the build context is the **repository
 # root** so the builder can install the in-repo path libs the job declares —
 # ``custos-spl`` (the ``AuthStoreProvider`` interface), ``custos-postgres`` (the
-# Postgres auth adapter), and ``custos-auth-service`` (the canonical permission
+# Postgres auth adapter), ``custos-callctx`` (an auth runtime dependency), and
+# ``custos-auth-service`` (the canonical permission
 # registry + role seeders) — before building the job wheel. The runtime stage
 # installs everything offline into a venv and runs as a non-root user.
 #
@@ -35,7 +36,7 @@ WORKDIR /build
 
 RUN pip install --upgrade pip==24.2 build==1.2.2
 
-# In-repo path libs (per pyproject.toml: custos-spl + custos-postgres +
+# In-repo path libs (per pyproject.toml: custos-spl + custos-postgres + custos-callctx +
 # custos-auth-service) and the job sources. The in-repo distributions are
 # wheeled with ``--no-deps``; the final ``pip wheel`` of the job (without
 # ``--no-deps``) resolves the auth-service third-party deps (fastapi, pydantic,
@@ -43,12 +44,14 @@ RUN pip install --upgrade pip==24.2 build==1.2.2
 # runtime install can be fully offline.
 COPY src/libs/storage-provider-layer/ ./libs/storage-provider-layer/
 COPY src/libs/custos-postgres/ ./libs/custos-postgres/
+COPY src/libs/custos-callctx/ ./libs/custos-callctx/
 COPY src/services/auth-service/ ./services/auth-service/
 COPY src/jobs/bootstrap/ ./jobs/bootstrap/
 
 RUN pip wheel --no-deps --wheel-dir /wheels \
         ./libs/storage-provider-layer \
         ./libs/custos-postgres \
+        ./libs/custos-callctx \
         ./services/auth-service
 
 RUN pip wheel --wheel-dir /wheels --find-links /wheels \

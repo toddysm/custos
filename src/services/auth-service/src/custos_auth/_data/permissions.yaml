@@ -111,6 +111,9 @@ permissions:
     declaredBy: trigger-service
 
   # ----- connector-service-owned permissions -------------------------
+  - name: connector:bind
+    description: Bind a connector for an authorized workflow execution attempt.
+    declaredBy: connector-service
   - name: connector:read
     description: |
       List connectors and read connector metadata, health, leases, and

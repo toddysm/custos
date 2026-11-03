@@ -35,6 +35,7 @@ classifiers = [
 dependencies = [
     "custos-cel",
     "custos-spl",
+    "custos-callctx",
     # custos-postgres provides the asyncpg-backed MetadataStoreProvider
     # adapter (custos_pg.PgMetadataAdapter) the WF-IMPL-115 durable
     # metadata store wires from WF_METADATA_STORE. The import is confined

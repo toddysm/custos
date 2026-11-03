@@ -43,7 +43,7 @@ following `CONN_*` environment variables.
 |---|---|---|---|
 | `CONN_CATALOG_STORE` | Yes | — | `CatalogStoreProvider` binding (Postgres DSN in v1). Used for the `ConnectorTypeVersion` registry. |
 | `CONN_METADATA_STORE` | Yes | — | `MetadataStoreProvider` binding (Postgres DSN in v1). Used for `ConnectorInstance`, leases, and pull cursors. |
-| `CONN_AUTHZ_ENDPOINT` | Yes (prod) | — | AuthN/AuthZ Service endpoint. Empty switches the call-context middleware to a dev-shim and refuses to start when `ENVIRONMENT=production`. |
+| `CONN_AUTHZ_ENDPOINT` | Yes (prod) | — | Auth Service base URL; public keys at `/.well-known/jwks.json` verify signed contexts. Invalid contexts return 401 and unavailable verification returns 503. Empty enables the dev shim, forbidden in production. |
 | `CONN_CATALOG_ENDPOINT` | Yes | — | Catalog Service endpoint for `ResolveConnectorTypeRef` lookups. |
 | `CONN_OCI_REFERRERS_TIMEOUT_MS` | No | `5000` | OCI Referrers API per-request timeout. |
 | `CONN_PUBLISH_MAX_BODY_MB` | No | `4` | Maximum ConnectorManifest size at registry write. |
@@ -57,6 +57,8 @@ following `CONN_*` environment variables.
 | `APP_API_TOKEN` | For private Trigger RPCs | unset | Token shared only with the local Dapr sidecar; empty/blank fails closed. |
 | `CONN_TRIGGER_APP_ID` | For private Trigger RPCs | `trigger-service` | Exact authenticated caller application ID, not an HTTP endpoint. |
 | `CONN_TRIGGER_NAMESPACE` | For private Trigger RPCs | unset | Exact authenticated caller namespace; required independently of application ID. |
+| `CONN_WORKFLOW_APP_ID` | For version-two binding | `workflow-service` | Exact authenticated Workflow caller application ID. |
+| `CONN_WORKFLOW_NAMESPACE` | For version-two binding | unset | Exact authenticated Workflow caller namespace. |
 
 ## Private webhook verification
 
@@ -254,7 +256,9 @@ Process bind:
 
 ```bash
 cd src/services/connector-service
-pip install -e ".[dev]"
+pip install -e ../../libs/storage-provider-layer -e ../../libs/custos-postgres \
+  -e ../../libs/custos-callctx -e ../../libs/custos-cel \
+  -e ../workflow-service -e ".[dev]"
 ruff check .
 ruff format --check .
 mypy src tests

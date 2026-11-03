@@ -21,7 +21,47 @@ workspace scope, and caller component.
 See [`design/components/auth-service/design.md`](../../../design/components/auth-service/design.md)
 § Internal vs External Auth — Trust Model.
 
-## Usage
+## Background execution identity
+
+`custos_callctx.execution` defines credential-free `ExecutionIdentity` references
+and an operator-owned `ExecutionBindings` registry. The registry is deployment
+configuration, not a workflow/event input:
+
+```json
+{
+  "bindings": [{
+    "workspaceId": "ws-team",
+    "principalId": "receiver-executor",
+    "bindingId": "receiver-v1",
+    "secretRef": "receiver-service-credential",
+    "secretKey": "token"
+  }],
+  "defaults": {"ws-team": "receiver-v1"}
+}
+```
+
+Select a default only for new work. Persist the returned reference with the
+accepted target/run and resolve that exact reference during retry/replay;
+changed defaults or account IDs cannot retarget it. Rotate the secret's value
+without changing the binding identity. Missing original bindings fail closed.
+
+`ExecutionContextClient.headers(identity, operation)` reads the credential through
+Dapr Secrets and obtains a fresh Auth context. Call it only inside the actual
+I/O boundary, never while building durable workflow history. The caller owns its
+HTTP client. Credentials and context tokens are not cached or persisted; response
+bodies are bounded, redirects rejected, and failures carry safe closed categories.
+The client does not replace receiving-side signature, audience or permission checks.
+
+Credential exchange signs an `executionOperation` claim that the generic signing
+RPC cannot request. Execution receivers require the matching operation as well
+as its permission; a legacy signed grant is not sufficient. The verifier rejects
+unknown operations, broader grants, missing workspace scope and lifetimes above
+300 seconds. Operations are `workflow-start`, `workflow-resume`, `catalog-read`,
+`catalog-activity-read`, `connector-bind` and `activity-execute`. Activity
+metadata reads carry only `catalog:activity-types:read`; workflow reads retain
+their separate `catalog:workflows:read` grant.
+
+## Verifier usage
 
 ```python
 from custos_callctx import CALLCTX_HEADER, CallContextVerifier, InvalidCallContextError

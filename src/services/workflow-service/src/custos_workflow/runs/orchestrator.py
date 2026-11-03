@@ -73,6 +73,7 @@ from types import MappingProxyType, SimpleNamespace
 from typing import TYPE_CHECKING, Any, Final, cast, get_args
 
 import custos_cel
+from custos_callctx.execution import ExecutionIdentity
 from custos_cel import (
     BindingScope,
     DaprWorkflowClock,
@@ -185,11 +186,19 @@ class RunInput:
     inputs: Mapping[str, Any] = field(default_factory=dict)
     idempotency_key: str = ""
     delivery_protocol: int = 1
+    execution_identity: ExecutionIdentity | None = None
 
     def __post_init__(self) -> None:
         """Never reinterpret an unknown persisted delivery protocol during runtime replay."""
-        if type(self.delivery_protocol) is not int or self.delivery_protocol not in (1, 2):
+        if type(self.delivery_protocol) is not int or self.delivery_protocol not in (1, 2, 3):
             raise ValueError("unsupported workflow delivery protocol")
+        if (self.delivery_protocol == 3) != (self.execution_identity is not None):
+            raise ValueError("execution-aware runs require protocol 3 and a pinned identity")
+        if (
+            self.execution_identity is not None
+            and self.execution_identity.workspace_id != self.workspace_id
+        ):
+            raise ValueError("execution identity belongs to another workspace")
 
     def to_dict(self) -> dict[str, Any]:
         """Render to a JSON-serializable dict for the Dapr boundary."""
@@ -203,6 +212,8 @@ class RunInput:
         }
         if self.delivery_protocol != 1:
             result["delivery_protocol"] = self.delivery_protocol
+        if self.execution_identity is not None:
+            result["execution_identity"] = self.execution_identity.to_dict()
         return result
 
     def model_dump(self, *, mode: str = "json") -> dict[str, Any]:
@@ -226,6 +237,11 @@ class RunInput:
             inputs=dict(payload.get("inputs") or {}),
             idempotency_key=str(payload.get("idempotency_key") or ""),
             delivery_protocol=payload.get("delivery_protocol", 1),
+            execution_identity=(
+                ExecutionIdentity.from_dict(payload["execution_identity"])
+                if payload.get("execution_identity") is not None
+                else None
+            ),
         )
 
 
@@ -588,7 +604,7 @@ def make_run_orchestrator(
                 # ``waitFor:`` node reached without a ``resume_handler``
                 # wired falls through to the generic dispatcher, which
                 # raises ``step.kind_not_implemented``.
-                if run_input.delivery_protocol == 2:
+                if run_input.delivery_protocol >= 2:
                     from custos_workflow.steps.resume.durable import drive_durable_resume
 
                     result = yield from drive_durable_resume(
@@ -888,6 +904,7 @@ def _step_ctx(
         outputs=MappingProxyType(snapshot),
         clock=clock,
         delivery_protocol=run_input.delivery_protocol,
+        execution_identity=run_input.execution_identity,
     )
 
 

@@ -28,16 +28,18 @@ WORKDIR /build
 
 RUN pip install --upgrade pip==24.2 build==1.2.2
 
-# In-repo path libs (per pyproject.toml: custos-spl + custos-postgres) and the
+# In-repo path libs (custos-spl, custos-postgres and custos-callctx) and the
 # service sources. ``custos-postgres`` itself depends on ``custos-spl``, so both
 # are built as wheels below.
 COPY src/libs/storage-provider-layer/ ./libs/storage-provider-layer/
 COPY src/libs/custos-postgres/ ./libs/custos-postgres/
+COPY src/libs/custos-callctx/ ./libs/custos-callctx/
 COPY src/services/auth-service/ ./services/auth-service/
 
 RUN pip wheel --no-deps --wheel-dir /wheels \
         ./libs/storage-provider-layer \
-        ./libs/custos-postgres
+        ./libs/custos-postgres \
+        ./libs/custos-callctx
 
 RUN pip wheel --wheel-dir /wheels --find-links /wheels \
         ./services/auth-service

@@ -68,6 +68,16 @@ responses. This does not certify a Kubernetes CSI driver or a live cloud account
 Artifact media types remain optional; conformance checks preserve explicit types
 and require the returned descriptor to agree with stored metadata.
 
+## Durable runtime snapshots
+
+[WorkflowStart](src/custos_spl/interfaces/delivery.py) accepts legacy runtime
+protocol 2 without an execution identity, or protocol 3 with a closed,
+workspace-matching reference. Protocol 3 fingerprints include that reference;
+credentials, extra identity fields and identity-bearing protocol-2 snapshots
+are rejected. This is separate from the unchanged delivery HTTP protocol 2.
+Providers retain the original snapshot for acknowledgement-loss recovery and
+restart rather than choosing a new execution account.
+
 ## Status
 
 Implementation tracked under GitHub label
