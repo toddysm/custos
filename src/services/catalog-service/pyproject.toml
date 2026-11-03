@@ -26,6 +26,7 @@ classifiers = [
 #
 #   pip install -e src/libs/storage-provider-layer[dev]
 #   pip install -e src/libs/custos-postgres[dev]
+#   pip install -e src/libs/custos-callctx
 #   pip install -e src/services/workflow-service
 #   pip install -e src/services/catalog-service[dev]
 #
@@ -38,6 +39,7 @@ classifiers = [
 # surface end-to-end through real routes.
 dependencies = [
     "custos-spl",
+    "custos-callctx",
     "custos-postgres",
     "custos-cel",
     "fastapi>=0.110,<0.137",  # pin <0.137: 0.137 made include_router lazy (_IncludedRouter), breaking app.routes introspection

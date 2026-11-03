@@ -101,6 +101,15 @@ jobs:
       - name: Pytest (with 90% coverage gate)
         run: pytest -q --cov=custos_catalog --cov-report=term-missing --cov-fail-under=90
 
+      - name: Build and verify the Catalog runtime image without dev dependencies
+        if: matrix.python-version == '3.12'
+        working-directory: ${{ github.workspace }}
+        run: |
+          docker build -f src/services/catalog-service/Dockerfile \
+            -t custos-catalog:runtime-smoke .
+          docker run --rm --entrypoint python custos-catalog:runtime-smoke \
+            -c "import custos_catalog; import custos_catalog.middleware.callctx"
+
   catalog-service-integration:
     name: catalog-service (integration vs Postgres)
     runs-on: ubuntu-latest

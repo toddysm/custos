@@ -56,6 +56,7 @@ cd src/services/catalog-service
 pip install -e ../../libs/storage-provider-layer[dev]
 pip install -e ../../libs/custos-postgres[dev]
 pip install -e ../../libs/custos-cel[dev]
+pip install -e ../../libs/custos-callctx
 pip install -e ../workflow-service
 pip install -e ".[dev]"
 ruff check .
@@ -65,6 +66,8 @@ pytest -q
 ```
 
 Workflow is a development-only dependency for publication-to-compiler contract tests.
+The signed-context verifier is a runtime dependency. Hosted validation builds the
+actual Catalog image and imports its middleware without the development extras.
 
 `python -m custos_catalog` starts the FastAPI app with the full REST +
 Internal RPC surface plus the `/healthz` and `/readyz` probes.
