@@ -56,7 +56,7 @@ class ConnectorContextWire(BaseModel):
     @classmethod
     def reject_versioned_context(cls, value: Any) -> Any:
         """Do not downgrade malformed or unknown versioned descriptors into legacy handles."""
-        if isinstance(value, dict) and "schemaVersion" in value:
+        if isinstance(value, dict) and {"schemaVersion", "schema_version"} & value.keys():
             raise ValueError("versioned bindings require the canonical descriptor")
         return value
 

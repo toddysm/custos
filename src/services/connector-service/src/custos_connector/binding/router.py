@@ -180,16 +180,18 @@ async def bind_for_step(
 
     Idempotent on ``(workspace_id, run_id, step_id, attempt, actor)`` — see
     :class:`BindForStepService` for the cache semantics and the M1
-    durability caveat.
+    durability caveat. Execution provenance always authenticates the Workflow
+    caller, independently of the selected response format.
     """
-    if body.context_version == 2 and (
+    execution_request = body.context_version == 2 or ctx.execution_operation is not None
+    if execution_request and (
         not getattr(request.state, "signed_call_context", False)
         or ctx.execution_operation != "connector-bind"
     ):
         raise CallContextError(
             403, "execution_denied", "credential-backed binding context required"
         )
-    if body.context_version == 2:
+    if execution_request:
         settings = request.app.state.settings
         try:
             require_service_caller(

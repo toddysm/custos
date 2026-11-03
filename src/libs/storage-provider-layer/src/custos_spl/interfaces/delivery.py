@@ -299,23 +299,31 @@ class WorkflowStart:
     input_json: str
 
     def __post_init__(self) -> None:
-        """Validate protocol/scope before persisting a replay-authoritative snapshot."""
+        """Validate legacy protocol two or identity-bound protocol three before persistence."""
         validate_delivery_key(self.workspace_id, "workflow-start", self.run_id)
         if re.fullmatch(r"[a-f0-9]{64}", self.request_hash) is None:
             raise ValueError("workflow start hash must be SHA-256")
         value = json.loads(self.input_json)
         if not isinstance(value, dict) or value.get("workspace_id") != self.workspace_id:
             raise ValueError("workflow input does not match its workspace")
-        if type(value.get("delivery_protocol")) is not int or value["delivery_protocol"] != 2:
-            raise ValueError("durable workflow input requires protocol 2")
+        protocol = value.get("delivery_protocol")
+        if type(protocol) is not int or protocol not in (2, 3):
+            raise ValueError("durable workflow input requires protocol 2 or 3")
+        if "executionIdentity" in value:
+            raise ValueError("runtime execution identity requires its canonical field name")
+        identity = value.get("execution_identity")
+        if protocol == 3:
+            validate_execution_reference(identity, workspace_id=self.workspace_id)
+        elif identity is not None:
+            raise ValueError("execution identity requires runtime protocol 3")
         version = value.get("workflow_version_id")
         if not isinstance(version, str) or not isinstance(value.get("inputs"), dict):
             raise ValueError("workflow input requires a version and object inputs")
         validate_delivery_key(self.workspace_id, "workflow-start", version)
-        if (
-            delivery_fingerprint({"workflowVersionId": version, "inputs": value["inputs"]})
-            != self.request_hash
-        ):
+        request = {"workflowVersionId": version, "inputs": value["inputs"]}
+        if protocol == 3:
+            request["executionIdentity"] = identity
+        if delivery_fingerprint(request) != self.request_hash:
             raise ValueError("workflow input does not match its request fingerprint")
         json.dumps(value, allow_nan=False)
 

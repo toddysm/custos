@@ -126,6 +126,62 @@ def test_execution_binding_requires_issuance_provenance(
         assert schemas["_ExecutionBindResponseWire"]["properties"]["schemaVersion"]["const"] == "2"
 
 
+@pytest.mark.parametrize("context_version", [None, 1])
+@pytest.mark.parametrize(
+    "changed_header,status",
+    [
+        (None, 200),
+        ("missing", 401),
+        ("dapr-api-token", 401),
+        ("dapr-caller-app-id", 403),
+        ("dapr-caller-namespace", 403),
+    ],
+)
+def test_execution_provenance_requires_mesh_auth_even_for_legacy_responses(
+    signing: Signing, context_version: int | None, changed_header: str | None, status: int
+) -> None:
+    """Response-format selection cannot disable the verified Workflow caller boundary."""
+    catalog = FakeCatalogAdapter(applied_revisions={1, 2})
+    instances = FakeConnectorInstanceAdapter(applied_revisions={1})
+    instance = _make_instance()
+    asyncio.run(_seed(catalog, instances, instance))
+    binder = StubPluginBinder()
+    app = create_app(
+        settings=replace(
+            _BASE_SETTINGS,
+            authz_endpoint="http://auth",
+            app_api_token="local-test-token",
+            workflow_namespace="custos",
+        ),
+        providers=_build_providers(catalog=catalog, instances=instances, plugin_binder=binder),
+        call_context_verifier=signing.verifier,
+    )
+    headers = {
+        CALLCTX_HEADER: signing.token(
+            {
+                "workspaceId": "ws-1",
+                "permissions": ["connector:bind"],
+                "callerComponent": "workflow-service",
+                "executionOperation": "connector-bind",
+            }
+        ),
+        "dapr-api-token": "local-test-token",
+        "dapr-caller-app-id": "workflow-service",
+        "dapr-caller-namespace": "custos",
+    }
+    if changed_header == "missing":
+        headers = {CALLCTX_HEADER: headers[CALLCTX_HEADER]}
+    elif changed_header is not None:
+        headers[changed_header] = "incorrect"
+    payload = _payload(instance)
+    if context_version is not None:
+        payload["contextVersion"] = context_version
+    with TestClient(app) as client:
+        response = client.post("/internal/v1/bind-for-step", json=payload, headers=headers)
+    assert response.status_code == status, response.text
+    assert len(binder.calls) == (1 if status == 200 else 0)
+
+
 def _compiled_producer(
     identity: ExecutionIdentity, instance_id: str, kind: str, *, connectorless: bool
 ) -> tuple[ActivityStepHandler, StepExecutionContext, ExecutionGraph]:

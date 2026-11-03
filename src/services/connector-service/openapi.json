@@ -1184,7 +1184,7 @@
     },
     "/internal/v1/bind-for-step": {
       "post": {
-        "description": "Resolve every connector slot a step references.\n\nIdempotent on ``(workspace_id, run_id, step_id, attempt, actor)`` \u2014 see\n:class:`BindForStepService` for the cache semantics and the M1\ndurability caveat.",
+        "description": "Resolve every connector slot a step references.\n\nIdempotent on ``(workspace_id, run_id, step_id, attempt, actor)`` \u2014 see\n:class:`BindForStepService` for the cache semantics and the M1\ndurability caveat. Execution provenance always authenticates the Workflow\ncaller, independently of the selected response format.",
         "operationId": "bind_for_step_internal_v1_bind_for_step_post",
         "requestBody": {
           "content": {

@@ -45,8 +45,13 @@ def test_canonical_binding_preserves_private_structure_without_synthetic_lease()
 
 
 @pytest.mark.parametrize("version", ["2", "3"])
-def test_versioned_binding_never_downgrades_to_legacy(version: str) -> None:
+@pytest.mark.parametrize("version_key", ["schemaVersion", "schema_version"])
+def test_versioned_binding_never_downgrades_to_legacy(version: str, version_key: str) -> None:
     """A legacy-looking handle cannot hide malformed or unknown version-two metadata."""
+    descriptor = canonical_binding()
+    descriptor.pop("schemaVersion")
+    descriptor[version_key] = version
+    descriptor["handle"] = "fake-lease"
     with pytest.raises(ValidationError):
         ScheduleActivityWire.model_validate(
             {
@@ -54,13 +59,7 @@ def test_versioned_binding_never_downgrades_to_legacy(version: str) -> None:
                 "stepId": "step",
                 "attempt": 1,
                 "activityRef": "acme/test@1",
-                "connectorContexts": {
-                    "registry": {
-                        **canonical_binding(),
-                        "schemaVersion": version,
-                        "handle": "fake-lease",
-                    }
-                },
+                "connectorContexts": {"registry": descriptor},
             }
         )
 
