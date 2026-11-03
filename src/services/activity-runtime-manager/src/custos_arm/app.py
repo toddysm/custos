@@ -18,9 +18,9 @@ The exposed surface is:
   deliberately bypassed by the middleware so liveness/readiness checks need
   no call-context header.
 
-The lifespan currently flips ``app.state.ready`` to ``True`` with no
-dependencies; ARM-IMPL-003+ replace the trivial startup with the runtime
-driver probe, Dapr worker start, and collaborator wiring.
+Startup cannot claim readiness without a configured scheduler. Production
+resource assembly and dependency probes remain tracked by TS-IMPL-039; until
+they install the scheduler, liveness remains available but readiness fails closed.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ from fastapi import FastAPI
 
 from custos_arm._version import __version__
 from custos_arm.config import Settings, load_settings
+from custos_arm.healthz import SCHEDULER_NOT_CONFIGURED
 from custos_arm.healthz import router as health_router
 from custos_arm.middleware import (
     CallContextError,
@@ -40,6 +41,7 @@ from custos_arm.middleware import (
     call_context_error_handler,
 )
 from custos_arm.rpc import router as rpc_router
+from custos_arm.scheduler import ActivityScheduler
 
 __all__ = ["create_app"]
 
@@ -76,18 +78,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        # Startup: ARM-IMPL-002 wires configuration and the call-context
-        # middleware but has no collaborators to warm up, so the gate
-        # opens immediately. Later tasks gate readiness on the
-        # runtime-driver probe and Dapr worker readiness.
-        app.state.ready = True
-        app.state.ready_detail = "ready"
-        logger.info(
-            "activity-runtime-manager %s ready (environment=%s, dev_shim=%s)",
-            __version__,
-            resolved.environment,
-            resolved.use_callctx_dev_shim,
-        )
+        """Publish scheduler availability and close readiness before shutdown."""
+        app.state.ready = isinstance(app.state.scheduler, ActivityScheduler)
+        app.state.ready_detail = "ready" if app.state.ready else SCHEDULER_NOT_CONFIGURED
+        if app.state.ready:
+            logger.info(
+                "activity-runtime-manager %s ready (environment=%s, dev_shim=%s)",
+                __version__,
+                resolved.environment,
+                resolved.use_callctx_dev_shim,
+            )
+        else:
+            logger.warning("activity-runtime-manager is not ready: %s", app.state.ready_detail)
         try:
             yield
         finally:

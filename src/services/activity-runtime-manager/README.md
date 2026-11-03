@@ -13,7 +13,7 @@ Service consumes.
 
 ## Status
 
-**Feature-complete (M1)** — the `ARM-IMPL-000-ACTIVITY-RUNTIME-MANAGER`
+**M1 components implemented; production startup incomplete** — the `ARM-IMPL-000-ACTIVITY-RUNTIME-MANAGER`
 milestone ([#591](https://github.com/toddysm/custos/issues/591)) has landed:
 the attempt state machine (resolve → limit → materialize → inject → run →
 finalize → map → persist), the OCI Container Driver (Job builder +
@@ -23,6 +23,14 @@ artifact finalization), the Secret Injector, the Result Mapper, the Dapr RPC
 adapter (`ScheduleActivity` / `CancelActivity`), cancel + deadline/timeout,
 OpenTelemetry spans + metrics, and a kind/k8s integration suite — all under the
 ruff + mypy (strict) + pytest (≥90 % coverage) quality-gate toolchain.
+
+The production composition root and sidecar bootstrap alignment are tracked by
+[#1038](https://github.com/toddysm/custos/issues/1038). An unwired scheduler now
+keeps `/readyz` at **503**, including in development; `/healthz` remains **200**.
+A supplied scheduler can open the lifespan gate, but readiness closes again if
+that scheduler is lost or shutdown begins. Dependency probes and full resource
+assembly are still required before production activation. Do not force the
+readiness flag or install test doubles to bypass an incomplete deployment.
 
 Deferred (tracked separately): the `http` / `wasm` runtime drivers (later
 milestones).
