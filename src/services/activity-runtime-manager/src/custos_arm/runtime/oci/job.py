@@ -57,13 +57,14 @@ round-tripping it through the official client's ``V1Job`` model.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from typing import Any, Final
 
 from custos_arm.contract import ImageRef, StepRef
 from custos_arm.limit import EffectiveResources
 from custos_arm.runtime.isolation import HARDENED_SECURITY_CONTEXT, SecurityContext
-from custos_arm.runtime.models import SandboxPlan, SidecarSpec, TmpfsMount
+from custos_arm.runtime.models import SIDECAR_PRIVATE_MOUNT, SandboxPlan, TmpfsMount
 
 __all__ = [
     "ACTIVITY_CONTAINER_NAME",
@@ -140,6 +141,8 @@ MANAGED_BY: Final[str] = "custos-activity-runtime-manager"
 JOB_NAME_PREFIX: Final[str] = "arm"
 #: Env var carrying the Connector Service endpoint into the sidecar.
 CONNECTOR_ENDPOINT_ENV: Final[str] = "CUSTOS_CONNECTOR_ENDPOINT"
+# Trusted helper/sidecar ownership is shared; the activity keeps its image UID.
+_TRUSTED_RUNTIME_UID: Final[int] = 1000
 
 _KUBERNETES_API_VERSION: Final[str] = "batch/v1"
 _KUBERNETES_KIND: Final[str] = "Job"
@@ -151,6 +154,7 @@ _MANAGED_BY_LABEL: Final[str] = "app.kubernetes.io/managed-by"
 _TMPFS_MEDIUM: Final[str] = "Memory"
 _MAX_NAME_LEN: Final[int] = 63
 _NAME_HASH_LEN: Final[int] = 8
+_SCOPED_NAME_HASH_LEN: Final[int] = 24
 _INVALID_NAME_CHARS = re.compile(r"[^a-z0-9]+")
 _INVALID_LABEL_CHARS = re.compile(r"[^A-Za-z0-9_.-]+")
 
@@ -204,16 +208,23 @@ _OUTPUT_BRIDGE_COMMAND: Final[tuple[str, ...]] = (
 )
 
 
-def job_name(step: StepRef) -> str:
+def job_name(step: StepRef, *, workspace_id: str | None = None) -> str:
     """Deterministic DNS-1123 ``Job`` name for an attempt.
 
-    The name is derived solely from the ``(runId, stepId, attempt)`` triple, so
+    The name binds the workspace and ``(runId, stepId, attempt)`` triple, so
     an idempotent replay of the same attempt always targets the same ``Job``
     (design § Idempotent replay). A readable, sanitized prefix is suffixed with
     a short hash of the triple to keep the name unique and within 63 chars.
+    Omitting workspace retains legacy standalone-driver naming.
     """
     triple = f"{step.run_id}|{step.step_id}|{step.attempt}"
-    digest = hashlib.sha1(triple.encode("utf-8")).hexdigest()[:_NAME_HASH_LEN]
+    if workspace_id is not None:
+        triple = json.dumps([workspace_id, step.run_id, step.step_id, step.attempt])
+        digest = hashlib.sha256(triple.encode("utf-8")).hexdigest()[:_SCOPED_NAME_HASH_LEN]
+    else:
+        digest = hashlib.sha1(triple.encode("utf-8"), usedforsecurity=False).hexdigest()[
+            :_NAME_HASH_LEN
+        ]
     slug = _INVALID_NAME_CHARS.sub("-", f"{step.run_id}-{step.step_id}-{step.attempt}".lower())
     budget = _MAX_NAME_LEN - len(JOB_NAME_PREFIX) - len(digest) - 2
     prefix = f"{JOB_NAME_PREFIX}-{slug.strip('-')[:budget].strip('-')}"
@@ -238,7 +249,7 @@ def build_activity_job(
         The ``Job`` manifest as the plain ``dict`` body accepted by the
         Kubernetes API.
     """
-    name = job_name(plan.step)
+    name = job_name(plan.step, workspace_id=plan.workspace_id)
     labels = _labels(plan.step)
     named_mounts = _named_mounts(plan.tmpfs_mounts)
     deadline_seconds = max(1, int(plan.resources.timeout.total_seconds()))
@@ -251,6 +262,10 @@ def build_activity_job(
         "hostNetwork": False,
         "hostPID": False,
         "hostIPC": False,
+        "securityContext": {
+            "fsGroup": _TRUSTED_RUNTIME_UID,
+            "fsGroupChangePolicy": "OnRootMismatch",
+        },
         "initContainers": [
             _output_bridge_container(plan.io_bridge_image, security_context, named_mounts),
             _input_bridge_container(plan.io_bridge_image, security_context, named_mounts),
@@ -263,7 +278,7 @@ def build_activity_job(
                 named_mounts,
                 allow_unpinned=plan.allow_unpinned_images,
             ),
-            _sidecar_container(plan.sidecar, security_context, named_mounts),
+            _sidecar_container(plan, security_context, named_mounts),
         ],
         "volumes": _volumes(named_mounts),
     }
@@ -376,21 +391,37 @@ def _activity_container(
         "imagePullPolicy": "IfNotPresent",
         "securityContext": _security_context(security_context),
         "resources": _resources(resources),
-        "volumeMounts": _volume_mounts(named_mounts),
+        "volumeMounts": _volume_mounts(
+            tuple(pair for pair in named_mounts if pair[1].mount_path != SIDECAR_PRIVATE_MOUNT)
+        ),
     }
 
 
 def _sidecar_container(
-    sidecar: SidecarSpec,
+    plan: SandboxPlan,
     security_context: SecurityContext,
     named_mounts: tuple[tuple[str, TmpfsMount], ...],
 ) -> dict[str, Any]:
+    """Mount private bootstrap material only into its sidecar, never into the activity."""
+    sidecar = plan.sidecar
+    env = [{"name": CONNECTOR_ENDPOINT_ENV, "value": sidecar.endpoint}]
+    if any(mount.mount_path == SIDECAR_PRIVATE_MOUNT for _name, mount in named_mounts):
+        env.append(
+            {
+                "name": "CUSTOS_SIDECAR_BOOTSTRAP_KEY_PATH",
+                "value": f"{SIDECAR_PRIVATE_MOUNT}/sidecar-key",
+            }
+        )
     return {
         "name": SIDECAR_CONTAINER_NAME,
         "image": sidecar.image,
         "imagePullPolicy": "IfNotPresent",
-        "securityContext": _security_context(security_context),
-        "env": [{"name": CONNECTOR_ENDPOINT_ENV, "value": sidecar.endpoint}],
+        "securityContext": {
+            **_security_context(security_context),
+            "runAsUser": _TRUSTED_RUNTIME_UID,
+            "runAsGroup": _TRUSTED_RUNTIME_UID,
+        },
+        "env": env,
         "volumeMounts": _volume_mounts(named_mounts),
     }
 
@@ -419,13 +450,21 @@ def _input_bridge_container(
     security_context: SecurityContext,
     named_mounts: tuple[tuple[str, TmpfsMount], ...],
 ) -> dict[str, Any]:
+    """Stage public and private archives before releasing the regular containers."""
+    mounts = [_writable_mount(named_mounts, _INPUT_MOUNT_PATH)]
+    if any(mount.mount_path == SIDECAR_PRIVATE_MOUNT for _name, mount in named_mounts):
+        mounts.append(_writable_mount(named_mounts, SIDECAR_PRIVATE_MOUNT))
     return {
         "name": INPUT_BRIDGE_CONTAINER_NAME,
         "image": io_bridge_image,
         "imagePullPolicy": "IfNotPresent",
         "command": list(_INPUT_BRIDGE_COMMAND),
-        "securityContext": _security_context(security_context),
-        "volumeMounts": [_writable_mount(named_mounts, _INPUT_MOUNT_PATH)],
+        "securityContext": {
+            **_security_context(security_context),
+            "runAsUser": _TRUSTED_RUNTIME_UID,
+            "runAsGroup": _TRUSTED_RUNTIME_UID,
+        },
+        "volumeMounts": mounts,
     }
 
 
@@ -440,7 +479,11 @@ def _output_bridge_container(
         "imagePullPolicy": "IfNotPresent",
         "restartPolicy": _NATIVE_SIDECAR_RESTART_POLICY,
         "command": list(_OUTPUT_BRIDGE_COMMAND),
-        "securityContext": _security_context(security_context),
+        "securityContext": {
+            **_security_context(security_context),
+            "runAsUser": _TRUSTED_RUNTIME_UID,
+            "runAsGroup": _TRUSTED_RUNTIME_UID,
+        },
         "volumeMounts": [_writable_mount(named_mounts, _OUTPUT_MOUNT_PATH)],
     }
 

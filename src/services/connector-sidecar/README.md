@@ -18,6 +18,13 @@ Every request must carry `Custos-Sidecar-Token: <bootstrap>` — an
 HMAC-SHA256-signed envelope ARM minted at sidecar start, bound to the
 specific `(runId, stepId, attempt)` triple.
 
+ARM and the sidecar now share the version-one codec from `custos-callctx`.
+Malformed/duplicate claims, future issuance, expiry and scope mismatch are
+rejected. ARM issues independent keys per workspace/attempt and never extends
+an accepted token on replay. Private key delivery and full runtime activation
+remain tracked in [#1038](https://github.com/toddysm/custos/issues/1038);
+the activity must not receive the verification key alongside its bearer token.
+
 Lease bookkeeping (capacity tracking + audit emission) is delegated
 to the Connector Service over `/internal/v1/leases:{issue,refresh,release}`.
 The sidecar mints the upstream credential locally (KMS integration
@@ -45,10 +52,10 @@ configuration from `CUSTOS_SIDECAR_*` environment variables seeded by
 ARM (see [`src/custos_sidecar/settings.py`](src/custos_sidecar/settings.py)
 for the full list).
 
-Build locally:
+Build from the repository root:
 
 ```sh
-docker build -t custos-connector-sidecar:dev .
+docker build -f src/services/connector-sidecar/Dockerfile -t custos-connector-sidecar:dev .
 ```
 
 The image is multi-stage (`python:3.11-slim` builder → `python:3.11-slim`

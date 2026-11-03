@@ -104,13 +104,21 @@ class SidecarToken:
     request. The scope triple lets the sidecar reject a token replayed across
     a different attempt.
 
+    ``verification_key`` is private sidecar-only material, never ordinary input.
+    ``workspace_id`` separates issuer registries even when execution coordinates
+    collide; ``expires_at`` is the absolute signed expiry. Legacy manually
+    constructed values may omit these fields but are not newly issued bootstraps.
+
     :raises ValueError: If the token value is empty or the scope is malformed.
     """
 
-    value: str
+    value: str = field(repr=False)
     run_id: str
     step_id: str
     attempt: int
+    workspace_id: str | None = None
+    verification_key: bytes = field(default=b"", repr=False)
+    expires_at: int | None = None
 
     def __post_init__(self) -> None:
         if not self.value:
@@ -123,6 +131,10 @@ class SidecarToken:
             raise ValueError("SidecarToken.attempt must be an int")
         if self.attempt < 1:
             raise ValueError("SidecarToken.attempt must be >= 1")
+        if self.workspace_id is not None and not self.workspace_id.strip():
+            raise ValueError("SidecarToken.workspace_id must be nonempty when supplied")
+        if self.expires_at is not None and type(self.expires_at) is not int:
+            raise ValueError("SidecarToken.expires_at must be an integer")
 
     @property
     def scope(self) -> tuple[str, str, int]:
@@ -159,6 +171,10 @@ class SecretSink(Protocol):
         place the file on a tmpfs (memory-backed) mount so plaintext
         credentials never touch durable storage.
         """
+        ...
+
+    async def write_private_secret(self, *, relative_path: str, content: bytes, mode: int) -> None:
+        """Write to a separate sidecar-only tree that is never mounted into the activity."""
         ...
 
 

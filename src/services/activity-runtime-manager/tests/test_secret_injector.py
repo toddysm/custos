@@ -52,10 +52,15 @@ class _FakeSink:
     def __init__(self) -> None:
         self.files: dict[str, tuple[bytes, int]] = {}
         self.write_order: list[str] = []
+        self.private_files: dict[str, tuple[bytes, int]] = {}
 
     async def write_secret(self, *, relative_path: str, content: bytes, mode: int) -> None:
         self.files[relative_path] = (content, mode)
         self.write_order.append(relative_path)
+
+    async def write_private_secret(self, *, relative_path: str, content: bytes, mode: int) -> None:
+        """Keep sidecar-only writes out of the activity-visible fixture tree."""
+        self.private_files[relative_path] = (content, mode)
 
 
 class _FakeLeaseClient:
@@ -254,6 +259,8 @@ async def test_inject_materializes_secrets_and_token() -> None:
     assert sink.write_order[-1] == SIDECAR_TOKEN_FILENAME
     assert sink.files["secrets/registry/password"] == (b"p", SECRET_FILE_MODE)
     assert sink.files[SIDECAR_TOKEN_FILENAME] == (result.token.value.encode(), SECRET_FILE_MODE)
+    assert sink.private_files["sidecar-key"] == (result.token.verification_key, SECRET_FILE_MODE)
+    assert all(result.token.verification_key not in data for data, _mode in sink.files.values())
     # The token value never lands in a credential file.
     assert all(name.startswith("secrets/") for name in result.secret_files)
 

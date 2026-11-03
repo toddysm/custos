@@ -257,13 +257,15 @@ def _scheduler(
     resolver: _FakeResolver | None = None,
     repo: ExecutionRepository | None = None,
     settings: Settings | None = None,
+    injector: SecretInjector | None = None,
 ) -> ActivityScheduler:
     settings = settings or _settings()
     return ActivityScheduler(
         resolver=resolver or _FakeResolver(_resolved()),
         limiter=ResourceLimiter(settings),
         broker=IOBroker(_StubArtifactStore(), output_max_bytes=1_000_000),  # type: ignore[arg-type]
-        injector=SecretInjector(token_minter=SidecarTokenMinter()),
+        injector=injector
+        or SecretInjector(token_minter=SidecarTokenMinter(clock=lambda: _NOW.timestamp())),
         mapper=ResultMapper(),
         dispatcher=RuntimeDriverDispatcher((driver,)),
         repository=repo or _repo(),
@@ -281,6 +283,34 @@ def _request(**overrides: Any) -> ScheduleRequest:
     }
     base.update(overrides)
     return ScheduleRequest(**base)
+
+
+async def test_terminal_attempt_releases_local_bootstrap_authority(tmp_path: Path) -> None:
+    """Completed attempts retain their execution record, not their private in-process key."""
+    request = _request()
+    minter = SidecarTokenMinter(clock=lambda: _NOW.timestamp(), ttl_seconds=1)
+    token = minter.mint(step=request.step, workspace_id=request.workspace_id)
+    repo = _repo()
+    scheduler = _scheduler(
+        _FakeDriver(tmp_path, outputs=_success_outputs()),
+        repo=repo,
+        injector=SecretInjector(token_minter=minter),
+    )
+    result = await scheduler.schedule(request)
+    assert result.class_ is ResultClass.SUCCESS
+    assert not minter.is_active(token)
+    record = await repo.get("ws-1", "run-1", "step-1", 1)
+    assert record is not None
+    assert token.value not in record.model_dump_json()
+
+
+async def test_expired_deadline_cancels_before_starting_activity(tmp_path: Path) -> None:
+    """Bootstrap expiry preserves deadline classification and never starts an expired attempt."""
+    driver = _FakeDriver(tmp_path, outputs=_success_outputs())
+    result = await _scheduler(driver).schedule(_request(step_deadline=_NOW - timedelta(seconds=1)))
+    assert result.class_ is ResultClass.CANCELLED
+    assert result.error is not None and result.error.code == "activity.timeout"
+    assert driver.started == 0
 
 
 # ---------------------------------------------------------------------------
@@ -603,7 +633,7 @@ async def test_input_artifact_refs_are_staged_before_start(tmp_path: Path) -> No
         resolver=_FakeResolver(_resolved()),
         limiter=ResourceLimiter(settings),
         broker=IOBroker(store, output_max_bytes=1_000_000),  # type: ignore[arg-type]
-        injector=SecretInjector(token_minter=SidecarTokenMinter()),
+        injector=SecretInjector(token_minter=SidecarTokenMinter(clock=lambda: _NOW.timestamp())),
         mapper=ResultMapper(),
         dispatcher=RuntimeDriverDispatcher((driver,)),
         repository=_repo(),
@@ -646,7 +676,7 @@ async def test_oversized_outputs_maps_permanent(tmp_path: Path) -> None:
         resolver=_FakeResolver(_resolved()),
         limiter=ResourceLimiter(settings),
         broker=IOBroker(_StubArtifactStore(), output_max_bytes=8),  # type: ignore[arg-type]
-        injector=SecretInjector(token_minter=SidecarTokenMinter()),
+        injector=SecretInjector(token_minter=SidecarTokenMinter(clock=lambda: _NOW.timestamp())),
         mapper=ResultMapper(),
         dispatcher=RuntimeDriverDispatcher((driver,)),
         repository=_repo(),

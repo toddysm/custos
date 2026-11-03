@@ -41,6 +41,7 @@ from typing import Any, Final, Protocol
 from custos_arm.contract import ErrorClass
 from custos_arm.runtime.models import (
     OCI_CONTAINER_KIND,
+    SIDECAR_PRIVATE_MOUNT,
     CancelReason,
     OutputBundle,
     SandboxHandle,
@@ -238,7 +239,7 @@ class OciContainerDriver:
         :meth:`start`, giving the I/O Broker and Secret Injector a window to
         populate ``/custos/in`` first.
         """
-        name = job_name(plan.step)
+        name = job_name(plan.step, workspace_id=plan.workspace_id)
         manifest = build_activity_job(plan)
         manifest["spec"]["suspend"] = True
 
@@ -287,9 +288,24 @@ class OciContainerDriver:
         self._stream_inputs(handle, namespace, name)
 
     def _stream_inputs(self, handle: SandboxHandle, namespace: str, name: str) -> None:
-        """Stream the host ``in/`` tree into the input bridge and drop the gate."""
+        """Stage a separate private archive first, then public inputs, then release the gate."""
         pod_name = self._await_input_bridge(namespace, name)
-        archive = _tar_directory(handle.input_root)
+        if handle.sidecar_root.exists():
+            private_archive = _tar_directory(handle.sidecar_root)
+            private_result = self._exec(
+                namespace=namespace,
+                pod=pod_name,
+                container=INPUT_BRIDGE_CONTAINER_NAME,
+                command=[
+                    "sh",
+                    "-c",
+                    f"head -c {len(private_archive)} | tar -x -o -C {SIDECAR_PRIVATE_MOUNT}",
+                ],
+                stdin=private_archive,
+            )
+            if private_result.exit_code != 0:
+                raise SandboxFailureError("private bootstrap staging failed")
+        archive = _tar_directory(handle.input_root, group_readable=True)
 
         # The exec stdin channel cannot be half-closed by the Kubernetes client,
         # so ``tar`` would block forever waiting for EOF. ``head -c <len>`` reads
@@ -299,7 +315,7 @@ class OciContainerDriver:
             namespace=namespace,
             pod=pod_name,
             container=INPUT_BRIDGE_CONTAINER_NAME,
-            command=["sh", "-c", f"head -c {len(archive)} | tar -x -C /custos/in"],
+            command=["sh", "-c", f"head -c {len(archive)} | tar -x -o -C /custos/in"],
             stdin=archive,
         )
         if extracted.exit_code != 0:
@@ -554,16 +570,27 @@ def _split_reference(reference: str) -> tuple[str, str]:
     return namespace, name
 
 
-def _tar_directory(root: Path) -> bytes:
+def _tar_directory(root: Path, *, group_readable: bool = False) -> bytes:
     """Pack ``root``'s contents into an uncompressed tar (members relative to it).
 
     Entries are added under paths relative to ``root`` so the archive extracts
-    directly into ``/custos/in``. An empty tree yields a valid empty archive.
+    directly into the target mount. Public files gain read/traverse permission
+    for the pod's supplemental group so activities retain their image UID.
+    Private archives keep owner-only permissions. An empty tree remains valid.
     """
+
+    def permissions(info: tarfile.TarInfo) -> tarfile.TarInfo:
+        """Grant only public read/traverse bits, never private access or group writes."""
+        if group_readable:
+            info.mode |= (info.mode & 0o500) >> 3
+        return info
+
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w") as archive:
         for path in sorted(root.rglob("*")):
-            archive.add(path, arcname=str(path.relative_to(root)), recursive=False)
+            archive.add(
+                path, arcname=str(path.relative_to(root)), recursive=False, filter=permissions
+            )
     return buffer.getvalue()
 
 

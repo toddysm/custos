@@ -393,7 +393,11 @@ def test_start_unsuspends_then_streams_inputs_and_writes_sentinel(tmp_path: Path
     assert stream_call["container"] == INPUT_BRIDGE_CONTAINER_NAME
     # ``head -c <len>`` closes the pipe so ``tar`` gets a clean EOF.
     archive = stream_call["stdin"]
-    assert stream_call["command"] == ["sh", "-c", f"head -c {len(archive)} | tar -x -C /custos/in"]
+    assert stream_call["command"] == [
+        "sh",
+        "-c",
+        f"head -c {len(archive)} | tar -x -o -C /custos/in",
+    ]
 
     # The streamed raw tar round-trips the host input tree.
     with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
@@ -430,6 +434,43 @@ def test_start_waits_for_the_input_bridge_to_start(tmp_path: Path) -> None:
 
     assert sleep.call_count == 1
     assert len(exec_.calls) == 2
+
+
+def test_private_bootstrap_stages_before_public_inputs_and_gate(tmp_path: Path) -> None:
+    """Stage private key material before ordinary inputs and the activity-start sentinel."""
+    core = MagicMock()
+    core.list_namespaced_pod.return_value = _pod_with_init([_init_running()])
+    exec_ = _RecordingExec()
+    driver = _driver(core=core, staging_root=tmp_path, pod_exec=exec_)
+    handle = _handle(_plan(), tmp_path)
+    handle.input_root.mkdir(parents=True)
+    handle.sidecar_root.mkdir()
+    secret = b"synthetic-private-key"
+    (handle.sidecar_root / "sidecar-key").write_bytes(secret)
+    (handle.input_root / "sidecar-token").write_text("public-bearer-fixture")
+    driver.start(handle)
+    private, public, gate = exec_.calls
+    assert private["command"][-1].endswith("tar -x -o -C /custos/sidecar")
+    assert secret in private["stdin"]
+    assert secret not in public["stdin"]
+    assert secret.decode() not in str(private["command"])
+    assert gate["command"] == ["touch", INPUT_READY_SENTINEL]
+
+
+def test_private_staging_failure_never_releases_gate_or_echoes_stderr(tmp_path: Path) -> None:
+    """A failed private transfer cannot start the activity or persist private remote diagnostics."""
+    core = MagicMock()
+    core.list_namespaced_pod.return_value = _pod_with_init([_init_running()])
+    exec_ = _RecordingExec([ExecResult(exit_code=1, stderr="private-verification-key")])
+    driver = _driver(core=core, staging_root=tmp_path, pod_exec=exec_)
+    handle = _handle(_plan(), tmp_path)
+    handle.input_root.mkdir(parents=True)
+    handle.sidecar_root.mkdir()
+    (handle.sidecar_root / "sidecar-key").write_bytes(b"synthetic-private-key")
+    with pytest.raises(SandboxFailureError, match="private bootstrap staging failed") as failed:
+        driver.start(handle)
+    assert "private-verification-key" not in str(failed.value)
+    assert len(exec_.calls) == 1
 
 
 def test_start_raises_when_input_bridge_exited_before_staging(tmp_path: Path) -> None:

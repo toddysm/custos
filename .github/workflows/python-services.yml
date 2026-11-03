@@ -611,10 +611,11 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install custos-callctx library from path
+      - name: Install bootstrap library and actual sidecar contract-test client
         working-directory: ${{ github.workspace }}
         run: |
           pip install -e src/libs/custos-callctx[dev]
+          pip install -e src/services/connector-sidecar
 
       - name: Install custos-spl library from path
         working-directory: ${{ github.workspace }}
@@ -686,10 +687,11 @@ jobs:
             tests/integration/assets
           kind load docker-image custos-arm-e2e-contract:test --name custos-arm
 
-      - name: Install custos-callctx library from path
+      - name: Install bootstrap library and actual sidecar contract-test client
         working-directory: ${{ github.workspace }}
         run: |
           pip install -e src/libs/custos-callctx[dev]
+          pip install -e src/services/connector-sidecar
 
       - name: Install custos-spl library from path
         working-directory: ${{ github.workspace }}
@@ -883,10 +885,7 @@ jobs:
           cache: pip
 
       - name: Install package and dev dependencies
-        # The sidecar has zero in-repo deps (no SPL / custos-postgres);
-        # it talks to Connector Service over HTTP. Only the package
-        # itself + its [dev] extra are needed.
-        run: pip install -e ".[dev]"
+        run: pip install -e ../../libs/custos-callctx -e ".[dev]"
 
       - name: Ruff lint
         run: ruff check .
@@ -919,7 +918,7 @@ jobs:
           cache: pip
 
       - name: Install package and dev dependencies
-        run: pip install -e ".[dev]"
+        run: pip install -e ../../libs/custos-callctx -e ".[dev]"
 
       - name: Pytest (integration — mTLS + E2E)
         # Runs ``test_mtls_integration.py`` and ``test_e2e.py``. The
@@ -981,7 +980,7 @@ jobs:
       - name: Build and (conditionally) push image
         uses: docker/build-push-action@v6
         with:
-          context: src/services/connector-sidecar
+          context: .
           file: src/services/connector-sidecar/Dockerfile
           push: ${{ steps.tags.outputs.push }}
           tags: ${{ steps.tags.outputs.tags }}

@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from itertools import chain
@@ -70,8 +70,9 @@ from custos_arm.runtime import (
     SidecarSpec,
     TmpfsMount,
 )
+from custos_arm.runtime.models import SIDECAR_PRIVATE_MOUNT
 from custos_arm.runtime.oci import SYSTEM_SANDBOX_FAILURE, signal_error_code
-from custos_arm.secrets import SecretInjector
+from custos_arm.secrets import SecretInjector, SidecarToken
 from custos_arm.store import ActivityExecution, ExecutionRepository, ExecutionState
 
 from .errors import synthesize_failure
@@ -141,6 +142,7 @@ class _AttemptContext:
     resolved: ActivityTypeVersion
     driver: RuntimeDriver
     deadline: datetime
+    bootstrap: SidecarToken | None = None
 
 
 class ActivityScheduler:
@@ -298,7 +300,8 @@ class ActivityScheduler:
                     )
                     self._materialize(request, resolved, handle, deadline)
                     await self._materialize_input_artifacts(request, handle)
-                    await self._inject(request, resolved, handle)
+                    bootstrap = await self._inject(request, resolved, handle, deadline)
+                    self._context[key] = replace(self._context[key], bootstrap=bootstrap)
                 with observe_stage(STAGE_RUN):
                     await self._ensure(key, ExecutionState.RUNNING)
                     await asyncio.to_thread(driver.start, handle)
@@ -411,7 +414,9 @@ class ActivityScheduler:
             finished_at=self._now(),
         )
         self._cache[key] = envelope
-        self._context.pop(key, None)
+        context = self._context.pop(key, None)
+        if context is not None and context.bootstrap is not None:
+            self._injector.revoke(token=context.bootstrap)
         record_result(envelope)
         if driver is not None and handle is not None:
             await self._safe_cleanup(driver, handle)
@@ -452,6 +457,7 @@ class ActivityScheduler:
             tmpfs_mounts=(
                 TmpfsMount(mount_path=CUSTOS_IN, read_only=True),
                 TmpfsMount(mount_path=CUSTOS_OUT),
+                TmpfsMount(mount_path=SIDECAR_PRIVATE_MOUNT, read_only=True, size_limit="16Ki"),
             ),
             sidecar=SidecarSpec(
                 image=self._settings.sidecar_image,
@@ -460,6 +466,7 @@ class ActivityScheduler:
             io_bridge_image=self._settings.io_bridge_image,
             deadline=deadline,
             allow_unpinned_images=self._settings.allow_unpinned_images,
+            workspace_id=request.workspace_id,
         )
 
     def _materialize(
@@ -509,13 +516,18 @@ class ActivityScheduler:
         request: ScheduleRequest,
         resolved: ActivityTypeVersion,
         handle: SandboxHandle,
-    ) -> None:
-        await self._injector.inject(
-            sink=FilesystemSecretSink(handle.input_root),
+        deadline: datetime,
+    ) -> SidecarToken:
+        """Bind bootstrap issuance to the actual workspace and clamped execution deadline."""
+        result = await self._injector.inject(
+            sink=FilesystemSecretSink(handle.input_root, private_root=handle.sidecar_root),
             step=request.step,
             connectors=resolved.connectors,
             contexts=request.connector_contexts,
+            workspace_id=request.workspace_id,
+            deadline=deadline,
         )
+        return result.token
 
     def _resolve_result(
         self,

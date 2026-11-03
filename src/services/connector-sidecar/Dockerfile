@@ -14,10 +14,9 @@
 #     virtualenv at ``/opt/custos/venv``. Runs as a non-root
 #     ``sidecar`` user.
 #
-# The sidecar has zero dependencies on other in-repo Python packages
-# (SPL / custos-postgres / etc.); it talks to Connector Service over
-# HTTP. The build context therefore is the connector-sidecar
-# directory itself — there is no monorepo copy step.
+# The shared bootstrap codec comes from custos-callctx. Build from the
+# repository root so both local wheels are available; no SPL/Postgres
+# dependency is introduced into the sidecar.
 #
 # Default entrypoint runs ``custos-connector-sidecar`` (which calls
 # :func:`custos_sidecar.__main__.main`). Configuration arrives via
@@ -44,21 +43,18 @@ RUN pip install --upgrade pip==24.2 build==1.2.2
 
 # Copy the package sources. ``.dockerignore`` keeps caches and test
 # artefacts out of the build context.
-COPY pyproject.toml README.md ./
-COPY src/ ./src/
+COPY src/libs/custos-callctx/ /build/custos-callctx/
+COPY src/services/connector-sidecar/ /build/connector-sidecar/
 
 # Build the wheel.
-RUN python -m build --wheel --outdir /wheels .
+RUN python -m build --wheel --outdir /wheels /build/custos-callctx && \
+    python -m build --wheel --outdir /wheels /build/connector-sidecar
 
 # Resolve and download the runtime dependency wheels into ``/wheels``
 # so the runtime stage can ``pip install`` from a local index with no
 # network access.
-RUN pip wheel --wheel-dir /wheels \
-        "fastapi>=0.110,<0.137" \
-        "uvicorn[standard]>=0.27,<1" \
-        "pydantic>=2.6,<3" \
-        "httpx>=0.27,<1" \
-        "opentelemetry-api>=1.20,<2"
+RUN pip wheel --wheel-dir /wheels --find-links=/wheels \
+        /wheels/custos_connector_sidecar-*.whl
 
 # --------------------------------------------------------------------------- #
 # Stage 2: runtime

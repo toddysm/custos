@@ -32,6 +32,21 @@ that scheduler is lost or shutdown begins. Dependency probes and full resource
 assembly are still required before production activation. Do not force the
 readiness flag or install test doubles to bypass an incomplete deployment.
 
+The bootstrap issuer now uses the sidecar's shared version-one signed format.
+Keys are independent per workspace/attempt; expiry is clamped to the execution
+deadline and never extended on replay. The injector writes the bearer into the
+ordinary input tree and the verification key into a separate private staging
+tree. The OCI input bridge transfers the private archive before releasing the
+activity, and `/custos/sidecar` is mounted only by that trusted bridge and the
+sidecar, never by the activity or output collector. This is not a claim that
+the default production resource graph is complete or that in-memory execution
+tracking provides durable restart ownership.
+Host staging remains owner-only for bootstrap material. In the pod, ordinary
+input files receive supplemental-group read/traverse access (the bearer becomes
+`0440`) so activity images can retain their own non-root user. The private key
+remains `0400`, owned by the trusted helper/sidecar user, on a volume the activity
+cannot mount. The bridge never grants group write access.
+
 Deferred (tracked separately): the `http` / `wasm` runtime drivers (later
 milestones).
 
@@ -164,6 +179,7 @@ this directory:
 ```bash
 pip install -e ../../libs/custos-callctx[dev]
 pip install -e ../../libs/storage-provider-layer[dev]
+pip install -e ../connector-sidecar
 pip install -e ".[dev]"
 
 ruff format . && ruff check . && mypy src tests && pytest -q

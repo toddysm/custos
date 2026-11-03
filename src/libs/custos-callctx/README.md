@@ -1,5 +1,11 @@
 # custos-callctx
 
+The `custos_callctx.bootstrap` module shares the existing HMAC-SHA256
+version-one sidecar bootstrap format between issuer and verifier. Tokens are
+limited to 16 KiB, carry exact run/step/attempt and integer issue/expiry times,
+and do not contain the verification key. They are distinct from Auth-issued
+call-context tokens. Private key delivery is the runtime's responsibility.
+
 Shared call-context verifier for Custos (AS-IMPL-019).
 
 Every Custos component (catalog, workflow, trigger, connector, …) plugs this

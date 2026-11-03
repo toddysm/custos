@@ -12,6 +12,7 @@ I/O Broker consume.
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Final
@@ -71,10 +72,18 @@ class FilesystemSecretSink:
     Secret files and the sidecar bootstrap token are written relative to the
     sandbox input tree the driver staged, with the mode the Secret Injector
     requests (``0o400`` for credential material).
+    Bootstrap verification keys require an explicitly separate ``private_root``;
+    they are not included in the activity-visible input archive.
     """
 
-    def __init__(self, input_root: Path) -> None:
+    def __init__(self, input_root: Path, *, private_root: Path | None = None) -> None:
+        """Keep private bootstrap material outside both the public tree and its ancestors."""
         self._input_root = input_root
+        self._private_root = private_root
+        if private_root is not None:
+            public, private = input_root.resolve(), private_root.resolve()
+            if private.is_relative_to(public) or public.is_relative_to(private):
+                raise ValueError("private bootstrap tree must be separate from ordinary inputs")
 
     async def write_secret(self, *, relative_path: str, content: bytes, mode: int) -> None:
         """Write ``content`` to ``input_root/relative_path`` with ``mode``."""
@@ -82,6 +91,24 @@ class FilesystemSecretSink:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
         path.chmod(mode)
+
+    async def write_private_secret(self, *, relative_path: str, content: bytes, mode: int) -> None:
+        """Create private material with its final mode, rejecting escape and symlink targets."""
+        if self._private_root is None:
+            raise ValueError("private bootstrap sink is not configured")
+        if (
+            not relative_path
+            or "/" in relative_path
+            or "\\" in relative_path
+            or relative_path in {".", ".."}
+        ):
+            raise ValueError("private bootstrap filename must be a single path segment")
+        self._private_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path = self._private_root / relative_path
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        descriptor = os.open(path, flags, mode)
+        with os.fdopen(descriptor, "wb") as target:
+            target.write(content)
 
 
 class FilesystemArtifactReader:

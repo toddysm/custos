@@ -41,6 +41,7 @@ __all__ = [
 #: The only runtime kind ARM registers in v1. ``http`` (M3) and ``wasm``
 #: (M4+) are reserved; their drivers slot into the same dispatcher.
 OCI_CONTAINER_KIND: Final[str] = "oci-container"
+SIDECAR_PRIVATE_MOUNT: Final[str] = "/custos/sidecar"
 
 
 class SandboxSignal(StrEnum):
@@ -118,6 +119,7 @@ class SandboxPlan:
     #: Test/dev escape hatch: render a digest-less image tag-only instead of
     #: rejecting it. Production leaves this ``False`` (strict digest pinning).
     allow_unpinned_images: bool = False
+    workspace_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,6 +136,11 @@ class SandboxHandle:
     reference: str
     input_root: Path
     output_root: Path
+
+    @property
+    def sidecar_root(self) -> Path:
+        """Separate per-attempt private staging tree, never part of the ordinary input archive."""
+        return self.input_root.parent / "sidecar"
 
 
 @dataclass(frozen=True, slots=True)

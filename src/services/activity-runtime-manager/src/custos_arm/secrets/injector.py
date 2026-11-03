@@ -9,7 +9,9 @@ The injector:
 #. writes each materialized credential to ``secrets/<slot>/<key>`` (``0400``,
    tmpfs) — never into ``inputs.json``;
 #. mints the ``(runId, stepId, attempt)``-scoped bootstrap token and writes it
-   to ``sidecar-token`` (``0400``).
+   to ``sidecar-token`` (``0400``), after writing its verification key through
+   the separate sidecar-only sink. Workspace and deadline are supplied by the
+   Scheduler; no verification key enters the ordinary input tree.
 
 For long-running steps the Scheduler additionally calls
 :meth:`SecretInjector.refresh_leases` to extend the connector leases ARM holds,
@@ -18,6 +20,7 @@ and :meth:`SecretInjector.revoke` once the attempt reaches a terminal state.
 
 from __future__ import annotations
 
+import asyncio
 import posixpath
 from collections.abc import Sequence
 from datetime import datetime
@@ -62,8 +65,13 @@ class SecretInjector:
         step: StepRef,
         connectors: Sequence[ConnectorSpec],
         contexts: Sequence[ConnectorContext],
+        workspace_id: str | None = None,
+        deadline: datetime | None = None,
     ) -> InjectionResult:
         """Materialize secrets + the bootstrap token into the input tree.
+
+        The verification key uses ``write_private_secret`` instead. A missing
+        private boundary fails explicitly; issuance is clamped by ``deadline``.
 
         :raises MissingConnectorError: a ``required`` connector slot has no
             bound context (permanent).
@@ -87,12 +95,19 @@ class SecretInjector:
                 )
                 secret_files.append(relative_path)
 
-        token = self._minter.mint(step=step)
-        await sink.write_secret(
-            relative_path=SIDECAR_TOKEN_FILENAME,
-            content=token.value.encode("utf-8"),
-            mode=SECRET_FILE_MODE,
-        )
+        token = self._minter.mint(step=step, workspace_id=workspace_id, deadline=deadline)
+        try:
+            await sink.write_private_secret(
+                relative_path="sidecar-key", content=token.verification_key, mode=SECRET_FILE_MODE
+            )
+            await sink.write_secret(
+                relative_path=SIDECAR_TOKEN_FILENAME,
+                content=token.value.encode("utf-8"),
+                mode=SECRET_FILE_MODE,
+            )
+        except (OSError, ValueError, asyncio.CancelledError):
+            self._minter.revoke(token)
+            raise
 
         return InjectionResult(token=token, secret_files=tuple(secret_files))
 
