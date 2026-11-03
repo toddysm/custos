@@ -6,7 +6,7 @@
 
 Last reconciled: 2026-08-28
 
-Trigger M2 implementation checkpoint: 2026-10-29. This scoped update does not claim
+Trigger M2 implementation checkpoint: 2026-11-02. This scoped update does not claim
 a fresh reconciliation of unrelated capabilities.
 
 ## Configuration
@@ -27,11 +27,11 @@ Status vocabulary: **Implemented** · **In progress** · **Planned** · **Deferr
 | ID | Component | Slug | Status | Open work |
 |---|---|---|---|---|
 | COMP-001 | API Gateway | api-gateway | Implemented | M2 items — #990 |
-| COMP-002 | AuthN/AuthZ Service | auth-service | Implemented | — |
-| COMP-003 | Workflow Service | workflow-service | In progress | Observability Client integration — #989 |
-| COMP-004 | Trigger Service | trigger-service | In progress | M2 receivers — [#988](https://github.com/toddysm/custos/issues/988); approved [design](../design/requirements/trigger-m2-receivers.md) and [16-item delivery plan](../design/components/trigger-service/implementation-plan-m2.md). Twelve delivery items are merged, including all receiver collaborators and [audited recovery](developers/trigger-api.md#dead-letter-administration). The approved [Kubernetes hook executor](https://github.com/toddysm/custos/issues/1035), production lifecycle/profile activation, deployed certification and final documentation remain open; the #988 ledger records live ownership and evidence. |
-| COMP-005 | Connector Service | connector-service | Implemented | — |
-| COMP-006 | Activity Runtime Manager | activity-runtime-manager | Implemented | M2 deferrals — #991; Kata tier validation — #763 |
+| COMP-002 | AuthN/AuthZ Service | auth-service | Implemented | M2 scoped execution-context issuance prerequisite — [#1037](https://github.com/toddysm/custos/issues/1037) |
+| COMP-003 | Workflow Service | workflow-service | In progress | Observability Client integration — #989; background execution identity and Connector contract alignment — [#1037](https://github.com/toddysm/custos/issues/1037) |
+| COMP-004 | Trigger Service | trigger-service | In progress | M2 receivers — [#988](https://github.com/toddysm/custos/issues/988); [design amendment](../design/requirements/trigger-m2-receivers.md) and [18-item delivery plan](../design/components/trigger-service/implementation-plan-m2.md). Thirteen items are merged. [Execution identity](https://github.com/toddysm/custos/issues/1037), [production activity startup/bootstrap](https://github.com/toddysm/custos/issues/1038), lifecycle activation, deployed certification and final documentation remain open. Both older owned worktrees are preserved; #988 records current ownership/evidence. |
+| COMP-005 | Connector Service | connector-service | Implemented | Workflow binding-contract alignment — [#1037](https://github.com/toddysm/custos/issues/1037) |
+| COMP-006 | Activity Runtime Manager | activity-runtime-manager | In progress | Production startup/readiness and sidecar bootstrap gaps verified; prerequisite [#1038](https://github.com/toddysm/custos/issues/1038). M1 components exist but deployed scheduling is not certified. Existing M2 deferrals — #991; Kata tier validation — #763 remain separate. |
 | COMP-007 | Definition/Template/Catalog Service | catalog-service | Implemented | — |
 | COMP-008 | Storage Provider Layer | storage-provider-layer | Implemented | schema-revision policy — #993 |
 | COMP-009 | Observability and Audit Service | observability-audit-service | Implemented | M2 deferrals — #992 |
@@ -46,7 +46,8 @@ Status vocabulary: **Implemented** · **In progress** · **Planned** · **Deferr
 | #22 | Design TODO | trigger-service | Done | Dead-letter handling + replay UX — durable DeadLetterEntry store + TTL + trigger:admin replay routes; resolved via #1002 (2026-08-29); implementation follows in #988 |
 | #23 | Design TODO | trigger-service | Done | Owner of webhook signing keys — Connector Service owns per-instance signing material; resolved via #1000 (2026-08-29); implementation follows in #988 |
 | #763 | Enhancement | activity-runtime-manager | Open | Validate vm/microvm (Kata) tier specifics |
-| [#988](https://github.com/toddysm/custos/issues/988) | Implementation gap | trigger-service | In progress | Twelve of 16 delivery items are merged through [#1034](https://github.com/toddysm/custos/pull/1034). Revision 3 adds the owner-approved [Kubernetes hook prerequisite](https://github.com/toddysm/custos/issues/1035) before [lifecycle activation](https://github.com/toddysm/custos/issues/1017). The parent ledger records approval history, parked work and the resume point; hosted continuous integration and Copilot review remain required. |
+| [#988](https://github.com/toddysm/custos/issues/988) | Implementation gap | trigger-service | In progress | Thirteen of 18 delivery items are merged. Revision 5 records the authorized [runtime prerequisite](https://github.com/toddysm/custos/issues/1038), alongside [execution identity](https://github.com/toddysm/custos/issues/1037), before [activation](https://github.com/toddysm/custos/issues/1017). The amendment awaits review; implementation was explicitly authorized. Existing work is preserved and hosted gates remain binding. |
+| [#1038](https://github.com/toddysm/custos/issues/1038) | Runtime prerequisite | activity-runtime-manager | In progress | Owner authorized startup/readiness and bootstrap alignment on 2026-11-02. First fix closes readiness for an unwired scheduler. No runtime completion or deployed certification claimed. |
 | #989 | Implementation gap | workflow-service | Open | Full Observability Client integration |
 | #990 | Implementation gap | api-gateway | Open | M2 items (thin-client, OpenAPI ext, device-code, rate-limiter, multi-region) |
 | #991 | Implementation gap | activity-runtime-manager | Open | M2 deferrals (manifest signing, artifact schema, secret slots, short-form refs, policy-eval@1) |

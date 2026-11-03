@@ -1,10 +1,10 @@
 # Trigger M2 receivers - product requirements and engineering design
 
-- Status: **Approved; implementation in progress under the #988 ledger.**
-- Planning format: full; revision 3 (owner-approved Kubernetes hook prerequisite).
+- Status: **Runtime prerequisite and implementation authorized; revision-5 amendment awaiting review.**
+- Planning format: full; revision 5 (production activity startup and bootstrap prerequisite).
 - Tracking: [#988](https://github.com/toddysm/custos/issues/988).
 - Design work item: [#1004](https://github.com/toddysm/custos/issues/1004).
-- Updated: 2026-10-30; original baseline commit `e344ab2`.
+- Updated: 2026-11-02; original baseline commit `e344ab2`.
 - Validation: GitHub-hosted continuous integration (CI), plus Copilot review.
 - Delivery plan: [implementation-plan-m2.md](../components/trigger-service/implementation-plan-m2.md).
 
@@ -104,7 +104,7 @@ set is not required. A graphical interface is out of scope.
 
 ### 7A. Proposed user-facing output
 
-These are proposed wire contracts for approval, not output of implemented code.
+These are approved contract examples, not proof that every path is deployed.
 Successful single replay:
 
 ```http
@@ -165,7 +165,7 @@ schedules and 10,000 connector events with duplicates. This is a test fixture,
 not a new supported-scale claim. Preserve the one-MiB webhook cap; reject larger
 bodies with 413. Pull intervals retain the existing minimum of 10 seconds.
 Paginated administration defaults to 50 entries, maximum 100; bulk replay
-selects at most 100 entries per request. These new bounds require approval.
+selects at most 100 entries per request. These bounds were approved with the baseline.
 
 ### 11. Observability and troubleshooting
 
@@ -195,9 +195,14 @@ storage/backup policies. Dead-letter retention defaults to 30 days.
 
 ### 13. Risks and open decisions
 
-D01-D05 below are **proposals awaiting human approval**. The design owner is the
-planning work item [#1004](https://github.com/toddysm/custos/issues/1004);
-implementation owners are the linked child issues.
+D01-D05 and the recorded amendments are approved. D06's workspace-scoped
+execution identity and new contract-alignment prerequisite were explicitly
+approved on 2026-11-02. On the same date the owner authorized creating and
+starting D07's startup/bootstrap prerequisite. The separate amendment pull
+request remains open for review; publication does not authorize its merge.
+The baseline design owner is
+[#1004](https://github.com/toddysm/custos/issues/1004); implementation owners
+are the linked child issues.
 Copilot findings can change a recommendation but cannot approve it on behalf of
 the repository owner. A material change to scope or contracts invalidates any
 earlier approval and updates both the plan and affected acceptance criteria.
@@ -216,7 +221,7 @@ general-availability announcement.
 
 ### A. Abstract
 
-This proposal completes Custos's clock and external-event ingestion using the
+This design completes Custos's clock and external-event ingestion using the
 existing Trigger Service pipeline and Connector Service execution boundary.
 Schedules use a PostgreSQL-backed fenced leader lease and durable pending
 fires; webhook requests are routed to an exact workspace and connector instance
@@ -227,9 +232,10 @@ Connector Service remains the sole upstream polling and cursor owner. Failed
 dispatches are durably retained before delivery is acknowledged, and
 administrators can replay them using the original idempotency key. Production
 provider reads, signed administrative authorization and downstream replay
-deduplication are explicit prerequisites. The design proposes resolutions for
-five cross-service contract gaps, including the mismatch between 30-day
-dead-letter retention and shorter or volatile downstream deduplication.
+deduplication are explicit prerequisites. The design resolves the original
+five cross-service contract gaps and adds the approved background execution
+identity/Workflow-to-Connector alignment prerequisite, plus production activity
+startup and compatible private bootstrap delivery.
 Implementation proceeds through native dependent work items, with tests on each
 change and deployed failure/recovery coverage before enablement. No new broker,
 polling engine or graphical interface is introduced.
@@ -240,9 +246,11 @@ The scope is [#988](https://github.com/toddysm/custos/issues/988). The original
 decisions [#20](https://github.com/toddysm/custos/issues/20),
 [#22](https://github.com/toddysm/custos/issues/22) and
 [#23](https://github.com/toddysm/custos/issues/23) remain resolved.
-Their implementations are not complete. The [M1 implementation plan](../components/trigger-service/implementation-plan.md)
-does not cover this work. Explicit approval of this revision and the breakdown
-is still required before its design pull request merges or any build begins.
+The [M1 implementation plan](../components/trigger-service/implementation-plan.md)
+does not cover this work. Baseline approval and subsequent amendments are recorded
+in the #988 ledger. The owner approved D06 and its new prerequisite on 2026-11-02;
+the same date's explicit start authorization covers D07/#1038. The existing
+hosted review, validation and merge gates remain binding.
 
 ### C. Introduction
 
@@ -524,6 +532,169 @@ implementation [#1013](https://github.com/toddysm/custos/issues/1013) /
 [#1016](https://github.com/toddysm/custos/issues/1016), including a replay
 after 24 hours, Workflow restart/replica changes and lost-response success.
 
+#### D06 - Workspace-scoped execution identity and the real binding contract
+
+**Owner-approved amendment, 2026-11-02:**
+[TS-IMPL-038 / #1037](https://github.com/toddysm/custos/issues/1037) precedes
+production activation in TS-IMPL-034. Autonomous scheduled, webhook/vendor-push
+and polling-triggered workflows use an explicitly configured, workspace-scoped
+service account with fresh, short-lived signed call contexts. They do not
+inherit the subscription creator's expiring credential or gain blanket authority
+from a platform caller name.
+
+The concrete integration probe found that the
+[Workflow Connector client](../../src/services/workflow-service/src/custos_workflow/clients/connector.py)
+sends `BindForStep` without a call context and with only `stepKey`/`slots`.
+The [Connector receiver](../../src/services/connector-service/src/custos_connector/binding/router.py)
+exposes `/internal/v1/bind-for-step` and requires real `runId`, `stepId` and
+`attempt` coordinates, signed workspace/permission context and different slot
+and response shapes. The actual client/application relay returns 401 without a
+context, then 404 with a synthetic development context; body validation confirms
+the missing execution coordinates. A route-only fix or fabricated identifiers
+would not establish the contract.
+
+Authorize explicit account selection within its workspace. Persist only stable
+identity/credential references with the accepted target and run; retries,
+reconciliation, child execution and replay retain the originally selected
+identity. Editing a subscription or account configuration cannot retarget
+already accepted work or a waiting run. Resolve credential material through the
+existing secret boundary; never persist service-account credentials or signed
+call-context tokens in event payloads, workflow history, audit records or logs.
+
+Reuse Auth's service-account, authorization, signer and verifier primitives.
+Context issuance must authenticate the selected account's credential and
+authorize the current operation for the exact workspace and receiving audience.
+Derive caller identity from the authenticated boundary, not asserted request
+fields. Do not copy caller-supplied principal/permission lists into signed claims.
+The current [signing RPC](../../src/services/auth-service/src/custos_auth/api/routes/rpc.py)
+retains an M1 trust assumption; it is not an unrestricted minting shortcut for
+this execution path. Missing/disabled accounts, expired/revoked credentials,
+denied grants and Auth/secret outages fail explicitly. Test existing cache,
+invalidation and token-lifetime bounds rather than promising instantaneous
+revocation.
+
+Align request and response contracts through the real Workflow runtime,
+Connector handler and directly coupled activity consumer. Execution coordinates
+come from the owning run/step/attempt, including child runs. Preserve opaque
+endpoint/handle metadata; any lease expiry or connector-kind data must come
+from actual Connector authority, not placeholder values or lossy string casts.
+Preserve signed authorization where required and authenticated app/namespace
+checks for private mesh-only routes. Keep public/manual/internal compatibility
+behind explicit rollout/version gates. Pending legacy work without a trustworthy
+identity requires explicit migration/operator action, not silent reassignment.
+
+Illustrative operator outcomes below describe the target behavior, not an
+already-shipped command or a new wire schema:
+
+```text
+Execution authorization: allowed
+Workspace: ws-team
+Service account: receiver-executor
+Operation: connector:bind
+Run/step/attempt: run-123 / fetch / 1
+Context: freshly issued; credential and token redacted
+```
+
+```text
+Execution authorization: denied
+Workspace: ws-team
+Service account: receiver-executor
+Reason: required permission is not granted
+Outcome: no new execution; original durable target/identity retained
+```
+
+This is not a platform-wide identity redesign, SPIFFE migration, new privilege
+model or second polling owner. TS-IMPL-034 retains lifecycle/profile activation;
+TS-IMPL-035 retains deployed resilience/capacity certification; TS-IMPL-036
+retains final user documentation. The four unpublished TS-IMPL-034 commits stay
+preserved while this prerequisite is implemented from the latest default branch.
+
+#### D07 - Production activity startup and bootstrap compatibility
+
+**Owner-authorized scope and implementation, 2026-11-02:**
+[TS-IMPL-039 / #1038](https://github.com/toddysm/custos/issues/1038) addresses
+two independently reproduced gaps before production activation:
+
+- The actual Activity Runtime Manager factory advertises `/readyz` 200 while
+  leaving its scheduler unset. A valid signed `ScheduleActivity` request
+  returns 503. The command-line entry point uses that same factory.
+- The actual bootstrap minter emits an opaque random string, while the actual
+  sidecar verifier requires a signed versioned payload bound to run, step,
+  attempt and expiry. The ARM-issued token fails with 401; a correctly signed
+  positive control succeeds.
+
+Start with a fail-closed readiness regression. Liveness remains independent,
+but an unwired, unhealthy or draining runtime must not claim it can schedule
+activities. Then assemble the existing scheduler collaborators in the production
+lifespan: resolver, durable execution repository, artifact I/O, secret injection
+and runtime driver. Readiness follows successful initialization and dependency
+probes, not merely process startup. Startup failure releases acquired resources;
+shutdown closes admission before draining workers and closing their resources.
+Do not install in-memory or test collaborators as production fallbacks.
+
+Align bootstrap issuance with the sidecar's existing signed format and exact
+attempt/expiry checks. Preserve separation between the bearer token and its
+verification key: the activity must not gain the key that lets it manufacture
+another attempt's authority. Use the private sandbox delivery boundary, not
+ordinary inputs, workflow history, job arguments, plaintext key values in pod
+specifications, logs or audit payloads. Missing configuration, malformed/tampered
+tokens, expiry and scope mismatch fail explicitly. Do not remove verification
+or widen workspace privileges to make the path work.
+
+The change locations are the existing [application factory](../../src/services/activity-runtime-manager/src/custos_arm/app.py),
+[health routes](../../src/services/activity-runtime-manager/src/custos_arm/healthz.py),
+[scheduler](../../src/services/activity-runtime-manager/src/custos_arm/scheduler),
+[runtime drivers](../../src/services/activity-runtime-manager/src/custos_arm/runtime),
+[secret injector/issuer](../../src/services/activity-runtime-manager/src/custos_arm/secrets)
+and [sidecar verifier](../../src/services/connector-sidecar/src/custos_sidecar/auth.py).
+Existing HTTP paths, response envelopes and the sidecar's versioned token payload
+remain the contracts; no new public API or cryptographic algorithm is introduced.
+The startup ownership path is:
+
+```text
+Application lifespan -> owned providers/clients -> probes and schema gates
+                     -> ActivityScheduler -> runtime driver -> sandbox + sidecar
+                                                private bootstrap -> verifier
+Shutdown -> close admission -> drain -> release resources
+```
+
+Retry/restart and cleanup must retain durable attempt ownership. A missing pod,
+expired lease or accepted delete request alone is not proof that replay cannot
+duplicate an effect. The complete prerequisite requires real adapter/runtime
+tests and actual issuer-to-verifier compatibility, not mutually compatible mocks.
+
+The intentional first behavior change is observable without activating receivers:
+
+```text
+GET /healthz: 200
+GET /readyz: 503
+Reason: activity scheduler is not configured
+ScheduleActivity: 503; no activity admitted
+```
+
+The target success state, after the complete production graph is initialized:
+
+```text
+GET /readyz: 200
+ScheduleActivity: admitted to the configured durable scheduler
+Bootstrap verification: accepted for the original run/step/attempt
+Credential material: private; not included in diagnostics
+```
+
+The first readiness/bootstrap work is independent of #1037 and starts from the
+default branch. Keep #1037's identity/binding changes and #1017's lifecycle work
+in their existing worktrees; integrate merged companion changes normally, without
+copying unpublished code or stacking branches. Both #1037 and #1038 must complete
+before #1017 activates the production profile. #1018 remains the deployed
+resilience/capacity gate, and #1019 remains final documentation.
+
+Rollout keeps receiver acceptance disabled until the runtime and identity gates
+pass. Rollback closes admission and preserves in-flight ownership/evidence before
+unwiring dependencies; it must not restore unsigned bootstrap acceptance or
+truthy readiness for an unwired scheduler. This prerequisite does not duplicate
+[#991](https://github.com/toddysm/custos/issues/991)'s deferred features or
+[#763](https://github.com/toddysm/custos/issues/763)'s Kata-specific certification.
+
 #### Components and flow
 
 ```text
@@ -561,7 +732,7 @@ checks; missing production capabilities fail readiness.
 | REQ-079, S2/S3 | Shared envelope adapter; D03 single polling owner | 023, 028-029 |
 | REQ-081, S2/S3/S4 | Shared start/resume matching; D05 downstream durability | 028, 031, 035 |
 | #988 dead-letter scope, S4 | D05, durable storage, protected recovery | 030-033 |
-| REQ-036/037/038 | Signed contexts, no secret persistence, durable audit | 026-027, 032-034 |
+| REQ-036/037/038 | Signed contexts, D06 execution identity, no secret persistence, durable audit | 026-027, 032-034, 038 |
 | Preserve REQ-004/080 | Existing manual/internal routes and regression gates | 022, 034-035 |
 | Operator enablement | Deployment/rollback and final documentation | 034-036 |
 
@@ -701,6 +872,8 @@ expired resume waits and Workflow terminal-state conflicts.
 | Multi-tenancy/noisy neighbor | Bounded batches/concurrency, per-instance polling and scoped queries. |
 | Regression | Gates per touched service plus deployed manual/internal/start/resume cases. |
 | Replay safety | Durable downstream identity and sufficient retention; never infer safety from a reused string alone. |
+| False activity readiness | D07 requires an initialized scheduler and successful dependency probes; liveness does not imply schedulability. |
+| Bootstrap mismatch/key exposure | D07 tests actual issuer/verifier compatibility, exact attempt/expiry and private delivery; the activity cannot access the signing/verification key. |
 
 ### F. Breaking changes and compatibility
 
@@ -711,6 +884,10 @@ D02 changes header handling only for the new route. Existing manual/internal
 requests, connector event envelopes and workflow public contracts remain valid.
 Provider additions require a coordinated internal library release and adapter
 conformance; do not pretend an old adapter supports newly required capabilities.
+D07 intentionally changes an unwired activity runtime from readyz 200 to 503,
+including development configurations. The endpoint schema and liveness response
+remain unchanged. Deployment and operator documentation must explain the blocked
+rollout; tests must cover both unwired and initialized lifecycles.
 
 ### G. Security risk management
 
@@ -774,7 +951,11 @@ internal, resume registration, selector and dispatch tests. Connector: listener,
 cursor, pause, secret-resolution and publication tests. Gateway: non-webhook
 authentication, raw forwarding and response shaping. Auth: permission registry
 and signed-context validation. Workflow: start/resume idempotency and terminal
-state behavior. Deployment: four Helm profiles and a real deployed flow.
+state behavior. Activity Runtime Manager: startup failure, truthful readiness,
+admission/drain and ownership cleanup. Connector Sidecar: bootstrap scope,
+signature, expiry and key/token isolation. Deployment: four Helm profiles and
+a real deployed flow; mixed runtime versions remain disabled until compatible
+bootstrap and execution-identity prerequisites are present.
 
 ### N. Rollback
 
@@ -801,12 +982,19 @@ Each child includes unit/contract tests and relevant integration coverage.
 Use existing Ruff, format, strict Mypy and pytest jobs with Python 3.11/3.12 and
 the 90% Trigger coverage floor. Extend real PostgreSQL fixtures to call actual
 provider/read paths. Add deployed receiver-to-Workflow tests, clock-controlled
-lease/retention tests, and all D01-D05 failure/compatibility cases.
+lease/retention tests, and all D01-D06 failure/compatibility cases.
 
 Review-added cases: durable pause before registration and across restart;
 staggered two-Connector-replica ticks within one polling interval; source-scoped
 resume without payload run/step IDs and with no start subscription; and
 mixed/all-invalid verification batches with exact counts and sanitized reasons.
+For D06, exercise the actual client against the actual binding handler, complete
+request/response shapes, scoped identity/grants, expiry and refresh across
+restart/child execution, rotation/revocation bounds, unchanged accepted identity
+after configuration edits, and absence of credentials from durable diagnostics.
+For D07, test readiness before initialization, at each startup failure and during
+shutdown; resource cleanup and admission ordering; and the actual bootstrap minter
+against the actual sidecar verifier, including scope, expiry and private delivery.
 
 The plan-only pull request changes documentation; path-filtered service jobs
 may not run. Report that as not applicable, not green runtime evidence.
@@ -817,11 +1005,13 @@ merge. Missing or pending required results remain blockers.
 
 ### O. Next actions and launch checklist
 
-- Publish the native child issues and this design pull request.
-- Request Copilot review and reconcile findings.
-- Obtain explicit approval of D01-D05, the document and the issue acceptance criteria.
-- Separately authorize the concrete implementation branches, pull requests,
-  review-fix replies, merges and safe cleanup before the build loop.
+- Preserve the recorded baseline and amendment approvals in #988.
+- Implement the approved #1037 prerequisite before #1017 profile activation.
+- Complete #1038's startup/bootstrap prerequisite before #1017 activation.
+- Keep the revision-5 plan-amendment pull request open for review; do not auto-merge it.
+- Retain the authorized per-item branches/pull requests, hosted checks, Copilot
+  reviews, fix-confirmation replies, gated merges and checkpoint-before-cleanup.
+- Obtain renewed approval for any further material scope or identity-policy change.
 - Complete every required child, including documentation.
 - Merge a reviewed inventory close-out before closing #988.
 
