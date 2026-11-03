@@ -32,6 +32,10 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
+from custos_callctx.execution import load_execution_bindings
+from custos_callctx.execution_client import ExecutionContextClient
+from custos_spl.interfaces.execution import ExecutionIdentityStoreProvider
+
 from custos_trigger._version import __version__
 from custos_trigger.api import register_exception_handlers
 from custos_trigger.api.routes import resume_rpc_router, subscriptions_router
@@ -180,6 +184,7 @@ def create_app(
         if authz_endpoint is not None
         else os.environ.get("TRIGGER_AUTHZ_ENDPOINT", "")
     )
+    execution_bindings = load_execution_bindings(os.environ)
     effective_env = (
         environment if environment is not None else os.environ.get("ENVIRONMENT", "development")
     )
@@ -237,8 +242,14 @@ def create_app(
             namespace=workflow_namespace,
         )
 
+    owned_providers: Providers | None = None
+    owned_http_client: httpx.AsyncClient | None = None
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        """Assemble collaborators; the outer lifespan owns cleanup even on early rejection."""
+        nonlocal owned_providers, owned_http_client
+        owned_providers, owned_http_client = None, None
         app.state.receiver_configuration_enabled = (
             receiver_configuration_enabled
             if receiver_configuration_enabled is not None
@@ -250,12 +261,23 @@ def create_app(
         # TRIGGER_METADATA_STORE is a DSN) and the domain store adapters
         # the REST/RPC surface (TS-IMPL-015..018) drives. The provider
         # factory never opens a socket, so binding here is cheap.
+        if execution_bindings is not None and providers is None:
+            from custos_trigger.providers import is_memory_dsn
+
+            if is_memory_dsn(os.environ.get(ENV_METADATA_STORE, "")):
+                raise ValueError("execution identity requires a durable metadata store")
         effective_providers = (
             providers
             if providers is not None
             else load_providers(os.environ.get(ENV_METADATA_STORE, ""))
         )
+        if providers is None:
+            owned_providers = effective_providers
         metadata_store = effective_providers.metadata_store
+        if execution_bindings is not None:
+            if not isinstance(metadata_store, ExecutionIdentityStoreProvider):
+                raise ValueError("execution identity storage capability is required")
+            await metadata_store.check_execution_identity_ready()
         app.state.providers = effective_providers
         app.state.subscription_store = SubscriptionStore(metadata_store)
         app.state.resume_subscription_store = ResumeSubscriptionStore(metadata_store)
@@ -315,7 +337,6 @@ def create_app(
             await metadata_store.check_dead_letters_ready()
             await metadata_store.check_scheduler_ready()
 
-        owned_http_client: httpx.AsyncClient | None = None
         if dispatcher is not None:
             app.state.dispatcher = dispatcher
         else:
@@ -367,7 +388,16 @@ def create_app(
                 await metadata_store.check_dead_letters_ready()
                 reliable_store = metadata_store
             owned_http_client = httpx.AsyncClient()
-            workflow_client = DaprWorkflowServiceClient(owned_http_client, endpoint)
+            if execution_bindings is not None and reliable_store is None:
+                raise ValueError("execution identity requires durable Trigger dispatch")
+            execution_context = (
+                ExecutionContextClient.from_env(owned_http_client, execution_bindings, os.environ)
+                if execution_bindings is not None
+                else None
+            )
+            workflow_client = DaprWorkflowServiceClient(
+                owned_http_client, endpoint, execution_context=execution_context
+            )
             reliable = None
             if reliable_store is not None:
                 reliable = ReliableDispatcher(
@@ -378,6 +408,7 @@ def create_app(
                     max_fanout_depth=depth,
                     retention_seconds=retention,
                     max_replay_attempts=replay_limit,
+                    execution_bindings=execution_bindings,
                 )
             app.state.dispatcher = _Dispatcher(
                 workflow_client,
@@ -414,13 +445,27 @@ def create_app(
             logger.info("trigger-service is ready")
             yield
         finally:
-            if owned_http_client is not None:
-                await owned_http_client.aclose()
+            app.state.ready = False
+
+    @asynccontextmanager
+    async def owned_lifespan(app: FastAPI) -> AsyncIterator[None]:
+        """Close owned clients/pools on every exit; injected providers stay borrowed."""
+        try:
+            async with lifespan(app):
+                yield
+        finally:
+            app.state.ready = False
+            try:
+                if owned_http_client is not None:
+                    await owned_http_client.aclose()
+            finally:
+                if owned_providers is not None and owned_providers.close is not None:
+                    await owned_providers.close()
 
     app = FastAPI(
         title="Custos Trigger Service",
         version=__version__,
-        lifespan=lifespan,
+        lifespan=owned_lifespan,
     )
 
     # CallContextMiddleware is instantiated lazily by Starlette when the

@@ -69,6 +69,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final, Protocol, runtime_checkable
 
+from custos_callctx.execution import ExecutionIdentity
+
 if TYPE_CHECKING:
     from custos_cel.clock import Clock
 
@@ -207,6 +209,15 @@ class StepExecutionContext:
     outputs: Mapping[str, Mapping[str, Any]]
     clock: Clock
     delivery_protocol: int = 1
+    execution_identity: ExecutionIdentity | None = None
+
+    def __post_init__(self) -> None:
+        """Do not let a child or replay substitute an account from another workspace."""
+        if (
+            self.execution_identity is not None
+            and self.execution_identity.workspace_id != self.workspace_id
+        ):
+            raise ValueError("step execution identity belongs to another workspace")
 
 
 # ---------------------------------------------------------------------------

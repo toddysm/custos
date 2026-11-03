@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import re
 
-from fastapi import APIRouter, Depends, HTTPException, Path
+from fastapi import APIRouter, Depends, HTTPException, Path, Request
 
 from custos_catalog.api.dependencies import (
     get_connector_registry,
@@ -50,7 +50,7 @@ from custos_catalog.api.models import (
 )
 from custos_catalog.managers.connector_registry import ConnectorTypeRegistry
 from custos_catalog.managers.definition import DefinitionManager
-from custos_catalog.middleware.callctx import CallContext, CallContextError
+from custos_catalog.middleware.callctx import CallContext, CallContextError, get_call_context
 
 router = APIRouter()
 
@@ -63,6 +63,23 @@ _CT_REF_RE = re.compile(r"^(?P<type>[^@/]+)@(?P<version>[^@/]+)$")
 #: (workflow runtime, activity dispatcher) and withheld from everyone
 #: else — ``catalog:rpc:read`` alone is not enough.
 CROSS_WORKSPACE_RPC_READ = "catalog:rpc:cross-workspace-read"
+
+
+def _require_workflow_read(
+    request: Request, ctx: CallContext = Depends(get_call_context)
+) -> CallContext:
+    """Admit scoped execution reads without generic or cross-workspace RPC authority."""
+    if ctx.execution_operation is not None:
+        if (
+            getattr(request.state, "signed_call_context", False)
+            and ctx.execution_operation == "catalog-read"
+            and ctx.has_permission("catalog:workflows:read")
+        ):
+            return ctx
+        raise CallContextError(403, "execution_denied", "scoped workflow read required")
+    if not ctx.has_permission("catalog:rpc:read"):
+        raise CallContextError(403, "permission_denied", "catalog:rpc:read permission required")
+    return ctx
 
 
 @router.get(
@@ -79,13 +96,17 @@ async def rpc_get_workflow_version(
             "``<workspaceId>/<workflowName>@<version>``."
         ),
     ),
-    ctx: CallContext = Depends(require_permission_only("catalog:rpc:read")),
+    ctx: CallContext = Depends(_require_workflow_read),
     manager: DefinitionManager = Depends(get_definition_manager),
 ) -> WorkflowVersionBody:
     """Resolve a ``WorkflowVersionId`` to its full row.
 
     Implements design ``GetWorkflowVersion`` (component sequence
     diagrams "Run Workflow" and "Activity Inputs Resolution").
+
+    Credential-backed ``catalog-read`` contexts may read their own workspace
+    with ``catalog:workflows:read``; no generic RPC or cross-workspace grant
+    is inferred from that narrower permission.
 
     Tenant boundary: ``catalog:rpc:read`` alone authorises
     **same-workspace** reads. If the workspace embedded in the id

@@ -187,6 +187,13 @@
             "title": "Attempt",
             "type": "integer"
           },
+          "contextVersion": {
+            "default": 1,
+            "maximum": 2.0,
+            "minimum": 1.0,
+            "title": "Contextversion",
+            "type": "integer"
+          },
           "runId": {
             "minLength": 1,
             "title": "Runid",
@@ -248,6 +255,43 @@
           "requiredCapabilities"
         ],
         "title": "_BindSlotWire",
+        "type": "object"
+      },
+      "_BoundConnectorWire": {
+        "additionalProperties": false,
+        "description": "Authoritative instance metadata alongside the opaque plugin binding.",
+        "properties": {
+          "capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Capabilities",
+            "type": "array"
+          },
+          "connectorInstanceId": {
+            "title": "Connectorinstanceid",
+            "type": "string"
+          },
+          "connectorKind": {
+            "title": "Connectorkind",
+            "type": "string"
+          },
+          "context": {
+            "$ref": "#/components/schemas/_ConnectorContextWire"
+          },
+          "slotName": {
+            "title": "Slotname",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slotName",
+          "connectorInstanceId",
+          "connectorKind",
+          "capabilities",
+          "context"
+        ],
+        "title": "_BoundConnectorWire",
         "type": "object"
       },
       "_ConnectorContextWire": {
@@ -447,6 +491,30 @@
           "type"
         ],
         "title": "_DeprecateConnectorWire",
+        "type": "object"
+      },
+      "_ExecutionBindResponseWire": {
+        "additionalProperties": false,
+        "description": "Version-two binding response for credential-backed Workflow callers.",
+        "properties": {
+          "contexts": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/_BoundConnectorWire"
+            },
+            "title": "Contexts",
+            "type": "object"
+          },
+          "schemaVersion": {
+            "const": "2",
+            "default": "2",
+            "title": "Schemaversion",
+            "type": "string"
+          }
+        },
+        "required": [
+          "contexts"
+        ],
+        "title": "_ExecutionBindResponseWire",
         "type": "object"
       },
       "_IssueWire": {
@@ -1116,7 +1184,7 @@
     },
     "/internal/v1/bind-for-step": {
       "post": {
-        "description": "Resolve every connector slot a step references.\n\nIdempotent on ``(workspace_id, run_id, step_id, attempt)`` \u2014 see\n:class:`BindForStepService` for the cache semantics and the M1\ndurability caveat.",
+        "description": "Resolve every connector slot a step references.\n\nIdempotent on ``(workspace_id, run_id, step_id, attempt, actor)`` \u2014 see\n:class:`BindForStepService` for the cache semantics and the M1\ndurability caveat. Execution provenance always authenticates the Workflow\ncaller, independently of the selected response format.",
         "operationId": "bind_for_step_internal_v1_bind_for_step_post",
         "requestBody": {
           "content": {
@@ -1133,7 +1201,15 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/_BindForStepResponseWire"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/_BindForStepResponseWire"
+                    },
+                    {
+                      "$ref": "#/components/schemas/_ExecutionBindResponseWire"
+                    }
+                  ],
+                  "title": "Response Bind For Step Internal V1 Bind For Step Post"
                 }
               }
             },

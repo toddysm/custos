@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Final
 
 import pytest
+from custos_callctx.execution import ExecutionIdentity
 
 from custos_workflow._telemetry import (
     LOCKED_OUTBOUND_RPC_OUTCOMES,
@@ -58,6 +59,7 @@ from custos_workflow.clients.activity_runtime import (
 from custos_workflow.clients.connector import (
     BIND_FOR_STEP_DAPR_METHOD,
     BindForStepRequest,
+    BoundConnectorContext,
     ConnectorContext,
     SlotSpec,
 )
@@ -116,7 +118,9 @@ def _validate_schedule_request(body: dict[str, Any]) -> None:
         activity_ref=body["activityRef"],
         inputs=body["inputs"],
         connector_contexts={
-            slot: ConnectorContext(
+            slot: BoundConnectorContext.from_wire(ctx)
+            if ctx.get("schemaVersion") == "2"
+            else ConnectorContext(
                 slot_name=ctx["slotName"],
                 handle=ctx["handle"],
                 expires_at=_parse_iso(ctx["expiresAt"]),
@@ -125,6 +129,9 @@ def _validate_schedule_request(body: dict[str, Any]) -> None:
             for slot, ctx in body["connectorContexts"].items()
         },
         deadline=_parse_iso(body["deadline"]),
+        execution_identity=ExecutionIdentity.from_dict(body["executionIdentity"])
+        if "executionIdentity" in body
+        else None,
     )
     assert _schedule_request_to_wire(request) == body, (
         "documented ScheduleActivity request does not match _request_to_wire output"
@@ -153,11 +160,17 @@ def _validate_cancel_request(body: dict[str, Any]) -> None:
 def _validate_bind_request(body: dict[str, Any]) -> None:
     request = BindForStepRequest(
         step_key=body["stepKey"],
+        run_id=body["runId"],
+        step_id=body["stepId"],
+        attempt=body["attempt"],
+        execution_identity=ExecutionIdentity("team-a", "workflow-executor", "background-v1")
+        if body.get("contextVersion") == 2
+        else None,
         slots=tuple(
             SlotSpec(
                 name=slot["name"],
-                connector_ref=slot["connectorRef"],
-                capabilities=tuple(slot["capabilities"]),
+                connector_ref=slot["instanceId"],
+                capabilities=tuple(slot["requiredCapabilities"]),
             )
             for slot in body["slots"]
         ),
@@ -292,7 +305,7 @@ _DOCUMENTED_ENDPOINTS: Final[dict[tuple[str, str], str]] = {
     (
         "connector",
         BIND_FOR_STEP_DAPR_METHOD,
-    ): "/v1.0/invoke/<connector-app-id>/method/BindForStep",
+    ): "/v1.0/invoke/<connector-app-id>/method/internal/v1/bind-for-step",
 }
 
 

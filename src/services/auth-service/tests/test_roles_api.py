@@ -15,7 +15,7 @@ def auth_header() -> dict[str, str]:
     return callctx_header(principal_id="alice")
 
 
-def test_list_roles_returns_all_six_builtins(
+def test_list_roles_includes_explicit_executor_after_existing_builtins(
     client: TestClient,
     auth_header: dict[str, str],
 ) -> None:
@@ -31,6 +31,7 @@ def test_list_roles_returns_all_six_builtins(
         "role:workspace.admin",
         "role:tenant.admin",
         "role:platform.admin",
+        "role:workspace.executor",
     ]
 
 

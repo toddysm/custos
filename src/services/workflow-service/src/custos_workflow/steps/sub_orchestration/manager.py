@@ -114,6 +114,7 @@ from custos_workflow.steps.errors import (
 from custos_workflow.steps.sub_orchestration.child import (
     CHILD_STEP_WORKFLOW_NAME,
     DEFAULT_LOOP_VAR,
+    EXECUTION_CHILD_STEP_WORKFLOW_NAME,
     ChildStepInput,
     ChildStepResult,
 )
@@ -296,9 +297,12 @@ class SubOrchestrationManager:
                 parent_outputs=ctx.outputs,
                 loop_var=DEFAULT_LOOP_VAR,
                 item=item,
+                execution_identity=ctx.execution_identity,
             )
             task = ctx.workflow_context.call_child_workflow(
-                CHILD_STEP_WORKFLOW_NAME,
+                EXECUTION_CHILD_STEP_WORKFLOW_NAME
+                if ctx.execution_identity is not None
+                else CHILD_STEP_WORKFLOW_NAME,
                 input=child_input.to_dict(),
                 instance_id=instance_id,
             )
@@ -387,6 +391,7 @@ class SubOrchestrationManager:
             compiled_graph_json=to_json(child_graph),
             inputs=child_inputs,
             delivery_protocol=ctx.delivery_protocol,
+            execution_identity=ctx.execution_identity,
         )
         task = ctx.workflow_context.call_child_workflow(
             WORKFLOW_NAME,

@@ -30,6 +30,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 
 from custos_arm._version import __version__
 from custos_arm.config import Settings, load_settings
@@ -40,6 +41,7 @@ from custos_arm.middleware import (
     call_context_error_handler,
 )
 from custos_arm.rpc import router as rpc_router
+from custos_arm.rpc.router import schedule_validation_error_handler
 
 __all__ = ["create_app"]
 
@@ -114,6 +116,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         environment=resolved.environment,
     )
     app.add_exception_handler(CallContextError, call_context_error_handler)
+    app.add_exception_handler(RequestValidationError, schedule_validation_error_handler)
     app.include_router(health_router)
     app.include_router(rpc_router)
     return app

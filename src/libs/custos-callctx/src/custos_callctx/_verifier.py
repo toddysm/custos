@@ -16,6 +16,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from custos_callctx._context import CallContext
 from custos_callctx._errors import InvalidCallContextError, InvalidReason
 from custos_callctx._jwks import JwksCache
+from custos_callctx.execution import EXECUTION_PERMISSIONS
 
 #: Canonical wire header carrying the call-context JWT. Lowercase form
 #: matches the design note in the API Gateway component
@@ -265,6 +266,20 @@ class CallContextVerifier:
         if isinstance(aud, list):
             aud = self._audience
         permissions = self._extract_permissions(claims, kid=kid)
+        operation = claims.get("executionOperation")
+        if "executionOperation" in claims and (
+            not isinstance(operation, str)
+            or operation not in EXECUTION_PERMISSIONS
+            or permissions != frozenset({EXECUTION_PERMISSIONS[operation]})
+            or not workspace
+            or not workspace.strip()
+            or type(claims["iat"]) is not int
+            or type(claims["exp"]) is not int
+            or not 0 < exp - iat <= 300
+        ):
+            raise InvalidCallContextError(
+                InvalidReason.MALFORMED_TOKEN, "invalid execution authorization claims", kid=kid
+            )
         return CallContext(
             acting_principal_id=principal,
             workspace_id=workspace,
@@ -276,6 +291,7 @@ class CallContextVerifier:
             audience=str(aud),
             kid=kid,
             permissions=permissions,
+            execution_operation=operation,
         )
 
     @staticmethod

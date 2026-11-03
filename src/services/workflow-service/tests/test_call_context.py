@@ -13,7 +13,14 @@ isolation. ``test_app.py`` already covers the full factory wiring.
 
 from __future__ import annotations
 
+import base64
+import time
+from typing import Any
+
+import jwt
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from custos_callctx import CallContextVerifier, JwksCache
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.requests import Request
@@ -156,3 +163,79 @@ def test_call_context_accepts_both_none() -> None:
     ctx = CallContext(workspace=None, principal=None)
     assert ctx.workspace is None
     assert ctx.principal is None
+
+
+@pytest.mark.parametrize(
+    "operation,expected_status", [(None, 403), ("workflow-start", 200), ("workflow-resume", 403)]
+)
+def test_private_delivery_requires_signed_operation_provenance(
+    operation: str | None, expected_status: int
+) -> None:
+    """A signed legacy grant or a different execution operation cannot authorize a new start."""
+    key = Ed25519PrivateKey.generate()
+    public = base64.urlsafe_b64encode(key.public_key().public_bytes_raw()).decode().rstrip("=")
+
+    async def fetch(url: str) -> tuple[dict[str, str], dict[str, Any]]:
+        """Serve the actual signing key's public portion without a network dependency."""
+        assert url == "http://auth/.well-known/jwks.json"
+        return {"cache-control": "max-age=300"}, {
+            "keys": [{"kty": "OKP", "crv": "Ed25519", "kid": "unit", "x": public}],
+        }
+
+    app = FastAPI()
+    app.state.entered = 0
+    app.add_middleware(
+        CallContextMiddleware,
+        require_call_context=True,
+        execution_verifier=CallContextVerifier(
+            jwks_cache=JwksCache(
+                jwks_url="http://auth/.well-known/jwks.json",
+                fetcher=fetch,
+            )
+        ),
+        app_api_token="unit-sidecar-token",
+        trigger_namespace="custos",
+    )
+
+    @app.post("/internal/runs:start")
+    async def start(request: Request) -> JSONResponse:
+        """Record entry only after the actual private-delivery authentication boundary."""
+        app.state.entered += 1
+        context = request.state.call_context
+        return JSONResponse(
+            {
+                "principal": context.principal,
+                "workspace": context.workspace,
+                "verified": context.execution_verified,
+            }
+        )
+
+    now = int(time.time())
+    claims: dict[str, Any] = {
+        "iss": "custos-auth",
+        "aud": "custos.internal",
+        "iat": now,
+        "exp": now + 300,
+        "jti": "unit",
+        "workspaceId": "ws",
+        "actingPrincipalId": "executor",
+        "callerComponent": "trigger-service",
+        "permissions": ["workflow:execute"],
+    }
+    if operation is not None:
+        claims["executionOperation"] = operation
+    token = jwt.encode(claims, key, algorithm="EdDSA", headers={"kid": "unit"})
+    with TestClient(app) as client:
+        response = client.post(
+            "/internal/runs:start",
+            headers={
+                "x-custos-callctx": token,
+                "dapr-api-token": "unit-sidecar-token",
+                "dapr-caller-app-id": "trigger-service",
+                "dapr-caller-namespace": "custos",
+            },
+        )
+    assert response.status_code == expected_status
+    assert app.state.entered == int(expected_status == 200)
+    if expected_status == 200:
+        assert response.json() == {"principal": "executor", "workspace": "ws", "verified": True}

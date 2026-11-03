@@ -22,6 +22,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
+from custos_callctx import CallContextVerifier, InvalidCallContextError, InvalidReason
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -95,6 +96,7 @@ class CallContext(BaseModel):
     permissions: frozenset[str] = Field(default_factory=frozenset)
     issued_at: int | None = Field(default=None, alias="iat")
     expires_at: int | None = Field(default=None, alias="exp")
+    execution_operation: str | None = None
 
     def has_permission(self, name: str) -> bool:
         return name in self.permissions
@@ -129,12 +131,12 @@ class CallContextMiddleware(BaseHTTPMiddleware):
     Args:
         app: The downstream ASGI application (FastAPI passes itself).
         authz_endpoint: Value of ``ARM_AUTHZ_ENDPOINT``. Empty enables the
-            dev shim; non-empty surfaces a 500 with
-            :class:`NotImplementedError` until the real-verifier wiring
-            lands.
+            development shim; otherwise signed contexts are verified against
+            the issuer's public keys, with no unsigned fallback.
         environment: Value of ``ENVIRONMENT``. ``"production"`` with an
             empty ``authz_endpoint`` raises
             :class:`DevShimDisabledInProductionError` at construction.
+        verifier: Optional verifier injection for controlled key fetching in tests.
 
     Raises:
         DevShimDisabledInProductionError: When constructed with the dev
@@ -147,10 +149,16 @@ class CallContextMiddleware(BaseHTTPMiddleware):
         *,
         authz_endpoint: str,
         environment: str,
+        verifier: CallContextVerifier | None = None,
     ) -> None:
         super().__init__(app)
         self._authz_endpoint = authz_endpoint
         self._dev_shim_active = authz_endpoint == ""
+        self._verifier = verifier or (
+            CallContextVerifier(jwks_url=authz_endpoint.rstrip("/") + "/.well-known/jwks.json")
+            if authz_endpoint
+            else None
+        )
         if self._dev_shim_active and environment.lower() == "production":
             raise DevShimDisabledInProductionError(
                 "ARM_AUTHZ_ENDPOINT is empty but ENVIRONMENT=production; "
@@ -173,15 +181,30 @@ class CallContextMiddleware(BaseHTTPMiddleware):
         if not raw_header:
             return _render_envelope(401, "callctx_missing", f"{CALLCTX_HEADER} header is required")
 
-        if not self._dev_shim_active:
-            # The real-verifier follow-up replaces this raise with the
-            # call to the Auth Service: sig-verify the JWT, parse claims,
-            # call /authorize.
-            raise NotImplementedError(
-                "Production call-context validation is not yet implemented "
-                "for activity-runtime-manager. Unset ARM_AUTHZ_ENDPOINT to "
-                "fall back to the dev shim in non-production environments."
+        if self._verifier is not None:
+            if len(request.headers.getlist(CALLCTX_HEADER)) != 1:
+                return _render_envelope(401, "callctx_invalid", "one signed context is required")
+            try:
+                verified = await self._verifier.verify(metadata=request.headers)
+            except InvalidCallContextError as exc:
+                logger.warning("Rejected signed activity context: %s", exc.reason.value)
+                return _render_envelope(
+                    503 if exc.reason is InvalidReason.JWKS_UNAVAILABLE else 401,
+                    "callctx_invalid",
+                    "context verification failed",
+                )
+            if not verified.workspace_id:
+                return _render_envelope(403, "workspace_required", "workspace scope is required")
+            request.state.call_context = CallContext(
+                workspace_id=verified.workspace_id,
+                principal_id=verified.acting_principal_id,
+                permissions=verified.permissions,
+                iat=verified.issued_at,
+                exp=verified.expires_at,
+                execution_operation=verified.execution_operation,
             )
+            request.state.signed_call_context = True
+            return await call_next(request)
 
         try:
             ctx = self._parse_dev_shim_header(raw_header)

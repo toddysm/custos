@@ -47,6 +47,8 @@ from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Final, NoReturn, cast
 
+from custos_callctx.execution import ExecutionIdentity
+
 if TYPE_CHECKING:
     # Eagerly importing ``custos_workflow.clients`` would close a
     # circular import via the package-level ``custos_workflow``
@@ -65,6 +67,7 @@ if TYPE_CHECKING:
     from custos_workflow.clients.connector import (
         BindForStepRequest,
         BindForStepResponse,
+        BoundConnectorContext,
         ConnectorClient,
         ConnectorContext,
         SlotSpec,
@@ -438,7 +441,12 @@ def _unwrap_value(value: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def _serialize_connector_context(ctx: ConnectorContext) -> dict[str, Any]:
+def _serialize_connector_context(ctx: ConnectorContext | BoundConnectorContext) -> dict[str, Any]:
+    """Keep canonical binding objects intact without inventing lease metadata."""
+    from custos_workflow.clients.connector import BoundConnectorContext
+
+    if isinstance(ctx, BoundConnectorContext):
+        return ctx.to_wire()
     return {
         "slotName": ctx.slot_name,
         "handle": ctx.handle,
@@ -447,9 +455,15 @@ def _serialize_connector_context(ctx: ConnectorContext) -> dict[str, Any]:
     }
 
 
-def _deserialize_connector_context(payload: Mapping[str, Any]) -> ConnectorContext:
+def _deserialize_connector_context(
+    payload: Mapping[str, Any],
+) -> ConnectorContext | BoundConnectorContext:
+    """Read the explicit binding version rather than coercing objects to legacy handles."""
+    from custos_workflow.clients.connector import BoundConnectorContext
     from custos_workflow.clients.connector import ConnectorContext as _ConnectorContext
 
+    if payload.get("schemaVersion") == "2":
+        return BoundConnectorContext.from_wire(payload)
     missing = {"slotName", "handle", "expiresAt", "connectorKind"} - set(payload)
     if missing:
         raise ValueError(
@@ -470,14 +484,19 @@ def _deserialize_connector_context(payload: Mapping[str, Any]) -> ConnectorConte
 
 
 def _serialize_slot_spec(spec: SlotSpec) -> dict[str, Any]:
-    return {
+    """Retain optional manifest kind authority across durable activity invocation."""
+    wire = {
         "name": spec.name,
         "connectorRef": spec.connector_ref,
         "capabilities": list(spec.capabilities),
     }
+    if spec.connector_kind is not None:
+        wire["connectorKind"] = spec.connector_kind
+    return wire
 
 
 def _deserialize_slot_spec(payload: Mapping[str, Any]) -> SlotSpec:
+    """Decode legacy specs and preserve a pinned connector kind when supplied."""
     from custos_workflow.clients.connector import SlotSpec as _SlotSpec
 
     missing = {"name", "connectorRef", "capabilities"} - set(payload)
@@ -493,10 +512,14 @@ def _deserialize_slot_spec(payload: Mapping[str, Any]) -> SlotSpec:
             raise ValueError(
                 f"SlotSpec.capabilities entries must be strings, got {type(cap).__name__}"
             )
+    kind = payload.get("connectorKind")
+    if kind is not None and (not isinstance(kind, str) or not kind):
+        raise ValueError("invalid SlotSpec connector kind")
     return _SlotSpec(
         name=payload["name"],
         connector_ref=payload["connectorRef"],
         capabilities=tuple(capabilities_raw),
+        connector_kind=kind,
     )
 
 
@@ -514,10 +537,17 @@ def serialize_bind_for_step_request(request: BindForStepRequest) -> dict[str, An
     activity-task payload sees the same JSON shape as the
     downstream HTTP RPC body.
     """
-    return {
+    result: dict[str, Any] = {
         "stepKey": request.step_key,
         "slots": [_serialize_slot_spec(spec) for spec in request.slots],
     }
+    if request.run_id is not None:
+        result.update(
+            {"runId": request.run_id, "stepId": request.step_id, "attempt": request.attempt}
+        )
+    if request.execution_identity is not None:
+        result["executionIdentity"] = request.execution_identity.to_dict()
+    return result
 
 
 def _deserialize_bind_for_step_request(payload: Mapping[str, Any]) -> BindForStepRequest:
@@ -541,7 +571,16 @@ def _deserialize_bind_for_step_request(payload: Mapping[str, Any]) -> BindForSte
         _deserialize_slot_spec(_require_mapping(slot, "BindForStepRequest.slots[*]"))
         for slot in slots_raw
     )
-    return _BindForStepRequest(step_key=payload["stepKey"], slots=slots)
+    return _BindForStepRequest(
+        step_key=payload["stepKey"],
+        slots=slots,
+        run_id=payload.get("runId"),
+        step_id=payload.get("stepId"),
+        attempt=payload.get("attempt"),
+        execution_identity=ExecutionIdentity.from_dict(payload["executionIdentity"])
+        if payload.get("executionIdentity") is not None
+        else None,
+    )
 
 
 def _serialize_bind_for_step_response(response: BindForStepResponse) -> dict[str, Any]:
@@ -602,6 +641,11 @@ def serialize_schedule_activity_request(request: ScheduleActivityRequest) -> dic
             for slot_name, ctx in request.connector_contexts.items()
         },
         "deadline": _format_iso_utc(request.deadline),
+        **(
+            {"executionIdentity": request.execution_identity.to_dict()}
+            if request.execution_identity is not None
+            else {}
+        ),
     }
 
 
@@ -656,6 +700,9 @@ def _deserialize_schedule_activity_request(
         inputs=MappingProxyType(_unwrap_mapping(inputs_raw) or {}),
         connector_contexts=MappingProxyType(connector_contexts),
         deadline=_parse_iso_utc(payload["deadline"]),
+        execution_identity=ExecutionIdentity.from_dict(payload["executionIdentity"])
+        if payload.get("executionIdentity") is not None
+        else None,
     )
 
 
@@ -880,6 +927,7 @@ def _error_envelope(exc: Any) -> dict[str, Any]:
 def _call_sync_or_async(
     fn: Callable[..., Any] | Callable[..., Awaitable[Any]],
     *args: Any,
+    loop: asyncio.AbstractEventLoop | None = None,
 ) -> Any:
     """Invoke ``fn`` sync, or run the coroutine to completion if async.
 
@@ -897,15 +945,24 @@ def _call_sync_or_async(
     where we can pick the right call style per request without
     forcing every caller to wrap its client.
 
-    Uses :func:`asyncio.run` so the coroutine executes on a
-    fresh event loop owned by the activity invocation; the
-    production adapters' ``httpx.AsyncClient`` instances are
-    constructed at worker startup and survive across calls
-    because the underlying transport pool is loop-agnostic
-    (httpx documents this as the supported pattern).
+    Production passes the application's owning loop so pooled clients never
+    cross loop boundaries. The standalone fallback is for isolated callers
+    that do not reuse loop-owned transports between invocations.
     """
     result = fn(*args)
     if inspect.isawaitable(result):
+        if loop is not None:
+            try:
+                active_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                active_loop = None
+            if active_loop is loop or not loop.is_running():
+                if inspect.iscoroutine(result):
+                    result.close()
+                raise RuntimeError(
+                    "synchronous activity bridge requires a live separate owner loop"
+                )
+            return asyncio.run_coroutine_threadsafe(_await(result), loop).result()
         return asyncio.run(_await(result))
     return result
 
@@ -916,6 +973,8 @@ async def _await(coro: Awaitable[Any]) -> Any:
 
 def build_arm_schedule_activity(
     client: ActivityRuntimeClient,
+    *,
+    loop: asyncio.AbstractEventLoop | None = None,
 ) -> Callable[[Any, Any], dict[str, Any]]:
     """Build the ``custos.workflow.arm.schedule_activity`` Dapr activity.
 
@@ -930,8 +989,10 @@ def build_arm_schedule_activity(
         :class:`ActivityRuntimeClient` (sync test fake or the
         async production
         :class:`~custos_workflow.clients.DaprActivityRuntimeClient`).
-        Async clients are bridged via :func:`asyncio.run` inside
-        the activity body.
+        Async clients execute on the supplied owner loop.
+    :param loop: Application loop owning pooled transports. The synchronous
+        callback must run on a worker thread; standalone clients without
+        shared transports may omit the loop.
 
     :returns: The Dapr activity function.
     """
@@ -954,17 +1015,21 @@ def build_arm_schedule_activity(
             # error string.
             return _error_envelope(OutboundRpcDecodeError(str(exc)))
         try:
-            envelope = _call_sync_or_async(client.schedule_activity, request)
+            envelope = _call_sync_or_async(client.schedule_activity, request, loop=loop)
         except OutboundRpcError as exc:
             return _error_envelope(exc)
         return _ok_envelope(_serialize_activity_result_envelope(envelope))
 
     arm_schedule_activity.__name__ = SCHEDULE_ACTIVITY_ACTIVITY_NAME
+    if loop is not None:
+        arm_schedule_activity.requires_async_bridge = True  # type: ignore[attr-defined]
     return arm_schedule_activity
 
 
 def build_connector_bind_for_step_activity(
     client: ConnectorClient,
+    *,
+    loop: asyncio.AbstractEventLoop | None = None,
 ) -> Callable[[Any, Any], dict[str, Any]]:
     """Build the ``custos.workflow.connector.bind_for_step`` Dapr activity.
 
@@ -976,6 +1041,8 @@ def build_connector_bind_for_step_activity(
         :class:`ConnectorClient` (sync test fake or the async
         production
         :class:`~custos_workflow.clients.DaprConnectorClient`).
+    :param loop: Application loop owning the client's pooled transport;
+        see :func:`build_arm_schedule_activity` for the worker-thread contract.
 
     :returns: The Dapr activity function.
     """
@@ -993,12 +1060,14 @@ def build_connector_bind_for_step_activity(
         except ValueError as exc:
             return _error_envelope(OutboundRpcDecodeError(str(exc)))
         try:
-            response = _call_sync_or_async(client.bind_for_step, request)
+            response = _call_sync_or_async(client.bind_for_step, request, loop=loop)
         except OutboundRpcError as exc:
             return _error_envelope(exc)
         return _ok_envelope(_serialize_bind_for_step_response(response))
 
     connector_bind_for_step.__name__ = BIND_FOR_STEP_ACTIVITY_NAME
+    if loop is not None:
+        connector_bind_for_step.requires_async_bridge = True  # type: ignore[attr-defined]
     return connector_bind_for_step
 
 

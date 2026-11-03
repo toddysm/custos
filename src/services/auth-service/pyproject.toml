@@ -41,6 +41,7 @@ dependencies = [
     "httpx>=0.27,<1",
     "custos-spl",
     "custos-postgres",
+    "custos-callctx",
 ]
 
 [project.optional-dependencies]

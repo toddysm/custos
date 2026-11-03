@@ -501,7 +501,7 @@ def compile(
             spec_defaults = document.spec.defaults
             try:
                 nodes = tuple(
-                    _build_node(by_id[sid], node_call_sites[sid], spec_defaults)
+                    _build_node(by_id[sid], node_call_sites[sid], spec_defaults, registry)
                     for sid in topological_order
                 )
             except RetryResolutionError as exc:
@@ -598,8 +598,12 @@ def _build_node(
     step: Step,
     typed_call_sites: dict[str, TypedCallSite],
     spec_defaults: Defaults | None,
+    registry: ActivityTypeRegistry | None = None,
 ) -> ExecutionNode:
     """Assemble one :class:`ExecutionNode` from a source step + its typed sites.
+
+    Catalog-aware registries also pin connector requirements onto activity nodes
+    so replay and child execution do not rediscover current slot authority.
 
     The step-level :class:`ResolvedRetryPolicy` is computed once
     here (layers: ``step.retry`` → ``spec.defaults.retry`` →
@@ -623,6 +627,8 @@ def _build_node(
     kind so the loop body still type-checks and dispatches against
     the right per-kind handler once expanded.
     """
+    from custos_workflow.bindings.registry import ActivityConnectorRegistry
+
     step_kind, handler = _STEP_DISPATCH[type(step)]
     if step.for_each is not None:
         handler = PrimitiveHandler.SUB_ORCHESTRATION
@@ -640,4 +646,9 @@ def _build_node(
         on_error_routes=on_error_routes,
         call_sites=typed_call_sites,
         step_source=step,
+        connector_requirements=(
+            registry.get_connector_requirements(step.activity)
+            if isinstance(step, ActivityStep) and isinstance(registry, ActivityConnectorRegistry)
+            else None
+        ),
     )

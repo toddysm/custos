@@ -5,6 +5,7 @@ from __future__ import annotations
 from custos_auth.api.routes import (
     auth,
     authz,
+    execution,
     jwks,
     oidc,
     principals,
@@ -33,6 +34,7 @@ all_routers = [
     role_bindings.router,
     jwks.router,
     rpc.router,
+    execution.router,
 ]
 
 
