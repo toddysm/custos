@@ -19,6 +19,7 @@ forever. A major ref (``…@MAJOR``) is a moving pointer and is always re-read.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Protocol, runtime_checkable
 from urllib.parse import quote
 
@@ -207,13 +208,16 @@ class ScopedCatalogActivityResolver(CatalogActivityResolver):
                 f"{self._base}/v1/workspaces/{quote(workspace_id, safe='')}"
                 f"/activity-types/{quote(str(ref), safe='/@')}"
             )
-            async with self._http.stream(
-                "GET",
-                url,
-                headers=headers,
-                timeout=self._timeout,
-                follow_redirects=False,
-            ) as response:
+            async with (
+                asyncio.timeout(self._timeout),
+                self._http.stream(
+                    "GET",
+                    url,
+                    headers=headers,
+                    timeout=self._timeout,
+                    follow_redirects=False,
+                ) as response,
+            ):
                 if response.status_code != 200:
                     raise CatalogUnavailableError(activity_ref, "activity metadata read failed")
                 raw = bytearray()
@@ -231,7 +235,13 @@ class ScopedCatalogActivityResolver(CatalogActivityResolver):
             ):
                 raise ValueError("activity metadata changed its requested reference")
             return result
-        except (httpx.HTTPError, ValueError, ExecutionAuthorizationError, CatalogUnavailableError):
+        except (
+            httpx.HTTPError,
+            ValueError,
+            TimeoutError,
+            ExecutionAuthorizationError,
+            CatalogUnavailableError,
+        ):
             raise CatalogUnavailableError(
                 activity_ref, "scoped activity resolution failed"
             ) from None

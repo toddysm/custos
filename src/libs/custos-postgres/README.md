@@ -109,6 +109,9 @@ transaction-scoped advisory lock. The production issuer requires this capability
 the legacy count-then-put sequence is not treated as a cross-replica guarantee.
 Lease revision **2** replaces the raw-coordinate index with bounded hash keys;
 queries retain exact coordinate comparisons. Apply it before enabling issuance.
+Scoped refresh shares the insertion lock and rechecks expiry inside that
+transaction. An expired lease cannot be revived after a replacement consumes
+its former capacity; callers must request a new lease.
 
 This package registers two adapters under the `custos_spl.adapters`
 entry-point group:

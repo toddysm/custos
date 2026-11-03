@@ -1,26 +1,57 @@
 """Production composition and admission with faulted external acquisition boundaries."""
 
+import asyncio
 import json
+import threading
+import time
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
+from custos_csi.adapters import CsiArtifactAdapter
 from custos_pg import PgMetadataAdapter
 from custos_pg.adapters.lease import PgLeaseAdapter
 from custos_pg.pool import LazyPool
+from custos_spl.errors import BackendUnavailable
+from custos_spl.ids import WorkspaceId
+from custos_spl.interfaces.artifact_store import ArtifactDescriptor
 from kubernetes import client as kube_client
 from kubernetes import config as kube_config
 
 from custos_arm import create_app
 from custos_arm.config import Settings
 from custos_arm.credential_proxy import CredentialProxy
-from custos_arm.resources import open_runtime
+from custos_arm.resources import _blocking_probe, open_runtime
 from custos_arm.scheduler import ActivityScheduler
 
 
-@pytest.mark.parametrize("failure", [None, "schema", "snapshot", "http", "kubernetes"])
+async def test_cancelled_kubernetes_probe_joins_its_owned_call() -> None:
+    """A readiness timeout cannot close the API client under a still-running probe thread."""
+    started, release = threading.Event(), threading.Event()
+
+    def blocked() -> None:
+        """Emulate a bounded Kubernetes call that finishes after cancellation was requested."""
+        started.set()
+        assert release.wait(5)
+
+    probe = asyncio.create_task(_blocking_probe(blocked))
+    try:
+        assert await asyncio.to_thread(started.wait, 1)
+        probe.cancel()
+        await asyncio.sleep(0.01)
+        assert not probe.done()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(probe, 1)
+
+
+@pytest.mark.parametrize(
+    "failure", [None, "schema", "snapshot", "http", "kubernetes", "csi", "secret", "auth"]
+)
 async def test_production_resource_graph_and_failure_cleanup(
     tmp_path: Path,
     settings: Settings,
@@ -29,7 +60,7 @@ async def test_production_resource_graph_and_failure_cleanup(
 ) -> None:
     """Keep actual adapters and clients; emulate only external readiness I/O."""
     events: list[str] = []
-    unhealthy = [False]
+    unhealthy: set[str] = set()
     artifact_root = tmp_path / "artifacts"
     artifact_root.mkdir()
     monkeypatch.setenv("CUSTOS_CSI_PVC_MOUNT", str(artifact_root))
@@ -84,8 +115,36 @@ async def test_production_resource_graph_and_failure_cleanup(
 
     def http_response(request: httpx.Request) -> httpx.Response:
         """Probe real HTTP clients without external network access."""
+        if "/v1.0/secrets/" in request.url.path:
+            events.append("secret")
+            return httpx.Response(
+                503 if failure == "secret" or "secret" in unhealthy else 200,
+                json={"token": "private-probe-credential"},
+            )
+        if request.url.path.endswith("/rpc/callctx.exchangeExecution"):
+            events.append("auth")
+            assert json.loads(request.content)["operation"] == "catalog-activity-read"
+            timestamp = int(time.time())
+            return httpx.Response(
+                503 if failure == "auth" or "auth" in unhealthy else 200,
+                json={"token": "e30.probe.signature", "iat": timestamp, "exp": timestamp + 60},
+            )
         events.append("http")
-        return httpx.Response(503 if failure == "http" or unhealthy[0] else 200)
+        return httpx.Response(503 if failure == "http" or "http" in unhealthy else 200)
+
+    original_put = CsiArtifactAdapter.put
+
+    async def put_artifact(
+        self: CsiArtifactAdapter,
+        workspace: WorkspaceId,
+        content: AsyncIterator[bytes],
+        media_type: str | None = None,
+    ) -> ArtifactDescriptor:
+        """Retain real CSI I/O except for explicit startup or recurring availability faults."""
+        events.append("csi")
+        if failure == "csi" or "csi" in unhealthy:
+            raise BackendUnavailable("CSI unavailable")
+        return await original_put(self, workspace, content, media_type)
 
     original_http = httpx.AsyncClient
 
@@ -99,9 +158,9 @@ async def test_production_resource_graph_and_failure_cleanup(
 
     def list_objects(self: object, *args: object, **kwargs: object) -> None:
         """Emulate the bounded real Kubernetes API readiness request."""
-        assert kwargs["_request_timeout"] == 10
+        assert kwargs["_request_timeout"] == 2
         events.append("kubernetes")
-        if failure == "kubernetes":
+        if failure == "kubernetes" or "kubernetes" in unhealthy:
             raise RuntimeError("Kubernetes unavailable")
 
     original_close = kube_client.ApiClient.close
@@ -115,6 +174,7 @@ async def test_production_resource_graph_and_failure_cleanup(
     monkeypatch.setattr(PgMetadataAdapter, "check_execution_identity_ready", schema)
     monkeypatch.setattr(PgMetadataAdapter, "read_activity_execution", read)
     monkeypatch.setattr(LazyPool, "aclose", close_pool)
+    monkeypatch.setattr(CsiArtifactAdapter, "put", put_artifact)
     monkeypatch.setattr(PgLeaseAdapter, "refresh_declared", lease_schema)
     monkeypatch.setattr(httpx, "AsyncClient", owned_http)
     monkeypatch.setattr(kube_config, "load_incluster_config", load_config)
@@ -136,13 +196,15 @@ async def test_production_resource_graph_and_failure_cleanup(
             ) as caller:
                 assert (await caller.get("/readyz")).status_code == 200
                 assert (await caller.get("/healthz")).status_code == 200
-                unhealthy[0] = True
-                assert (await caller.get("/readyz")).status_code == 503
-                assert not app.state.dependencies_ready
-                assert (await caller.get("/healthz")).status_code == 200
-                unhealthy[0] = False
-                assert (await caller.get("/readyz")).status_code == 200
-                assert app.state.dependencies_ready
+                assert "auth" in events and "secret" in events
+                for dependency in ("http", "kubernetes", "csi", "secret", "auth"):
+                    unhealthy.add(dependency)
+                    assert (await caller.get("/readyz")).status_code == 503
+                    assert not app.state.dependencies_ready
+                    assert (await caller.get("/healthz")).status_code == 200
+                    unhealthy.clear()
+                    assert (await caller.get("/readyz")).status_code == 200
+                    assert app.state.dependencies_ready
                 denied = await caller.post(
                     "/internal/v1/activity-credentials",
                     json={

@@ -4,6 +4,9 @@ Only the authenticated runtime control-plane caller may invoke this surface.
 Slot authority comes from the immutable accepted snapshot, never instance IDs,
 grants or TTL hints supplied by the sandbox. Upstream material stays opaque;
 lease expiry is deliberately separate from actual or unknown provider expiry.
+The retained instance ID pins its immutable type/version/credential descriptor;
+supported updates change only lifecycle state, name and lease TTL. Secret values
+behind that fixed descriptor may rotate without changing accepted authority.
 """
 
 from __future__ import annotations

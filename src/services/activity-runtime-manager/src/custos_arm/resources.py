@@ -7,6 +7,7 @@ import os
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import cast
 from uuid import uuid4
@@ -18,9 +19,11 @@ from custos_csi.adapters import make_adapter
 from custos_pg import PgMetadataAdapter
 from custos_pg.adapters.lease import PgLeaseAdapter
 from custos_pg.pool import LazyPool
-from custos_spl.errors import MigrationRequired
+from custos_spl.errors import MigrationRequired, SPLError
 from custos_spl.ids import WorkspaceId
 from custos_spl.interfaces.metadata_store import MetadataStoreProvider
+from kubernetes.client.exceptions import ApiException
+from urllib3.exceptions import HTTPError as KubernetesTransportError
 
 from custos_arm.config import Settings, SettingsError
 from custos_arm.credential_proxy import CredentialProxy
@@ -34,6 +37,22 @@ from custos_arm.scheduler import ActivityScheduler
 from custos_arm.secrets import SecretInjector, SidecarTokenMinter
 from custos_arm.store import ExecutionRepository
 from custos_arm.store.artifact import ArtifactStoreClient
+
+
+async def _blocking_probe(operation: Callable[[], object]) -> None:
+    """Join bounded Kubernetes calls before cancellation can close their owning API client."""
+    worker = asyncio.create_task(asyncio.to_thread(operation))
+    cancelled = False
+    while True:
+        try:
+            await asyncio.shield(worker)
+            break
+        except asyncio.CancelledError:
+            if worker.cancelled():
+                raise
+            cancelled = True
+    if cancelled:
+        raise asyncio.CancelledError
 
 
 @dataclass(frozen=True)
@@ -51,6 +70,8 @@ async def open_runtime(settings: Settings) -> AsyncIterator[RuntimeResources]:
     bindings = load_execution_bindings(os.environ)
     if bindings is None:
         raise SettingsError("runtime activation requires explicit execution-account bindings")
+    if not bindings.identities:
+        raise SettingsError("runtime readiness requires a configured execution-account reference")
     if settings.artifact_store != "csi":
         raise SettingsError("production runtime currently requires ARM_ARTIFACT_STORE=csi")
     root = Path(settings.staging_root)
@@ -77,26 +98,33 @@ async def open_runtime(settings: Settings) -> AsyncIterator[RuntimeResources]:
             """Write only random non-secret readiness data through the real artifact provider."""
             yield probe
 
-        descriptor = await artifacts.put(
-            WorkspaceId("__runtime_probe__"), chunks(), "application/octet-stream"
-        )
-        try:
-            actual = b"".join(
-                [
-                    part
-                    async for part in artifacts.get(
-                        WorkspaceId("__runtime_probe__"), descriptor.artifact_id
+        async def probe_artifacts() -> None:
+            """Check real CSI write/read/delete each cycle, reusing one non-secret probe blob."""
+            async with asyncio.timeout(2):
+                descriptor = await artifacts.put(
+                    WorkspaceId("__runtime_probe__"),
+                    chunks(),
+                    "application/octet-stream",
+                )
+                try:
+                    actual = b"".join(
+                        [
+                            part
+                            async for part in artifacts.get(
+                                WorkspaceId("__runtime_probe__"),
+                                descriptor.artifact_id,
+                            )
+                        ]
                     )
-                ]
-            )
-            if actual != probe:
-                raise RuntimeError("artifact readiness round-trip failed")
-        finally:
-            await artifacts.delete(
-                WorkspaceId("__runtime_probe__"),
-                descriptor.artifact_id,
-                is_sweeper=True,
-            )
+                    if actual != probe:
+                        raise RuntimeError("artifact readiness round-trip failed")
+                finally:
+                    await artifacts.delete(
+                        WorkspaceId("__runtime_probe__"),
+                        descriptor.artifact_id,
+                        is_sweeper=True,
+                    )
+
         http = await stack.enter_async_context(httpx.AsyncClient(trust_env=False))
         execution = ExecutionContextClient.from_env(http, bindings, os.environ)
         probe_headers = (
@@ -104,31 +132,14 @@ async def open_runtime(settings: Settings) -> AsyncIterator[RuntimeResources]:
             if os.environ.get("DAPR_API_TOKEN")
             else {}
         )
-        for endpoint in (settings.catalog_endpoint, settings.connector_endpoint):
-            response = await http.get(
-                endpoint.rstrip("/") + "/readyz", headers=probe_headers, timeout=5
-            )
-            if response.status_code != 200:
-                raise RuntimeError("runtime dependency is not ready")
         from kubernetes import client, config
 
         configuration = client.Configuration()
+        configuration.retries = 0
         config.load_incluster_config(client_configuration=configuration)
         api = client.ApiClient(configuration)
         stack.callback(api.close)
         batch, core = client.BatchV1Api(api), client.CoreV1Api(api)
-        await asyncio.to_thread(
-            batch.list_namespaced_job,
-            settings.sandbox_namespace,
-            limit=1,
-            _request_timeout=10,
-        )
-        await asyncio.to_thread(
-            core.list_namespaced_pod,
-            settings.sandbox_namespace,
-            limit=1,
-            _request_timeout=10,
-        )
         driver = OciContainerDriver(
             batch_api=batch, core_api=core, staging_root=root, api_timeout=10
         )
@@ -158,19 +169,72 @@ async def open_runtime(settings: Settings) -> AsyncIterator[RuntimeResources]:
             settings=settings,
         )
 
-        async def probe_dependencies() -> None:
-            """Recheck owned storage and service availability without opening new resources."""
-            await metadata.read_activity_execution("__runtime_probe__", "probe", "probe", 1)
-            for endpoint in (settings.catalog_endpoint, settings.connector_endpoint):
-                result = await http.get(
-                    endpoint.rstrip("/") + "/readyz",
-                    headers=probe_headers,
-                    timeout=2,
-                )
+        probe_lock = asyncio.Lock()
+
+        async def probe_service(endpoint: str, headers: dict[str, str]) -> None:
+            """Check availability without retaining or consuming an unbounded response body."""
+            async with http.stream(
+                "GET", endpoint.rstrip("/") + "/readyz", headers=headers, timeout=2
+            ) as result:
                 if result.status_code != 200:
                     raise RuntimeError("runtime dependency is unavailable")
 
+        async def probe_authorization() -> None:
+            """Exercise the configured secret/Auth path using one explicit diagnostic identity."""
+            headers = await execution.headers(bindings.identities[0], "catalog-activity-read")
+            await probe_service(settings.catalog_endpoint, headers)
+
+        async def probe_dependencies() -> None:
+            """Recheck every required collaborator under one elapsed-time and cleanup boundary."""
+            async with probe_lock:
+                try:
+                    async with asyncio.timeout(5), asyncio.TaskGroup() as probes:
+                        probes.create_task(
+                            metadata.read_activity_execution(
+                                "__runtime_probe__",
+                                "probe",
+                                "probe",
+                                1,
+                            )
+                        )
+                        probes.create_task(probe_artifacts())
+                        probes.create_task(probe_authorization())
+                        probes.create_task(
+                            probe_service(settings.connector_endpoint, probe_headers)
+                        )
+                        probes.create_task(
+                            _blocking_probe(
+                                partial(
+                                    batch.list_namespaced_job,
+                                    settings.sandbox_namespace,
+                                    limit=1,
+                                    _request_timeout=2,
+                                )
+                            )
+                        )
+                        probes.create_task(
+                            _blocking_probe(
+                                partial(
+                                    core.list_namespaced_pod,
+                                    settings.sandbox_namespace,
+                                    limit=1,
+                                    _request_timeout=2,
+                                )
+                            )
+                        )
+                except* (
+                    SPLError,
+                    httpx.HTTPError,
+                    RuntimeError,
+                    ApiException,
+                    KubernetesTransportError,
+                    OSError,
+                    TimeoutError,
+                ):
+                    raise RuntimeError("required runtime dependency probe failed") from None
+
         try:
+            await probe_dependencies()
             yield RuntimeResources(
                 scheduler,
                 CredentialProxy(metadata, execution, http, settings.connector_endpoint),

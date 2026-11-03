@@ -222,26 +222,52 @@ class ActivityScheduler:
             logger.error("Owned activity worker failed; durable ownership must be reconciled")
 
     async def drain(self) -> None:
-        """Close admission, request stop, and join workers before their clients/pools can close."""
+        """Join owned workers before resource closure, even if shutdown itself is cancelled."""
         self._closing = True
+        draining = asyncio.create_task(self._drain_workers(), name="activity-runtime-drain")
+        cancelled = False
+        while True:
+            try:
+                await asyncio.shield(draining)
+                break
+            except asyncio.CancelledError:
+                if draining.cancelled():
+                    raise
+                cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _drain_workers(self) -> None:
+        """Retry failed revocation without stopping first; never abandon the worker join."""
         cancelled: set[str] = set()
-        while self._workers:
-            for key, context in tuple(self._context.items()):
-                if context.handle.reference in cancelled:
-                    continue
-                try:
-                    await self._repo.revoke_credentials(key)
-                    await asyncio.to_thread(
-                        context.driver.cancel, context.handle, CancelReason.SHUTDOWN
-                    )
-                except SandboxFailureError:
-                    logger.error(
-                        "Sandbox stop request failed; retaining ownership and joining its worker"
-                    )
-                finally:
-                    cancelled.add(context.handle.reference)
+        reported: set[str] = set()
+        try:
+            while self._workers:
+                for key, context in tuple(self._context.items()):
+                    reference = context.handle.reference
+                    if reference in cancelled:
+                        continue
+                    try:
+                        await self._repo.revoke_credentials(key)
+                    except (SPLError, UnsafeExecutionError):
+                        if reference not in reported:
+                            logger.error(
+                                "Credential revocation failed; stop deferred and workers retained"
+                            )
+                            reported.add(reference)
+                        continue
+                    try:
+                        await asyncio.to_thread(
+                            context.driver.cancel, context.handle, CancelReason.SHUTDOWN
+                        )
+                    except SandboxFailureError:
+                        logger.error("Sandbox stop request failed; joining its owned worker")
+                    cancelled.add(reference)
+                if self._workers:
+                    await asyncio.wait(tuple(self._workers), timeout=0.1)
+        finally:
             if self._workers:
-                await asyncio.wait(tuple(self._workers), timeout=0.1)
+                await asyncio.gather(*tuple(self._workers), return_exceptions=True)
 
     async def _admitted(self, request: ScheduleRequest) -> ActivityResultEnvelope:
         """Retain the per-key fence even when the requesting HTTP connection is cancelled."""

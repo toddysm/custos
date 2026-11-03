@@ -431,14 +431,30 @@ class LeaseManager:
                     ),
                 )
                 new_expires_at = now + timedelta(seconds=ttl_sec)
-                refreshed = await self._lease_store.refresh_lease(
-                    workspace_id, lease_id, new_expires_at
-                )
+                if self._require_atomic and isinstance(self._lease_store, AtomicLeaseStoreProvider):
+                    try:
+                        refreshed = await self._lease_store.refresh_lease_bounded(
+                            workspace_id,
+                            lease_id,
+                            new_expires_at,
+                            self._max_concurrent_leases,
+                        )
+                    except LeaseBusy:
+                        raise LeaseError(
+                            LeaseErrorCode.CAPACITY_EXCEEDED,
+                            "credential lease cap reached",
+                        ) from None
+                else:
+                    refreshed = await self._lease_store.refresh_lease(
+                        workspace_id,
+                        lease_id,
+                        new_expires_at,
+                    )
                 if refreshed is None:
-                    # Race: lease was released between get and refresh.
+                    # Scope/liveness can change after the initial read.
                     raise LeaseError(
                         LeaseErrorCode.ALREADY_RELEASED,
-                        f"lease {lease_id} was released concurrently with refresh",
+                        "credential lease became inactive before refresh",
                     )
             except LeaseError as exc:
                 await self._record_denied_for(

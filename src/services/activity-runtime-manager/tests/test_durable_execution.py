@@ -10,7 +10,7 @@ from typing import cast
 
 import pytest
 from custos_callctx.execution import ExecutionIdentity
-from custos_spl.errors import ImmutableViolation, LeaseBusy, LeaseExpired
+from custos_spl.errors import BackendUnavailable, ImmutableViolation, LeaseBusy, LeaseExpired
 from custos_spl.interfaces.activity_execution import (
     ActivityExecutionRecord,
     activity_snapshot,
@@ -238,6 +238,43 @@ async def test_disconnect_and_drain_keep_unknown_effect_fenced(tmp_path: Path) -
     refusal = await scheduler.schedule(_request())
     assert refusal.class_ is ResultClass.RETRYABLE
     assert driver.prepared == 1
+
+
+async def test_drain_retries_revocation_and_joins_even_when_cancelled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A failed revocation cannot close resources or stop the sandbox before authority is closed."""
+    store = SharedAttempts()
+    driver = _CancellableDriver(tmp_path)
+    scheduler = _scheduler(driver, repo=repository(store))
+    caller = asyncio.create_task(scheduler.schedule(_request()))
+    await _wait_for_live_attempt(scheduler)
+    attempted, recover = asyncio.Event(), asyncio.Event()
+    revoke = store.revoke_activity_authority
+
+    async def unavailable(record: ActivityExecutionRecord) -> ActivityExecutionRecord:
+        """Hold the store unavailable until the test verifies the stop/join boundary."""
+        attempted.set()
+        if not recover.is_set():
+            raise BackendUnavailable("private-backend-diagnostic")
+        return await revoke(record)
+
+    monkeypatch.setattr(store, "revoke_activity_authority", unavailable)
+    draining = asyncio.create_task(scheduler.drain())
+    await asyncio.wait_for(attempted.wait(), timeout=1)
+    draining.cancel()
+    await asyncio.sleep(0.02)
+    assert not draining.done() and scheduler._workers and not driver.cancellations
+    recover.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(draining, timeout=5)
+    await caller
+    assert not scheduler._workers
+    assert driver.cancellations == [CancelReason.SHUTDOWN]
+    assert next(iter(store.rows.values())).authority_revoked
+    assert "private-backend-diagnostic" not in caplog.text
 
 
 @pytest.mark.parametrize("with_slot", [False, True])

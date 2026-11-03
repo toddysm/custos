@@ -1,9 +1,12 @@
 """Bound private JSON responses without leaking upstream diagnostics or following redirects."""
 
+import asyncio
 import json
 from collections.abc import Mapping
 
 import httpx
+
+PRIVATE_REQUEST_TIMEOUT_SECONDS = 15.0
 
 
 class PrivateTransportError(RuntimeError):
@@ -23,14 +26,17 @@ async def private_post(
 ) -> dict[str, object]:
     """Send one private request with a 1 MiB response limit and a bounded I/O budget."""
     try:
-        async with client.stream(
-            "POST",
-            url,
-            json=dict(payload),
-            headers=dict(headers),
-            timeout=15,
-            follow_redirects=False,
-        ) as response:
+        async with (
+            asyncio.timeout(PRIVATE_REQUEST_TIMEOUT_SECONDS),
+            client.stream(
+                "POST",
+                url,
+                json=dict(payload),
+                headers=dict(headers),
+                timeout=PRIVATE_REQUEST_TIMEOUT_SECONDS,
+                follow_redirects=False,
+            ) as response,
+        ):
             if response.status_code != 200:
                 status = (
                     response.status_code if response.status_code in {401, 403, 410, 429} else 503
@@ -45,5 +51,5 @@ async def private_post(
             if not isinstance(result, dict):
                 raise PrivateTransportError()
             return result
-    except (httpx.HTTPError, ValueError):
+    except (httpx.HTTPError, ValueError, TimeoutError):
         raise PrivateTransportError() from None

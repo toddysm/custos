@@ -44,6 +44,7 @@ from datetime import datetime
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar, Final
 
+from asyncpg import InterfaceError, PostgresError
 from custos_spl.errors import BackendUnavailable, ImmutableViolation, LeaseBusy, MigrationRequired
 from custos_spl.ids import ConnectorInstanceId, RunId, StepId, WorkspaceId
 from custos_spl.interfaces.lease_store import Lease, LeaseFilter
@@ -100,6 +101,11 @@ def _resolve_limit(limit: int | None) -> int:
     if limit < 1:
         return DEFAULT_LIST_LIMIT
     return min(limit, MAX_LIST_LIMIT)
+
+
+def _attempt_lock_key(workspace: str, run: str, step: str, attempt: int) -> str:
+    """Share one admission lock across inserts and refreshes of an exact attempt."""
+    return json.dumps(["lease", workspace, run, step, attempt])
 
 
 class PgLeaseAdapter:
@@ -202,14 +208,11 @@ class PgLeaseAdapter:
             async with pool.acquire() as conn, conn.transaction():
                 await conn.execute(
                     "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-                    json.dumps(
-                        [
-                            "lease",
-                            str(workspace_id),
-                            str(lease.run_id),
-                            str(lease.step_id),
-                            lease.attempt,
-                        ]
+                    _attempt_lock_key(
+                        str(workspace_id),
+                        str(lease.run_id),
+                        str(lease.step_id),
+                        lease.attempt,
                     ),
                 )
                 if limit is not None:
@@ -272,6 +275,71 @@ class PgLeaseAdapter:
         except Exception as exc:
             raise self._classify(exc) from exc
         return _row_to_lease(row)
+
+    async def refresh_lease_bounded(
+        self,
+        workspace_id: WorkspaceId,
+        lease_id: str,
+        expires_at: datetime,
+        limit: int,
+    ) -> Lease | None:
+        """Recheck lifetime and capacity after acquiring the same lock used by bounded inserts."""
+        if type(limit) is not int or limit < 1:
+            raise ValueError("lease limit must be positive")
+        if expires_at.utcoffset() is None:
+            raise ValueError("lease expiry must be timezone aware")
+        pool = await self._pool_ref()
+        try:
+            async with pool.acquire() as conn, conn.transaction():
+                coordinates = await conn.fetchrow(
+                    "SELECT run_id,step_id,attempt FROM lease.lease "
+                    "WHERE workspace_id=$1 AND lease_id=$2",
+                    str(workspace_id),
+                    lease_id,
+                )
+                if coordinates is None:
+                    return None
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                    _attempt_lock_key(
+                        str(workspace_id),
+                        coordinates["run_id"],
+                        coordinates["step_id"],
+                        coordinates["attempt"],
+                    ),
+                )
+                if not await conn.fetchval(
+                    "SELECT EXISTS(SELECT 1 FROM custos_meta.adapter_revisions "
+                    "WHERE interface_name='LeaseStoreProvider' AND revision=2)"
+                ):
+                    raise MigrationRequired([("LeaseStoreProvider", 2)])
+                active = await conn.fetchval(
+                    "SELECT count(*) FROM lease.lease WHERE workspace_id=$1 "
+                    "AND run_id=$2 AND step_id=$3 AND attempt=$4 "
+                    "AND md5(run_id)=md5($2) AND md5(step_id)=md5($3) "
+                    "AND released_at IS NULL AND revoked_at IS NULL "
+                    "AND expires_at>clock_timestamp()",
+                    str(workspace_id),
+                    coordinates["run_id"],
+                    coordinates["step_id"],
+                    coordinates["attempt"],
+                )
+                if active > limit:
+                    raise LeaseBusy("activity credential lease capacity exhausted")
+                row = await conn.fetchrow(
+                    "UPDATE lease.lease SET expires_at=$3,updated_at=clock_timestamp() "
+                    "WHERE workspace_id=$1 AND lease_id=$2 AND released_at IS NULL "
+                    "AND revoked_at IS NULL AND expires_at>clock_timestamp() "
+                    "AND $3>clock_timestamp() RETURNING *",
+                    str(workspace_id),
+                    lease_id,
+                    expires_at,
+                )
+        except (LeaseBusy, MigrationRequired):
+            raise
+        except (PostgresError, InterfaceError, OSError, TimeoutError) as exc:
+            raise self._classify(exc) from exc
+        return _row_to_lease(row) if row is not None else None
 
     async def get_lease(
         self,

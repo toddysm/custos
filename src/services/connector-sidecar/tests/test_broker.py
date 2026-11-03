@@ -41,9 +41,11 @@ def private_bundle(root: Path) -> Path:
 async def test_production_broker_authentication_and_lossless_response(
     tmp_path: Path,
     failure: str | None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Run real bootstrap verification and broker transport; no synthetic minter is present."""
     bundle, verifier = load_runtime_bundle(private_bundle(tmp_path))
+    monkeypatch.setattr(verifier, "_clock", lambda: 1009)
     calls: list[dict[str, object]] = []
 
     def upstream(request: httpx.Request) -> httpx.Response:
@@ -78,9 +80,12 @@ async def test_production_broker_authentication_and_lossless_response(
         key=b"k" * 32,
         triple=BoundTriple("run", "step", 2 if failure == "wrong-attempt" else 1),
         ttl_sec=300,
+        now=1009,
     )
     if failure == "tampered":
-        token = token[:-1] + ("a" if token[-1] != "a" else "b")
+        payload, signature = token.split(".")
+        signature = ("a" if signature[0] != "a" else "b") + signature[1:]
+        token = payload + "." + signature
     headers = [] if failure == "missing" else [("Custos-Sidecar-Token", token)]
     if failure == "duplicate":
         headers *= 2

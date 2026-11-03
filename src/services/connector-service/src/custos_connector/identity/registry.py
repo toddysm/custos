@@ -101,6 +101,28 @@ class _KeyLock:
     waiters: int = 0
 
 
+async def _resolve_once(
+    resolver: IdentityResolver,
+    credentials_authentication: Mapping[str, Any],
+    context: IdentityResolverContext,
+    *,
+    private_errors: bool,
+) -> ResolvedIdentity:
+    """Sanitize private failures before tracing or audit scopes can observe them."""
+    try:
+        return await resolver.resolve(
+            credentials_authentication=credentials_authentication,
+            context=context,
+        )
+    except IdentityResolverError as exc:
+        if private_errors:
+            raise IdentityResolverError(
+                detail="private credential resolution failed",
+                code=exc.code,
+            ) from None
+        raise
+
+
 class IdentityResolverRegistry:
     """Compose the per-auth-type resolvers and cache their results.
 
@@ -369,9 +391,11 @@ class IdentityResolverRegistry:
                     _span.set_attribute("authenticationType", authentication_type)
                     _span.set_attribute("category", str(category))
                     try:
-                        resolved = await resolver.resolve(
-                            credentials_authentication=credentials_authentication,
-                            context=context,
+                        resolved = await _resolve_once(
+                            resolver,
+                            credentials_authentication,
+                            context,
+                            private_errors=private_errors,
                         )
                     except IdentityResolverError as exc:
                         await self._emit_failure(

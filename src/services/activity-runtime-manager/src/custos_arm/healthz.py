@@ -44,7 +44,7 @@ async def readyz(request: Request) -> JSONResponse:
             probe = getattr(request.app.state, "readiness_probe", None)
             if probe is not None:
                 try:
-                    await asyncio.wait_for(probe(), timeout=3)
+                    await asyncio.wait_for(probe(), timeout=8)
                 except (TimeoutError, RuntimeError, SPLError, httpx.HTTPError):
                     request.app.state.dependencies_ready = False
                     logger.warning("Activity runtime dependency readiness failed")

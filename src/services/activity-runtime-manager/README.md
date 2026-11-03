@@ -31,10 +31,18 @@ Service consumes.
   owner-only directory; mount writable storage there with a read-only root filesystem.
 
 The lifespan probes the real database schema/table, artifact write/read/delete,
-service readiness and Kubernetes APIs before opening admission. It never
+service readiness, Kubernetes APIs and the secret/Auth exchange before opening
+admission, and repeats required availability checks on readiness requests. It never
 auto-migrates. Failure releases resources already acquired. Shutdown closes new
 admission, revokes attempt credential authority, stops and joins owned workers,
 then closes clients/pools. A disconnected HTTP caller does not orphan its worker.
+Readiness uses the first explicitly configured account reference only to probe
+the shared authorization transport; it is not a fallback identity for work.
+Every execution operation still resolves its own originally accepted reference.
+Probe streams have elapsed-time budgets, and blocking Kubernetes probes are
+joined before their API client can close. Failed credential revocation defers
+the stop request while retaining/joining workers; shutdown cancellation cannot
+close clients under those workers.
 
 Each accepted attempt persists a request fingerprint, stable execution identity,
 slot authority and only a hash of its private broker proof. The actual proof and

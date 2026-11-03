@@ -22,6 +22,10 @@ registry with a fresh provider read. Completed, expired, revoked or cross-attemp
 authority is denied. PostgreSQL lease admission is atomic across replicas (cap 16);
 readiness for this surface requires both durable attempt and atomic-lease capabilities.
 Issuance audit must persist before returning private material.
+The retained instance ID pins the immutable type/version/credential descriptor:
+supported patches cannot replace those fields, and creation assigns a new UUID.
+Changing values behind the same secret reference remains supported rotation.
+Private resolver failures are sanitized before tracing as well as audit/log output.
 
 Version-two responses distinguish the platform `lease` from `credential.material`,
 `credential.issuedAt` and optional `credential.expiresAt`. An unknown upstream

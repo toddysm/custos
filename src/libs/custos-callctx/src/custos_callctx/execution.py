@@ -125,6 +125,11 @@ class ExecutionBindings:
         self._bindings = MappingProxyType(rows)
         self._defaults = MappingProxyType(selected)
 
+    @property
+    def identities(self) -> tuple[ExecutionIdentity, ...]:
+        """Return probe references, not a fallback identity-selection policy."""
+        return tuple(binding.identity for binding in self._bindings.values())
+
     def select(self, workspace: str) -> ExecutionIdentity:
         """Select identity for new work only; absent configuration is never a creator fallback."""
         _identifier(workspace)

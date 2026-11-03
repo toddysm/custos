@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from datetime import datetime
 from typing import Any
 
@@ -29,7 +30,7 @@ _CATALOG = "http://catalog.svc:8080"
 _DIGEST = "sha256:" + "ab" * 32
 
 
-@pytest.mark.parametrize("failure", [None, "transport", "json", "version", "denied"])
+@pytest.mark.parametrize("failure", [None, "transport", "json", "version", "denied", "trickle"])
 async def test_scoped_resolver_uses_fresh_private_authority(failure: str | None) -> None:
     """Resolve the actual Catalog shape without unsigned fallback or private error diagnostics."""
     identity = ExecutionIdentity("ws", "account", "stable")
@@ -39,6 +40,16 @@ async def test_scoped_resolver_uses_fresh_private_authority(failure: str | None)
     )
     calls: list[httpx.Request] = []
     token = "e30.privateContext.signature"
+
+    class Trickle(httpx.AsyncByteStream):
+        """Keep read progress below the per-read timeout while exceeding total duration."""
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            """Stream actual Catalog response bytes across many short delays."""
+            raw = json.dumps(_body()).encode()
+            for offset in range(0, len(raw), 16):
+                await asyncio.sleep(0.01)
+                yield raw[offset : offset + 16]
 
     def respond(request: httpx.Request) -> httpx.Response:
         """Use real scoped resolution and exchange over a simulated transport."""
@@ -58,6 +69,8 @@ async def test_scoped_resolver_uses_fresh_private_authority(failure: str | None)
             raise httpx.ConnectError(token, request=request)
         if failure == "json":
             return httpx.Response(200, text=token)
+        if failure == "trickle":
+            return httpx.Response(200, stream=Trickle())
         return httpx.Response(200, json=_body(version="2.2.0" if failure == "version" else "2.1.0"))
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
@@ -66,6 +79,9 @@ async def test_scoped_resolver_uses_fresh_private_authority(failure: str | None)
             catalog_endpoint=_CATALOG,
             execution=ExecutionContextClient(http, bindings),
         )
+        if failure == "trickle":
+            resolver._timeout = 0.05
+        started = time.monotonic()
         with pytest.raises(ActivityUnresolvedError):
             await resolver.resolve(workspace_id="ws", activity_ref="security/scan-image@2.1.0")
         assert not calls
@@ -77,6 +93,8 @@ async def test_scoped_resolver_uses_fresh_private_authority(failure: str | None)
                     identity=identity,
                 )
             assert token not in str(failed.value) and failed.value.__cause__ is None
+            if failure == "trickle":
+                assert time.monotonic() - started < 0.5
         else:
             for _ in range(2):
                 result = await resolver.resolve_execution(

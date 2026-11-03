@@ -12,9 +12,11 @@ from asyncpg.pool import Pool
 from custos_spl.errors import ImmutableViolation, LeaseBusy, LeaseExpired, MigrationRequired
 from custos_spl.ids import ConnectorInstanceId, RunId, StepId, WorkspaceId
 from custos_spl.interfaces.activity_execution import ActivityExecutionRecord
+from custos_spl.interfaces.connector_instance_store import ConnectorInstance
 from custos_spl.interfaces.lease_store import Lease
 
-from custos_pg.adapters.lease import PgLeaseAdapter
+from custos_pg.adapters.connector_instance import PgConnectorInstanceAdapter
+from custos_pg.adapters.lease import PgLeaseAdapter, _attempt_lock_key
 from custos_pg.adapters.metadata import PgMetadataAdapter
 
 pytestmark = pytest.mark.integration
@@ -239,36 +241,38 @@ async def test_revocation_retains_unknown_effect_and_cannot_be_undone(pg_pool: P
     ) == moved
 
 
+def credential_lease(number: int, now: datetime) -> Lease:
+    """Use distinct leases for one accepted attempt in native concurrency tests."""
+    return Lease(
+        workspace_id=WorkspaceId("ws"),
+        lease_id=f"lease-{number}",
+        run_id=RunId("run"),
+        step_id=StepId("step"),
+        attempt=1,
+        slot="source",
+        capability="oci.pull",
+        connector_instance_id=ConnectorInstanceId("instance"),
+        token_type="provider-material",
+        issued_at=now,
+        expires_at=now + timedelta(minutes=5),
+        released_at=None,
+        revoked_at=None,
+        revoke_reason=None,
+        created_at=now,
+        updated_at=now,
+    )
+
+
 async def test_credential_lease_capacity_is_atomic_across_adapters(pg_pool: Pool) -> None:
     """Concurrent real inserts never exceed the attempt cap; revocation releases capacity."""
     adapters = [PgLeaseAdapter(pool=pg_pool), PgLeaseAdapter(pool=pg_pool)]
     await adapters[0].apply_pending()
     now = datetime.now(UTC)
-
-    def lease(number: int) -> Lease:
-        """Use distinct leases for the same accepted attempt."""
-        return Lease(
-            workspace_id=WorkspaceId("ws"),
-            lease_id=f"lease-{number}",
-            run_id=RunId("run"),
-            step_id=StepId("step"),
-            attempt=1,
-            slot="source",
-            capability="oci.pull",
-            connector_instance_id=ConnectorInstanceId("instance"),
-            token_type="provider-material",
-            issued_at=now,
-            expires_at=now + timedelta(minutes=5),
-            released_at=None,
-            revoked_at=None,
-            revoke_reason=None,
-            created_at=now,
-            updated_at=now,
-        )
-
     results = await asyncio.gather(
         *(
-            adapters[index % 2].put_lease_bounded(WorkspaceId("ws"), lease(index), 2)
+            adapters[index % 2].put_lease_bounded(
+                WorkspaceId("ws"), credential_lease(index, now), 2
+            )
             for index in range(10)
         ),
         return_exceptions=True,
@@ -278,5 +282,83 @@ async def test_credential_lease_capacity_is_atomic_across_adapters(pg_pool: Pool
     assert sum(isinstance(row, LeaseBusy) for row in results) == 8
     await adapters[0].revoke_lease(WorkspaceId("ws"), admitted[0].lease_id, "operator", now)
     assert (
-        await adapters[1].put_lease_bounded(WorkspaceId("ws"), lease(11), 2)
+        await adapters[1].put_lease_bounded(WorkspaceId("ws"), credential_lease(11, now), 2)
     ).lease_id == "lease-11"
+
+
+async def test_expired_refresh_cannot_race_replacement_admission(pg_pool: Pool) -> None:
+    """Expire after the caller's live read; refresh and replacement serialize on the same lock."""
+    first, second = PgLeaseAdapter(pool=pg_pool), PgLeaseAdapter(pool=pg_pool)
+    await first.apply_pending()
+    now = datetime.now(UTC)
+    old = await first.put_lease_bounded(WorkspaceId("ws"), credential_lease(1, now), 1)
+    assert (await first.get_lease(WorkspaceId("ws"), old.lease_id)) == old
+    async with pg_pool.acquire() as blocker, blocker.transaction():
+        await blocker.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            _attempt_lock_key("ws", "run", "step", 1),
+        )
+        # Fault injection advances only expiry; all behavior under test uses the real adapters.
+        await blocker.execute(
+            "UPDATE lease.lease SET expires_at=clock_timestamp()-interval '1 second' "
+            "WHERE workspace_id=$1 AND lease_id=$2",
+            "ws",
+            old.lease_id,
+        )
+        replacement = asyncio.create_task(
+            second.put_lease_bounded(WorkspaceId("ws"), credential_lease(2, now), 1)
+        )
+        refresh = asyncio.create_task(
+            first.refresh_lease_bounded(
+                WorkspaceId("ws"),
+                old.lease_id,
+                now + timedelta(minutes=5),
+                1,
+            )
+        )
+        await asyncio.sleep(0)
+    admitted, refused = await asyncio.gather(replacement, refresh)
+    assert admitted.lease_id == "lease-2" and refused is None
+    assert (
+        await first.count_active_for_step_attempt(
+            WorkspaceId("ws"),
+            RunId("run"),
+            StepId("step"),
+            1,
+            datetime.now(UTC),
+        )
+        == 1
+    )
+
+
+async def test_accepted_instance_descriptor_is_immutable_through_provider(pg_pool: Pool) -> None:
+    """Stable instance references pin descriptors; secret-value rotation remains separate."""
+    adapter = PgConnectorInstanceAdapter(pool=pg_pool)
+    await adapter.apply_pending()
+    now = datetime.now(UTC)
+    original = ConnectorInstance(
+        WorkspaceId("ws"),
+        ConnectorInstanceId("instance"),
+        "registry",
+        "1.0.0",
+        "original",
+        300,
+        True,
+        "active",
+        "healthy",
+        {},
+        {"type": "x-dapr-secret", "secretName": "original"},
+        ("oci.pull",),
+        now,
+        now,
+    )
+    await adapter.put_connector_instance(WorkspaceId("ws"), original)
+    with pytest.raises(ValueError, match="unknown patch fields"):
+        await adapter.patch_connector_instance(
+            WorkspaceId("ws"),
+            original.instance_id,
+            {"credentials_authentication": {"type": "x-dapr-secret", "secretName": "other"}},
+        )
+    saved = await adapter.get_connector_instance(WorkspaceId("ws"), original.instance_id)
+    assert saved is not None
+    assert saved.credentials_authentication == original.credentials_authentication

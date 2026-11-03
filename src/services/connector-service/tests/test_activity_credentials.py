@@ -25,6 +25,7 @@ from custos_spl.interfaces.activity_execution import ActivityExecutionRecord
 from custos_spl.interfaces.lease_store import Lease, LeaseStoreProvider
 from custos_spl.interfaces.metadata_store import AuditEvent, MetadataStoreProvider
 from fastapi import FastAPI
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from custos_connector import create_app
 from custos_connector.identity import (
@@ -44,6 +45,7 @@ from tests._fakes import (
 from tests.test_binding_router import _BASE_SETTINGS, _build_providers, _make_instance, _seed
 from tests.test_signed_callctx import Signing
 from tests.test_signed_callctx import signing as signing
+from tests.test_telemetry import span_exporter as span_exporter
 
 
 class Attempts(FakeMetadataAdapter):
@@ -123,6 +125,34 @@ class AtomicLeases(FakeLeaseAdapter):
                 raise LeaseBusy("capacity exhausted")
             return await self.put_lease(workspace_id, lease)
 
+    async def refresh_lease_bounded(
+        self,
+        workspace_id: WorkspaceId,
+        lease_id: str,
+        expires_at: datetime,
+        limit: int,
+    ) -> Lease | None:
+        """Match atomic refresh lifetime fencing; the real concurrency case runs on PostgreSQL."""
+        async with self.lock:
+            row = await self.get_lease(workspace_id, lease_id)
+            if (
+                row is None
+                or row.expires_at <= datetime.now(UTC)
+                or row.released_at is not None
+                or row.revoked_at is not None
+            ):
+                return None
+            count = await self.count_active_for_step_attempt(
+                workspace_id,
+                row.run_id,
+                row.step_id,
+                row.attempt,
+                datetime.now(UTC),
+            )
+            if count > limit:
+                raise LeaseBusy("capacity exhausted")
+            return await self.refresh_lease(workspace_id, lease_id, expires_at)
+
 
 @pytest.mark.parametrize(
     "failure",
@@ -143,12 +173,14 @@ class AtomicLeases(FakeLeaseAdapter):
         "late-completion",
         "authority-revoked",
         "audit",
+        "descriptor",
     ],
 )
 async def test_real_credential_issuer_scope_rotation_and_rejection(
     signing: Signing,
     failure: str | None,
     caplog: pytest.LogCaptureFixture,
+    span_exporter: InMemorySpanExporter,
 ) -> None:
     """Use actual signed middleware, binder, registry, Dapr resolver and lease manager."""
     catalog = FakeCatalogAdapter(applied_revisions={1, 2})
@@ -192,6 +224,13 @@ async def test_real_credential_issuer_scope_rotation_and_rejection(
         failure == "completed",
         authority_revoked=failure == "authority-revoked",
     )
+    if failure == "descriptor":
+        with pytest.raises(ValueError, match="unknown patch fields"):
+            await instances.patch_connector_instance(
+                WorkspaceId("ws-1"),
+                instance.instance_id,
+                {"credentials_authentication": {"type": "x-dapr-secret", "secretName": "other"}},
+            )
     upstream_calls: list[httpx.Request] = []
 
     def upstream(request: httpx.Request) -> httpx.Response:
@@ -365,10 +404,20 @@ async def test_real_credential_issuer_scope_rotation_and_rejection(
             response = await client.post(
                 "/internal/v1/activity-credentials", json=request, headers=headers
             )
-            if failure is not None:
+            if failure not in {None, "descriptor"}:
                 assert response.status_code in {403, 503}, response.text
                 assert "private-provider-value" not in response.text
                 assert "private-provider-value" not in caplog.text
+                exported = str(
+                    [
+                        dict(event.attributes or {})
+                        for span in span_exporter.get_finished_spans()
+                        for event in span.events
+                    ]
+                )
+                assert "private-provider-value" not in exported
+                if failure == "transport":
+                    assert "private credential resolution failed" in exported
                 if failure not in {"provider", "transport", "late-completion", "audit"}:
                     assert not upstream_calls
                 return

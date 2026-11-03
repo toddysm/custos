@@ -49,8 +49,10 @@ class ConnectorInstance:
       create time and validated against the referenced
       `ConnectorTypeVersion` manifest by the service layer; once
       persisted they pin the configuration the operator approved.
-      Re-configuring an instance requires deleting and recreating
-      (or, in M2+, a versioned config replace).
+      The supported service create API generates a new UUID for new
+      configuration. Neither this provider contract nor the service exposes
+      descriptor replacement or instance-ID reuse; versioned config replace
+      remains a separate M2+ capability.
     * **Operator-mutable via patch**: `name`, `lease_ttl_seconds`,
       `enabled`.
     * **Server-mutated soft state**: `status`, `health_status`,
