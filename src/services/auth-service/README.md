@@ -80,7 +80,8 @@ expiry. Do not promise instantaneous revocation or retain an old user context.
 cd src/services/auth-service
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e ../../libs/storage-provider-layer -e ../../libs/custos-postgres \
+  -e ../../libs/custos-callctx -e ".[dev]"
 pytest -q
 ```
 

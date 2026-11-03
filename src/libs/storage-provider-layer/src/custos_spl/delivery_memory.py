@@ -208,6 +208,9 @@ class MemoryDeliveryState:
     async def check_delivery_ready(self) -> None:
         """Memory structures exist at construction; no restart durability is implied."""
 
+    async def check_execution_identity_ready(self) -> None:
+        """Memory identity guards are available without implying production restart durability."""
+
     async def delivery_now(self) -> datetime:
         """Return injected provider time as an aware UTC instant."""
         return delivery_instant(self._delivery_clock())

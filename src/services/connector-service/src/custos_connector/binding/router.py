@@ -21,8 +21,9 @@ are mapped to HTTP status codes via
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
+from custos_callctx.mesh import MeshAuthenticationError, require_service_caller
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.responses import JSONResponse
@@ -34,7 +35,7 @@ from custos_connector.binding.models import (
     BindSlotRequest,
 )
 from custos_connector.binding.service import BindForStepService
-from custos_connector.middleware import CallContext, require_permission
+from custos_connector.middleware import CallContext, CallContextError, require_permission
 from custos_connector.permissions import CONNECTOR_BIND
 
 router = APIRouter(prefix="/internal/v1", tags=["binding"])
@@ -66,6 +67,7 @@ class _BindForStepWire(BaseModel):
     attempt: int = Field(..., ge=1)
     step_key: str = Field(..., min_length=1, alias="stepKey")
     slots: list[_BindSlotWire]
+    context_version: int = Field(default=1, ge=1, le=2, alias="contextVersion", strict=True)
 
 
 class _ConnectorContextWire(BaseModel):
@@ -83,6 +85,25 @@ class _BindForStepResponseWire(BaseModel):
     """Wire shape of the ``BindForStep`` response body."""
 
     contexts: dict[str, _ConnectorContextWire]
+
+
+class _BoundConnectorWire(BaseModel):
+    """Authoritative instance metadata alongside the opaque plugin binding."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+    slot_name: str = Field(alias="slotName")
+    connector_instance_id: str = Field(alias="connectorInstanceId")
+    connector_kind: str = Field(alias="connectorKind")
+    capabilities: list[str]
+    context: _ConnectorContextWire
+
+
+class _ExecutionBindResponseWire(BaseModel):
+    """Version-two binding response for credential-backed Workflow callers."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+    schema_version: Literal["2"] = Field(default="2", alias="schemaVersion")
+    contexts: dict[str, _BoundConnectorWire]
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +170,7 @@ def _resolve_service(request: Request) -> BindForStepService:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/bind-for-step", response_model=_BindForStepResponseWire)
+@router.post("/bind-for-step", response_model=_BindForStepResponseWire | _ExecutionBindResponseWire)
 async def bind_for_step(
     body: _BindForStepWire,
     request: Request,
@@ -157,10 +178,30 @@ async def bind_for_step(
 ) -> JSONResponse:
     """Resolve every connector slot a step references.
 
-    Idempotent on ``(workspace_id, run_id, step_id, attempt)`` — see
+    Idempotent on ``(workspace_id, run_id, step_id, attempt, actor)`` — see
     :class:`BindForStepService` for the cache semantics and the M1
     durability caveat.
     """
+    if body.context_version == 2 and (
+        not getattr(request.state, "signed_call_context", False)
+        or ctx.execution_operation != "connector-bind"
+    ):
+        raise CallContextError(
+            403, "execution_denied", "credential-backed binding context required"
+        )
+    if body.context_version == 2:
+        settings = request.app.state.settings
+        try:
+            require_service_caller(
+                request.headers,
+                token=settings.app_api_token,
+                app_id=settings.workflow_app_id,
+                namespace=settings.workflow_namespace,
+            )
+        except MeshAuthenticationError as exc:
+            raise CallContextError(exc.status_code, exc.code, exc.detail) from None
+        if ctx.caller_component != settings.workflow_app_id:
+            raise CallContextError(403, "execution_denied", "Workflow binding context required")
     service = _resolve_service(request)
     service_request = _to_service_request(body, actor=ctx.principal_id)
     try:
@@ -174,6 +215,22 @@ async def bind_for_step(
             content={"error": {"code": str(exc.code), "detail": exc.detail}},
         )
     wire = _to_response_wire(response)
+    if body.context_version == 2:
+        if set(response.bindings) != set(response.contexts):
+            raise RuntimeError("authoritative binding metadata is unavailable")
+        versioned = _ExecutionBindResponseWire(
+            contexts={
+                name: _BoundConnectorWire(
+                    slotName=name,
+                    connectorInstanceId=response.bindings[name].instance_id,
+                    connectorKind=response.bindings[name].connector_kind,
+                    capabilities=list(response.bindings[name].capabilities),
+                    context=value,
+                )
+                for name, value in wire.contexts.items()
+            }
+        )
+        return JSONResponse(status_code=200, content=versioned.model_dump(by_alias=True))
     return JSONResponse(
         status_code=200,
         content=wire.model_dump(by_alias=True),

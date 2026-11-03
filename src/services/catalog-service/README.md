@@ -36,7 +36,7 @@ Per [`design/components/catalog-service/design.md`](../../../design/components/c
 | `CAT_CONNECTOR_TIMEOUT_SECONDS` | No | `2.0` | Per-call timeout for the Connector Service client. |
 | `CAT_CONNECTOR_NEGATIVE_CACHE_TTL_SECONDS` | No | `5.0` | TTL for the in-process negative-result cache used on 404 responses from Connector Service. |
 | `CAT_USE_STUB_CONNECTOR_CLIENT` | No | `false` | Feature flag. When `true`, the catalog wires the offline `StubConnectorClient` (always-`True`) instead of the live HTTP client. Use only in airgapped or offline tests; production must leave this unset. |
-| `CAT_AUTHZ_ENDPOINT` | Yes (prod) | — | AuthN/AuthZ Service endpoint. Leaving this empty switches the call-context middleware to a dev-shim that trusts `x-custos-callctx` verbatim, logs a WARNING per request, and refuses to start when `ENVIRONMENT=production`. See [`design/components/catalog-service/design.md`](../../../design/components/catalog-service/design.md) § Configuration. |
+| `CAT_AUTHZ_ENDPOINT` | Yes (prod) | — | Auth base URL for signed-context public keys. Invalid contexts return 401; unavailable verification returns 503. Empty enables only the non-production JSON development shim. |
 | `CAT_PUBLISH_MAX_BODY_MB` | No | `4` | Maximum workflow/template document size at publish. |
 | `CAT_CEL_PARSE_TIMEOUT_MS` | No | `500` | Per-expression parse timeout at publish (separate from runtime evaluation timeout in WF). |
 | `CAT_DEFAULT_NAMESPACE_TIER_VENDOR` | No | — | Optional default vendor namespace for short-form publishes (unused in M1). |

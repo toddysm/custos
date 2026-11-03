@@ -399,6 +399,10 @@ class ActivityStepHandler:
             bind_request = BindForStepRequest(
                 step_key=triple.to_str(),
                 slots=slot_specs,
+                run_id=triple.run_id,
+                step_id=triple.step_id,
+                attempt=triple.attempt,
+                execution_identity=ctx.execution_identity,
             )
             try:
                 with observe_step_bind_connectors(step_kind_label):
@@ -445,6 +449,7 @@ class ActivityStepHandler:
                 inputs=inputs,
                 connector_contexts=bind_response.contexts,
                 deadline=deadline,
+                execution_identity=ctx.execution_identity,
             )
             try:
                 with observe_step_schedule_activity(step_kind_label):

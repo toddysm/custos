@@ -404,6 +404,8 @@ class ResumeSubscriptionReplayReconciler:
             selector=mirror.selector,
             workspace_id=mirror.workspace_id,
             source=mirror.source,
+            delivery_protocol=mirror.delivery_protocol,
+            execution_identity=mirror.execution_identity,
         )
         with observe_resume_registration():
             result = self._trigger_client.register_resume_subscription(request)

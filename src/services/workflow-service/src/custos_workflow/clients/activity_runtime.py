@@ -35,6 +35,8 @@ from datetime import UTC, datetime
 from typing import Any, Final, Literal, Protocol, get_args, runtime_checkable
 
 import httpx
+from custos_callctx.execution import ExecutionIdentity
+from custos_callctx.execution_client import ExecutionAuthorizationError, ExecutionContextClient
 
 from custos_workflow.clients._dapr_invoke import (
     DEFAULT_OUTBOUND_RPC_TIMEOUT_SECONDS,
@@ -147,6 +149,7 @@ class ScheduleActivityRequest:
     # implementation plan.
     connector_contexts: Mapping[str, Any]
     deadline: datetime
+    execution_identity: ExecutionIdentity | None = None
 
     def __post_init__(self) -> None:
         # Re-use the WF-IMPL-047 idempotency-triple validation so
@@ -369,8 +372,10 @@ def _serialize_connector_context(value: Any) -> Mapping[str, Any]:
     # imports from :mod:`_errors`, and :mod:`_errors` imports
     # ``ActivityResultEnvelope`` / ``ActivityResultClass`` from
     # this module.
-    from custos_workflow.clients.connector import ConnectorContext
+    from custos_workflow.clients.connector import BoundConnectorContext, ConnectorContext
 
+    if isinstance(value, BoundConnectorContext):
+        return value.to_wire()
     if isinstance(value, ConnectorContext):
         return {
             "slotName": value.slot_name,
@@ -406,6 +411,11 @@ def _request_to_wire(request: ScheduleActivityRequest) -> Mapping[str, Any]:
             for slot, ctx in request.connector_contexts.items()
         },
         "deadline": _iso_utc(request.deadline),
+        **(
+            {"executionIdentity": request.execution_identity.to_dict()}
+            if request.execution_identity is not None
+            else {}
+        ),
     }
 
 
@@ -525,6 +535,7 @@ class DaprActivityRuntimeClient:
     http_client: httpx.AsyncClient
     endpoint: DaprInvokeEndpoint
     timeout: float = DEFAULT_OUTBOUND_RPC_TIMEOUT_SECONDS
+    execution_context: ExecutionContextClient | None = field(default=None, repr=False)
 
     async def schedule_activity(self, request: ScheduleActivityRequest) -> ActivityResultEnvelope:
         """Post one ``ScheduleActivity`` call through the Dapr sidecar.
@@ -557,6 +568,23 @@ class DaprActivityRuntimeClient:
         wire = _request_to_wire(request)
 
         try:
+            headers = {"Content-Type": "application/json", IDEMPOTENCY_HEADER: idempotency_key}
+            if request.execution_identity is not None:
+                if self.execution_context is None:
+                    raise OutboundRpcStatusError(
+                        "execution authorization unavailable", status_code=503
+                    )
+                try:
+                    headers.update(
+                        await self.execution_context.headers(
+                            request.execution_identity, "activity-execute"
+                        )
+                    )
+                except ExecutionAuthorizationError as exc:
+                    raise OutboundRpcStatusError(
+                        "execution authorization failed",
+                        status_code=503 if exc.unavailable else 403,
+                    ) from None
             async with observe_outbound_rpc(
                 client="arm",
                 method=SCHEDULE_ACTIVITY_DAPR_METHOD,
@@ -569,12 +597,13 @@ class DaprActivityRuntimeClient:
                         url,
                         json=wire,
                         timeout=self.timeout,
-                        headers={
-                            "Content-Type": "application/json",
-                            IDEMPOTENCY_HEADER: idempotency_key,
-                        },
+                        headers=headers,
                     )
                 except httpx.HTTPError as exc:
+                    if request.execution_identity is not None:
+                        raise OutboundRpcTransportError(
+                            "execution activity transport failed"
+                        ) from None
                     # No response observed — transport-layer failure.
                     # Preserved on ``__cause__`` so the envelope mapper
                     # renders the original ``httpx`` exception class +
@@ -590,6 +619,11 @@ class DaprActivityRuntimeClient:
                         f"Dapr ScheduleActivity cancelled upstream (HTTP {status_code})"
                     )
                 if status_code // 100 != 2:
+                    if request.execution_identity is not None:
+                        raise OutboundRpcStatusError(
+                            f"execution activity returned HTTP {status_code}",
+                            status_code=status_code,
+                        )
                     body_preview = response.text[:200] if response.text else ""
                     raise OutboundRpcStatusError(
                         f"Dapr ScheduleActivity returned HTTP {status_code}: {body_preview!r}",
@@ -604,6 +638,10 @@ class DaprActivityRuntimeClient:
                     # httpx-internal decoding failure.
                     from custos_workflow.clients._errors import OutboundRpcDecodeError
 
+                    if request.execution_identity is not None:
+                        raise OutboundRpcDecodeError(
+                            "invalid execution activity response"
+                        ) from None
                     raise OutboundRpcDecodeError(
                         f"Dapr ScheduleActivity response is not valid JSON: {exc!r}"
                     ) from exc

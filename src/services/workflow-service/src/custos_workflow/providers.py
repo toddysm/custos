@@ -37,6 +37,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Protocol, cast, runtime_checkable
 
 import httpx
+from custos_callctx.execution import load_execution_bindings
+from custos_callctx.execution_client import ExecutionContextClient
 from custos_spl.delivery_memory import MemoryDeliveryState
 from custos_spl.errors import ImmutableViolation
 from custos_spl.ids import PrincipalId as SplPrincipalId
@@ -1049,6 +1051,7 @@ def _build_activity_client(
     env: Mapping[str, str],
     http_client: httpx.AsyncClient | None,
     timeout_seconds: float,
+    execution_context: ExecutionContextClient | None = None,
 ) -> ActivityRuntimeClient:
     """Return the production or Noop ARM client per the env flags.
 
@@ -1087,6 +1090,7 @@ def _build_activity_client(
             http_client=http_client,
             endpoint=endpoint,
             timeout=timeout_seconds,
+            execution_context=execution_context,
         ),
     )
 
@@ -1096,6 +1100,7 @@ def _build_connector_client(
     env: Mapping[str, str],
     http_client: httpx.AsyncClient | None,
     timeout_seconds: float,
+    execution_context: ExecutionContextClient | None = None,
 ) -> ConnectorClient:
     """Return the production or Noop Connector client per the env flags.
 
@@ -1122,6 +1127,7 @@ def _build_connector_client(
             http_client=http_client,
             endpoint=endpoint,
             timeout=timeout_seconds,
+            execution_context=execution_context,
         ),
     )
 
@@ -1312,6 +1318,7 @@ def _build_catalog_client(
     env: Mapping[str, str],
     http_client: httpx.AsyncClient | None,
     timeout_seconds: float,
+    execution_context: ExecutionContextClient | None = None,
 ) -> CatalogClient:
     """Return the production or not-configured Catalog client per the env flags.
 
@@ -1350,6 +1357,7 @@ def _build_catalog_client(
         http_client=http_client,
         endpoint=endpoint,
         timeout=timeout_seconds,
+        execution_context=execution_context,
     )
 
 
@@ -1436,9 +1444,22 @@ def load_run_components(
         shutdown.
     """
     resolved_env: Mapping[str, str] = env if env is not None else os.environ
+    execution_bindings = load_execution_bindings(resolved_env)
     enabled = resolved_env.get("WF_TRIGGER_DELIVERY_ENABLED", "false").strip().lower()
     if enabled not in {"true", "false"}:
         raise ValueError("WF_TRIGGER_DELIVERY_ENABLED must be true or false")
+    if execution_bindings is not None and enabled != "true":
+        raise ValueError("execution identity requires durable Workflow delivery")
+    if execution_bindings is not None:
+        if metadata_store is None:
+            raise ValueError("execution identity requires an explicit durable metadata provider")
+        for variable, supplied in (
+            (ENV_ARM_APP_ID, activity_client),
+            (ENV_CONNECTOR_APP_ID, connector_client),
+            (ENV_CATALOG_APP_ID, catalog),
+        ):
+            if supplied is None and not resolved_env.get(variable, "").strip():
+                raise ValueError(f"execution identity requires {variable}")
     metadata_store_provider: MetadataStoreProvider = (
         metadata_store if metadata_store is not None else _in_memory_metadata_store()
     )
@@ -1492,6 +1513,7 @@ def load_run_components(
         or need_http_for_connector
         or need_http_for_trigger
         or need_http_for_catalog
+        or execution_bindings is not None
     ):
         # The per-request ``timeout=`` arg every adapter passes
         # overrides the client-default; we still set a sane
@@ -1501,6 +1523,11 @@ def load_run_components(
         dapr_http_client = httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds))
     else:
         dapr_http_client = None
+    execution_context = (
+        ExecutionContextClient.from_env(dapr_http_client, execution_bindings, resolved_env)
+        if execution_bindings is not None and dapr_http_client is not None
+        else None
+    )
 
     # WF-IMPL-080 reconciles two distinct slots for the ARM /
     # Connector clients:
@@ -1511,7 +1538,7 @@ def load_run_components(
     #   is the async
     #   :class:`DaprActivityRuntimeClient` /
     #   :class:`DaprConnectorClient`; the bridge body adapts the
-    #   sync/async surface via :func:`asyncio.run` (see
+    # sync/async surface on the application's owner loop (see
     #   ``_call_sync_or_async`` in
     #   :mod:`custos_workflow.runtime.dapr_activities`), so the
     #   sync :class:`ActivityRuntimeClient` /
@@ -1538,6 +1565,7 @@ def load_run_components(
             env=resolved_env,
             http_client=dapr_http_client,
             timeout_seconds=timeout_seconds,
+            execution_context=execution_context,
         )
     )
     outbound_connector: ConnectorClient = (
@@ -1547,6 +1575,7 @@ def load_run_components(
             env=resolved_env,
             http_client=dapr_http_client,
             timeout_seconds=timeout_seconds,
+            execution_context=execution_context,
         )
     )
     # The legacy sync slots are *always* the in-process Noop
@@ -1647,6 +1676,7 @@ def load_run_components(
             env=resolved_env,
             http_client=dapr_http_client,
             timeout_seconds=timeout_seconds,
+            execution_context=execution_context,
         )
     )
     registry: ActivityTypeRegistry = (

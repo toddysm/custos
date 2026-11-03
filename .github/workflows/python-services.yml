@@ -74,12 +74,13 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install SPL + Postgres adapter + CEL library from path
+      - name: Install SPL + Postgres + CEL + call-context libraries from path
         working-directory: ${{ github.workspace }}
         run: |
           pip install -e src/libs/storage-provider-layer[dev]
           pip install -e src/libs/custos-postgres[dev]
           pip install -e src/libs/custos-cel[dev]
+          pip install -e src/libs/custos-callctx[dev]
 
       - name: Install Workflow compiler for publication contract tests
         working-directory: ${{ github.workspace }}
@@ -132,12 +133,13 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install SPL + Postgres adapter + CEL library from path
+      - name: Install SPL + Postgres + CEL + call-context libraries from path
         working-directory: ${{ github.workspace }}
         run: |
           pip install -e src/libs/storage-provider-layer[dev]
           pip install -e src/libs/custos-postgres[dev]
           pip install -e src/libs/custos-cel[dev]
+          pip install -e src/libs/custos-callctx[dev]
 
       - name: Install Workflow compiler for publication contract tests
         working-directory: ${{ github.workspace }}
@@ -412,11 +414,12 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install SPL + Postgres adapter from path
+      - name: Install Auth path dependencies
         working-directory: ${{ github.workspace }}
         run: |
           pip install -e src/libs/storage-provider-layer[dev]
           pip install -e src/libs/custos-postgres[dev]
+          pip install -e src/libs/custos-callctx[dev]
 
       - name: Install package and dev dependencies
         run: pip install -e ".[dev]"
@@ -465,11 +468,12 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install SPL + Postgres adapter from path
+      - name: Install Auth path dependencies
         working-directory: ${{ github.workspace }}
         run: |
           pip install -e src/libs/storage-provider-layer[dev]
           pip install -e src/libs/custos-postgres[dev]
+          pip install -e src/libs/custos-callctx[dev]
 
       - name: Install package and dev dependencies
         run: pip install -e ".[dev]"
@@ -500,10 +504,11 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install custos-cel library from path
+      - name: Install CEL and call-context libraries from path
         working-directory: ${{ github.workspace }}
         run: |
           pip install -e src/libs/custos-cel[dev]
+          pip install -e src/libs/custos-callctx[dev]
 
       - name: Install custos-spl library from path
         working-directory: ${{ github.workspace }}
@@ -567,10 +572,11 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install custos-cel library from path
+      - name: Install CEL and call-context libraries from path
         working-directory: ${{ github.workspace }}
         run: |
           pip install -e src/libs/custos-cel[dev]
+          pip install -e src/libs/custos-callctx[dev]
 
       - name: Install custos-spl library from path
         working-directory: ${{ github.workspace }}
@@ -723,12 +729,14 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install SPL + Postgres adapter + call-context lib from path
+      - name: Install Connector libraries and Workflow contract-test client
         working-directory: ${{ github.workspace }}
         run: |
           pip install -e src/libs/storage-provider-layer[dev]
           pip install -e src/libs/custos-postgres[dev]
           pip install -e src/libs/custos-callctx[dev]
+          pip install -e src/libs/custos-cel
+          pip install -e src/services/workflow-service
 
       - name: Install package and dev dependencies
         run: pip install -e ".[dev]"
@@ -777,12 +785,14 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install SPL + Postgres adapter + call-context lib from path
+      - name: Install Connector libraries and Workflow contract-test client
         working-directory: ${{ github.workspace }}
         run: |
           pip install -e src/libs/storage-provider-layer[dev]
           pip install -e src/libs/custos-postgres[dev]
           pip install -e src/libs/custos-callctx[dev]
+          pip install -e src/libs/custos-cel
+          pip install -e src/services/workflow-service
 
       - name: Install package and dev dependencies
         run: pip install -e ".[dev]"
@@ -829,12 +839,14 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install SPL + Postgres adapter + call-context lib from path
+      - name: Install Connector libraries and Workflow contract-test client
         working-directory: ${{ github.workspace }}
         run: |
           pip install -e src/libs/storage-provider-layer[dev]
           pip install -e src/libs/custos-postgres[dev]
           pip install -e src/libs/custos-callctx[dev]
+          pip install -e src/libs/custos-cel
+          pip install -e src/services/workflow-service
 
       - name: Install package and dev dependencies
         run: pip install -e ".[dev]"

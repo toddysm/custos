@@ -718,6 +718,81 @@ METADATA_REV13 = Revision(
 )
 
 
+# Python str.strip() whitespace, independent of the database's locale.
+_EXECUTION_WHITESPACE = (
+    r"\0009\000A\000B\000C\000D\001C\001D\001E\001F\0020\0085\00A0\1680"
+    r"\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000"
+)
+
+METADATA_REV14 = Revision(
+    number=14,
+    statements=(
+        f"""
+        CREATE OR REPLACE FUNCTION custos_state.valid_execution_identity(ws TEXT, ref JSONB)
+        RETURNS BOOLEAN LANGUAGE SQL IMMUTABLE AS $guard$
+        WITH policy AS (SELECT U&'{_EXECUTION_WHITESPACE}' AS whitespace)
+        SELECT COALESCE(CASE WHEN jsonb_typeof(ref) = 'object' THEN
+            ref ?& ARRAY['workspaceId','principalId','bindingId']
+            AND ref - 'workspaceId' - 'principalId' - 'bindingId' = '{{}}'::jsonb
+            AND jsonb_typeof(ref->'workspaceId') = 'string'
+            AND jsonb_typeof(ref->'principalId') = 'string'
+            AND jsonb_typeof(ref->'bindingId') = 'string'
+            AND ref->>'workspaceId' = ws
+            AND char_length(ref->>'workspaceId') BETWEEN 1 AND 120
+            AND char_length(ref->>'principalId') BETWEEN 1 AND 120
+            AND char_length(ref->>'bindingId') BETWEEN 1 AND 120
+            AND btrim(ref->>'workspaceId', whitespace) = ref->>'workspaceId'
+            AND btrim(ref->>'principalId', whitespace) = ref->>'principalId'
+            AND btrim(ref->>'bindingId', whitespace) = ref->>'bindingId'
+            ELSE FALSE END, FALSE)
+        FROM policy
+        $guard$
+        """,
+        """
+        DO $migration$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname='resume_execution_identity_valid'
+                AND conrelid='custos_state.resume_subscription'::regclass
+            ) THEN
+                ALTER TABLE custos_state.resume_subscription
+                ADD CONSTRAINT resume_execution_identity_valid CHECK (
+                    NOT (payload ? 'executionIdentity')
+                    OR (
+                        COALESCE(
+                            jsonb_typeof(payload->'deliveryProtocol') = 'number'
+                            AND payload->>'deliveryProtocol' = '2', FALSE)
+                        AND custos_state.valid_execution_identity(
+                            workspace_id, payload->'executionIdentity')
+                    )
+                );
+            END IF;
+        END
+        $migration$
+        """,
+        """
+        CREATE OR REPLACE FUNCTION custos_state.preserve_resume_execution_identity()
+        RETURNS TRIGGER LANGUAGE plpgsql AS $guard$
+        BEGIN
+            IF OLD.payload->'executionIdentity'
+                    IS DISTINCT FROM NEW.payload->'executionIdentity' THEN
+                RAISE EXCEPTION 'resume execution identity cannot be rebound'
+                    USING ERRCODE='23514';
+            END IF;
+            RETURN NEW;
+        END
+        $guard$
+        """,
+        "DROP TRIGGER IF EXISTS preserve_resume_execution_identity "
+        "ON custos_state.resume_subscription",
+        "CREATE TRIGGER preserve_resume_execution_identity BEFORE UPDATE OF payload "
+        "ON custos_state.resume_subscription FOR EACH ROW "
+        "EXECUTE FUNCTION custos_state.preserve_resume_execution_identity()",
+    ),
+)
+
+
 __all__ = [
     "AUDIT_OUTBOX_LOCK_KEY",
     "METADATA_REV1",
@@ -733,4 +808,5 @@ __all__ = [
     "METADATA_REV11",
     "METADATA_REV12",
     "METADATA_REV13",
+    "METADATA_REV14",
 ]

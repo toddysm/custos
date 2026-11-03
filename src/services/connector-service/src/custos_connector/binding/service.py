@@ -93,6 +93,7 @@ from custos_connector.binding.errors import BindError, BindErrorCode
 from custos_connector.binding.models import (
     BindForStepRequest,
     BindForStepResponse,
+    BindingMetadata,
     BindSlotRequest,
 )
 from custos_connector.identity import (
@@ -160,8 +161,8 @@ class PluginBinder(Protocol):
 # Idempotency primitives
 # ---------------------------------------------------------------------------
 
-#: Idempotency cache key: (workspace_id, run_id, step_id, attempt).
-_CacheKey = tuple[str, str, str, int]
+#: Idempotency cache key: (workspace_id, run_id, step_id, attempt, actor).
+_CacheKey = tuple[str, str, str, int, str]
 
 #: Default upper bound on the number of cached :class:`BindForStepResponse`
 #: entries. Reached, the binder evicts the least-recently-used entry on
@@ -309,6 +310,7 @@ class BindForStepService:
             request.run_id,
             request.step_id,
             request.attempt,
+            request.actor,
         )
 
         # Lock-free cache check (cache hits don't need serialization).
@@ -470,6 +472,7 @@ class BindForStepService:
         """
         try:
             resolved: list[tuple[str, ConnectorContext]] = []
+            bindings: dict[str, BindingMetadata] = {}
             slot_instance_map: dict[str, str] = {}
             slot_instances: list[ConnectorInstance] = []
             for slot in request.slots:
@@ -481,6 +484,11 @@ class BindForStepService:
                 resolved.append((slot.name, ctx))
                 slot_instance_map[slot.name] = str(instance.instance_id)
                 slot_instances.append(instance)
+                bindings[slot.name] = BindingMetadata(
+                    str(instance.instance_id),
+                    instance.type,
+                    slot.required_capabilities,
+                )
         except BindError as exc:
             await audit_binding_rejected(
                 self._metadata,
@@ -513,7 +521,7 @@ class BindForStepService:
             if inst.lease_ttl_seconds and inst.lease_ttl_seconds > 0
         ]
         min_lease_ttl_seconds = min(positive_ttls) if positive_ttls else 0
-        return BindForStepResponse.build(resolved), min_lease_ttl_seconds
+        return BindForStepResponse.build(resolved, bindings), min_lease_ttl_seconds
 
     async def _resolve_slot(
         self,

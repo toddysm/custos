@@ -138,6 +138,23 @@ def snapshot_dispatch_object(value: Mapping[str, object]) -> Mapping[str, JsonVa
     return frozen
 
 
+def validate_execution_reference(value: object, *, workspace_id: str | None = None) -> None:
+    """Keep persistence references credential-free and bound to the owning workspace."""
+    if not isinstance(value, Mapping) or set(value) != {"workspaceId", "principalId", "bindingId"}:
+        raise ValueError("execution identity requires an exact reference")
+    for part in value.values():
+        if (
+            not isinstance(part, str)
+            or not part.strip()
+            or part != part.strip()
+            or len(part) > 120
+            or "\0" in part
+        ):
+            raise ValueError("invalid execution identity reference")
+    if workspace_id is not None and value["workspaceId"] != workspace_id:
+        raise ValueError("execution identity belongs to another workspace")
+
+
 def validate_dispatch_target(
     value: Mapping[str, object], *, allow_unresolved_version: bool = False
 ) -> Mapping[str, JsonValue]:
@@ -149,11 +166,21 @@ def validate_dispatch_target(
         if kind == "start"
         else {"kind", "runId", "stepId", "eventName", "payload"}
     )
-    if kind not in ("start", "resume") or set(target) - {"deliveryProtocol"} != required:
+    if (
+        kind not in ("start", "resume")
+        or set(target) - {"deliveryProtocol", "executionIdentity"} != required
+    ):
         raise ValueError("resolved target must be an exact start or resume RPC shape")
     protocol = target.get("deliveryProtocol", 1)
     if type(protocol) is not int or protocol not in (1, 2):
         raise ValueError("unsupported target delivery protocol")
+    identity = target.get("executionIdentity")
+    if identity is not None:
+        if protocol != 2:
+            raise ValueError("execution identity requires durable delivery")
+        validate_execution_reference(identity)
+    elif "executionIdentity" in target:
+        raise ValueError("execution identity must not be null when present")
     for key in required - {"kind", "inputs", "payload"}:
         item = target[key]
         if key == "workflowVersionId" and item is None and allow_unresolved_version:
@@ -233,6 +260,9 @@ class DeadLetterData:
         target = validate_dispatch_target(
             self.target, allow_unresolved_version=self.history[-1].code == "configuration"
         )
+        identity = target.get("executionIdentity")
+        if isinstance(identity, Mapping) and identity["workspaceId"] != self.workspace_id:
+            raise ValueError("execution identity belongs to another workspace")
         if set(event) - {"schemaVersion", "eventId", "source", "kind", "subject", "data"}:
             raise ValueError("unsupported persisted event field")
         if event.get("schemaVersion") != "1":

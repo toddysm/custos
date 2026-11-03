@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from datetime import UTC, datetime
 
@@ -11,6 +12,7 @@ import pytest
 from custos_arm.contract import StepRef
 from custos_arm.contract.errors import ErrorClass
 from custos_arm.manifest import ConnectorSpec
+from custos_arm.rpc.models import BoundConnectorContextWire
 from custos_arm.secrets import (
     SECRET_FILE_MODE,
     SIDECAR_TOKEN_FILENAME,
@@ -29,6 +31,7 @@ from custos_arm.secrets import (
     SidecarToken,
     SidecarTokenMinter,
 )
+from tests.test_rpc_models import canonical_binding
 
 _CONNECTOR = "http://127.0.0.1:3500/v1.0/invoke/connector/method"
 
@@ -78,6 +81,23 @@ class _FakeLeaseClient:
             slot="registry",
             connector_instance_id="ci-1",
         )
+
+
+async def test_canonical_binding_is_a_private_file_not_a_lease() -> None:
+    """Preserve endpoint and opaque handle in tmpfs without refreshing a fabricated lease."""
+    sink = _FakeSink()
+    leases = _FakeLeaseClient()
+    injector = SecretInjector(token_minter=SidecarTokenMinter(), lease_client=leases)
+    context = BoundConnectorContextWire.model_validate(canonical_binding()).to_connector_context()
+    result = await injector.inject(
+        sink=sink, step=_step(), connectors=[_connector("registry")], contexts=[context]
+    )
+    content, mode = sink.files["secrets/registry/binding.json"]
+    assert json.loads(content) == canonical_binding()["context"]
+    assert mode == SECRET_FILE_MODE
+    assert result.secret_files == ("secrets/registry/binding.json",)
+    assert await injector.refresh_leases(contexts=[context]) == []
+    assert leases.calls == []
 
 
 _Handler = Callable[[httpx.Request], httpx.Response]

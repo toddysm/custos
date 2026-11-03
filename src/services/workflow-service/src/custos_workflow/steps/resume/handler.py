@@ -442,6 +442,7 @@ class WaitForStepHandler:
             workspace_id=source_workspace,
             source=source,
             delivery_protocol=delivery_protocol,
+            execution_identity=ctx.execution_identity,
         )
         try:
             yield PersistMirrorCall(mirror=pending_mirror)
@@ -467,6 +468,7 @@ class WaitForStepHandler:
             workspace_id=source_workspace,
             source=source,
             delivery_protocol=delivery_protocol,
+            execution_identity=ctx.execution_identity,
         )
         attempt = 1
         while True:
@@ -515,6 +517,7 @@ class WaitForStepHandler:
             workspace_id=source_workspace,
             source=source,
             delivery_protocol=delivery_protocol,
+            execution_identity=ctx.execution_identity,
         )
         try:
             yield PersistMirrorCall(mirror=registered_mirror)

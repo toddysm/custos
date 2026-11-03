@@ -24,6 +24,7 @@ from custos_spl.interfaces.dead_letters import (
     DeadLetterEntry,
     DispatchAttempt,
     json_value,
+    validate_execution_reference,
 )
 from custos_spl.interfaces.metadata_store import Run
 from custos_spl.pagination import Cursor, Page
@@ -67,10 +68,16 @@ def resume_identity(
     event_name: str,
     idempotency_key: str,
     payload: Mapping[str, object],
+    *,
+    execution_identity: Mapping[str, str] | None = None,
 ) -> tuple[str, str]:
     """Bind a resume receipt to its exact scoped wait, original key and payload."""
     key = delivery_identity(workspace_id, run_id, step_id, event_name, idempotency_key)
-    return key, delivery_fingerprint({"key": key, "payload": payload})
+    request: dict[str, object] = {"key": key, "payload": payload}
+    if execution_identity is not None:
+        validate_execution_reference(execution_identity, workspace_id=workspace_id)
+        request["executionIdentity"] = execution_identity
+    return key, delivery_fingerprint(request)
 
 
 def resume_result(key: str) -> str:

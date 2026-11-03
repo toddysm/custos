@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -12,6 +13,7 @@ from custos_arm import create_app
 from custos_arm.config import Settings
 from custos_arm.result import ActivityResultEnvelope
 from custos_arm.scheduler import ActivityScheduler, CancelOutcome, ScheduleRequest
+from tests.test_rpc_models import canonical_binding
 
 
 class _RecordingScheduler(ActivityScheduler):
@@ -125,6 +127,30 @@ def test_schedule_activity_translates_connector_contexts(settings: Settings) -> 
     assert ctx.connector_instance_id == "lease-abc"
     assert ctx.lease_id == "lease-abc"
     assert dict(ctx.secrets) == {}
+
+
+def test_invalid_private_binding_is_not_echoed(
+    settings: Settings, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Malformed opaque payloads fail before scheduling without returning their private data."""
+    scheduler = _RecordingScheduler(result=_success_envelope())
+    with _client(settings, scheduler) as client:
+        response = client.post(
+            "/ScheduleActivity",
+            json=_body(
+                connectorContexts={
+                    "registry": {
+                        **canonical_binding(),
+                        "unexpected": "private-binding-value",
+                    }
+                }
+            ),
+            headers={"x-custos-callctx": _callctx_header()},
+        )
+    assert response.status_code == 422
+    assert "private-binding-value" not in response.text
+    assert "private-binding-value" not in caplog.text
+    assert not scheduler.scheduled
 
 
 def test_schedule_activity_idempotency_key_match_is_accepted(settings: Settings) -> None:

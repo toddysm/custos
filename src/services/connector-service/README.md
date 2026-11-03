@@ -57,6 +57,8 @@ following `CONN_*` environment variables.
 | `APP_API_TOKEN` | For private Trigger RPCs | unset | Token shared only with the local Dapr sidecar; empty/blank fails closed. |
 | `CONN_TRIGGER_APP_ID` | For private Trigger RPCs | `trigger-service` | Exact authenticated caller application ID, not an HTTP endpoint. |
 | `CONN_TRIGGER_NAMESPACE` | For private Trigger RPCs | unset | Exact authenticated caller namespace; required independently of application ID. |
+| `CONN_WORKFLOW_APP_ID` | For version-two binding | `workflow-service` | Exact authenticated Workflow caller application ID. |
+| `CONN_WORKFLOW_NAMESPACE` | For version-two binding | unset | Exact authenticated Workflow caller namespace. |
 
 ## Private webhook verification
 
@@ -254,7 +256,9 @@ Process bind:
 
 ```bash
 cd src/services/connector-service
-pip install -e ".[dev]"
+pip install -e ../../libs/storage-provider-layer -e ../../libs/custos-postgres \
+  -e ../../libs/custos-callctx -e ../../libs/custos-cel \
+  -e ../workflow-service -e ".[dev]"
 ruff check .
 ruff format --check .
 mypy src tests

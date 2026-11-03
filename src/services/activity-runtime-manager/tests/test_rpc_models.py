@@ -4,11 +4,65 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+from pydantic import ValidationError
+
 from custos_arm.rpc import (
     CancelActivityWire,
     ConnectorContextWire,
     ScheduleActivityWire,
 )
+from custos_arm.rpc.models import BoundConnectorContextWire
+
+
+def canonical_binding() -> dict[str, object]:
+    """Return a structured binding with no made-up lease or expiry."""
+    return {
+        "schemaVersion": "2",
+        "slotName": "registry",
+        "connectorInstanceId": "instance-1",
+        "connectorKind": "oci-registry",
+        "capabilities": ["oci.pull"],
+        "context": {
+            "endpoint": "https://registry.test",
+            "tokenTypeHint": None,
+            "handle": {"opaque": {"key": "private-binding-value"}},
+            "extras": {"region": "west"},
+        },
+    }
+
+
+def test_canonical_binding_preserves_private_structure_without_synthetic_lease() -> None:
+    """The actual runtime consumer keeps authoritative metadata and the complete opaque object."""
+    wire = BoundConnectorContextWire.model_validate(canonical_binding())
+    context = wire.to_connector_context()
+    assert context.connector_instance_id == "instance-1"
+    assert context.capabilities == ("oci.pull",)
+    assert context.lease_id is None and not context.secrets
+    assert context.binding == canonical_binding()["context"]
+    assert "private-binding-value" not in repr(context)
+    assert "private-binding-value" not in repr(wire)
+
+
+@pytest.mark.parametrize("version", ["2", "3"])
+def test_versioned_binding_never_downgrades_to_legacy(version: str) -> None:
+    """A legacy-looking handle cannot hide malformed or unknown version-two metadata."""
+    with pytest.raises(ValidationError):
+        ScheduleActivityWire.model_validate(
+            {
+                "runId": "run",
+                "stepId": "step",
+                "attempt": 1,
+                "activityRef": "acme/test@1",
+                "connectorContexts": {
+                    "registry": {
+                        **canonical_binding(),
+                        "schemaVersion": version,
+                        "handle": "fake-lease",
+                    }
+                },
+            }
+        )
 
 
 def test_connector_context_wire_drops_secrets_and_keeps_handle() -> None:

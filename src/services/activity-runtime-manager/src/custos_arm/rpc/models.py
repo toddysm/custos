@@ -11,20 +11,19 @@ Two deliberate boundary decisions:
   ``x-custos-callctx`` document is the source of truth for the tenant; the
   request body never carries ``workspaceId`` so a caller cannot schedule into
   a workspace it is not authorized for.
-* **Connector contexts carry no secrets on the wire.** The wire form exposes
-  only credential-free handles (``slotName``/``handle``/``connectorKind``);
-  credential material reaches the activity through the sidecar token flow, not
-  ``ScheduleActivity``. The translation therefore builds
-  :class:`~custos_arm.secrets.ConnectorContext` instances with empty
-  ``secrets`` and the handle as the refreshable ``lease_id``.
+* **Versioned bindings preserve their opaque structure.** Legacy handles retain
+  their existing translation. Version-two descriptors carry actual instance
+  metadata without a fabricated lease or expiry. Their opaque context is treated
+  as private and materialized under the slot's secret directory, not in inputs.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from custos_callctx.execution import ExecutionIdentity
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from custos_arm.contract import StepRef
 from custos_arm.scheduler import ScheduleRequest
@@ -53,6 +52,14 @@ class ConnectorContextWire(BaseModel):
     connector_kind: str = Field(alias="connectorKind", min_length=1)
     expires_at: datetime | None = Field(default=None, alias="expiresAt")
 
+    @model_validator(mode="before")
+    @classmethod
+    def reject_versioned_context(cls, value: Any) -> Any:
+        """Do not downgrade malformed or unknown versioned descriptors into legacy handles."""
+        if isinstance(value, dict) and "schemaVersion" in value:
+            raise ValueError("versioned bindings require the canonical descriptor")
+        return value
+
     def to_connector_context(self) -> ConnectorContext:
         """Build the internal :class:`ConnectorContext` for this slot."""
         return ConnectorContext(
@@ -61,6 +68,43 @@ class ConnectorContextWire(BaseModel):
             connector_instance_id=self.handle,
             secrets={},
             lease_id=self.handle,
+        )
+
+
+class BoundConnectorContextWire(BaseModel):
+    """Canonical binding metadata; opaque data is not reinterpreted as a lease identifier."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+    schema_version: Literal["2"] = Field(alias="schemaVersion")
+    slot_name: str = Field(alias="slotName", min_length=1)
+    connector_instance_id: str = Field(alias="connectorInstanceId", min_length=1)
+    connector_kind: str = Field(alias="connectorKind", min_length=1)
+    capabilities: list[str]
+    context: dict[str, Any] = Field(repr=False)
+
+    @field_validator("context")
+    @classmethod
+    def validate_context(cls, value: dict[str, Any]) -> dict[str, Any]:
+        """Require the actual Connector shape without inventing credential or expiry fields."""
+        if (
+            set(value) != {"endpoint", "tokenTypeHint", "handle", "extras"}
+            or not isinstance(value["endpoint"], str)
+            or not value["endpoint"]
+            or not isinstance(value["handle"], dict)
+            or not isinstance(value["extras"], dict)
+            or (value["tokenTypeHint"] is not None and not isinstance(value["tokenTypeHint"], str))
+        ):
+            raise ValueError("invalid canonical connector context")
+        return value
+
+    def to_connector_context(self) -> ConnectorContext:
+        """Preserve real instance identity and opaque binding; no synthetic refresh lease exists."""
+        return ConnectorContext(
+            slot_name=self.slot_name,
+            connector_type=self.connector_kind,
+            connector_instance_id=self.connector_instance_id,
+            binding=self.context,
+            capabilities=tuple(self.capabilities),
         )
 
 
@@ -74,10 +118,29 @@ class ScheduleActivityWire(BaseModel):
     attempt: int = Field(ge=1)
     activity_ref: str = Field(alias="activityRef", min_length=1)
     inputs: dict[str, Any] = Field(default_factory=dict)
-    connector_contexts: dict[str, ConnectorContextWire] = Field(
+    connector_contexts: dict[str, ConnectorContextWire | BoundConnectorContextWire] = Field(
         default_factory=dict, alias="connectorContexts"
     )
     deadline: datetime | None = None
+    execution_identity: dict[str, str] | None = Field(default=None, alias="executionIdentity")
+
+    @field_validator("execution_identity")
+    @classmethod
+    def validate_execution_identity(cls, value: dict[str, str] | None) -> dict[str, str] | None:
+        """Accept only a credential-free execution reference at the HTTP boundary."""
+        if value is not None:
+            ExecutionIdentity.from_dict(value)
+        return value
+
+    @field_validator("connector_contexts")
+    @classmethod
+    def validate_slot_keys(
+        cls, value: dict[str, ConnectorContextWire | BoundConnectorContextWire]
+    ) -> dict[str, ConnectorContextWire | BoundConnectorContextWire]:
+        """Reject conflicting slot names before invoking the scheduler."""
+        if any(name != context.slot_name for name, context in value.items()):
+            raise ValueError("connector slot key does not match the binding")
+        return value
 
     def idempotency_key(self) -> str:
         """The canonical ``runId|stepId|attempt`` dedup key for this request."""

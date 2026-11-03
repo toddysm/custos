@@ -44,6 +44,7 @@ from dataclasses import dataclass, field
 from typing import Any, Final, Protocol, runtime_checkable
 
 import httpx
+from custos_callctx.execution import ExecutionIdentity
 from custos_spl.interfaces.trigger_source import ResumeSource, validate_resume_context
 
 from custos_workflow.clients._dapr_invoke import (
@@ -130,6 +131,7 @@ class RegisterResumeSubscriptionRequest:
     workspace_id: str | None = None
     source: ResumeSource | None = None
     delivery_protocol: int = 1
+    execution_identity: ExecutionIdentity | None = None
 
     def __post_init__(self) -> None:
         """Validate resolved values and require tenant/selective context for external waits."""
@@ -140,6 +142,10 @@ class RegisterResumeSubscriptionRequest:
             raise ValueError("unsupported resume delivery protocol")
         if self.delivery_protocol == 2 and self.workspace_id is None:
             raise ValueError("version-2 resume registration requires workspace")
+        if self.execution_identity is not None and (
+            self.delivery_protocol != 2 or self.execution_identity.workspace_id != self.workspace_id
+        ):
+            raise ValueError("execution registration requires matching durable scope")
         if not self.run_id:
             raise ValueError("RegisterResumeSubscriptionRequest.run_id must be a non-empty string")
         if not self.step_id:
@@ -379,6 +385,8 @@ def _register_request_to_wire(request: RegisterResumeSubscriptionRequest) -> Map
         wire["deliveryProtocol"] = request.delivery_protocol
     if request.source is not None:
         wire["source"] = request.source.to_wire()
+    if request.execution_identity is not None:
+        wire["executionIdentity"] = request.execution_identity.to_dict()
     return wire
 
 

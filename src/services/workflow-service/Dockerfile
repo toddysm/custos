@@ -35,12 +35,14 @@ RUN pip install --upgrade pip==24.2 build==1.2.2
 COPY src/libs/storage-provider-layer/ ./libs/storage-provider-layer/
 COPY src/libs/custos-postgres/ ./libs/custos-postgres/
 COPY src/libs/custos-cel/ ./libs/custos-cel/
+COPY src/libs/custos-callctx/ ./libs/custos-callctx/
 COPY src/services/workflow-service/ ./services/workflow-service/
 
 RUN pip wheel --no-deps --wheel-dir /wheels \
         ./libs/storage-provider-layer \
         ./libs/custos-postgres \
-        ./libs/custos-cel
+        ./libs/custos-cel \
+        ./libs/custos-callctx
 
 RUN pip wheel --wheel-dir /wheels --find-links /wheels \
         ./services/workflow-service

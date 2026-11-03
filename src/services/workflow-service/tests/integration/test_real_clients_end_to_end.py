@@ -103,7 +103,7 @@ ARM_APP_ID = "activity-runtime-manager"
 CONNECTOR_APP_ID = "connector-service"
 
 SCHEDULE_PATH = f"/v1.0/invoke/{ARM_APP_ID}/method/ScheduleActivity"
-BIND_PATH = f"/v1.0/invoke/{CONNECTOR_APP_ID}/method/BindForStep"
+BIND_PATH = f"/v1.0/invoke/{CONNECTOR_APP_ID}/method/internal/v1/bind-for-step"
 
 #: The activity ref + connector reference the workflow doc binds.
 ACTIVITY_REF = "security/scan@1"
