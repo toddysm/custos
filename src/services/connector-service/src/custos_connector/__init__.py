@@ -51,6 +51,7 @@ from custos_connector.api import (
 from custos_connector.api.pull_demand import router as pull_demand_router
 from custos_connector.api.verify_webhook import router as verify_webhook_router
 from custos_connector.binding import binding_router
+from custos_connector.credentials import router as credential_router
 from custos_connector.cursor.router import router as cursor_admin_router
 from custos_connector.health import router as health_router
 from custos_connector.lease.router import router as lease_router
@@ -240,6 +241,7 @@ def create_app(
 
     app.include_router(health_router)
     app.include_router(binding_router)
+    app.include_router(credential_router)
     app.include_router(lease_router)
     app.include_router(cursor_admin_router)
     app.include_router(listen_router)

@@ -73,10 +73,12 @@ def body(token: str) -> dict[str, str]:
 
 
 @pytest.mark.parametrize(
-    "operation,permission",
+    "operation,permission,caller",
     [
-        ("connector-bind", "connector:bind"),
-        ("catalog-activity-read", "catalog:activity-types:read"),
+        ("connector-bind", "connector:bind", "workflow-service"),
+        ("catalog-activity-read", "catalog:activity-types:read", "workflow-service"),
+        ("catalog-activity-read", "catalog:activity-types:read", "activity-runtime-manager"),
+        ("connector-credentials", "connector:bind", "activity-runtime-manager"),
     ],
 )
 def test_exchange_issues_one_verified_grant_and_a_fresh_context(
@@ -84,13 +86,16 @@ def test_exchange_issues_one_verified_grant_and_a_fresh_context(
     fake_auth_store: FakeAuthAdapter,
     operation: str,
     permission: str,
+    caller: str,
 ) -> None:
     """The actual signer/verifier round trip binds scope, principal, operation and short expiry."""
     token, _ = credential(fake_auth_store)
     issued = []
     for _ in range(2):
         response = configured.post(
-            PATH, json={**body(token), "operation": operation}, headers=HEADERS
+            PATH,
+            json={**body(token), "operation": operation},
+            headers={**HEADERS, "dapr-caller-app-id": caller},
         )
         assert response.status_code == 200, response.text
         signed = response.json()
@@ -103,11 +108,27 @@ def test_exchange_issues_one_verified_grant_and_a_fresh_context(
         assert verified["valid"] is True
         assert verified["acting_principal_id"] == SA
         assert verified["workspace_id"] == WORKSPACE
-        assert verified["caller_component"] == "workflow-service"
+        assert verified["caller_component"] == caller
         assert verified["permissions"] == [permission]
         assert decode_claims_unverified(signed["token"])["executionOperation"] == operation
         issued.append(signed["jti"])
     assert issued[0] != issued[1]
+
+
+@pytest.mark.parametrize("caller", ["workflow-service", "trigger-service", "connector-sidecar"])
+def test_credential_issuance_requires_runtime_control_caller(
+    configured: TestClient,
+    fake_auth_store: FakeAuthAdapter,
+    caller: str,
+) -> None:
+    """A valid account credential cannot give a different component runtime proxy authority."""
+    token, _ = credential(fake_auth_store)
+    response = configured.post(
+        PATH,
+        json={**body(token), "operation": "connector-credentials"},
+        headers={**HEADERS, "dapr-caller-app-id": caller},
+    )
+    assert response.status_code == 403
 
 
 @pytest.mark.parametrize(

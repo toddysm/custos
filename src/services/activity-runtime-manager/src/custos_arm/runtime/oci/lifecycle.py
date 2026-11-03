@@ -215,6 +215,7 @@ class OciContainerDriver:
         pod_exec: PodExec | None = None,
         start_timeout: float = _DEFAULT_START_TIMEOUT,
         max_output_bytes: int = _DEFAULT_MAX_OUTPUT_BYTES,
+        api_timeout: float | None = None,
     ) -> None:
         self._batch = batch_api
         self._core = core_api
@@ -225,6 +226,7 @@ class OciContainerDriver:
         self._exec = pod_exec or self._default_pod_exec
         self._start_timeout = start_timeout
         self._max_output_bytes = max_output_bytes
+        self._api_options = {"_request_timeout": api_timeout} if api_timeout is not None else {}
         # Records a scheduler-driven cancel keyed by handle reference so the
         # blocking ``await_terminal`` loop (running on another thread) observes
         # it and reports the right signal instead of blocking to the deadline.
@@ -249,7 +251,9 @@ class OciContainerDriver:
         output_root.mkdir(parents=True, exist_ok=True)
 
         try:
-            self._batch.create_namespaced_job(namespace=plan.namespace, body=manifest)
+            self._batch.create_namespaced_job(
+                namespace=plan.namespace, body=manifest, **self._api_options
+            )
         except Exception as exc:
             # Don't leak the staging tree we just created if the Job never lands.
             shutil.rmtree(self._staging_root / name, ignore_errors=True)
@@ -281,6 +285,7 @@ class OciContainerDriver:
                 name=name,
                 namespace=namespace,
                 body={"spec": {"suspend": False}},
+                **self._api_options,
             )
         except Exception as exc:
             raise SandboxFailureError(f"failed to start sandbox Job {name!r}: {exc}") from exc
@@ -324,6 +329,8 @@ class OciContainerDriver:
                 f"(exit {extracted.exit_code}): {extracted.stderr}"
             )
 
+        if handle.reference in self._cancellations:
+            raise SandboxFailureError("cancelled attempt cannot release its activity gate")
         released = self._exec(
             namespace=namespace,
             pod=pod_name,
@@ -346,6 +353,8 @@ class OciContainerDriver:
         """
         deadline = self._now() + timedelta(seconds=self._start_timeout)
         while True:
+            if f"{namespace}/{name}" in self._cancellations:
+                raise SandboxFailureError("cancelled attempt cannot start its input bridge")
             pod = self._activity_pod(namespace, name)
             if pod is not None:
                 state = _init_container_state(pod, INPUT_BRIDGE_CONTAINER_NAME)
@@ -501,6 +510,7 @@ class OciContainerDriver:
                 name=name,
                 namespace=namespace,
                 propagation_policy="Background",
+                **self._api_options,
             )
         except Exception as exc:
             if _is_not_found(exc):
@@ -512,6 +522,7 @@ class OciContainerDriver:
             pods = self._core.list_namespaced_pod(
                 namespace=namespace,
                 label_selector=f"{_JOB_NAME_LABEL}={name}",
+                **self._api_options,
             )
         except Exception as exc:
             raise SandboxFailureError(
@@ -529,39 +540,70 @@ class OciContainerDriver:
         command: list[str],
         stdin: bytes | None,
     ) -> ExecResult:
-        """Drive ``connect_get_namespaced_pod_exec`` over a websocket stream."""
+        """Use an isolated, bounded binary stream; missing exit status is never success."""
+        from kubernetes import client as kube_client
         from kubernetes.stream import stream
 
-        client = stream(
-            self._core.connect_get_namespaced_pod_exec,
-            pod,
-            namespace,
-            container=container,
-            command=command,
-            stderr=True,
-            stdin=stdin is not None,
-            stdout=True,
-            tty=False,
-            _preload_content=False,
-        )
-        stderr_parts: list[str] = []
-        stdout_parts: list[str] = []
+        # stream temporarily replaces ApiClient.request; isolate it from concurrent API calls.
+        api = kube_client.ApiClient(self._core.api_client.configuration)
+        opened = False
         try:
+            client = stream(
+                kube_client.CoreV1Api(api).connect_get_namespaced_pod_exec,
+                pod,
+                namespace,
+                container=container,
+                command=command,
+                stderr=True,
+                stdin=stdin is not None,
+                stdout=True,
+                tty=False,
+                _preload_content=False,
+                binary=True,
+                _request_timeout=10,
+            )
+            opened = True
+        finally:
+            if not opened:
+                api.close()
+        stderr_parts: list[bytes] = []
+        stdout_parts: list[bytes] = []
+        total_stdout = total_stderr = 0
+        until = time.monotonic() + 30
+        try:
+            client.sock.settimeout(10)
             if stdin is not None:
                 client.write_stdin(stdin)
             while client.is_open():
+                if time.monotonic() >= until:
+                    raise SandboxFailureError("sandbox stream exceeded its time budget")
                 client.update(timeout=1)
                 if client.peek_stdout():
-                    stdout_parts.append(client.read_stdout())
+                    chunk = client.read_stdout()
+                    if not isinstance(chunk, bytes):
+                        raise SandboxFailureError("sandbox stream is not binary")
+                    total_stdout += len(chunk)
+                    if total_stdout > self._max_output_bytes:
+                        raise SandboxFailureError("sandbox output exceeds its byte budget")
+                    stdout_parts.append(chunk)
                 if client.peek_stderr():
-                    stderr_parts.append(client.read_stderr())
+                    chunk = client.read_stderr()
+                    if not isinstance(chunk, bytes):
+                        raise SandboxFailureError("sandbox diagnostics are not binary")
+                    total_stderr += len(chunk)
+                    if total_stderr > 64 * 1024:
+                        raise SandboxFailureError("sandbox diagnostics exceed their byte budget")
+                    stderr_parts.append(chunk)
             returncode = client.returncode
         finally:
             client.close()
+            api.close()
+        if returncode is None:
+            raise SandboxFailureError("sandbox stream has no terminal status")
         return ExecResult(
-            exit_code=returncode if returncode is not None else 0,
-            stdout="".join(stdout_parts).encode("utf-8"),
-            stderr="".join(stderr_parts),
+            exit_code=returncode,
+            stdout=b"".join(stdout_parts),
+            stderr=b"".join(stderr_parts).decode("utf-8", errors="replace"),
         )
 
 
@@ -585,9 +627,16 @@ def _tar_directory(root: Path, *, group_readable: bool = False) -> bytes:
             info.mode |= (info.mode & 0o500) >> 3
         return info
 
+    paths = []
+    budget = 10240
+    for path in root.rglob("*"):
+        paths.append(path)
+        budget += 8192 + (path.stat().st_size if path.is_file() else 0)
+        if len(paths) > 4096 or budget > _DEFAULT_MAX_OUTPUT_BYTES:
+            raise SandboxFailureError("sandbox input archive exceeds its bounded staging budget")
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w") as archive:
-        for path in sorted(root.rglob("*")):
+        for path in sorted(paths):
             archive.add(
                 path, arcname=str(path.relative_to(root)), recursive=False, filter=permissions
             )

@@ -64,6 +64,10 @@ def get_scheduler(request: Request) -> ActivityScheduler:
     retry rather than observe a 500.
     """
     scheduler = getattr(request.app.state, "scheduler", None)
+    if getattr(request.app.state, "runtime_managed", False) and (
+        not request.app.state.ready or not request.app.state.dependencies_ready
+    ):
+        raise HTTPException(503, "activity runtime admission is closed")
     if not isinstance(scheduler, ActivityScheduler):
         raise HTTPException(
             status_code=503,

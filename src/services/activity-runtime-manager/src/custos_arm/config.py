@@ -18,6 +18,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Final
+from urllib.parse import urlsplit
 
 # ---------------------------------------------------------------------------
 # Environment variable names
@@ -102,6 +103,9 @@ ENV_ENVIRONMENT: Final[str] = "ENVIRONMENT"
 #: ASGI server binding.
 ENV_HOST: Final[str] = "HOST"
 ENV_PORT: Final[str] = "PORT"
+ENV_RUNTIME_ENABLED: Final[str] = "ARM_RUNTIME_ENABLED"
+ENV_CREDENTIAL_PROXY_URL: Final[str] = "ARM_CREDENTIAL_PROXY_URL"
+ENV_STAGING_ROOT: Final[str] = "ARM_STAGING_ROOT"
 
 # ---------------------------------------------------------------------------
 # Defaults (design § Configuration)
@@ -220,6 +224,39 @@ class Settings:
     #: Raw ISO-8601 sources retained for diagnostics / round-tripping.
     max_timeout_raw: str = field(default=DEFAULT_MAX_TIMEOUT)
     idempotency_ttl_raw: str = field(default=DEFAULT_IDEMPOTENCY_TTL)
+    credential_proxy_url: str = ""
+    runtime_enabled: bool = False
+    staging_root: str = "/var/run/custos/attempts"
+
+    def __post_init__(self) -> None:
+        """Private attempt proofs may only leave the pod over a verified HTTPS origin."""
+        if self.credential_proxy_url:
+            parsed = urlsplit(self.credential_proxy_url)
+            if (
+                parsed.scheme != "https"
+                or not parsed.hostname
+                or parsed.username
+                or parsed.password
+                or parsed.path not in {"", "/"}
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise SettingsError("ARM_CREDENTIAL_PROXY_URL requires an HTTPS origin")
+        if self.runtime_enabled and (not self.credential_proxy_url or not self.authz_endpoint):
+            raise SettingsError(
+                "runtime activation requires signed authorization and private HTTPS"
+            )
+        if self.runtime_enabled and self.is_production and self.allow_unpinned_images:
+            raise SettingsError("production runtime requires digest-pinned images")
+        if (
+            self.runtime_enabled
+            and self.is_production
+            and any(
+                re.search(r"@sha256:[a-f0-9]{64}$", image) is None
+                for image in (self.sidecar_image, self.io_bridge_image)
+            )
+        ):
+            raise SettingsError("production Sidecar and I/O helper images must be digest-pinned")
 
     @property
     def use_callctx_dev_shim(self) -> bool:
@@ -326,6 +363,9 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         catalog_endpoint=_require(ENV_CATALOG_ENDPOINT, src),
         connector_endpoint=_require(ENV_CONNECTOR_ENDPOINT, src),
         authz_endpoint=src.get(ENV_AUTHZ_ENDPOINT, "").strip(),
+        credential_proxy_url=src.get(ENV_CREDENTIAL_PROXY_URL, "").strip(),
+        runtime_enabled=_opt_bool(ENV_RUNTIME_ENABLED, src, False),
+        staging_root=_opt_str(ENV_STAGING_ROOT, src, "/var/run/custos/attempts"),
         sandbox_namespace=_require(ENV_SANDBOX_NAMESPACE, src),
         sidecar_image=_require(ENV_SIDECAR_IMAGE, src),
         io_bridge_image=_opt_str(ENV_IO_BRIDGE_IMAGE, src, DEFAULT_IO_BRIDGE_IMAGE),

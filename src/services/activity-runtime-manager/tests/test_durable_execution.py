@@ -1,6 +1,7 @@
 """Durable attempt replay/ownership through the real repository and scheduler."""
 
 import asyncio
+import hashlib
 import json
 from dataclasses import replace
 from datetime import timedelta
@@ -8,6 +9,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from custos_callctx.execution import ExecutionIdentity
 from custos_spl.errors import ImmutableViolation, LeaseBusy, LeaseExpired
 from custos_spl.interfaces.activity_execution import (
     ActivityExecutionRecord,
@@ -16,15 +18,23 @@ from custos_spl.interfaces.activity_execution import (
 )
 from custos_spl.interfaces.metadata_store import MetadataStoreProvider
 
+from custos_arm.manifest import ConnectorSpec
 from custos_arm.result import ResultClass
+from custos_arm.runtime import CancelReason
 from custos_arm.scheduler import ActivityScheduler
+from custos_arm.secrets import ConnectorContext
 from custos_arm.store import ExecutionRepository
 from tests.test_scheduler import (
+    _CancellableDriver,
     _FakeDriver,
     _FakeMetadataStore,
+    _FakeResolver,
     _request,
+    _resolved,
     _scheduler,
+    _settings,
     _success_outputs,
+    _wait_for_live_attempt,
 )
 
 
@@ -60,7 +70,9 @@ class SharedAttempts:
                 return row
             for other, row in self.rows.items():
                 if other[:3] == key[:3] and (
-                    not row.completed or json.loads(row.snapshot_json)["state"] == "succeeded"
+                    not row.completed
+                    or json.loads(row.snapshot_json)["state"] == "succeeded"
+                    or row.attempt >= attempt
                 ):
                     raise LeaseBusy("unresolved or successful earlier attempt")
             row = ActivityExecutionRecord(
@@ -88,6 +100,18 @@ class SharedAttempts:
             )
             self.rows[key] = row
             return row
+
+    async def revoke_activity_authority(
+        self, record: ActivityExecutionRecord
+    ) -> ActivityExecutionRecord:
+        """Irreversibly revoke private credential admission while retaining pending execution."""
+        key = (record.workspace_id, record.run_id, record.step_id, record.attempt)
+        row = self.rows[key]
+        if row.owner != record.owner:
+            raise LeaseExpired("different owner")
+        updated = replace(row, authority_revoked=True)
+        self.rows[key] = updated
+        return updated
 
 
 def repository(store: SharedAttempts) -> ExecutionRepository:
@@ -171,3 +195,112 @@ async def test_terminal_snapshot_is_immutable(tmp_path: Path) -> None:
     row = next(iter(store.rows.values()))
     with pytest.raises(LeaseExpired):
         await store.write_activity_execution(row, row.snapshot_json, completed=True)
+
+
+def test_fingerprint_covers_binding_authority_and_original_identity() -> None:
+    """Opaque contexts, capabilities and credential references cannot change during replay."""
+    identity = ExecutionIdentity("ws-1", "account", "stable")
+    context = ConnectorContext(
+        slot_name="source",
+        connector_type="registry",
+        connector_instance_id="instance",
+        binding={"handle": {"opaque": "one"}},
+        capabilities=("oci.pull",),
+    )
+    request = replace(_request(), execution_identity=identity, connector_contexts=(context,))
+    original = ActivityScheduler._request_hash(request)
+    for changed in (
+        replace(request, execution_identity=replace(identity, binding_id="replacement")),
+        replace(request, connector_contexts=(replace(context, capabilities=("oci.push",)),)),
+        replace(
+            request, connector_contexts=(replace(context, binding={"handle": {"opaque": "two"}}),)
+        ),
+    ):
+        assert ActivityScheduler._request_hash(changed) != original
+
+
+async def test_disconnect_and_drain_keep_unknown_effect_fenced(tmp_path: Path) -> None:
+    """Request cancellation retains the live worker and unknown-effect fence."""
+    store = SharedAttempts()
+    driver = _CancellableDriver(tmp_path)
+    scheduler = _scheduler(driver, repo=repository(store))
+    caller = asyncio.create_task(scheduler.schedule(_request()))
+    await _wait_for_live_attempt(scheduler)
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    assert scheduler._workers
+    await asyncio.wait_for(scheduler.drain(), timeout=5)
+    assert not scheduler._workers
+    assert driver.cancellations == [CancelReason.SHUTDOWN]
+    assert not next(iter(store.rows.values())).completed
+    assert next(iter(store.rows.values())).authority_revoked
+    refusal = await scheduler.schedule(_request())
+    assert refusal.class_ is ResultClass.RETRYABLE
+    assert driver.prepared == 1
+
+
+@pytest.mark.parametrize("with_slot", [False, True])
+async def test_private_broker_bundle_is_separate_from_activity_inputs(
+    tmp_path: Path,
+    with_slot: bool,
+) -> None:
+    """Only proof hashes and stable references persist; the pod plan contains no raw proof."""
+    store = SharedAttempts()
+    identity = ExecutionIdentity("ws-1", "executor", "stable")
+    driver = _FakeDriver(tmp_path, outputs=_success_outputs())
+    settings = replace(_settings(), credential_proxy_url="https://runtime.internal")
+    resolved = _resolved()
+    contexts: tuple[ConnectorContext, ...] = ()
+    if with_slot:
+        requirement = ConnectorSpec(
+            name="source", type="registry", required=True, capabilities=["oci.pull"]
+        )
+        manifest = resolved.manifest.model_copy(
+            update={
+                "spec": resolved.manifest.spec.model_copy(update={"connectors": [requirement]}),
+            }
+        )
+        resolved = resolved.model_copy(update={"manifest": manifest})
+        contexts = (
+            ConnectorContext(
+                slot_name="source",
+                connector_type="registry",
+                connector_instance_id="instance",
+                capabilities=("oci.pull",),
+                binding={
+                    "endpoint": "https://registry",
+                    "tokenTypeHint": None,
+                    "handle": {"opaque": "reference"},
+                    "extras": {},
+                },
+            ),
+        )
+    result = await _scheduler(
+        driver,
+        repo=repository(store),
+        settings=settings,
+        resolver=_FakeResolver(resolved),
+    ).schedule(
+        _request(principal_id="executor", execution_identity=identity, connector_contexts=contexts),
+    )
+    assert result.class_ is ResultClass.SUCCESS
+    assert driver.handle is not None and driver.last_plan is not None
+    bundle_path = driver.handle.sidecar_root / "runtime.json"
+    bundle = json.loads(bundle_path.read_bytes())
+    assert bundle_path.stat().st_mode & 0o777 == 0o400
+    assert not (driver.handle.input_root / "runtime.json").exists()
+    row = next(iter(store.rows.values()))
+    assert bundle["proof"] not in row.snapshot_json
+    assert json.loads(row.snapshot_json)["execution_identity"] == identity.to_dict()
+    assert (
+        json.loads(row.snapshot_json)["credential_grant_hash"]
+        == hashlib.sha256(bundle["proof"].encode()).hexdigest()
+    )
+    assert json.loads(row.snapshot_json)["credential_scopes"] == (
+        {"source": {"instanceId": "instance", "kind": "registry", "capabilities": ["oci.pull"]}}
+        if with_slot
+        else {}
+    )
+    assert driver.last_plan.sidecar.credential_broker
+    assert any(mount.mount_path == "/custos/run" for mount in driver.last_plan.tmpfs_mounts)

@@ -1,19 +1,8 @@
-"""Sidecar entry point (CONN-IMPL-019 + CONN-IMPL-020).
+"""Production broker sidecar entry point and explicit legacy test-server helpers.
 
-Reads :class:`~custos_sidecar.settings.Settings` from environment
-variables, wires the production collaborators, and launches two
-``uvicorn`` servers concurrently:
-
-* The UDS HTTP server bound to ``${CUSTOS_SIDECAR_SOCKET_PATH}`` for
-  the activity-facing token API (CONN-IMPL-019).
-* When ``CUSTOS_SIDECAR_CONTROL_ENABLED=true``, the mTLS-gated HTTPS
-  control server bound to ``${CUSTOS_SIDECAR_CONTROL_PORT}`` for the
-  operator/ARM-driven revoke API (CONN-IMPL-020).
-
-This module is intentionally thin so the bulk of the logic stays
-under unit tests; the actual ``Server.serve()`` invocations are only
-exercised by the integration UDS / mTLS harnesses (and in production
-by ARM).
+Production requires the private runtime bundle and real credential broker.
+The existing UDS/mTLS helper builders remain available to integration tests;
+production revocation is checked at the broker on every credential operation.
 """
 
 from __future__ import annotations
@@ -22,20 +11,15 @@ import asyncio
 import os
 import ssl
 import sys
-from contextlib import suppress
 from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
 
-from custos_sidecar import create_app
 from custos_sidecar.auth import BootstrapTokenVerifier, BoundTriple
-from custos_sidecar.context_registry import ContextRegistry
-from custos_sidecar.control_app import create_control_app
-from custos_sidecar.credential_minter import StubCredentialMinter
+from custos_sidecar.broker import create_broker_app, load_runtime_bundle
 from custos_sidecar.lease_gateway import LeaseGateway, LeaseGatewaySettings
-from custos_sidecar.revocation import RevocationRegistry
-from custos_sidecar.settings import Settings, load_settings
+from custos_sidecar.settings import Settings
 
 #: Mode the sidecar applies to the UDS file after uvicorn binds it.
 #: ``0o660`` = ``rw`` for the sidecar UID and (when ``activity_gid`` is set)
@@ -219,37 +203,25 @@ async def _run_servers(
 
 
 def main() -> int:
-    """Process entry point used by the ``custos-connector-sidecar`` script.
-
-    Returns the exit code; the server loop typically blocks until a
-    signal triggers ``should_exit``. A non-zero return only happens on
-    a setup error (bad settings, unreadable HMAC key, stale socket
-    that cannot be removed).
-    """
+    """Start only from a private broker bundle; malformed configuration exits nonzero."""
     try:
-        settings = load_settings()
-    except ValueError as exc:
-        print(f"[sidecar] settings error: {exc!s}", file=sys.stderr)
+        path = Path(os.environ.get("CUSTOS_SIDECAR_RUNTIME_CONFIG", "/custos/sidecar/runtime.json"))
+        bundle, verifier = load_runtime_bundle(path)
+        if os.environ.get("CUSTOS_SIDECAR_CONTROL_ENABLED", "false").lower() not in {"false", "0"}:
+            raise ValueError("broker mode uses authoritative revocation, not legacy control")
+        socket_path = Path(
+            os.environ.get("CUSTOS_SIDECAR_SOCKET_PATH", "/custos/run/connector.sock")
+        )
+        if not socket_path.is_absolute():
+            raise ValueError("sidecar socket path must be absolute")
+    except (OSError, ValueError):
+        print("[sidecar] invalid or unavailable private broker configuration", file=sys.stderr)
         return 2
 
-    verifier = _build_verifier(settings)
-    registry = ContextRegistry.from_wire(settings.contexts_wire)
-    gateway = _build_gateway(settings)
-    minter = StubCredentialMinter()  # CONN-IMPL-019 stub; real minter ships later.
-    revocation_registry = RevocationRegistry()
-
-    app = create_app(
-        bootstrap_verifier=verifier,
-        context_registry=registry,
-        lease_gateway=gateway,
-        credential_minter=minter,
-        bound_triple=(settings.run_id, settings.step_id, settings.attempt),
-        revocation_registry=revocation_registry,
-    )
+    app = create_broker_app(bundle, verifier)
 
     # Best-effort: remove any stale socket file so uvicorn can bind. The
     # tmpfs mount is per-pod so cross-pod collisions cannot happen.
-    socket_path = Path(settings.socket_path)
     try:
         if socket_path.exists():
             socket_path.unlink()
@@ -265,25 +237,9 @@ def main() -> int:
     uds_server = _build_uds_server(
         app=app,
         socket_path=socket_path,
-        activity_gid=settings.activity_gid,
+        activity_gid=1000,
     )
-
-    control_server: uvicorn.Server | None = None
-    if settings.control_enabled:
-        control_app = create_control_app(
-            revocation_registry=revocation_registry,
-            lease_gateway=gateway,
-        )
-        control_server = _build_control_server(app=control_app, settings=settings)
-
-    try:
-        asyncio.run(_run_servers(uds_server=uds_server, control_server=control_server))
-    finally:
-        # Release the lease gateway's httpx connection pool so we do
-        # not leak sockets when the sidecar is signalled (or when a
-        # test imports ``main`` and then tears the process down).
-        with suppress(RuntimeError):  # pragma: no cover - loop already closed
-            asyncio.run(gateway.aclose())
+    asyncio.run(_run_servers(uds_server=uds_server, control_server=None))
     return 0
 
 

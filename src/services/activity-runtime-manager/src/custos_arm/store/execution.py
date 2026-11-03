@@ -92,6 +92,9 @@ _IMMUTABLE_FIELDS: Final[frozenset[str]] = frozenset(
         "activity_ref",
         "request_hash",
         "owner_id",
+        "execution_identity",
+        "credential_scopes",
+        "credential_grant_hash",
     }
 )
 
@@ -148,6 +151,9 @@ class ActivityExecution(BaseModel):
     finished_at: datetime | None = None
     request_hash: str | None = None
     owner_id: str | None = Field(default=None, repr=False)
+    execution_identity: dict[str, str] | None = None
+    credential_scopes: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    credential_grant_hash: str | None = Field(default=None, repr=False)
     result: ActivityResultEnvelope | None = None
 
     @property
@@ -241,6 +247,11 @@ class ExecutionRepository:
         """Whether pending ownership and complete results survive process failure."""
         return self._durable is not None
 
+    @property
+    def pending_count(self) -> int:
+        """Bound process-local retained ownership, including uncertain effects awaiting recovery."""
+        return sum(not execution.is_terminal for execution in self._live.values())
+
     async def insert(self, execution: ActivityExecution) -> ActivityExecution:
         """Register a new execution, rejecting a duplicate idempotency triple."""
         key = execution.key
@@ -303,6 +314,9 @@ class ExecutionRepository:
                     "activity ownership changed before persistence"
                 ) from None
             self._live[key] = updated
+            if updated.is_terminal:
+                self._live.pop(key, None)
+                self._records.pop(key, None)
             return updated
         # Persist before mutating ``_live`` so a rejected terminal write leaves
         # the live record at its prior state.
@@ -327,7 +341,11 @@ class ExecutionRepository:
                 raise UnsafeExecutionError(
                     "activity has an unresolved owner; automatic replay denied"
                 )
-            self._records[key], self._live[key] = record, execution
+            if record.completed:
+                self._records.pop(key, None)
+                self._live.pop(key, None)
+            else:
+                self._records[key], self._live[key] = record, execution
             return execution
         live = self._live.get(key)
         if live is not None:
@@ -350,6 +368,15 @@ class ExecutionRepository:
             del self._live[key]
             self._records.pop(key, None)
         return len(expired)
+
+    async def revoke_credentials(self, key: ExecutionKey) -> None:
+        """Close credential access before a stop request, retaining unknown-effect ownership."""
+        if self._durable is None:
+            return
+        record = self._records.get(key)
+        if record is None or record.owner != self._owner:
+            raise UnsafeExecutionError("activity credential owner is unavailable")
+        self._records[key] = await self._durable.revoke_activity_authority(record)
 
     async def _persist_terminal(self, execution: ActivityExecution) -> None:
         try:

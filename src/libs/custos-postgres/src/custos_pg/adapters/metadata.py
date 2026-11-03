@@ -54,8 +54,8 @@ from custos_spl.interfaces.activity_execution import (
     ACTIVITY_EXECUTION_SCHEMA_REVISION,
     ActivityExecutionRecord,
     activity_execution_key,
-    activity_snapshot,
     validate_activity_claim,
+    validate_activity_snapshot,
 )
 from custos_spl.interfaces.bulk_replay import (
     BulkReplayCommand,
@@ -743,6 +743,7 @@ class PgMetadataAdapter:
             row["owner"],
             snapshot if isinstance(snapshot, str) else json.dumps(snapshot),
             row["completed"],
+            row["authority_revoked"],
         )
 
     async def claim_activity_execution(
@@ -757,7 +758,17 @@ class PgMetadataAdapter:
     ) -> ActivityExecutionRecord:
         """Fence the whole step while its previous effect is pending or already succeeded."""
         key = validate_activity_claim(workspace_id, run_id, step_id, attempt, request_hash, owner)
-        snapshot = activity_snapshot(snapshot_json)
+        snapshot = validate_activity_snapshot(
+            snapshot_json,
+            workspace_id=workspace_id,
+            run_id=run_id,
+            step_id=step_id,
+            attempt=attempt,
+            request_hash=request_hash,
+            owner=owner,
+            completed=False,
+        )
+        step_key = activity_execution_key(run_id, step_id, 1)
         lock_key = json.dumps(["activity", workspace_id, run_id, step_id])
         async with self._delivery_transaction() as conn:
             await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", lock_key)
@@ -773,18 +784,19 @@ class PgMetadataAdapter:
                 return self._activity_record(row)
             blocked = await conn.fetchval(
                 "SELECT EXISTS(SELECT 1 FROM custos_state.activity_execution "
-                "WHERE workspace_id=$1 AND run_id=$2 AND step_id=$3 "
-                "AND (NOT completed OR snapshot->>'state'='succeeded'))",
+                "WHERE workspace_id=$1 AND step_key=$2 "
+                "AND (NOT completed OR snapshot->>'state'='succeeded' OR attempt >= $3))",
                 workspace_id,
-                run_id,
-                step_id,
+                step_key,
+                attempt,
             )
             if blocked:
                 raise LeaseBusy("activity step has an unresolved or successful earlier attempt")
             row = await conn.fetchrow(
                 "INSERT INTO custos_state.activity_execution "
-                "(workspace_id,execution_key,run_id,step_id,attempt,request_hash,owner,snapshot) "
-                "VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb) RETURNING *",
+                "(workspace_id,execution_key,run_id,step_id,attempt,"
+                "request_hash,owner,snapshot,step_key) "
+                "VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9) RETURNING *",
                 workspace_id,
                 key,
                 run_id,
@@ -793,8 +805,35 @@ class PgMetadataAdapter:
                 request_hash,
                 owner,
                 snapshot,
+                step_key,
             )
         assert row is not None
+        return self._activity_record(row)
+
+    async def revoke_activity_authority(
+        self, record: ActivityExecutionRecord
+    ) -> ActivityExecutionRecord:
+        """Fence credential admission independently of uncertain sandbox termination."""
+        key = validate_activity_claim(
+            record.workspace_id,
+            record.run_id,
+            record.step_id,
+            record.attempt,
+            record.request_hash,
+            record.owner,
+        )
+        async with self._delivery_transaction() as conn:
+            row = await conn.fetchrow(
+                "UPDATE custos_state.activity_execution SET authority_revoked=TRUE,"
+                "updated_at=clock_timestamp() WHERE workspace_id=$1 AND execution_key=$2 "
+                "AND request_hash=$3 AND owner=$4 RETURNING *",
+                record.workspace_id,
+                key,
+                record.request_hash,
+                record.owner,
+            )
+            if row is None:
+                raise LeaseExpired("activity authority owner does not match")
         return self._activity_record(row)
 
     async def read_activity_execution(
@@ -833,7 +872,17 @@ class PgMetadataAdapter:
             record.request_hash,
             record.owner,
         )
-        snapshot = activity_snapshot(snapshot_json)
+        snapshot = validate_activity_snapshot(
+            snapshot_json,
+            workspace_id=record.workspace_id,
+            run_id=record.run_id,
+            step_id=record.step_id,
+            attempt=record.attempt,
+            request_hash=record.request_hash,
+            owner=record.owner,
+            completed=completed,
+            previous=record.snapshot_json,
+        )
         async with self._delivery_transaction() as conn:
             row = await conn.fetchrow(
                 "UPDATE custos_state.activity_execution SET snapshot=$1::jsonb,completed=$2,"
@@ -851,6 +900,7 @@ class PgMetadataAdapter:
             if row is None:
                 raise LeaseExpired("activity ownership or transition no longer matches")
         return self._activity_record(row)
+
     async def check_execution_identity_ready(self) -> None:
         """Require the additive immutable identity guard before accepting execution-aware work."""
         async with self._delivery_transaction() as conn:

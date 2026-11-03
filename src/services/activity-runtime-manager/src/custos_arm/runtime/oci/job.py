@@ -283,6 +283,24 @@ def build_activity_job(
         "volumes": _volumes(named_mounts),
     }
     runtime_class = plan.resources.runtime_class
+    if plan.sidecar.credential_broker:
+        sidecar = pod_spec["containers"].pop()
+        sidecar["restartPolicy"] = "Always"
+        sidecar["startupProbe"] = {
+            "exec": {
+                "command": [
+                    "python",
+                    "-c",
+                    "import socket; s=socket.socket(socket.AF_UNIX); s.settimeout(2); "
+                    "s.connect('/custos/run/connector.sock'); "
+                    "s.sendall(b'GET /healthz HTTP/1.0\\r\\n\\r\\n'); "
+                    "assert b' 200 ' in s.recv(64)",
+                ]
+            },
+            "periodSeconds": 1,
+            "failureThreshold": 60,
+        }
+        pod_spec["initContainers"].append(sidecar)
     if runtime_class:
         pod_spec["runtimeClassName"] = runtime_class
 
@@ -412,6 +430,13 @@ def _sidecar_container(
                 "value": f"{SIDECAR_PRIVATE_MOUNT}/sidecar-key",
             }
         )
+        if sidecar.credential_broker:
+            env.append(
+                {
+                    "name": "CUSTOS_SIDECAR_RUNTIME_CONFIG",
+                    "value": f"{SIDECAR_PRIVATE_MOUNT}/runtime.json",
+                }
+            )
     return {
         "name": SIDECAR_CONTAINER_NAME,
         "image": sidecar.image,

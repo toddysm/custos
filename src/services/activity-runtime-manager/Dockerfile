@@ -32,11 +32,15 @@ RUN pip install --upgrade pip==24.2 build==1.2.2
 # service sources. Both are built as wheels below.
 COPY src/libs/storage-provider-layer/ ./libs/storage-provider-layer/
 COPY src/libs/custos-callctx/ ./libs/custos-callctx/
+COPY src/libs/custos-postgres/ ./libs/custos-postgres/
+COPY src/libs/custos-csi/ ./libs/custos-csi/
 COPY src/services/activity-runtime-manager/ ./services/activity-runtime-manager/
 
 RUN pip wheel --no-deps --wheel-dir /wheels \
         ./libs/storage-provider-layer \
-        ./libs/custos-callctx
+        ./libs/custos-callctx \
+        ./libs/custos-postgres \
+        ./libs/custos-csi
 
 RUN pip wheel --wheel-dir /wheels --find-links /wheels \
         ./services/activity-runtime-manager
@@ -54,7 +58,10 @@ ENV PIP_NO_CACHE_DIR=1 \
 
 RUN groupadd --system --gid 1000 custos && \
     useradd --system --uid 1000 --gid custos --home-dir /home/custos \
-            --create-home --shell /usr/sbin/nologin custos
+            --create-home --shell /usr/sbin/nologin custos && \
+    mkdir -p /var/run/custos/attempts && \
+    chown custos:custos /var/run/custos/attempts && \
+    chmod 0700 /var/run/custos/attempts
 
 RUN python -m venv /opt/custos/venv && \
     /opt/custos/venv/bin/pip install --upgrade pip==24.2

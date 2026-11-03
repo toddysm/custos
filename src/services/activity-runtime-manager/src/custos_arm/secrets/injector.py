@@ -84,6 +84,17 @@ class SecretInjector:
         self._reject_undeclared_contexts(connectors, by_slot)
         self._require_bound_connectors(connectors, by_slot)
         self._reject_empty_secrets(contexts)
+        for connector in connectors:
+            context = by_slot.get(connector.name)
+            if (
+                context is not None
+                and context.binding is not None
+                and (
+                    context.connector_type != connector.type
+                    or set(context.capabilities) != set(connector.capabilities)
+                )
+            ):
+                raise MissingConnectorError("canonical binding does not match activity authority")
 
         secret_files: list[str] = []
         for context in sorted(contexts, key=lambda c: c.slot_name):

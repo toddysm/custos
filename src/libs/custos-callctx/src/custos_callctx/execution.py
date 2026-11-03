@@ -19,6 +19,7 @@ ExecutionOperation = Literal[
     "catalog-activity-read",
     "connector-bind",
     "activity-execute",
+    "connector-credentials",
 ]
 EXECUTION_PERMISSIONS: Mapping[str, str] = MappingProxyType(
     {
@@ -28,6 +29,7 @@ EXECUTION_PERMISSIONS: Mapping[str, str] = MappingProxyType(
         "catalog-activity-read": "catalog:activity-types:read",
         "connector-bind": "connector:bind",
         "activity-execute": "workflow:execute",
+        "connector-credentials": "connector:bind",
     }
 )
 

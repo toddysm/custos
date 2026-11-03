@@ -86,12 +86,15 @@ class TmpfsMount:
 class SidecarSpec:
     """The connector sidecar injected alongside every activity container.
 
-    ``endpoint`` is the Connector Service address the sidecar dials on the
-    activity's behalf; the activity itself only ever talks to the sidecar.
+    ``endpoint`` retains legacy Connector addressing; broker mode takes its
+    HTTPS proxy origin from the private bundle instead. Activities use only UDS.
+    ``credential_broker`` selects private-bundle startup as a native sidecar,
+    whose successful startup probe gates activity execution.
     """
 
     image: str
     endpoint: str
+    credential_broker: bool = False
 
 
 @dataclass(frozen=True, slots=True)

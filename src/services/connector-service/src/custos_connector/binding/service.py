@@ -536,6 +536,35 @@ class BindForStepService:
         :class:`ConnectorInstance` so the caller can build the
         slot→instance map used by the success audit event.
         """
+        instance, connector_type = await self.credential_instance(workspace_id, slot)
+        capability_index = _capability_index(connector_type)
+        await self._emit_deprecated_capability_events(
+            workspace_id=workspace_id,
+            request=request,
+            slot=slot,
+            instance=instance,
+            capability_index=capability_index,
+        )
+        identity = await self._resolve_identity(
+            workspace_id=workspace_id,
+            request=request,
+            slot=slot,
+            instance=instance,
+        )
+        ctx = await self._invoke_plugin_bind(
+            slot=slot,
+            instance=instance,
+            connector_type=connector_type,
+            identity=identity,
+        )
+        return ctx, instance
+
+    async def credential_instance(
+        self,
+        workspace_id: str,
+        slot: BindSlotRequest,
+    ) -> tuple[ConnectorInstance, ConnectorTypeVersion]:
+        """Validate live scope, health and capabilities for binding or credential issuance."""
         instance = await self._load_instance(workspace_id, slot)
         if not instance.enabled:
             raise BindError(
@@ -557,26 +586,29 @@ class BindForStepService:
         connector_type = await self._load_connector_type(slot, instance)
         capability_index = _capability_index(connector_type)
         self._check_capability_coverage(slot, instance, capability_index)
-        await self._emit_deprecated_capability_events(
+        return instance, connector_type
+
+    async def credential_material(
+        self,
+        *,
+        workspace_id: str,
+        actor: str,
+        slot: BindSlotRequest,
+        instance: ConnectorInstance,
+    ) -> ResolvedIdentity:
+        """Resolve real provider material without reusing cached credentials across refreshes."""
+        if instance.lease_ttl_seconds is None or instance.lease_ttl_seconds <= 0:
+            raise BindError(BindErrorCode.INVALID_REQUEST, "positive instance lease TTL required")
+        return await self._identity.resolve(
             workspace_id=workspace_id,
-            request=request,
-            slot=slot,
-            instance=instance,
-            capability_index=capability_index,
+            actor=actor,
+            instance_id=str(instance.instance_id),
+            authentication_type=_authentication_type(instance, slot_name=slot.name),
+            credentials_authentication=instance.credentials_authentication,
+            lease_ttl_seconds=instance.lease_ttl_seconds,
+            force_refresh=True,
+            private_errors=True,
         )
-        identity = await self._resolve_identity(
-            workspace_id=workspace_id,
-            request=request,
-            slot=slot,
-            instance=instance,
-        )
-        ctx = await self._invoke_plugin_bind(
-            slot=slot,
-            instance=instance,
-            connector_type=connector_type,
-            identity=identity,
-        )
-        return ctx, instance
 
     # ------------------------------------------------------------------
     # Internals: per-step helpers

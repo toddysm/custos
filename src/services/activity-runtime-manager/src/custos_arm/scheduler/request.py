@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from custos_callctx.execution import ExecutionIdentity
+
 from custos_arm.contract import ConnectorRef, StepRef
 from custos_arm.limit import ResourceOverride
 from custos_arm.secrets import ConnectorContext
@@ -35,6 +37,10 @@ class ScheduleRequest:
         deadline below the manifest timeout.
     :param override: Optional per-step resource/isolation tuning.
     :param cluster_ceiling: Optional operator-policy absolute resource cap.
+    :param principal_id: Verified actor included in the immutable replay fingerprint.
+    :param execution_identity: Original stable account reference for fresh control-plane calls.
+    :param credential_proof: Runtime-generated private proof; never accepted from the RPC body
+        or persisted as plaintext.
     """
 
     workspace_id: str
@@ -47,6 +53,8 @@ class ScheduleRequest:
     override: ResourceOverride | None = None
     cluster_ceiling: ResourceOverride | None = None
     principal_id: str | None = None
+    execution_identity: ExecutionIdentity | None = None
+    credential_proof: str | None = field(default=None, repr=False, compare=False)
 
 
 __all__ = ["ScheduleRequest"]

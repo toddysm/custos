@@ -1,6 +1,86 @@
 {
   "components": {
     "schemas": {
+      "CredentialRequest": {
+        "additionalProperties": false,
+        "description": "Closed per-attempt request: authority and lifetime are exclusively server-owned.",
+        "properties": {
+          "attempt": {
+            "maximum": 2147483647.0,
+            "minimum": 1.0,
+            "title": "Attempt",
+            "type": "integer"
+          },
+          "capability": {
+            "anyOf": [
+              {
+                "maxLength": 120,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Capability"
+          },
+          "leaseId": {
+            "anyOf": [
+              {
+                "maxLength": 120,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Leaseid"
+          },
+          "operation": {
+            "enum": [
+              "issue",
+              "refresh",
+              "release"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
+          "runId": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Runid",
+            "type": "string"
+          },
+          "slot": {
+            "anyOf": [
+              {
+                "maxLength": 120,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slot"
+          },
+          "stepId": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Stepid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation",
+          "runId",
+          "stepId",
+          "attempt"
+        ],
+        "title": "CredentialRequest",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -1179,6 +1259,46 @@
         "summary": "Verify Webhook",
         "tags": [
           "webhook-verification"
+        ]
+      }
+    },
+    "/internal/v1/activity-credentials": {
+      "post": {
+        "description": "Authorize the runtime mesh hop separately from the durable account/attempt scope.",
+        "operationId": "activity_credentials_internal_v1_activity_credentials_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CredentialRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Activity Credentials",
+        "tags": [
+          "credentials"
         ]
       }
     },

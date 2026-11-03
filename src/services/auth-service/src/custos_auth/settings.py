@@ -277,6 +277,7 @@ class Settings:
     execution_caller_namespace: str = ""
     execution_trigger_app_id: str = "trigger-service"
     execution_workflow_app_id: str = "workflow-service"
+    execution_runtime_app_id: str = "activity-runtime-manager"
     execution_gateway_app_id: str = "api-gateway"
 
     def __post_init__(self) -> None:
@@ -286,6 +287,7 @@ class Settings:
         callers = (
             self.execution_trigger_app_id,
             self.execution_workflow_app_id,
+            self.execution_runtime_app_id,
             self.execution_gateway_app_id,
         )
         if self.execution_context_enabled and (
@@ -605,6 +607,9 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
             "CUSTOS_AUTH_EXECUTION_WORKFLOW_APP_ID", "workflow-service"
         ),
         execution_gateway_app_id=src.get("CUSTOS_AUTH_EXECUTION_GATEWAY_APP_ID", "api-gateway"),
+        execution_runtime_app_id=src.get(
+            "CUSTOS_AUTH_EXECUTION_RUNTIME_APP_ID", "activity-runtime-manager"
+        ),
     )
 
 

@@ -95,7 +95,10 @@ async def test_canonical_binding_is_a_private_file_not_a_lease() -> None:
     injector = SecretInjector(token_minter=SidecarTokenMinter(), lease_client=leases)
     context = BoundConnectorContextWire.model_validate(canonical_binding()).to_connector_context()
     result = await injector.inject(
-        sink=sink, step=_step(), connectors=[_connector("registry")], contexts=[context]
+        sink=sink,
+        step=_step(),
+        connectors=[_connector("registry").model_copy(update={"capabilities": ["oci.pull"]})],
+        contexts=[context],
     )
     content, mode = sink.files["secrets/registry/binding.json"]
     assert json.loads(content) == canonical_binding()["context"]
@@ -103,6 +106,22 @@ async def test_canonical_binding_is_a_private_file_not_a_lease() -> None:
     assert result.secret_files == ("secrets/registry/binding.json",)
     assert await injector.refresh_leases(contexts=[context]) == []
     assert leases.calls == []
+
+
+@pytest.mark.parametrize("changes", [{"type": "different"}, {"capabilities": ["oci.push"]}])
+async def test_canonical_context_cannot_widen_manifest_authority(
+    changes: dict[str, object],
+) -> None:
+    """Reject mismatched kind/capabilities before writing private files or bootstrap authority."""
+    sink = _FakeSink()
+    injector = SecretInjector(token_minter=SidecarTokenMinter())
+    context = BoundConnectorContextWire.model_validate(canonical_binding()).to_connector_context()
+    requirement = _connector("registry").model_copy(
+        update={"capabilities": ["oci.pull"], **changes}
+    )
+    with pytest.raises(MissingConnectorError):
+        await injector.inject(sink=sink, step=_step(), connectors=[requirement], contexts=[context])
+    assert not sink.files
 
 
 _Handler = Callable[[httpx.Request], httpx.Response]

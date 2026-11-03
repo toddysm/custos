@@ -276,6 +276,7 @@ class IdentityResolverRegistry:
         credentials_authentication: Mapping[str, Any],
         lease_ttl_seconds: int,
         force_refresh: bool = False,
+        private_errors: bool = False,
     ) -> ResolvedIdentity:
         """Resolve an identity, hitting the cache first.
 
@@ -303,6 +304,8 @@ class IdentityResolverRegistry:
             force_refresh: Perform an independent fresh read without cache reads/writes or
                 cache-miss serialization. Webhook rotation must not reuse stale material or
                 queue a burst of independent reads behind one slow upstream lookup.
+            private_errors: Audit/log only a safe error category for credential-broker calls.
+                Provider exceptions may contain private request or credential diagnostics.
 
         Raises:
             IdentityResolverError: On any resolver-side failure. The
@@ -327,6 +330,7 @@ class IdentityResolverRegistry:
                 authentication_type=authentication_type,
                 category=None,
                 error=exc,
+                private=private_errors,
             )
             raise
         descriptor_key = _descriptor_key(authentication_type, credentials_authentication)
@@ -377,6 +381,7 @@ class IdentityResolverRegistry:
                             authentication_type=authentication_type,
                             category=category,
                             error=exc,
+                            private=private_errors,
                         )
                         raise
 
@@ -399,6 +404,7 @@ class IdentityResolverRegistry:
                         authentication_type=authentication_type,
                         category=category,
                         error=category_mismatch,
+                        private=private_errors,
                     )
                     raise category_mismatch
 
@@ -538,7 +544,14 @@ class IdentityResolverRegistry:
         authentication_type: str,
         category: IdentityCategory | None,
         error: IdentityResolverError,
+        private: bool = False,
     ) -> None:
+        """Emit the existing failure taxonomy without private broker diagnostics."""
+        if private:
+            error = IdentityResolverError(
+                detail="private credential resolution failed",
+                code=error.code,
+            )
         category_value = category.value if category is not None else "unknown"
         if self._metadata_store is None:
             _LOGGER.warning(

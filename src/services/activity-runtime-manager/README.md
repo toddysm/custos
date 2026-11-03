@@ -11,9 +11,52 @@ short-lived secret leases from the Connector Service, and maps the container's
 outcome back to the locked `ActivityResultEnvelope` contract the Workflow
 Service consumes.
 
+## Scoped production activation
+
+`ARM_RUNTIME_ENABLED` defaults to `false`. Enabling it requires:
+
+- `ARM_METADATA_STORE`: the PostgreSQL DSN, provided through the deployment's
+  secret boundary; apply metadata revisions 14/15 and lease revision 2 before startup.
+  Connector's metadata/lease adapters must address the same accepted-state database.
+- `ARM_ARTIFACT_STORE=csi` and `CUSTOS_CSI_PVC_MOUNT`: an existing mounted
+  artifact directory. Unsupported providers fail explicitly.
+- The shared `CUSTOS_EXECUTION_IDENTITY_ENABLED` / `CUSTOS_EXECUTION_BINDINGS`
+  configuration. Accepted work retains its original reference.
+- Signed `ARM_AUTHZ_ENDPOINT`, Catalog/Connector Dapr invocation base URLs,
+  and `ARM_CREDENTIAL_PROXY_URL`: a private HTTPS origin exposing this runtime.
+  The Sidecar verifies TLS; a private CA must be trusted by its image or
+  supplied with `CUSTOS_SIDECAR_CA_BUNDLE` in that deployment.
+- An in-cluster Kubernetes identity authorized for activity Jobs and pod exec.
+  `ARM_STAGING_ROOT` (default `/var/run/custos/attempts`) must be a writable,
+  owner-only directory; mount writable storage there with a read-only root filesystem.
+
+The lifespan probes the real database schema/table, artifact write/read/delete,
+service readiness and Kubernetes APIs before opening admission. It never
+auto-migrates. Failure releases resources already acquired. Shutdown closes new
+admission, revokes attempt credential authority, stops and joins owned workers,
+then closes clients/pools. A disconnected HTTP caller does not orphan its worker.
+
+Each accepted attempt persists a request fingerprint, stable execution identity,
+slot authority and only a hash of its private broker proof. The actual proof and
+bootstrap verification key are delivered separately to the trusted Sidecar.
+Connector Service rechecks the live attempt and instance on every issuance,
+uses existing identity resolvers, and atomically enforces the per-attempt lease cap.
+Provider credential expiry is not replaced with the platform lease deadline.
+
+Pending or uncertain effects remain fenced after restart, deadline or failed
+termination. Neither missing Pods nor elapsed ownership time authorize another
+execution. Exact terminal results remain in durable storage; the in-process
+idempotency TTL does not delete durable receipts or grant automatic takeover.
+Disable admission before rollback; preserve revision-15 rows and use roll-forward
+recovery rather than deleting ownership to make a retry succeed.
+
+Production profile activation and full deployed certification remain gated by
+[#1017](https://github.com/toddysm/custos/issues/1017) and
+[#1018](https://github.com/toddysm/custos/issues/1018).
+
 ## Status
 
-**M1 components implemented; production startup incomplete** — the `ARM-IMPL-000-ACTIVITY-RUNTIME-MANAGER`
+**M1 components implemented; scoped production runtime is default-off** — the `ARM-IMPL-000-ACTIVITY-RUNTIME-MANAGER`
 milestone ([#591](https://github.com/toddysm/custos/issues/591)) has landed:
 the attempt state machine (resolve → limit → materialize → inject → run →
 finalize → map → persist), the OCI Container Driver (Job builder +
@@ -28,8 +71,9 @@ The production composition root and sidecar bootstrap alignment are tracked by
 [#1038](https://github.com/toddysm/custos/issues/1038). An unwired scheduler now
 keeps `/readyz` at **503**, including in development; `/healthz` remains **200**.
 A supplied scheduler can open the lifespan gate, but readiness closes again if
-that scheduler is lost or shutdown begins. Dependency probes and full resource
-assembly are still required before production activation. Do not force the
+that scheduler is lost or shutdown begins. The production resource graph is
+explicitly enabled with `ARM_RUNTIME_ENABLED=true`; it requires revision 15,
+real storage, signed execution identity and private credential transport. Do not force the
 readiness flag or install test doubles to bypass an incomplete deployment.
 
 The bootstrap issuer now uses the sidecar's shared version-one signed format.
@@ -39,7 +83,7 @@ ordinary input tree and the verification key into a separate private staging
 tree. The OCI input bridge transfers the private archive before releasing the
 activity, and `/custos/sidecar` is mounted only by that trusted bridge and the
 sidecar, never by the activity or output collector. This is not a claim that
-the default production resource graph is complete or that in-memory execution
+deployed transport certification is complete or that in-memory execution
 tracking provides durable restart ownership.
 The new optional revision-15 activity store persists pending ownership and exact
 terminal results. Unknown owners and changed request fingerprints fail closed;
@@ -183,6 +227,7 @@ this directory:
 ```bash
 pip install -e ../../libs/custos-callctx[dev]
 pip install -e ../../libs/storage-provider-layer[dev]
+pip install -e ../../libs/custos-postgres -e ../../libs/custos-csi
 pip install -e ../connector-sidecar
 pip install -e ".[dev]"
 

@@ -161,6 +161,11 @@ class ScheduleActivityWire(BaseModel):
         return ScheduleRequest(
             workspace_id=workspace_id,
             principal_id=principal_id,
+            execution_identity=(
+                ExecutionIdentity.from_dict(self.execution_identity)
+                if self.execution_identity is not None
+                else None
+            ),
             step=step,
             activity_ref=self.activity_ref,
             inputs=self.inputs,

@@ -83,4 +83,16 @@ LEASE_REV1 = Revision(
 )
 
 
-__all__ = ["LEASE_REV1"]
+LEASE_REV2 = Revision(
+    number=2,
+    statements=(
+        "DROP INDEX IF EXISTS lease.lease_by_step_attempt",
+        # Bound index width only; authorization queries still compare exact coordinates.
+        "CREATE INDEX lease_by_step_attempt ON lease.lease "
+        "(workspace_id, md5(run_id), md5(step_id), attempt, expires_at) "
+        "WHERE released_at IS NULL",
+    ),
+)
+
+
+__all__ = ["LEASE_REV1", "LEASE_REV2"]

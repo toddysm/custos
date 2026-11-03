@@ -725,6 +725,7 @@ METADATA_REV15 = Revision(
         CREATE TABLE IF NOT EXISTS custos_state.activity_execution (
             workspace_id TEXT NOT NULL,
             execution_key TEXT NOT NULL,
+            step_key TEXT NOT NULL CHECK (step_key ~ '^[a-f0-9]{64}$'),
             run_id TEXT NOT NULL,
             step_id TEXT NOT NULL,
             attempt INTEGER NOT NULL CHECK (attempt > 0),
@@ -734,15 +735,16 @@ METADATA_REV15 = Revision(
                 jsonb_typeof(snapshot)='object' AND octet_length(snapshot::text) <= 33554432
             ),
             completed BOOLEAN NOT NULL DEFAULT FALSE,
+            authority_revoked BOOLEAN NOT NULL DEFAULT FALSE,
             created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
             PRIMARY KEY (workspace_id, execution_key)
         )
         """,
         "CREATE INDEX IF NOT EXISTS activity_execution_step "
-        "ON custos_state.activity_execution(workspace_id, run_id, step_id, attempt)",
+        "ON custos_state.activity_execution(workspace_id, step_key, attempt)",
         "CREATE UNIQUE INDEX IF NOT EXISTS activity_execution_live_step "
-        "ON custos_state.activity_execution(workspace_id, run_id, step_id) WHERE NOT completed",
+        "ON custos_state.activity_execution(workspace_id, step_key) WHERE NOT completed",
     ),
 )
 

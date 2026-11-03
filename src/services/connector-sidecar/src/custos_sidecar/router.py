@@ -114,6 +114,8 @@ def _verify_bootstrap(
     problem document.
     """
     verifier: BootstrapTokenVerifier = request.app.state.bootstrap_verifier
+    if len(request.headers.getlist(BOOTSTRAP_HEADER)) != 1:
+        raise SidecarError(SidecarErrorCode.BOOTSTRAP_INVALID, "one bootstrap token is required")
     verifier.verify(custos_sidecar_token)
 
 
