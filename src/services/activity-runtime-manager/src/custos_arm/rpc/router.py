@@ -64,15 +64,23 @@ def get_scheduler(request: Request) -> ActivityScheduler:
     retry rather than observe a 500.
     """
     scheduler = getattr(request.app.state, "scheduler", None)
-    if getattr(request.app.state, "runtime_managed", False) and (
-        not request.app.state.ready or not request.app.state.dependencies_ready
-    ):
-        raise HTTPException(503, "activity runtime admission is closed")
     if not isinstance(scheduler, ActivityScheduler):
         raise HTTPException(
             status_code=503,
             detail="activity scheduler is not ready",
         )
+    return scheduler
+
+
+def get_admitted_scheduler(
+    request: Request,
+    scheduler: Annotated[ActivityScheduler, Depends(get_scheduler)],
+) -> ActivityScheduler:
+    """Gate only new scheduling; authorized cancellation must still reach its safety checks."""
+    if getattr(request.app.state, "runtime_managed", False) and (
+        not request.app.state.ready or not request.app.state.dependencies_ready
+    ):
+        raise HTTPException(503, "activity runtime admission is closed")
     return scheduler
 
 
@@ -90,6 +98,7 @@ def require_execution_permission(
 
 CallContextDep = Annotated[CallContext, Depends(require_execution_permission)]
 SchedulerDep = Annotated[ActivityScheduler, Depends(get_scheduler)]
+AdmittedSchedulerDep = Annotated[ActivityScheduler, Depends(get_admitted_scheduler)]
 
 
 @router.post("/ScheduleActivity", include_in_schema=False)
@@ -97,7 +106,7 @@ async def schedule_activity(
     request: Request,
     body: ScheduleActivityWire,
     call_context: CallContextDep,
-    scheduler: SchedulerDep,
+    scheduler: AdmittedSchedulerDep,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> JSONResponse:
     """Dispatch a ``ScheduleActivity`` request and return the result envelope.

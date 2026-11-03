@@ -81,6 +81,42 @@ def _body(**overrides: Any) -> dict[str, Any]:
     return base
 
 
+@pytest.mark.parametrize("ready,dependencies_ready", [(True, False), (False, True), (False, False)])
+@pytest.mark.parametrize("authorized", [True, False])
+def test_cancellation_ignores_admission_but_keeps_authorization(
+    ready: bool,
+    dependencies_ready: bool,
+    authorized: bool,
+) -> None:
+    """Unrelated dependency loss closes new admission, not authorized safety operations."""
+    scheduler = _RecordingScheduler(result=_success_envelope())
+    app = FastAPI()
+    app.include_router(router)
+    app.state.scheduler = scheduler
+    app.state.runtime_managed = True
+    app.state.ready, app.state.dependencies_ready = ready, dependencies_ready
+
+    def verified_context(request: Request) -> CallContext:
+        """Isolate real route admission/authorization from signature verification tested below."""
+        request.state.signed_call_context = True
+        return CallContext(
+            workspace_id="ws-1",
+            principal_id="p-1",
+            permissions=frozenset(
+                {"workflow:execute"} if authorized else {"catalog:workflows:read"}
+            ),
+        )
+
+    app.dependency_overrides[get_call_context] = verified_context
+    with TestClient(app) as client:
+        scheduled = client.post("/ScheduleActivity", json=_body())
+        cancelled = client.post("/CancelActivity", json={"runId": "run-1", "stepId": "step-1"})
+    assert scheduled.status_code == (503 if authorized else 403)
+    assert cancelled.status_code == (204 if authorized else 403)
+    assert not scheduler.scheduled
+    assert scheduler.cancelled == ([("ws-1", "run-1", "step-1")] if authorized else [])
+
+
 @pytest.mark.parametrize("operation", ["catalog-read", "activity-execute"])
 @pytest.mark.parametrize("method", ["ScheduleActivity", "CancelActivity"])
 def test_execution_provenance_cannot_opt_out_with_a_legacy_body(

@@ -43,6 +43,9 @@ Probe streams have elapsed-time budgets, and blocking Kubernetes probes are
 joined before their API client can close. Failed credential revocation defers
 the stop request while retaining/joining workers; shutdown cancellation cannot
 close clients under those workers.
+Readiness gates new scheduling only. Authorized cancellation remains available
+when unrelated Catalog/CSI probes fail, while still requiring execution permission
+and durable credential revocation before stopping a sandbox.
 
 Each accepted attempt persists a request fingerprint, stable execution identity,
 slot authority and only a hash of its private broker proof. The actual proof and
