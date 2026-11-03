@@ -31,6 +31,7 @@ classifiers = [
 #
 #   pip install -e src/libs/storage-provider-layer[dev]
 #   pip install -e src/libs/custos-postgres[dev]
+#   pip install -e src/libs/custos-callctx
 #   pip install -e src/services/auth-service
 #   pip install -e src/jobs/bootstrap[dev]
 dependencies = [
