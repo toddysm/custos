@@ -23,7 +23,7 @@ from custos_workflow.runtime.dapr_activities import _serialize_activity_result_e
 
 
 @pytest.mark.parametrize("kind", ["binding", "activity", "catalog"])
-@pytest.mark.parametrize("failure", ["transport", "status"])
+@pytest.mark.parametrize("failure", ["transport", "status", "json", "schema"])
 async def test_execution_failures_do_not_serialize_transient_authority(
     kind: str, failure: str, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -60,6 +60,24 @@ async def test_execution_failures_do_not_serialize_transient_authority(
         assert credential.encode() not in request.content
         if failure == "transport":
             raise httpx.ConnectError(token + credential, request=request)
+        if failure == "json":
+            return httpx.Response(200, text=token + credential)
+        if failure == "schema":
+            if kind == "activity":
+                return httpx.Response(
+                    200, json={"class": token + credential, "attempt": 1, "outputs": {}}
+                )
+            if kind == "catalog":
+                return httpx.Response(
+                    200,
+                    json={
+                        "workspaceId": "ws",
+                        "workflowName": "flow",
+                        "version": 1,
+                        "document": {"steps": token + credential},
+                    },
+                )
+            return httpx.Response(200, json={"schemaVersion": "2", "contexts": token + credential})
         return httpx.Response(503, text=token + credential)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
@@ -81,7 +99,9 @@ async def test_execution_failures_do_not_serialize_transient_authority(
                     execution_identity=identity,
                 )
             )
-            assert envelope.class_ == "retryable"
+            assert envelope.class_ == (
+                "retryable" if failure in {"transport", "status"} else "permanent"
+            )
             serialized = json.dumps(_serialize_activity_result_envelope(envelope))
         else:
             with pytest.raises(OutboundRpcError) as failed:

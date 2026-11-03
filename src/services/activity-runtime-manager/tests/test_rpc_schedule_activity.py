@@ -8,10 +8,13 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from custos_arm import create_app
 from custos_arm.config import Settings
+from custos_arm.middleware import CallContext, get_call_context
 from custos_arm.result import ActivityResultEnvelope
+from custos_arm.rpc.router import router
 from custos_arm.scheduler import ActivityScheduler, CancelOutcome, ScheduleRequest
 from tests.test_rpc_models import canonical_binding
 
@@ -71,6 +74,31 @@ def _body(**overrides: Any) -> dict[str, Any]:
     }
     base.update(overrides)
     return base
+
+
+@pytest.mark.parametrize("operation", ["catalog-read", "activity-execute"])
+def test_execution_provenance_cannot_opt_out_with_a_legacy_body(operation: str) -> None:
+    """Verified execution contexts always require their pinned identity before dispatch."""
+    scheduler = _RecordingScheduler(result=_success_envelope())
+    app = FastAPI()
+    app.include_router(router)
+    app.state.scheduler = scheduler
+
+    def verified_context(request: Request) -> CallContext:
+        """Supply the verified middleware result to isolate the receiving-route guard."""
+        request.state.signed_call_context = True
+        return CallContext(
+            workspace_id="ws-1",
+            principal_id="p-1",
+            permissions=frozenset({"catalog:workflows:read", "workflow:execute"}),
+            execution_operation=operation,
+        )
+
+    app.dependency_overrides[get_call_context] = verified_context
+    with TestClient(app) as client:
+        response = client.post("/ScheduleActivity", json=_body(connectorContexts={}))
+    assert response.status_code == 403
+    assert not scheduler.scheduled
 
 
 def test_schedule_activity_dispatches_and_returns_envelope(settings: Settings) -> None:

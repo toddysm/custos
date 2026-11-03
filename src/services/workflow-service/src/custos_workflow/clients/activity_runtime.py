@@ -553,6 +553,7 @@ class DaprActivityRuntimeClient:
         from custos_workflow._telemetry import observe_outbound_rpc
         from custos_workflow.clients._errors import (
             OutboundRpcCancelledError,
+            OutboundRpcDecodeError,
             OutboundRpcError,
             OutboundRpcStatusError,
             OutboundRpcTransportError,
@@ -636,8 +637,6 @@ class DaprActivityRuntimeClient:
                     # ``ValueError`` covers both
                     # :class:`json.JSONDecodeError` and any
                     # httpx-internal decoding failure.
-                    from custos_workflow.clients._errors import OutboundRpcDecodeError
-
                     if request.execution_identity is not None:
                         raise OutboundRpcDecodeError(
                             "invalid execution activity response"
@@ -646,7 +645,14 @@ class DaprActivityRuntimeClient:
                         f"Dapr ScheduleActivity response is not valid JSON: {exc!r}"
                     ) from exc
 
-                return _envelope_from_wire(body, expected_attempt=request.attempt)
+                try:
+                    return _envelope_from_wire(body, expected_attempt=request.attempt)
+                except OutboundRpcDecodeError:
+                    if request.execution_identity is not None:
+                        raise OutboundRpcDecodeError(
+                            "invalid execution activity response"
+                        ) from None
+                    raise
         except OutboundRpcError as exc:
             return map_to_activity_envelope(exc, attempt=request.attempt)
 

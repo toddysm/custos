@@ -38,7 +38,7 @@ import asyncio
 import logging
 import os
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import TYPE_CHECKING
 
 from custos_callctx import CallContextVerifier
@@ -180,6 +180,11 @@ def create_app(
         app.state.ready_detail = "workflow-service has not finished startup"
         components, metadata_pool, metadata_detail = await _resolve_run_components(run_components)
         if execution_registry is not None:
+            if run_components is None and (metadata_pool is None or metadata_detail is not None):
+                await _shutdown_components(components, metadata_pool, worker_shutdown_timeout_s)
+                raise WorkflowRuntimeUnavailableError(
+                    "execution identity requires an opened durable metadata backend"
+                )
             store = components.metadata_store
             if not isinstance(store, ExecutionIdentityStoreProvider):
                 await _shutdown_components(components, metadata_pool, worker_shutdown_timeout_s)
@@ -463,7 +468,9 @@ async def _resolve_run_components(
     WF-IMPL-115 additionally opens the durable
     :class:`~custos_spl.interfaces.metadata_store.MetadataStoreProvider`
     here (env-driven path only) and threads it onto the bundle so the
-    durable Run / idempotency sub-modules share one provider.
+    durable Run / idempotency sub-modules share one provider. A construction
+    failure closes the opened pool; successful construction transfers it to
+    the lifespan, which rejects fallback storage when execution is enabled.
     """
     if injected is not None:
         return injected, None, None
@@ -487,7 +494,11 @@ async def _resolve_run_components(
     # ``production`` deployment fails fast inside ``open_metadata_store``
     # (it never returns the in-memory provider in production).
     metadata_store, metadata_pool, metadata_detail = await open_metadata_store(os.environ)
-    components = load_run_components(metadata_store=metadata_store)
+    async with AsyncExitStack() as cleanup:
+        if metadata_pool is not None:
+            cleanup.push_async_callback(metadata_pool.aclose)
+        components = load_run_components(metadata_store=metadata_store)
+        cleanup.pop_all()
     return components, metadata_pool, metadata_detail
 
 

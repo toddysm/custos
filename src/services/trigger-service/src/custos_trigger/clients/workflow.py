@@ -322,17 +322,22 @@ class DaprWorkflowServiceClient:
     execution_context: ExecutionContextClient | None = field(default=None, repr=False)
 
     async def start_run(self, request: StartRunRequest) -> RunRef:
+        """Decode a run reference without retaining private execution-mode diagnostics."""
         url = build_invoke_url(self.endpoint, START_RUN_METHOD)
         response = await self._post(url, request, what="StartRun")
         try:
             body = response.json()
         except ValueError as exc:
+            if request.execution_identity is not None:
+                raise WorkflowClientDecodeError("invalid execution StartRun response") from None
             raise WorkflowClientDecodeError(
                 f"StartRun response was not valid JSON: {exc!r}"
             ) from exc
         try:
             return RunRef.model_validate(body)
         except ValueError as exc:
+            if request.execution_identity is not None:
+                raise WorkflowClientDecodeError("invalid execution StartRun response") from None
             raise WorkflowClientDecodeError(
                 f"StartRun response did not match RunRef: {exc!r}"
             ) from exc
@@ -367,6 +372,7 @@ class DaprWorkflowServiceClient:
     async def _post(
         self, url: str, request: StartRunRequest | RaiseExternalEventRequest, *, what: str
     ) -> httpx.Response:
+        """Send fresh authority and sanitize execution failures before returning to API callers."""
         wire = request.model_dump(
             by_alias=True,
             mode="json",
@@ -408,10 +414,17 @@ class DaprWorkflowServiceClient:
                 url, json=wire, timeout=self.timeout, headers=headers
             )
         except httpx.HTTPError as exc:
+            if request.execution_identity is not None:
+                raise WorkflowClientTransportError(f"execution {what} transport failed") from None
             raise WorkflowClientTransportError(f"{what} transport failure: {exc!r}") from exc
         if response.status_code // 100 != 2:
             if request.delivery_protocol == 2 and response.status_code == 409:
                 raise WorkflowClientReplayUnsafeError()
+            if request.execution_identity is not None:
+                raise WorkflowClientStatusError(
+                    f"execution {what} returned HTTP {response.status_code}",
+                    status_code=response.status_code,
+                )
             preview = response.text[:200] if response.text else ""
             raise WorkflowClientStatusError(
                 f"{what} returned HTTP {response.status_code}: {preview!r}",

@@ -88,12 +88,17 @@ async def schedule_activity(
 
     The workspace is taken from the verified call context, never the body. The
     ``Idempotency-Key`` header (``runId|stepId|attempt``) must agree with the
-    body when present; the Scheduler performs the actual dedup.
+    body when present; the Scheduler performs the actual dedup. Execution
+    provenance always requires the pinned identity, even with no connector slots.
     """
-    if body.execution_identity is None and any(
-        isinstance(value, BoundConnectorContextWire) for value in body.connector_contexts.values()
+    if body.execution_identity is None and (
+        call_context.execution_operation is not None
+        or any(
+            isinstance(value, BoundConnectorContextWire)
+            for value in body.connector_contexts.values()
+        )
     ):
-        raise HTTPException(403, "execution identity is required for canonical bindings")
+        raise HTTPException(403, "execution identity is required for scoped scheduling")
     if body.execution_identity is not None:
         identity = ExecutionIdentity.from_dict(body.execution_identity)
         if (

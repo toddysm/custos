@@ -447,8 +447,13 @@ class DaprCatalogClient:
                 f"Dapr GetWorkflowVersion response is not valid JSON: {exc!r}"
             ) from exc
 
-        return _parse_workflow_version_response(
-            body,
-            workspace_id=workspace_id,
-            workflow_version_id=workflow_version_id,
-        )
+        try:
+            return _parse_workflow_version_response(
+                body,
+                workspace_id=workspace_id,
+                workflow_version_id=workflow_version_id,
+            )
+        except OutboundRpcDecodeError:
+            if execution:
+                raise OutboundRpcDecodeError("invalid execution Catalog response") from None
+            raise
