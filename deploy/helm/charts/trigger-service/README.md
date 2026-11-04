@@ -118,9 +118,12 @@ the chart's legacy minimum remains unchanged when receiver mode is off.
    collector, registry and other required external services, and explicit
    Kubernetes API endpoint CIDRs/ports. Hook/activity upstream egress remains
    separately allow-listed.
-   Set `global.networkPolicies.monitoringNamespace` to the actual Prometheus
-   namespace; the prerequisite installer uses `custos-system`. An out-of-band
-   Prometheus in another namespace must discover the controller namespace.
+   `global.networkPolicies.monitoringNamespace` defaults to `custos-system`,
+   matching the prerequisite installer. Override it explicitly for a separate
+   monitoring namespace (including deployments previously relying on `monitoring`).
+   Co-located Prometheus gets DNS, Kubernetes discovery and metrics egress through
+   the managed deny-all policy; external Prometheus retains its own egress policy
+   and must discover the actual controller namespace.
 
 Production mode creates namespace-scoped caller allowlists, protected broker
 topics, and reference-scoped execution Secret readers. Remote pods cannot reach

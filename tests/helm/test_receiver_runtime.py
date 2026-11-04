@@ -90,6 +90,7 @@ def render(
     values: dict[str, Any],
     *,
     kube_version: str | None = None,
+    namespace: str = "controllers",
 ) -> subprocess.CompletedProcess[str]:
     """Render the real chart with a namespace distinct from sandbox and hook execution."""
     command = [
@@ -98,7 +99,7 @@ def render(
         "custos",
         str(CHART),
         "--namespace",
-        "controllers",
+        namespace,
         "-f",
         str(CHART / f"values-{profile}.yaml"),
         "-f",
@@ -526,3 +527,53 @@ def test_static_and_operator_scrapes_select_only_the_metrics_listener() -> None:
         pattern = jobs[0]["relabel_configs"][0]["regex"]
         assert re.fullmatch(pattern, "metrics") and re.fullmatch(pattern, "http")
         assert not re.fullmatch(pattern, "https")
+
+
+@pytest.mark.parametrize("monitoring_namespace", [None, "separate-monitoring"])
+def test_installed_prometheus_namespace_and_discovery_egress(
+    monitoring_namespace: str | None,
+) -> None:
+    """The supplied installation works under deny-all; explicit external monitoring stays supported."""
+    values = enabled_values()
+    if monitoring_namespace is not None:
+        values["global"]["networkPolicies"]["monitoringNamespace"] = (
+            monitoring_namespace
+        )
+    result = render("connected-ha", values, namespace="custos-system")
+    assert result.returncode == 0, result.stderr
+    documents = [value for value in yaml.safe_load_all(result.stdout) if value]
+    policies = {
+        value["metadata"]["name"]: value
+        for value in documents
+        if value["kind"] == "NetworkPolicy"
+    }
+    source = monitoring_namespace or "custos-system"
+    ingress = policies["custos-receivers-activity-runtime-manager"]["spec"]["ingress"]
+    scrape = next(
+        rule for rule in ingress if rule["ports"] == [{"protocol": "TCP", "port": 8090}]
+    )
+    assert scrape["from"] == [
+        {
+            "namespaceSelector": {
+                "matchLabels": {
+                    "kubernetes.io/metadata.name": source,
+                }
+            }
+        }
+    ]
+    monitor = policies.get("custos-receivers-prometheus")
+    if monitoring_namespace is not None:
+        assert monitor is None
+        return
+    assert monitor is not None
+    spec = monitor["spec"]
+    assert spec["podSelector"]["matchLabels"] == {
+        "app.kubernetes.io/name": "prometheus",
+        "app.kubernetes.io/component": "server",
+    }
+    assert spec["policyTypes"] == ["Egress"]
+    assert spec["egress"][1]["to"] == [{"ipBlock": {"cidr": "10.96.0.1/32"}}]
+    assert spec["egress"][2]["ports"] == [
+        {"protocol": "TCP", "port": 8080},
+        {"protocol": "TCP", "port": 8090},
+    ]

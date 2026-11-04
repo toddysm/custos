@@ -74,8 +74,8 @@ global:
   # on once they are validated for the target cluster's namespace layout.
   networkPolicies:
     enabled: false
-    # Namespace (by `kubernetes.io/metadata.name`) Prometheus scrapes from.
-    monitoringNamespace: monitoring
+    # Matches scripts/install-prereqs.sh; override for a separate monitoring namespace.
+    monitoringNamespace: custos-system
     # Namespace the Envoy Gateway data plane runs in (north-south ingress).
     gatewayNamespace: custos-system
     # Cluster DNS namespace (egress on 53 is always required).
