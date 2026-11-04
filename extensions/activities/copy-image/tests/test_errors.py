@@ -100,6 +100,11 @@ def test_end_to_end_mapping_through_main(monkeypatch: pytest.MonkeyPatch, tmp_pa
     monkeypatch.setenv("CUSTOS_IO_ROOT", str(tmp_path))
 
     def runner(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        """Inspect the real private auth file before simulating a copy failure."""
+        authfile = Path(argv[argv.index("--authfile") + 1])
+        assert authfile.is_file()
+        assert authfile.parent.parent == tmp_path / "run"
+        assert authfile.stat().st_mode & 0o777 == 0o600
         return subprocess.CompletedProcess(argv, 1, "", "Error reading manifest: manifest unknown")
 
     monkeypatch.setattr("copy_image.copy.subprocess.run", runner)
@@ -107,3 +112,4 @@ def test_end_to_end_mapping_through_main(monkeypatch: pytest.MonkeyPatch, tmp_pa
     out = json.loads((tmp_path / "out" / "outputs.json").read_text())
     assert out["error"]["code"] == "source.not_found"
     assert out["error"]["class"] == "permanent"
+    assert list((tmp_path / "run").iterdir()) == []

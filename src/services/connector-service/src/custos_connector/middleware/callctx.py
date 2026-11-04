@@ -132,6 +132,8 @@ class CallContext(BaseModel):
     permissions: frozenset[str] = Field(default_factory=frozenset)
     issued_at: int | None = Field(default=None, alias="iat")
     expires_at: int | None = Field(default=None, alias="exp")
+    execution_operation: str | None = None
+    caller_component: str | None = None
 
     def has_permission(self, name: str) -> bool:
         return name in self.permissions
@@ -269,7 +271,10 @@ class CallContextMiddleware(BaseHTTPMiddleware):
                 permissions=verified.permissions,
                 iat=verified.issued_at,
                 exp=verified.expires_at,
+                execution_operation=verified.execution_operation,
+                caller_component=verified.caller_component,
             )
+            request.state.signed_call_context = True
             return await call_next(request)
 
         try:

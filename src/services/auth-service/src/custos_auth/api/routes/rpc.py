@@ -40,6 +40,7 @@ overhead). External components rely on the JWKS endpoint plus the
 
 from __future__ import annotations
 
+import logging
 from typing import Annotated, Any
 
 import jwt
@@ -55,6 +56,7 @@ from custos_auth.api.dependencies import (
     get_authn_cache,
     get_authz_cache,
     get_metadata_store,
+    get_settings,
 )
 from custos_auth.api.errors import Unauthenticated
 from custos_auth.api.models import (
@@ -74,8 +76,10 @@ from custos_auth.callctx_signer import (
     ISSUER,
     CallContextSigner,
 )
+from custos_auth.settings import Settings
 
 router = APIRouter(prefix="/rpc", tags=["rpc"])
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -377,7 +381,7 @@ class CallctxSignRpcResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    token: str
+    token: str = Field(repr=False)
     kid: str
     jti: str
     iat: int
@@ -390,17 +394,36 @@ class CallctxSignRpcResponse(BaseModel):
     status_code=status.HTTP_200_OK,
 )
 async def callctx_sign(
+    request: Request,
     body: CallctxSignRpcRequest,
     signer: Annotated[CallContextSigner, Depends(get_call_context_signer)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> CallctxSignRpcResponse:
     """Internal RPC: mint a signed call-context JWT.
 
-    TODO(M2): pin this method to a ``callctx:sign`` permission and
-    enforce it via the permission registry (currently the bypass
-    list lets any bootstrapped caller invoke it, which mirrors the
-    M1 trust assumption that only the API Gateway is wired into the
-    cluster as a caller of this RPC).
+    Execution-enabled deployments restrict the legacy assertion-based
+    contract to the authenticated Gateway. Background execution uses the
+    credential-backed exchange instead. Disabled deployments retain the
+    original M1 Gateway trust assumption for compatibility.
     """
+    if settings.execution_context_enabled:
+        from custos_callctx.mesh import MeshAuthenticationError, require_service_caller
+
+        from custos_auth.middleware.callctx import CallContextError
+
+        try:
+            require_service_caller(
+                request.headers,
+                token=settings.app_api_token,
+                app_id=settings.execution_gateway_app_id,
+                namespace=settings.execution_caller_namespace,
+            )
+        except MeshAuthenticationError as exc:
+            logger.warning("Legacy signing caller rejected: %s", exc.code)
+            raise CallContextError(exc.status_code, exc.code, exc.detail) from None
+        if body.caller_component != settings.execution_gateway_app_id:
+            logger.warning("Legacy signing caller assertion rejected")
+            raise CallContextError(403, "mesh_caller_denied", "Gateway caller identity required")
     with telemetry.observe_operation(telemetry.OP_RPC_CALLCTX_SIGN):
         signed = await signer.sign(
             principal_id=body.principal_id,

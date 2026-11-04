@@ -37,6 +37,7 @@ Design references:
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -44,6 +45,8 @@ from types import MappingProxyType
 from typing import Any, Final, Protocol, runtime_checkable
 
 import httpx
+from custos_callctx.execution import ExecutionIdentity
+from custos_callctx.execution_client import ExecutionAuthorizationError, ExecutionContextClient
 
 from custos_workflow.clients._dapr_invoke import (
     DEFAULT_OUTBOUND_RPC_TIMEOUT_SECONDS,
@@ -67,7 +70,7 @@ __all__ = [
 #: Dapr Service-Invocation ``method`` name for Connector Service's
 #: ``BindForStep`` RPC. Pinned here so the adapter and any
 #: smoke-test fixture key off the same constant.
-BIND_FOR_STEP_DAPR_METHOD: Final[str] = "BindForStep"
+BIND_FOR_STEP_DAPR_METHOD: Final[str] = "internal/v1/bind-for-step"
 
 #: HTTP status code the Dapr sidecar surfaces when an upstream
 #: cancelled the request (nginx-style ``client-closed-request``).
@@ -97,9 +100,9 @@ class SlotSpec:
     :attr:`capabilities` is stored as a ``tuple`` (not a ``list``
     or ``set``) so the whole spec is hashable and the caller can
     stash it in a cache key without copying. Order is preserved
-    so test assertions can pin it. An empty tuple is valid — it
-    means *bind without an explicit capability check*; the
-    connector adapter still enforces its own.
+    so test assertions can pin it. An empty tuple is retained for legacy
+    injected adapters; the real Connector requires explicit capabilities.
+    ``connector_kind`` optionally pins the kind from the activity manifest.
 
     :raises ValueError: If :attr:`name` or :attr:`connector_ref`
         is empty.
@@ -108,6 +111,7 @@ class SlotSpec:
     name: str
     connector_ref: str
     capabilities: tuple[str, ...] = ()
+    connector_kind: str | None = None
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -168,6 +172,73 @@ class ConnectorContext:
 
 
 @dataclass(frozen=True, slots=True)
+class BoundConnectorContext:
+    """Lossless version-two binding without invented lease identifiers or expiry times."""
+
+    slot_name: str
+    connector_instance_id: str
+    connector_kind: str
+    capabilities: tuple[str, ...]
+    context_json: str = field(repr=False)
+
+    @classmethod
+    def from_wire(cls, value: Mapping[str, Any]) -> BoundConnectorContext:
+        """Validate authoritative metadata while keeping opaque context data structurally intact."""
+        if set(value) - {"schemaVersion"} != {
+            "slotName",
+            "connectorInstanceId",
+            "connectorKind",
+            "capabilities",
+            "context",
+        }:
+            raise ValueError("invalid binding descriptor")
+        if value.get("schemaVersion", "2") != "2":
+            raise ValueError("unsupported binding descriptor version")
+        for key in ("slotName", "connectorInstanceId", "connectorKind"):
+            if not isinstance(value[key], str) or not value[key]:
+                raise ValueError("binding metadata must contain nonempty identifiers")
+        capabilities, context = value["capabilities"], value["context"]
+        if not isinstance(capabilities, list) or not all(
+            isinstance(item, str) and item for item in capabilities
+        ):
+            raise ValueError("invalid bound capabilities")
+        if (
+            not isinstance(context, Mapping)
+            or set(context) != {"endpoint", "tokenTypeHint", "handle", "extras"}
+            or not isinstance(context["endpoint"], str)
+            or not context["endpoint"]
+            or not isinstance(context["handle"], Mapping)
+            or not isinstance(context["extras"], Mapping)
+            or (
+                context["tokenTypeHint"] is not None
+                and not isinstance(context["tokenTypeHint"], str)
+            )
+        ):
+            raise ValueError("invalid opaque binding context")
+        encoded = json.dumps(dict(context), sort_keys=True, separators=(",", ":"), allow_nan=False)
+        if len(encoded.encode()) > 4 * 1024 * 1024:
+            raise ValueError("binding context exceeds its size bound")
+        return cls(
+            value["slotName"],
+            value["connectorInstanceId"],
+            value["connectorKind"],
+            tuple(capabilities),
+            encoded,
+        )
+
+    def to_wire(self) -> dict[str, Any]:
+        """Return a fresh JSON object, not a string-coerced opaque handle."""
+        return {
+            "schemaVersion": "2",
+            "slotName": self.slot_name,
+            "connectorInstanceId": self.connector_instance_id,
+            "connectorKind": self.connector_kind,
+            "capabilities": list(self.capabilities),
+            "context": json.loads(self.context_json),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class BindForStepRequest:
     """Frozen request envelope passed to :meth:`ConnectorClient.bind_for_step`.
 
@@ -183,10 +254,21 @@ class BindForStepRequest:
 
     step_key: str
     slots: tuple[SlotSpec, ...]
+    run_id: str | None = None
+    step_id: str | None = None
+    attempt: int | None = None
+    execution_identity: ExecutionIdentity | None = None
 
     def __post_init__(self) -> None:
         if not self.step_key:
             raise ValueError("BindForStepRequest.step_key must be a non-empty string")
+        has_coordinates = any(
+            value is not None for value in (self.run_id, self.step_id, self.attempt)
+        )
+        if (self.execution_identity is not None or has_coordinates) and (
+            not self.run_id or not self.step_id or type(self.attempt) is not int or self.attempt < 1
+        ):
+            raise ValueError("binding requires actual run, step and positive attempt coordinates")
         seen: set[str] = set()
         for spec in self.slots:
             if spec.name in seen:
@@ -219,7 +301,7 @@ class BindForStepResponse:
         mapping key.
     """
 
-    contexts: Mapping[str, ConnectorContext]
+    contexts: Mapping[str, ConnectorContext | BoundConnectorContext]
 
     def __post_init__(self) -> None:
         # Validate slot_name ↔ key alignment first so the error
@@ -364,13 +446,19 @@ def _request_to_wire(request: BindForStepRequest) -> Mapping[str, Any]:
     so Connector Service's audit log reflects exactly what the
     Step Coordinator declared.
     """
+    if request.run_id is None or request.step_id is None or request.attempt is None:
+        raise ValueError("binding requires execution coordinates")
     return {
+        "runId": request.run_id,
+        "stepId": request.step_id,
+        "attempt": request.attempt,
+        **({"contextVersion": 2} if request.execution_identity is not None else {}),
         "stepKey": request.step_key,
         "slots": [
             {
                 "name": spec.name,
-                "connectorRef": spec.connector_ref,
-                "capabilities": list(spec.capabilities),
+                "instanceId": spec.connector_ref,
+                "requiredCapabilities": list(spec.capabilities),
             }
             for spec in request.slots
         ],
@@ -429,6 +517,22 @@ def _response_from_wire(body: Any) -> BindForStepResponse:
     # close a circular ring.
     from custos_workflow.clients._errors import OutboundRpcDecodeError
 
+    if isinstance(body, Mapping) and body.get("schemaVersion") == "2":
+        contexts = body.get("contexts")
+        if not isinstance(contexts, Mapping):
+            raise OutboundRpcDecodeError("binding response requires named contexts")
+        try:
+            rebuilt_v2 = {}
+            for name, value in contexts.items():
+                if not isinstance(value, Mapping):
+                    raise ValueError("binding context must be an object")
+                context = BoundConnectorContext.from_wire(value)
+                if context.slot_name != name:
+                    raise ValueError("binding slot does not match response key")
+                rebuilt_v2[name] = context
+            return BindForStepResponse(rebuilt_v2)
+        except (ValueError, TypeError, RecursionError):
+            raise OutboundRpcDecodeError("invalid version-two binding response") from None
     if not isinstance(body, Mapping):
         raise OutboundRpcDecodeError(
             f"Connector BindForStep response body must be a JSON object, got {type(body).__name__}"
@@ -538,6 +642,7 @@ class DaprConnectorClient:
     http_client: httpx.AsyncClient
     endpoint: DaprInvokeEndpoint
     timeout: float = DEFAULT_OUTBOUND_RPC_TIMEOUT_SECONDS
+    execution_context: ExecutionContextClient | None = field(default=None, repr=False)
 
     async def bind_for_step(self, request: BindForStepRequest) -> BindForStepResponse:
         """Post one ``BindForStep`` call through the Dapr sidecar.
@@ -575,28 +680,48 @@ class DaprConnectorClient:
             OutboundRpcTransportError,
         )
 
+        if not request.slots and request.execution_identity is not None:
+            return BindForStepResponse({})
         url = build_invoke_url(self.endpoint, BIND_FOR_STEP_DAPR_METHOD)
-        wire = _request_to_wire(request)
+        try:
+            wire = _request_to_wire(request)
+        except ValueError:
+            raise OutboundRpcDecodeError("binding requires actual execution coordinates") from None
+        headers = {"Content-Type": "application/json"}
+        if request.execution_identity is not None:
+            if self.execution_context is None:
+                raise OutboundRpcStatusError(
+                    "execution authorization is unavailable", status_code=503
+                )
+            try:
+                headers.update(
+                    await self.execution_context.headers(
+                        request.execution_identity, "connector-bind"
+                    )
+                )
+            except ExecutionAuthorizationError as exc:
+                raise OutboundRpcStatusError(
+                    "execution authorization failed",
+                    status_code=503 if exc.unavailable else 403,
+                ) from None
 
-        # ``BindForStepRequest`` carries ``step_key`` + ``slots`` only;
-        # the workflow-level run / step-instance / attempt identifiers
-        # live one layer up (the orchestrator), so we surface
-        # ``step_key`` as ``wf.step.id`` (it's the most precise
-        # step-identifying token the adapter sees) and omit
-        # ``wf.run.id`` / ``wf.attempt`` rather than fabricate values.
         async with observe_outbound_rpc(
             client="connector",
             method=BIND_FOR_STEP_DAPR_METHOD,
-            step_id=request.step_key,
+            run_id=request.run_id,
+            step_id=request.step_id,
+            attempt=request.attempt,
         ) as obs_ctx:
             try:
                 response = await self.http_client.post(
                     url,
                     json=wire,
                     timeout=self.timeout,
-                    headers={"Content-Type": "application/json"},
+                    headers=headers,
                 )
             except httpx.HTTPError as exc:
+                if request.execution_identity is not None:
+                    raise OutboundRpcTransportError("execution binding transport failed") from None
                 # No response observed — transport-layer failure.
                 # Original ``httpx`` exception preserved on
                 # ``__cause__`` so the envelope mapper renders it
@@ -612,6 +737,11 @@ class DaprConnectorClient:
                     f"Dapr BindForStep cancelled upstream (HTTP {status_code})"
                 )
             if status_code // 100 != 2:
+                if request.execution_identity is not None:
+                    raise OutboundRpcStatusError(
+                        f"execution binding returned HTTP {status_code}",
+                        status_code=status_code,
+                    )
                 body_preview = response.text[:200] if response.text else ""
                 raise OutboundRpcStatusError(
                     f"Dapr BindForStep returned HTTP {status_code}: {body_preview!r}",
@@ -621,10 +751,34 @@ class DaprConnectorClient:
             try:
                 body = response.json()
             except ValueError as exc:
+                if request.execution_identity is not None:
+                    raise OutboundRpcDecodeError("invalid execution binding response") from None
                 # Covers ``json.JSONDecodeError`` and any
                 # httpx-internal decoding failure.
                 raise OutboundRpcDecodeError(
                     f"Dapr BindForStep response is not valid JSON: {exc!r}"
                 ) from exc
 
-            return _response_from_wire(body)
+            if request.execution_identity is not None and (
+                not isinstance(body, Mapping) or body.get("schemaVersion") != "2"
+            ):
+                raise OutboundRpcDecodeError("execution binding requires a version-two response")
+            bound_response = _response_from_wire(body)
+            if set(bound_response.contexts) != {slot.name for slot in request.slots}:
+                raise OutboundRpcDecodeError("binding response does not match the requested slots")
+            if request.execution_identity is not None:
+                for slot in request.slots:
+                    context = bound_response.contexts[slot.name]
+                    if (
+                        not isinstance(context, BoundConnectorContext)
+                        or context.connector_instance_id != slot.connector_ref
+                        or context.capabilities != slot.capabilities
+                        or (
+                            slot.connector_kind is not None
+                            and context.connector_kind != slot.connector_kind
+                        )
+                    ):
+                        raise OutboundRpcDecodeError(
+                            "binding response changed the requested authority"
+                        )
+            return bound_response

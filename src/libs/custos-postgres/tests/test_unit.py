@@ -19,6 +19,7 @@ from custos_spl.interfaces.auth_store import AuthStoreProvider
 from custos_spl.interfaces.catalog_store import CatalogStoreProvider
 from custos_spl.interfaces.dead_letters import DeadLetterStoreProvider
 from custos_spl.interfaces.definition_store import DefinitionStoreProvider
+from custos_spl.interfaces.execution import ExecutionIdentityStoreProvider
 from custos_spl.interfaces.metadata_store import (
     MetadataStoreProvider,
     TransactionHandle,
@@ -54,8 +55,22 @@ from custos_pg.migrations.metadata import (
     METADATA_REV6,
     METADATA_REV7,
     METADATA_REV10,
+    METADATA_REV14,
 )
 from custos_pg.pool import DSN_ENV_VAR, LazyPool, read_dsn_from_env
+
+
+def test_execution_identity_guard_is_an_optional_capability() -> None:
+    """Keep the shared baseline while advertising the explicit execution-readiness gate."""
+    assert METADATA_REV14.number == 14
+    assert PgMetadataAdapter.SCHEMA_REVISION == 4
+    assert isinstance(
+        PgMetadataAdapter(lazy=LazyPool("postgresql://noop")), ExecutionIdentityStoreProvider
+    )
+    statements = " ".join(METADATA_REV14.statements)
+    assert "resume_execution_identity_valid" in statements
+    assert "preserve_resume_execution_identity BEFORE UPDATE OF payload" in statements
+    assert "IS DISTINCT FROM NEW.payload->'executionIdentity'" in statements
 
 
 def test_pull_control_migration_is_optional_and_fail_closed() -> None:

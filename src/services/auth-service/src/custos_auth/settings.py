@@ -22,7 +22,7 @@ AS-IMPL-* phases.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Final
 
 from custos_auth.authz_cache import DEFAULT_AUTHZ_CACHE_TTL_SECONDS
@@ -272,6 +272,32 @@ class Settings:
     oidc_enabled: bool
     oidc_issuers_raw: str
     internal_identity_mode: str
+    execution_context_enabled: bool = False
+    app_api_token: str | None = field(default=None, repr=False)
+    execution_caller_namespace: str = ""
+    execution_trigger_app_id: str = "trigger-service"
+    execution_workflow_app_id: str = "workflow-service"
+    execution_runtime_app_id: str = "activity-runtime-manager"
+    execution_gateway_app_id: str = "api-gateway"
+
+    def __post_init__(self) -> None:
+        """Require authenticated deployment identities before enabling context issuance."""
+        if type(self.execution_context_enabled) is not bool:
+            raise SettingsError("execution context enablement must be a boolean")
+        callers = (
+            self.execution_trigger_app_id,
+            self.execution_workflow_app_id,
+            self.execution_runtime_app_id,
+            self.execution_gateway_app_id,
+        )
+        if self.execution_context_enabled and (
+            not self.app_api_token
+            or not self.app_api_token.strip()
+            or not self.execution_caller_namespace.strip()
+            or any(not name.strip() or "/" in name or "://" in name for name in callers)
+            or len(set(callers)) != len(callers)
+        ):
+            raise SettingsError("execution contexts require a sidecar token and scoped caller IDs")
 
     @property
     def is_production(self) -> bool:
@@ -472,23 +498,23 @@ _BOOL_TRUE_VALUES: Final[frozenset[str]] = frozenset({"true", "1", "yes", "on"})
 _BOOL_FALSE_VALUES: Final[frozenset[str]] = frozenset({"false", "0", "no", "off"})
 
 
-def _parse_oidc_enabled(raw: str) -> bool:
-    """Parse the ``CUSTOS_AUTH_OIDC_ENABLED`` env value.
+def _parse_enabled(name: str, raw: str) -> bool:
+    """Parse a named default-off feature flag.
 
-    Empty string falls back to :data:`DEFAULT_OIDC_ENABLED` (``False``).
+    Empty string keeps the feature disabled.
     Accepted truthy values: ``true``, ``1``, ``yes``, ``on``
     (case-insensitive). Accepted falsy values: ``false``, ``0``,
     ``no``, ``off``. Any other value raises :class:`SettingsError`.
     """
     if raw == "":
-        return DEFAULT_OIDC_ENABLED
+        return False
     folded = raw.lower()
     if folded in _BOOL_TRUE_VALUES:
         return True
     if folded in _BOOL_FALSE_VALUES:
         return False
     raise SettingsError(
-        f"{ENV_OIDC_ENABLED} must be a boolean "
+        f"{name} must be a boolean "
         f"(one of {{{', '.join(sorted(_BOOL_TRUE_VALUES | _BOOL_FALSE_VALUES))}}}); "
         f"got {raw!r}"
     )
@@ -562,12 +588,27 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         call_context_key_rotation_seconds=_parse_call_context_key_rotation(
             src.get(ENV_CALL_CONTEXT_KEY_ROTATION, "").strip(),
         ),
-        oidc_enabled=_parse_oidc_enabled(
+        oidc_enabled=_parse_enabled(
+            ENV_OIDC_ENABLED,
             src.get(ENV_OIDC_ENABLED, "").strip(),
         ),
         oidc_issuers_raw=src.get(ENV_OIDC_ISSUERS, ""),
         internal_identity_mode=_parse_internal_identity_mode(
             src.get(ENV_INTERNAL_IDENTITY_MODE, "").strip(),
+        ),
+        execution_context_enabled=_parse_enabled(
+            "CUSTOS_AUTH_EXECUTION_CONTEXT_ENABLED",
+            src.get("CUSTOS_AUTH_EXECUTION_CONTEXT_ENABLED", "").strip(),
+        ),
+        app_api_token=src.get("APP_API_TOKEN"),
+        execution_caller_namespace=src.get("CUSTOS_AUTH_EXECUTION_CALLER_NAMESPACE", "").strip(),
+        execution_trigger_app_id=src.get("CUSTOS_AUTH_EXECUTION_TRIGGER_APP_ID", "trigger-service"),
+        execution_workflow_app_id=src.get(
+            "CUSTOS_AUTH_EXECUTION_WORKFLOW_APP_ID", "workflow-service"
+        ),
+        execution_gateway_app_id=src.get("CUSTOS_AUTH_EXECUTION_GATEWAY_APP_ID", "api-gateway"),
+        execution_runtime_app_id=src.get(
+            "CUSTOS_AUTH_EXECUTION_RUNTIME_APP_ID", "activity-runtime-manager"
         ),
     )
 

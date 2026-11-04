@@ -56,6 +56,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from custos_callctx.execution import ExecutionIdentity
 from custos_spl.interfaces.trigger_source import ResumeSource, validate_resume_context
 
 if TYPE_CHECKING:
@@ -126,6 +127,7 @@ class ResumeSubscriptionMirror:
     workspace_id: str | None = None
     source: ResumeSource | None = None
     delivery_protocol: int = 1
+    execution_identity: ExecutionIdentity | None = None
 
     def __post_init__(self) -> None:
         """Validate mirror identity, timestamps and the optional external association."""
@@ -136,6 +138,10 @@ class ResumeSubscriptionMirror:
             raise ValueError("unsupported resume delivery protocol")
         if self.delivery_protocol == 2 and self.workspace_id is None:
             raise ValueError("version-2 mirror requires workspace")
+        if self.execution_identity is not None and (
+            self.delivery_protocol != 2 or self.execution_identity.workspace_id != self.workspace_id
+        ):
+            raise ValueError("execution mirror requires matching durable scope")
         if not self.mirror_id:
             raise ValueError("ResumeSubscriptionMirror.mirror_id must be a non-empty string")
         if not self.run_id:
@@ -190,6 +196,8 @@ class ResumeSubscriptionMirror:
             wire["deliveryProtocol"] = self.delivery_protocol
         if self.source is not None:
             wire["source"] = self.source.to_wire()
+        if self.execution_identity is not None:
+            wire["executionIdentity"] = self.execution_identity.to_dict()
         return wire
 
     def to_json(self) -> str:
@@ -227,6 +235,9 @@ class ResumeSubscriptionMirror:
             delivery_protocol=data.get("deliveryProtocol", 1),
             source=ResumeSource.from_wire(data["source"])
             if data.get("source") is not None
+            else None,
+            execution_identity=ExecutionIdentity.from_dict(data["executionIdentity"])
+            if data.get("executionIdentity") is not None
             else None,
         )
 
@@ -315,6 +326,7 @@ class InMemoryResumeSubscriptionMirrorRepository:
                 existing.workspace_id != mirror.workspace_id
                 or existing.source != mirror.source
                 or existing.delivery_protocol != mirror.delivery_protocol
+                or existing.execution_identity != mirror.execution_identity
             ):
                 raise ValueError("resume mirror source association cannot be rebound")
             self._rows[mirror.mirror_id] = mirror

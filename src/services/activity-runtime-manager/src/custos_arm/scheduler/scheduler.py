@@ -18,11 +18,13 @@ returns the cached result envelope without launching a second sandbox. A
 per-key :class:`asyncio.Lock` serializes concurrent calls for the same key so
 the get/insert/drive sequence cannot race two sandboxes into existence.
 
-**Crash reconciliation.** When a record exists in a non-terminal state, the
-Scheduler reconciles against the live sandbox: if it still holds the in-flight
-context it resumes monitoring; otherwise it relaunches the attempt. (Durable
-cross-restart adoption of an orphaned ``Job`` additionally depends on the
-deterministic ``Job`` name — see :func:`~custos_arm.runtime.oci.job.job_name`.)
+**Crash reconciliation.** Durable ownership never expires into permission to
+relaunch an unknown effect. The original process may resume monitoring, but a
+replacement process must retain the pending fence until termination is proven.
+Only explicitly non-durable legacy test adapters retain the earlier relaunch path.
+An unconfirmed owned attempt loses credential admission before its worker returns.
+Revocation outages retain the worker/context for retry; shutdown also drains
+retained contexts whose original request workers have already finished.
 
 The driver lifecycle methods are synchronous and blocking; the Scheduler
 offloads each onto a worker thread via :func:`asyncio.to_thread` so the event
@@ -32,12 +34,19 @@ loop is never blocked while a sandbox runs.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
+import logging
+import secrets
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from itertools import chain
 from typing import Final
+from weakref import WeakValueDictionary
+
+from custos_spl.errors import SPLError
 
 from custos_arm.config import Settings
 from custos_arm.contract import (
@@ -47,6 +56,7 @@ from custos_arm.contract import (
     ImageRef,
     OutputsEnvelope,
 )
+from custos_arm.contract.errors import ErrorClass
 from custos_arm.io import IOBroker
 from custos_arm.limit import EffectiveResources, ResourceLimiter
 from custos_arm.observe import (
@@ -59,6 +69,7 @@ from custos_arm.observe import (
     record_result,
 )
 from custos_arm.resolve import ActivityResolver, ActivityTypeVersion
+from custos_arm.resolve.resolver import ScopedCatalogActivityResolver
 from custos_arm.result import ActivityResultEnvelope, ResultClass, ResultMapper
 from custos_arm.runtime import (
     CancelReason,
@@ -70,9 +81,12 @@ from custos_arm.runtime import (
     SidecarSpec,
     TmpfsMount,
 )
+from custos_arm.runtime.models import SIDECAR_PRIVATE_MOUNT
 from custos_arm.runtime.oci import SYSTEM_SANDBOX_FAILURE, signal_error_code
-from custos_arm.secrets import SecretInjector
+from custos_arm.runtime.oci.errors import SandboxFailureError
+from custos_arm.secrets import SecretInjector, SidecarToken
 from custos_arm.store import ActivityExecution, ExecutionRepository, ExecutionState
+from custos_arm.store.execution import UnsafeExecutionError
 
 from .errors import synthesize_failure
 from .fsio import (
@@ -90,6 +104,7 @@ ExecutionKey = tuple[str, str, str, int]
 #: Contract mount paths realized as ``tmpfs`` in the sandbox.
 CUSTOS_IN: Final[str] = "/custos/in"
 CUSTOS_OUT: Final[str] = "/custos/out"
+logger = logging.getLogger(__name__)
 #: The forward (happy-path) progression of live states.
 _NEXT: Final[dict[ExecutionState, ExecutionState]] = {
     ExecutionState.PENDING: ExecutionState.RESOLVING,
@@ -133,6 +148,13 @@ class CancelOutcome(StrEnum):
     UNKNOWN = "unknown"
 
 
+class RuntimeAdmissionClosed(RuntimeError):
+    """A shutdown/capacity refusal is retryable and has not accepted an activity effect."""
+
+    code = "activity.runtime_unavailable"
+    error_class = ErrorClass.RETRYABLE
+
+
 @dataclass(frozen=True, slots=True)
 class _AttemptContext:
     """The in-process state needed to resume monitoring a live attempt."""
@@ -141,6 +163,7 @@ class _AttemptContext:
     resolved: ActivityTypeVersion
     driver: RuntimeDriver
     deadline: datetime
+    bootstrap: SidecarToken | None = None
 
 
 class ActivityScheduler:
@@ -160,6 +183,8 @@ class ActivityScheduler:
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self._resolver = resolver
+        self._closing = False
+        self._workers: set[asyncio.Task[ActivityResultEnvelope]] = set()
         self._limiter = limiter
         self._broker = broker
         self._injector = injector
@@ -170,7 +195,7 @@ class ActivityScheduler:
         self._now = now or (lambda: datetime.now(UTC))
         self._context: dict[ExecutionKey, _AttemptContext] = {}
         self._cache: dict[ExecutionKey, ActivityResultEnvelope] = {}
-        self._locks: dict[ExecutionKey, asyncio.Lock] = {}
+        self._locks: WeakValueDictionary[ExecutionKey, asyncio.Lock] = WeakValueDictionary()
 
     async def schedule(self, request: ScheduleRequest) -> ActivityResultEnvelope:
         """Run (or replay / reconcile) one attempt and return its result.
@@ -179,22 +204,147 @@ class ActivityScheduler:
         so the get/insert/drive sequence cannot race two sandboxes into
         existence and the idempotent-replay guarantee holds under at-least-once
         delivery.
+        The lifespan owns the worker even if the HTTP caller disconnects, and
+        admission is bounded to 64 concurrent requests.
         """
+        if self._closing or len(self._workers) + self._repo.pending_count >= 64:
+            logger.warning("Activity runtime admission is closed or at capacity")
+            return synthesize_failure(
+                RuntimeAdmissionClosed("runtime admission unavailable"),
+                attempt=request.step.attempt,
+            )
+        worker = asyncio.create_task(self._admitted(request), name="activity-attempt")
+        self._workers.add(worker)
+        worker.add_done_callback(self._worker_done)
+        return await asyncio.shield(worker)
+
+    def _worker_done(self, worker: asyncio.Task[ActivityResultEnvelope]) -> None:
+        """Observe detached request failures without serializing credential-bearing exceptions."""
+        self._workers.discard(worker)
+        if not worker.cancelled() and worker.exception() is not None:
+            logger.error("Owned activity worker failed; durable ownership must be reconciled")
+
+    async def drain(self) -> None:
+        """Close authority and request stops for workers and retained contexts before closure.
+
+        Cancellation of shutdown waits for that drain; stop requests never prove
+        termination or remove the durable unknown-effect fence.
+        """
+        self._closing = True
+        draining = asyncio.create_task(self._drain_workers(), name="activity-runtime-drain")
+        cancelled = False
+        while True:
+            try:
+                await asyncio.shield(draining)
+                break
+            except asyncio.CancelledError:
+                if draining.cancelled():
+                    raise
+                cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _drain_workers(self) -> None:
+        """Retry revocation/stop for retained contexts even without a request worker to join."""
+        cancelled: set[ExecutionKey] = set()
+        reported: set[ExecutionKey] = set()
+        stop_reported: set[ExecutionKey] = set()
+        try:
+            while self._workers or self._context.keys() - cancelled:
+                for key, context in tuple(self._context.items()):
+                    if key in cancelled:
+                        continue
+                    try:
+                        await self._repo.revoke_credentials(key)
+                    except (SPLError, UnsafeExecutionError):
+                        if key not in reported:
+                            logger.error(
+                                "Credential revocation failed; stop deferred and ownership retained"
+                            )
+                            reported.add(key)
+                        continue
+                    if self._context.get(key) is not context:
+                        continue
+                    try:
+                        await asyncio.to_thread(
+                            context.driver.cancel, context.handle, CancelReason.SHUTDOWN
+                        )
+                    except SandboxFailureError:
+                        if key not in stop_reported:
+                            logger.error("Sandbox stop request failed; retaining context for retry")
+                            stop_reported.add(key)
+                        continue
+                    cancelled.add(key)
+                if self._workers:
+                    await asyncio.wait(tuple(self._workers), timeout=0.1)
+                elif self._context.keys() - cancelled:
+                    await asyncio.sleep(0.1)
+        finally:
+            if self._workers:
+                await asyncio.gather(*tuple(self._workers), return_exceptions=True)
+
+    async def _admitted(self, request: ScheduleRequest) -> ActivityResultEnvelope:
+        """Close unknown-effect credential admission before releasing the owned worker."""
         key = self._key(request)
-        async with self._locks.setdefault(key, asyncio.Lock()):
-            return await self._schedule(key, request)
+        try:
+            async with self._locks.setdefault(key, asyncio.Lock()):
+                try:
+                    return await self._schedule(key, request)
+                finally:
+                    if self._repo.durable and key in self._context:
+                        await self._close_credential_admission(key)
+        except UnsafeExecutionError as exc:
+            return synthesize_failure(exc, attempt=request.step.attempt)
+
+    async def _close_credential_admission(self, key: ExecutionKey) -> None:
+        """Retain the worker until revocation succeeds, without claiming termination."""
+        reported = False
+        while True:
+            try:
+                await self._repo.revoke_credentials(key)
+                return
+            except (SPLError, UnsafeExecutionError):
+                if not reported:
+                    logger.error("Credential revocation failed; owned attempt retained for retry")
+                    reported = True
+                await asyncio.sleep(0.1)
 
     async def _schedule(
         self, key: ExecutionKey, request: ScheduleRequest
     ) -> ActivityResultEnvelope:
         existing = await self._repo.get(*key)
         if existing is not None:
+            if self._repo.durable and existing.request_hash != self._request_hash(request):
+                raise UnsafeExecutionError("activity coordinates are bound to different inputs")
             if existing.is_terminal:
                 return self._replay(key, existing)
             return await self._reconcile(key, request)
 
         started = self._now()
         deadline = self._clamp(started + self._settings.max_timeout, request.step_deadline)
+        grant_hash = None
+        scopes: dict[str, dict[str, object]] = {}
+        if self._settings.credential_proxy_url:
+            identity = request.execution_identity
+            if (
+                not self._repo.durable
+                or identity is None
+                or identity.workspace_id != request.workspace_id
+                or identity.principal_id != request.principal_id
+                or any(context.binding is None for context in request.connector_contexts)
+            ):
+                raise UnsafeExecutionError("durable scoped activity authority is required")
+            proof = secrets.token_urlsafe(32)
+            request = replace(request, credential_proof=proof)
+            grant_hash = hashlib.sha256(proof.encode()).hexdigest()
+            scopes = {
+                context.slot_name: {
+                    "instanceId": context.connector_instance_id,
+                    "kind": context.connector_type,
+                    "capabilities": list(context.capabilities),
+                }
+                for context in request.connector_contexts
+            }
         execution = ActivityExecution(
             workspace_id=request.workspace_id,
             run_id=request.step.run_id,
@@ -203,6 +353,12 @@ class ActivityScheduler:
             activity_ref=request.activity_ref,
             deadline=deadline,
             started_at=started,
+            request_hash=self._request_hash(request),
+            execution_identity=(
+                request.execution_identity.to_dict() if request.execution_identity else None
+            ),
+            credential_scopes=scopes,
+            credential_grant_hash=grant_hash,
         )
         await self._repo.insert(execution)
         return await self._drive(key, request)
@@ -246,6 +402,7 @@ class ActivityScheduler:
                 continue
             record = await self._repo.get(*key)
             if record is not None and not record.is_terminal:
+                await self._repo.revoke_credentials(key)
                 await asyncio.to_thread(
                     context.driver.cancel, context.handle, CancelReason.CANCELLED
                 )
@@ -263,13 +420,23 @@ class ActivityScheduler:
     async def _drive(self, key: ExecutionKey, request: ScheduleRequest) -> ActivityResultEnvelope:
         driver: RuntimeDriver | None = None
         handle: SandboxHandle | None = None
+        start_requested = False
         with observe_attempt(request):
             try:
                 with observe_stage(STAGE_RESOLVE):
                     await self._ensure(key, ExecutionState.RESOLVING)
-                    resolved = await self._resolver.resolve(
-                        workspace_id=request.workspace_id, activity_ref=request.activity_ref
-                    )
+                    if isinstance(self._resolver, ScopedCatalogActivityResolver):
+                        if request.execution_identity is None:
+                            raise UnsafeExecutionError("pinned execution identity is required")
+                        resolved = await self._resolver.resolve_execution(
+                            workspace_id=request.workspace_id,
+                            activity_ref=request.activity_ref,
+                            identity=request.execution_identity,
+                        )
+                    else:
+                        resolved = await self._resolver.resolve(
+                            workspace_id=request.workspace_id, activity_ref=request.activity_ref
+                        )
                     effective = self._limiter.limit(
                         resources=resolved.resources,
                         isolation_floor=resolved.isolation_floor,
@@ -298,13 +465,25 @@ class ActivityScheduler:
                     )
                     self._materialize(request, resolved, handle, deadline)
                     await self._materialize_input_artifacts(request, handle)
-                    await self._inject(request, resolved, handle)
+                    bootstrap = await self._inject(request, resolved, handle, deadline)
+                    self._context[key] = replace(self._context[key], bootstrap=bootstrap)
                 with observe_stage(STAGE_RUN):
                     await self._ensure(key, ExecutionState.RUNNING)
+                    start_requested = True
                     await asyncio.to_thread(driver.start, handle)
                     outcome = await asyncio.to_thread(driver.await_terminal, handle, deadline)
+                    if self._repo.durable and outcome.signal.value in {"deadline", "cancelled"}:
+                        raise UnsafeExecutionError(
+                            "activity termination is unconfirmed; ownership remains fenced"
+                        )
                 return await self._finalize(key, request, resolved, driver, handle, outcome)
+            except (UnsafeExecutionError, SPLError):
+                raise
             except Exception as exc:
+                if self._repo.durable and start_requested:
+                    raise UnsafeExecutionError(
+                        "activity result is unconfirmed; ownership remains fenced"
+                    ) from None
                 envelope = synthesize_failure(exc, attempt=request.step.attempt)
                 return await self._complete(key, envelope, driver, handle)
 
@@ -343,10 +522,10 @@ class ActivityScheduler:
 
     @staticmethod
     def _reconstruct(existing: ActivityExecution) -> ActivityResultEnvelope:
+        if existing.result is not None:
+            return existing.result
         if existing.state is ExecutionState.SUCCEEDED:
-            return ActivityResultEnvelope.model_validate(
-                {"class": ResultClass.SUCCESS.value, "attempt": existing.attempt, "outputs": {}}
-            )
+            raise UnsafeExecutionError("legacy successful attempt has no retained result")
         result_class = existing.result_class or ResultClass.RETRYABLE.value
         error = ErrorEnvelope.model_validate(
             {
@@ -362,15 +541,31 @@ class ActivityScheduler:
     async def _reconcile(
         self, key: ExecutionKey, request: ScheduleRequest
     ) -> ActivityResultEnvelope:
+        """Resume owned monitoring without relaunch; close admission if its local handle is lost."""
         context = self._context.get(key)
         if context is None:
+            if self._repo.durable:
+                await self._close_credential_admission(key)
+                raise UnsafeExecutionError("activity ownership cannot be reconstructed safely")
             # No live sandbox to resume (e.g. lost after a restart): relaunch.
             return await self._drive(key, request)
         try:
             outcome = await asyncio.to_thread(
                 context.driver.await_terminal, context.handle, context.deadline
             )
+            if self._repo.durable:
+                if outcome.signal.value in {"deadline", "cancelled"}:
+                    raise UnsafeExecutionError(
+                        "activity termination is unconfirmed; ownership remains fenced"
+                    )
+                return await self._finalize(
+                    key, request, context.resolved, context.driver, context.handle, outcome
+                )
         except Exception as exc:
+            if self._repo.durable:
+                raise UnsafeExecutionError(
+                    "activity result is unconfirmed; ownership remains fenced"
+                ) from None
             envelope = synthesize_failure(exc, attempt=request.step.attempt)
             return await self._complete(key, envelope, context.driver, context.handle)
         return await self._finalize(
@@ -409,13 +604,52 @@ class ActivityScheduler:
             result_class=envelope.class_.value,
             error_code=envelope.error.code if envelope.error else None,
             finished_at=self._now(),
+            result=envelope,
         )
-        self._cache[key] = envelope
-        self._context.pop(key, None)
+        if not self._repo.durable:
+            self._cache[key] = envelope
+        context = self._context.pop(key, None)
+        if context is not None and context.bootstrap is not None:
+            self._injector.revoke(token=context.bootstrap)
         record_result(envelope)
         if driver is not None and handle is not None:
             await self._safe_cleanup(driver, handle)
         return envelope
+
+    @staticmethod
+    def _request_hash(request: ScheduleRequest) -> str:
+        """Bind accepted inputs, caller and opaque contexts without persisting secret material."""
+        payload = {
+            "activity_ref": request.activity_ref,
+            "inputs": dict(request.inputs),
+            "principal_id": request.principal_id,
+            "execution_identity": (
+                request.execution_identity.to_dict() if request.execution_identity else None
+            ),
+            "connectors": {
+                name: ref.model_dump(mode="json") for name, ref in request.connectors.items()
+            },
+            "contexts": [
+                {
+                    "slot": context.slot_name,
+                    "type": context.connector_type,
+                    "instance": context.connector_instance_id,
+                    "lease": context.lease_id,
+                    "secrets": dict(context.secrets),
+                    "binding": dict(context.binding) if context.binding is not None else None,
+                    "capabilities": context.capabilities,
+                }
+                for context in sorted(request.connector_contexts, key=lambda value: value.slot_name)
+            ],
+            "deadline": request.step_deadline.isoformat() if request.step_deadline else None,
+            "override": asdict(request.override) if request.override is not None else None,
+            "ceiling": asdict(request.cluster_ceiling)
+            if request.cluster_ceiling is not None
+            else None,
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+        ).hexdigest()
 
     async def _require(self, key: ExecutionKey) -> ActivityExecution:
         current = await self._repo.get(*key)
@@ -452,14 +686,22 @@ class ActivityScheduler:
             tmpfs_mounts=(
                 TmpfsMount(mount_path=CUSTOS_IN, read_only=True),
                 TmpfsMount(mount_path=CUSTOS_OUT),
+                TmpfsMount(mount_path=SIDECAR_PRIVATE_MOUNT, read_only=True, size_limit="16Ki"),
+                *(
+                    (TmpfsMount(mount_path="/custos/run", size_limit="1Mi"),)
+                    if self._settings.credential_proxy_url
+                    else ()
+                ),
             ),
             sidecar=SidecarSpec(
                 image=self._settings.sidecar_image,
                 endpoint=self._settings.connector_endpoint,
+                credential_broker=bool(self._settings.credential_proxy_url),
             ),
             io_bridge_image=self._settings.io_bridge_image,
             deadline=deadline,
             allow_unpinned_images=self._settings.allow_unpinned_images,
+            workspace_id=request.workspace_id,
         )
 
     def _materialize(
@@ -509,13 +751,35 @@ class ActivityScheduler:
         request: ScheduleRequest,
         resolved: ActivityTypeVersion,
         handle: SandboxHandle,
-    ) -> None:
-        await self._injector.inject(
-            sink=FilesystemSecretSink(handle.input_root),
+        deadline: datetime,
+    ) -> SidecarToken:
+        """Bind bootstrap issuance to the actual workspace and clamped execution deadline."""
+        result = await self._injector.inject(
+            sink=FilesystemSecretSink(handle.input_root, private_root=handle.sidecar_root),
             step=request.step,
             connectors=resolved.connectors,
             contexts=request.connector_contexts,
+            workspace_id=request.workspace_id,
+            deadline=deadline,
         )
+        if request.credential_proof is not None:
+            bundle = {
+                "workspaceId": request.workspace_id,
+                "runId": request.step.run_id,
+                "stepId": request.step.step_id,
+                "attempt": request.step.attempt,
+                "proof": request.credential_proof,
+                "endpoint": self._settings.credential_proxy_url,
+            }
+            await FilesystemSecretSink(
+                handle.input_root,
+                private_root=handle.sidecar_root,
+            ).write_private_secret(
+                relative_path="runtime.json",
+                content=json.dumps(bundle).encode(),
+                mode=0o400,
+            )
+        return result.token
 
     def _resolve_result(
         self,

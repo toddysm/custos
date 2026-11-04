@@ -175,16 +175,15 @@ jobs:
           # python-services.yml gated on its mTLS/E2E integration tests. Build
           # it here only for full/release builds (tags, dispatch, workflow_call)
           # so the release pipeline + offline bundle get connector-sidecar:vX.Y.Z
-          # without double-building it on every main push. Unlike the path-lib
-          # services it is self-contained, so its build context is the service
-          # directory (no monorepo copy step).
+          # without double-building it on every main push. The shared bootstrap
+          # codec requires the same repository-root context as other path-lib services.
           if build_all:
               table.append({
                   "key": "connector-sidecar",
                   "title": "connector-sidecar",
                   "image": "custos/connector-sidecar",
                   "dockerfile": "src/services/connector-sidecar/Dockerfile",
-                  "context": "src/services/connector-sidecar",
+                  "context": ".",
               })
 
           selected = [

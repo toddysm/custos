@@ -29,6 +29,7 @@ from custos_auth.roles import (
     ROLE_TENANT_ADMIN,
     ROLE_WORKSPACE_ADMIN,
     ROLE_WORKSPACE_AUTHOR,
+    ROLE_WORKSPACE_EXECUTOR,
     ROLE_WORKSPACE_OPERATOR,
     ROLE_WORKSPACE_VIEWER,
     is_scope_allowed,
@@ -51,11 +52,26 @@ def test_builtin_roles_canonical_ids() -> None:
         ROLE_WORKSPACE_ADMIN,
         ROLE_TENANT_ADMIN,
         ROLE_PLATFORM_ADMIN,
+        ROLE_WORKSPACE_EXECUTOR,
     ]
 
 
 def test_builtin_roles_by_id_covers_every_role() -> None:
     assert set(BUILTIN_ROLES_BY_ID.keys()) == {r.role_id for r in BUILTIN_ROLES}
+
+
+def test_executor_role_is_explicit_scoped_and_not_administrative() -> None:
+    """New execution grants do not widen any existing author/operator role."""
+    role = BUILTIN_ROLES_BY_ID[ROLE_WORKSPACE_EXECUTOR]
+    assert role.allowed_scopes == frozenset({"workspace"})
+    assert set(role.permission_names) == {
+        "workflow:execute",
+        "catalog:workflows:read",
+        "catalog:activity-types:read",
+        "connector:bind",
+    }
+    for existing in (ROLE_WORKSPACE_VIEWER, ROLE_WORKSPACE_AUTHOR, ROLE_WORKSPACE_OPERATOR):
+        assert "connector:bind" not in BUILTIN_ROLES_BY_ID[existing].permission_names
 
 
 def test_workspace_roles_inherit_perms() -> None:

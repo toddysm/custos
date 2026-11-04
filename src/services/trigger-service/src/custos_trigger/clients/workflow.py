@@ -29,6 +29,8 @@ from typing import Any, Protocol, Self, runtime_checkable
 from urllib.parse import quote
 
 import httpx
+from custos_callctx.execution import ExecutionIdentity
+from custos_callctx.execution_client import ExecutionAuthorizationError, ExecutionContextClient
 from pydantic import (
     AwareDatetime,
     Field,
@@ -93,6 +95,7 @@ class _DeliveryRequest(WireModel):
 
     delivery_protocol: StrictInt = Field(default=1, ge=1, le=2)
     retain_until: AwareDatetime | None = None
+    execution_identity: dict[str, str] | None = None
 
     @model_serializer(mode="wrap")
     def serialize_delivery(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
@@ -101,6 +104,9 @@ class _DeliveryRequest(WireModel):
         if self.delivery_protocol == 1:
             for key in ("deliveryProtocol", "delivery_protocol", "retainUntil", "retain_until"):
                 wire.pop(key, None)
+        if self.execution_identity is None:
+            wire.pop("executionIdentity", None)
+            wire.pop("execution_identity", None)
         return wire
 
     @model_validator(mode="after")
@@ -110,6 +116,14 @@ class _DeliveryRequest(WireModel):
             self.retain_until is None or not getattr(self, "idempotency_key", None)
         ):
             raise ValueError("version-2 delivery requires an idempotency key and retention horizon")
+        if self.execution_identity is not None:
+            identity = ExecutionIdentity.from_dict(self.execution_identity)
+            if self.delivery_protocol != 2 or identity.workspace_id != getattr(
+                self, "workspace_id", None
+            ):
+                raise ValueError(
+                    "execution identity requires the same workspace and durable delivery"
+                )
         return self
 
 
@@ -305,19 +319,25 @@ class DaprWorkflowServiceClient:
     http_client: httpx.AsyncClient
     endpoint: DaprEndpoint
     timeout: float = DEFAULT_RPC_TIMEOUT_SECONDS
+    execution_context: ExecutionContextClient | None = field(default=None, repr=False)
 
     async def start_run(self, request: StartRunRequest) -> RunRef:
+        """Decode a run reference without retaining private execution-mode diagnostics."""
         url = build_invoke_url(self.endpoint, START_RUN_METHOD)
         response = await self._post(url, request, what="StartRun")
         try:
             body = response.json()
         except ValueError as exc:
+            if request.execution_identity is not None:
+                raise WorkflowClientDecodeError("invalid execution StartRun response") from None
             raise WorkflowClientDecodeError(
                 f"StartRun response was not valid JSON: {exc!r}"
             ) from exc
         try:
             return RunRef.model_validate(body)
         except ValueError as exc:
+            if request.execution_identity is not None:
+                raise WorkflowClientDecodeError("invalid execution StartRun response") from None
             raise WorkflowClientDecodeError(
                 f"StartRun response did not match RunRef: {exc!r}"
             ) from exc
@@ -352,6 +372,7 @@ class DaprWorkflowServiceClient:
     async def _post(
         self, url: str, request: StartRunRequest | RaiseExternalEventRequest, *, what: str
     ) -> httpx.Response:
+        """Send fresh authority and sanitize execution failures before returning to API callers."""
         wire = request.model_dump(
             by_alias=True,
             mode="json",
@@ -360,6 +381,29 @@ class DaprWorkflowServiceClient:
             else set(),
         )
         headers = {"Content-Type": "application/json"}
+        if self.execution_context is not None:
+            if request.execution_identity is None:
+                raise WorkflowClientReplayUnsafeError()
+            try:
+                headers.update(
+                    await self.execution_context.headers(
+                        ExecutionIdentity.from_dict(request.execution_identity),
+                        "workflow-start"
+                        if isinstance(request, StartRunRequest)
+                        else "workflow-resume",
+                    )
+                )
+            except ExecutionAuthorizationError as exc:
+                raise WorkflowClientError(
+                    "execution authorization unavailable"
+                    if exc.unavailable
+                    else "execution denied",
+                    retryable=exc.unavailable,
+                ) from None
+        elif request.execution_identity is not None:
+            raise WorkflowClientError(
+                "execution context transport is not configured", retryable=False
+            )
         if request.idempotency_key:
             # Mirror the RFC fallback the WF route honours; the body field is
             # authoritative but the header keeps the call idempotent through
@@ -370,10 +414,17 @@ class DaprWorkflowServiceClient:
                 url, json=wire, timeout=self.timeout, headers=headers
             )
         except httpx.HTTPError as exc:
+            if request.execution_identity is not None:
+                raise WorkflowClientTransportError(f"execution {what} transport failed") from None
             raise WorkflowClientTransportError(f"{what} transport failure: {exc!r}") from exc
         if response.status_code // 100 != 2:
             if request.delivery_protocol == 2 and response.status_code == 409:
                 raise WorkflowClientReplayUnsafeError()
+            if request.execution_identity is not None:
+                raise WorkflowClientStatusError(
+                    f"execution {what} returned HTTP {response.status_code}",
+                    status_code=response.status_code,
+                )
             preview = response.text[:200] if response.text else ""
             raise WorkflowClientStatusError(
                 f"{what} returned HTTP {response.status_code}: {preview!r}",

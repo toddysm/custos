@@ -80,6 +80,60 @@ async def test_verify_returns_decoded_context(
     assert ctx.audience == "custos.internal"
     assert ctx.issuer == "custos-auth"
     assert ctx.expires_at > ctx.issued_at
+    assert ctx.execution_operation is None
+
+
+async def test_verified_execution_operation(
+    signing_key: SigningKeyFixture, verifier: CallContextVerifier
+) -> None:
+    """Only a signed operation-specific grant is exposed as execution provenance."""
+    token = signing_key.mint(
+        permissions=["connector:bind"],
+        extra_claims={"executionOperation": "connector-bind"},
+    )
+    context = await verifier.verify(metadata={CALLCTX_HEADER: token})
+    assert context.execution_operation == "connector-bind"
+
+
+@pytest.mark.parametrize(
+    "claims",
+    [
+        {"executionOperation": None},
+        {"executionOperation": True},
+        {"executionOperation": ["connector-bind"]},
+        {"executionOperation": "unknown"},
+        {"permissions": ["workflow:execute"]},
+        {"permissions": ["connector:bind", "workflow:execute"]},
+        {"workspaceId": None},
+        {"workspaceId": ""},
+        {"workspaceId": " "},
+    ],
+)
+async def test_invalid_execution_provenance_is_rejected(
+    signing_key: SigningKeyFixture, verifier: CallContextVerifier, claims: dict[str, Any]
+) -> None:
+    """A valid signature does not excuse a malformed or overprivileged execution grant."""
+    token = signing_key.mint(
+        permissions=["connector:bind"],
+        extra_claims={"executionOperation": "connector-bind", **claims},
+    )
+    with pytest.raises(InvalidCallContextError) as error:
+        await verifier.verify(metadata={CALLCTX_HEADER: token})
+    assert error.value.reason is InvalidReason.MALFORMED_TOKEN
+
+
+async def test_execution_lifetime_is_bounded(
+    signing_key: SigningKeyFixture, verifier: CallContextVerifier
+) -> None:
+    """Execution provenance never turns a long-lived legacy token into fresh authority."""
+    token = signing_key.mint(
+        ttl_seconds=301,
+        permissions=["connector:bind"],
+        extra_claims={"executionOperation": "connector-bind"},
+    )
+    with pytest.raises(InvalidCallContextError) as error:
+        await verifier.verify(metadata={CALLCTX_HEADER: token})
+    assert error.value.reason is InvalidReason.MALFORMED_TOKEN
 
 
 async def test_verify_is_case_insensitive_on_header_name(

@@ -21,7 +21,7 @@ These are dataclasses (not pydantic models) for two reasons:
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
@@ -83,6 +83,18 @@ class BindForStepRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class BindingMetadata:
+    """Non-secret instance facts from the same authoritative snapshot used to bind the slot.
+
+    ``connector_kind`` is the target family, not the distinct provider type ID.
+    """
+
+    instance_id: str
+    connector_kind: str
+    capabilities: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class BindForStepResponse:
     """The ``BindForStep`` RPC output.
 
@@ -93,14 +105,21 @@ class BindForStepResponse:
     """
 
     contexts: Mapping[str, ConnectorContext]
+    bindings: Mapping[str, BindingMetadata] = field(default_factory=dict)
 
     @classmethod
     def build(
         cls,
         contexts: Sequence[tuple[str, ConnectorContext]],
+        bindings: Mapping[str, BindingMetadata] | None = None,
     ) -> BindForStepResponse:
         """Freeze the slot list into an ordered, immutable mapping."""
-        return cls(contexts=MappingProxyType(dict(contexts)))
+        return cls(
+            contexts=MappingProxyType(dict(contexts)),
+            bindings=MappingProxyType(dict(bindings))
+            if bindings is not None
+            else MappingProxyType({}),
+        )
 
 
 def freeze_request_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:

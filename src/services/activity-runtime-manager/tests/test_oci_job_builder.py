@@ -243,12 +243,14 @@ def test_activity_container_runs_hardened_security_context() -> None:
 
 
 def test_both_containers_share_the_hardened_context() -> None:
+    """The trusted sidecar adds fixed file ownership without weakening activity hardening."""
     manifest = build_activity_job(_plan())
     containers = _containers(manifest)
-    assert (
-        containers[ACTIVITY_CONTAINER_NAME]["securityContext"]
-        == containers[SIDECAR_CONTAINER_NAME]["securityContext"]
-    )
+    assert containers[SIDECAR_CONTAINER_NAME]["securityContext"] == {
+        **containers[ACTIVITY_CONTAINER_NAME]["securityContext"],
+        "runAsUser": 1000,
+        "runAsGroup": 1000,
+    }
 
 
 def test_runtime_class_omitted_for_default_runtime() -> None:
@@ -475,10 +477,62 @@ def test_bridge_helpers_share_the_activity_contract_volumes() -> None:
 
 
 def test_bridge_helpers_run_the_hardened_security_context() -> None:
+    """Helpers can stage owned private files without root or additional capabilities."""
     manifest = build_activity_job(_plan())
     activity_sc = _containers(manifest)[ACTIVITY_CONTAINER_NAME]["securityContext"]
     for name, container in _init_containers(manifest).items():
-        assert container["securityContext"] == activity_sc, name
+        assert container["securityContext"] == {
+            **activity_sc,
+            "runAsUser": 1000,
+            "runAsGroup": 1000,
+        }, name
+
+
+def test_private_bootstrap_volume_is_never_mounted_into_activity() -> None:
+    """Private bootstrap ownership is enforced by mount topology, not a filename convention."""
+    manifest = build_activity_job(
+        _plan(
+            tmpfs_mounts=(
+                TmpfsMount("/custos/in", read_only=True),
+                TmpfsMount("/custos/out"),
+                TmpfsMount("/custos/sidecar", read_only=True, size_limit="16Ki"),
+            )
+        )
+    )
+    private_volume = next(
+        volume["name"]
+        for volume in _pod_spec(manifest)["volumes"]
+        if volume["name"] == "custos-sidecar"
+    )
+    containers, helpers = _containers(manifest), _init_containers(manifest)
+    assert all(
+        mount["name"] != private_volume
+        for mount in containers[ACTIVITY_CONTAINER_NAME]["volumeMounts"]
+    )
+    assert all(
+        mount["name"] != private_volume
+        for mount in helpers[OUTPUT_BRIDGE_CONTAINER_NAME]["volumeMounts"]
+    )
+    assert (
+        next(
+            mount
+            for mount in containers[SIDECAR_CONTAINER_NAME]["volumeMounts"]
+            if mount["name"] == private_volume
+        )["readOnly"]
+        is True
+    )
+    assert "readOnly" not in next(
+        mount
+        for mount in helpers[INPUT_BRIDGE_CONTAINER_NAME]["volumeMounts"]
+        if mount["name"] == private_volume
+    )
+    assert _pod_spec(manifest)["securityContext"]["fsGroup"] == 1000
+
+
+def test_workspace_is_part_of_sandbox_identity() -> None:
+    """Colliding run/step coordinates in separate workspaces cannot share a Job."""
+    step = _step()
+    assert job_name(step, workspace_id="ws-a") != job_name(step, workspace_id="ws-b")
 
 
 def test_no_container_uses_host_path() -> None:

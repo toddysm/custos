@@ -181,6 +181,10 @@ class Settings:
     hook_image_pull_secrets: tuple[str, ...] = ()
     receiver_drain_seconds: int = 330
     pull_worker_enabled: bool = False
+    workflow_app_id: str = "workflow-service"
+    workflow_namespace: str | None = None
+    runtime_app_id: str = "activity-runtime-manager"
+    runtime_namespace: str | None = None
 
     def __post_init__(self) -> None:
         """Validate hook selection and durable-polling prerequisites before resource creation."""
@@ -332,6 +336,10 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         durable_pull_enabled=_read_gate(src, ENV_DURABLE_PULL_ENABLED),
         pull_worker_enabled=_read_gate(src, ENV_PULL_WORKER_ENABLED),
         receiver_drain_seconds=_opt_int(ENV_RECEIVER_DRAIN_SECONDS, src, 330, minimum=1),
+        workflow_app_id=src.get("CONN_WORKFLOW_APP_ID", "workflow-service").strip(),
+        workflow_namespace=src.get("CONN_WORKFLOW_NAMESPACE", "").strip() or None,
+        runtime_app_id=src.get("CONN_RUNTIME_APP_ID", "activity-runtime-manager").strip(),
+        runtime_namespace=src.get("CONN_RUNTIME_NAMESPACE", "").strip() or None,
         pull_default_interval_sec=_opt_int(
             ENV_PULL_DEFAULT_INTERVAL_SEC, src, 60, minimum=PULL_LOOP_HARD_FLOOR_SEC
         ),

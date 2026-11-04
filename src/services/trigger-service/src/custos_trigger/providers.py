@@ -49,6 +49,7 @@ from custos_spl.interfaces.dead_letters import (
     new_dead_letter,
     recover_replay,
     validate_dispatch_identifier,
+    validate_execution_reference,
 )
 from custos_spl.interfaces.metadata_store import (
     AuditEvent,
@@ -752,6 +753,12 @@ class InMemoryTriggerMetadataStore(MemoryDeliveryState):
     async def put_resume_subscription(
         self, workspace_id: WorkspaceId, resume: SplResumeSubscription
     ) -> SplResumeSubscription:
+        if "executionIdentity" in resume.payload:
+            validate_execution_reference(
+                resume.payload["executionIdentity"], workspace_id=workspace_id
+            )
+            if resume.payload.get("deliveryProtocol") != 2:
+                raise ValueError("execution identity requires durable registration")
         key = (str(workspace_id), resume.resume_id)
         # The Postgres adapter INSERTs on the `(workspace_id, resume_id)`
         # primary key and maps the 23505 collision to `ImmutableViolation`;
@@ -898,10 +905,17 @@ class InMemoryTriggerMetadataStore(MemoryDeliveryState):
         """Register without yielding between checking expiry and preserving the live winner."""
         if as_of.utcoffset() is None:
             raise ValueError("resume registration cutoff must be timezone-aware")
+        if "executionIdentity" in resume.payload:
+            validate_execution_reference(
+                resume.payload["executionIdentity"], workspace_id=workspace_id
+            )
+            if resume.payload.get("deliveryProtocol") != 2:
+                raise ValueError("execution identity requires durable registration")
         key = (str(workspace_id), resume.resume_id)
         existing = self._resume.get(key)
         if existing is not None and (
             existing.payload.get("source") != resume.payload.get("source")
+            or existing.payload.get("executionIdentity") != resume.payload.get("executionIdentity")
             or existing.payload.get("deliveryProtocol", 1)
             != resume.payload.get("deliveryProtocol", 1)
             or existing.expires_at.astimezone(UTC) > as_of.astimezone(UTC)

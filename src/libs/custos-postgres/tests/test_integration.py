@@ -30,23 +30,7 @@ from custos_spl.errors import (
     LeaseBusy,
     LeaseExpired,
 )
-from custos_spl.interfaces.metadata_store import (
-    ArtifactUse,
-    DedupDuplicate,
-    DedupReserved,
-    ExistingCompleted,
-    ExistingInFlight,
-    KeyReuse,
-    IdemReserved,
-    ResumeSubscription,
-    Run,
-    Schedule,
-    Step,
-    StepAttempt,
-    Subscription,
-    SubscriptionSelector,
-    DeviceCodeSession,
-)
+from custos_spl.ids import ConnectorInstanceId, WorkspaceId
 from custos_spl.interfaces.auth_store import (
     PrincipalFilter,
     ServiceAccount,
@@ -55,18 +39,34 @@ from custos_spl.interfaces.auth_store import (
     Workspace,
     WorkspaceFilter,
 )
-from custos_spl.ids import ConnectorInstanceId, WorkspaceId
 from custos_spl.interfaces.connector_instance_store import (
     ConnectorInstance,
     ConnectorInstanceFilter,
 )
+from custos_spl.interfaces.metadata_store import (
+    ArtifactUse,
+    DedupDuplicate,
+    DedupReserved,
+    DeviceCodeSession,
+    ExistingCompleted,
+    ExistingInFlight,
+    IdemReserved,
+    KeyReuse,
+    ResumeSubscription,
+    Run,
+    Schedule,
+    Step,
+    StepAttempt,
+    Subscription,
+    SubscriptionSelector,
+)
 from custos_spl.migrations.runner import check_revisions
 
+from custos_pg.adapters.auth import PgAuthAdapter
 from custos_pg.adapters.catalog import PgCatalogAdapter
 from custos_pg.adapters.connector_instance import PgConnectorInstanceAdapter
 from custos_pg.adapters.definition import PgDefinitionAdapter
 from custos_pg.adapters.metadata import PgMetadataAdapter
-from custos_pg.adapters.auth import PgAuthAdapter
 
 if TYPE_CHECKING:
     from asyncpg.pool import Pool
@@ -120,9 +120,7 @@ async def test_check_revisions_passes_after_apply(pg_pool: Pool) -> None:
 async def test_put_and_get_workflow_version(pg_pool: Pool) -> None:
     adapter = PgDefinitionAdapter(pool=pg_pool)
     await adapter.apply_pending()
-    v = await adapter.put_workflow_version(
-        "ws-1", "wf-1", "1.0.0", {"steps": []}
-    )
+    v = await adapter.put_workflow_version("ws-1", "wf-1", "1.0.0", {"steps": []})
     assert v.workspace_id == "ws-1"
     assert v.workflow_id == "wf-1"
     assert v.version == "1.0.0"
@@ -174,14 +172,10 @@ async def test_list_workflow_versions_paginates(pg_pool: Pool) -> None:
     page1 = await adapter.list_workflow_versions("ws-1", "wf-1", limit=2)
     assert len(page1.items) == 2
     assert page1.next_cursor is not None
-    page2 = await adapter.list_workflow_versions(
-        "ws-1", "wf-1", cursor=page1.next_cursor, limit=2
-    )
+    page2 = await adapter.list_workflow_versions("ws-1", "wf-1", cursor=page1.next_cursor, limit=2)
     assert len(page2.items) == 2
     # Ensure no overlap.
-    assert {v.version for v in page1.items}.isdisjoint(
-        {v.version for v in page2.items}
-    )
+    assert {v.version for v in page1.items}.isdisjoint({v.version for v in page2.items})
 
 
 async def test_workspace_scoping_isolates_workflows(pg_pool: Pool) -> None:
@@ -212,12 +206,8 @@ async def test_template_version_write_once(pg_pool: Pool) -> None:
 async def test_put_activity_type_idempotent_on_same_digest(pg_pool: Pool) -> None:
     adapter = PgCatalogAdapter(pool=pg_pool)
     await adapter.apply_pending()
-    a = await adapter.put_activity_type_version(
-        "ns", "echo", "1.0.0", "sha256:abc", {"k": 1}
-    )
-    b = await adapter.put_activity_type_version(
-        "ns", "echo", "1.0.0", "sha256:abc", {"k": 1}
-    )
+    a = await adapter.put_activity_type_version("ns", "echo", "1.0.0", "sha256:abc", {"k": 1})
+    b = await adapter.put_activity_type_version("ns", "echo", "1.0.0", "sha256:abc", {"k": 1})
     assert a.digest == b.digest == "sha256:abc"
 
 
@@ -321,9 +311,7 @@ async def test_catalog_list_paginates(pg_pool: Pool) -> None:
         "ns", "echo", cursor=page1.next_cursor, limit=2
     )
     assert len(page2.items) == 2
-    assert {v.version for v in page1.items}.isdisjoint(
-        {v.version for v in page2.items}
-    )
+    assert {v.version for v in page1.items}.isdisjoint({v.version for v in page2.items})
 
 
 # ----- Cross-interface negotiation sanity check -----
@@ -400,7 +388,7 @@ async def test_metadata_fully_satisfied_after_trigger_query_indexes(pg_pool: Poo
     adapter = PgMetadataAdapter(pool=pg_pool)
     await adapter.apply_pending()
     assert adapter.declared_revisions["MetadataStoreProvider"] == frozenset(
-        {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}
+        {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
     )
 
 
@@ -446,9 +434,7 @@ async def test_list_runs_paginates(pg_pool: Pool) -> None:
     assert page1.next_cursor is not None
     page2 = await adapter.list_runs("ws-1", cursor=page1.next_cursor, limit=2)
     assert len(page2.items) == 2
-    assert {r.run_id for r in page1.items}.isdisjoint(
-        {r.run_id for r in page2.items}
-    )
+    assert {r.run_id for r in page1.items}.isdisjoint({r.run_id for r in page2.items})
 
 
 async def test_append_step_attempt_is_immutable(pg_pool: Pool) -> None:
@@ -595,31 +581,23 @@ async def test_schedule_put_and_advance(pg_pool: Pool) -> None:
 async def test_cursor_lease_acquire_commit_release(pg_pool: Pool) -> None:
     adapter = PgMetadataAdapter(pool=pg_pool)
     await adapter.apply_pending()
-    cur, handle = await adapter.acquire_cursor_lease(
-        "ws-1", "inst-1", "holder-1", ttl_seconds=60
-    )
+    cur, handle = await adapter.acquire_cursor_lease("ws-1", "inst-1", "holder-1", ttl_seconds=60)
     assert cur.lease_holder == "holder-1"
     new_at = _now()
     committed = await adapter.commit_cursor("ws-1", handle, "checkpoint-1", new_at)
     assert committed.value == "checkpoint-1"
     assert committed.lease_holder is None
     # Re-acquire after release-via-commit succeeds.
-    _, handle2 = await adapter.acquire_cursor_lease(
-        "ws-1", "inst-1", "holder-2", ttl_seconds=60
-    )
+    _, handle2 = await adapter.acquire_cursor_lease("ws-1", "inst-1", "holder-2", ttl_seconds=60)
     await adapter.release_cursor_lease("ws-1", handle2)
 
 
 async def test_cursor_lease_busy_when_held_by_other(pg_pool: Pool) -> None:
     adapter = PgMetadataAdapter(pool=pg_pool)
     await adapter.apply_pending()
-    await adapter.acquire_cursor_lease(
-        "ws-1", "inst-1", "holder-1", ttl_seconds=60
-    )
+    await adapter.acquire_cursor_lease("ws-1", "inst-1", "holder-1", ttl_seconds=60)
     with pytest.raises(LeaseBusy):
-        await adapter.acquire_cursor_lease(
-            "ws-1", "inst-1", "holder-2", ttl_seconds=60
-        )
+        await adapter.acquire_cursor_lease("ws-1", "inst-1", "holder-2", ttl_seconds=60)
 
 
 async def test_first_touch_acquire_does_not_block_on_concurrent_insert(
@@ -644,9 +622,7 @@ async def test_first_touch_acquire_does_not_block_on_concurrent_insert(
         )
         with pytest.raises(LeaseBusy):
             await asyncio.wait_for(
-                adapter.acquire_cursor_lease(
-                    "ws-race", "inst-race", "holder-x", ttl_seconds=60
-                ),
+                adapter.acquire_cursor_lease("ws-race", "inst-race", "holder-x", ttl_seconds=60),
                 timeout=5.0,
             )
 
@@ -659,9 +635,7 @@ async def test_commit_cursor_raises_lease_expired_after_other_steals(
     zero rows because `lease_holder` no longer equals the handle)."""
     adapter = PgMetadataAdapter(pool=pg_pool)
     await adapter.apply_pending()
-    _, handle1 = await adapter.acquire_cursor_lease(
-        "ws-1", "inst-1", "holder-1", ttl_seconds=1
-    )
+    _, handle1 = await adapter.acquire_cursor_lease("ws-1", "inst-1", "holder-1", ttl_seconds=1)
     # Force the row's lease to look expired by writing a past timestamp.
     async with pg_pool.acquire() as conn:
         await conn.execute(
@@ -698,13 +672,9 @@ async def test_artifact_use_append_and_paginate(pg_pool: Pool) -> None:
     page1 = await adapter.list_artifact_uses("ws-1", "art-1", limit=2)
     assert len(page1.items) == 2
     assert page1.next_cursor is not None
-    page2 = await adapter.list_artifact_uses(
-        "ws-1", "art-1", cursor=page1.next_cursor, limit=2
-    )
+    page2 = await adapter.list_artifact_uses("ws-1", "art-1", cursor=page1.next_cursor, limit=2)
     assert len(page2.items) == 2
-    assert {u.run_id for u in page1.items}.isdisjoint(
-        {u.run_id for u in page2.items}
-    )
+    assert {u.run_id for u in page1.items}.isdisjoint({u.run_id for u in page2.items})
 
 
 # ----- Gateway short-lived state -----
@@ -798,7 +768,12 @@ async def test_delete_expired_idempotency_records(pg_pool: Pool) -> None:
             "(workspace_id, principal_id, route, idempotency_key, request_hash, "
             " status, reserved_at, expires_at) "
             "VALUES ($1, $2, $3, $4, $5, 'completed', now(), $6)",
-            "ws-1", "user-1", "/api/boundary", "key-boundary", "hash-boundary", now,
+            "ws-1",
+            "user-1",
+            "/api/boundary",
+            "key-boundary",
+            "hash-boundary",
+            now,
         )
     # Insert one with expires_at in the past (will be deleted).
     async with pg_pool.acquire() as conn:
@@ -807,7 +782,12 @@ async def test_delete_expired_idempotency_records(pg_pool: Pool) -> None:
             "(workspace_id, principal_id, route, idempotency_key, request_hash, "
             " status, reserved_at, expires_at) "
             "VALUES ($1, $2, $3, $4, $5, 'completed', now(), $6)",
-            "ws-1", "user-1", "/api/delete", "key-2", "hash-2", past,
+            "ws-1",
+            "user-1",
+            "/api/delete",
+            "key-2",
+            "hash-2",
+            past,
         )
 
     count = await adapter.delete_expired_idempotency_records(now)
@@ -850,9 +830,7 @@ async def test_get_device_code_session_by_device_code(pg_pool: Pool) -> None:
     )
     await adapter.put_device_code_session("ws-1", session)
 
-    retrieved = await adapter.get_device_code_session_by_device_code(
-        "ws-1", "D-ABC123"
-    )
+    retrieved = await adapter.get_device_code_session_by_device_code("ws-1", "D-ABC123")
     assert retrieved is not None
     assert retrieved.device_code == "D-ABC123"
 
@@ -873,9 +851,7 @@ async def test_get_device_code_session_by_user_code(pg_pool: Pool) -> None:
     )
     await adapter.put_device_code_session("ws-1", session)
 
-    retrieved = await adapter.get_device_code_session_by_user_code(
-        "ws-1", "U-XYZ789"
-    )
+    retrieved = await adapter.get_device_code_session_by_user_code("ws-1", "U-XYZ789")
     assert retrieved is not None
     assert retrieved.user_code == "U-XYZ789"
 
@@ -945,7 +921,13 @@ async def test_delete_expired_device_code_sessions(pg_pool: Pool) -> None:
             "(workspace_id, device_code, user_code, issuer_alias, "
             " status, created_at, expires_at) "
             "VALUES ($1, $2, $3, $4, $5, $6, $7)",
-            "ws-1", "D-BOUNDARY", "U-BOUNDARY", "google", "pending", now, now,
+            "ws-1",
+            "D-BOUNDARY",
+            "U-BOUNDARY",
+            "google",
+            "pending",
+            now,
+            now,
         )
 
     # Insert a fresh session (won't be deleted).
@@ -1269,20 +1251,14 @@ async def test_list_workspaces_filters_by_tenant(pg_pool: Pool) -> None:
     )
 
     # List workspaces for tenant 1
-    ws_t1 = await adapter.list_workspaces(
-        WorkspaceFilter(tenant_id="t-1", include_disabled=False)
-    )
+    ws_t1 = await adapter.list_workspaces(WorkspaceFilter(tenant_id="t-1", include_disabled=False))
     assert len(ws_t1) == 2
     assert {w.workspace_id for w in ws_t1} == {"ws-t1-1", "ws-t1-2"}
 
     # List workspaces for tenant 2
-    ws_t2 = await adapter.list_workspaces(
-        WorkspaceFilter(tenant_id="t-2", include_disabled=False)
-    )
+    ws_t2 = await adapter.list_workspaces(WorkspaceFilter(tenant_id="t-2", include_disabled=False))
     assert len(ws_t2) == 1
     assert ws_t2[0].workspace_id == "ws-t2-1"
-
-
 
 
 async def test_put_and_get_user_principal(pg_pool: Pool) -> None:
@@ -1650,9 +1626,7 @@ async def test_list_principals_filters_by_kind(pg_pool: Pool) -> None:
     await adapter.put_principal(sa)
 
     # Filter by user kind
-    users = await adapter.list_principals(
-        PrincipalFilter(kind="user", include_disabled=False)
-    )
+    users = await adapter.list_principals(PrincipalFilter(kind="user", include_disabled=False))
     assert len(users) == 1
     assert users[0].principal_id == "user-1"
 
@@ -1709,9 +1683,7 @@ async def test_list_principals_excludes_disabled_by_default(pg_pool: Pool) -> No
     assert active[0].principal_id == "user-1"
 
     # List with disabled
-    all_principals = await adapter.list_principals(
-        PrincipalFilter(include_disabled=True)
-    )
+    all_principals = await adapter.list_principals(PrincipalFilter(include_disabled=True))
     assert len(all_principals) == 2
 
 
@@ -1742,6 +1714,7 @@ async def test_disable_principal(pg_pool: Pool) -> None:
 
     # Disable the principal
     from custos_spl.ids import PrincipalId
+
     await adapter.disable_principal(
         PrincipalId("user-1"), PrincipalId("admin"), "Unauthorized access"
     )
@@ -1751,8 +1724,6 @@ async def test_disable_principal(pg_pool: Pool) -> None:
     assert retrieved is not None
     assert retrieved.disabled_at is not None
     assert retrieved.disabled_reason == "Unauthorized access"
-
-
 
 
 async def test_put_and_get_oidc_identity(pg_pool: Pool) -> None:
@@ -1781,7 +1752,10 @@ async def test_put_and_get_oidc_identity(pg_pool: Pool) -> None:
     await adapter.put_principal(user)
 
     from custos_spl.ids import PrincipalId
-    await adapter.put_oidc_identity("https://example.com", "alice@example.com", PrincipalId("user-1"))
+
+    await adapter.put_oidc_identity(
+        "https://example.com", "alice@example.com", PrincipalId("user-1")
+    )
 
     retrieved = await adapter.get_oidc_identity("https://example.com", "alice@example.com")
     assert retrieved == PrincipalId("user-1")
@@ -1821,11 +1795,16 @@ async def test_put_oidc_identity_write_once_raises_immutable_violation(pg_pool: 
     await adapter.put_principal(user)
 
     from custos_spl.ids import PrincipalId
-    await adapter.put_oidc_identity("https://example.com", "alice@example.com", PrincipalId("user-1"))
+
+    await adapter.put_oidc_identity(
+        "https://example.com", "alice@example.com", PrincipalId("user-1")
+    )
 
     # Try to rebind the same (issuer, subject) — should raise ImmutableViolation
     with pytest.raises(ImmutableViolation):
-        await adapter.put_oidc_identity("https://example.com", "alice@example.com", PrincipalId("user-1"))
+        await adapter.put_oidc_identity(
+            "https://example.com", "alice@example.com", PrincipalId("user-1")
+        )
 
 
 async def test_list_oidc_identities_for_user(pg_pool: Pool) -> None:
@@ -1854,8 +1833,11 @@ async def test_list_oidc_identities_for_user(pg_pool: Pool) -> None:
     await adapter.put_principal(user)
 
     from custos_spl.ids import PrincipalId
+
     # Add multiple OIDC identities for the same user
-    await adapter.put_oidc_identity("https://example.com", "alice@example.com", PrincipalId("user-1"))
+    await adapter.put_oidc_identity(
+        "https://example.com", "alice@example.com", PrincipalId("user-1")
+    )
     await adapter.put_oidc_identity("https://github.com", "alice_github", PrincipalId("user-1"))
 
     identities = await adapter.list_oidc_identities_for_user(PrincipalId("user-1"))
@@ -1893,6 +1875,7 @@ async def test_list_oidc_identities_for_user_returns_empty_when_none_exist(pg_po
     await adapter.put_principal(user)
 
     from custos_spl.ids import PrincipalId
+
     identities = await adapter.list_oidc_identities_for_user(PrincipalId("user-1"))
     assert len(identities) == 0
 
@@ -2074,7 +2057,9 @@ async def test_revoke_service_token(pg_pool: Pool) -> None:
     await adapter.put_service_token(token)
 
     # Revoke the token
-    await adapter.revoke_service_token(ServiceTokenId("token-1"), PrincipalId("admin"), "Compromised")
+    await adapter.revoke_service_token(
+        ServiceTokenId("token-1"), PrincipalId("admin"), "Compromised"
+    )
 
     retrieved = await adapter.get_service_token_by_hash("hash123")
     assert retrieved is not None
@@ -2182,9 +2167,9 @@ async def test_service_token_hash_is_immutable(pg_pool: Pool) -> None:
     )
     await adapter.put_principal(sa)
 
+    from custos_spl.errors import ImmutableViolation
     from custos_spl.ids import PrincipalId, ServiceTokenId
     from custos_spl.interfaces.auth_store import ServiceToken
-    from custos_spl.errors import ImmutableViolation
 
     token = ServiceToken(
         token_id=ServiceTokenId("token-1"),
@@ -2530,7 +2515,12 @@ async def test_put_and_list_role_bindings_for_principal(pg_pool: Pool) -> None:
     await adapter.put_role(role)
 
     from custos_spl.ids import RoleBindingId
-    from custos_spl.interfaces.auth_store import RoleBinding, WorkspaceScope, TenantScope, GlobalScope
+    from custos_spl.interfaces.auth_store import (
+        GlobalScope,
+        RoleBinding,
+        TenantScope,
+        WorkspaceScope,
+    )
 
     binding1 = RoleBinding(
         binding_id=RoleBindingId("binding-1"),
@@ -2639,7 +2629,7 @@ async def test_delete_role_binding(pg_pool: Pool) -> None:
     await adapter.put_role(role)
 
     from custos_spl.ids import RoleBindingId
-    from custos_spl.interfaces.auth_store import RoleBinding, GlobalScope
+    from custos_spl.interfaces.auth_store import GlobalScope, RoleBinding
 
     binding = RoleBinding(
         binding_id=RoleBindingId("binding-1"),
@@ -2731,7 +2721,7 @@ async def test_put_role_binding_upserts_by_binding_id(pg_pool: Pool) -> None:
     await adapter.put_role(viewer_role)
 
     from custos_spl.ids import RoleBindingId
-    from custos_spl.interfaces.auth_store import RoleBinding, GlobalScope
+    from custos_spl.interfaces.auth_store import GlobalScope, RoleBinding
 
     binding = RoleBinding(
         binding_id=RoleBindingId("binding-1"),
@@ -2825,7 +2815,7 @@ async def test_put_role_binding_retry_is_idempotent(pg_pool: Pool) -> None:
     await adapter.put_role(viewer_role)
 
     from custos_spl.ids import RoleBindingId
-    from custos_spl.interfaces.auth_store import RoleBinding, GlobalScope
+    from custos_spl.interfaces.auth_store import GlobalScope, RoleBinding
 
     binding = RoleBinding(
         binding_id=RoleBindingId("binding-1"),
@@ -2935,7 +2925,7 @@ async def test_list_role_bindings_for_scope(pg_pool: Pool) -> None:
     await adapter.put_role(viewer_role)
 
     from custos_spl.ids import RoleBindingId
-    from custos_spl.interfaces.auth_store import RoleBinding, TenantScope, RoleBindingFilter
+    from custos_spl.interfaces.auth_store import RoleBinding, RoleBindingFilter, TenantScope
 
     binding1 = RoleBinding(
         binding_id=RoleBindingId("binding-1"),
@@ -2984,7 +2974,6 @@ async def test_unimplemented_transaction_methods_raise_not_implemented_error(
 
     with pytest.raises(NotImplementedError, match="SPL-130h"):
         await adapter.with_transaction(None)
-
 
 
 # ----- ConnectorInstanceStoreProvider -----
@@ -3059,9 +3048,7 @@ async def test_put_connector_instance_creates_row(pg_pool: Pool) -> None:
     assert put.credentials_authentication == {}
     assert put.used_capabilities is None
 
-    got = await adapter.get_connector_instance(
-        WorkspaceId("ws-1"), ConnectorInstanceId("inst-1")
-    )
+    got = await adapter.get_connector_instance(WorkspaceId("ws-1"), ConnectorInstanceId("inst-1"))
     assert got is not None
     assert got.name == "prod-http"
 
@@ -3089,9 +3076,7 @@ async def test_put_connector_instance_persists_config_jsonb(pg_pool: Pool) -> No
     }
     assert put.used_capabilities == ("oci.registry.read", "oci.referrers.list")
 
-    got = await adapter.get_connector_instance(
-        WorkspaceId("ws-1"), ConnectorInstanceId("inst-1")
-    )
+    got = await adapter.get_connector_instance(WorkspaceId("ws-1"), ConnectorInstanceId("inst-1"))
     assert got is not None
     assert got.target_config == {"repositoryNamespace": "acme/widgets"}
     assert got.credentials_authentication == {
@@ -3109,9 +3094,7 @@ async def test_put_connector_instance_is_create_only(pg_pool: Pool) -> None:
     # Re-put on identical contents still rejects — adapters do not
     # silently merge; idempotence is the service layer's job.
     with pytest.raises(ImmutableViolation):
-        await adapter.put_connector_instance(
-            WorkspaceId("ws-1"), _make_instance()
-        )
+        await adapter.put_connector_instance(WorkspaceId("ws-1"), _make_instance())
 
 
 async def test_put_connector_instance_rejects_workspace_mismatch(
@@ -3131,9 +3114,7 @@ async def test_get_connector_instance_returns_none_when_absent(
 
     adapter = PgConnectorInstanceAdapter(pool=pg_pool)
     await adapter.apply_pending()
-    got = await adapter.get_connector_instance(
-        WorkspaceId("ws-1"), ConnectorInstanceId("nope")
-    )
+    got = await adapter.get_connector_instance(WorkspaceId("ws-1"), ConnectorInstanceId("nope"))
     assert got is None
 
 
@@ -3142,12 +3123,8 @@ async def test_get_connector_instance_workspace_isolation(pg_pool: Pool) -> None
 
     adapter = PgConnectorInstanceAdapter(pool=pg_pool)
     await adapter.apply_pending()
-    await adapter.put_connector_instance(
-        WorkspaceId("ws-A"), _make_instance(workspace_id="ws-A")
-    )
-    got = await adapter.get_connector_instance(
-        WorkspaceId("ws-B"), ConnectorInstanceId("inst-1")
-    )
+    await adapter.put_connector_instance(WorkspaceId("ws-A"), _make_instance(workspace_id="ws-A"))
+    got = await adapter.get_connector_instance(WorkspaceId("ws-B"), ConnectorInstanceId("inst-1"))
     assert got is None  # cross-workspace existence MUST NOT leak
 
 
@@ -3223,9 +3200,7 @@ async def test_patch_connector_instance_workspace_isolation(pg_pool: Pool) -> No
     )
     assert res is None  # cross-workspace patch returns None
     # Verify the ws-A row is untouched.
-    got = await adapter.get_connector_instance(
-        WorkspaceId("ws-A"), ConnectorInstanceId("inst-1")
-    )
+    got = await adapter.get_connector_instance(WorkspaceId("ws-A"), ConnectorInstanceId("inst-1"))
     assert got is not None
     assert got.name == "A-original"
 
@@ -3309,6 +3284,4 @@ async def test_list_connector_instances_keyset_pagination(pg_pool: Pool) -> None
     )
     assert len(second.items) == 2
     # No overlap between pages.
-    assert {i.instance_id for i in first.items}.isdisjoint(
-        {i.instance_id for i in second.items}
-    )
+    assert {i.instance_id for i in first.items}.isdisjoint({i.instance_id for i in second.items})

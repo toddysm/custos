@@ -18,6 +18,7 @@ from urllib.parse import quote
 
 import pytest
 from asyncpg.pool import Pool
+from custos_callctx.execution import ExecutionIdentity
 from custos_pg import PgMetadataAdapter
 from custos_spl.errors import BackendUnavailable, ImmutableViolation, LeaseBusy, LeaseExpired
 from custos_spl.ids import RunId as SplRunId
@@ -338,9 +339,13 @@ async def setup_runtime(
     return runtime, AmbiguousClient(runtime), trigger
 
 
-async def test_start_ack_loss_recovers_original_runtime_and_snapshot(harness: Harness) -> None:
+@pytest.mark.parametrize("execution", [False, True])
+async def test_start_ack_loss_recovers_original_runtime_and_snapshot(
+    harness: Harness, execution: bool
+) -> None:
     """Restarted controllers recover persisted inputs and never recreate the already-started run."""
     runtime, client, trigger = await setup_runtime(harness)
+    identity = ExecutionIdentity(str(WS), "executor", "stable") if execution else None
     try:
         controller = TriggerDeliveryController(
             harness.delivery,
@@ -354,7 +359,9 @@ async def test_start_ack_loss_recovers_original_runtime_and_snapshot(harness: Ha
         from custos_workflow.runs.errors import WorkflowRuntimeUnavailableError
 
         with pytest.raises(WorkflowRuntimeUnavailableError):
-            await controller.start(str(WS), version(), {}, "start-key", until)
+            await controller.start(
+                str(WS), version(), {}, "start-key", until, execution_identity=identity
+            )
         metadata, provider = harness.restart()
         restarted = TriggerDeliveryController(
             provider,
@@ -363,7 +370,9 @@ async def test_start_ack_loss_recovers_original_runtime_and_snapshot(harness: Ha
             InMemoryActivityTypeRegistry({}),
             InMemoryLifecycleEventPublisher(),
         )
-        result = await restarted.lookup_start(str(WS), "version", {}, "start-key", until)
+        result = await restarted.lookup_start(
+            str(WS), "version", {}, "start-key", until, execution_identity=identity
+        )
         assert result is not None and result.run_id == derive_run_id(str(WS), "start-key")
         assert len(trigger.register_calls) == 1
         assert trigger.register_calls[0].delivery_protocol == 2
@@ -372,6 +381,14 @@ async def test_start_ack_loss_recovers_original_runtime_and_snapshot(harness: Ha
         )
         assert len(mirrors) == 1 and mirrors[0].step_id == "first"
         assert mirrors[0].delivery_protocol == 2
+        expected_identity = identity.to_dict() if identity else None
+        assert mirrors[0].execution_identity == identity
+        assert trigger.register_calls[0].execution_identity == identity
+        saved = await provider.get_workflow_start(WS, str(result.run_id))
+        assert saved is not None
+        snapshot = json.loads(saved.input_json)
+        assert snapshot["delivery_protocol"] == (3 if execution else 2)
+        assert snapshot.get("execution_identity") == expected_identity
     finally:
         await runtime.shutdown()
 

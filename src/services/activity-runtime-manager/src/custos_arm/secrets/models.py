@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Final, Protocol, runtime_checkable
+from typing import Any, Final, Protocol, runtime_checkable
 
 #: Sub-directory of ``/custos/in`` that holds materialized connector
 #: credentials. Mirrors the locked Activity Contract path
@@ -68,6 +68,9 @@ class ConnectorContext:
         from the sidecar instead of reading static files.
     :param lease_id: Connector Service lease id ARM may ``RefreshLease`` for a
         long-running step; ``None`` when ARM holds no refreshable lease.
+    :param binding: Canonical opaque plugin context, written only to the private
+        slot binding file. It is not a lease identifier.
+    :param capabilities: Capabilities resolved for this exact slot binding.
     :raises ValueError: If any identity field is empty or a secret key is empty.
     """
 
@@ -76,6 +79,8 @@ class ConnectorContext:
     connector_instance_id: str
     secrets: Mapping[str, str] = field(default_factory=dict)
     lease_id: str | None = None
+    binding: Mapping[str, Any] | None = field(default=None, repr=False)
+    capabilities: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.slot_name:
@@ -104,13 +109,21 @@ class SidecarToken:
     request. The scope triple lets the sidecar reject a token replayed across
     a different attempt.
 
+    ``verification_key`` is private sidecar-only material, never ordinary input.
+    ``workspace_id`` separates issuer registries even when execution coordinates
+    collide; ``expires_at`` is the absolute signed expiry. Legacy manually
+    constructed values may omit these fields but are not newly issued bootstraps.
+
     :raises ValueError: If the token value is empty or the scope is malformed.
     """
 
-    value: str
+    value: str = field(repr=False)
     run_id: str
     step_id: str
     attempt: int
+    workspace_id: str | None = None
+    verification_key: bytes = field(default=b"", repr=False)
+    expires_at: int | None = None
 
     def __post_init__(self) -> None:
         if not self.value:
@@ -123,6 +136,10 @@ class SidecarToken:
             raise ValueError("SidecarToken.attempt must be an int")
         if self.attempt < 1:
             raise ValueError("SidecarToken.attempt must be >= 1")
+        if self.workspace_id is not None and not self.workspace_id.strip():
+            raise ValueError("SidecarToken.workspace_id must be nonempty when supplied")
+        if self.expires_at is not None and type(self.expires_at) is not int:
+            raise ValueError("SidecarToken.expires_at must be an integer")
 
     @property
     def scope(self) -> tuple[str, str, int]:
@@ -159,6 +176,10 @@ class SecretSink(Protocol):
         place the file on a tmpfs (memory-backed) mount so plaintext
         credentials never touch durable storage.
         """
+        ...
+
+    async def write_private_secret(self, *, relative_path: str, content: bytes, mode: int) -> None:
+        """Write to a separate sidecar-only tree that is never mounted into the activity."""
         ...
 
 

@@ -8,6 +8,31 @@ instance lifecycle, capability matching at publish, context issuance to
 running activities (via the secret-bridge sidecar), and the trigger
 listen / pull streams that feed the Trigger Service.
 
+## Scoped activity credential issuance
+
+`POST /internal/v1/activity-credentials` is a private runtime-only control-plane
+endpoint. It requires fresh `connector-credentials` execution provenance,
+`connector:bind`, the configured `CONN_RUNTIME_APP_ID` (default
+`activity-runtime-manager`), `CONN_RUNTIME_NAMESPACE` and the local app token.
+Legacy assertion contexts or sandbox-selected instance IDs/TTL hints are rejected.
+
+The issuer reads the live revision-15 attempt and original principal/slot scope,
+checks the current Connector instance, and uses the existing identity resolver
+registry with a fresh provider read. Completed, expired, revoked or cross-attempt
+authority is denied. PostgreSQL lease admission is atomic across replicas (cap 16);
+readiness for this surface requires both durable attempt and atomic-lease capabilities.
+Issuance audit must persist before returning private material.
+The retained instance ID pins the immutable type/version/credential descriptor:
+supported patches cannot replace those fields, and creation assigns a new UUID.
+Changing values behind the same secret reference remains supported rotation.
+Private resolver failures are sanitized before tracing as well as audit/log output.
+
+Version-two responses distinguish the platform `lease` from `credential.material`,
+`credential.issuedAt` and optional `credential.expiresAt`. An unknown upstream
+expiry remains `null`; releasing a platform lease is not a claim that a static
+provider credential has been revoked upstream. Production Sidecars use the
+runtime's private HTTPS proxy and never receive service-account bearer credentials.
+
 ## Status
 
 **Implemented** — the CONN-IMPL-000 milestone ([#318](https://github.com/toddysm/custos/issues/318))
@@ -59,6 +84,8 @@ following `CONN_*` environment variables.
 | `APP_API_TOKEN` | For private Trigger RPCs | unset | Token shared only with the local Dapr sidecar; empty/blank fails closed. |
 | `CONN_TRIGGER_APP_ID` | For private Trigger RPCs | `trigger-service` | Exact authenticated caller application ID, not an HTTP endpoint. |
 | `CONN_TRIGGER_NAMESPACE` | For private Trigger RPCs | unset | Exact authenticated caller namespace; required independently of application ID. |
+| `CONN_WORKFLOW_APP_ID` | For version-two binding | `workflow-service` | Exact authenticated Workflow caller application ID. |
+| `CONN_WORKFLOW_NAMESPACE` | For version-two binding | unset | Exact authenticated Workflow caller namespace. |
 
 ## Private webhook verification
 
@@ -270,7 +297,10 @@ Process bind:
 
 ```bash
 cd src/services/connector-service
-pip install -e ".[dev]"
+pip install -e ../../libs/storage-provider-layer -e ../../libs/custos-postgres \
+  -e ../../libs/custos-callctx -e ../../libs/custos-cel \
+  -e ../../libs/custos-csi -e ../activity-runtime-manager -e ../connector-sidecar \
+  -e ../workflow-service -e ".[dev]"
 ruff check .
 ruff format --check .
 mypy src tests

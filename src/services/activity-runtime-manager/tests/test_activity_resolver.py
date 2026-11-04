@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import asyncio
+import json
+import time
+from collections.abc import AsyncIterator, Callable
 from datetime import datetime
 from typing import Any
 
 import httpx
 import pytest
+from custos_callctx.execution import ExecutionBinding, ExecutionBindings, ExecutionIdentity
+from custos_callctx.execution_client import ExecutionContextClient
 
 from custos_arm.contract import ErrorClass
 from custos_arm.manifest import IsolationTier
@@ -19,9 +24,117 @@ from custos_arm.resolve import (
     CatalogActivityResolver,
     CatalogUnavailableError,
 )
+from custos_arm.resolve.resolver import ScopedCatalogActivityResolver
 
 _CATALOG = "http://catalog.svc:8080"
 _DIGEST = "sha256:" + "ab" * 32
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        None,
+        "transport",
+        "json",
+        "version",
+        "denied",
+        "trickle",
+        "not-found",
+        "invalid-ref",
+        "unpinned",
+    ],
+)
+async def test_scoped_resolver_uses_fresh_private_authority(failure: str | None) -> None:
+    """Resolve the actual Catalog shape without unsigned fallback or private error diagnostics."""
+    identity = ExecutionIdentity("ws", "account", "stable")
+    bindings = ExecutionBindings(
+        (ExecutionBinding(identity, "credential-source", "token"),),
+        {"ws": "stable"},
+    )
+    calls: list[httpx.Request] = []
+    token = "e30.privateContext.signature"
+
+    class Trickle(httpx.AsyncByteStream):
+        """Keep read progress below the per-read timeout while exceeding total duration."""
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            """Stream actual Catalog response bytes across many short delays."""
+            raw = json.dumps(_body()).encode()
+            for offset in range(0, len(raw), 16):
+                await asyncio.sleep(0.01)
+                yield raw[offset : offset + 16]
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        """Use real scoped resolution and exchange over a simulated transport."""
+        calls.append(request)
+        if "/v1.0/secrets/" in request.url.path:
+            return httpx.Response(200, json={"token": "private-credential"})
+        if request.url.path.endswith("/rpc/callctx.exchangeExecution"):
+            assert json.loads(request.content)["operation"] == "catalog-activity-read"
+            timestamp = int(time.time())
+            return httpx.Response(
+                403 if failure == "denied" else 200,
+                json={"token": token, "iat": timestamp, "exp": timestamp + 60},
+            )
+        assert request.url.path == "/v1/workspaces/ws/activity-types/security/scan-image@2.1.0"
+        assert request.headers["x-custos-callctx"] == token
+        if failure == "transport":
+            raise httpx.ConnectError(token, request=request)
+        if failure == "json":
+            return httpx.Response(200, text=token)
+        if failure == "trickle":
+            return httpx.Response(200, stream=Trickle())
+        if failure == "not-found":
+            return httpx.Response(404, text=token)
+        return httpx.Response(200, json=_body(version="2.2.0" if failure == "version" else "2.1.0"))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        resolver = ScopedCatalogActivityResolver(
+            http,
+            catalog_endpoint=_CATALOG,
+            execution=ExecutionContextClient(http, bindings),
+        )
+        if failure == "trickle":
+            resolver._timeout = 0.05
+        started = time.monotonic()
+        with pytest.raises(ActivityUnresolvedError):
+            await resolver.resolve(workspace_id="ws", activity_ref="security/scan-image@2.1.0")
+        assert not calls
+        if failure:
+            expected = (
+                ActivityUnresolvedError
+                if failure
+                in {
+                    "not-found",
+                    "invalid-ref",
+                    "unpinned",
+                }
+                else CatalogUnavailableError
+            )
+            ref = {
+                "invalid-ref": "not-an-activity",
+                "unpinned": "security/scan-image@2",
+            }.get(failure, "security/scan-image@2.1.0")
+            with pytest.raises(expected) as failed:
+                await resolver.resolve_execution(
+                    workspace_id="ws",
+                    activity_ref=ref,
+                    identity=identity,
+                )
+            assert token not in str(failed.value) and failed.value.__cause__ is None
+            if failure == "trickle":
+                assert time.monotonic() - started < 0.5
+            if failure in {"invalid-ref", "unpinned"}:
+                assert not calls
+        else:
+            for _ in range(2):
+                result = await resolver.resolve_execution(
+                    workspace_id="ws",
+                    activity_ref="security/scan-image@2.1.0",
+                    identity=identity,
+                )
+                assert result.version == "2.1.0" and result.digest == _DIGEST
+            assert len(calls) == 6
 
 
 def _manifest(*, version: str = "2.1.0", min_tier: str | None = "vm") -> dict[str, Any]:

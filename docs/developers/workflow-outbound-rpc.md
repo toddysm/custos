@@ -1,6 +1,6 @@
 # Workflow Service Outbound RPC
 
-Last Updated: 2026-06-04
+Last Updated: 2026-11-03
 
 The Workflow Service drives two downstream services over **Dapr
 Service Invocation** while a run executes: the **Activity Runtime
@@ -23,6 +23,13 @@ resolved connector contexts (ARM `ScheduleActivity`). Cancellation
 flows through ARM `CancelActivity`. The adapters do not own the HTTP
 client — the FastAPI lifespan builds one shared
 `httpx.AsyncClient` and `aclose()`s it on shutdown.
+
+Background execution pins a workspace service-account reference, not the
+creator's credential. Each actual call obtains a fresh operation-scoped context
+from Auth; neither the credential nor the signed header enters activity input,
+history or error diagnostics. Synchronous worker callbacks submit their network
+work to the application's owning event loop rather than creating new loops for
+the shared connection pool.
 
 ```mermaid
 sequenceDiagram
@@ -58,7 +65,7 @@ sidecar host/port default to `127.0.0.1:3500` (overridable via
 |---|---|---|---|
 | `arm` | Schedule an activity | `ScheduleActivity` | `/v1.0/invoke/<arm-app-id>/method/ScheduleActivity` |
 | `arm` | Cancel an activity | `CancelActivity` | `/v1.0/invoke/<arm-app-id>/method/CancelActivity` |
-| `connector` | Bind a step's slots | `BindForStep` | `/v1.0/invoke/<connector-app-id>/method/BindForStep` |
+| `connector` | Bind a step's slots | `internal/v1/bind-for-step` | `/v1.0/invoke/<connector-app-id>/method/internal/v1/bind-for-step` |
 
 ## ScheduleActivity (ARM)
 
@@ -81,15 +88,40 @@ use the `Z` suffix.
   },
   "connectorContexts": {
     "default": {
+      "schemaVersion": "2",
       "slotName": "default",
-      "handle": "ctx-default-handle",
-      "expiresAt": "2030-01-02T03:04:05Z",
-      "connectorKind": "oci-registry"
+      "connectorInstanceId": "primary",
+      "connectorKind": "oci-registry",
+      "capabilities": ["oci.pull", "oci.inspect"],
+      "context": {
+        "endpoint": "https://registry.example",
+        "tokenTypeHint": null,
+        "handle": {"reference": "opaque-binding"},
+        "extras": {}
+      }
     }
+  },
+  "executionIdentity": {
+    "workspaceId": "team-a",
+    "principalId": "workflow-executor",
+    "bindingId": "background-v1"
   },
   "deadline": "2030-01-02T03:04:05Z"
 }
 ```
+
+The receiving runtime requires a signed `activity-execute` context matching
+the reference's account and workspace. Opaque binding data is treated as
+private: it is written to `secrets/<slot>/binding.json` in the input tmpfs.
+Only the credential-free endpoint, its host authority, and registered target
+kind are projected into `ctx.connectors`; opaque handles/extras are not exposed
+to ordinary inputs or expressions. Its `handle` is not a lease ID.
+`connectorKind` is the registered manifest's `spec.target.kind` (for example
+`oci-registry`), not its provider type identifier (for example `custos-dockerhub`).
+Instance identity still pins the concrete provider type/version and credentials.
+Canonical endpoints must have an unambiguous host authority without user-info,
+query strings or fragments; credential/configuration data belongs in the
+private binding, not the public endpoint projection.
 
 ### Success response envelope
 
@@ -157,12 +189,16 @@ response (`499` → `OutboundRpcCancelledError`, other non-2xx →
 
 ```json
 {
+  "runId": "run-7f3a",
+  "stepId": "scan",
+  "attempt": 1,
+  "contextVersion": 2,
   "stepKey": "run-7f3a/scan",
   "slots": [
     {
       "name": "default",
-      "connectorRef": "primary",
-      "capabilities": [
+      "instanceId": "primary",
+      "requiredCapabilities": [
         "oci.pull",
         "oci.inspect"
       ]
@@ -173,19 +209,35 @@ response (`499` → `OutboundRpcCancelledError`, other non-2xx →
 
 ### Response envelope
 
-The response is a single `contexts` mapping keyed by slot name; each
-context carries `slotName` / `handle` / `expiresAt` (tz-aware
-ISO-8601) / `connectorKind`. The context handles flow straight into
-the subsequent `ScheduleActivity` call's `connectorContexts`.
+Version two carries actual instance metadata alongside the opaque binding.
+It does not invent an expiry or turn an opaque object into a lease ID.
+Workflow checks the returned slot set, instance and capabilities against its
+request, then adds `schemaVersion: "2"` to each forwarded descriptor.
+The example's execution reference is the same `team-a` / `workflow-executor` /
+`background-v1` binding used above; the reference itself is not in this binding
+request because the receiving service derives actor and workspace from the
+signed `connector-bind` context.
+
+Version-two binding additionally requires the authenticated Workflow app and
+namespace (`CONN_WORKFLOW_APP_ID`, `CONN_WORKFLOW_NAMESPACE`) and the local
+sidecar's `APP_API_TOKEN`. A legacy signed permission without credential-exchange
+provenance is insufficient.
 
 ```json
 {
+  "schemaVersion": "2",
   "contexts": {
     "default": {
       "slotName": "default",
-      "handle": "ctx-default-handle",
-      "expiresAt": "2030-01-02T03:04:05Z",
-      "connectorKind": "oci-registry"
+      "connectorInstanceId": "primary",
+      "connectorKind": "oci-registry",
+      "capabilities": ["oci.pull", "oci.inspect"],
+      "context": {
+        "endpoint": "https://registry.example",
+        "tokenTypeHint": null,
+        "handle": {"reference": "opaque-binding"},
+        "extras": {}
+      }
     }
   }
 }
@@ -239,6 +291,15 @@ active). Sharing the client keeps the in-memory dev / test path
 sidecar-free and guarantees no second pool is created once the
 production paths activate.
 
+Execution-aware deployments also configure `CUSTOS_EXECUTION_IDENTITY_ENABLED`
+and the operator-owned `CUSTOS_EXECUTION_BINDINGS` registry described in the
+[shared call-context library](../../src/libs/custos-callctx/README.md#background-execution-identity).
+They require an explicit durable metadata provider and configured Catalog,
+Connector and Activity Runtime Manager endpoints; missing configuration cannot
+select the development Noop clients.
+Changing a default does not retarget accepted work; missing original bindings
+fail closed. The feature remains default-off.
+
 ## Observability
 
 Each outbound call is wrapped by
@@ -269,7 +330,7 @@ One span per call. Its attribute keys are pinned by
 | Attribute | Meaning |
 |---|---|
 | `wf.client` | `arm` or `connector`. |
-| `wf.method` | The Dapr method segment (`ScheduleActivity` / `CancelActivity` / `BindForStep`). |
+| `wf.method` | The Dapr method segment (`ScheduleActivity` / `CancelActivity` / `internal/v1/bind-for-step`). |
 | `wf.run.id` | Run id (when supplied). |
 | `wf.step.id` | Step id (when supplied). |
 | `wf.attempt` | Per-step attempt counter (when supplied). |

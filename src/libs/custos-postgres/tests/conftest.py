@@ -56,6 +56,7 @@ async def pg_pool() -> AsyncIterator[Pool]:
             await conn.execute("DROP SCHEMA IF EXISTS definition CASCADE")
             await conn.execute("DROP SCHEMA IF EXISTS catalog CASCADE")
             await conn.execute("DROP SCHEMA IF EXISTS connector_instance CASCADE")
+            await conn.execute("DROP SCHEMA IF EXISTS lease CASCADE")
             await conn.execute("DROP SCHEMA IF EXISTS custos_state CASCADE")
             await conn.execute("DROP SCHEMA IF EXISTS custos_meta CASCADE")
         yield pool

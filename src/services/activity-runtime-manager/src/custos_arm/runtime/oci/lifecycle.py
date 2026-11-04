@@ -26,8 +26,6 @@ with fakes; the real ``kind``-cluster path is exercised by the
 
 from __future__ import annotations
 
-import base64
-import binascii
 import io
 import shutil
 import tarfile
@@ -41,6 +39,7 @@ from typing import Any, Final, Protocol
 from custos_arm.contract import ErrorClass
 from custos_arm.runtime.models import (
     OCI_CONTAINER_KIND,
+    SIDECAR_PRIVATE_MOUNT,
     CancelReason,
     OutputBundle,
     SandboxHandle,
@@ -214,6 +213,7 @@ class OciContainerDriver:
         pod_exec: PodExec | None = None,
         start_timeout: float = _DEFAULT_START_TIMEOUT,
         max_output_bytes: int = _DEFAULT_MAX_OUTPUT_BYTES,
+        api_timeout: float | None = None,
     ) -> None:
         self._batch = batch_api
         self._core = core_api
@@ -224,6 +224,7 @@ class OciContainerDriver:
         self._exec = pod_exec or self._default_pod_exec
         self._start_timeout = start_timeout
         self._max_output_bytes = max_output_bytes
+        self._api_options = {"_request_timeout": api_timeout} if api_timeout is not None else {}
         # Records a scheduler-driven cancel keyed by handle reference so the
         # blocking ``await_terminal`` loop (running on another thread) observes
         # it and reports the right signal instead of blocking to the deadline.
@@ -238,7 +239,7 @@ class OciContainerDriver:
         :meth:`start`, giving the I/O Broker and Secret Injector a window to
         populate ``/custos/in`` first.
         """
-        name = job_name(plan.step)
+        name = job_name(plan.step, workspace_id=plan.workspace_id)
         manifest = build_activity_job(plan)
         manifest["spec"]["suspend"] = True
 
@@ -248,7 +249,9 @@ class OciContainerDriver:
         output_root.mkdir(parents=True, exist_ok=True)
 
         try:
-            self._batch.create_namespaced_job(namespace=plan.namespace, body=manifest)
+            self._batch.create_namespaced_job(
+                namespace=plan.namespace, body=manifest, **self._api_options
+            )
         except Exception as exc:
             # Don't leak the staging tree we just created if the Job never lands.
             shutil.rmtree(self._staging_root / name, ignore_errors=True)
@@ -280,6 +283,7 @@ class OciContainerDriver:
                 name=name,
                 namespace=namespace,
                 body={"spec": {"suspend": False}},
+                **self._api_options,
             )
         except Exception as exc:
             raise SandboxFailureError(f"failed to start sandbox Job {name!r}: {exc}") from exc
@@ -287,9 +291,24 @@ class OciContainerDriver:
         self._stream_inputs(handle, namespace, name)
 
     def _stream_inputs(self, handle: SandboxHandle, namespace: str, name: str) -> None:
-        """Stream the host ``in/`` tree into the input bridge and drop the gate."""
+        """Stage a separate private archive first, then public inputs, then release the gate."""
         pod_name = self._await_input_bridge(namespace, name)
-        archive = _tar_directory(handle.input_root)
+        if handle.sidecar_root.exists():
+            private_archive = _tar_directory(handle.sidecar_root)
+            private_result = self._exec(
+                namespace=namespace,
+                pod=pod_name,
+                container=INPUT_BRIDGE_CONTAINER_NAME,
+                command=[
+                    "sh",
+                    "-c",
+                    f"head -c {len(private_archive)} | tar -x -o -C {SIDECAR_PRIVATE_MOUNT}",
+                ],
+                stdin=private_archive,
+            )
+            if private_result.exit_code != 0:
+                raise SandboxFailureError("private bootstrap staging failed")
+        archive = _tar_directory(handle.input_root, group_readable=True)
 
         # The exec stdin channel cannot be half-closed by the Kubernetes client,
         # so ``tar`` would block forever waiting for EOF. ``head -c <len>`` reads
@@ -299,7 +318,7 @@ class OciContainerDriver:
             namespace=namespace,
             pod=pod_name,
             container=INPUT_BRIDGE_CONTAINER_NAME,
-            command=["sh", "-c", f"head -c {len(archive)} | tar -x -C /custos/in"],
+            command=["sh", "-c", f"head -c {len(archive)} | tar -x -o -C /custos/in"],
             stdin=archive,
         )
         if extracted.exit_code != 0:
@@ -308,6 +327,8 @@ class OciContainerDriver:
                 f"(exit {extracted.exit_code}): {extracted.stderr}"
             )
 
+        if handle.reference in self._cancellations:
+            raise SandboxFailureError("cancelled attempt cannot release its activity gate")
         released = self._exec(
             namespace=namespace,
             pod=pod_name,
@@ -330,6 +351,8 @@ class OciContainerDriver:
         """
         deadline = self._now() + timedelta(seconds=self._start_timeout)
         while True:
+            if f"{namespace}/{name}" in self._cancellations:
+                raise SandboxFailureError("cancelled attempt cannot start its input bridge")
             pod = self._activity_pod(namespace, name)
             if pod is not None:
                 state = _init_container_state(pod, INPUT_BRIDGE_CONTAINER_NAME)
@@ -410,10 +433,12 @@ class OciContainerDriver:
         ``restartPolicy: Always`` — that ignores the kubelet's SIGTERM), so the
         tree it shares with the activity is ``tar``-streamed out over
         ``pods/exec`` and unpacked into the host ``out/`` the I/O Broker reads
-        from. The collector pipes the archive through ``base64`` so the binary
-        tar survives the (text-framed) exec channel without corruption. Once the
-        tree is drained the monitor drops :data:`OUTPUT_COLLECTED_SENTINEL` so
-        the collector exits and the Pod completes promptly.
+        from. Raw uncompressed tar travels over the binary exec channel, so
+        ``max_output_bytes`` bounds archive bytes (including tar headers/padding),
+        without Base64 expansion reducing the ceiling. Empty, truncated or
+        malformed streams are failures, not empty output trees. Once the tree
+        is drained the monitor drops :data:`OUTPUT_COLLECTED_SENTINEL` so the
+        collector exits and the Pod completes promptly.
 
         Raises:
             SandboxFailureError: the collector Pod is gone, the exec failed, or
@@ -428,7 +453,7 @@ class OciContainerDriver:
             namespace=namespace,
             pod=str(pod.metadata.name),
             container=OUTPUT_BRIDGE_CONTAINER_NAME,
-            command=["sh", "-c", "tar -c -C /custos/out . | base64"],
+            command=["tar", "-c", "-C", "/custos/out", "."],
             stdin=None,
         )
         if result.exit_code != 0:
@@ -437,23 +462,21 @@ class OciContainerDriver:
                 f"(exit {result.exit_code}): {result.stderr}"
             )
 
-        try:
-            archive = base64.b64decode(result.stdout)
-        except (binascii.Error, ValueError) as exc:
-            raise SandboxFailureError(
-                f"failed to decode the output stream from sandbox {name!r}: {exc}"
-            ) from exc
+        archive = result.stdout
         if len(archive) > self._max_output_bytes:
             raise SandboxFailureError(
                 f"sandbox {name!r} outputs ({len(archive)} bytes) exceed the "
                 f"{self._max_output_bytes}-byte limit"
             )
+        if (
+            len(archive) < 2 * tarfile.BLOCKSIZE
+            or len(archive) % tarfile.BLOCKSIZE
+            or archive[-2 * tarfile.BLOCKSIZE :] != b"\0" * (2 * tarfile.BLOCKSIZE)
+        ):
+            raise SandboxFailureError("sandbox output is not a complete raw tar archive")
 
         try:
-            if archive:
-                _extract_tar(archive, handle.output_root)
-            else:
-                handle.output_root.mkdir(parents=True, exist_ok=True)
+            _extract_tar(archive, handle.output_root)
         except (tarfile.TarError, OSError) as exc:
             raise SandboxFailureError(
                 f"failed to unpack the output tree from sandbox {name!r}: {exc}"
@@ -461,13 +484,15 @@ class OciContainerDriver:
 
         # Release the collector so the Pod completes promptly instead of idling
         # out its termination grace window: it exits as soon as this appears.
-        self._exec(
+        released = self._exec(
             namespace=namespace,
             pod=str(pod.metadata.name),
             container=OUTPUT_BRIDGE_CONTAINER_NAME,
             command=["touch", OUTPUT_COLLECTED_SENTINEL],
             stdin=None,
         )
+        if released.exit_code != 0:
+            raise SandboxFailureError("failed to release the sandbox output collector")
         return OutputBundle(root=handle.output_root)
 
     def cleanup(self, handle: SandboxHandle) -> None:
@@ -485,6 +510,7 @@ class OciContainerDriver:
                 name=name,
                 namespace=namespace,
                 propagation_policy="Background",
+                **self._api_options,
             )
         except Exception as exc:
             if _is_not_found(exc):
@@ -496,6 +522,7 @@ class OciContainerDriver:
             pods = self._core.list_namespaced_pod(
                 namespace=namespace,
                 label_selector=f"{_JOB_NAME_LABEL}={name}",
+                **self._api_options,
             )
         except Exception as exc:
             raise SandboxFailureError(
@@ -504,7 +531,7 @@ class OciContainerDriver:
         items = list(pods.items)
         return items[0] if items else None
 
-    def _default_pod_exec(  # pragma: no cover - exercised against a real cluster
+    def _default_pod_exec(
         self,
         *,
         namespace: str,
@@ -513,39 +540,70 @@ class OciContainerDriver:
         command: list[str],
         stdin: bytes | None,
     ) -> ExecResult:
-        """Drive ``connect_get_namespaced_pod_exec`` over a websocket stream."""
+        """Bound raw stdout bytes and elapsed time; missing exit status is never success."""
+        from kubernetes import client as kube_client
         from kubernetes.stream import stream
 
-        client = stream(
-            self._core.connect_get_namespaced_pod_exec,
-            pod,
-            namespace,
-            container=container,
-            command=command,
-            stderr=True,
-            stdin=stdin is not None,
-            stdout=True,
-            tty=False,
-            _preload_content=False,
-        )
-        stderr_parts: list[str] = []
-        stdout_parts: list[str] = []
+        # stream temporarily replaces ApiClient.request; isolate it from concurrent API calls.
+        api = kube_client.ApiClient(self._core.api_client.configuration)
+        opened = False
         try:
+            client = stream(
+                kube_client.CoreV1Api(api).connect_get_namespaced_pod_exec,
+                pod,
+                namespace,
+                container=container,
+                command=command,
+                stderr=True,
+                stdin=stdin is not None,
+                stdout=True,
+                tty=False,
+                _preload_content=False,
+                binary=True,
+                _request_timeout=10,
+            )
+            opened = True
+        finally:
+            if not opened:
+                api.close()
+        stderr_parts: list[bytes] = []
+        stdout_parts: list[bytes] = []
+        total_stdout = total_stderr = 0
+        until = time.monotonic() + 30
+        try:
+            client.sock.settimeout(10)
             if stdin is not None:
                 client.write_stdin(stdin)
             while client.is_open():
+                if time.monotonic() >= until:
+                    raise SandboxFailureError("sandbox stream exceeded its time budget")
                 client.update(timeout=1)
                 if client.peek_stdout():
-                    stdout_parts.append(client.read_stdout())
+                    chunk = client.read_stdout()
+                    if not isinstance(chunk, bytes):
+                        raise SandboxFailureError("sandbox stream is not binary")
+                    total_stdout += len(chunk)
+                    if total_stdout > self._max_output_bytes:
+                        raise SandboxFailureError("sandbox output exceeds its byte budget")
+                    stdout_parts.append(chunk)
                 if client.peek_stderr():
-                    stderr_parts.append(client.read_stderr())
+                    chunk = client.read_stderr()
+                    if not isinstance(chunk, bytes):
+                        raise SandboxFailureError("sandbox diagnostics are not binary")
+                    total_stderr += len(chunk)
+                    if total_stderr > 64 * 1024:
+                        raise SandboxFailureError("sandbox diagnostics exceed their byte budget")
+                    stderr_parts.append(chunk)
             returncode = client.returncode
         finally:
             client.close()
+            api.close()
+        if returncode is None:
+            raise SandboxFailureError("sandbox stream has no terminal status")
         return ExecResult(
-            exit_code=returncode if returncode is not None else 0,
-            stdout="".join(stdout_parts).encode("utf-8"),
-            stderr="".join(stderr_parts),
+            exit_code=returncode,
+            stdout=b"".join(stdout_parts),
+            stderr=b"".join(stderr_parts).decode("utf-8", errors="replace"),
         )
 
 
@@ -554,16 +612,34 @@ def _split_reference(reference: str) -> tuple[str, str]:
     return namespace, name
 
 
-def _tar_directory(root: Path) -> bytes:
+def _tar_directory(root: Path, *, group_readable: bool = False) -> bytes:
     """Pack ``root``'s contents into an uncompressed tar (members relative to it).
 
     Entries are added under paths relative to ``root`` so the archive extracts
-    directly into ``/custos/in``. An empty tree yields a valid empty archive.
+    directly into the target mount. Public files gain read/traverse permission
+    for the pod's supplemental group so activities retain their image UID.
+    Private archives keep owner-only permissions. An empty tree remains valid.
     """
+
+    def permissions(info: tarfile.TarInfo) -> tarfile.TarInfo:
+        """Grant only public read/traverse bits, never private access or group writes."""
+        if group_readable:
+            info.mode |= (info.mode & 0o500) >> 3
+        return info
+
+    paths = []
+    budget = 10240
+    for path in root.rglob("*"):
+        paths.append(path)
+        budget += 8192 + (path.stat().st_size if path.is_file() else 0)
+        if len(paths) > 4096 or budget > _DEFAULT_MAX_OUTPUT_BYTES:
+            raise SandboxFailureError("sandbox input archive exceeds its bounded staging budget")
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w") as archive:
-        for path in sorted(root.rglob("*")):
-            archive.add(path, arcname=str(path.relative_to(root)), recursive=False)
+        for path in sorted(paths):
+            archive.add(
+                path, arcname=str(path.relative_to(root)), recursive=False, filter=permissions
+            )
     return buffer.getvalue()
 
 
@@ -575,7 +651,7 @@ def _extract_tar(archive: bytes, dest: Path) -> None:
     activity cannot use the output stream to write outside its staging tree.
     """
     dest.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(fileobj=io.BytesIO(archive), mode="r") as archive_file:
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as archive_file:
         archive_file.extractall(dest, filter="data")
 
 

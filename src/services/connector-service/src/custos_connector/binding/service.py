@@ -93,6 +93,7 @@ from custos_connector.binding.errors import BindError, BindErrorCode
 from custos_connector.binding.models import (
     BindForStepRequest,
     BindForStepResponse,
+    BindingMetadata,
     BindSlotRequest,
 )
 from custos_connector.identity import (
@@ -104,6 +105,19 @@ from custos_connector.runtime import (
     ConnectorContext,
     PluginRuntimeError,
 )
+
+
+def connector_target_kind(connector_type: ConnectorTypeVersion) -> str:
+    """Read the registered target family, not the provider's distinct type identifier."""
+    spec = connector_type.normalized_manifest.get("spec")
+    target = spec.get("target") if isinstance(spec, Mapping) else None
+    kind = target.get("kind") if isinstance(target, Mapping) else None
+    if not isinstance(kind, str) or not kind.strip():
+        raise BindError(
+            BindErrorCode.INVALID_REQUEST, "registered connector target kind is missing"
+        )
+    return kind
+
 
 # ---------------------------------------------------------------------------
 # Metrics
@@ -160,8 +174,8 @@ class PluginBinder(Protocol):
 # Idempotency primitives
 # ---------------------------------------------------------------------------
 
-#: Idempotency cache key: (workspace_id, run_id, step_id, attempt).
-_CacheKey = tuple[str, str, str, int]
+#: Idempotency cache key: (workspace_id, run_id, step_id, attempt, actor).
+_CacheKey = tuple[str, str, str, int, str]
 
 #: Default upper bound on the number of cached :class:`BindForStepResponse`
 #: entries. Reached, the binder evicts the least-recently-used entry on
@@ -309,6 +323,7 @@ class BindForStepService:
             request.run_id,
             request.step_id,
             request.attempt,
+            request.actor,
         )
 
         # Lock-free cache check (cache hits don't need serialization).
@@ -470,10 +485,11 @@ class BindForStepService:
         """
         try:
             resolved: list[tuple[str, ConnectorContext]] = []
+            bindings: dict[str, BindingMetadata] = {}
             slot_instance_map: dict[str, str] = {}
             slot_instances: list[ConnectorInstance] = []
             for slot in request.slots:
-                ctx, instance = await self._resolve_slot(
+                ctx, instance, kind = await self._resolve_slot(
                     workspace_id=workspace_id,
                     request=request,
                     slot=slot,
@@ -481,6 +497,11 @@ class BindForStepService:
                 resolved.append((slot.name, ctx))
                 slot_instance_map[slot.name] = str(instance.instance_id)
                 slot_instances.append(instance)
+                bindings[slot.name] = BindingMetadata(
+                    str(instance.instance_id),
+                    kind,
+                    slot.required_capabilities,
+                )
         except BindError as exc:
             await audit_binding_rejected(
                 self._metadata,
@@ -513,7 +534,7 @@ class BindForStepService:
             if inst.lease_ttl_seconds and inst.lease_ttl_seconds > 0
         ]
         min_lease_ttl_seconds = min(positive_ttls) if positive_ttls else 0
-        return BindForStepResponse.build(resolved), min_lease_ttl_seconds
+        return BindForStepResponse.build(resolved, bindings), min_lease_ttl_seconds
 
     async def _resolve_slot(
         self,
@@ -521,13 +542,44 @@ class BindForStepService:
         workspace_id: str,
         request: BindForStepRequest,
         slot: BindSlotRequest,
-    ) -> tuple[ConnectorContext, ConnectorInstance]:
+    ) -> tuple[ConnectorContext, ConnectorInstance, str]:
         """Resolve one slot end-to-end.
 
         Returns the :class:`ConnectorContext` together with the
         :class:`ConnectorInstance` so the caller can build the
-        slot→instance map used by the success audit event.
+        slot→instance map used by the success audit event. The final value
+        is the registered target family used by activity slot declarations.
         """
+        instance, connector_type = await self.credential_instance(workspace_id, slot)
+        kind = connector_target_kind(connector_type)
+        capability_index = _capability_index(connector_type)
+        await self._emit_deprecated_capability_events(
+            workspace_id=workspace_id,
+            request=request,
+            slot=slot,
+            instance=instance,
+            capability_index=capability_index,
+        )
+        identity = await self._resolve_identity(
+            workspace_id=workspace_id,
+            request=request,
+            slot=slot,
+            instance=instance,
+        )
+        ctx = await self._invoke_plugin_bind(
+            slot=slot,
+            instance=instance,
+            connector_type=connector_type,
+            identity=identity,
+        )
+        return ctx, instance, kind
+
+    async def credential_instance(
+        self,
+        workspace_id: str,
+        slot: BindSlotRequest,
+    ) -> tuple[ConnectorInstance, ConnectorTypeVersion]:
+        """Validate live scope, health and capabilities for binding or credential issuance."""
         instance = await self._load_instance(workspace_id, slot)
         if not instance.enabled:
             raise BindError(
@@ -549,26 +601,29 @@ class BindForStepService:
         connector_type = await self._load_connector_type(slot, instance)
         capability_index = _capability_index(connector_type)
         self._check_capability_coverage(slot, instance, capability_index)
-        await self._emit_deprecated_capability_events(
+        return instance, connector_type
+
+    async def credential_material(
+        self,
+        *,
+        workspace_id: str,
+        actor: str,
+        slot: BindSlotRequest,
+        instance: ConnectorInstance,
+    ) -> ResolvedIdentity:
+        """Resolve real provider material without reusing cached credentials across refreshes."""
+        if instance.lease_ttl_seconds is None or instance.lease_ttl_seconds <= 0:
+            raise BindError(BindErrorCode.INVALID_REQUEST, "positive instance lease TTL required")
+        return await self._identity.resolve(
             workspace_id=workspace_id,
-            request=request,
-            slot=slot,
-            instance=instance,
-            capability_index=capability_index,
+            actor=actor,
+            instance_id=str(instance.instance_id),
+            authentication_type=_authentication_type(instance, slot_name=slot.name),
+            credentials_authentication=instance.credentials_authentication,
+            lease_ttl_seconds=instance.lease_ttl_seconds,
+            force_refresh=True,
+            private_errors=True,
         )
-        identity = await self._resolve_identity(
-            workspace_id=workspace_id,
-            request=request,
-            slot=slot,
-            instance=instance,
-        )
-        ctx = await self._invoke_plugin_bind(
-            slot=slot,
-            instance=instance,
-            connector_type=connector_type,
-            identity=identity,
-        )
-        return ctx, instance
 
     # ------------------------------------------------------------------
     # Internals: per-step helpers

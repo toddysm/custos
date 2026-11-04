@@ -229,6 +229,7 @@ class TestBindForStepResponse:
         resp = BindForStepResponse(contexts=original)
         original["primary"] = _ctx(handle="mutated")
         # The snapshot is independent of the caller's dict.
+        assert isinstance(resp.contexts["primary"], ConnectorContext)
         assert resp.contexts["primary"].handle == "h-1"
 
     def test_is_frozen(self) -> None:

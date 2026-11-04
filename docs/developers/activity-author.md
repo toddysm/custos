@@ -201,13 +201,17 @@ spec:
   `args` override in v1).
 - **`spec.inputs.schema` / `spec.outputs.schema`** — JSON Schema Draft 2020-12.
   May `$ref` platform types via `custos://types/<Name>` (`ImageRef`,
-  `OciDescriptor`, `ConnectorRef`, `ArtifactRef`, `Duration`).
+  `OciDescriptor`, `ConnectorRef`, `ArtifactRef`, `Duration`). These references
+  resolve locally from the runtime contract. Unknown/external schema references
+  fail validation; the runtime never downloads schemas during an attempt.
 - **`spec.outputs.artifacts[]`** — declare each file you emit by `name`,
   `mediaType`, and `required`. ARM uploads them and expands the matching
   `ArtifactRef`s in `outputs`.
-- **`spec.connectors[]`** — connector slots the workflow must bind. ARM injects
-  the resolved secrets under `/custos/in/secrets/<name>/`. `capabilities` are
-  dot-namespaced advisory tokens the connector enforces.
+- **`spec.connectors[]`** — connector slots the workflow must bind. Production
+  ARM injects opaque bindings under `/custos/in/secrets/<name>/`; activities
+  request real credentials through the authenticated local Sidecar socket.
+  Explicit legacy secret-file injection remains supported. `capabilities` are
+  dot-namespaced tokens checked against the accepted slot authority.
 - **`spec.resources.timeout`** — the only required resource field (ISO-8601).
   CPU/memory/ephemeral-storage are optional and fall back to the operator
   defaults below.

@@ -5,23 +5,45 @@ container over a Unix Domain Socket.
 
 The sidecar is co-deployed by the Activity Runtime Manager (ARM) into
 the same pod as the activity container. It exposes three endpoints on
-a UDS at `/custos/run/connector.sock` (mode `0600`, owner `sidecar
-UID`, group `activity UID`):
+a UDS at `/custos/run/connector.sock` (mode `0660`, trusted Sidecar
+UID 1000 and the activity's supplemental group 1000):
 
 | Method | Path | Purpose |
 |---|---|---|
 | `GET`  | `/v1/token`         | Mint a lease + upstream credential for a slot/purpose. |
 | `POST` | `/v1/token/refresh` | Re-mint while keeping the lease id stable. |
-| `POST` | `/v1/token/release` | Best-effort release. |
+| `POST` | `/v1/token/release` | Authoritative scoped release. |
 
 Every request must carry `Custos-Sidecar-Token: <bootstrap>` — an
 HMAC-SHA256-signed envelope ARM minted at sidecar start, bound to the
 specific `(runId, stepId, attempt)` triple.
 
-Lease bookkeeping (capacity tracking + audit emission) is delegated
-to the Connector Service over `/internal/v1/leases:{issue,refresh,release}`.
-The sidecar mints the upstream credential locally (KMS integration
-arrives in a follow-up ticket; CONN-IMPL-019 ships a stub minter).
+ARM and the sidecar now share the version-one codec from `custos-callctx`.
+Malformed/duplicate claims, future issuance, expiry and scope mismatch are
+rejected. ARM issues independent keys per workspace/attempt and never extends
+an accepted token on replay. Private key delivery and full runtime activation
+remain tracked in [#1038](https://github.com/toddysm/custos/issues/1038);
+the activity must not receive the verification key alongside its bearer token.
+
+Production loads an owner-only private bundle from
+`CUSTOS_SIDECAR_RUNTIME_CONFIG` (default `/custos/sidecar/runtime.json`) and the
+adjacent bootstrap key. Missing/unsafe configuration fails startup; it never
+selects `StubCredentialMinter`. The bundle carries only attempt addressing and a
+private attempt proof, not a service-account credential or general signed context.
+
+The Sidecar forwards to the runtime's private HTTPS credential proxy. The runtime
+obtains fresh scoped Auth authorization; Connector Service checks durable accepted
+scope, current instance health/capabilities and lease revocation, then calls its
+real identity resolvers. Production responses use `schemaVersion: "2"` with
+separate `lease` and `credential` objects. `credential.material` is opaque JSON;
+`credential.expiresAt: null` means upstream expiry is unknown, not that it equals
+`lease.expiresAt`. Consumers must handle the material required by their provider.
+
+TLS verification and redirect rejection are mandatory. Private CA deployments
+can provide `CUSTOS_SIDECAR_CA_BUNDLE`; otherwise the image's default trust store
+is used. The production broker checks revocation on every operation rather than
+serving cached credentials from the legacy control-channel registry.
+The explicit legacy factories and stub minter remain test utilities only.
 
 See [design/components/connector-service/design.md § Secret and Token
 Flow to
@@ -41,14 +63,15 @@ for the normative contract.
 The sidecar ships as the `ghcr.io/toddysm/custos/connector-sidecar`
 OCI image. The image runs the `custos-connector-sidecar` console
 script (which calls `custos_sidecar.__main__:main`) and reads its
-configuration from `CUSTOS_SIDECAR_*` environment variables seeded by
-ARM (see [`src/custos_sidecar/settings.py`](src/custos_sidecar/settings.py)
-for the full list).
+private configuration seeded by ARM (see
+[`src/custos_sidecar/broker.py`](src/custos_sidecar/broker.py)).
+The [legacy settings](src/custos_sidecar/settings.py) remain for explicit
+legacy UDS/mTLS integration harnesses, not production credential issuance.
 
-Build locally:
+Build from the repository root:
 
 ```sh
-docker build -t custos-connector-sidecar:dev .
+docker build -f src/services/connector-sidecar/Dockerfile -t custos-connector-sidecar:dev .
 ```
 
 The image is multi-stage (`python:3.11-slim` builder → `python:3.11-slim`

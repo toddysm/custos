@@ -181,7 +181,8 @@ def test_create_app_honours_env_flag_production(
         if m.cls is CallContextMiddleware  # type: ignore[comparison-overlap]
     )
     # Starlette stores the kwargs on the wrapper's ``kwargs`` mapping.
-    assert installed.kwargs == {"require_call_context": True}
+    assert installed.kwargs["require_call_context"] is True
+    assert installed.kwargs["execution_verifier"] is None
 
 
 def test_create_app_env_flag_only_truthy_on_exact_1(_clean_env: None) -> None:
@@ -194,7 +195,7 @@ def test_create_app_env_flag_only_truthy_on_exact_1(_clean_env: None) -> None:
             for m in app.user_middleware
             if m.cls is CallContextMiddleware  # type: ignore[comparison-overlap]
         )
-        assert installed.kwargs == {"require_call_context": False}, (
+        assert installed.kwargs["require_call_context"] is False, (
             f"WF_REQUIRE_CALL_CONTEXT={non_truthy!r} must not enable production "
             "mode — only the literal string '1' may flip the gate."
         )
@@ -209,7 +210,8 @@ def test_explicit_kwarg_overrides_env(_clean_env: None) -> None:
         for m in app.user_middleware
         if m.cls is CallContextMiddleware  # type: ignore[comparison-overlap]
     )
-    assert installed.kwargs == {"require_call_context": False}
+    assert installed.kwargs["require_call_context"] is False
+    assert installed.kwargs["execution_verifier"] is None
 
 
 # ---------------------------------------------------------------------------

@@ -74,12 +74,13 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install SPL + Postgres adapter + CEL library from path
+      - name: Install SPL + Postgres + CEL + call-context libraries from path
         working-directory: ${{ github.workspace }}
         run: |
           pip install -e src/libs/storage-provider-layer[dev]
           pip install -e src/libs/custos-postgres[dev]
           pip install -e src/libs/custos-cel[dev]
+          pip install -e src/libs/custos-callctx[dev]
 
       - name: Install Workflow compiler for publication contract tests
         working-directory: ${{ github.workspace }}
@@ -99,6 +100,15 @@ jobs:
 
       - name: Pytest (with 90% coverage gate)
         run: pytest -q --cov=custos_catalog --cov-report=term-missing --cov-fail-under=90
+
+      - name: Build and verify the Catalog runtime image without dev dependencies
+        if: matrix.python-version == '3.12'
+        working-directory: ${{ github.workspace }}
+        run: |
+          docker build -f src/services/catalog-service/Dockerfile \
+            -t custos-catalog:runtime-smoke .
+          docker run --rm --entrypoint python custos-catalog:runtime-smoke \
+            -c "import custos_catalog; import custos_catalog.middleware.callctx"
 
   catalog-service-integration:
     name: catalog-service (integration vs Postgres)
@@ -132,12 +142,13 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install SPL + Postgres adapter + CEL library from path
+      - name: Install SPL + Postgres + CEL + call-context libraries from path
         working-directory: ${{ github.workspace }}
         run: |
           pip install -e src/libs/storage-provider-layer[dev]
           pip install -e src/libs/custos-postgres[dev]
           pip install -e src/libs/custos-cel[dev]
+          pip install -e src/libs/custos-callctx[dev]
 
       - name: Install Workflow compiler for publication contract tests
         working-directory: ${{ github.workspace }}
@@ -413,11 +424,12 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install SPL + Postgres adapter from path
+      - name: Install Auth path dependencies
         working-directory: ${{ github.workspace }}
         run: |
           pip install -e src/libs/storage-provider-layer[dev]
           pip install -e src/libs/custos-postgres[dev]
+          pip install -e src/libs/custos-callctx[dev]
 
       - name: Install package and dev dependencies
         run: pip install -e ".[dev]"
@@ -466,11 +478,12 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install SPL + Postgres adapter from path
+      - name: Install Auth path dependencies
         working-directory: ${{ github.workspace }}
         run: |
           pip install -e src/libs/storage-provider-layer[dev]
           pip install -e src/libs/custos-postgres[dev]
+          pip install -e src/libs/custos-callctx[dev]
 
       - name: Install package and dev dependencies
         run: pip install -e ".[dev]"
@@ -501,10 +514,11 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install custos-cel library from path
+      - name: Install CEL and call-context libraries from path
         working-directory: ${{ github.workspace }}
         run: |
           pip install -e src/libs/custos-cel[dev]
+          pip install -e src/libs/custos-callctx[dev]
 
       - name: Install custos-spl library from path
         working-directory: ${{ github.workspace }}
@@ -568,10 +582,11 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install custos-cel library from path
+      - name: Install CEL and call-context libraries from path
         working-directory: ${{ github.workspace }}
         run: |
           pip install -e src/libs/custos-cel[dev]
+          pip install -e src/libs/custos-callctx[dev]
 
       - name: Install custos-spl library from path
         working-directory: ${{ github.workspace }}
@@ -612,15 +627,18 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install custos-callctx library from path
+      - name: Install bootstrap library and actual sidecar contract-test client
         working-directory: ${{ github.workspace }}
         run: |
           pip install -e src/libs/custos-callctx[dev]
+          pip install -e src/services/connector-sidecar
 
-      - name: Install custos-spl library from path
+      - name: Install runtime storage adapters from path
         working-directory: ${{ github.workspace }}
         run: |
           pip install -e src/libs/storage-provider-layer[dev]
+          pip install -e src/libs/custos-postgres
+          pip install -e src/libs/custos-csi
 
       - name: Install package and dev dependencies
         run: pip install -e ".[dev]"
@@ -636,6 +654,14 @@ jobs:
 
       - name: Pytest (with 90% coverage gate)
         run: pytest -q --cov=custos_arm --cov-report=term-missing --cov-fail-under=90
+
+      - name: Build and verify the actual runtime resource image
+        if: matrix.python-version == '3.12'
+        working-directory: ${{ github.workspace }}
+        run: |
+          docker build -f src/services/activity-runtime-manager/Dockerfile -t custos-arm:runtime-smoke .
+          docker run --rm --entrypoint python custos-arm:runtime-smoke \
+            -c "import custos_arm.resources; import custos_arm.credential_proxy"
 
   activity-runtime-manager-integration:
     name: activity-runtime-manager (kind integration)
@@ -687,15 +713,26 @@ jobs:
             tests/integration/assets
           kind load docker-image custos-arm-e2e-contract:test --name custos-arm
 
-      - name: Install custos-callctx library from path
+      - name: Build and load real Sidecar and private bootstrap probe
+        working-directory: ${{ github.workspace }}
+        run: |
+          docker build -f src/services/connector-sidecar/Dockerfile -t custos-sidecar-e2e:test .
+          docker build -t custos-bootstrap-probe:test \
+            src/services/activity-runtime-manager/tests/integration/assets/bootstrap
+          kind load docker-image custos-sidecar-e2e:test custos-bootstrap-probe:test --name custos-arm
+
+      - name: Install bootstrap library and actual sidecar contract-test client
         working-directory: ${{ github.workspace }}
         run: |
           pip install -e src/libs/custos-callctx[dev]
+          pip install -e src/services/connector-sidecar
 
-      - name: Install custos-spl library from path
+      - name: Install runtime storage adapters from path
         working-directory: ${{ github.workspace }}
         run: |
           pip install -e src/libs/storage-provider-layer[dev]
+          pip install -e src/libs/custos-postgres
+          pip install -e src/libs/custos-csi
 
       - name: Install package and dev dependencies
         run: pip install -e ".[dev]"
@@ -704,6 +741,8 @@ jobs:
         env:
           CUSTOS_ARM_E2E_IMAGE: custos-arm-e2e:test
           CUSTOS_ARM_E2E_CONTRACT_IMAGE: custos-arm-e2e-contract:test
+          CUSTOS_ARM_BOOTSTRAP_IMAGE: custos-bootstrap-probe:test
+          CUSTOS_ARM_SIDECAR_IMAGE: custos-sidecar-e2e:test
         run: pytest -q -m integration --no-cov
 
   connector-service:
@@ -724,12 +763,16 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install SPL + Postgres adapter + call-context lib from path
+      - name: Install Connector libraries and real execution clients
         working-directory: ${{ github.workspace }}
         run: |
           pip install -e src/libs/storage-provider-layer[dev]
           pip install -e src/libs/custos-postgres[dev]
           pip install -e src/libs/custos-callctx[dev]
+          pip install -e src/libs/custos-cel
+          pip install -e src/libs/custos-csi
+          pip install -e src/services/activity-runtime-manager -e src/services/connector-sidecar
+          pip install -e src/services/workflow-service
 
       - name: Install package and dev dependencies
         run: pip install -e ".[dev]"
@@ -778,12 +821,16 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install SPL + Postgres adapter + call-context lib from path
+      - name: Install Connector libraries and real execution clients
         working-directory: ${{ github.workspace }}
         run: |
           pip install -e src/libs/storage-provider-layer[dev]
           pip install -e src/libs/custos-postgres[dev]
           pip install -e src/libs/custos-callctx[dev]
+          pip install -e src/libs/custos-cel
+          pip install -e src/libs/custos-csi
+          pip install -e src/services/activity-runtime-manager -e src/services/connector-sidecar
+          pip install -e src/services/workflow-service
 
       - name: Install package and dev dependencies
         run: pip install -e ".[dev]"
@@ -830,12 +877,16 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install SPL + Postgres adapter + call-context lib from path
+      - name: Install Connector libraries and real execution clients
         working-directory: ${{ github.workspace }}
         run: |
           pip install -e src/libs/storage-provider-layer[dev]
           pip install -e src/libs/custos-postgres[dev]
           pip install -e src/libs/custos-callctx[dev]
+          pip install -e src/libs/custos-cel
+          pip install -e src/libs/custos-csi
+          pip install -e src/services/activity-runtime-manager -e src/services/connector-sidecar
+          pip install -e src/services/workflow-service
 
       - name: Install package and dev dependencies
         run: pip install -e ".[dev]"
@@ -884,10 +935,7 @@ jobs:
           cache: pip
 
       - name: Install package and dev dependencies
-        # The sidecar has zero in-repo deps (no SPL / custos-postgres);
-        # it talks to Connector Service over HTTP. Only the package
-        # itself + its [dev] extra are needed.
-        run: pip install -e ".[dev]"
+        run: pip install -e ../../libs/custos-callctx -e ".[dev]"
 
       - name: Ruff lint
         run: ruff check .
@@ -920,7 +968,7 @@ jobs:
           cache: pip
 
       - name: Install package and dev dependencies
-        run: pip install -e ".[dev]"
+        run: pip install -e ../../libs/custos-callctx -e ".[dev]"
 
       - name: Pytest (integration — mTLS + E2E)
         # Runs ``test_mtls_integration.py`` and ``test_e2e.py``. The
@@ -982,7 +1030,7 @@ jobs:
       - name: Build and (conditionally) push image
         uses: docker/build-push-action@v6
         with:
-          context: src/services/connector-sidecar
+          context: .
           file: src/services/connector-sidecar/Dockerfile
           push: ${{ steps.tags.outputs.push }}
           tags: ${{ steps.tags.outputs.tags }}
@@ -1208,11 +1256,12 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install SPL + Postgres adapter + auth domain from path
+      - name: Install SPL + call context + Postgres adapter + auth domain from path
         working-directory: ${{ github.workspace }}
         run: |
           pip install -e src/libs/storage-provider-layer[dev]
           pip install -e src/libs/custos-postgres[dev]
+          pip install -e src/libs/custos-callctx
           pip install -e src/services/auth-service
 
       - name: Install package and dev dependencies

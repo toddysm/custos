@@ -555,6 +555,31 @@ The dedicated namespace holds only connector credentials, keeping the platform's
 
 ## Secret and Token Flow to Activities
 
+### Approved production amendment: Connector-owned issuance (#1038)
+
+The owner approved Connector Service-owned issuance on 2026-11-02. Production
+Sidecars no longer mint provider credentials or receive general service-account
+authority. ARM retains the accepted execution identity/slot scope in durable
+revision-15 ownership state and privately delivers an attempt-specific proof.
+The Sidecar uses that proof over verified HTTPS to ARM's credential proxy; ARM
+obtains a fresh `connector-credentials` context and invokes Connector Service
+over authenticated Dapr transport. Connector validates the live scope, principal,
+instance, deadline and revocation, then calls the existing identity resolver.
+
+Capacity reservation is atomic across replicas. Credential admission can be
+revoked without treating an unknown sandbox effect as terminated. Issuance audit
+must commit before material is returned. Responses use `schemaVersion: "2"` and
+separate `lease` and `credential` objects; opaque `credential.material` is not
+stringified, and unknown upstream `expiresAt` remains `null`. A lease deadline
+is not evidence that a static upstream credential expires or is revoked.
+
+The version-one API/control-channel descriptions and diagrams below are retained
+as historical/test-harness contracts, not the current production minting path.
+Current configuration and wire behavior are documented in the
+[Sidecar reference](../../../src/services/connector-sidecar/README.md) and
+[runtime activation contract](../../../src/services/activity-runtime-manager/README.md).
+Activation and full deployed certification remain gated by #1017/#1018.
+
 The connector runtime authenticates to upstream systems and obtains short-lived token material as needed. Activities never receive raw static credentials directly — they receive a `ConnectorContext` containing opaque slot handles and request resolved token material at runtime from a local **connector sidecar** over a pod-local Unix domain socket.
 
 This section is the normative contract for the sidecar API. The sidecar is co-deployed with each activity pod by ARM (see `design/components/activity-runtime-manager/design.md` § Sandbox Layout).

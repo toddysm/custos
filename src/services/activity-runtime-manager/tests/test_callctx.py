@@ -119,8 +119,6 @@ def test_production_dev_shim_refuses_to_start() -> None:
 
 def test_production_with_authz_endpoint_starts() -> None:
     settings = _settings(ENVIRONMENT="production", ARM_AUTHZ_ENDPOINT="http://auth.svc:8080")
-    # Construction must succeed; the request path is NotImplementedError
-    # until the real verifier lands.
     app = _app_with_protected_route(settings)
     with TestClient(app):
         pass
@@ -136,19 +134,24 @@ def test_metrics_path_bypasses_the_middleware() -> None:
     assert response.status_code == 404
 
 
-def test_real_verifier_path_raises_not_implemented() -> None:
+def test_signed_verifier_rejects_unsigned_development_context() -> None:
+    """Configuring real authorization never falls back to caller-asserted JSON."""
     settings = _settings(ARM_AUTHZ_ENDPOINT="http://auth.svc:8080")
     app = _app_with_protected_route(settings)
     client = TestClient(app, raise_server_exceptions=False)
     response = client.get("/whoami", headers=_ctx_header())
-    assert response.status_code == 500
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "callctx_invalid"
 
 
 def test_probes_bypass_the_middleware() -> None:
+    """Unwired readiness bypasses authentication and returns its real scheduling status."""
     app = create_app()
     with TestClient(app) as client:
         assert client.get("/healthz").status_code == 200
-        assert client.get("/readyz").status_code == 200
+        readiness = client.get("/readyz")
+        assert readiness.status_code == 503
+        assert readiness.json()["status"] == "not_ready"
 
 
 def test_create_app_mounts_middleware_and_requires_header() -> None:

@@ -84,8 +84,10 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from typing import Annotated
 
+from custos_callctx.execution import ExecutionBindings, ExecutionIdentity
 from custos_spl.errors import (
     BackendUnavailable,
     ImmutableViolation,
@@ -143,6 +145,33 @@ def _delivery_scope(ctx: CallContext, workspace_id: str) -> None:
         )
 
 
+def _execution_identity(
+    request: Request, ctx: CallContext, raw: dict[str, str] | None, workspace: str
+) -> ExecutionIdentity | None:
+    """Check signed identity and the pinned reference before touching receipts or runtime state."""
+    registry = getattr(request.app.state, "execution_bindings", None)
+    if raw is None:
+        if registry is not None:
+            raise RunStateConflictError(
+                "execution identity required; legacy delivery needs migration"
+            )
+        return None
+    if not isinstance(registry, ExecutionBindings) or not ctx.execution_verified:
+        raise WorkflowRuntimeUnavailableError("execution identity verification is not enabled")
+    identity = ExecutionIdentity.from_dict(raw)
+    if (
+        identity.workspace_id != workspace
+        or identity.workspace_id != ctx.workspace
+        or identity.principal_id != ctx.principal
+    ):
+        raise WorkspaceUnauthorizedError("execution identity does not match signed scope")
+    try:
+        registry.resolve(identity)
+    except ValueError:
+        raise WorkflowRuntimeUnavailableError("original execution binding is unavailable") from None
+    return identity
+
+
 @contextmanager
 def _delivery_errors() -> Iterator[None]:
     """Map explicit storage/ownership failures through the existing Workflow error envelope."""
@@ -168,6 +197,7 @@ def _delivery_errors() -> Iterator[None]:
     summary="Internal RPC: start a workflow run.",
 )
 async def start_run(
+    request: Request,
     body: Annotated[InternalStartRunRequest, Body(...)],
     validator: Annotated[StartRunValidator, Depends(get_validator)],
     controller: Annotated[RunController, Depends(get_run_controller)],
@@ -196,6 +226,8 @@ async def start_run(
         body_key=body.idempotency_key,
         header_key=idempotency_key_header,
     )
+    identity = _execution_identity(request, ctx, body.execution_identity, body.workspace_id)
+    ctx = replace(ctx, execution_identity=identity)
     if body.delivery_protocol == 2:
         _delivery_scope(ctx, body.workspace_id)
         if delivery is None:
@@ -208,6 +240,7 @@ async def start_run(
                 body.inputs,
                 effective_key,
                 body.retain_until,
+                execution_identity=identity,
             )
             if prior is not None:
                 return ref_response_from_ref(prior)
@@ -224,6 +257,7 @@ async def start_run(
                 validated.inputs,
                 effective_key,
                 body.retain_until,
+                execution_identity=identity,
             )
             return ref_response_from_ref(ref)
     validated = await validator.validate_start_run(
@@ -300,6 +334,7 @@ async def cancel_run(
     summary="Internal RPC: deliver an external event into a running workflow.",
 )
 async def raise_external_event(
+    request: Request,
     body: Annotated[RaiseExternalEventRequest, Body(...)],
     controller: Annotated[RunController, Depends(get_run_controller)],
     _ctx: Annotated[CallContext, Depends(get_call_context)],
@@ -350,6 +385,7 @@ async def raise_external_event(
       ``cancelled``) → ``workflow.run_state_conflict`` (409).
     * Runtime failure → ``workflow.runtime_unavailable`` (503).
     """
+    identity = _execution_identity(request, _ctx, body.execution_identity, body.workspace_id)
     _delivery_scope(_ctx, body.workspace_id)
     if body.delivery_protocol == 1 and body.event_name.casefold().startswith(RESUME_CHANNEL_PREFIX):
         raise RunStateConflictError("reserved resume channels require versioned delivery")
@@ -366,6 +402,7 @@ async def raise_external_event(
                 body.payload,
                 body.idempotency_key,
                 body.retain_until,
+                execution_identity=identity,
             )
         return Response(status_code=204 if consumed else 202)
 
@@ -386,6 +423,7 @@ async def raise_external_event(
     responses={204: {"description": "Version-2 delivery acknowledged by the durable consumer."}},
 )
 async def raise_routed_resume(
+    request: Request,
     body: Annotated[RoutedResumeRequest, Body(...)],
     controller: Annotated[RunController, Depends(get_run_controller)],
     ctx: Annotated[CallContext, Depends(get_call_context)],
@@ -393,6 +431,7 @@ async def raise_routed_resume(
 ) -> Response:
     """Keep arbitrary child identities out of security-sensitive Dapr method paths."""
     return await raise_external_event(
+        request,
         body,
         controller,
         ctx,

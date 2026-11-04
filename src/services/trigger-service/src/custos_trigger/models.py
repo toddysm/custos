@@ -22,6 +22,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Final, Self
 
+from custos_callctx.execution import ExecutionIdentity
 from custos_spl.ids import RunId, StepId, SubscriptionId, WorkflowId, WorkspaceId
 from custos_spl.interfaces.metadata_store import (
     DedupKey as SplDedupKey,
@@ -177,6 +178,7 @@ class RegisterResumeRequest(WireModel):
     workspace_id: str | None = Field(default=None, min_length=1)
     source: ResumeSourceWire | None = None
     delivery_protocol: StrictInt = Field(default=1, ge=1, le=2)
+    execution_identity: dict[str, str] | None = None
 
     @model_validator(mode="after")
     def validate_source_association(self) -> Self:
@@ -186,6 +188,9 @@ class RegisterResumeRequest(WireModel):
         )
         if self.delivery_protocol == 2 and self.workspace_id is None:
             raise SourceConfigurationError("version-2 resume requires workspaceId")
+        _validate_execution_reference(
+            self.execution_identity, self.workspace_id, self.delivery_protocol
+        )
         return self
 
 
@@ -266,6 +271,7 @@ class ResumeRegistration(WireModel):
     workspace_id: str | None = Field(default=None, min_length=1)
     source: ResumeSourceWire | None = None
     delivery_protocol: StrictInt = Field(default=1, ge=1, le=2)
+    execution_identity: dict[str, str] | None = None
 
     @model_validator(mode="after")
     def validate_source_association(self) -> Self:
@@ -275,7 +281,20 @@ class ResumeRegistration(WireModel):
         )
         if self.delivery_protocol == 2 and self.workspace_id is None:
             raise SourceConfigurationError("version-2 resume requires workspaceId")
+        _validate_execution_reference(
+            self.execution_identity, self.workspace_id, self.delivery_protocol
+        )
         return self
+
+
+def _validate_execution_reference(
+    raw: dict[str, str] | None, workspace: str | None, protocol: int
+) -> None:
+    """Reject credentials and scope changes in a Workflow-owned immutable registration."""
+    if raw is not None:
+        reference = ExecutionIdentity.from_dict(raw)
+        if protocol != 2 or reference.workspace_id != workspace:
+            raise SourceConfigurationError("execution reference requires matching durable scope")
 
 
 def _validate_resume_source(
@@ -399,6 +418,8 @@ def to_spl_resume_subscription(
         if reg.workspace_id != workspace_id:
             raise ValueError("resume source workspace does not match the storage partition")
         payload["source"] = reg.source.to_source().to_wire()
+    if reg.execution_identity is not None:
+        payload["executionIdentity"] = dict(reg.execution_identity)
     return SplResumeSubscription(
         workspace_id=WorkspaceId(workspace_id),
         resume_id=resume_id,
@@ -422,6 +443,7 @@ def resume_registration_from_spl(row: SplResumeSubscription) -> ResumeRegistrati
         if payload.get("source") is not None or payload.get("deliveryProtocol", 1) == 2
         else None,
         delivery_protocol=payload.get("deliveryProtocol", 1),
+        execution_identity=payload.get("executionIdentity"),
     )
 
 

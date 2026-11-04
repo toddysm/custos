@@ -11,9 +11,69 @@ short-lived secret leases from the Connector Service, and maps the container's
 outcome back to the locked `ActivityResultEnvelope` contract the Workflow
 Service consumes.
 
+## Scoped production activation
+
+`ARM_RUNTIME_ENABLED` defaults to `false`. Enabling it requires:
+
+- `ARM_METADATA_STORE`: the PostgreSQL DSN, provided through the deployment's
+  secret boundary; apply metadata revisions 14/15 and lease revision 2 before startup.
+  Connector's metadata/lease adapters must address the same accepted-state database.
+- `ARM_ARTIFACT_STORE=csi` and `CUSTOS_CSI_PVC_MOUNT`: an existing mounted
+  artifact directory. Unsupported providers fail explicitly.
+- The shared `CUSTOS_EXECUTION_IDENTITY_ENABLED` / `CUSTOS_EXECUTION_BINDINGS`
+  configuration. Accepted work retains its original reference.
+- Signed `ARM_AUTHZ_ENDPOINT`, Catalog/Connector Dapr invocation base URLs,
+  and `ARM_CREDENTIAL_PROXY_URL`: a private HTTPS origin exposing this runtime.
+  The Sidecar verifies TLS; a private CA must be trusted by its image or
+  supplied with `CUSTOS_SIDECAR_CA_BUNDLE` in that deployment.
+- An in-cluster Kubernetes identity authorized for activity Jobs and pod exec.
+  `ARM_STAGING_ROOT` (default `/var/run/custos/attempts`) must be a writable,
+  owner-only directory; mount writable storage there with a read-only root filesystem.
+
+The lifespan probes the real database schema/table, artifact write/read/delete,
+service readiness, Kubernetes APIs and the secret/Auth exchange before opening
+admission, and repeats required availability checks on readiness requests. It never
+auto-migrates. Failure releases resources already acquired. Shutdown closes new
+admission, revokes attempt credential authority, stops and joins owned workers,
+then closes clients/pools. A disconnected HTTP caller does not orphan its worker.
+Readiness uses the first explicitly configured account reference only to probe
+the shared authorization transport; it is not a fallback identity for work.
+Every execution operation still resolves its own originally accepted reference.
+Probe streams have elapsed-time budgets, and blocking Kubernetes probes are
+joined before their API client can close. Failed credential revocation defers
+the stop request while retaining/joining workers and retained attempt contexts;
+shutdown cancellation cannot close clients under unfinished revocation or stop
+requests. Contexts are drained even if their original request worker has finished.
+An unconfirmed start, monitor or reconciliation failure closes durable credential
+admission before its worker returns; revocation outages retain that worker for
+retry. Stop failures are retried during drain. Neither credential revocation nor
+a successful stop request proves termination or permits a later execution attempt;
+unknown-effect rows remain fenced and exact successful replay is unchanged.
+Readiness gates new scheduling only. Authorized cancellation remains available
+when unrelated Catalog/CSI probes fail, while still requiring execution permission
+and durable credential revocation before stopping a sandbox.
+
+Each accepted attempt persists a request fingerprint, stable execution identity,
+slot authority and only a hash of its private broker proof. The actual proof and
+bootstrap verification key are delivered separately to the trusted Sidecar.
+Connector Service rechecks the live attempt and instance on every issuance,
+uses existing identity resolvers, and atomically enforces the per-attempt lease cap.
+Provider credential expiry is not replaced with the platform lease deadline.
+
+Pending or uncertain effects remain fenced after restart, deadline or failed
+termination. Neither missing Pods nor elapsed ownership time authorize another
+execution. Exact terminal results remain in durable storage; the in-process
+idempotency TTL does not delete durable receipts or grant automatic takeover.
+Disable admission before rollback; preserve revision-15 rows and use roll-forward
+recovery rather than deleting ownership to make a retry succeed.
+
+Production profile activation and full deployed certification remain gated by
+[#1017](https://github.com/toddysm/custos/issues/1017) and
+[#1018](https://github.com/toddysm/custos/issues/1018).
+
 ## Status
 
-**Feature-complete (M1)** — the `ARM-IMPL-000-ACTIVITY-RUNTIME-MANAGER`
+**M1 components implemented; scoped production runtime is default-off** — the `ARM-IMPL-000-ACTIVITY-RUNTIME-MANAGER`
 milestone ([#591](https://github.com/toddysm/custos/issues/591)) has landed:
 the attempt state machine (resolve → limit → materialize → inject → run →
 finalize → map → persist), the OCI Container Driver (Job builder +
@@ -23,6 +83,34 @@ artifact finalization), the Secret Injector, the Result Mapper, the Dapr RPC
 adapter (`ScheduleActivity` / `CancelActivity`), cancel + deadline/timeout,
 OpenTelemetry spans + metrics, and a kind/k8s integration suite — all under the
 ruff + mypy (strict) + pytest (≥90 % coverage) quality-gate toolchain.
+
+The production composition root and sidecar bootstrap alignment are tracked by
+[#1038](https://github.com/toddysm/custos/issues/1038). An unwired scheduler now
+keeps `/readyz` at **503**, including in development; `/healthz` remains **200**.
+A supplied scheduler can open the lifespan gate, but readiness closes again if
+that scheduler is lost or shutdown begins. The production resource graph is
+explicitly enabled with `ARM_RUNTIME_ENABLED=true`; it requires revision 15,
+real storage, signed execution identity and private credential transport. Do not force the
+readiness flag or install test doubles to bypass an incomplete deployment.
+
+The bootstrap issuer now uses the sidecar's shared version-one signed format.
+Keys are independent per workspace/attempt; expiry is clamped to the execution
+deadline and never extended on replay. The injector writes the bearer into the
+ordinary input tree and the verification key into a separate private staging
+tree. The OCI input bridge transfers the private archive before releasing the
+activity, and `/custos/sidecar` is mounted only by that trusted bridge and the
+sidecar, never by the activity or output collector. This is not a claim that
+deployed transport certification is complete or that in-memory execution
+tracking provides durable restart ownership.
+The new optional revision-15 activity store persists pending ownership and exact
+terminal results. Unknown owners and changed request fingerprints fail closed;
+successful replay must not fabricate empty outputs. Wiring that capability into
+the production composition root remains required before enabling execution.
+Host staging remains owner-only for bootstrap material. In the pod, ordinary
+input files receive supplemental-group read/traverse access (the bearer becomes
+`0440`) so activity images can retain their own non-root user. The private key
+remains `0400`, owned by the trusted helper/sidecar user, on a volume the activity
+cannot mount. The bridge never grants group write access.
 
 Deferred (tracked separately): the `http` / `wasm` runtime drivers (later
 milestones).
@@ -86,7 +174,7 @@ are parsed and validated to positive `timedelta` values.
 | `ARM_METADATA_STORE` | yes | — | `MetadataStoreProvider` binding. |
 | `ARM_CATALOG_ENDPOINT` | yes | — | Catalog Service endpoint for `activityRef` resolution. |
 | `ARM_CONNECTOR_ENDPOINT` | yes | — | Connector Service endpoint for `RefreshLease`. |
-| `ARM_AUTHZ_ENDPOINT` | prod | (empty) | Empty enables the dev-shim that trusts `x-custos-callctx`, warns per request, and refuses to start when `ENVIRONMENT=production`. |
+| `ARM_AUTHZ_ENDPOINT` | prod | (empty) | Auth base URL for signed-context public keys. Every signed scheduling or cancellation caller needs `workflow:execute`, including legacy request shapes. Invalid signatures return 401; missing permission returns 403; unavailable verification returns 503. Empty enables the non-production JSON development shim. |
 | `ARM_SANDBOX_NAMESPACE` | yes | — | Kubernetes namespace for activity `Job`s. |
 | `ARM_SIDECAR_IMAGE` | yes | — | Connector sidecar image injected into every activity Pod. |
 | `ARM_IO_BRIDGE_IMAGE` | no | `busybox:1.37.0@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028` | Image for the io-bridge input-injector init container and output-collector native sidecar; override to point at an internal mirror. |
@@ -129,6 +217,13 @@ and `/custos/out`):
   `restartPolicy: Always`) that idles after the activity exits, ignoring
   `SIGTERM`, until ARM execs `tar -c -C /custos/out` to stream `outputs.json` and
   produced artifacts back, then drops the collected sentinel so the pod can drain.
+  Collection uses raw, uncompressed tar over binary pod exec. The driver's
+  `max_output_bytes` ceiling (256 MiB by default) includes tar headers and padding;
+  transport encoding does not reduce it. The same byte ceiling is enforced while
+  reading and before extraction. A missing exit status, empty/truncated archive,
+  failed tar command or failed sentinel command is an error. Empty output
+  directories still produce a valid tar. The 30-second stream budget and separate
+  64 KiB diagnostic bound also apply; private input delivery remains binary.
 
 On the host side the **I/O Broker** runs the two schema-validation boundaries of
 an attempt: it validates the materialized `inputs` payload against the activity's
@@ -156,6 +251,8 @@ this directory:
 ```bash
 pip install -e ../../libs/custos-callctx[dev]
 pip install -e ../../libs/storage-provider-layer[dev]
+pip install -e ../../libs/custos-postgres -e ../../libs/custos-csi
+pip install -e ../connector-sidecar
 pip install -e ".[dev]"
 
 ruff format . && ruff check . && mypy src tests && pytest -q

@@ -22,14 +22,17 @@ the ARM + Connector outbound RPCs:
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import MappingProxyType
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 
+from custos_workflow.clients._dapr_invoke import DaprInvokeEndpoint
 from custos_workflow.clients._errors import (
     LOCKED_OUTBOUND_RPC_KINDS,
     MAX_CAUSE_DEPTH,
@@ -40,13 +43,17 @@ from custos_workflow.clients._errors import (
 )
 from custos_workflow.clients.activity_runtime import (
     ActivityResultEnvelope,
+    ActivityRuntimeClient,
+    DaprActivityRuntimeClient,
     FakeActivityRuntimeClient,
     ScheduleActivityRequest,
 )
 from custos_workflow.clients.connector import (
     BindForStepRequest,
     BindForStepResponse,
+    ConnectorClient,
     ConnectorContext,
+    DaprConnectorClient,
     FakeConnectorClient,
     SlotSpec,
 )
@@ -128,6 +135,71 @@ def _make_envelope(class_: str = "success") -> ActivityResultEnvelope:
         error=MappingProxyType({"code": "X", "message": "boom"}),
         attempt=2,
     )
+
+
+@pytest.mark.parametrize("kind", ["binding", "activity"])
+async def test_worker_callbacks_keep_real_http_clients_on_their_owner_loop(kind: str) -> None:
+    """Concurrent worker callbacks reuse the application-owned HTTP loop and reject deadlocks."""
+    owner_loop = asyncio.get_running_loop()
+    requests: list[httpx.Request] = []
+
+    async def transport(request: httpx.Request) -> httpx.Response:
+        """Check loop ownership at the actual transport boundary, not just at the callback."""
+        assert asyncio.get_running_loop() is owner_loop
+        requests.append(request)
+        await asyncio.sleep(0)
+        if kind == "activity":
+            return httpx.Response(200, json={"class": "success", "outputs": {}, "attempt": 1})
+        return httpx.Response(
+            200,
+            json={
+                "contexts": {
+                    "registry": {
+                        "slotName": "registry",
+                        "handle": "opaque",
+                        "connectorKind": "oci",
+                        "expiresAt": "2030-01-01T00:00:00Z",
+                    }
+                }
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
+        endpoint = DaprInvokeEndpoint(host="127.0.0.1", http_port=3500, app_id=kind)
+        if kind == "activity":
+            activity_client = cast(
+                ActivityRuntimeClient,
+                DaprActivityRuntimeClient(http_client=http, endpoint=endpoint),
+            )
+            callback = build_arm_schedule_activity(activity_client, loop=owner_loop)
+            payload = serialize_schedule_activity_request(_make_schedule_request())
+        else:
+            connector_client = cast(
+                ConnectorClient, DaprConnectorClient(http_client=http, endpoint=endpoint)
+            )
+            callback = build_connector_bind_for_step_activity(connector_client, loop=owner_loop)
+            payload = serialize_bind_for_step_request(
+                BindForStepRequest(
+                    step_key="logical",
+                    slots=_make_bind_request().slots,
+                    run_id="run-1",
+                    step_id="step-7",
+                    attempt=1,
+                )
+            )
+        results = await asyncio.gather(
+            asyncio.to_thread(callback, None, payload),
+            asyncio.to_thread(callback, None, payload),
+        )
+        for result in results:
+            if kind == "activity":
+                assert parse_arm_schedule_activity_result(result).class_ == "success"
+            else:
+                assert set(parse_connector_bind_for_step_result(result).contexts) == {"registry"}
+        assert len(requests) == 2
+        with pytest.raises(RuntimeError, match="separate owner loop"):
+            callback(None, payload)
+        assert len(requests) == 2
 
 
 # ---------------------------------------------------------------------------

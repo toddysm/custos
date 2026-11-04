@@ -14,6 +14,7 @@ from collections.abc import Callable, Generator, Mapping
 from datetime import datetime, timedelta
 from typing import Any
 
+from custos_callctx.execution import ExecutionIdentity
 from custos_spl.errors import BackendUnavailable, ImmutableViolation
 from custos_spl.ids import WorkspaceId
 from custos_spl.interfaces.delivery import (
@@ -66,17 +67,18 @@ class DurableResumeMirrorRepository:
         """Update registration metadata without rebinding the immutable wait association."""
         if mirror.workspace_id != self.workspace_id or mirror.delivery_protocol != 2:
             raise ValueError("durable mirror requires the bound workspace and protocol 2")
-        identity = delivery_fingerprint(
-            {
-                "workspace": mirror.workspace_id,
-                "run": mirror.run_id,
-                "step": mirror.step_id,
-                "event": mirror.event_key,
-                "selector": mirror.selector,
-                "protocol": 2,
-                "source": mirror.source.to_wire() if mirror.source else None,
-            }
-        )
+        request: dict[str, object] = {
+            "workspace": mirror.workspace_id,
+            "run": mirror.run_id,
+            "step": mirror.step_id,
+            "event": mirror.event_key,
+            "selector": mirror.selector,
+            "protocol": 2,
+            "source": mirror.source.to_wire() if mirror.source else None,
+        }
+        if mirror.execution_identity is not None:
+            request["executionIdentity"] = mirror.execution_identity.to_dict()
+        identity = delivery_fingerprint(request)
         await self.provider.put_workflow_mirror(
             WorkflowMirror(
                 self.workspace_id,
@@ -160,6 +162,9 @@ class ResumeActivityHandler:
                 workspace_id=workspace,
                 source=ResumeSource.from_wire(data["source"]) if data.get("source") else None,
                 delivery_protocol=2,
+                execution_identity=ExecutionIdentity.from_dict(data["executionIdentity"])
+                if data.get("executionIdentity") is not None
+                else None,
             )
             result = self.trigger.register_resume_subscription(request)
             response = await result if inspect.isawaitable(result) else result
@@ -313,6 +318,11 @@ def drive_durable_resume(
                             "ttl": request.ttl,
                             "selector": request.selector,
                             "source": request.source.to_wire() if request.source else None,
+                            **(
+                                {"executionIdentity": request.execution_identity.to_dict()}
+                                if request.execution_identity is not None
+                                else {}
+                            ),
                         },
                     },
                 )
@@ -357,6 +367,9 @@ def drive_durable_resume(
                     token.event_key,
                     wire["idempotencyKey"],
                     wire["payload"],
+                    execution_identity=step.execution_identity.to_dict()
+                    if step.execution_identity is not None
+                    else None,
                 )
                 if key != wire.get("deliveryKey") or fingerprint != wire.get("requestHash"):
                     raise ValueError("resume envelope does not match this wait")

@@ -47,6 +47,7 @@ from custos_catalog.providers import (
 from custos_catalog.settings import Settings, load_settings
 
 if TYPE_CHECKING:
+    from custos_callctx import CallContextVerifier
     from fastapi import FastAPI
 
 __all__ = ["__version__", "create_app"]
@@ -61,6 +62,7 @@ def create_app(
     settings: Settings | None = None,
     providers: Providers | None = None,
     connector_factory: ConnectorClientFactory | ConnectorClient | None = None,
+    call_context_verifier: CallContextVerifier | None = None,
 ) -> FastAPI:
     """Build and return the Catalog Service FastAPI application.
 
@@ -79,6 +81,8 @@ def create_app(
             constructs the factory from ``settings.connector_*``. Test
             code that supplies a factory is responsible for nothing
             extra: the lifespan still owns ``aclose()`` on shutdown.
+        call_context_verifier: Optional signed-context verifier for controlled
+            public-key fetching; production derives one from the Auth endpoint.
 
     The factory is import-safe: no DSN lookups, no socket connections.
     All side-effecting work happens inside the FastAPI lifespan context.
@@ -161,6 +165,7 @@ def create_app(
         CallContextMiddleware,
         authz_endpoint=effective_settings.authz_endpoint,
         environment=effective_settings.environment,
+        verifier=call_context_verifier,
     )
     # Pair the middleware with its exception handler so the dependency-side
     # 4xx responses (get_call_context / require_permission) emit the same

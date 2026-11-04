@@ -94,7 +94,10 @@ jobs:
       - name: Install runtime and tests
         run: |
           pip install -e src/libs/storage-provider-layer -e src/libs/custos-postgres \
-            -e src/libs/custos-callctx -e "src/services/connector-service[dev]"
+            -e src/libs/custos-callctx -e src/libs/custos-cel \
+            -e src/libs/custos-csi -e src/services/activity-runtime-manager \
+            -e src/services/connector-sidecar \
+            -e src/services/workflow-service -e "src/services/connector-service[dev]"
       - name: Test actual sandbox lifecycle
         env:
           CUSTOS_HOOK_KUBERNETES_TEST: "1"

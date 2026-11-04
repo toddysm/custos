@@ -25,10 +25,15 @@ import json
 from typing import Any
 
 from custos_spl.errors import ArtifactNotFound, WorkspaceMismatch
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator, FormatChecker
 from jsonschema.exceptions import ValidationError as SchemaValidationError
 from pydantic import ValidationError
+from referencing import Registry, Resource
+from referencing.exceptions import Unresolvable
+from referencing.jsonschema import DRAFT202012
 
+from custos_arm.contract import ArtifactRef, ConnectorRef, ImageRef, OciDescriptor
+from custos_arm.contract._base import is_iso8601_duration
 from custos_arm.contract.envelope import (
     ActivitySpec,
     InputsEnvelope,
@@ -45,6 +50,33 @@ from custos_arm.io.errors import (
 from custos_arm.io.models import InputArtifactWriter, OutputArtifactReader
 from custos_arm.manifest.models import ActivityManifest
 from custos_arm.store.artifact import ArtifactRecord, ArtifactStoreClient, ArtifactStoreError
+
+_FORMATS = FormatChecker(formats=[])
+
+
+@_FORMATS.checks("custos-duration")
+def _duration_format(value: object) -> bool:
+    """Keep the shared Duration schema aligned with the actual activity contract validator."""
+    return isinstance(value, str) and is_iso8601_duration(value)
+
+
+_PLATFORM_SCHEMAS = (
+    Registry[dict[str, Any]]()
+    .with_resources(
+        (
+            f"custos://types/{model.__name__}",
+            Resource.from_contents(model.model_json_schema(), default_specification=DRAFT202012),
+        )
+        for model in (ImageRef, OciDescriptor, ConnectorRef, ArtifactRef)
+    )
+    .with_resource(
+        "custos://types/Duration",
+        Resource.from_contents(
+            {"type": "string", "format": "custos-duration"},
+            default_specification=DRAFT202012,
+        ),
+    )
+)
 
 
 def _pointer(error: SchemaValidationError) -> str:
@@ -65,10 +97,14 @@ def _schema_issues(schema: dict[str, Any], document: Any) -> list[str]:
     """Collect every Draft 2020-12 violation of ``document`` against ``schema``.
 
     Errors are gathered in one pass (no first-error short-circuit) and ordered
-    by their JSON-Pointer path so the surfaced list is stable.
+    by their JSON-Pointer path so the surfaced list is stable. Shared platform
+    references resolve locally; unknown references fail without network retrieval.
     """
-    validator = Draft202012Validator(schema)
-    errors = sorted(validator.iter_errors(document), key=_pointer)
+    validator = Draft202012Validator(schema, registry=_PLATFORM_SCHEMAS, format_checker=_FORMATS)
+    try:
+        errors = sorted(validator.iter_errors(document), key=_pointer)
+    except Unresolvable:
+        return ["<root> -> schema references an unavailable resource"]
     return [f"{_pointer(error) or '<root>'} -> {error.message}" for error in errors]
 
 

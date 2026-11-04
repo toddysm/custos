@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from datetime import UTC, datetime
 
@@ -11,6 +12,7 @@ import pytest
 from custos_arm.contract import StepRef
 from custos_arm.contract.errors import ErrorClass
 from custos_arm.manifest import ConnectorSpec
+from custos_arm.rpc.models import BoundConnectorContextWire
 from custos_arm.secrets import (
     SECRET_FILE_MODE,
     SIDECAR_TOKEN_FILENAME,
@@ -29,6 +31,7 @@ from custos_arm.secrets import (
     SidecarToken,
     SidecarTokenMinter,
 )
+from tests.test_rpc_models import canonical_binding
 
 _CONNECTOR = "http://127.0.0.1:3500/v1.0/invoke/connector/method"
 
@@ -52,10 +55,15 @@ class _FakeSink:
     def __init__(self) -> None:
         self.files: dict[str, tuple[bytes, int]] = {}
         self.write_order: list[str] = []
+        self.private_files: dict[str, tuple[bytes, int]] = {}
 
     async def write_secret(self, *, relative_path: str, content: bytes, mode: int) -> None:
         self.files[relative_path] = (content, mode)
         self.write_order.append(relative_path)
+
+    async def write_private_secret(self, *, relative_path: str, content: bytes, mode: int) -> None:
+        """Keep sidecar-only writes out of the activity-visible fixture tree."""
+        self.private_files[relative_path] = (content, mode)
 
 
 class _FakeLeaseClient:
@@ -78,6 +86,42 @@ class _FakeLeaseClient:
             slot="registry",
             connector_instance_id="ci-1",
         )
+
+
+async def test_canonical_binding_is_a_private_file_not_a_lease() -> None:
+    """Preserve endpoint and opaque handle in tmpfs without refreshing a fabricated lease."""
+    sink = _FakeSink()
+    leases = _FakeLeaseClient()
+    injector = SecretInjector(token_minter=SidecarTokenMinter(), lease_client=leases)
+    context = BoundConnectorContextWire.model_validate(canonical_binding()).to_connector_context()
+    result = await injector.inject(
+        sink=sink,
+        step=_step(),
+        connectors=[_connector("registry").model_copy(update={"capabilities": ["oci.pull"]})],
+        contexts=[context],
+    )
+    content, mode = sink.files["secrets/registry/binding.json"]
+    assert json.loads(content) == canonical_binding()["context"]
+    assert mode == SECRET_FILE_MODE
+    assert result.secret_files == ("secrets/registry/binding.json",)
+    assert await injector.refresh_leases(contexts=[context]) == []
+    assert leases.calls == []
+
+
+@pytest.mark.parametrize("changes", [{"type": "different"}, {"capabilities": ["oci.push"]}])
+async def test_canonical_context_cannot_widen_manifest_authority(
+    changes: dict[str, object],
+) -> None:
+    """Reject mismatched kind/capabilities before writing private files or bootstrap authority."""
+    sink = _FakeSink()
+    injector = SecretInjector(token_minter=SidecarTokenMinter())
+    context = BoundConnectorContextWire.model_validate(canonical_binding()).to_connector_context()
+    requirement = _connector("registry").model_copy(
+        update={"capabilities": ["oci.pull"], **changes}
+    )
+    with pytest.raises(MissingConnectorError):
+        await injector.inject(sink=sink, step=_step(), connectors=[requirement], contexts=[context])
+    assert not sink.files
 
 
 _Handler = Callable[[httpx.Request], httpx.Response]
@@ -254,6 +298,8 @@ async def test_inject_materializes_secrets_and_token() -> None:
     assert sink.write_order[-1] == SIDECAR_TOKEN_FILENAME
     assert sink.files["secrets/registry/password"] == (b"p", SECRET_FILE_MODE)
     assert sink.files[SIDECAR_TOKEN_FILENAME] == (result.token.value.encode(), SECRET_FILE_MODE)
+    assert sink.private_files["sidecar-key"] == (result.token.verification_key, SECRET_FILE_MODE)
+    assert all(result.token.verification_key not in data for data, _mode in sink.files.values())
     # The token value never lands in a credential file.
     assert all(name.startswith("secrets/") for name in result.secret_files)
 

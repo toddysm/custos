@@ -15,6 +15,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any, Literal, Protocol, runtime_checkable
 
+from custos_callctx.execution import ExecutionBindings, ExecutionIdentity
 from custos_spl.errors import ImmutableViolation, LeaseBusy, SPLError
 from custos_spl.ids import WorkspaceId
 from custos_spl.interfaces.bulk_replay import bulk_entry_identity
@@ -104,6 +105,11 @@ def build_resume_target(event: NormalizedEvent, match: ResumeMatch) -> dict[str,
         "eventName": reg.event_key,
         "payload": event.data,
         "deliveryProtocol": reg.delivery_protocol,
+        **(
+            {"executionIdentity": dict(reg.execution_identity)}
+            if reg.execution_identity is not None
+            else {}
+        ),
     }
 
 
@@ -194,6 +200,7 @@ class ReliableDispatcher:
         retention_seconds: int = 2_592_000,
         max_replay_attempts: int = 3,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        execution_bindings: ExecutionBindings | None = None,
     ) -> None:
         """Validate retry/retention bounds before accepting receiver traffic."""
         validate_dispatch_limits(
@@ -202,6 +209,7 @@ class ReliableDispatcher:
         self.client, self.store, self.audit = client, store, audit
         self.max_retries, self.max_depth = max_retries, max_fanout_depth
         self.retention, self.max_replays, self.sleep = retention_seconds, max_replay_attempts, sleep
+        self.execution_bindings = execution_bindings
 
     def _snapshot(
         self,
@@ -214,6 +222,19 @@ class ReliableDispatcher:
         """Validate one original target without performing any external side effect."""
         key = compute_dispatch_key(subscription_id, event)
         try:
+            if self.execution_bindings is not None:
+                if target["kind"] == "start":
+                    target = {
+                        **target,
+                        "executionIdentity": self.execution_bindings.select(workspace).to_dict(),
+                    }
+                elif "executionIdentity" not in target:
+                    raise ValueError("legacy wait has no pinned execution identity")
+                else:
+                    identity = target["executionIdentity"]
+                    if not isinstance(identity, Mapping):
+                        raise ValueError("invalid execution identity")
+                    self.execution_bindings.resolve(ExecutionIdentity.from_dict(identity))
             return DeadLetterData(
                 workspace_id=WorkspaceId(workspace),
                 entry_id="dl_" + delivery_identity(workspace, key),
@@ -475,6 +496,7 @@ class ReliableDispatcher:
                     idempotency_key=data.idempotency_key,
                     delivery_protocol=protocol,
                     retain_until=horizon,
+                    execution_identity=target.get("executionIdentity"),
                 )
             )
         await self.client.raise_external_event(
@@ -487,6 +509,7 @@ class ReliableDispatcher:
                 idempotency_key=data.idempotency_key,
                 delivery_protocol=protocol,
                 retain_until=horizon,
+                execution_identity=target.get("executionIdentity"),
             ),
         )
         return None

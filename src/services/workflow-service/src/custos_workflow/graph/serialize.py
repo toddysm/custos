@@ -42,6 +42,7 @@ from custos_cel import (
 from custos_cel.ast import to_dict_envelope as _cel_to_dict_envelope
 from pydantic import TypeAdapter, ValidationError
 
+from custos_workflow.bindings.registry import ConnectorRequirement
 from custos_workflow.document import Step
 from custos_workflow.graph.model import (
     BackoffStrategyTag,
@@ -143,6 +144,10 @@ def _encode_node(node: ExecutionNode) -> dict[str, Any]:
     }
     if node.retry_policy is not None:
         out["retry_policy"] = _encode_retry(node.retry_policy)
+    if node.connector_requirements is not None:
+        out["connector_requirements"] = [
+            item.model_dump(mode="json") for item in node.connector_requirements
+        ]
     return out
 
 
@@ -265,6 +270,7 @@ def _decode_call_site(data: Mapping[str, Any], label: str) -> TypedCallSite:
 
 
 def _decode_node(data: Mapping[str, Any]) -> ExecutionNode:
+    """Decode a graph node without dropping retained connector authority."""
     call_sites_raw = _require_mapping(data["call_sites"], "node.call_sites")
     call_sites = {
         label: _decode_call_site(
@@ -294,6 +300,15 @@ def _decode_node(data: Mapping[str, Any]) -> ExecutionNode:
         raise GraphSerializationError(
             f"node {data.get('step_id')!r}: step_source does not match Step union",
         ) from exc
+    requirements = None
+    if "connector_requirements" in data:
+        raw = data["connector_requirements"]
+        if not isinstance(raw, list):
+            raise GraphSerializationError("node.connector_requirements must be an array")
+        try:
+            requirements = tuple(ConnectorRequirement.model_validate(item) for item in raw)
+        except ValidationError:
+            raise GraphSerializationError("invalid retained connector requirements") from None
     return ExecutionNode(
         step_id=str(data["step_id"]),
         kind=StepKind(data["kind"]),
@@ -302,6 +317,7 @@ def _decode_node(data: Mapping[str, Any]) -> ExecutionNode:
         on_error_routes=routes,
         call_sites=call_sites,
         step_source=step_source,
+        connector_requirements=requirements,
     )
 
 

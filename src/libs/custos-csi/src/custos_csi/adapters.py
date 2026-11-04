@@ -101,7 +101,16 @@ class CsiArtifactAdapter:
         """Compute storage path for an artifact.
 
         Path: {pvc_mount}/{workspace_id}/{digest-prefix-2}/{digest}
+        WorkspaceMismatch rejects traversal and ambiguous artifact-ID workspace components.
         """
+        workspace = str(workspace_id)
+        if (
+            not workspace
+            or workspace in {".", ".."}
+            or len(workspace) > 120
+            or any(character in workspace for character in "/\\:\0")
+        ):
+            raise WorkspaceMismatch("artifact workspace must be one bounded path component")
         digest_prefix = digest[:2]
         return self.pvc_mount / str(workspace_id) / digest_prefix / digest
 

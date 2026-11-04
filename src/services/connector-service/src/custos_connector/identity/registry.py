@@ -101,6 +101,28 @@ class _KeyLock:
     waiters: int = 0
 
 
+async def _resolve_once(
+    resolver: IdentityResolver,
+    credentials_authentication: Mapping[str, Any],
+    context: IdentityResolverContext,
+    *,
+    private_errors: bool,
+) -> ResolvedIdentity:
+    """Sanitize private failures before tracing or audit scopes can observe them."""
+    try:
+        return await resolver.resolve(
+            credentials_authentication=credentials_authentication,
+            context=context,
+        )
+    except IdentityResolverError as exc:
+        if private_errors:
+            raise IdentityResolverError(
+                detail="private credential resolution failed",
+                code=exc.code,
+            ) from None
+        raise
+
+
 class IdentityResolverRegistry:
     """Compose the per-auth-type resolvers and cache their results.
 
@@ -276,6 +298,7 @@ class IdentityResolverRegistry:
         credentials_authentication: Mapping[str, Any],
         lease_ttl_seconds: int,
         force_refresh: bool = False,
+        private_errors: bool = False,
     ) -> ResolvedIdentity:
         """Resolve an identity, hitting the cache first.
 
@@ -303,6 +326,8 @@ class IdentityResolverRegistry:
             force_refresh: Perform an independent fresh read without cache reads/writes or
                 cache-miss serialization. Webhook rotation must not reuse stale material or
                 queue a burst of independent reads behind one slow upstream lookup.
+            private_errors: Audit/log only a safe error category for credential-broker calls.
+                Provider exceptions may contain private request or credential diagnostics.
 
         Raises:
             IdentityResolverError: On any resolver-side failure. The
@@ -327,6 +352,7 @@ class IdentityResolverRegistry:
                 authentication_type=authentication_type,
                 category=None,
                 error=exc,
+                private=private_errors,
             )
             raise
         descriptor_key = _descriptor_key(authentication_type, credentials_authentication)
@@ -365,9 +391,11 @@ class IdentityResolverRegistry:
                     _span.set_attribute("authenticationType", authentication_type)
                     _span.set_attribute("category", str(category))
                     try:
-                        resolved = await resolver.resolve(
-                            credentials_authentication=credentials_authentication,
-                            context=context,
+                        resolved = await _resolve_once(
+                            resolver,
+                            credentials_authentication,
+                            context,
+                            private_errors=private_errors,
                         )
                     except IdentityResolverError as exc:
                         await self._emit_failure(
@@ -377,6 +405,7 @@ class IdentityResolverRegistry:
                             authentication_type=authentication_type,
                             category=category,
                             error=exc,
+                            private=private_errors,
                         )
                         raise
 
@@ -399,6 +428,7 @@ class IdentityResolverRegistry:
                         authentication_type=authentication_type,
                         category=category,
                         error=category_mismatch,
+                        private=private_errors,
                     )
                     raise category_mismatch
 
@@ -538,7 +568,14 @@ class IdentityResolverRegistry:
         authentication_type: str,
         category: IdentityCategory | None,
         error: IdentityResolverError,
+        private: bool = False,
     ) -> None:
+        """Emit the existing failure taxonomy without private broker diagnostics."""
+        if private:
+            error = IdentityResolverError(
+                detail="private credential resolution failed",
+                code=error.code,
+            )
         category_value = category.value if category is not None else "unknown"
         if self._metadata_store is None:
             _LOGGER.warning(
