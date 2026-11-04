@@ -217,6 +217,13 @@ and `/custos/out`):
   `restartPolicy: Always`) that idles after the activity exits, ignoring
   `SIGTERM`, until ARM execs `tar -c -C /custos/out` to stream `outputs.json` and
   produced artifacts back, then drops the collected sentinel so the pod can drain.
+  Collection uses raw, uncompressed tar over binary pod exec. The driver's
+  `max_output_bytes` ceiling (256 MiB by default) includes tar headers and padding;
+  transport encoding does not reduce it. The same byte ceiling is enforced while
+  reading and before extraction. A missing exit status, empty/truncated archive,
+  failed tar command or failed sentinel command is an error. Empty output
+  directories still produce a valid tar. The 30-second stream budget and separate
+  64 KiB diagnostic bound also apply; private input delivery remains binary.
 
 On the host side the **I/O Broker** runs the two schema-validation boundaries of
 an attempt: it validates the materialized `inputs` payload against the activity's

@@ -8,7 +8,6 @@ cancel/cleanup) without a cluster. The real ``kind`` path lives in the
 
 from __future__ import annotations
 
-import base64
 import io
 import tarfile
 from datetime import UTC, datetime, timedelta
@@ -223,8 +222,8 @@ def _driver(
     )
 
 
-def _b64_tar(entries: dict[str, bytes]) -> bytes:
-    """Return the base64-encoded tar the output collector would emit on stdout.
+def _raw_tar(entries: dict[str, bytes]) -> bytes:
+    """Return the raw tar the output collector emits on the binary stdout channel.
 
     ``entries`` maps archive member paths to their bytes; an empty mapping yields
     a valid (non-empty) empty tar, just like ``tar -c`` of an empty directory.
@@ -235,7 +234,7 @@ def _b64_tar(entries: dict[str, bytes]) -> bytes:
             info = tarfile.TarInfo(name)
             info.size = len(payload)
             tar.addfile(info, io.BytesIO(payload))
-    return base64.b64encode(buffer.getvalue())
+    return buffer.getvalue()
 
 
 def _handle(plan: SandboxPlan, staging_root: Path) -> SandboxHandle:
@@ -726,6 +725,7 @@ def test_cancel_wraps_unexpected_delete_failure(tmp_path: Path) -> None:
 
 
 def test_collect_streams_outputs_into_the_host_tree(tmp_path: Path) -> None:
+    """The collector requests raw tar and releases only after the actual files are extracted."""
     plan = _plan()
     handle = _handle(plan, tmp_path)
     core = MagicMock()
@@ -734,7 +734,7 @@ def test_collect_streams_outputs_into_the_host_tree(tmp_path: Path) -> None:
         [
             ExecResult(
                 exit_code=0,
-                stdout=_b64_tar({"outputs.json": b'{"ok": true}', "nested/a.txt": b"hi"}),
+                stdout=_raw_tar({"outputs.json": b'{"ok": true}', "nested/a.txt": b"hi"}),
             )
         ]
     )
@@ -748,7 +748,7 @@ def test_collect_streams_outputs_into_the_host_tree(tmp_path: Path) -> None:
     tar_call, release_call = exec_.calls
     assert tar_call["pod"] == "sandbox-pod-abc12"
     assert tar_call["container"] == OUTPUT_BRIDGE_CONTAINER_NAME
-    assert tar_call["command"] == ["sh", "-c", "tar -c -C /custos/out . | base64"]
+    assert tar_call["command"] == ["tar", "-c", "-C", "/custos/out", "."]
     assert tar_call["stdin"] is None
     assert release_call["container"] == OUTPUT_BRIDGE_CONTAINER_NAME
     assert release_call["command"] == ["touch", OUTPUT_COLLECTED_SENTINEL]
@@ -759,10 +759,11 @@ def test_collect_streams_outputs_into_the_host_tree(tmp_path: Path) -> None:
 
 
 def test_collect_handles_empty_output_tree(tmp_path: Path) -> None:
+    """An empty tree is a valid, nonempty tar stream rather than missing transport output."""
     handle = _handle(_plan(), tmp_path)
     core = MagicMock()
     core.list_namespaced_pod.return_value = _pod_with_init([_init_running()])
-    exec_ = _RecordingExec([ExecResult(exit_code=0, stdout=_b64_tar({}))])
+    exec_ = _RecordingExec([ExecResult(exit_code=0, stdout=_raw_tar({}))])
     driver = _driver(core=core, staging_root=tmp_path, pod_exec=exec_)
 
     bundle = driver.collect(handle)
@@ -772,18 +773,17 @@ def test_collect_handles_empty_output_tree(tmp_path: Path) -> None:
     assert list(handle.output_root.iterdir()) == []
 
 
-def test_collect_handles_empty_stdout(tmp_path: Path) -> None:
-    # A collector that emits no bytes at all (degenerate) must not error.
+def test_collect_rejects_empty_stdout(tmp_path: Path) -> None:
+    """No bytes is an incomplete collection; an empty directory still produces a real tar."""
     handle = _handle(_plan(), tmp_path)
     core = MagicMock()
     core.list_namespaced_pod.return_value = _pod_with_init([_init_running()])
     exec_ = _RecordingExec([ExecResult(exit_code=0, stdout=b"")])
     driver = _driver(core=core, staging_root=tmp_path, pod_exec=exec_)
 
-    bundle = driver.collect(handle)
-
-    assert bundle == OutputBundle(root=handle.output_root)
-    assert handle.output_root.is_dir()
+    with pytest.raises(SandboxFailureError, match="complete raw tar"):
+        driver.collect(handle)
+    assert len(exec_.calls) == 1
 
 
 def test_collect_raises_when_pod_is_gone(tmp_path: Path) -> None:
@@ -806,9 +806,10 @@ def test_collect_raises_when_exec_fails(tmp_path: Path) -> None:
 
 
 def test_collect_guards_oversize_output(tmp_path: Path) -> None:
+    """Decoded archive size remains bounded even for an injected completed-exec implementation."""
     core = MagicMock()
     core.list_namespaced_pod.return_value = _pod_with_init([_init_running()])
-    exec_ = _RecordingExec([ExecResult(exit_code=0, stdout=_b64_tar({"big.bin": b"x" * 4096}))])
+    exec_ = _RecordingExec([ExecResult(exit_code=0, stdout=_raw_tar({"big.bin": b"x" * 4096}))])
     # A tiny ceiling forces the over-size guard to trip.
     driver = _driver(core=core, staging_root=tmp_path, pod_exec=exec_, max_output_bytes=64)
 
@@ -816,11 +817,11 @@ def test_collect_guards_oversize_output(tmp_path: Path) -> None:
         driver.collect(_handle(_plan(), tmp_path))
 
 
-def test_collect_wraps_undecodable_stream(tmp_path: Path) -> None:
+def test_collect_rejects_malformed_raw_stream(tmp_path: Path) -> None:
+    """Reject malformed raw collection without interpreting it as encoded output."""
     core = MagicMock()
     core.list_namespaced_pod.return_value = _pod_with_init([_init_running()])
-    # Not valid base64 — the raw decode error must surface as SandboxFailureError.
-    exec_ = _RecordingExec([ExecResult(exit_code=0, stdout=b"not base64!!")])
+    exec_ = _RecordingExec([ExecResult(exit_code=0, stdout=b"not a tar archive")])
     driver = _driver(core=core, staging_root=tmp_path, pod_exec=exec_)
 
     with pytest.raises(SandboxFailureError):
@@ -828,14 +829,28 @@ def test_collect_wraps_undecodable_stream(tmp_path: Path) -> None:
 
 
 def test_collect_wraps_corrupt_tar_stream(tmp_path: Path) -> None:
+    """An invalid member header with a valid trailer remains a typed collection failure."""
     core = MagicMock()
     core.list_namespaced_pod.return_value = _pod_with_init([_init_running()])
-    # Valid base64 of bytes that are not a tar archive — extraction must fail
-    # as a SandboxFailureError rather than a raw tarfile.TarError.
-    exec_ = _RecordingExec([ExecResult(exit_code=0, stdout=base64.b64encode(b"x" * 2048))])
+    exec_ = _RecordingExec([ExecResult(exit_code=0, stdout=b"x" * 1024 + b"\0" * 1024)])
     driver = _driver(core=core, staging_root=tmp_path, pod_exec=exec_)
 
     with pytest.raises(SandboxFailureError):
+        driver.collect(_handle(_plan(), tmp_path))
+
+
+def test_collect_rejects_failed_collector_release(tmp_path: Path) -> None:
+    """A failed drain-sentinel command must not be reported as a successful collection."""
+    core = MagicMock()
+    core.list_namespaced_pod.return_value = _pod_with_init([_init_running()])
+    exec_ = _RecordingExec(
+        [
+            ExecResult(exit_code=0, stdout=_raw_tar({})),
+            ExecResult(exit_code=2),
+        ]
+    )
+    driver = _driver(core=core, staging_root=tmp_path, pod_exec=exec_)
+    with pytest.raises(SandboxFailureError, match="release"):
         driver.collect(_handle(_plan(), tmp_path))
 
 
