@@ -61,6 +61,8 @@ env entries; unrelated operator entries survive. Secret values never enter Helm.
 {{- else if eq $service "workflow-service" -}}
 {{- $config = dict "WF_AUTHZ_ENDPOINT" $auth "WF_REQUIRE_CALL_CONTEXT" "1"
   "WF_DAPR_WORKFLOW_COMPONENT" "dapr"
+  "WF_DAPR_ENDPOINT" "http://127.0.0.1:3500"
+  "WF_PUBLISH_PUBSUB" "custos-pubsub" "WF_PUBLISH_TOPIC" "custos.workflow.events"
   "WF_TRIGGER_DELIVERY_ENABLED" "true" "WF_TRIGGER_NAMESPACE" .Release.Namespace
   "WF_ARM_ENDPOINT" "activity-runtime-manager" "WF_TS_ENDPOINT" "trigger-service"
   "WF_CONNECTOR_ENDPOINT" "connector-service" "WF_CATALOG_ENDPOINT" "catalog-service" -}}

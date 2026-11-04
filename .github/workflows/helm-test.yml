@@ -41,7 +41,8 @@ jobs:
       - name: install render-test dependencies
         run: |
           pip install -e src/libs/storage-provider-layer -e src/libs/custos-postgres \
-            -e src/libs/custos-callctx -e src/services/auth-service -e tests/helm
+            -e src/libs/custos-callctx -e src/libs/custos-cel \
+            -e src/services/auth-service -e src/services/workflow-service -e tests/helm
       - name: helm dependency update
         run: helm dependency update deploy/helm/custos
       - name: pytest (helm render assertions)

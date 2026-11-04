@@ -19,6 +19,7 @@ def main() -> None:
     actual FastAPI application is constructed by
     :func:`custos_trigger.create_app`. Activated source receivers own bounded
     OTLP exporters for the server lifetime, including paused worker deployments.
+    Source mode requires one serving process; replica scaling preserves exporter ownership.
     ``CUSTOS_HTTP_DRAIN_SECONDS`` bounds HTTP shutdown before owned workers drain;
     an unset value preserves uvicorn's legacy default.
     """
@@ -31,12 +32,16 @@ def main() -> None:
     from custos_trigger._runtime import receiver_telemetry
     from custos_trigger.settings import read_source_receivers_enabled
 
-    with receiver_telemetry(enabled=read_source_receivers_enabled(os.environ)):
+    enabled = read_source_receivers_enabled(os.environ)
+    if enabled and int(os.environ.get("WEB_CONCURRENCY", "1")) != 1:
+        raise ValueError("source receivers require one process per Pod; scale replicas instead")
+    with receiver_telemetry(enabled=enabled):
         uvicorn.run(
             "custos_trigger:create_app",
             host=host,
             port=port,
             factory=True,
+            workers=1 if enabled else None,
             timeout_graceful_shutdown=(
                 int(os.environ["CUSTOS_HTTP_DRAIN_SECONDS"])
                 if "CUSTOS_HTTP_DRAIN_SECONDS" in os.environ

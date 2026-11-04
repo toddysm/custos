@@ -69,7 +69,8 @@ bundle:
 
 helm-test: deps
 	pip install -e src/libs/storage-provider-layer -e src/libs/custos-postgres \
-		-e src/libs/custos-callctx -e src/services/auth-service -e tests/helm >/dev/null
+		-e src/libs/custos-callctx -e src/libs/custos-cel \
+		-e src/services/auth-service -e src/services/workflow-service -e tests/helm >/dev/null
 	cd tests/helm && pytest -q
 
 # Build all service + job images. The build context is the repository root so

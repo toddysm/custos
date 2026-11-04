@@ -39,7 +39,7 @@ _duration = _meter.create_histogram("custos_trigger_receiver_pass_seconds", unit
 
 @dataclass
 class _Progress:
-    """Keep only the current workspace's paging state, not an unbounded tenant cache."""
+    """Keep one admitted workspace's paging state inside the bounded active queue."""
 
     cursor: Cursor | None = None
     scheduler: ScheduledReceiver | None = None
@@ -121,24 +121,27 @@ class ReceiverRuntime:
     async def _work(
         self, name: str, operation: Callable[[str, _Progress], Awaitable[bool]]
     ) -> None:
-        """Keep at most 50 IDs and one continuation; complete each finite scan before advancing."""
+        """Rotate after each page, retaining at most 50 active workspace continuations."""
         cursor: Cursor | None = None
-        workspaces: deque[str] = deque()
-        progress = _Progress()
+        workspaces: deque[tuple[str, _Progress]] = deque()
         while not self._stop.is_set():
             started = time.monotonic()
             outcome = "success"
             try:
-                if not workspaces:
+                if len(workspaces) < 50:
                     async with asyncio.timeout(SOURCE_RECONCILE_QUERY_SECONDS):
                         page = await self.workspaces.query_receiver_workspaces(
-                            cursor=cursor, limit=50
+                            cursor=cursor, limit=50 - len(workspaces)
                         )
-                    workspaces.extend(str(ws) for ws in page.items)
+                    active = {workspace for workspace, _ in workspaces}
+                    workspaces.extend(
+                        (str(ws), _Progress()) for ws in page.items if str(ws) not in active
+                    )
                     cursor = page.next_cursor
-                if workspaces and not await operation(workspaces[0], progress):
-                    workspaces.popleft()
-                    progress = _Progress()
+                if workspaces:
+                    workspace, progress = workspaces.popleft()
+                    if await operation(workspace, progress):
+                        workspaces.append((workspace, progress))
             except (
                 SPLError,
                 TriggerError,
@@ -149,9 +152,6 @@ class ReceiverRuntime:
                 self._failures[name] = True
                 outcome = "unavailable"
                 logger.warning("Receiver %s unavailable: %s", name, type(exc).__name__)
-                if workspaces:
-                    workspaces.popleft()
-                    progress = _Progress()
             else:
                 self._failures[name] = False
             _passes.add(1, {"receiver": name, "outcome": outcome})

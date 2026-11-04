@@ -1,10 +1,12 @@
 """All-profile receiver activation is explicit, reference-only and fail-closed."""
 
+import asyncio
 import copy
 import json
 import re
 import runpy
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +26,41 @@ SERVICES = (
     "activity-runtime-manager",
     "observability-audit-service",
 )
+
+
+async def verify_workflow_publisher(environment: dict[str, str]) -> None:
+    """Pass the rendered environment through the real factory and inspect its wire request."""
+    import httpx
+    from custos_callctx.dapr_http import dapr_http_client
+    from custos_workflow.providers import _build_lifecycle_publisher
+    from custos_workflow.runs import LifecycleEvent, derive_run_id
+
+    requests: list[httpx.Request] = []
+
+    def acknowledge(request: httpx.Request) -> httpx.Response:
+        """Capture a bounded synthetic publication without opening a socket."""
+        requests.append(request)
+        return httpx.Response(204)
+
+    async with dapr_http_client(
+        env=environment,
+        transport=httpx.MockTransport(acknowledge),
+    ) as client:
+        publisher = _build_lifecycle_publisher(env=environment, http_client=client)
+        await publisher.publish(
+            LifecycleEvent(
+                kind="workflow.started",
+                workspace_id="ws",
+                run_id=derive_run_id("ws", "event"),
+                workflow_version_id="version",
+                occurred_at=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+        )
+    assert len(requests) == 1
+    assert str(requests[0].url) == (
+        "http://127.0.0.1:3500/v1.0/publish/custos-pubsub/custos.workflow.events"
+    )
+    assert requests[0].headers["dapr-api-token"] == environment["DAPR_API_TOKEN"]
 
 
 def assert_unique_keys(node: yaml.Node) -> None:
@@ -182,6 +219,7 @@ def test_enabled_profiles_wire_actual_receiver_prerequisites(profile: str) -> No
             "catalog-service",
             "auth-service",
             "api-gateway",
+            "workflow-service",
         }:
             environment = dict(configmaps["custos-" + service])
             for entry in env:
@@ -192,6 +230,9 @@ def test_enabled_profiles_wire_actual_receiver_prerequisites(profile: str) -> No
                     if entry["valueFrom"]["secretKeyRef"]["key"] == "uri"
                     else "unit-api-token"
                 )
+            if service == "workflow-service":
+                asyncio.run(verify_workflow_publisher(environment))
+                continue
             package = {
                 "trigger-service": "custos_trigger/settings.py",
                 "connector-service": "custos_connector/settings.py",

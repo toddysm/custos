@@ -182,6 +182,16 @@ shared storage and runtime infrastructure remain configured. Existing manual and
 scoped internal routes remain available. Audit and telemetry remain active for
 accepted deliveries even with background workers paused. The pause rolls only
 Trigger/Connector worker Pods, not Auth, Workflow or the activity runtime.
+Activated Trigger source receivers require one serving process per Pod so their
+process-owned exporters run with the workers; scale replicas instead of setting
+`WEB_CONCURRENCY` above one. Disabled source mode retains legacy worker behavior.
+Each operation rotates after one workspace page, retaining at most 50 active
+continuations and filling freed slots from discovery. A single busy workspace
+cannot monopolize the scan or reset another workspace's continuation.
+
+Managed Workflow lifecycle publications explicitly use the local Dapr sidecar,
+`custos-pubsub`, and `custos.workflow.events`, matching Trigger's deployed
+subscription rather than relying on Workflow's legacy publisher defaults.
 
 The normal worker drain budget is 330 seconds; termination grace must exceed it
 by more than 65 seconds (420 by default). This reserves 15 seconds for HTTP,

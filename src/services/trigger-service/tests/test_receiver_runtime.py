@@ -141,6 +141,54 @@ async def test_pending_delivery_continuation_is_retained_and_null_only_ends_a_pa
     assert calls[:3] == [None, Cursor("continuation"), None]
 
 
+async def test_busy_workspace_yields_while_its_continuation_is_retained(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One endless backlog cannot block other workspaces, including beyond a discovery page."""
+    store = InMemoryTriggerMetadataStore(now=lambda: NOW)
+    names = ["a-busy", *(f"z-{index:02}" for index in range(54))]
+    for workspace in names:
+        await store.put_source_delivery(
+            SourceDeliverySelection(
+                WorkspaceId(workspace),
+                "selection",
+                "a" * 64,
+                NOW + timedelta(days=1),
+                (),
+            )
+        )
+    visited: set[str] = set()
+    cursors: list[Cursor | None] = []
+    completed = asyncio.Event()
+
+    async def reconcile(
+        workspace: str,
+        *,
+        cursor: Cursor | None,
+        limit: int,
+    ) -> SourceReconciliationPage:
+        """Retain a perpetual continuation only for the first workspace in keyset order."""
+        assert limit == 50
+        if workspace == "a-busy":
+            cursors.append(cursor)
+            return SourceReconciliationPage(1, 0, 1, Cursor("busy-continuation"))
+        visited.add(workspace)
+        if len(visited) == 54:
+            completed.set()
+        return SourceReconciliationPage(1, 0, 0, None)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(acknowledge)) as client:
+        worker = runtime(store, client, [])
+        monkeypatch.setattr(worker.reliable, "reconcile_pending", reconcile)
+        try:
+            await worker.start()
+            await asyncio.wait_for(completed.wait(), 2)
+        finally:
+            await worker.aclose()
+    assert cursors[0] is None
+    assert len(cursors) > 1 and all(cursor == Cursor("busy-continuation") for cursor in cursors[1:])
+
+
 async def test_audit_sink_does_not_persist_raw_diagnostics() -> None:
     """Keep identifiers/counts without persisting exception text or credentials."""
     store = InMemoryTriggerMetadataStore(now=lambda: NOW)
