@@ -370,13 +370,22 @@ class ExecutionRepository:
         return len(expired)
 
     async def revoke_credentials(self, key: ExecutionKey) -> None:
-        """Close credential access before a stop request, retaining unknown-effect ownership."""
+        """Close credential access without ending ownership; terminal races are already closed."""
         if self._durable is None:
             return
         record = self._records.get(key)
+        if record is None:
+            record = await self._durable.read_activity_execution(*key)
+        if record is not None and record.completed:
+            return
         if record is None or record.owner != self._owner:
             raise UnsafeExecutionError("activity credential owner is unavailable")
-        self._records[key] = await self._durable.revoke_activity_authority(record)
+        if not record.authority_revoked:
+            revoked = await self._durable.revoke_activity_authority(record)
+            if revoked.completed:
+                self._records.pop(key, None)
+            else:
+                self._records[key] = revoked
 
     async def _persist_terminal(self, execution: ActivityExecution) -> None:
         try:

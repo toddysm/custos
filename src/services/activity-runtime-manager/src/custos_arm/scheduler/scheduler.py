@@ -22,6 +22,9 @@ the get/insert/drive sequence cannot race two sandboxes into existence.
 relaunch an unknown effect. The original process may resume monitoring, but a
 replacement process must retain the pending fence until termination is proven.
 Only explicitly non-durable legacy test adapters retain the earlier relaunch path.
+An unconfirmed owned attempt loses credential admission before its worker returns.
+Revocation outages retain the worker/context for retry; shutdown also drains
+retained contexts whose original request workers have already finished.
 
 The driver lifecycle methods are synchronous and blocking; the Scheduler
 offloads each onto a worker thread via :func:`asyncio.to_thread` so the event
@@ -222,7 +225,11 @@ class ActivityScheduler:
             logger.error("Owned activity worker failed; durable ownership must be reconciled")
 
     async def drain(self) -> None:
-        """Join owned workers before resource closure, even if shutdown itself is cancelled."""
+        """Close authority and request stops for workers and retained contexts before closure.
+
+        Cancellation of shutdown waits for that drain; stop requests never prove
+        termination or remove the durable unknown-effect fence.
+        """
         self._closing = True
         draining = asyncio.create_task(self._drain_workers(), name="activity-runtime-drain")
         cancelled = False
@@ -238,45 +245,69 @@ class ActivityScheduler:
             raise asyncio.CancelledError
 
     async def _drain_workers(self) -> None:
-        """Retry failed revocation without stopping first; never abandon the worker join."""
-        cancelled: set[str] = set()
-        reported: set[str] = set()
+        """Retry revocation/stop for retained contexts even without a request worker to join."""
+        cancelled: set[ExecutionKey] = set()
+        reported: set[ExecutionKey] = set()
+        stop_reported: set[ExecutionKey] = set()
         try:
-            while self._workers:
+            while self._workers or self._context.keys() - cancelled:
                 for key, context in tuple(self._context.items()):
-                    reference = context.handle.reference
-                    if reference in cancelled:
+                    if key in cancelled:
                         continue
                     try:
                         await self._repo.revoke_credentials(key)
                     except (SPLError, UnsafeExecutionError):
-                        if reference not in reported:
+                        if key not in reported:
                             logger.error(
-                                "Credential revocation failed; stop deferred and workers retained"
+                                "Credential revocation failed; stop deferred and ownership retained"
                             )
-                            reported.add(reference)
+                            reported.add(key)
+                        continue
+                    if self._context.get(key) is not context:
                         continue
                     try:
                         await asyncio.to_thread(
                             context.driver.cancel, context.handle, CancelReason.SHUTDOWN
                         )
                     except SandboxFailureError:
-                        logger.error("Sandbox stop request failed; joining its owned worker")
-                    cancelled.add(reference)
+                        if key not in stop_reported:
+                            logger.error("Sandbox stop request failed; retaining context for retry")
+                            stop_reported.add(key)
+                        continue
+                    cancelled.add(key)
                 if self._workers:
                     await asyncio.wait(tuple(self._workers), timeout=0.1)
+                elif self._context.keys() - cancelled:
+                    await asyncio.sleep(0.1)
         finally:
             if self._workers:
                 await asyncio.gather(*tuple(self._workers), return_exceptions=True)
 
     async def _admitted(self, request: ScheduleRequest) -> ActivityResultEnvelope:
-        """Retain the per-key fence even when the requesting HTTP connection is cancelled."""
+        """Close unknown-effect credential admission before releasing the owned worker."""
         key = self._key(request)
         try:
             async with self._locks.setdefault(key, asyncio.Lock()):
-                return await self._schedule(key, request)
+                try:
+                    return await self._schedule(key, request)
+                finally:
+                    if self._repo.durable and key in self._context:
+                        await self._close_credential_admission(key)
         except UnsafeExecutionError as exc:
             return synthesize_failure(exc, attempt=request.step.attempt)
+
+    async def _close_credential_admission(self, key: ExecutionKey) -> None:
+        """Retain the worker until revocation succeeds, without claiming termination."""
+        reported = False
+        while True:
+            try:
+                await self._repo.revoke_credentials(key)
+                return
+            except (SPLError, UnsafeExecutionError):
+                if not reported:
+                    logger.error("Credential revocation failed; owned attempt retained for retry")
+                    reported = True
+                await asyncio.sleep(0.1)
 
     async def _schedule(
         self, key: ExecutionKey, request: ScheduleRequest
@@ -447,7 +478,6 @@ class ActivityScheduler:
                         )
                 return await self._finalize(key, request, resolved, driver, handle, outcome)
             except (UnsafeExecutionError, SPLError):
-                await self._repo.revoke_credentials(key)
                 raise
             except Exception as exc:
                 if self._repo.durable and start_requested:
@@ -511,9 +541,11 @@ class ActivityScheduler:
     async def _reconcile(
         self, key: ExecutionKey, request: ScheduleRequest
     ) -> ActivityResultEnvelope:
+        """Resume owned monitoring without relaunch; close admission if its local handle is lost."""
         context = self._context.get(key)
         if context is None:
             if self._repo.durable:
+                await self._close_credential_admission(key)
                 raise UnsafeExecutionError("activity ownership cannot be reconstructed safely")
             # No live sandbox to resume (e.g. lost after a restart): relaunch.
             return await self._drive(key, request)
@@ -521,6 +553,14 @@ class ActivityScheduler:
             outcome = await asyncio.to_thread(
                 context.driver.await_terminal, context.handle, context.deadline
             )
+            if self._repo.durable:
+                if outcome.signal.value in {"deadline", "cancelled"}:
+                    raise UnsafeExecutionError(
+                        "activity termination is unconfirmed; ownership remains fenced"
+                    )
+                return await self._finalize(
+                    key, request, context.resolved, context.driver, context.handle, outcome
+                )
         except Exception as exc:
             if self._repo.durable:
                 raise UnsafeExecutionError(
@@ -528,10 +568,6 @@ class ActivityScheduler:
                 ) from None
             envelope = synthesize_failure(exc, attempt=request.step.attempt)
             return await self._complete(key, envelope, context.driver, context.handle)
-        if self._repo.durable and outcome.signal.value in {"deadline", "cancelled"}:
-            raise UnsafeExecutionError(
-                "activity termination is unconfirmed; ownership remains fenced"
-            )
         return await self._finalize(
             key, request, context.resolved, context.driver, context.handle, outcome
         )

@@ -41,8 +41,14 @@ the shared authorization transport; it is not a fallback identity for work.
 Every execution operation still resolves its own originally accepted reference.
 Probe streams have elapsed-time budgets, and blocking Kubernetes probes are
 joined before their API client can close. Failed credential revocation defers
-the stop request while retaining/joining workers; shutdown cancellation cannot
-close clients under those workers.
+the stop request while retaining/joining workers and retained attempt contexts;
+shutdown cancellation cannot close clients under unfinished revocation or stop
+requests. Contexts are drained even if their original request worker has finished.
+An unconfirmed start, monitor or reconciliation failure closes durable credential
+admission before its worker returns; revocation outages retain that worker for
+retry. Stop failures are retried during drain. Neither credential revocation nor
+a successful stop request proves termination or permits a later execution attempt;
+unknown-effect rows remain fenced and exact successful replay is unchanged.
 Readiness gates new scheduling only. Authorized cancellation remains available
 when unrelated Catalog/CSI probes fail, while still requiring execution permission
 and durable credential revocation before stopping a sandbox.
