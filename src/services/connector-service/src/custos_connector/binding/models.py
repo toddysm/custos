@@ -84,7 +84,10 @@ class BindForStepRequest:
 
 @dataclass(frozen=True, slots=True)
 class BindingMetadata:
-    """Non-secret instance facts from the same authoritative snapshot used to bind the slot."""
+    """Non-secret instance facts from the same authoritative snapshot used to bind the slot.
+
+    ``connector_kind`` is the target family, not the distinct provider type ID.
+    """
 
     instance_id: str
     connector_kind: str

@@ -26,6 +26,42 @@ from custos_arm.io import (
 from custos_arm.manifest import ActivityManifest, parse_manifest
 from custos_arm.store.artifact import ArtifactStoreClient
 
+
+@pytest.mark.parametrize(
+    "name,value,valid",
+    [
+        ("ImageRef", {"ref": "registry.test/image:tag"}, True),
+        ("ImageRef", {"ref": 42}, False),
+        ("ArtifactRef", {"kind": "ArtifactRef", "name": "report"}, True),
+        ("Duration", "PT30M", True),
+        ("Duration", "not-a-duration", False),
+    ],
+)
+def test_shared_types_are_validated_without_external_resolution(
+    name: str,
+    value: object,
+    valid: bool,
+) -> None:
+    """Public shared schemas use the existing typed contract, including scalar duration rules."""
+    from custos_arm.io.broker import _schema_issues
+
+    issues = _schema_issues({"$ref": "custos://types/" + name}, value)
+    assert bool(issues) is not valid
+
+
+def test_unknown_schema_reference_is_closed_and_permanent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No manifest can cause schema validation to retrieve remote data."""
+    from custos_arm.io.broker import _schema_issues
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        """Fail if the validator attempts network retrieval."""
+        raise AssertionError("unexpected external schema retrieval")
+
+    monkeypatch.setattr("urllib.request.urlopen", forbidden)
+    issues = _schema_issues({"$ref": "https://example.invalid/private"}, {})
+    assert issues == ["<root> -> schema references an unavailable resource"]
+
+
 # ---------------------------------------------------------------------------
 # Schemas + manifest fixtures (concrete JSON Schemas, no unresolvable $refs)
 # ---------------------------------------------------------------------------

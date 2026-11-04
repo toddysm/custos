@@ -21,11 +21,12 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from custos_callctx.execution import ExecutionIdentity
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from custos_arm.contract import StepRef
+from custos_arm.contract import ConnectorRef, StepRef
 from custos_arm.scheduler import ScheduleRequest
 from custos_arm.secrets import ConnectorContext
 
@@ -34,6 +35,25 @@ __all__ = [
     "ConnectorContextWire",
     "ScheduleActivityWire",
 ]
+
+
+def _endpoint_host(endpoint: str) -> str:
+    """Extract public authority, rejecting credential-bearing or ambiguous endpoint forms."""
+    try:
+        parts = urlsplit(endpoint if "://" in endpoint else "//" + endpoint)
+        if (
+            not parts.hostname
+            or parts.username is not None
+            or parts.password is not None
+            or parts.query
+            or parts.fragment
+            or any(character.isspace() or ord(character) < 32 for character in endpoint)
+        ):
+            raise ValueError
+        _ = parts.port
+        return parts.netloc
+    except ValueError:
+        raise ValueError("connector endpoint must have a credential-free authority") from None
 
 
 class ConnectorContextWire(BaseModel):
@@ -95,7 +115,17 @@ class BoundConnectorContextWire(BaseModel):
             or (value["tokenTypeHint"] is not None and not isinstance(value["tokenTypeHint"], str))
         ):
             raise ValueError("invalid canonical connector context")
+        _endpoint_host(value["endpoint"])
         return value
+
+    def to_connector_ref(self) -> ConnectorRef:
+        """Expose only endpoint authority and registered family, never opaque binding data."""
+        endpoint = self.context["endpoint"]
+        return ConnectorRef(
+            host=_endpoint_host(endpoint),
+            endpoint=endpoint,
+            type=self.connector_kind,
+        )
 
     def to_connector_context(self) -> ConnectorContext:
         """Preserve real instance identity and opaque binding; no synthetic refresh lease exists."""
@@ -170,6 +200,11 @@ class ScheduleActivityWire(BaseModel):
             activity_ref=self.activity_ref,
             inputs=self.inputs,
             connector_contexts=contexts,
+            connectors={
+                name: value.to_connector_ref()
+                for name, value in self.connector_contexts.items()
+                if isinstance(value, BoundConnectorContextWire)
+            },
             step_deadline=self.deadline,
         )
 

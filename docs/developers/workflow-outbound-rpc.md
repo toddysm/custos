@@ -112,8 +112,16 @@ use the `Z` suffix.
 
 The receiving runtime requires a signed `activity-execute` context matching
 the reference's account and workspace. Opaque binding data is treated as
-private: it is written to `secrets/<slot>/binding.json` in the input tmpfs,
-not into ordinary inputs or expressions. Its `handle` is not a lease ID.
+private: it is written to `secrets/<slot>/binding.json` in the input tmpfs.
+Only the credential-free endpoint, its host authority, and registered target
+kind are projected into `ctx.connectors`; opaque handles/extras are not exposed
+to ordinary inputs or expressions. Its `handle` is not a lease ID.
+`connectorKind` is the registered manifest's `spec.target.kind` (for example
+`oci-registry`), not its provider type identifier (for example `custos-dockerhub`).
+Instance identity still pins the concrete provider type/version and credentials.
+Canonical endpoints must have an unambiguous host authority without user-info,
+query strings or fragments; credential/configuration data belongs in the
+private binding, not the public endpoint projection.
 
 ### Success response envelope
 

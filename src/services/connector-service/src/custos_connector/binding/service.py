@@ -106,6 +106,19 @@ from custos_connector.runtime import (
     PluginRuntimeError,
 )
 
+
+def connector_target_kind(connector_type: ConnectorTypeVersion) -> str:
+    """Read the registered target family, not the provider's distinct type identifier."""
+    spec = connector_type.normalized_manifest.get("spec")
+    target = spec.get("target") if isinstance(spec, Mapping) else None
+    kind = target.get("kind") if isinstance(target, Mapping) else None
+    if not isinstance(kind, str) or not kind.strip():
+        raise BindError(
+            BindErrorCode.INVALID_REQUEST, "registered connector target kind is missing"
+        )
+    return kind
+
+
 # ---------------------------------------------------------------------------
 # Metrics
 # ---------------------------------------------------------------------------
@@ -476,7 +489,7 @@ class BindForStepService:
             slot_instance_map: dict[str, str] = {}
             slot_instances: list[ConnectorInstance] = []
             for slot in request.slots:
-                ctx, instance = await self._resolve_slot(
+                ctx, instance, kind = await self._resolve_slot(
                     workspace_id=workspace_id,
                     request=request,
                     slot=slot,
@@ -486,7 +499,7 @@ class BindForStepService:
                 slot_instances.append(instance)
                 bindings[slot.name] = BindingMetadata(
                     str(instance.instance_id),
-                    instance.type,
+                    kind,
                     slot.required_capabilities,
                 )
         except BindError as exc:
@@ -529,14 +542,16 @@ class BindForStepService:
         workspace_id: str,
         request: BindForStepRequest,
         slot: BindSlotRequest,
-    ) -> tuple[ConnectorContext, ConnectorInstance]:
+    ) -> tuple[ConnectorContext, ConnectorInstance, str]:
         """Resolve one slot end-to-end.
 
         Returns the :class:`ConnectorContext` together with the
         :class:`ConnectorInstance` so the caller can build the
-        slot→instance map used by the success audit event.
+        slot→instance map used by the success audit event. The final value
+        is the registered target family used by activity slot declarations.
         """
         instance, connector_type = await self.credential_instance(workspace_id, slot)
+        kind = connector_target_kind(connector_type)
         capability_index = _capability_index(connector_type)
         await self._emit_deprecated_capability_events(
             workspace_id=workspace_id,
@@ -557,7 +572,7 @@ class BindForStepService:
             connector_type=connector_type,
             identity=identity,
         )
-        return ctx, instance
+        return ctx, instance, kind
 
     async def credential_instance(
         self,

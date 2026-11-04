@@ -56,11 +56,11 @@ class OciDescriptor(ContractModel):
 
 
 class ConnectorRef(ContractModel):
-    """Opaque handle to a connector instance.
+    """Credential-free endpoint metadata for a bound connector.
 
-    Exposes the narrow, credential-free surface that expressions and
-    activities may read. ARM resolves the handle to a full
-    ``ConnectorContext`` (credentials included) only inside the sandbox.
+    Expressions and activities may read this narrow projection. ``type`` names
+    the target family; opaque binding data and credentials are not projected.
+    Production activities obtain material through the local Sidecar broker.
     """
 
     host: str = Field(..., min_length=1)

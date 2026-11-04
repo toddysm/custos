@@ -88,8 +88,21 @@ The process exit code follows the contract: `0` success, `2` for a
 
 ## Credential model
 
-ARM injects the per-slot resolved registry credentials at
-`/custos/in/secrets/<slot>/...`. The activity hands those to `skopeo`, which
+In production, the activity presents `/custos/in/sidecar-token` to the local
+Unix-domain socket `/custos/run/connector.sock`. It requests `oci.pull` for
+`source` and `oci.push` for `dest`, validates the version-two lease scope and
+registry `{username, token}` material, and attempts lease release on every
+exit. Explicit legacy files at `/custos/in/secrets/<slot>/username` and `token`
+remain supported; partial file injection never falls back to the broker.
+
+The private auth file is created below `/custos/run` (not collected output or
+the read-only root filesystem) and removed after the copy. Release failures
+are logged without turning a completed external copy into a retry. Unknown
+provider expiry remains unknown; lease expiry/release does not imply upstream
+token revocation. Local broker exchanges have a 15-second total deadline and
+a 1 MiB response limit; diagnostics never include provider response bodies.
+
+The activity hands the material to `skopeo`, which
 performs the registry token exchange and any mid-copy refresh itself (Docker
 Hub and GHCR are spec-compliant). Minting, leasing, and refreshing credentials
 is the **connector + sidecar's** responsibility, not the activity's. (A

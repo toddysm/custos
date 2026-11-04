@@ -218,6 +218,8 @@ class ScopedCatalogActivityResolver(CatalogActivityResolver):
                     follow_redirects=False,
                 ) as response,
             ):
+                if response.status_code == 404:
+                    raise ActivityUnresolvedError(activity_ref)
                 if response.status_code != 200:
                     raise CatalogUnavailableError(activity_ref, "activity metadata read failed")
                 raw = bytearray()

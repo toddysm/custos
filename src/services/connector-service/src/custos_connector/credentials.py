@@ -30,6 +30,7 @@ from starlette.responses import JSONResponse
 from custos_connector.audit import build_audit_event
 from custos_connector.binding.errors import BindError
 from custos_connector.binding.models import BindSlotRequest
+from custos_connector.binding.service import connector_target_kind
 from custos_connector.identity.errors import IdentityResolverError
 from custos_connector.lease.errors import LeaseError, http_status_for
 from custos_connector.lease.router import _lease_to_wire
@@ -150,8 +151,8 @@ class CredentialIssuer:
             assert lease is not None
             await manager.release(workspace_id=workspace, lease_id=lease.lease_id)
             return {"released": True}
-        instance, _ = await self.binder.credential_instance(ctx.workspace_id, spec)
-        if instance.type != scope["kind"] or not instance.lease_ttl_seconds:
+        instance, connector_type = await self.binder.credential_instance(ctx.workspace_id, spec)
+        if connector_target_kind(connector_type) != scope["kind"] or not instance.lease_ttl_seconds:
             raise CredentialDenied("instance kind or lease policy changed")
         deadline = datetime.fromisoformat(accepted["deadline"])
         if lease is None:

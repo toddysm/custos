@@ -44,6 +44,45 @@ def test_canonical_binding_preserves_private_structure_without_synthetic_lease()
     assert "private-binding-value" not in repr(wire)
 
 
+def test_canonical_binding_projects_only_public_connector_metadata() -> None:
+    """Actual RPC translation supplies the endpoint required by bundled activities."""
+    request = ScheduleActivityWire.model_validate(
+        {
+            "runId": "run",
+            "stepId": "step",
+            "attempt": 1,
+            "activityRef": "custos.builtin/copy-image@0.1.0",
+            "connectorContexts": {"registry": canonical_binding()},
+        }
+    ).to_schedule_request(workspace_id="ws")
+    public = request.connectors["registry"]
+    assert public.host == "registry.test"
+    assert public.endpoint == "https://registry.test"
+    assert public.type == "oci-registry"
+    assert "private-binding-value" not in public.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://user:private@registry.test",
+        "https://registry.test?token=private",
+        "https://registry.test#private",
+        "https://registry.test:bad",
+        "https:///missing",
+        "https://registry.\ntest",
+    ],
+)
+def test_unsafe_public_endpoint_is_rejected(endpoint: str) -> None:
+    """Canonical endpoints cannot publish embedded credentials or ambiguous authorities."""
+    descriptor = canonical_binding()
+    context = descriptor["context"]
+    assert isinstance(context, dict)
+    context["endpoint"] = endpoint
+    with pytest.raises(ValidationError):
+        BoundConnectorContextWire.model_validate(descriptor)
+
+
 @pytest.mark.parametrize("version", ["2", "3"])
 @pytest.mark.parametrize("version_key", ["schemaVersion", "schema_version"])
 def test_versioned_binding_never_downgrades_to_legacy(version: str, version_key: str) -> None:

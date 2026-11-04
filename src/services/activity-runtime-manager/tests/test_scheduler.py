@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import subprocess
+import sys
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 from custos_spl.errors import ImmutableViolation
 from custos_spl.ids import RunId, StepId, WorkspaceId
 from custos_spl.interfaces.metadata_store import MetadataStoreProvider, StepAttempt
@@ -22,6 +26,7 @@ from custos_arm.manifest import parse_manifest
 from custos_arm.resolve import ActivityTypeVersion
 from custos_arm.resolve.errors import ActivityUnresolvedError, CatalogUnavailableError
 from custos_arm.result import ResultClass, ResultMapper
+from custos_arm.rpc.models import ScheduleActivityWire
 from custos_arm.runtime import (
     OCI_CONTAINER_KIND,
     CancelReason,
@@ -376,6 +381,75 @@ async def test_ctx_carries_connector_handles(tmp_path: Path) -> None:
     assert driver.handle is not None
     ctx = json.loads((driver.handle.input_root / "ctx.json").read_text())
     assert ctx["connectors"]["registry"]["type"] == "oci-registry"
+
+
+def test_runtime_materialization_is_consumable_by_bundled_copy_image(tmp_path: Path) -> None:
+    """Pass actual runtime-written files to the dependency-free activity, not a compatible DTO."""
+    root = Path(__file__).resolve().parents[4]
+    activity_root = root / "extensions/activities/copy-image"
+    manifest = parse_manifest(
+        yaml.safe_load((activity_root / "activity-manifest.yaml").read_text())
+    )
+    resolved = ActivityTypeVersion(
+        namespace=manifest.metadata.namespace,
+        type=manifest.metadata.type,
+        version=manifest.metadata.version,
+        digest=_DIGEST,
+        manifest=manifest,
+    )
+    contexts = {
+        slot: {
+            "schemaVersion": "2",
+            "slotName": slot,
+            "connectorInstanceId": slot + "-instance",
+            "connectorKind": "oci-registry",
+            "capabilities": ["oci.pull"] if slot == "source" else ["oci.push"],
+            "context": {
+                "endpoint": endpoint,
+                "tokenTypeHint": "basic",
+                "handle": {"opaque": "private-binding-value"},
+                "extras": {},
+            },
+        }
+        for slot, endpoint in (("source", "https://registry.test"), ("dest", "https://ghcr.io"))
+    }
+    request = ScheduleActivityWire.model_validate(
+        {
+            "runId": "run",
+            "stepId": "step",
+            "attempt": 1,
+            "activityRef": "custos.builtin/copy-image@0.1.0",
+            "connectorContexts": contexts,
+            "inputs": {
+                "source": {"ref": "registry.test/source/image:latest"},
+                "destination": {"repository": "org/image"},
+            },
+        }
+    ).to_schedule_request(workspace_id="ws")
+    handle = _handle(tmp_path / "in", tmp_path / "out")
+    _scheduler(_FakeDriver(tmp_path, outputs=None))._materialize(
+        request,
+        resolved,
+        handle,
+        _NOW + timedelta(minutes=30),
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from pathlib import Path; from copy_image.contract import Sandbox; "
+            "from copy_image.copy import resolve_copy_plan; "
+            "s=Sandbox(Path(sys.argv[1])); "
+            "print(resolve_copy_plan(s.read_inputs(),s.read_context()).destination_ref)",
+            str(tmp_path),
+        ],
+        env={**os.environ, "PYTHONPATH": str(activity_root / "app")},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip() == "ghcr.io/org/image:latest"
+    assert "private-binding-value" not in (handle.input_root / "ctx.json").read_text()
 
 
 # ---------------------------------------------------------------------------

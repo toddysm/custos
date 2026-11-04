@@ -94,6 +94,7 @@ def _make_connector_type(
     *,
     capabilities: list[str | dict[str, Any]] | None = None,
 ) -> ConnectorTypeVersion:
+    """Build provider metadata containing its required target family."""
     caps = capabilities if capabilities is not None else ["events.delivery", "objects.read"]
     return ConnectorTypeVersion(
         type="http",
@@ -102,7 +103,7 @@ def _make_connector_type(
         image_ref="example.test/http@sha256:fake",
         normalized_manifest={
             "metadata": {"type": "http", "version": "1.0.0"},
-            "spec": {"capabilities": caps},
+            "spec": {"capabilities": caps, "target": {"kind": "http"}},
         },
         parent_deprecated=False,
         published_at=datetime.now(UTC),
@@ -204,6 +205,7 @@ def _payload(
 
 
 async def _seed_catalog(catalog: FakeCatalogAdapter) -> None:
+    """Seed the minimal registered target metadata required by actual binding."""
     await catalog.put_connector_type_version(
         "http",
         "1.0.0",
@@ -211,7 +213,10 @@ async def _seed_catalog(catalog: FakeCatalogAdapter) -> None:
         "example.test/http@sha256:fake",
         {
             "metadata": {"type": "http", "version": "1.0.0"},
-            "spec": {"capabilities": ["events.delivery", "objects.read"]},
+            "spec": {
+                "capabilities": ["events.delivery", "objects.read"],
+                "target": {"kind": "http"},
+            },
         },
     )
 

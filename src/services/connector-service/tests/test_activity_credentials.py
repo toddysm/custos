@@ -174,6 +174,7 @@ class AtomicLeases(FakeLeaseAdapter):
         "authority-revoked",
         "audit",
         "descriptor",
+        "target-kind",
     ],
 )
 async def test_real_credential_issuer_scope_rotation_and_rejection(
@@ -187,10 +188,19 @@ async def test_real_credential_issuer_scope_rotation_and_rejection(
     instances = FakeConnectorInstanceAdapter(applied_revisions={1})
     instance = replace(
         _make_instance(),
+        type="custom-http-provider" if failure == "target-kind" else "http",
         credentials_authentication={"type": "x-dapr-secret", "secretName": "registry"},
         enabled=failure != "disabled",
     )
     await _seed(catalog, instances, instance)
+    if failure == "target-kind":
+        await catalog.put_connector_type_version(
+            instance.type,
+            instance.version,
+            "sha256:fixture",
+            "registry.test/provider",
+            {"spec": {"target": {"kind": "http"}, "capabilities": ["events.delivery"]}},
+        )
     metadata, leases = Attempts(), AtomicLeases()
     metadata.fail_issuance_audit = failure == "audit"
     proof = "private-attempt-proof-" + "x" * 32
@@ -206,7 +216,7 @@ async def test_real_credential_issuer_scope_rotation_and_rejection(
         "credential_scopes": {
             "source": {
                 "instanceId": str(instance.instance_id),
-                "kind": instance.type,
+                "kind": "http",
                 "capabilities": ["events.delivery"],
             }
         },
@@ -404,7 +414,7 @@ async def test_real_credential_issuer_scope_rotation_and_rejection(
             response = await client.post(
                 "/internal/v1/activity-credentials", json=request, headers=headers
             )
-            if failure not in {None, "descriptor"}:
+            if failure not in {None, "descriptor", "target-kind"}:
                 assert response.status_code in {403, 503}, response.text
                 assert "private-provider-value" not in response.text
                 assert "private-provider-value" not in caplog.text

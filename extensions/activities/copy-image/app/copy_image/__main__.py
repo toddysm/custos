@@ -11,6 +11,7 @@ envelope + copy-report.
 from __future__ import annotations
 
 import json
+import logging
 import tempfile
 from pathlib import Path
 
@@ -23,31 +24,47 @@ from copy_image.copy import (
     run_oras_copy,
     run_skopeo_copy,
 )
-from copy_image.credentials import read_slot_credentials, redact, write_authfile
+from copy_image.credentials import (
+    SlotCredentials,
+    read_slot_credentials,
+    redact,
+    release_slot_credentials,
+    write_authfile,
+)
 from copy_image.errors import classify_skopeo_error
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the copy with private temporary auth data and release acquired leases on every exit.
+
+    Cleanup failures are reported without changing a completed copy into a retry.
+    """
     sandbox = Sandbox.from_env()
     secrets: list[str] = []
+    acquired: dict[str, SlotCredentials] = {}
     try:
         inputs = sandbox.read_inputs()
         ctx = sandbox.read_context()
         plan = resolve_copy_plan(inputs, ctx)
 
         source_creds = read_slot_credentials(sandbox, "source")
+        acquired["source"] = source_creds
+        secrets.extend([source_creds.secret, source_creds.docker_auth()])
         dest_creds = read_slot_credentials(sandbox, "dest")
-        secrets = [source_creds.secret, dest_creds.secret]
-        authfile = write_authfile(
-            Path(tempfile.mkdtemp(prefix="copy-image-auth-")),
-            {plan.source_host: source_creds, plan.dest_host: dest_creds},
-        )
-
-        outcome = (
-            run_oras_copy(plan, authfile)
-            if plan.copy_referrers
-            else run_skopeo_copy(plan, authfile)
-        )
+        acquired["dest"] = dest_creds
+        secrets.extend([dest_creds.secret, dest_creds.docker_auth()])
+        run_root = sandbox.base / "run"
+        run_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="copy-image-auth-", dir=run_root) as directory:
+            authfile = write_authfile(
+                Path(directory),
+                {plan.source_host: source_creds, plan.dest_host: dest_creds},
+            )
+            outcome = (
+                run_oras_copy(plan, authfile)
+                if plan.copy_referrers
+                else run_skopeo_copy(plan, authfile)
+            )
         _write_result(sandbox, outcome)
         return 0
     except (SkopeoError, OrasError) as exc:
@@ -60,6 +77,12 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:  # pragma: no cover - last-resort guard
         sandbox.write_failure("activity.unexpected_error", "retryable", redact(str(exc), secrets))
         return 1
+    finally:
+        for slot, credentials in acquired.items():
+            try:
+                release_slot_credentials(sandbox, slot, credentials)
+            except ActivityError:
+                logging.getLogger(__name__).warning("Credential lease cleanup failed for %s", slot)
 
 
 def _write_result(sandbox: Sandbox, outcome: CopyOutcome) -> None:

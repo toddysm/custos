@@ -30,7 +30,9 @@ _CATALOG = "http://catalog.svc:8080"
 _DIGEST = "sha256:" + "ab" * 32
 
 
-@pytest.mark.parametrize("failure", [None, "transport", "json", "version", "denied", "trickle"])
+@pytest.mark.parametrize(
+    "failure", [None, "transport", "json", "version", "denied", "trickle", "not-found"]
+)
 async def test_scoped_resolver_uses_fresh_private_authority(failure: str | None) -> None:
     """Resolve the actual Catalog shape without unsigned fallback or private error diagnostics."""
     identity = ExecutionIdentity("ws", "account", "stable")
@@ -71,6 +73,8 @@ async def test_scoped_resolver_uses_fresh_private_authority(failure: str | None)
             return httpx.Response(200, text=token)
         if failure == "trickle":
             return httpx.Response(200, stream=Trickle())
+        if failure == "not-found":
+            return httpx.Response(404, text=token)
         return httpx.Response(200, json=_body(version="2.2.0" if failure == "version" else "2.1.0"))
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
@@ -86,7 +90,10 @@ async def test_scoped_resolver_uses_fresh_private_authority(failure: str | None)
             await resolver.resolve(workspace_id="ws", activity_ref="security/scan-image@2.1.0")
         assert not calls
         if failure:
-            with pytest.raises(CatalogUnavailableError) as failed:
+            expected = (
+                ActivityUnresolvedError if failure == "not-found" else CatalogUnavailableError
+            )
+            with pytest.raises(expected) as failed:
                 await resolver.resolve_execution(
                     workspace_id="ws",
                     activity_ref="security/scan-image@2.1.0",
