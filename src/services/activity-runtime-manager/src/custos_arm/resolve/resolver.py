@@ -196,13 +196,18 @@ class ScopedCatalogActivityResolver(CatalogActivityResolver):
         activity_ref: str,
         identity: ExecutionIdentity,
     ) -> ActivityTypeVersion:
-        """Read the actual Catalog endpoint with a scoped grant and bounded private diagnostics."""
+        """Resolve valid exact pins; bad references are permanent, transport failures retryable."""
         if identity.workspace_id != workspace_id:
             raise ActivityUnresolvedError(activity_ref, "execution workspace mismatch")
         try:
             ref = ActivityRef.parse(activity_ref)
             if not ref.is_exact_pin:
                 raise ValueError("execution requires an exact activity pin")
+        except ValueError:
+            raise ActivityUnresolvedError(
+                activity_ref, "execution requires a valid exact activity pin"
+            ) from None
+        try:
             headers = await self._execution.headers(identity, "catalog-activity-read")
             url = (
                 f"{self._base}/v1/workspaces/{quote(workspace_id, safe='')}"

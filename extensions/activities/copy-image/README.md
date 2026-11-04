@@ -97,8 +97,10 @@ exit. Explicit legacy files at `/custos/in/secrets/<slot>/username` and `token`
 remain supported; partial file injection never falls back to the broker.
 
 The private auth file is created below `/custos/run` (not collected output or
-the read-only root filesystem) and removed after the copy. Release failures
-are logged without turning a completed external copy into a retry. Unknown
+the read-only root filesystem), with cleanup attempted after the copy. Filesystem
+cleanup or lease-release failures are logged without turning a completed external
+copy into a retry; the runtime must still reap the sandbox to remove any residual
+private files. Unknown
 provider expiry remains unknown; lease expiry/release does not imply upstream
 token revocation. Local broker exchanges have a 15-second total deadline and
 a 1 MiB response limit; diagnostics never include provider response bodies.

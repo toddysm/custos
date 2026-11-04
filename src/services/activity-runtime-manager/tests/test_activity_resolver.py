@@ -31,7 +31,18 @@ _DIGEST = "sha256:" + "ab" * 32
 
 
 @pytest.mark.parametrize(
-    "failure", [None, "transport", "json", "version", "denied", "trickle", "not-found"]
+    "failure",
+    [
+        None,
+        "transport",
+        "json",
+        "version",
+        "denied",
+        "trickle",
+        "not-found",
+        "invalid-ref",
+        "unpinned",
+    ],
 )
 async def test_scoped_resolver_uses_fresh_private_authority(failure: str | None) -> None:
     """Resolve the actual Catalog shape without unsigned fallback or private error diagnostics."""
@@ -91,17 +102,30 @@ async def test_scoped_resolver_uses_fresh_private_authority(failure: str | None)
         assert not calls
         if failure:
             expected = (
-                ActivityUnresolvedError if failure == "not-found" else CatalogUnavailableError
+                ActivityUnresolvedError
+                if failure
+                in {
+                    "not-found",
+                    "invalid-ref",
+                    "unpinned",
+                }
+                else CatalogUnavailableError
             )
+            ref = {
+                "invalid-ref": "not-an-activity",
+                "unpinned": "security/scan-image@2",
+            }.get(failure, "security/scan-image@2.1.0")
             with pytest.raises(expected) as failed:
                 await resolver.resolve_execution(
                     workspace_id="ws",
-                    activity_ref="security/scan-image@2.1.0",
+                    activity_ref=ref,
                     identity=identity,
                 )
             assert token not in str(failed.value) and failed.value.__cause__ is None
             if failure == "trickle":
                 assert time.monotonic() - started < 0.5
+            if failure in {"invalid-ref", "unpinned"}:
+                assert not calls
         else:
             for _ in range(2):
                 result = await resolver.resolve_execution(

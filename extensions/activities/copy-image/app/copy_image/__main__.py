@@ -55,9 +55,10 @@ def main(argv: list[str] | None = None) -> int:
         secrets.extend([dest_creds.secret, dest_creds.docker_auth()])
         run_root = sandbox.base / "run"
         run_root.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="copy-image-auth-", dir=run_root) as directory:
+        directory = tempfile.TemporaryDirectory(prefix="copy-image-auth-", dir=run_root)
+        try:
             authfile = write_authfile(
-                Path(directory),
+                Path(directory.name),
                 {plan.source_host: source_creds, plan.dest_host: dest_creds},
             )
             outcome = (
@@ -65,6 +66,11 @@ def main(argv: list[str] | None = None) -> int:
                 if plan.copy_referrers
                 else run_skopeo_copy(plan, authfile)
             )
+        finally:
+            try:
+                directory.cleanup()
+            except OSError:
+                logging.getLogger(__name__).warning("Private auth cleanup failed")
         _write_result(sandbox, outcome)
         return 0
     except (SkopeoError, OrasError) as exc:

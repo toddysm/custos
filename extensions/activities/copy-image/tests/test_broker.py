@@ -277,10 +277,12 @@ def test_partial_acquisition_releases_source(
     assert len(calls) == 3
 
 
-def test_completed_copy_stays_successful_when_release_fails(
+@pytest.mark.parametrize("cleanup_failure", ["lease", "auth-file"])
+def test_completed_copy_stays_successful_when_cleanup_fails(
     sandbox: Sandbox,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    cleanup_failure: str,
 ) -> None:
     """Clean private auth data and report cleanup failure without retrying an external effect."""
     from copy_image.__main__ import main
@@ -289,6 +291,17 @@ def test_completed_copy_stays_successful_when_release_fails(
 
     seed_copy(sandbox)
     monkeypatch.setenv("CUSTOS_IO_ROOT", str(sandbox.base))
+    cleanup_original = tempfile.TemporaryDirectory.cleanup
+    retained: list[tempfile.TemporaryDirectory[str]] = []
+
+    def cleanup(directory: tempfile.TemporaryDirectory[str]) -> None:
+        """Fail actual auth directory cleanup, retaining the object for safe fixture teardown."""
+        if cleanup_failure == "auth-file" and Path(directory.name).name.startswith(
+            "copy-image-auth-"
+        ):
+            retained.append(directory)
+            raise PermissionError("private-cleanup-body")
+        cleanup_original(directory)
 
     def credentials(sandbox: Sandbox, slot: str) -> SlotCredentials:
         """Return leased material for the lifecycle test, without changing transport tests."""
@@ -302,12 +315,29 @@ def test_completed_copy_stays_successful_when_release_fails(
 
     def release(sandbox: Sandbox, slot: str, credentials: SlotCredentials) -> None:
         """Simulate a cleanup failure whose private message must not enter logs."""
-        raise ActivityError("activity.unexpected_error", "retryable", "private-release-body")
+        if cleanup_failure == "lease":
+            raise ActivityError("activity.unexpected_error", "retryable", "private-release-body")
 
     monkeypatch.setattr("copy_image.__main__.read_slot_credentials", credentials)
     monkeypatch.setattr("copy_image.__main__.run_skopeo_copy", copy)
     monkeypatch.setattr("copy_image.__main__.release_slot_credentials", release)
-    assert main([]) == 0
-    assert list((sandbox.base / "run").iterdir()) == []
-    assert "Credential lease cleanup failed" in caplog.text
-    assert "private-release-body" not in caplog.text and "private-pat" not in caplog.text
+    monkeypatch.setattr(tempfile.TemporaryDirectory, "cleanup", cleanup)
+    try:
+        assert main([]) == 0
+        if cleanup_failure == "auth-file":
+            assert retained and (Path(retained[0].name) / "auth.json").is_file()
+            assert "Private auth cleanup failed" in caplog.text
+        else:
+            assert list((sandbox.base / "run").iterdir()) == []
+            assert "Credential lease cleanup failed" in caplog.text
+        assert all(
+            secret not in caplog.text
+            for secret in (
+                "private-release-body",
+                "private-pat",
+                "private-cleanup-body",
+            )
+        )
+    finally:
+        for directory in retained:
+            cleanup_original(directory)
