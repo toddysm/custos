@@ -20,6 +20,31 @@
 {{- fail "receiverRuntime requires the deployed custos-pubsub Redis broker" -}}{{- end -}}
 {{- if empty $r.kubernetesApiCIDRs -}}{{- fail "receiverRuntime requires explicit Kubernetes API CIDRs" -}}{{- end -}}
 {{- if ne $r.databaseSecret .Values.postgres.secretName -}}{{- fail "receiverRuntime databaseSecret must match the migration database Secret" -}}{{- end -}}
+{{- range $hook := list "migrate" "bootstrap" -}}
+{{- $job := index $.Values $hook -}}
+{{- if and $job.enabled (or (not (kindIs "string" $job.image.tag)) (has $job.image.tag (list "" "dev" "latest"))) -}}
+{{- fail (printf "receiverRuntime requires an explicit tested %s.image.tag" $hook) -}}{{- end -}}
+{{- end -}}
+{{- $obsEnv := dict -}}
+{{- range (index .Values "observability-audit-service").env -}}
+{{- $_ := set $obsEnv .name . -}}
+{{- end -}}
+{{- range $kind := list "LOG" "METRICS" -}}
+{{- $providerKey := printf "CUSTOS_%s_QUERY_PROVIDER" $kind -}}
+{{- $provider := get $obsEnv $providerKey | default dict -}}
+{{- if hasKey $provider "valueFrom" -}}{{- fail "receiverRuntime query-provider modes must be literal values" -}}{{- end -}}
+{{- $default := ternary "loki" "prometheus" (eq $kind "LOG") -}}
+{{- $mode := default $default $provider.value -}}
+{{- if not (has $mode (list $default "noop")) -}}{{- fail (printf "receiverRuntime invalid %s" $providerKey) -}}{{- end -}}
+{{- $urlKey := ternary "CUSTOS_LOKI_URL" "CUSTOS_PROMETHEUS_URL" (eq $kind "LOG") -}}
+{{- if eq $mode "noop" -}}
+{{- $urlKey = ternary "CUSTOS_LOGS_EXTERNAL_URL" "CUSTOS_METRICS_EXTERNAL_URL" (eq $kind "LOG") -}}
+{{- end -}}
+{{- $endpoint := get $obsEnv $urlKey | default dict -}}
+{{- if and (empty $endpoint.value) (empty $endpoint.valueFrom) -}}
+{{- fail (printf "receiverRuntime requires observability-audit-service.env %s for %s" $urlKey $mode) -}}
+{{- end -}}
+{{- end -}}
 {{- if or (lt (int $r.drainSeconds) 330) (gt (int $r.drainSeconds) 3600) (le (int $r.terminationGraceSeconds) (add (int $r.drainSeconds) 65)) -}}
 {{- fail "receiverRuntime requires drainSeconds in330..3600 and termination grace > drainSeconds+65 (HTTP15, hook cleanup30, resource close15, Dapr5)" -}}{{- end -}}
 {{- range $field := list "sidecarImage" "ioBridgeImage" -}}

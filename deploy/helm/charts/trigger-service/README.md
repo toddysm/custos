@@ -84,8 +84,10 @@ It uses the registered app IDs, including Auth's `custos-auth`, and app port 808
 
 Before activation, provision:
 
-Use explicit tested controller image tags (prefer the released commit tag);
-`dev` and `latest` are rejected in this mode. Sidecar and helper images require
+Use explicit tested controller image tags (prefer the released commit tag).
+Set `migrate.image.tag` and, when bootstrap is enabled, `bootstrap.image.tag`
+to the corresponding tested release too: they do not inherit `global.imageTag`.
+Empty, `dev` and `latest` tags are rejected in this mode. Sidecar and helper images require
 immutable digests. Native activity sidecars require Kubernetes 1.29 or newer;
 the chart's legacy minimum remains unchanged when receiver mode is off.
 
@@ -124,6 +126,14 @@ the chart's legacy minimum remains unchanged when receiver mode is off.
    Co-located Prometheus gets DNS, Kubernetes discovery and metrics egress through
    the managed deny-all policy; external Prometheus retains its own egress policy
    and must discover the actual controller namespace.
+8. Configure Observability query providers in `observability-audit-service.env`.
+   The default Loki and Prometheus providers require `CUSTOS_LOKI_URL` and
+   `CUSTOS_PROMETHEUS_URL`; the supplied installer exposes `http://custos-loki:3100`
+   and `http://custos-prometheus-server` in its namespace. Include their reachable
+   destinations in the applicable network policies. An explicitly selected
+   `noop` provider instead requires `CUSTOS_LOGS_EXTERNAL_URL` or
+   `CUSTOS_METRICS_EXTERNAL_URL` for the external-view link; it does not serve
+   query data. Missing conditional endpoints fail rendering for every profile.
 
 Production mode creates namespace-scoped caller allowlists, protected broker
 topics, and reference-scoped execution Secret readers. Remote pods cannot reach
@@ -178,7 +188,8 @@ by more than 65 seconds (420 by default). This reserves 15 seconds for HTTP,
 30 for hook cancellation cleanup, 15 for resource closure, and five for Dapr.
 Managed Trigger/Connector/Workflow processes and the runtime entry point
 bound the initial HTTP shutdown wait to 15 seconds, so it
-does not consume the worker drain budget. Owned cancellation is joined before HTTP clients
+does not consume the worker drain budget. Every concurrently dispatched poll
+hook is cancelled and joined before its driver exits. Owned cancellation is joined before HTTP clients
 and storage pools close. A forced Kubernetes kill is not proof of sandbox
 termination; unknown-effect fences must remain intact.
 

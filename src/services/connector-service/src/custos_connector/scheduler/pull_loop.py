@@ -58,6 +58,7 @@ from custos_connector.cursor.service import (
     CursorHalted,
     CursorInstanceUnavailable,
 )
+from custos_connector.runtime import _finish_owned_task
 from custos_connector.settings import PULL_LOOP_HARD_FLOOR_SEC as _PULL_LOOP_HARD_FLOOR_SEC
 
 if TYPE_CHECKING:
@@ -443,8 +444,8 @@ class PullLoopScheduler:
         Eligible instances are dispatched as concurrent
         :class:`asyncio.Task`\\s bounded by
         ``max_concurrent_ticks``. The method awaits every dispatched
-        task before returning, so callers can drive the scheduler
-        synchronously from a test.
+        task before returning, including cancellation cleanup. A failed or
+        cancelled dispatch cancels and joins its siblings before propagating.
         """
         await self._refresh_pull_controls()
         started_at = await self._storage_now()
@@ -469,14 +470,28 @@ class PullLoopScheduler:
         for sched in eligible:
             sched.in_flight = True
 
-        outcomes = await asyncio.gather(
-            *(
+        tasks = [
+            asyncio.create_task(
                 self._dispatch(
                     sched, self._registration_generations[(sched.workspace_id, sched.instance_id)]
                 )
-                for sched in eligible
-            ),
-        )
+            )
+            for sched in eligible
+        ]
+        try:
+            outcomes = await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                if not task.done() and not task.cancelling():
+                    task.cancel()
+            await _finish_owned_task(
+                asyncio.gather(*tasks, return_exceptions=True),
+                "connector-poll-dispatches",
+            )
+            raise
+        finally:
+            for sched in eligible:
+                sched.in_flight = False
         return SchedulerPassResult(
             started_at=started_at,
             finished_at=await self._storage_now(),

@@ -12,6 +12,7 @@ from custos_spl.ids import ConnectorInstanceId, WorkspaceId
 
 from custos_connector import create_app
 from custos_connector.pull_runtime import PullRuntime
+from custos_connector.runtime import HookRunResult
 from custos_connector.settings import SettingsError
 from tests._pull import PullClock, memory_runtime, seed_instance, settings, start_demand
 
@@ -51,6 +52,75 @@ async def test_real_runtime_rediscovers_and_polls_persisted_demand() -> None:
     assert not runtime.healthy and len(runner.calls) == 1
     with pytest.raises(RuntimeError, match="restarted"):
         await runtime.start()
+
+
+async def test_shutdown_joins_every_concurrent_hook_before_closing_clients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fast cancelled hook must not detach a sibling still completing owned cleanup."""
+    providers, metadata, runner, _ = memory_runtime(PullClock())
+    assert providers.pull_demand_reconciler is not None
+    for workspace in ("source-a", "source-b"):
+        await seed_instance(providers, workspace=workspace)
+        start_demand(metadata, workspace=workspace)
+        await providers.pull_demand_reconciler.reconcile(workspace)
+    entered, fast_done, slow_cleaning, release_slow, slow_done = (asyncio.Event() for _ in range(5))
+    calls = 0
+    order: list[str] = []
+
+    async def hook(**kwargs: object) -> HookRunResult:
+        """Model concurrent hooks with different cancellation cleanup times."""
+        nonlocal calls
+        slot = calls
+        calls += 1
+        if calls == 2:
+            entered.set()
+        try:
+            await asyncio.Event().wait()
+            raise AssertionError("hook should be cancelled")
+        except asyncio.CancelledError:
+            if slot == 0:
+                fast_done.set()
+            else:
+                slow_cleaning.set()
+                await release_slow.wait()
+                order.append("slow-cleanup")
+                slow_done.set()
+            raise
+
+    async def close_http() -> None:
+        """Record whether borrowed transports outlive both dispatch children."""
+        order.append("http")
+
+    monkeypatch.setattr(runner, "run", hook)
+    http = AsyncMock()
+    http.aclose.side_effect = close_http
+    app = create_app(
+        settings=replace(settings(), pull_worker_enabled=True),
+        providers=replace(providers, dapr_http_client=http),
+    )
+    lifetime = app.router.lifespan_context(app)
+    await lifetime.__aenter__()
+    app.state.pull_runtime.drain_seconds = 0.01
+    shutdown: asyncio.Task[bool | None] | None = None
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        shutdown = asyncio.create_task(lifetime.__aexit__(None, None, None))
+        await asyncio.wait_for(fast_done.wait(), 1)
+        await asyncio.wait_for(slow_cleaning.wait(), 1)
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(shutdown), 0.05)
+        assert not order
+        release_slow.set()
+        await shutdown
+        assert order == ["slow-cleanup", "http"]
+    finally:
+        release_slow.set()
+        if shutdown is not None:
+            await asyncio.gather(shutdown, return_exceptions=True)
+            await asyncio.wait_for(slow_done.wait(), 1)
+        else:
+            await lifetime.__aexit__(None, None, None)
 
 
 @pytest.mark.parametrize("force_cancel", [False, True])

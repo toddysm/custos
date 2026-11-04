@@ -82,6 +82,19 @@ def enabled_values() -> dict[str, Any]:
                 "registryUrl": "https://registry.test",
             },
         },
+        "migrate": {"image": {"tag": "tested-receiver-release"}},
+        "bootstrap": {"image": {"tag": "tested-receiver-release"}},
+        "observability-audit-service": {
+            "env": [
+                {"name": "CUSTOS_LOG_QUERY_PROVIDER", "value": "loki"},
+                {"name": "CUSTOS_METRICS_QUERY_PROVIDER", "value": "prometheus"},
+                {"name": "CUSTOS_LOKI_URL", "value": "http://custos-loki:3100"},
+                {
+                    "name": "CUSTOS_PROMETHEUS_URL",
+                    "value": "http://custos-prometheus-server",
+                },
+            ],
+        },
     }
 
 
@@ -92,7 +105,7 @@ def render(
     kube_version: str | None = None,
     namespace: str = "controllers",
 ) -> subprocess.CompletedProcess[str]:
-    """Render the real chart with a namespace distinct from sandbox and hook execution."""
+    """Render the real chart in a chosen controller namespace, distinct by default."""
     command = [
         "helm",
         "template",
@@ -165,6 +178,10 @@ def test_enabled_profiles_wire_actual_receiver_prerequisites(profile: str) -> No
             "trigger-service",
             "connector-service",
             "activity-runtime-manager",
+            "observability-audit-service",
+            "catalog-service",
+            "auth-service",
+            "api-gateway",
         }:
             environment = dict(configmaps["custos-" + service])
             for entry in env:
@@ -179,6 +196,10 @@ def test_enabled_profiles_wire_actual_receiver_prerequisites(profile: str) -> No
                 "trigger-service": "custos_trigger/settings.py",
                 "connector-service": "custos_connector/settings.py",
                 "activity-runtime-manager": "custos_arm/config.py",
+                "observability-audit-service": "custos_obs/settings.py",
+                "catalog-service": "custos_catalog/settings.py",
+                "auth-service": "custos_auth/settings.py",
+                "api-gateway": "custos_gateway/settings.py",
             }[service]
             module = runpy.run_path(
                 str(ROOT / "src/services" / service / "src" / package)
@@ -190,8 +211,14 @@ def test_enabled_profiles_wire_actual_receiver_prerequisites(profile: str) -> No
             elif service == "activity-runtime-manager":
                 assert parsed.runtime_enabled and parsed.artifact_store == "csi"
                 assert parsed.sidecar_ca_file == "/custos/tls/ca.crt"
-            else:
+            elif service == "trigger-service":
                 assert module["read_receiver_worker_settings"](environment).enabled
+            elif service == "observability-audit-service":
+                assert parsed.log_query_provider == "loki" and parsed.loki_url
+                assert (
+                    parsed.metrics_query_provider == "prometheus"
+                    and parsed.prometheus_url
+                )
     trigger = deployments["custos-trigger-service"]["spec"]["template"]["spec"][
         "containers"
     ][0]
@@ -374,6 +401,63 @@ def test_shutdown_reserves_owned_cleanup_and_dapr_time(
         == f"{drain + 60}s"
     )
     assert pod["spec"]["terminationGracePeriodSeconds"] > drain + 15 + 30 + 15 + 5
+
+
+@pytest.mark.parametrize("hook", ["migrate", "bootstrap"])
+@pytest.mark.parametrize("tag", ["", "dev", "latest"])
+def test_enabled_hook_images_require_tested_tags(hook: str, tag: str) -> None:
+    """A tested controller tag cannot accidentally leave a cached development hook image."""
+    values = enabled_values()
+    values[hook]["image"]["tag"] = tag
+    result = render("connected-ha", values)
+    assert result.returncode != 0 and f"{hook}.image.tag" in result.stderr
+
+
+def test_disabled_bootstrap_does_not_require_a_hook_release_tag() -> None:
+    """Image validation follows actual hook enablement instead of gating unused settings."""
+    values = enabled_values()
+    values["bootstrap"] = {"enabled": False, "image": {"tag": "dev"}}
+    result = render("connected-ha", values)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("missing", ["CUSTOS_LOKI_URL", "CUSTOS_PROMETHEUS_URL"])
+def test_observability_requires_its_query_provider_endpoint(missing: str) -> None:
+    """Reject missing conditional settings at render time, not only after Pod startup."""
+    values = enabled_values()
+    values["observability-audit-service"]["env"] = [
+        entry
+        for entry in values["observability-audit-service"]["env"]
+        if entry["name"] != missing
+    ]
+    result = render("airgapped-ha", values)
+    assert result.returncode != 0 and missing in result.stderr
+
+
+def test_explicit_external_query_providers_remain_supported() -> None:
+    """Noop query providers require external-view links, never pretend a query sink exists."""
+    values = enabled_values()
+    entries = [
+        {"name": "CUSTOS_LOG_QUERY_PROVIDER", "value": "noop"},
+        {"name": "CUSTOS_METRICS_QUERY_PROVIDER", "value": "noop"},
+        {"name": "CUSTOS_LOGS_EXTERNAL_URL", "value": "https://logs.example.test"},
+        {
+            "name": "CUSTOS_METRICS_EXTERNAL_URL",
+            "value": "https://metrics.example.test",
+        },
+    ]
+    values["observability-audit-service"]["env"] = entries
+    result = render("airgapped-eval", values)
+    assert result.returncode == 0, result.stderr
+    module = runpy.run_path(
+        str(
+            ROOT / "src/services/observability-audit-service/src/custos_obs/settings.py"
+        )
+    )
+    environment = {entry["name"]: entry["value"] for entry in entries}
+    environment["CUSTOS_OBS_METADATA_STORE_DSN"] = "postgresql://localhost/unit"
+    parsed = module["load_settings"](environment)
+    assert parsed.logs_external_url and parsed.metrics_external_url
 
 
 @pytest.mark.parametrize(
