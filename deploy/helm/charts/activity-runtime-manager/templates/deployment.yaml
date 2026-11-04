@@ -55,20 +55,7 @@ spec:
           image: {{ include "svc.image" . | quote }}
           imagePullPolicy: {{ include "svc.imagePullPolicy" . }}
           {{- if $receiver.enabled }}
-          command: ["uvicorn"]
-          args:
-            - custos_arm:create_app
-            - --factory
-            - --timeout-graceful-shutdown
-            - "15"
-            - --host
-            - 0.0.0.0
-            - --port
-            - "8080"
-            - --ssl-certfile
-            - /custos/tls/tls.crt
-            - --ssl-keyfile
-            - /custos/tls/tls.key
+          command: ["python", "-m", "custos_arm"]
           volumeMounts:
             - name: runtime-tls
               mountPath: /custos/tls
@@ -79,9 +66,14 @@ spec:
               mountPath: /custos/artifacts
           {{- end }}
           ports:
-            - name: http
+            - name: {{ ternary "https" "http" ($receiver.enabled | default false) }}
               containerPort: {{ .Values.service.port }}
               protocol: TCP
+            {{- if $receiver.enabled }}
+            - name: metrics
+              containerPort: 8090
+              protocol: TCP
+            {{- end }}
           envFrom:
             - configMapRef:
                 name: {{ include "svc.fullname" . }}
@@ -100,7 +92,7 @@ spec:
           startupProbe:
             httpGet:
               path: /healthz
-              port: http
+              port: https
               scheme: HTTPS
             periodSeconds: 3
             failureThreshold: 60
@@ -109,14 +101,14 @@ spec:
           livenessProbe:
             httpGet:
               path: /healthz
-              port: http
+              port: {{ ternary "https" "http" ($receiver.enabled | default false) }}
               {{- if $receiver.enabled }}
               scheme: HTTPS
               {{- end }}
           readinessProbe:
             httpGet:
               path: /readyz
-              port: http
+              port: {{ ternary "https" "http" ($receiver.enabled | default false) }}
               {{- if $receiver.enabled }}
               scheme: HTTPS
               {{- end }}

@@ -1,0 +1,71 @@
+{{/*
+Hook allowances must precede the injector gate (-10) and migration (0), including
+an upgrade from an existing namespace deny-all. Keep them between upgrades for
+post-install bootstrap; hook-succeeded would remove required database ingress.
+*/}}
+{{- $r := .Values.global.receiverRuntime -}}
+{{- if $r.enabled -}}
+{{- $network := .Values.global.networkPolicies -}}
+{{- range $kind := list "database-jobs" "injector-gate" "database-ingress" }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $.Release.Name }}-receivers-{{ $kind }}
+  namespace: {{ $.Release.Namespace }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-15"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  {{- if eq $kind "database-ingress" }}
+  podSelector:
+    matchLabels:
+      {{- toYaml $network.postgresPodSelector | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ $.Release.Name }}
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: In
+                values: [migrate, bootstrap]
+      ports: [{protocol: TCP, port: {{ $network.postgresPort }}}]
+  {{- else }}
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ $.Release.Name }}
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: {{ ternary "[migrate, bootstrap]" "[dapr-injector-wait]" (eq $kind "database-jobs") }}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $network.dnsNamespace }}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+    {{- if eq $kind "database-jobs" }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- toYaml $network.postgresPodSelector | nindent 14 }}
+      ports: [{protocol: TCP, port: {{ $network.postgresPort }}}]
+    {{- else }}
+    - to:
+        {{- range $cidr := $r.kubernetesApiCIDRs }}
+        - ipBlock:
+            cidr: {{ $cidr | quote }}
+        {{- end }}
+      ports:
+        {{- range $port := $r.kubernetesApiPorts }}
+        - protocol: TCP
+          port: {{ $port }}
+        {{- end }}
+    {{- end }}
+  {{- end }}
+{{- end }}
+{{- end }}

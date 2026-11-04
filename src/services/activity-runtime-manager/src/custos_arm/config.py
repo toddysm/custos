@@ -232,13 +232,16 @@ class Settings:
     sidecar_ca_file: str = ""
 
     def read_sidecar_ca_bundle(self) -> bytes | None:
-        """Validate bounded operator CA material at startup and again when staging a new attempt."""
+        """Accept only bounded public PEM certificates, rechecking before every projection."""
         if not self.sidecar_ca_file:
             return None
         with Path(self.sidecar_ca_file).open("rb") as source:
             bundle = source.read(8193)
         if not bundle or len(bundle) > 8192:
             raise SettingsError("Sidecar CA bundle must contain at most 8192 bytes")
+        certificate = rb"-----BEGIN CERTIFICATE-----[A-Za-z0-9+/=\r\n]+-----END CERTIFICATE-----"
+        if re.fullmatch(rb"(?:\s*" + certificate + rb")+\s*", bundle) is None:
+            raise SettingsError("Sidecar CA bundle must contain only public PEM certificates")
         try:
             ssl.create_default_context(cadata=bundle.decode("ascii"))
         except (UnicodeError, ssl.SSLError):

@@ -7,8 +7,14 @@ metadata:
 spec:
   type: {{ .Values.service.type }}
   ports:
-    - name: http
+    {{- $receiver := ((.Values.global | default dict).receiverRuntime) | default dict }}
+    - name: {{ ternary "https" "http" ($receiver.enabled | default false) }}
       port: {{ .Values.service.port }}
-      targetPort: http
+      targetPort: {{ ternary "https" "http" ($receiver.enabled | default false) }}
+    {{- if $receiver.enabled }}
+    - name: metrics
+      port: 8090
+      targetPort: metrics
+    {{- end }}
   selector:
     {{- include "svc.selectorLabels" . | nindent 4 }}

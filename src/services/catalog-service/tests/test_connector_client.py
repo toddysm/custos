@@ -86,6 +86,38 @@ async def test_exists_returns_true_on_200() -> None:
         await factory.aclose()
 
 
+@pytest.mark.parametrize("local_dapr", [True, False])
+async def test_real_factory_scopes_api_token_and_preserves_invocation_path(
+    monkeypatch: pytest.MonkeyPatch,
+    local_dapr: bool,
+) -> None:
+    """Catalog publishing reaches the protected local invocation path, not a direct app port."""
+    monkeypatch.setenv("DAPR_API_TOKEN", "synthetic-sidecar-token")
+    endpoint = (
+        "http://127.0.0.1:3500/v1.0/invoke/connector-service/method"
+        if local_dapr
+        else "http://connector-service.test"
+    )
+    received: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Capture the actual factory request after shared credential scoping."""
+        received.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    factory = _factory(handler, endpoint=endpoint)
+    try:
+        client = factory.for_request(callctx_header_value="synthetic-callctx")
+        assert await client.exists_connector_instance("ws", "instance")
+        assert str(received[0].url) == endpoint + "/internal/v1/connectors:validate"
+        assert received[0].headers[CALLCTX_HEADER] == "synthetic-callctx"
+        assert received[0].headers.get("dapr-api-token") == (
+            "synthetic-sidecar-token" if local_dapr else None
+        )
+    finally:
+        await factory.aclose()
+
+
 async def test_exists_returns_true_on_400_and_logs_info(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

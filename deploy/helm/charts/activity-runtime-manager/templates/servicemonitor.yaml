@@ -10,6 +10,6 @@ spec:
     matchLabels:
       {{- include "svc.selectorLabels" . | nindent 6 }}
   endpoints:
-    - port: http
+    - port: {{ ternary "metrics" "http" ((((.Values.global | default dict).receiverRuntime) | default dict).enabled | default false) }}
       path: /metrics
 {{- end }}

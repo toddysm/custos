@@ -71,10 +71,13 @@ env entries; unrelated operator entries survive. Secret values never enter Helm.
   "ARM_CONNECTOR_ENDPOINT" (printf "%s/connector-service/method" $invoke)
   "ARM_CREDENTIAL_PROXY_URL" (printf "https://%s.%s.svc:8080" (include "svc.fullname" .) .Release.Namespace)
   "ARM_SIDECAR_CA_FILE" "/custos/tls/ca.crt" "CUSTOS_CSI_PVC_MOUNT" "/custos/artifacts"
+  "ARM_TLS_CERT_FILE" "/custos/tls/tls.crt" "ARM_TLS_KEY_FILE" "/custos/tls/tls.key"
+  "ARM_METRICS_PORT" "8090"
   "ARM_SANDBOX_NAMESPACE" $r.sandboxNamespace "ARM_STAGING_ROOT" "/var/run/custos/attempts"
   "ARM_SIDECAR_IMAGE" $r.sidecarImage "ARM_IO_BRIDGE_IMAGE" $r.ioBridgeImage -}}
 {{- else if eq $service "catalog-service" -}}
-{{- $config = dict "CAT_AUTHZ_ENDPOINT" $auth -}}
+{{- $config = dict "CAT_AUTHZ_ENDPOINT" $auth
+  "CAT_CONNECTOR_ENDPOINT" (printf "%s/connector-service/method" $invoke) -}}
 {{- else if eq $service "observability-audit-service" -}}
 {{- $config = dict "CUSTOS_OBS_AUTHZ_JWKS_URL" (printf "%s/.well-known/jwks.json" $auth) -}}
 {{- end -}}
@@ -96,7 +99,11 @@ env entries; unrelated operator entries survive. Secret values never enter Helm.
 dapr.io/app-token-secret: {{ index $r.appTokenSecrets .Chart.Name | quote }}
 dapr.io/api-token-secret: {{ $r.apiTokenSecret | quote }}
 dapr.io/config: {{ printf "%s-receivers-%s" .Release.Name .Chart.Name | quote }}
-dapr.io/graceful-shutdown-seconds: {{ $r.terminationGraceSeconds | quote }}
+dapr.io/graceful-shutdown-seconds: "5"
+{{- if has .Chart.Name (list "trigger-service" "connector-service" "workflow-service" "activity-runtime-manager") }}
+dapr.io/block-shutdown-duration: {{ printf "%ds" (add (int $r.drainSeconds) 60) | quote }}
+dapr.io/enable-app-health-check: "false"
+{{- end }}
 checksum/receiver-config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum | quote }}
 {{- end }}
 {{- end -}}

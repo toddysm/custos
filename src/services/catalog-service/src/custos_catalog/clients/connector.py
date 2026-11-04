@@ -38,6 +38,7 @@ from collections.abc import Mapping
 from typing import Any, Final, Protocol, runtime_checkable
 
 import httpx
+from custos_callctx.dapr_http import dapr_http_client
 
 _LOGGER = logging.getLogger("custos_catalog.clients.connector")
 
@@ -251,6 +252,7 @@ class ConnectorClientFactory:
         transport: httpx.AsyncBaseTransport | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
+        """Own a proxy-free pool; attach the API token only to local Dapr requests."""
         if not endpoint:
             raise ValueError(
                 "ConnectorClientFactory requires a non-empty endpoint "
@@ -263,7 +265,7 @@ class ConnectorClientFactory:
         # Tests inject an ``httpx.ASGITransport`` to mount a Connector
         # Service test double in the same event loop; production leaves
         # ``transport=None`` so httpx opens real sockets.
-        self._http = httpx.AsyncClient(
+        self._http = dapr_http_client(
             base_url=self._endpoint,
             timeout=self._timeout,
             transport=transport,

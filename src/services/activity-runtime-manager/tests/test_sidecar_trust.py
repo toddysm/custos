@@ -1,5 +1,6 @@
 """Operator-provided public CA trust stays bounded and private to the credential Sidecar."""
 
+import ssl
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -10,6 +11,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
+from custos_arm.config import SettingsError
 from custos_arm.result import ResultClass
 from custos_arm.runtime.oci.job import build_activity_job
 from tests.test_durable_execution import SharedAttempts, repository
@@ -35,22 +37,40 @@ def public_ca() -> bytes:
     return certificate.public_bytes(serialization.Encoding.PEM)
 
 
-@pytest.mark.parametrize("kind", ["valid", "invalid", "oversized"])
+@pytest.mark.parametrize("kind", ["valid", "invalid", "oversized", "private-key", "rotated-key"])
 async def test_ca_projection_is_private_and_fail_closed(tmp_path: Path, kind: str) -> None:
     """Reject invalid trust before starting a sandbox; project valid trust only to the Sidecar."""
     ca = public_ca() if kind == "valid" else b"invalid" if kind == "invalid" else b"x" * 8193
     path = tmp_path / "ca.pem"
     path.write_bytes(ca)
+    settings = replace(_settings(), sidecar_ca_file=str(path))
+    if kind in {"private-key", "rotated-key"}:
+        path.write_bytes(public_ca())
+        if kind == "rotated-key":
+            assert settings.read_sidecar_ca_bundle() == path.read_bytes()
+        key = ec.generate_private_key(ec.SECP256R1())
+        path.write_bytes(
+            path.read_bytes()
+            + key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            )
+        )
+        ssl.create_default_context(cadata=path.read_text())
+        with pytest.raises(SettingsError, match="only public PEM"):
+            settings.read_sidecar_ca_bundle()
     driver = _FakeDriver(tmp_path / "sandbox", outputs=_success_outputs())
     scheduler = _scheduler(
         driver,
         repo=repository(SharedAttempts()),
-        settings=replace(_settings(), sidecar_ca_file=str(path)),
+        settings=settings,
     )
     result = await scheduler.schedule(_request())
     assert driver.handle is not None
     if kind != "valid":
         assert result.class_ is not ResultClass.SUCCESS and driver.started == 0
+        assert not (driver.handle.sidecar_root / "ca.pem").exists()
         return
     assert result.class_ is ResultClass.SUCCESS
     assert (driver.handle.sidecar_root / "ca.pem").read_bytes() == ca

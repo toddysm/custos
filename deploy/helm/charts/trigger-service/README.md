@@ -109,13 +109,18 @@ the chart's legacy minimum remains unchanged when receiver mode is off.
 6. A runtime TLS Secret with `tls.crt`, `tls.key`, and `ca.crt`. Its certificate
    must cover `<release>-activity-runtime-manager.<namespace>.svc` (using the
    rendered, possibly truncated Service name). The public CA bundle is limited
-   to 8 KiB and validated before runtime readiness. Only the public CA, not the
+   to 8 KiB and validated before runtime readiness and each new attempt. Only
+   PEM certificate blocks and whitespace are accepted; combined key/certificate
+   files are rejected. Only the public CA, not the
    TLS private key, is delivered with the Sidecar's private bootstrap files.
 7. An explicit telemetry collector origin (`telemetryEndpoint`) accepting
    OpenTelemetry Protocol (OTLP) over HTTP. Configure `controllerEgress` for the
    collector, registry and other required external services, and explicit
    Kubernetes API endpoint CIDRs/ports. Hook/activity upstream egress remains
    separately allow-listed.
+   Set `global.networkPolicies.monitoringNamespace` to the actual Prometheus
+   namespace; the prerequisite installer uses `custos-system`. An out-of-band
+   Prometheus in another namespace must discover the controller namespace.
 
 Production mode creates namespace-scoped caller allowlists, protected broker
 topics, and reference-scoped execution Secret readers. Remote pods cannot reach
@@ -124,6 +129,16 @@ authenticated 50002 channel, including Auth public-key discovery. Protected
 operations also require the distinct destination app token. Application authorization is not replaced by network
 policy. Network policies restrict peers/ports, not HTTP paths. Validate policies
 with the target cluster's network provider before use.
+PostgreSQL/Redis ingress and peer traffic have explicit backend policies.
+`global.networkPolicies.postgresOperatorNamespace` selects the CloudNativePG
+operator namespace (default `cnpg-system`). Migration/bootstrap database and DNS
+allowances, plus the injector gate's API egress, are pre-install/pre-upgrade
+hooks at weight -15: they exist before the injector gate and migrations even
+when upgrading a namespace already denied by policy. These three hook policies
+persist between upgrades; remove them explicitly only when decommissioning the
+release after its Jobs finish. Out-of-band infrastructure (including monitoring,
+identity providers and backup destinations) must retain its own appropriate
+network allowances; additive policies must not re-open private controller ports.
 Authenticated local HTTP clients do not inherit ambient HTTP proxy routing.
 External credential providers needing a proxy must use a separately configured
 transport; never proxy the local Dapr API credential. Secret-reference uniqueness
@@ -155,12 +170,22 @@ scoped internal routes remain available. Audit and telemetry remain active for
 accepted deliveries even with background workers paused. The pause rolls only
 Trigger/Connector worker Pods, not Auth, Workflow or the activity runtime.
 
-The normal drain budget is 330 seconds; termination grace must exceed it by more
-than 15 seconds (360 by default). Managed Trigger/Connector processes and the
-runtime TLS command bound the initial HTTP shutdown wait to 15 seconds, so it
+The normal worker drain budget is 330 seconds; termination grace must exceed it
+by more than 65 seconds (420 by default). This reserves 15 seconds for HTTP,
+30 for hook cancellation cleanup, 15 for resource closure, and five for Dapr.
+Managed Trigger/Connector/Workflow processes and the runtime entry point
+bound the initial HTTP shutdown wait to 15 seconds, so it
 does not consume the worker drain budget. Owned cancellation is joined before HTTP clients
 and storage pools close. A forced Kubernetes kill is not proof of sandbox
 termination; unknown-effect fences must remain intact.
+
+The four execution/receiver sidecars use Dapr's `block-shutdown-duration` for
+the application HTTP wait, worker drain, hook cleanup and resource-close reserve
+(390 seconds by default), followed by a five-second Dapr
+drain. This keeps local Dapr APIs available while the application finishes its
+owned work. Dapr application-health early exit is disabled for this window
+because uvicorn closes its listener before lifespan cleanup. Pods may therefore
+remain Terminating for the block window even when work completes sooner.
 
 Do not roll back to binaries predating protocol 3 or remove metadata/lease rows,
 signing references, execution accounts or accepted-request identities to force a

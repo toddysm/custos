@@ -43,7 +43,7 @@ global:
     artifactClaim: ""
     telemetryEndpoint: ""
     drainSeconds: 330
-    terminationGraceSeconds: 360
+    terminationGraceSeconds: 420
     kubernetesApiCIDRs: []
     kubernetesApiPorts: [443, 6443]
     controllerEgress: []
@@ -86,6 +86,7 @@ global:
     daprPorts: [3500, 50001, 50002]
     # CNPG Postgres cluster pod selector + port (egress for DB-backed services).
     postgresPort: 5432
+    postgresOperatorNamespace: cnpg-system
     postgresPodSelector:
       cnpg.io/cluster: custos
 
@@ -394,13 +395,11 @@ prometheus:
     enabled: false
   kube-state-metrics:
     enabled: false
-  # Scrape the Custos services' `/metrics` endpoints. The vendored
-  # prometheus-community chart has no Prometheus Operator, so ServiceMonitors do
-  # not apply; this static job uses Kubernetes pod discovery instead. Every
-  # Custos service container exposes a port named `http` (the app port that also
-  # serves `/metrics`), whereas the vendored sinks and the Dapr sidecar use
-  # differently-named ports — so keeping only the `http` port targets exactly the
-  # Custos workloads. Rendered through the chart's `tpl`, hence `.Release.*`.
+  # Reference static scrape job for the out-of-band Prometheus installation.
+  # Legacy HTTP metrics and the managed runtime's dedicated metrics-only port
+  # are selected; its private `https` app port is never scraped as plaintext.
+  # Install-prereqs projects this job too. For a separate monitoring namespace,
+  # configure discovery with the actual controller namespace instead.
   extraScrapeConfigs: |
     - job_name: custos-services
       metrics_path: /metrics
@@ -411,7 +410,7 @@ prometheus:
               - {{ .Release.Namespace }}
       relabel_configs:
         - source_labels: [__meta_kubernetes_pod_container_port_name]
-          regex: http
+          regex: http|metrics
           action: keep
         - source_labels: [__meta_kubernetes_namespace]
           target_label: namespace

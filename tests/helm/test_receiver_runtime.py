@@ -2,6 +2,7 @@
 
 import copy
 import json
+import re
 import runpy
 import subprocess
 from pathlib import Path
@@ -147,7 +148,18 @@ def test_enabled_profiles_wire_actual_receiver_prerequisites(profile: str) -> No
             pod["metadata"]["annotations"]["dapr.io/app-token-secret"]
             == service + "-app-token"
         )
-        assert pod["spec"]["terminationGracePeriodSeconds"] > 345
+        assert pod["spec"]["terminationGracePeriodSeconds"] == 420
+        annotations = pod["metadata"]["annotations"]
+        assert annotations["dapr.io/graceful-shutdown-seconds"] == "5"
+        if service in {
+            "trigger-service",
+            "connector-service",
+            "workflow-service",
+            "activity-runtime-manager",
+        }:
+            assert annotations["dapr.io/block-shutdown-duration"] == "390s"
+            assert annotations["dapr.io/enable-app-health-check"] == "false"
+            assert pod["spec"]["terminationGracePeriodSeconds"] > 390 + 5
         if service in {
             "trigger-service",
             "connector-service",
@@ -189,9 +201,11 @@ def test_enabled_profiles_wire_actual_receiver_prerequisites(profile: str) -> No
     assert json.loads(env["CUSTOS_EXECUTION_BINDINGS"])["defaults"] == {"ws": "v1"}
     runtime = deployments["custos-activity-runtime-manager"]["spec"]["template"]
     container = runtime["spec"]["containers"][0]
-    assert (
-        "--ssl-certfile" in container["args"] and "--ssl-keyfile" in container["args"]
-    )
+    assert container["command"] == ["python", "-m", "custos_arm"]
+    runtime_env = {entry["name"]: entry.get("value") for entry in container["env"]}
+    assert runtime_env["ARM_TLS_CERT_FILE"] == "/custos/tls/tls.crt"
+    assert runtime_env["ARM_TLS_KEY_FILE"] == "/custos/tls/tls.key"
+    assert runtime_env["ARM_METRICS_PORT"] == "8090"
     assert container["readinessProbe"]["httpGet"]["scheme"] == "HTTPS"
     assert runtime["metadata"]["annotations"]["dapr.io/app-protocol"] == "https"
     assert any(
@@ -207,6 +221,24 @@ def test_enabled_profiles_wire_actual_receiver_prerequisites(profile: str) -> No
         policy["namespace"] == "controllers"
         for value in configs
         for policy in value["spec"]["accessControl"]["policies"]
+    )
+    connector_config = next(
+        value
+        for value in configs
+        if value["metadata"]["name"] == "custos-receivers-connector-service"
+    )
+    assert "catalog-service" in {
+        policy["appId"]
+        for policy in connector_config["spec"]["accessControl"]["policies"]
+    }
+    catalog_env = {
+        entry["name"]: entry.get("value")
+        for entry in deployments["custos-catalog-service"]["spec"]["template"]["spec"][
+            "containers"
+        ][0]["env"]
+    }
+    assert catalog_env["CAT_CONNECTOR_ENDPOINT"] == (
+        "http://127.0.0.1:3500/v1.0/invoke/connector-service/method"
     )
     subscriptions = {
         value["spec"]["topic"]: value
@@ -240,13 +272,107 @@ def test_enabled_profiles_wire_actual_receiver_prerequisites(profile: str) -> No
         and value["metadata"].get("namespace") == "controllers"
         and value["metadata"]["name"].startswith("custos-receivers-")
     ]
-    assert len(policies) == 8
+    assert len(policies) == 13
     assert all(
         port.get("port") not in {3500, 50001}
         for policy in policies
-        for rule in policy["spec"]["ingress"]
+        for rule in policy["spec"].get("ingress", [])
         for port in rule.get("ports", [])
     )
+
+
+@pytest.mark.parametrize("profile", PROFILES)
+def test_backend_and_preupgrade_job_policy_paths(profile: str) -> None:
+    """Actual Jobs retain database/API paths before an upgrade reaches regular resources."""
+    result = render(profile, enabled_values())
+    assert result.returncode == 0, result.stderr
+    documents = [value for value in yaml.safe_load_all(result.stdout) if value]
+    policies = {
+        value["metadata"]["name"]: value
+        for value in documents
+        if value["kind"] == "NetworkPolicy"
+    }
+    jobs = {
+        value["metadata"]["name"]: value
+        for value in documents
+        if value["kind"] == "Job"
+    }
+    for suffix in ("database-jobs", "injector-gate", "database-ingress"):
+        annotations = policies[f"custos-receivers-{suffix}"]["metadata"]["annotations"]
+        assert annotations["helm.sh/hook"] == "pre-install,pre-upgrade"
+        assert int(annotations["helm.sh/hook-weight"]) < min(
+            int(jobs[name]["metadata"]["annotations"]["helm.sh/hook-weight"])
+            for name in ("custos-migrate", "custos-dapr-injector-wait")
+        )
+        assert annotations["helm.sh/hook-delete-policy"] == "before-hook-creation"
+    database_jobs = policies["custos-receivers-database-jobs"]["spec"]
+    selected = database_jobs["podSelector"]["matchExpressions"][0]["values"]
+    for name in ("custos-migrate", "custos-bootstrap"):
+        labels = jobs[name]["spec"]["template"]["metadata"]["labels"]
+        assert labels["app.kubernetes.io/component"] in selected
+        assert labels["app.kubernetes.io/instance"] == "custos"
+    pg_selector = {"cnpg.io/cluster": "custos"}
+    assert database_jobs["egress"][1]["to"] == [
+        {"podSelector": {"matchLabels": pg_selector}}
+    ]
+    assert database_jobs["egress"][1]["ports"] == [{"protocol": "TCP", "port": 5432}]
+    ingress = policies["custos-receivers-database-ingress"]["spec"]
+    assert ingress["podSelector"]["matchLabels"] == pg_selector
+    assert (
+        ingress["ingress"][0]["from"][0]["podSelector"] == database_jobs["podSelector"]
+    )
+    gate = policies["custos-receivers-injector-gate"]["spec"]
+    assert gate["podSelector"]["matchExpressions"][0]["values"] == [
+        "dapr-injector-wait"
+    ]
+    assert gate["egress"][1]["to"] == [{"ipBlock": {"cidr": "10.96.0.1/32"}}]
+    for suffix, port in (("postgres", 5432), ("redis", 6379)):
+        backend = policies[f"custos-receivers-{suffix}"]["spec"]
+        assert backend["ingress"][0]["from"][0]["podSelector"]["matchExpressions"][0][
+            "values"
+        ] == list(SERVICES)
+        assert backend["ingress"][0]["ports"] == [{"protocol": "TCP", "port": port}]
+
+
+@pytest.mark.parametrize(
+    ("drain", "grace", "accepted"),
+    [
+        (330, 360, False),
+        (330, 395, False),
+        (330, 396, True),
+        (700, 765, False),
+        (700, 766, True),
+    ],
+)
+def test_shutdown_reserves_owned_cleanup_and_dapr_time(
+    drain: int,
+    grace: int,
+    accepted: bool,
+) -> None:
+    """Reject the exact insufficient boundary, not just one previously unsafe default."""
+    values = enabled_values()
+    values["global"]["receiverRuntime"].update(
+        drainSeconds=drain,
+        terminationGraceSeconds=grace,
+    )
+    result = render("connected-ha", values)
+    assert (result.returncode == 0) is accepted, result.stderr
+    if not accepted:
+        assert "drainSeconds+65" in result.stderr
+        return
+    documents = [value for value in yaml.safe_load_all(result.stdout) if value]
+    connector = next(
+        value
+        for value in documents
+        if value["kind"] == "Deployment"
+        and value["metadata"]["name"] == "custos-connector-service"
+    )
+    pod = connector["spec"]["template"]
+    assert (
+        pod["metadata"]["annotations"]["dapr.io/block-shutdown-duration"]
+        == f"{drain + 60}s"
+    )
+    assert pod["spec"]["terminationGracePeriodSeconds"] > drain + 15 + 30 + 15 + 5
 
 
 @pytest.mark.parametrize(
@@ -356,3 +482,47 @@ def test_admission_pause_does_not_restart_the_execution_control_plane() -> None:
         name for name in snapshots[0] if snapshots[0][name] != snapshots[1][name]
     }
     assert changed == {"custos-trigger-service", "custos-connector-service"}
+
+
+def test_static_and_operator_scrapes_select_only_the_metrics_listener() -> None:
+    """Both scrape surfaces target plaintext operational metrics, never the private TLS app port."""
+    values = enabled_values()
+    values["activity-runtime-manager"] = {"serviceMonitor": {"enabled": True}}
+    result = render("connected-ha", values)
+    assert result.returncode == 0, result.stderr
+    documents = [value for value in yaml.safe_load_all(result.stdout) if value]
+    monitor = next(
+        value
+        for value in documents
+        if value["kind"] == "ServiceMonitor"
+        and value["metadata"]["name"] == "custos-activity-runtime-manager"
+    )
+    endpoint = monitor["spec"]["endpoints"][0]
+    assert endpoint["port"] == "metrics" and endpoint.get("scheme", "http") == "http"
+    service = next(
+        value
+        for value in documents
+        if value["kind"] == "Service"
+        and value["metadata"]["name"] == "custos-activity-runtime-manager"
+    )
+    assert {(port["name"], port["port"]) for port in service["spec"]["ports"]} == {
+        ("https", 8080),
+        ("metrics", 8090),
+    }
+    chart = yaml.safe_load((CHART / "values.yaml").read_text())
+    installer = (ROOT / "scripts/install-prereqs.sh").read_text()
+    source = installer.split("<<'PROMETHEUS_SCRAPE_VALUES'\n", 1)[1].split(
+        "\nPROMETHEUS_SCRAPE_VALUES",
+        1,
+    )[0]
+    snippets = [
+        chart["prometheus"]["extraScrapeConfigs"],
+        yaml.safe_load(source)["extraScrapeConfigs"],
+    ]
+    for snippet in snippets:
+        jobs = yaml.safe_load(
+            snippet.replace("{{ .Release.Namespace }}", "controllers")
+        )
+        pattern = jobs[0]["relabel_configs"][0]["regex"]
+        assert re.fullmatch(pattern, "metrics") and re.fullmatch(pattern, "http")
+        assert not re.fullmatch(pattern, "https")

@@ -20,8 +20,8 @@
 {{- fail "receiverRuntime requires the deployed custos-pubsub Redis broker" -}}{{- end -}}
 {{- if empty $r.kubernetesApiCIDRs -}}{{- fail "receiverRuntime requires explicit Kubernetes API CIDRs" -}}{{- end -}}
 {{- if ne $r.databaseSecret .Values.postgres.secretName -}}{{- fail "receiverRuntime databaseSecret must match the migration database Secret" -}}{{- end -}}
-{{- if or (lt (int $r.drainSeconds) 330) (gt (int $r.drainSeconds) 3600) (le (int $r.terminationGraceSeconds) (add (int $r.drainSeconds) 15)) -}}
-{{- fail "receiverRuntime requires drainSeconds in330..3600 and termination grace > drainSeconds+15" -}}{{- end -}}
+{{- if or (lt (int $r.drainSeconds) 330) (gt (int $r.drainSeconds) 3600) (le (int $r.terminationGraceSeconds) (add (int $r.drainSeconds) 65)) -}}
+{{- fail "receiverRuntime requires drainSeconds in330..3600 and termination grace > drainSeconds+65 (HTTP15, hook cleanup30, resource close15, Dapr5)" -}}{{- end -}}
 {{- range $field := list "sidecarImage" "ioBridgeImage" -}}
 {{- if not (regexMatch "^[^@\\s]+@sha256:[a-f0-9]{64}$" (index $r $field)) -}}
 {{- fail (printf "receiverRuntime.%s must be digest-pinned" $field) -}}{{- end -}}
@@ -66,7 +66,7 @@
   "auth-service" (list "api-gateway" "workflow-service" "trigger-service" "activity-runtime-manager" "connector-service" "catalog-service" "observability-audit-service")
   "workflow-service" (list "api-gateway" "trigger-service" "workflow-service")
   "trigger-service" (list "api-gateway" "workflow-service")
-  "connector-service" (list "api-gateway" "workflow-service" "trigger-service" "activity-runtime-manager")
+  "connector-service" (list "api-gateway" "workflow-service" "trigger-service" "activity-runtime-manager" "catalog-service")
   "activity-runtime-manager" (list "workflow-service")
   "catalog-service" (list "api-gateway" "workflow-service" "connector-service" "activity-runtime-manager")
   "observability-audit-service" $services -}}

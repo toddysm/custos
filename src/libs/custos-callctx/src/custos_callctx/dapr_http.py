@@ -52,11 +52,14 @@ def dapr_http_client(
     *,
     timeout: float | httpx.Timeout = 5.0,
     env: Mapping[str, str] | None = None,
+    base_url: str = "",
+    transport: httpx.AsyncBaseTransport | None = None,
 ) -> httpx.AsyncClient:
     """Create an owned client without implicit proxies, including token-less secret reads.
 
     Dapr exchanges carry private response/body data even without an API token.
     Upstream providers requiring proxies must use a separate explicit transport.
+    Explicit base URLs and test transports retain the same token and CA policy.
     """
     source = os.environ if env is None else env
     trust: ssl.SSLContext | bool = True
@@ -65,5 +68,11 @@ def dapr_http_client(
             cafile=source.get("SSL_CERT_FILE"),
             capath=source.get("SSL_CERT_DIR"),
         )
-    client = httpx.AsyncClient(timeout=timeout, trust_env=False, verify=trust)
+    client = httpx.AsyncClient(
+        timeout=timeout,
+        trust_env=False,
+        verify=trust,
+        base_url=base_url,
+        transport=transport,
+    )
     return configure_dapr_http(client, source)

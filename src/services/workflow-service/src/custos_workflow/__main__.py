@@ -17,7 +17,8 @@ def main() -> None:
     Honours ``HOST`` / ``PORT`` env vars (defaults ``0.0.0.0`` / ``8080``)
     so the deployment manifests can override without code changes. The
     FastAPI application is constructed by
-    :func:`custos_workflow.create_app`.
+    :func:`custos_workflow.create_app`. ``CUSTOS_HTTP_DRAIN_SECONDS`` optionally
+    bounds the HTTP wait before owned workflow shutdown; unset keeps the legacy default.
     """
     # Imported lazily so ``python -m custos_workflow --help``-style probes
     # do not require uvicorn to be installed for non-runtime tooling.
@@ -30,6 +31,11 @@ def main() -> None:
         host=host,
         port=port,
         factory=True,
+        timeout_graceful_shutdown=(
+            int(os.environ["CUSTOS_HTTP_DRAIN_SECONDS"])
+            if "CUSTOS_HTTP_DRAIN_SECONDS" in os.environ
+            else None
+        ),
     )
 
 
