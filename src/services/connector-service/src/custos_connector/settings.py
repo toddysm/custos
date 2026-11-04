@@ -192,6 +192,8 @@ class Settings:
             raise SettingsError("CONN_PULL_WORKER_ENABLED must be a boolean")
         if self.pull_worker_enabled and not self.durable_pull_enabled:
             raise SettingsError("pull worker requires durable pull mode")
+        if self.pull_worker_enabled and self.is_production and not self.dapr_pubsub_enabled:
+            raise SettingsError("production pull workers require a real Dapr publisher")
         if (
             type(self.receiver_drain_seconds) is not int
             or not 1 <= self.receiver_drain_seconds <= 3600

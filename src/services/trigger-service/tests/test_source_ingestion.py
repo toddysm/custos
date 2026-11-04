@@ -386,9 +386,20 @@ def test_source_activation_requires_security_and_durable_dependencies() -> None:
 
 def test_production_source_activation_rejects_volatile_storage(
     workflow_auth: tuple[WorkflowCallerVerifier, dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Protocol parity does not make development memory restart-durable in production."""
-    store = InMemoryTriggerMetadataStore(now=lambda: NOW)
+    from tests.test_execution_startup import configure
+
+    configure(monkeypatch)
+
+    class VolatileWithIdentityCapability(InMemoryTriggerMetadataStore):
+        """Advertising an identity interface cannot turn this memory store into durable storage."""
+
+        async def check_execution_identity_ready(self) -> None:
+            """Let the test reach the independent production durability guard."""
+
+    store = VolatileWithIdentityCapability(now=lambda: NOW)
     assert isinstance(store, SourceStorage)
     with (
         pytest.raises(ValueError, match="restart-durable"),

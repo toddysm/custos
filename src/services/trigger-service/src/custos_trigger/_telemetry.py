@@ -11,8 +11,9 @@ The library depends only on ``opentelemetry-api``. The API ships no-op tracer /
 meter providers by default, so instrumentation is inert until an SDK + exporter
 is configured at the process boundary (the Helm-managed OTel Collector in
 production; the in-memory exporters in :mod:`tests.test_telemetry`). The inner
-sink defaults to :class:`~custos_trigger.pipeline.dispatch.NoopAuditSink`; activated receiver
-workers instead wire :class:`DurableAuditSink` through the metadata audit outbox.
+sink defaults to :class:`~custos_trigger.pipeline.dispatch.NoopAuditSink`; activated source
+receivers wire :class:`DurableAuditSink` through the metadata audit outbox,
+including while new upstream admission is paused.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from datetime import UTC, datetime
 from typing import Any, Final, Protocol, runtime_checkable
 from uuid import uuid4
 
+from custos_spl.errors import SPLError
 from custos_spl.ids import WorkspaceId
 from custos_spl.interfaces.metadata_store import AuditEvent
 from opentelemetry import metrics, trace
@@ -66,6 +68,16 @@ PIPELINE_EVENTS_TOTAL: Final[Counter] = _meter.create_counter(
     description="Count of trigger pipeline audit events by stage and outcome.",
     unit="1",
 )
+SCHEDULE_LAG_SECONDS = _meter.create_histogram(
+    "custos_trigger_schedule_lag_seconds",
+    unit="s",
+)
+REPLAY_AGE_SECONDS = _meter.create_histogram(
+    "custos_trigger_replay_age_seconds",
+    unit="s",
+)
+REPLAY_EVENTS_TOTAL = _meter.create_counter("custos_trigger_replay_events_total")
+RETENTION_EXPIRED_TOTAL = _meter.create_counter("custos_trigger_retention_expired_total")
 
 #: Map each dispatcher audit event onto its ``(stage, outcome)`` label pair.
 _EVENT_STAGE_OUTCOME: Final[dict[str, tuple[str, str]]] = {
@@ -155,7 +167,11 @@ class TelemetryAuditSink:
     ) -> None:
         stage, outcome = _EVENT_STAGE_OUTCOME.get(event_name, (STAGE_OTHER, "other"))
         PIPELINE_EVENTS_TOTAL.add(1, {"stage": stage, "outcome": outcome})
-        with _tracer.start_as_current_span(f"custos_trigger.pipeline.{stage}") as span:
+        with _tracer.start_as_current_span(
+            f"custos_trigger.pipeline.{stage}",
+            record_exception=False,
+            set_status_on_exception=False,
+        ) as span:
             span.set_attribute("trigger.event", event_name)
             span.set_attribute("trigger.stage", stage)
             span.set_attribute("trigger.outcome", outcome)
@@ -163,4 +179,8 @@ class TelemetryAuditSink:
             # Forward inside the span so the inner sink's work (and any child
             # spans it emits) is parented to this stage span and the span
             # duration captures the audit-forwarding latency.
-            await self._inner.emit(event_name, workspace_id=workspace_id, attributes=attributes)
+            try:
+                await self._inner.emit(event_name, workspace_id=workspace_id, attributes=attributes)
+            except SPLError:
+                span.set_status(trace.StatusCode.ERROR, "audit storage unavailable")
+                raise

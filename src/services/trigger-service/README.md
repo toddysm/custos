@@ -69,6 +69,12 @@ for limits, error codes, original-target replay and timeout recovery.
 
 ## Receiver worker lifecycle
 
+For all four Helm profiles, see the default-off
+[production activation and pause contract](../../../deploy/helm/charts/trigger-service/README.md#production-receiver-activation).
+`TRIGGER_TELEMETRY_ENDPOINT` supplies the credential-free OTLP/HTTP collector origin.
+The process entry point owns metrics/trace exporters whenever source consumption
+is enabled, including when upstream receiver admission is paused.
+
 `TRIGGER_RECEIVER_WORKERS_ENABLED=true` activates lifespan-owned scheduled
 publication, pending-delivery reconciliation, Connector demand hints and audited
 retention. It is separate from configuration authoring, source consumption and

@@ -17,7 +17,10 @@ def main() -> None:
     Honours ``HOST`` / ``PORT`` env vars (defaults ``0.0.0.0`` / ``8080``)
     so the deployment manifests can override without code changes. The
     actual FastAPI application is constructed by
-    :func:`custos_trigger.create_app`.
+    :func:`custos_trigger.create_app`. Activated source receivers own bounded
+    OTLP exporters for the server lifetime, including paused worker deployments.
+    ``CUSTOS_HTTP_DRAIN_SECONDS`` bounds HTTP shutdown before owned workers drain;
+    an unset value preserves uvicorn's legacy default.
     """
     # Imported lazily so ``python -m custos_trigger --help``-style probes
     # do not require uvicorn to be installed for non-runtime tooling.
@@ -25,12 +28,21 @@ def main() -> None:
 
     host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", "8080"))
-    uvicorn.run(
-        "custos_trigger:create_app",
-        host=host,
-        port=port,
-        factory=True,
-    )
+    from custos_trigger._runtime import receiver_telemetry
+    from custos_trigger.settings import read_source_receivers_enabled
+
+    with receiver_telemetry(enabled=read_source_receivers_enabled(os.environ)):
+        uvicorn.run(
+            "custos_trigger:create_app",
+            host=host,
+            port=port,
+            factory=True,
+            timeout_graceful_shutdown=(
+                int(os.environ["CUSTOS_HTTP_DRAIN_SECONDS"])
+                if "CUSTOS_HTTP_DRAIN_SECONDS" in os.environ
+                else None
+            ),
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised via ``python -m``

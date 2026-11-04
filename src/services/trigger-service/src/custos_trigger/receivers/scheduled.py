@@ -411,8 +411,8 @@ class ScheduledReceiver:
         return published, suppressed
 
     async def _publish(self, fire: PendingScheduleFire) -> bool:
-        """Settle ineligible work separately; acknowledge eligible work only after publication."""
-        await self._heartbeat()
+        """Settle ineligible work, record bounded lag and acknowledge only after publication."""
+        now = await self._heartbeat()
         subscription = await self.subscriptions.get(str(self.workspace), fire.schedule_id)
         reason = _suppression(subscription, fire.subscription_revision)
         assert self._lease is not None
@@ -440,6 +440,9 @@ class ScheduledReceiver:
                 workspace_id=str(self.workspace),
                 attributes=attributes,
             )
+        from custos_trigger._telemetry import SCHEDULE_LAG_SECONDS
+
+        SCHEDULE_LAG_SECONDS.record(max(0.0, (now - fire.planned_fire_at).total_seconds()))
         await self.publish(scheduled_event(fire))
         await self.store.acknowledge_schedule_fire(self.workspace, fire.fire_id, self._lease)
         return True

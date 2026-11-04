@@ -216,3 +216,33 @@ async def test_default_inner_sink_is_noop() -> None:
 
     sink = telemetry.TelemetryAuditSink()
     assert isinstance(sink._inner, NoopAuditSink)
+
+
+async def test_audit_backend_diagnostics_never_enter_exported_spans() -> None:
+    """Production exporters must not turn a storage failure into a credential-bearing event."""
+    from custos_spl.errors import BackendUnavailable
+
+    class FailedAudit:
+        """Simulate a private database diagnostic at the real audit boundary."""
+
+        async def emit(
+            self,
+            event_name: str,
+            *,
+            workspace_id: str,
+            attributes: Mapping[str, Any],
+        ) -> None:
+            """Raise the unsanitized provider diagnostic to test exporter isolation."""
+            raise BackendUnavailable("private-database-credential")
+
+    _SPAN_EXPORTER.clear()
+    with pytest.raises(BackendUnavailable):
+        await telemetry.TelemetryAuditSink(FailedAudit()).emit(
+            "trigger.dispatched",
+            workspace_id="ws",
+            attributes={},
+        )
+    spans = _SPAN_EXPORTER.get_finished_spans()
+    assert spans and "private-database-credential" not in repr(spans)
+    assert not spans[-1].events
+    assert spans[-1].status.description == "audit storage unavailable"

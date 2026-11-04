@@ -179,8 +179,13 @@ class DeadLetterAdmin:
         *,
         request_key: str | None = None,
     ) -> Literal["pending", "discarded", "replayed"]:
-        """Replay the original target, reconciling successful concurrent/repeated requests."""
+        """Replay the original target and expose age/outcome without tenant metric labels."""
         entry = await self._entry(workspace, entry_id)
+        from custos_trigger._telemetry import REPLAY_AGE_SECONDS, REPLAY_EVENTS_TOTAL
+
+        REPLAY_AGE_SECONDS.record(
+            max(0.0, ((await self.store.delivery_now()) - entry.created_at).total_seconds())
+        )
         identity = bulk_entry_identity(entry)
         if bulk is None:
             await self._bind_command(entry, actor, request_key, "replay")
@@ -192,6 +197,7 @@ class DeadLetterAdmin:
                     "unsafe", "Selected entry changed or was replaced."
                 ) from exc
         if entry.status == "replayed":
+            REPLAY_EVENTS_TOTAL.add(1, {"outcome": "replayed"})
             return "replayed"
         try:
             outcome = await self.dispatcher.replay(
@@ -215,6 +221,7 @@ class DeadLetterAdmin:
                 if bulk_entry_identity(current) != identity:
                     raise DeadLetterAdminError("unsafe", "Selected entry was replaced.") from exc
                 if current.status == "replayed":
+                    REPLAY_EVENTS_TOTAL.add(1, {"outcome": "replayed"})
                     return "replayed"
                 raise DeadLetterAdminError("unsafe", "Entry cannot be safely replayed.") from exc
             if exc.kind == TriggerErrorKind.DISPATCH_UNAVAILABLE:
@@ -224,6 +231,7 @@ class DeadLetterAdmin:
             raise
         if outcome.replay_status is None:
             raise RuntimeError("replay completed without its committed attempt status")
+        REPLAY_EVENTS_TOTAL.add(1, {"outcome": outcome.replay_status})
         return outcome.replay_status
 
     async def replay(
@@ -348,7 +356,7 @@ class DeadLetterAdmin:
     async def sweep(
         self, workspace: str, *, cursor: str | None = None, limit: int = 100
     ) -> RetentionPage:
-        """Sweep every status in one page, auditing expiry atomically under the entry lock."""
+        """Sweep one bounded page with atomic audit and aggregate expiry telemetry."""
         async with _operation():
             page = await self.list(workspace, DeadLetterFilter(), cursor=cursor, limit=limit)
             expired = 0
@@ -361,4 +369,7 @@ class DeadLetterAdmin:
             sources = await self.store.purge_source_delivery_selections(
                 WorkspaceId(workspace), limit=limit
             )
+            from custos_trigger._telemetry import RETENTION_EXPIRED_TOTAL
+
+            RETENTION_EXPIRED_TOTAL.add(expired)
             return RetentionPage(len(page.items), expired, page.next_cursor, sources)

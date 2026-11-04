@@ -32,6 +32,7 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import TYPE_CHECKING
 
+from custos_callctx.dapr_http import dapr_http_client
 from custos_callctx.execution import load_execution_bindings
 from custos_callctx.execution_client import ExecutionContextClient
 from custos_spl.interfaces.execution import ExecutionIdentityStoreProvider
@@ -208,6 +209,12 @@ def create_app(
         if source_receivers_enabled is not None
         else read_source_receivers_enabled(os.environ)
     )
+    if (
+        effective_sources
+        and effective_env.strip().lower() == "production"
+        and execution_bindings is None
+    ):
+        raise ValueError("production source receivers require explicit execution identities")
     effective_webhooks = (
         webhook_receiver_enabled
         if webhook_receiver_enabled is not None
@@ -309,20 +316,20 @@ def create_app(
         from custos_trigger._telemetry import AuditWriter, DurableAuditSink, TelemetryAuditSink
 
         if workers_config.enabled and (
-            not effective_sources
-            or not isinstance(metadata_store, ReceiverWorkspaceProvider)
-            or not isinstance(metadata_store, AuditWriter)
+            not effective_sources or not isinstance(metadata_store, ReceiverWorkspaceProvider)
         ):
             raise ValueError(
                 "receiver workers require source consumption, discovery and audit storage"
             )
+        if effective_sources and not isinstance(metadata_store, AuditWriter):
+            raise ValueError("source receivers require durable audit storage")
 
         effective_audit: AuditSink = (
             audit_sink
             if audit_sink is not None
             else TelemetryAuditSink(
                 DurableAuditSink(metadata_store)
-                if workers_config.enabled and isinstance(metadata_store, AuditWriter)
+                if effective_sources and isinstance(metadata_store, AuditWriter)
                 else None
             )
         )
@@ -370,8 +377,6 @@ def create_app(
         if dispatcher is not None:
             app.state.dispatcher = dispatcher
         else:
-            import httpx
-
             from custos_trigger.clients import (
                 DaprWorkflowServiceClient,
                 read_dapr_endpoint,
@@ -417,7 +422,7 @@ def create_app(
                 await metadata_store.check_delivery_ready()
                 await metadata_store.check_dead_letters_ready()
                 reliable_store = metadata_store
-            owned_http_client = httpx.AsyncClient()
+            owned_http_client = dapr_http_client()
             if execution_bindings is not None and reliable_store is None:
                 raise ValueError("execution identity requires durable Trigger dispatch")
             execution_context = (
@@ -454,12 +459,10 @@ def create_app(
                 if webhook_transport is not None:
                     app.state.webhook_transport = webhook_transport
                 else:
-                    import httpx
-
                     from custos_trigger.clients import read_dapr_endpoint
 
                     if owned_http_client is None:
-                        owned_http_client = httpx.AsyncClient()
+                        owned_http_client = dapr_http_client()
                     app.state.webhook_transport = DaprWebhookTransport(
                         owned_http_client,
                         read_dapr_endpoint(
@@ -473,8 +476,6 @@ def create_app(
                     )
             async with AsyncExitStack() as workers:
                 if workers_config.enabled:
-                    import httpx
-
                     from custos_trigger.clients import read_dapr_endpoint
                     from custos_trigger.clients.pull_demand import DaprPullDemandClient
                     from custos_trigger.receiver_runtime import ReceiverRuntime
@@ -485,7 +486,7 @@ def create_app(
                     ):
                         raise ValueError("receiver workers require durable dispatch and discovery")
                     if owned_http_client is None:
-                        owned_http_client = httpx.AsyncClient()
+                        owned_http_client = dapr_http_client()
 
                     async def publish_schedule(event: NormalizedEvent) -> None:
                         """Publish scheduled events through the scoped normalized broker path."""

@@ -109,10 +109,12 @@ async def _build_signing_state(
     """
     key_ref = settings.call_context_key_ref.strip()
     if key_ref:
-        import httpx
 
         async def _fetch(url: str) -> dict[str, Any]:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            """Read signing material through authenticated local Dapr, without token forwarding."""
+            from custos_callctx.dapr_http import dapr_http_client
+
+            async with dapr_http_client(timeout=5.0) as client:
                 response = await client.get(url)
                 response.raise_for_status()
                 return response.json()  # type: ignore[no-any-return]

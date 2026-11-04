@@ -95,6 +95,8 @@ class SidecarSpec:
     image: str
     endpoint: str
     credential_broker: bool = False
+    #: Public PEM trust bundle is staged privately; never disables HTTPS verification.
+    custom_ca: bool = False
 
 
 @dataclass(frozen=True, slots=True)

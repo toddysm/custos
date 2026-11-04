@@ -1,0 +1,96 @@
+{{- $r := .Values.global.receiverRuntime -}}
+{{- if $r.enabled -}}
+{{- $services := list "api-gateway" "auth-service" "catalog-service" "connector-service" "workflow-service" "trigger-service" "activity-runtime-manager" "observability-audit-service" -}}
+{{- $network := .Values.global.networkPolicies -}}
+{{- range $service := $services }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-receivers-%s" $.Release.Name $service }}
+  namespace: {{ $.Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ $.Release.Name }}
+      app.kubernetes.io/name: {{ $service }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # Remote callers reach only mTLS invocation, never another pod's local Dapr APIs.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ $.Release.Name }}
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: {{ toJson $services }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $network.daprNamespace }}
+      ports:
+        - protocol: TCP
+          port: 50002
+    {{- if eq $service "activity-runtime-manager" }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $r.sandboxNamespace }}
+      ports: [{protocol: TCP, port: 8080}]
+    {{- end }}
+    {{- if eq $service "api-gateway" }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $network.gatewayNamespace }}
+      ports: [{protocol: TCP, port: 8080}]
+    {{- end }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $network.monitoringNamespace }}
+      ports: [{protocol: TCP, port: 8080}]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $network.dnsNamespace }}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $network.daprNamespace }}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ $.Release.Name }}
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: {{ toJson $services }}
+      ports: [{protocol: TCP, port: 50002}]
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- toYaml $network.postgresPodSelector | nindent 14 }}
+      ports: [{protocol: TCP, port: {{ $network.postgresPort }}}]
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: redis
+      ports: [{protocol: TCP, port: 6379}]
+    - to:
+        {{- range $cidr := $r.kubernetesApiCIDRs }}
+        - ipBlock:
+            cidr: {{ $cidr | quote }}
+        {{- end }}
+      ports:
+        {{- range $port := $r.kubernetesApiPorts }}
+        - protocol: TCP
+          port: {{ $port }}
+        {{- end }}
+    {{- with $r.controllerEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}
+{{- end }}

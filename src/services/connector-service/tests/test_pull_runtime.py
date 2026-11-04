@@ -16,6 +16,17 @@ from custos_connector.settings import SettingsError
 from tests._pull import PullClock, memory_runtime, seed_instance, settings, start_demand
 
 
+def test_production_worker_cannot_select_a_noop_publisher() -> None:
+    """Reject silent source-event loss before loading any production runtime resources."""
+    with pytest.raises(SettingsError, match="real Dapr publisher"):
+        replace(
+            settings(),
+            environment="production",
+            pull_worker_enabled=True,
+            dapr_http_endpoint="",
+        )
+
+
 async def test_real_runtime_rediscovers_and_polls_persisted_demand() -> None:
     """Starting the owner requires no manual registration or second poll timer."""
     providers, metadata, runner, _ = memory_runtime(PullClock())

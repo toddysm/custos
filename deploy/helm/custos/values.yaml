@@ -20,6 +20,34 @@ global:
   imageTag: dev
   imagePullPolicy: IfNotPresent
   imagePullSecrets: []
+  # Opt-in production receiver/runtime wiring; all four profiles remain legacy-compatible off.
+  # Values contain references only. Provision the database, tokens, signing key,
+  # execution accounts, TLS Secret and shared artifact claim before activation.
+  receiverRuntime:
+    enabled: false
+    # Pause new scheduled/poll/webhook admission without removing identity,
+    # shared storage, queued callbacks or private runtime infrastructure.
+    admissionEnabled: false
+    deploymentId: ""
+    databaseSecret: custos-app
+    apiTokenSecret: ""
+    appTokenSecrets: {}
+    authSigningKeyRef: ""
+    executionBindings:
+      bindings: []
+      defaults: {}
+    sandboxNamespace: ""
+    tlsSecret: ""
+    sidecarImage: ""
+    ioBridgeImage: ""
+    artifactClaim: ""
+    telemetryEndpoint: ""
+    drainSeconds: 330
+    terminationGraceSeconds: 360
+    kubernetesApiCIDRs: []
+    kubernetesApiPorts: [443, 6443]
+    controllerEgress: []
+    sandboxEgress: []
   # correlationId header name minted by API Gateway and propagated downstream
   correlationIdHeader: x-correlation-id
   # Deployment profile exposed to every subchart (top-level `profile` is not

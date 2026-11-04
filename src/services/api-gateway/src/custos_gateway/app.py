@@ -118,7 +118,9 @@ def create_app(
                 """Share one owned transport, including cleanup after partial startup."""
                 nonlocal owned_client
                 if owned_client is None:
-                    owned_client = httpx.AsyncClient()
+                    from custos_callctx.dapr_http import dapr_http_client
+
+                    owned_client = dapr_http_client()
                     stack.push_async_callback(owned_client.aclose)
                 return owned_client
 

@@ -60,6 +60,16 @@ def acknowledge(_: httpx.Request) -> httpx.Response:
     return httpx.Response(200, json={"schemaVersion": "1", "registered": 0})
 
 
+def test_production_receivers_cannot_omit_execution_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not start a production source path that can never obtain fresh scoped authority."""
+    monkeypatch.delenv("CUSTOS_EXECUTION_IDENTITY_ENABLED", raising=False)
+    monkeypatch.delenv("CUSTOS_EXECUTION_BINDINGS", raising=False)
+    with pytest.raises(ValueError, match="execution identities"):
+        create_app(environment="production", source_receivers_enabled=True)
+
+
 async def test_scheduled_worker_advances_past_the_first_due_page() -> None:
     """More than 50 due schedules finish instead of repeatedly restarting at the first page."""
     clock = [NOW]

@@ -508,9 +508,9 @@ def load_identity_registry(
     """
     # Lazy import keeps providers.py importable in unit tests that
     # never touch the identity path.
-    import httpx
+    from custos_callctx.dapr_http import dapr_http_client
 
-    http_client = httpx.AsyncClient()
+    http_client = dapr_http_client()
     transport = HttpxAsyncHttpClient(http_client, owns_client=True)
 
     registry = IdentityResolverRegistry(
@@ -554,7 +554,9 @@ def load_event_publisher(
     """
     if not settings.dapr_pubsub_enabled:
         return NoOpEventPublisher(), None
-    client = httpx.AsyncClient()
+    from custos_callctx.dapr_http import dapr_http_client
+
+    client = dapr_http_client()
     publisher = DaprPubSubEventPublisher(
         http_client=client,
         dapr_endpoint=settings.dapr_http_endpoint,

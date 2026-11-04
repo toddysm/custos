@@ -367,8 +367,14 @@ def test_default_transport_is_owned_and_closed_on_startup_failure(
     monkeypatch.setenv("TRIGGER_GATEWAY_NAMESPACE", "custos")
     if invalid_destination:
         monkeypatch.setenv("TRIGGER_PUBSUB_COMPONENT", "invalid/name")
-    owned = httpx.AsyncClient()
-    monkeypatch.setattr(httpx, "AsyncClient", lambda: owned)
+    owned = httpx.AsyncClient(trust_env=False)
+
+    def client(**kwargs: object) -> httpx.AsyncClient:
+        """Retain the real owned client while checking proxy-safe construction."""
+        assert kwargs["trust_env"] is False
+        return owned
+
+    monkeypatch.setattr(httpx, "AsyncClient", client)
     store = InMemoryTriggerMetadataStore(now=lambda: NOW)
     app = create_app(
         authz_endpoint="",

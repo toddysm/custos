@@ -24,7 +24,7 @@ allow the Dapr sidecar ports.
 {{- $g := ((.Values.global | default dict).networkPolicies) | default dict -}}
 {{- $enabled := $g.enabled | default false -}}
 {{- if not (kindIs "invalid" $np.enabled) -}}{{- $enabled = $np.enabled -}}{{- end -}}
-{{- if $enabled -}}
+{{- if and $enabled (not (((.Values.global | default dict).receiverRuntime | default dict).enabled)) -}}
 {{- $appPort := .Values.service.port -}}
 {{- $daprPorts := $g.daprPorts | default (list 3500 50001 50002) -}}
 apiVersion: networking.k8s.io/v1
