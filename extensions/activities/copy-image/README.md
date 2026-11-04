@@ -90,7 +90,8 @@ The process exit code follows the contract: `0` success, `2` for a
 
 In production, the activity presents `/custos/in/sidecar-token` to the local
 Unix-domain socket `/custos/run/connector.sock`. It requests `oci.pull` for
-`source` and `oci.push` for `dest`, validates the version-two lease scope and
+`source` and `oci.push` for `dest` using the `Custos-Sidecar-Token` header,
+validates the version-two lease scope and
 registry `{username, token}` material, and attempts lease release on every
 exit. Explicit legacy files at `/custos/in/secrets/<slot>/username` and `token`
 remain supported; partial file injection never falls back to the broker.

@@ -77,12 +77,15 @@ def broker(
 
         def do_GET(self) -> None:
             """Record issuance requests and write the controlled response."""
-            assert self.headers["Authorization"] == "Bearer bootstrap"
+            assert self.headers["Custos-Sidecar-Token"] == "bootstrap"
+            assert "Authorization" not in self.headers
             calls.append(("GET", self.path))
             self.reply(payload)
 
         def do_POST(self) -> None:
             """Record the exact release body independently of the issuance envelope."""
+            assert self.headers["Custos-Sidecar-Token"] == "bootstrap"
+            assert "Authorization" not in self.headers
             calls.append(("POST", self.rfile.read(int(self.headers["Content-Length"])).decode()))
             self.reply({"released": True})
 

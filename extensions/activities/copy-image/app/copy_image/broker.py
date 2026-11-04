@@ -70,7 +70,7 @@ def request(
                     path,
                     body=None if payload is None else json.dumps(payload).encode(),
                     headers={
-                        "Authorization": "Bearer " + token,
+                        "Custos-Sidecar-Token": token,
                         "Content-Type": "application/json",
                     },
                 )
