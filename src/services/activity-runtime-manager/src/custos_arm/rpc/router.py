@@ -72,6 +72,18 @@ def get_scheduler(request: Request) -> ActivityScheduler:
     return scheduler
 
 
+def get_admitted_scheduler(
+    request: Request,
+    scheduler: Annotated[ActivityScheduler, Depends(get_scheduler)],
+) -> ActivityScheduler:
+    """Gate only new scheduling; authorized cancellation must still reach its safety checks."""
+    if getattr(request.app.state, "runtime_managed", False) and (
+        not request.app.state.ready or not request.app.state.dependencies_ready
+    ):
+        raise HTTPException(503, "activity runtime admission is closed")
+    return scheduler
+
+
 def require_execution_permission(
     request: Request,
     context: Annotated[CallContext, Depends(get_call_context)],
@@ -86,6 +98,7 @@ def require_execution_permission(
 
 CallContextDep = Annotated[CallContext, Depends(require_execution_permission)]
 SchedulerDep = Annotated[ActivityScheduler, Depends(get_scheduler)]
+AdmittedSchedulerDep = Annotated[ActivityScheduler, Depends(get_admitted_scheduler)]
 
 
 @router.post("/ScheduleActivity", include_in_schema=False)
@@ -93,7 +106,7 @@ async def schedule_activity(
     request: Request,
     body: ScheduleActivityWire,
     call_context: CallContextDep,
-    scheduler: SchedulerDep,
+    scheduler: AdmittedSchedulerDep,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> JSONResponse:
     """Dispatch a ``ScheduleActivity`` request and return the result envelope.
@@ -126,7 +139,9 @@ async def schedule_activity(
             status_code=400,
             detail="Idempotency-Key header does not match the request body",
         )
-    schedule_request = body.to_schedule_request(workspace_id=call_context.workspace_id)
+    schedule_request = body.to_schedule_request(
+        workspace_id=call_context.workspace_id, principal_id=call_context.principal_id
+    )
     result = await scheduler.schedule(schedule_request)
     return JSONResponse(content=result.model_dump(by_alias=True, mode="json"))
 

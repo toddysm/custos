@@ -82,6 +82,11 @@ def execution_caller(request: Request, settings: Settings, operation: ExecutionO
         if operation in ("workflow-start", "workflow-resume")
         else settings.execution_workflow_app_id
     )
+    if operation == "connector-credentials" or (
+        operation == "catalog-activity-read"
+        and request.headers.get("dapr-caller-app-id") == settings.execution_runtime_app_id
+    ):
+        caller = settings.execution_runtime_app_id
     try:
         require_service_caller(
             request.headers,

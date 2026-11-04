@@ -30,11 +30,12 @@ classifiers = [
 # * ``opentelemetry-api`` so failure counters and span attributes can
 #   surface from day one without pulling the SDK at runtime.
 #
-# Path-installed locally and in CI the same way ``connector-service``
-# is installed, with no SPL dependency: the sidecar talks to
+# Path-installed locally and in CI with the shared ``custos-callctx``
+# bootstrap codec, but no SPL dependency: the sidecar talks to
 # ``connector-service`` over HTTP for every lease op, so it has zero
 # need to import ``custos_spl`` / ``custos_pg`` itself.
 dependencies = [
+    "custos-callctx",
     "fastapi>=0.110,<0.137",  # pin <0.137: 0.137 made include_router lazy (_IncludedRouter), breaking app.routes introspection
     "uvicorn[standard]>=0.27,<1",
     "pydantic>=2.6,<3",

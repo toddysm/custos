@@ -30,7 +30,9 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Final
 
+from custos_spl.errors import LeaseBusy
 from custos_spl.ids import ConnectorInstanceId, RunId, StepId, WorkspaceId
+from custos_spl.interfaces.atomic_lease import AtomicLeaseStoreProvider
 from custos_spl.interfaces.lease_store import Lease, LeaseStoreProvider
 from custos_spl.interfaces.metadata_store import MetadataStoreProvider
 
@@ -142,7 +144,9 @@ class LeaseManager:
         max_concurrent_leases: int,
         clock: Callable[[], datetime] | None = None,
         actor: str = "connector-service",
+        require_atomic: bool = False,
     ) -> None:
+        """Bind owned policy; scoped issuers require atomic storage, legacy callers remain gated."""
         if default_ttl_sec <= 0:
             raise ValueError(f"default_ttl_sec must be positive; got {default_ttl_sec}")
         if max_concurrent_leases <= 0:
@@ -155,6 +159,9 @@ class LeaseManager:
             clock if clock is not None else (lambda: datetime.now(UTC))
         )
         self._actor = actor
+        self._require_atomic = require_atomic
+        if require_atomic and not isinstance(lease_store, AtomicLeaseStoreProvider):
+            raise ValueError("atomic credential lease admission is required")
 
     # ----- TTL precedence -----
 
@@ -256,6 +263,8 @@ class LeaseManager:
         check uses :meth:`LeaseStoreProvider.count_active_for_step_attempt`
         against the current clock so released or expired leases free
         up their slot.
+        Scoped issuance requires atomic admission in the insert transaction.
+        Legacy callers retain the existing optional-capability rollout behavior.
 
         Raises :class:`LeaseError(CAPACITY_EXCEEDED)` when the
         ``(workspace_id, run_id, step_id, attempt)`` tuple is at the
@@ -326,7 +335,27 @@ class LeaseManager:
                 created_at=now,
                 updated_at=now,
             )
-            stored = await self._lease_store.put_lease(workspace_id, lease)
+            try:
+                if self._require_atomic and isinstance(self._lease_store, AtomicLeaseStoreProvider):
+                    stored = await self._lease_store.put_lease_bounded(
+                        workspace_id,
+                        lease,
+                        self._max_concurrent_leases,
+                    )
+                else:
+                    stored = await self._lease_store.put_lease(workspace_id, lease)
+            except LeaseBusy:
+                denial = LeaseError(
+                    LeaseErrorCode.CAPACITY_EXCEEDED, "credential lease cap reached"
+                )
+                await self._record_denied_for(
+                    workspace_id=workspace_id,
+                    lease_id=None,
+                    connector_instance_id=instance_id_str,
+                    op="issue",
+                    exc=denial,
+                )
+                raise denial from None
             # CONN-IMPL-029: bump the active-lease gauge on the
             # storage-commit success path so failures upstream of
             # ``put_lease`` do not leak counts.
@@ -402,14 +431,30 @@ class LeaseManager:
                     ),
                 )
                 new_expires_at = now + timedelta(seconds=ttl_sec)
-                refreshed = await self._lease_store.refresh_lease(
-                    workspace_id, lease_id, new_expires_at
-                )
+                if self._require_atomic and isinstance(self._lease_store, AtomicLeaseStoreProvider):
+                    try:
+                        refreshed = await self._lease_store.refresh_lease_bounded(
+                            workspace_id,
+                            lease_id,
+                            new_expires_at,
+                            self._max_concurrent_leases,
+                        )
+                    except LeaseBusy:
+                        raise LeaseError(
+                            LeaseErrorCode.CAPACITY_EXCEEDED,
+                            "credential lease cap reached",
+                        ) from None
+                else:
+                    refreshed = await self._lease_store.refresh_lease(
+                        workspace_id,
+                        lease_id,
+                        new_expires_at,
+                    )
                 if refreshed is None:
-                    # Race: lease was released between get and refresh.
+                    # Scope/liveness can change after the initial read.
                     raise LeaseError(
                         LeaseErrorCode.ALREADY_RELEASED,
-                        f"lease {lease_id} was released concurrently with refresh",
+                        "credential lease became inactive before refresh",
                     )
             except LeaseError as exc:
                 await self._record_denied_for(

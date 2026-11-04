@@ -145,10 +145,13 @@ def test_signed_verifier_rejects_unsigned_development_context() -> None:
 
 
 def test_probes_bypass_the_middleware() -> None:
+    """Unwired readiness bypasses authentication and returns its real scheduling status."""
     app = create_app()
     with TestClient(app) as client:
         assert client.get("/healthz").status_code == 200
-        assert client.get("/readyz").status_code == 200
+        readiness = client.get("/readyz")
+        assert readiness.status_code == 503
+        assert readiness.json()["status"] == "not_ready"
 
 
 def test_create_app_mounts_middleware_and_requires_header() -> None:

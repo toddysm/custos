@@ -66,6 +66,13 @@ operation so each exchange still issues exactly one permission. No existing
 role is widened and no service account automatically receives the role.
 Workspace administrators must provision and bind the intended execution account.
 
+`connector-credentials` issues only the existing `connector:bind` permission and
+requires the authenticated runtime app (`CUSTOS_AUTH_EXECUTION_RUNTIME_APP_ID`,
+default `activity-runtime-manager`) in the configured execution namespace.
+That runtime may also request `catalog-activity-read` for scoped manifest
+resolution. Workflow remains the only caller for `connector-bind`; no broader
+role is introduced by the credential broker.
+
 When enabled, the legacy `rpc/callctx.sign` assertion-based endpoint accepts only
 the authenticated Gateway; execution workloads must use the credential-backed
 exchange. Keep Dapr mutual TLS, caller namespace checks and deployment network

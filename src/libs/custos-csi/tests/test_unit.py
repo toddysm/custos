@@ -1,6 +1,7 @@
 """Unit tests for custos-csi adapter — no live PVC required."""
 
 import tempfile
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,29 @@ def test_adapter_requires_existing_directory() -> None:
     """Adapter must be initialized with existing directory."""
     with pytest.raises(ValueError, match="does not exist"):
         CsiArtifactAdapter(Path("/nonexistent/path"))
+
+
+@pytest.mark.parametrize(
+    "workspace", ["", ".", "..", "../other", "/tmp/other", "ws:other", "ws\\other"]
+)
+def test_workspace_cannot_escape_artifact_mount(
+    adapter: CsiArtifactAdapter, workspace: str
+) -> None:
+    """Signed workspace identifiers still cannot become traversal paths or ambiguous artifact IDs."""
+    with pytest.raises(WorkspaceMismatch):
+        adapter._artifact_path(WorkspaceId(workspace), "a" * 64)
+
+
+async def test_public_put_rejects_traversal_and_cleans_up(adapter: CsiArtifactAdapter) -> None:
+    """Exercise the actual provider operation, including cleanup after rejection."""
+
+    async def content() -> AsyncIterator[bytes]:
+        """Supply a small non-secret artifact to the real streaming adapter."""
+        yield b"artifact"
+
+    with pytest.raises(WorkspaceMismatch):
+        await adapter.put(WorkspaceId("../escape"), content())
+    assert not any(path.is_file() for path in adapter.pvc_mount.rglob("*"))
 
 
 def test_adapter_requires_directory_not_file(temp_mount: Path) -> None:

@@ -90,6 +90,29 @@ retain the general revision-4 minimum.
 
 ## Entry points
 
+Metadata revision **15** adds optional durable activity-attempt ownership.
+It follows merged revision 14's execution-identity guards.
+Claims bind workspace, opaque run/step coordinates, attempt, request fingerprint
+and owner generation. Pending ownership never expires into permission to rerun;
+it also fences later attempts for the same step. Completed snapshots retain the
+exact result instead of manufacturing an empty success. Activity snapshots are
+bounded to 16 MiB at the adapter boundary. The shared revision-4 baseline remains
+unchanged. Runtime startup must explicitly require this capability before use.
+Credential authority can be irreversibly revoked without marking an unknown
+sandbox effect completed. Snapshot transitions preserve identity/scope and may
+only shorten the accepted deadline. Fixed-size step indexes support opaque IDs
+without oversized index entries. Terminal results and pending fences are retained
+for safe replay/roll-forward; there is no timeout-based ownership takeover.
+
+`PgLeaseAdapter.put_lease_bounded` serializes count-and-insert admission using a
+transaction-scoped advisory lock. The production issuer requires this capability;
+the legacy count-then-put sequence is not treated as a cross-replica guarantee.
+Lease revision **2** replaces the raw-coordinate index with bounded hash keys;
+queries retain exact coordinate comparisons. Apply it before enabling issuance.
+Scoped refresh shares the insertion lock and rechecks expiry inside that
+transaction. An expired lease cannot be revived after a replacement consumes
+its former capacity; callers must request a new lease.
+
 This package registers two adapters under the `custos_spl.adapters`
 entry-point group:
 

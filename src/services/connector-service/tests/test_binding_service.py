@@ -115,7 +115,9 @@ def _make_connector_type(
     type_: str = "http",
     version: str = "1.0.0",
     capabilities: list[str | dict[str, Any]] | None = None,
+    target_kind: str = "http",
 ) -> ConnectorTypeVersion:
+    """Build registered provider facts with an independently declared target family."""
     caps = capabilities if capabilities is not None else ["events.delivery", "objects.read"]
     return ConnectorTypeVersion(
         type=type_,
@@ -126,6 +128,7 @@ def _make_connector_type(
             "metadata": {"type": type_, "version": version},
             "spec": {
                 "capabilities": caps,
+                "target": {"kind": target_kind},
             },
         },
         parent_deprecated=False,

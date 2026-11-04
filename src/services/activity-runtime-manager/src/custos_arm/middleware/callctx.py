@@ -38,7 +38,16 @@ CALLCTX_HEADER: str = "x-custos-callctx"
 #: Paths the middleware deliberately bypasses — probes and the OpenAPI
 #: documentation surface require no call-context header.
 _BYPASS_PATHS: frozenset[str] = frozenset(
-    {"/healthz", "/readyz", "/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
+    {
+        "/healthz",
+        "/readyz",
+        "/openapi.json",
+        "/docs",
+        "/docs/oauth2-redirect",
+        "/redoc",
+        # This route verifies its private attempt proof against durable scope itself.
+        "/internal/v1/activity-credentials",
+    }
 )
 
 #: Path prefixes the middleware bypasses (e.g. the Prometheus ``/metrics``

@@ -2,9 +2,19 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
+import pytest
 from fastapi.testclient import TestClient
 
 from custos_arm import create_app
+from custos_arm.config import Settings
+from tests.test_rpc_schedule_activity import (
+    _body,
+    _callctx_header,
+    _RecordingScheduler,
+    _success_envelope,
+)
 
 
 def test_healthz_is_always_200() -> None:
@@ -15,14 +25,60 @@ def test_healthz_is_always_200() -> None:
     assert response.json() == {"status": "ok"}
 
 
-def test_readyz_is_200_after_lifespan_startup() -> None:
-    app = create_app()
-    # TestClient enters the lifespan on ``__enter__`` so by the time we
-    # issue a request, ``app.state.ready`` has been flipped.
+@pytest.mark.parametrize("environment", ["development", "production"])
+@pytest.mark.parametrize("scheduler", [None, object()])
+def test_unwired_scheduler_never_reports_ready(
+    settings: Settings, environment: str, scheduler: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Starting the actual factory is not proof that it can schedule work."""
+    app = create_app(
+        replace(
+            settings,
+            environment=environment,
+            authz_endpoint="http://auth" if environment == "production" else "",
+        )
+    )
+    app.state.scheduler = scheduler
     with TestClient(app) as client:
         response = client.get("/readyz")
-    assert response.status_code == 200
-    assert response.json() == {"status": "ready"}
+        assert client.get("/healthz").status_code == 200
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "not_ready",
+        "detail": "activity scheduler is not configured",
+    }
+    assert "activity scheduler is not configured" in caplog.text
+
+
+def test_configured_scheduler_opens_readiness_only_during_lifespan() -> None:
+    """A supplied scheduler follows the readiness lifecycle, including shutdown."""
+    app = create_app()
+    scheduler = _RecordingScheduler(result=_success_envelope())
+    app.state.scheduler = scheduler
+    assert app.state.ready is False
+    with TestClient(app) as client:
+        response = client.get("/readyz")
+        assert response.status_code == 200
+        assert response.json() == {"status": "ready"}
+        scheduled = client.post(
+            "/ScheduleActivity", json=_body(), headers={"x-custos-callctx": _callctx_header()}
+        )
+        assert scheduled.status_code == 200
+        assert len(scheduler.scheduled) == 1
+    assert app.state.ready is False
+    assert app.state.ready_detail == "activity-runtime-manager is shutting down"
+
+
+def test_ready_flag_cannot_hide_a_lost_scheduler() -> None:
+    """Readiness also checks the actual dispatcher rather than trusting a stale boolean."""
+    app = create_app()
+    app.state.scheduler = _RecordingScheduler(result=_success_envelope())
+    with TestClient(app) as client:
+        assert client.get("/readyz").status_code == 200
+        app.state.scheduler = None
+        response = client.get("/readyz")
+    assert response.status_code == 503
+    assert response.json()["detail"] == "activity scheduler is not configured"
 
 
 def test_readyz_is_503_before_lifespan_flips_ready() -> None:

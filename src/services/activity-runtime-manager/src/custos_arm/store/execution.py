@@ -4,7 +4,12 @@ ARM persists one execution record per ``(run_id, step_id, attempt)`` idempotency
 triple. The record drives idempotent replay — a terminal record short-circuits a
 re-scheduled attempt — and crash reconciliation.
 
-The SPL ``MetadataStoreProvider`` exposes per-attempt state through the
+Production repositories use the optional ActivityExecutionStoreProvider to
+persist pending ownership, immutable input fingerprints and exact results.
+Pending ownership has no automatic expiry/takeover. The older compatibility
+path below is retained for existing in-process adapters, not production activation.
+
+The legacy SPL ``MetadataStoreProvider`` exposes per-attempt state through the
 append-only ``StepAttempt`` family: a write to an already-written triple raises
 ``ImmutableViolation``. That immutability is incompatible with an in-place,
 update-per-transition row, so the state machine lives on the ARM-owned
@@ -20,11 +25,19 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Any, Final
+from uuid import uuid4
 
-from custos_spl.errors import ImmutableViolation
+from custos_spl.errors import ImmutableViolation, LeaseBusy, LeaseExpired
 from custos_spl.ids import RunId, StepId, WorkspaceId
+from custos_spl.interfaces.activity_execution import (
+    ActivityExecutionRecord,
+    ActivityExecutionStoreProvider,
+)
 from custos_spl.interfaces.metadata_store import MetadataStoreProvider, StepAttempt
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
+
+from custos_arm.contract import ErrorClass
+from custos_arm.result import ActivityResultEnvelope
 
 #: The idempotency triple plus its owning workspace, used as the in-process key.
 ExecutionKey = tuple[str, str, str, int]
@@ -70,7 +83,19 @@ _TERMINATING: Final[frozenset[ExecutionState]] = frozenset(
 #: Fields that identify an execution (or are owned by the state machine) and so
 #: may never be rewritten by :meth:`ActivityExecution.transition`.
 _IMMUTABLE_FIELDS: Final[frozenset[str]] = frozenset(
-    {"workspace_id", "run_id", "step_id", "attempt", "state"}
+    {
+        "workspace_id",
+        "run_id",
+        "step_id",
+        "attempt",
+        "state",
+        "activity_ref",
+        "request_hash",
+        "owner_id",
+        "execution_identity",
+        "credential_scopes",
+        "credential_grant_hash",
+    }
 )
 
 
@@ -83,6 +108,13 @@ def allowed_transitions(state: ExecutionState) -> frozenset[ExecutionState]:
 
 class ExecutionStoreError(Exception):
     """Base class for execution-store failures."""
+
+
+class UnsafeExecutionError(ExecutionStoreError):
+    """Unconfirmed ownership/result cannot authorize another effect or a fake success."""
+
+    code = "activity.execution_unconfirmed"
+    error_class = ErrorClass.PERMANENT
 
 
 class DuplicateExecutionError(ExecutionStoreError):
@@ -117,6 +149,12 @@ class ActivityExecution(BaseModel):
     error_code: str | None = None
     sandbox_ref: str | None = None
     finished_at: datetime | None = None
+    request_hash: str | None = None
+    owner_id: str | None = Field(default=None, repr=False)
+    execution_identity: dict[str, str] | None = None
+    credential_scopes: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    credential_grant_hash: str | None = Field(default=None, repr=False)
+    result: ActivityResultEnvelope | None = None
 
     @property
     def key(self) -> ExecutionKey:
@@ -156,7 +194,9 @@ class ActivityExecution(BaseModel):
 
 def _to_step_attempt(execution: ActivityExecution) -> StepAttempt:
     """Map a terminal execution onto an append-only SPL ``StepAttempt``."""
-    snapshot = execution.model_dump(mode="json", exclude_none=True)
+    snapshot = execution.model_dump(
+        mode="json", exclude_none=True, exclude={"request_hash", "owner_id", "result"}
+    )
     return StepAttempt(
         workspace_id=WorkspaceId(execution.workspace_id),
         run_id=RunId(execution.run_id),
@@ -182,18 +222,59 @@ def _from_step_attempt(attempt: StepAttempt) -> ActivityExecution:
 class ExecutionRepository:
     """``MetadataStoreProvider``-backed repository for activity executions.
 
-    Live (non-terminal) executions are tracked in process; terminal records are
-    persisted once to the append-only store for idempotent replay.
+    With ``durable_store``, every transition is owner/snapshot checked and
+    persisted; a different process cannot relaunch a pending effect. Without
+    it, legacy adapters retain the earlier in-process/append-only behavior.
     """
 
-    def __init__(self, store: MetadataStoreProvider, *, idempotency_ttl: timedelta) -> None:
+    def __init__(
+        self,
+        store: MetadataStoreProvider,
+        *,
+        idempotency_ttl: timedelta,
+        durable_store: ActivityExecutionStoreProvider | None = None,
+    ) -> None:
+        """Use explicit durable ownership while preserving legacy in-process adapters."""
         self._store = store
         self._idempotency_ttl = idempotency_ttl
         self._live: dict[ExecutionKey, ActivityExecution] = {}
+        self._durable = durable_store
+        self._owner = uuid4().hex
+        self._records: dict[ExecutionKey, ActivityExecutionRecord] = {}
+
+    @property
+    def durable(self) -> bool:
+        """Whether pending ownership and complete results survive process failure."""
+        return self._durable is not None
+
+    @property
+    def pending_count(self) -> int:
+        """Bound process-local retained ownership, including uncertain effects awaiting recovery."""
+        return sum(not execution.is_terminal for execution in self._live.values())
 
     async def insert(self, execution: ActivityExecution) -> ActivityExecution:
         """Register a new execution, rejecting a duplicate idempotency triple."""
         key = execution.key
+        if self._durable is not None:
+            if execution.request_hash is None or execution.is_terminal:
+                raise UnsafeExecutionError(
+                    "durable acceptance requires a fingerprinted pending attempt"
+                )
+            owned = execution.model_copy(update={"owner_id": self._owner})
+            try:
+                record = await self._durable.claim_activity_execution(
+                    *key,
+                    execution.request_hash,
+                    self._owner,
+                    owned.model_dump_json(),
+                )
+            except (ImmutableViolation, LeaseBusy) as exc:
+                raise UnsafeExecutionError(str(exc)) from None
+            if record.owner != self._owner or record.completed:
+                raise UnsafeExecutionError("activity attempt is owned by another execution")
+            stored = ActivityExecution.model_validate_json(record.snapshot_json)
+            self._records[key], self._live[key] = record, stored
+            return stored
         if key in self._live:
             raise DuplicateExecutionError(f"execution {key} already exists")
         if await self._has_terminal_record(*key):
@@ -218,6 +299,25 @@ class ExecutionRepository:
         if current is None:
             raise UnknownExecutionError(f"no live execution for {key}")
         updated = current.transition(to_state, **changes)
+        if self._durable is not None:
+            record = self._records.get(key)
+            if record is None or record.owner != self._owner:
+                raise UnsafeExecutionError("activity ownership is unavailable")
+            if updated.is_terminal and updated.result is None:
+                raise UnsafeExecutionError("a durable terminal attempt requires its exact result")
+            try:
+                self._records[key] = await self._durable.write_activity_execution(
+                    record, updated.model_dump_json(), completed=updated.is_terminal
+                )
+            except (ImmutableViolation, LeaseExpired):
+                raise UnsafeExecutionError(
+                    "activity ownership changed before persistence"
+                ) from None
+            self._live[key] = updated
+            if updated.is_terminal:
+                self._live.pop(key, None)
+                self._records.pop(key, None)
+            return updated
         # Persist before mutating ``_live`` so a rejected terminal write leaves
         # the live record at its prior state.
         if updated.is_terminal:
@@ -230,13 +330,30 @@ class ExecutionRepository:
     ) -> ActivityExecution | None:
         """Return the execution for the triple, preferring the live working set."""
         key: ExecutionKey = (workspace_id, run_id, step_id, attempt)
+        if self._durable is not None:
+            record = await self._durable.read_activity_execution(*key)
+            if record is None:
+                if await self._has_terminal_record(*key):
+                    raise UnsafeExecutionError("legacy activity record requires explicit migration")
+                return None
+            execution = ActivityExecution.model_validate_json(record.snapshot_json)
+            if not record.completed and record.owner != self._owner:
+                raise UnsafeExecutionError(
+                    "activity has an unresolved owner; automatic replay denied"
+                )
+            if record.completed:
+                self._records.pop(key, None)
+                self._live.pop(key, None)
+            else:
+                self._records[key], self._live[key] = record, execution
+            return execution
         live = self._live.get(key)
         if live is not None:
             return live
-        record = await self._terminal_record(*key)
-        if record is not None:
-            self._live[key] = record
-        return record
+        legacy_record = await self._terminal_record(*key)
+        if legacy_record is not None:
+            self._live[key] = legacy_record
+        return legacy_record
 
     async def purge_expired(self, *, now: datetime) -> int:
         """Drop terminal live records past ``ARM_IDEMPOTENCY_TTL``; return the count."""
@@ -249,7 +366,26 @@ class ExecutionRepository:
         ]
         for key in expired:
             del self._live[key]
+            self._records.pop(key, None)
         return len(expired)
+
+    async def revoke_credentials(self, key: ExecutionKey) -> None:
+        """Close credential access without ending ownership; terminal races are already closed."""
+        if self._durable is None:
+            return
+        record = self._records.get(key)
+        if record is None:
+            record = await self._durable.read_activity_execution(*key)
+        if record is not None and record.completed:
+            return
+        if record is None or record.owner != self._owner:
+            raise UnsafeExecutionError("activity credential owner is unavailable")
+        if not record.authority_revoked:
+            revoked = await self._durable.revoke_activity_authority(record)
+            if revoked.completed:
+                self._records.pop(key, None)
+            else:
+                self._records[key] = revoked
 
     async def _persist_terminal(self, execution: ActivityExecution) -> None:
         try:

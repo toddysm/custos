@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import subprocess
+import sys
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 from custos_spl.errors import ImmutableViolation
 from custos_spl.ids import RunId, StepId, WorkspaceId
 from custos_spl.interfaces.metadata_store import MetadataStoreProvider, StepAttempt
@@ -22,6 +26,7 @@ from custos_arm.manifest import parse_manifest
 from custos_arm.resolve import ActivityTypeVersion
 from custos_arm.resolve.errors import ActivityUnresolvedError, CatalogUnavailableError
 from custos_arm.result import ResultClass, ResultMapper
+from custos_arm.rpc.models import ScheduleActivityWire
 from custos_arm.runtime import (
     OCI_CONTAINER_KIND,
     CancelReason,
@@ -257,13 +262,15 @@ def _scheduler(
     resolver: _FakeResolver | None = None,
     repo: ExecutionRepository | None = None,
     settings: Settings | None = None,
+    injector: SecretInjector | None = None,
 ) -> ActivityScheduler:
     settings = settings or _settings()
     return ActivityScheduler(
         resolver=resolver or _FakeResolver(_resolved()),
         limiter=ResourceLimiter(settings),
         broker=IOBroker(_StubArtifactStore(), output_max_bytes=1_000_000),  # type: ignore[arg-type]
-        injector=SecretInjector(token_minter=SidecarTokenMinter()),
+        injector=injector
+        or SecretInjector(token_minter=SidecarTokenMinter(clock=lambda: _NOW.timestamp())),
         mapper=ResultMapper(),
         dispatcher=RuntimeDriverDispatcher((driver,)),
         repository=repo or _repo(),
@@ -281,6 +288,34 @@ def _request(**overrides: Any) -> ScheduleRequest:
     }
     base.update(overrides)
     return ScheduleRequest(**base)
+
+
+async def test_terminal_attempt_releases_local_bootstrap_authority(tmp_path: Path) -> None:
+    """Completed attempts retain their execution record, not their private in-process key."""
+    request = _request()
+    minter = SidecarTokenMinter(clock=lambda: _NOW.timestamp(), ttl_seconds=1)
+    token = minter.mint(step=request.step, workspace_id=request.workspace_id)
+    repo = _repo()
+    scheduler = _scheduler(
+        _FakeDriver(tmp_path, outputs=_success_outputs()),
+        repo=repo,
+        injector=SecretInjector(token_minter=minter),
+    )
+    result = await scheduler.schedule(request)
+    assert result.class_ is ResultClass.SUCCESS
+    assert not minter.is_active(token)
+    record = await repo.get("ws-1", "run-1", "step-1", 1)
+    assert record is not None
+    assert token.value not in record.model_dump_json()
+
+
+async def test_expired_deadline_cancels_before_starting_activity(tmp_path: Path) -> None:
+    """Bootstrap expiry preserves deadline classification and never starts an expired attempt."""
+    driver = _FakeDriver(tmp_path, outputs=_success_outputs())
+    result = await _scheduler(driver).schedule(_request(step_deadline=_NOW - timedelta(seconds=1)))
+    assert result.class_ is ResultClass.CANCELLED
+    assert result.error is not None and result.error.code == "activity.timeout"
+    assert driver.started == 0
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +383,75 @@ async def test_ctx_carries_connector_handles(tmp_path: Path) -> None:
     assert ctx["connectors"]["registry"]["type"] == "oci-registry"
 
 
+def test_runtime_materialization_is_consumable_by_bundled_copy_image(tmp_path: Path) -> None:
+    """Pass actual runtime-written files to the dependency-free activity, not a compatible DTO."""
+    root = Path(__file__).resolve().parents[4]
+    activity_root = root / "extensions/activities/copy-image"
+    manifest = parse_manifest(
+        yaml.safe_load((activity_root / "activity-manifest.yaml").read_text())
+    )
+    resolved = ActivityTypeVersion(
+        namespace=manifest.metadata.namespace,
+        type=manifest.metadata.type,
+        version=manifest.metadata.version,
+        digest=_DIGEST,
+        manifest=manifest,
+    )
+    contexts = {
+        slot: {
+            "schemaVersion": "2",
+            "slotName": slot,
+            "connectorInstanceId": slot + "-instance",
+            "connectorKind": "oci-registry",
+            "capabilities": ["oci.pull"] if slot == "source" else ["oci.push"],
+            "context": {
+                "endpoint": endpoint,
+                "tokenTypeHint": "basic",
+                "handle": {"opaque": "private-binding-value"},
+                "extras": {},
+            },
+        }
+        for slot, endpoint in (("source", "https://registry.test"), ("dest", "https://ghcr.io"))
+    }
+    request = ScheduleActivityWire.model_validate(
+        {
+            "runId": "run",
+            "stepId": "step",
+            "attempt": 1,
+            "activityRef": "custos.builtin/copy-image@0.1.0",
+            "connectorContexts": contexts,
+            "inputs": {
+                "source": {"ref": "registry.test/source/image:latest"},
+                "destination": {"repository": "org/image"},
+            },
+        }
+    ).to_schedule_request(workspace_id="ws")
+    handle = _handle(tmp_path / "in", tmp_path / "out")
+    _scheduler(_FakeDriver(tmp_path, outputs=None))._materialize(
+        request,
+        resolved,
+        handle,
+        _NOW + timedelta(minutes=30),
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from pathlib import Path; from copy_image.contract import Sandbox; "
+            "from copy_image.copy import resolve_copy_plan; "
+            "s=Sandbox(Path(sys.argv[1])); "
+            "print(resolve_copy_plan(s.read_inputs(),s.read_context()).destination_ref)",
+            str(tmp_path),
+        ],
+        env={**os.environ, "PYTHONPATH": str(activity_root / "app")},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip() == "ghcr.io/org/image:latest"
+    assert "private-binding-value" not in (handle.input_root / "ctx.json").read_text()
+
+
 # ---------------------------------------------------------------------------
 # Idempotent replay
 # ---------------------------------------------------------------------------
@@ -375,7 +479,7 @@ async def test_replay_reconstructs_from_terminal_record(tmp_path: Path) -> None:
     result = await _scheduler(fresh_driver, repo=repo).schedule(_request())
 
     assert result.class_ is ResultClass.SUCCESS
-    assert result.outputs == {}  # outputs are not part of the persisted record
+    assert result.outputs == {"ok": True}
     assert fresh_driver.prepared == 0
 
 
@@ -603,7 +707,7 @@ async def test_input_artifact_refs_are_staged_before_start(tmp_path: Path) -> No
         resolver=_FakeResolver(_resolved()),
         limiter=ResourceLimiter(settings),
         broker=IOBroker(store, output_max_bytes=1_000_000),  # type: ignore[arg-type]
-        injector=SecretInjector(token_minter=SidecarTokenMinter()),
+        injector=SecretInjector(token_minter=SidecarTokenMinter(clock=lambda: _NOW.timestamp())),
         mapper=ResultMapper(),
         dispatcher=RuntimeDriverDispatcher((driver,)),
         repository=_repo(),
@@ -646,7 +750,7 @@ async def test_oversized_outputs_maps_permanent(tmp_path: Path) -> None:
         resolver=_FakeResolver(_resolved()),
         limiter=ResourceLimiter(settings),
         broker=IOBroker(_StubArtifactStore(), output_max_bytes=8),  # type: ignore[arg-type]
-        injector=SecretInjector(token_minter=SidecarTokenMinter()),
+        injector=SecretInjector(token_minter=SidecarTokenMinter(clock=lambda: _NOW.timestamp())),
         mapper=ResultMapper(),
         dispatcher=RuntimeDriverDispatcher((driver,)),
         repository=_repo(),

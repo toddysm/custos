@@ -19,9 +19,13 @@ forever. A major ref (``…@MAJOR``) is a moving pointer and is always re-read.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Protocol, runtime_checkable
+from urllib.parse import quote
 
 import httpx
+from custos_callctx.execution import ExecutionIdentity
+from custos_callctx.execution_client import ExecutionAuthorizationError, ExecutionContextClient
 from pydantic import ValidationError
 
 from custos_arm.manifest import ManifestError, parse_manifest
@@ -165,3 +169,86 @@ class CatalogActivityResolver:
             raise CatalogUnavailableError(
                 str(ref), f"catalog returned an invalid type version for {ref}: {exc}"
             ) from exc
+
+
+class ScopedCatalogActivityResolver(CatalogActivityResolver):
+    """Production resolver uses fresh account authority even for cached immutable manifests."""
+
+    def __init__(
+        self,
+        http_client: httpx.AsyncClient,
+        *,
+        catalog_endpoint: str,
+        execution: ExecutionContextClient,
+    ) -> None:
+        """Borrow the lifespan HTTP and credential clients; never cache signed contexts."""
+        super().__init__(http_client, catalog_endpoint=catalog_endpoint)
+        self._execution = execution
+
+    async def resolve(self, *, workspace_id: str, activity_ref: str) -> ActivityTypeVersion:
+        """Production cannot fall back to the unsigned legacy resolver entry point."""
+        raise ActivityUnresolvedError(activity_ref, "pinned execution identity is required")
+
+    async def resolve_execution(
+        self,
+        *,
+        workspace_id: str,
+        activity_ref: str,
+        identity: ExecutionIdentity,
+    ) -> ActivityTypeVersion:
+        """Resolve valid exact pins; bad references are permanent, transport failures retryable."""
+        if identity.workspace_id != workspace_id:
+            raise ActivityUnresolvedError(activity_ref, "execution workspace mismatch")
+        try:
+            ref = ActivityRef.parse(activity_ref)
+            if not ref.is_exact_pin:
+                raise ValueError("execution requires an exact activity pin")
+        except ValueError:
+            raise ActivityUnresolvedError(
+                activity_ref, "execution requires a valid exact activity pin"
+            ) from None
+        try:
+            headers = await self._execution.headers(identity, "catalog-activity-read")
+            url = (
+                f"{self._base}/v1/workspaces/{quote(workspace_id, safe='')}"
+                f"/activity-types/{quote(str(ref), safe='/@')}"
+            )
+            async with (
+                asyncio.timeout(self._timeout),
+                self._http.stream(
+                    "GET",
+                    url,
+                    headers=headers,
+                    timeout=self._timeout,
+                    follow_redirects=False,
+                ) as response,
+            ):
+                if response.status_code == 404:
+                    raise ActivityUnresolvedError(activity_ref)
+                if response.status_code != 200:
+                    raise CatalogUnavailableError(activity_ref, "activity metadata read failed")
+                raw = bytearray()
+                async for chunk in response.aiter_bytes(chunk_size=16384):
+                    if len(raw) + len(chunk) > 1024 * 1024:
+                        raise CatalogUnavailableError(activity_ref, "activity metadata too large")
+                    raw.extend(chunk)
+            import json
+
+            result = self._parse(ref=ref, payload=json.loads(raw))
+            if (result.namespace, result.type, result.version) != (
+                ref.namespace,
+                ref.type,
+                ref.version,
+            ):
+                raise ValueError("activity metadata changed its requested reference")
+            return result
+        except (
+            httpx.HTTPError,
+            ValueError,
+            TimeoutError,
+            ExecutionAuthorizationError,
+            CatalogUnavailableError,
+        ):
+            raise CatalogUnavailableError(
+                activity_ref, "scoped activity resolution failed"
+            ) from None

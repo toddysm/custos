@@ -7,6 +7,7 @@ import json
 import time
 from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
 
 import httpx
 import pytest
@@ -252,7 +253,17 @@ def _compiled_producer(
 
 @pytest.mark.parametrize(
     "mutation",
-    [None, "instance", "capabilities", "kind", "slot", "schema", "producer", "connectorless"],
+    [
+        None,
+        "instance",
+        "capabilities",
+        "kind",
+        "slot",
+        "schema",
+        "producer",
+        "connectorless",
+        "provider-kind",
+    ],
 )
 async def test_real_workflow_client_uses_actual_connector_contract(
     signing: Signing, mutation: str | None
@@ -261,7 +272,32 @@ async def test_real_workflow_client_uses_actual_connector_contract(
     catalog = FakeCatalogAdapter(applied_revisions={1, 2})
     instances = FakeConnectorInstanceAdapter(applied_revisions={1})
     instance = _make_instance()
+    required = ("events.delivery",)
+    target_kind = instance.type
+    if mutation == "provider-kind":
+        manifest = json.loads(
+            (
+                Path(__file__).resolve().parents[4]
+                / "extensions/connectors/dockerhub/connector-manifest.json"
+            ).read_text()
+        )
+        instance = replace(
+            instance,
+            type=manifest["metadata"]["type"],
+            version=manifest["metadata"]["version"],
+            used_capabilities=("oci.pull",),
+        )
+        required = ("oci.pull",)
+        target_kind = manifest["spec"]["target"]["kind"]
     await _seed(catalog, instances, instance)
+    if mutation == "provider-kind":
+        await catalog.put_connector_type_version(
+            instance.type,
+            instance.version,
+            "sha256:fixture",
+            "registry.test/plugin@sha256:fixture",
+            manifest,
+        )
     binder = StubPluginBinder()
     app = create_app(
         settings=replace(
@@ -376,14 +412,10 @@ async def test_real_workflow_client_uses_actual_connector_contract(
                 run_id="actual-run",
                 step_id="step",
                 attempt=3,
-                slots=(
-                    SlotSpec(
-                        "source", str(instance.instance_id), ("events.delivery",), instance.type
-                    ),
-                ),
+                slots=(SlotSpec("source", str(instance.instance_id), required, target_kind),),
                 execution_identity=identity,
             )
-            if mutation is not None:
+            if mutation not in {None, "provider-kind"}:
                 with pytest.raises(OutboundRpcDecodeError):
                     await client.bind_for_step(request)
                 return

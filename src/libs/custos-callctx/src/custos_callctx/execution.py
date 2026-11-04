@@ -19,6 +19,7 @@ ExecutionOperation = Literal[
     "catalog-activity-read",
     "connector-bind",
     "activity-execute",
+    "connector-credentials",
 ]
 EXECUTION_PERMISSIONS: Mapping[str, str] = MappingProxyType(
     {
@@ -28,6 +29,7 @@ EXECUTION_PERMISSIONS: Mapping[str, str] = MappingProxyType(
         "catalog-activity-read": "catalog:activity-types:read",
         "connector-bind": "connector:bind",
         "activity-execute": "workflow:execute",
+        "connector-credentials": "connector:bind",
     }
 )
 
@@ -122,6 +124,11 @@ class ExecutionBindings:
             selected[workspace] = identifier
         self._bindings = MappingProxyType(rows)
         self._defaults = MappingProxyType(selected)
+
+    @property
+    def identities(self) -> tuple[ExecutionIdentity, ...]:
+        """Return probe references, not a fallback identity-selection policy."""
+        return tuple(binding.identity for binding in self._bindings.values())
 
     def select(self, workspace: str) -> ExecutionIdentity:
         """Select identity for new work only; absent configuration is never a creator fallback."""

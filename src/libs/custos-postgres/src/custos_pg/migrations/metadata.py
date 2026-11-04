@@ -718,6 +718,37 @@ METADATA_REV13 = Revision(
 )
 
 
+METADATA_REV15 = Revision(
+    number=15,
+    statements=(
+        """
+        CREATE TABLE IF NOT EXISTS custos_state.activity_execution (
+            workspace_id TEXT NOT NULL,
+            execution_key TEXT NOT NULL,
+            step_key TEXT NOT NULL CHECK (step_key ~ '^[a-f0-9]{64}$'),
+            run_id TEXT NOT NULL,
+            step_id TEXT NOT NULL,
+            attempt INTEGER NOT NULL CHECK (attempt > 0),
+            request_hash TEXT NOT NULL CHECK (request_hash ~ '^[a-f0-9]{64}$'),
+            owner TEXT NOT NULL CHECK (owner ~ '^[a-f0-9]{32}$'),
+            snapshot JSONB NOT NULL CHECK (
+                jsonb_typeof(snapshot)='object' AND octet_length(snapshot::text) <= 33554432
+            ),
+            completed BOOLEAN NOT NULL DEFAULT FALSE,
+            authority_revoked BOOLEAN NOT NULL DEFAULT FALSE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+            PRIMARY KEY (workspace_id, execution_key)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS activity_execution_step "
+        "ON custos_state.activity_execution(workspace_id, step_key, attempt)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS activity_execution_live_step "
+        "ON custos_state.activity_execution(workspace_id, step_key) WHERE NOT completed",
+    ),
+)
+
+
 # Python str.strip() whitespace, independent of the database's locale.
 _EXECUTION_WHITESPACE = (
     r"\0009\000A\000B\000C\000D\001C\001D\001E\001F\0020\0085\00A0\1680"
@@ -809,4 +840,5 @@ __all__ = [
     "METADATA_REV12",
     "METADATA_REV13",
     "METADATA_REV14",
+    "METADATA_REV15",
 ]
