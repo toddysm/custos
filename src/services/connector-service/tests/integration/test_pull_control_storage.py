@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import replace
 from datetime import timedelta
+from typing import Any, cast
 
 import asyncpg
 import pytest
-from custos_pg import PgMetadataAdapter
+from custos_pg import PgConnectorInstanceAdapter, PgMetadataAdapter
 from custos_spl.errors import ImmutableViolation, LeaseBusy, LeaseExpired
 from custos_spl.ids import (
     ConnectorInstanceId,
@@ -18,22 +19,100 @@ from custos_spl.ids import (
     WorkflowId,
     WorkspaceId,
 )
+from custos_spl.interfaces.connector_instance_store import (
+    ConnectorInstance,
+    ConnectorInstanceFilter,
+)
 from custos_spl.interfaces.metadata_store import (
+    MetadataStoreProvider,
     ResumeSubscription,
     Subscription,
     SubscriptionSelector,
 )
 from custos_spl.interfaces.pull_control import PullTickBlocked
+from custos_spl.pagination import Cursor, Page
 
 from custos_connector.audit import (
     EVENT_PULL_LOOP_PAUSED,
     EVENT_PULL_LOOP_RESUMED,
     build_audit_event,
 )
+from custos_connector.cursor.service import CursorService
+from custos_connector.runtime import PluginInvoker
+from custos_connector.scheduler.demand import PullDemandReconciler
+from custos_connector.scheduler.pull_loop import PullLoopScheduler
+from tests._pull import PullClock, memory_runtime, seed_instance
 
 pytestmark = pytest.mark.integration
 WS = WorkspaceId("pull-a")
 INSTANCE = ConnectorInstanceId("same")
+
+
+async def test_native_registration_retries_do_not_repeat_completed_prefix(
+    pull_store: PgMetadataAdapter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reconcile205 actual database instances through repeated deadline-limited listing pages."""
+    providers, _, plugin, _ = memory_runtime(PullClock())
+    base = await seed_instance(providers)
+    instances = PgConnectorInstanceAdapter(pool=await pull_store._pool_ref())
+    for index in range(205):
+        instance = replace(base, instance_id=ConnectorInstanceId(f"instance-{index:03}"))
+        await instances.put_connector_instance(WS, instance)
+        await pull_store.initialize_pull_control(WS, instance.instance_id, actor="creator")
+        await pull_store.set_pull_native_demand(
+            WS,
+            instance.instance_id,
+            interval_seconds=60,
+            actor="native",
+        )
+
+    async def publish(
+        workspace_id: WorkspaceId,
+        instance: ConnectorInstance,
+        events: Sequence[Mapping[str, Any]],
+    ) -> None:
+        """No upstream poll occurs during registry reconciliation."""
+        raise AssertionError("registration must not publish events")
+
+    cursor_service = CursorService(
+        metadata_store=cast(MetadataStoreProvider, pull_store),
+        catalog_store=providers.catalog_store,
+        instance_store=instances,
+        plugin_invoker=PluginInvoker(plugin),
+        publisher=publish,
+        pull_control=pull_store,
+        lease_ttl_seconds=60,
+    )
+    scheduler = PullLoopScheduler(cursor_service=cursor_service, pull_control=pull_store)
+    reconciler = PullDemandReconciler(controls=pull_store, instances=instances, scheduler=scheduler)
+    listing = instances.list_connector_instances
+    calls = 0
+    positions: list[Cursor | None] = []
+
+    async def expire_second_page(
+        workspace_id: WorkspaceId,
+        filter: ConnectorInstanceFilter | None = None,
+        cursor: Cursor | None = None,
+        limit: int | None = None,
+    ) -> Page[ConnectorInstance]:
+        """Inject the deadline at the actual provider boundary without changing native cursors."""
+        nonlocal calls
+        calls += 1
+        positions.append(cursor)
+        if calls % 2 == 0:
+            raise TimeoutError("synthetic listing deadline")
+        return await listing(workspace_id, filter=filter, cursor=cursor, limit=limit)
+
+    monkeypatch.setattr(instances, "list_connector_instances", expire_second_page)
+    for count in (100, 200):
+        with pytest.raises(TimeoutError):
+            await reconciler.reconcile(str(WS))
+        assert len(scheduler.registration_snapshot(str(WS))) == count
+    assert await reconciler.reconcile(str(WS)) == 205
+    assert len(scheduler.registration_snapshot(str(WS))) == 205
+    assert positions[0] is None and positions[1] == positions[2] and positions[3] == positions[4]
+    assert positions[1] is not None and positions[1] != positions[3]
 
 
 @pytest.fixture

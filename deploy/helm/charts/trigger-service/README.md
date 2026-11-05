@@ -202,6 +202,12 @@ only after acknowledgement. There is no 50-workspace continuation window:
 in-memory state is one discovery page plus one claimed continuation per operation.
 Scheduled workers must hold scheduler leadership before claiming; standbys
 cannot postpone another workspace's scheduled progress.
+Connector's local polling-registry rebuild also advances per completed
+100-instance page. Deadline retries resume that advisory cursor and only a
+complete scan removes old registrations; no all-instance eligible set is built.
+This cursor is process-local because a new process must rebuild its own registry.
+It is not the upstream Connector cursor or Trigger's durable delivery progress,
+and every poll still rechecks current instance, pause and invocation authority.
 
 Progress leases last 360 seconds, covering the 300-second page deadline plus
 bounded database operations; discovery has a 30-second lease and 15-second
