@@ -90,6 +90,7 @@ from custos_spl.pagination import (
     encode_query_cursor,
     query_page_limit,
 )
+from custos_spl.receiver_memory import MemoryReceiverScanProgress
 
 from custos_trigger.stores.base import TriggerMetadataStore
 
@@ -135,7 +136,7 @@ def is_memory_dsn(dsn: str) -> bool:
     return lowered == "" or lowered in _MEMORY_DSN_SENTINELS or lowered.startswith("memory://")
 
 
-class InMemoryTriggerMetadataStore(MemoryDeliveryState):
+class InMemoryTriggerMetadataStore(MemoryDeliveryState, MemoryReceiverScanProgress):
     """In-process :class:`TriggerMetadataStore` for local dev + tests.
 
     Implements the eight Trigger-Service write methods of
@@ -160,6 +161,11 @@ class InMemoryTriggerMetadataStore(MemoryDeliveryState):
         self._dedup: dict[tuple[str, str], SplDedupKey] = {}
         self._schedules: dict[tuple[str, str], SplSchedule] = {}
         self._scheduler_leases: dict[str, SchedulerLease] = {}
+        MemoryReceiverScanProgress.__init__(
+            self,
+            now=self._now,
+            scheduler_lookup=self._scheduler_leases.get,
+        )
         self._pending_fires: dict[tuple[str, str], PendingScheduleFire] = {}
         self._dead_letters: dict[tuple[str, str], DeadLetterEntry] = self._delivery_dead_letters
         self._bulk_replays: dict[tuple[str, str], BulkReplayCommand] = {}

@@ -17,6 +17,7 @@ from typing import Any, Protocol, runtime_checkable
 from custos_spl.errors import ImmutableViolation, LeaseExpired, QueryUnsupported
 from custos_spl.ids import WorkspaceId
 from custos_spl.interfaces.dead_letters import DeadLetterData
+from custos_spl.interfaces.receiver_progress import ScanContinuation, ScanOperation
 from custos_spl.interfaces.scheduler import (
     PendingScheduleFire,
     SchedulerLease,
@@ -25,7 +26,7 @@ from custos_spl.interfaces.scheduler import (
     utc_instant,
 )
 from custos_spl.interfaces.trigger_queries import TriggerQueryProvider
-from custos_spl.pagination import Cursor, query_page_limit
+from custos_spl.pagination import Cursor, decode_query_cursor, query_page_limit
 
 from custos_trigger.events import EventSource, NormalizedEvent
 from custos_trigger.input_mapping import resolve_input_mapping
@@ -290,8 +291,9 @@ class ScheduledReceiver:
         publish: Callable[[NormalizedEvent], Awaitable[None]],
         audit: AuditSink,
         page_size: int = 50,
+        continuation: ScanContinuation | None = None,
     ) -> None:
-        """Bind explicit scope, publication acknowledgement and storage capabilities."""
+        """Bind scope and optional committed progress; never restore scheduler authority."""
         if not workspace_id.strip():
             raise ValueError("scheduled receiver requires a workspace")
         if not isinstance(provider, ScheduledStorage):
@@ -308,6 +310,27 @@ class ScheduledReceiver:
         self._due_cutoff: datetime | None = None
         self._due_cursor: Cursor | None = None
         self._pending_more = False
+        if continuation is not None:
+            if continuation.operation is not ScanOperation.SCHEDULED:
+                raise ValueError("scheduled receiver requires scheduled continuation")
+            continuation = ScanContinuation.from_json(continuation.to_json())
+            if continuation.cursor is not None:
+                assert continuation.due_cutoff is not None
+                decode_query_cursor(
+                    continuation.cursor,
+                    ("schedules", workspace_id, continuation.due_cutoff.isoformat()),
+                )
+            self._due_cursor, self._due_cutoff = continuation.cursor, continuation.due_cutoff
+
+    def snapshot_continuation(self) -> ScanContinuation:
+        """Return the acknowledged due-page position only when no tick is in flight."""
+        if self._lock.locked():
+            raise RuntimeError("scheduled continuation cannot be captured during a tick")
+        return ScanContinuation(
+            ScanOperation.SCHEDULED,
+            self._due_cursor,
+            self._due_cutoff if self._due_cursor is not None else None,
+        )
 
     async def _heartbeat(self) -> datetime:
         """Refresh provider authority before side effects and during cooperative cron counting."""

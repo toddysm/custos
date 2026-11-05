@@ -371,8 +371,11 @@ class ReliableDispatcher:
                         current = await self.store.get_source_delivery(
                             WorkspaceId(workspace), position[0]
                         )
-                        if current is None:
-                            raise ImmutableViolation("source selection no longer exists")
+                        if current is None or current.requests is None:
+                            logger.warning("retained-source-absent during source reconciliation")
+                            return SourceReconciliationPage(
+                                0, 0, 0, _source_progress_cursor(workspace, position[0])
+                            )
                         page = Page([current], None)
                         following = _source_progress_cursor(workspace, position[0])
                     else:

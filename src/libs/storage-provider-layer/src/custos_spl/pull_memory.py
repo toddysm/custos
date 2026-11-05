@@ -68,14 +68,17 @@ class MemoryPullControl:
         """Memory is ready at construction; this does not assert production restart durability."""
 
     async def check_receiver_workspaces_ready(self) -> None:
-        """Expose memory-owned polling state without claiming restart durability."""
+        """Polling recovery discovery is available independently of active demand."""
 
     async def query_receiver_workspaces(
-        self, *, cursor: Cursor | None = None, limit: int | None = None
+        self,
+        *,
+        cursor: Cursor | None = None,
+        limit: int | None = None,
     ) -> Page[WorkspaceId]:
-        """Keep paused/fenced controls and legacy cursor workspaces discoverable."""
+        """Include retained paused controls and cursors without requiring a live subscription."""
         return receiver_workspace_page(
-            (key[0] for rows in (self._pull_controls, self._pull_cursor_rows) for key in rows),
+            (ws for rows in (self._pull_controls, self._pull_cursor_rows) for ws, _ in rows),
             cursor=cursor,
             limit=limit,
         )
