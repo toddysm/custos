@@ -1,10 +1,10 @@
 # Trigger M2 receivers - product requirements and engineering design
 
-- Status: **Runtime prerequisite and Connector-owned issuer extension authorized; implementation in progress.**
-- Planning format: full; revision 6 (owner-approved Connector-owned credential issuance extension).
+- Status: **Revision-7 durable scan-progress amendment proposed; implementation awaits design approval.**
+- Planning format: full; revision 7. D01-D07 approvals remain historical; D08 is not yet approved.
 - Tracking: [#988](https://github.com/toddysm/custos/issues/988).
 - Design work item: [#1004](https://github.com/toddysm/custos/issues/1004).
-- Updated: 2026-11-02; original baseline commit `e344ab2`.
+- Updated: 2026-11-05; original baseline commit `e344ab2`.
 - Validation: GitHub-hosted continuous integration (CI), plus Copilot review.
 - Delivery plan: [implementation-plan-m2.md](../components/trigger-service/implementation-plan-m2.md).
 
@@ -38,6 +38,16 @@ This is an existing-platform completion effort, not a market-validation study.
 No external customer interviews, three named customer references, adoption
 baseline or commercial impact measurements were supplied. Those remain absent;
 this document does not invent them or claim general-availability readiness.
+
+Revision-7 evidence: [#1044](https://github.com/toddysm/custos/pull/1044) at
+`e34dfa1a40cf07088356d18094ff2d2ddeadbe24` retains at most 50 continuing
+workspaces in memory. A 51-workspace reproduction made 1,457 delivery passes
+but visited only the first 50. Its
+[open review finding](https://github.com/toddysm/custos/pull/1044#discussion_r4474284303)
+blocks lifecycle completion despite passing hosted checks. The owner authorized
+one prerequisite issue, [#1045](https://github.com/toddysm/custos/issues/1045),
+and this design-amendment pull request on 2026-11-04T16:20:02.742-08:00.
+That authorization is for planning, not approval of the concrete D08 contract.
 
 ### 3. Customer scenarios
 
@@ -198,14 +208,20 @@ storage/backup policies. Dead-letter retention defaults to 30 days.
 D01-D05 and the recorded amendments are approved. D06's workspace-scoped
 execution identity and new contract-alignment prerequisite were explicitly
 approved on 2026-11-02. On the same date the owner authorized creating and
-starting D07's startup/bootstrap prerequisite. The separate amendment pull
-request remains open for review; publication does not authorize its merge.
+starting D07's startup/bootstrap prerequisite. Those prerequisites subsequently
+merged through #1040/#1041; publication of the new D08 amendment does not
+authorize its merge.
 The baseline design owner is
 [#1004](https://github.com/toddysm/custos/issues/1004); implementation owners
 are the linked child issues.
 Copilot findings can change a recommendation but cannot approve it on behalf of
 the repository owner. A material change to scope or contracts invalidates any
 earlier approval and updates both the plan and affected acceptance criteria.
+
+D08 adds durable scan progress and fair admission, rather than discarding
+unfinished cursors to free memory. Its schema, ownership, retention and rollout
+contract require explicit approval of revision 7 before #1045 implementation.
+The existing #1044 remains open and must consume the merged prerequisite.
 
 ### 14. Rollout and milestones
 
@@ -695,6 +711,324 @@ truthy readiness for an unwired scheduler. This prerequisite does not duplicate
 [#991](https://github.com/toddysm/custos/issues/991)'s deferred features or
 [#763](https://github.com/toddysm/custos/issues/763)'s Kata-specific certification.
 
+#### D08 - Durable scan progress and fair workspace admission (proposed)
+
+**Decision and scope.** Replace #1044's in-memory-only continuation queue with
+bounded discovery plus a durable service-order queue in the existing PostgreSQL
+metadata store. This is a quality prerequisite for S1-S4 and the existing
+multi-tenancy requirement, not a new receiver, external queue, public endpoint
+or coordinated rate limiter. No payload, authorization identity or dispatch
+receipt moves into scan-progress storage. Existing effects remain authoritative.
+
+**Operator scenarios and requirements.**
+
+- **SP1, saturation:** an operator enables receivers for 51 or more workspaces.
+  Even when every early workspace keeps returning a continuation, later
+  workspaces must be discovered and receive bounded passes. A small active
+  window must limit memory, not which workspaces can ever run.
+- **SP2, restart:** an on-call operator restarts a replica midway through a
+  selection with more than 32 targets or a multi-page scheduled scan. The next
+  owner resumes the committed target position/cutoff, rather than restarting
+  every busy workspace at page one. Repeating an uncheckpointed page is safe;
+  skipping unprocessed work is not.
+- **SP3, degraded storage:** when progress cannot be read or checkpointed, the
+  process reports unavailable, stops claiming new work and retains the last
+  committed state. Restoring the database resumes normal work; there is no
+  success-shaped empty scan or automatic in-memory fallback.
+
+The existing scheduled occurrence, downstream idempotency, operator pause and
+credential contracts remain unchanged. This amendment does not promise a fixed
+wall-clock latency for arbitrarily many tenants or arbitrarily slow upstreams.
+
+**Proposed component flow (revision 7, not implemented).** Solid arrows denote
+provider or collaborator calls, not new network endpoints:
+
+```text
+Trigger discovery task -- bounded ID pages --> receiver workspace provider
+         |
+         +-- atomic register + discovery checkpoint --> metadata scan store
+                                                        ^
+Trigger operation task -- claim next fair row -----------|
+         |                                               |
+         +-- restore typed continuation                  |
+         +-- one bounded existing operation page         |
+         +-- fenced checkpoint + release ----------------+
+                    |
+        existing schedule / delivery / retention / demand collaborators
+                    |
+        existing effect fences, receipts and downstream authorization
+```
+
+The [storage interfaces](../../src/libs/storage-provider-layer) and
+[PostgreSQL adapter](../../src/libs/custos-postgres) gain the optional progress
+capability and additive migration in #1045. The
+[scheduled receiver](../../src/services/trigger-service/src/custos_trigger/receivers/scheduled.py)
+gains a typed continuation snapshot/restore contract there as well.
+#1017 owns lifecycle/discovery integration, readiness and four-profile wiring
+in its preserved PR; #1018 certifies deployment; #1019 owns final user docs.
+
+**Discovery is not Auth workspace enumeration.** The current candidate
+[#1044 interface](https://github.com/toddysm/custos/blob/e34dfa1a40cf07088356d18094ff2d2ddeadbe24/src/libs/storage-provider-layer/src/custos_spl/interfaces/receiver_workspaces.py)
+already defines `ReceiverWorkspaceProvider` with
+`check_receiver_workspaces_ready()` and
+`query_receiver_workspaces(*, cursor: Cursor | None = None,
+limit: int | None = None) -> Page[WorkspaceId]`. Its default page is 50,
+maximum 200; runtime requests exactly 50. Its
+[PostgreSQL implementation](https://github.com/toddysm/custos/blob/e34dfa1a40cf07088356d18094ff2d2ddeadbe24/src/libs/custos-postgres/src/custos_pg/adapters/metadata.py#L737)
+projects only distinct workspace IDs from subscription, resume, schedule,
+pending-fire, dead-letter, replay-command, source-selection, receipt and
+connector-control/cursor tables. It uses C-collation keyset order, bound
+`workspace_id > after` and `limit + 1` both per table and on the outer union.
+At runtime limit 50, at most 51 IDs cross the database boundary, including the
+one-row lookahead; only 50 are returned for registration. No upstream
+`AuthStoreProvider.list_workspaces` or `GET /v1/workspaces` call is permitted.
+The opaque, versioned query-scoped cursor resumes the keyset query itself,
+not slicing a previously materialized full workspace list.
+
+These are reviewed candidate capabilities, **not yet on main**. #1045 must
+extract this bounded interface, PostgreSQL projection, memory parity and native
+tests from the owned #1044 changes into the standalone prerequisite, alongside
+the new progress capability. The memory fixture may own all seeded test data;
+the production discovery path must never materialize all workspace IDs.
+Reconcile the identical extracted changes when #1017 integrates main; do not
+copy its unrelated lifespan/deployment code or pretend the prerequisite already
+exists. Continue including orphaned recovery state, not only live subscriptions.
+
+##### Persisted model and lifecycle
+
+Use the next available additive metadata revision (16 at the inspected main
+`a4eaa5e`); recheck numbering before implementation. Model version 1 has:
+
+| Record | Key / bounded fields | Purpose |
+|---|---|---|
+| Discovery | `deployment_id`; opaque workspace cursor; sweep generation; completed sweep generation; holder, generation, claim token, database-time expiry | Resume bounded discovery independently of operation occupancy. |
+| Workspace operation | `(deployment_id, workspace_id, operation)`; unique row incarnation; format version; progress revision; continuation; service ticket; `next_eligible_at`; holder/generation/token/expiry; `last_seen_sweep`, `last_seen_at`, `updated_at` | Retain one operation's progress and fair eligibility across replicas/restarts. |
+
+`operation` is exactly `scheduled`, `delivery`, `pull-demand` or `retention`.
+Continuation is a closed tagged structure, serialized as at most 64 KiB of
+UTF-8 JSON with unknown fields/versions rejected:
+
+| Operation | Version-1 continuation |
+|---|---|
+| `scheduled` | nullable opaque due cursor plus its UTC due cutoff; either both present or both null. A restored receiver reacquires scheduler leadership; no lease, Python object, callable or pending-fire payload is serialized. |
+| `delivery` | nullable opaque source-reconciliation cursor, including the existing within-selection target index unchanged. |
+| `retention` | nullable opaque dead-letter sweep cursor. |
+| `pull-demand` | no continuation; one bounded reconciliation hint completes the pass. |
+
+Nullable cursor means the next pass starts a new scan, not that retained source
+work is acknowledged or can be deleted. Opaque cursor contents are not decoded
+by the progress adapter; the owning operation validates their workspace/query
+scope before effects. Validate the entire record at the provider boundary and
+again when restoring it, including enum, type, timestamp and size constraints.
+Malformed/unsupported state raises an explicit provider/validation error;
+never silently reset it. Contract tests must prove the cap accepts the largest
+legal cursor from each actual producer; do not truncate to make it fit.
+
+Registration creates missing operation rows with null progress and an initial
+service ticket. Repeated discovery only refreshes last-seen fields: it cannot
+reset progress, ownership, retry eligibility or service order. A completed
+operation page persists its exact next continuation and releases the claim;
+a finished scan persists the corresponding null continuation. Failure,
+cancellation or lost lease preserves the previous committed continuation.
+Last-seen refreshes do not increment the progress revision: background discovery
+must not invalidate an otherwise current worker's checkpoint. Format version,
+progress revision and ownership generation are distinct fields.
+
+Discovery has its own fenced claim, shared per deployment, and reads at most
+50 IDs per pass. Register all four operations for that page and advance the
+discovery cursor in one transaction. Duplicate attempts are idempotent.
+Generation completion is recorded only after the terminal discovery page
+commits; a crash cannot turn a partial scan into proof of absence.
+No processing-queue length condition may prevent the next discovery page.
+
+##### Internal provider contract, fairness and ownership
+
+Add a runtime-checkable `ReceiverScanProgressProvider` capability rather than
+expanding every existing metadata consumer. The Python contract includes:
+
+| Operation | Required inputs / result | Failure or retry behavior |
+|---|---|---|
+| `check_receiver_scan_progress_ready()` | Required schema/capability probe | `MigrationRequired`/`QueryUnsupported` blocks activated receiver readiness. |
+| Claim discovery | deployment, owner, lease duration -> lease plus cursor/sweep, or no available claim | Database time; no claim is a normal competing-owner outcome. |
+| Commit discovery page | current discovery claim, at most 50 workspace IDs, next opaque cursor -> committed cursor/sweep | Atomic registration/checkpoint. Wrong or expired ownership raises `LeaseExpired`; retry by rereading, never by assuming a timed-out write failed. |
+| Claim operation | deployment, operation, owner, lease duration; live scheduler lease additionally required for `scheduled` -> one typed progress row and claim, or no eligible work | Atomic indexed selection, row lock/`SKIP LOCKED`, then fenced claim update; scheduled claims also verify scheduler authority before any queue mutation. |
+| Checkpoint operation | current claim and validated continuation -> committed progress revision | Verify exact scope/incarnation/generation/token, unexpired lease and expected progress revision; atomically update continuation and release. |
+| Release failed operation | current claim -> released unchanged continuation, next retry time | Same fencing; never clear another owner's claim. Expired claims recover by takeover, not unfenced release. |
+| Prune inactive progress | deployment, completed discovery generation, bounded limit | Delete only eligible finished, unclaimed records proved absent; return bounded count/continuation. |
+
+Names may follow existing provider naming conventions during implementation;
+the input/output semantics and error distinctions above are mandatory.
+Use existing `BackendUnavailable`, `ImmutableViolation` and `LeaseExpired`
+categories where applicable. No new public HTTP error format is introduced.
+
+Within each deployment/operation, assign a strictly increasing database-backed
+service ticket at insertion and at every successful claim. Select the eligible,
+unleased row with the smallest ticket; move it to the tail **when claimed**,
+not only after success. This prevents a failing/crashing workspace from
+continually remaining first. Registration cannot move an existing row back to
+the head, and new work joins the tail. Persist ticket allocation and claim in
+one transaction; an index covers deployment/operation/service order and
+eligibility. Gaps in tickets are harmless; wrap/reuse is not permitted.
+
+For a fixed set of N eligible, unleased rows, with one controlled test worker
+and advancing retry time, every row must be claimed within N successful claims,
+even if every page returns more work. This is a turn-based fairness assertion,
+not a wall-clock service-level objective. Multiple replicas must never own the
+same unexpired row concurrently. New registrations and completed claims get
+later tickets, so they cannot repeatedly jump ahead of older eligible work.
+Expired leases and database locks may delay service and must be observable.
+
+The operation lease is 360 seconds for an existing page deadline of at most
+300 seconds plus query/checkpoint reserve; its configured maximum is 3,600
+seconds. Discovery uses a 30-second lease for a pass bounded to 15 seconds.
+The provider validates finite positive durations and caps them; activated
+runtime settings reject budgets that do not cover the page and checkpoint
+deadlines. Work must stop at its existing deadline and cannot continue effects
+on the strength of a progress lease. Successful pages become eligible after
+the existing receiver interval (one second by default); failed pages have a
+five-second retry floor. Tests use a controlled provider clock, not sleeps.
+
+Progress fencing protects only continuation ownership. Scheduled effects still
+require the deployment scheduler lease, delivery still uses immutable snapshots
+and downstream deduplication, and pull effects remain Connector-owned.
+Before claiming **scheduled** progress, the runtime acquires or force-renews
+`SchedulerLeadership`; a standby waits without claiming, moving tickets or
+postponing eligibility. The provider also verifies the supplied lease's
+deployment, holder, epoch and database-time expiry atomically with the scheduled
+progress claim, so expiry between the preflight and transaction cannot let a
+standby consume a turn. Lock scheduler authority before progress rows with a
+consistent ordering. A missing/stale/expired scheduler lease rejects the claim
+without queue mutation. Non-scheduled operations require no scheduler lease.
+Retain every existing effect-time scheduler check/heartbeat. If leadership is
+lost after claiming, stop the page and fenced-release unchanged progress with
+the failure retry floor, or let the progress lease expire if storage is down.
+This finite recovery delay must not become a loop of standby postponements.
+A lost checkpoint response
+requires reading the current row on a later claim; never submit an old position
+unconditionally. A crash after an effect but before checkpoint may repeat that
+page, using the same existing event/target identity. No exactly-once claim is
+made, and progress must never advance before the page's acknowledged outcome.
+
+Each process registers at most 50 discovery IDs per page, with at most one
+additional backend lookahead ID (51 distinct IDs materialized by discovery),
+plus one claimed continuation per operation, not a map or task per workspace.
+The durable bound is at most four
+progress rows per discovered workspace per deployment plus one discovery row;
+retained history scales with workspace count in PostgreSQL, not process memory.
+
+##### Retention, recovery, security and diagnostics
+
+Retain unfinished continuations without time-based eviction. A bounded cleanup
+may remove a row only when its continuation is null, no lease is live, it was
+not seen in a fully completed later discovery sweep, and it has been idle for
+at least 30 days. Recheck all conditions atomically against concurrent discovery
+and claims. Deletion and recreation use a new incarnation so old tokens cannot
+write through an ABA race. A workspace absent while still unfinished is retained
+and alerted; no automatic deletion invents completion. An operator retires a
+deployment only after admission is disabled, tasks drained and its retained
+work assessed; do not delete all rows merely because a Pod disappears.
+
+Unsupported/corrupt continuation is a readiness/diagnostic failure with a bounded
+reason code, not an empty cursor. A known workspace-scoped delivery cursor whose
+referenced payload was legitimately removed by existing retention is different:
+the operation must confirm absence through the authoritative store, emit a safe
+`retained-source-absent` diagnostic, and checkpoint an after-selection position
+using that operation's existing cursor codec. It must not skip a malformed
+cursor or recreate an expired payload. Test this exact race natively.
+
+No new service identity, public route, broker, secret, credential exchange or
+network port is introduced. Use the existing Trigger-to-PostgreSQL connection,
+private network policy and runtime metadata role; migration permission remains
+with the migration Job. Every read/write is deployment- and workspace-scoped.
+Cursor metadata may contain tenant identifiers, so it remains under the same
+encryption/backup/sovereignty policy as metadata and is never exported verbatim.
+No workspace, cursor or claim token becomes a metric label.
+
+Keep existing receiver pass counts/durations and add bounded operation/outcome
+metrics for discovery, progress checkpoint failure, oldest eligible age and
+claim expiry. Existing durable source/dispatch audits remain the longitudinal
+per-workspace usage/adoption history; scan checkpoints are current operational
+state, not a replacement audit history. Measure additional rows/bytes, indexed
+query latency and database writes per pass for the proposed N=51/200/1,000 tests.
+There is no new price or committed currency estimate; apply operator database
+rates to the measured overhead.
+
+##### Proposed operator output (success and error)
+
+These are illustrative summaries from existing readiness/metric surfaces, not
+a proposed new command or public response schema. No live tenant data is shown.
+
+```text
+Receiver progress: ready
+Discovery: 51 workspaces registered
+Delivery fairness probe: 51 of 51 workspaces served in 51 claims
+Restart probe: committed target position retained
+```
+
+```text
+Receiver progress: unavailable
+Reason: migration-required
+Action: keep receiver admission disabled; apply metadata revision 16;
+        deploy compatible providers and recheck readiness.
+```
+
+##### Validation, rollout and human gate
+
+Acceptance tests are proposed requirements, not results from an implementation:
+
+1. Register 51, 200 and 1,000 always-continuing workspaces. Discovery must pass
+   the initial 50 IDs without waiting for any workspace to finish. After
+   registration and with all rows eligible, every operation visits all N within
+   N successful claims. Measure the 50-ID returned page/51-ID production fetch
+   and four-claim bounds exactly, including the adapter boundary. Persist a
+   discovery cursor, recreate the provider, and verify its next SQL keyset
+   query resumes after that ID rather than fetching all N and slicing locally.
+2. Use real producer cursors: a 1,000-target delivery selection crossing the
+   32-target pass budget; more than 50 due schedules retaining the cutoff;
+   retention pagination; and finite plus continuously replenished backlogs.
+   Repeat across eviction from process memory, new provider instances and two
+   PostgreSQL connections. No tail target is perpetually reset to page one.
+3. Race claim, checkpoint, failure release, lease expiry and fresh takeover.
+   Stale/expired/wrong-scope/incarnation writes fail. Crash before/after effect
+   and before/after checkpoint; inject a lost commit response. Verify unchanged
+   effect identity, no false acknowledgement and resumed committed progress.
+   For scheduled work, run a leader and a competing standby against the actual
+   scheduler/progress providers. Repeated standby scans must not acquire or
+   postpone rows. Assert actual scheduled pages/occurrences advance for every
+   eligible workspace, not just successful claim counts. Expire leadership
+   between preflight and claim (no queue mutation), then after claim/before
+   effect (existing fencing rejects the effect); verify the new leader resumes
+   the unchanged continuation after fenced release or progress-lease expiry.
+4. Test restart during discovery, duplicate page commit, deletion/recreation,
+   legitimate source retention, invalid/oversized/versioned state and schema 15
+   rejection for activated receivers. Off-mode/manual/internal behavior stays
+   unchanged. PostgreSQL cases must execute in hosted CI, not be skipped.
+5. #1017 tests actual lifespan composition, bounded cancellation/join, defaults,
+   activation guards and all four Helm profiles; #1018 remains the deployed
+   saturation/restart/partition certification gate. #1019 documents metrics,
+   safe maintenance, schema upgrade and rollback; it is not duplicated here.
+
+Apply the additive schema before compatible provider/service binaries. Disable
+receiver admission and drain old in-memory workers before enabling the new
+progress protocol; old and new receiver workers must not operate together.
+Preserve accepted source records and identities throughout. If new code must
+roll back, first disable/drain it, keep the additive progress tables, and keep
+background admission disabled on old binaries. Do not silently downgrade an
+active deployment to the starvation-prone runtime or destructively down-migrate.
+A later compatible rollout resumes the retained state.
+
+Risks: added database writes (measure indexed claim/checkpoint cost), stale
+owners (fencing and expiry), growing inactive state (bounded conditional cleanup),
+corrupt state (fail closed), tenant confusion (scope tests), and restart
+duplicates (existing effect identities). These mitigations supplement E-N.
+No new commercial/customer-evidence claims or delivery date are introduced.
+
+**Approval gate:** authorize this concrete D08 design and the revised
+19-item breakdown before implementing #1045. One prerequisite implementation
+pull request comes first; after its gated merge, integrate main normally in
+#1044's owned checkout and finish #1017. This plan PR does not close #1045,
+#1017 or #988 and must not be merged unattended.
+
 #### Components and flow
 
 **Owner-approved issuer extension (2026-11-02T20:56:34.079-08:00).** Within
@@ -763,6 +1097,7 @@ checks; missing production capabilities fail readiness.
 | REQ-036/037/038 | Signed contexts, D06 execution identity, no secret persistence, durable audit | 026-027, 032-034, 038 |
 | Preserve REQ-004/080 | Existing manual/internal routes and regression gates | 022, 034-035 |
 | Operator enablement | Deployment/rollback and final documentation | 034-036 |
+| SP1-SP3, bounded multi-tenant recovery | D08 durable progress, independent discovery, fair fenced claims and restart-safe continuation | 040, 034-036 |
 
 ### PM-2. Interfaces and versioning
 
@@ -1004,6 +1339,20 @@ The long poles are D05 crash-safe replay and production cross-service testing.
 Re-estimate after design review; split an oversized task only with an updated
 breakdown and renewed scope approval.
 
+D08 planning estimates below are provisional engineer-day ranges, not dates or
+owner commitments. They assume the existing PostgreSQL test harness and no new
+infrastructure; claim/cleanup concurrency and safe cursor restoration are the
+long poles. Re-estimate after the first native race tests. Do not silently split
+the single authorized prerequisite into additional issues.
+
+| D08 component / phase | Implement | Test/review | Deploy/rollback preparation | Item |
+|---|---|---|---|---|
+| Provider contract, memory parity, PostgreSQL schema/claims | 2-4 | 2-3 | 0.5-1 | 040 |
+| Typed scheduled scan snapshot/restore | 0.5-1 | 0.5-1 | 0.25-0.5 | 040 |
+| Runtime discovery/operation integration and readiness | 1-2 | 1-2 | 0.5-1 | 034, after 040 merges |
+| Profile/deployed saturation and failure certification | 0.5-1 | 1-2 | 0.5-1 | 034/035 |
+| Operator/developer progress documentation | 0.5-1 | 0.5 | 0.25 | Existing 036 |
+
 ### PM-7. Test plan and hosted CI
 
 Each child includes unit/contract tests and relevant integration coverage.
@@ -1024,6 +1373,17 @@ For D07, test readiness before initialization, at each startup failure and durin
 shutdown; resource cleanup and admission ordering; and the actual bootstrap minter
 against the actual sidecar verifier, including scope, expiry and private delivery.
 
+D08 uses synthetic scoped IDs and controlled clocks. Wire its provider tests
+into the PostgreSQL native job in
+[python-libs.yml](../../.github/workflows/python-libs.yml), and its Trigger
+continuation/lifespan tests into both unit and PostgreSQL jobs in
+[python-services.yml](../../.github/workflows/python-services.yml), on every
+matching pull request. Extend
+[helm-test.yml](../../.github/workflows/helm-test.yml) for capability/activation
+projection. Inspect logs to prove native cases execute; deselection is not a
+pass. The owned implementation must pass current-head applicable hosted gates
+and settled reviews; no new CI system or scheduled production probe is required.
+
 The plan-only pull request changes documentation; path-filtered service jobs
 may not run. Report that as not applicable, not green runtime evidence.
 Use normal hosted triggers without skip markers. Request Copilot review.
@@ -1036,7 +1396,9 @@ merge. Missing or pending required results remain blockers.
 - Preserve the recorded baseline and amendment approvals in #988.
 - Implement the approved #1037 prerequisite before #1017 profile activation.
 - Complete #1038's startup/bootstrap prerequisite before #1017 activation.
-- Keep the revision-5 plan-amendment pull request open for review; do not auto-merge it.
+- The revision-5 amendment and execution/runtime prerequisites have since merged
+  through #1039, #1040 and #1041. Review revision 7/D08 and approve #1045's exact
+  storage/ownership contract before implementation. #1044 remains open.
 - Retain the authorized per-item branches/pull requests, hosted checks, Copilot
   reviews, fix-confirmation replies, gated merges and checkpoint-before-cleanup.
 - Obtain renewed approval for any further material scope or identity-policy change.
