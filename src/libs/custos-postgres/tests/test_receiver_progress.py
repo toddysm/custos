@@ -97,8 +97,11 @@ async def eligible(pool: Pool) -> None:
 
 
 @pytest.mark.parametrize("count", [51, 200, 1000])
+@pytest.mark.parametrize("operation", list(ScanOperation))
 async def test_saturated_fairness_and_restart_preserve_all_positions(
-    pg_pool: Pool, count: int
+    pg_pool: Pool,
+    count: int,
+    operation: ScanOperation,
 ) -> None:
     """All N continuing workspaces get a turn in N claims, with no in-memory state dependency."""
     store = PgMetadataAdapter(pool=pg_pool)
@@ -108,17 +111,33 @@ async def test_saturated_fairness_and_restart_preserve_all_positions(
     await store.apply_pending()
     await store.check_receiver_scan_progress_ready()
     await register(store, count)
+    authority = await store.acquire_scheduler_lease("deployment", "worker", ttl_seconds=300)
+    assert authority is not None
+    cutoff = authority.observed_at
     for turn in range(2):
         seen: set[str] = set()
         for _ in range(count):
-            scan = await store.claim_receiver_scan("deployment", ScanOperation.DELIVERY, "worker")
+            scan = await store.claim_receiver_scan(
+                "deployment",
+                operation,
+                "worker",
+                scheduler_lease=authority,
+            )
             assert scan is not None and scan.claim.workspace_id not in seen
             assert scan.claim.workspace_id is not None
             seen.add(scan.claim.workspace_id)
-            assert scan.continuation.cursor == (None if turn == 0 else Cursor("position-999"))
+            assert scan.continuation.cursor == (
+                None
+                if turn == 0 or operation is ScanOperation.PULL_DEMAND
+                else Cursor("position-999")
+            )
             await store.checkpoint_receiver_scan(
                 scan,
-                ScanContinuation(ScanOperation.DELIVERY, Cursor("position-999")),
+                ScanContinuation(
+                    operation,
+                    None if operation is ScanOperation.PULL_DEMAND else Cursor("position-999"),
+                    cutoff if operation is ScanOperation.SCHEDULED else None,
+                ),
             )
         assert len(seen) == count
         store = PgMetadataAdapter(pool=pg_pool)
@@ -327,3 +346,36 @@ async def test_malformed_persisted_version_is_not_silently_reset(pg_pool: Pool) 
         )
     with pytest.raises(MigrationRequired):
         await store.check_receiver_scan_progress_ready()
+
+
+async def test_live_claim_survives_prune_and_recreated_row_rejects_old_incarnation(
+    pg_pool: Pool,
+) -> None:
+    """Prove the live-claim exclusion and actual delete/recreate ABA fence."""
+    store = PgMetadataAdapter(pool=pg_pool)
+    await store.apply_pending()
+    await register(store, 1)
+    claimed = await store.claim_receiver_scan("deployment", ScanOperation.RETENTION, "worker")
+    assert claimed is not None
+    absent = await store.claim_receiver_discovery("deployment", "discovery")
+    assert absent is not None
+    await store.commit_receiver_discovery(absent, [], None)
+    async with pg_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE custos_state.receiver_progress "
+            "SET updated_at=clock_timestamp()-interval '31 days'"
+        )
+    assert await store.prune_receiver_scans("deployment", 2) == 3
+    assert await store.prune_receiver_scans("deployment", 2) == 0
+    async with pg_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE custos_state.receiver_progress "
+            "SET expires_at=clock_timestamp()-interval '1 second'"
+        )
+    assert await store.prune_receiver_scans("deployment", 2) == 1
+    await register(store, 1)
+    recreated = await store.claim_receiver_scan("deployment", ScanOperation.RETENTION, "worker")
+    assert recreated is not None and recreated.claim.incarnation != claimed.claim.incarnation
+    with pytest.raises(LeaseExpired):
+        await store.release_receiver_scan(claimed)
+    await store.checkpoint_receiver_scan(recreated, ScanContinuation(ScanOperation.RETENTION))

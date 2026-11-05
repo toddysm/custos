@@ -56,28 +56,56 @@ async def register(
 
 
 @pytest.mark.parametrize("count", [51, 200, 1000])
-async def test_every_continuing_workspace_gets_a_turn_without_cursor_eviction(count: int) -> None:
+@pytest.mark.parametrize("operation", list(ScanOperation))
+async def test_every_continuing_workspace_gets_a_turn_without_cursor_eviction(
+    count: int,
+    operation: ScanOperation,
+) -> None:
     """Exact N-claim rounds retain every committed position while all workspaces stay busy."""
     clock = [NOW]
     data = MemoryReceiverScanData()
-    store = MemoryReceiverScanProgress(now=lambda: clock[0], data=data)
+    authority = SchedulerLease("deployment", "worker", 1, NOW + timedelta(days=1), NOW)
+    store = MemoryReceiverScanProgress(
+        now=lambda: clock[0],
+        data=data,
+        scheduler_lookup=lambda _: authority,
+    )
     assert isinstance(store, ReceiverScanProgressProvider)
     await register(store, count)
     for turn in range(3):
         visited: set[str] = set()
         for _ in range(count):
-            scan = await store.claim_receiver_scan("deployment", ScanOperation.DELIVERY, "worker")
+            scan = await store.claim_receiver_scan(
+                "deployment",
+                operation,
+                "worker",
+                scheduler_lease=authority,
+            )
             assert scan is not None and scan.claim.workspace_id is not None
             assert scan.claim.workspace_id not in visited
             visited.add(scan.claim.workspace_id)
-            assert scan.continuation.cursor == (None if turn == 0 else Cursor(f"position-{turn}"))
+            assert scan.continuation.cursor == (
+                None
+                if turn == 0 or operation is ScanOperation.PULL_DEMAND
+                else Cursor(f"position-{turn}")
+            )
             await store.checkpoint_receiver_scan(
                 scan,
-                ScanContinuation(ScanOperation.DELIVERY, Cursor(f"position-{turn + 1}")),
+                ScanContinuation(
+                    operation,
+                    None
+                    if operation is ScanOperation.PULL_DEMAND
+                    else Cursor(f"position-{turn + 1}"),
+                    NOW if operation is ScanOperation.SCHEDULED else None,
+                ),
             )
             clock[0] += timedelta(seconds=1)
         assert len(visited) == count
-        store = MemoryReceiverScanProgress(now=lambda: clock[0], data=data)
+        store = MemoryReceiverScanProgress(
+            now=lambda: clock[0],
+            data=data,
+            scheduler_lookup=lambda _: authority,
+        )
         await register(store, count)
 
 
