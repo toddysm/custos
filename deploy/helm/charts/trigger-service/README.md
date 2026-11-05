@@ -92,7 +92,7 @@ immutable digests. Native activity sidecars require Kubernetes 1.29 or newer;
 the chart's legacy minimum remains unchanged when receiver mode is off.
 
 1. The shared PostgreSQL Secret (`uri` key), also selected by `postgres.secretName`.
-   Apply all migration revisions, including metadata 13/14/15 and lease 2.
+   Apply all migration revisions, including metadata 13/14/15/16 and lease 2.
    Startup checks fail closed; services do not auto-migrate.
 2. One Dapr API-token Secret and **distinct** app-token Secrets for every service,
    each with a `token` key. Values contain Secret names only. Dapr must run with
@@ -185,9 +185,24 @@ Trigger/Connector worker Pods, not Auth, Workflow or the activity runtime.
 Activated Trigger source receivers require one serving process per Pod so their
 process-owned exporters run with the workers; scale replicas instead of setting
 `WEB_CONCURRENCY` above one. Disabled source mode retains legacy worker behavior.
-Each operation rotates after one workspace page, retaining at most 50 active
-continuations and filling freed slots from discovery. A single busy workspace
-cannot monopolize the scan or reset another workspace's continuation.
+Discovery runs independently of the four operation workers. Each pass registers
+at most 50 workspace IDs (51 database rows including lookahead), even when
+all workers are occupied. Each worker claims one fair, fenced metadata row,
+restores its persisted continuation, performs one bounded page and checkpoints
+only after acknowledgement. There is no 50-workspace continuation window:
+in-memory state is one discovery page plus one claimed continuation per operation.
+Scheduled workers must hold scheduler leadership before claiming; standbys
+cannot postpone another workspace's scheduled progress.
+
+Progress leases last 360 seconds, covering the 300-second page deadline plus
+bounded database operations; discovery has a 30-second lease and 15-second
+pass deadline. Failed/cancelled pages retain their committed cursor and release
+with a five-second retry floor; uncertain commits are reread, not overwritten.
+Startup requires revision 16, and storage/worker failures affect readiness.
+Finished scopes absent from a completed discovery sweep stop being claimed;
+bounded pruning removes them only after 30 idle days. Unfinished progress is
+never age-evicted. Disable and drain old workers before the schema-first upgrade;
+on rollback retain progress tables and keep old background admission disabled.
 
 Managed Workflow lifecycle publications explicitly use the local Dapr sidecar,
 `custos-pubsub`, and `custos.workflow.events`, matching Trigger's deployed
@@ -228,7 +243,12 @@ Trigger exports `custos_trigger_receiver_passes_total`,
 `custos_trigger_receiver_pass_seconds`, `custos_trigger_schedule_lag_seconds`,
 `custos_trigger_replay_age_seconds`, `custos_trigger_replay_events_total` and
 `custos_trigger_retention_expired_total`, plus bounded pipeline outcome counters
-and spans. New metric labels contain only operation/outcome categories, not
+and spans. Durable drivers also export `custos_trigger_receiver_checkpoints_total`,
+`custos_trigger_receiver_claim_expirations_total`,
+`custos_trigger_receiver_discovered_total` and
+`custos_trigger_receiver_progress_pruned_total`. Discovery is its own receiver
+pass category; unavailable checkpoints and expired release authority are explicit.
+New metric labels contain only operation/outcome categories, not
 workspace/event/run identifiers. Connector adds
 `custos_connector_webhook_verification_failures_total` and retains its existing
 poll duration/cursor-lag instrumentation. Durable audit records retain safe

@@ -6,15 +6,20 @@ import asyncio
 import logging
 import math
 import time
-from collections import deque
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from functools import partial
 from uuid import uuid4
 
 from custos_spl.errors import LeaseExpired, SPLError
 from custos_spl.ids import WorkspaceId
+from custos_spl.interfaces.receiver_progress import (
+    ReceiverScan,
+    ReceiverScanProgressProvider,
+    ScanContinuation,
+    ScanOperation,
+    scan_delay,
+)
 from custos_spl.interfaces.receiver_workspaces import ReceiverWorkspaceProvider
-from custos_spl.pagination import Cursor
 from opentelemetry import metrics
 
 from custos_trigger.clients.pull_demand import DaprPullDemandClient
@@ -35,14 +40,12 @@ logger = logging.getLogger(__name__)
 _meter = metrics.get_meter("custos_trigger.receivers")
 _passes = _meter.create_counter("custos_trigger_receiver_passes_total")
 _duration = _meter.create_histogram("custos_trigger_receiver_pass_seconds", unit="s")
-
-
-@dataclass
-class _Progress:
-    """Keep one admitted workspace's paging state inside the bounded active queue."""
-
-    cursor: Cursor | None = None
-    scheduler: ScheduledReceiver | None = None
+_checkpoints = _meter.create_counter("custos_trigger_receiver_checkpoints_total")
+_expired = _meter.create_counter("custos_trigger_receiver_claim_expirations_total")
+_discovered = _meter.create_counter("custos_trigger_receiver_discovered_total")
+_pruned = _meter.create_counter("custos_trigger_receiver_progress_pruned_total")
+SCAN_LEASE_SECONDS = 360
+DISCOVERY_LEASE_SECONDS = 30
 
 
 class ReceiverRuntime:
@@ -66,13 +69,20 @@ class ReceiverRuntime:
         for value in (interval_seconds, drain_seconds):
             if not math.isfinite(value) or value <= 0:
                 raise ValueError("receiver timing must be finite and positive")
+        scan_delay(interval_seconds)
+        if not isinstance(reliable.store, ReceiverScanProgressProvider):
+            raise ValueError("receiver workers require durable scan-progress storage")
+        if SCAN_LEASE_SECONDS <= MAX_DISPATCH_SECONDS + 2 * SOURCE_RECONCILE_QUERY_SECONDS:
+            raise ValueError("scan lease must cover claim, page and checkpoint deadlines")
         self.workspaces, self.reliable, self.demand = workspaces, reliable, demand
+        self.progress = reliable.store
+        self.deployment_id, self.holder = deployment_id, uuid4().hex
         self.publish, self.audit = publish, audit
         self.interval, self.drain_seconds = interval_seconds, drain_seconds
         self.leadership = SchedulerLeadership(
             reliable.store,
             deployment_id=deployment_id,
-            holder_id=uuid4().hex,
+            holder_id=self.holder,
             lease_seconds=lease_seconds,
             renew_seconds=renew_seconds,
         )
@@ -98,15 +108,17 @@ class ReceiverRuntime:
             raise RuntimeError("receiver runtime cannot be restarted")
         async with asyncio.timeout(SOURCE_RECONCILE_QUERY_SECONDS):
             await self.workspaces.check_receiver_workspaces_ready()
+            await self.progress.check_receiver_scan_progress_ready()
             await self.reliable.store.check_delivery_ready()
             await self.reliable.store.check_dead_letters_ready()
             await self.leadership.check_ready()
-        operations = (
-            ("scheduled", self._schedule),
-            ("delivery", self._deliver),
-            ("pull-demand", self._pull),
-            ("retention", self._retain),
-        )
+        operations: list[tuple[str, Callable[[], Awaitable[None]]]] = [
+            ("discovery", self._discover),
+            *(
+                (operation.value, partial(self._run_operation, operation))
+                for operation in ScanOperation
+            ),
+        ]
         for name, operation in operations:
             self._failures[name] = False
             task = asyncio.create_task(self._work(name, operation), name=f"trigger-{name}")
@@ -118,30 +130,13 @@ class ReceiverRuntime:
         if not task.cancelled() and (error := task.exception()) is not None:
             logger.error("Receiver task %s failed: %s", task.get_name(), type(error).__name__)
 
-    async def _work(
-        self, name: str, operation: Callable[[str, _Progress], Awaitable[bool]]
-    ) -> None:
-        """Rotate after each page, retaining at most 50 active workspace continuations."""
-        cursor: Cursor | None = None
-        workspaces: deque[tuple[str, _Progress]] = deque()
+    async def _work(self, name: str, operation: Callable[[], Awaitable[None]]) -> None:
+        """Drive one bounded pass independently; durable rows retain all workspace progress."""
         while not self._stop.is_set():
             started = time.monotonic()
             outcome = "success"
             try:
-                if len(workspaces) < 50:
-                    async with asyncio.timeout(SOURCE_RECONCILE_QUERY_SECONDS):
-                        page = await self.workspaces.query_receiver_workspaces(
-                            cursor=cursor, limit=50 - len(workspaces)
-                        )
-                    active = {workspace for workspace, _ in workspaces}
-                    workspaces.extend(
-                        (str(ws), _Progress()) for ws in page.items if str(ws) not in active
-                    )
-                    cursor = page.next_cursor
-                if workspaces:
-                    workspace, progress = workspaces.popleft()
-                    if await operation(workspace, progress):
-                        workspaces.append((workspace, progress))
+                await operation()
             except (
                 SPLError,
                 TriggerError,
@@ -161,42 +156,122 @@ class ReceiverRuntime:
             except TimeoutError:
                 continue
 
-    async def _schedule(self, workspace: str, progress: _Progress) -> bool:
-        """Preserve due-page progress and publish through the normal acknowledged broker path."""
-        if progress.scheduler is None:
-            progress.scheduler = ScheduledReceiver(
+    async def _discover(self) -> None:
+        """Register a bounded page independently; failed discovery never resets progress."""
+        async with asyncio.timeout(SOURCE_RECONCILE_QUERY_SECONDS):
+            scan = await self.progress.claim_receiver_discovery(
+                self.deployment_id,
+                self.holder,
+                lease_seconds=DISCOVERY_LEASE_SECONDS,
+            )
+            if scan is None:
+                return
+            page = await self.workspaces.query_receiver_workspaces(cursor=scan.cursor, limit=50)
+            await self.progress.commit_receiver_discovery(scan, page.items, page.next_cursor)
+        _discovered.add(len(page.items))
+        completed = scan.sweep if page.next_cursor is None else scan.completed_sweep
+        if completed:
+            async with asyncio.timeout(SOURCE_RECONCILE_QUERY_SECONDS):
+                count = await self.progress.prune_receiver_scans(
+                    self.deployment_id,
+                    completed,
+                    limit=50,
+                )
+            _pruned.add(count)
+
+    async def _run_operation(self, operation: ScanOperation) -> None:
+        """Claim one fair row, run a bounded page, then fence its acknowledged checkpoint."""
+        async with asyncio.timeout(SOURCE_RECONCILE_QUERY_SECONDS):
+            lease = None
+            if operation is ScanOperation.SCHEDULED:
+                lease = await self.leadership.poll(force_renew=True)
+                if lease is None:
+                    return
+            scan = await self.progress.claim_receiver_scan(
+                self.deployment_id,
+                operation,
+                self.holder,
+                lease_seconds=SCAN_LEASE_SECONDS,
+                scheduler_lease=lease,
+            )
+        if scan is None:
+            return
+        committed = False
+        try:
+            async with asyncio.timeout(MAX_DISPATCH_SECONDS):
+                continuation = await self._page(scan)
+            try:
+                async with asyncio.timeout(SOURCE_RECONCILE_QUERY_SECONDS):
+                    await self.progress.checkpoint_receiver_scan(
+                        scan,
+                        continuation,
+                        interval_seconds=self.interval,
+                    )
+            except (SPLError, TimeoutError):
+                _checkpoints.add(1, {"receiver": operation.value, "outcome": "unavailable"})
+                raise
+            committed = True
+            _checkpoints.add(1, {"receiver": operation.value, "outcome": "success"})
+        finally:
+            if not committed:
+                cleanup = asyncio.create_task(self._release(scan))
+                interrupted = False
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        interrupted = True
+                cleanup.result()
+                if interrupted:
+                    raise asyncio.CancelledError
+
+    async def _release(self, scan: ReceiverScan) -> None:
+        """Join bounded failure cleanup; uncertain committed checkpoints cannot be overwritten."""
+        try:
+            async with asyncio.timeout(SOURCE_RECONCILE_QUERY_SECONDS):
+                await self.progress.release_receiver_scan(scan)
+        except LeaseExpired:
+            _expired.add(1, {"receiver": str(scan.claim.operation)})
+            logger.info("Receiver progress claim no longer owned during release")
+        except (SPLError, TimeoutError) as exc:
+            logger.warning("Receiver progress release unavailable: %s", type(exc).__name__)
+            raise
+
+    async def _page(self, scan: ReceiverScan) -> ScanContinuation:
+        """Restore claimed scope only; existing collaborators retain effect authority."""
+        workspace, operation = scan.claim.workspace_id, scan.claim.operation
+        if workspace is None or operation is None or scan.continuation.operation is not operation:
+            raise ValueError("receiver progress claim has invalid operation scope")
+        cursor = scan.continuation.cursor
+        if operation is ScanOperation.SCHEDULED:
+            scheduler = ScheduledReceiver(
                 self.reliable.store,
                 workspace_id=workspace,
                 leadership=self.leadership,
                 publish=self.publish,
                 audit=self.audit,
+                continuation=scan.continuation,
             )
-        async with asyncio.timeout(MAX_DISPATCH_SECONDS):
-            result = await progress.scheduler.tick()
-        return result.has_more
-
-    async def _deliver(self, workspace: str, progress: _Progress) -> bool:
-        """A null cursor ends a pass; future passes still retry pending targets."""
-        result = await self.reliable.reconcile_pending(workspace, cursor=progress.cursor, limit=50)
-        progress.cursor = result.next_cursor
-        return progress.cursor is not None
-
-    async def _pull(self, workspace: str, progress: _Progress) -> bool:
-        """Send a bounded hint only; Connector retains all upstream polling authority."""
-        await self.demand.reconcile(workspace)
-        return False
-
-    async def _retain(self, workspace: str, progress: _Progress) -> bool:
-        """Run audited retention without deleting receipt identities or schedule replay proofs."""
+            result = await scheduler.tick()
+            if not result.leader:
+                raise LeaseExpired("scheduler leadership lost after progress claim")
+            return scheduler.snapshot_continuation()
+        if operation is ScanOperation.DELIVERY:
+            delivery = await self.reliable.reconcile_pending(workspace, cursor=cursor, limit=50)
+            return ScanContinuation(operation, delivery.next_cursor)
+        if operation is ScanOperation.PULL_DEMAND:
+            await self.demand.reconcile(workspace)
+            return ScanContinuation(operation)
         async with asyncio.timeout(ADMIN_TIMEOUT_SECONDS):
-            result = await self.admin.sweep(
-                workspace, cursor=progress.cursor.token if progress.cursor else None, limit=50
+            retention = await self.admin.sweep(
+                workspace,
+                cursor=cursor.token if cursor else None,
+                limit=50,
             )
             await self.reliable.store.clear_expired_delivery_requests(
                 WorkspaceId(workspace), limit=50
             )
-        progress.cursor = result.next_cursor
-        return progress.cursor is not None
+        return ScanContinuation(operation, retention.next_cursor)
 
     async def _drain(self) -> None:
         """Join owned tasks before releasing leadership or borrowed clients."""

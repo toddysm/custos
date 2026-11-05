@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import timedelta
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from custos_spl.errors import BackendUnavailable
+from custos_spl.errors import BackendUnavailable, MigrationRequired
 from custos_spl.ids import WorkspaceId
+from custos_spl.interfaces.receiver_progress import ReceiverScan, ScanContinuation, ScanOperation
 from custos_spl.interfaces.source_delivery import SourceDeliverySelection
 from custos_spl.pagination import Cursor
 
@@ -39,6 +41,8 @@ def runtime(
     store: InMemoryTriggerMetadataStore, client: httpx.AsyncClient, published: list[NormalizedEvent]
 ) -> ReceiverRuntime:
     """Bind the real scheduler and durable services with an explicitly borrowed mock HTTP client."""
+    origin, monotonic = store._now(), time.monotonic()
+    store._scan_now = lambda: origin + timedelta(seconds=time.monotonic() - monotonic)
 
     async def publish(event: NormalizedEvent) -> None:
         """Record acknowledged publication without performing downstream effects in this fixture."""
@@ -314,3 +318,143 @@ async def test_unexpected_worker_exit_is_not_reported_ready(
         with pytest.raises(RuntimeError, match="receiver task failed"):
             await worker.aclose()
     assert "synthetic-private-diagnostic" not in caplog.text
+
+
+async def test_progress_schema_failure_blocks_startup_before_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Revision15 is insufficient for activated workers; never fall back to a volatile queue."""
+    store = InMemoryTriggerMetadataStore(now=lambda: NOW)
+    monkeypatch.setattr(
+        store,
+        "check_receiver_scan_progress_ready",
+        AsyncMock(side_effect=MigrationRequired([("MetadataStoreProvider", 16)])),
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(acknowledge)) as client:
+        worker = runtime(store, client, [])
+        with pytest.raises(MigrationRequired):
+            await worker.start()
+        assert not worker._tasks and not worker.healthy
+
+
+async def test_checkpoint_acknowledgement_loss_preserves_committed_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An uncertain checkpoint must not replace the new cursor with stale caller state."""
+    store = InMemoryTriggerMetadataStore(now=lambda: NOW)
+    await store.put_source_delivery(
+        SourceDeliverySelection(
+            WorkspaceId("workspace"),
+            "selection",
+            "a" * 64,
+            NOW + timedelta(days=1),
+            (),
+        )
+    )
+    saved = ScanContinuation(ScanOperation.DELIVERY, Cursor("committed-target"))
+    checkpoint = store.checkpoint_receiver_scan
+
+    async def lost(
+        scan: ReceiverScan, continuation: ScanContinuation, *, interval_seconds: float = 1
+    ) -> None:
+        """Commit for real, then model a lost network acknowledgement."""
+        await checkpoint(scan, continuation, interval_seconds=interval_seconds)
+        raise BackendUnavailable("synthetic-private-response")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(acknowledge)) as client:
+        worker = runtime(store, client, [])
+        await worker._discover()
+        monkeypatch.setattr(worker, "_page", AsyncMock(return_value=saved))
+        monkeypatch.setattr(store, "checkpoint_receiver_scan", lost)
+        with pytest.raises(BackendUnavailable):
+            await worker._run_operation(ScanOperation.DELIVERY)
+        monkeypatch.setattr(store, "checkpoint_receiver_scan", checkpoint)
+        store._scan_now = lambda: NOW + timedelta(seconds=10)
+        successor = await store.claim_receiver_scan(
+            "unit-receivers",
+            ScanOperation.DELIVERY,
+            "successor",
+        )
+        assert successor is not None and successor.continuation == saved
+
+
+async def test_failed_page_releases_unchanged_progress_with_retry_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No effect failure can acknowledge a page, reset progress or be retried immediately."""
+    store = InMemoryTriggerMetadataStore(now=lambda: NOW)
+    await store.put_source_delivery(
+        SourceDeliverySelection(
+            WorkspaceId("workspace"),
+            "selection",
+            "a" * 64,
+            NOW + timedelta(days=1),
+            (),
+        )
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(acknowledge)) as client:
+        worker = runtime(store, client, [])
+        store._scan_now = lambda: NOW
+        await worker._discover()
+        monkeypatch.setattr(worker, "_page", AsyncMock(side_effect=TimeoutError))
+        with pytest.raises(TimeoutError):
+            await worker._run_operation(ScanOperation.DELIVERY)
+        assert (
+            await store.claim_receiver_scan("unit-receivers", ScanOperation.DELIVERY, "next")
+            is None
+        )
+        store._scan_now = lambda: NOW + timedelta(seconds=5)
+        retry = await store.claim_receiver_scan("unit-receivers", ScanOperation.DELIVERY, "next")
+        assert retry is not None and retry.continuation.cursor is None
+
+
+async def test_failure_release_is_joined_through_repeated_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The driver cannot detach database cleanup when a shutdown caller cancels again."""
+    store = InMemoryTriggerMetadataStore(now=lambda: NOW)
+    await store.put_source_delivery(
+        SourceDeliverySelection(
+            WorkspaceId("workspace"),
+            "selection",
+            "a" * 64,
+            NOW + timedelta(days=1),
+            (),
+        )
+    )
+    entered, finish = asyncio.Event(), asyncio.Event()
+    release = store.release_receiver_scan
+
+    async def hold_release(scan: ReceiverScan) -> None:
+        """Hold actual failure release until cancellation ownership has been checked."""
+        entered.set()
+        await finish.wait()
+        await release(scan)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(acknowledge)) as client:
+        worker = runtime(store, client, [])
+        await worker._discover()
+        monkeypatch.setattr(worker, "_page", AsyncMock(side_effect=TimeoutError))
+        monkeypatch.setattr(store, "release_receiver_scan", hold_release)
+        task = asyncio.create_task(worker._run_operation(ScanOperation.DELIVERY))
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            for _ in range(2):
+                task.cancel()
+                await asyncio.sleep(0)
+            assert not task.done()
+            finish.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            store._scan_now = lambda: NOW + timedelta(seconds=10)
+            assert (
+                await store.claim_receiver_scan(
+                    "unit-receivers",
+                    ScanOperation.DELIVERY,
+                    "successor",
+                )
+                is not None
+            )
+        finally:
+            finish.set()
+            await asyncio.gather(task, return_exceptions=True)

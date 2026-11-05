@@ -65,9 +65,14 @@ def test_actual_receiver_metrics_and_traces_export_from_process() -> None:
                     "import asyncio\n"
                     "from custos_trigger._runtime import receiver_telemetry\n"
                     "with receiver_telemetry(enabled=True):\n"
-                    "    from custos_trigger.receiver_runtime import _passes\n"
+                    "    from custos_trigger.receiver_runtime import "
+                    "_passes, _checkpoints, _expired, _discovered, _pruned\n"
                     "    from custos_trigger._telemetry import TelemetryAuditSink\n"
                     "    _passes.add(1, {'receiver': 'retention', 'outcome': 'success'})\n"
+                    "    _checkpoints.add(1, {'receiver': 'delivery', 'outcome': 'success'})\n"
+                    "    _expired.add(1, {'receiver': 'delivery'})\n"
+                    "    _discovered.add(51)\n"
+                    "    _pruned.add(1)\n"
                     "    asyncio.run(TelemetryAuditSink().emit('trigger.dispatched', "
                     "workspace_id='test-workspace', attributes={}))\n",
                 ],
@@ -104,6 +109,19 @@ def test_actual_receiver_metrics_and_traces_export_from_process() -> None:
         "receiver",
         "outcome",
     }
+    exported = {
+        metric.name
+        for batch in metrics
+        for resource in batch.resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+    }
+    assert {
+        "custos_trigger_receiver_checkpoints_total",
+        "custos_trigger_receiver_claim_expirations_total",
+        "custos_trigger_receiver_discovered_total",
+        "custos_trigger_receiver_progress_pruned_total",
+    } <= exported
     assert any(
         scope.spans
         for batch in traces

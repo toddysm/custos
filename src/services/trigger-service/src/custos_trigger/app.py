@@ -36,6 +36,7 @@ from custos_callctx.dapr_http import dapr_http_client
 from custos_callctx.execution import load_execution_bindings
 from custos_callctx.execution_client import ExecutionContextClient
 from custos_spl.interfaces.execution import ExecutionIdentityStoreProvider
+from custos_spl.interfaces.receiver_progress import ReceiverScanProgressProvider
 from custos_spl.interfaces.receiver_workspaces import ReceiverWorkspaceProvider
 
 from custos_trigger._version import __version__
@@ -316,10 +317,13 @@ def create_app(
         from custos_trigger._telemetry import AuditWriter, DurableAuditSink, TelemetryAuditSink
 
         if workers_config.enabled and (
-            not effective_sources or not isinstance(metadata_store, ReceiverWorkspaceProvider)
+            not effective_sources
+            or not isinstance(metadata_store, ReceiverWorkspaceProvider)
+            or not isinstance(metadata_store, ReceiverScanProgressProvider)
         ):
             raise ValueError(
-                "receiver workers require source consumption, discovery and audit storage"
+                "receiver workers require source consumption, discovery, "
+                "durable progress and audit storage"
             )
         if effective_sources and not isinstance(metadata_store, AuditWriter):
             raise ValueError("source receivers require durable audit storage")
