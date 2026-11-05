@@ -100,7 +100,11 @@ succeed; the provider never migrates at startup or silently falls back to memory
 
 Discovery queries only bounded metadata ID projections, including orphaned
 recovery rows, not Auth's workspace directory. A limit of 50 returns at most 50
-IDs and fetches at most 51 including keyset lookahead. Discovery registration
+IDs and fetches at most 51 including keyset lookahead. Discovery
+uses explicit C-collation workspace indexes added by revision16 on every
+projected table, so database-default collation cannot force an incompatible
+ordering. Native plan tests exercise the production query over 100,000 retained
+subscription rows without disabling the normal planner. Discovery registration
 and its checkpoint commit together. Its last-seen updates never change an
 operation's progress revision or fair service ticket.
 

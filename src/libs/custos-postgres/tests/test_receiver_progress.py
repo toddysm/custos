@@ -23,8 +23,56 @@ from custos_spl.interfaces.source_delivery import SourceDeliverySelection
 from custos_spl.pagination import Cursor
 
 from custos_pg import PgMetadataAdapter
+from custos_pg.adapters.metadata import RECEIVER_WORKSPACE_QUERY
+from custos_pg.migrations.receiver_progress import RECEIVER_WORKSPACE_TABLES
 
 pytestmark = pytest.mark.integration
+
+
+async def test_real_discovery_query_uses_matching_indexes_over_retained_history(
+    pg_pool: Pool,
+) -> None:
+    """Prove C-keyset indexing and 51-row fetch bounds with the production query."""
+    store = PgMetadataAdapter(pool=pg_pool)
+    await store.apply_pending()
+    async with pg_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO custos_state.subscription "
+            "(workspace_id,subscription_id,workflow_id,state,created_at,updated_at) "
+            "SELECT 'ws-'||lpad(w::text,4,'0'), 'sub-'||n::text,'wf','active',now(),now() "
+            "FROM generate_series(1,1000) w CROSS JOIN generate_series(1,100) n"
+        )
+        await conn.execute("ANALYZE custos_state.subscription")
+        for table in RECEIVER_WORKSPACE_TABLES:
+            definition = await conn.fetchval(
+                "SELECT indexdef FROM pg_indexes WHERE schemaname='custos_state' AND indexname=$1",
+                f"receiver_workspace_{table}",
+            )
+            assert definition is not None and 'COLLATE "C"' in definition
+        plans = json.loads(
+            await conn.fetchval(
+                "EXPLAIN (ANALYZE, FORMAT JSON) " + RECEIVER_WORKSPACE_QUERY,
+                "ws-0500",
+                51,
+            )
+        )
+        plan = plans[0]["Plan"]
+        nodes = [plan]
+        subscription_scans = []
+        while nodes:
+            node = nodes.pop()
+            nodes.extend(node.get("Plans", []))
+            if node.get("Relation Name") == "subscription":
+                subscription_scans.append(node)
+        assert plan["Actual Rows"] == 51
+        assert subscription_scans
+        assert all(
+            node.get("Index Name") == "receiver_workspace_subscription"
+            for node in subscription_scans
+        )
+        assert all(node["Actual Rows"] <= 5101 for node in subscription_scans)
+    page = await store.query_receiver_workspaces(limit=50)
+    assert len(page.items) == 50 and page.next_cursor is not None
 
 
 async def register(store: PgMetadataAdapter, count: int, deployment: str = "deployment") -> None:

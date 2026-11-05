@@ -2,9 +2,27 @@
 
 from custos_pg.migrations import Revision
 
+RECEIVER_WORKSPACE_TABLES = (
+    "subscription",
+    "resume_subscription",
+    "schedule",
+    "pending_schedule_fire",
+    "dead_letter",
+    "bulk_replay_command",
+    "source_delivery_selection",
+    "delivery_receipt",
+    "connector_pull_control",
+    "connector_cursor",
+)
+
 METADATA_REV16 = Revision(
     number=16,
     statements=(
+        *(
+            f"CREATE INDEX IF NOT EXISTS receiver_workspace_{table} "
+            f'ON custos_state.{table}(workspace_id COLLATE "C")'
+            for table in RECEIVER_WORKSPACE_TABLES
+        ),
         "CREATE SEQUENCE IF NOT EXISTS custos_state.receiver_service_ticket AS BIGINT NO CYCLE",
         """
         CREATE TABLE IF NOT EXISTS custos_state.receiver_discovery (
