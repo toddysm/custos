@@ -50,7 +50,7 @@ design gate [#1004](https://github.com/toddysm/custos/issues/1004).
 | TS-IMPL-037 | [#1035](https://github.com/toddysm/custos/issues/1035) | Kubernetes-backed connector hooks, bounded confidential I/O, immutable invocation ownership and verified termination; no privileged Docker backend | 029, 032 |
 | TS-IMPL-038 | [#1037](https://github.com/toddysm/custos/issues/1037) | Explicit workspace service-account execution identity, fresh authorized signed contexts and real Workflow/Connector request/response alignment across retries/restarts/child execution | 031, 032, 037 |
 | TS-IMPL-039 | [#1038](https://github.com/toddysm/custos/issues/1038) | Production activity startup/readiness and resource ownership; private bootstrap delivery; real Connector-owned credential issuance with durable per-attempt authorization | 032, 038 |
-| TS-IMPL-040 | [#1045](https://github.com/toddysm/custos/issues/1045) | Proposed D08 storage/provider capability, migration, fair fenced claims, durable bounded continuations and typed scheduled-scan restore; native saturation/restart/isolation evidence | D08 approval, 022, 024, 031, 033 |
+| TS-IMPL-040 | [#1045](https://github.com/toddysm/custos/issues/1045) | Proposed D08 storage/progress capability and extraction of #1044's bounded workspace discovery, migration, fair fenced claims with scheduled-leader admission, durable continuations and typed scheduled-scan restore; native saturation/restart/isolation evidence | D08 approval, 022, 024, 031, 033 |
 | TS-IMPL-034 | [#1017](https://github.com/toddysm/custos/issues/1017) | Activation/readiness/deployment wiring, durable audit and operational signals; consume all prerequisites, independent bounded discovery and fair progress workers; four-profile rendering and safe rollback | 025, 027, 028, 029, 033, 037, 038, 039, 040 |
 | TS-IMPL-035 | [#1018](https://github.com/toddysm/custos/issues/1018) | Deployed receiver-to-Workflow failure/recovery and legacy regression coverage in hosted CI | 034 |
 | TS-IMPL-036 | [#1019](https://github.com/toddysm/custos/issues/1019) | Developer/operator setup, recovery and migration documentation; checked links/examples | 035 |
@@ -83,10 +83,13 @@ not the current status.
 
 040 is one provider-focused implementation pull request from current main,
 not a stack based on unmerged #1044. It implements the progress capability,
-schema and serializable scheduled collaborator contract. 034 then integrates
+schema and serializable scheduled collaborator contract, and extracts #1044's
+bounded `ReceiverWorkspaceProvider`/keyset projection and tests into this
+prerequisite. Auth's unpaginated workspace directory is not the discovery source.
+034 then integrates
 that merged prerequisite normally into its existing worktree, preserving its
 commits, and replaces the in-memory-only queue. No duplicate provider contract
-or copied unmerged lifecycle implementation is permitted. Coordinate overlapping
+or unrelated copied lifecycle implementation is permitted. Coordinate overlapping
 metadata/scheduled-receiver changes and stop on unresolved conflicts.
 035 adds deployed saturation and restart checks; the existing 036 documentation
 item expands to progress diagnostics and migration/rollback. There is no second
@@ -185,14 +188,19 @@ of path filters; report the real check state.
 For 040/034, require the exact saturated boundary: 51, 200 and 1,000 workspaces
 all continuing, with all N eligible rows served in N successful claims after
 registration under a controlled provider clock. Verify discovery progresses
-while every local operation slot is occupied. Assert no more than 50 discovery
-IDs and one claimed continuation per operation in process memory; use actual
+while every local operation slot is occupied. Assert 50 returned discovery IDs,
+at most 51 IDs fetched including lookahead, and one claimed continuation per
+operation in process memory; use actual
 producer cursors for deep delivery, due-schedule cutoff and retention progress.
 Race two native PostgreSQL connections, lose checkpoint responses, expire and
 replace owners, restart every collaborator and attempt wrong-scope/stale writes.
 Test inactive-row cleanup and source-retention races without resetting unfinished
 work. 034 additionally exercises actual lifespans, old-schema refusal,
 off-mode compatibility and shutdown; 035 remains the deployed certification.
+Require scheduler leadership before scheduled claims and transactional
+verification in the provider; a standby cannot repeatedly postpone work.
+Two-replica tests must measure actual scheduled-page progress and loss of
+leadership both before claim and before effect, not merely queue claim counts.
 
 Before closing #988, every required child must be complete, documentation
 merged, and a separately reviewed close-out must promote the capability

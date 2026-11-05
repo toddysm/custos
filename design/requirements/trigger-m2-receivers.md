@@ -744,7 +744,7 @@ wall-clock latency for arbitrarily many tenants or arbitrarily slow upstreams.
 provider or collaborator calls, not new network endpoints:
 
 ```text
-Trigger discovery task -- bounded ID pages --> existing workspace discovery
+Trigger discovery task -- bounded ID pages --> receiver workspace provider
          |
          +-- atomic register + discovery checkpoint --> metadata scan store
                                                         ^
@@ -766,6 +766,33 @@ capability and additive migration in #1045. The
 gains a typed continuation snapshot/restore contract there as well.
 #1017 owns lifecycle/discovery integration, readiness and four-profile wiring
 in its preserved PR; #1018 certifies deployment; #1019 owns final user docs.
+
+**Discovery is not Auth workspace enumeration.** The current candidate
+[#1044 interface](https://github.com/toddysm/custos/blob/e34dfa1a40cf07088356d18094ff2d2ddeadbe24/src/libs/storage-provider-layer/src/custos_spl/interfaces/receiver_workspaces.py)
+already defines `ReceiverWorkspaceProvider` with
+`check_receiver_workspaces_ready()` and
+`query_receiver_workspaces(*, cursor: Cursor | None = None,
+limit: int | None = None) -> Page[WorkspaceId]`. Its default page is 50,
+maximum 200; runtime requests exactly 50. Its
+[PostgreSQL implementation](https://github.com/toddysm/custos/blob/e34dfa1a40cf07088356d18094ff2d2ddeadbe24/src/libs/custos-postgres/src/custos_pg/adapters/metadata.py#L737)
+projects only distinct workspace IDs from subscription, resume, schedule,
+pending-fire, dead-letter, replay-command, source-selection, receipt and
+connector-control/cursor tables. It uses C-collation keyset order, bound
+`workspace_id > after` and `limit + 1` both per table and on the outer union.
+At runtime limit 50, at most 51 IDs cross the database boundary, including the
+one-row lookahead; only 50 are returned for registration. No upstream
+`AuthStoreProvider.list_workspaces` or `GET /v1/workspaces` call is permitted.
+The opaque, versioned query-scoped cursor resumes the keyset query itself,
+not slicing a previously materialized full workspace list.
+
+These are reviewed candidate capabilities, **not yet on main**. #1045 must
+extract this bounded interface, PostgreSQL projection, memory parity and native
+tests from the owned #1044 changes into the standalone prerequisite, alongside
+the new progress capability. The memory fixture may own all seeded test data;
+the production discovery path must never materialize all workspace IDs.
+Reconcile the identical extracted changes when #1017 integrates main; do not
+copy its unrelated lifespan/deployment code or pretend the prerequisite already
+exists. Continue including orphaned recovery state, not only live subscriptions.
 
 ##### Persisted model and lifecycle
 
@@ -824,7 +851,7 @@ expanding every existing metadata consumer. The Python contract includes:
 | `check_receiver_scan_progress_ready()` | Required schema/capability probe | `MigrationRequired`/`QueryUnsupported` blocks activated receiver readiness. |
 | Claim discovery | deployment, owner, lease duration -> lease plus cursor/sweep, or no available claim | Database time; no claim is a normal competing-owner outcome. |
 | Commit discovery page | current discovery claim, at most 50 workspace IDs, next opaque cursor -> committed cursor/sweep | Atomic registration/checkpoint. Wrong or expired ownership raises `LeaseExpired`; retry by rereading, never by assuming a timed-out write failed. |
-| Claim operation | deployment, operation, owner, lease duration -> one typed progress row and claim, or no eligible work | Atomic indexed selection, row lock/`SKIP LOCKED`, then fenced claim update. |
+| Claim operation | deployment, operation, owner, lease duration; live scheduler lease additionally required for `scheduled` -> one typed progress row and claim, or no eligible work | Atomic indexed selection, row lock/`SKIP LOCKED`, then fenced claim update; scheduled claims also verify scheduler authority before any queue mutation. |
 | Checkpoint operation | current claim and validated continuation -> committed progress revision | Verify exact scope/incarnation/generation/token, unexpired lease and expected progress revision; atomically update continuation and release. |
 | Release failed operation | current claim -> released unchanged continuation, next retry time | Same fencing; never clear another owner's claim. Expired claims recover by takeover, not unfenced release. |
 | Prune inactive progress | deployment, completed discovery generation, bounded limit | Delete only eligible finished, unclaimed records proved absent; return bounded count/continuation. |
@@ -864,15 +891,28 @@ five-second retry floor. Tests use a controlled provider clock, not sleeps.
 Progress fencing protects only continuation ownership. Scheduled effects still
 require the deployment scheduler lease, delivery still uses immutable snapshots
 and downstream deduplication, and pull effects remain Connector-owned.
-Acquiring progress while not scheduler leader must release without resetting
-scheduled progress and apply the failure retry floor. A lost checkpoint response
+Before claiming **scheduled** progress, the runtime acquires or force-renews
+`SchedulerLeadership`; a standby waits without claiming, moving tickets or
+postponing eligibility. The provider also verifies the supplied lease's
+deployment, holder, epoch and database-time expiry atomically with the scheduled
+progress claim, so expiry between the preflight and transaction cannot let a
+standby consume a turn. Lock scheduler authority before progress rows with a
+consistent ordering. A missing/stale/expired scheduler lease rejects the claim
+without queue mutation. Non-scheduled operations require no scheduler lease.
+Retain every existing effect-time scheduler check/heartbeat. If leadership is
+lost after claiming, stop the page and fenced-release unchanged progress with
+the failure retry floor, or let the progress lease expire if storage is down.
+This finite recovery delay must not become a loop of standby postponements.
+A lost checkpoint response
 requires reading the current row on a later claim; never submit an old position
 unconditionally. A crash after an effect but before checkpoint may repeat that
 page, using the same existing event/target identity. No exactly-once claim is
 made, and progress must never advance before the page's acknowledged outcome.
 
-Each process holds at most 50 discovery IDs plus one claimed continuation per
-operation, not a map or task per workspace. The durable bound is at most four
+Each process registers at most 50 discovery IDs per page, with at most one
+additional backend lookahead ID (51 distinct IDs materialized by discovery),
+plus one claimed continuation per operation, not a map or task per workspace.
+The durable bound is at most four
 progress rows per discovered workspace per deployment plus one discovery row;
 retained history scales with workspace count in PostgreSQL, not process memory.
 
@@ -939,7 +979,10 @@ Acceptance tests are proposed requirements, not results from an implementation:
 1. Register 51, 200 and 1,000 always-continuing workspaces. Discovery must pass
    the initial 50 IDs without waiting for any workspace to finish. After
    registration and with all rows eligible, every operation visits all N within
-   N successful claims. Measure maximum in-process IDs/continuations exactly.
+   N successful claims. Measure the 50-ID returned page/51-ID production fetch
+   and four-claim bounds exactly, including the adapter boundary. Persist a
+   discovery cursor, recreate the provider, and verify its next SQL keyset
+   query resumes after that ID rather than fetching all N and slicing locally.
 2. Use real producer cursors: a 1,000-target delivery selection crossing the
    32-target pass budget; more than 50 due schedules retaining the cutoff;
    retention pagination; and finite plus continuously replenished backlogs.
@@ -949,6 +992,13 @@ Acceptance tests are proposed requirements, not results from an implementation:
    Stale/expired/wrong-scope/incarnation writes fail. Crash before/after effect
    and before/after checkpoint; inject a lost commit response. Verify unchanged
    effect identity, no false acknowledgement and resumed committed progress.
+   For scheduled work, run a leader and a competing standby against the actual
+   scheduler/progress providers. Repeated standby scans must not acquire or
+   postpone rows. Assert actual scheduled pages/occurrences advance for every
+   eligible workspace, not just successful claim counts. Expire leadership
+   between preflight and claim (no queue mutation), then after claim/before
+   effect (existing fencing rejects the effect); verify the new leader resumes
+   the unchanged continuation after fenced release or progress-lease expiry.
 4. Test restart during discovery, duplicate page commit, deletion/recreation,
    legitimate source retention, invalid/oversized/versioned state and schema 15
    rejection for activated receivers. Off-mode/manual/internal behavior stays
