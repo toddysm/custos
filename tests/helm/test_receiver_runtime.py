@@ -752,3 +752,35 @@ def test_installed_gateway_namespace_has_default_north_south_path(
     assert allowed == ["custos-receivers-api-gateway"]
     installer = (ROOT / "scripts/install-prereqs.sh").read_text()
     assert "--namespace envoy-gateway-system --create-namespace" in installer
+
+
+@pytest.mark.parametrize("profile", PROFILES)
+def test_managed_workflow_publisher_replaces_a_legacy_endpoint_override(
+    profile: str,
+) -> None:
+    """The actual factory must use authenticated loopback even with a legacy operator endpoint."""
+    values = enabled_values()
+    values["workflow-service"] = {
+        "env": [
+            {
+                "name": "WF_DAPR_HTTP_ENDPOINT",
+                "value": "http://old-sidecar.example.test:3500",
+            },
+            {"name": "UNRELATED_OPERATOR_SETTING", "value": "preserve"},
+        ]
+    }
+    result = render(profile, values)
+    assert result.returncode == 0, result.stderr
+    documents = [value for value in yaml.safe_load_all(result.stdout) if value]
+    workflow = next(
+        value
+        for value in documents
+        if value["kind"] == "Deployment"
+        and value["metadata"]["name"] == "custos-workflow-service"
+    )
+    environment = {
+        entry["name"]: entry.get("value", "synthetic-api-token")
+        for entry in workflow["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert environment["UNRELATED_OPERATOR_SETTING"] == "preserve"
+    asyncio.run(verify_workflow_publisher(environment))

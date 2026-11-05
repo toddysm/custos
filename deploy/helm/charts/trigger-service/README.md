@@ -222,6 +222,8 @@ on rollback retain progress tables and keep old background admission disabled.
 Managed Workflow lifecycle publications explicitly use the local Dapr sidecar,
 `custos-pubsub`, and `custos.workflow.events`, matching Trigger's deployed
 subscription rather than relying on Workflow's legacy publisher defaults.
+Managed `WF_DAPR_HTTP_ENDPOINT` replaces any legacy operator endpoint with
+`http://127.0.0.1:3500`; unrelated operator environment entries remain intact.
 
 The normal worker drain budget is 330 seconds; termination grace must exceed it
 by more than 65 seconds (420 by default). This reserves 15 seconds for HTTP,
