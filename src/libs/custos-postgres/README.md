@@ -125,6 +125,9 @@ explicit diagnostic; malformed or cross-workspace cursors still fail closed.
 
 Pruning requires a completed later discovery sweep, no live claim, null finished
 continuation and at least 30 idle days; unfinished rows are not age-evicted.
+Finished rows proven absent by a completed discovery sweep are excluded from
+new operation claims, so empty polling cannot keep refreshing their inactivity
+clock. Rediscovery makes them eligible again without changing retained progress.
 Disable/drain old receiver workers before schema-first rollout. Keep the additive
 tables on rollback and keep old background admission disabled; do not erase
 progress or accepted effect identities to force a rollout.

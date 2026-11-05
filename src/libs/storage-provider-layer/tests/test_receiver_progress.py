@@ -193,6 +193,29 @@ async def test_pruning_requires_completed_absence_and_never_removes_unfinished_w
     assert retry is not None and retry.continuation.cursor == Cursor("unfinished")
 
 
+async def test_polling_absent_finished_scopes_does_not_prevent_retention() -> None:
+    """Thirty-one days of polling cannot keep absent completed rows permanently alive."""
+    clock = [NOW]
+    store = MemoryReceiverScanProgress(now=lambda: clock[0])
+    await register(store, 1)
+    absent = await store.claim_receiver_discovery("deployment", "discovery")
+    assert absent is not None
+    await store.commit_receiver_discovery(absent, [], None)
+    for day in range(31):
+        clock[0] = NOW + timedelta(days=day)
+        for operation in (
+            ScanOperation.DELIVERY,
+            ScanOperation.RETENTION,
+            ScanOperation.PULL_DEMAND,
+        ):
+            assert await store.claim_receiver_scan("deployment", operation, "worker") is None
+    assert await store.prune_receiver_scans("deployment", 2) == 4
+    await register(store, 1)
+    assert (
+        await store.claim_receiver_scan("deployment", ScanOperation.DELIVERY, "worker") is not None
+    )
+
+
 @pytest.mark.parametrize("operation", list(ScanOperation))
 def test_closed_serialization_and_exact_byte_bound(operation: ScanOperation) -> None:
     """Every tagged shape round-trips; unknown/duplicate fields and oversized positions fail."""

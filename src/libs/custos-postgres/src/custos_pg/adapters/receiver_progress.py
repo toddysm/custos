@@ -239,10 +239,14 @@ class PgReceiverScanProgress:
                 assert current is not None
                 authority_expires = current.expires_at
             row = await conn.fetchrow(
-                "SELECT * FROM custos_state.receiver_progress "
-                "WHERE deployment_id=$1 AND operation=$2 AND next_eligible_at<=clock_timestamp() "
-                "AND (expires_at IS NULL OR expires_at<=clock_timestamp()) "
-                "ORDER BY service_ticket LIMIT 1 FOR UPDATE SKIP LOCKED",
+                "SELECT p.* FROM custos_state.receiver_progress p "
+                "JOIN custos_state.receiver_discovery d USING(deployment_id) "
+                "WHERE p.deployment_id=$1 AND p.operation=$2 "
+                "AND p.next_eligible_at<=clock_timestamp() "
+                "AND (p.expires_at IS NULL OR p.expires_at<=clock_timestamp()) "
+                "AND (p.last_seen_sweep>=d.completed_sweep "
+                "OR p.continuation::jsonb->>'cursor' IS NOT NULL) "
+                "ORDER BY p.service_ticket LIMIT 1 FOR UPDATE OF p SKIP LOCKED",
                 deployment_id,
                 operation.value,
             )

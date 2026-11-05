@@ -178,6 +178,9 @@ class MemoryReceiverScanProgress:
             ):
                 raise LeaseExpired("scheduled progress requires matching scheduler authority")
             require_scheduler_lease(self._scan_scheduler(deployment_id), scheduler_lease, now)
+        discovery = self._scan_data.discovery.get(deployment_id)
+        if discovery is None:
+            return None
         eligible = [
             (key, row)
             for key, row in self._scan_data.progress.items()
@@ -185,6 +188,7 @@ class MemoryReceiverScanProgress:
             and key[2] == operation
             and row.eligible <= now
             and (row.claim is None or row.claim.expires_at <= now)
+            and (row.last_seen >= discovery.completed or row.continuation.cursor is not None)
         ]
         if not eligible:
             return None

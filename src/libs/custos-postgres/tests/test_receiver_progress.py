@@ -379,3 +379,36 @@ async def test_live_claim_survives_prune_and_recreated_row_rejects_old_incarnati
     with pytest.raises(LeaseExpired):
         await store.release_receiver_scan(claimed)
     await store.checkpoint_receiver_scan(recreated, ScanContinuation(ScanOperation.RETENTION))
+
+
+async def test_absent_finished_rows_are_not_reclaimed_by_continuing_pollers(pg_pool: Pool) -> None:
+    """Actual empty claim queries leave the inactivity clock untouched until pruning."""
+    store = PgMetadataAdapter(pool=pg_pool)
+    await store.apply_pending()
+    await register(store, 1)
+    discovery = await store.claim_receiver_discovery("deployment", "discovery")
+    assert discovery is not None
+    await store.commit_receiver_discovery(discovery, [], None)
+    async with pg_pool.acquire() as conn:
+        before = await conn.fetchval("SELECT min(updated_at) FROM custos_state.receiver_progress")
+    for _ in range(31):
+        for operation in (
+            ScanOperation.DELIVERY,
+            ScanOperation.RETENTION,
+            ScanOperation.PULL_DEMAND,
+        ):
+            assert await store.claim_receiver_scan("deployment", operation, "worker") is None
+    async with pg_pool.acquire() as conn:
+        assert (
+            await conn.fetchval("SELECT min(updated_at) FROM custos_state.receiver_progress")
+            == before
+        )
+        await conn.execute(
+            "UPDATE custos_state.receiver_progress "
+            "SET updated_at=clock_timestamp()-interval '31 days'"
+        )
+    assert await store.prune_receiver_scans("deployment", 2) == 4
+    await register(store, 1)
+    assert (
+        await store.claim_receiver_scan("deployment", ScanOperation.DELIVERY, "worker") is not None
+    )
