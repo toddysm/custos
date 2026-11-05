@@ -384,11 +384,11 @@ async def test_metadata_apply_pending_is_idempotent(pg_pool: Pool) -> None:
 
 
 async def test_metadata_fully_satisfied_after_trigger_query_indexes(pg_pool: Pool) -> None:
-    """Apply the required schema plus backward-compatible trigger-query indexes."""
+    """Apply the shared minimum plus every additive revision, including receiver progress."""
     adapter = PgMetadataAdapter(pool=pg_pool)
     await adapter.apply_pending()
     assert adapter.declared_revisions["MetadataStoreProvider"] == frozenset(
-        {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
+        {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
     )
 
 
