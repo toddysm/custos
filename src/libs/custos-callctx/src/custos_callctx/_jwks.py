@@ -24,7 +24,6 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any, Final
 
-import httpx
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from custos_callctx._errors import InvalidCallContextError, InvalidReason
@@ -105,12 +104,14 @@ def _decode_jwk_to_ed25519_public_key(jwk: dict[str, Any]) -> Ed25519PublicKey:
 async def default_http_fetcher(
     url: str,
 ) -> tuple[dict[str, str], dict[str, Any]]:
-    """Production JWKS fetcher backed by :mod:`httpx`.
+    """Fetch public keys, authenticating local Dapr hops without forwarding its token upstream.
 
     Returns ``(headers, body)``. Headers are lower-cased so the cache
     can pick up ``Cache-Control`` regardless of upstream casing.
     """
-    async with httpx.AsyncClient(timeout=5.0) as client:
+    from custos_callctx.dapr_http import dapr_http_client
+
+    async with dapr_http_client(timeout=5.0) as client:
         response = await client.get(url)
         response.raise_for_status()
         headers = {k.lower(): v for k, v in response.headers.items()}

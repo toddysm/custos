@@ -1,3 +1,4 @@
+{{- $receiver := ((.Values.global | default dict).receiverRuntime) | default dict -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -17,9 +18,34 @@ spec:
       labels:
         {{- include "svc.selectorLabels" . | nindent 8 }}
       annotations:
+        {{- if $receiver.enabled }}
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "activity-runtime-manager"
+        dapr.io/app-port: "8080"
+        dapr.io/app-protocol: "https"
+        {{- include "custos.receiverAnnotations" . | nindent 8 }}
+        {{- else }}
         {{- include "svc.daprAnnotations" . | nindent 8 }}
+        {{- end }}
     spec:
       serviceAccountName: {{ include "svc.fullname" . }}
+      {{- if $receiver.enabled }}
+      terminationGracePeriodSeconds: {{ $receiver.terminationGraceSeconds }}
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      volumes:
+        - name: runtime-tls
+          secret:
+            secretName: {{ $receiver.tlsSecret | quote }}
+            defaultMode: 0440
+        - name: runtime-staging
+          emptyDir: {}
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: {{ $receiver.artifactClaim | quote }}
+      {{- end }}
       {{- with (.Values.global).imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -28,24 +54,61 @@ spec:
         - name: {{ .Chart.Name }}
           image: {{ include "svc.image" . | quote }}
           imagePullPolicy: {{ include "svc.imagePullPolicy" . }}
+          {{- if $receiver.enabled }}
+          command: ["python", "-m", "custos_arm"]
+          volumeMounts:
+            - name: runtime-tls
+              mountPath: /custos/tls
+              readOnly: true
+            - name: runtime-staging
+              mountPath: /var/run/custos
+            - name: artifacts
+              mountPath: /custos/artifacts
+          {{- end }}
           ports:
-            - name: http
+            - name: {{ ternary "https" "http" ($receiver.enabled | default false) }}
               containerPort: {{ .Values.service.port }}
               protocol: TCP
+            {{- if $receiver.enabled }}
+            - name: metrics
+              containerPort: 8090
+              protocol: TCP
+            {{- end }}
           envFrom:
             - configMapRef:
                 name: {{ include "svc.fullname" . }}
+          {{- if $receiver.enabled }}
+          env:
+            {{- include "custos.receiverEnv" . | nindent 12 }}
+          {{- else }}
           {{- with .Values.env }}
           env:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          {{- end }}
           resources:
             {{- include "svc.resources" . | nindent 12 }}
+          {{- if $receiver.enabled }}
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: https
+              scheme: HTTPS
+            periodSeconds: 3
+            failureThreshold: 60
+            timeoutSeconds: 3
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz
-              port: http
+              port: {{ ternary "https" "http" ($receiver.enabled | default false) }}
+              {{- if $receiver.enabled }}
+              scheme: HTTPS
+              {{- end }}
           readinessProbe:
             httpGet:
               path: /readyz
-              port: http
+              port: {{ ternary "https" "http" ($receiver.enabled | default false) }}
+              {{- if $receiver.enabled }}
+              scheme: HTTPS
+              {{- end }}

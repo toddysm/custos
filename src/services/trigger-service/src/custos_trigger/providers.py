@@ -52,6 +52,7 @@ from custos_spl.interfaces.dead_letters import (
     validate_execution_reference,
 )
 from custos_spl.interfaces.metadata_store import (
+    AuditEvent,
     DedupDuplicate,
     DedupReserved,
     PutDedupKeyResult,
@@ -142,9 +143,9 @@ class InMemoryTriggerMetadataStore(MemoryDeliveryState, MemoryReceiverScanProgre
     ``MetadataStoreProvider`` with faithful semantics — immutable
     ``put_subscription``, not-found ``ValueError`` on state/next-fire updates,
     TTL-aware reserve-or-read dedup — mirroring
-    ``custos_pg.PgMetadataAdapter``. The run / cursor / idempotency / audit
-    families are intentionally absent; this backend exists only to exercise
-    the Trigger Service store adapters without a database.
+    ``custos_pg.PgMetadataAdapter``. Scoped runtime audit records remain in
+    memory; the full run/cursor/idempotency families are intentionally absent.
+    This backend exercises Trigger collaborators without a database.
 
     Async reads implement the shared ``TriggerQueryProvider`` capability with
     the same ordering, filtering and cursor validation as PostgreSQL. Legacy
@@ -169,6 +170,38 @@ class InMemoryTriggerMetadataStore(MemoryDeliveryState, MemoryReceiverScanProgre
         self._dead_letters: dict[tuple[str, str], DeadLetterEntry] = self._delivery_dead_letters
         self._bulk_replays: dict[tuple[str, str], BulkReplayCommand] = {}
         self._dead_letter_commands: dict[tuple[str, str], tuple[str, str]] = {}
+
+    async def check_receiver_workspaces_ready(self) -> None:
+        """Memory has all receiver tables at construction; it is not restart durable."""
+
+    async def append_audit(self, workspace_id: str, event: AuditEvent) -> None:
+        """Retain scoped runtime audit evidence without claiming production durability."""
+        if event.workspace_id != workspace_id:
+            raise ValueError("audit workspace does not match the caller scope")
+        self._dead_letter_audits.append(event)
+
+    async def query_receiver_workspaces(
+        self, *, cursor: Cursor | None = None, limit: int | None = None
+    ) -> Page[WorkspaceId]:
+        """Include persisted selections, receipts and recovery commands without active intent."""
+        return receiver_workspace_page(
+            (
+                key[0]
+                for rows in (
+                    self._subscriptions,
+                    self._resume,
+                    self._schedules,
+                    self._pending_fires,
+                    self._dead_letters,
+                    self._bulk_replays,
+                    self._source_deliveries,
+                    self._delivery_rows,
+                )
+                for key in rows
+            ),
+            cursor=cursor,
+            limit=limit,
+        )
 
     async def begin_bulk_replay(
         self,
@@ -481,32 +514,6 @@ class InMemoryTriggerMetadataStore(MemoryDeliveryState, MemoryReceiverScanProgre
 
     async def check_scheduler_ready(self) -> None:
         """Memory scheduler structures exist at construction; no durable backend is implied."""
-
-    async def check_receiver_workspaces_ready(self) -> None:
-        """Memory keeps recovery state at construction; this is not production durability."""
-
-    async def query_receiver_workspaces(
-        self,
-        *,
-        cursor: Cursor | None = None,
-        limit: int | None = None,
-    ) -> Page[WorkspaceId]:
-        """Discover both live subscription scope and orphaned durable recovery state."""
-        workspaces = (
-            workspace
-            for rows in (
-                self._subscriptions,
-                self._resume,
-                self._schedules,
-                self._pending_fires,
-                self._dead_letters,
-                self._bulk_replays,
-                self._source_deliveries,
-                self._delivery_rows,
-            )
-            for workspace, *_ in rows
-        )
-        return receiver_workspace_page(workspaces, cursor=cursor, limit=limit)
 
     async def scheduler_now(self) -> datetime:
         """Expose the injected provider clock, independent of receiver-local wall clocks."""

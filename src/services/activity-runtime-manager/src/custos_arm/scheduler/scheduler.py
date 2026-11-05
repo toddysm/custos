@@ -686,7 +686,7 @@ class ActivityScheduler:
             tmpfs_mounts=(
                 TmpfsMount(mount_path=CUSTOS_IN, read_only=True),
                 TmpfsMount(mount_path=CUSTOS_OUT),
-                TmpfsMount(mount_path=SIDECAR_PRIVATE_MOUNT, read_only=True, size_limit="16Ki"),
+                TmpfsMount(mount_path=SIDECAR_PRIVATE_MOUNT, read_only=True, size_limit="32Ki"),
                 *(
                     (TmpfsMount(mount_path="/custos/run", size_limit="1Mi"),)
                     if self._settings.credential_proxy_url
@@ -697,6 +697,7 @@ class ActivityScheduler:
                 image=self._settings.sidecar_image,
                 endpoint=self._settings.connector_endpoint,
                 credential_broker=bool(self._settings.credential_proxy_url),
+                custom_ca=bool(self._settings.sidecar_ca_file),
             ),
             io_bridge_image=self._settings.io_bridge_image,
             deadline=deadline,
@@ -753,7 +754,8 @@ class ActivityScheduler:
         handle: SandboxHandle,
         deadline: datetime,
     ) -> SidecarToken:
-        """Bind bootstrap issuance to the actual workspace and clamped execution deadline."""
+        """Bind bootstrap to the attempt and stage optional bounded public HTTPS trust privately."""
+        ca_bundle = self._settings.read_sidecar_ca_bundle()
         result = await self._injector.inject(
             sink=FilesystemSecretSink(handle.input_root, private_root=handle.sidecar_root),
             step=request.step,
@@ -762,6 +764,15 @@ class ActivityScheduler:
             workspace_id=request.workspace_id,
             deadline=deadline,
         )
+        self._context[self._key(request)] = replace(
+            self._context[self._key(request)],
+            bootstrap=result.token,
+        )
+        if ca_bundle is not None:
+            await FilesystemSecretSink(
+                handle.input_root,
+                private_root=handle.sidecar_root,
+            ).write_private_secret(relative_path="ca.pem", content=ca_bundle, mode=0o400)
         if request.credential_proof is not None:
             bundle = {
                 "workspaceId": request.workspace_id,

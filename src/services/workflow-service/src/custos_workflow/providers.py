@@ -1520,7 +1520,12 @@ def load_run_components(
         # default here so an adapter added later without a
         # per-request timeout does not fall back to httpx's
         # implicit 5 s default.
-        dapr_http_client = httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds))
+        from custos_callctx.dapr_http import dapr_http_client as create_dapr_http_client
+
+        dapr_http_client = create_dapr_http_client(
+            timeout=httpx.Timeout(timeout_seconds),
+            env=resolved_env,
+        )
     else:
         dapr_http_client = None
     execution_context = (

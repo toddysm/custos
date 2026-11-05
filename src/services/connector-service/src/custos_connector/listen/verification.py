@@ -16,6 +16,7 @@ from custos_spl.interfaces.connector_instance_store import (
     ConnectorInstance,
     ConnectorInstanceStoreProvider,
 )
+from opentelemetry import metrics
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from custos_connector.identity import IdentityResolverError, IdentityResolverRegistry
@@ -24,6 +25,9 @@ from custos_connector.listen.normalizer import DELIVERY_MODE_PUSH, EventNormaliz
 from custos_connector.listen.signature import SIGNATURE_HEADER, HmacSignatureVerifier
 
 logger = logging.getLogger(__name__)
+_verification_failures = metrics.get_meter("custos_connector.receivers").create_counter(
+    "custos_connector_webhook_verification_failures_total",
+)
 MAX_RAW_BYTES = 1024 * 1024
 MAX_ENCODED_REQUEST_BYTES = 2 * 1024 * 1024
 MAX_HEADER_BYTES = 16 * 1024
@@ -46,9 +50,19 @@ class WebhookVerificationError(Exception):
     """A stable sanitized failure, never carrying raw payloads or credential values."""
 
     def __init__(self, status_code: int, code: str, detail: str) -> None:
-        """Store only caller-safe error metadata."""
+        """Store caller-safe metadata and record only a bounded failure category."""
         super().__init__(detail)
         self.status_code, self.code, self.detail = status_code, code, detail
+        _verification_failures.add(
+            1,
+            {
+                "category": "authentication"
+                if status_code == 401
+                else "input"
+                if status_code < 500
+                else "upstream",
+            },
+        )
 
 
 class VerifyWebhookRequest(BaseModel):

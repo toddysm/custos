@@ -219,6 +219,7 @@ class Providers:
     pull_demand_reconciler: PullDemandReconciler | None = field(default=None)
     plugin_invoker: PluginInvoker | None = field(default=None)
     hook_readiness: Callable[[], Awaitable[None]] | None = field(default=None)
+    close: Callable[[], Awaitable[None]] | None = field(default=None)
 
 
 def load_registration_registry_client(settings: Settings) -> httpx.AsyncClient | None:
@@ -285,9 +286,10 @@ def load_providers(settings: Settings) -> Providers:
     from custos_pg.pool import LazyPool
 
     metadata_lazy_pool = LazyPool(settings.metadata_store_dsn)
+    catalog_lazy_pool = LazyPool(settings.catalog_store_dsn)
 
     catalog_store = PgCatalogAdapter(
-        lazy=LazyPool(settings.catalog_store_dsn),
+        lazy=catalog_lazy_pool,
     )
     instance_store = PgConnectorInstanceAdapter(
         lazy=metadata_lazy_pool,
@@ -353,6 +355,14 @@ def load_providers(settings: Settings) -> Providers:
         if registration_registry_client is not None
         else None
     )
+
+    async def close_pools() -> None:
+        """Close both factory-owned pools even when the first reports a shutdown failure."""
+        try:
+            await metadata_lazy_pool.aclose()
+        finally:
+            await catalog_lazy_pool.aclose()
+
     providers = Providers(
         catalog_store=typed_catalog,
         instance_store=typed_instances,
@@ -388,6 +398,7 @@ def load_providers(settings: Settings) -> Providers:
         registration_registry_client=registration_registry_client,
         plugin_invoker=invoker,
         hook_readiness=hook_readiness,
+        close=close_pools,
     )
     return (
         wire_durable_pull_runtime(providers, settings)
@@ -497,9 +508,9 @@ def load_identity_registry(
     """
     # Lazy import keeps providers.py importable in unit tests that
     # never touch the identity path.
-    import httpx
+    from custos_callctx.dapr_http import dapr_http_client
 
-    http_client = httpx.AsyncClient()
+    http_client = dapr_http_client()
     transport = HttpxAsyncHttpClient(http_client, owns_client=True)
 
     registry = IdentityResolverRegistry(
@@ -543,7 +554,9 @@ def load_event_publisher(
     """
     if not settings.dapr_pubsub_enabled:
         return NoOpEventPublisher(), None
-    client = httpx.AsyncClient()
+    from custos_callctx.dapr_http import dapr_http_client
+
+    client = dapr_http_client()
     publisher = DaprPubSubEventPublisher(
         http_client=client,
         dapr_endpoint=settings.dapr_http_endpoint,

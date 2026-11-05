@@ -100,6 +100,7 @@ from custos_spl.interfaces.metrics_query import (
     MetricSeries,
     MetricsQueryProvider,
 )
+from custos_spl.interfaces.receiver_workspaces import ReceiverWorkspaceProvider
 from custos_spl.interfaces.scheduler import (
     PendingScheduleFire,
     SchedulerLease,
@@ -164,6 +165,7 @@ __all__ = [
     "Principal",
     "PrincipalFilter",
     "PutDedupKeyResult",
+    "ReceiverWorkspaceProvider",
     "ReserveIdempotencyResult",
     "ResumeRegistrationProvider",
     "ResumeSource",

@@ -167,7 +167,27 @@ if [[ "$INSTALL_PROMETHEUS" == "true" ]]; then
   helm upgrade --install custos-prometheus prometheus-community/prometheus \
     --version "$PROMETHEUS_VERSION" \
     --namespace custos-system --create-namespace \
-    $WAIT_FLAG
+    $WAIT_FLAG \
+    -f - <<'PROMETHEUS_SCRAPE_VALUES'
+extraScrapeConfigs: |
+  - job_name: custos-services
+    metrics_path: /metrics
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names:
+            - {{ .Release.Namespace }}
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_container_port_name]
+        regex: http|metrics
+        action: keep
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+      - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+        target_label: app
+PROMETHEUS_SCRAPE_VALUES
 fi
 
 # ---------------------------------------------------------------------------

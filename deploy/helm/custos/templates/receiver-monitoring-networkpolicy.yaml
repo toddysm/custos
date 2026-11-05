@@ -1,0 +1,45 @@
+{{/*
+The supplied Prometheus runs beside controllers, so namespace deny-all also
+requires source egress for DNS, Kubernetes discovery and selected metric ports.
+An external monitoring namespace retains its own source-policy ownership.
+*/}}
+{{- $r := .Values.global.receiverRuntime -}}
+{{- $network := .Values.global.networkPolicies -}}
+{{- if and $r.enabled (eq $network.monitoringNamespace .Release.Namespace) }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-receivers-prometheus
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus
+      app.kubernetes.io/component: server
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $network.dnsNamespace }}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+    - to:
+        {{- range $cidr := $r.kubernetesApiCIDRs }}
+        - ipBlock:
+            cidr: {{ $cidr | quote }}
+        {{- end }}
+      ports:
+        {{- range $port := $r.kubernetesApiPorts }}
+        - protocol: TCP
+          port: {{ $port }}
+        {{- end }}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: [api-gateway, auth-service, catalog-service, connector-service, workflow-service, trigger-service, activity-runtime-manager, observability-audit-service]
+      ports: [{protocol: TCP, port: 8080}, {protocol: TCP, port: 8090}]
+{{- end }}

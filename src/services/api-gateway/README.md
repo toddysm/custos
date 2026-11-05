@@ -211,11 +211,20 @@ tests/
 
 ## Development
 
-The gateway depends on two path-local libraries (`custos-spl`,
-`custos-callctx`). Install them first, then the service:
+Set `CUSTOS_GATEWAY_METADATA_STORE` to a PostgreSQL data-source name to enable
+production request-key binding. Startup requires metadata revision 4 and does
+not run migrations. Connection/schema failures prevent readiness; partial
+startup and shutdown close only the clients and pool created by this lifespan.
+Injected stores and transports remain caller-owned. Without a configured or
+injected store, recovery writes return 503 and ordinary routes retain their
+previous behavior.
+
+The gateway depends on three path-local libraries (`custos-spl`,
+`custos-postgres`, `custos-callctx`). Install them first, then the service:
 
 ```bash
 pip install -e src/libs/storage-provider-layer[dev]
+pip install -e src/libs/custos-postgres[dev]
 pip install -e src/libs/custos-callctx[dev]
 pip install -e src/services/api-gateway[dev]
 ```

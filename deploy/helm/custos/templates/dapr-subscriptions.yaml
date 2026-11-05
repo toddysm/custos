@@ -1,6 +1,15 @@
 {{- if .Values.dapr.install -}}
 {{- $ns := include "custos.namespace" . -}}
-{{- $subs := .Values.dapr.subscriptions -}}
+{{- $subs := deepCopy .Values.dapr.subscriptions -}}
+{{- if .Values.global.receiverRuntime.enabled -}}
+{{- range $entry := list
+  (dict "key" "triggerWorkflowEvents" "name" "trigger-workflow-events" "topic" "custos.workflow.events" "route" "/internal/events/workflow")
+  (dict "key" "triggerConnectorEvents" "name" "trigger-connector-events" "topic" "custos.connector.events" "route" "/internal/events/connectors")
+  (dict "key" "triggerNormalizedEvents" "name" "trigger-normalized-events" "topic" "custos.triggers.normalized" "route" "/internal/events/normalized") -}}
+{{- $_ := set $subs $entry.key (dict "enabled" true "name" $entry.name "pubsub" "custos-pubsub"
+  "topic" $entry.topic "route" $entry.route "scopes" (list "trigger-service")) -}}
+{{- end -}}
+{{- end -}}
 {{- $first := true -}}
 {{/* Iterate sorted keys so the rendered manifest stays stable across runs. */}}
 {{- range $key := keys $subs | sortAlpha }}

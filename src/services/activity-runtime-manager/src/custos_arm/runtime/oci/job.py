@@ -437,6 +437,13 @@ def _sidecar_container(
                     "value": f"{SIDECAR_PRIVATE_MOUNT}/runtime.json",
                 }
             )
+            if sidecar.custom_ca:
+                env.append(
+                    {
+                        "name": "CUSTOS_SIDECAR_CA_BUNDLE",
+                        "value": f"{SIDECAR_PRIVATE_MOUNT}/ca.pem",
+                    }
+                )
     return {
         "name": SIDECAR_CONTAINER_NAME,
         "image": sidecar.image,

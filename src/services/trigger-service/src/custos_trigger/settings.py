@@ -58,6 +58,9 @@ ENV_GATEWAY_APP_ID: Final[str] = "TRIGGER_GATEWAY_APP_ID"
 ENV_GATEWAY_NAMESPACE: Final[str] = "TRIGGER_GATEWAY_NAMESPACE"
 ENV_CONNECTOR_APP_ID: Final[str] = "TRIGGER_CONNECTOR_APP_ID"
 ENV_CONNECTOR_EVENTS_TOPIC: Final[str] = "TRIGGER_CONNECTOR_EVENTS_TOPIC"
+ENV_RECEIVER_WORKERS_ENABLED: Final[str] = "TRIGGER_RECEIVER_WORKERS_ENABLED"
+ENV_DEPLOYMENT_ID: Final[str] = "TRIGGER_DEPLOYMENT_ID"
+ENV_RECEIVER_DRAIN_SECONDS: Final[str] = "TRIGGER_RECEIVER_DRAIN_SECONDS"
 
 # --- Dapr Pub/Sub transport (chart § Dapr Pub/Sub subscriptions) -------------
 
@@ -119,6 +122,27 @@ class SettingsError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class ReceiverWorkerSettings:
+    """Default-off background activation, deployment lease identity and graceful drain budget."""
+
+    enabled: bool = False
+    deployment_id: str = ""
+    drain_seconds: int = 330
+    lease_seconds: int = DEFAULT_SCHEDULER_LEADER_LEASE_SECONDS
+    renew_seconds: int = DEFAULT_SCHEDULER_LEADER_RENEW_SECONDS
+
+    def __post_init__(self) -> None:
+        """Reject ambiguous activation or unusable timing before any worker starts."""
+        if type(self.enabled) is not bool:
+            raise SettingsError("receiver worker activation must be a boolean")
+        if self.enabled and not self.deployment_id.strip():
+            raise SettingsError("receiver workers require TRIGGER_DEPLOYMENT_ID")
+        if type(self.drain_seconds) is not int or not 1 <= self.drain_seconds <= 3600:
+            raise SettingsError("receiver drain seconds must be an integer in 1..3600")
+        validate_scheduler_timing(self.lease_seconds, self.renew_seconds)
+
+
+@dataclass(frozen=True, slots=True)
 class Settings:
     """Parsed and validated trigger-service configuration."""
 
@@ -148,6 +172,7 @@ class Settings:
     gateway_app_id: str = "api-gateway"
     gateway_namespace: str | None = None
     connector_app_id: str = "connector-service"
+    receiver_workers: ReceiverWorkerSettings = field(default_factory=ReceiverWorkerSettings)
 
     def __post_init__(self) -> None:
         """Reject unusable ownership timing or an explicitly blank mesh credential."""
@@ -231,6 +256,22 @@ def _read_gate(env: Mapping[str, str], name: str) -> bool:
     raise SettingsError(f"{name} must be true or false")
 
 
+def read_receiver_worker_settings(env: Mapping[str, str]) -> ReceiverWorkerSettings:
+    """Share typed activation/timing parsing between factories and the full loader."""
+    src = dict(env)
+    return ReceiverWorkerSettings(
+        enabled=_read_gate(src, ENV_RECEIVER_WORKERS_ENABLED),
+        deployment_id=src.get(ENV_DEPLOYMENT_ID, "").strip(),
+        drain_seconds=_opt_non_negative_int(ENV_RECEIVER_DRAIN_SECONDS, src, 330),
+        lease_seconds=_opt_non_negative_int(
+            ENV_SCHEDULER_LEADER_LEASE_SECONDS, src, DEFAULT_SCHEDULER_LEADER_LEASE_SECONDS
+        ),
+        renew_seconds=_opt_non_negative_int(
+            ENV_SCHEDULER_LEADER_RENEW_SECONDS, src, DEFAULT_SCHEDULER_LEADER_RENEW_SECONDS
+        ),
+    )
+
+
 def load_settings(env: dict[str, str] | None = None) -> Settings:
     """Parse a :class:`Settings` from the supplied env mapping (default ``os.environ``).
 
@@ -241,6 +282,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
     """
     src: dict[str, str] = dict(os.environ if env is None else env)
     return Settings(
+        receiver_workers=read_receiver_worker_settings(src),
         receiver_configuration_enabled=read_receiver_configuration_enabled(src),
         source_receivers_enabled=read_source_receivers_enabled(src),
         webhook_receiver_enabled=read_webhook_receiver_enabled(src),

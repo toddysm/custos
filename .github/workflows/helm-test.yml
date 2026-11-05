@@ -9,6 +9,8 @@ on:
     paths:
       - 'deploy/helm/**'
       - 'tests/helm/**'
+      - 'src/services/**/settings.py'
+      - 'src/services/activity-runtime-manager/src/custos_arm/config.py'
       - '.github/workflows/helm-test.yml'
 
 jobs:
@@ -37,9 +39,11 @@ jobs:
           python-version: "3.11"
           cache: pip
       - name: install render-test dependencies
-        run: pip install -e tests/helm
+        run: |
+          pip install -e src/libs/storage-provider-layer -e src/libs/custos-postgres \
+            -e src/libs/custos-callctx -e src/libs/custos-cel \
+            -e src/services/auth-service -e src/services/workflow-service -e tests/helm
       - name: helm dependency update
         run: helm dependency update deploy/helm/custos
       - name: pytest (helm render assertions)
         run: pytest -q tests/helm
-

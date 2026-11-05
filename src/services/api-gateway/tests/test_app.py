@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
+import pytest
+from custos_pg import PgMetadataAdapter
+from custos_pg.pool import LazyPool
+from custos_spl.errors import BackendUnavailable, MigrationRequired
 from fastapi.testclient import TestClient
 
 from custos_gateway.app import create_app
@@ -41,3 +47,60 @@ def test_readyz_503_before_ready_then_200_after(
 def test_settings_attached_to_app_state(settings: Settings) -> None:
     app = create_app(settings=settings)
     assert app.state.settings is settings
+
+
+@pytest.mark.parametrize("failure", [None, "migration", "backend"])
+async def test_owned_metadata_readiness_and_cleanup(
+    settings: Settings,
+    auth_client: FakeAuthServiceClient,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str | None,
+) -> None:
+    """Configured stores gate readiness and close owned resources on success or partial startup."""
+    pool = LazyPool("postgresql://unused")
+    monkeypatch.setattr("custos_pg.pool.LazyPool", lambda dsn: pool)
+
+    async def refresh(adapter: PgMetadataAdapter) -> None:
+        """Supply schema evidence or an explicit backend failure without opening a socket."""
+        if failure == "backend":
+            raise BackendUnavailable("metadata unavailable")
+        adapter._applied_revisions = set() if failure == "migration" else {1, 2, 3, 4}
+
+    monkeypatch.setattr(PgMetadataAdapter, "refresh_declared", refresh)
+    app = create_app(
+        settings=replace(settings, metadata_store_dsn="postgresql://unused"),
+        auth_client=auth_client,
+    )
+    if failure is None:
+        async with app.router.lifespan_context(app):
+            assert app.state.ready and isinstance(app.state.metadata_store, PgMetadataAdapter)
+            assert app.state.metadata_store._lazy is pool
+    else:
+        expected = MigrationRequired if failure == "migration" else BackendUnavailable
+        with pytest.raises(expected):
+            async with app.router.lifespan_context(app):
+                raise AssertionError("unready metadata must not serve requests")
+    assert not app.state.ready
+    assert app.state.downstream_router.http_client.is_closed
+    with pytest.raises(RuntimeError, match="closed"):
+        await pool.get()
+
+
+async def test_injected_metadata_remains_caller_owned(
+    settings: Settings,
+    auth_client: FakeAuthServiceClient,
+) -> None:
+    """An injected store overrides the DSN without transferring ownership of its pool."""
+    pool = LazyPool("postgresql://unused")
+    store = PgMetadataAdapter(lazy=pool)
+    app = create_app(
+        settings=replace(settings, metadata_store_dsn="postgresql://unused"),
+        auth_client=auth_client,
+        metadata_store=store,
+    )
+    try:
+        async with app.router.lifespan_context(app):
+            assert app.state.metadata_store is store
+        assert not pool._closed
+    finally:
+        await pool.aclose()

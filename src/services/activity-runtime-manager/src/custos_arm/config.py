@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import os
 import re
+import ssl
 from dataclasses import dataclass, field
 from datetime import timedelta
+from pathlib import Path
 from typing import Final
 from urllib.parse import urlsplit
 
@@ -227,6 +229,24 @@ class Settings:
     credential_proxy_url: str = ""
     runtime_enabled: bool = False
     staging_root: str = "/var/run/custos/attempts"
+    sidecar_ca_file: str = ""
+
+    def read_sidecar_ca_bundle(self) -> bytes | None:
+        """Accept only bounded public PEM certificates, rechecking before every projection."""
+        if not self.sidecar_ca_file:
+            return None
+        with Path(self.sidecar_ca_file).open("rb") as source:
+            bundle = source.read(8193)
+        if not bundle or len(bundle) > 8192:
+            raise SettingsError("Sidecar CA bundle must contain at most 8192 bytes")
+        certificate = rb"-----BEGIN CERTIFICATE-----[A-Za-z0-9+/=\r\n]+-----END CERTIFICATE-----"
+        if re.fullmatch(rb"(?:\s*" + certificate + rb")+\s*", bundle) is None:
+            raise SettingsError("Sidecar CA bundle must contain only public PEM certificates")
+        try:
+            ssl.create_default_context(cadata=bundle.decode("ascii"))
+        except (UnicodeError, ssl.SSLError):
+            raise SettingsError("Sidecar CA bundle is not valid PEM trust material") from None
+        return bundle
 
     def __post_init__(self) -> None:
         """Private attempt proofs may only leave the pod over a verified HTTPS origin."""
@@ -366,6 +386,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         credential_proxy_url=src.get(ENV_CREDENTIAL_PROXY_URL, "").strip(),
         runtime_enabled=_opt_bool(ENV_RUNTIME_ENABLED, src, False),
         staging_root=_opt_str(ENV_STAGING_ROOT, src, "/var/run/custos/attempts"),
+        sidecar_ca_file=_opt_str("ARM_SIDECAR_CA_FILE", src, ""),
         sandbox_namespace=_require(ENV_SANDBOX_NAMESPACE, src),
         sidecar_image=_require(ENV_SIDECAR_IMAGE, src),
         io_bridge_image=_opt_str(ENV_IO_BRIDGE_IMAGE, src, DEFAULT_IO_BRIDGE_IMAGE),

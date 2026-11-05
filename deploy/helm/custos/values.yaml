@@ -20,6 +20,34 @@ global:
   imageTag: dev
   imagePullPolicy: IfNotPresent
   imagePullSecrets: []
+  # Opt-in production receiver/runtime wiring; all four profiles remain legacy-compatible off.
+  # Values contain references only. Provision the database, tokens, signing key,
+  # execution accounts, TLS Secret and shared artifact claim before activation.
+  receiverRuntime:
+    enabled: false
+    # Pause new scheduled/poll/webhook admission without removing identity,
+    # shared storage, queued callbacks or private runtime infrastructure.
+    admissionEnabled: false
+    deploymentId: ""
+    databaseSecret: custos-app
+    apiTokenSecret: ""
+    appTokenSecrets: {}
+    authSigningKeyRef: ""
+    executionBindings:
+      bindings: []
+      defaults: {}
+    sandboxNamespace: ""
+    tlsSecret: ""
+    sidecarImage: ""
+    ioBridgeImage: ""
+    artifactClaim: ""
+    telemetryEndpoint: ""
+    drainSeconds: 330
+    terminationGraceSeconds: 420
+    kubernetesApiCIDRs: []
+    kubernetesApiPorts: [443, 6443]
+    controllerEgress: []
+    sandboxEgress: []
   # correlationId header name minted by API Gateway and propagated downstream
   correlationIdHeader: x-correlation-id
   # Deployment profile exposed to every subchart (top-level `profile` is not
@@ -46,10 +74,10 @@ global:
   # on once they are validated for the target cluster's namespace layout.
   networkPolicies:
     enabled: false
-    # Namespace (by `kubernetes.io/metadata.name`) Prometheus scrapes from.
-    monitoringNamespace: monitoring
+    # Matches scripts/install-prereqs.sh; override for a separate monitoring namespace.
+    monitoringNamespace: custos-system
     # Namespace the Envoy Gateway data plane runs in (north-south ingress).
-    gatewayNamespace: custos-system
+    gatewayNamespace: envoy-gateway-system
     # Cluster DNS namespace (egress on 53 is always required).
     dnsNamespace: kube-system
     # Dapr control-plane namespace (Sentry / Placement / Operator / Injector).
@@ -58,6 +86,7 @@ global:
     daprPorts: [3500, 50001, 50002]
     # CNPG Postgres cluster pod selector + port (egress for DB-backed services).
     postgresPort: 5432
+    postgresOperatorNamespace: cnpg-system
     postgresPodSelector:
       cnpg.io/cluster: custos
 
@@ -366,13 +395,11 @@ prometheus:
     enabled: false
   kube-state-metrics:
     enabled: false
-  # Scrape the Custos services' `/metrics` endpoints. The vendored
-  # prometheus-community chart has no Prometheus Operator, so ServiceMonitors do
-  # not apply; this static job uses Kubernetes pod discovery instead. Every
-  # Custos service container exposes a port named `http` (the app port that also
-  # serves `/metrics`), whereas the vendored sinks and the Dapr sidecar use
-  # differently-named ports — so keeping only the `http` port targets exactly the
-  # Custos workloads. Rendered through the chart's `tpl`, hence `.Release.*`.
+  # Reference static scrape job for the out-of-band Prometheus installation.
+  # Legacy HTTP metrics and the managed runtime's dedicated metrics-only port
+  # are selected; its private `https` app port is never scraped as plaintext.
+  # Install-prereqs projects this job too. For a separate monitoring namespace,
+  # configure discovery with the actual controller namespace instead.
   extraScrapeConfigs: |
     - job_name: custos-services
       metrics_path: /metrics
@@ -383,7 +410,7 @@ prometheus:
               - {{ .Release.Namespace }}
       relabel_configs:
         - source_labels: [__meta_kubernetes_pod_container_port_name]
-          regex: http
+          regex: http|metrics
           action: keep
         - source_labels: [__meta_kubernetes_namespace]
           target_label: namespace

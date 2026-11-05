@@ -10,7 +10,7 @@
 # ``pyproject.toml`` before building the service wheel.
 #
 #   * ``builder`` — python:3.14-slim. Builds wheels for the in-repo path libs
-#     (``custos-spl`` = ``src/libs/storage-provider-layer``; ``custos-callctx``)
+#     (``custos-spl``, ``custos-postgres`` and ``custos-callctx``)
 #     with ``--no-deps``, then ``pip wheel``s the service so its external
 #     dependencies resolve against PyPI while the ``custos-*`` deps resolve
 #     against the locally built wheels in ``/wheels``.
@@ -42,10 +42,11 @@ WORKDIR /build
 RUN pip install --upgrade pip==24.2 build==1.2.2
 
 # Copy the in-repo path libraries this service depends on (per its
-# ``pyproject.toml``: ``custos-spl`` + ``custos-callctx``) and the service
+# ``pyproject.toml``: ``custos-spl``, ``custos-postgres`` and ``custos-callctx``) and the service
 # sources. ``.dockerignore`` keeps caches, tests, and virtualenvs out of the
 # build context.
 COPY src/libs/storage-provider-layer/ ./libs/storage-provider-layer/
+COPY src/libs/custos-postgres/ ./libs/custos-postgres/
 COPY src/libs/custos-callctx/ ./libs/custos-callctx/
 COPY src/services/api-gateway/ ./services/api-gateway/
 
@@ -53,10 +54,11 @@ COPY src/services/api-gateway/ ./services/api-gateway/
 # requirements are resolved transitively when the service is wheeled below).
 RUN pip wheel --no-deps --wheel-dir /wheels \
         ./libs/storage-provider-layer \
+        ./libs/custos-postgres \
         ./libs/custos-callctx
 
 # Build the service wheel plus all remaining (external) dependency wheels.
-# ``--find-links /wheels`` lets the ``custos-spl`` / ``custos-callctx``
+# ``--find-links /wheels`` lets the in-repository ``custos-*``
 # requirements resolve against the locally built wheels.
 RUN pip wheel --wheel-dir /wheels --find-links /wheels \
         ./services/api-gateway

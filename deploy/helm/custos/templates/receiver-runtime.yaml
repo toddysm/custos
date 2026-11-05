@@ -1,0 +1,236 @@
+{{- $r := .Values.global.receiverRuntime -}}
+{{- if not (kindIs "bool" $r.enabled) -}}{{- fail "receiverRuntime.enabled must be boolean" -}}{{- end -}}
+{{- if $r.enabled -}}
+{{- if semverCompare "<1.29.0-0" .Capabilities.KubeVersion.Version -}}
+{{- fail "receiverRuntime requires Kubernetes >=1.29 for native sidecars" -}}{{- end -}}
+{{- if not (kindIs "bool" $r.admissionEnabled) -}}{{- fail "receiverRuntime.admissionEnabled must be boolean" -}}{{- end -}}
+{{- $services := list "api-gateway" "auth-service" "catalog-service" "connector-service" "workflow-service" "trigger-service" "activity-runtime-manager" "observability-audit-service" -}}
+{{- range $field := list "deploymentId" "databaseSecret" "apiTokenSecret" "authSigningKeyRef" "sandboxNamespace" "tlsSecret" "artifactClaim" "telemetryEndpoint" -}}
+{{- if not (and (kindIs "string" (index $r $field)) (index $r $field)) -}}{{- fail (printf "receiverRuntime.%s must be a nonempty string" $field) -}}{{- end -}}
+{{- end -}}
+{{- if or (eq $r.sandboxNamespace .Release.Namespace) (eq $r.sandboxNamespace (index .Values "connector-service").hookRuntime.namespace) -}}
+{{- fail "receiverRuntime.sandboxNamespace must be separate from controllers and hooks" -}}
+{{- end -}}
+{{- if not (index .Values "connector-service").hookRuntime.enabled -}}{{- fail "receiverRuntime requires connector hookRuntime.enabled" -}}{{- end -}}
+{{- if not .Values.global.networkPolicies.enabled -}}{{- fail "receiverRuntime requires global.networkPolicies.enabled" -}}{{- end -}}
+{{- if and .Values.namespace.name (ne .Values.namespace.name .Release.Namespace) -}}
+{{- fail "receiverRuntime requires one consistent controller namespace" -}}{{- end -}}
+{{- if or (not .Values.dapr.install) (not .Values.migrate.enabled) -}}{{- fail "receiverRuntime requires Dapr glue and migrations" -}}{{- end -}}
+{{- if or (not .Values.dapr.components.pubsub.redis.enabled) (ne .Values.dapr.components.pubsub.redis.name "custos-pubsub") -}}
+{{- fail "receiverRuntime requires the deployed custos-pubsub Redis broker" -}}{{- end -}}
+{{- if empty $r.kubernetesApiCIDRs -}}{{- fail "receiverRuntime requires explicit Kubernetes API CIDRs" -}}{{- end -}}
+{{- if ne $r.databaseSecret .Values.postgres.secretName -}}{{- fail "receiverRuntime databaseSecret must match the migration database Secret" -}}{{- end -}}
+{{- range $hook := list "migrate" "bootstrap" -}}
+{{- $job := index $.Values $hook -}}
+{{- if and $job.enabled (or (not (kindIs "string" $job.image.tag)) (has $job.image.tag (list "" "dev" "latest"))) -}}
+{{- fail (printf "receiverRuntime requires an explicit tested %s.image.tag" $hook) -}}{{- end -}}
+{{- end -}}
+{{- $obsEnv := dict -}}
+{{- range (index .Values "observability-audit-service").env -}}
+{{- $_ := set $obsEnv .name . -}}
+{{- end -}}
+{{- range $kind := list "LOG" "METRICS" -}}
+{{- $providerKey := printf "CUSTOS_%s_QUERY_PROVIDER" $kind -}}
+{{- $provider := get $obsEnv $providerKey | default dict -}}
+{{- if hasKey $provider "valueFrom" -}}{{- fail "receiverRuntime query-provider modes must be literal values" -}}{{- end -}}
+{{- $default := ternary "loki" "prometheus" (eq $kind "LOG") -}}
+{{- $mode := default $default $provider.value -}}
+{{- if not (has $mode (list $default "noop")) -}}{{- fail (printf "receiverRuntime invalid %s" $providerKey) -}}{{- end -}}
+{{- $urlKey := ternary "CUSTOS_LOKI_URL" "CUSTOS_PROMETHEUS_URL" (eq $kind "LOG") -}}
+{{- if eq $mode "noop" -}}
+{{- $urlKey = ternary "CUSTOS_LOGS_EXTERNAL_URL" "CUSTOS_METRICS_EXTERNAL_URL" (eq $kind "LOG") -}}
+{{- end -}}
+{{- $endpoint := get $obsEnv $urlKey | default dict -}}
+{{- if and (empty $endpoint.value) (empty $endpoint.valueFrom) -}}
+{{- fail (printf "receiverRuntime requires observability-audit-service.env %s for %s" $urlKey $mode) -}}
+{{- end -}}
+{{- end -}}
+{{- if or (lt (int $r.drainSeconds) 330) (gt (int $r.drainSeconds) 3600) (le (int $r.terminationGraceSeconds) (add (int $r.drainSeconds) 65)) -}}
+{{- fail "receiverRuntime requires drainSeconds in330..3600 and termination grace > drainSeconds+65 (HTTP15, hook cleanup30, resource close15, Dapr5)" -}}{{- end -}}
+{{- range $field := list "sidecarImage" "ioBridgeImage" -}}
+{{- if not (regexMatch "^[^@\\s]+@sha256:[a-f0-9]{64}$" (index $r $field)) -}}
+{{- fail (printf "receiverRuntime.%s must be digest-pinned" $field) -}}{{- end -}}
+{{- end -}}
+{{- if or (empty $r.executionBindings.bindings) (empty $r.executionBindings.defaults) (gt (len (toJson $r.executionBindings)) 65536) -}}
+{{- fail "receiverRuntime requires bounded explicit execution bindings and defaults" -}}{{- end -}}
+{{- $knownBindings := dict -}}
+{{- $executionSecrets := list -}}
+{{- range $binding := $r.executionBindings.bindings -}}
+{{- if ne (len $binding) 5 -}}{{- fail "execution bindings contain references only, with exactly five fields" -}}{{- end -}}
+{{- range $field := list "workspaceId" "principalId" "bindingId" "secretRef" "secretKey" -}}
+{{- if not (and (kindIs "string" (index $binding $field)) (index $binding $field)) -}}
+{{- fail (printf "execution binding %s must be a nonempty string" $field) -}}{{- end -}}
+{{- end -}}
+{{- $key := toJson (list $binding.workspaceId $binding.bindingId) -}}
+{{- if hasKey $knownBindings $key -}}{{- fail "duplicate execution binding" -}}{{- end -}}
+{{- $_ := set $knownBindings $key true -}}
+{{- $executionSecrets = append $executionSecrets $binding.secretRef -}}
+{{- end -}}
+{{- range $workspace, $binding := $r.executionBindings.defaults -}}
+{{- if not (hasKey $knownBindings (toJson (list $workspace $binding))) -}}{{- fail "execution default must resolve to an explicit binding" -}}{{- end -}}
+{{- end -}}
+{{- $tokens := list $r.apiTokenSecret -}}
+{{- range $service := $services -}}
+{{- $values := index $.Values $service -}}
+{{- $tag := default $.Values.global.imageTag $values.image.tag -}}
+{{- if or (not (kindIs "string" $tag)) (has $tag (list "" "dev" "latest")) -}}
+{{- fail "receiverRuntime requires explicit tested controller image tags, not dev/latest" -}}{{- end -}}
+{{- if or (ne (int $values.service.port) 8080) (ne (int $values.dapr.appPort) 8080) -}}
+{{- fail "receiverRuntime requires the registered app port 8080" -}}{{- end -}}
+{{- if and (ne $service "api-gateway") (ne $values.service.type "ClusterIP") -}}
+{{- fail "receiverRuntime control-plane Services must be private ClusterIP" -}}{{- end -}}
+{{- if or (not $values.enabled) (not $values.dapr.enabled) -}}{{- fail (printf "receiverRuntime requires enabled service and Dapr: %s" $service) -}}{{- end -}}
+{{- $appId := ternary "custos-auth" $service (eq $service "auth-service") -}}
+{{- if and $values.dapr.appId (ne $values.dapr.appId $appId) -}}{{- fail "receiverRuntime uses the registered service app IDs" -}}{{- end -}}
+{{- $token := required (printf "receiverRuntime.appTokenSecrets.%s is required" $service) (index $r.appTokenSecrets $service) -}}
+{{- if has $token $tokens -}}{{- fail "receiverRuntime requires distinct app tokens and API token" -}}{{- end -}}
+{{- $tokens = append $tokens $token -}}
+{{- end -}}
+{{- $callers := dict
+  "api-gateway" (list)
+  "auth-service" (list "api-gateway" "workflow-service" "trigger-service" "activity-runtime-manager" "connector-service" "catalog-service" "observability-audit-service")
+  "workflow-service" (list "api-gateway" "trigger-service" "workflow-service")
+  "trigger-service" (list "api-gateway" "workflow-service")
+  "connector-service" (list "api-gateway" "workflow-service" "trigger-service" "activity-runtime-manager" "catalog-service")
+  "activity-runtime-manager" (list "workflow-service")
+  "catalog-service" (list "api-gateway" "workflow-service" "connector-service" "activity-runtime-manager")
+  "observability-audit-service" $services -}}
+{{- range $service := $services }}
+---
+apiVersion: dapr.io/v1alpha1
+kind: Configuration
+metadata:
+  name: {{ printf "%s-receivers-%s" $.Release.Name $service }}
+  namespace: {{ $.Release.Namespace }}
+spec:
+  accessControl:
+    defaultAction: deny
+    trustDomain: public
+    policies:
+      {{- range $caller := index $callers $service }}
+      - appId: {{ ternary "custos-auth" $caller (eq $caller "auth-service") }}
+        namespace: {{ $.Release.Namespace }}
+        trustDomain: public
+        defaultAction: allow
+      {{- else }} []
+      {{- end }}
+  {{- $secrets := list }}
+  {{- if eq $service "auth-service" }}{{- $secrets = list $r.authSigningKeyRef }}
+  {{- else if has $service (list "api-gateway" "workflow-service" "trigger-service" "activity-runtime-manager") }}
+  {{- $secrets = $executionSecrets | uniq }}
+  {{- end }}
+  {{- if $secrets }}
+  secrets:
+    scopes:
+      - storeName: kubernetes
+        defaultAccess: deny
+        allowedSecrets:
+          {{- toYaml (concat $secrets (list $r.databaseSecret $.Values.dapr.components.pubsub.redis.passwordSecret) | uniq) | nindent 10 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ printf "%s-execution-secrets-%s" $.Release.Name $service }}
+  namespace: {{ $.Release.Namespace }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames:
+      {{- toYaml $secrets | nindent 6 }}
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ printf "%s-execution-secrets-%s" $.Release.Name $service }}
+  namespace: {{ $.Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ printf "%s-execution-secrets-%s" $.Release.Name $service }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ printf "%s-%s" $.Release.Name $service | trunc 63 | trimSuffix "-" }}
+    namespace: {{ $.Release.Namespace }}
+  {{- end }}
+{{- end }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $r.sandboxNamespace }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: activity-controller
+  namespace: {{ $r.sandboxNamespace }}
+  annotations:
+    helm.sh/resource-policy: keep
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["get", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: activity-controller
+  namespace: {{ $r.sandboxNamespace }}
+  annotations:
+    helm.sh/resource-policy: keep
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: activity-controller
+subjects:
+  - kind: ServiceAccount
+    name: {{ printf "%s-activity-runtime-manager" .Release.Name | trunc 63 | trimSuffix "-" }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: activity-isolation
+  namespace: {{ $r.sandboxNamespace }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/name: activity-runtime-manager
+      ports:
+        - protocol: TCP
+          port: 8080
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.global.networkPolicies.dnsNamespace }}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- with $r.sandboxEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

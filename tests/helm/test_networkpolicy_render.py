@@ -89,6 +89,7 @@ POSTGRES_SERVICES = {
 
 
 def _render(enabled: bool) -> list[dict[str, Any]]:
+    """Keep distinct role namespaces explicit when testing the legacy allow matrix."""
     subprocess.run(
         ["helm", "dependency", "update", str(UMBRELLA)],
         check=True,
@@ -103,7 +104,12 @@ def _render(enabled: bool) -> list[dict[str, Any]]:
         str(UMBRELLA / "values-connected-eval.yaml"),
     ]
     if enabled:
-        cmd += ["--set", "global.networkPolicies.enabled=true"]
+        cmd += [
+            "--set",
+            "global.networkPolicies.enabled=true",
+            "--set",
+            "global.networkPolicies.monitoringNamespace=monitoring",
+        ]
     result = subprocess.run(cmd, check=True, capture_output=True, text=True)
     return [d for d in yaml.safe_load_all(result.stdout) if d is not None]
 
@@ -223,8 +229,8 @@ def test_only_gateway_accepts_north_south(
             if "namespaceSelector" in peer
         }
         if svc == "api-gateway":
-            assert "custos-system" in ns_targets
+            assert "envoy-gateway-system" in ns_targets
         else:
-            assert "custos-system" not in ns_targets, (
+            assert "envoy-gateway-system" not in ns_targets, (
                 f"{svc} must not accept north-south gateway ingress"
             )

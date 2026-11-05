@@ -67,6 +67,7 @@ class RuntimeResources:
 @asynccontextmanager
 async def open_runtime(settings: Settings) -> AsyncIterator[RuntimeResources]:
     """Build and probe PostgreSQL, CSI, HTTP and Kubernetes resources on the owning lifespan."""
+    settings.read_sidecar_ca_bundle()
     bindings = load_execution_bindings(os.environ)
     if bindings is None:
         raise SettingsError("runtime activation requires explicit execution-account bindings")

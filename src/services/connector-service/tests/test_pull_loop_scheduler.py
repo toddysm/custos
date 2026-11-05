@@ -10,7 +10,7 @@ fake stack. Tick happy/halt/lease-busy paths against the real
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock
@@ -139,6 +139,72 @@ async def test_min_interval_below_design_floor_rejected() -> None:
     cursor = _ScriptedCursorService()
     with pytest.raises(ValueError, match=">= 10"):
         PullLoopScheduler(cursor_service=cursor, min_interval_seconds=5)  # type: ignore[arg-type]
+
+
+async def test_old_pass_completion_cannot_clear_a_new_dispatch_reservation() -> None:
+    """A slow sibling from pass A cannot make pass B's running instance eligible for pass C."""
+    cursor = _ScriptedCursorService()
+    scheduler, clock = _build_scheduler(cursor)
+    fast = scheduler.register(_WORKSPACE, "fast")
+    scheduler.register(_WORKSPACE, "slow")
+    slow_entered, release_slow, second_entered, release_second = (asyncio.Event() for _ in range(4))
+
+    async def slow() -> TickResult:
+        """Hold pass A after its fast sibling finishes."""
+        slow_entered.set()
+        await release_slow.wait()
+        return _make_tick_result()
+
+    async def second() -> TickResult:
+        """Keep pass B's fast instance owned while pass A finishes."""
+        second_entered.set()
+        await release_second.wait()
+        return _make_tick_result()
+
+    cursor.queue(_WORKSPACE, "fast", _make_tick_result())
+    cursor.queue(_WORKSPACE, "slow", slow)
+    cursor.queue(_WORKSPACE, "fast", second)
+    pass_a = asyncio.create_task(scheduler.tick_once())
+    pass_b: asyncio.Task[Any] | None = None
+    try:
+        await asyncio.wait_for(slow_entered.wait(), 1)
+        async with asyncio.timeout(1):
+            while fast.in_flight:
+                await asyncio.sleep(0)
+        clock.advance(10)
+        pass_b = asyncio.create_task(scheduler.tick_once())
+        await asyncio.wait_for(second_entered.wait(), 1)
+        release_slow.set()
+        await pass_a
+        assert fast.in_flight
+        third = await scheduler.tick_once()
+        assert third.eligible == 0
+        assert cursor.calls.count((_WORKSPACE, "fast")) == 2
+    finally:
+        release_slow.set()
+        release_second.set()
+        await asyncio.gather(pass_a, *([pass_b] if pass_b else []), return_exceptions=True)
+
+
+async def test_cancelled_before_dispatch_entry_releases_only_its_reservation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task callbacks release reservations even when cancellation skips the coroutine body."""
+    cursor = _ScriptedCursorService()
+    scheduler, _ = _build_scheduler(cursor)
+    state = scheduler.register(_WORKSPACE, "cancelled")
+    create = asyncio.create_task
+
+    def cancel_before_entry(coro: Coroutine[Any, Any, TickResult]) -> asyncio.Task[TickResult]:
+        """Cancel the actual child immediately, before it can enter semaphore or cursor code."""
+        task = create(coro)
+        task.cancel()
+        return task
+
+    monkeypatch.setattr(asyncio, "create_task", cancel_before_entry)
+    with pytest.raises(asyncio.CancelledError):
+        await scheduler.tick_once()
+    assert not state.in_flight and not cursor.calls
 
 
 async def test_backoff_cap_below_min_interval_rejected() -> None:

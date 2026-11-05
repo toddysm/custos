@@ -11,15 +11,21 @@ The library depends only on ``opentelemetry-api``. The API ships no-op tracer /
 meter providers by default, so instrumentation is inert until an SDK + exporter
 is configured at the process boundary (the Helm-managed OTel Collector in
 production; the in-memory exporters in :mod:`tests.test_telemetry`). The inner
-sink defaults to :class:`~custos_trigger.pipeline.dispatch.NoopAuditSink`; a
-durable Observability/Audit forwarder can be injected when one is wired.
+sink defaults to :class:`~custos_trigger.pipeline.dispatch.NoopAuditSink`; activated source
+receivers wire :class:`DurableAuditSink` through the metadata audit outbox,
+including while new upstream admission is paused.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Final
+from datetime import UTC, datetime
+from typing import Any, Final, Protocol, runtime_checkable
+from uuid import uuid4
 
+from custos_spl.errors import SPLError
+from custos_spl.ids import WorkspaceId
+from custos_spl.interfaces.metadata_store import AuditEvent
 from opentelemetry import metrics, trace
 from opentelemetry.metrics import Counter
 
@@ -62,6 +68,16 @@ PIPELINE_EVENTS_TOTAL: Final[Counter] = _meter.create_counter(
     description="Count of trigger pipeline audit events by stage and outcome.",
     unit="1",
 )
+SCHEDULE_LAG_SECONDS = _meter.create_histogram(
+    "custos_trigger_schedule_lag_seconds",
+    unit="s",
+)
+REPLAY_AGE_SECONDS = _meter.create_histogram(
+    "custos_trigger_replay_age_seconds",
+    unit="s",
+)
+REPLAY_EVENTS_TOTAL = _meter.create_counter("custos_trigger_replay_events_total")
+RETENTION_EXPIRED_TOTAL = _meter.create_counter("custos_trigger_retention_expired_total")
 
 #: Map each dispatcher audit event onto its ``(stage, outcome)`` label pair.
 _EVENT_STAGE_OUTCOME: Final[dict[str, tuple[str, str]]] = {
@@ -74,14 +90,71 @@ _EVENT_STAGE_OUTCOME: Final[dict[str, tuple[str, str]]] = {
 }
 
 
+@runtime_checkable
+class AuditWriter(Protocol):
+    """The existing append-only provider boundary used by the runtime's audit sink."""
+
+    async def append_audit(self, workspace_id: str, event: AuditEvent) -> None:
+        """Persist the event and its existing outbox record before acknowledging."""
+        ...
+
+
+class DurableAuditSink:
+    """Persist controller-owned identifiers/counts, never raw events or exception diagnostics."""
+
+    def __init__(self, writer: AuditWriter) -> None:
+        """Borrow the same metadata provider as the receiver pipeline."""
+        self.writer = writer
+
+    async def emit(
+        self, event_name: str, *, workspace_id: str, attributes: Mapping[str, Any]
+    ) -> None:
+        """Append allow-listed scalar evidence; diagnostic messages are not durable audit data."""
+        allowed = {
+            "eventId",
+            "subscriptionId",
+            "workflowId",
+            "runId",
+            "stepId",
+            "kind",
+            "depth",
+            "limit",
+            "skippedCount",
+            "accepted",
+            "rejected",
+            "retryable",
+        }
+        details = {
+            key: value
+            for key, value in attributes.items()
+            if key in allowed and type(value) in (str, int, bool)
+        }
+        if "reason" in attributes:
+            details["reason"] = (
+                "dispatch-failure" if event_name == AUDIT_DISPATCH_FAILED else "rejected"
+            )
+        await self.writer.append_audit(
+            workspace_id,
+            AuditEvent(
+                WorkspaceId(workspace_id),
+                uuid4().hex,
+                event_name,
+                "trigger-service",
+                {},
+                details,
+                datetime.now(UTC),
+            ),
+        )
+
+
 class TelemetryAuditSink:
     """An :class:`AuditSink` that records OTel telemetry then forwards events.
 
     For every audit event it increments :data:`PIPELINE_EVENTS_TOTAL` (tagged
     with the event's ``stage`` / ``outcome``) and opens a short pipeline-stage
     span, then delegates to ``inner`` so a durable audit forwarder still sees
-    the event. Unmapped event names are recorded under :data:`STAGE_OTHER` with
-    the raw event name as the outcome, so nothing is silently dropped.
+    the event. Unmapped names share the bounded ``other`` metric outcome;
+    their original name remains available to the inner sink.
     """
 
     __slots__ = ("_inner",)
@@ -92,9 +165,13 @@ class TelemetryAuditSink:
     async def emit(
         self, event_name: str, *, workspace_id: str, attributes: Mapping[str, Any]
     ) -> None:
-        stage, outcome = _EVENT_STAGE_OUTCOME.get(event_name, (STAGE_OTHER, event_name))
+        stage, outcome = _EVENT_STAGE_OUTCOME.get(event_name, (STAGE_OTHER, "other"))
         PIPELINE_EVENTS_TOTAL.add(1, {"stage": stage, "outcome": outcome})
-        with _tracer.start_as_current_span(f"custos_trigger.pipeline.{stage}") as span:
+        with _tracer.start_as_current_span(
+            f"custos_trigger.pipeline.{stage}",
+            record_exception=False,
+            set_status_on_exception=False,
+        ) as span:
             span.set_attribute("trigger.event", event_name)
             span.set_attribute("trigger.stage", stage)
             span.set_attribute("trigger.outcome", outcome)
@@ -102,4 +179,8 @@ class TelemetryAuditSink:
             # Forward inside the span so the inner sink's work (and any child
             # spans it emits) is parented to this stage span and the span
             # duration captures the audit-forwarding latency.
-            await self._inner.emit(event_name, workspace_id=workspace_id, attributes=attributes)
+            try:
+                await self._inner.emit(event_name, workspace_id=workspace_id, attributes=attributes)
+            except SPLError:
+                span.set_status(trace.StatusCode.ERROR, "audit storage unavailable")
+                raise

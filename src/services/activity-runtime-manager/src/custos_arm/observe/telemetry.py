@@ -9,11 +9,11 @@ Design notes
 ------------
 
 The module imports ``opentelemetry-api`` only. The API ships default
-no-op providers, so ``custos_arm`` imports cleanly without an SDK
-configured. Production deployments wire their own SDK (the ARM Helm
-subchart attaches the OTel Collector per design § Observability); the
-in-memory SDK is dev-only and exists only to drive the assertions in
-``tests/test_observe.py``.
+no-op providers, so ``custos_arm`` imports cleanly without an SDK configured.
+The managed process entry point owns a Prometheus metrics provider and a
+separate metrics-only listener. Its export view drops arbitrary activity
+error-code labels, retaining only the bounded result class. Tests can install
+an in-memory provider to inspect the full instrumentation attributes below.
 
 The Scheduler is the single instrumentation site. It opens one
 ``custos_arm.attempt`` span per attempt, nests one

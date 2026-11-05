@@ -14,6 +14,10 @@ import httpx
 import pytest
 from custos_spl.errors import BackendUnavailable
 from custos_spl.ids import ConnectorInstanceId, WorkspaceId
+from custos_spl.interfaces.connector_instance_store import (
+    ConnectorInstance,
+    ConnectorInstanceFilter,
+)
 from custos_spl.interfaces.pull_control import ConnectorPullControl, PullTickBlocked
 from custos_spl.pagination import Cursor, Page
 
@@ -41,6 +45,93 @@ from tests._pull import (
     settings,
     start_demand,
 )
+
+
+@pytest.mark.parametrize("failure", [TimeoutError, asyncio.CancelledError])
+async def test_deadline_retries_resume_registration_after_completed_instance_pages(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: type[BaseException],
+) -> None:
+    """Page deadlines or cancellation cannot keep later instances outside the polling registry."""
+    providers, metadata, _, _ = memory_runtime(PullClock())
+    for index in range(205):
+        instance = await seed_instance(providers, identifier=f"instance-{index:03}")
+        await metadata.set_pull_native_demand(
+            instance.workspace_id,
+            instance.instance_id,
+            interval_seconds=60,
+            actor="native",
+        )
+    reconciler, scheduler = providers.pull_demand_reconciler, providers.pull_loop_scheduler
+    assert reconciler is not None and scheduler is not None
+    listing = providers.instance_store.list_connector_instances
+    requests: list[str | None] = []
+    calls = 0
+
+    async def deadline_after_one_page(
+        workspace_id: WorkspaceId,
+        filter: ConnectorInstanceFilter | None = None,
+        cursor: Cursor | None = None,
+        limit: int | None = None,
+    ) -> Page[ConnectorInstance]:
+        """Expire every second query, as the caller's fixed reconciliation deadline can."""
+        nonlocal calls
+        calls += 1
+        requests.append(cursor.token if cursor else None)
+        if calls % 2 == 0:
+            raise failure("synthetic page deadline")
+        return await listing(workspace_id, filter=filter, cursor=cursor, limit=limit)
+
+    monkeypatch.setattr(
+        providers.instance_store, "list_connector_instances", deadline_after_one_page
+    )
+    for expected_registered in (100, 200):
+        with pytest.raises(failure):
+            await reconciler.reconcile(WS)
+        assert len(scheduler.registration_snapshot(WS)) == expected_registered
+    assert await reconciler.reconcile(WS) == 205
+    assert len(scheduler.registration_snapshot(WS)) == 205
+    assert requests == [None, "100", "100", "200", "200"]
+
+
+@pytest.mark.parametrize("inactive_count", [0, 1, 100])
+async def test_empty_and_inactive_pages_finish_cleanup_and_advance_to_active_tail(
+    monkeypatch: pytest.MonkeyPatch,
+    inactive_count: int,
+) -> None:
+    """Normal empty demand skips invalid zero-key reads but still finishes or advances the scan."""
+    providers, metadata, _, _ = memory_runtime(PullClock())
+    active = await seed_instance(providers, identifier="active-tail")
+    await metadata.set_pull_native_demand(
+        active.workspace_id,
+        active.instance_id,
+        interval_seconds=60,
+        actor="native",
+    )
+    reconciler, scheduler = providers.pull_demand_reconciler, providers.pull_loop_scheduler
+    assert reconciler is not None and scheduler is not None
+    scheduler.register(WS, "stale")
+    inactive = [
+        replace(active, instance_id=ConnectorInstanceId(f"inactive-{i}"), status="unavailable")
+        for i in range(inactive_count)
+    ]
+    listing = AsyncMock(
+        side_effect=[
+            Page(inactive, Cursor("tail") if inactive_count == 100 else None),
+            Page([active], None),
+        ]
+    )
+    read = AsyncMock(wraps=metadata.read_pull_controls)
+    monkeypatch.setattr(providers.instance_store, "list_connector_instances", listing)
+    monkeypatch.setattr(metadata, "read_pull_controls", read)
+    assert await reconciler.reconcile(WS) == int(inactive_count == 100)
+    assert "stale" not in scheduler.registration_snapshot(WS)
+    if inactive_count == 100:
+        read.assert_awaited_once_with(WorkspaceId(WS), [active.instance_id])
+        assert listing.await_args_list[1].kwargs["cursor"] == Cursor("tail")
+        assert (WS, "active-tail") in scheduler.schedules()
+    else:
+        read.assert_not_awaited()
 
 
 async def test_redacted_plugin_mismatch_retains_trusted_migration_target() -> None:
@@ -479,20 +570,18 @@ async def test_old_reconciliation_cannot_remove_new_native_activation(
     assert reconciler is not None and scheduler is not None and manager is not None
     await reconciler.reconcile(WS)
     metadata.pull_subscriptions.clear()
-    query = metadata.query_pull_controls
+    query = metadata.read_pull_controls
 
     async def activate_after_snapshot(
         workspace_id: WorkspaceId,
-        *,
-        cursor: Cursor | None = None,
-        limit: int | None = None,
-    ) -> Page[ConnectorPullControl]:
+        instance_ids: Sequence[ConnectorInstanceId],
+    ) -> tuple[ConnectorPullControl, ...]:
         """Create newer durable/native intent after the old no-demand snapshot is read."""
-        page = await query(workspace_id, cursor=cursor, limit=limit)
+        page = await query(workspace_id, instance_ids)
         await manager.activate(instance)
         return page
 
-    monkeypatch.setattr(metadata, "query_pull_controls", activate_after_snapshot)
+    monkeypatch.setattr(metadata, "read_pull_controls", activate_after_snapshot)
     await reconciler.reconcile(WS)
     assert (WS, INSTANCE) in scheduler.schedules()
     assert (await scheduler.tick_once()).outcomes[0].status == "ticked"

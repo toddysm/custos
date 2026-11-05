@@ -1,3 +1,4 @@
+{{- $receiver := ((.Values.global | default dict).receiverRuntime) | default dict -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -18,8 +19,14 @@ spec:
         {{- include "svc.selectorLabels" . | nindent 8 }}
       annotations:
         {{- include "svc.daprAnnotations" . | nindent 8 }}
+        {{- if $receiver.enabled }}
+        {{- include "custos.receiverAnnotations" . | nindent 8 }}
+        {{- end }}
     spec:
       serviceAccountName: {{ include "svc.fullname" . }}
+      {{- if $receiver.enabled }}
+      terminationGracePeriodSeconds: {{ $receiver.terminationGraceSeconds }}
+      {{- end }}
       {{- with (.Values.global).imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -35,9 +42,14 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "svc.fullname" . }}
+          {{- if $receiver.enabled }}
+          env:
+            {{- include "custos.receiverEnv" . | nindent 12 }}
+          {{- else }}
           {{- with .Values.env }}
           env:
             {{- toYaml . | nindent 12 }}
+          {{- end }}
           {{- end }}
           resources:
             {{- include "svc.resources" . | nindent 12 }}

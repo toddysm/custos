@@ -87,6 +87,14 @@ spec:
       secretKeyRef:
         name: {{ .passwordSecret | quote }}
         key: {{ .passwordKey | quote }}
+    {{- if $.Values.global.receiverRuntime.enabled }}
+    - name: protectedTopics
+      value: custos.workflow.events,custos.connector.events,custos.triggers.normalized
+    - name: publishingScopes
+      value: "workflow-service=custos.workflow.events;connector-service=custos.connector.events;trigger-service=custos.triggers.normalized"
+    - name: subscriptionScopes
+      value: "trigger-service=custos.workflow.events,custos.connector.events,custos.triggers.normalized;observability-audit-service=custos.workflow.events"
+    {{- end }}
 auth:
   secretStore: {{ $secretStore | quote }}
 {{- end }}
