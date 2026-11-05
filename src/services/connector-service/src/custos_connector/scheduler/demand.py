@@ -83,7 +83,11 @@ class PullDemandReconciler:
                     for instance in instances.items
                     if instance.status == "active"
                 ]
-                controls = await self._controls.read_pull_controls(workspace, identifiers)
+                controls = (
+                    await self._controls.read_pull_controls(workspace, identifiers)
+                    if identifiers
+                    else ()
+                )
                 returned = {control.instance_id for control in controls}
                 if (
                     len(returned) != len(controls)

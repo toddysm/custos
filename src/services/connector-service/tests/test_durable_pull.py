@@ -94,6 +94,46 @@ async def test_deadline_retries_resume_registration_after_completed_instance_pag
     assert requests == [None, "100", "100", "200", "200"]
 
 
+@pytest.mark.parametrize("inactive_count", [0, 1, 100])
+async def test_empty_and_inactive_pages_finish_cleanup_and_advance_to_active_tail(
+    monkeypatch: pytest.MonkeyPatch,
+    inactive_count: int,
+) -> None:
+    """Normal empty demand skips invalid zero-key reads but still finishes or advances the scan."""
+    providers, metadata, _, _ = memory_runtime(PullClock())
+    active = await seed_instance(providers, identifier="active-tail")
+    await metadata.set_pull_native_demand(
+        active.workspace_id,
+        active.instance_id,
+        interval_seconds=60,
+        actor="native",
+    )
+    reconciler, scheduler = providers.pull_demand_reconciler, providers.pull_loop_scheduler
+    assert reconciler is not None and scheduler is not None
+    scheduler.register(WS, "stale")
+    inactive = [
+        replace(active, instance_id=ConnectorInstanceId(f"inactive-{i}"), status="unavailable")
+        for i in range(inactive_count)
+    ]
+    listing = AsyncMock(
+        side_effect=[
+            Page(inactive, Cursor("tail") if inactive_count == 100 else None),
+            Page([active], None),
+        ]
+    )
+    read = AsyncMock(wraps=metadata.read_pull_controls)
+    monkeypatch.setattr(providers.instance_store, "list_connector_instances", listing)
+    monkeypatch.setattr(metadata, "read_pull_controls", read)
+    assert await reconciler.reconcile(WS) == int(inactive_count == 100)
+    assert "stale" not in scheduler.registration_snapshot(WS)
+    if inactive_count == 100:
+        read.assert_awaited_once_with(WorkspaceId(WS), [active.instance_id])
+        assert listing.await_args_list[1].kwargs["cursor"] == Cursor("tail")
+        assert (WS, "active-tail") in scheduler.schedules()
+    else:
+        read.assert_not_awaited()
+
+
 async def test_redacted_plugin_mismatch_retains_trusted_migration_target() -> None:
     """Keep operator/audit migration context without reintroducing private plugin diagnostics."""
     providers, metadata, plugin, publisher = memory_runtime(PullClock())

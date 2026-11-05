@@ -113,6 +113,10 @@ async def test_native_registration_retries_do_not_repeat_completed_prefix(
     assert len(scheduler.registration_snapshot(str(WS))) == 205
     assert positions[0] is None and positions[1] == positions[2] and positions[3] == positions[4]
     assert positions[1] is not None and positions[1] != positions[3]
+    monkeypatch.setattr(instances, "list_connector_instances", listing)
+    scheduler.register("empty-workspace", "stale")
+    assert await reconciler.reconcile("empty-workspace") == 0
+    assert scheduler.registration_snapshot("empty-workspace") == {}
 
 
 @pytest.fixture
