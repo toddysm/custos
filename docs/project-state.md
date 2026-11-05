@@ -6,7 +6,7 @@
 
 Last reconciled: 2026-08-28
 
-Trigger M2 implementation checkpoint: 2026-11-02. This scoped update does not claim
+Trigger M2 implementation checkpoint: 2026-11-05. This scoped update does not claim
 a fresh reconciliation of unrelated capabilities.
 
 ## Configuration
@@ -27,13 +27,13 @@ Status vocabulary: **Implemented** · **In progress** · **Planned** · **Deferr
 | ID | Component | Slug | Status | Open work |
 |---|---|---|---|---|
 | COMP-001 | API Gateway | api-gateway | Implemented | M2 items — #990 |
-| COMP-002 | AuthN/AuthZ Service | auth-service | Implemented | M2 scoped execution-context issuance prerequisite — [#1037](https://github.com/toddysm/custos/issues/1037) |
-| COMP-003 | Workflow Service | workflow-service | In progress | Observability Client integration — #989; background execution identity and Connector contract alignment — [#1037](https://github.com/toddysm/custos/issues/1037) |
-| COMP-004 | Trigger Service | trigger-service | In progress | M2 receivers — [#988](https://github.com/toddysm/custos/issues/988); [design amendment](../design/requirements/trigger-m2-receivers.md) and [18-item delivery plan](../design/components/trigger-service/implementation-plan-m2.md). Fourteen items are merged, including [execution identity #1040](https://github.com/toddysm/custos/pull/1040). [Production activity startup/bootstrap and real issuer](https://github.com/toddysm/custos/issues/1038), lifecycle activation, deployed certification and final documentation remain open. #988 records current ownership/evidence. |
-| COMP-005 | Connector Service | connector-service | Implemented | Workflow binding-contract alignment — [#1037](https://github.com/toddysm/custos/issues/1037) |
-| COMP-006 | Activity Runtime Manager | activity-runtime-manager | In progress | Production startup/readiness and sidecar bootstrap gaps verified; prerequisite [#1038](https://github.com/toddysm/custos/issues/1038). M1 components exist but deployed scheduling is not certified. Existing M2 deferrals — #991; Kata tier validation — #763 remain separate. |
+| COMP-002 | AuthN/AuthZ Service | auth-service | Implemented | Scoped execution-context prerequisite [#1037](https://github.com/toddysm/custos/issues/1037) merged through #1040. |
+| COMP-003 | Workflow Service | workflow-service | In progress | Observability Client integration — #989; background execution identity/Connector contract prerequisite #1037 merged through #1040. |
+| COMP-004 | Trigger Service | trigger-service | In progress | M2 receivers — [#988](https://github.com/toddysm/custos/issues/988); [revision-7 design proposal](../design/requirements/trigger-m2-receivers.md) and [19-item proposed delivery plan](../design/components/trigger-service/implementation-plan-m2.md). Fifteen merged; lifecycle [#1044](https://github.com/toddysm/custos/pull/1044) is blocked on durable-progress prerequisite [#1045](https://github.com/toddysm/custos/issues/1045). D08 is awaiting design approval, not implemented. Certification and final documentation remain. |
+| COMP-005 | Connector Service | connector-service | Implemented | Workflow binding alignment and credential issuance prerequisites #1037/#1038 merged through #1040/#1041; lifecycle/deployed certification remain under #988. |
+| COMP-006 | Activity Runtime Manager | activity-runtime-manager | In progress | Production ownership/readiness, real credentials and private bootstrap merged through [#1041](https://github.com/toddysm/custos/pull/1041), including #1043/#1042 repairs. Profile activation #1017 and deployed certification #1018 remain. Existing M2 deferrals — #991; Kata validation — #763 remain separate. |
 | COMP-007 | Definition/Template/Catalog Service | catalog-service | Implemented | — |
-| COMP-008 | Storage Provider Layer | storage-provider-layer | Implemented | schema-revision policy — #993 |
+| COMP-008 | Storage Provider Layer | storage-provider-layer | Implemented | schema-revision policy — #993; proposed durable receiver progress — [#1045](https://github.com/toddysm/custos/issues/1045), not yet implemented. |
 | COMP-009 | Observability and Audit Service | observability-audit-service | Implemented | M2 deferrals — #992 |
 | COMP-010 | Web UI and Template Designer | web-ui | Deferred (M2+) | not yet implemented — #994 |
 | COMP-011 | Local Dev & Test CLI | custosctl | Implemented | — |
@@ -46,8 +46,9 @@ Status vocabulary: **Implemented** · **In progress** · **Planned** · **Deferr
 | #22 | Design TODO | trigger-service | Done | Dead-letter handling + replay UX — durable DeadLetterEntry store + TTL + trigger:admin replay routes; resolved via #1002 (2026-08-29); implementation follows in #988 |
 | #23 | Design TODO | trigger-service | Done | Owner of webhook signing keys — Connector Service owns per-instance signing material; resolved via #1000 (2026-08-29); implementation follows in #988 |
 | #763 | Enhancement | activity-runtime-manager | Open | Validate vm/microvm (Kata) tier specifics |
-| [#988](https://github.com/toddysm/custos/issues/988) | Implementation gap | trigger-service | In progress | Fourteen of 18 delivery items merged. [#1039](https://github.com/toddysm/custos/pull/1039) records the approved prerequisite plan; [#1040](https://github.com/toddysm/custos/pull/1040) merged scoped execution identity after owner security/operations approval on 2026-11-03. [#1038](https://github.com/toddysm/custos/issues/1038) now consumes that reviewed contract; activation, deployed certification and final documentation remain required. |
-| [#1038](https://github.com/toddysm/custos/issues/1038) | Runtime prerequisite | activity-runtime-manager | In progress | Owner approved Connector-owned issuance and continuation. Work includes durable ownership, private bootstrap/proxy transport, real resolver issuance and default-off production assembly. Hosted validation/review and merge remain required; no deployed certification claimed. |
+| [#988](https://github.com/toddysm/custos/issues/988) | Implementation gap | trigger-service | In progress | Fifteen of 18 original delivery items merged. One proposed prerequisite makes 19; its design approval is pending. #1017/#1044 remain open, followed by #1018 certification, #1019 documentation and reviewed inventory close-out. |
+| [#1038](https://github.com/toddysm/custos/issues/1038) | Runtime prerequisite | activity-runtime-manager | Done | Merged via [#1041](https://github.com/toddysm/custos/pull/1041) at `a4eaa5e`; no deployed receiver certification claimed. |
+| [#1045](https://github.com/toddysm/custos/issues/1045) | Scan-progress prerequisite | trigger-service / storage-provider-layer | Planned | Owner approved one issue and one design-amendment PR on 2026-11-04. D08 durable fair progress, schema and ownership contract await concrete design approval. #1044 is preserved, not merged. |
 | #989 | Implementation gap | workflow-service | Open | Full Observability Client integration |
 | #990 | Implementation gap | api-gateway | Open | M2 items (thin-client, OpenAPI ext, device-code, rate-limiter, multi-region) |
 | #991 | Implementation gap | activity-runtime-manager | Open | M2 deferrals (manifest signing, artifact schema, secret slots, short-form refs, policy-eval@1) |
