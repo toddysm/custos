@@ -683,10 +683,26 @@ def test_installed_prometheus_namespace_and_discovery_egress(
                 "matchLabels": {
                     "kubernetes.io/metadata.name": source,
                 }
-            }
+            },
+            "podSelector": {
+                "matchLabels": {
+                    "app.kubernetes.io/name": "prometheus",
+                    "app.kubernetes.io/component": "server",
+                }
+            },
         }
     ]
     monitor = policies.get("custos-receivers-prometheus")
+    for service in SERVICES:
+        rules = policies[f"custos-receivers-{service}"]["spec"]["ingress"]
+        metrics_rule = rules[-1]
+        assert metrics_rule["from"] == scrape["from"]
+        peer = metrics_rule["from"][0]
+        expected = peer["podSelector"]["matchLabels"]
+        controller_labels = {"app.kubernetes.io/name": service}
+        assert not all(
+            controller_labels.get(key) == value for key, value in expected.items()
+        )
     if monitoring_namespace is not None:
         assert monitor is None
         return
@@ -696,6 +712,7 @@ def test_installed_prometheus_namespace_and_discovery_egress(
         "app.kubernetes.io/name": "prometheus",
         "app.kubernetes.io/component": "server",
     }
+    assert spec["podSelector"] == scrape["from"][0]["podSelector"]
     assert spec["policyTypes"] == ["Egress"]
     assert spec["egress"][1]["to"] == [{"ipBlock": {"cidr": "10.96.0.1/32"}}]
     assert spec["egress"][2]["ports"] == [

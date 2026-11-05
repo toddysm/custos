@@ -49,6 +49,10 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: {{ $network.monitoringNamespace }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+              app.kubernetes.io/component: server
       ports: [{protocol: TCP, port: {{ ternary 8090 8080 (eq $service "activity-runtime-manager") }}}]
   egress:
     - to:

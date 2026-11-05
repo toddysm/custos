@@ -126,6 +126,12 @@ the chart's legacy minimum remains unchanged when receiver mode is off.
    Co-located Prometheus gets DNS, Kubernetes discovery and metrics egress through
    the managed deny-all policy; external Prometheus retains its own egress policy
    and must discover the actual controller namespace.
+   Metrics ingress additionally selects Pods labeled
+   `app.kubernetes.io/name=prometheus` and `app.kubernetes.io/component=server`,
+   matching the supplied server and its egress policy. Namespace and Pod
+   selectors are combined: co-located controllers do not gain direct app-port
+   access just because they share the monitoring namespace. External scrapers
+   must carry the same labels in the explicitly configured namespace.
    `global.networkPolicies.gatewayNamespace` defaults to `envoy-gateway-system`,
    matching the prerequisite installer's Envoy data plane. Override it explicitly
    if the proxy runs elsewhere; only API Gateway admits its north-south app traffic.
