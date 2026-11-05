@@ -1,7 +1,7 @@
 # Trigger M2 receivers - product requirements and engineering design
 
-- Status: **Revision-7 durable scan-progress amendment proposed; implementation awaits design approval.**
-- Planning format: full; revision 7. D01-D07 approvals remain historical; D08 is not yet approved.
+- Status: **Revision-7/D08 approved and merged through #1046; prerequisite implementation in progress.**
+- Planning format: full; revision 7. D01-D08 approved; implementation and deployed validation are separate gates.
 - Tracking: [#988](https://github.com/toddysm/custos/issues/988).
 - Design work item: [#1004](https://github.com/toddysm/custos/issues/1004).
 - Updated: 2026-11-05; original baseline commit `e344ab2`.
@@ -47,7 +47,10 @@ but visited only the first 50. Its
 blocks lifecycle completion despite passing hosted checks. The owner authorized
 one prerequisite issue, [#1045](https://github.com/toddysm/custos/issues/1045),
 and this design-amendment pull request on 2026-11-04T16:20:02.742-08:00.
-That authorization is for planning, not approval of the concrete D08 contract.
+That initial authorization was for planning. The owner subsequently approved
+the concrete D08 design and 19-item breakdown on 2026-11-04T16:41:03.590-08:00;
+[#1046](https://github.com/toddysm/custos/pull/1046) merged as `8eb0414`.
+Build for #1045 was authorized on 2026-11-04T17:03:00.903-08:00.
 
 ### 3. Customer scenarios
 
@@ -209,8 +212,8 @@ D01-D05 and the recorded amendments are approved. D06's workspace-scoped
 execution identity and new contract-alignment prerequisite were explicitly
 approved on 2026-11-02. On the same date the owner authorized creating and
 starting D07's startup/bootstrap prerequisite. Those prerequisites subsequently
-merged through #1040/#1041; publication of the new D08 amendment does not
-authorize its merge.
+merged through #1040/#1041. D08 subsequently passed its owner-approval gate
+and merged through #1046; that is not runtime completion.
 The baseline design owner is
 [#1004](https://github.com/toddysm/custos/issues/1004); implementation owners
 are the linked child issues.
@@ -220,7 +223,7 @@ earlier approval and updates both the plan and affected acceptance criteria.
 
 D08 adds durable scan progress and fair admission, rather than discarding
 unfinished cursors to free memory. Its schema, ownership, retention and rollout
-contract require explicit approval of revision 7 before #1045 implementation.
+contract received explicit approval of revision 7 before #1045 implementation.
 The existing #1044 remains open and must consume the merged prerequisite.
 
 ### 14. Rollout and milestones
@@ -711,7 +714,7 @@ truthy readiness for an unwired scheduler. This prerequisite does not duplicate
 [#991](https://github.com/toddysm/custos/issues/991)'s deferred features or
 [#763](https://github.com/toddysm/custos/issues/763)'s Kata-specific certification.
 
-#### D08 - Durable scan progress and fair workspace admission (proposed)
+#### D08 - Durable scan progress and fair workspace admission (approved)
 
 **Decision and scope.** Replace #1044's in-memory-only continuation queue with
 bounded discovery plus a durable service-order queue in the existing PostgreSQL
@@ -740,7 +743,7 @@ The existing scheduled occurrence, downstream idempotency, operator pause and
 credential contracts remain unchanged. This amendment does not promise a fixed
 wall-clock latency for arbitrarily many tenants or arbitrarily slow upstreams.
 
-**Proposed component flow (revision 7, not implemented).** Solid arrows denote
+**Approved component flow (revision 7; implementation in progress).** Solid arrows denote
 provider or collaborator calls, not new network endpoints:
 
 ```text
@@ -974,7 +977,7 @@ Action: keep receiver admission disabled; apply metadata revision 16;
 
 ##### Validation, rollout and human gate
 
-Acceptance tests are proposed requirements, not results from an implementation:
+Acceptance tests are approved requirements; this design does not itself certify implementation:
 
 1. Register 51, 200 and 1,000 always-continuing workspaces. Discovery must pass
    the initial 50 IDs without waiting for any workspace to finish. After
@@ -1023,11 +1026,11 @@ corrupt state (fail closed), tenant confusion (scope tests), and restart
 duplicates (existing effect identities). These mitigations supplement E-N.
 No new commercial/customer-evidence claims or delivery date are introduced.
 
-**Approval gate:** authorize this concrete D08 design and the revised
-19-item breakdown before implementing #1045. One prerequisite implementation
+**Approval gate satisfied:** the owner approved this concrete D08 design and the
+revised 19-item breakdown before authorizing #1045 Build. One prerequisite implementation
 pull request comes first; after its gated merge, integrate main normally in
 #1044's owned checkout and finish #1017. This plan PR does not close #1045,
-#1017 or #988 and must not be merged unattended.
+#1017 or #988. Its approved merge does not waive implementation review gates.
 
 #### Components and flow
 
@@ -1397,8 +1400,8 @@ merge. Missing or pending required results remain blockers.
 - Implement the approved #1037 prerequisite before #1017 profile activation.
 - Complete #1038's startup/bootstrap prerequisite before #1017 activation.
 - The revision-5 amendment and execution/runtime prerequisites have since merged
-  through #1039, #1040 and #1041. Review revision 7/D08 and approve #1045's exact
-  storage/ownership contract before implementation. #1044 remains open.
+  through #1039, #1040 and #1041. Revision 7/D08 is approved and merged via #1046;
+  implement and validate #1045's exact storage/ownership contract. #1044 remains open.
 - Retain the authorized per-item branches/pull requests, hosted checks, Copilot
   reviews, fix-confirmation replies, gated merges and checkpoint-before-cleanup.
 - Obtain renewed approval for any further material scope or identity-policy change.

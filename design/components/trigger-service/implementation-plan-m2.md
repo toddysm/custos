@@ -1,6 +1,6 @@
 # Trigger Service M2 implementation plan
 
-Status: **Revision-7 durable scan-progress prerequisite proposed; awaiting design approval.** Revision: 7. Updated: 2026-11-05.
+Status: **Revision-7/D08 approved and merged via #1046; #1045 implementation in progress.** Revision: 7. Updated: 2026-11-05.
 
 Parent: [#988](https://github.com/toddysm/custos/issues/988).
 Design: [#1004](https://github.com/toddysm/custos/issues/1004) and the
@@ -23,9 +23,10 @@ on each pull request. One implementation item maps to one reviewed pull request.
 Only the designated owner may claim/edit an item's worktree and ledger.
 On 2026-11-04T16:20:02.742-08:00 the owner approved creating one prerequisite
 issue and one design-amendment pull request to address #1044's full-window
-starvation. That is planning authorization only: D08 and TS-IMPL-040 require
-approval of this concrete revision before Build. Existing D01-D07 approvals
-and completed items are not invalidated.
+starvation. That initial authorization covered planning only. The owner approved
+the concrete D08/19-item design on 2026-11-04T16:41:03.590-08:00 and authorized
+TS-IMPL-040 Build on 2026-11-04T17:03:00.903-08:00. Design #1046 merged as
+`8eb0414`; existing D01-D07 approvals and completed items are not invalidated.
 
 ## Work breakdown
 
@@ -50,7 +51,7 @@ design gate [#1004](https://github.com/toddysm/custos/issues/1004).
 | TS-IMPL-037 | [#1035](https://github.com/toddysm/custos/issues/1035) | Kubernetes-backed connector hooks, bounded confidential I/O, immutable invocation ownership and verified termination; no privileged Docker backend | 029, 032 |
 | TS-IMPL-038 | [#1037](https://github.com/toddysm/custos/issues/1037) | Explicit workspace service-account execution identity, fresh authorized signed contexts and real Workflow/Connector request/response alignment across retries/restarts/child execution | 031, 032, 037 |
 | TS-IMPL-039 | [#1038](https://github.com/toddysm/custos/issues/1038) | Production activity startup/readiness and resource ownership; private bootstrap delivery; real Connector-owned credential issuance with durable per-attempt authorization | 032, 038 |
-| TS-IMPL-040 | [#1045](https://github.com/toddysm/custos/issues/1045) | Proposed D08 storage/progress capability and extraction of #1044's bounded workspace discovery, migration, fair fenced claims with scheduled-leader admission, durable continuations and typed scheduled-scan restore; native saturation/restart/isolation evidence | D08 approval, 022, 024, 031, 033 |
+| TS-IMPL-040 | [#1045](https://github.com/toddysm/custos/issues/1045) | Approved D08 storage/progress capability and extraction of #1044's bounded workspace discovery, migration, fair fenced claims with scheduled-leader admission, durable continuations and typed scheduled-scan restore; native saturation/restart/isolation evidence | 1046 merged, 022, 024, 031, 033 |
 | TS-IMPL-034 | [#1017](https://github.com/toddysm/custos/issues/1017) | Activation/readiness/deployment wiring, durable audit and operational signals; consume all prerequisites, independent bounded discovery and fair progress workers; four-profile rendering and safe rollback | 025, 027, 028, 029, 033, 037, 038, 039, 040 |
 | TS-IMPL-035 | [#1018](https://github.com/toddysm/custos/issues/1018) | Deployed receiver-to-Workflow failure/recovery and legacy regression coverage in hosted CI | 034 |
 | TS-IMPL-036 | [#1019](https://github.com/toddysm/custos/issues/1019) | Developer/operator setup, recovery and migration documentation; checked links/examples | 035 |
@@ -74,8 +75,8 @@ One valid sequential order is:
 Current scoped checkpoint (2026-11-05): 038 and 039 merged through
 [#1040](https://github.com/toddysm/custos/pull/1040) and
 [#1041](https://github.com/toddysm/custos/pull/1041). Fifteen of the original
-18 delivery items are merged. This proposal adds one planned prerequisite,
-making **19 delivery items, 15 merged**, conditional on D08 approval.
+18 delivery items are merged. The approved D08 amendment adds one prerequisite,
+making **19 delivery items, 15 merged**. #1045 is in review through #1047.
 #1044 retains the lifecycle implementation at `e34dfa1`; it must not merge
 until its saturation finding is fixed and its current-head gates pass.
 The historical 13/18 and parked-work descriptions below are earlier checkpoints,
@@ -143,10 +144,10 @@ separate authorization. Proposed branches follow
 | D05 | Durable fenced replay and downstream dedup over the full recovery horizon; no reliance on a volatile/24-hour key alone | [#1004](https://github.com/toddysm/custos/issues/1004) / [#1013](https://github.com/toddysm/custos/issues/1013), [#1014](https://github.com/toddysm/custos/issues/1014), [#1016](https://github.com/toddysm/custos/issues/1016) |
 | D06 | Explicit workspace service-account identity, fresh authorized contexts and the actual Workflow/Connector execution contract; no credential persistence or replay retargeting | Owner approval 2026-11-02 / [#1037](https://github.com/toddysm/custos/issues/1037) |
 | D07 | Truthful production activity readiness, private compatible bootstrap, Connector-owned credential issuance | Owner approvals recorded in #988; [#1038](https://github.com/toddysm/custos/issues/1038) merged through #1041 |
-| D08 (proposed) | Durable per-workspace/operation progress, independent bounded discovery, ticket-ordered fenced claims and safe restart/cleanup | Planning authorized 2026-11-04; concrete design and [#1045](https://github.com/toddysm/custos/issues/1045) implementation await approval |
+| D08 (approved) | Durable per-workspace/operation progress, independent bounded discovery, ticket-ordered fenced claims and safe restart/cleanup | Design approved/merged via #1046; [#1045](https://github.com/toddysm/custos/issues/1045) Build authorized 2026-11-04T17:03:00.903-08:00 |
 
 The design document owns the exact contracts, alternatives and migration impact.
-D01-D07 were explicitly approved; D08 is proposed. Approval and amendment
+D01-D08 were explicitly approved. Approval and amendment
 history are recorded in #988 rather than inferred from issue creation.
 
 Revision 2 incorporates the initial Codex/Copilot findings: operator pauses need
