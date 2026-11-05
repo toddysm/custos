@@ -71,6 +71,7 @@ from custos_spl.interfaces.metadata_store import (
 from custos_spl.interfaces.metadata_store import (
     SubscriptionSelector as SplSubscriptionSelector,
 )
+from custos_spl.interfaces.receiver_workspaces import receiver_workspace_page
 from custos_spl.interfaces.scheduler import (
     PendingScheduleFire,
     SchedulerLease,
@@ -88,6 +89,7 @@ from custos_spl.pagination import (
     encode_query_cursor,
     query_page_limit,
 )
+from custos_spl.receiver_memory import MemoryReceiverScanProgress
 
 from custos_trigger.stores.base import TriggerMetadataStore
 
@@ -133,7 +135,7 @@ def is_memory_dsn(dsn: str) -> bool:
     return lowered == "" or lowered in _MEMORY_DSN_SENTINELS or lowered.startswith("memory://")
 
 
-class InMemoryTriggerMetadataStore(MemoryDeliveryState):
+class InMemoryTriggerMetadataStore(MemoryDeliveryState, MemoryReceiverScanProgress):
     """In-process :class:`TriggerMetadataStore` for local dev + tests.
 
     Implements the eight Trigger-Service write methods of
@@ -158,6 +160,11 @@ class InMemoryTriggerMetadataStore(MemoryDeliveryState):
         self._dedup: dict[tuple[str, str], SplDedupKey] = {}
         self._schedules: dict[tuple[str, str], SplSchedule] = {}
         self._scheduler_leases: dict[str, SchedulerLease] = {}
+        MemoryReceiverScanProgress.__init__(
+            self,
+            now=self._now,
+            scheduler_lookup=self._scheduler_leases.get,
+        )
         self._pending_fires: dict[tuple[str, str], PendingScheduleFire] = {}
         self._dead_letters: dict[tuple[str, str], DeadLetterEntry] = self._delivery_dead_letters
         self._bulk_replays: dict[tuple[str, str], BulkReplayCommand] = {}
@@ -474,6 +481,32 @@ class InMemoryTriggerMetadataStore(MemoryDeliveryState):
 
     async def check_scheduler_ready(self) -> None:
         """Memory scheduler structures exist at construction; no durable backend is implied."""
+
+    async def check_receiver_workspaces_ready(self) -> None:
+        """Memory keeps recovery state at construction; this is not production durability."""
+
+    async def query_receiver_workspaces(
+        self,
+        *,
+        cursor: Cursor | None = None,
+        limit: int | None = None,
+    ) -> Page[WorkspaceId]:
+        """Discover both live subscription scope and orphaned durable recovery state."""
+        workspaces = (
+            workspace
+            for rows in (
+                self._subscriptions,
+                self._resume,
+                self._schedules,
+                self._pending_fires,
+                self._dead_letters,
+                self._bulk_replays,
+                self._source_deliveries,
+                self._delivery_rows,
+            )
+            for workspace, *_ in rows
+        )
+        return receiver_workspace_page(workspaces, cursor=cursor, limit=limit)
 
     async def scheduler_now(self) -> datetime:
         """Expose the injected provider clock, independent of receiver-local wall clocks."""

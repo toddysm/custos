@@ -19,6 +19,12 @@ from custos_spl.errors import (
     MigrationRequired,
 )
 from custos_spl.ids import WorkspaceId
+from custos_spl.interfaces.receiver_progress import (
+    ReceiverScanProgressProvider,
+    ScanContinuation,
+    ScanOperation,
+)
+from custos_spl.interfaces.receiver_workspaces import ReceiverWorkspaceProvider
 from custos_spl.interfaces.scheduler import (
     PendingScheduleFire,
     SchedulerLease,
@@ -41,6 +47,132 @@ _WS = WorkspaceId("scheduler-test")
 
 class Backend(TriggerMetadataStore, TriggerQueryProvider, SchedulerStateProvider, Protocol):
     """The production storage surfaces exercised by this contract."""
+
+
+async def test_serialized_due_cutoff_survives_receiver_recreation(harness: Harness) -> None:
+    """A real due-page cursor survives JSON/database storage without restoring lease authority."""
+    store = harness.store
+    assert isinstance(store, ReceiverScanProgressProvider)
+    for index in range(55):
+        await _due(harness, f"schedule-{index:02}", interval_seconds=3600)
+    discovery = await store.claim_receiver_discovery("restart", "discoverer")
+    assert discovery is not None
+    await store.commit_receiver_discovery(discovery, [str(_WS)], None)
+    leader = SchedulerLeadership(store, deployment_id="restart", holder_id="leader")
+    lease = await leader.poll(force_renew=True)
+    assert lease is not None
+    scan = await store.claim_receiver_scan(
+        "restart",
+        ScanOperation.SCHEDULED,
+        "leader",
+        scheduler_lease=lease,
+    )
+    assert scan is not None
+    events: list[NormalizedEvent] = []
+
+    async def publish(event: NormalizedEvent) -> None:
+        """Acknowledge real planned occurrences and retain their identities for assertions."""
+        events.append(event)
+
+    receiver = ScheduledReceiver(
+        store,
+        workspace_id=str(_WS),
+        leadership=leader,
+        publish=publish,
+        audit=NoopAuditSink(),
+        continuation=scan.continuation,
+    )
+    first = await receiver.tick()
+    assert first.planned == 50
+    saved = ScanContinuation.from_json(receiver.snapshot_continuation().to_json())
+    assert saved.cursor is not None and saved.due_cutoff is not None
+    await store.checkpoint_receiver_scan(scan, saved)
+    if harness.pool is None:
+        harness.clock[0] += timedelta(seconds=2)
+    else:
+        async with harness.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE custos_state.receiver_progress SET next_eligible_at=clock_timestamp()"
+            )
+    resumed = await store.claim_receiver_scan(
+        "restart",
+        ScanOperation.SCHEDULED,
+        "leader",
+        scheduler_lease=lease,
+    )
+    assert resumed is not None and resumed.continuation == saved
+    recreated = ScheduledReceiver(
+        store,
+        workspace_id=str(_WS),
+        leadership=leader,
+        publish=publish,
+        audit=NoopAuditSink(),
+        continuation=resumed.continuation,
+    )
+    last = await recreated.tick()
+    assert last.planned == 5
+    assert recreated.snapshot_continuation() == ScanContinuation(ScanOperation.SCHEDULED)
+    assert len({event.event_id for event in events}) == 55
+    with pytest.raises(ValueError, match="query"):
+        ScheduledReceiver(
+            store,
+            workspace_id="wrong-workspace",
+            leadership=leader,
+            publish=publish,
+            audit=NoopAuditSink(),
+            continuation=saved,
+        )
+
+
+async def test_competing_standby_cannot_delay_actual_scheduled_pages(harness: Harness) -> None:
+    """Check effect progress for 51 real workspaces, not just fair claim counters."""
+    store = harness.store
+    assert isinstance(store, ReceiverScanProgressProvider)
+    assert isinstance(store, ReceiverWorkspaceProvider)
+    for index in range(51):
+        await _due(harness, workspace=WorkspaceId(f"tenant-{index:02}"), interval_seconds=3600)
+    while True:
+        discovery = await store.claim_receiver_discovery("fair", "discoverer")
+        assert discovery is not None
+        page = await store.query_receiver_workspaces(cursor=discovery.cursor, limit=50)
+        await store.commit_receiver_discovery(discovery, page.items, page.next_cursor)
+        if page.next_cursor is None:
+            break
+    leader = SchedulerLeadership(store, deployment_id="fair", holder_id="leader", lease_seconds=300)
+    standby = SchedulerLeadership(
+        store, deployment_id="fair", holder_id="standby", lease_seconds=300
+    )
+    published: list[str] = []
+
+    async def publish(event: NormalizedEvent) -> None:
+        """Record actual scheduled publication with the original scoped occurrence."""
+        published.append(str(event.data["workspace"]))
+
+    for _ in range(51):
+        lease = await leader.poll(force_renew=True)
+        assert lease is not None
+        assert await standby.poll(force_renew=True) is None
+        with pytest.raises(LeaseExpired):
+            await store.claim_receiver_scan("fair", ScanOperation.SCHEDULED, "standby")
+        scan = await store.claim_receiver_scan(
+            "fair",
+            ScanOperation.SCHEDULED,
+            "leader",
+            scheduler_lease=lease,
+        )
+        assert scan is not None and scan.claim.workspace_id is not None
+        receiver = ScheduledReceiver(
+            store,
+            workspace_id=scan.claim.workspace_id,
+            leadership=leader,
+            publish=publish,
+            audit=NoopAuditSink(),
+            continuation=scan.continuation,
+        )
+        result = await receiver.tick()
+        assert result.planned == result.published == 1
+        await store.checkpoint_receiver_scan(scan, receiver.snapshot_continuation())
+    assert len(set(published)) == 51
 
 
 @dataclass

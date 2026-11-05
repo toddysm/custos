@@ -26,6 +26,11 @@ from custos_spl.interfaces.delivery import (
     delivery_identity,
     encode_delivery_request,
 )
+from custos_spl.interfaces.receiver_progress import (
+    ReceiverScanProgressProvider,
+    ScanContinuation,
+    ScanOperation,
+)
 from custos_spl.interfaces.source_delivery import MAX_SOURCE_PAGE_BYTES, SourceDeliverySelection
 from custos_spl.interfaces.trigger_queries import SubscriptionSnapshot
 from custos_spl.pagination import Cursor, Page
@@ -55,6 +60,94 @@ from custos_trigger.source_config import SourceConfig
 from custos_trigger.stores import ResumeSubscriptionStore, SubscriptionStore
 from tests._source_helpers import NOW, WS, SourceStorage, connector_event, dispatcher, resume, start
 from tests.integration.test_dead_letter_state import capture
+
+
+async def test_durable_deep_delivery_continuation_reaches_all_thousand_targets(
+    source_store: SourceStorage,
+) -> None:
+    """Recreate the dispatcher between every bounded page and retain the actual target cursor."""
+    assert isinstance(source_store, ReceiverScanProgressProvider)
+    if isinstance(source_store, InMemoryTriggerMetadataStore):
+        clock = [NOW]
+        source_store._scan_now = lambda: clock[0]
+    client = FakeWorkflowServiceClient()
+    reliable = dispatcher(source_store, client).reliable
+    assert reliable is not None
+    event = adapt_connector_event(connector_event()).event
+    requests = []
+    for index in range(1000):
+        request = await reliable.prepare_request(
+            event,
+            WS,
+            f"wait-{index}",
+            {
+                "kind": "resume",
+                "runId": f"run-{index}",
+                "stepId": "step",
+                "eventName": "ready",
+                "payload": {},
+                "deliveryProtocol": 2,
+            },
+        )
+        assert request is not None
+        requests.append(encode_delivery_request(request))
+    await source_store.put_source_delivery(
+        SourceDeliverySelection(
+            WorkspaceId(WS),
+            "deep",
+            "a" * 64,
+            await source_store.delivery_now() + timedelta(days=1),
+            tuple(requests),
+        )
+    )
+    discovery = await source_store.claim_receiver_discovery("deep", "discovery")
+    assert discovery is not None
+    await source_store.commit_receiver_discovery(discovery, [WS], None)
+    for _ in range(34):
+        scan = await source_store.claim_receiver_scan("deep", ScanOperation.DELIVERY, "worker")
+        assert scan is not None
+        reliable = dispatcher(source_store, client).reliable
+        assert reliable is not None
+        report = await reliable.reconcile_pending(WS, cursor=scan.continuation.cursor, limit=50)
+        assert report.settled_targets <= 32
+        saved = ScanContinuation.from_json(
+            ScanContinuation(ScanOperation.DELIVERY, report.next_cursor).to_json()
+        )
+        await source_store.checkpoint_receiver_scan(scan, saved)
+        if report.next_cursor is None:
+            break
+        if isinstance(source_store, InMemoryTriggerMetadataStore):
+            clock[0] += timedelta(seconds=1)
+        else:
+            assert isinstance(source_store, PgMetadataAdapter)
+            pool = await source_store._pool_ref()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE custos_state.receiver_progress SET next_eligible_at=clock_timestamp()"
+                )
+    assert len(client.raise_event_calls) == 1000
+    assert report.next_cursor is None
+
+
+async def test_known_missing_source_cursor_advances_without_recreating_expired_payload(
+    source_store: SourceStorage,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A valid saved cursor survives source retention; malformed/cross-scope cursors do not."""
+    from custos_trigger.pipeline.reliable import _source_progress_cursor
+
+    client = FakeWorkflowServiceClient()
+    reliable = dispatcher(source_store, client).reliable
+    assert reliable is not None
+    cursor = _source_progress_cursor(WS, "retired-selection", 999)
+    saved = ScanContinuation.from_json(ScanContinuation(ScanOperation.DELIVERY, cursor).to_json())
+    report = await reliable.reconcile_pending(WS, cursor=saved.cursor)
+    assert report.next_cursor == _source_progress_cursor(WS, "retired-selection")
+    assert report.settled_targets == report.pending_targets == 0
+    assert "retained-source-absent" in caplog.text
+    with pytest.raises(ValueError):
+        await reliable.reconcile_pending("other", cursor=saved.cursor)
+    assert not client.raise_event_calls
 
 
 @pytest.fixture(params=["memory", pytest.param("postgres", marks=pytest.mark.integration)])

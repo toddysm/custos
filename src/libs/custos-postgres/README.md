@@ -90,6 +90,45 @@ retain the general revision-4 minimum.
 
 ## Entry points
 
+### Optional durable receiver scan progress
+
+Metadata revision **16** adds the optional
+[receiver-progress capability](../storage-provider-layer/src/custos_spl/interfaces/receiver_progress.py).
+The shared metadata minimum remains **4**. Activate consumers only after
+`check_receiver_workspaces_ready()` and `check_receiver_scan_progress_ready()`
+succeed; the provider never migrates at startup or silently falls back to memory.
+
+Discovery queries only bounded metadata ID projections, including orphaned
+recovery rows, not Auth's workspace directory. A limit of 50 returns at most 50
+IDs and fetches at most 51 including keyset lookahead. Discovery registration
+and its checkpoint commit together. Its last-seen updates never change an
+operation's progress revision or fair service ticket.
+
+Each `(deployment, workspace, operation)` row stores a version-1 continuation
+of at most 64 KiB. Claims use database time, unique incarnation/token and
+generation/revision checks. An indexed service ticket moves to the tail at claim,
+including on failure or crash. Scheduled claims additionally require matching
+live scheduler authority checked transactionally; a standby cannot postpone work.
+Progress authority never replaces effect-time scheduler fencing or dispatch
+authorization. No transaction spans external execution.
+
+Checkpoint only after a bounded page is acknowledged. On ambiguous commit
+response, reacquire/reread instead of replaying a stale write. Failure release
+retains the stored continuation with a five-second retry floor. A typed scheduled
+snapshot retains its due cutoff/cursor without retaining its scheduler lease.
+Known absent source payloads advance to an after-selection position with an
+explicit diagnostic; malformed or cross-workspace cursors still fail closed.
+
+Pruning requires a completed later discovery sweep, no live claim, null finished
+continuation and at least 30 idle days; unfinished rows are not age-evicted.
+Disable/drain old receiver workers before schema-first rollout. Keep the additive
+tables on rollback and keep old background admission disabled; do not erase
+progress or accepted effect identities to force a rollout.
+This prerequisite supplies storage/collaborators; lifespan activation remains
+[#1017](https://github.com/toddysm/custos/issues/1017), deployed certification
+[#1018](https://github.com/toddysm/custos/issues/1018), and final operator docs
+[#1019](https://github.com/toddysm/custos/issues/1019).
+
 Metadata revision **15** adds optional durable activity-attempt ownership.
 It follows merged revision 14's execution-identity guards.
 Claims bind workspace, opaque run/step coordinates, attempt, request fingerprint
