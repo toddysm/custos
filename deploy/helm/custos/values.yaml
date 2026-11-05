@@ -77,7 +77,7 @@ global:
     # Matches scripts/install-prereqs.sh; override for a separate monitoring namespace.
     monitoringNamespace: custos-system
     # Namespace the Envoy Gateway data plane runs in (north-south ingress).
-    gatewayNamespace: custos-system
+    gatewayNamespace: envoy-gateway-system
     # Cluster DNS namespace (egress on 53 is always required).
     dnsNamespace: kube-system
     # Dapr control-plane namespace (Sentry / Placement / Operator / Injector).

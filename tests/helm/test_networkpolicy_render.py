@@ -229,8 +229,8 @@ def test_only_gateway_accepts_north_south(
             if "namespaceSelector" in peer
         }
         if svc == "api-gateway":
-            assert "custos-system" in ns_targets
+            assert "envoy-gateway-system" in ns_targets
         else:
-            assert "custos-system" not in ns_targets, (
+            assert "envoy-gateway-system" not in ns_targets, (
                 f"{svc} must not accept north-south gateway ingress"
             )

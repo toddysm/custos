@@ -42,6 +42,7 @@ import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
@@ -478,6 +479,8 @@ class PullLoopScheduler:
             )
             for sched in eligible
         ]
+        for sched, task in zip(eligible, tasks, strict=True):
+            task.add_done_callback(partial(self._finish_dispatch, sched))
         try:
             outcomes = await asyncio.gather(*tasks)
         except BaseException:
@@ -489,9 +492,6 @@ class PullLoopScheduler:
                 "connector-poll-dispatches",
             )
             raise
-        finally:
-            for sched in eligible:
-                sched.in_flight = False
         return SchedulerPassResult(
             started_at=started_at,
             finished_at=await self._storage_now(),
@@ -501,16 +501,17 @@ class PullLoopScheduler:
         )
 
     async def _dispatch(self, sched: InstanceSchedule, generation: int) -> TickOutcome:
-        """Run one tick for one instance, releasing the in-flight slot."""
-        try:
-            async with self._sem:
-                return await self._run_tick(sched, generation)
-        finally:
-            sched.in_flight = False
-            if (sched.workspace_id, sched.instance_id) not in self._schedules:
-                CURSOR_LAG_REGISTRY.forget(
-                    workspace_id=sched.workspace_id, instance_id=sched.instance_id
-                )
+        """Run one bounded tick; its task completion exclusively releases the reservation."""
+        async with self._sem:
+            return await self._run_tick(sched, generation)
+
+    def _finish_dispatch(self, sched: InstanceSchedule, task: asyncio.Task[TickOutcome]) -> None:
+        """Release once, including pre-entry cancellation; never reset a whole pass."""
+        sched.in_flight = False
+        if (sched.workspace_id, sched.instance_id) not in self._schedules:
+            CURSOR_LAG_REGISTRY.forget(
+                workspace_id=sched.workspace_id, instance_id=sched.instance_id
+            )
 
     async def _run_tick(self, sched: InstanceSchedule, generation: int) -> TickOutcome:
         """Execute one cursor tick and update the per-instance schedule."""

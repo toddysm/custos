@@ -702,3 +702,36 @@ def test_installed_prometheus_namespace_and_discovery_egress(
         {"protocol": "TCP", "port": 8080},
         {"protocol": "TCP", "port": 8090},
     ]
+
+
+@pytest.mark.parametrize("gateway_namespace", [None, "custom-edge"])
+def test_installed_gateway_namespace_has_default_north_south_path(
+    gateway_namespace: str | None,
+) -> None:
+    """Only Gateway admits the installed Envoy namespace; explicit operator overrides survive."""
+    values = enabled_values()
+    if gateway_namespace is not None:
+        values["global"]["networkPolicies"]["gatewayNamespace"] = gateway_namespace
+    result = render("connected-ha", values)
+    assert result.returncode == 0, result.stderr
+    source = gateway_namespace or "envoy-gateway-system"
+    documents = [value for value in yaml.safe_load_all(result.stdout) if value]
+    allowed = []
+    for policy in documents:
+        if policy["kind"] != "NetworkPolicy":
+            continue
+        for rule in policy["spec"].get("ingress", []):
+            if any(
+                peer.get("namespaceSelector", {})
+                .get("matchLabels", {})
+                .get(
+                    "kubernetes.io/metadata.name",
+                )
+                == source
+                for peer in rule.get("from", [])
+            ):
+                allowed.append(policy["metadata"]["name"])
+                assert rule["ports"] == [{"protocol": "TCP", "port": 8080}]
+    assert allowed == ["custos-receivers-api-gateway"]
+    installer = (ROOT / "scripts/install-prereqs.sh").read_text()
+    assert "--namespace envoy-gateway-system --create-namespace" in installer

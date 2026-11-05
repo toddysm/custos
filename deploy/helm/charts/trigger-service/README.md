@@ -126,6 +126,9 @@ the chart's legacy minimum remains unchanged when receiver mode is off.
    Co-located Prometheus gets DNS, Kubernetes discovery and metrics egress through
    the managed deny-all policy; external Prometheus retains its own egress policy
    and must discover the actual controller namespace.
+   `global.networkPolicies.gatewayNamespace` defaults to `envoy-gateway-system`,
+   matching the prerequisite installer's Envoy data plane. Override it explicitly
+   if the proxy runs elsewhere; only API Gateway admits its north-south app traffic.
 8. Configure Observability query providers in `observability-audit-service.env`.
    The default Loki and Prometheus providers require `CUSTOS_LOKI_URL` and
    `CUSTOS_PROMETHEUS_URL`; the supplied installer exposes `http://custos-loki:3100`
