@@ -150,6 +150,10 @@ from custos_spl.interfaces.pull_control import (
     require_pull_ready,
     validate_pause_audit,
 )
+from custos_spl.interfaces.receiver_workspaces import (
+    RECEIVER_WORKSPACE_SCHEMA_REVISION,
+    RECEIVER_WORKSPACE_SCOPE,
+)
 from custos_spl.interfaces.scheduler import (
     SCHEDULER_SCHEMA_REVISION,
     PendingScheduleFire,
@@ -175,6 +179,7 @@ from custos_spl.pagination import (
     query_page_limit,
 )
 
+from custos_pg.adapters.receiver_progress import PgReceiverScanProgress
 from custos_pg.migrations.metadata import (
     AUDIT_OUTBOX_LOCK_KEY,
     METADATA_REV1,
@@ -193,6 +198,7 @@ from custos_pg.migrations.metadata import (
     METADATA_REV14,
     METADATA_REV15,
 )
+from custos_pg.migrations.receiver_progress import METADATA_REV16, RECEIVER_WORKSPACE_TABLES
 from custos_pg.pool import LazyPool, read_dsn_from_env
 from custos_pg.revisions import ensure_ledger, read_declared, record_revision
 
@@ -205,6 +211,18 @@ if TYPE_CHECKING:
 INTERFACE_NAME = "MetadataStoreProvider"
 DEFAULT_LIST_LIMIT = 50
 MAX_LIST_LIMIT = 200
+
+RECEIVER_WORKSPACE_QUERY = (
+    "SELECT workspace_id FROM ("
+    + " UNION ".join(
+        '(SELECT DISTINCT workspace_id COLLATE "C" AS workspace_id '
+        f"FROM custos_state.{table} "
+        'WHERE ($1::text IS NULL OR workspace_id COLLATE "C" > $1) '
+        "ORDER BY workspace_id LIMIT $2)"
+        for table in RECEIVER_WORKSPACE_TABLES
+    )
+    + ') AS workspaces ORDER BY workspace_id COLLATE "C" LIMIT $2'
+)
 
 _SUBSCRIPTION_QUERY = """
 SELECT s.workspace_id, s.subscription_id, s.workflow_id, s.state,
@@ -600,7 +618,7 @@ def _row_to_audit_outbox_row(row: Record) -> AuditOutboxRow:
     )
 
 
-class PgMetadataAdapter:
+class PgMetadataAdapter(PgReceiverScanProgress):
     """asyncpg implementation of `MetadataStoreProvider` — #127 slice.
 
     Construction mirrors the existing Pg adapters: tests inject a live
@@ -671,6 +689,7 @@ class PgMetadataAdapter:
                 METADATA_REV13,
                 METADATA_REV14,
                 METADATA_REV15,
+                METADATA_REV16,
             ):
                 if rev.number in already:
                     continue
@@ -712,6 +731,42 @@ class PgMetadataAdapter:
         """Return authoritative database time for retention planning."""
         async with self._delivery_transaction() as conn:
             return await _scheduler_now(conn)
+
+    async def check_receiver_workspaces_ready(self) -> None:
+        """Require recovery selections without raising the shared metadata minimum."""
+        async with self._delivery_transaction() as conn:
+            try:
+                exists = await conn.fetchval(
+                    "SELECT EXISTS(SELECT 1 FROM custos_meta.adapter_revisions "
+                    "WHERE interface_name=$1 AND revision=$2)",
+                    INTERFACE_NAME,
+                    RECEIVER_WORKSPACE_SCHEMA_REVISION,
+                )
+            except UndefinedTableError as exc:
+                raise MigrationRequired(
+                    [(INTERFACE_NAME, RECEIVER_WORKSPACE_SCHEMA_REVISION)]
+                ) from exc
+            if not exists:
+                raise MigrationRequired([(INTERFACE_NAME, RECEIVER_WORKSPACE_SCHEMA_REVISION)])
+
+    async def query_receiver_workspaces(
+        self, *, cursor: Cursor | None = None, limit: int | None = None
+    ) -> Page[WorkspaceId]:
+        """Bound each table's ID projection and retain workspaces with orphaned durable work."""
+        size = query_page_limit(limit)
+        after = decode_query_cursor(cursor, RECEIVER_WORKSPACE_SCOPE)
+        async with self._delivery_transaction() as conn:
+            rows = await conn.fetch(
+                RECEIVER_WORKSPACE_QUERY,
+                after,
+                size + 1,
+            )
+        return Page(
+            (WorkspaceId(row["workspace_id"]) for row in rows[:size]),
+            encode_query_cursor(RECEIVER_WORKSPACE_SCOPE, rows[size - 1]["workspace_id"])
+            if len(rows) > size
+            else None,
+        )
 
     async def check_activity_execution_ready(self) -> None:
         """Require durable attempt ownership before runtime activation; never auto-migrate."""

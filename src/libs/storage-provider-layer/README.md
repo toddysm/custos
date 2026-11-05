@@ -78,6 +78,23 @@ are rejected. This is separate from the unchanged delivery HTTP protocol 2.
 Providers retain the original snapshot for acknowledgement-loss recovery and
 restart rather than choosing a new execution account.
 
+## Receiver scan capabilities
+
+[ReceiverWorkspaceProvider](src/custos_spl/interfaces/receiver_workspaces.py)
+discovers bounded keyset pages of workspace IDs retaining intent or recovery
+state, independent of the Auth directory. It does not authorize effects.
+[ReceiverScanProgressProvider](src/custos_spl/interfaces/receiver_progress.py)
+persists versioned opaque continuations with fenced discovery/operation claims.
+Only acknowledged pages advance; failures retain prior progress. Scheduled
+claims require live scheduler authority; all existing effect fences still apply.
+
+[MemoryReceiverScanProgress](src/custos_spl/receiver_memory.py) supplies atomic
+single-loop reference behavior and shareable state for replica tests, not
+process-restart durability. The
+[PostgreSQL implementation](../custos-postgres/README.md#optional-durable-receiver-scan-progress)
+requires additive metadata revision 16. Test 51, 200 and 1,000 continuing scopes,
+deep target positions, stale owners and restart using the actual provider APIs.
+
 ## Status
 
 Implementation tracked under GitHub label
