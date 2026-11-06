@@ -24,6 +24,10 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "svc.fullname" . }}
+      {{- if and $receiver.enabled $receiver.executionBindingsBundle }}
+      volumes:
+        {{- include "custos.executionVolume" . | nindent 8 }}
+      {{- end }}
       {{- if $receiver.enabled }}
       terminationGracePeriodSeconds: {{ $receiver.terminationGraceSeconds }}
       {{- end }}
@@ -66,6 +70,10 @@ spec:
           {{- end }}
           resources:
             {{- include "svc.resources" . | nindent 12 }}
+          {{- if and $receiver.enabled $receiver.executionBindingsBundle }}
+          volumeMounts:
+            {{- include "custos.executionMount" . | nindent 12 }}
+          {{- end }}
           {{- if .Values.startupProbe.enabled }}
           # The lifespan blocks on the Dapr Workflow worker reporting ready
           # before uvicorn serves HTTP; the startupProbe absorbs that cold-start

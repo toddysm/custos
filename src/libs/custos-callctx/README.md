@@ -45,6 +45,19 @@ accepted target/run and resolve that exact reference during retry/replay;
 changed defaults or account IDs cannot retarget it. Rotate the secret's value
 without changing the binding identity. Missing original bindings fail closed.
 
+Enabled deployments select exactly one source: legacy
+`CUSTOS_EXECUTION_BINDINGS` (65,536 UTF-8 bytes), or an absolute
+`CUSTOS_EXECUTION_BINDINGS_FILE` with mandatory
+`CUSTOS_EXECUTION_BINDINGS_SHA256` (1,000,000 bytes). The file source verifies
+one bounded regular-file snapshot before strict decoding and the same closed
+semantic validation; projected symlinks are supported. Both retain the
+1,024-binding/120-character limits. Ambiguous sources, invalid digests and
+unreadable/invalid files fail closed, never falling back. Disabled mode ignores
+unused source settings. There is no hot reload.
+
+See the [managed provisioning, migration and recovery procedure](../../../docs/operations/execution-bindings.md)
+before switching an existing Helm release to file mode.
+
 `ExecutionContextClient.headers(identity, operation)` reads the credential through
 Dapr Secrets and obtains a fresh Auth context. Call it only inside the actual
 I/O boundary, never while building durable workflow history. The caller owns its

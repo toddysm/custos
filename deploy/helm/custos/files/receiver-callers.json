@@ -1,0 +1,10 @@
+{
+  "api-gateway": [],
+  "auth-service": ["api-gateway", "workflow-service", "trigger-service", "activity-runtime-manager", "connector-service", "catalog-service", "observability-audit-service"],
+  "workflow-service": ["api-gateway", "trigger-service", "workflow-service"],
+  "trigger-service": ["api-gateway", "workflow-service"],
+  "connector-service": ["api-gateway", "workflow-service", "trigger-service", "activity-runtime-manager", "catalog-service"],
+  "activity-runtime-manager": ["workflow-service"],
+  "catalog-service": ["api-gateway", "workflow-service", "connector-service", "activity-runtime-manager"],
+  "observability-audit-service": ["api-gateway", "auth-service", "catalog-service", "connector-service", "workflow-service", "trigger-service", "activity-runtime-manager", "observability-audit-service"]
+}

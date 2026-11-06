@@ -9,6 +9,8 @@ on:
     paths:
       - 'deploy/helm/**'
       - 'tests/helm/**'
+      - 'scripts/receiver_bindings.py'
+      - 'src/libs/custos-callctx/**'
       - 'src/services/**/settings.py'
       - 'src/services/activity-runtime-manager/src/custos_arm/config.py'
       - '.github/workflows/helm-test.yml'
