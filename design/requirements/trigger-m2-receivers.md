@@ -1181,8 +1181,9 @@ only the ConfigMap would leave four repeated Secret allow-lists/resource-name
 lists in release storage. In file mode the chart must not render duplicate
 Configurations/Roles/RoleBindings for these four consumers. Other managed
 consumers' authorization resources and all inline-mode resources stay chart
-owned and behaviorally unchanged. Extract/reuse the existing policy generation
-so the inline and bundle modes cannot diverge silently.
+owned and behaviorally unchanged, except for the explicit migration retention
+opt-in below. Extract/reuse the existing policy generation so the inline and
+bundle modes cannot diverge silently.
 
 Bound input to 1,000,000 bytes and 1,024 entries; independently check complete
 ConfigMap key-plus-value data at **1,000,013 bytes** or less, below Kubernetes'
@@ -1242,6 +1243,56 @@ Operator-owned registry file + existing deployment/security inputs
            -> original identity -> existing Secret/Auth boundaries
 Legacy inline Helm values -> unchanged managed 64 KiB path
 ```
+
+**First inline-to-file migration: staged legacy retention.** Merely omitting
+legacy chart-owned resources in the first file-mode release would let Helm
+delete fixed-name Dapr Configurations still referenced by old Pods. Retaining
+new versioned bundles alone does not protect a restarted old sidecar. Therefore
+an existing inline deployment must complete this two-upgrade handoff:
+
+1. Pause admission and drain. Install compatible binaries and a **bridge
+   release**, still using the same bounded inline registry, service identities
+   and effective authorization policy. A new boolean
+   `global.receiverRuntime.retainLegacyExecutionResources` defaults to `false`
+   and is valid only in inline mode. When explicitly `true`, it adds
+   `helm.sh/resource-policy: keep` to exactly the four consumers' existing
+   Configurations, execution Secret Roles and RoleBindings (12 resources).
+   Do not rename or change their policy/subjects during this bridge step.
+   Normal inline deployments keep their existing lifecycle when the opt-in is
+   false.
+2. Before producing/applying a first file bundle, the preparation helper must
+   inspect the current Helm release and **stored bridge manifest**, not only
+   live object annotations. Verify that all 12 legacy resources carry `keep`
+   in that stored manifest, remain present with matching effective live
+   content, and match the registered service identities. Record their names,
+   unique identifiers, content digests and bridge revision in the operator's
+   retained-resource inventory. An inline predecessor without this verified
+   bridge is an explicit preflight error; never proceed directly to file mode.
+3. Provision/verify the new versioned bundle, then upgrade to its compact file
+   descriptor with the retention flag false. Helm omits the legacy resources
+   but preserves them because the **previous stored release** marked them
+   `keep`. Do not delete, rename, repurpose or strip their Helm ownership
+   metadata. Old Pods keep their original inline environments and fixed-name
+   Dapr policy even if either their application container or sidecar restarts.
+   New Pods use the versioned file bundle. Verify every consumer before
+   resuming admission.
+
+Preparation/verification is a required automated step before deployment, not
+an optional manual annotation recipe. A fresh file-mode installation has no
+legacy resources to hand off; subsequent file-to-file upgrades retain the
+versioned lifecycle above. Missing/changed legacy resources or an unverified
+bridge abort migration instead of assuming sidecar defaults are safe.
+
+After Helm omits the kept objects, the operator owns their retention/cleanup
+lifecycle; preserve their release metadata so a compatible bridge rollback can
+reuse them. Rollback to that bridge may restore chart management only with its
+original policy and the same valid bounded identities. Do not select an
+inline-only target for an oversized registry or after accepting work whose
+identities the target cannot resolve. Keep the legacy objects while any old
+Pod, supported retained rollback revision or retained work needs them, including
+across uninstall; remove them only through the same verified cleanup protocol
+as versioned bundles. This handoff is an intentional, opt-in deployment-resource
+ownership change, not automatic garbage collection.
 
 **Snapshot and authority.** Each process loads once during its existing lifespan
 initialization, before advertising readiness or starting receiver admission.
@@ -1350,12 +1401,25 @@ configuration/provisioning docs and these tests:
    mutate existing clusters. Record exact tested commit, commands, results,
    skips and cleanup. Full deployed receiver-to-Workflow effects and saturation
    remain #1018, not 041.
+5. Add a dedicated actual inline-to-file migration scenario: install a legacy
+   inline release, prove direct migration fails preflight, upgrade to the
+   same-policy retention bridge, inspect its stored Helm manifest, then migrate
+   to file mode. Restart an **old sidecar** and application container while
+   old/new Pods coexist; prove all fixed-name policies/Roles/RoleBindings remain
+   usable, denied Secrets stay denied, and original identities survive.
+   Exercise a same-identity small-registry rollback to the retained bridge and
+   repeat file migration, plus refusal of an incompatible/oversized rollback.
+   Test the retention flag's type/mode guards, missing/changed legacy objects,
+   rollback metadata preservation and eventual verified cleanup. A
+   file-to-file-only test does not cover this migration.
 
 **Risk, rollout and rollback.** Main risks are oversized input, source ambiguity,
-configuration drift, Helm release storage, external-resource lifecycle,
+configuration drift, Helm release storage, legacy-resource deletion at migration,
+external-resource lifecycle,
 mixed binaries/chart capabilities and loss of old identity references.
 Bounded reads/counts, closed validation, externalized bulk resources,
-digest-verified version-pinned snapshots and retained identities mitigate them. File
+the verified retention bridge, digest-verified version-pinned snapshots and
+retained identities mitigate them. File
 references remain inside the deployment's existing sovereignty boundary; no
 new customer-data retention, external service or schema migration is introduced.
 Explicit retained-version Secret access and cleanup are described above.
@@ -1366,7 +1430,9 @@ cannot read it. Pause receiver admission and drain before changing the managed
 source mode. Prepare/verify the external bundle, then deploy its compact
 descriptor with compatible chart/binaries; verify all four consumers' actual
 snapshots, Secret access and readiness before resuming. Keep prior versions
-untouched. Test a descriptor-only update rolls every consumer without hot reload.
+untouched. For an existing inline release, complete and verify the retention
+bridge above **before** the file-mode upgrade. Test a descriptor-only update
+rolls every consumer without hot reload.
 
 For rollback, pause admission and drain first. Roll back to the last known
 compatible chart/binary/configuration set, including its exact external bundle,
@@ -1607,7 +1673,7 @@ expired resume waits and Workflow terminal-state conflicts.
 | False activity readiness | D07 requires an initialized scheduler and successful dependency probes; liveness does not imply schedulability. |
 | Bootstrap mismatch/key exposure | D07 tests actual issuer/verifier compatibility, exact attempt/expiry and private delivery; the activity cannot access the signing/verification key. |
 | Configuration capacity/source ambiguity | D09 preserves inline limits, bounds file/ConfigMap data, rejects dual sources, externalizes registry/authorization bulk and tests actual Helm Secret storage for all managed consumers/profiles. |
-| Snapshot drift or stale external permissions | D09 pins immutable versions and expected digests, tests old-container restart/rollback, and requires verified retained-bundle cleanup. |
+| Snapshot drift, deleted legacy policies or stale permissions | D09 verifies a stored-manifest retention bridge before first file mode, pins immutable versions/digests, tests old sidecar/application restart and rollback, and requires verified legacy/bundle cleanup. |
 | Rollback to an incapable binary/chart | D09 stages file-aware binaries first; pause/drain and retain pinned bindings; oversized registries cannot roll back to inline-only mode. |
 
 ### F. Breaking changes and compatibility
@@ -1726,10 +1792,11 @@ the single authorized prerequisite into additional issues.
 | Operator/developer progress documentation | 0.5-1 | 0.5 | 0.25 | Existing 036 |
 
 D09 adds one existing-architecture prerequisite, not another feature tracker.
-Provisional effort for 041 is 2-3 engineer-days for the shared source,
-bundle preparation/policy reuse and four-consumer/chart wiring, 1-2 for
-boundary/consumer/profile tests and review, and 1-2 for actual hosted Helm
-storage/restart/rollback validation and directly related lifecycle docs.
+Provisional effort for 041 is 3-4 engineer-days for the shared source,
+bundle preparation/policy reuse, retention handoff and four-consumer/chart
+wiring, 2-3 for boundary/consumer/profile/migration tests and review, and 1-2
+for actual hosted Helm storage/restart/rollback validation and directly related
+lifecycle docs.
 These are planning estimates, not measured durations or delivery commitments;
 re-estimate after the first mounted-file checks. Final operator documentation
 remains 036. No implementation starts from this design PR.

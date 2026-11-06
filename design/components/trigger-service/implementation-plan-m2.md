@@ -62,7 +62,7 @@ design gate [#1004](https://github.com/toddysm/custos/issues/1004).
 | TS-IMPL-039 | [#1038](https://github.com/toddysm/custos/issues/1038) | Production activity startup/readiness and resource ownership; private bootstrap delivery; real Connector-owned credential issuance with durable per-attempt authorization | 032, 038 |
 | TS-IMPL-040 | [#1045](https://github.com/toddysm/custos/issues/1045) | Approved D08 storage/progress capability and extraction of #1044's bounded workspace discovery, migration, fair fenced claims with scheduled-leader admission, durable continuations and typed scheduled-scan restore; native saturation/restart/isolation evidence | 1046 merged, 022, 024, 031, 033 |
 | TS-IMPL-034 | [#1017](https://github.com/toddysm/custos/issues/1017) | Activation/readiness/deployment wiring, durable audit and operational signals; consume all prerequisites, independent bounded discovery and fair progress workers; four-profile rendering and safe rollback | 025, 027, 028, 029, 033, 037, 038, 039, 040 |
-| TS-IMPL-041 (proposed) | [#1048](https://github.com/toddysm/custos/issues/1048) | D09 bounded digest-verified file registry; unchanged legacy 64 KiB path; externally provisioned versioned registry/Dapr/RBAC bundle, compact Helm descriptor; every consumer/profile; actual Helm storage and restart-safe rollback tests | Revision-8/D09 approval/merge, completed 038 and 034 |
+| TS-IMPL-041 (proposed) | [#1048](https://github.com/toddysm/custos/issues/1048) | D09 bounded digest-verified file registry; unchanged legacy 64 KiB path; external versioned registry/Dapr/RBAC bundle and compact Helm descriptor; verified retention bridge for first inline-to-file migration; every consumer/profile; actual Helm storage and restart-safe rollback tests | Revision-8/D09 approval/merge, completed 038 and 034 |
 | TS-IMPL-035 | [#1018](https://github.com/toddysm/custos/issues/1018) | Deployed receiver-to-Workflow failure/recovery and legacy regression coverage in hosted CI; full-cardinality managed effects after the configuration prerequisite | 034, 041 |
 | TS-IMPL-036 | [#1019](https://github.com/toddysm/custos/issues/1019) | Developer/operator setup, recovery and migration documentation; checked links/examples | 035 |
 
@@ -174,7 +174,7 @@ separate authorization. Proposed branches follow
 | D06 | Explicit workspace service-account identity, fresh authorized contexts and the actual Workflow/Connector execution contract; no credential persistence or replay retargeting | Owner approval 2026-11-02 / [#1037](https://github.com/toddysm/custos/issues/1037) |
 | D07 | Truthful production activity readiness, private compatible bootstrap, Connector-owned credential issuance | Owner approvals recorded in #988; [#1038](https://github.com/toddysm/custos/issues/1038) merged through #1041 |
 | D08 (approved) | Durable per-workspace/operation progress, independent bounded discovery, ticket-ordered fenced claims and safe restart/cleanup | Design approved/merged via #1046; [#1045](https://github.com/toddysm/custos/issues/1045) Build authorized 2026-11-04T17:03:00.903-08:00 |
-| D09 (proposed, unapproved) | Bounded digest-verified file and external immutable/version-pinned registry/authorization bundle; compact Helm references; 1,000,000-byte file, unchanged 65,536-byte inline and 1,024-entry limits; real Helm storage and restart-safe rollback | Planning authorized 2026-11-05; [#1048](https://github.com/toddysm/custos/issues/1048) before #1018; no Build/merge yet |
+| D09 (proposed, unapproved) | Bounded digest-verified file and external immutable/version-pinned registry/authorization bundle; compact Helm references; verified legacy retention bridge; 1,000,000-byte file, unchanged 65,536-byte inline and 1,024-entry limits; real Helm storage and restart-safe rollback | Planning authorized 2026-11-05; [#1048](https://github.com/toddysm/custos/issues/1048) before #1018; no Build/merge yet |
 
 The design document owns the exact contracts, alternatives and migration impact.
 D01-D08 were explicitly approved. Approval and amendment
@@ -258,6 +258,15 @@ upgrade and roll back using reused and recreated Pods; verify expected
 snapshots/defaults, digest refusal and original work/credential identities.
 Keep immutable bundles and explicit named-Secret permissions for retained work
 and rollback; test verified cleanup only after no retained reference needs them.
+For first inline-to-file migration, require a same-policy inline bridge release
+with `retainLegacyExecutionResources: true`; verify `helm.sh/resource-policy:
+keep` in its **stored Helm manifest** on all 12 legacy Configurations/Roles/
+RoleBindings before allowing the file upgrade. Keep those fixed-name resources
+and ownership metadata for old sidecar restarts and compatible rollback.
+Test direct-migration refusal, actual bridge/file upgrades with restarted old
+sidecars, bounded same-identity bridge rollback/re-migration, incompatible
+rollback refusal and verified eventual legacy-resource cleanup. Fresh file
+installs and ordinary inline deployments do not need this migration opt-in.
 Wire actual cases into existing hosted jobs. This is prerequisite evidence,
 not a substitute for 035's deployed receiver-to-Workflow/security/shutdown work.
 Direct configuration/source docs are part of 041; final user docs remain 036.
