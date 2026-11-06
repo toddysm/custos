@@ -282,6 +282,13 @@ Test concurrent/partial-patch refusal, wrong ownership and incompatible/oversize
 recovery; never force, bypass ownership or delete/recreate. File-to-file native
 rollback remains covered. Fresh file
 installs and ordinary inline deployments do not need this migration opt-in.
+File mode requires `namespace.create: false`. If the legacy release owns the
+controller Namespace, the bridge must also retain it with `keep` in the stored
+manifest before file mode hands off its lifecycle. Verify namespace ownership,
+labels and unique identifier; never delete/recreate it during recovery.
+Test actual file-mode uninstall with both operator-owned and handed-off
+Namespaces, proving retained resources survive; reject unprotected namespace
+ownership and file-mode namespace creation at preflight/render respectively.
 Wire actual cases into existing hosted jobs. This is prerequisite evidence,
 not a substitute for 035's deployed receiver-to-Workflow/security/shutdown work.
 Direct configuration/source docs are part of 041; final user docs remain 036.

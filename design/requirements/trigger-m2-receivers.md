@@ -1201,7 +1201,16 @@ create-only: an existing object can be reused only after exact effective-content
 and digest verification, never patched to represent a different bundle.
 
 The operator creates the controller namespace and provisions/verifies this
-external bundle **before** Helm install/upgrade. Missing resources, conflicting
+external bundle **before** a fresh Helm installation. File mode requires
+`namespace.create: false`: the chart must not render the controller Namespace,
+whose deletion would cascade to external bundles regardless of their individual
+retention annotations. For an existing chart-owned Namespace, use the staged
+handoff below without deleting/recreating it. The operator owns namespace
+retention through the lifetime of every live/retained resource; if a different
+release or namespace-cleanup controller can delete it, establish that owner's
+retention protection before proceeding, or fail preflight.
+
+Provision/verify bundles before each upgrade. Missing resources, conflicting
 objects or mismatched descriptor/security inputs abort that preparation.
 Verify all bundle objects and their bindings, not only the ConfigMap; do not
 rely on a missing Dapr Configuration producing safe default behavior. Bundle
@@ -1257,6 +1266,10 @@ an existing inline deployment must complete this two-upgrade handoff:
    and is valid only in inline mode. When explicitly `true`, it adds
    `helm.sh/resource-policy: keep` to exactly the four consumers' existing
    Configurations, execution Secret Roles and RoleBindings (12 resources).
+   If the current release also owns the controller Namespace through
+   `namespace.create: true`, retain that value in the bridge and add `keep`
+   to its Namespace manifest under the same retention opt-in. Preserve its
+   unique identifier, name and security labels.
    Do not rename or change their policy/subjects during this bridge step.
    Normal inline deployments keep their existing lifecycle when the opt-in is
    false.
@@ -1268,8 +1281,11 @@ an existing inline deployment must complete this two-upgrade handoff:
    unique identifiers, content digests and bridge revision in the operator's
    retained-resource inventory. An inline predecessor without this verified
    bridge is an explicit preflight error; never proceed directly to file mode.
+   When the Namespace was chart-owned, verify its `keep` in the stored bridge
+   manifest and its live ownership/content too; add it to the retained inventory.
 3. Provision/verify the new versioned bundle, then upgrade to its compact file
-   descriptor with the retention flag false. Helm omits the legacy resources
+   descriptor with the retention flag false and `namespace.create: false`.
+   Helm omits the legacy resources (and any handed-off Namespace)
    but preserves them because the **previous stored release** marked them
    `keep`. Do not delete, rename, repurpose or strip their Helm ownership
    metadata. Old Pods keep their original inline environments and fixed-name
@@ -1313,6 +1329,9 @@ Do not use `--reuse-values`, `--force`, ownership bypass or delete/recreate.
 Beforehand verify the chart/values digests, source compatibility, retained
 identities and all 12 live resources' original content, unique identifiers and
 matching Helm release-name/namespace/managed-by metadata.
+For a formerly chart-owned Namespace, verify its retained identity, original
+labels and ownership too; the bridge recovery upgrade re-adopts it without
+recreation. Its stored bridge `keep` remains required.
 
 Before invoking the recovery upgrade, the helper must reconcile each of the
 four **live Deployment Pod templates** to the verified bridge's managed
@@ -1473,6 +1492,14 @@ configuration/provisioning docs and these tests:
    Test the retention flag's type/mode guards, missing/changed legacy objects,
    recovery metadata preservation and eventual verified cleanup. A
    file-to-file-only test does not cover this migration.
+6. Require file-mode render refusal for `namespace.create: true`. On hosted
+   kind, test both a pre-existing operator Namespace and a legacy chart-owned
+   Namespace handed off through the verified bridge. Actually uninstall the
+   file-mode release; assert the same Namespace and all retained legacy/bundle
+   objects survive with unchanged unique identifiers. Namespace deletion is
+   never part of ordinary release uninstall or bundle cleanup; explicitly
+   authorize it only after every child resource's retention obligations end.
+   Test preflight refusal where namespace-owner retention is not established.
 
 **Risk, rollout and rollback.** Main risks are oversized input, source ambiguity,
 configuration drift, Helm release storage, legacy-resource deletion at migration,
