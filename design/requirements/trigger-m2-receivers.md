@@ -1,11 +1,11 @@
 # Trigger M2 receivers - product requirements and engineering design
 
-- Status: **Revision-7/D08 approved and merged through #1046; prerequisite implementation in progress.**
-- Planning format: full; revision 7. D01-D08 approved; implementation and deployed validation are separate gates.
+- Status: **Revision-8/D09 proposed for #1048; awaiting concrete design/breakdown approval. Revision-7/D08 remains approved.**
+- Planning format: full; revision 8 proposed. D01-D08 approvals are retained; D09, implementation and deployed validation are separate gates.
 - Tracking: [#988](https://github.com/toddysm/custos/issues/988).
 - Design work item: [#1004](https://github.com/toddysm/custos/issues/1004).
 - Updated: 2026-11-05; original baseline commit `e344ab2`.
-- Validation: GitHub-hosted continuous integration (CI), plus Copilot review.
+- Validation: GitHub-hosted continuous integration (CI), plus Copilot-only review.
 - Delivery plan: [implementation-plan-m2.md](../components/trigger-service/implementation-plan-m2.md).
 
 ## Part I - Product requirements
@@ -52,6 +52,18 @@ the concrete D08 design and 19-item breakdown on 2026-11-04T16:41:03.590-08:00;
 [#1046](https://github.com/toddysm/custos/pull/1046) merged as `8eb0414`.
 Build for #1045 was authorized on 2026-11-04T17:03:00.903-08:00.
 
+Revision-8 evidence: at merged main
+`4d7d067d5e4380c0adb5e242bdf4193528edc5fb`, #1018's production
+execution-binding loader and managed Helm rendering accepted 51/200 compact
+workspace registries (5,005/19,807 bytes) but rejected 1,000 (99,807 bytes):
+both impose a 65,536-byte ceiling. See the
+[measured preflight](https://github.com/toddysm/custos/issues/1018#issuecomment-6672885330).
+The owner authorized adding [#1048](https://github.com/toddysm/custos/issues/1048)
+on 2026-11-05T16:15:23.655-08:00 and opening this scoped design amendment on
+2026-11-05T17:27:24.414-08:00. Neither authorization approves D09, Build or merge.
+#1045/#1017 are now closed through #1047/#1044; the revision-7 finding above is
+historical, not an outstanding approval gate.
+
 ### 3. Customer scenarios
 
 **S1 - Scheduled checks.** A security analyst currently fires a workflow manually.
@@ -78,12 +90,28 @@ replay uses the original target and idempotency key. Concurrent replay is bounde
 and explicit; a crashed replay worker can be recovered. An unauthorized user
 cannot inspect retained payloads or replay another workspace's entry.
 
+**S5 - Managed capacity and safe configuration.** A deployment operator prepares
+the approved 1,000-workspace receiver certification workload. Today even compact,
+reference-only account mappings fail before deployment, despite the loader's
+1,024-entry allowance. With D09, the operator keeps explicit workspace accounts
+in the existing Helm values, reviews the generated reference-only ConfigMap and
+rolls out compatible controllers. Every consumer loads the same bounded file
+snapshot; credentials still come from the existing secret boundary. A missing
+mount, ambiguous source or malformed/oversized file blocks readiness with a safe
+reason instead of selecting another account. The operator corrects configuration
+and rolls again; already accepted work keeps its original identity.
+
 ### 4. Outcomes, goals and scope
 
 All five deliverables in #988 are must-have: four receiver types and durable
 dead-letter/replay operations. Production storage reads, verification, signed
 administration and the narrowly coupled Workflow idempotency contract are
 prerequisites, not separate unrelated enhancements.
+
+For S5, D09 must admit the 1,000-workspace reference registry through every
+managed consumer without weakening account scope or legacy inline limits.
+This is a capacity prerequisite to certification, not a claim that the workload
+has run successfully.
 
 Non-goals: the web designer ([#994](https://github.com/toddysm/custos/issues/994)),
 the general Workflow observability integration ([#989](https://github.com/toddysm/custos/issues/989)),
@@ -147,6 +175,28 @@ Content-Type: application/json
 {"error":{"code":"permission_denied","detail":"missing required permission: trigger:admin"}}
 ```
 
+For proposed D09, the primary new surface is startup/readiness configuration
+diagnostics, not a new command or HTTP endpoint. These two samples are
+**unapproved proposed output**, not shipped behavior or certification evidence:
+
+```text
+Execution bindings: loaded
+Source: file
+Workspaces: 1000
+Bindings: 1000
+UTF-8 bytes: 927027
+Snapshot: fixed until process restart
+Credentials: resolved through existing Secret/Auth boundaries
+```
+
+```text
+Execution bindings: rejected
+Source: file
+Reason: file exceeds 1000000 bytes
+Readiness: not ready; no new work admitted
+Fallback: none
+```
+
 ### 8. Goals and measurements
 
 | Goal | Baseline | Acceptance target | When measured |
@@ -156,6 +206,7 @@ Content-Type: application/json
 | Duplicate protection | Not established for M2/replay | Zero duplicate effects in the specified concurrency/crash tests | Each path and TS-IMPL-035 |
 | Isolation | Missing new ingress/admin paths | All spoofing, wrong-workspace and unauthorized cases rejected | TS-IMPL-026/027/032/035 |
 | Regression | Existing suites and coverage gate | Existing behavior preserved; Trigger coverage at least 90% | Every relevant code change |
+| Managed binding capacity, S5 | 1,000 compact bindings rejected at 99,807 bytes | Exact rendered 1,000-workspace files load in all four consumers/profiles within D09 limits; source/limit errors remain fail-closed | TS-IMPL-041; deployed effects remain TS-IMPL-035 |
 
 These are bounded acceptance tests, not proof of exactly-once behavior for all
 possible outages. Track dispatch latency, queue age, retained bytes and upstream
@@ -224,7 +275,9 @@ earlier approval and updates both the plan and affected acceptance criteria.
 D08 adds durable scan progress and fair admission, rather than discarding
 unfinished cursors to free memory. Its schema, ownership, retention and rollout
 contract received explicit approval of revision 7 before #1045 implementation.
-The existing #1044 remains open and must consume the merged prerequisite.
+Those prerequisites have since merged through #1047/#1044. D09 is a new,
+unapproved capacity amendment, not a reopening of D01-D08. Its exact source,
+byte/count limits and rollout contract below require approval before #1048 Build.
 
 ### 14. Rollout and milestones
 
@@ -1032,6 +1085,211 @@ pull request comes first; after its gated merge, integrate main normally in
 #1044's owned checkout and finish #1017. This plan PR does not close #1045,
 #1017 or #988. Its approved merge does not waive implementation review gates.
 
+#### D09 - Bounded file-backed execution bindings (proposed)
+
+**Scope and gate.** [TS-IMPL-041 / #1048](https://github.com/toddysm/custos/issues/1048)
+removes the measured configuration ceiling before #1018's full-cardinality
+managed Workflow-effects workload. This is a quality/capacity amendment to the
+current product requirements (S5), not a new identity service. Approval of this
+revision and its 20-item breakdown must precede implementation. Keep the parked
+#1018 worktree/claim intact; implement 041 separately from current main only
+after its own Build authorization. #1019 remains the final documentation item.
+
+**Chosen source contract.** Extend the existing shared
+[execution loader](../../src/libs/custos-callctx/src/custos_callctx/execution.py);
+reuse its closed `bindings`/`defaults` JSON structure and immutable registry.
+Add the operator-only environment key `CUSTOS_EXECUTION_BINDINGS_FILE`, whose
+value is an absolute filesystem path, not file contents. The existing
+`CUSTOS_EXECUTION_IDENTITY_ENABLED` gate remains authoritative:
+
+| Enabled gate / configured sources | Result |
+|---|---|
+| Absent or `false` | Existing off-mode behavior: no registry loaded; unused source settings are ignored. |
+| Invalid boolean | Existing explicit configuration error. |
+| `true`, inline key only | Existing `CUSTOS_EXECUTION_BINDINGS` parser and 65,536-byte limit. |
+| `true`, file key only | Read and validate one bounded file snapshot. |
+| `true`, both source keys present | Explicit ambiguous-source error, even if one value is empty; never choose precedence or fallback. |
+| `true`, neither key, or the selected value is empty/blank | Explicit missing/invalid-source error; no default registry. |
+
+File input is a regular file, including Kubernetes projected-file symlinks.
+Reject directories and special files without waiting on a pipe/device. Open one
+descriptor and read at most **1,000,001 bytes**; reject if more than
+**1,000,000 bytes** are present. Decode strict UTF-8 before JSON validation.
+Whitespace counts toward the byte limit; it is not trimmed to admit an oversized
+source. Reject malformed UTF-8/JSON, duplicate keys, unknown fields, duplicate
+workspace/binding pairs, invalid identifiers and defaults outside their binding's
+workspace using the same closed validation as inline input. The existing
+**1,024-binding** count and **120-character** identifier limits remain.
+Non-ASCII identifiers remain supported within the byte limit; 1,024 entries are
+a count ceiling, not a promise that every multibyte configuration fits.
+
+The implementation must separate the common semantic parser from source-specific
+size checks; it must not globally raise the inline parser's 64 KiB limit as a
+shortcut. No REST, remote procedure call, queue envelope, persisted identity,
+schema revision or idempotency key changes. The JSON structure is unchanged;
+this is an additive deployment-input source, not a new version of durable data.
+No new package, secret-store implementation or hot-reload mechanism is needed.
+
+**Managed Helm projection.** Keep
+`global.receiverRuntime.executionBindings` as the existing reference-only values
+object. When managed receiver runtime is enabled, serialize it once as compact
+JSON and render a release-namespaced ConfigMap
+`<release>-receiver-execution-bindings` (using existing name helpers/limits), with
+the single data key `bindings.json`. Reject a serialized value above
+1,000,000 UTF-8 bytes or 1,024 entries at render time. Independently validate the
+complete ConfigMap data budget conservatively as key bytes plus value bytes:
+at most **1,000,013 bytes**, below Kubernetes' **1,048,576-byte** ConfigMap
+limit. Do not silently truncate, split, compress or select a workspace subset.
+
+Project that file read-only at `/custos/execution/bindings.json`, without a
+`subPath` mount, into exactly the existing registry consumers: API Gateway,
+Trigger Service, Workflow Service and Activity Runtime Manager. Set
+`CUSTOS_EXECUTION_BINDINGS_FILE` to that path and remove any preserved inline
+source key from their managed environments so the generated manifest is not
+ambiguous. Managed keys continue to replace legacy entries; unrelated operator
+environment entries survive. All four connected/airgapped and evaluation/high
+availability profiles use this same contract. Do not mount the registry into
+activity sandboxes, Connector hook pods or services that do not consume it.
+
+Update the existing
+[managed helper](../../deploy/helm/custos/templates/_receiver-runtime.tpl),
+[receiver validation/resources](../../deploy/helm/custos/templates/receiver-runtime.yaml),
+the four consuming
+[service charts](../../deploy/helm/charts) and their existing render tests.
+The ConfigMap contains references, never service credentials or signed contexts.
+Existing credential Secret references and narrowly scoped Secret permissions
+remain; the file mount needs no new application Kubernetes API permission.
+There are no new service identities, roles, network paths, ports or egress rules.
+The existing operator/Helm resource permissions govern who may change references.
+
+```text
+Operator-owned executionBindings values (references only)
+  -> Helm compact serialization + byte/count/ConfigMap checks
+  -> release ConfigMap: bindings.json
+     -> read-only projected file in Gateway / Trigger / Workflow / ARM
+        -> shared bounded loader -> immutable startup registry
+           -> original workspace/principal/binding reference
+              -> existing Secret boundary + Auth exchange -> scoped execution
+Legacy inline source -> unchanged 64 KiB path (non-managed/older charts)
+```
+
+**Snapshot and authority.** Each process loads once during its existing lifespan
+initialization, before advertising readiness or starting receiver admission.
+A ConfigMap projection update must not mutate the loaded registry. Put a
+checksum of the exact serialized file bytes on each consuming Deployment so a
+values change causes an explicit rolling update. Do not add a background
+watcher. A successful parse does not authorize an account: existing credential
+lookup, disabled/revoked-account/grant checks, fresh signed contexts and
+application/namespace checks remain at their existing boundaries.
+
+Defaults choose identities for new work only. Retained targets, runs, child
+execution and resume waits resolve their pinned workspace/principal/binding;
+changing a default cannot retarget them. Removing/rebinding an original identity
+fails closed rather than adopting the new default. Credential rotation follows
+the existing Secret/issuer contract; the reference file is not a credential
+cache. No plaintext material, file contents or full registry enters error output,
+logs, traces, workflow history or audit. Closed-field checks reject added
+credential fields; operators must still keep actual credentials out of
+reference-valued fields.
+
+**Error handling and operator output.** File I/O, type, decode, size and
+validation failures abort enabled initialization and follow the existing
+service startup/readiness error path. Do not catch them and return an empty
+registry, fall back to inline, or mark the service ready. Diagnostics may report
+the source kind, safe reason code and aggregate byte/binding counts, not content
+or per-workspace metric labels. The proposed success/error output is rendered in
+Part I.7A; no new CLI command or endpoint is introduced.
+
+**Measured budget and success criteria.** A compact synthetic registry with all
+five reference fields at the existing maximum of 120 ASCII characters and an
+explicit default for every workspace has these measured JSON byte counts:
+
+| Workspaces / bindings | File bytes | Conservative key + value bytes |
+|---|---:|---:|
+| 51 | 47,304 | 47,317 |
+| 200 | 185,427 | 185,440 |
+| 1,000 | 927,027 | 927,040 |
+| 1,024 | 949,275 | 949,288 |
+
+These are local serialization measurements, not file-loader/deployment results;
+the new source does not exist yet. The 1,000,000-byte cap admits those fixtures
+with ConfigMap headroom while retaining a bounded allocation and count limit.
+Record parse duration and peak memory for the documented fixtures during 041;
+no unmeasured latency/service-level guarantee or currency estimate is added.
+There is one bounded startup read per consumer, not one read per event. Use
+existing startup diagnostics and rollout history for source mode/snapshot
+adoption; existing workspace-scoped subscription/dispatch audit records continue
+to measure tenant usage, stop events and frequency over time. Do not duplicate
+that data or introduce customer identifiers as metric labels.
+
+**Validation and traceability.** S5/#1048 map to the shared file source, managed
+projection and startup snapshot; S1-S4 retain D01-D08 authority and wire formats.
+The same 041 implementation pull request covers the library, every consuming
+service's startup boundary, all four profile projections, directly related
+configuration docs and these tests:
+
+1. Use real temporary/projected files through the production loader. Test
+   1,000,000 bytes accepted and 1,000,001 rejected, with valid JSON padded to
+   the boundary; 65,536/65,537 for legacy inline; 1,024/1,025 entries;
+   UTF-8 byte rather than character counting; malformed/duplicate/unknown/
+   cross-scope data; missing/unreadable/special files; ambiguous/empty sources;
+   and unchanged disabled behavior. Preserve source/callable documentation.
+2. Render all four managed profiles for 51/200/1,000 distinct workspaces, with
+   realistic references and the maximum-ASCII fixtures above. Feed the exact
+   rendered ConfigMap bytes through the real file loader; assert the
+   conservative ConfigMap size, every required mount/environment/checksum and
+   absence of inline duplication or credential literals. Test exact and
+   one-over chart budgets, including serialization expansion/escaping.
+3. Exercise Gateway, Trigger, Workflow and ARM startup with valid and rejected
+   files; verify admission/readiness and owned-resource cleanup on failure.
+   Re-run pinned-identity/default-change and credential/grant/rotation/restart
+   regressions; no consumer may infer a missing workspace identity.
+4. Wire these cases into existing library/service Python 3.11/3.12 and Helm
+   jobs, extending actual selectors if needed rather than claiming deselected
+   cases ran. Validate the mounted snapshot and rollout on disposable hosted
+   `kind`; do not run local Docker or mutate existing clusters. Record exact
+   tested commit, commands, results, skips and cleanup. Full deployed
+   receiver-to-Workflow effects and saturation remain #1018, not 041.
+
+**Risk, rollout and rollback.** Main risks are oversized input, source ambiguity,
+configuration drift, mixed binaries/chart capabilities and loss of old identity
+references. Bounded reads/counts, closed validation, startup-only snapshots,
+exact-byte checksums and retained pinned identities mitigate them. File
+references remain inside the deployment's existing sovereignty boundary; no
+new customer-data retention, external service, schema migration or permission
+expansion is introduced.
+
+Ship compatible shared-library/service binaries first, with the old inline
+chart and existing 64 KiB behavior. Do not enable file mode on binaries that
+cannot read it. Pause receiver admission and drain before changing the managed
+projection; deploy the generated ConfigMap and compatible chart/binaries
+together, verify all four consumers' mounted snapshots/readiness, then resume.
+Test a values-only update rolls every consumer without hot reload.
+
+For rollback, pause admission and drain first. Roll back to the last known
+compatible chart/binary/configuration set and retain the reference ConfigMap
+and original credential bindings until no retained work needs them. A registry
+above 64 KiB **cannot** safely roll back to the old inline-only contract: keep
+admission paused on compatible file-aware binaries until a validated
+same-identity rollback configuration exists. Never drop bindings or reassign
+workspaces to fit a ceiling; never weaken readiness or authorization to obtain
+a green deployment.
+
+The earlier receiver-disabled
+[baseline run](https://github.com/toddysm/custos/actions/runs/42131707104)
+failed Helm installation with ARM readiness reporting an unconfigured activity
+scheduler; its disposable `kind` cleanup succeeded. That independent deployment
+configuration finding remains for #1018. File-capacity work must not claim to
+repair it without a separate measured check. No full receiver certification has
+occurred. After approved 041 merges, resume 035, then 036 and the reviewed
+inventory close-out. D09 does not close #1048/#1018/#988 on design merge.
+
+Alternatives rejected: raising only the environment limit leaves oversized
+environment/manifest transport and mismatched chart guards; disabling identity
+or sharing an ambient account breaks D06; testing claims without real effects
+does not certify #1018; compression/sharding/live reload adds unnecessary new
+contracts. D09 changes source transport only and retains explicit authority.
+
 #### Components and flow
 
 **Owner-approved issuer extension (2026-11-02T20:56:34.079-08:00).** Within
@@ -1101,6 +1359,7 @@ checks; missing production capabilities fail readiness.
 | Preserve REQ-004/080 | Existing manual/internal routes and regression gates | 022, 034-035 |
 | Operator enablement | Deployment/rollback and final documentation | 034-036 |
 | SP1-SP3, bounded multi-tenant recovery | D08 durable progress, independent discovery, fair fenced claims and restart-safe continuation | 040, 034-036 |
+| S5 / #1048, managed 1,000-workspace configuration | D09 bounded file source, reference-only four-consumer projection, startup snapshots and fail-closed rollback | 041 before 035; final docs 036 |
 
 ### PM-2. Interfaces and versioning
 
@@ -1240,6 +1499,8 @@ expired resume waits and Workflow terminal-state conflicts.
 | Replay safety | Durable downstream identity and sufficient retention; never infer safety from a reused string alone. |
 | False activity readiness | D07 requires an initialized scheduler and successful dependency probes; liveness does not imply schedulability. |
 | Bootstrap mismatch/key exposure | D07 tests actual issuer/verifier compatibility, exact attempt/expiry and private delivery; the activity cannot access the signing/verification key. |
+| Configuration capacity/source ambiguity | D09 preserves inline limits, bounds file and complete ConfigMap data, rejects dual sources and tests all four managed consumers/profiles. |
+| Rollback to an incapable binary/chart | D09 stages file-aware binaries first; pause/drain and retain pinned bindings; oversized registries cannot roll back to inline-only mode. |
 
 ### F. Breaking changes and compatibility
 
@@ -1356,6 +1617,14 @@ the single authorized prerequisite into additional issues.
 | Profile/deployed saturation and failure certification | 0.5-1 | 1-2 | 0.5-1 | 034/035 |
 | Operator/developer progress documentation | 0.5-1 | 0.5 | 0.25 | Existing 036 |
 
+D09 adds one existing-architecture prerequisite, not another feature tracker.
+Provisional effort for 041 is 1-2 engineer-days for the shared source and
+four-consumer/chart wiring, 1-2 for boundary/consumer/profile tests and review,
+and 0.5-1 for hosted mount/rollout/rollback validation and directly related docs.
+These are planning estimates, not measured durations or delivery commitments;
+re-estimate after the first mounted-file checks. Final operator documentation
+remains 036. No implementation starts from this design PR.
+
 ### PM-7. Test plan and hosted CI
 
 Each child includes unit/contract tests and relevant integration coverage.
@@ -1390,6 +1659,11 @@ and settled reviews; no new CI system or scheduled production probe is required.
 The plan-only pull request changes documentation; path-filtered service jobs
 may not run. Report that as not applicable, not green runtime evidence.
 Use normal hosted triggers without skip markers. Request Copilot review.
+For this amendment and subsequent authorized work, request **only Copilot**;
+do not request Codex or another hosted reviewer. D09's source/byte/count,
+four-consumer and exact rendered-file checks above are mandatory for 041.
+This three-document plan PR has no source or chart changes and does not
+establish that those future tests pass.
 Repository rules require resolved review threads and include code-quality and
 CodeQL rules; inspect actual applicability/check results before any authorized
 merge. Missing or pending required results remain blockers.
@@ -1399,9 +1673,15 @@ merge. Missing or pending required results remain blockers.
 - Preserve the recorded baseline and amendment approvals in #988.
 - Implement the approved #1037 prerequisite before #1017 profile activation.
 - Complete #1038's startup/bootstrap prerequisite before #1017 activation.
-- The revision-5 amendment and execution/runtime prerequisites have since merged
-  through #1039, #1040 and #1041. Revision 7/D08 is approved and merged via #1046;
-  implement and validate #1045's exact storage/ownership contract. #1044 remains open.
+- The revision-5 amendment and execution/runtime prerequisites merged through
+  #1039, #1040 and #1041. Revision 7/D08 merged via #1046, and #1045/#1017
+  completed through #1047/#1044. Their approval/evidence remain historical facts.
+- Review proposed revision 8/D09 and the 20-item breakdown, including #1048;
+  obtain explicit approval before design merge or separate 041 Build. Only
+  planning publication is authorized now.
+- Implement/validate 041 after its separate Build authorization, then resume
+  #1018's deployed certification, including the independent baseline readiness
+  configuration finding. Keep #1019 and reviewed inventory close-out required.
 - Retain the authorized per-item branches/pull requests, hosted checks, Copilot
   reviews, fix-confirmation replies, gated merges and checkpoint-before-cleanup.
 - Obtain renewed approval for any further material scope or identity-policy change.
