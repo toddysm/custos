@@ -331,8 +331,16 @@ def transition_preflight(
     ns = json.loads(run(["kubectl", "get", "namespace", namespace, "-o", "json"]))
     annotations = ns["metadata"].get("annotations", {})
     owner = annotations.get("meta.helm.sh/release-name")
-    if owner and owner != bundle["release"]:
-        raise OperatorValidationError("namespace is owned by a different Helm release")
+    owner_namespace = annotations.get("meta.helm.sh/release-namespace")
+    helm_managed = (
+        ns["metadata"].get("labels", {}).get("app.kubernetes.io/managed-by") == "Helm"
+    )
+    if (owner or owner_namespace or helm_managed) and (
+        owner != bundle["release"] or owner_namespace != namespace
+    ):
+        raise OperatorValidationError(
+            "namespace is owned by a different Helm release or release namespace"
+        )
     if ns["metadata"].get("deletionTimestamp") or ns["metadata"].get("ownerReferences"):
         raise OperatorValidationError("namespace has an unprotected lifecycle owner")
     releases = json.loads(
@@ -468,6 +476,14 @@ def transition_preflight(
         ):
             raise OperatorValidationError(
                 "bridge inventory belongs to a different deployment"
+            )
+        rendering_pin = inventory.get("renderingSha256")
+        if (
+            not isinstance(rendering_pin, str)
+            or re.fullmatch(r"[0-9a-f]{64}", rendering_pin) is None
+        ):
+            raise OperatorValidationError(
+                "bridge inventory lacks a complete rendering digest"
             )
         verify_retained(inventory)
     if legacy:
@@ -700,7 +716,7 @@ def bridge_resources(
 def rendered_bridge(
     chart: Path, paths: list[Path], release: str, namespace: str
 ) -> list[dict[str, Any]]:
-    """Render a saved exact bridge artifact and complete values, never reuse live values."""
+    """Render the saved bridge in upgrade context with complete values, never live values."""
     command = [
         "helm",
         "template",
@@ -710,10 +726,22 @@ def rendered_bridge(
         namespace,
         "--kube-version",
         "1.29.0",
+        "--is-upgrade",
     ]
     for path in paths:
         command.extend(["-f", str(path)])
     return [doc for doc in yaml.safe_load_all(run(command)) if doc]
+
+
+def rendering_digest(docs: list[dict[str, Any]]) -> str:
+    """Fingerprint every manifest/hook field, independent of document and mapping order.
+
+    Duplicate document multiplicity is preserved. Only the digest is retained;
+    complete Helm manifests can contain sensitive operator configuration.
+    """
+    return hashlib.sha256(
+        b"\n".join(sorted(canonical(doc) for doc in docs))
+    ).hexdigest()
 
 
 def artifact_digests(chart: Path, paths: list[Path]) -> dict[str, Any]:
@@ -731,39 +759,67 @@ def artifact_digests(chart: Path, paths: list[Path]) -> dict[str, Any]:
 def record_bridge(
     chart: Path, paths: list[Path], release: str, namespace: str
 ) -> dict[str, Any]:
-    """Verify stored/live bridge content, identities and exact artifacts before first cutover."""
+    """Pin the full stored bridge and hooks to the recovery upgrade render and artifacts.
+
+    All reads use one deployed revision; concurrent history changes abort
+    recording. Retained policy identities/ownership are also checked live.
+    """
+    history_command = ["helm", "history", release, "-n", namespace, "-o", "json"]
+    history = json.loads(run(history_command))
+    if (
+        not isinstance(history, list)
+        or not history
+        or not isinstance(history[-1], dict)
+        or history[-1].get("status") != "deployed"
+        or type(history[-1].get("revision")) is not int
+        or history[-1]["revision"] < 1
+    ):
+        raise OperatorValidationError("bridge revision must be successfully deployed")
+    revision = history[-1]["revision"]
     docs = [
         doc
         for doc in yaml.safe_load_all(
-            run(["helm", "get", "manifest", release, "-n", namespace])
+            run(
+                [
+                    "helm",
+                    "get",
+                    "manifest",
+                    release,
+                    "-n",
+                    namespace,
+                    "--revision",
+                    str(revision),
+                ]
+            )
+        )
+        if doc
+    ]
+    hooks = [
+        doc
+        for doc in yaml.safe_load_all(
+            run(
+                [
+                    "helm",
+                    "get",
+                    "hooks",
+                    release,
+                    "-n",
+                    namespace,
+                    "--revision",
+                    str(revision),
+                ]
+            )
         )
         if doc
     ]
     stored = bridge_resources(docs, release, namespace)
     rendered = rendered_bridge(chart, paths, release, namespace)
-    target = bridge_resources(rendered, release, namespace)
-    if [effective(doc) for doc in stored] != [effective(doc) for doc in target]:
+    bridge_resources(rendered, release, namespace)
+    rendering_pin = rendering_digest([*docs, *hooks])
+    if rendering_pin != rendering_digest(rendered):
         raise OperatorValidationError(
-            "saved bridge artifact/values differ from stored Helm release"
+            "saved bridge full rendering differs from stored Helm release"
         )
-    for service in CONSUMERS:
-        deployment_name = f"{release}-{service}"[:63].rstrip("-")
-        original = next(
-            row
-            for row in docs
-            if row["kind"] == "Deployment"
-            and row["metadata"]["name"] == deployment_name
-        )
-        desired = next(
-            row
-            for row in rendered
-            if row["kind"] == "Deployment"
-            and row["metadata"]["name"] == deployment_name
-        )
-        if effective(original) != effective(desired):
-            raise OperatorValidationError(
-                "saved bridge deployment differs from stored release"
-            )
     records = []
     for doc in stored:
         live = get_resource(doc)
@@ -798,16 +854,14 @@ def record_bridge(
                 "sha256": hashlib.sha256(canonical(effective(doc))).hexdigest(),
             }
         )
-    history = json.loads(
-        run(["helm", "history", release, "-n", namespace, "-o", "json"])
-    )
-    if not history or history[-1]["status"] != "deployed":
-        raise OperatorValidationError("bridge revision must be successfully deployed")
+    if json.loads(run(history_command)) != history:
+        raise OperatorValidationError("bridge release history changed while recording")
     return {
         "release": release,
         "namespace": namespace,
         "artifacts": artifact_digests(chart, paths),
-        "revision": history[-1]["revision"],
+        "revision": revision,
+        "renderingSha256": rendering_pin,
         "resources": records,
     }
 
@@ -853,12 +907,18 @@ def recover_bridge(inventory: dict[str, Any], chart: Path, paths: list[Path]) ->
 
     The operator must pause admission/drain first. Current live identities must
     all resolve through the inline target; otherwise file-aware recovery is
-    required. No force, ownership bypass, atomic rollback or recreation is used.
+    required. The complete recovery render, including non-consumers and hooks,
+    must match the recorded bridge digest before any live reconciliation.
+    No force, ownership bypass, atomic rollback or recreation is used.
     """
     if artifact_digests(chart, paths) != inventory["artifacts"]:
         raise OperatorValidationError("bridge recovery artifacts changed")
     release, namespace = inventory["release"], inventory["namespace"]
     docs = rendered_bridge(chart, paths, release, namespace)
+    if rendering_digest(docs) != inventory.get("renderingSha256"):
+        raise OperatorValidationError(
+            "saved bridge full rendering differs from recorded release"
+        )
     expected = bridge_resources(docs, release, namespace)
     if [effective(row["resource"]) for row in inventory["resources"]] != [
         effective(doc) for doc in expected

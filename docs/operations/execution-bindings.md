@@ -35,12 +35,18 @@ and operator permissions to create ConfigMaps, Dapr Configurations, Roles and
 RoleBindings. Use an operator-owned controller Namespace protected from other
 cleanup controllers. Namespace deletion is never part of ordinary uninstall
 or bundle cleanup.
+For a Helm-owned Namespace, both the owning release name and owning release
+Namespace must match the intended deployment; partial Helm ownership metadata
+or a same-named release in another Namespace is rejected.
 
 Keep local registries, bundle artifacts, inventories and complete deployment
 values under operator-controlled access. Never put credentials in any
 reference field, print artifacts, or commit them. The helper does not read
 Secret contents, but Helm release manifests/values can contain sensitive
 operator configuration.
+The bundle SHA-256 fingerprints registry bytes and reference-only policy
+metadata. In particular, `databaseSecret` and `passwordSecret` identify
+Kubernetes Secret resources, not passwords to store or verify.
 
 Run from the repository root, supplying the same ordered profile and complete
 overrides that will be passed to Helm:
@@ -113,7 +119,14 @@ and activity/hook sandboxes do not receive the registry.
    ```
 
    Use the archive name actually returned by `helm package`; do not assume its
-   version. The complete values must reproduce the stored bridge rendering.
+   version. The complete values must reproduce the entire stored bridge as a
+   recovery upgrade: all chart resources, non-consumer services and Helm hooks,
+   not just the four managed Deployments and retained policies. Recording reads
+   manifests/hooks at one deployed revision and rejects concurrent history
+   changes. The inventory pins a `renderingSha256` as well as artifact hashes.
+   Inventories without this full rendering pin cannot authorize a new cutover
+   or recovery; record a verified bridge before cutover rather than accepting
+   an unverified fallback.
 4. Run preparation and provisioning with `--bridge-inventory
    /operator/bridge-inventory.json` in addition to the fresh-deployment
    arguments. Missing/changed/unretained resources or conflicting ownership
@@ -143,7 +156,10 @@ python scripts/receiver_bindings.py recover \
   --acknowledge-paused-drained
 ```
 
-The helper verifies saved artifacts, original object identities/policies and
+The helper first verifies saved artifacts and the complete recovery rendering
+against the recorded digest, including non-consumer services and hooks. A
+changed image, metadata, resource or hook aborts before live reconciliation.
+It then verifies original object identities/policies and
 ownership, checks that current configured identity references fit the bridge,
 then reconciles each live Deployment's managed source fields with a
 resource-version-tested patch. It removes file/digest environments, mounts,

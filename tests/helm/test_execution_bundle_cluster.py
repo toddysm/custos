@@ -853,6 +853,11 @@ def test_actual_inline_bridge_timeout_recovery(
     helm(namespace, "upgrade", packaged_chart, bridge)
     inventory = operator.record_bridge(packaged_chart, [bridge], "custos", namespace)
     assert len(inventory["resources"]) == 13
+    unverified = copy.deepcopy(config)
+    unverified["auth-service"]["image"]["tag"] = "intentionally-unverified"
+    unverified_bridge = save_values(tmp_path / "unverified-bridge.yaml", unverified)
+    with pytest.raises(ValueError, match="full rendering"):
+        operator.record_bridge(packaged_chart, [unverified_bridge], "custos", namespace)
     with pytest.raises(ValueError, match="atomic"):
         operator.transition_preflight(bundle, inventory, atomic=True)
     with pytest.raises(ValueError, match="native inline"):
@@ -946,6 +951,26 @@ def test_actual_inline_bridge_timeout_recovery(
     operator.provision(bundle, create=False, inventory=inventory)
     helm(namespace, "upgrade", packaged_chart, valid)
     assert_consumers(namespace, raw)
+    kube(
+        namespace,
+        "annotate",
+        "namespace",
+        namespace,
+        "meta.helm.sh/release-namespace=another-namespace",
+        "--overwrite",
+    )
+    try:
+        with pytest.raises(ValueError, match="release namespace"):
+            operator.transition_preflight(bundle)
+    finally:
+        kube(
+            namespace,
+            "annotate",
+            "namespace",
+            namespace,
+            f"meta.helm.sh/release-namespace={namespace}",
+            "--overwrite",
+        )
     command(
         ["helm", "uninstall", "custos", "-n", namespace, "--wait", "--timeout", "5m"]
     )
@@ -967,4 +992,6 @@ def test_actual_inline_bridge_timeout_recovery(
         legacy_application_and_sidecar_restarts=True,
         timed_out_first_cutover_recovered_and_remigrated=True,
         concurrent_patch_refused_and_partial_recovery_retried=True,
+        full_recovery_render_mismatch_refused=True,
+        foreign_helm_release_namespace_refused=True,
     )

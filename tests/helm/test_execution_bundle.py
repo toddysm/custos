@@ -500,14 +500,21 @@ def test_cleanup_checks_live_rolebindings_before_any_delete(
             assert binding_index < role_index
 
 
-def retained_fixture() -> tuple[dict[str, Any], dict[tuple[str, str], dict[str, Any]]]:
-    """Model the actual bridge render and API-managed metadata without inventing policy fixtures."""
+def bridge_configuration() -> dict[str, Any]:
+    """Use actual chart prerequisites with retained inline policies and an owned Namespace."""
     config = enabled_values()
     config["global"]["receiverRuntime"]["retainLegacyExecutionResources"] = True
     config["namespace"] = {"name": "controllers", "create": True}
+    return config
+
+
+def retained_fixture() -> tuple[dict[str, Any], dict[tuple[str, str], dict[str, Any]]]:
+    """Model the actual bridge render and API-managed metadata without inventing policy fixtures."""
     docs = [
         row
-        for row in yaml.safe_load_all(render("connected-eval", config).stdout)
+        for row in yaml.safe_load_all(
+            render("connected-eval", bridge_configuration()).stdout
+        )
         if row
     ]
     resources = operator.bridge_resources(docs, "custos", "controllers")
@@ -537,7 +544,306 @@ def retained_fixture() -> tuple[dict[str, Any], dict[tuple[str, str], dict[str, 
                 ).hexdigest(),
             }
         )
-    return {"release": "custos", "namespace": "controllers", "resources": records}, live
+    return {
+        "release": "custos",
+        "namespace": "controllers",
+        "resources": records,
+        "renderingSha256": operator.rendering_digest(docs),
+    }, live
+
+
+@pytest.mark.parametrize(
+    "ownership",
+    [
+        "none",
+        "same",
+        "foreign-name",
+        "foreign-namespace",
+        "missing-namespace",
+        "namespace-only",
+        "managed-only",
+    ],
+)
+def test_namespace_preflight_checks_the_complete_helm_owner(
+    ownership: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same-named releases elsewhere and partial Helm ownership fail before release lookup."""
+    bundle = operator.prepare(fixture(1), configuration(), "custos", "controllers")
+    annotations = {"helm.sh/resource-policy": "keep"}
+    metadata: dict[str, Any] = {"name": "controllers", "annotations": annotations}
+    if ownership != "none":
+        metadata["labels"] = {"app.kubernetes.io/managed-by": "Helm"}
+    if ownership not in {"none", "managed-only"}:
+        annotations["meta.helm.sh/release-name"] = "custos"
+        annotations["meta.helm.sh/release-namespace"] = "controllers"
+    if ownership == "foreign-name":
+        annotations["meta.helm.sh/release-name"] = "another"
+    elif ownership == "foreign-namespace":
+        annotations["meta.helm.sh/release-namespace"] = "another-namespace"
+    elif ownership == "missing-namespace":
+        annotations.pop("meta.helm.sh/release-namespace")
+    elif ownership == "namespace-only":
+        annotations.pop("meta.helm.sh/release-name")
+
+    def run(command: list[str], payload: Any = None) -> str:
+        """Expose an existing file release only after the Namespace ownership check passes."""
+        if command[:3] == ["kubectl", "get", "namespace"]:
+            return json.dumps({"metadata": metadata})
+        assert ownership in {"none", "same"}, (
+            "foreign owner must prevent release lookup"
+        )
+        if command[:2] == ["helm", "list"]:
+            return '[{"name":"custos"}]'
+        if command[:3] == ["helm", "get", "manifest"]:
+            return ""
+        raise AssertionError("preflight must not mutate resources")
+
+    monkeypatch.setattr(operator, "run", run)
+    if ownership in {"none", "same"}:
+        operator.transition_preflight(bundle)
+    else:
+        with pytest.raises(operator.OperatorValidationError, match="release namespace"):
+            operator.transition_preflight(bundle)
+
+
+@pytest.mark.parametrize("pin", [None, [], "A" * 64, "0" * 63, "valid"])
+def test_cutover_requires_a_complete_rendering_pin(
+    pin: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reject old/malformed recovery evidence without weakening retained-resource cleanup checks."""
+    inventory, live = retained_fixture()
+    if pin is None:
+        inventory.pop("renderingSha256")
+    elif pin != "valid":
+        inventory["renderingSha256"] = pin
+    bundle = operator.prepare(fixture(1), configuration(), "custos", "controllers")
+
+    def run(command: list[str], payload: Any = None) -> str:
+        """Expose a file release without permitting any write during pin validation."""
+        if command[:3] == ["kubectl", "get", "namespace"]:
+            return '{"metadata":{"name":"controllers"}}'
+        if command[:2] == ["helm", "list"]:
+            return '[{"name":"custos"}]'
+        if command[:3] == ["helm", "get", "manifest"]:
+            return ""
+        raise AssertionError("pin validation must not mutate resources")
+
+    monkeypatch.setattr(operator, "run", run)
+    monkeypatch.setattr(
+        operator,
+        "get_resource",
+        lambda resource: live[(resource["kind"], resource["metadata"]["name"])],
+    )
+    operator.verify_retained(inventory)
+    if pin == "valid":
+        operator.transition_preflight(bundle, inventory)
+    else:
+        with pytest.raises(
+            operator.OperatorValidationError, match="complete rendering"
+        ):
+            operator.transition_preflight(bundle, inventory)
+
+
+def test_full_render_digest_preserves_all_fields_and_document_multiplicity() -> None:
+    """Full-render comparison includes metadata, Secret fields, hooks and extra/duplicate objects."""
+    docs: list[dict[str, Any]] = [
+        {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {"name": "synthetic", "labels": {"scope": "bridge"}},
+            "type": "Opaque",
+            "stringData": {"synthetic-key": "synthetic-value"},
+        },
+        {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "name": "hook",
+                "annotations": {"helm.sh/hook": "pre-upgrade"},
+            },
+            "spec": {
+                "template": {
+                    "spec": {"containers": [{"name": "hook", "image": "verified:1"}]}
+                }
+            },
+        },
+    ]
+    original = copy.deepcopy(docs)
+    digest = operator.rendering_digest(docs)
+    assert digest == operator.rendering_digest(list(reversed(docs)))
+    assert digest == operator.rendering_digest(
+        json.loads(json.dumps(docs, sort_keys=True))
+    )
+    assert docs == original
+    changed = []
+    for field, value in (
+        ("type", "kubernetes.io/basic-auth"),
+        ("stringData", {"synthetic-key": "private-canary"}),
+        ("data", {"synthetic-key": "dW52ZXJpZmllZA=="}),
+        ("metadata", {"name": "synthetic", "labels": {"scope": "changed"}}),
+    ):
+        variant = copy.deepcopy(docs)
+        variant[0][field] = value
+        changed.append(variant)
+    variant = copy.deepcopy(docs)
+    variant[1]["spec"]["template"]["spec"]["containers"][0]["image"] = "unverified:2"
+    changed.extend([variant, docs[:1], [*docs, docs[0]]])
+    assert all(operator.rendering_digest(variant) != digest for variant in changed)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "none",
+        "auth-image",
+        "hook-image",
+        "metadata",
+        "extra",
+        "missing",
+        "history-race",
+    ],
+)
+def test_record_bridge_verifies_the_complete_stored_render(
+    change: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reject changes outside the four consumers and bind manifests/hooks to one deployed revision."""
+    config = bridge_configuration()
+    stored = [
+        row
+        for row in yaml.safe_load_all(render("connected-eval", config).stdout)
+        if row
+    ]
+    desired_config = copy.deepcopy(config)
+    if change == "auth-image":
+        desired_config.setdefault("auth-service", {}).setdefault("image", {})["tag"] = (
+            "unverified"
+        )
+    desired = [
+        row
+        for row in yaml.safe_load_all(render("connected-eval", desired_config).stdout)
+        if row
+    ]
+    if change == "hook-image":
+        hook = next(
+            row
+            for row in desired
+            if row["kind"] == "Job"
+            and row["metadata"].get("annotations", {}).get("helm.sh/hook")
+        )
+        hook["spec"]["template"]["spec"]["containers"][0]["image"] = "unverified:2"
+    elif change == "metadata":
+        auth = next(
+            row
+            for row in desired
+            if row["kind"] == "Deployment"
+            and row["metadata"]["name"] == "custos-auth-service"
+        )
+        auth["metadata"].setdefault("labels", {})["scope"] = "unverified"
+    elif change == "extra":
+        desired.append(
+            {
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {"name": "unverified"},
+                "data": {"value": "synthetic"},
+            }
+        )
+    elif change == "missing":
+        desired = [
+            row for row in desired if row["metadata"]["name"] != "custos-auth-service"
+        ]
+    chart = tmp_path / "saved.tgz"
+    chart.write_bytes(b"synthetic saved chart archive")
+    path = tmp_path / "values.yaml"
+    path.write_text(yaml.safe_dump(desired_config))
+    _, live = retained_fixture()
+    history_calls = 0
+
+    def run(command: list[str], payload: Any = None) -> str:
+        """Return actual chart renders at a pinned revision; every mutation is forbidden."""
+        nonlocal history_calls
+        if command[:2] == ["helm", "history"]:
+            history_calls += 1
+            revision = 3 if change == "history-race" and history_calls > 1 else 2
+            return json.dumps([{"revision": revision, "status": "deployed"}])
+        if command[:3] in (["helm", "get", "manifest"], ["helm", "get", "hooks"]):
+            assert command[command.index("--revision") + 1] == "2"
+            hooks = command[2] == "hooks"
+            return yaml.safe_dump_all(
+                [
+                    row
+                    for row in stored
+                    if bool(row["metadata"].get("annotations", {}).get("helm.sh/hook"))
+                    == hooks
+                ]
+            )
+        if command[:2] == ["helm", "template"]:
+            assert "--is-upgrade" in command
+            return yaml.safe_dump_all(desired)
+        raise AssertionError("recording must never mutate resources")
+
+    monkeypatch.setattr(operator, "run", run)
+    monkeypatch.setattr(
+        operator,
+        "get_resource",
+        lambda resource: live[(resource["kind"], resource["metadata"]["name"])],
+    )
+    if change == "none":
+        inventory = operator.record_bridge(chart, [path], "custos", "controllers")
+        assert inventory["renderingSha256"] == operator.rendering_digest(stored)
+        assert inventory["revision"] == 2
+        assert len(inventory["resources"]) == 13
+    else:
+        with pytest.raises(
+            operator.OperatorValidationError, match="full rendering|history changed"
+        ):
+            operator.record_bridge(chart, [path], "custos", "controllers")
+
+
+@pytest.mark.parametrize(
+    "change", ["auth-image", "hook-image", "missing-pin", "wrong-pin"]
+)
+def test_recovery_checks_the_complete_render_before_live_access(
+    change: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Even supplied artifact hashes cannot bypass the recorded full rendering before reconciliation."""
+    inventory, _ = retained_fixture()
+    config = bridge_configuration()
+    if change == "auth-image":
+        config.setdefault("auth-service", {}).setdefault("image", {})["tag"] = (
+            "unverified"
+        )
+    desired = [
+        row
+        for row in yaml.safe_load_all(render("connected-eval", config).stdout)
+        if row
+    ]
+    if change == "hook-image":
+        hook = next(
+            row
+            for row in desired
+            if row["kind"] == "Job"
+            and row["metadata"].get("annotations", {}).get("helm.sh/hook")
+        )
+        hook["spec"]["template"]["spec"]["containers"][0]["image"] = "unverified:2"
+    elif change == "missing-pin":
+        inventory.pop("renderingSha256")
+    elif change == "wrong-pin":
+        inventory["renderingSha256"] = "0" * 64
+    chart = tmp_path / "saved.tgz"
+    chart.write_bytes(b"synthetic saved chart archive")
+    path = tmp_path / "values.yaml"
+    path.write_text(yaml.safe_dump(config))
+    inventory["artifacts"] = operator.artifact_digests(chart, [path])
+
+    def run(command: list[str], payload: Any = None) -> str:
+        """Permit rendering only; no live query, patch or upgrade may precede the full check."""
+        assert command[:2] == ["helm", "template"]
+        return yaml.safe_dump_all(desired)
+
+    monkeypatch.setattr(operator, "run", run)
+    with pytest.raises(operator.OperatorValidationError, match="full rendering"):
+        operator.recover_bridge(inventory, chart, [path])
 
 
 @pytest.mark.parametrize(
