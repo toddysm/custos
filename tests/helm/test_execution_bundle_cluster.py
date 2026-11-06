@@ -71,6 +71,7 @@ def settings(namespace: str, *, chart_owned: bool = False) -> dict[str, Any]:
     config = configuration()
     config["namespace"] = {"name": namespace, "create": chart_owned}
     config["postgres"]["embedded"] = False
+    config["dapr"]["components"]["stateStore"]["enabled"] = False
     config["secrets"]["eso"]["enabled"] = False
     config["gateway"]["tls"]["certManager"]["enabled"] = False
     config["envoyGateway"]["install"] = False
@@ -104,8 +105,8 @@ def settings(namespace: str, *, chart_owned: bool = False) -> dict[str, Any]:
     return config
 
 
-def foundation(namespace: str, config: dict[str, Any]) -> str:
-    """Create test-only Secrets, Redis and storage, preserving chart-owned Namespace metadata."""
+def foundation(namespace: str, config: dict[str, Any], tmp_path: Path) -> str:
+    """Create disposable TLS, Secrets, Redis and storage without changing chart security contracts."""
     metadata: dict[str, Any] = {"name": namespace}
     if config["namespace"]["create"]:
         metadata.update(
@@ -122,6 +123,27 @@ def foundation(namespace: str, config: dict[str, Any]) -> str:
         {"apiVersion": "v1", "kind": "Namespace", "metadata": metadata},
     )
     runtime = config["global"]["receiverRuntime"]
+    certificate, key = tmp_path / "tls.crt", tmp_path / "tls.key"
+    command(
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-days",
+            "2",
+            "-subj",
+            "/CN=localhost",
+            "-addext",
+            "subjectAltName=DNS:localhost,IP:127.0.0.1",
+            "-out",
+            str(certificate),
+            "-keyout",
+            str(key),
+        ]
+    )
     refs = {
         runtime["apiTokenSecret"]: {"token": os.urandom(24).hex()},
         **{
@@ -133,7 +155,11 @@ def foundation(namespace: str, config: dict[str, Any]) -> str:
             "password": os.urandom(24).hex(),
         },
         "custos-redis-auth": {"redis-password": os.urandom(24).hex()},
-        "runtime-tls": {"tls.crt": "fixture-only", "tls.key": "fixture-only"},
+        runtime["tlsSecret"]: {
+            "tls.crt": certificate.read_text(),
+            "tls.key": key.read_text(),
+            "ca.crt": certificate.read_text(),
+        },
         "binding-denied": {"token": os.urandom(24).hex()},
         runtime["authSigningKeyRef"]: {"key": "fixture-only"},
     }
@@ -259,7 +285,7 @@ def file_config(config: dict[str, Any], bundle: dict[str, Any]) -> dict[str, Any
     config["namespace"]["create"] = False
     runtime = config["global"]["receiverRuntime"]
     runtime["retainLegacyExecutionResources"] = False
-    runtime["executionBindings"] = {"bindings": [], "defaults": {}}
+    runtime["executionBindings"] = {"bindings": [], "defaults": None}
     runtime["executionBindingsBundle"] = bundle["descriptor"]
     return config
 
@@ -311,11 +337,18 @@ def probe(
     identity: dict[str, str] | None = None,
 ) -> Any:
     """Read synthetic aggregate diagnostics inside the original application container."""
+    tls = service == "activity-runtime-manager"
+    scheme = "https" if tls else "http"
+    context = (
+        ",context=ssl.create_default_context(cafile=os.environ['ARM_TLS_CERT_FILE'])"
+        if tls
+        else ""
+    )
     code = (
-        "import json,urllib.request;"
+        "import json,os,ssl,urllib.request;"
         f"data={None if identity is None else json.dumps(identity).encode()!r};"
-        f"req=urllib.request.Request('http://127.0.0.1:8080{route}',data=data,headers={{'Content-Type':'application/json'}});"
-        "print(urllib.request.urlopen(req,timeout=30).read().decode())"
+        f"req=urllib.request.Request('{scheme}://127.0.0.1:8080{route}',data=data,headers={{'Content-Type':'application/json'}});"
+        f"print(urllib.request.urlopen(req,timeout=30{context}).read().decode())"
     )
     return json.loads(
         kube(
@@ -462,7 +495,7 @@ def test_actual_maximum_storage_and_file_rollback(
     """Install 1000, upgrade 1024, restart pinned Pods, rollback both reused/recreated snapshots."""
     namespace = "binding-files"
     config = settings(namespace)
-    namespace_uid = foundation(namespace, config)
+    namespace_uid = foundation(namespace, config, tmp_path)
     raw = fixture(1000, maximum=True)
     next_raw = fixture(1024, maximum=True)
     bundles = [
@@ -474,10 +507,11 @@ def test_actual_maximum_storage_and_file_rollback(
         if bundle == bundles[0]:
             with pytest.raises(ValueError, match="missing"):
                 operator.provision(bundle, create=False)
-                retained_uids.update(object_uids(bundle["objects"]))
         execution_secrets(namespace, value)
         operator.provision(bundle, create=True)
         operator.provision(bundle, create=False)
+        retained_uids.update(object_uids(bundle["objects"]))
+    assert len(retained_uids) == sum(len(bundle["objects"]) for bundle in bundles)
     files = [
         save_values(tmp_path / f"file-{index}.yaml", file_config(config, bundle))
         for index, bundle in enumerate(bundles)
@@ -646,7 +680,7 @@ def test_actual_inline_bridge_timeout_recovery(
     """Verify chart-owned Namespace handoff and recover updated-but-timed-out first cutover."""
     namespace = "binding-bridge"
     config = settings(namespace, chart_owned=True)
-    namespace_uid = foundation(namespace, config)
+    namespace_uid = foundation(namespace, config, tmp_path)
     raw = operator.canonical(config["global"]["receiverRuntime"]["executionBindings"])
     execution_secrets(namespace, raw)
     bundle = operator.prepare(raw, config, "custos", namespace)

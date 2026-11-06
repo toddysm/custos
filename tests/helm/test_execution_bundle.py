@@ -6,6 +6,7 @@ import importlib.util
 import json
 import random
 import string
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -114,6 +115,92 @@ def test_verify_missing_bundle_is_failure(monkeypatch: pytest.MonkeyPatch) -> No
         operator.provision(bundle, create=False)
 
 
+def test_dapr_metric_admission_defaults() -> None:
+    """Known enabled defaults compare equally; changed metrics/policies remain conflicts."""
+    bundle = operator.prepare(fixture(1), configuration(), "custos", "controllers")
+    desired = bundle["objects"][1]
+    original = copy.deepcopy(desired)
+    live = copy.deepcopy(desired)
+    live["spec"].update(metric={"enabled": True}, metrics={"enabled": True})
+    assert operator.effective(live) == operator.effective(desired)
+    assert desired == original
+    live["spec"]["metrics"]["enabled"] = False
+    assert operator.effective(live) != operator.effective(desired)
+    live["spec"]["metrics"]["enabled"] = True
+    live["spec"]["accessControl"]["defaultAction"] = "allow"
+    assert operator.effective(live) != operator.effective(desired)
+
+
+def test_prepare_fragment_deletes_inherited_inline_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The actual CLI fragment clears earlier inline/retention values under Helm's merge rules."""
+    config = configuration()
+    config["global"]["receiverRuntime"]["retainLegacyExecutionResources"] = True
+    config["namespace"]["create"] = True
+    baseline = tmp_path / "inline.yaml"
+    baseline.write_text(yaml.safe_dump(config))
+    registry = tmp_path / "bindings.json"
+    registry.write_bytes(fixture(1))
+    artifact = tmp_path / "bundle.json"
+    monkeypatch.setattr(operator, "transition_preflight", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "receiver_bindings.py",
+            "prepare",
+            "--registry",
+            str(registry),
+            "--bundle",
+            str(artifact),
+            "--values",
+            str(baseline),
+        ],
+    )
+    operator.main()
+    fragment = json.loads(capsys.readouterr().out.split("\n", 1)[1])
+    assert (
+        fragment["global"]["receiverRuntime"]["executionBindings"]["defaults"] is None
+    )
+    override = tmp_path / "file.yaml"
+    override.write_text(yaml.safe_dump(fragment))
+    result = subprocess.run(
+        [
+            "helm",
+            "template",
+            "custos",
+            str(CHART),
+            "--namespace",
+            "controllers",
+            "--kube-version",
+            "1.31.0",
+            "-f",
+            str(baseline),
+            "-f",
+            str(override),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    docs = [doc for doc in yaml.safe_load_all(result.stdout) if doc]
+    for service in operator.CONSUMERS:
+        deployment = next(
+            doc
+            for doc in docs
+            if doc["kind"] == "Deployment"
+            and doc["metadata"]["name"] == f"custos-{service}"
+        )
+        env = {
+            entry["name"]: entry
+            for entry in deployment["spec"]["template"]["spec"]["containers"][0]["env"]
+        }
+        assert "CUSTOS_EXECUTION_BINDINGS" not in env
+        assert "CUSTOS_EXECUTION_BINDINGS_FILE" in env
+
+
 def test_recovery_patch_is_guarded_and_preserves_unrelated_fields() -> None:
     """Timeout recovery removes every file-only field without replacing the Pod template."""
     values = enabled_values()
@@ -180,6 +267,7 @@ def test_cleanup_refuses_retained_references(
     """Cleanup refuses each retention class before making any deletion request."""
     bundle = operator.prepare(fixture(1), configuration(), "custos", "controllers")
     config_name = bundle["descriptor"]["configMapName"]
+    pod = {"spec": {"volumes": [{"configMap": {"name": config_name}}]}}
     writes: list[list[str]] = []
 
     def run(command: list[str], payload: Any = None) -> str:
@@ -188,17 +276,17 @@ def test_cleanup_refuses_retained_references(
             writes.append(command)
             return "{}"
         if command[:3] == ["kubectl", "get", "pods"]:
-            return json.dumps({"reference": config_name} if reference == "pod" else {})
+            return json.dumps({"items": [pod] if reference == "pod" else []})
         if command[:2] == ["kubectl", "get"]:
-            return json.dumps(
-                {"reference": config_name} if reference == "controller" else {}
-            )
+            return json.dumps({"items": [pod] if reference == "controller" else []})
         if command[:2] == ["helm", "list"]:
             return '[{"name":"custos"}]'
         if command[:2] == ["helm", "history"]:
             return '[{"revision":1}]'
         if command[:3] == ["helm", "get", "manifest"]:
-            return config_name if reference == "history" else ""
+            return (
+                yaml.safe_dump(bundle["objects"][0]) if reference == "history" else ""
+            )
         raise AssertionError("unexpected cleanup command")
 
     monkeypatch.setattr(operator, "run", run)
@@ -207,6 +295,69 @@ def test_cleanup_refuses_retained_references(
             bundle, confirmed_no_retained_work=reference != "work"
         )
     assert writes == []
+
+
+def test_cleanup_inspects_later_helm_release_pages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retained rollback reference beyond Helm's default page prevents every deletion."""
+    bundle = operator.prepare(fixture(1), configuration(), "custos", "controllers")
+    pages = []
+    writes = []
+
+    def run(command: list[str], payload: Any = None) -> str:
+        """Return 257 releases with the sole dependency in the last release's older revision."""
+        if command[:2] == ["kubectl", "get"]:
+            return '{"items":[]}'
+        if command[:2] == ["helm", "list"]:
+            assert command[command.index("--max") + 1] == "256"
+            offset = int(command[command.index("--offset") + 1])
+            pages.append(offset)
+            return json.dumps(
+                [{"name": f"release-{index}"} for index in range(256)]
+                if offset == 0
+                else [{"name": "last-release"}]
+            )
+        if command[:2] == ["helm", "history"]:
+            return '[{"revision":1}]' if command[2] == "last-release" else "[]"
+        if command[:3] == ["helm", "get", "manifest"]:
+            return yaml.safe_dump(bundle["objects"][0])
+        writes.append(command)
+        raise AssertionError("deletion must not precede the complete history scan")
+
+    monkeypatch.setattr(operator, "run", run)
+    with pytest.raises(ValueError, match="retained Helm"):
+        operator.cleanup_resources(bundle, confirmed_no_retained_work=True)
+    assert pages == [0, 256]
+    assert writes == []
+
+
+@pytest.mark.parametrize(
+    "stage", ["pod", "controller", "release", "history", "manifest"]
+)
+def test_cleanup_rejects_malformed_retention_inventories(
+    stage: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Malformed structured inventory must not become an empty successful retention scan."""
+    bundle = operator.prepare(fixture(1), configuration(), "custos", "controllers")
+
+    def run(command: list[str], payload: Any = None) -> str:
+        """Corrupt one required inventory; every mutation is forbidden."""
+        if command[:3] == ["kubectl", "get", "pods"]:
+            return "{}" if stage == "pod" else '{"items":[]}'
+        if command[:2] == ["kubectl", "get"]:
+            return "{}" if stage == "controller" else '{"items":[]}'
+        if command[:2] == ["helm", "list"]:
+            return "{}" if stage == "release" else '[{"name":"custos"}]'
+        if command[:2] == ["helm", "history"]:
+            return "{}" if stage == "history" else '[{"revision":1}]'
+        if command[:3] == ["helm", "get", "manifest"]:
+            return "not-a-resource"
+        raise AssertionError("invalid inventory must prevent every mutation")
+
+    monkeypatch.setattr(operator, "run", run)
+    with pytest.raises(TypeError, match="invalid"):
+        operator.cleanup_resources(bundle, confirmed_no_retained_work=True)
 
 
 def retained_fixture() -> tuple[dict[str, Any], dict[tuple[str, str], dict[str, Any]]]:
@@ -247,6 +398,91 @@ def retained_fixture() -> tuple[dict[str, Any], dict[tuple[str, str], dict[str, 
             }
         )
     return {"release": "custos", "namespace": "controllers", "resources": records}, live
+
+
+@pytest.mark.parametrize(
+    "reference", ["collision", "resource", "configuration", "role"]
+)
+def test_bridge_cleanup_uses_typed_references(
+    reference: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A same-named NetworkPolicy does not retain Dapr policy; actual identities/references do."""
+    inventory, live = retained_fixture()
+    configuration_resource = next(
+        row["resource"]
+        for row in inventory["resources"]
+        if row["resource"]["kind"] == "Configuration"
+    )
+    role_resource = next(
+        row["resource"]
+        for row in inventory["resources"]
+        if row["resource"]["kind"] == "Role"
+    )
+    config_name = configuration_resource["metadata"]["name"]
+    document: dict[str, Any] = {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": {"name": config_name, "namespace": "controllers"},
+    }
+    if reference == "resource":
+        document = configuration_resource
+    elif reference == "configuration":
+        document = {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {"name": "consumer"},
+            "spec": {
+                "template": {
+                    "metadata": {"annotations": {"dapr.io/config": config_name}}
+                }
+            },
+        }
+    elif reference == "role":
+        document = {
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "RoleBinding",
+            "metadata": {"name": "retained-binding"},
+            "roleRef": {
+                "apiGroup": "rbac.authorization.k8s.io",
+                "kind": "Role",
+                "name": role_resource["metadata"]["name"],
+            },
+        }
+    writes = []
+    for resource in live.values():
+        resource["metadata"]["resourceVersion"] = "1"
+
+    def run(command: list[str], payload: Any = None) -> str:
+        """Emulate an otherwise unused bridge with one manifest and guarded individual deletes."""
+        if command[:2] == ["kubectl", "get"]:
+            return '{"items":[]}'
+        if command[:2] == ["helm", "list"]:
+            return '[{"name":"custos"}]'
+        if command[:2] == ["helm", "history"]:
+            return '[{"revision":2}]'
+        if command[:3] == ["helm", "get", "manifest"]:
+            return yaml.safe_dump(document)
+        assert command[:2] == ["kubectl", "delete"]
+        writes.append((command, payload))
+        return "{}"
+
+    monkeypatch.setattr(operator, "run", run)
+    monkeypatch.setattr(
+        operator,
+        "get_resource",
+        lambda resource: live[(resource["kind"], resource["metadata"]["name"])],
+    )
+    if reference != "collision":
+        with pytest.raises(ValueError, match="retained Helm"):
+            operator.cleanup_resources(inventory, confirmed_no_retained_work=True)
+        assert writes == []
+    else:
+        operator.cleanup_resources(inventory, confirmed_no_retained_work=True)
+        assert len(writes) == 12
+        assert all("/namespaces/controllers/" in command[3] for command, _ in writes)
+        assert all(
+            payload["preconditions"]["resourceVersion"] == "1" for _, payload in writes
+        )
 
 
 @pytest.mark.parametrize(

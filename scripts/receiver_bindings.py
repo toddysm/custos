@@ -245,9 +245,9 @@ def run(command: list[str], payload: Any = None) -> str:
 
 
 def effective(resource: dict[str, Any]) -> dict[str, Any]:
-    """Compare relevant desired content, ignoring only server-managed metadata/status."""
+    """Compare managed content, normalizing metadata and Dapr's enabled metric defaults."""
     metadata = resource["metadata"]
-    return {
+    result = {
         "apiVersion": resource["apiVersion"],
         "kind": resource["kind"],
         "name": metadata["name"],
@@ -268,6 +268,12 @@ def effective(resource: dict[str, Any]) -> dict[str, Any]:
             and not (resource["kind"] == "Namespace" and key == "spec")
         },
     }
+    if resource["kind"] == "Configuration":
+        spec = copy.deepcopy(resource.get("spec", {}))
+        for field in ("metric", "metrics"):
+            spec.setdefault(field, {"enabled": True})
+        result["spec"] = spec
+    return result
 
 
 def get_resource(resource: dict[str, Any]) -> dict[str, Any] | None:
@@ -475,7 +481,7 @@ def provision(
         run(["kubectl", "create", "-f", "-", "-o", "json"], resource)
         live = get_resource(resource)
         if live is None or effective(live) != effective(resource):
-            raise ValueError("created bundle could not be verified")
+            raise ValueError(f"created bundle {resource['kind']} could not be verified")
 
 
 def reconcile_source(
@@ -912,12 +918,84 @@ def recover_bridge(inventory: dict[str, Any], chart: Path, paths: list[Path]) ->
     verify_retained(inventory)
 
 
+def references_resources(
+    document: Any, resources: list[dict[str, Any]], namespace: str
+) -> bool:
+    """Find managed identities and actual Kubernetes/Dapr references, not name substrings.
+
+    Walk workload templates and List items while preserving their namespace.
+    A same-named resource of a different kind/group is not a dependency.
+    """
+    identities = {
+        (row["apiVersion"].split("/")[0], row["kind"], row["metadata"]["name"])
+        for row in resources
+    }
+    names = {
+        kind: {row["metadata"]["name"] for row in resources if row["kind"] == kind}
+        for kind in ("ConfigMap", "Configuration", "Role")
+    }
+
+    def referenced(node: Any, current_namespace: str) -> bool:
+        """Recognize resource identities, projected maps, Dapr configurations and Role references."""
+        if isinstance(node, list):
+            return any(referenced(value, current_namespace) for value in node)
+        if not isinstance(node, dict):
+            return False
+        metadata = node.get("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        declared_namespace = metadata.get("namespace")
+        if isinstance(declared_namespace, str) and declared_namespace:
+            current_namespace = declared_namespace
+        if current_namespace == namespace:
+            version, kind, resource_name = (
+                node.get("apiVersion"),
+                node.get("kind"),
+                metadata.get("name"),
+            )
+            if (
+                isinstance(version, str)
+                and isinstance(kind, str)
+                and isinstance(resource_name, str)
+                and (version.split("/")[0], kind, resource_name) in identities
+            ):
+                return True
+            annotations = metadata.get("annotations", {})
+            if (
+                isinstance(annotations, dict)
+                and isinstance(annotations.get("dapr.io/config"), str)
+                and annotations.get("dapr.io/config") in names["Configuration"]
+            ):
+                return True
+            for field in ("configMap", "configMapRef", "configMapKeyRef"):
+                reference = node.get(field)
+                if (
+                    isinstance(reference, dict)
+                    and isinstance(reference.get("name"), str)
+                    and reference.get("name") in names["ConfigMap"]
+                ):
+                    return True
+            role = node.get("roleRef")
+            if (
+                isinstance(role, dict)
+                and role.get("apiGroup") == "rbac.authorization.k8s.io"
+                and role.get("kind") == "Role"
+                and isinstance(role.get("name"), str)
+                and role.get("name") in names["Role"]
+            ):
+                return True
+        return any(referenced(value, current_namespace) for value in node.values())
+
+    return referenced(document, namespace)
+
+
 def cleanup_resources(
     bundle: dict[str, Any], *, confirmed_no_retained_work: bool
 ) -> None:
     """Delete only an unused verified bundle after explicit retained-work attestation.
 
-    All Pods and every retained release revision must be free of references.
+    All Pods, controllers and every revision of every paginated release must
+    be free of typed resource references.
     This does not query durable work stores: the operator must first establish
     and explicitly attest that no retained work needs these identities. The
     Namespace is never eligible. UID/resource-version delete preconditions
@@ -939,55 +1017,94 @@ def cleanup_resources(
         ]
     if any(row["kind"] == "Namespace" for row in resources):
         raise ValueError("namespace cleanup is prohibited")
-    names = {row["metadata"]["name"] for row in resources}
-    pods = run(["kubectl", "get", "pods", "-n", namespace, "-o", "json"])
-    if any(value in pods for value in names):
+    pods = json.loads(run(["kubectl", "get", "pods", "-n", namespace, "-o", "json"]))
+    if not isinstance(pods, dict) or not isinstance(pods.get("items"), list):
+        raise TypeError("invalid Pod inventory")
+    if references_resources(pods, resources, namespace):
         raise ValueError("bundle is referenced by a live or retained Pod")
-    controllers = run(
-        [
-            "kubectl",
-            "get",
-            "deployments,replicasets,statefulsets,daemonsets,jobs,cronjobs",
-            "-n",
-            namespace,
-            "-o",
-            "json",
-        ]
+    controllers = json.loads(
+        run(
+            [
+                "kubectl",
+                "get",
+                "deployments,replicasets,statefulsets,daemonsets,jobs,cronjobs",
+                "-n",
+                namespace,
+                "-o",
+                "json",
+            ]
+        )
     )
-    if any(value in controllers for value in names):
+    if not isinstance(controllers, dict) or not isinstance(
+        controllers.get("items"), list
+    ):
+        raise TypeError("invalid workload controller inventory")
+    if references_resources(controllers, resources, namespace):
         raise ValueError("bundle is referenced by a retained workload controller")
-    releases = json.loads(run(["helm", "list", "--all", "-n", namespace, "-o", "json"]))
-    for current in releases:
-        history = json.loads(
+    offset = 0
+    while True:
+        releases = json.loads(
             run(
                 [
                     "helm",
-                    "history",
-                    current["name"],
+                    "list",
+                    "--all",
                     "-n",
                     namespace,
                     "--max",
-                    "2147483647",
+                    "256",
+                    "--offset",
+                    str(offset),
                     "-o",
                     "json",
                 ]
             )
         )
-        for revision in history:
-            manifest = run(
-                [
-                    "helm",
-                    "get",
-                    "manifest",
-                    current["name"],
-                    "-n",
-                    namespace,
-                    "--revision",
-                    str(revision["revision"]),
-                ]
+        if not isinstance(releases, list):
+            raise TypeError("invalid Helm release inventory")
+        for current in releases:
+            history = json.loads(
+                run(
+                    [
+                        "helm",
+                        "history",
+                        current["name"],
+                        "-n",
+                        namespace,
+                        "--max",
+                        "2147483647",
+                        "-o",
+                        "json",
+                    ]
+                )
             )
-            if any(value in manifest for value in names):
-                raise ValueError("bundle is referenced by a retained Helm revision")
+            if not isinstance(history, list):
+                raise TypeError("invalid Helm revision inventory")
+            for revision in history:
+                manifest = run(
+                    [
+                        "helm",
+                        "get",
+                        "manifest",
+                        current["name"],
+                        "-n",
+                        namespace,
+                        "--revision",
+                        str(revision["revision"]),
+                    ]
+                )
+                for document in yaml.safe_load_all(manifest):
+                    if document is None:
+                        continue
+                    if not isinstance(document, dict):
+                        raise TypeError("invalid retained Helm manifest")
+                    if references_resources(document, resources, namespace):
+                        raise ValueError(
+                            "bundle is referenced by a retained Helm revision"
+                        )
+        if len(releases) < 256:
+            break
+        offset += len(releases)
     live_resources = []
     for resource in resources:
         live = get_resource(resource)
@@ -1109,8 +1226,9 @@ def main() -> None:
                     {
                         "global": {
                             "receiverRuntime": {
-                                "executionBindings": {"bindings": [], "defaults": {}},
+                                "executionBindings": {"bindings": [], "defaults": None},
                                 "executionBindingsBundle": result["descriptor"],
+                                "retainLegacyExecutionResources": False,
                             }
                         },
                         "namespace": {"create": False},

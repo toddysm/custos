@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import ssl
 import time
 import tracemalloc
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -104,7 +105,14 @@ def main() -> None:
             registry.resolve(identity)
             self.respond({"resolved": True})
 
-    HTTPServer(("0.0.0.0", int(os.environ["PORT"])), Handler).serve_forever()
+    server = HTTPServer(("0.0.0.0", int(os.environ["PORT"])), Handler)
+    if "ARM_TLS_CERT_FILE" in os.environ or "ARM_TLS_KEY_FILE" in os.environ:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(
+            os.environ["ARM_TLS_CERT_FILE"], os.environ["ARM_TLS_KEY_FILE"]
+        )
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+    server.serve_forever()
 
 
 if __name__ == "__main__":

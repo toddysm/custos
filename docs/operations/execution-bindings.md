@@ -60,8 +60,10 @@ python scripts/receiver_bindings.py provision \
 Preparation is an automated cluster/release preflight, not just an offline
 JSON generator. It emits only a compact descriptor to standard output. Save
 that descriptor under `global.receiverRuntime.executionBindingsBundle` in a
-small values file, with `executionBindings: {bindings: [], defaults: {}}`,
+small values file, with `executionBindings: {bindings: [], defaults: null}`,
 `retainLegacyExecutionResources: false` and `namespace.create: false`.
+The null deletion marker clears defaults inherited from earlier values files;
+an empty mapping would merge with and retain those inline defaults.
 Do not pass the registry, bundle artifact or repeated Secret lists to Helm
 through other values, `--set-file`, hooks or a subchart.
 
@@ -179,6 +181,9 @@ python scripts/receiver_bindings.py cleanup-bridge \
   --acknowledge-paused-drained --confirm-no-retained-work
 ```
 
+Cleanup inspects every page of Helm releases and every retained revision.
+It distinguishes resource kinds and actual configuration/map/Role references
+from unrelated same-named objects, such as receiver NetworkPolicies.
 Cleanup refuses live/retained references, missing/changed policies and changed
 ownership. Individual deletes require the verified unique identifier and
 resource version. Partial/concurrent failure stops explicitly; preserve the
@@ -194,6 +199,10 @@ budgets, policy equivalence and operator guards.
 use a disposable kind cluster, Helm's actual default Secret storage and actual
 Dapr/Kubernetes permissions with maximum-length nonrepetitive 1,000/1,024
 fixtures. They use a configuration-probe image and no-op migration-hook
-fixtures, explicitly not deployed application or migration certification.
+fixtures. The unused PostgreSQL state-store Component is explicitly disabled;
+the Redis broker and Dapr/Kubernetes Secret authorization remain real.
+Runtime Manager retains its HTTPS probes and Dapr application protocol using
+a disposable certificate and a certificate-verifying diagnostic client.
+These fixtures are explicitly not deployed application or migration certification.
 Full receiver-to-Workflow effects and saturation remain #1018; final user
 documentation remains #1019.

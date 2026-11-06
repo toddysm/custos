@@ -62,6 +62,9 @@ jobs:
           name: binding-lifecycle-evidence
           path: ${{ runner.temp }}/binding-evidence.json
           if-no-files-found: warn
+      - name: Show failed workload readiness without Secret contents
+        if: failure()
+        run: kubectl get pods --all-namespaces -o wide
       - name: Delete owned disposable cluster
         if: always()
         run: kind delete cluster --name "$BINDING_CLUSTER"
