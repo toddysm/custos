@@ -1284,15 +1284,50 @@ versioned lifecycle above. Missing/changed legacy resources or an unverified
 bridge abort migration instead of assuming sidecar defaults are safe.
 
 After Helm omits the kept objects, the operator owns their retention/cleanup
-lifecycle; preserve their release metadata so a compatible bridge rollback can
-reuse them. Rollback to that bridge may restore chart management only with its
-original policy and the same valid bounded identities. Do not select an
-inline-only target for an oversized registry or after accepting work whose
-identities the target cannot resolve. Keep the legacy objects while any old
+lifecycle; preserve their release metadata for the recovery upgrade below.
+Restoring chart management requires the original policy and the same valid
+bounded identities. Do not select an inline-only target for an oversized
+registry or after accepting work whose identities the target cannot resolve.
+Keep the legacy objects while any old
 Pod, supported retained rollback revision or retained work needs them, including
 across uninstall; remove them only through the same verified cleanup protocol
 as versioned bundles. This handoff is an intentional, opt-in deployment-resource
 ownership change, not automatic garbage collection.
+
+**Pinned Helm recovery, not native bridge rollback.** The current
+[deployment smoke workflow](../../.github/workflows/deploy-smoke.yml) pins
+Helm **3.16.2**. Its [rollback path](https://github.com/helm/helm/blob/v3.16.2/pkg/action/rollback.go)
+cannot reintroduce a retained live resource absent from the current file-mode
+manifest: the Kubernetes update path rejects the missing original entry.
+Therefore **do not use `helm rollback` to cross from file mode to the inline
+bridge**, and do not use `--atomic` for the first file-mode upgrade: its
+automatic rollback would cross that same unsupported boundary. Detect/reject
+that operation in deployment preparation rather than discovering it during
+production recovery. Ordinary rollback between compatible file-mode releases
+remains in scope.
+
+For a small, same-identity bridge recovery, keep admission paused and run a
+**new `helm upgrade` revision** using the exact saved bridge chart artifact and
+complete bridge values, with `--reset-values --wait` and an explicit timeout.
+Do not use `--reuse-values`, `--force`, ownership bypass or delete/recreate.
+Beforehand verify the chart/values digests, source compatibility, retained
+identities and all 12 live resources' original content, unique identifiers and
+matching Helm release-name/namespace/managed-by metadata. The
+[normal upgrade path](https://github.com/helm/helm/blob/v3.16.2/pkg/action/upgrade.go)
+checks that ownership and includes the existing resources in its update set,
+unlike native rollback. Mismatch aborts recovery; never overwrite another
+owner's resources. Record the bridge artifact/values digests during the bridge
+step, without exposing values in diagnostics.
+
+The recovery upgrade must reuse the retained objects without changing their
+unique identifiers or effective policy; verify those facts and all consumers'
+readiness before resuming. If it fails, keep admission paused and preserve all
+resources for diagnosis/retry; do not invoke a destructive fallback. Prove this
+procedure on the pinned Helm binary in hosted tests, including a failed first
+file-mode rollout and subsequent re-migration. Upstream source inspection is
+the rationale, **not** deployment evidence. If the bridge cannot represent
+accepted identities or fit the inline cap, recovery must stay on compatible
+file-aware binaries and a validated retained file bundle instead.
 
 **Snapshot and authority.** Each process loads once during its existing lifespan
 initialization, before advertising readiness or starting receiver admission.
@@ -1407,10 +1442,13 @@ configuration/provisioning docs and these tests:
    to file mode. Restart an **old sidecar** and application container while
    old/new Pods coexist; prove all fixed-name policies/Roles/RoleBindings remain
    usable, denied Secrets stay denied, and original identities survive.
-   Exercise a same-identity small-registry rollback to the retained bridge and
-   repeat file migration, plus refusal of an incompatible/oversized rollback.
+   Exercise a same-identity small-registry **recovery upgrade** to the retained
+   bridge with Helm 3.16.2, unchanged object identifiers/policies, and repeat
+   file migration. Include failed first-file-rollout recovery and refusal of
+   native bridge rollback, atomic first migration, conflicting ownership and
+   incompatible/oversized inline recovery.
    Test the retention flag's type/mode guards, missing/changed legacy objects,
-   rollback metadata preservation and eventual verified cleanup. A
+   recovery metadata preservation and eventual verified cleanup. A
    file-to-file-only test does not cover this migration.
 
 **Risk, rollout and rollback.** Main risks are oversized input, source ambiguity,
@@ -1437,7 +1475,9 @@ rolls every consumer without hot reload.
 For rollback, pause admission and drain first. Roll back to the last known
 compatible chart/binary/configuration set, including its exact external bundle,
 and retain its ConfigMap, authorization resources and original credential
-bindings. Do not reuse a resource name for different contents. Cleanup is an
+bindings. Crossing back to the inline bridge requires the verified recovery
+upgrade above, not native Helm rollback. Do not reuse a resource name for
+different contents. Cleanup is an
 explicit operator step only after no live Pod, retained Helm rollback revision
 or retained work requires that bundle or its permissions; Helm uninstall alone
 is not permission cleanup. A registry

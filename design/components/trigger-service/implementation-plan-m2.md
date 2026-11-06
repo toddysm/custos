@@ -262,10 +262,18 @@ For first inline-to-file migration, require a same-policy inline bridge release
 with `retainLegacyExecutionResources: true`; verify `helm.sh/resource-policy:
 keep` in its **stored Helm manifest** on all 12 legacy Configurations/Roles/
 RoleBindings before allowing the file upgrade. Keep those fixed-name resources
-and ownership metadata for old sidecar restarts and compatible rollback.
+and ownership metadata for old sidecar restarts and compatible recovery.
 Test direct-migration refusal, actual bridge/file upgrades with restarted old
-sidecars, bounded same-identity bridge rollback/re-migration, incompatible
-rollback refusal and verified eventual legacy-resource cleanup. Fresh file
+sidecars, bounded same-identity bridge **recovery upgrade**/re-migration and
+verified eventual legacy-resource cleanup. With pinned Helm 3.16.2, native
+rollback cannot recover live retained resources absent from the current
+manifest: prohibit native file-to-bridge rollback and `--atomic` first
+migration. Recover using a new `helm upgrade` revision with the exact bridge
+chart/complete values and `--reset-values --wait`; verify matching ownership,
+unchanged object identifiers/policy and all consumers. Test failed first-file
+rollout recovery and refusal of wrong ownership or incompatible/oversized inline
+recovery; never force, bypass ownership or delete/recreate. File-to-file native
+rollback remains covered. Fresh file
 installs and ordinary inline deployments do not need this migration opt-in.
 Wire actual cases into existing hosted jobs. This is prerequisite evidence,
 not a substitute for 035's deployed receiver-to-Workflow/security/shutdown work.
