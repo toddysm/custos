@@ -54,9 +54,11 @@ def fixture(count: int, *, maximum: bool = False) -> bytes:
 
 def configuration() -> dict[str, Any]:
     """Merge actual chart defaults and reference-only managed prerequisites."""
-    return operator.merge(
+    result = operator.merge(
         yaml.safe_load((CHART / "values.yaml").read_text()), enabled_values()
     )
+    assert isinstance(result, dict)
+    return result
 
 
 @pytest.mark.parametrize("existing", ["missing", "same", "conflict"])

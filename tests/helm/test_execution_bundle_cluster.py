@@ -29,6 +29,82 @@ pytestmark = pytest.mark.skipif(
     reason="requires explicitly selected disposable hosted kind; never run on an existing cluster",
 )
 
+DIAGNOSTIC_MARKERS = (
+    "pubsub.redis",
+    "secretstores.kubernetes",
+    "state.postgresql",
+    "state store is not configured",
+    "actor state store",
+    "failed to initialize",
+    "failed to init component",
+    "failed to get secret",
+    "forbidden",
+    "connection refused",
+    "authentication failed",
+    "password authentication failed",
+    "noauth",
+    "wrongpass",
+    "no such host",
+    "i/o timeout",
+    "context deadline exceeded",
+    "not registered",
+    "failed to parse",
+    "invalid character",
+    "access control",
+    "trust domain",
+    "no module named",
+    "permission denied",
+    "failed to load",
+    "certificate",
+)
+
+
+def diagnostic_markers(log: str) -> list[str]:
+    """Return only fixed diagnostic categories; no raw log text or credential can escape."""
+    return [marker for marker in DIAGNOSTIC_MARKERS if marker in log.lower()]
+
+
+def diagnose_workloads(namespace: str) -> None:
+    """Report unready regular/native-sidecar exits and fixed log categories, never raw logs."""
+    inventory = json.loads(kube(namespace, "get", "pods", "-o", "json"))
+    for pod in inventory["items"]:
+        status = pod.get("status", {})
+        for container in [
+            *status.get("containerStatuses", []),
+            *status.get("initContainerStatuses", []),
+        ]:
+            if container.get("ready"):
+                continue
+            previous = container.get("lastState", {}).get("terminated", {})
+            args = [
+                "kubectl",
+                "-n",
+                namespace,
+                "logs",
+                pod["metadata"]["name"],
+                "-c",
+                container["name"],
+                "--tail=50",
+            ]
+            if previous:
+                args.append("--previous")
+            result = subprocess.run(
+                args, capture_output=True, text=True, timeout=30, check=False
+            )
+            print(
+                json.dumps(
+                    {
+                        "namespace": namespace,
+                        "pod": pod["metadata"]["name"],
+                        "container": container["name"],
+                        "previousExit": previous.get("exitCode"),
+                        "logsAvailable": result.returncode == 0,
+                        "logCommandExit": result.returncode,
+                        "diagnosticMarkers": diagnostic_markers(result.stdout),
+                    }
+                )
+            )
+
 
 def command(args: list[str], payload: Any = None, *, succeeds: bool = True) -> str:
     """Execute a bounded command without displaying values, manifests or Secret contents."""
@@ -71,7 +147,6 @@ def settings(namespace: str, *, chart_owned: bool = False) -> dict[str, Any]:
     config = configuration()
     config["namespace"] = {"name": namespace, "create": chart_owned}
     config["postgres"]["embedded"] = False
-    config["dapr"]["components"]["stateStore"]["enabled"] = False
     config["secrets"]["eso"]["enabled"] = False
     config["gateway"]["tls"]["certManager"]["enabled"] = False
     config["envoyGateway"]["install"] = False
@@ -83,6 +158,7 @@ def settings(namespace: str, *, chart_owned: bool = False) -> dict[str, Any]:
     runtime["sandboxNamespace"] = namespace + "-activities"
     runtime["artifactClaim"] = "binding-artifacts"
     config["connector-service"]["hookRuntime"]["namespace"] = namespace + "-hooks"
+    config["connectorCredentials"]["namespace"] = namespace + "-credentials"
     config["dapr"]["injectorReadyGate"]["enabled"] = False
     config["dapr"]["components"]["pubsub"]["redis"]["host"] = "binding-redis:6379"
     config["dapr"]["components"]["pubsub"]["redis"]["passwordSecret"] = (
@@ -103,6 +179,37 @@ def settings(namespace: str, *, chart_owned: bool = False) -> dict[str, Any]:
             {"name": "BINDING_UNRELATED", "value": "preserved"},
         ]
     return config
+
+
+def backend(
+    namespace: str, resource_name: str, port: int, container: dict[str, Any]
+) -> None:
+    """Create one disposable backend and wait for its actual readiness in the owned namespace."""
+    kube(
+        namespace,
+        "create",
+        "-f",
+        "-",
+        payload={
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {"name": resource_name},
+            "spec": {
+                "replicas": 1,
+                "selector": {"matchLabels": {"app": resource_name}},
+                "template": {
+                    "metadata": {"labels": {"app": resource_name}},
+                    "spec": {
+                        "containers": [
+                            {**container, "ports": [{"containerPort": port}]}
+                        ]
+                    },
+                },
+            },
+        },
+    )
+    kube(namespace, "expose", "deployment", resource_name, f"--port={port}")
+    kube(namespace, "rollout", "status", f"deployment/{resource_name}", "--timeout=3m")
 
 
 def foundation(namespace: str, config: dict[str, Any], tmp_path: Path) -> str:
@@ -144,6 +251,7 @@ def foundation(namespace: str, config: dict[str, Any], tmp_path: Path) -> str:
             str(key),
         ]
     )
+    database_password = os.urandom(24).hex()
     refs = {
         runtime["apiTokenSecret"]: {"token": os.urandom(24).hex()},
         **{
@@ -151,8 +259,8 @@ def foundation(namespace: str, config: dict[str, Any], tmp_path: Path) -> str:
             for value in runtime["appTokenSecrets"].values()
         },
         "custos-app": {
-            "uri": "postgresql://unused/fixture",
-            "password": os.urandom(24).hex(),
+            "uri": f"postgresql://custos:{database_password}@binding-postgres:5432/custos?sslmode=disable",
+            "password": database_password,
         },
         "custos-redis-auth": {"redis-password": os.urandom(24).hex()},
         runtime["tlsSecret"]: {
@@ -191,42 +299,48 @@ def foundation(namespace: str, config: dict[str, Any], tmp_path: Path) -> str:
             },
         },
     )
-    kube(
+    backend(
         namespace,
-        "create",
-        "-f",
-        "-",
-        payload={
-            "apiVersion": "apps/v1",
-            "kind": "Deployment",
-            "metadata": {"name": "binding-redis"},
-            "spec": {
-                "replicas": 1,
-                "selector": {"matchLabels": {"app": "binding-redis"}},
-                "template": {
-                    "metadata": {"labels": {"app": "binding-redis"}},
-                    "spec": {
-                        "containers": [
-                            {
-                                "name": "redis",
-                                "image": "redis:7-alpine",
-                                "args": [
-                                    "--requirepass",
-                                    refs["custos-redis-auth"]["redis-password"],
-                                ],
-                                "ports": [{"containerPort": 6379}],
-                            }
-                        ]
+        "binding-postgres",
+        5432,
+        {
+            "name": "postgres",
+            "image": "postgres:16-alpine",
+            "env": [
+                {"name": "POSTGRES_USER", "value": "custos"},
+                {"name": "POSTGRES_DB", "value": "custos"},
+                {
+                    "name": "POSTGRES_PASSWORD",
+                    "valueFrom": {
+                        "secretKeyRef": {"name": "custos-app", "key": "password"}
                     },
                 },
+            ],
+            "readinessProbe": {
+                "exec": {"command": ["pg_isready", "-U", "custos", "-d", "custos"]},
+                "periodSeconds": 2,
+            },
+            "resources": {
+                "requests": {"cpu": "100m", "memory": "128Mi"},
+                "limits": {"cpu": "500m", "memory": "512Mi"},
             },
         },
     )
-    kube(namespace, "expose", "deployment", "binding-redis", "--port=6379")
-    kube(namespace, "rollout", "status", "deployment/binding-redis", "--timeout=3m")
-    return json.loads(
-        command(["kubectl", "get", "namespace", namespace, "-o", "json"])
-    )["metadata"]["uid"]
+    backend(
+        namespace,
+        "binding-redis",
+        6379,
+        {
+            "name": "redis",
+            "image": "redis:7-alpine",
+            "args": ["--requirepass", refs["custos-redis-auth"]["redis-password"]],
+        },
+    )
+    uid = json.loads(command(["kubectl", "get", "namespace", namespace, "-o", "json"]))[
+        "metadata"
+    ]["uid"]
+    assert isinstance(uid, str)
+    return uid
 
 
 def save_values(path: Path, config: dict[str, Any]) -> Path:
@@ -252,7 +366,11 @@ def helm(
     if path is not None:
         args.extend(["--reset-values"] if action == "upgrade" else [])
         args.extend(["-f", str(path)])
-    command(args, succeeds=succeeds)
+    try:
+        command(args, succeeds=succeeds)
+    except AssertionError:
+        diagnose_workloads(namespace)
+        raise
 
 
 def execution_secrets(namespace: str, raw: bytes) -> None:
@@ -754,7 +872,9 @@ def test_actual_inline_bridge_timeout_recovery(
         """Inject a bounded tool failure after the first real reconciliation to test safe retry."""
         if args[:4] == ["kubectl", "patch", "deployment", "custos-trigger-service"]:
             raise ValueError("injected partial reconciliation failure")
-        return original_run(args, payload)
+        result = original_run(args, payload)
+        assert isinstance(result, str)
+        return result
 
     with monkeypatch.context() as patch:
         patch.setattr(operator, "run", fail_second_patch)

@@ -1,4 +1,4 @@
-"""Verify the configuration fixture's real TLS wrapping without Docker or a cluster."""
+"""Verify fixture TLS, isolated namespaces and fixed diagnostics without Docker or a cluster."""
 
 import importlib.util
 import ssl
@@ -7,6 +7,13 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
+import yaml
+from test_execution_bundle_cluster import (
+    DIAGNOSTIC_MARKERS,
+    diagnostic_markers,
+    settings,
+)
+from test_receiver_runtime import CHART
 
 SPEC = importlib.util.spec_from_file_location(
     "binding_probe", Path(__file__).parent / "binding_probe/probe.py"
@@ -68,6 +75,9 @@ def test_probe_preserves_managed_application_protocol(
         probe.main()
         assert len(servers) == 1
         assert isinstance(servers[0].socket, ssl.SSLSocket) is tls
+        if tls:
+            assert isinstance(servers[0].socket, ssl.SSLSocket)
+            assert servers[0].socket.context.minimum_version == ssl.TLSVersion.TLSv1_2
     finally:
         for value in servers:
             value.server_close()
@@ -85,3 +95,78 @@ def test_migration_fixture_does_not_open_a_server(
 
     monkeypatch.setattr(probe, "HTTPServer", forbidden)
     probe.main()
+
+
+def test_lifecycle_fixtures_isolate_all_namespaces_and_preserve_database_authority(
+    tmp_path: Path,
+) -> None:
+    """Two chart renders cannot collide, and actual state-store/DB Secret authority is retained."""
+    namespaces = []
+    for namespace in ("binding-files", "binding-bridge"):
+        config = settings(namespace, chart_owned=True)
+        values = tmp_path / f"{namespace}.yaml"
+        values.write_text(yaml.safe_dump(config))
+        result = subprocess.run(
+            [
+                "helm",
+                "template",
+                "custos",
+                str(CHART),
+                "--namespace",
+                namespace,
+                "--kube-version",
+                "1.31.0",
+                "-f",
+                str(values),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        documents = [
+            document for document in yaml.safe_load_all(result.stdout) if document
+        ]
+        owned = {
+            document["metadata"]["name"]
+            for document in documents
+            if document["kind"] == "Namespace"
+        }
+        assert owned == {
+            namespace,
+            namespace + "-activities",
+            namespace + "-hooks",
+            namespace + "-credentials",
+        }
+        namespaces.append(owned)
+        state_store = next(
+            document
+            for document in documents
+            if document["kind"] == "Component"
+            and document["spec"]["type"] == "state.postgresql"
+        )
+        assert (
+            state_store["spec"]["metadata"][0]["secretKeyRef"]["name"] == "custos-app"
+        )
+        reader = next(
+            document
+            for document in documents
+            if document["kind"] == "Role"
+            and document["metadata"]["name"] == "custos-dapr-secret-reader"
+        )
+        assert "custos-app" in reader["rules"][0]["resourceNames"]
+    assert namespaces[0].isdisjoint(namespaces[1])
+
+
+def test_workload_diagnostics_emit_only_fixed_categories() -> None:
+    """Credential-looking or arbitrary log text never appears in the bounded diagnostic output."""
+    log = "canary-do-not-print: password authentication failed for state.postgresql"
+    markers = diagnostic_markers(log)
+    assert markers == [
+        "state.postgresql",
+        "authentication failed",
+        "password authentication failed",
+    ]
+    assert all(marker in DIAGNOSTIC_MARKERS for marker in markers)
+    assert "canary-do-not-print" not in repr(markers)
+    assert diagnostic_markers("an unknown message or credential") == []

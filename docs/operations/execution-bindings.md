@@ -199,10 +199,12 @@ budgets, policy equivalence and operator guards.
 use a disposable kind cluster, Helm's actual default Secret storage and actual
 Dapr/Kubernetes permissions with maximum-length nonrepetitive 1,000/1,024
 fixtures. They use a configuration-probe image and no-op migration-hook
-fixtures. The unused PostgreSQL state-store Component is explicitly disabled;
-the Redis broker and Dapr/Kubernetes Secret authorization remain real.
+fixtures. PostgreSQL state-store and Redis broker use disposable real backends;
+database/broker Secret authority and Dapr/Kubernetes authorization remain real.
 Runtime Manager retains its HTTPS probes and Dapr application protocol using
-a disposable certificate and a certificate-verifying diagnostic client.
+a disposable certificate, a TLS 1.2 minimum and a certificate-verifying diagnostic client.
+Unexpected Helm failures report container exits and fixed diagnostic categories,
+never raw application/sidecar logs or Secret values.
 These fixtures are explicitly not deployed application or migration certification.
 Full receiver-to-Workflow effects and saturation remain #1018; final user
 documentation remains #1019.

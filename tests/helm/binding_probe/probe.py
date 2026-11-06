@@ -24,7 +24,7 @@ from custos_callctx.execution import ExecutionIdentity, load_execution_bindings
 
 
 def main() -> None:
-    """Load once before HTTP readiness; hook fixtures exit without claiming migration work."""
+    """Load before HTTP(S) readiness; require TLS 1.2+ for Runtime and exit no-PORT hooks."""
     if "PORT" not in os.environ:
         return
     tracemalloc.start()
@@ -108,6 +108,7 @@ def main() -> None:
     server = HTTPServer(("0.0.0.0", int(os.environ["PORT"])), Handler)
     if "ARM_TLS_CERT_FILE" in os.environ or "ARM_TLS_KEY_FILE" in os.environ:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.load_cert_chain(
             os.environ["ARM_TLS_CERT_FILE"], os.environ["ARM_TLS_KEY_FILE"]
         )
