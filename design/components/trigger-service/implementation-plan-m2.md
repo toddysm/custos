@@ -62,7 +62,7 @@ design gate [#1004](https://github.com/toddysm/custos/issues/1004).
 | TS-IMPL-039 | [#1038](https://github.com/toddysm/custos/issues/1038) | Production activity startup/readiness and resource ownership; private bootstrap delivery; real Connector-owned credential issuance with durable per-attempt authorization | 032, 038 |
 | TS-IMPL-040 | [#1045](https://github.com/toddysm/custos/issues/1045) | Approved D08 storage/progress capability and extraction of #1044's bounded workspace discovery, migration, fair fenced claims with scheduled-leader admission, durable continuations and typed scheduled-scan restore; native saturation/restart/isolation evidence | 1046 merged, 022, 024, 031, 033 |
 | TS-IMPL-034 | [#1017](https://github.com/toddysm/custos/issues/1017) | Activation/readiness/deployment wiring, durable audit and operational signals; consume all prerequisites, independent bounded discovery and fair progress workers; four-profile rendering and safe rollback | 025, 027, 028, 029, 033, 037, 038, 039, 040 |
-| TS-IMPL-041 (proposed) | [#1048](https://github.com/toddysm/custos/issues/1048) | D09 bounded file-backed reference registry; unchanged legacy 64 KiB inline path; exact byte/count/ConfigMap boundaries; every managed consumer/profile; startup snapshots, safe rollout/rollback and hosted mounted-file evidence | Revision-8/D09 approval/merge, completed 038 and 034 |
+| TS-IMPL-041 (proposed) | [#1048](https://github.com/toddysm/custos/issues/1048) | D09 bounded digest-verified file registry; unchanged legacy 64 KiB path; externally provisioned versioned registry/Dapr/RBAC bundle, compact Helm descriptor; every consumer/profile; actual Helm storage and restart-safe rollback tests | Revision-8/D09 approval/merge, completed 038 and 034 |
 | TS-IMPL-035 | [#1018](https://github.com/toddysm/custos/issues/1018) | Deployed receiver-to-Workflow failure/recovery and legacy regression coverage in hosted CI; full-cardinality managed effects after the configuration prerequisite | 034, 041 |
 | TS-IMPL-036 | [#1019](https://github.com/toddysm/custos/issues/1019) | Developer/operator setup, recovery and migration documentation; checked links/examples | 035 |
 
@@ -174,7 +174,7 @@ separate authorization. Proposed branches follow
 | D06 | Explicit workspace service-account identity, fresh authorized contexts and the actual Workflow/Connector execution contract; no credential persistence or replay retargeting | Owner approval 2026-11-02 / [#1037](https://github.com/toddysm/custos/issues/1037) |
 | D07 | Truthful production activity readiness, private compatible bootstrap, Connector-owned credential issuance | Owner approvals recorded in #988; [#1038](https://github.com/toddysm/custos/issues/1038) merged through #1041 |
 | D08 (approved) | Durable per-workspace/operation progress, independent bounded discovery, ticket-ordered fenced claims and safe restart/cleanup | Design approved/merged via #1046; [#1045](https://github.com/toddysm/custos/issues/1045) Build authorized 2026-11-04T17:03:00.903-08:00 |
-| D09 (proposed, unapproved) | Bounded reference-only file/ConfigMap registry for every managed consumer; 1,000,000-byte file, unchanged 65,536-byte inline and 1,024-entry limits; startup snapshots and safe rollback | Planning authorized 2026-11-05; [#1048](https://github.com/toddysm/custos/issues/1048) before #1018; no Build/merge yet |
+| D09 (proposed, unapproved) | Bounded digest-verified file and external immutable/version-pinned registry/authorization bundle; compact Helm references; 1,000,000-byte file, unchanged 65,536-byte inline and 1,024-entry limits; real Helm storage and restart-safe rollback | Planning authorized 2026-11-05; [#1048](https://github.com/toddysm/custos/issues/1048) before #1018; no Build/merge yet |
 
 The design document owns the exact contracts, alternatives and migration impact.
 D01-D08 were explicitly approved. Approval and amendment
@@ -238,13 +238,27 @@ leadership both before claim and before effect, not merely queue claim counts.
 For 041, use D09's exact 1,000,000/1,000,001-byte file and
 65,536/65,537-byte inline boundaries, 1,024/1,025-entry limits and conservative
 complete ConfigMap data budget. Test the production loader with actual files,
-all four managed consumers' lifespan failures/successes, and exact rendered
-file bytes from all four profiles for 51/200/1,000 workspaces. Include the
-120-character ASCII reference fixtures, multibyte/escaped values, duplicate/
-unknown/cross-scope fields, ambiguous/missing/special/unreadable sources,
-checksum rollouts, immutable startup snapshots and identity/default/credential
-regressions. Wire actual cases into existing hosted jobs and validate mounted
-files/rollout on a disposable hosted kind cluster. This is prerequisite evidence,
+all four managed consumers' lifespan failures/successes, and exact externally
+provisioned file bytes for every profile at 51/200/1,000 workspaces and 1,024
+bindings. Include nonrepetitive 120-character ASCII references, multibyte/escaped
+values, duplicate/unknown/cross-scope fields, ambiguous/missing/special/unreadable
+sources and missing/malformed/mismatched expected digests.
+
+Provision immutable versioned ConfigMaps and versioned Dapr Configuration/
+Secret Role/RoleBinding resources outside Helm using the shared existing policy
+rules. Compare effective policies with legacy inline mode; retain default deny
+and exact named-Secret `get` permissions, database/broker access and pinned
+identities. Test create-or-verify reuse, conflicting resources, closed compact
+descriptors and no registry/authorization bulk in Helm values/manifests.
+On disposable hosted kind, actually install/upgrade/roll back with Helm 3's
+default Secret storage and maximum-length nonrepetitive 1,000/1,024-entry
+registries. Measure release Secret data below 1,048,576 bytes; file/render
+measurements alone do not satisfy this gate. Restart old Pod containers during
+upgrade and roll back using reused and recreated Pods; verify expected
+snapshots/defaults, digest refusal and original work/credential identities.
+Keep immutable bundles and explicit named-Secret permissions for retained work
+and rollback; test verified cleanup only after no retained reference needs them.
+Wire actual cases into existing hosted jobs. This is prerequisite evidence,
 not a substitute for 035's deployed receiver-to-Workflow/security/shutdown work.
 Direct configuration/source docs are part of 041; final user docs remain 036.
 

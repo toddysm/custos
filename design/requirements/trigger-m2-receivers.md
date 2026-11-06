@@ -93,12 +93,13 @@ cannot inspect retained payloads or replay another workspace's entry.
 **S5 - Managed capacity and safe configuration.** A deployment operator prepares
 the approved 1,000-workspace receiver certification workload. Today even compact,
 reference-only account mappings fail before deployment, despite the loader's
-1,024-entry allowance. With D09, the operator keeps explicit workspace accounts
-in the existing Helm values, reviews the generated reference-only ConfigMap and
-rolls out compatible controllers. Every consumer loads the same bounded file
-snapshot; credentials still come from the existing secret boundary. A missing
-mount, ambiguous source or malformed/oversized file blocks readiness with a safe
-reason instead of selecting another account. The operator corrects configuration
+1,024-entry allowance. With D09, the operator prepares a reference-only registry
+and its narrowly scoped authorization resources outside the Helm release, then
+passes only a compact version-pinned bundle descriptor to Helm. Every consumer
+loads and verifies the same bounded, immutable file snapshot; credentials still
+come from the existing secret boundary. A missing mount, digest mismatch,
+ambiguous source or malformed/oversized file blocks readiness with a safe reason
+instead of selecting another account. The operator creates a corrected bundle
 and rolls again; already accepted work keeps its original identity.
 
 ### 4. Outcomes, goals and scope
@@ -175,8 +176,9 @@ Content-Type: application/json
 {"error":{"code":"permission_denied","detail":"missing required permission: trigger:admin"}}
 ```
 
-For proposed D09, the primary new surface is startup/readiness configuration
-diagnostics, not a new command or HTTP endpoint. These two samples are
+For proposed D09, the primary runtime surface is startup/readiness configuration
+diagnostics, not a new service endpoint. An operator preparation helper produces
+the external deployment bundle described in D09. These two samples are
 **unapproved proposed output**, not shipped behavior or certification evidence:
 
 ```text
@@ -185,7 +187,7 @@ Source: file
 Workspaces: 1000
 Bindings: 1000
 UTF-8 bytes: 927027
-Snapshot: fixed until process restart
+Snapshot: expected SHA-256 verified; fixed until process restart
 Credentials: resolved through existing Secret/Auth boundaries
 ```
 
@@ -206,7 +208,7 @@ Fallback: none
 | Duplicate protection | Not established for M2/replay | Zero duplicate effects in the specified concurrency/crash tests | Each path and TS-IMPL-035 |
 | Isolation | Missing new ingress/admin paths | All spoofing, wrong-workspace and unauthorized cases rejected | TS-IMPL-026/027/032/035 |
 | Regression | Existing suites and coverage gate | Existing behavior preserved; Trigger coverage at least 90% | Every relevant code change |
-| Managed binding capacity, S5 | 1,000 compact bindings rejected at 99,807 bytes | Exact rendered 1,000-workspace files load in all four consumers/profiles within D09 limits; source/limit errors remain fail-closed | TS-IMPL-041; deployed effects remain TS-IMPL-035 |
+| Managed binding capacity, S5 | 1,000 compact bindings rejected at 99,807 bytes | Exact provisioned 1,000-workspace files load in all four consumers/profiles; real Helm release storage fits, and source/limit/digest errors remain fail-closed | TS-IMPL-041; deployed effects remain TS-IMPL-035 |
 
 These are bounded acceptance tests, not proof of exactly-once behavior for all
 possible outages. Track dispatch latency, queue age, retained bytes and upstream
@@ -1099,7 +1101,9 @@ after its own Build authorization. #1019 remains the final documentation item.
 [execution loader](../../src/libs/custos-callctx/src/custos_callctx/execution.py);
 reuse its closed `bindings`/`defaults` JSON structure and immutable registry.
 Add the operator-only environment key `CUSTOS_EXECUTION_BINDINGS_FILE`, whose
-value is an absolute filesystem path, not file contents. The existing
+value is an absolute filesystem path, not file contents, and its required
+companion `CUSTOS_EXECUTION_BINDINGS_SHA256`, the lowercase 64-hex-character
+SHA-256 digest of the exact file bytes. The existing
 `CUSTOS_EXECUTION_IDENTITY_ENABLED` gate remains authoritative:
 
 | Enabled gate / configured sources | Result |
@@ -1107,14 +1111,19 @@ value is an absolute filesystem path, not file contents. The existing
 | Absent or `false` | Existing off-mode behavior: no registry loaded; unused source settings are ignored. |
 | Invalid boolean | Existing explicit configuration error. |
 | `true`, inline key only | Existing `CUSTOS_EXECUTION_BINDINGS` parser and 65,536-byte limit. |
-| `true`, file key only | Read and validate one bounded file snapshot. |
+| `true`, file key only | Require the companion digest; read, verify and validate one bounded file snapshot. |
 | `true`, both source keys present | Explicit ambiguous-source error, even if one value is empty; never choose precedence or fallback. |
 | `true`, neither key, or the selected value is empty/blank | Explicit missing/invalid-source error; no default registry. |
+
+When enabled, reject a missing/blank/malformed file digest, a digest mismatch,
+or a digest key supplied with the inline source. Digest verification is an
+integrity/snapshot check, not a replacement for account authorization.
 
 File input is a regular file, including Kubernetes projected-file symlinks.
 Reject directories and special files without waiting on a pipe/device. Open one
 descriptor and read at most **1,000,001 bytes**; reject if more than
-**1,000,000 bytes** are present. Decode strict UTF-8 before JSON validation.
+**1,000,000 bytes** are present. Verify the digest against those same bytes,
+then decode strict UTF-8 before JSON validation; do not reopen the path.
 Whitespace counts toward the byte limit; it is not trimmed to admit an oversized
 source. Reject malformed UTF-8/JSON, duplicate keys, unknown fields, duplicate
 workspace/binding pairs, invalid identifiers and defaults outside their binding's
@@ -1130,56 +1139,121 @@ schema revision or idempotency key changes. The JSON structure is unchanged;
 this is an additive deployment-input source, not a new version of durable data.
 No new package, secret-store implementation or hot-reload mechanism is needed.
 
-**Managed Helm projection.** Keep
-`global.receiverRuntime.executionBindings` as the existing reference-only values
-object. When managed receiver runtime is enabled, serialize it once as compact
-JSON and render a release-namespaced ConfigMap
-`<release>-receiver-execution-bindings` (using existing name helpers/limits), with
-the single data key `bindings.json`. Reject a serialized value above
-1,000,000 UTF-8 bytes or 1,024 entries at render time. Independently validate the
-complete ConfigMap data budget conservatively as key bytes plus value bytes:
-at most **1,000,013 bytes**, below Kubernetes' **1,048,576-byte** ConfigMap
-limit. Do not silently truncate, split, compress or select a workspace subset.
+**Managed provisioning and Helm storage.** Helm 3 stores supplied values and
+rendered manifests in its release Secret. A ConfigMap/file limit alone cannot
+bound that release: the registry must not occur in either location in file mode.
+Keep `global.receiverRuntime.executionBindings` and its existing **65,536-byte**
+managed inline path unchanged for compatible small deployments. File mode is
+explicitly selected with a new `global.receiverRuntime.executionBindingsBundle`
+descriptor; reject it together with a nonempty legacy registry. An empty legacy
+default object is not a second source. Never automatically fall back between
+modes or increase the legacy chart guard.
 
-Project that file read-only at `/custos/execution/bindings.json`, without a
-`subPath` mount, into exactly the existing registry consumers: API Gateway,
-Trigger Service, Workflow Service and Activity Runtime Manager. Set
-`CUSTOS_EXECUTION_BINDINGS_FILE` to that path and remove any preserved inline
-source key from their managed environments so the generated manifest is not
-ambiguous. Managed keys continue to replace legacy entries; unrelated operator
-environment entries survive. All four connected/airgapped and evaluation/high
-availability profiles use this same contract. Do not mount the registry into
-activity sandboxes, Connector hook pods or services that do not consume it.
+The descriptor has only `configMapName`, `sha256`, `bundleSha256` and
+`daprConfigurations`, the latter mapping exactly the four consumer service names
+to versioned Dapr Configuration names. Digests are lowercase SHA-256; object
+names obey Kubernetes name limits. Validate its closed shape at render time.
+Do not pass registry entries, execution Secret-name lists, generated bulk
+manifests or an extra copy under another values key through Helm, including
+`--set-file`, hooks or a bundle subchart. Only the compact descriptor belongs in
+release values; release manifests contain references, mounts and annotations.
 
-Update the existing
-[managed helper](../../deploy/helm/custos/templates/_receiver-runtime.tpl),
-[receiver validation/resources](../../deploy/helm/custos/templates/receiver-runtime.yaml),
-the four consuming
-[service charts](../../deploy/helm/charts) and their existing render tests.
-The ConfigMap contains references, never service credentials or signed contexts.
-Existing credential Secret references and narrowly scoped Secret permissions
-remain; the file mount needs no new application Kubernetes API permission.
-There are no new service identities, roles, network paths, ports or egress rules.
-The existing operator/Helm resource permissions govern who may change references.
+Implement one repository-owned operator preparation helper as part of 041,
+reusing the production parser and existing managed authorization rules rather
+than hand-maintaining a second account-policy specification. It accepts a
+bounded local registry file and the deployment's namespace/release/security
+inputs. It validates the exact bytes, computes the registry digest, and emits:
+
+- One namespaced ConfigMap with `immutable: true` and exactly one data key,
+  `bindings.json`, preserving the validated file bytes.
+- For each of Gateway, Trigger, Workflow and Activity Runtime Manager, a
+  versioned Dapr Configuration, Secret Role and RoleBinding: the same
+  default-deny caller policies, Secret allow-lists, exact ServiceAccount subjects,
+  and `get`-only, named-Secret rules currently generated by
+  [receiver resources](../../deploy/helm/custos/templates/receiver-runtime.yaml).
+  Preserve database/broker Secret allowances in Dapr and the separate
+  [shared component Secret permissions](../../deploy/helm/custos/templates/dapr-secret-rbac.yaml).
+  No wildcard, Secret enumeration or cross-namespace permission is added.
+- The compact descriptor for the consuming Helm release.
+
+This moves the registry-dependent authorization lists outside Helm too; moving
+only the ConfigMap would leave four repeated Secret allow-lists/resource-name
+lists in release storage. In file mode the chart must not render duplicate
+Configurations/Roles/RoleBindings for these four consumers. Other managed
+consumers' authorization resources and all inline-mode resources stay chart
+owned and behaviorally unchanged. Extract/reuse the existing policy generation
+so the inline and bundle modes cannot diverge silently.
+
+Bound input to 1,000,000 bytes and 1,024 entries; independently check complete
+ConfigMap key-plus-value data at **1,000,013 bytes** or less, below Kubernetes'
+**1,048,576-byte** ConfigMap limit. Validate every generated authorization
+resource against Kubernetes/Dapr schemas and actual hosted API admission.
+Never truncate, compress, shard or select a workspace subset to fit a limit.
+
+Bundle names include a content-derived version, using existing naming limits.
+The full bundle digest covers the exact registry digest and all effective
+namespace, release, ServiceAccount and authorization inputs, with deterministic
+serialization before deriving resource names. Annotate each object with the
+full digest; detect shortened-name collisions rather than overwrite. ConfigMap
+immutability is API-enforced; the helper treats all other bundle resources as
+create-only: an existing object can be reused only after exact effective-content
+and digest verification, never patched to represent a different bundle.
+
+The operator creates the controller namespace and provisions/verifies this
+external bundle **before** Helm install/upgrade. Missing resources, conflicting
+objects or mismatched descriptor/security inputs abort that preparation.
+Verify all bundle objects and their bindings, not only the ConfigMap; do not
+rely on a missing Dapr Configuration producing safe default behavior. Bundle
+resources have separate operator lifecycle ownership, not Helm owner references
+or hooks. Helm install/upgrade/rollback and uninstall must not mutate/delete
+them. Document preparation, verification, retained-version inventory and explicit
+cleanup in the same 041 delivery; this is not another service or end-user API.
+
+Project the descriptor's immutable ConfigMap read-only at
+`/custos/execution/bindings.json`, without `subPath`, into exactly API Gateway,
+Trigger Service, Workflow Service and Activity Runtime Manager. Set the file
+path and expected digest environments, select each pinned Dapr Configuration,
+and annotate each Pod template with both registry and bundle digests. Replace
+conflicting managed source/digest entries while preserving unrelated operator
+environment entries. All four connected/airgapped and evaluation/high
+availability profiles use the same contract. Do not mount the registry into
+activity sandboxes, Connector hook pods or non-consuming services. Update the
+existing [managed helper](../../deploy/helm/custos/templates/_receiver-runtime.tpl),
+receiver resources, four consuming [service charts](../../deploy/helm/charts)
+and existing render tests.
+
+The external resources contain references, never credentials or signed contexts.
+The file mount adds no application Kubernetes API permission, service identity,
+network path, port or egress rule. Existing operator resource permissions govern
+bundle creation. Versioned RoleBindings coexist during rollout/rollback, so a
+ServiceAccount temporarily has the union of **explicitly named** Secrets in
+retained bundles, not arbitrary Secret access. Keep old references available for
+pinned work, audit that overlap, and remove obsolete permissions only during
+verified bundle cleanup. This lifecycle cost is explicit, not a claim that no
+additional resource objects are created.
 
 ```text
-Operator-owned executionBindings values (references only)
-  -> Helm compact serialization + byte/count/ConfigMap checks
-  -> release ConfigMap: bindings.json
-     -> read-only projected file in Gateway / Trigger / Workflow / ARM
-        -> shared bounded loader -> immutable startup registry
-           -> original workspace/principal/binding reference
-              -> existing Secret boundary + Auth exchange -> scoped execution
-Legacy inline source -> unchanged 64 KiB path (non-managed/older charts)
+Operator-owned registry file + existing deployment/security inputs
+  -> bounded preparation/verification outside Helm
+  -> immutable versioned ConfigMap + versioned Dapr/RBAC resources
+  -> compact names/digests descriptor only -> Helm release
+     -> pinned read-only file and Dapr configuration in four consumers
+        -> digest-verified bounded loader -> immutable startup registry
+           -> original identity -> existing Secret/Auth boundaries
+Legacy inline Helm values -> unchanged managed 64 KiB path
 ```
 
 **Snapshot and authority.** Each process loads once during its existing lifespan
 initialization, before advertising readiness or starting receiver admission.
-A ConfigMap projection update must not mutate the loaded registry. Put a
-checksum of the exact serialized file bytes on each consuming Deployment so a
-values change causes an explicit rolling update. Do not add a background
-watcher. A successful parse does not authorize an account: existing credential
-lookup, disabled/revoked-account/grant checks, fresh signed contexts and
+A Pod always references one immutable ConfigMap version and one expected
+digest. A restarted container in an old Pod must reload the old bytes even
+during an upgrade; a replacement Pod loads only its newly pinned version.
+Reject digest mismatch before readiness/admission, including tampered local
+file mounts. Updating the compact descriptor rolls every consumer; it does not
+mutate a retained bundle. Rollback restores old names/digests, so a reused old
+Pod or a newly created rollback Pod loads the same old snapshot. Do not add a
+background watcher. A successful parse does not authorize an account: existing
+credential lookup, disabled/revoked-account/grant checks, fresh signed contexts and
 application/namespace checks remain at their existing boundaries.
 
 Defaults choose identities for new work only. Retained targets, runs, child
@@ -1192,13 +1266,14 @@ logs, traces, workflow history or audit. Closed-field checks reject added
 credential fields; operators must still keep actual credentials out of
 reference-valued fields.
 
-**Error handling and operator output.** File I/O, type, decode, size and
+**Error handling and operator output.** File I/O, type, digest, decode, size and
 validation failures abort enabled initialization and follow the existing
 service startup/readiness error path. Do not catch them and return an empty
 registry, fall back to inline, or mark the service ready. Diagnostics may report
 the source kind, safe reason code and aggregate byte/binding counts, not content
 or per-workspace metric labels. The proposed success/error output is rendered in
-Part I.7A; no new CLI command or endpoint is introduced.
+Part I.7A. The operator helper reports safe preparation/verification failures;
+no new service endpoint or `custosctl` command is introduced.
 
 **Measured budget and success criteria.** A compact synthetic registry with all
 five reference fields at the existing maximum of 120 ASCII characters and an
@@ -1214,6 +1289,15 @@ explicit default for every workspace has these measured JSON byte counts:
 These are local serialization measurements, not file-loader/deployment results;
 the new source does not exist yet. The 1,000,000-byte cap admits those fixtures
 with ConfigMap headroom while retaining a bounded allocation and count limit.
+Those initial padded fixtures are repetitive and **do not** prove compression
+or Helm release safety. A separate deterministic synthetic model, using 1,000
+bindings with independently generated 120-character lowercase-alphanumeric
+references (seed 1048), reproduces a 927,027-byte registry and **1,561,348 bytes**
+for Helm's base64-of-gzip release value when both values and a rendered ConfigMap
+contain it. That is already larger than the **1,048,576-byte** Secret data
+limit before counting other release resources. This is a serialization model,
+not an actual installation result. Externalize the authorization lists as well;
+do not infer storage safety from compressible fixtures or file size alone.
 Record parse duration and peak memory for the documented fixtures during 041;
 no unmeasured latency/service-level guarantee or currency estimate is added.
 There is one bounded startup read per consumer, not one read per event. Use
@@ -1226,49 +1310,71 @@ that data or introduce customer identifiers as metric labels.
 projection and startup snapshot; S1-S4 retain D01-D08 authority and wire formats.
 The same 041 implementation pull request covers the library, every consuming
 service's startup boundary, all four profile projections, directly related
-configuration docs and these tests:
+configuration/provisioning docs and these tests:
 
 1. Use real temporary/projected files through the production loader. Test
    1,000,000 bytes accepted and 1,000,001 rejected, with valid JSON padded to
    the boundary; 65,536/65,537 for legacy inline; 1,024/1,025 entries;
    UTF-8 byte rather than character counting; malformed/duplicate/unknown/
    cross-scope data; missing/unreadable/special files; ambiguous/empty sources;
+   absent/blank/malformed/mismatched expected digests; valid projected symlinks;
    and unchanged disabled behavior. Preserve source/callable documentation.
 2. Render all four managed profiles for 51/200/1,000 distinct workspaces, with
-   realistic references and the maximum-ASCII fixtures above. Feed the exact
-   rendered ConfigMap bytes through the real file loader; assert the
-   conservative ConfigMap size, every required mount/environment/checksum and
-   absence of inline duplication or credential literals. Test exact and
-   one-over chart budgets, including serialization expansion/escaping.
+   realistic references and **nonrepetitive** maximum-ASCII fixtures, including
+   1,024 bindings. Feed exact externally generated ConfigMap bytes through the
+   real loader. Assert conservative data budgets, required mounts/digests/Dapr
+   names, no bulk registry/authorization lists in Helm values/manifests, and
+   no credential literals. Test exact/one-over helper budgets, multibyte and
+   escaped serialization, closed descriptors, legacy inline rendering and
+   ambiguous mode rejection. Compare both modes' effective caller/Secret
+   policies and verify unrelated Secrets remain inaccessible.
 3. Exercise Gateway, Trigger, Workflow and ARM startup with valid and rejected
    files; verify admission/readiness and owned-resource cleanup on failure.
    Re-run pinned-identity/default-change and credential/grant/rotation/restart
-   regressions; no consumer may infer a missing workspace identity.
+   regressions; no consumer may infer a missing workspace identity. Reject
+   conflicting pre-existing bundle objects and invalid/missing authorization
+   resources during preparation; verify same-bundle idempotent reuse.
 4. Wire these cases into existing library/service Python 3.11/3.12 and Helm
    jobs, extending actual selectors if needed rather than claiming deselected
-   cases ran. Validate the mounted snapshot and rollout on disposable hosted
-   `kind`; do not run local Docker or mutate existing clusters. Record exact
-   tested commit, commands, results, skips and cleanup. Full deployed
-   receiver-to-Workflow effects and saturation remain #1018, not 041.
+   cases ran. On disposable hosted `kind`, perform **real Helm 3 default-Secret
+   storage install, upgrade and rollback** with nonrepetitive maximum-length
+   1,000- and 1,024-binding bundles and the existing full managed manifests.
+   Measure decoded Secret data bytes (including Helm's inner base64 release
+   value) against 1,048,576; a render/model is not installation evidence.
+   Confirm mounted bytes and each consumer's actual Secret access, including
+   the database/broker paths. Restart an old Pod's application container during
+   an upgrade, then roll back with both reused and recreated Pods; assert
+   old/new snapshot/default selection and pinned-work identities. Test wrong
+   digest, attempted immutable ConfigMap mutation, missing bundles, retained
+   authorization and safe obsolete-version cleanup. Do not run local Docker or
+   mutate existing clusters. Record exact tested commit, commands, results,
+   skips and cleanup. Full deployed receiver-to-Workflow effects and saturation
+   remain #1018, not 041.
 
 **Risk, rollout and rollback.** Main risks are oversized input, source ambiguity,
-configuration drift, mixed binaries/chart capabilities and loss of old identity
-references. Bounded reads/counts, closed validation, startup-only snapshots,
-exact-byte checksums and retained pinned identities mitigate them. File
+configuration drift, Helm release storage, external-resource lifecycle,
+mixed binaries/chart capabilities and loss of old identity references.
+Bounded reads/counts, closed validation, externalized bulk resources,
+digest-verified version-pinned snapshots and retained identities mitigate them. File
 references remain inside the deployment's existing sovereignty boundary; no
-new customer-data retention, external service, schema migration or permission
-expansion is introduced.
+new customer-data retention, external service or schema migration is introduced.
+Explicit retained-version Secret access and cleanup are described above.
 
 Ship compatible shared-library/service binaries first, with the old inline
 chart and existing 64 KiB behavior. Do not enable file mode on binaries that
 cannot read it. Pause receiver admission and drain before changing the managed
-projection; deploy the generated ConfigMap and compatible chart/binaries
-together, verify all four consumers' mounted snapshots/readiness, then resume.
-Test a values-only update rolls every consumer without hot reload.
+source mode. Prepare/verify the external bundle, then deploy its compact
+descriptor with compatible chart/binaries; verify all four consumers' actual
+snapshots, Secret access and readiness before resuming. Keep prior versions
+untouched. Test a descriptor-only update rolls every consumer without hot reload.
 
 For rollback, pause admission and drain first. Roll back to the last known
-compatible chart/binary/configuration set and retain the reference ConfigMap
-and original credential bindings until no retained work needs them. A registry
+compatible chart/binary/configuration set, including its exact external bundle,
+and retain its ConfigMap, authorization resources and original credential
+bindings. Do not reuse a resource name for different contents. Cleanup is an
+explicit operator step only after no live Pod, retained Helm rollback revision
+or retained work requires that bundle or its permissions; Helm uninstall alone
+is not permission cleanup. A registry
 above 64 KiB **cannot** safely roll back to the old inline-only contract: keep
 admission paused on compatible file-aware binaries until a validated
 same-identity rollback configuration exists. Never drop bindings or reassign
@@ -1288,7 +1394,8 @@ Alternatives rejected: raising only the environment limit leaves oversized
 environment/manifest transport and mismatched chart guards; disabling identity
 or sharing an ambient account breaks D06; testing claims without real effects
 does not certify #1018; compression/sharding/live reload adds unnecessary new
-contracts. D09 changes source transport only and retains explicit authority.
+contracts. D09 changes configuration transport and deployment-resource ownership,
+not authority selection or credential issuance.
 
 #### Components and flow
 
@@ -1359,7 +1466,7 @@ checks; missing production capabilities fail readiness.
 | Preserve REQ-004/080 | Existing manual/internal routes and regression gates | 022, 034-035 |
 | Operator enablement | Deployment/rollback and final documentation | 034-036 |
 | SP1-SP3, bounded multi-tenant recovery | D08 durable progress, independent discovery, fair fenced claims and restart-safe continuation | 040, 034-036 |
-| S5 / #1048, managed 1,000-workspace configuration | D09 bounded file source, reference-only four-consumer projection, startup snapshots and fail-closed rollback | 041 before 035; final docs 036 |
+| S5 / #1048, managed 1,000-workspace configuration | D09 bounded verified file, external versioned registry/authorization bundle, compact Helm references and restart-safe rollback | 041 before 035; final docs 036 |
 
 ### PM-2. Interfaces and versioning
 
@@ -1499,7 +1606,8 @@ expired resume waits and Workflow terminal-state conflicts.
 | Replay safety | Durable downstream identity and sufficient retention; never infer safety from a reused string alone. |
 | False activity readiness | D07 requires an initialized scheduler and successful dependency probes; liveness does not imply schedulability. |
 | Bootstrap mismatch/key exposure | D07 tests actual issuer/verifier compatibility, exact attempt/expiry and private delivery; the activity cannot access the signing/verification key. |
-| Configuration capacity/source ambiguity | D09 preserves inline limits, bounds file and complete ConfigMap data, rejects dual sources and tests all four managed consumers/profiles. |
+| Configuration capacity/source ambiguity | D09 preserves inline limits, bounds file/ConfigMap data, rejects dual sources, externalizes registry/authorization bulk and tests actual Helm Secret storage for all managed consumers/profiles. |
+| Snapshot drift or stale external permissions | D09 pins immutable versions and expected digests, tests old-container restart/rollback, and requires verified retained-bundle cleanup. |
 | Rollback to an incapable binary/chart | D09 stages file-aware binaries first; pause/drain and retain pinned bindings; oversized registries cannot roll back to inline-only mode. |
 
 ### F. Breaking changes and compatibility
@@ -1618,9 +1726,10 @@ the single authorized prerequisite into additional issues.
 | Operator/developer progress documentation | 0.5-1 | 0.5 | 0.25 | Existing 036 |
 
 D09 adds one existing-architecture prerequisite, not another feature tracker.
-Provisional effort for 041 is 1-2 engineer-days for the shared source and
-four-consumer/chart wiring, 1-2 for boundary/consumer/profile tests and review,
-and 0.5-1 for hosted mount/rollout/rollback validation and directly related docs.
+Provisional effort for 041 is 2-3 engineer-days for the shared source,
+bundle preparation/policy reuse and four-consumer/chart wiring, 1-2 for
+boundary/consumer/profile tests and review, and 1-2 for actual hosted Helm
+storage/restart/rollback validation and directly related lifecycle docs.
 These are planning estimates, not measured durations or delivery commitments;
 re-estimate after the first mounted-file checks. Final operator documentation
 remains 036. No implementation starts from this design PR.
@@ -1661,7 +1770,8 @@ may not run. Report that as not applicable, not green runtime evidence.
 Use normal hosted triggers without skip markers. Request Copilot review.
 For this amendment and subsequent authorized work, request **only Copilot**;
 do not request Codex or another hosted reviewer. D09's source/byte/count,
-four-consumer and exact rendered-file checks above are mandatory for 041.
+four-consumer, exact provisioned-file and actual Helm-storage/restart/rollback
+checks above are mandatory for 041.
 This three-document plan PR has no source or chart changes and does not
 establish that those future tests pass.
 Repository rules require resolved review threads and include code-quality and
