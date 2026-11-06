@@ -1,6 +1,6 @@
 # Trigger Service M2 implementation plan
 
-Status: **Revision-7/D08 approved and merged via #1046; #1045 implementation in progress.** Revision: 7. Updated: 2026-11-05.
+Status: **Revision-8/D09 proposed for #1048; awaiting design/breakdown approval. Revision-7/D08 remains approved.** Revision: 8 proposed. Updated: 2026-11-05.
 
 Parent: [#988](https://github.com/toddysm/custos/issues/988).
 Design: [#1004](https://github.com/toddysm/custos/issues/1004) and the
@@ -18,7 +18,7 @@ All issues below are native children of #988. Every implementation issue is
 blocked by [#1004](https://github.com/toddysm/custos/issues/1004)'s completed
 design and human approval. The owner approved the baseline, subsequent recorded
 amendments and continuous implementation; publication alone never grants
-authorization. Testing mode is **GitHub-hosted CI**, with Copilot review
+authorization. Testing mode is **GitHub-hosted continuous integration (CI)**, with Copilot-only review
 on each pull request. One implementation item maps to one reviewed pull request.
 Only the designated owner may claim/edit an item's worktree and ledger.
 On 2026-11-04T16:20:02.742-08:00 the owner approved creating one prerequisite
@@ -27,6 +27,15 @@ starvation. That initial authorization covered planning only. The owner approved
 the concrete D08/19-item design on 2026-11-04T16:41:03.590-08:00 and authorized
 TS-IMPL-040 Build on 2026-11-04T17:03:00.903-08:00. Design #1046 merged as
 `8eb0414`; existing D01-D07 approvals and completed items are not invalidated.
+
+The owner approved adding the configuration-capacity prerequisite
+[#1048](https://github.com/toddysm/custos/issues/1048) on
+2026-11-05T16:15:23.655-08:00 and opening one scoped design-amendment pull
+request on 2026-11-05T17:27:24.414-08:00. That authorizes planning only.
+Proposed D09 adds TS-IMPL-041 before deployed certification, making **20 proposed
+delivery items, 17 already merged**. The previously approved 19-item/D01-D08
+baseline remains approved; D09/the added scope requires renewed approval.
+No implementation or merge of this amendment is authorized.
 
 ## Work breakdown
 
@@ -53,7 +62,8 @@ design gate [#1004](https://github.com/toddysm/custos/issues/1004).
 | TS-IMPL-039 | [#1038](https://github.com/toddysm/custos/issues/1038) | Production activity startup/readiness and resource ownership; private bootstrap delivery; real Connector-owned credential issuance with durable per-attempt authorization | 032, 038 |
 | TS-IMPL-040 | [#1045](https://github.com/toddysm/custos/issues/1045) | Approved D08 storage/progress capability and extraction of #1044's bounded workspace discovery, migration, fair fenced claims with scheduled-leader admission, durable continuations and typed scheduled-scan restore; native saturation/restart/isolation evidence | 1046 merged, 022, 024, 031, 033 |
 | TS-IMPL-034 | [#1017](https://github.com/toddysm/custos/issues/1017) | Activation/readiness/deployment wiring, durable audit and operational signals; consume all prerequisites, independent bounded discovery and fair progress workers; four-profile rendering and safe rollback | 025, 027, 028, 029, 033, 037, 038, 039, 040 |
-| TS-IMPL-035 | [#1018](https://github.com/toddysm/custos/issues/1018) | Deployed receiver-to-Workflow failure/recovery and legacy regression coverage in hosted CI | 034 |
+| TS-IMPL-041 (proposed) | [#1048](https://github.com/toddysm/custos/issues/1048) | D09 bounded digest-verified file registry; unchanged legacy 64 KiB path; external versioned registry/Dapr/RBAC bundle and compact Helm descriptor; verified retention bridge for first inline-to-file migration; every consumer/profile; actual Helm storage and restart-safe rollback tests | Revision-8/D09 approval/merge, completed 038 and 034 |
+| TS-IMPL-035 | [#1018](https://github.com/toddysm/custos/issues/1018) | Deployed receiver-to-Workflow failure/recovery and legacy regression coverage in hosted CI; full-cardinality managed effects after the configuration prerequisite | 034, 041 |
 | TS-IMPL-036 | [#1019](https://github.com/toddysm/custos/issues/1019) | Developer/operator setup, recovery and migration documentation; checked links/examples | 035 |
 
 ## Execution order and overlap
@@ -70,9 +80,28 @@ activation/control-plane responsibilities or 035's deployed certification gate.
 
 One valid sequential order is:
 
-`022 -> 023 -> 024 -> 030 -> 031 -> 032 -> 025 -> 026 -> 028 -> 027 -> 029 -> 033 -> 037 -> 038 -> 039 -> [D08 approval] -> 040 -> 034 -> 035 -> 036`.
+`022 -> 023 -> 024 -> 030 -> 031 -> 032 -> 025 -> 026 -> 028 -> 027 -> 029 -> 033 -> 037 -> 038 -> 039 -> [D08 approval] -> 040 -> 034 -> [D09 approval] -> 041 -> 035 -> 036`.
 
-Current scoped checkpoint (2026-11-05): 038 and 039 merged through
+Current scoped checkpoint (2026-11-05): 038/039/040/034 are merged through
+[#1040](https://github.com/toddysm/custos/pull/1040),
+[#1041](https://github.com/toddysm/custos/pull/1041),
+[#1047](https://github.com/toddysm/custos/pull/1047) and
+[#1044](https://github.com/toddysm/custos/pull/1044). Seventeen approved delivery
+items are complete. #1018 is blocked by native prerequisite #1048; the 1,000-
+workspace production-loader/managed-chart preflight exceeds the 64 KiB registry
+ceiling. 041 is one proposed implementation item covering the shared library,
+API Gateway, Trigger, Workflow and Activity Runtime Manager consumers and
+managed chart wiring. The plan PR changes only design/plan/inventory, remains
+open for approval and must not close #1048 or start Build.
+
+The receiver-disabled
+[hosted baseline](https://github.com/toddysm/custos/actions/runs/42131707104)
+failed Custos installation with final activity-runtime readiness reporting an
+unconfigured scheduler; disposable kind cleanup succeeded. #1018 must address
+that independent deployment configuration finding before certification. D09 is
+not represented as its fix.
+
+Historical revision-7 checkpoint (superseded): 038 and 039 merged through
 [#1040](https://github.com/toddysm/custos/pull/1040) and
 [#1041](https://github.com/toddysm/custos/pull/1041). Fifteen of the original
 18 delivery items are merged. The approved D08 amendment adds one prerequisite,
@@ -145,10 +174,13 @@ separate authorization. Proposed branches follow
 | D06 | Explicit workspace service-account identity, fresh authorized contexts and the actual Workflow/Connector execution contract; no credential persistence or replay retargeting | Owner approval 2026-11-02 / [#1037](https://github.com/toddysm/custos/issues/1037) |
 | D07 | Truthful production activity readiness, private compatible bootstrap, Connector-owned credential issuance | Owner approvals recorded in #988; [#1038](https://github.com/toddysm/custos/issues/1038) merged through #1041 |
 | D08 (approved) | Durable per-workspace/operation progress, independent bounded discovery, ticket-ordered fenced claims and safe restart/cleanup | Design approved/merged via #1046; [#1045](https://github.com/toddysm/custos/issues/1045) Build authorized 2026-11-04T17:03:00.903-08:00 |
+| D09 (proposed, unapproved) | Bounded digest-verified file and external immutable/version-pinned registry/authorization bundle; compact Helm references; verified legacy retention bridge; 1,000,000-byte file, unchanged 65,536-byte inline and 1,024-entry limits; real Helm storage and restart-safe rollback | Planning authorized 2026-11-05; [#1048](https://github.com/toddysm/custos/issues/1048) before #1018; no Build/merge yet |
 
 The design document owns the exact contracts, alternatives and migration impact.
 D01-D08 were explicitly approved. Approval and amendment
 history are recorded in #988 rather than inferred from issue creation.
+D09 is excluded from that approval. Its exact contract and updated 20-item
+breakdown require explicit owner approval of this amendment.
 
 Revision 2 incorporates the initial Codex/Copilot findings: operator pauses need
 durable intent, cursor leases alone do not enforce the polling interval across
@@ -202,6 +234,64 @@ Require scheduler leadership before scheduled claims and transactional
 verification in the provider; a standby cannot repeatedly postpone work.
 Two-replica tests must measure actual scheduled-page progress and loss of
 leadership both before claim and before effect, not merely queue claim counts.
+
+For 041, use D09's exact 1,000,000/1,000,001-byte file and
+65,536/65,537-byte inline boundaries, 1,024/1,025-entry limits and conservative
+complete ConfigMap data budget. Test the production loader with actual files,
+all four managed consumers' lifespan failures/successes, and exact externally
+provisioned file bytes for every profile at 51/200/1,000 workspaces and 1,024
+bindings. Include nonrepetitive 120-character ASCII references, multibyte/escaped
+values, duplicate/unknown/cross-scope fields, ambiguous/missing/special/unreadable
+sources and missing/malformed/mismatched expected digests.
+
+Provision immutable versioned ConfigMaps and versioned Dapr Configuration/
+Secret Role/RoleBinding resources outside Helm using the shared existing policy
+rules. Compare effective policies with legacy inline mode; retain default deny
+and exact named-Secret `get` permissions, database/broker access and pinned
+identities. Test create-or-verify reuse, conflicting resources, closed compact
+descriptors and no registry/authorization bulk in Helm values/manifests.
+On disposable hosted kind, actually install/upgrade/roll back with Helm 3's
+default Secret storage and maximum-length nonrepetitive 1,000/1,024-entry
+registries. Measure release Secret data below 1,048,576 bytes; file/render
+measurements alone do not satisfy this gate. Restart old Pod containers during
+upgrade and roll back using reused and recreated Pods; verify expected
+snapshots/defaults, digest refusal and original work/credential identities.
+Keep immutable bundles and explicit named-Secret permissions for retained work
+and rollback; test verified cleanup only after no retained reference needs them.
+For first inline-to-file migration, require a same-policy inline bridge release
+with `retainLegacyExecutionResources: true`; verify `helm.sh/resource-policy:
+keep` in its **stored Helm manifest** on all 12 legacy Configurations/Roles/
+RoleBindings before allowing the file upgrade. Keep those fixed-name resources
+and ownership metadata for old sidecar restarts and compatible recovery.
+Test direct-migration refusal, actual bridge/file upgrades with restarted old
+sidecars, bounded same-identity bridge **recovery upgrade**/re-migration and
+verified eventual legacy-resource cleanup. With pinned Helm 3.16.2, native
+rollback cannot recover live retained resources absent from the current
+manifest: prohibit native file-to-bridge rollback and `--atomic` first
+migration. Recover using a new `helm upgrade` revision with the exact bridge
+chart/complete values and `--reset-values --wait`; verify matching ownership,
+unchanged object identifiers/policy and all consumers. Before recovery Helm
+runs, reconcile each live Deployment's managed source settings to the verified
+bridge rendering using resource-version-tested targeted patches: restore inline
+and Dapr config, remove all file/digest environments and file-only mounts/
+volumes/digest annotations, and preserve unrelated fields/resources. Resetting
+values alone does not remove live-only fields after a failed upgrade.
+Force a first-file rollout to update live Deployments and then time out under
+`--wait`; prove reconciliation/recovery yields one valid source and readiness.
+Test concurrent/partial-patch refusal, wrong ownership and incompatible/oversized inline
+recovery; never force, bypass ownership or delete/recreate. File-to-file native
+rollback remains covered. Fresh file
+installs and ordinary inline deployments do not need this migration opt-in.
+File mode requires `namespace.create: false`. If the legacy release owns the
+controller Namespace, the bridge must also retain it with `keep` in the stored
+manifest before file mode hands off its lifecycle. Verify namespace ownership,
+labels and unique identifier; never delete/recreate it during recovery.
+Test actual file-mode uninstall with both operator-owned and handed-off
+Namespaces, proving retained resources survive; reject unprotected namespace
+ownership and file-mode namespace creation at preflight/render respectively.
+Wire actual cases into existing hosted jobs. This is prerequisite evidence,
+not a substitute for 035's deployed receiver-to-Workflow/security/shutdown work.
+Direct configuration/source docs are part of 041; final user docs remain 036.
 
 Before closing #988, every required child must be complete, documentation
 merged, and a separately reviewed close-out must promote the capability
