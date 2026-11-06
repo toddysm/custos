@@ -30,12 +30,35 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - uses: helm/kind-action@v1.10.0
-        with:
-          version: v0.24.0
-          kubectl_version: v1.31.2
-          cluster_name: custos-bindings
-          node_image: kindest/node:v1.31.2
+      - name: Install verified kind and kubectl
+        id: tools
+        env:
+          KIND_VERSION: v0.24.0
+          KUBECTL_VERSION: v1.31.2
+        run: |
+          tools="$RUNNER_TEMP/binding-tools"
+          mkdir -p "$tools"
+          cd "$tools"
+          curl --fail --silent --show-error --location --retry 3 --output kubectl \
+            "https://dl.k8s.io/release/$KUBECTL_VERSION/bin/linux/amd64/kubectl"
+          curl --fail --silent --show-error --location --retry 3 --output kubectl.sha256 \
+            "https://dl.k8s.io/release/$KUBECTL_VERSION/bin/linux/amd64/kubectl.sha256"
+          echo "$(cat kubectl.sha256)  kubectl" | sha256sum -c
+          curl --fail --silent --show-error --location --retry 3 --output kind-linux-amd64 \
+            "https://github.com/kubernetes-sigs/kind/releases/download/$KIND_VERSION/kind-linux-amd64"
+          curl --fail --silent --show-error --location --retry 3 --output kind-linux-amd64.sha256sum \
+            "https://github.com/kubernetes-sigs/kind/releases/download/$KIND_VERSION/kind-linux-amd64.sha256sum"
+          sha256sum -c kind-linux-amd64.sha256sum
+          chmod +x kubectl kind-linux-amd64
+          mv kind-linux-amd64 kind
+          printf '%s\n' "$tools" >> "$GITHUB_PATH"
+          "$tools/kubectl" version --client=true
+          "$tools/kind" version
+      - name: Create owned disposable cluster
+        id: cluster
+        run: |
+          kind create cluster --name "$BINDING_CLUSTER" \
+            --image kindest/node:v1.31.2 --wait 60s
       - name: Install lifecycle test dependencies
         run: |
           pip install -e src/libs/storage-provider-layer -e src/libs/custos-postgres \
@@ -65,8 +88,8 @@ jobs:
           path: ${{ runner.temp }}/binding-evidence.json
           if-no-files-found: warn
       - name: Show failed workload readiness without Secret contents
-        if: failure()
+        if: failure() && steps.cluster.outcome == 'success'
         run: kubectl get pods --all-namespaces -o wide
       - name: Delete owned disposable cluster
-        if: always()
+        if: always() && steps.tools.outcome == 'success'
         run: kind delete cluster --name "$BINDING_CLUSTER"

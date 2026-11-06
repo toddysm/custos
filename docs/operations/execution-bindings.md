@@ -215,7 +215,9 @@ budgets, policy equivalence and operator guards.
 [Hosted lifecycle tests](../../tests/helm/test_execution_bundle_cluster.py)
 use a disposable kind cluster, Helm's actual default Secret storage and actual
 Dapr/Kubernetes permissions with maximum-length nonrepetitive 1,000/1,024
-fixtures. They use a configuration-probe image and no-op migration-hook
+fixtures. The hosted installer downloads pinned kind/kubectl binaries from
+their official release endpoints and verifies SHA-256 checksums before execution.
+They use a configuration-probe image and no-op migration-hook
 fixtures. PostgreSQL state-store and Redis broker use disposable real backends;
 database/broker Secret authority and Dapr/Kubernetes authorization remain real.
 Runtime Manager retains its HTTPS probes and Dapr application protocol using
