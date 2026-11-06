@@ -1,12 +1,15 @@
 """Verify fixture TLS, isolated namespaces and fixed diagnostics without Docker or a cluster."""
 
 import importlib.util
+import json
 import ssl
 import subprocess
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
+import test_execution_bundle_cluster as cluster
 import yaml
 from test_execution_bundle_cluster import (
     DIAGNOSTIC_MARKERS,
@@ -99,9 +102,22 @@ def test_migration_fixture_does_not_open_a_server(
 
 def test_lifecycle_fixtures_isolate_all_namespaces_and_preserve_database_authority(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Two chart renders cannot collide, and actual state-store/DB Secret authority is retained."""
+    """Keep disjoint Namespaces, actual DB authority and backend labels selected by managed policies."""
     namespaces = []
+    backends = []
+
+    def kube(namespace: str, *arguments: str, **options: object) -> str:
+        """Capture backend Pod labels without contacting a cluster."""
+        assert arguments[0] in {"create", "expose", "rollout"}
+        if arguments[0] == "create":
+            payload = options["payload"]
+            assert isinstance(payload, dict)
+            backends.append(payload)
+        return ""
+
+    monkeypatch.setattr(cluster, "kube", kube)
     for namespace in ("binding-files", "binding-bridge"):
         config = settings(namespace, chart_owned=True)
         values = tmp_path / f"{namespace}.yaml"
@@ -155,6 +171,32 @@ def test_lifecycle_fixtures_isolate_all_namespaces_and_preserve_database_authori
             and document["metadata"]["name"] == "custos-dapr-secret-reader"
         )
         assert "custos-app" in reader["rules"][0]["resourceNames"]
+        for resource, port, labels in (
+            ("redis", 6379, {"app.kubernetes.io/name": "redis"}),
+            (
+                "postgres",
+                5432,
+                config["global"]["networkPolicies"]["postgresPodSelector"],
+            ),
+        ):
+            cluster.backend(
+                namespace,
+                f"binding-{resource}",
+                port,
+                {"name": resource},
+                labels=labels,
+            )
+            policy = next(
+                document
+                for document in documents
+                if document["kind"] == "NetworkPolicy"
+                and document["metadata"]["name"] == f"custos-receivers-{resource}"
+            )
+            pod_labels = backends[-1]["spec"]["template"]["metadata"]["labels"]
+            assert all(
+                pod_labels.get(key) == value
+                for key, value in policy["spec"]["podSelector"]["matchLabels"].items()
+            )
     assert namespaces[0].isdisjoint(namespaces[1])
 
 
@@ -170,3 +212,45 @@ def test_workload_diagnostics_emit_only_fixed_categories() -> None:
     assert all(marker in DIAGNOSTIC_MARKERS for marker in markers)
     assert "canary-do-not-print" not in repr(markers)
     assert diagnostic_markers("an unknown message or credential") == []
+
+
+@pytest.mark.parametrize("retained", [False, True])
+def test_release_retirement_waits_for_actual_workloads(
+    monkeypatch: pytest.MonkeyPatch, retained: bool
+) -> None:
+    """Keep cleanup behind real Pod/controller retirement, with a bounded ten-minute wait."""
+    calls: list[tuple[str, ...]] = []
+    delays: list[int] = []
+
+    def kube(namespace: str, *arguments: str) -> str:
+        """Retain a terminating release Pod until its actual inventory is empty."""
+        assert namespace == "binding-files"
+        calls.append(arguments)
+        items = [{"metadata": {"deletionTimestamp": "2026-01-01T00:00:00Z"}}]
+        if not retained and len(calls) > 1:
+            items = []
+        return json.dumps({"items": items})
+
+    monkeypatch.setattr(cluster, "kube", kube)
+    monkeypatch.setattr(time, "sleep", delays.append)
+    if retained:
+        with pytest.raises(pytest.fail.Exception, match="did not retire"):
+            cluster.await_release_retirement("binding-files")
+        assert len(calls) == 120
+        assert sum(delays) == 600
+    else:
+        cluster.await_release_retirement("binding-files")
+        assert len(calls) == 2
+        assert delays == [5]
+    assert all(
+        call
+        == (
+            "get",
+            "pods,deployments,replicasets,statefulsets,daemonsets,jobs,cronjobs",
+            "-l",
+            "app.kubernetes.io/instance=custos",
+            "-o",
+            "json",
+        )
+        for call in calls
+    )

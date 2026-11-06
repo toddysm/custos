@@ -117,6 +117,68 @@ def test_verify_missing_bundle_is_failure(monkeypatch: pytest.MonkeyPatch) -> No
         operator.provision(bundle, create=False)
 
 
+@pytest.mark.parametrize("release", ["a" * 19 + ".b", "a" * 19 + "-b", "a." * 10 + "b"])
+def test_truncated_release_prefix_remains_a_valid_resource_name(release: str) -> None:
+    """Valid Helm release names remain valid after truncation at a dot/hyphen boundary."""
+    bundle = operator.prepare(fixture(1), configuration(), release, "controllers")
+    for resource in bundle["objects"]:
+        assert (
+            operator.name(resource["metadata"]["name"]) == resource["metadata"]["name"]
+        )
+
+
+def test_cli_preserves_actionable_safe_domain_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A real bundle-integrity rejection identifies remediation without dumping registry contents."""
+    config = configuration()
+    bundle = operator.prepare(fixture(1), config, "custos", "controllers")
+    bundle["descriptor"]["sha256"] = "0" * 64
+    artifact = tmp_path / "bundle.json"
+    artifact.write_text(json.dumps(bundle))
+    monkeypatch.setattr(operator, "values", lambda paths: config)
+    monkeypatch.setattr(
+        sys, "argv", ["receiver_bindings.py", "verify", "--bundle", str(artifact)]
+    )
+    with pytest.raises(SystemExit) as failure:
+        operator.main()
+    assert failure.value.code == 1
+    error = capsys.readouterr().err
+    assert "reason=bundle content or deployment/security inputs changed" in error
+    assert "workspaceid-0" not in error
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ValueError("private-canary"),
+        OSError("private-canary"),
+        KeyError("private-canary"),
+    ],
+)
+def test_cli_suppresses_untrusted_exception_details(
+    error: Exception,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Only helper-authored reasons are public; parser/OS/library failures remain sanitized."""
+
+    def values(paths: list[Path]) -> dict[str, Any]:
+        """Raise an untrusted failure that could otherwise disclose file contents."""
+        raise error
+
+    monkeypatch.setattr(operator, "values", values)
+    monkeypatch.setattr(
+        sys, "argv", ["receiver_bindings.py", "verify", "--bundle", "unused"]
+    )
+    with pytest.raises(SystemExit) as failure:
+        operator.main()
+    assert failure.value.code == 1
+    output = capsys.readouterr().err
+    assert f"reason={type(error).__name__}" in output
+    assert "private-canary" not in output
+
+
 def test_dapr_metric_admission_defaults() -> None:
     """Known enabled defaults compare equally; changed metrics/policies remain conflicts."""
     bundle = operator.prepare(fixture(1), configuration(), "custos", "controllers")
@@ -335,7 +397,16 @@ def test_cleanup_inspects_later_helm_release_pages(
 
 
 @pytest.mark.parametrize(
-    "stage", ["pod", "controller", "release", "history", "manifest"]
+    "stage",
+    [
+        "pod",
+        "pod-items",
+        "controller",
+        "controller-items",
+        "release",
+        "history",
+        "manifest",
+    ],
 )
 def test_cleanup_rejects_malformed_retention_inventories(
     stage: str, monkeypatch: pytest.MonkeyPatch
@@ -346,8 +417,12 @@ def test_cleanup_rejects_malformed_retention_inventories(
     def run(command: list[str], payload: Any = None) -> str:
         """Corrupt one required inventory; every mutation is forbidden."""
         if command[:3] == ["kubectl", "get", "pods"]:
+            if stage == "pod-items":
+                return '{"items":["invalid"]}'
             return "{}" if stage == "pod" else '{"items":[]}'
         if command[:2] == ["kubectl", "get"]:
+            if stage == "controller-items":
+                return '{"items":["invalid"]}'
             return "{}" if stage == "controller" else '{"items":[]}'
         if command[:2] == ["helm", "list"]:
             return "{}" if stage == "release" else '[{"name":"custos"}]'
@@ -360,6 +435,69 @@ def test_cleanup_rejects_malformed_retention_inventories(
     monkeypatch.setattr(operator, "run", run)
     with pytest.raises(TypeError, match="invalid"):
         operator.cleanup_resources(bundle, confirmed_no_retained_work=True)
+
+
+@pytest.mark.parametrize("dependency", ["owned", "unrelated", "external"])
+def test_cleanup_checks_live_rolebindings_before_any_delete(
+    monkeypatch: pytest.MonkeyPatch, dependency: str
+) -> None:
+    """Protect externally referenced Roles while allowing deletion of verified own bindings."""
+    bundle = operator.prepare(fixture(1), configuration(), "custos", "controllers")
+    live = {
+        (row["kind"], row["metadata"]["name"]): copy.deepcopy(row)
+        for row in bundle["objects"]
+    }
+    for index, row in enumerate(live.values()):
+        row["metadata"].update(uid=f"uid-{index}", resourceVersion="1")
+    bindings = [
+        copy.deepcopy(row) for row in live.values() if row["kind"] == "RoleBinding"
+    ]
+    if dependency != "owned":
+        extra = copy.deepcopy(bindings[0])
+        extra["metadata"]["name"] = "standalone-reader"
+        if dependency == "unrelated":
+            extra["roleRef"]["name"] = "unrelated-role"
+        bindings.append(extra)
+    writes: list[list[str]] = []
+
+    def run(command: list[str], payload: Any = None) -> str:
+        """Return live authorization dependencies and record every attempted deletion."""
+        if command[:3] == ["kubectl", "get", "pods"]:
+            return '{"items":[]}'
+        if command[:2] == ["kubectl", "get"]:
+            assert command[2].endswith(",rolebindings")
+            return json.dumps({"items": bindings})
+        if command[:2] == ["helm", "list"]:
+            return "[]"
+        if command[:2] == ["kubectl", "delete"]:
+            writes.append(command)
+            return "{}"
+        raise AssertionError(command)
+
+    monkeypatch.setattr(operator, "run", run)
+    monkeypatch.setattr(
+        operator,
+        "get_resource",
+        lambda resource: live[(resource["kind"], resource["metadata"]["name"])],
+    )
+    if dependency == "external":
+        with pytest.raises(ValueError, match="RoleBinding"):
+            operator.cleanup_resources(bundle, confirmed_no_retained_work=True)
+        assert writes == []
+    else:
+        operator.cleanup_resources(bundle, confirmed_no_retained_work=True)
+        assert len(writes) == len(bundle["objects"])
+        paths = [command[3] for command in writes]
+        for binding in bindings[:4]:
+            binding_path = f"/rolebindings/{binding['metadata']['name']}"
+            role_path = f"/roles/{binding['roleRef']['name']}"
+            binding_index = next(
+                i for i, path in enumerate(paths) if path.endswith(binding_path)
+            )
+            role_index = next(
+                i for i, path in enumerate(paths) if path.endswith(role_path)
+            )
+            assert binding_index < role_index
 
 
 def retained_fixture() -> tuple[dict[str, Any], dict[tuple[str, str], dict[str, Any]]]:
@@ -488,7 +626,19 @@ def test_bridge_cleanup_uses_typed_references(
 
 
 @pytest.mark.parametrize(
-    "change", ["none", "missing", "uid", "policy", "owner", "labels", "digest"]
+    "change",
+    [
+        "none",
+        "missing",
+        "uid",
+        "policy",
+        "owner",
+        "labels",
+        "digest",
+        "lifecycle-owner",
+        "terminating",
+        "namespace-owner",
+    ],
 )
 def test_retained_identity_policy_and_namespace_guards(
     change: str,
@@ -513,6 +663,11 @@ def test_retained_identity_policy_and_namespace_guards(
         ] = "privileged"
     elif change == "digest":
         inventory["resources"][0]["sha256"] = "0" * 64
+    elif change in {"lifecycle-owner", "namespace-owner"}:
+        key = ("Namespace", "controllers") if change == "namespace-owner" else role_key
+        live[key]["metadata"]["ownerReferences"] = [{"uid": "garbage-collection-owner"}]
+    elif change == "terminating":
+        live[role_key]["metadata"]["deletionTimestamp"] = "2026-01-01T00:00:00Z"
     monkeypatch.setattr(
         operator,
         "get_resource",
@@ -555,6 +710,105 @@ def test_preparation_rejects_unsupported_helm_transition(
             atomic=operation == "atomic",
             rollback_revision=1 if operation == "native-inline-rollback" else None,
         )
+
+
+@pytest.mark.parametrize("section", [None, [], "private-canary"])
+def test_stored_descriptor_rejects_non_mapping_sections(section: object) -> None:
+    """Malformed retained values fail with a fixed domain reason, never an attribute traceback."""
+    for config in (
+        {"global": section},
+        {"global": {"receiverRuntime": section}},
+        {"global": {"receiverRuntime": {"executionBindingsBundle": section}}},
+    ):
+        with pytest.raises(operator.OperatorValidationError, match="must be mappings"):
+            operator.execution_descriptor(config)
+    assert operator.execution_descriptor({}) == {}
+
+
+@pytest.mark.parametrize(
+    "target", ["deployed-bridge", "superseded-bridge", "file", "no-success"]
+)
+def test_atomic_retry_checks_actual_successful_rollback_target(
+    target: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed file revision cannot hide the inline bridge Helm would choose for atomic rollback."""
+    previous = operator.prepare(fixture(1), configuration(), "custos", "controllers")
+    bundle = operator.prepare(fixture(2), configuration(), "custos", "controllers")
+    requested = []
+
+    def run(command: list[str], payload: Any = None) -> str:
+        """Expose a failed latest revision and forbid every mutation during transition preflight."""
+        if command[:3] == ["kubectl", "get", "namespace"]:
+            return '{"metadata":{"name":"controllers"}}'
+        if command[:2] == ["helm", "list"]:
+            return '[{"name":"custos"}]'
+        if command[:3] == ["helm", "get", "manifest"]:
+            return ""
+        if command[:2] == ["helm", "history"]:
+            assert command[command.index("--max") + 1] == "2147483647"
+            rows = [{"revision": 3, "status": "failed"}]
+            if target == "file":
+                rows.extend(
+                    [
+                        {"revision": 2, "status": "deployed"},
+                        {"revision": 1, "status": "superseded"},
+                    ]
+                )
+            elif target != "no-success":
+                rows.append({"revision": 1, "status": target.split("-")[0]})
+            return json.dumps(rows)
+        if command[:3] == ["helm", "get", "values"]:
+            requested.append(int(command[command.index("--revision") + 1]))
+            config = configuration()
+            if target == "file":
+                config["global"]["receiverRuntime"]["executionBindingsBundle"] = (
+                    previous["descriptor"]
+                )
+            return json.dumps(config)
+        raise AssertionError("atomic preflight must not mutate resources")
+
+    monkeypatch.setattr(operator, "run", run)
+    if target == "file":
+        operator.transition_preflight(bundle, atomic=True)
+        assert requested == [2]
+    else:
+        with pytest.raises(ValueError, match="prohibited|successful"):
+            operator.transition_preflight(bundle, atomic=True)
+        assert requested == ([] if target == "no-success" else [1])
+
+
+@pytest.mark.parametrize("field", ["ownerReferences", "deletionTimestamp"])
+def test_bridge_cleanup_rejects_lifecycle_ownership(
+    field: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kept Helm objects cannot be treated as retained while another lifecycle can delete them."""
+    inventory, live = retained_fixture()
+    role = next(row for row in live.values() if row["kind"] == "Role")
+    role["metadata"][field] = (
+        [{"uid": "garbage-collection-owner"}]
+        if field == "ownerReferences"
+        else "2026-01-01T00:00:00Z"
+    )
+    writes = []
+
+    def run(command: list[str], payload: Any = None) -> str:
+        """Return no work references but prohibit deletion of any policy."""
+        if command[:2] == ["kubectl", "get"]:
+            return '{"items":[]}'
+        if command[:2] == ["helm", "list"]:
+            return "[]"
+        writes.append(command)
+        raise AssertionError("lifecycle ownership must prevent every deletion")
+
+    monkeypatch.setattr(operator, "run", run)
+    monkeypatch.setattr(
+        operator,
+        "get_resource",
+        lambda resource: live[(resource["kind"], resource["metadata"]["name"])],
+    )
+    with pytest.raises(ValueError, match="ownership"):
+        operator.cleanup_resources(inventory, confirmed_no_retained_work=True)
+    assert writes == []
 
 
 @pytest.mark.parametrize("size", [1_000_000, 1_000_001])

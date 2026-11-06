@@ -40,6 +40,10 @@ class OperatorCommandError(ValueError):
     """A failed operator subprocess carrying only a safe tool/operation/exit summary."""
 
 
+class OperatorValidationError(ValueError):
+    """A helper-authored rejection with a safe fixed message, never raw input or parser details."""
+
+
 def canonical(value: Any) -> bytes:
     """Encode deterministic JSON for digests and Kubernetes requests."""
     return json.dumps(
@@ -58,7 +62,7 @@ def name(value: str) -> str:
         )
         is None
     ):
-        raise ValueError("invalid deployment resource name")
+        raise OperatorValidationError("invalid deployment resource name")
     return value
 
 
@@ -95,21 +99,25 @@ def prepare(
     name(release)
     name(namespace)
     if len(release) > 53 or len(namespace) > 63 or "." in namespace:
-        raise ValueError("invalid Helm release or namespace length")
+        raise OperatorValidationError("invalid Helm release or namespace length")
     if len(raw) > 1_000_000:
-        raise ValueError("execution binding file exceeds 1000000 bytes")
+        raise OperatorValidationError("execution binding file exceeds 1000000 bytes")
     digest = hashlib.sha256(raw).hexdigest()
     # Apply the production semantic parser after this source's independent cap.
     bindings = ExecutionBindings.from_file_bytes(raw)
     if not bindings.bindings:
-        raise ValueError("managed bundle requires explicit execution bindings")
+        raise OperatorValidationError(
+            "managed bundle requires explicit execution bindings"
+        )
     runtime = config["global"]["receiverRuntime"]
     database = name(runtime["databaseSecret"])
     broker = name(config["dapr"]["components"]["pubsub"]["redis"]["passwordSecret"])
     secrets = sorted({name(row.secret_ref) for row in bindings.bindings})
     for row in bindings.bindings:
         if re.fullmatch(r"[-._a-zA-Z0-9]+", row.secret_key) is None:
-            raise ValueError("execution Secret key is not Kubernetes-compatible")
+            raise OperatorValidationError(
+                "execution Secret key is not Kubernetes-compatible"
+            )
     callers = json.loads((CHART / "files/receiver-callers.json").read_text())
     inputs: dict[str, Any] = {
         "sha256": digest,
@@ -123,7 +131,7 @@ def prepare(
         },
     }
     bundle_digest = hashlib.sha256(canonical(inputs)).hexdigest()
-    prefix = f"{release[:20].rstrip('-')}-exec-{bundle_digest[:20]}"
+    prefix = f"{release[:20].rstrip('.-')}-exec-{bundle_digest[:20]}"
     objects: list[dict[str, Any]] = [
         {
             "apiVersion": "v1",
@@ -292,8 +300,23 @@ def verify_bundle(bundle: dict[str, Any], config: dict[str, Any]) -> dict[str, A
     raw = cm["data"]["bindings.json"].encode()
     expected = prepare(raw, config, bundle["release"], bundle["namespace"])
     if expected != bundle:
-        raise ValueError("bundle content or deployment/security inputs changed")
+        raise OperatorValidationError(
+            "bundle content or deployment/security inputs changed"
+        )
     return expected
+
+
+def execution_descriptor(config: Any) -> dict[str, Any]:
+    """Read stored binding values, preserving omitted inline paths and rejecting non-mapping sections."""
+    for key in ("global", "receiverRuntime", "executionBindingsBundle"):
+        if not isinstance(config, dict):
+            raise OperatorValidationError(
+                "retained Helm binding values must be mappings"
+            )
+        config = config.get(key, {})
+    if not isinstance(config, dict):
+        raise OperatorValidationError("retained Helm binding values must be mappings")
+    return config
 
 
 def transition_preflight(
@@ -309,9 +332,9 @@ def transition_preflight(
     annotations = ns["metadata"].get("annotations", {})
     owner = annotations.get("meta.helm.sh/release-name")
     if owner and owner != bundle["release"]:
-        raise ValueError("namespace is owned by a different Helm release")
+        raise OperatorValidationError("namespace is owned by a different Helm release")
     if ns["metadata"].get("deletionTimestamp") or ns["metadata"].get("ownerReferences"):
-        raise ValueError("namespace has an unprotected lifecycle owner")
+        raise OperatorValidationError("namespace has an unprotected lifecycle owner")
     releases = json.loads(
         run(
             [
@@ -329,11 +352,13 @@ def transition_preflight(
     )
     if not releases:
         if owner or rollback_revision is not None:
-            raise ValueError("namespace retention requires verified owning release")
+            raise OperatorValidationError(
+                "namespace retention requires verified owning release"
+            )
         return
     if rollback_revision is not None:
         if rollback_revision < 1:
-            raise ValueError("rollback revision must be positive")
+            raise OperatorValidationError("rollback revision must be positive")
         target = json.loads(
             run(
                 [
@@ -350,13 +375,9 @@ def transition_preflight(
                 ]
             )
         )
-        descriptor = (
-            target.get("global", {})
-            .get("receiverRuntime", {})
-            .get("executionBindingsBundle")
-        )
+        descriptor = execution_descriptor(target)
         if not descriptor or descriptor != bundle["descriptor"]:
-            raise ValueError(
+            raise OperatorValidationError(
                 "native inline bridge rollback is prohibited; verify a retained file target"
             )
     manifest = run(["helm", "get", "manifest", bundle["release"], "-n", namespace])
@@ -381,24 +402,82 @@ def transition_preflight(
         and not namespace_docs
         and annotations.get("helm.sh/resource-policy") != "keep"
     ):
-        raise ValueError("namespace owner retention is not established")
+        raise OperatorValidationError("namespace owner retention is not established")
     if legacy and len(legacy) != 12:
-        raise ValueError("incomplete legacy authorization bridge")
+        raise OperatorValidationError("incomplete legacy authorization bridge")
     if legacy and atomic:
-        raise ValueError("atomic first file migration is prohibited")
+        raise OperatorValidationError("atomic first file migration is prohibited")
+    if atomic:
+        history = json.loads(
+            run(
+                [
+                    "helm",
+                    "history",
+                    bundle["release"],
+                    "-n",
+                    namespace,
+                    "--max",
+                    "2147483647",
+                    "-o",
+                    "json",
+                ]
+            )
+        )
+        if not isinstance(history, list) or not all(
+            isinstance(row, dict)
+            and type(row.get("revision")) is int
+            and row["revision"] > 0
+            for row in history
+        ):
+            raise TypeError("invalid Helm revision inventory")
+        successful = [
+            row for row in history if row.get("status") in {"deployed", "superseded"}
+        ]
+        if not successful:
+            raise OperatorValidationError(
+                "atomic upgrade requires a successful retained file predecessor"
+            )
+        revision = max(successful, key=lambda row: row["revision"])["revision"]
+        target = json.loads(
+            run(
+                [
+                    "helm",
+                    "get",
+                    "values",
+                    bundle["release"],
+                    "-n",
+                    namespace,
+                    "--revision",
+                    str(revision),
+                    "-o",
+                    "json",
+                ]
+            )
+        )
+        descriptor = execution_descriptor(target)
+        if not isinstance(descriptor, dict) or set(descriptor) != set(
+            bundle["descriptor"]
+        ):
+            raise OperatorValidationError(
+                "atomic rollback to an inline bridge is prohibited"
+            )
     if inventory is not None:
         if (inventory.get("release"), inventory.get("namespace")) != (
             bundle["release"],
             namespace,
         ):
-            raise ValueError("bridge inventory belongs to a different deployment")
+            raise OperatorValidationError(
+                "bridge inventory belongs to a different deployment"
+            )
         verify_retained(inventory)
     if legacy:
         if inventory is None or (
             inventory.get("release"),
             inventory.get("namespace"),
         ) != (bundle["release"], namespace):
-            raise ValueError("first migration requires recorded bridge inventory")
+            raise OperatorValidationError(
+                "first migration requires recorded bridge inventory"
+            )
         recorded = {
             (row["resource"]["kind"], row["resource"]["metadata"]["name"]): row
             for row in inventory["resources"]
@@ -408,29 +487,37 @@ def transition_preflight(
             doc["metadata"].get("annotations", {}).get("helm.sh/resource-policy")
             != "keep"
         ):
-            raise ValueError("stored Helm manifest lacks required retention bridge")
+            raise OperatorValidationError(
+                "stored Helm manifest lacks required retention bridge"
+            )
         if doc["kind"] == "Namespace":
             live = ns
         else:
             live = get_resource(doc)
         if live is None or effective(live) != effective(doc):
-            raise ValueError("legacy bridge live content differs from stored release")
+            raise OperatorValidationError(
+                "legacy bridge live content differs from stored release"
+            )
         if doc["kind"] == "Namespace" and any(
             live["metadata"].get("labels", {}).get(key) != value
             for key, value in doc["metadata"].get("labels", {}).items()
         ):
-            raise ValueError("namespace security labels changed")
+            raise OperatorValidationError("namespace security labels changed")
         if not live["metadata"].get("uid"):
-            raise ValueError("retained resource identity is missing")
+            raise OperatorValidationError("retained resource identity is missing")
         live_metadata = live["metadata"]
         live_annotations = live_metadata.get("annotations", {})
         if (
-            live_annotations.get("meta.helm.sh/release-name") != bundle["release"]
+            live_metadata.get("ownerReferences")
+            or live_metadata.get("deletionTimestamp")
+            or live_annotations.get("meta.helm.sh/release-name") != bundle["release"]
             or live_annotations.get("meta.helm.sh/release-namespace") != namespace
             or live_metadata.get("labels", {}).get("app.kubernetes.io/managed-by")
             != "Helm"
         ):
-            raise ValueError("legacy resource has conflicting Helm ownership")
+            raise OperatorValidationError(
+                "legacy resource has conflicting Helm ownership"
+            )
         if legacy:
             row = recorded.get((doc["kind"], doc["metadata"]["name"]))
             if (
@@ -438,7 +525,7 @@ def transition_preflight(
                 or row["uid"] != live["metadata"]["uid"]
                 or effective(row["resource"]) != effective(doc)
             ):
-                raise ValueError(
+                raise OperatorValidationError(
                     "retained resource differs from recorded bridge inventory"
                 )
 
@@ -462,17 +549,18 @@ def provision(
             if (
                 effective(live) != effective(resource)
                 or live["metadata"].get("ownerReferences")
+                or live["metadata"].get("deletionTimestamp")
                 or live["metadata"]
                 .get("annotations", {})
                 .get("meta.helm.sh/release-name")
             ):
-                raise ValueError(
+                raise OperatorValidationError(
                     "existing bundle resource conflicts; no overwrite allowed"
                 )
         elif create:
             missing.append(resource)
         else:
-            raise ValueError("required bundle resource is missing")
+            raise OperatorValidationError("required bundle resource is missing")
     for resource in missing:
         run(
             ["kubectl", "create", "--dry-run=server", "-f", "-", "-o", "json"], resource
@@ -481,7 +569,9 @@ def provision(
         run(["kubectl", "create", "-f", "-", "-o", "json"], resource)
         live = get_resource(resource)
         if live is None or effective(live) != effective(resource):
-            raise ValueError(f"created bundle {resource['kind']} could not be verified")
+            raise OperatorValidationError(
+                f"created bundle {resource['kind']} could not be verified"
+            )
 
 
 def reconcile_source(
@@ -503,14 +593,14 @@ def reconcile_source(
         if entry["name"] not in SOURCE_ENVS
     ] + [entry for entry in target_container["env"] if entry["name"] in SOURCE_ENVS]
     if any(entry["name"] in FILE_ENVS for entry in old_container["env"]):
-        raise ValueError("bridge template still selects file mode")
+        raise OperatorValidationError("bridge template still selects file mode")
     inline = [
         entry
         for entry in old_container["env"]
         if entry["name"] == "CUSTOS_EXECUTION_BINDINGS"
     ]
     if len(inline) != 1:
-        raise ValueError("bridge requires exactly one inline source")
+        raise OperatorValidationError("bridge requires exactly one inline source")
     ExecutionBindings.from_json(inline[0]["value"])
     for owner, key in ((old_container, "volumeMounts"), (desired["spec"], "volumes")):
         if key in owner:
@@ -593,7 +683,7 @@ def bridge_resources(
         or (doc["kind"] == "Namespace" and doc["metadata"]["name"] == namespace)
     ]
     if len([doc for doc in resources if doc["kind"] != "Namespace"]) != 12:
-        raise ValueError(
+        raise OperatorValidationError(
             "bridge must contain all twelve legacy authorization resources"
         )
     for doc in resources:
@@ -601,7 +691,9 @@ def bridge_resources(
             doc["metadata"].get("annotations", {}).get("helm.sh/resource-policy")
             != "keep"
         ):
-            raise ValueError("bridge stored manifest lacks retention annotations")
+            raise OperatorValidationError(
+                "bridge stored manifest lacks retention annotations"
+            )
     return resources
 
 
@@ -627,7 +719,7 @@ def rendered_bridge(
 def artifact_digests(chart: Path, paths: list[Path]) -> dict[str, Any]:
     """Bind recovery to a packaged chart and ordered complete values without storing their data."""
     if not chart.is_file() or not paths:
-        raise ValueError(
+        raise OperatorValidationError(
             "bridge requires a saved chart archive and complete values files"
         )
     return {
@@ -651,7 +743,9 @@ def record_bridge(
     rendered = rendered_bridge(chart, paths, release, namespace)
     target = bridge_resources(rendered, release, namespace)
     if [effective(doc) for doc in stored] != [effective(doc) for doc in target]:
-        raise ValueError("saved bridge artifact/values differ from stored Helm release")
+        raise OperatorValidationError(
+            "saved bridge artifact/values differ from stored Helm release"
+        )
     for service in CONSUMERS:
         deployment_name = f"{release}-{service}"[:63].rstrip("-")
         original = next(
@@ -667,27 +761,35 @@ def record_bridge(
             and row["metadata"]["name"] == deployment_name
         )
         if effective(original) != effective(desired):
-            raise ValueError("saved bridge deployment differs from stored release")
+            raise OperatorValidationError(
+                "saved bridge deployment differs from stored release"
+            )
     records = []
     for doc in stored:
         live = get_resource(doc)
         if live is None or effective(live) != effective(doc):
-            raise ValueError("bridge live resources differ from stored manifest")
+            raise OperatorValidationError(
+                "bridge live resources differ from stored manifest"
+            )
         if doc["kind"] == "Namespace" and any(
             live["metadata"].get("labels", {}).get(key) != value
             for key, value in doc["metadata"].get("labels", {}).items()
         ):
-            raise ValueError(
+            raise OperatorValidationError(
                 "bridge namespace security labels differ from stored manifest"
             )
         metadata = live["metadata"]
         annotations = metadata.get("annotations", {})
         if (
-            annotations.get("meta.helm.sh/release-name") != release
+            metadata.get("ownerReferences")
+            or metadata.get("deletionTimestamp")
+            or annotations.get("meta.helm.sh/release-name") != release
             or annotations.get("meta.helm.sh/release-namespace") != namespace
             or metadata.get("labels", {}).get("app.kubernetes.io/managed-by") != "Helm"
         ):
-            raise ValueError("bridge resource has conflicting Helm ownership")
+            raise OperatorValidationError(
+                "bridge resource has conflicting Helm ownership"
+            )
         records.append(
             {
                 "resource": doc,
@@ -700,7 +802,7 @@ def record_bridge(
         run(["helm", "history", release, "-n", namespace, "-o", "json"])
     )
     if not history or history[-1]["status"] != "deployed":
-        raise ValueError("bridge revision must be successfully deployed")
+        raise OperatorValidationError("bridge revision must be successfully deployed")
     return {
         "release": release,
         "namespace": namespace,
@@ -721,27 +823,29 @@ def verify_retained(inventory: dict[str, Any]) -> None:
             hashlib.sha256(canonical(effective(record["resource"]))).hexdigest()
             != record["sha256"]
         ):
-            raise ValueError("retained bridge content digest changed")
+            raise OperatorValidationError("retained bridge content digest changed")
         live = get_resource(record["resource"])
         if (
             live is None
             or live["metadata"]["uid"] != record["uid"]
             or effective(live) != effective(record["resource"])
         ):
-            raise ValueError("retained bridge identity/policy changed")
+            raise OperatorValidationError("retained bridge identity/policy changed")
         metadata = live["metadata"]
         annotations = metadata.get("annotations", {})
         if (
-            annotations.get("meta.helm.sh/release-name") != release
+            metadata.get("ownerReferences")
+            or metadata.get("deletionTimestamp")
+            or annotations.get("meta.helm.sh/release-name") != release
             or annotations.get("meta.helm.sh/release-namespace") != namespace
             or metadata.get("labels", {}).get("app.kubernetes.io/managed-by") != "Helm"
         ):
-            raise ValueError("retained bridge ownership changed")
+            raise OperatorValidationError("retained bridge ownership changed")
         if (
             live["kind"] == "Namespace"
             and metadata.get("labels", {}) != record["labels"]
         ):
-            raise ValueError("retained namespace labels changed")
+            raise OperatorValidationError("retained namespace labels changed")
 
 
 def recover_bridge(inventory: dict[str, Any], chart: Path, paths: list[Path]) -> None:
@@ -752,14 +856,14 @@ def recover_bridge(inventory: dict[str, Any], chart: Path, paths: list[Path]) ->
     required. No force, ownership bypass, atomic rollback or recreation is used.
     """
     if artifact_digests(chart, paths) != inventory["artifacts"]:
-        raise ValueError("bridge recovery artifacts changed")
+        raise OperatorValidationError("bridge recovery artifacts changed")
     release, namespace = inventory["release"], inventory["namespace"]
     docs = rendered_bridge(chart, paths, release, namespace)
     expected = bridge_resources(docs, release, namespace)
     if [effective(row["resource"]) for row in inventory["resources"]] != [
         effective(doc) for doc in expected
     ]:
-        raise ValueError("bridge resource inventory changed")
+        raise OperatorValidationError("bridge resource inventory changed")
     verify_retained(inventory)
     for service in CONSUMERS:
         print(
@@ -824,7 +928,7 @@ def recover_bridge(inventory: dict[str, Any], chart: Path, paths: list[Path]) ->
                 hashlib.sha256(raw).hexdigest()
                 != env["CUSTOS_EXECUTION_BINDINGS_SHA256"]["value"]
             ):
-                raise ValueError("live file snapshot digest mismatch")
+                raise OperatorValidationError("live file snapshot digest mismatch")
             current = ExecutionBindings.from_file_bytes(raw)
         else:
             current = ExecutionBindings.from_json(
@@ -832,7 +936,7 @@ def recover_bridge(inventory: dict[str, Any], chart: Path, paths: list[Path]) ->
             )
         for binding in current.bindings:
             if registry.resolve(binding.identity) != binding:
-                raise ValueError(
+                raise OperatorValidationError(
                     "inline recovery cannot preserve current identity references"
                 )
         patch = reconcile_source(live, target)
@@ -864,7 +968,9 @@ def recover_bridge(inventory: dict[str, Any], chart: Path, paths: list[Path]) ->
             )
         )
         if source_fields(updated) != source_fields(target):
-            raise ValueError(f"recovery source verification failed for {service}")
+            raise OperatorValidationError(
+                f"recovery source verification failed for {service}"
+            )
     command = [
         "helm",
         "upgrade",
@@ -914,7 +1020,9 @@ def recover_bridge(inventory: dict[str, Any], chart: Path, paths: list[Path]) ->
             and row["metadata"]["name"] == deployment_name
         )
         if source_fields(current) != source_fields(target):
-            raise ValueError(f"recovery source changed after upgrade for {service}")
+            raise OperatorValidationError(
+                f"recovery source changed after upgrade for {service}"
+            )
     verify_retained(inventory)
 
 
@@ -994,21 +1102,25 @@ def cleanup_resources(
 ) -> None:
     """Delete only an unused verified bundle after explicit retained-work attestation.
 
-    All Pods, controllers and every revision of every paginated release must
-    be free of typed resource references.
+    All Pods, controllers, other live RoleBindings and every revision of every
+    paginated release must be free of typed resource references.
     This does not query durable work stores: the operator must first establish
     and explicitly attest that no retained work needs these identities. The
     Namespace is never eligible. UID/resource-version delete preconditions
     refuse concurrent replacement instead of deleting a different object.
     """
     if not confirmed_no_retained_work:
-        raise ValueError("cleanup requires explicit no-retained-work confirmation")
+        raise OperatorValidationError(
+            "cleanup requires explicit no-retained-work confirmation"
+        )
     namespace = bundle["namespace"]
     records = bundle.get("resources")
     resources = bundle.get("objects")
     if resources is None:
         if not isinstance(records, list):
-            raise ValueError("cleanup requires a verified bundle or bridge inventory")
+            raise OperatorValidationError(
+                "cleanup requires a verified bundle or bridge inventory"
+            )
         bridge_resources(
             [row["resource"] for row in records], bundle["release"], namespace
         )
@@ -1016,18 +1128,22 @@ def cleanup_resources(
             row["resource"] for row in records if row["resource"]["kind"] != "Namespace"
         ]
     if any(row["kind"] == "Namespace" for row in resources):
-        raise ValueError("namespace cleanup is prohibited")
+        raise OperatorValidationError("namespace cleanup is prohibited")
     pods = json.loads(run(["kubectl", "get", "pods", "-n", namespace, "-o", "json"]))
-    if not isinstance(pods, dict) or not isinstance(pods.get("items"), list):
+    if (
+        not isinstance(pods, dict)
+        or not isinstance(pods.get("items"), list)
+        or not all(isinstance(row, dict) for row in pods["items"])
+    ):
         raise TypeError("invalid Pod inventory")
     if references_resources(pods, resources, namespace):
-        raise ValueError("bundle is referenced by a live or retained Pod")
+        raise OperatorValidationError("bundle is referenced by a live or retained Pod")
     controllers = json.loads(
         run(
             [
                 "kubectl",
                 "get",
-                "deployments,replicasets,statefulsets,daemonsets,jobs,cronjobs",
+                "deployments,replicasets,statefulsets,daemonsets,jobs,cronjobs,rolebindings",
                 "-n",
                 namespace,
                 "-o",
@@ -1035,12 +1151,32 @@ def cleanup_resources(
             ]
         )
     )
-    if not isinstance(controllers, dict) or not isinstance(
-        controllers.get("items"), list
+    if (
+        not isinstance(controllers, dict)
+        or not isinstance(controllers.get("items"), list)
+        or not all(isinstance(row, dict) for row in controllers["items"])
     ):
         raise TypeError("invalid workload controller inventory")
+    owned_bindings = {
+        row["metadata"]["name"] for row in resources if row["kind"] == "RoleBinding"
+    }
+    remaining = []
+    for row in controllers["items"]:
+        if row.get("kind") == "RoleBinding":
+            metadata = row.get("metadata")
+            if not isinstance(metadata, dict):
+                raise TypeError("invalid RoleBinding inventory")
+            if (
+                metadata.get("namespace", namespace) == namespace
+                and metadata.get("name") in owned_bindings
+            ):
+                continue
+        remaining.append(row)
+    controllers["items"] = remaining
     if references_resources(controllers, resources, namespace):
-        raise ValueError("bundle is referenced by a retained workload controller")
+        raise OperatorValidationError(
+            "bundle is referenced by a retained workload controller or RoleBinding"
+        )
     offset = 0
     while True:
         releases = json.loads(
@@ -1099,7 +1235,7 @@ def cleanup_resources(
                     if not isinstance(document, dict):
                         raise TypeError("invalid retained Helm manifest")
                     if references_resources(document, resources, namespace):
-                        raise ValueError(
+                        raise OperatorValidationError(
                             "bundle is referenced by a retained Helm revision"
                         )
         if len(releases) < 256:
@@ -1109,7 +1245,7 @@ def cleanup_resources(
     for resource in resources:
         live = get_resource(resource)
         if live is None or effective(live) != effective(resource):
-            raise ValueError(
+            raise OperatorValidationError(
                 "cleanup resource missing or changed; no deletion performed"
             )
         if records is not None:
@@ -1120,21 +1256,29 @@ def cleanup_resources(
                 and row["resource"]["metadata"]["name"] == resource["metadata"]["name"]
             )
             if live["metadata"]["uid"] != record["uid"]:
-                raise ValueError("retained bridge resource identity changed")
+                raise OperatorValidationError(
+                    "retained bridge resource identity changed"
+                )
             annotations = live["metadata"].get("annotations", {})
             if (
-                annotations.get("meta.helm.sh/release-name") != bundle["release"]
+                live["metadata"].get("ownerReferences")
+                or live["metadata"].get("deletionTimestamp")
+                or annotations.get("meta.helm.sh/release-name") != bundle["release"]
                 or annotations.get("meta.helm.sh/release-namespace") != namespace
                 or live["metadata"]
                 .get("labels", {})
                 .get("app.kubernetes.io/managed-by")
                 != "Helm"
             ):
-                raise ValueError("retained bridge cleanup ownership changed")
-        elif live["metadata"].get("ownerReferences") or live["metadata"].get(
-            "annotations", {}
-        ).get("meta.helm.sh/release-name"):
-            raise ValueError("bundle cleanup ownership changed")
+                raise OperatorValidationError(
+                    "retained bridge cleanup ownership changed"
+                )
+        elif (
+            live["metadata"].get("deletionTimestamp")
+            or live["metadata"].get("ownerReferences")
+            or live["metadata"].get("annotations", {}).get("meta.helm.sh/release-name")
+        ):
+            raise OperatorValidationError("bundle cleanup ownership changed")
         live_resources.append(live)
     endpoints = {
         "ConfigMap": "/api/v1",
@@ -1203,7 +1347,7 @@ def main() -> None:
         config = values(args.values)
         if args.operation == "prepare":
             if args.registry is None:
-                raise ValueError("prepare requires --registry")
+                raise OperatorValidationError("prepare requires --registry")
             path = args.registry.resolve()
             raw = read_execution_snapshot(str(path))
             result = prepare(raw, config, args.release, args.namespace)
@@ -1238,7 +1382,9 @@ def main() -> None:
             )
         elif args.operation == "cleanup-bridge":
             if not args.acknowledge_paused_drained:
-                raise ValueError("cleanup requires paused/drained acknowledgment")
+                raise OperatorValidationError(
+                    "cleanup requires paused/drained acknowledgment"
+                )
             cleanup_resources(
                 json.loads(args.bundle.read_text()),
                 confirmed_no_retained_work=args.confirm_no_retained_work,
@@ -1246,7 +1392,7 @@ def main() -> None:
             print("Execution bridge: obsolete policies removed; namespace retained")
         elif args.operation in {"record-bridge", "recover"}:
             if args.bridge_chart is None or not args.acknowledge_paused_drained:
-                raise ValueError(
+                raise OperatorValidationError(
                     "bridge operation requires saved chart and paused/drained acknowledgment"
                 )
             if args.operation == "record-bridge":
@@ -1274,7 +1420,9 @@ def main() -> None:
             )
             if args.operation == "cleanup":
                 if not args.acknowledge_paused_drained:
-                    raise ValueError("cleanup requires paused/drained acknowledgment")
+                    raise OperatorValidationError(
+                        "cleanup requires paused/drained acknowledgment"
+                    )
                 cleanup_resources(
                     bundle, confirmed_no_retained_work=args.confirm_no_retained_work
                 )
@@ -1301,7 +1449,9 @@ def main() -> None:
     ) as exc:
         # Parser/OS/tool exceptions can embed file contents/paths; never print them.
         reason = (
-            str(exc) if isinstance(exc, OperatorCommandError) else type(exc).__name__
+            str(exc)
+            if isinstance(exc, (OperatorCommandError, OperatorValidationError))
+            else type(exc).__name__
         )
         print(
             f"Execution bundle: rejected (operation={args.operation}; reason={reason}); admission remains paused; no fallback",

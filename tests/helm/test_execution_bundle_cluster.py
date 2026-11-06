@@ -182,9 +182,15 @@ def settings(namespace: str, *, chart_owned: bool = False) -> dict[str, Any]:
 
 
 def backend(
-    namespace: str, resource_name: str, port: int, container: dict[str, Any]
+    namespace: str,
+    resource_name: str,
+    port: int,
+    container: dict[str, Any],
+    *,
+    labels: dict[str, str],
 ) -> None:
-    """Create one disposable backend and wait for its actual readiness in the owned namespace."""
+    """Create a ready backend selected by the unchanged chart's explicit network allow rules."""
+    selector = {"app": resource_name, **labels}
     kube(
         namespace,
         "create",
@@ -196,9 +202,9 @@ def backend(
             "metadata": {"name": resource_name},
             "spec": {
                 "replicas": 1,
-                "selector": {"matchLabels": {"app": resource_name}},
+                "selector": {"matchLabels": selector},
                 "template": {
-                    "metadata": {"labels": {"app": resource_name}},
+                    "metadata": {"labels": selector},
                     "spec": {
                         "containers": [
                             {**container, "ports": [{"containerPort": port}]}
@@ -325,6 +331,7 @@ def foundation(namespace: str, config: dict[str, Any], tmp_path: Path) -> str:
                 "limits": {"cpu": "500m", "memory": "512Mi"},
             },
         },
+        labels=config["global"]["networkPolicies"]["postgresPodSelector"],
     )
     backend(
         namespace,
@@ -335,6 +342,7 @@ def foundation(namespace: str, config: dict[str, Any], tmp_path: Path) -> str:
             "image": "redis:7-alpine",
             "args": ["--requirepass", refs["custos-redis-auth"]["redis-password"]],
         },
+        labels={"app.kubernetes.io/name": "redis"},
     )
     uid = json.loads(command(["kubectl", "get", "namespace", namespace, "-o", "json"]))[
         "metadata"
@@ -566,6 +574,27 @@ def restart_container(namespace: str, pod: dict[str, Any], container: str) -> No
     pytest.fail("original Pod container failed to restart")
 
 
+def await_release_retirement(namespace: str) -> None:
+    """Wait for actual release Pods/controllers to retire without shortening Dapr shutdown."""
+    for _ in range(120):
+        inventory = json.loads(
+            kube(
+                namespace,
+                "get",
+                "pods,deployments,replicasets,statefulsets,daemonsets,jobs,cronjobs",
+                "-l",
+                "app.kubernetes.io/instance=custos",
+                "-o",
+                "json",
+            )
+        )
+        assert isinstance(inventory, dict) and isinstance(inventory.get("items"), list)
+        if not inventory["items"]:
+            return
+        time.sleep(5)
+    pytest.fail("retained release workloads did not retire before cleanup")
+
+
 @pytest.fixture(scope="module")
 def packaged_chart(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Refuse any cluster except the explicitly named hosted kind and save the exact chart archive."""
@@ -766,12 +795,24 @@ def test_actual_maximum_storage_and_file_rollback(
     command(
         ["helm", "uninstall", "custos", "-n", namespace, "--wait", "--timeout", "5m"]
     )
+    await_release_retirement(namespace)
     assert (
         json.loads(command(["kubectl", "get", "namespace", namespace, "-o", "json"]))[
             "metadata"
         ]["uid"]
         == namespace_uid
     )
+    standalone = copy.deepcopy(
+        next(row for row in bundles[0]["objects"] if row["kind"] == "RoleBinding")
+    )
+    standalone["metadata"] = {
+        "name": "retained-execution-reader",
+        "namespace": namespace,
+    }
+    command(["kubectl", "create", "-f", "-"], standalone)
+    with pytest.raises(ValueError, match="RoleBinding"):
+        operator.cleanup_resources(bundles[0], confirmed_no_retained_work=True)
+    kube(namespace, "delete", "rolebinding", standalone["metadata"]["name"])
     for bundle in bundles:
         operator.provision(bundle, create=False)
         assert object_uids(bundle["objects"]) == {
@@ -786,6 +827,7 @@ def test_actual_maximum_storage_and_file_rollback(
         helm_secret_data_bytes=sizes,
         file_rollback_reused_and_recreated=True,
         operator_namespace_uninstall_survived=True,
+        standalone_rolebinding_retained_role=True,
         changed_default_kept_original_identity=True,
     )
 
@@ -907,6 +949,7 @@ def test_actual_inline_bridge_timeout_recovery(
     command(
         ["helm", "uninstall", "custos", "-n", namespace, "--wait", "--timeout", "5m"]
     )
+    await_release_retirement(namespace)
     for record in inventory["resources"]:
         live = operator.get_resource(record["resource"])
         assert live is not None and live["metadata"]["uid"] == record["uid"]

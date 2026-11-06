@@ -78,6 +78,10 @@ file upgrade, or `--rollback-revision N` when planning a native rollback.
 The helper rejects atomic first migration and native inline bridge targets;
 rollback targets must match the verified retained file descriptor. These
 arguments validate a plan, not execute Helm. Do not bypass a failed preflight.
+Atomic preflight inspects the latest deployed/superseded history target, not
+only the latest (possibly failed) manifest. An atomic retry remains prohibited
+while that target is the inline bridge. Verify the retained rollback bundle
+with `--rollback-revision N` before an atomic file-to-file upgrade.
 
 Deploy with the compact descriptor and the complete deployment/security
 values. Each consumer mounts `/custos/execution/bindings.json` read-only,
@@ -167,6 +171,8 @@ ServiceAccount the union of explicitly named retained Secrets. Audit that
 overlap. Keep each bundle and legacy policy while any Pod, supported retained
 Helm revision or retained work needs it, including across uninstall. Old
 ReplicaSets and other retained workload controllers count as references too.
+Standalone RoleBindings that reference a bundle Role also prevent cleanup;
+only the verified RoleBindings being deleted with that bundle are excluded.
 
 After pausing/draining, proving no retained work needs the identities and
 retiring all referencing Pods/controllers/Helm history, explicitly clean up:
@@ -188,6 +194,17 @@ Cleanup refuses live/retained references, missing/changed policies and changed
 ownership. Individual deletes require the verified unique identifier and
 resource version. Partial/concurrent failure stops explicitly; preserve the
 remaining inventory for diagnosis. **Cleanup never deletes the Namespace.**
+Helm uninstall completion does not prove that terminating Pods have retired.
+Wait for actual Pod/controller retirement before cleanup; do not shorten
+production drain or shutdown budgets to bypass this retention check.
+Bridge recording, verification and cleanup reject owner references and
+terminating objects: Helm's keep annotation cannot prevent owner-driven
+garbage collection.
+
+Helper-authored validation failures include a fixed actionable reason
+(for example, `bundle content or deployment/security inputs changed`).
+Raw parser, filesystem and subprocess details remain suppressed; inspect
+the reported operation and tool exit status without exposing credentials.
 
 ## Validation scope
 
