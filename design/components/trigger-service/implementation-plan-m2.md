@@ -270,8 +270,15 @@ rollback cannot recover live retained resources absent from the current
 manifest: prohibit native file-to-bridge rollback and `--atomic` first
 migration. Recover using a new `helm upgrade` revision with the exact bridge
 chart/complete values and `--reset-values --wait`; verify matching ownership,
-unchanged object identifiers/policy and all consumers. Test failed first-file
-rollout recovery and refusal of wrong ownership or incompatible/oversized inline
+unchanged object identifiers/policy and all consumers. Before recovery Helm
+runs, reconcile each live Deployment's managed source settings to the verified
+bridge rendering using resource-version-tested targeted patches: restore inline
+and Dapr config, remove all file/digest environments and file-only mounts/
+volumes/digest annotations, and preserve unrelated fields/resources. Resetting
+values alone does not remove live-only fields after a failed upgrade.
+Force a first-file rollout to update live Deployments and then time out under
+`--wait`; prove reconciliation/recovery yields one valid source and readiness.
+Test concurrent/partial-patch refusal, wrong ownership and incompatible/oversized inline
 recovery; never force, bypass ownership or delete/recreate. File-to-file native
 rollback remains covered. Fresh file
 installs and ordinary inline deployments do not need this migration opt-in.

@@ -1312,7 +1312,25 @@ complete bridge values, with `--reset-values --wait` and an explicit timeout.
 Do not use `--reuse-values`, `--force`, ownership bypass or delete/recreate.
 Beforehand verify the chart/values digests, source compatibility, retained
 identities and all 12 live resources' original content, unique identifiers and
-matching Helm release-name/namespace/managed-by metadata. The
+matching Helm release-name/namespace/managed-by metadata.
+
+Before invoking the recovery upgrade, the helper must reconcile each of the
+four **live Deployment Pod templates** to the verified bridge's managed
+source settings. After a timed-out `--wait`, Helm may use the still-deployed
+bridge as its original manifest, so `--reset-values` alone does not remove
+file-only fields present only in the live objects. Derive the target from the
+verified bridge rendering; restore its inline/enabled entries and Dapr config
+annotation, remove **all** file/digest environment entries (not empty them), and
+remove only the file mode's named volume/mounts and digest annotations absent
+from the bridge. Preserve unrelated operator fields and every external/legacy
+resource. Use targeted, resource-version-tested patches; do not replace whole
+templates, delete/recreate Deployments or blindly overwrite concurrent changes.
+Validate the resulting managed field set exactly before continuing. Conflict,
+partial reconciliation or failure keeps admission paused and reports the
+affected consumer; retries must re-read/revalidate, not assume all four patches
+succeeded. Old Pods are not edited in place; normal rollout replaces them.
+
+The
 [normal upgrade path](https://github.com/helm/helm/blob/v3.16.2/pkg/action/upgrade.go)
 checks that ownership and includes the existing resources in its update set,
 unlike native rollback. Mismatch aborts recovery; never overwrite another
@@ -1444,7 +1462,12 @@ configuration/provisioning docs and these tests:
    usable, denied Secrets stay denied, and original identities survive.
    Exercise a same-identity small-registry **recovery upgrade** to the retained
    bridge with Helm 3.16.2, unchanged object identifiers/policies, and repeat
-   file migration. Include failed first-file-rollout recovery and refusal of
+   file migration. Force a first-file upgrade to update the live Deployments
+   and then time out under `--wait`; reconcile live managed source fields and
+   recover from the still-deployed bridge manifest. Assert exactly one source,
+   no stale file/digest environments, mounts or annotations, preserved
+   unrelated fields, readiness and actual old-sidecar authorization. Cover
+   concurrent-patch refusal and partial reconciliation, plus refusal of
    native bridge rollback, atomic first migration, conflicting ownership and
    incompatible/oversized inline recovery.
    Test the retention flag's type/mode guards, missing/changed legacy objects,
