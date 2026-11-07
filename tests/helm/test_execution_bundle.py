@@ -948,6 +948,167 @@ def test_recovery_checks_the_complete_render_before_live_access(
 
 
 @pytest.mark.parametrize(
+    "change",
+    [
+        "none",
+        "missing-owner",
+        "foreign-release",
+        "foreign-release-namespace",
+        "foreign-resource-namespace",
+        "manager",
+        "lifecycle-owner",
+        "terminating",
+    ],
+)
+@pytest.mark.parametrize("consumer", [0, 3])
+def test_recovery_checks_all_deployment_owners_before_any_patch(
+    change: str, consumer: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Even a foreign last consumer prevents patching any earlier owned Deployment."""
+    inventory, retained = retained_fixture()
+    config = bridge_configuration()
+    docs = [
+        row
+        for row in yaml.safe_load_all(render("connected-eval", config).stdout)
+        if row
+    ]
+    deployments = {
+        row["metadata"]["name"]: copy.deepcopy(row)
+        for row in docs
+        if row["kind"] == "Deployment"
+    }
+    for deployment in deployments.values():
+        metadata = deployment["metadata"]
+        metadata["namespace"] = "controllers"
+        metadata["uid"] = metadata["name"] + "-uid"
+        metadata["resourceVersion"] = "1"
+        metadata.setdefault("labels", {})["app.kubernetes.io/managed-by"] = "Helm"
+        metadata.setdefault("annotations", {}).update(
+            {
+                "meta.helm.sh/release-name": "custos",
+                "meta.helm.sh/release-namespace": "controllers",
+            }
+        )
+    metadata = deployments[f"custos-{operator.CONSUMERS[consumer]}"]["metadata"]
+    if change == "missing-owner":
+        metadata["annotations"].pop("meta.helm.sh/release-name")
+    elif change == "foreign-release":
+        metadata["annotations"]["meta.helm.sh/release-name"] = "another"
+    elif change == "foreign-release-namespace":
+        metadata["annotations"]["meta.helm.sh/release-namespace"] = "another"
+    elif change == "foreign-resource-namespace":
+        metadata["namespace"] = "another"
+    elif change == "manager":
+        metadata["labels"]["app.kubernetes.io/managed-by"] = "another"
+    elif change == "lifecycle-owner":
+        metadata["ownerReferences"] = [{"uid": "another-controller"}]
+    elif change == "terminating":
+        metadata["deletionTimestamp"] = "2026-01-01T00:00:00Z"
+    chart = tmp_path / "saved.tgz"
+    chart.write_bytes(b"synthetic saved chart archive")
+    path = tmp_path / "values.yaml"
+    path.write_text(yaml.safe_dump(config))
+    inventory["artifacts"] = operator.artifact_digests(chart, [path])
+    reads: list[str] = []
+    writes: list[list[str]] = []
+
+    def run(command: list[str], payload: Any = None) -> str:
+        """Emulate Helm-owned bridge state; record reconciliation without touching a cluster."""
+        if command[:2] == ["helm", "template"]:
+            return yaml.safe_dump_all(docs)
+        if command[:3] == ["kubectl", "get", "deployment"]:
+            reads.append(command[3])
+            return json.dumps(deployments[command[3]])
+        if command[:2] in (["kubectl", "patch"], ["helm", "upgrade"]):
+            writes.append(command)
+            return "{}"
+        if command[:3] == ["kubectl", "rollout", "status"]:
+            return ""
+        raise AssertionError("unexpected recovery command")
+
+    monkeypatch.setattr(operator, "run", run)
+    monkeypatch.setattr(
+        operator,
+        "get_resource",
+        lambda resource: retained[(resource["kind"], resource["metadata"]["name"])],
+    )
+    if change == "none":
+        operator.recover_bridge(inventory, chart, [path])
+        assert len(writes) == 5
+        assert reads[:4] == [f"custos-{service}" for service in operator.CONSUMERS]
+    else:
+        with pytest.raises(
+            operator.OperatorValidationError, match="ownership|namespace"
+        ):
+            operator.recover_bridge(inventory, chart, [path])
+        assert writes == []
+
+
+@pytest.mark.parametrize("source", ["bundle", "bridge"])
+@pytest.mark.parametrize("kind", ["Configuration", "Role", "RoleBinding"])
+def test_cleanup_rejects_cross_namespace_resources_before_any_api_read(
+    source: str, kind: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A mixed-namespace artifact cannot use one namespace's retention scan for another."""
+    if source == "bridge":
+        inventory, _ = retained_fixture()
+        resources = [row["resource"] for row in inventory["resources"]]
+    else:
+        inventory = operator.prepare(
+            fixture(1), configuration(), "custos", "controllers"
+        )
+        resources = inventory["objects"]
+    resource = next(row for row in resources if row["kind"] == kind)
+    resource["metadata"]["namespace"] = "another"
+    reads: list[list[str]] = []
+    writes: list[list[str]] = []
+
+    def get_resource(resource: dict[str, Any]) -> dict[str, Any]:
+        """Expose matching live content with valid ownership, despite the wrong namespace."""
+        reads.append(["get", resource["kind"], resource["metadata"]["name"]])
+        live = copy.deepcopy(resource)
+        live["metadata"]["uid"] = next(
+            (
+                row["uid"]
+                for row in inventory.get("resources", [])
+                if row["resource"] == resource
+            ),
+            "synthetic-uid",
+        )
+        live["metadata"]["resourceVersion"] = "1"
+        if source == "bridge":
+            live["metadata"].setdefault("labels", {})[
+                "app.kubernetes.io/managed-by"
+            ] = "Helm"
+            live["metadata"].setdefault("annotations", {}).update(
+                {
+                    "meta.helm.sh/release-name": "custos",
+                    "meta.helm.sh/release-namespace": "controllers",
+                }
+            )
+        return live
+
+    def run(command: list[str], payload: Any = None) -> str:
+        """Return empty requested-namespace inventories and record all forbidden deletes."""
+        if command[:2] == ["kubectl", "delete"]:
+            writes.append(command)
+            return "{}"
+        reads.append(command)
+        if command[:2] == ["kubectl", "get"]:
+            return '{"items":[]}'
+        if command[:2] == ["helm", "list"]:
+            return "[]"
+        raise AssertionError("unexpected cleanup command")
+
+    monkeypatch.setattr(operator, "get_resource", get_resource)
+    monkeypatch.setattr(operator, "run", run)
+    with pytest.raises(operator.OperatorValidationError, match="namespace"):
+        operator.cleanup_resources(inventory, confirmed_no_retained_work=True)
+    assert reads == []
+    assert writes == []
+
+
+@pytest.mark.parametrize(
     "reference", ["collision", "resource", "configuration", "role"]
 )
 @pytest.mark.parametrize("source", ["manifest", "hooks"])

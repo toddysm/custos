@@ -160,7 +160,9 @@ The helper first verifies saved artifacts and the complete recovery rendering
 against the recorded digest, including non-consumer services and hooks. A
 changed image, metadata, resource or hook aborts before live reconciliation.
 It then verifies original object identities/policies and
-ownership, checks that current configured identity references fit the bridge,
+ownership, checks all four live Deployments' Helm release name, release
+namespace, managed-by label and lifecycle metadata before any patch, and
+checks that current configured identity references fit the bridge,
 then reconciles each live Deployment's managed source fields with a
 resource-version-tested patch. It removes file/digest environments, mounts,
 volumes and annotations, restores the bridge source/Dapr Configuration, and
@@ -210,8 +212,10 @@ its stored hook still needs the bundle during rollback.
 It distinguishes resource kinds and actual configuration/map/Role references
 from unrelated same-named objects, such as receiver NetworkPolicies.
 Cleanup refuses live/retained references, missing/changed policies and changed
-ownership. Individual deletes require the verified unique identifier and
-resource version. Partial/concurrent failure stops explicitly; preserve the
+ownership. Every namespaced bundle or bridge resource must belong to the
+controller Namespace being scanned; mixed-namespace inventories are rejected
+before any live API read or deletion. Individual deletes require the verified
+unique identifier and resource version. Partial/concurrent failure stops explicitly; preserve the
 remaining inventory for diagnosis. **Cleanup never deletes the Namespace.**
 Helm uninstall completion does not prove that terminating Pods have retired.
 Wait for actual Pod/controller retirement before cleanup; do not shorten

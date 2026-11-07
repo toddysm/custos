@@ -66,6 +66,17 @@ def name(value: str) -> str:
     return value
 
 
+def require_namespace(
+    resource: dict[str, Any], namespace: str, *, allow_implicit: bool = False
+) -> None:
+    """Reject foreign namespaces; rendered manifests may inherit Helm's release namespace."""
+    if (
+        resource["metadata"].get("namespace", namespace if allow_implicit else None)
+        != namespace
+    ):
+        raise OperatorValidationError("resource belongs to a different namespace")
+
+
 def merge(base: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:
     """Merge Helm mapping overrides; lists/scalars replace rather than concatenate."""
     result = copy.deepcopy(base)
@@ -684,7 +695,7 @@ def source_fields(deployment: dict[str, Any]) -> dict[str, Any]:
 def bridge_resources(
     docs: list[dict[str, Any]], release: str, namespace: str
 ) -> list[dict[str, Any]]:
-    """Select exactly twelve legacy policies and any chart-owned controller Namespace."""
+    """Select twelve controller-namespace legacy policies and any chart-owned Namespace."""
     resources = [
         doc
         for doc in docs
@@ -703,6 +714,8 @@ def bridge_resources(
             "bridge must contain all twelve legacy authorization resources"
         )
     for doc in resources:
+        if doc["kind"] != "Namespace":
+            require_namespace(doc, namespace)
         if (
             doc["metadata"].get("annotations", {}).get("helm.sh/resource-policy")
             != "keep"
@@ -902,6 +915,28 @@ def verify_retained(inventory: dict[str, Any]) -> None:
             raise OperatorValidationError("retained namespace labels changed")
 
 
+def verify_recovery_deployment(
+    deployment: dict[str, Any], deployment_name: str, release: str, namespace: str
+) -> None:
+    """Reject foreign, terminating or controller-owned live Deployments before recovery."""
+    require_namespace(deployment, namespace)
+    metadata = deployment["metadata"]
+    annotations = metadata.get("annotations", {})
+    if (
+        deployment.get("apiVersion") != "apps/v1"
+        or deployment.get("kind") != "Deployment"
+        or metadata.get("name") != deployment_name
+        or metadata.get("ownerReferences")
+        or metadata.get("deletionTimestamp")
+        or annotations.get("meta.helm.sh/release-name") != release
+        or annotations.get("meta.helm.sh/release-namespace") != namespace
+        or metadata.get("labels", {}).get("app.kubernetes.io/managed-by") != "Helm"
+    ):
+        raise OperatorValidationError(
+            "recovery Deployment identity or ownership changed"
+        )
+
+
 def recover_bridge(inventory: dict[str, Any], chart: Path, paths: list[Path]) -> None:
     """Reconcile managed live fields then recover via an ownership-checked normal upgrade.
 
@@ -909,6 +944,8 @@ def recover_bridge(inventory: dict[str, Any], chart: Path, paths: list[Path]) ->
     all resolve through the inline target; otherwise file-aware recovery is
     required. The complete recovery render, including non-consumers and hooks,
     must match the recorded bridge digest before any live reconciliation.
+    All four live Deployment owners and identity references are checked before
+    the first patch; resource-version tests reject changes after that preflight.
     No force, ownership bypass, atomic rollback or recreation is used.
     """
     if artifact_digests(chart, paths) != inventory["artifacts"]:
@@ -925,11 +962,8 @@ def recover_bridge(inventory: dict[str, Any], chart: Path, paths: list[Path]) ->
     ]:
         raise OperatorValidationError("bridge resource inventory changed")
     verify_retained(inventory)
+    planned: list[tuple[str, dict[str, Any], list[dict[str, Any]]]] = []
     for service in CONSUMERS:
-        print(
-            f"Execution bridge: reconciling {service}; admission remains paused",
-            file=sys.stderr,
-        )
         deployment_name = f"{release}-{service}"[:63].rstrip("-")
         target = next(
             doc
@@ -937,6 +971,7 @@ def recover_bridge(inventory: dict[str, Any], chart: Path, paths: list[Path]) ->
             if doc["kind"] == "Deployment"
             and doc["metadata"]["name"] == deployment_name
         )
+        require_namespace(target, namespace, allow_implicit=True)
         live = json.loads(
             run(
                 [
@@ -951,6 +986,7 @@ def recover_bridge(inventory: dict[str, Any], chart: Path, paths: list[Path]) ->
                 ]
             )
         )
+        verify_recovery_deployment(live, deployment_name, release, namespace)
         env = {
             row["name"]: row
             for row in live["spec"]["template"]["spec"]["containers"][0]["env"]
@@ -999,7 +1035,13 @@ def recover_bridge(inventory: dict[str, Any], chart: Path, paths: list[Path]) ->
                 raise OperatorValidationError(
                     "inline recovery cannot preserve current identity references"
                 )
-        patch = reconcile_source(live, target)
+        planned.append((service, target, reconcile_source(live, target)))
+    for service, target, patch in planned:
+        print(
+            f"Execution bridge: reconciling {service}; admission remains paused",
+            file=sys.stderr,
+        )
+        deployment_name = target["metadata"]["name"]
         run(
             [
                 "kubectl",
@@ -1027,6 +1069,7 @@ def recover_bridge(inventory: dict[str, Any], chart: Path, paths: list[Path]) ->
                 ]
             )
         )
+        verify_recovery_deployment(updated, deployment_name, release, namespace)
         if source_fields(updated) != source_fields(target):
             raise OperatorValidationError(
                 f"recovery source verification failed for {service}"
@@ -1073,6 +1116,7 @@ def recover_bridge(inventory: dict[str, Any], chart: Path, paths: list[Path]) ->
                 ]
             )
         )
+        verify_recovery_deployment(current, deployment_name, release, namespace)
         target = next(
             row
             for row in docs
@@ -1189,6 +1233,8 @@ def cleanup_resources(
         ]
     if any(row["kind"] == "Namespace" for row in resources):
         raise OperatorValidationError("namespace cleanup is prohibited")
+    for resource in resources:
+        require_namespace(resource, namespace)
     pods = json.loads(run(["kubectl", "get", "pods", "-n", namespace, "-o", "json"]))
     if (
         not isinstance(pods, dict)
