@@ -1,7 +1,9 @@
 """Execution-aware startup never silently substitutes in-memory or Noop collaborators."""
 
+import hashlib
 import json
 from collections.abc import Mapping
+from pathlib import Path
 
 import pytest
 from custos_callctx import CallContextVerifier
@@ -129,3 +131,40 @@ async def test_component_construction_failure_closes_opened_metadata_pool(
     with pytest.raises(ValueError, match="execution configuration failed"):
         await app_module._resolve_run_components(None)
     assert closed == [pool]
+
+
+@pytest.mark.parametrize("valid", [False, True])
+def test_file_source_at_actual_startup(
+    valid: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_run_components: RunComponents,
+) -> None:
+    """The actual factory validates one snapshot before readiness and rejects invalid bytes."""
+    env = execution_env()
+    raw = env.pop("CUSTOS_EXECUTION_BINDINGS").encode()
+    path = tmp_path / "bindings.json"
+    path.write_bytes(raw)
+    env["CUSTOS_EXECUTION_BINDINGS_FILE"] = str(path)
+    env["CUSTOS_EXECUTION_BINDINGS_SHA256"] = hashlib.sha256(raw).hexdigest() if valid else "0" * 64
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("CUSTOS_EXECUTION_BINDINGS", raising=False)
+    verifier = CallContextVerifier(jwks_url="http://auth/.well-known/jwks.json")
+    if not valid:
+        with pytest.raises(ValueError, match="SHA-256 mismatch"):
+            app_module.create_app(
+                run_components=fake_run_components,
+                execution_verifier=verifier,
+                app_api_token="test-app-token",
+                trigger_namespace="test",
+            )
+    else:
+        app = app_module.create_app(
+            run_components=fake_run_components,
+            execution_verifier=verifier,
+            app_api_token="test-app-token",
+            trigger_namespace="test",
+        )
+        with TestClient(app) as client:
+            assert client.get("/readyz").status_code == 200

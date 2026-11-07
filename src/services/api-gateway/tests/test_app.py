@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from custos_pg import PgMetadataAdapter
@@ -47,6 +50,48 @@ def test_readyz_503_before_ready_then_200_after(
 def test_settings_attached_to_app_state(settings: Settings) -> None:
     app = create_app(settings=settings)
     assert app.state.settings is settings
+
+
+@pytest.mark.parametrize("valid", [False, True])
+def test_execution_file_before_gateway_readiness(
+    valid: bool,
+    settings: Settings,
+    auth_client: FakeAuthServiceClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Validate managed ingress's pinned registry before opening transports or admission."""
+    raw = json.dumps(
+        {
+            "bindings": [
+                {
+                    "workspaceId": "ws",
+                    "principalId": "executor",
+                    "bindingId": "one",
+                    "secretRef": "source",
+                    "secretKey": "token",
+                }
+            ],
+            "defaults": {"ws": "one"},
+        }
+    ).encode()
+    path = tmp_path / "bindings.json"
+    path.write_bytes(raw)
+    monkeypatch.setenv("CUSTOS_EXECUTION_IDENTITY_ENABLED", "true")
+    monkeypatch.delenv("CUSTOS_EXECUTION_BINDINGS", raising=False)
+    monkeypatch.setenv("CUSTOS_EXECUTION_BINDINGS_FILE", str(path))
+    monkeypatch.setenv(
+        "CUSTOS_EXECUTION_BINDINGS_SHA256", hashlib.sha256(raw).hexdigest() if valid else "0" * 64
+    )
+    app = create_app(settings=settings, auth_client=auth_client)
+    if valid:
+        with TestClient(app) as client:
+            assert client.get("/readyz").status_code == 200
+            assert app.state.execution_bindings.select("ws").principal_id == "executor"
+    else:
+        with pytest.raises(ValueError, match="SHA-256 mismatch"), TestClient(app):
+            pytest.fail("invalid snapshot opened Gateway admission")
+        assert app.state.ready is False
 
 
 @pytest.mark.parametrize("failure", [None, "migration", "backend"])

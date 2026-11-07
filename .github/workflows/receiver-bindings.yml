@@ -1,0 +1,95 @@
+name: receiver-bindings
+
+on:
+  pull_request:
+    paths:
+      - 'deploy/helm/**'
+      - 'scripts/receiver_bindings.py'
+      - 'src/libs/custos-callctx/**'
+      - 'tests/helm/**'
+      - '.github/workflows/receiver-bindings.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lifecycle:
+    name: kind binding storage and recovery (Helm 3.16.2)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CUSTOS_BINDING_KIND: "true"
+      BINDING_CLUSTER: custos-bindings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install verified kind and kubectl
+        id: tools
+        env:
+          KIND_VERSION: v0.24.0
+          KUBECTL_VERSION: v1.31.2
+        run: |
+          tools="$RUNNER_TEMP/binding-tools"
+          mkdir -p "$tools"
+          cd "$tools"
+          curl --fail --silent --show-error --location --retry 3 --output kubectl \
+            "https://dl.k8s.io/release/$KUBECTL_VERSION/bin/linux/amd64/kubectl"
+          curl --fail --silent --show-error --location --retry 3 --output kubectl.sha256 \
+            "https://dl.k8s.io/release/$KUBECTL_VERSION/bin/linux/amd64/kubectl.sha256"
+          echo "$(cat kubectl.sha256)  kubectl" | sha256sum -c
+          curl --fail --silent --show-error --location --retry 3 --output kind-linux-amd64 \
+            "https://github.com/kubernetes-sigs/kind/releases/download/$KIND_VERSION/kind-linux-amd64"
+          curl --fail --silent --show-error --location --retry 3 --output kind-linux-amd64.sha256sum \
+            "https://github.com/kubernetes-sigs/kind/releases/download/$KIND_VERSION/kind-linux-amd64.sha256sum"
+          sha256sum -c kind-linux-amd64.sha256sum
+          chmod +x kubectl kind-linux-amd64
+          mv kind-linux-amd64 kind
+          printf '%s\n' "$tools" >> "$GITHUB_PATH"
+          "$tools/kubectl" version --client=true
+          "$tools/kind" version
+      - name: Create owned disposable cluster
+        id: cluster
+        run: |
+          kind create cluster --name "$BINDING_CLUSTER" \
+            --image kindest/node:v1.31.2 --wait 60s
+      - name: Install lifecycle test dependencies
+        run: |
+          pip install -e src/libs/storage-provider-layer -e src/libs/custos-postgres \
+            -e src/libs/custos-callctx -e src/libs/custos-cel \
+            -e src/services/auth-service -e src/services/workflow-service -e tests/helm
+          helm dependency build deploy/helm/custos
+      - name: Install actual Dapr control plane and Gateway schemas
+        run: |
+          kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.1.0/standard-install.yaml
+          helm repo add dapr https://dapr.github.io/helm-charts/
+          helm upgrade --install dapr dapr/dapr --version 1.18.9 \
+            --namespace dapr-system --create-namespace --set global.mtls.enabled=true \
+            --wait --timeout 5m
+      - name: Build and load configuration probe
+        run: |
+          docker build -f tests/helm/binding_probe/Dockerfile -t custos-binding-probe:tested .
+          kind load docker-image custos-binding-probe:tested --name "$BINDING_CLUSTER"
+      - name: Actual Helm Secret-storage and lifecycle tests
+        env:
+          BINDING_REPORT: ${{ runner.temp }}/binding-evidence.json
+        run: pytest -q -s tests/helm/test_execution_bundle_cluster.py
+      - name: Upload bounded evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: binding-lifecycle-evidence
+          path: ${{ runner.temp }}/binding-evidence.json
+          if-no-files-found: warn
+      - name: Show failed workload readiness without Secret contents
+        if: failure() && steps.cluster.outcome == 'success'
+        run: kubectl get pods --all-namespaces -o wide
+      - name: Delete owned disposable cluster
+        if: always() && steps.tools.outcome == 'success'
+        run: kind delete cluster --name "$BINDING_CLUSTER"

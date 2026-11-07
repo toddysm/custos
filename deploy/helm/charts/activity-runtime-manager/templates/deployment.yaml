@@ -36,6 +36,9 @@ spec:
         runAsGroup: 1000
         fsGroup: 1000
       volumes:
+        {{- if $receiver.executionBindingsBundle }}
+        {{- include "custos.executionVolume" . | nindent 8 }}
+        {{- end }}
         - name: runtime-tls
           secret:
             secretName: {{ $receiver.tlsSecret | quote }}
@@ -57,6 +60,9 @@ spec:
           {{- if $receiver.enabled }}
           command: ["python", "-m", "custos_arm"]
           volumeMounts:
+            {{- if $receiver.executionBindingsBundle }}
+            {{- include "custos.executionMount" . | nindent 12 }}
+            {{- end }}
             - name: runtime-tls
               mountPath: /custos/tls
               readOnly: true
