@@ -1131,11 +1131,17 @@ def recover_bridge(inventory: dict[str, Any], chart: Path, paths: list[Path]) ->
 
 
 def references_resources(
-    document: Any, resources: list[dict[str, Any]], namespace: str
+    document: Any,
+    resources: list[dict[str, Any]],
+    namespace: str,
+    *,
+    source_namespace: str | None = None,
 ) -> bool:
     """Find managed identities and actual Kubernetes/Dapr references, not name substrings.
 
     Walk workload templates and List items while preserving their namespace.
+    Unqualified documents inherit their release's source namespace, or the
+    target namespace for live inventories; explicit namespaces override it.
     A same-named resource of a different kind/group is not a dependency.
     """
     identities = {
@@ -1198,7 +1204,9 @@ def references_resources(
                 return True
         return any(referenced(value, current_namespace) for value in node.values())
 
-    return referenced(document, namespace)
+    return referenced(
+        document, namespace if source_namespace is None else source_namespace
+    )
 
 
 def cleanup_resources(
@@ -1207,7 +1215,8 @@ def cleanup_resources(
     """Delete only an unused verified bundle after explicit retained-work attestation.
 
     All Pods, controllers, other live RoleBindings and the manifests and hooks
-    of every revision of every paginated release must be free of typed references.
+    of every revision of every paginated release across all namespaces must be
+    free of typed references.
     This does not query durable work stores: the operator must first establish
     and explicitly attest that no retained work needs these identities. The
     Namespace is never eligible. UID/resource-version delete preconditions
@@ -1291,8 +1300,7 @@ def cleanup_resources(
                     "helm",
                     "list",
                     "--all",
-                    "-n",
-                    namespace,
+                    "--all-namespaces",
                     "--max",
                     "256",
                     "--offset",
@@ -1305,14 +1313,22 @@ def cleanup_resources(
         if not isinstance(releases, list):
             raise TypeError("invalid Helm release inventory")
         for current in releases:
+            if (
+                not isinstance(current, dict)
+                or not isinstance(current.get("name"), str)
+                or not isinstance(current.get("namespace"), str)
+            ):
+                raise TypeError("invalid Helm release inventory")
+            release_name = name(current["name"])
+            release_namespace = name(current["namespace"])
             history = json.loads(
                 run(
                     [
                         "helm",
                         "history",
-                        current["name"],
+                        release_name,
                         "-n",
-                        namespace,
+                        release_namespace,
                         "--max",
                         "2147483647",
                         "-o",
@@ -1329,9 +1345,9 @@ def cleanup_resources(
                             "helm",
                             "get",
                             source,
-                            current["name"],
+                            release_name,
                             "-n",
-                            namespace,
+                            release_namespace,
                             "--revision",
                             str(revision["revision"]),
                         ]
@@ -1341,7 +1357,12 @@ def cleanup_resources(
                             continue
                         if not isinstance(document, dict):
                             raise TypeError(f"invalid retained Helm {source}")
-                        if references_resources(document, resources, namespace):
+                        if references_resources(
+                            document,
+                            resources,
+                            namespace,
+                            source_namespace=release_namespace,
+                        ):
                             raise OperatorValidationError(
                                 "bundle is referenced by a retained Helm revision"
                             )

@@ -430,7 +430,7 @@ def test_cleanup_refuses_retained_references(
         if command[:2] == ["kubectl", "get"]:
             return json.dumps({"items": [pod] if reference == "controller" else []})
         if command[:2] == ["helm", "list"]:
-            return '[{"name":"custos"}]'
+            return '[{"name":"custos","namespace":"controllers"}]'
         if command[:2] == ["helm", "history"]:
             return '[{"revision":1},{"revision":2},{"revision":3}]'
         if command[:3] == ["helm", "get", "manifest"]:
@@ -472,17 +472,25 @@ def test_cleanup_inspects_later_helm_release_pages(
         if command[:2] == ["kubectl", "get"]:
             return '{"items":[]}'
         if command[:2] == ["helm", "list"]:
+            assert "--all-namespaces" in command
             assert command[command.index("--max") + 1] == "256"
             offset = int(command[command.index("--offset") + 1])
             pages.append(offset)
             return json.dumps(
-                [{"name": f"release-{index}"} for index in range(256)]
+                [
+                    {"name": f"release-{index}", "namespace": "controllers"}
+                    for index in range(256)
+                ]
                 if offset == 0
-                else [{"name": "last-release"}]
+                else [{"name": "last-release", "namespace": "release-storage"}]
             )
         if command[:2] == ["helm", "history"]:
+            assert command[command.index("-n") + 1] == (
+                "release-storage" if command[2] == "last-release" else "controllers"
+            )
             return '[{"revision":1}]' if command[2] == "last-release" else "[]"
         if command[:3] in (["helm", "get", "manifest"], ["helm", "get", "hooks"]):
+            assert command[command.index("-n") + 1] == "release-storage"
             return yaml.safe_dump(bundle["objects"][0]) if command[2] == source else ""
         writes.append(command)
         raise AssertionError("deletion must not precede the complete history scan")
@@ -492,6 +500,105 @@ def test_cleanup_inspects_later_helm_release_pages(
         operator.cleanup_resources(bundle, confirmed_no_retained_work=True)
     assert pages == [0, 256]
     assert writes == []
+
+
+@pytest.mark.parametrize("source", ["manifest", "hooks"])
+@pytest.mark.parametrize("resource_namespace", [None, "controllers", "unrelated"])
+def test_cleanup_scans_other_release_namespaces_with_correct_defaults(
+    source: str, resource_namespace: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Other release namespaces retain explicit controller references, not implicit lookalikes."""
+    bundle = operator.prepare(fixture(1), configuration(), "custos", "controllers")
+    document: dict[str, Any] = {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {"name": "retained-hook"},
+        "spec": {
+            "template": {
+                "spec": {
+                    "volumes": [
+                        {"configMap": {"name": bundle["descriptor"]["configMapName"]}}
+                    ]
+                }
+            }
+        },
+    }
+    if resource_namespace is not None:
+        document["metadata"]["namespace"] = resource_namespace
+    histories: list[tuple[str, str]] = []
+    writes: list[list[str]] = []
+
+    def run(command: list[str], payload: Any = None) -> str:
+        """Store same-named releases in two namespaces with a dependency in an older revision."""
+        if command[:2] == ["kubectl", "get"]:
+            return '{"items":[]}'
+        if command[:2] == ["kubectl", "delete"]:
+            writes.append(command)
+            return "{}"
+        if command[:2] == ["helm", "list"]:
+            assert "--all-namespaces" in command and "-n" not in command
+            return (
+                '[{"name":"custos","namespace":"controllers"},'
+                '{"name":"custos","namespace":"release-storage"}]'
+            )
+        namespace = command[command.index("-n") + 1]
+        if command[:2] == ["helm", "history"]:
+            histories.append((command[2], namespace))
+            return (
+                '[{"revision":1},{"revision":2}]'
+                if namespace == "release-storage"
+                else "[]"
+            )
+        if command[:3] in (["helm", "get", "manifest"], ["helm", "get", "hooks"]):
+            assert namespace == "release-storage"
+            return (
+                yaml.safe_dump(document)
+                if command[2] == source and command[-1] == "1"
+                else ""
+            )
+        raise AssertionError("unexpected cleanup command")
+
+    def get_resource(resource: dict[str, Any]) -> dict[str, Any]:
+        """Return the otherwise unused target bundle with guarded deletion metadata."""
+        live = copy.deepcopy(resource)
+        live["metadata"].update(uid="synthetic-uid", resourceVersion="1")
+        return live
+
+    monkeypatch.setattr(operator, "run", run)
+    monkeypatch.setattr(operator, "get_resource", get_resource)
+    if resource_namespace == "controllers":
+        with pytest.raises(operator.OperatorValidationError, match="retained Helm"):
+            operator.cleanup_resources(bundle, confirmed_no_retained_work=True)
+        assert writes == []
+    else:
+        operator.cleanup_resources(bundle, confirmed_no_retained_work=True)
+        assert len(writes) == len(bundle["objects"])
+    assert histories == [("custos", "controllers"), ("custos", "release-storage")]
+
+
+@pytest.mark.parametrize(
+    "release",
+    [{"name": "custos"}, {"name": "custos", "namespace": None}, "not-a-release"],
+)
+def test_cleanup_rejects_missing_release_namespace(
+    release: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Malformed all-namespace release metadata cannot fall back to the controller namespace."""
+    bundle = operator.prepare(fixture(1), configuration(), "custos", "controllers")
+
+    def run(command: list[str], payload: Any = None) -> str:
+        """Expose one invalid release row; history reads and all mutations are forbidden."""
+        if command[:2] == ["kubectl", "get"]:
+            return '{"items":[]}'
+        if command[:2] == ["helm", "list"]:
+            return json.dumps([release])
+        raise AssertionError(
+            "invalid release metadata must stop before history or deletion"
+        )
+
+    monkeypatch.setattr(operator, "run", run)
+    with pytest.raises(TypeError, match="invalid Helm release inventory"):
+        operator.cleanup_resources(bundle, confirmed_no_retained_work=True)
 
 
 @pytest.mark.parametrize(
@@ -524,7 +631,11 @@ def test_cleanup_rejects_malformed_retention_inventories(
                 return '{"items":["invalid"]}'
             return "{}" if stage == "controller" else '{"items":[]}'
         if command[:2] == ["helm", "list"]:
-            return "{}" if stage == "release" else '[{"name":"custos"}]'
+            return (
+                "{}"
+                if stage == "release"
+                else ('[{"name":"custos","namespace":"controllers"}]')
+            )
         if command[:2] == ["helm", "history"]:
             return "{}" if stage == "history" else '[{"revision":1}]'
         if command[:3] == ["helm", "get", "manifest"]:
@@ -1166,7 +1277,7 @@ def test_bridge_cleanup_uses_typed_references(
         if command[:2] == ["kubectl", "get"]:
             return '{"items":[]}'
         if command[:2] == ["helm", "list"]:
-            return '[{"name":"custos"}]'
+            return '[{"name":"custos","namespace":"controllers"}]'
         if command[:2] == ["helm", "history"]:
             return '[{"revision":2}]'
         if command[:3] in (["helm", "get", "manifest"], ["helm", "get", "hooks"]):

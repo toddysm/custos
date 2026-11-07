@@ -205,10 +205,16 @@ python scripts/receiver_bindings.py cleanup-bridge \
   --acknowledge-paused-drained --confirm-no-retained-work
 ```
 
-Cleanup inspects every page of Helm releases and every retained revision.
+Cleanup inspects every page of Helm releases across all namespaces and every
+retained revision, reading each release's history in its storage namespace.
+It requires permission to discover releases cluster-wide and read that
+history; an unreadable release or malformed inventory aborts cleanup.
 It reads both `helm get manifest` and `helm get hooks` for each revision:
 a completed hook Job can be absent from the live controller inventory while
 its stored hook still needs the bundle during rollback.
+Unqualified manifest/hook resources inherit the owning release's namespace;
+explicit controller-namespace resources retain the bundle even when the
+release history is stored in another namespace.
 It distinguishes resource kinds and actual configuration/map/Role references
 from unrelated same-named objects, such as receiver NetworkPolicies.
 Cleanup refuses live/retained references, missing/changed policies and changed
