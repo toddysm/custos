@@ -352,7 +352,7 @@ def transition_preflight(
                 "-n",
                 namespace,
                 "--filter",
-                "^" + bundle["release"] + "$",
+                "^" + re.escape(bundle["release"]) + "$",
                 "-o",
                 "json",
             ]
@@ -1162,8 +1162,8 @@ def cleanup_resources(
 ) -> None:
     """Delete only an unused verified bundle after explicit retained-work attestation.
 
-    All Pods, controllers, other live RoleBindings and every revision of every
-    paginated release must be free of typed resource references.
+    All Pods, controllers, other live RoleBindings and the manifests and hooks
+    of every revision of every paginated release must be free of typed references.
     This does not query durable work stores: the operator must first establish
     and explicitly attest that no retained work needs these identities. The
     Namespace is never eligible. UID/resource-version delete preconditions
@@ -1277,27 +1277,28 @@ def cleanup_resources(
             if not isinstance(history, list):
                 raise TypeError("invalid Helm revision inventory")
             for revision in history:
-                manifest = run(
-                    [
-                        "helm",
-                        "get",
-                        "manifest",
-                        current["name"],
-                        "-n",
-                        namespace,
-                        "--revision",
-                        str(revision["revision"]),
-                    ]
-                )
-                for document in yaml.safe_load_all(manifest):
-                    if document is None:
-                        continue
-                    if not isinstance(document, dict):
-                        raise TypeError("invalid retained Helm manifest")
-                    if references_resources(document, resources, namespace):
-                        raise OperatorValidationError(
-                            "bundle is referenced by a retained Helm revision"
-                        )
+                for source in ("manifest", "hooks"):
+                    content = run(
+                        [
+                            "helm",
+                            "get",
+                            source,
+                            current["name"],
+                            "-n",
+                            namespace,
+                            "--revision",
+                            str(revision["revision"]),
+                        ]
+                    )
+                    for document in yaml.safe_load_all(content):
+                        if document is None:
+                            continue
+                        if not isinstance(document, dict):
+                            raise TypeError(f"invalid retained Helm {source}")
+                        if references_resources(document, resources, namespace):
+                            raise OperatorValidationError(
+                                "bundle is referenced by a retained Helm revision"
+                            )
         if len(releases) < 256:
             break
         offset += len(releases)

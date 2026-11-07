@@ -204,6 +204,9 @@ python scripts/receiver_bindings.py cleanup-bridge \
 ```
 
 Cleanup inspects every page of Helm releases and every retained revision.
+It reads both `helm get manifest` and `helm get hooks` for each revision:
+a completed hook Job can be absent from the live controller inventory while
+its stored hook still needs the bundle during rollback.
 It distinguishes resource kinds and actual configuration/map/Role references
 from unrelated same-named objects, such as receiver NetworkPolicies.
 Cleanup refuses live/retained references, missing/changed policies and changed

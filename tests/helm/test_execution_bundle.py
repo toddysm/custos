@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 import random
+import re
 import string
 import subprocess
 import sys
@@ -125,6 +126,39 @@ def test_truncated_release_prefix_remains_a_valid_resource_name(release: str) ->
         assert (
             operator.name(resource["metadata"]["name"]) == resource["metadata"]["name"]
         )
+
+
+@pytest.mark.parametrize("release", ["custos", "custos.prod", "custos.prod.stage"])
+@pytest.mark.parametrize("installed", [False, True])
+def test_transition_preflight_matches_only_the_literal_release(
+    release: str, installed: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fresh dotted releases ignore lookalikes; installed releases still receive preflight."""
+    bundle = operator.prepare(fixture(1), configuration(), release, "controllers")
+    candidates = [f"{release}-other", f"other-{release}"]
+    if "." in release:
+        candidates.append(release.replace(".", "x"))
+    if installed:
+        candidates.append(release)
+    manifests: list[str] = []
+
+    def run(command: list[str], payload: Any = None) -> str:
+        """Emulate Helm's regex filter without permitting any cluster mutation."""
+        if command[:3] == ["kubectl", "get", "namespace"]:
+            return '{"metadata":{"name":"controllers"}}'
+        if command[:2] == ["helm", "list"]:
+            pattern = command[command.index("--filter") + 1]
+            return json.dumps(
+                [{"name": value} for value in candidates if re.search(pattern, value)]
+            )
+        if command[:3] == ["helm", "get", "manifest"]:
+            manifests.append(command[3])
+            return ""
+        raise AssertionError("unexpected transition command")
+
+    monkeypatch.setattr(operator, "run", run)
+    operator.transition_preflight(bundle)
+    assert manifests == ([release] if installed else [])
 
 
 def test_cli_preserves_actionable_safe_domain_reason(
@@ -323,19 +357,71 @@ def test_recovery_patch_is_guarded_and_preserves_unrelated_fields() -> None:
     assert all(row["path"] != "/spec/template" for row in patch)
 
 
-@pytest.mark.parametrize("reference", ["pod", "controller", "history", "work"])
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "pod",
+        "controller",
+        "history",
+        "hook-configmap",
+        "hook-configuration",
+        "hook-role",
+        "work",
+    ],
+)
 def test_cleanup_refuses_retained_references(
     reference: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cleanup refuses each retention class before making any deletion request."""
+    """Cleanup refuses live, manifest and hook-only references before any deletion."""
     bundle = operator.prepare(fixture(1), configuration(), "custos", "controllers")
     config_name = bundle["descriptor"]["configMapName"]
     pod = {"spec": {"volumes": [{"configMap": {"name": config_name}}]}}
+    hook: dict[str, Any] = {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {
+            "name": "retained-hook",
+            "namespace": "controllers",
+            "annotations": {
+                "helm.sh/hook": "post-rollback",
+                "helm.sh/hook-delete-policy": "hook-succeeded",
+            },
+        },
+        "spec": {"template": copy.deepcopy(pod)},
+    }
+    if reference == "hook-configuration":
+        hook["spec"]["template"] = {
+            "metadata": {
+                "annotations": {
+                    "dapr.io/config": next(
+                        row["metadata"]["name"]
+                        for row in bundle["objects"]
+                        if row["kind"] == "Configuration"
+                    )
+                }
+            }
+        }
+    elif reference == "hook-role":
+        hook = {
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "RoleBinding",
+            "metadata": hook["metadata"],
+            "roleRef": {
+                "apiGroup": "rbac.authorization.k8s.io",
+                "kind": "Role",
+                "name": next(
+                    row["metadata"]["name"]
+                    for row in bundle["objects"]
+                    if row["kind"] == "Role"
+                ),
+            },
+        }
     writes: list[list[str]] = []
+    hook_revisions: list[str] = []
 
     def run(command: list[str], payload: Any = None) -> str:
-        """Return one selected retention reference and record any forbidden deletion."""
+        """Return one reference, including a retired hook stored only in Helm history."""
         if command[:2] == ["kubectl", "delete"]:
             writes.append(command)
             return "{}"
@@ -346,10 +432,18 @@ def test_cleanup_refuses_retained_references(
         if command[:2] == ["helm", "list"]:
             return '[{"name":"custos"}]'
         if command[:2] == ["helm", "history"]:
-            return '[{"revision":1}]'
+            return '[{"revision":1},{"revision":2},{"revision":3}]'
         if command[:3] == ["helm", "get", "manifest"]:
             return (
                 yaml.safe_dump(bundle["objects"][0]) if reference == "history" else ""
+            )
+        if command[:3] == ["helm", "get", "hooks"]:
+            assert command[3:-1] == ["custos", "-n", "controllers", "--revision"]
+            hook_revisions.append(command[-1])
+            return (
+                yaml.safe_dump_all([{}, hook])
+                if reference.startswith("hook-") and command[-1] == "3"
+                else ""
             )
         raise AssertionError("unexpected cleanup command")
 
@@ -359,9 +453,13 @@ def test_cleanup_refuses_retained_references(
             bundle, confirmed_no_retained_work=reference != "work"
         )
     assert writes == []
+    if reference.startswith("hook-"):
+        assert hook_revisions == ["1", "2", "3"]
 
 
+@pytest.mark.parametrize("source", ["manifest", "hooks"])
 def test_cleanup_inspects_later_helm_release_pages(
+    source: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A retained rollback reference beyond Helm's default page prevents every deletion."""
@@ -370,7 +468,7 @@ def test_cleanup_inspects_later_helm_release_pages(
     writes = []
 
     def run(command: list[str], payload: Any = None) -> str:
-        """Return 257 releases with the sole dependency in the last release's older revision."""
+        """Return 257 releases with a sole manifest or hook dependency in the last release."""
         if command[:2] == ["kubectl", "get"]:
             return '{"items":[]}'
         if command[:2] == ["helm", "list"]:
@@ -384,8 +482,8 @@ def test_cleanup_inspects_later_helm_release_pages(
             )
         if command[:2] == ["helm", "history"]:
             return '[{"revision":1}]' if command[2] == "last-release" else "[]"
-        if command[:3] == ["helm", "get", "manifest"]:
-            return yaml.safe_dump(bundle["objects"][0])
+        if command[:3] in (["helm", "get", "manifest"], ["helm", "get", "hooks"]):
+            return yaml.safe_dump(bundle["objects"][0]) if command[2] == source else ""
         writes.append(command)
         raise AssertionError("deletion must not precede the complete history scan")
 
@@ -406,6 +504,7 @@ def test_cleanup_inspects_later_helm_release_pages(
         "release",
         "history",
         "manifest",
+        "hooks",
     ],
 )
 def test_cleanup_rejects_malformed_retention_inventories(
@@ -429,6 +528,8 @@ def test_cleanup_rejects_malformed_retention_inventories(
         if command[:2] == ["helm", "history"]:
             return "{}" if stage == "history" else '[{"revision":1}]'
         if command[:3] == ["helm", "get", "manifest"]:
+            return "not-a-resource" if stage == "manifest" else ""
+        if command[:3] == ["helm", "get", "hooks"]:
             return "not-a-resource"
         raise AssertionError("invalid inventory must prevent every mutation")
 
@@ -849,10 +950,11 @@ def test_recovery_checks_the_complete_render_before_live_access(
 @pytest.mark.parametrize(
     "reference", ["collision", "resource", "configuration", "role"]
 )
+@pytest.mark.parametrize("source", ["manifest", "hooks"])
 def test_bridge_cleanup_uses_typed_references(
-    reference: str, monkeypatch: pytest.MonkeyPatch
+    reference: str, source: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A same-named NetworkPolicy does not retain Dapr policy; actual identities/references do."""
+    """Manifest and hook scans protect typed bridge references, not same-named NetworkPolicies."""
     inventory, live = retained_fixture()
     configuration_resource = next(
         row["resource"]
@@ -899,15 +1001,15 @@ def test_bridge_cleanup_uses_typed_references(
         resource["metadata"]["resourceVersion"] = "1"
 
     def run(command: list[str], payload: Any = None) -> str:
-        """Emulate an otherwise unused bridge with one manifest and guarded individual deletes."""
+        """Expose one stored manifest or hook and guard individual unused-bridge deletes."""
         if command[:2] == ["kubectl", "get"]:
             return '{"items":[]}'
         if command[:2] == ["helm", "list"]:
             return '[{"name":"custos"}]'
         if command[:2] == ["helm", "history"]:
             return '[{"revision":2}]'
-        if command[:3] == ["helm", "get", "manifest"]:
-            return yaml.safe_dump(document)
+        if command[:3] in (["helm", "get", "manifest"], ["helm", "get", "hooks"]):
+            return yaml.safe_dump(document) if command[2] == source else ""
         assert command[:2] == ["kubectl", "delete"]
         writes.append((command, payload))
         return "{}"
