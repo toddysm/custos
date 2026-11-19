@@ -1217,6 +1217,8 @@ def cleanup_resources(
     All Pods, controllers, other live RoleBindings and the manifests and hooks
     of every revision of every paginated release across all namespaces must be
     free of typed references.
+    Bridge inventories must still match their recorded digests and retained
+    object identities, including the Namespace, before retention scanning.
     This does not query durable work stores: the operator must first establish
     and explicitly attest that no retained work needs these identities. The
     Namespace is never eligible. UID/resource-version delete preconditions
@@ -1234,9 +1236,7 @@ def cleanup_resources(
             raise OperatorValidationError(
                 "cleanup requires a verified bundle or bridge inventory"
             )
-        bridge_resources(
-            [row["resource"] for row in records], bundle["release"], namespace
-        )
+        verify_retained(bundle)
         resources = [
             row["resource"] for row in records if row["resource"]["kind"] != "Namespace"
         ]

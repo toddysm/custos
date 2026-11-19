@@ -220,7 +220,10 @@ from unrelated same-named objects, such as receiver NetworkPolicies.
 Cleanup refuses live/retained references, missing/changed policies and changed
 ownership. Every namespaced bundle or bridge resource must belong to the
 controller Namespace being scanned; mixed-namespace inventories are rejected
-before any live API read or deletion. Individual deletes require the verified
+before any live API read or deletion. Bridge cleanup also verifies all recorded
+content digests, original object identities and Namespace lifecycle/security
+metadata before scanning references; retaining the Namespace does not bypass
+these checks. Individual deletes require the verified
 unique identifier and resource version. Partial/concurrent failure stops explicitly; preserve the
 remaining inventory for diagnosis. **Cleanup never deletes the Namespace.**
 Helm uninstall completion does not prove that terminating Pods have retired.

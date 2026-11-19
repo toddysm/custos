@@ -1491,6 +1491,47 @@ def test_bridge_cleanup_rejects_lifecycle_ownership(
     assert writes == []
 
 
+@pytest.mark.parametrize("change", ["digest", "namespace-uid", "namespace-lifecycle"])
+def test_bridge_cleanup_verifies_complete_retained_inventory(
+    change: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cleanup must reject corrupt inventory or changed Namespace lifecycle before deleting policies."""
+    inventory, live = retained_fixture()
+    for resource in live.values():
+        resource["metadata"]["resourceVersion"] = "1"
+    if change == "digest":
+        inventory["resources"][0]["sha256"] = "0" * 64
+    elif change == "namespace-uid":
+        live[("Namespace", "controllers")]["metadata"]["uid"] = "replacement-namespace"
+    else:
+        live[("Namespace", "controllers")]["metadata"]["ownerReferences"] = [
+            {"uid": "garbage-collection-owner"}
+        ]
+    writes: list[list[str]] = []
+
+    def run(command: list[str], payload: Any = None) -> str:
+        """Return no retained-work references while recording any unsafe cleanup mutation."""
+        if command[:2] == ["kubectl", "get"]:
+            return '{"items":[]}'
+        if command[:2] == ["helm", "list"]:
+            return "[]"
+        assert command[:2] == ["kubectl", "delete"]
+        writes.append(command)
+        return "{}"
+
+    monkeypatch.setattr(operator, "run", run)
+    monkeypatch.setattr(
+        operator,
+        "get_resource",
+        lambda resource: live[(resource["kind"], resource["metadata"]["name"])],
+    )
+    with pytest.raises(
+        operator.OperatorValidationError, match="digest|identity|ownership"
+    ):
+        operator.cleanup_resources(inventory, confirmed_no_retained_work=True)
+    assert writes == []
+
+
 @pytest.mark.parametrize("size", [1_000_000, 1_000_001])
 def test_preparation_byte_budget(size: int) -> None:
     """The operator preserves exact padding bytes and uses the independent production file cap."""
