@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import yaml
@@ -247,6 +247,8 @@ def test_preseed_grants_only_workspace_execution_and_closes_pool(
     monkeypatch.setattr(PgAuthAdapter, "put_principal", principal)
     monkeypatch.setattr(PgAuthAdapter, "put_service_token", credential)
     monkeypatch.setattr(LazyPool, "aclose", close)
+    pool_factory = Mock(wraps=LazyPool)
+    monkeypatch.setattr("custos_pg.pool.LazyPool", pool_factory)
     token, hashed = mint_token()
     monkeypatch.setenv("SMOKE_EXECUTION_TOKEN", token)
     monkeypatch.setenv("CUSTOS_PG_DSN", "postgresql://unused/synthetic")
@@ -260,3 +262,11 @@ def test_preseed_grants_only_workspace_execution_and_closes_pool(
     assert token not in repr(credential.call_args.args[0])
     assert seed.call_args.kwargs["admin_oidc_issuer"] is None
     close.assert_awaited_once()
+    connection = SimpleNamespace(set_type_codec=AsyncMock())
+    asyncio.run(pool_factory.call_args.kwargs["init"](connection))
+    codec = connection.set_type_codec.call_args
+    assert codec.args == ("jsonb",)
+    scope = {"type": "workspace", "workspace_id": smoke.WORKSPACE}
+    encoded = codec.kwargs["encoder"](scope)
+    assert isinstance(encoded, str)
+    assert codec.kwargs["decoder"](encoded) == scope

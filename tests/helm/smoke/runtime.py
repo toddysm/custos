@@ -167,7 +167,7 @@ async def seed_execution() -> None:
         seed_platform,
     )
     from custos_pg import PgAuthAdapter
-    from custos_pg.pool import LazyPool
+    from custos_pg.pool import LazyPool, register_jsonb_codec
     from custos_spl import AuthStoreProvider
     from custos_spl.ids import PrincipalId, RoleBindingId, ServiceTokenId, WorkspaceId
     from custos_spl.interfaces.auth_store import (
@@ -184,7 +184,7 @@ async def seed_execution() -> None:
     if not dsn:
         raise ValueError("smoke bootstrap requires its database Secret")
     os.environ["CUSTOS_PG_DSN"] = dsn
-    pool = LazyPool(dsn)
+    pool = LazyPool(dsn, init=register_jsonb_codec)
     store = PgAuthAdapter(lazy=pool)
     now = datetime.now(UTC)
     try:

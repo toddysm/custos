@@ -9,12 +9,14 @@ plain callables) but pool construction must happen inside an event
 loop.
 
 The pool is owned by whoever constructs it; adapters do not close
-pools they did not create.
+pools they did not create. Consumers passing native dicts to JSONB columns
+can opt into the shared per-connection codec.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
@@ -31,6 +33,21 @@ DSN_ENV_VAR = "CUSTOS_PG_DSN"
 #: connection the pool checks out from the underlying socket pool —
 #: the standard place to register type codecs (e.g. JSONB <-> dict).
 ConnectionInit = Callable[["Connection"], Awaitable[None]]
+
+
+async def register_jsonb_codec(conn: Connection) -> None:
+    """Opt a connection into native dict/JSONB writes and symmetric reads.
+
+    Pass as ``LazyPool(init=...)`` when adapters accept Python dicts, such as
+    Auth role-binding scopes. Do not enable this implicitly for consumers that
+    already serialize JSON strings.
+    """
+    await conn.set_type_codec(
+        "jsonb",
+        encoder=json.dumps,
+        decoder=json.loads,
+        schema="pg_catalog",
+    )
 
 
 def read_dsn_from_env() -> str:
@@ -113,4 +130,10 @@ class LazyPool:
                 self._pool = None
 
 
-__all__ = ["DSN_ENV_VAR", "ConnectionInit", "LazyPool", "read_dsn_from_env"]
+__all__ = [
+    "DSN_ENV_VAR",
+    "ConnectionInit",
+    "LazyPool",
+    "read_dsn_from_env",
+    "register_jsonb_codec",
+]
