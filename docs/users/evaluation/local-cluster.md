@@ -26,6 +26,8 @@ Its readiness/Helm-test evidence does not certify receiver effects, activity
 execution, or enforced network isolation; those remain separate certification.
 The authentication exercised here is the credential-backed execution exchange,
 not the legacy protected Auth administration routes.
+With managed deny-all policies, the Helm test client receives only DNS and
+public Gateway access, not controller mesh, database or Kubernetes API access.
 For a managed/remote cluster, follow
 [Install — connected](install-connected.md) instead; this page is the local
 variant of the same flow.

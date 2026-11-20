@@ -89,6 +89,53 @@ def test_smoke_activates_actual_scheduler_with_only_secret_references() -> None:
     assert all(not row.get("stringData") for row in documents)
 
 
+def test_managed_smoke_client_has_only_dns_and_public_gateway_access() -> None:
+    """The actual Helm client escapes deny-all for its public checks, not backend/mesh access."""
+    documents = managed_render()
+    pod = next(
+        row
+        for row in documents
+        if row["kind"] == "Pod" and row["metadata"]["name"] == "custos-smoke-test"
+    )
+    policies = {
+        row["metadata"]["name"]: row
+        for row in documents
+        if row["kind"] == "NetworkPolicy"
+    }
+    egress = policies["custos-smoke-test-egress"]["spec"]
+    ingress = policies["custos-smoke-test-gateway"]["spec"]
+    assert all(
+        pod["metadata"]["labels"][key] == value
+        for key, value in egress["podSelector"]["matchLabels"].items()
+    )
+    assert egress["policyTypes"] == ["Egress"]
+    assert len(egress["egress"]) == 2
+    dns, gateway = egress["egress"]
+    assert dns["to"] == [
+        {
+            "namespaceSelector": {
+                "matchLabels": {
+                    "kubernetes.io/metadata.name": "kube-system",
+                }
+            }
+        }
+    ]
+    assert dns["ports"] == [
+        {"protocol": "UDP", "port": 53},
+        {"protocol": "TCP", "port": 53},
+    ]
+    assert gateway["to"] == [{"podSelector": ingress["podSelector"]}]
+    assert gateway["ports"] == [{"protocol": "TCP", "port": 8080}]
+    assert ingress["policyTypes"] == ["Ingress"]
+    assert ingress["ingress"] == [
+        {
+            "from": [{"podSelector": egress["podSelector"]}],
+            "ports": [{"protocol": "TCP", "port": 8080}],
+        }
+    ]
+    assert "annotations" not in policies["custos-smoke-test-egress"]["metadata"]
+
+
 @pytest.mark.parametrize(
     "tag,sidecar,addresses",
     [
