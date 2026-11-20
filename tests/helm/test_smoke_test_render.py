@@ -11,6 +11,7 @@ the parsed manifests. They lock the wiring contract for
   (non-root, read-only root FS, all caps dropped).
 - The optional bearer-token env is omitted by default and wired via
   ``secretKeyRef`` when ``tests.auth.tokenSecret`` is set.
+- Managed-only smoke client network allowances stay absent from default profiles.
 """
 
 from __future__ import annotations
@@ -46,6 +47,8 @@ def test_hook_resources_render(
     # The script is shipped inline so it needs no extra image layer.
     assert "smoke.py" in cm["data"]
     assert "Custos helm-test smoke scenario" in cm["data"]["smoke.py"]
+    assert _find(rendered[profile], "NetworkPolicy", POD_NAME + "-egress") is None
+    assert _find(rendered[profile], "NetworkPolicy", POD_NAME + "-gateway") is None
 
 
 @pytest.mark.parametrize("profile", ALL_PROFILES)

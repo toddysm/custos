@@ -2,7 +2,7 @@ name: deploy-smoke
 
 # Deployment regression gate (DEPLOY-IMPL-019). Spins up a throwaway kind
 # cluster, installs the connected-eval profile of the umbrella chart end-to-end
-# with freshly built `:dev` images, and runs `helm test` in-cluster. The job
+# with freshly built commit-tagged images, and runs `helm test` in-cluster. The job
 # fails loudly — with pod/job logs and events — whenever a workload doesn't
 # become Ready or a hook fails.
 #
@@ -14,7 +14,7 @@ name: deploy-smoke
 # installs the chart with `postgres.embedded=false` so the same database is
 # reused and the pre-install migrate hook finds its Secret.
 
-# Trigger: manual dispatch only — for now.
+# Trigger: manual dispatch and focused regression changes.
 #
 # This gate was previously red because the kind cluster was missing out-of-band
 # prerequisites. Every Custos service Pod carries Dapr sidecar-injection
@@ -25,13 +25,18 @@ name: deploy-smoke
 # `daprd` sidecar exits fatally if the Redis pub/sub broker (`custos-pubsub`
 # Component) is absent, so the broker must exist too (#865). The job now installs
 # Dapr and Redis out-of-band — the same way scripts/install-prereqs.sh does —
-# before the umbrella install, so connected-eval deploys clean. The earlier
+# before the umbrella install. The earlier
 # api-gateway / workflow-service startup blockers (#815, #816) are resolved.
-# Consider restoring the `pull_request` trigger (paths: deploy/helm/**,
+# Consider expanding the `pull_request` trigger (paths: deploy/helm/**,
 # src/services/**, src/jobs/**, src/libs/**, .github/workflows/deploy-smoke.yml)
 # as a required gate once this has run green a few times on dispatch.
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/deploy-smoke.yml'
+      - 'tests/helm/smoke/**'
+      - 'tests/helm/test_deploy_smoke.py'
 
 permissions:
   contents: read
@@ -43,7 +48,7 @@ concurrency:
 jobs:
   smoke:
     name: kind install + helm test (connected-eval)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
       CLUSTER: custos-smoke
@@ -60,11 +65,23 @@ jobs:
         with:
           version: v3.16.2
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Start owned image registry
+        run: docker run -d --name custos-smoke-registry -p 127.0.0.1:5001:5000 registry:2.8
+
       - name: Create kind cluster
         uses: helm/kind-action@v1.10.0
         with:
           cluster_name: custos-smoke
           node_image: kindest/node:v1.31.2
+          config: tests/helm/smoke/kind.yaml
+
+      - name: Connect owned registry
+        run: docker network connect kind custos-smoke-registry
 
       # Optional Docker Hub login to dodge anonymous pull rate limits on the
       # third-party subchart images (Redis, Loki sidecar, …). The `secrets`
@@ -167,16 +184,29 @@ jobs:
             observability-audit-service"
           for s in $services; do
             echo "::group::build $s"
-            docker build -t "${IMAGE_PREFIX}/${s}:dev" -f "src/services/${s}/Dockerfile" .
-            kind load docker-image "${IMAGE_PREFIX}/${s}:dev" --name "$CLUSTER"
+            docker build -t "${IMAGE_PREFIX}/${s}:${GITHUB_SHA}" -f "src/services/${s}/Dockerfile" .
+            kind load docker-image "${IMAGE_PREFIX}/${s}:${GITHUB_SHA}" --name "$CLUSTER"
             echo "::endgroup::"
           done
           for j in migrate bootstrap; do
             echo "::group::build custos-$j"
-            docker build -t "${IMAGE_PREFIX}/custos-${j}:dev" -f "src/jobs/${j}/Dockerfile" .
-            kind load docker-image "${IMAGE_PREFIX}/custos-${j}:dev" --name "$CLUSTER"
+            docker build -t "${IMAGE_PREFIX}/custos-${j}:${GITHUB_SHA}" -f "src/jobs/${j}/Dockerfile" .
+            kind load docker-image "${IMAGE_PREFIX}/custos-${j}:${GITHUB_SHA}" --name "$CLUSTER"
             echo "::endgroup::"
           done
+
+      - name: Build actual digest-pinned sandbox helpers
+        run: |
+          docker build -t localhost:5001/smoke-sidecar:tested \
+            -f src/services/connector-sidecar/Dockerfile .
+          docker build --target hook-runtime -t localhost:5001/smoke-hook-helper:tested \
+            -f src/services/connector-service/Dockerfile .
+          docker push localhost:5001/smoke-sidecar:tested
+          docker push localhost:5001/smoke-hook-helper:tested
+          {
+            echo "SMOKE_SIDECAR_IMAGE=$(docker inspect --format='{{index .RepoDigests 0}}' localhost:5001/smoke-sidecar:tested)"
+            echo "SMOKE_HOOK_HELPER_IMAGE=$(docker inspect --format='{{index .RepoDigests 0}}' localhost:5001/smoke-hook-helper:tested)"
+          } >> "$GITHUB_ENV"
 
       - name: Vendor chart dependencies
         run: helm dependency update "$CHART"
@@ -218,13 +248,20 @@ jobs:
             --set architecture=standalone \
             --wait --timeout 5m
 
-      - name: Install Custos (connected-eval)
+      - name: Provision actual managed runtime prerequisites and execution identity
+        run: |
+          pip install -e src/libs/storage-provider-layer -e src/libs/custos-postgres \
+            -e src/libs/custos-callctx -e src/services/auth-service pyyaml
+          python tests/helm/smoke/runtime.py prepare --output "$RUNNER_TEMP/runtime-values.yaml"
+
+      - name: Install Custos (managed connected-eval)
         run: |
           set -euo pipefail
           # embedded=false: reuse the pre-provisioned CNPG Cluster (above) so the
           # pre-install migrate hook finds its Secret. certManager.install=false:
-          # cert-manager is pre-installed out-of-band (above). All other subcharts
-          # stay at their eval defaults. PVCs default to kind's `standard` class.
+          # cert-manager is pre-installed out-of-band (above). The smoke overlay
+          # enables the real managed runtime with receiver admission paused.
+          # PVCs default to kind's `standard` class.
           #
           # HELM VERSION CAVEAT: this completes because the job pins Helm v3 (see
           # "Set up Helm"), whose `--wait` only waits on built-in workloads. The
@@ -236,12 +273,22 @@ jobs:
           # Gateway programs.
           helm install "$RELEASE" "$CHART" -f "$VALUES" \
             --namespace "$NS" \
-            --set postgres.embedded=false \
-            --set certManager.install=false \
+            -f "$RUNNER_TEMP/runtime-values.yaml" \
             --wait --timeout 20m
+
+      - name: Verify actual scheduler and dependency readiness
+        run: python tests/helm/smoke/runtime.py verify --output "$RUNNER_TEMP/runtime-evidence.json"
 
       - name: Run helm test
         run: helm test "$RELEASE" -n "$NS" --logs
+
+      - name: Upload safe runtime readiness evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-smoke-evidence
+          path: ${{ runner.temp }}/runtime-evidence.json
+          if-no-files-found: warn
 
       - name: Diagnostics on failure
         if: failure()
@@ -297,7 +344,7 @@ jobs:
                 continue
               fi
               echo "--- /readyz body pod/$pod ---"
-              kubectl exec -n "$NS" "pod/$pod" -- python -c 'import os, http.client; c = http.client.HTTPConnection("127.0.0.1", int(os.environ.get("PORT", "8080")), timeout=3); c.request("GET", "/readyz"); r = c.getresponse(); print(r.status, r.read().decode())' 2>/dev/null \
+              kubectl exec -n "$NS" "pod/$pod" -- python -c 'import os, http.client, ssl; port = int(os.environ.get("PORT", "8080")); c = http.client.HTTPSConnection("localhost", port, context=ssl.create_default_context(cafile=os.environ["ARM_SIDECAR_CA_FILE"]), timeout=8) if os.environ.get("ARM_TLS_CERT_FILE") else http.client.HTTPConnection("127.0.0.1", port, timeout=8); c.request("GET", "/readyz"); r = c.getresponse(); print(r.status, r.read().decode())' 2>/dev/null \
                 || echo "(could not exec /readyz probe in $pod)"
               echo "--- startup/readiness log lines pod/$pod (full history) ---"
               kubectl logs -n "$NS" "pod/$pod" --all-containers 2>/dev/null \
@@ -307,7 +354,7 @@ jobs:
             done
           echo "::endgroup::"
           echo "::group::hook job logs"
-          for job in custos-migrate custos-bootstrap custos-smoke-test; do
+          for job in smoke-schema-migrate smoke-execution-bootstrap custos-migrate custos-bootstrap custos-smoke-test; do
             echo "--- logs job/$job ---"
             # Job pods are name-suffixed, so the fallback selects by the
             # standard job-name label rather than a bare pod name.
@@ -319,3 +366,10 @@ jobs:
           echo "::group::CNPG cluster status"
           kubectl describe cluster/custos -n "$NS" || true
           echo "::endgroup::"
+
+      - name: Remove owned image registry
+        if: always()
+        run: |
+          if docker container inspect custos-smoke-registry > /dev/null 2>&1; then
+            docker rm -f custos-smoke-registry
+          fi

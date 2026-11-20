@@ -43,6 +43,7 @@ env entries; unrelated operator entries survive. Secret values never enter Helm.
   "CUSTOS_AUTH_EXECUTION_CALLER_NAMESPACE" .Release.Namespace
   "CUSTOS_AUTH_CALL_CONTEXT_KEY_REF" $r.authSigningKeyRef
   "CUSTOS_AUTH_CALL_CONTEXT_SECRET_STORE" "kubernetes"
+  "CUSTOS_AUTH_CALLCTX_VERIFIER_URL" (printf "%s/.well-known/jwks.json" $auth)
   "CUSTOS_AUTH_CALL_CONTEXT_KEY_ROTATION" "0" -}}
 {{- else if eq $service "trigger-service" -}}
 {{- $config = dict "TRIGGER_AUTHZ_ENDPOINT" $auth

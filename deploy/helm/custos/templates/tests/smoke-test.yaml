@@ -25,6 +25,57 @@ metadata:
 data:
   smoke.py: |
 {{ .Files.Get "files/smoke.py" | indent 4 }}
+{{- if .Values.global.receiverRuntime.enabled }}
+---
+# Managed deny-all also selects the test client. Allow DNS and the public
+# Gateway only, without giving the client controller, database or API access.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}-egress
+  namespace: {{ include "custos.namespace" . }}
+  labels:
+    {{- include "custos.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: smoke-test
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.global.networkPolicies.dnsNamespace }}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/name: api-gateway
+      ports: [{protocol: TCP, port: {{ (index .Values "api-gateway").service.port }}}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}-gateway
+  namespace: {{ include "custos.namespace" . }}
+  labels:
+    {{- include "custos.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/name: api-gateway
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/component: smoke-test
+      ports: [{protocol: TCP, port: {{ (index .Values "api-gateway").service.port }}}]
+{{- end }}
 ---
 apiVersion: v1
 kind: Pod
