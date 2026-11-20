@@ -1,0 +1,13 @@
+**
+!src
+!src/libs
+!src/libs/custos-callctx
+!src/libs/custos-callctx/pyproject.toml
+!src/libs/custos-callctx/README.md
+!src/libs/custos-callctx/src
+!src/libs/custos-callctx/src/**
+!tests
+!tests/helm
+!tests/helm/binding_probe
+!tests/helm/binding_probe/probe.py
+**/__pycache__

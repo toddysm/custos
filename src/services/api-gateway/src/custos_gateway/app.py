@@ -24,6 +24,7 @@ from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from typing import TYPE_CHECKING
 
 import httpx
+from custos_callctx.execution import load_execution_bindings
 
 from custos_gateway._version import __version__
 from custos_gateway.clients.auth import DaprAuthServiceClient, read_dapr_endpoint
@@ -110,9 +111,11 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        """Validate the immutable managed registry before opening transports or admission."""
         owned_client: httpx.AsyncClient | None = None
         app.state.ready = False
         async with AsyncExitStack() as stack:
+            app.state.execution_bindings = load_execution_bindings(os.environ)
 
             def owned_http_client() -> httpx.AsyncClient:
                 """Share one owned transport, including cleanup after partial startup."""

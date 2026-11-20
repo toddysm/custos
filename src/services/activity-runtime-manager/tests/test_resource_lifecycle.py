@@ -1,7 +1,9 @@
 """Production composition and admission with faulted external acquisition boundaries."""
 
 import asyncio
+import hashlib
 import json
+import os
 import threading
 import time
 from collections.abc import AsyncIterator
@@ -52,11 +54,13 @@ async def test_cancelled_kubernetes_probe_joins_its_owned_call() -> None:
 @pytest.mark.parametrize(
     "failure", [None, "schema", "snapshot", "http", "kubernetes", "csi", "secret", "auth"]
 )
+@pytest.mark.parametrize("file_source", [False, True])
 async def test_production_resource_graph_and_failure_cleanup(
     tmp_path: Path,
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
     failure: str | None,
+    file_source: bool,
 ) -> None:
     """Keep actual adapters and clients; emulate only external readiness I/O."""
     events: list[str] = []
@@ -82,6 +86,13 @@ async def test_production_resource_graph_and_failure_cleanup(
             }
         ),
     )
+    if file_source:
+        raw = os.environ["CUSTOS_EXECUTION_BINDINGS"].encode()
+        path = tmp_path / "bindings.json"
+        path.write_bytes(raw)
+        monkeypatch.delenv("CUSTOS_EXECUTION_BINDINGS")
+        monkeypatch.setenv("CUSTOS_EXECUTION_BINDINGS_FILE", str(path))
+        monkeypatch.setenv("CUSTOS_EXECUTION_BINDINGS_SHA256", hashlib.sha256(raw).hexdigest())
     selected = replace(
         settings,
         runtime_enabled=True,
@@ -224,3 +235,20 @@ async def test_production_resource_graph_and_failure_cleanup(
     if "kubernetes" in events:
         assert "api-closed" in events
     assert not list(artifact_root.rglob("*.json"))
+
+
+async def test_file_digest_failure_precedes_resource_acquisition(
+    tmp_path: Path,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wrong snapshot fails the actual production resource factory before opening clients."""
+    path = tmp_path / "bindings.json"
+    path.write_text('{"bindings":[],"defaults":{}}')
+    monkeypatch.setenv("CUSTOS_EXECUTION_IDENTITY_ENABLED", "true")
+    monkeypatch.delenv("CUSTOS_EXECUTION_BINDINGS", raising=False)
+    monkeypatch.setenv("CUSTOS_EXECUTION_BINDINGS_FILE", str(path))
+    monkeypatch.setenv("CUSTOS_EXECUTION_BINDINGS_SHA256", "0" * 64)
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        async with open_runtime(settings):
+            pytest.fail("invalid snapshot opened runtime admission")

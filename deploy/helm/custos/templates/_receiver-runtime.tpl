@@ -13,7 +13,15 @@ env entries; unrelated operator entries survive. Secret values never enter Helm.
 {{- $auth := printf "%s/custos-auth/method" $invoke -}}
 {{- if has $service (list "api-gateway" "trigger-service" "workflow-service" "activity-runtime-manager") -}}
 {{- $_ := set $plain "CUSTOS_EXECUTION_IDENTITY_ENABLED" "true" -}}
+{{- $_ := unset $env "CUSTOS_EXECUTION_BINDINGS" -}}
+{{- $_ := unset $env "CUSTOS_EXECUTION_BINDINGS_FILE" -}}
+{{- $_ := unset $env "CUSTOS_EXECUTION_BINDINGS_SHA256" -}}
+{{- if $r.executionBindingsBundle -}}
+{{- $_ := set $plain "CUSTOS_EXECUTION_BINDINGS_FILE" "/custos/execution/bindings.json" -}}
+{{- $_ := set $plain "CUSTOS_EXECUTION_BINDINGS_SHA256" $r.executionBindingsBundle.sha256 -}}
+{{- else -}}
 {{- $_ := set $plain "CUSTOS_EXECUTION_BINDINGS" (toJson $r.executionBindings) -}}
+{{- end -}}
 {{- $_ := set $plain "CUSTOS_EXECUTION_SECRET_STORE" "kubernetes" -}}
 {{- $_ := set $plain "CUSTOS_EXECUTION_AUTH_APP_ID" "custos-auth" -}}
 {{- end -}}
@@ -100,7 +108,13 @@ env entries; unrelated operator entries survive. Secret values never enter Helm.
 {{- if $r.enabled }}
 dapr.io/app-token-secret: {{ index $r.appTokenSecrets .Chart.Name | quote }}
 dapr.io/api-token-secret: {{ $r.apiTokenSecret | quote }}
+{{- if and $r.executionBindingsBundle (has .Chart.Name (list "api-gateway" "trigger-service" "workflow-service" "activity-runtime-manager")) }}
+dapr.io/config: {{ index $r.executionBindingsBundle.daprConfigurations .Chart.Name | quote }}
+checksum/execution-bindings: {{ $r.executionBindingsBundle.sha256 | quote }}
+checksum/execution-bundle: {{ $r.executionBindingsBundle.bundleSha256 | quote }}
+{{- else }}
 dapr.io/config: {{ printf "%s-receivers-%s" .Release.Name .Chart.Name | quote }}
+{{- end }}
 dapr.io/graceful-shutdown-seconds: "5"
 {{- if has .Chart.Name (list "trigger-service" "connector-service" "workflow-service" "activity-runtime-manager") }}
 dapr.io/block-shutdown-duration: {{ printf "%ds" (add (int $r.drainSeconds) 60) | quote }}
@@ -108,4 +122,21 @@ dapr.io/enable-app-health-check: "false"
 {{- end }}
 checksum/receiver-config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum | quote }}
 {{- end }}
+{{- end -}}
+
+{{/* One read-only projected directory; no subPath, hot reload or API access. */}}
+{{- define "custos.executionVolume" -}}
+- name: execution-bindings
+  configMap:
+    name: {{ .Values.global.receiverRuntime.executionBindingsBundle.configMapName | quote }}
+    defaultMode: 0444
+    items:
+      - key: bindings.json
+        path: bindings.json
+{{- end -}}
+
+{{- define "custos.executionMount" -}}
+- name: execution-bindings
+  mountPath: /custos/execution
+  readOnly: true
 {{- end -}}

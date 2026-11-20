@@ -5,6 +5,32 @@
 {{- fail "receiverRuntime requires Kubernetes >=1.29 for native sidecars" -}}{{- end -}}
 {{- if not (kindIs "bool" $r.admissionEnabled) -}}{{- fail "receiverRuntime.admissionEnabled must be boolean" -}}{{- end -}}
 {{- $services := list "api-gateway" "auth-service" "catalog-service" "connector-service" "workflow-service" "trigger-service" "activity-runtime-manager" "observability-audit-service" -}}
+{{- $consumers := list "api-gateway" "workflow-service" "trigger-service" "activity-runtime-manager" -}}
+{{- $bundle := $r.executionBindingsBundle | default dict -}}
+{{- $fileMode := not (empty $bundle) -}}
+{{- if not (kindIs "bool" $r.retainLegacyExecutionResources) -}}
+{{- fail "receiverRuntime.retainLegacyExecutionResources must be boolean" -}}{{- end -}}
+{{- if $fileMode -}}
+{{- if or $r.retainLegacyExecutionResources $.Values.namespace.create -}}
+{{- fail "file bundle requires namespace.create=false and no inline retention flag" -}}{{- end -}}
+{{- if or (not (kindIs "map" $bundle)) (ne (len $bundle) 4) -}}
+{{- fail "executionBindingsBundle requires only configMapName, sha256, bundleSha256 and daprConfigurations" -}}{{- end -}}
+{{- range $field := list "sha256" "bundleSha256" -}}
+{{- if not (and (kindIs "string" (index $bundle $field)) (regexMatch "^[a-f0-9]{64}$" (index $bundle $field))) -}}
+{{- fail "executionBindingsBundle requires lowercase SHA-256 digests" -}}{{- end -}}
+{{- end -}}
+{{- if or (not (kindIs "string" $bundle.configMapName)) (gt (len $bundle.configMapName) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $bundle.configMapName)) -}}
+{{- fail "executionBindingsBundle requires a valid ConfigMap name" -}}{{- end -}}
+{{- if or (not (kindIs "map" $bundle.daprConfigurations)) (ne (len $bundle.daprConfigurations) 4) -}}
+{{- fail "executionBindingsBundle requires exactly four Dapr configuration names" -}}{{- end -}}
+{{- range $service := $consumers -}}
+{{- $name := index $bundle.daprConfigurations $service -}}
+{{- if or (not (kindIs "string" $name)) (gt (len $name) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $name)) -}}
+{{- fail "executionBindingsBundle requires valid consumer Dapr configuration names" -}}{{- end -}}
+{{- end -}}
+{{- if or (not (empty $r.executionBindings.bindings)) (not (empty $r.executionBindings.defaults)) -}}
+{{- fail "execution bindings inline and file bundle sources are ambiguous" -}}{{- end -}}
+{{- end -}}
 {{- range $field := list "deploymentId" "databaseSecret" "apiTokenSecret" "authSigningKeyRef" "sandboxNamespace" "tlsSecret" "artifactClaim" "telemetryEndpoint" -}}
 {{- if not (and (kindIs "string" (index $r $field)) (index $r $field)) -}}{{- fail (printf "receiverRuntime.%s must be a nonempty string" $field) -}}{{- end -}}
 {{- end -}}
@@ -51,10 +77,11 @@
 {{- if not (regexMatch "^[^@\\s]+@sha256:[a-f0-9]{64}$" (index $r $field)) -}}
 {{- fail (printf "receiverRuntime.%s must be digest-pinned" $field) -}}{{- end -}}
 {{- end -}}
+{{- $executionSecrets := list -}}
+{{- if not $fileMode -}}
 {{- if or (empty $r.executionBindings.bindings) (empty $r.executionBindings.defaults) (gt (len (toJson $r.executionBindings)) 65536) -}}
 {{- fail "receiverRuntime requires bounded explicit execution bindings and defaults" -}}{{- end -}}
 {{- $knownBindings := dict -}}
-{{- $executionSecrets := list -}}
 {{- range $binding := $r.executionBindings.bindings -}}
 {{- if ne (len $binding) 5 -}}{{- fail "execution bindings contain references only, with exactly five fields" -}}{{- end -}}
 {{- range $field := list "workspaceId" "principalId" "bindingId" "secretRef" "secretKey" -}}
@@ -68,6 +95,7 @@
 {{- end -}}
 {{- range $workspace, $binding := $r.executionBindings.defaults -}}
 {{- if not (hasKey $knownBindings (toJson (list $workspace $binding))) -}}{{- fail "execution default must resolve to an explicit binding" -}}{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- $tokens := list $r.apiTokenSecret -}}
 {{- range $service := $services -}}
@@ -86,22 +114,19 @@
 {{- if has $token $tokens -}}{{- fail "receiverRuntime requires distinct app tokens and API token" -}}{{- end -}}
 {{- $tokens = append $tokens $token -}}
 {{- end -}}
-{{- $callers := dict
-  "api-gateway" (list)
-  "auth-service" (list "api-gateway" "workflow-service" "trigger-service" "activity-runtime-manager" "connector-service" "catalog-service" "observability-audit-service")
-  "workflow-service" (list "api-gateway" "trigger-service" "workflow-service")
-  "trigger-service" (list "api-gateway" "workflow-service")
-  "connector-service" (list "api-gateway" "workflow-service" "trigger-service" "activity-runtime-manager" "catalog-service")
-  "activity-runtime-manager" (list "workflow-service")
-  "catalog-service" (list "api-gateway" "workflow-service" "connector-service" "activity-runtime-manager")
-  "observability-audit-service" $services -}}
+{{- $callers := .Files.Get "files/receiver-callers.json" | fromJson -}}
 {{- range $service := $services }}
+{{- if not (and $fileMode (has $service $consumers)) }}
 ---
 apiVersion: dapr.io/v1alpha1
 kind: Configuration
 metadata:
   name: {{ printf "%s-receivers-%s" $.Release.Name $service }}
   namespace: {{ $.Release.Namespace }}
+  {{- if and $r.retainLegacyExecutionResources (has $service $consumers) }}
+  annotations:
+    helm.sh/resource-policy: keep
+  {{- end }}
 spec:
   accessControl:
     defaultAction: deny
@@ -132,6 +157,10 @@ kind: Role
 metadata:
   name: {{ printf "%s-execution-secrets-%s" $.Release.Name $service }}
   namespace: {{ $.Release.Namespace }}
+  {{- if and $r.retainLegacyExecutionResources (has $service $consumers) }}
+  annotations:
+    helm.sh/resource-policy: keep
+  {{- end }}
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
@@ -144,6 +173,10 @@ kind: RoleBinding
 metadata:
   name: {{ printf "%s-execution-secrets-%s" $.Release.Name $service }}
   namespace: {{ $.Release.Namespace }}
+  {{- if and $r.retainLegacyExecutionResources (has $service $consumers) }}
+  annotations:
+    helm.sh/resource-policy: keep
+  {{- end }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -153,6 +186,7 @@ subjects:
     name: {{ printf "%s-%s" $.Release.Name $service | trunc 63 | trimSuffix "-" }}
     namespace: {{ $.Release.Namespace }}
   {{- end }}
+{{- end }}
 {{- end }}
 ---
 apiVersion: v1

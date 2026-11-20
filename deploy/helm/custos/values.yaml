@@ -36,6 +36,10 @@ global:
     executionBindings:
       bindings: []
       defaults: {}
+    # File mode: compact external bundle names/digests only, never registry contents.
+    executionBindingsBundle: {}
+    # Inline bridge only: retain legacy authorization resources (and owned Namespace).
+    retainLegacyExecutionResources: false
     sandboxNamespace: ""
     tlsSecret: ""
     sidecarImage: ""
