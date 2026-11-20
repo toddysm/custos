@@ -1,4 +1,4 @@
-"""Regress the smoke-only runtime activation and pre-admission identity bootstrap."""
+"""Regress managed smoke activation, scoped bootstrap and real receiver evidence acceptance."""
 
 import asyncio
 import json
@@ -6,7 +6,7 @@ import runpy
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
@@ -322,9 +322,12 @@ def test_preseed_grants_only_workspace_execution_and_closes_pool(
     assert codec.kwargs["decoder"](encoded) == scope
 
 
-@pytest.mark.parametrize("waiting", [False, True])
+@pytest.mark.parametrize(
+    "waiting,delivery_mode", [(False, "push"), (True, "push"), (True, "pull")]
+)
 def test_receiver_certification_definitions_use_actual_workflow_contracts(
     waiting: bool,
+    delivery_mode: Literal["push", "pull"],
 ) -> None:
     """Synthetic start/wait definitions must pass the real compiler, not just JSON construction."""
     from datetime import UTC, datetime
@@ -334,7 +337,7 @@ def test_receiver_certification_definitions_use_actual_workflow_contracts(
     from custos_workflow.document import WorkflowDocument
 
     document = WorkflowDocument.model_validate(
-        receivers.workflow_document(waiting=waiting)
+        receivers.workflow_document(waiting=waiting, delivery_mode=delivery_mode)
     )
     graph = compile(
         document,
@@ -597,6 +600,68 @@ def test_vendor_public_effect_deadline_does_not_accept_a_producer_acknowledgemen
         receivers.exercise_vendor(redelivery=False)
     gateway.wait_terminal.assert_not_called()
     assert receivers.REPORT_PREFIX not in capsys.readouterr().out
+
+
+def test_pull_effect_report_requires_the_real_resume_to_complete(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Acknowledged unpause and polling cannot certify a wait that failed to resume."""
+    monkeypatch.setenv("CUSTOS_WAIT_RUN_ID", "synthetic-pull-wait")
+    gateway = Mock()
+    gateway.wait_terminal.side_effect = receivers.CertificationFailure(
+        "synthetic resume failed"
+    )
+    monkeypatch.setitem(
+        receivers.exercise_pull.__globals__, "Gateway", Mock(return_value=gateway)
+    )
+    with pytest.raises(receivers.CertificationFailure, match="resume failed"):
+        receivers.exercise_pull("pull-resume")
+    gateway.pull_cursor.assert_not_called()
+    assert receivers.REPORT_PREFIX not in capsys.readouterr().out
+
+
+def test_pull_pause_rejects_a_cursor_advance(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A public pause acknowledgement cannot hide a later committed upstream effect."""
+    gateway = Mock()
+    gateway.pull_cursor.side_effect = ["synthetic-before", "synthetic-after"]
+    monkeypatch.setitem(
+        receivers.exercise_pull.__globals__, "Gateway", Mock(return_value=gateway)
+    )
+    with pytest.raises(receivers.CertificationFailure, match="operator-paused"):
+        receivers.exercise_pull("pull-pause")
+    assert receivers.REPORT_PREFIX not in capsys.readouterr().out
+
+
+def test_pull_cursor_requires_a_real_committed_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An acquired but never-committed cursor remains uninitialized, not progress proof."""
+    gateway = object.__new__(receivers.Gateway)
+    monkeypatch.setattr(
+        gateway,
+        "request",
+        Mock(
+            return_value={
+                "workspaceId": receivers.WORKSPACE,
+                "instanceId": receivers.PULL_CONNECTOR,
+                "encoding": "oci-list-tags-v1",
+                "valueFingerprint": None,
+                "valueLength": None,
+                "leaseHolder": "synthetic-holder",
+            }
+        ),
+    )
+    monkeypatch.setitem(
+        receivers.Gateway.pull_cursor.__globals__,
+        "time",
+        SimpleNamespace(monotonic=Mock(side_effect=[0, 0, 181]), sleep=Mock()),
+    )
+    with pytest.raises(receivers.CertificationFailure, match="cursor observation"):
+        gateway.pull_cursor()
 
 
 def test_vendor_completion_requires_the_registered_wait_to_resume(

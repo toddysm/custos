@@ -54,8 +54,18 @@ It requires real broker-to-Trigger delivery followed by public Workflow start
 and source-resume completion, then observes a repeated producer event for ten
 seconds without another Workflow. This tests the existing Connector event
 contract; it does not claim a live third-party vendor integration.
+The pull scenario executes the shipped deterministic OCI reference plugin
+through the real Kubernetes hook runner and requires broker delivery, a
+source-associated resume without a start subscription, a later completed
+Workflow start and redacted cursor progress. With two Ready Connector replicas,
+an operator pause must leave the settled cursor unchanged for twenty seconds.
+This is bounded pause evidence, not yet failover, publish-failure recovery or
+full shared due-time certification.
 Certification dispatches and pull requests select a separate kind configuration
 with kindnet disabled and Cilium **1.18.17** installed before other workloads.
+Because kind hosts its API server on a cluster node, Cilium enables node CIDR
+matching so the managed hooks' existing exact API endpoint allowances work;
+the default pod isolation and explicit API ports remain unchanged.
 The client also requires timed-out connections to a Ready Trigger pod's app,
 local Dapr HTTP/gRPC and remote invocation ports while public Gateway access
 works. Connection refusals, DNS failures and HTTP denials do not pass that check.

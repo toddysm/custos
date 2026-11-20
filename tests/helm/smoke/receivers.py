@@ -17,6 +17,7 @@ import hmac
 import ipaddress
 import json
 import os
+import re
 import secrets
 import socket
 import subprocess
@@ -27,7 +28,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 WORKSPACE = "workspace-default"
 OPERATOR = "receiver-certification-operator"
@@ -36,12 +37,28 @@ WORKFLOW = "receiver-certification"
 WAIT_WORKFLOW = "receiver-certification-wait"
 WEBHOOK_WORKFLOW = "receiver-certification-webhook"
 VENDOR_WORKFLOW = "receiver-certification-vendor-push"
+PULL_WORKFLOW = "receiver-certification-pull"
+PULL_WAIT_WORKFLOW = "receiver-certification-pull-wait"
 CONNECTOR = "receiver-fixture"
+PULL_CONNECTOR = "receiver-pull-fixture"
+PULL_SELECTOR = "event.data.subject.tag != ''"
 EVENT_KEY = "oci.image.pushed"
 CREDENTIAL_NAMESPACE = "custos-connectors"
 WEBHOOK_SECRET = "receiver-certification-webhook"
 OTHER_WORKSPACE = "receiver-other-tenant"
 REPORT_PREFIX = "RECEIVER_EVIDENCE "
+CLIENT_PHASES = (
+    "wait-setup",
+    "exercise",
+    "rotation",
+    "vendor-setup",
+    "vendor-observe",
+    "vendor-redelivery",
+    "pull-setup",
+    "pull-resume",
+    "pull-start",
+    "pull-pause",
+)
 
 
 class CertificationFailure(RuntimeError):
@@ -76,6 +93,7 @@ def workflow_document(
     *,
     waiting: bool = False,
     name: str | None = None,
+    delivery_mode: Literal["push", "pull"] = "push",
 ) -> dict[str, Any]:
     """Build a pure workflow, optionally parked on a real source-associated durable wait."""
     steps: list[dict[str, Any]] = [{"id": "effect", "let": {"observed": "${{ true }}"}}]
@@ -86,11 +104,19 @@ def workflow_document(
                 "id": "await-source",
                 "waitFor": {
                     "eventKey": "${{ '" + EVENT_KEY + "' }}",
-                    "selector": "${{ \"event.data.route == 'match'\" }}",
+                    "selector": '${{ "'
+                    + (
+                        PULL_SELECTOR
+                        if delivery_mode == "pull"
+                        else "event.data.route == 'match'"
+                    )
+                    + '" }}',
                     "ttl": "PT1H",
                     "source": {
-                        "connectorInstanceId": CONNECTOR,
-                        "deliveryModes": ["push"],
+                        "connectorInstanceId": (
+                            PULL_CONNECTOR if delivery_mode == "pull" else CONNECTOR
+                        ),
+                        "deliveryModes": [delivery_mode],
                     },
                 },
             },
@@ -181,10 +207,19 @@ async def seed() -> None:
             (WAIT_WORKFLOW, True),
             (WEBHOOK_WORKFLOW, False),
             (VENDOR_WORKFLOW, False),
+            (PULL_WORKFLOW, False),
         ):
             await definitions.put_workflow_version(
                 WORKSPACE, name, "1", workflow_document(waiting=waiting, name=name)
             )
+        await definitions.put_workflow_version(
+            WORKSPACE,
+            PULL_WAIT_WORKFLOW,
+            "1",
+            workflow_document(
+                waiting=True, name=PULL_WAIT_WORKFLOW, delivery_mode="pull"
+            ),
+        )
         manifest = json.loads(Path("/smoke/connector-manifest.json").read_text())
         await PgCatalogAdapter(lazy=pool).put_connector_type_version(
             type=manifest["metadata"]["type"],
@@ -195,15 +230,16 @@ async def seed() -> None:
             normalized_manifest=manifest,
         )
         instances = PgConnectorInstanceAdapter(lazy=pool)
-        for workspace, secret_name in (
-            (WORKSPACE, WEBHOOK_SECRET),
-            (OTHER_WORKSPACE, WEBHOOK_SECRET + "-other"),
+        for workspace, connector_id, secret_name in (
+            (WORKSPACE, CONNECTOR, WEBHOOK_SECRET),
+            (OTHER_WORKSPACE, CONNECTOR, WEBHOOK_SECRET + "-other"),
+            (WORKSPACE, PULL_CONNECTOR, WEBHOOK_SECRET),
         ):
             await instances.put_connector_instance(
                 WorkspaceId(workspace),
                 ConnectorInstance(
                     workspace_id=WorkspaceId(workspace),
-                    instance_id=ConnectorInstanceId(CONNECTOR),
+                    instance_id=ConnectorInstanceId(connector_id),
                     type=manifest["metadata"]["type"],
                     version=manifest["metadata"]["version"],
                     name="Disposable reference connector",
@@ -339,7 +375,13 @@ class Gateway:
             time.sleep(1)
         raise CertificationFailure("workflow: completion deadline exceeded")
 
-    def subscription(self, source: str, *, workflow: str = WORKFLOW) -> str:
+    def subscription(
+        self,
+        source: str,
+        *,
+        workflow: str = WORKFLOW,
+        connector: str = CONNECTOR,
+    ) -> str:
         """Configure a real receiver while preserving normal Gateway authorization and validation."""
         body: dict[str, Any] = {
             "sourceType": source,
@@ -349,8 +391,12 @@ class Gateway:
         if source == "scheduled":
             body["sourceConfig"] = {"intervalSeconds": 10}
         elif source in ("webhook", "vendor-push", "pull"):
-            body["sourceConfig"] = {"connectorInstanceId": CONNECTOR}
-            body["selector"] = "event.data.route == 'match'"
+            body["sourceConfig"] = {"connectorInstanceId": connector}
+            body["selector"] = (
+                PULL_SELECTOR if source == "pull" else "event.data.route == 'match'"
+            )
+            if source == "pull":
+                body["sourceConfig"]["pollIntervalSeconds"] = 10
         result = self.request(
             "POST", f"/v1/workspaces/{WORKSPACE}/triggers", body, expected=(201,)
         )
@@ -358,6 +404,71 @@ class Gateway:
         if not isinstance(identifier, str) or not identifier:
             raise CertificationFailure("subscription: missing identifier")
         return identifier
+
+    def start_run(self, workflow: str) -> str:
+        """Start an immutable fixture version publicly and require its real run identifier."""
+        result = self.request(
+            "POST",
+            f"/v1/workspaces/{WORKSPACE}/runs",
+            {"workflowVersionId": f"{WORKSPACE}/{workflow}@1", "inputs": {}},
+            expected=(202,),
+        )
+        run_id = result.get("runId")
+        if not isinstance(run_id, str) or not run_id:
+            raise CertificationFailure("wait: missing workflow run identifier")
+        return run_id
+
+    def pull_cursor(
+        self, *, changed_from: str | None = None, settled: bool = False
+    ) -> str:
+        """Require a redacted committed cursor, optionally advanced or without a live lease.
+
+        A not-yet-created cursor is allowed only while waiting for the first
+        real tick. Pause acknowledgement alone does not imply an admitted hook
+        finished; settled reads wait for its ordinary lease release.
+        """
+        deadline = time.monotonic() + 180
+        while time.monotonic() < deadline:
+            row = self.request(
+                "GET",
+                f"/v1/workspaces/{WORKSPACE}/connectors/{PULL_CONNECTOR}/cursor",
+                expected=(200, 404),
+            )
+            error = row.get("error")
+            if (
+                isinstance(error, dict)
+                and error.get("code") == "connector.cursor.not_found"
+            ):
+                time.sleep(1)
+                continue
+            fingerprint = row.get("valueFingerprint")
+            if (
+                row.get("encoding") == "oci-list-tags-v1"
+                and fingerprint is None
+                and row.get("valueLength") is None
+                and "leaseHolder" in row
+            ):
+                time.sleep(1)
+                continue
+            if (
+                row.get("workspaceId") != WORKSPACE
+                or row.get("instanceId") != PULL_CONNECTOR
+                or row.get("encoding") != "oci-list-tags-v1"
+                or not isinstance(fingerprint, str)
+                or re.fullmatch("[0-9a-f]{64}", fingerprint) is None
+                or not isinstance(row.get("valueLength"), int)
+                or row["valueLength"] <= 0
+                or "leaseHolder" not in row
+            ):
+                raise CertificationFailure("pull: invalid redacted cursor response")
+            if fingerprint != changed_from and (
+                not settled or row["leaseHolder"] is None
+            ):
+                return fingerprint
+            time.sleep(1)
+        raise CertificationFailure(
+            "pull: committed cursor observation deadline exceeded"
+        )
 
     def webhook(
         self,
@@ -531,15 +642,7 @@ def setup_wait(*, vendor: bool = False) -> None:
     started = time.monotonic()
     if vendor:
         gateway.subscription("vendor-push", workflow=VENDOR_WORKFLOW)
-    result = gateway.request(
-        "POST",
-        f"/v1/workspaces/{WORKSPACE}/runs",
-        {"workflowVersionId": f"{WORKSPACE}/{WAIT_WORKFLOW}@1", "inputs": {}},
-        expected=(202,),
-    )
-    run_id = result.get("runId")
-    if not isinstance(run_id, str) or not run_id:
-        raise CertificationFailure("wait: missing workflow run identifier")
+    run_id = gateway.start_run(WAIT_WORKFLOW)
     emit_report(["workflow-source-wait-start-accepted"], started, waiting_run=run_id)
 
 
@@ -639,7 +742,83 @@ def exercise_vendor(*, redelivery: bool) -> None:
     raise CertificationFailure("vendor-push: no workflow effect before deadline")
 
 
-def observe_wait(run_id: str) -> None:
+def exercise_pull(phase: str) -> None:
+    """Require real hook/broker effects, resume-only demand and a settled operator pause.
+
+    The runner makes two real Connector replicas ready before these phases.
+    Only the upstream plugin data is deterministic; no hook, cursor provider,
+    broker callback or Workflow implementation is replaced.
+    """
+    gateway = Gateway()
+    started = time.monotonic()
+    path = f"/v1/workspaces/{WORKSPACE}/connectors/{PULL_CONNECTOR}/pull-loop:"
+    if phase == "pull-setup":
+        gateway.request("POST", path + "pause")
+        registered_run = gateway.start_run(PULL_WAIT_WORKFLOW)
+        emit_report(
+            ["pull-source-wait-start-accepted"], started, waiting_run=registered_run
+        )
+        return
+    if phase == "pull-resume":
+        waiting_run = os.environ.get("CUSTOS_WAIT_RUN_ID")
+        if not waiting_run:
+            raise CertificationFailure("pull: missing registered resume-only wait")
+        gateway.request("POST", path + "resume")
+        gateway.wait_terminal(waiting_run)
+        gateway.pull_cursor()
+        waits = gateway.runs(PULL_WAIT_WORKFLOW)
+        if (
+            gateway.runs(PULL_WORKFLOW)
+            or len(waits) != 1
+            or waits[0]["runId"] != waiting_run
+        ):
+            raise CertificationFailure(
+                "pull: resume-only demand created a start effect"
+            )
+        emit_report(
+            ["pull-real-hook-broker-source-resume-without-start-intent"], started
+        )
+        return
+    if phase == "pull-start":
+        previous = gateway.pull_cursor()
+        gateway.subscription("pull", workflow=PULL_WORKFLOW, connector=PULL_CONNECTOR)
+        deadline = time.monotonic() + 180
+        while time.monotonic() < deadline:
+            runs = gateway.runs(PULL_WORKFLOW)
+            if runs:
+                gateway.wait_terminal(runs[0]["runId"])
+                gateway.pull_cursor(changed_from=previous)
+                emit_report(
+                    ["pull-real-hook-broker-workflow-start-and-cursor-progress"],
+                    started,
+                )
+                return
+            time.sleep(1)
+        raise CertificationFailure("pull: no start effect before deadline")
+    if phase == "pull-pause":
+        gateway.request("POST", path + "pause")
+        previous = gateway.pull_cursor(settled=True)
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            if gateway.pull_cursor(settled=True) != previous:
+                raise CertificationFailure(
+                    "pull: cursor advanced while operator-paused"
+                )
+            time.sleep(1)
+        emit_report(
+            ["pull-paused-cursor-stable-over-20-seconds-with-two-ready-replicas"],
+            started,
+        )
+        return
+    raise CertificationFailure("pull: unsupported certification phase")
+
+
+def observe_wait(
+    run_id: str,
+    *,
+    connector: str = CONNECTOR,
+    delivery_mode: Literal["push", "pull"] = "push",
+) -> None:
     """Require the actual Trigger provider to expose this live wait before admitting a source event.
 
     The runner observes storage inside the owned Trigger deployment. The public
@@ -663,7 +842,7 @@ def observe_wait(run_id: str) -> None:
                     while True:
                         page = await store.query_resume_subscriptions(
                             sys.argv[2], connector_instance_id=sys.argv[3],
-                            delivery_mode="push", as_of=datetime.now(UTC), limit=100,
+                            delivery_mode=sys.argv[4], as_of=datetime.now(UTC), limit=100,
                         )
                         matches = [row for row in page.items if str(row.run_id) == sys.argv[1]]
                         if len(matches) == 1 and str(matches[0].step_id) == "await-source":
@@ -690,7 +869,8 @@ def observe_wait(run_id: str) -> None:
             script,
             run_id,
             WORKSPACE,
-            CONNECTOR,
+            connector,
+            delivery_mode,
         ],
         timeout=210,
     )
@@ -797,14 +977,7 @@ def client_job(
     waiting_run: str = "",
 ) -> dict[str, Any]:
     """Project only a workspace token and upstream keys into the public-only client for one phase."""
-    if phase not in (
-        "wait-setup",
-        "exercise",
-        "rotation",
-        "vendor-setup",
-        "vendor-observe",
-        "vendor-redelivery",
-    ):
+    if phase not in CLIENT_PHASES:
         raise CertificationFailure("client: unsupported certification phase")
     job_name = "receiver-certification-" + ("client" if phase == "exercise" else phase)
     return {
@@ -1105,6 +1278,67 @@ def run(output: Path) -> None:
     publish_vendor_event()
     redelivery = run_client(image, ready_addresses[0], phase="vendor-redelivery")
     report["completedScenarios"].extend(redelivery["completedScenarios"])
+    output.write_text(json.dumps(report, indent=2))
+    smoke.command(
+        [
+            "kubectl",
+            "-n",
+            namespace,
+            "scale",
+            "deployment/custos-connector-service",
+            "--replicas=2",
+        ]
+    )
+    smoke.command(
+        [
+            "kubectl",
+            "-n",
+            namespace,
+            "rollout",
+            "status",
+            "deployment/custos-connector-service",
+            "--timeout=240s",
+        ],
+        timeout=270,
+    )
+    connector_pods = json.loads(
+        smoke.command(
+            [
+                "kubectl",
+                "-n",
+                namespace,
+                "get",
+                "pods",
+                "-l",
+                "app.kubernetes.io/component=connector-service",
+                "-o",
+                "json",
+            ]
+        )
+    )
+    ready_connectors = [
+        pod
+        for pod in connector_pods["items"]
+        if not pod["metadata"].get("deletionTimestamp")
+        and any(
+            condition.get("type") == "Ready" and condition.get("status") == "True"
+            for condition in pod.get("status", {}).get("conditions", [])
+        )
+    ]
+    if len(ready_connectors) != 2:
+        raise CertificationFailure("pull: two real Connector replicas are not Ready")
+    pull_setup = run_client(image, ready_addresses[0], phase="pull-setup")
+    pull_wait = pull_setup.get("waitingRunId")
+    if not isinstance(pull_wait, str) or not pull_wait:
+        raise CertificationFailure("pull: setup evidence is missing the run identifier")
+    observe_wait(pull_wait, connector=PULL_CONNECTOR, delivery_mode="pull")
+    for phase in ("pull-resume", "pull-start", "pull-pause"):
+        pull_report = run_client(
+            image, ready_addresses[0], phase=phase, waiting_run=pull_wait
+        )
+        report["completedScenarios"].extend(pull_report["completedScenarios"])
+        report["phase"] = "exercise-rotation-vendor-and-pull"
+        output.write_text(json.dumps(report, indent=2))
     report["elapsedSeconds"] = round(time.monotonic() - started, 3)
     output.write_text(json.dumps(report, indent=2))
     print(
@@ -1117,17 +1351,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "phase",
-        choices=(
-            "prepare",
-            "seed",
-            "wait-setup",
-            "exercise",
-            "rotation",
-            "run",
-            "vendor-setup",
-            "vendor-observe",
-            "vendor-redelivery",
-        ),
+        choices=("prepare", "seed", "run", *CLIENT_PHASES),
     )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
@@ -1141,6 +1365,8 @@ def main() -> None:
         exercise(rotating=args.phase == "rotation")
     elif args.phase in ("vendor-observe", "vendor-redelivery"):
         exercise_vendor(redelivery=args.phase == "vendor-redelivery")
+    elif args.phase.startswith("pull-"):
+        exercise_pull(args.phase)
     elif args.output is None:
         parser.error("--output is required for run")
     else:

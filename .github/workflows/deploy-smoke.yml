@@ -94,6 +94,7 @@ jobs:
           helm install cilium cilium/cilium --version 1.18.17 \
             --namespace kube-system --set ipam.mode=kubernetes \
             --set kubeProxyReplacement=false --set operator.replicas=1 \
+            --set policyCIDRMatchMode=nodes \
             --wait --timeout 5m
           kubectl wait --for=condition=Ready nodes --all --timeout=2m
 
@@ -397,7 +398,7 @@ jobs:
             done
           echo "::endgroup::"
           echo "::group::hook job logs"
-          for job in smoke-schema-migrate smoke-execution-bootstrap receiver-certification-seed receiver-certification-wait-setup receiver-certification-client receiver-certification-rotation receiver-certification-vendor-setup receiver-certification-vendor-observe receiver-certification-vendor-redelivery custos-migrate custos-bootstrap custos-smoke-test; do
+          for job in smoke-schema-migrate smoke-execution-bootstrap receiver-certification-seed receiver-certification-wait-setup receiver-certification-client receiver-certification-rotation receiver-certification-vendor-setup receiver-certification-vendor-observe receiver-certification-vendor-redelivery receiver-certification-pull-setup receiver-certification-pull-resume receiver-certification-pull-start receiver-certification-pull-pause custos-migrate custos-bootstrap custos-smoke-test; do
             echo "--- logs job/$job ---"
             # Job pods are name-suffixed, so the fallback selects by the
             # standard job-name label rather than a bare pod name.
