@@ -109,6 +109,67 @@ def test_create_only_bundle(
         operator.provision(bundle, create=False)
 
 
+@pytest.mark.parametrize(
+    "change",
+    [
+        "none",
+        "controller-owner",
+        "terminating",
+        "helm-name",
+        "helm-namespace",
+        "helm-manager",
+    ],
+)
+def test_provision_checks_post_create_ownership(
+    change: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Admission-added lifecycle ownership must fail post-create verification, not report success."""
+    bundle = operator.prepare(fixture(1), configuration(), "custos", "controllers")
+    objects: dict[tuple[str, str], dict[str, Any]] = {}
+    writes: list[list[str]] = []
+
+    def run(command: list[str], payload: Any = None) -> str:
+        """Model create-time admission mutation without modifying the prepared bundle."""
+        assert command[:2] == ["kubectl", "create"]
+        if "--dry-run=server" not in command:
+            writes.append(command)
+            live = copy.deepcopy(payload)
+            metadata = live["metadata"]
+            if change == "controller-owner":
+                metadata["ownerReferences"] = [{"uid": "garbage-collection-owner"}]
+            elif change == "terminating":
+                metadata["deletionTimestamp"] = "2026-01-01T00:00:00Z"
+            elif change == "helm-name":
+                metadata.setdefault("annotations", {})["meta.helm.sh/release-name"] = (
+                    "another"
+                )
+            elif change == "helm-namespace":
+                metadata.setdefault("annotations", {})[
+                    "meta.helm.sh/release-namespace"
+                ] = "another"
+            elif change == "helm-manager":
+                metadata.setdefault("labels", {})["app.kubernetes.io/managed-by"] = (
+                    "Helm"
+                )
+            objects[(live["kind"], metadata["name"])] = live
+        return "{}"
+
+    monkeypatch.setattr(operator, "transition_preflight", lambda *args, **kwargs: None)
+    monkeypatch.setattr(operator, "run", run)
+    monkeypatch.setattr(
+        operator,
+        "get_resource",
+        lambda resource: objects.get((resource["kind"], resource["metadata"]["name"])),
+    )
+    if change == "none":
+        operator.provision(bundle, create=True)
+        assert len(writes) == len(bundle["objects"])
+    else:
+        with pytest.raises(operator.OperatorValidationError, match="conflicts"):
+            operator.provision(bundle, create=True)
+        assert len(writes) == 1
+
+
 def test_verify_missing_bundle_is_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verification never creates a missing authorization object or reports success."""
     bundle = operator.prepare(fixture(1), configuration(), "custos", "controllers")

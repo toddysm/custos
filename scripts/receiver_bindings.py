@@ -557,6 +557,21 @@ def transition_preflight(
                 )
 
 
+def verify_bundle_resource(live: dict[str, Any], resource: dict[str, Any]) -> None:
+    """Reject changed content or lifecycle ownership both before reuse and after creation."""
+    metadata = live["metadata"]
+    annotations = metadata.get("annotations", {})
+    if (
+        effective(live) != effective(resource)
+        or metadata.get("ownerReferences")
+        or metadata.get("deletionTimestamp")
+        or annotations.get("meta.helm.sh/release-name")
+        or annotations.get("meta.helm.sh/release-namespace")
+        or metadata.get("labels", {}).get("app.kubernetes.io/managed-by") == "Helm"
+    ):
+        raise OperatorValidationError("bundle resource conflicts; no overwrite allowed")
+
+
 def provision(
     bundle: dict[str, Any],
     *,
@@ -565,7 +580,11 @@ def provision(
     atomic: bool = False,
     rollback_revision: int | None = None,
 ) -> None:
-    """Preflight then create-or-verify all resources, never patch/replace existing objects."""
+    """Preflight then create-or-verify resources, including post-create content and lifecycle.
+
+    Never patch, replace or delete conflicting objects; failures leave partial
+    creates for operator diagnosis with admission still paused.
+    """
     transition_preflight(
         bundle, inventory, atomic=atomic, rollback_revision=rollback_revision
     )
@@ -573,17 +592,7 @@ def provision(
     for resource in bundle["objects"]:
         live = get_resource(resource)
         if live is not None:
-            if (
-                effective(live) != effective(resource)
-                or live["metadata"].get("ownerReferences")
-                or live["metadata"].get("deletionTimestamp")
-                or live["metadata"]
-                .get("annotations", {})
-                .get("meta.helm.sh/release-name")
-            ):
-                raise OperatorValidationError(
-                    "existing bundle resource conflicts; no overwrite allowed"
-                )
+            verify_bundle_resource(live, resource)
         elif create:
             missing.append(resource)
         else:
@@ -595,10 +604,11 @@ def provision(
     for resource in missing:
         run(["kubectl", "create", "-f", "-", "-o", "json"], resource)
         live = get_resource(resource)
-        if live is None or effective(live) != effective(resource):
+        if live is None:
             raise OperatorValidationError(
                 f"created bundle {resource['kind']} could not be verified"
             )
+        verify_bundle_resource(live, resource)
 
 
 def reconcile_source(

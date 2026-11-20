@@ -76,6 +76,9 @@ through other values, `--set-file`, hooks or a subchart.
 Provisioning server-validates all missing objects before creating them.
 Existing resources must exactly match their expected digest/content and must
 not have another lifecycle owner. Conflicts abort; nothing is overwritten.
+After each create, the helper rereads and applies the same checks to the live
+object, rejecting admission-added owner references, termination or Helm
+ownership metadata before reporting success.
 A partial API failure can leave created objects: retain them and rerun the
 same verified bundle, never replace them with a different snapshot.
 
