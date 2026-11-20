@@ -1,9 +1,11 @@
-"""Exercise real receiver effects through the disposable deployment's public Gateway.
+"""Orchestrate real receiver effects in the disposable managed deployment.
 
 The seed job uses production providers, never test SQL or application fakes.
-The client has only a workspace operator credential and Gateway network access.
-Its report distinguishes executed scenarios from the full, still-required
-receiver certification matrix. No credentials or response bodies are printed.
+Public clients have only workspace/upstream credentials and Gateway access.
+The runner separately observes real wait registrations and supplies synthetic
+upstream events through Connector's real producer. Reports distinguish executed
+scenarios from the still-required full matrix. No credentials or response bodies
+are printed.
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ OPERATOR_SECRET = "receiver-certification-operator"
 WORKFLOW = "receiver-certification"
 WAIT_WORKFLOW = "receiver-certification-wait"
 WEBHOOK_WORKFLOW = "receiver-certification-webhook"
+VENDOR_WORKFLOW = "receiver-certification-vendor-push"
 CONNECTOR = "receiver-fixture"
 EVENT_KEY = "oci.image.pushed"
 CREDENTIAL_NAMESPACE = "custos-connectors"
@@ -177,6 +180,7 @@ async def seed() -> None:
             (WORKFLOW, False),
             (WAIT_WORKFLOW, True),
             (WEBHOOK_WORKFLOW, False),
+            (VENDOR_WORKFLOW, False),
         ):
             await definitions.put_workflow_version(
                 WORKSPACE, name, "1", workflow_document(waiting=waiting, name=name)
@@ -521,10 +525,12 @@ def emit_report(
     )
 
 
-def setup_wait() -> None:
-    """Start a real source-associated wait through the public Workflow API; do not infer registration."""
+def setup_wait(*, vendor: bool = False) -> None:
+    """Start a public source-associated wait and optional vendor start intent, not a stored test wait."""
     gateway = Gateway()
     started = time.monotonic()
+    if vendor:
+        gateway.subscription("vendor-push", workflow=VENDOR_WORKFLOW)
     result = gateway.request(
         "POST",
         f"/v1/workspaces/{WORKSPACE}/runs",
@@ -535,6 +541,102 @@ def setup_wait() -> None:
     if not isinstance(run_id, str) or not run_id:
         raise CertificationFailure("wait: missing workflow run identifier")
     emit_report(["workflow-source-wait-start-accepted"], started, waiting_run=run_id)
+
+
+def publish_vendor_event() -> None:
+    """Publish a synthetic upstream event using Connector's real normalizer and configured Dapr producer.
+
+    Only the external producer input is synthetic. No broker callback, Trigger
+    dispatch, Workflow client or provider is replaced. Repeated calls preserve
+    event identity while receive timestamps change, like actual redelivery.
+    """
+    import runtime as smoke
+
+    script = textwrap.dedent("""
+        import asyncio, sys
+        from custos_connector.listen.normalizer import EventNormalizer
+        from custos_connector.listen.publisher import DaprPubSubEventPublisher
+        from custos_connector.providers import load_event_publisher
+        from custos_connector.settings import load_settings
+
+        async def publish() -> None:
+            \"\"\"Use the production publisher factory and close its independently owned client.\"\"\"
+            publisher, client = load_event_publisher(settings=load_settings())
+            try:
+                if not isinstance(publisher, DaprPubSubEventPublisher) or client is None:
+                    raise RuntimeError("real Dapr event publisher is required")
+                event = EventNormalizer(produced_event_types=[sys.argv[3]]).normalize(
+                    {"eventId": "receiver-certification-vendor-event",
+                     "eventType": sys.argv[3], "route": "match"},
+                    workspace_id=sys.argv[1], instance_id=sys.argv[2], delivery_mode="push",
+                )
+                await publisher.publish(event)
+                print("VENDOR_EVENT_PUBLISHED")
+            finally:
+                if client is not None:
+                    await client.aclose()
+
+        asyncio.run(publish())
+    """)
+    published = smoke.command(
+        [
+            "kubectl",
+            "-n",
+            os.environ["NS"],
+            "exec",
+            "deployment/custos-connector-service",
+            "-c",
+            "connector-service",
+            "--",
+            "python",
+            "-c",
+            script,
+            WORKSPACE,
+            CONNECTOR,
+            EVENT_KEY,
+        ],
+        timeout=60,
+    )
+    if published.strip() != "VENDOR_EVENT_PUBLISHED":
+        raise CertificationFailure(
+            "vendor-push: real broker publication was not acknowledged"
+        )
+
+
+def exercise_vendor(*, redelivery: bool) -> None:
+    """Require public Workflow start/resume effects independently of the real producer's acknowledgement."""
+    gateway = Gateway()
+    started = time.monotonic()
+    if redelivery:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if len(gateway.runs(VENDOR_WORKFLOW)) != 1:
+                raise CertificationFailure(
+                    "vendor-push: unexpected redelivery workflow count"
+                )
+            time.sleep(1)
+        emit_report(
+            ["vendor-push-redelivery-no-extra-workflow-over-10-seconds"], started
+        )
+        return
+    waiting_run = os.environ.get("CUSTOS_WAIT_RUN_ID")
+    if not waiting_run:
+        raise CertificationFailure("vendor-push: missing registered wait control")
+    deadline = time.monotonic() + 180
+    while time.monotonic() < deadline:
+        runs = gateway.runs(VENDOR_WORKFLOW)
+        if len(runs) > 1:
+            raise CertificationFailure("vendor-push: unexpected workflow effect count")
+        if runs:
+            gateway.wait_terminal(runs[0]["runId"])
+            gateway.wait_terminal(waiting_run)
+            emit_report(
+                ["vendor-push-real-broker-workflow-start-and-source-resume-completion"],
+                started,
+            )
+            return
+        time.sleep(1)
+    raise CertificationFailure("vendor-push: no workflow effect before deadline")
 
 
 def observe_wait(run_id: str) -> None:
@@ -552,7 +654,7 @@ def observe_wait(run_id: str) -> None:
         from custos_pg import PgMetadataAdapter
         from custos_pg.pool import LazyPool, register_jsonb_codec
 
-        async def observe():
+        async def observe() -> None:
             \"\"\"Bound the observation and close its independent real-provider pool.\"\"\"
             pool = LazyPool(os.environ["TRIGGER_METADATA_STORE"], init=register_jsonb_codec)
             store = PgMetadataAdapter(lazy=pool)
@@ -695,7 +797,14 @@ def client_job(
     waiting_run: str = "",
 ) -> dict[str, Any]:
     """Project only a workspace token and upstream keys into the public-only client for one phase."""
-    if phase not in ("wait-setup", "exercise", "rotation"):
+    if phase not in (
+        "wait-setup",
+        "exercise",
+        "rotation",
+        "vendor-setup",
+        "vendor-observe",
+        "vendor-redelivery",
+    ):
         raise CertificationFailure("client: unsupported certification phase")
     job_name = "receiver-certification-" + ("client" if phase == "exercise" else phase)
     return {
@@ -875,7 +984,7 @@ def run_client(
 
 
 def run(output: Path) -> None:
-    """Provision actual credential Secrets, run public checks, rotate, then require fresh resolution.
+    """Run public and real-producer phases against actual Secrets, registrations and Workflow effects.
 
     Completed-phase evidence is retained if a later phase fails; every report
     deliberately remains partial certification. Private Secret bytes never
@@ -884,6 +993,7 @@ def run(output: Path) -> None:
     import runtime as smoke
 
     namespace = os.environ["NS"]
+    started = time.monotonic()
     image = os.environ["IMAGE_PREFIX"] + "/api-gateway:" + os.environ["GITHUB_SHA"]
     pods = json.loads(
         smoke.command(
@@ -974,9 +1084,28 @@ def run(output: Path) -> None:
     rotation = run_client(image, ready_addresses[0], phase="rotation")
     report["phase"] = "exercise-and-rotation"
     report["completedScenarios"].extend(rotation["completedScenarios"])
-    report["elapsedSeconds"] = round(
-        report["elapsedSeconds"] + rotation["elapsedSeconds"], 3
+    output.write_text(json.dumps(report, indent=2))
+    vendor_setup = run_client(image, ready_addresses[0], phase="vendor-setup")
+    vendor_wait = vendor_setup.get("waitingRunId")
+    if not isinstance(vendor_wait, str) or not vendor_wait:
+        raise CertificationFailure(
+            "vendor-push: setup evidence is missing the run identifier"
+        )
+    observe_wait(vendor_wait)
+    publish_vendor_event()
+    vendor = run_client(
+        image,
+        ready_addresses[0],
+        phase="vendor-observe",
+        waiting_run=vendor_wait,
     )
+    report["completedScenarios"].extend(vendor["completedScenarios"])
+    report["phase"] = "exercise-rotation-and-vendor"
+    output.write_text(json.dumps(report, indent=2))
+    publish_vendor_event()
+    redelivery = run_client(image, ready_addresses[0], phase="vendor-redelivery")
+    report["completedScenarios"].extend(redelivery["completedScenarios"])
+    report["elapsedSeconds"] = round(time.monotonic() - started, 3)
     output.write_text(json.dumps(report, indent=2))
     print(
         "Real deployed receiver effect evidence captured; full matrix remains required."
@@ -988,7 +1117,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "phase",
-        choices=("prepare", "seed", "wait-setup", "exercise", "rotation", "run"),
+        choices=(
+            "prepare",
+            "seed",
+            "wait-setup",
+            "exercise",
+            "rotation",
+            "run",
+            "vendor-setup",
+            "vendor-observe",
+            "vendor-redelivery",
+        ),
     )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
@@ -996,10 +1135,12 @@ def main() -> None:
         prepare()
     elif args.phase == "seed":
         asyncio.run(seed())
-    elif args.phase == "wait-setup":
-        setup_wait()
+    elif args.phase in ("wait-setup", "vendor-setup"):
+        setup_wait(vendor=args.phase == "vendor-setup")
     elif args.phase in ("exercise", "rotation"):
         exercise(rotating=args.phase == "rotation")
+    elif args.phase in ("vendor-observe", "vendor-redelivery"):
+        exercise_vendor(redelivery=args.phase == "vendor-redelivery")
     elif args.output is None:
         parser.error("--output is required for run")
     else:

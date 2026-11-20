@@ -570,3 +570,56 @@ def test_receiver_evidence_cannot_promote_partial_or_mismatched_execution(
     )
     with pytest.raises(receivers.CertificationFailure, match="receiver evidence"):
         receivers.run_client("synthetic:tested", "10.244.0.12", phase="exercise")
+
+
+def test_vendor_public_effect_deadline_does_not_accept_a_producer_acknowledgement(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """No effect report is emitted when a real-producer phase is followed by no Workflow start."""
+    monkeypatch.setenv("CUSTOS_WAIT_RUN_ID", "synthetic-wait")
+    gateway = Mock()
+    gateway.runs.return_value = []
+    monkeypatch.setitem(
+        receivers.exercise_vendor.__globals__,
+        "Gateway",
+        Mock(return_value=gateway),
+    )
+    monkeypatch.setitem(
+        receivers.exercise_vendor.__globals__,
+        "time",
+        SimpleNamespace(
+            monotonic=Mock(side_effect=[0, 0, 0, 181]),
+            sleep=Mock(),
+        ),
+    )
+    with pytest.raises(receivers.CertificationFailure, match="no workflow effect"):
+        receivers.exercise_vendor(redelivery=False)
+    gateway.wait_terminal.assert_not_called()
+    assert receivers.REPORT_PREFIX not in capsys.readouterr().out
+
+
+def test_vendor_completion_requires_the_registered_wait_to_resume(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A successful started Workflow cannot hide a missing source-associated resume effect."""
+    monkeypatch.setenv("CUSTOS_WAIT_RUN_ID", "synthetic-wait")
+    gateway = Mock()
+    gateway.runs.return_value = [{"runId": "synthetic-start"}]
+    gateway.wait_terminal.side_effect = [
+        None,
+        receivers.CertificationFailure("synthetic wait did not complete"),
+    ]
+    monkeypatch.setitem(
+        receivers.exercise_vendor.__globals__,
+        "Gateway",
+        Mock(return_value=gateway),
+    )
+    with pytest.raises(receivers.CertificationFailure, match="wait did not complete"):
+        receivers.exercise_vendor(redelivery=False)
+    assert [call.args[0] for call in gateway.wait_terminal.call_args_list] == [
+        "synthetic-start",
+        "synthetic-wait",
+    ]
+    assert receivers.REPORT_PREFIX not in capsys.readouterr().out

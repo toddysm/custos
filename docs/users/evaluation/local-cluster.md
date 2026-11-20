@@ -48,6 +48,12 @@ the Secret: the old key must fail and the new key must complete a Workflow.
 These checks use the production Connector identity resolver and authenticated
 Dapr transport; the public client gets only its workspace token and upstream
 webhook keys, never database, Kubernetes or mesh credentials.
+The vendor-push scenario supplies a synthetic upstream event to Connector's
+production normalizer and configured Dapr publisher inside the owned deployment.
+It requires real broker-to-Trigger delivery followed by public Workflow start
+and source-resume completion, then observes a repeated producer event for ten
+seconds without another Workflow. This tests the existing Connector event
+contract; it does not claim a live third-party vendor integration.
 Certification dispatches and pull requests select a separate kind configuration
 with kindnet disabled and Cilium **1.18.17** installed before other workloads.
 The client also requires timed-out connections to a Ready Trigger pod's app,
