@@ -255,6 +255,7 @@ def test_preseed_grants_only_workspace_execution_and_closes_pool(
     assert binding.role_id == ROLE_WORKSPACE_EXECUTOR
     assert binding.scope == WorkspaceScope(smoke.WORKSPACE)
     assert principal.call_args.args[0].workspace_id == smoke.WORKSPACE
+    assert binding.bound_by == principal.call_args.args[0].principal_id
     assert credential.call_args.args[0].hash == hashed
     assert token not in repr(credential.call_args.args[0])
     assert seed.call_args.kwargs["admin_oidc_issuer"] is None

@@ -213,7 +213,7 @@ async def seed_execution() -> None:
                 role_id=ROLE_WORKSPACE_EXECUTOR,
                 scope=WorkspaceScope(WorkspaceId(WORKSPACE)),
                 bound_at=now,
-                bound_by=PrincipalId("smoke-bootstrap"),
+                bound_by=PrincipalId(PRINCIPAL),
             )
         )
         await store.put_service_token(
