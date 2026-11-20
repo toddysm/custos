@@ -24,6 +24,8 @@ is a disposable test fixture, not a replacement for provisioning the
 [managed execution prerequisites](../../operations/execution-bindings.md).
 Its readiness/Helm-test evidence does not certify receiver effects, activity
 execution, or enforced network isolation; those remain separate certification.
+The authentication exercised here is the credential-backed execution exchange,
+not the legacy protected Auth administration routes.
 For a managed/remote cluster, follow
 [Install — connected](install-connected.md) instead; this page is the local
 variant of the same flow.

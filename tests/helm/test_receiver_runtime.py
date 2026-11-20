@@ -28,6 +28,29 @@ SERVICES = (
 )
 
 
+def verify_auth_health(environment: dict[str, str]) -> None:
+    """Exercise Auth's real production middleware/probe path with the rendered configuration."""
+    from custos_auth.health import router
+    from custos_auth.middleware.callctx import CallContextMiddleware
+    from custos_auth.settings import load_settings
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    settings = load_settings(environment)
+    app = FastAPI()
+    app.include_router(router)
+    app.add_middleware(
+        CallContextMiddleware,
+        verifier_url=settings.callctx_verifier_url,
+        environment=settings.environment,
+    )
+    with TestClient(app) as client:
+        assert client.get("/healthz").status_code == 200
+    assert settings.callctx_verifier_url == (
+        "http://127.0.0.1:3500/v1.0/invoke/custos-auth/method/.well-known/jwks.json"
+    )
+
+
 async def verify_workflow_publisher(environment: dict[str, str]) -> None:
     """Pass the rendered environment through the real factory and inspect its wire request."""
     import httpx
@@ -233,6 +256,8 @@ def test_enabled_profiles_wire_actual_receiver_prerequisites(profile: str) -> No
             if service == "workflow-service":
                 asyncio.run(verify_workflow_publisher(environment))
                 continue
+            if service == "auth-service":
+                verify_auth_health(environment)
             package = {
                 "trigger-service": "custos_trigger/settings.py",
                 "connector-service": "custos_connector/settings.py",
