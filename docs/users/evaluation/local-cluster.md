@@ -34,7 +34,27 @@ synthetic workflow definitions and a separate, expiring workspace operator,
 then enables receiver admission only after managed readiness passes.
 [`receivers.py`](../../../tests/helm/smoke/receivers.py) uses a public-only
 client to check authentication, workspace denial, manual-trigger completion
-and scheduled-receiver completion through the real Workflow runtime.
+and scheduled-receiver completion through the real Workflow runtime. The fixture
+also builds the shipped reference OCI connector image and seeds its real catalog
+record plus identically named instances in two workspaces with distinct
+Kubernetes-backed credentials. Public webhook checks require exact mixed-batch
+counts, matching Workflow completion and no extra Workflow over a ten-second
+redelivery observation window. A source-associated wait is started through the
+public API; the runner must observe its live registration through the real
+Trigger storage provider before sending the event, then require the waiting
+Workflow to complete. The test never inserts a resume registration itself.
+A separate client runs after the runner rotates
+the Secret: the old key must fail and the new key must complete a Workflow.
+These checks use the production Connector identity resolver and authenticated
+Dapr transport; the public client gets only its workspace token and upstream
+webhook keys, never database, Kubernetes or mesh credentials.
+Certification dispatches and pull requests select a separate kind configuration
+with kindnet disabled and Cilium **1.18.17** installed before other workloads.
+The client also requires timed-out connections to a Ready Trigger pod's app,
+local Dapr HTTP/gRPC and remote invocation ports while public Gateway access
+works. Connection refusals, DNS failures and HTTP denials do not pass that check.
+Ordinary baseline dispatches keep their existing kind networking and do not
+claim network-policy enforcement.
 The artifact names the scenarios actually completed. This initial effects
 gate is not the full recovery/security/scale certification required by
 [#1018](https://github.com/toddysm/custos/issues/1018); its

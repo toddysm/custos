@@ -83,7 +83,19 @@ jobs:
         with:
           cluster_name: custos-smoke
           node_image: kindest/node:v1.31.2
-          config: tests/helm/smoke/kind.yaml
+          config: ${{ (inputs.certify_receivers || github.event_name == 'pull_request') && 'tests/helm/smoke/kind-certification.yaml' || 'tests/helm/smoke/kind.yaml' }}
+          wait: ${{ (inputs.certify_receivers || github.event_name == 'pull_request') && '0s' || '60s' }}
+
+      - name: Install enforcing certification CNI
+        if: inputs.certify_receivers || github.event_name == 'pull_request'
+        run: |
+          helm repo add cilium https://helm.cilium.io
+          helm repo update
+          helm install cilium cilium/cilium --version 1.18.17 \
+            --namespace kube-system --set ipam.mode=kubernetes \
+            --set kubeProxyReplacement=false --set operator.replicas=1 \
+            --wait --timeout 5m
+          kubectl wait --for=condition=Ready nodes --all --timeout=2m
 
       - name: Connect owned registry
         run: docker network connect kind custos-smoke-registry
@@ -212,6 +224,14 @@ jobs:
             echo "SMOKE_SIDECAR_IMAGE=$(docker inspect --format='{{index .RepoDigests 0}}' localhost:5001/smoke-sidecar:tested)"
             echo "SMOKE_HOOK_HELPER_IMAGE=$(docker inspect --format='{{index .RepoDigests 0}}' localhost:5001/smoke-hook-helper:tested)"
           } >> "$GITHUB_ENV"
+
+      - name: Build reference receiver connector
+        if: inputs.certify_receivers || github.event_name == 'pull_request'
+        run: |
+          docker build -t localhost:5001/smoke-oci-registry:tested \
+            extensions/connectors/oci-registry
+          docker push localhost:5001/smoke-oci-registry:tested
+          echo "SMOKE_CONNECTOR_IMAGE=$(docker inspect --format='{{index .RepoDigests 0}}' localhost:5001/smoke-oci-registry:tested)" >> "$GITHUB_ENV"
 
       - name: Vendor chart dependencies
         run: helm dependency update "$CHART"
@@ -377,13 +397,23 @@ jobs:
             done
           echo "::endgroup::"
           echo "::group::hook job logs"
-          for job in smoke-schema-migrate smoke-execution-bootstrap receiver-certification-seed receiver-certification-client custos-migrate custos-bootstrap custos-smoke-test; do
+          for job in smoke-schema-migrate smoke-execution-bootstrap receiver-certification-seed receiver-certification-wait-setup receiver-certification-client receiver-certification-rotation custos-migrate custos-bootstrap custos-smoke-test; do
             echo "--- logs job/$job ---"
             # Job pods are name-suffixed, so the fallback selects by the
             # standard job-name label rather than a bare pod name.
             kubectl logs -n "$NS" "job/$job" --all-containers --tail=200 2>/dev/null \
               || kubectl logs -n "$NS" -l job-name="$job" --all-containers --tail=200 2>/dev/null \
               || echo "(no logs for $job)"
+          done
+          echo "::endgroup::"
+          echo "::group::receiver dependency application errors (including Ready pods)"
+          for service in api-gateway auth-service workflow-service trigger-service connector-service catalog-service; do
+            echo "--- recent application errors: $service ---"
+            kubectl logs -n "$NS" "deployment/custos-$service" \
+              -c "$service" --since=15m --tail=1000 2>/dev/null \
+              | grep -iE 'warning|error|exception|traceback|failed|denied|unavailable' \
+              | tail -100 \
+              || echo "(no matching application errors for $service)"
           done
           echo "::endgroup::"
           echo "::group::CNPG cluster status"

@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 import yaml
@@ -355,9 +355,9 @@ def test_receiver_certification_definitions_use_actual_workflow_contracts(
 def test_receiver_client_cannot_access_backend_secrets_or_kubernetes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The real public client gets one workspace token, no database, mesh or Kubernetes credential."""
+    """Only one workspace token and upstream test keys are projected, never backend credentials."""
     monkeypatch.setenv("GITHUB_SHA", TAG)
-    job = receivers.client_job("synthetic:tested")
+    job = receivers.client_job("synthetic:tested", "10.244.0.12")
     pod = job["spec"]["template"]["spec"]
     container = pod["containers"][0]
     assert pod["automountServiceAccountToken"] is False
@@ -367,7 +367,10 @@ def test_receiver_client_cannot_access_backend_secrets_or_kubernetes(
         for row in container["env"]
         if "valueFrom" in row
     ]
-    assert projected == [{"name": receivers.OPERATOR_SECRET, "key": "token"}]
+    assert {(row["name"], row["key"]) for row in projected} == {
+        (receivers.OPERATOR_SECRET, key)
+        for key in ("token", "webhook-key", "rotated-webhook-key")
+    }
     assert "envFrom" not in container
     assert container["securityContext"]["readOnlyRootFilesystem"] is True
     assert pod["volumes"] == [
@@ -377,7 +380,6 @@ def test_receiver_client_cannot_access_backend_secrets_or_kubernetes(
 
 def test_receiver_client_refuses_a_successful_job_without_effect_evidence(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     """Job completion alone is never reported as receiver-to-Workflow certification."""
     import sys
@@ -398,9 +400,173 @@ def test_receiver_client_refuses_a_successful_job_without_effect_evidence(
             )
         ),
     )
-    output = tmp_path / "evidence.json"
     with pytest.raises(
         receivers.CertificationFailure, match="no certification claimed"
     ):
-        receivers.run(output)
-    assert not output.exists()
+        receivers.run_client("synthetic:tested", "10.244.0.12", phase="exercise")
+
+
+@pytest.mark.parametrize("outcome", ["reachable", "refused", "dns-failure"])
+def test_receiver_isolation_does_not_confuse_unavailability_with_filtering(
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+) -> None:
+    """An absent listener, bad address or successful TCP session cannot certify policy denial."""
+    connect = Mock()
+    if outcome == "reachable":
+        connect.return_value = MagicMock()
+    elif outcome == "refused":
+        connect.side_effect = ConnectionRefusedError()
+    else:
+        import socket
+
+        connect.side_effect = socket.gaierror()
+    monkeypatch.setattr("socket.create_connection", connect)
+    with pytest.raises(receivers.CertificationFailure, match="network-policy"):
+        receivers.check_network_isolation("10.244.0.12")
+
+
+def test_receiver_isolation_requires_every_backend_port_to_be_filtered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One filtered connection cannot hide an exposed app or Dapr listener."""
+    connect = Mock(side_effect=[TimeoutError(), MagicMock()])
+    monkeypatch.setattr("socket.create_connection", connect)
+    with pytest.raises(receivers.CertificationFailure, match="3500 is reachable"):
+        receivers.check_network_isolation("10.244.0.12")
+    connect.side_effect = TimeoutError()
+    connect.reset_mock()
+    receivers.check_network_isolation("10.244.0.12")
+    assert connect.call_count == 4
+
+
+def test_receiver_webhook_signs_the_exact_anonymous_request_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Public upstream signatures must cover transmitted JSON without leaking the operator token."""
+    import hashlib
+    import hmac
+
+    monkeypatch.setenv("CUSTOS_TEST_TOKEN", "synthetic-operator")
+    monkeypatch.setenv("CUSTOS_GATEWAY_URL", "http://custos-api-gateway:8080")
+    monkeypatch.setenv("CUSTOS_TEST_PHASE", "exercise")
+    response = MagicMock()
+    response.__enter__.return_value = response
+    response.status = 200
+    response.read.return_value = b'{"accepted": 1, "rejected": 0}'
+    send = Mock(return_value=response)
+    monkeypatch.setattr("urllib.request.urlopen", send)
+    gateway = receivers.Gateway()
+    gateway.webhook(
+        [{"eventId": "synthetic", "value": "quoted \\"}], "synthetic-upstream"
+    )
+    request = send.call_args.args[0]
+    headers = {key.lower(): value for key, value in request.header_items()}
+    assert "authorization" not in headers
+    assert (
+        headers["x-custos-signature"]
+        == "sha256="
+        + hmac.new(
+            b"synthetic-upstream",
+            request.data,
+            hashlib.sha256,
+        ).hexdigest()
+    )
+
+
+def test_receiver_http_failure_records_only_a_closed_problem_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep enough evidence to classify a real 503 without leaking upstream detail fields."""
+    import io
+    import urllib.error
+    from email.message import Message
+
+    monkeypatch.setenv("CUSTOS_TEST_TOKEN", "synthetic-operator")
+    monkeypatch.setenv("CUSTOS_GATEWAY_URL", "http://custos-api-gateway:8080")
+    monkeypatch.setenv("CUSTOS_TEST_PHASE", "exercise")
+    failure = urllib.error.HTTPError(
+        "http://custos-api-gateway:8080/synthetic",
+        503,
+        "unavailable",
+        Message(),
+        io.BytesIO(
+            b'{"code":"trigger.dispatch_unavailable","detail":"sensitive-upstream"}'
+        ),
+    )
+    monkeypatch.setattr("urllib.request.urlopen", Mock(side_effect=failure))
+    with pytest.raises(receivers.CertificationFailure) as caught:
+        receivers.Gateway().request("POST", "/synthetic", {})
+    assert (
+        str(caught.value) == "POST /synthetic: HTTP 503 (trigger.dispatch_unavailable)"
+    )
+    assert "sensitive-upstream" not in str(caught.value)
+    assert failure.closed
+
+
+def test_receiver_effect_reads_page_past_the_first_workflow_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A redelivery or missing deep-page run must not disappear behind the public page boundary."""
+    from urllib.parse import parse_qs, urlsplit
+
+    monkeypatch.setenv("CUSTOS_TEST_TOKEN", "synthetic-operator")
+    monkeypatch.setenv("CUSTOS_GATEWAY_URL", "http://custos-api-gateway:8080")
+    monkeypatch.setenv("CUSTOS_TEST_PHASE", "exercise")
+    gateway = receivers.Gateway()
+    request = Mock(
+        side_effect=[
+            {"items": [{"runId": "first"}], "nextCursor": "cursor+with/slash"},
+            {"items": [{"runId": "second"}], "nextCursor": None},
+        ]
+    )
+    monkeypatch.setattr(gateway, "request", request)
+    assert [row["runId"] for row in gateway.runs("synthetic")] == ["first", "second"]
+    query = parse_qs(urlsplit(request.call_args.args[1]).query)
+    assert query == {
+        "cursor": ["cursor+with/slash"],
+        "workflowVersionId": [receivers.WORKSPACE + "/synthetic@1"],
+    }
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"fullReceiverCertification": True},
+        {"completedScenarios": []},
+        {"sha": "b" * 40},
+        {"phase": "rotation"},
+    ],
+)
+def test_receiver_evidence_cannot_promote_partial_or_mismatched_execution(
+    monkeypatch: pytest.MonkeyPatch,
+    overrides: dict[str, Any],
+) -> None:
+    """A completed Job is insufficient if its report overclaims scope or names a different run."""
+    import sys
+
+    monkeypatch.setenv("NS", "synthetic")
+    monkeypatch.setenv("GITHUB_SHA", TAG)
+    report = {
+        "sha": TAG,
+        "phase": "exercise",
+        "fullReceiverCertification": False,
+        "completedScenarios": ["synthetic-completed-scenario"],
+        "elapsedSeconds": 1,
+        **overrides,
+    }
+    monkeypatch.setitem(
+        sys.modules,
+        "runtime",
+        SimpleNamespace(
+            command=Mock(
+                side_effect=[
+                    "created",
+                    json.dumps({"status": {"succeeded": 1}}),
+                    receivers.REPORT_PREFIX + json.dumps(report),
+                ]
+            )
+        ),
+    )
+    with pytest.raises(receivers.CertificationFailure, match="receiver evidence"):
+        receivers.run_client("synthetic:tested", "10.244.0.12", phase="exercise")

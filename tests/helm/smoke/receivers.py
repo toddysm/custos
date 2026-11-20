@@ -10,12 +10,19 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
+import hmac
+import ipaddress
 import json
 import os
+import secrets
+import socket
 import subprocess
 import sys
+import textwrap
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -25,6 +32,12 @@ OPERATOR = "receiver-certification-operator"
 OPERATOR_SECRET = "receiver-certification-operator"
 WORKFLOW = "receiver-certification"
 WAIT_WORKFLOW = "receiver-certification-wait"
+WEBHOOK_WORKFLOW = "receiver-certification-webhook"
+CONNECTOR = "receiver-fixture"
+EVENT_KEY = "oci.image.pushed"
+CREDENTIAL_NAMESPACE = "custos-connectors"
+WEBHOOK_SECRET = "receiver-certification-webhook"
+OTHER_WORKSPACE = "receiver-other-tenant"
 REPORT_PREFIX = "RECEIVER_EVIDENCE "
 
 
@@ -32,7 +45,35 @@ class CertificationFailure(RuntimeError):
     """Carry only a fixed scenario label and HTTP status, never a response or credential."""
 
 
-def workflow_document(*, waiting: bool = False) -> dict[str, Any]:
+def check_network_isolation(address: str) -> None:
+    """Require dropped backend connections, not DNS errors, refusals or HTTP authentication denial.
+
+    The runner supplies a Ready Trigger pod's private IPv4 address. A successful
+    public Gateway request is the client connectivity control; only timeouts at
+    the app, local Dapr HTTP/gRPC and remote invocation ports count as isolation.
+    """
+    ip = ipaddress.IPv4Address(address)
+    if not ip.is_private or ip.is_loopback or ip.is_unspecified:
+        raise CertificationFailure("network-policy: invalid backend pod address")
+    for port in (8080, 3500, 50001, 50002):
+        try:
+            with socket.create_connection((str(ip), port), timeout=3):
+                raise CertificationFailure(
+                    f"network-policy: backend port {port} is reachable"
+                )
+        except TimeoutError:
+            continue
+        except OSError as error:
+            raise CertificationFailure(
+                f"network-policy: backend port {port} was not proven filtered"
+            ) from error
+
+
+def workflow_document(
+    *,
+    waiting: bool = False,
+    name: str | None = None,
+) -> dict[str, Any]:
     """Build a pure workflow, optionally parked on a real source-associated durable wait."""
     steps: list[dict[str, Any]] = [{"id": "effect", "let": {"observed": "${{ true }}"}}]
     if waiting:
@@ -41,11 +82,11 @@ def workflow_document(*, waiting: bool = False) -> dict[str, Any]:
             {
                 "id": "await-source",
                 "waitFor": {
-                    "eventKey": "${{ 'registry.push' }}",
+                    "eventKey": "${{ '" + EVENT_KEY + "' }}",
                     "selector": "${{ \"event.data.route == 'match'\" }}",
                     "ttl": "PT1H",
                     "source": {
-                        "connectorInstanceId": "receiver-fixture",
+                        "connectorInstanceId": CONNECTOR,
                         "deliveryModes": ["push"],
                     },
                 },
@@ -56,7 +97,7 @@ def workflow_document(*, waiting: bool = False) -> dict[str, Any]:
         "apiVersion": "custos.dev/v1",
         "kind": "Workflow",
         "metadata": {
-            "name": WAIT_WORKFLOW if waiting else WORKFLOW,
+            "name": name or (WAIT_WORKFLOW if waiting else WORKFLOW),
             "workspace": WORKSPACE,
         },
         "spec": {"steps": steps},
@@ -64,21 +105,33 @@ def workflow_document(*, waiting: bool = False) -> dict[str, Any]:
 
 
 async def seed() -> None:
-    """Seed immutable synthetic definitions and an expiring workspace-only operator grant."""
+    """Seed real provider rows, reference connector instances and a workspace-only operator grant."""
     from datetime import UTC, datetime, timedelta
 
     from custos_auth.roles import ROLE_WORKSPACE_OPERATOR
     from custos_auth.tokens import hash_token
     from custos_bootstrap.__main__ import resolve_dsn
-    from custos_pg import PgAuthAdapter, PgDefinitionAdapter
+    from custos_pg import (
+        PgAuthAdapter,
+        PgCatalogAdapter,
+        PgConnectorInstanceAdapter,
+        PgDefinitionAdapter,
+    )
     from custos_pg.pool import LazyPool, register_jsonb_codec
-    from custos_spl.ids import PrincipalId, RoleBindingId, ServiceTokenId, WorkspaceId
+    from custos_spl.ids import (
+        ConnectorInstanceId,
+        PrincipalId,
+        RoleBindingId,
+        ServiceTokenId,
+        WorkspaceId,
+    )
     from custos_spl.interfaces.auth_store import (
         RoleBinding,
         ServiceAccount,
         ServiceToken,
         WorkspaceScope,
     )
+    from custos_spl.interfaces.connector_instance_store import ConnectorInstance
 
     dsn = resolve_dsn(os.environ)
     if not dsn:
@@ -120,10 +173,57 @@ async def seed() -> None:
                 revoked_reason=None,
             )
         )
-        for waiting in (False, True):
-            name = WAIT_WORKFLOW if waiting else WORKFLOW
+        for name, waiting in (
+            (WORKFLOW, False),
+            (WAIT_WORKFLOW, True),
+            (WEBHOOK_WORKFLOW, False),
+        ):
             await definitions.put_workflow_version(
-                WORKSPACE, name, "1", workflow_document(waiting=waiting)
+                WORKSPACE, name, "1", workflow_document(waiting=waiting, name=name)
+            )
+        manifest = json.loads(Path("/smoke/connector-manifest.json").read_text())
+        await PgCatalogAdapter(lazy=pool).put_connector_type_version(
+            type=manifest["metadata"]["type"],
+            version=manifest["metadata"]["version"],
+            digest="sha256:"
+            + hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest(),
+            image_ref=os.environ["SMOKE_CONNECTOR_IMAGE"],
+            normalized_manifest=manifest,
+        )
+        instances = PgConnectorInstanceAdapter(lazy=pool)
+        for workspace, secret_name in (
+            (WORKSPACE, WEBHOOK_SECRET),
+            (OTHER_WORKSPACE, WEBHOOK_SECRET + "-other"),
+        ):
+            await instances.put_connector_instance(
+                WorkspaceId(workspace),
+                ConnectorInstance(
+                    workspace_id=WorkspaceId(workspace),
+                    instance_id=ConnectorInstanceId(CONNECTOR),
+                    type=manifest["metadata"]["type"],
+                    version=manifest["metadata"]["version"],
+                    name="Disposable reference connector",
+                    lease_ttl_seconds=60,
+                    enabled=True,
+                    status="active",
+                    health_status=None,
+                    target_config={},
+                    credentials_authentication={
+                        "webhookVerification": {
+                            "scheme": "hmac-sha256",
+                            "authenticationType": "x-dapr-secret",
+                            "authentication": {
+                                "secretName": secret_name,
+                                "namespace": CREDENTIAL_NAMESPACE,
+                                "store": "custos-secretstore",
+                            },
+                            "materialKey": "token",
+                        }
+                    },
+                    used_capabilities=None,
+                    created_at=now,
+                    updated_at=now,
+                ),
             )
     finally:
         await pool.aclose()
@@ -141,16 +241,18 @@ class Gateway:
                 "client must target the disposable public Gateway"
             )
         self.token = os.environ["CUSTOS_TEST_TOKEN"]
+        self.phase = os.environ["CUSTOS_TEST_PHASE"]
         self.sequence = 0
 
     def request(
         self,
         method: str,
         path: str,
-        body: dict[str, Any] | None = None,
+        body: dict[str, Any] | list[object] | None = None,
         *,
         expected: tuple[int, ...] = (200,),
         authenticated: bool = True,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Require the exact expected status and JSON shape without publishing response content."""
         self.sequence += 1
@@ -162,7 +264,10 @@ class Gateway:
             data = json.dumps(body).encode()
             headers["content-type"] = "application/json"
         if method not in ("GET", "HEAD"):
-            headers["idempotency-key"] = f"receiver-certification-{self.sequence}"
+            headers["idempotency-key"] = (
+                f"receiver-certification-{self.phase}-{self.sequence}"
+            )
+        headers.update(extra_headers or {})
         request = urllib.request.Request(
             self.base + path, data=data, headers=headers, method=method
         )
@@ -170,9 +275,23 @@ class Gateway:
             with urllib.request.urlopen(request, timeout=90) as response:
                 status, raw = response.status, response.read()
         except urllib.error.HTTPError as error:
-            status, raw = error.code, error.read()
+            with error:
+                status, raw = error.code, error.read()
         if status not in expected:
-            raise CertificationFailure(f"{method} {path}: HTTP {status}")
+            try:
+                problem = json.loads(raw)
+            except (ValueError, UnicodeError):
+                problem = None
+            code = "unclassified"
+            if isinstance(problem, dict) and problem.get("code") in (
+                "trigger.dispatch_unavailable",
+                "trigger.dispatch_failed",
+                "trigger.source_unavailable",
+                "callctx_unavailable",
+                "workflow.runtime_unavailable",
+            ):
+                code = problem["code"]
+            raise CertificationFailure(f"{method} {path}: HTTP {status} ({code})")
         if not raw:
             return {}
         decoded: object = json.loads(raw)
@@ -180,15 +299,28 @@ class Gateway:
             raise CertificationFailure(f"{method} {path}: invalid response shape")
         return decoded
 
-    def runs(self) -> list[dict[str, Any]]:
-        """Read the real public run list; never infer consumer effects from producer claims."""
-        result = self.request("GET", f"/v1/workspaces/{WORKSPACE}/runs")
-        items = result.get("items")
-        if not isinstance(items, list) or not all(
-            isinstance(row, dict) for row in items
-        ):
-            raise CertificationFailure("runs: invalid list response shape")
-        return items
+    def runs(self, workflow: str | None = None) -> list[dict[str, Any]]:
+        """Page actual public runs, optionally isolated from other continuously active receivers."""
+        query = {"workflowVersionId": f"{WORKSPACE}/{workflow}@1"} if workflow else {}
+        rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        while True:
+            path = f"/v1/workspaces/{WORKSPACE}/runs?" + urllib.parse.urlencode(query)
+            result = self.request("GET", path)
+            items = result.get("items")
+            if not isinstance(items, list) or not all(
+                isinstance(row, dict) and isinstance(row.get("runId"), str)
+                for row in items
+            ):
+                raise CertificationFailure("runs: invalid list response shape")
+            rows.extend(items)
+            cursor = result.get("nextCursor")
+            if cursor is None:
+                return rows
+            if not isinstance(cursor, str) or not cursor or cursor in seen:
+                raise CertificationFailure("runs: invalid pagination cursor")
+            seen.add(cursor)
+            query["cursor"] = cursor
 
     def wait_terminal(self, run_id: str, *, timeout: float = 180) -> None:
         """Require a successful real workflow; failures and expiry are not skipped scenarios."""
@@ -203,15 +335,18 @@ class Gateway:
             time.sleep(1)
         raise CertificationFailure("workflow: completion deadline exceeded")
 
-    def subscription(self, source: str) -> str:
+    def subscription(self, source: str, *, workflow: str = WORKFLOW) -> str:
         """Configure a real receiver while preserving normal Gateway authorization and validation."""
         body: dict[str, Any] = {
             "sourceType": source,
-            "workflowId": f"{WORKSPACE}/{WORKFLOW}",
-            "targetWorkflowVersionId": f"{WORKSPACE}/{WORKFLOW}@1",
+            "workflowId": f"{WORKSPACE}/{workflow}",
+            "targetWorkflowVersionId": f"{WORKSPACE}/{workflow}@1",
         }
         if source == "scheduled":
             body["sourceConfig"] = {"intervalSeconds": 10}
+        elif source in ("webhook", "vendor-push", "pull"):
+            body["sourceConfig"] = {"connectorInstanceId": CONNECTOR}
+            body["selector"] = "event.data.route == 'match'"
         result = self.request(
             "POST", f"/v1/workspaces/{WORKSPACE}/triggers", body, expected=(201,)
         )
@@ -220,12 +355,104 @@ class Gateway:
             raise CertificationFailure("subscription: missing identifier")
         return identifier
 
+    def webhook(
+        self,
+        batch: list[object],
+        key: str,
+        *,
+        workspace: str = WORKSPACE,
+        expected: tuple[int, ...] = (200,),
+    ) -> dict[str, Any]:
+        """Sign exact public request bytes using only an upstream test credential, never a mesh token."""
+        signature = hmac.new(
+            key.encode(), json.dumps(batch).encode(), hashlib.sha256
+        ).hexdigest()
+        return self.request(
+            "POST",
+            f"/v1/webhooks/workspaces/{workspace}/connectors/{CONNECTOR}/events",
+            batch,
+            expected=expected,
+            authenticated=False,
+            extra_headers={"x-custos-signature": "sha256=" + signature},
+        )
 
-def exercise() -> None:
-    """Prove manual regression, tenant denial and scheduled start effects in the real deployment."""
+
+def exercise_webhook(gateway: Gateway, *, rotating: bool) -> list[str]:
+    """Require indexed mixed-batch counts, real completion and stable effects across redelivery.
+
+    Rotation uses a fresh runner-updated Kubernetes Secret, while both clients
+    retain the old upstream key. The other tenant has the same instance ID and
+    a different actual secret, not an absent-instance denial.
+    """
+    initial_key = os.environ["CUSTOS_WEBHOOK_KEY"]
+    key = os.environ["CUSTOS_ROTATED_WEBHOOK_KEY"] if rotating else initial_key
+    batch: list[object] = [
+        {"eventId": gateway.phase + "-match", "eventType": EVENT_KEY, "route": "match"},
+        {
+            "eventId": gateway.phase + "-ignore",
+            "eventType": EVENT_KEY,
+            "route": "ignore",
+        },
+        {"eventType": EVENT_KEY},
+        {"eventId": gateway.phase + "-missing-type"},
+        {"eventId": gateway.phase + "-unknown", "eventType": "not.produced"},
+        "malformed-event",
+    ]
+    if not rotating:
+        gateway.subscription("webhook", workflow=WEBHOOK_WORKFLOW)
+    before = {row["runId"] for row in gateway.runs(WEBHOOK_WORKFLOW)}
+    gateway.webhook(
+        batch, initial_key if rotating else key + "-invalid", expected=(401,)
+    )
+    gateway.webhook(batch, key, workspace=OTHER_WORKSPACE, expected=(401,))
+    if gateway.webhook(batch, key) != {"accepted": 2, "rejected": 4}:
+        raise CertificationFailure("webhook: incorrect mixed-batch accounting")
+    deadline = time.monotonic() + 180
+    while time.monotonic() < deadline:
+        new = [
+            row for row in gateway.runs(WEBHOOK_WORKFLOW) if row["runId"] not in before
+        ]
+        if len(new) > 1:
+            raise CertificationFailure("webhook: unexpected workflow effect count")
+        if new:
+            gateway.wait_terminal(new[0]["runId"])
+            if not rotating:
+                waiting_run = os.environ.get("CUSTOS_WAIT_RUN_ID")
+                if not waiting_run:
+                    raise CertificationFailure(
+                        "webhook: missing registered wait control"
+                    )
+                gateway.wait_terminal(waiting_run)
+            break
+        time.sleep(1)
+    else:
+        raise CertificationFailure("webhook: no workflow effect before deadline")
+    stable = {row["runId"] for row in gateway.runs(WEBHOOK_WORKFLOW)}
+    if gateway.webhook(batch, key) != {"accepted": 2, "rejected": 4}:
+        raise CertificationFailure("webhook: incorrect redelivery accounting")
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if {row["runId"] for row in gateway.runs(WEBHOOK_WORKFLOW)} != stable:
+            raise CertificationFailure("webhook: redelivery created an extra workflow")
+        time.sleep(1)
+    return [
+        "webhook-rotated-secret-old-key-denied-new-key-completes"
+        if rotating
+        else "webhook-mixed-batch-real-workflow-start-and-source-resume-completion",
+        "webhook-same-instance-id-cross-tenant-signature-denied",
+        "webhook-redelivery-no-extra-workflow-over-10-seconds",
+    ]
+
+
+def exercise(*, rotating: bool = False) -> None:
+    """Emit only completed public-client scenarios; rotation runs after the runner changes the key."""
     gateway = Gateway()
     started = time.monotonic()
     completed: list[str] = []
+    if rotating:
+        completed.extend(exercise_webhook(gateway, rotating=True))
+        emit_report(completed, started)
+        return
     gateway.request(
         "GET",
         f"/v1/workspaces/{WORKSPACE}/runs",
@@ -234,6 +461,9 @@ def exercise() -> None:
     )
     gateway.request("GET", "/v1/workspaces/receiver-other-tenant/runs", expected=(403,))
     completed.append("public-gateway-authentication-and-workspace-denial")
+    gateway.runs()
+    check_network_isolation(os.environ["CUSTOS_BACKEND_POD_IP"])
+    completed.append("public-client-denied-backend-and-dapr-ports")
     manual = gateway.subscription("manual")
     fired = gateway.request(
         "POST",
@@ -265,18 +495,105 @@ def exercise() -> None:
             f"/v1/workspaces/{WORKSPACE}/triggers/{scheduled}",
             {"state": "paused"},
         )
+    completed.extend(exercise_webhook(gateway, rotating=False))
+    emit_report(completed, started)
+
+
+def emit_report(
+    completed: list[str],
+    started: float,
+    *,
+    waiting_run: str | None = None,
+) -> None:
+    """Publish controlled scenario names and elapsed time, never test credentials or payloads."""
+    report: dict[str, Any] = {
+        "sha": os.environ["GITHUB_SHA"],
+        "phase": os.environ["CUSTOS_TEST_PHASE"],
+        "completedScenarios": completed,
+        "elapsedSeconds": round(time.monotonic() - started, 3),
+        "fullReceiverCertification": False,
+    }
+    if waiting_run is not None:
+        report["waitingRunId"] = waiting_run
     print(
-        REPORT_PREFIX
-        + json.dumps(
-            {
-                "sha": os.environ["GITHUB_SHA"],
-                "completedScenarios": completed,
-                "elapsedSeconds": round(time.monotonic() - started, 3),
-                "fullReceiverCertification": False,
-            }
-        ),
+        REPORT_PREFIX + json.dumps(report),
         flush=True,
     )
+
+
+def setup_wait() -> None:
+    """Start a real source-associated wait through the public Workflow API; do not infer registration."""
+    gateway = Gateway()
+    started = time.monotonic()
+    result = gateway.request(
+        "POST",
+        f"/v1/workspaces/{WORKSPACE}/runs",
+        {"workflowVersionId": f"{WORKSPACE}/{WAIT_WORKFLOW}@1", "inputs": {}},
+        expected=(202,),
+    )
+    run_id = result.get("runId")
+    if not isinstance(run_id, str) or not run_id:
+        raise CertificationFailure("wait: missing workflow run identifier")
+    emit_report(["workflow-source-wait-start-accepted"], started, waiting_run=run_id)
+
+
+def observe_wait(run_id: str) -> None:
+    """Require the actual Trigger provider to expose this live wait before admitting a source event.
+
+    The runner observes storage inside the owned Trigger deployment. The public
+    test client never receives database access, and no wait record is inserted
+    by the test. Registration must come from the deployed Workflow worker.
+    """
+    import runtime as smoke
+
+    script = textwrap.dedent("""
+        import asyncio, os, sys
+        from datetime import UTC, datetime
+        from custos_pg import PgMetadataAdapter
+        from custos_pg.pool import LazyPool, register_jsonb_codec
+
+        async def observe():
+            \"\"\"Bound the observation and close its independent real-provider pool.\"\"\"
+            pool = LazyPool(os.environ["TRIGGER_METADATA_STORE"], init=register_jsonb_codec)
+            store = PgMetadataAdapter(lazy=pool)
+            try:
+                async with asyncio.timeout(180):
+                    while True:
+                        page = await store.query_resume_subscriptions(
+                            sys.argv[2], connector_instance_id=sys.argv[3],
+                            delivery_mode="push", as_of=datetime.now(UTC), limit=100,
+                        )
+                        matches = [row for row in page.items if str(row.run_id) == sys.argv[1]]
+                        if len(matches) == 1 and str(matches[0].step_id) == "await-source":
+                            print("SOURCE_WAIT_REGISTERED")
+                            return
+                        await asyncio.sleep(1)
+            finally:
+                await pool.aclose()
+
+        asyncio.run(observe())
+    """)
+    observed = smoke.command(
+        [
+            "kubectl",
+            "-n",
+            os.environ["NS"],
+            "exec",
+            "deployment/custos-trigger-service",
+            "-c",
+            "trigger-service",
+            "--",
+            "python",
+            "-c",
+            script,
+            run_id,
+            WORKSPACE,
+            CONNECTOR,
+        ],
+        timeout=210,
+    )
+    if observed.strip() != "SOURCE_WAIT_REGISTERED":
+        raise CertificationFailure("wait: durable source registration was not observed")
 
 
 def prepare() -> None:
@@ -314,7 +631,12 @@ def prepare() -> None:
             "apiVersion": "v1",
             "kind": "Secret",
             "metadata": {"name": OPERATOR_SECRET},
-            "stringData": {"token": token},
+            "stringData": {
+                "token": token,
+                "webhook-key": secrets.token_hex(32),
+                "rotated-webhook-key": secrets.token_hex(32),
+                "other-webhook-key": secrets.token_hex(32),
+            },
         },
     )
     smoke.command(
@@ -323,7 +645,13 @@ def prepare() -> None:
             "apiVersion": "v1",
             "kind": "ConfigMap",
             "metadata": {"name": "receiver-certification-script"},
-            "data": {"receivers.py": Path(__file__).read_text()},
+            "data": {
+                "receivers.py": Path(__file__).read_text(),
+                "connector-manifest.json": (
+                    Path(__file__).resolve().parents[3]
+                    / "extensions/connectors/oci-registry/connector-manifest.json"
+                ).read_text(),
+            },
         },
     )
     job = smoke.seed_job(documents, tag)
@@ -342,6 +670,9 @@ def prepare() -> None:
             "valueFrom": {"secretKeyRef": {"name": OPERATOR_SECRET, "key": "token"}},
         }
     )
+    container["env"].append(
+        {"name": "SMOKE_CONNECTOR_IMAGE", "value": os.environ["SMOKE_CONNECTOR_IMAGE"]}
+    )
     smoke.command(["kubectl", "-n", namespace, "create", "-f", "-"], job)
     smoke.command(
         [
@@ -356,12 +687,21 @@ def prepare() -> None:
     )
 
 
-def client_job(image: str) -> dict[str, Any]:
-    """Run a credential-scoped, tokenless Kubernetes client with only existing public-client access."""
+def client_job(
+    image: str,
+    backend_ip: str,
+    *,
+    phase: str = "exercise",
+    waiting_run: str = "",
+) -> dict[str, Any]:
+    """Project only a workspace token and upstream keys into the public-only client for one phase."""
+    if phase not in ("wait-setup", "exercise", "rotation"):
+        raise CertificationFailure("client: unsupported certification phase")
+    job_name = "receiver-certification-" + ("client" if phase == "exercise" else phase)
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
-        "metadata": {"name": "receiver-certification-client"},
+        "metadata": {"name": job_name},
         "spec": {
             "backoffLimit": 0,
             "activeDeadlineSeconds": 600,
@@ -385,13 +725,33 @@ def client_job(image: str) -> dict[str, Any]:
                             "name": "client",
                             "image": image,
                             "imagePullPolicy": "IfNotPresent",
-                            "command": ["python", "/smoke/receivers.py", "exercise"],
+                            "command": ["python", "/smoke/receivers.py", phase],
                             "securityContext": {
                                 "allowPrivilegeEscalation": False,
                                 "readOnlyRootFilesystem": True,
                                 "capabilities": {"drop": ["ALL"]},
                             },
                             "env": [
+                                {
+                                    "name": "CUSTOS_WEBHOOK_KEY",
+                                    "valueFrom": {
+                                        "secretKeyRef": {
+                                            "name": OPERATOR_SECRET,
+                                            "key": "webhook-key",
+                                        }
+                                    },
+                                },
+                                {
+                                    "name": "CUSTOS_ROTATED_WEBHOOK_KEY",
+                                    "valueFrom": {
+                                        "secretKeyRef": {
+                                            "name": OPERATOR_SECRET,
+                                            "key": "rotated-webhook-key",
+                                        }
+                                    },
+                                },
+                                {"name": "CUSTOS_TEST_PHASE", "value": phase},
+                                {"name": "CUSTOS_WAIT_RUN_ID", "value": waiting_run},
                                 {
                                     "name": "CUSTOS_TEST_TOKEN",
                                     "valueFrom": {
@@ -405,6 +765,7 @@ def client_job(image: str) -> dict[str, Any]:
                                     "name": "CUSTOS_GATEWAY_URL",
                                     "value": "http://custos-api-gateway:8080",
                                 },
+                                {"name": "CUSTOS_BACKEND_POD_IP", "value": backend_ip},
                                 {
                                     "name": "GITHUB_SHA",
                                     "value": os.environ["GITHUB_SHA"],
@@ -436,13 +797,23 @@ def client_job(image: str) -> dict[str, Any]:
     }
 
 
-def run(output: Path) -> None:
-    """Require the real in-cluster job and extract only its explicitly sanitized evidence object."""
+def run_client(
+    image: str,
+    backend_ip: str,
+    *,
+    phase: str,
+    waiting_run: str = "",
+) -> dict[str, Any]:
+    """Require Job success and exactly one matching, sanitized real-effect report for this phase."""
     import runtime as smoke
 
     namespace = os.environ["NS"]
-    image = os.environ["IMAGE_PREFIX"] + "/api-gateway:" + os.environ["GITHUB_SHA"]
-    smoke.command(["kubectl", "-n", namespace, "create", "-f", "-"], client_job(image))
+    manifest = client_job(image, backend_ip, phase=phase, waiting_run=waiting_run)
+    name = "job/" + manifest["metadata"]["name"]
+    smoke.command(
+        ["kubectl", "-n", namespace, "create", "-f", "-"],
+        manifest,
+    )
     deadline = time.monotonic() + 600
     succeeded = False
     while time.monotonic() < deadline:
@@ -453,7 +824,7 @@ def run(output: Path) -> None:
                     "-n",
                     namespace,
                     "get",
-                    "job/receiver-certification-client",
+                    name,
                     "-o",
                     "json",
                 ]
@@ -466,9 +837,7 @@ def run(output: Path) -> None:
         if status.get("failed"):
             break
         time.sleep(2)
-    logs = smoke.command(
-        ["kubectl", "-n", namespace, "logs", "job/receiver-certification-client"]
-    )
+    logs = smoke.command(["kubectl", "-n", namespace, "logs", name])
     reports = [
         json.loads(line.removeprefix(REPORT_PREFIX))
         for line in logs.splitlines()
@@ -485,9 +854,129 @@ def run(output: Path) -> None:
         raise CertificationFailure(
             "receiver client job failed; no certification claimed"
         )
-    report = reports[0]
-    if report["sha"] != os.environ["GITHUB_SHA"]:
+    report: dict[str, Any] = reports[0]
+    if (
+        not isinstance(report, dict)
+        or report.get("fullReceiverCertification") is not False
+        or not isinstance(report.get("completedScenarios"), list)
+        or not report["completedScenarios"]
+        or not all(
+            isinstance(item, str) and item for item in report["completedScenarios"]
+        )
+        or not isinstance(report.get("elapsedSeconds"), (int, float))
+        or report["elapsedSeconds"] < 0
+    ):
+        raise CertificationFailure(
+            "receiver evidence has an invalid partial-report shape"
+        )
+    if report.get("sha") != os.environ["GITHUB_SHA"] or report.get("phase") != phase:
         raise CertificationFailure("receiver evidence does not match deployed commit")
+    return report
+
+
+def run(output: Path) -> None:
+    """Provision actual credential Secrets, run public checks, rotate, then require fresh resolution.
+
+    Completed-phase evidence is retained if a later phase fails; every report
+    deliberately remains partial certification. Private Secret bytes never
+    enter command arguments or diagnostic output.
+    """
+    import runtime as smoke
+
+    namespace = os.environ["NS"]
+    image = os.environ["IMAGE_PREFIX"] + "/api-gateway:" + os.environ["GITHUB_SHA"]
+    pods = json.loads(
+        smoke.command(
+            [
+                "kubectl",
+                "-n",
+                namespace,
+                "get",
+                "pods",
+                "-l",
+                "app.kubernetes.io/instance=custos,app.kubernetes.io/name=trigger-service",
+                "-o",
+                "json",
+            ]
+        )
+    )
+    ready_addresses = [
+        pod["status"]["podIP"]
+        for pod in pods["items"]
+        if any(
+            condition["type"] == "Ready" and condition["status"] == "True"
+            for condition in pod.get("status", {}).get("conditions", [])
+        )
+    ]
+    if not ready_addresses:
+        raise CertificationFailure("network-policy: no Ready backend pod")
+    credentials = json.loads(
+        smoke.command(
+            [
+                "kubectl",
+                "-n",
+                namespace,
+                "get",
+                "secret/" + OPERATOR_SECRET,
+                "-o",
+                "json",
+            ]
+        )
+    )["data"]
+    for name, key in (
+        (WEBHOOK_SECRET, "webhook-key"),
+        (WEBHOOK_SECRET + "-other", "other-webhook-key"),
+    ):
+        smoke.command(
+            ["kubectl", "-n", CREDENTIAL_NAMESPACE, "create", "-f", "-"],
+            {
+                "apiVersion": "v1",
+                "kind": "Secret",
+                "metadata": {"name": name},
+                "data": {"username": "Y2VydGlmaWNhdGlvbg==", "token": credentials[key]},
+            },
+        )
+    setup = run_client(image, ready_addresses[0], phase="wait-setup")
+    waiting_run = setup.get("waitingRunId")
+    if not isinstance(waiting_run, str) or not waiting_run:
+        raise CertificationFailure("wait: setup evidence is missing the run identifier")
+    output.write_text(json.dumps(setup, indent=2))
+    observe_wait(waiting_run)
+    report = run_client(
+        image,
+        ready_addresses[0],
+        phase="exercise",
+        waiting_run=waiting_run,
+    )
+    report["completedScenarios"][:0] = [
+        *setup["completedScenarios"],
+        "real-workflow-source-wait-registration-observed-in-trigger-provider",
+    ]
+    output.write_text(json.dumps(report, indent=2))
+    current = json.loads(
+        smoke.command(
+            [
+                "kubectl",
+                "-n",
+                CREDENTIAL_NAMESPACE,
+                "get",
+                "secret/" + WEBHOOK_SECRET,
+                "-o",
+                "json",
+            ]
+        )
+    )
+    current["data"]["token"] = credentials["rotated-webhook-key"]
+    smoke.command(
+        ["kubectl", "-n", CREDENTIAL_NAMESPACE, "replace", "-f", "-"],
+        current,
+    )
+    rotation = run_client(image, ready_addresses[0], phase="rotation")
+    report["phase"] = "exercise-and-rotation"
+    report["completedScenarios"].extend(rotation["completedScenarios"])
+    report["elapsedSeconds"] = round(
+        report["elapsedSeconds"] + rotation["elapsedSeconds"], 3
+    )
     output.write_text(json.dumps(report, indent=2))
     print(
         "Real deployed receiver effect evidence captured; full matrix remains required."
@@ -497,15 +986,20 @@ def run(output: Path) -> None:
 def main() -> None:
     """Separate runner orchestration, real-provider seeding and public-only application probing."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", choices=("prepare", "seed", "exercise", "run"))
+    parser.add_argument(
+        "phase",
+        choices=("prepare", "seed", "wait-setup", "exercise", "rotation", "run"),
+    )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     if args.phase == "prepare":
         prepare()
     elif args.phase == "seed":
         asyncio.run(seed())
-    elif args.phase == "exercise":
-        exercise()
+    elif args.phase == "wait-setup":
+        setup_wait()
+    elif args.phase in ("exercise", "rotation"):
+        exercise(rotating=args.phase == "rotation")
     elif args.output is None:
         parser.error("--output is required for run")
     else:
