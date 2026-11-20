@@ -1,8 +1,7 @@
 """FastAPI application factory for the Workflow Service (WF-IMPL-015, WF-IMPL-043).
 
-The factory is import-safe: no environment lookups beyond the
-``WF_REQUIRE_CALL_CONTEXT`` flag, no socket connections, no Postgres
-DSN parsing. All side-effecting work (workflow runtime construction,
+The factory is import-safe: construction validates environment configuration
+without socket connections or Postgres DSN parsing. Side-effecting work (runtime construction,
 worker start, Dapr Pub/Sub HTTP client construction) lands inside
 the FastAPI lifespan.
 
@@ -13,10 +12,9 @@ The exposed surface is:
   ``app.state.ready``; the lifespan flips that flag only after the
   Dapr Workflow worker reports ready via
   :attr:`WorkflowRuntimeProtocol.is_ready`).
-- :class:`custos_workflow.call_context.CallContextMiddleware` —
-  extracts ``X-Custos-Workspace`` / ``X-Custos-Principal`` headers
-  onto ``request.state.call_context`` (dev shim by default;
-  production mode opts in via ``WF_REQUIRE_CALL_CONTEXT=1``).
+- :class:`custos_workflow.call_context.CallContextMiddleware` verifies public
+  Gateway signed contexts independently of private Trigger execution. Production
+  forbids unsigned identity; the unconfigured development shim is optional.
 
 WF-IMPL-043 extends the lifespan to:
 
@@ -69,6 +67,7 @@ from custos_workflow.steps.sub_orchestration import (
 )
 from custos_workflow.steps.sub_orchestration.child import EXECUTION_CHILD_STEP_WORKFLOW_NAME
 from custos_workflow.validator import DurableIdempotencyLedger
+from custos_workflow.validator.idempotency_ledger import idempotency_ttl_from_env
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -106,12 +105,16 @@ def _read_require_call_context_flag() -> bool:
 def create_app(
     *,
     require_call_context: bool | None = None,
+    public_execution_enabled: bool | None = None,
     run_components: RunComponents | None = None,
     worker_ready_timeout_s: float = DEFAULT_WORKER_READY_TIMEOUT_S,
     worker_shutdown_timeout_s: float = DEFAULT_WORKER_SHUTDOWN_TIMEOUT_S,
+    call_context_verifier: CallContextVerifier | None = None,
     execution_bindings: ExecutionBindings | None = None,
     execution_verifier: CallContextVerifier | None = None,
     app_api_token: str | None = None,
+    gateway_namespace: str | None = None,
+    gateway_app_id: str = "api-gateway",
     trigger_namespace: str | None = None,
     trigger_app_id: str = "trigger-service",
 ) -> FastAPI:
@@ -119,20 +122,24 @@ def create_app(
 
     Args:
         require_call_context: Override for the ``WF_REQUIRE_CALL_CONTEXT``
-            env-driven default. Tests pass this explicitly; production
-            and CI rely on the env-var path. The flag is only consulted
-            at app construction time so a running app never silently
-            flips identity-enforcement behaviour.
+            env-driven default. Production always requires signed contexts.
+            Configuring a public verifier also disables the unsigned shim.
+        call_context_verifier: Public verification override; otherwise built
+            from ``WF_AUTHZ_ENDPOINT``, independently of execution bindings.
+        public_execution_enabled: Opt into caller-bound durable public starts,
+            otherwise read strict ``WF_PUBLIC_EXECUTION_ENABLED`` (default false).
+            Disabled enforced public starts return503, never the legacy path.
+        gateway_namespace: Authenticated Dapr Gateway namespace, defaulting to
+            ``WF_GATEWAY_NAMESPACE``. Required with public verification.
+        gateway_app_id: Deployment-owned Dapr Gateway app identity.
         run_components: Pre-built dependency bundle (used by tests to
             inject a :class:`~custos_workflow.runtime.FakeWorkflowRuntime`
             and in-memory adapters). When ``None`` the lifespan
             constructs the real defaults via
             :func:`~custos_workflow.providers.load_run_components`,
             reading ``WF_DAPR_WORKFLOW_COMPONENT`` from the
-            environment. The factory itself never reads the env;
-            missing variables surface as :class:`RuntimeError`
-            inside the lifespan startup so import remains
-            side-effect-free.
+            environment. Runtime configuration is resolved during lifespan
+            startup; authentication configuration is checked at construction.
         worker_ready_timeout_s: Seconds the lifespan blocks on
             :meth:`WorkflowRuntimeProtocol.wait_for_worker_ready`
             before giving up. A timeout leaves ``app.state.ready``
@@ -154,6 +161,15 @@ def create_app(
         if require_call_context is not None
         else _read_require_call_context_flag()
     )
+    effective_require = (
+        effective_require or os.environ.get("ENVIRONMENT", "").strip().lower() == "production"
+    )
+    public_flag = os.environ.get("WF_PUBLIC_EXECUTION_ENABLED", "false").strip().lower()
+    if public_flag not in {"true", "false"}:
+        raise ValueError("WF_PUBLIC_EXECUTION_ENABLED must be true or false")
+    public_enabled = (
+        public_execution_enabled if public_execution_enabled is not None else public_flag == "true"
+    )
     execution_registry = (
         execution_bindings
         if execution_bindings is not None
@@ -163,20 +179,41 @@ def create_app(
         app_api_token if app_api_token is not None else os.environ.get("APP_API_TOKEN")
     )
     effective_namespace = trigger_namespace or os.environ.get("WF_TRIGGER_NAMESPACE")
+    effective_gateway_namespace = gateway_namespace or os.environ.get("WF_GATEWAY_NAMESPACE")
+    endpoint = os.environ.get("WF_AUTHZ_ENDPOINT", "").strip()
+    if call_context_verifier is None and endpoint:
+        call_context_verifier = CallContextVerifier(
+            jwks_url=endpoint.rstrip("/") + "/.well-known/jwks.json"
+        )
+    if effective_require or call_context_verifier is not None:
+        if call_context_verifier is None:
+            raise ValueError("public call context requires WF_AUTHZ_ENDPOINT")
+        if (
+            not effective_token
+            or not effective_token.strip()
+            or not effective_gateway_namespace
+            or not effective_gateway_namespace.strip()
+            or not gateway_app_id.strip()
+            or "/" in gateway_app_id
+            or "://" in gateway_app_id
+        ):
+            raise ValueError(
+                "public call context requires authenticated Gateway app/token/namespace"
+            )
     if execution_registry is not None:
         if not effective_token or not effective_token.strip() or not effective_namespace:
             raise ValueError("execution identity requires an authenticated Trigger app/namespace")
         if execution_verifier is None:
-            endpoint = os.environ.get("WF_AUTHZ_ENDPOINT", "").strip()
-            if not endpoint:
+            if call_context_verifier is None:
                 raise ValueError("execution identity requires WF_AUTHZ_ENDPOINT")
-            execution_verifier = CallContextVerifier(
-                jwks_url=endpoint.rstrip("/") + "/.well-known/jwks.json"
-            )
+            execution_verifier = call_context_verifier
+    if public_enabled and (execution_registry is None or call_context_verifier is None):
+        raise ValueError("public execution requires signed contexts and execution bindings")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.ready = False
+        app.state.public_run_starter = None
         app.state.ready_detail = "workflow-service has not finished startup"
         components, metadata_pool, metadata_detail = await _resolve_run_components(run_components)
         if execution_registry is not None:
@@ -204,6 +241,22 @@ def create_app(
             raise WorkflowRuntimeUnavailableError(
                 "durable delivery cannot start with a failed metadata backend"
             )
+        public_starter = None
+        if public_enabled:
+            from custos_workflow.runs.public_start import PublicRunStarter
+
+            try:
+                if execution_registry is None or components.trigger_delivery_controller is None:
+                    raise ValueError("public execution requires durable delivery")
+                public_starter = PublicRunStarter(
+                    execution_registry,
+                    components.trigger_delivery_controller,
+                    components.start_run_validator,
+                    idempotency_ttl_from_env(),
+                )
+            except (ValueError, WorkflowRuntimeUnavailableError):
+                await _shutdown_components(components, metadata_pool, worker_shutdown_timeout_s)
+                raise
 
         # Register the WF-IMPL-035 ``run_orchestrator`` under the
         # canonical :data:`WORKFLOW_NAME`. WF-IMPL-057 wires the
@@ -352,6 +405,8 @@ def create_app(
         # so it shares the same Catalog client the Run Controller
         # drives.
         app.state.start_run_validator = components.start_run_validator
+        if app.state.ready:
+            app.state.public_run_starter = public_starter
         # WF-IMPL-109: launch the background TTL-expiry sweep that
         # garbage-collects expired resume-subscription mirror rows on a
         # wall-clock interval, independent of the WF mirror writes the
@@ -382,12 +437,19 @@ def create_app(
     app.add_middleware(
         CallContextMiddleware,
         require_call_context=effective_require,
+        call_context_verifier=call_context_verifier,
         execution_verifier=execution_verifier if execution_registry is not None else None,
         app_api_token=effective_token,
+        gateway_namespace=effective_gateway_namespace,
+        gateway_app_id=gateway_app_id,
         trigger_namespace=effective_namespace,
         trigger_app_id=trigger_app_id,
     )
     app.state.execution_bindings = execution_registry
+    app.state.public_execution_required = (
+        effective_require or call_context_verifier is not None or public_enabled
+    )
+    app.state.public_run_starter = None
     app.include_router(health_router)
 
     # WF-IMPL-069: mount the public REST + Internal RPC surface.

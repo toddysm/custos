@@ -4,6 +4,7 @@ import asyncio
 import json
 import runpy
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -14,14 +15,19 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 smoke = SimpleNamespace(**runpy.run_path(str(ROOT / "tests/helm/smoke/runtime.py")))
+public = SimpleNamespace(
+    **runpy.run_path(str(ROOT / "tests/helm/smoke/public_workflow.py"))
+)
 TAG = "a" * 40
 SIDECAR = "localhost:5001/smoke-sidecar@sha256:" + "b" * 64
 HELPER = "localhost:5001/smoke-hook-helper@sha256:" + "c" * 64
 
 
-def managed_render() -> list[dict[str, Any]]:
+def managed_render(*, public_execution: bool = False) -> list[dict[str, Any]]:
     """Render the actual profile with the exact overlay used by hosted smoke setup."""
     overlay = smoke.settings(TAG, "custos-system", ["10.96.0.1"], SIDECAR, HELPER)
+    if public_execution:
+        public.configure_public_execution(overlay)
     result = subprocess.run(
         [
             "helm",
@@ -86,6 +92,20 @@ def test_smoke_activates_actual_scheduler_with_only_secret_references() -> None:
         for row in trigger["spec"]["template"]["spec"]["containers"][0]["env"]
     }
     assert trigger_env["TRIGGER_RECEIVER_WORKERS_ENABLED"]["value"] == "false"
+    workflow = next(
+        row
+        for row in documents
+        if row["kind"] == "Deployment"
+        and row["metadata"]["name"] == "custos-workflow-service"
+    )
+    workflow_env = {
+        row["name"]: row
+        for row in workflow["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert workflow_env["WF_GATEWAY_NAMESPACE"]["value"] == "custos-system"
+    assert workflow_env["WF_AUTHZ_ENDPOINT"]["value"].endswith("/custos-auth/method")
+    assert workflow_env["WF_REQUIRE_CALL_CONTEXT"]["value"] == "1"
+    assert workflow_env["WF_PUBLIC_EXECUTION_ENABLED"]["value"] == "false"
     assert all(not row.get("stringData") for row in documents)
 
 
@@ -317,3 +337,254 @@ def test_preseed_grants_only_workspace_execution_and_closes_pool(
     encoded = codec.kwargs["encoder"](scope)
     assert isinstance(encoded, str)
     assert codec.kwargs["decoder"](encoded) == scope
+
+
+def test_real_gateway_minted_metadata_reaches_real_workflow_list_handler() -> None:
+    """Keep actual minter/signer/verifier defaults compatible without legacy identity headers."""
+    import base64
+
+    from custos_auth.callctx_signer import (
+        CallContextSigner,
+        SigningKey,
+        StaticSigningKeyResolver,
+    )
+    from custos_callctx import CallContextVerifier, JwksCache
+    from custos_gateway.clients.auth import (
+        CallctxSignRequest,
+        CallctxSignResponse,
+        FakeAuthServiceClient,
+    )
+    from custos_gateway.middleware.auth import AuthorizedCaller
+    from custos_gateway.middleware.callctx_mint import mint_call_context
+    from custos_workflow import create_app
+    from custos_workflow.providers import load_run_components
+    from custos_workflow.runtime import FakeWorkflowRuntime
+    from fastapi import FastAPI, Request
+    from fastapi.testclient import TestClient
+
+    key = SigningKey.generate()
+    signer = CallContextSigner(StaticSigningKeyResolver(key))
+
+    class SigningClient(FakeAuthServiceClient):
+        """Replace only the remote signing RPC with its actual domain signer."""
+
+        async def callctx_sign(
+            self, request: CallctxSignRequest
+        ) -> CallctxSignResponse:
+            """Honor the Gateway's exact authorized sign request and signer defaults."""
+            result = await signer.sign(
+                principal_id=request.principal_id,
+                workspace_id=request.workspace_id,
+                caller_component=request.caller_component,
+                permissions=request.permissions,
+            )
+            return CallctxSignResponse(
+                token=result.token,
+                kid=result.kid,
+                jti=result.jti,
+                iat=result.iat,
+                exp=result.exp,
+            )
+
+    gateway = FastAPI()
+    gateway.state.auth_client = SigningClient()
+    outbound = Request(
+        {"type": "http", "method": "GET", "path": "/", "headers": [], "app": gateway}
+    )
+    outbound.state.auth = AuthorizedCaller(
+        principal_id="operator",
+        audit_event_id="synthetic",
+        permission="run:read",
+        workspace_id="ws",
+    )
+    outbound.state.correlation_id = "synthetic-correlation"
+    minted = asyncio.run(mint_call_context(outbound))
+    assert set(minted.metadata) == {"x-custos-callctx", "x-correlation-id"}
+
+    async def fetch(url: str) -> tuple[dict[str, str], dict[str, Any]]:
+        """Expose the real signing key's public portion to the shared JWKS verifier."""
+        encoded = (
+            base64.urlsafe_b64encode(key.public_key.public_bytes_raw())
+            .decode()
+            .rstrip("=")
+        )
+        return {}, {
+            "keys": [{"kty": "OKP", "crv": "Ed25519", "kid": key.kid, "x": encoded}]
+        }
+
+    app = create_app(
+        require_call_context=True,
+        run_components=load_run_components(
+            env={}, workflow_runtime=FakeWorkflowRuntime()
+        ),
+        call_context_verifier=CallContextVerifier(
+            jwks_cache=JwksCache(
+                jwks_url="http://auth/.well-known/jwks.json", fetcher=fetch
+            ),
+        ),
+        app_api_token="synthetic-app-token",
+        gateway_namespace="custos",
+    )
+    with TestClient(app) as client:
+        response = client.get(
+            "/v1/workspaces/ws/runs",
+            headers={
+                **minted.metadata,
+                "dapr-api-token": "synthetic-app-token",
+                "dapr-caller-app-id": "api-gateway",
+                "dapr-caller-namespace": "custos",
+            },
+        )
+    assert response.status_code == 200
+    assert response.json() == {"items": [], "nextCursor": None}
+
+
+def test_public_execution_opt_in_keeps_background_default_and_separate_secret_scope() -> (
+    None
+):
+    """The actual rendered public opt-in adds its caller pin without sharing its client token."""
+    documents = managed_render(public_execution=True)
+    workflow = next(
+        row
+        for row in documents
+        if row["kind"] == "Deployment"
+        and row["metadata"]["name"] == "custos-workflow-service"
+    )
+    env = {
+        row["name"]: row
+        for row in workflow["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert env["WF_PUBLIC_EXECUTION_ENABLED"]["value"] == "true"
+    bindings = json.loads(env["CUSTOS_EXECUTION_BINDINGS"]["value"])
+    assert bindings["defaults"] == {smoke.WORKSPACE: "smoke-v1"}
+    caller = next(
+        row for row in bindings["bindings"] if row["principalId"] == public.OPERATOR
+    )
+    assert caller["secretRef"] == public.EXECUTION_RESOURCE
+    configuration = next(
+        row
+        for row in documents
+        if row["kind"] == "Configuration"
+        and row["metadata"]["name"] == "custos-receivers-workflow-service"
+    )
+    scopes = configuration["spec"]["secrets"]["scopes"]
+    secrets = next(row for row in scopes if row["storeName"] == "kubernetes")
+    assert public.EXECUTION_RESOURCE in secrets["allowedSecrets"]
+    assert public.RESOURCE not in secrets["allowedSecrets"]
+
+
+def test_public_preparation_preserves_dsn_and_separates_credentials(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Seed before activation without dropping DSN settings or sharing execution credentials."""
+    documents = managed_render(public_execution=True)
+    overlay = tmp_path / "values.yaml"
+    overlay.write_text(
+        yaml.safe_dump(
+            smoke.settings(TAG, "custos-system", ["10.96.0.1"], SIDECAR, HELPER)
+        )
+    )
+    wait = Mock()
+    monkeypatch.setenv("NS", "custos-system")
+    monkeypatch.setenv("GITHUB_SHA", TAG)
+    monkeypatch.setitem(
+        sys.modules, "runtime", SimpleNamespace(command=Mock(), seed_job=smoke.seed_job)
+    )
+    monkeypatch.setitem(public.prepare.__globals__, "rendered", lambda path: documents)
+    monkeypatch.setitem(public.prepare.__globals__, "wait_job", wait)
+    public.prepare(overlay)
+    seed = wait.call_args.args[0]
+    container = seed["spec"]["template"]["spec"]["containers"][0]
+    original = smoke.seed_job(documents, TAG)["spec"]["template"]["spec"]["containers"][
+        0
+    ]
+    for row in original["env"]:
+        if row["name"] != "SMOKE_EXECUTION_TOKEN":
+            assert row in container["env"]
+    env = {row["name"]: row for row in container["env"]}
+    assert (
+        env["CUSTOS_TEST_TOKEN"]["valueFrom"]["secretKeyRef"]["name"] == public.RESOURCE
+    )
+    assert (
+        env["CUSTOS_TEST_EXECUTION_TOKEN"]["valueFrom"]["secretKeyRef"]["name"]
+        == public.EXECUTION_RESOURCE
+    )
+    assert "SMOKE_EXECUTION_TOKEN" not in env
+    assert yaml.safe_load(overlay.read_text())["global"]["receiverRuntime"][
+        "publicExecutionEnabled"
+    ]
+
+
+def test_public_workflow_client_inherits_only_public_policy_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The lifecycle probe has no seed/mesh authority despite using a production image."""
+    monkeypatch.setenv("GITHUB_SHA", TAG)
+    original = next(
+        row
+        for row in managed_render()
+        if row["kind"] == "Pod" and row["metadata"]["name"] == "custos-smoke-test"
+    )
+    job = public.client_job(original, "public-client:" + TAG)
+    pod = job["spec"]["template"]
+    assert pod["metadata"] == {"labels": original["metadata"]["labels"]}
+    spec = pod["spec"]
+    assert spec["automountServiceAccountToken"] is False
+    assert "serviceAccountName" not in spec
+    container = spec["containers"][0]
+    env = {row["name"]: row for row in container["env"]}
+    assert set(env) == {"GITHUB_SHA", "PYTHONDONTWRITEBYTECODE", "CUSTOS_TEST_TOKEN"}
+    assert "envFrom" not in container
+    assert container["securityContext"]["readOnlyRootFilesystem"] is True
+    assert container["resources"]["limits"]
+
+
+def test_public_start_acceptance_does_not_count_as_runtime_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An accepted start that never completes cannot produce a successful proof."""
+    calls = 0
+
+    def request(method: str, path: str, body: object = None) -> dict[str, str]:
+        """Return HTTP-shaped acceptance and pending state without real completion."""
+        nonlocal calls
+        calls += 1
+        return {"runId": "synthetic-run"} if method == "POST" else {"status": "pending"}
+
+    monkeypatch.setitem(public.exercise.__globals__, "request", request)
+    times = iter((0.0, 121.0))
+    monkeypatch.setitem(
+        public.exercise.__globals__,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(times)),
+    )
+    with pytest.raises(RuntimeError, match="did not complete"):
+        public.exercise()
+    assert calls == 2
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("sha", "stale"),
+        ("publicWorkflowCompleted", False),
+        ("publicReadbackVerified", False),
+        ("fullReceiverCertification", True),
+        ("runId", None),
+    ],
+)
+def test_public_lifecycle_evidence_rejects_stale_or_incomplete_reports(
+    field: str,
+    value: object,
+) -> None:
+    """Job success cannot hide stale commit attribution or missing actual effects."""
+    report = {
+        "sha": TAG,
+        "publicWorkflowCompleted": True,
+        "publicReadbackVerified": True,
+        "fullReceiverCertification": False,
+        "runId": "synthetic",
+    }
+    report[field] = value
+    with pytest.raises(ValueError, match="stale or incomplete"):
+        public.report_from_logs(public.REPORT_PREFIX + json.dumps(report), TAG)

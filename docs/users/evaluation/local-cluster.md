@@ -24,8 +24,21 @@ is a disposable test fixture, not a replacement for provisioning the
 [managed execution prerequisites](../../operations/execution-bindings.md).
 Its readiness/Helm-test evidence does not certify receiver effects, activity
 execution, or enforced network isolation; those remain separate certification.
-The authentication exercised here is the credential-backed execution exchange,
-not the legacy protected Auth administration routes.
+The hosted gate also runs a separate
+[public Workflow lifecycle probe](../../../tests/helm/smoke/public_workflow.py):
+a seeded synthetic pure Workflow must start through the real public
+Gateway/Auth/Dapr/Workflow chain, complete in the real worker, and appear in
+public get/list readback. Its separate seed Job uses production database
+adapters; the public client receives only an expiring workspace-scoped operator
+token and never database, Kubernetes, mesh or server-side execution credentials.
+Before installation, the fixture explicitly enables caller-bound public starts
+and provisions a matching binding with a separate execution credential for the
+same workspace account; it does not borrow the background executor.
+Completion evidence
+is tied to the tested commit, not merely HTTP acceptance. This does not certify
+receiver effects, activity execution or the legacy protected Auth administration
+routes. Workflow's managed configuration sets `WF_GATEWAY_NAMESPACE` to the
+release namespace and uses signed contexts, never forged plain identity headers.
 With managed deny-all policies, the Helm test client receives only DNS and
 public Gateway access, not controller mesh, database or Kubernetes API access.
 For a managed/remote cluster, follow

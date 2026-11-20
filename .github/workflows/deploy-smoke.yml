@@ -253,6 +253,8 @@ jobs:
           pip install -e src/libs/storage-provider-layer -e src/libs/custos-postgres \
             -e src/libs/custos-callctx -e src/services/auth-service pyyaml
           python tests/helm/smoke/runtime.py prepare --output "$RUNNER_TEMP/runtime-values.yaml"
+          python tests/helm/smoke/public_workflow.py prepare \
+            --values "$RUNNER_TEMP/runtime-values.yaml"
 
       - name: Install Custos (managed connected-eval)
         run: |
@@ -282,12 +284,20 @@ jobs:
       - name: Run helm test
         run: helm test "$RELEASE" -n "$NS" --logs
 
+      - name: Verify real public signed-context Workflow lifecycle
+        run: |
+          python tests/helm/smoke/public_workflow.py run \
+            --values "$RUNNER_TEMP/runtime-values.yaml" \
+            --output "$RUNNER_TEMP/public-workflow-evidence.json"
+
       - name: Upload safe runtime readiness evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: runtime-smoke-evidence
-          path: ${{ runner.temp }}/runtime-evidence.json
+          path: |
+            ${{ runner.temp }}/runtime-evidence.json
+            ${{ runner.temp }}/public-workflow-evidence.json
           if-no-files-found: warn
 
       - name: Diagnostics on failure
