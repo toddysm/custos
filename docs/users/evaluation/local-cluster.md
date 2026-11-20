@@ -28,6 +28,18 @@ The authentication exercised here is the credential-backed execution exchange,
 not the legacy protected Auth administration routes.
 With managed deny-all policies, the Helm test client receives only DNS and
 public Gateway access, not controller mesh, database or Kubernetes API access.
+
+The hosted workflow's `certify_receivers` dispatch input additionally seeds
+synthetic workflow definitions and a separate, expiring workspace operator,
+then enables receiver admission only after managed readiness passes.
+[`receivers.py`](../../../tests/helm/smoke/receivers.py) uses a public-only
+client to check authentication, workspace denial, manual-trigger completion
+and scheduled-receiver completion through the real Workflow runtime.
+The artifact names the scenarios actually completed. This initial effects
+gate is not the full recovery/security/scale certification required by
+[#1018](https://github.com/toddysm/custos/issues/1018); its
+`fullReceiverCertification` field deliberately remains false.
+
 For a managed/remote cluster, follow
 [Install — connected](install-connected.md) instead; this page is the local
 variant of the same flow.

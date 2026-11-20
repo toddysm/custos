@@ -14,6 +14,9 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 smoke = SimpleNamespace(**runpy.run_path(str(ROOT / "tests/helm/smoke/runtime.py")))
+receivers = SimpleNamespace(
+    **runpy.run_path(str(ROOT / "tests/helm/smoke/receivers.py"))
+)
 TAG = "a" * 40
 SIDECAR = "localhost:5001/smoke-sidecar@sha256:" + "b" * 64
 HELPER = "localhost:5001/smoke-hook-helper@sha256:" + "c" * 64
@@ -317,3 +320,87 @@ def test_preseed_grants_only_workspace_execution_and_closes_pool(
     encoded = codec.kwargs["encoder"](scope)
     assert isinstance(encoded, str)
     assert codec.kwargs["decoder"](encoded) == scope
+
+
+@pytest.mark.parametrize("waiting", [False, True])
+def test_receiver_certification_definitions_use_actual_workflow_contracts(
+    waiting: bool,
+) -> None:
+    """Synthetic start/wait definitions must pass the real compiler, not just JSON construction."""
+    from datetime import UTC, datetime
+
+    from custos_workflow.bindings.registry import InMemoryActivityTypeRegistry
+    from custos_workflow.compiler import RunMeta, compile
+    from custos_workflow.document import WorkflowDocument
+
+    document = WorkflowDocument.model_validate(
+        receivers.workflow_document(waiting=waiting)
+    )
+    graph = compile(
+        document,
+        RunMeta(
+            workspace_id=receivers.WORKSPACE,
+            workflow_version_id="synthetic",
+            workflow_name=document.metadata.name,
+            workflow_version_label="1",
+            started_at_default=datetime(2026, 1, 1, tzinfo=UTC),
+        ),
+        InMemoryActivityTypeRegistry({}),
+    )
+    assert graph.topological_order == (
+        ("await-source", "effect") if waiting else ("effect",)
+    )
+
+
+def test_receiver_client_cannot_access_backend_secrets_or_kubernetes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real public client gets one workspace token, no database, mesh or Kubernetes credential."""
+    monkeypatch.setenv("GITHUB_SHA", TAG)
+    job = receivers.client_job("synthetic:tested")
+    pod = job["spec"]["template"]["spec"]
+    container = pod["containers"][0]
+    assert pod["automountServiceAccountToken"] is False
+    assert "serviceAccountName" not in pod
+    projected = [
+        row["valueFrom"]["secretKeyRef"]
+        for row in container["env"]
+        if "valueFrom" in row
+    ]
+    assert projected == [{"name": receivers.OPERATOR_SECRET, "key": "token"}]
+    assert "envFrom" not in container
+    assert container["securityContext"]["readOnlyRootFilesystem"] is True
+    assert pod["volumes"] == [
+        {"name": "script", "configMap": {"name": "receiver-certification-script"}}
+    ]
+
+
+def test_receiver_client_refuses_a_successful_job_without_effect_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Job completion alone is never reported as receiver-to-Workflow certification."""
+    import sys
+
+    monkeypatch.setenv("NS", "synthetic")
+    monkeypatch.setenv("GITHUB_SHA", TAG)
+    monkeypatch.setenv("IMAGE_PREFIX", "synthetic")
+    monkeypatch.setitem(
+        sys.modules,
+        "runtime",
+        SimpleNamespace(
+            command=Mock(
+                side_effect=[
+                    "created",
+                    json.dumps({"status": {"succeeded": 1}}),
+                    "no evidence",
+                ]
+            )
+        ),
+    )
+    output = tmp_path / "evidence.json"
+    with pytest.raises(
+        receivers.CertificationFailure, match="no certification claimed"
+    ):
+        receivers.run(output)
+    assert not output.exists()

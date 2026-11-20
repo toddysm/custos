@@ -32,6 +32,11 @@ name: deploy-smoke
 # as a required gate once this has run green a few times on dispatch.
 on:
   workflow_dispatch:
+    inputs:
+      certify_receivers:
+        description: Run real deployed receiver effects in addition to baseline readiness
+        type: boolean
+        default: false
   pull_request:
     paths:
       - '.github/workflows/deploy-smoke.yml'
@@ -254,6 +259,10 @@ jobs:
             -e src/libs/custos-callctx -e src/services/auth-service pyyaml
           python tests/helm/smoke/runtime.py prepare --output "$RUNNER_TEMP/runtime-values.yaml"
 
+      - name: Seed scoped receiver certification prerequisites
+        if: inputs.certify_receivers || github.event_name == 'pull_request'
+        run: python tests/helm/smoke/receivers.py prepare
+
       - name: Install Custos (managed connected-eval)
         run: |
           set -euo pipefail
@@ -282,12 +291,26 @@ jobs:
       - name: Run helm test
         run: helm test "$RELEASE" -n "$NS" --logs
 
+      - name: Enable receiver admission after managed readiness
+        if: inputs.certify_receivers || github.event_name == 'pull_request'
+        run: |
+          helm upgrade "$RELEASE" "$CHART" -f "$VALUES" \
+            --namespace "$NS" -f "$RUNNER_TEMP/runtime-values.yaml" \
+            --set global.receiverRuntime.admissionEnabled=true \
+            --wait --timeout 10m
+
+      - name: Exercise actual deployed receiver Workflow effects
+        if: inputs.certify_receivers || github.event_name == 'pull_request'
+        run: python tests/helm/smoke/receivers.py run --output "$RUNNER_TEMP/receiver-evidence.json"
+
       - name: Upload safe runtime readiness evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: runtime-smoke-evidence
-          path: ${{ runner.temp }}/runtime-evidence.json
+          path: |
+            ${{ runner.temp }}/runtime-evidence.json
+            ${{ runner.temp }}/receiver-evidence.json
           if-no-files-found: warn
 
       - name: Diagnostics on failure
@@ -354,7 +377,7 @@ jobs:
             done
           echo "::endgroup::"
           echo "::group::hook job logs"
-          for job in smoke-schema-migrate smoke-execution-bootstrap custos-migrate custos-bootstrap custos-smoke-test; do
+          for job in smoke-schema-migrate smoke-execution-bootstrap receiver-certification-seed receiver-certification-client custos-migrate custos-bootstrap custos-smoke-test; do
             echo "--- logs job/$job ---"
             # Job pods are name-suffixed, so the fallback selects by the
             # standard job-name label rather than a bare pod name.
