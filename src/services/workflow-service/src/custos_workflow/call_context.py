@@ -21,7 +21,7 @@ from custos_callctx import (
     InvalidCallContextError,
     InvalidReason,
 )
-from custos_callctx.execution import ExecutionIdentity
+from custos_callctx.execution import EXECUTION_PERMISSIONS, ExecutionIdentity, ExecutionOperation
 from custos_callctx.mesh import MeshAuthenticationError, require_service_caller
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -128,12 +128,17 @@ class CallContextMiddleware(BaseHTTPMiddleware):
         if request.method == "GET" and request.url.path in _BYPASS_PATHS:
             return await call_next(request)
 
-        execution_route = request.method == "POST" and (
-            request.url.path in {"/internal/runs:start", "/internal/runs:raiseEvent"}
-            or re.fullmatch(r"/internal/runs/.+/steps/[^/]+:raiseEvent", request.url.path)
-            is not None
-        )
-        if self._execution_verifier is not None and execution_route:
+        expected_operation: ExecutionOperation | None = None
+        if request.method == "POST":
+            if request.url.path == "/internal/runs:start":
+                expected_operation = "workflow-start"
+            elif request.url.path == "/internal/runs:raiseEvent" or re.fullmatch(
+                r"/internal/runs/.+/steps/[^/]+:raiseEvent", request.url.path
+            ):
+                expected_operation = "workflow-resume"
+            elif re.fullmatch(r"/internal/runs/[^/]+:cancel", request.url.path):
+                expected_operation = "workflow-cancel"
+        if self._execution_verifier is not None and expected_operation is not None:
             try:
                 require_service_caller(
                     request.headers,
@@ -158,14 +163,9 @@ class CallContextMiddleware(BaseHTTPMiddleware):
                 )
             if (
                 not verified.workspace_id
-                or "workflow:execute" not in verified.permissions
+                or EXECUTION_PERMISSIONS[expected_operation] not in verified.permissions
                 or verified.caller_component != self._trigger_app_id
-                or verified.execution_operation
-                != (
-                    "workflow-start"
-                    if request.url.path == "/internal/runs:start"
-                    else "workflow-resume"
-                )
+                or verified.execution_operation != expected_operation
             ):
                 return _envelope(403, "execution_denied", "scoped execution permission required")
             request.state.call_context = CallContext(

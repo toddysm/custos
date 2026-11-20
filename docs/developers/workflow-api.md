@@ -356,10 +356,12 @@ locked so SDK clients can branch deterministically on `code`:
 
 ## Internal RPC API
 
-In-cluster siblings reach the workflow service through a flat
+The configured Trigger service reaches the workflow service through a flat
 `/internal/...` prefix rather than the public
-`/v1/workspaces/{ws}/...` shape. The prefix is the seam the Helm
-chart / mesh uses to pin mTLS-only access. Because the workspace
+`/v1/workspaces/{ws}/...` shape. The prefix is not an authentication
+exemption: enforced deployments require the local sidecar app token,
+the exact Trigger app/namespace and an Auth-signed operation context.
+Because the workspace
 is no longer carried in the URL, every Internal RPC body promotes
 `workspaceId` to a top-level field.
 
@@ -397,12 +399,33 @@ responses remain 202.
 
 ### `InternalCancelRunRequest`
 
+Cancellation requires `executionOperation=workflow-cancel` with the existing
+`run:cancel` permission, obtained through the credential-backed
+`rpc/callctx.exchangeExecution` operation from the actual Trigger sidecar.
+The operator must provision an account and binding with that workspace grant;
+the default workspace-executor role does not acquire it. Ordinary Gateway
+contexts, legacy grants and start/resume contexts cannot authorize this RPC,
+and a cancellation context cannot authorize start or resume.
+
+The body workspace must equal the signed workspace **before any run lookup or
+runtime call**. This is workspace administration: an authorized account may
+cancel another account's run in the same workspace without replacing its
+accepted execution pin or immutable input. Public-start activation controls
+starts only; cancellation uses the independently configured private boundary.
+Mixed/incomplete production configurations fail closed.
+
 ```json
 {
   "workspaceId": "ws-prod",
   "reason": "trigger condition retracted"
 }
 ```
+
+The existing controller returns202 with a RunRef,404 for a missing run,409 for
+an invalid terminal transition and503 for dependency/runtime failure.
+`cancelling` is in progress, not terminal evidence; only `cancelled` confirms
+the terminal controller state. This does not introduce an autonomous Trigger
+cancellation policy or a new cancellation state machine.
 
 ### `RaiseExternalEventRequest`
 
@@ -507,10 +530,12 @@ The wire surface accepts the idempotency key in two places:
 - The `idempotencyKey` body field on
   `StartRunRequest` / `InternalStartRunRequest`.
 
-When both are present, **the body field wins**. The empty string
-in either field is normalised to "no key supplied". This means
-callers can opt out of the header per-request without removing
-the header entirely:
+When both contain a nonempty key, **the body field wins**. The empty string
+and whitespace-only values are normalised to "no key in that field":
+a blank body falls back to a nonempty header. Genuinely keyless execution
+requires both fields to be absent or blank. Gateway applies the same
+normalization and forwards keyed retries to durable Workflow acceptance
+rather than caching a transient HTTP response:
 
 ```bash
 # Header alone — falls through to the validator.
@@ -525,9 +550,9 @@ curl -X POST https://wf.custos.example/v1/workspaces/ws-prod/runs \
   -H 'Content-Type: application/json' \
   -d '{"workflowVersionId": "wfv-1", "idempotencyKey": "body-key-wins"}'
 
-# Body field set to empty string — opts out, header ignored too.
+# Empty body field falls back to the supplied header.
 curl -X POST https://wf.custos.example/v1/workspaces/ws-prod/runs \
-  -H 'Idempotency-Key: also-ignored' \
+  -H 'Idempotency-Key: header-fallback' \
   -H 'Content-Type: application/json' \
   -d '{"workflowVersionId": "wfv-1", "idempotencyKey": ""}'
 ```

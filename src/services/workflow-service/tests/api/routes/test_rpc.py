@@ -381,6 +381,20 @@ class TestInternalStartRun:
 
 
 class TestInternalCancelRun:
+    async def test_signed_workspace_must_match_body_before_cancellation(
+        self, client: httpx.AsyncClient, harness: _Harness
+    ) -> None:
+        """A valid private caller cannot target a different tenant in the cancellation body."""
+        harness.controller.cancel_run.return_value = _make_ref(status=RunStatus.CANCELLING)
+        harness.call_context = CallContext(
+            workspace="other-workspace", principal="operator", execution_verified=True
+        )
+        response = await client.post(
+            f"/internal/runs/{RUN_ID}:cancel", json={"workspaceId": WORKSPACE}
+        )
+        assert response.status_code == 403
+        harness.controller.cancel_run.assert_not_awaited()
+
     async def test_happy_path_dispatches_and_returns_202(
         self, client: httpx.AsyncClient, harness: _Harness
     ) -> None:

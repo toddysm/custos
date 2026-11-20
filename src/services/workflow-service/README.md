@@ -107,7 +107,11 @@ Process bind:
 Public requests must carry a valid Auth-signed context over an authenticated
 Gateway Dapr invocation, with the exact route grant and URL workspace.
 Plain identity headers cannot substitute for or override it. Private Trigger
-execution keeps its independent caller/operation boundary. Missing production
+execution keeps its independent caller/operation boundary. Private cancellation
+requires the Trigger-only `workflow-cancel` exchange, an explicit `run:cancel`
+workspace grant and a matching body workspace before run lookup; it may
+administrate another account's run without changing its execution pin.
+Missing production
 trust configuration fails at startup; see [Public authentication boundary](../../../docs/developers/workflow-api.md#public-authentication-boundary).
 Public starts never adopt the workspace background executor. The caller must be
 a provisioned service account in the target workspace; its actual grants govern

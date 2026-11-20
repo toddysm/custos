@@ -604,6 +604,7 @@ def test_public_routes_require_their_exact_grant_and_ignore_plain_identity(
         ("exp", 1, 401),
         ("aud", "other-service", 401),
         ("iss", "untrusted", 401),
+        ("executionOperation", "workflow-cancel", 403),
     ],
 )
 def test_public_claim_rejections_precede_any_handler(
@@ -616,6 +617,8 @@ def test_public_claim_rejections_precede_any_handler(
     client, key, _ = public_boundary
     claims = _gateway_claims()
     claims[claim] = value
+    if claim == "executionOperation":
+        claims["permissions"] = ["run:cancel"]
     response = client.get("/v1/workspaces/ws/runs", headers=_gateway_headers(key, claims))
     assert response.status_code == status
     assert _handler_entries(client) == 0
@@ -707,12 +710,23 @@ def test_public_context_cannot_authorize_private_or_unrecognized_operations(
 
 
 @pytest.mark.parametrize(
-    "operation,expected_status", [(None, 403), ("workflow-start", 200), ("workflow-resume", 403)]
+    "operation,permission,path,expected_status",
+    [
+        (None, "workflow:execute", "/internal/runs:start", 403),
+        ("workflow-start", "workflow:execute", "/internal/runs:start", 200),
+        ("workflow-resume", "workflow:execute", "/internal/runs:start", 403),
+        ("workflow-cancel", "run:cancel", "/internal/runs/root:cancel", 200),
+        ("workflow-start", "workflow:execute", "/internal/runs/root:cancel", 403),
+        (None, "run:cancel", "/internal/runs/root:cancel", 403),
+        ("workflow-cancel", "workflow:execute", "/internal/runs/root:cancel", 401),
+        ("workflow-cancel", "run:cancel", "/internal/runs:start", 403),
+        ("workflow-cancel", "run:cancel", "/internal/runs:raiseEvent", 403),
+    ],
 )
 def test_private_delivery_requires_signed_operation_provenance(
-    operation: str | None, expected_status: int
+    operation: str | None, permission: str, path: str, expected_status: int
 ) -> None:
-    """A signed legacy grant or a different execution operation cannot authorize a new start."""
+    """Only a valid operation-specific grant can cross its matching private boundary."""
     key = Ed25519PrivateKey.generate()
     public = base64.urlsafe_b64encode(key.public_key().public_bytes_raw()).decode().rstrip("=")
 
@@ -738,7 +752,7 @@ def test_private_delivery_requires_signed_operation_provenance(
         trigger_namespace="custos",
     )
 
-    @app.post("/internal/runs:start")
+    @app.post("/internal/{route:path}")
     async def start(request: Request) -> JSONResponse:
         """Record entry only after the actual private-delivery authentication boundary."""
         app.state.entered += 1
@@ -761,14 +775,14 @@ def test_private_delivery_requires_signed_operation_provenance(
         "workspaceId": "ws",
         "actingPrincipalId": "executor",
         "callerComponent": "trigger-service",
-        "permissions": ["workflow:execute"],
+        "permissions": [permission],
     }
     if operation is not None:
         claims["executionOperation"] = operation
     token = jwt.encode(claims, key, algorithm="EdDSA", headers={"kid": "unit"})
     with TestClient(app) as client:
         response = client.post(
-            "/internal/runs:start",
+            path,
             headers={
                 "x-custos-callctx": token,
                 "dapr-api-token": "unit-sidecar-token",

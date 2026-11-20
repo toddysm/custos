@@ -284,7 +284,7 @@ jobs:
       - name: Run helm test
         run: helm test "$RELEASE" -n "$NS" --logs
 
-      - name: Verify real public signed-context Workflow lifecycle
+      - name: Verify real public lifecycle and signed private cancellation
         run: |
           python tests/helm/smoke/public_workflow.py run \
             --values "$RUNNER_TEMP/runtime-values.yaml" \

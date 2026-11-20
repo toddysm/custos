@@ -3,7 +3,10 @@
 Only the separate seed Job receives database access. The client inherits the
 chart's public Helm-test network identity and receives a workspace operator
 credential, never database, Kubernetes or mesh credentials. Synthetic definition
-data does not replace Gateway/Auth/Dapr/Workflow transport or execution.
+data does not replace Gateway/Auth/Dapr/Workflow transport or execution. A
+separate runner probe uses the actual Trigger container/sidecar for signed
+cancellation and the Workflow container's production client to confirm runtime
+termination; neither private authority is given to the public client.
 """
 
 from __future__ import annotations
@@ -19,9 +22,11 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 WORKSPACE = "workspace-default"
 WORKFLOW = "public-context-proof"
+WAITING_WORKFLOW = "private-cancellation-proof"
 OPERATOR = "public-context-operator"
 RESOURCE = "smoke-public-workflow"
 EXECUTION_RESOURCE = RESOURCE + "-execution"
@@ -36,6 +41,19 @@ def workflow_document() -> dict[str, Any]:
         "metadata": {"name": WORKFLOW, "workspace": WORKSPACE},
         "spec": {"steps": [{"id": "proof", "let": {"observed": "${{ true }}"}}]},
     }
+
+
+def waiting_workflow_document() -> dict[str, Any]:
+    """Keep the real worker waiting for a never-sent event, bounded by a five-minute TTL."""
+    document = workflow_document()
+    document["metadata"]["name"] = WAITING_WORKFLOW
+    document["spec"]["steps"] = [
+        {
+            "id": "await-cancellation",
+            "waitFor": {"eventKey": "${{ 'never-sent' }}", "ttl": "PT5M"},
+        }
+    ]
+    return document
 
 
 async def seed() -> None:
@@ -105,9 +123,12 @@ async def seed() -> None:
                     revoked_reason=None,
                 )
             )
-        await PgDefinitionAdapter(lazy=pool).put_workflow_version(
-            WORKSPACE, WORKFLOW, "1", workflow_document()
-        )
+        definitions = PgDefinitionAdapter(lazy=pool)
+        for name, document in (
+            (WORKFLOW, workflow_document()),
+            (WAITING_WORKFLOW, waiting_workflow_document()),
+        ):
+            await definitions.put_workflow_version(WORKSPACE, name, "1", document)
     finally:
         await pool.aclose()
     print("Synthetic definition and workspace-only public operator seeded.", flush=True)
@@ -169,7 +190,7 @@ def exercise() -> dict[str, Any]:
         {"workflowVersionId": f"{WORKSPACE}/{WORKFLOW}@1", "inputs": {}},
     )
     run_id = started.get("runId")
-    if not isinstance(run_id, str) or not re.fullmatch(r"[\w-]+", run_id):
+    if not isinstance(run_id, str) or UUID(run_id).version != 5:
         raise ValueError("public start did not return an opaque run identifier")
     deadline = time.monotonic() + 120
     while True:
@@ -199,14 +220,140 @@ def exercise() -> dict[str, Any]:
         "publicWorkflowCompleted": True,
         "publicReadbackVerified": True,
         "runId": run_id,
+        "cancellationRunId": start_waiting_run(),
         "fullReceiverCertification": False,
     }
 
 
-def client_job(public_pod: dict[str, Any], image: str) -> dict[str, Any]:
-    """Reuse the chart's public-only test identity without its container or ambient authority."""
-    pod = copy.deepcopy(public_pod)
-    pod["metadata"] = {"labels": pod["metadata"]["labels"]}
+def start_waiting_run() -> str:
+    """Require a running, cancellable real Workflow through the public-only client."""
+    prefix = f"/v1/workspaces/{WORKSPACE}/runs"
+    started = request(
+        "POST",
+        prefix,
+        {
+            "workflowVersionId": f"{WORKSPACE}/{WAITING_WORKFLOW}@1",
+            "idempotencyKey": WAITING_WORKFLOW + "-" + os.environ["GITHUB_SHA"],
+        },
+    )
+    run_id = started.get("runId")
+    if not isinstance(run_id, str) or UUID(run_id).version != 5:
+        raise ValueError("cancellation start did not return an opaque run identifier")
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        observed = request("GET", prefix + "/" + run_id)
+        if observed.get("status") == "running":
+            return run_id
+        if observed.get("status") in {"succeeded", "failed", "cancelled"}:
+            raise RuntimeError(
+                "cancellable Workflow terminated before the private proof"
+            )
+        time.sleep(2)
+    raise RuntimeError("cancellable Workflow never became running")
+
+
+def cancellation_readback(run_id: str) -> dict[str, Any]:
+    """Require terminal public cancellation, not a 202 or in-progress cancelling record."""
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        observed = request("GET", f"/v1/workspaces/{WORKSPACE}/runs/{run_id}")
+        if observed.get("status") == "cancelled":
+            if (
+                observed.get("runId") != run_id
+                or observed.get("workspaceId") != WORKSPACE
+                or observed.get("workflowVersionId")
+                != f"{WORKSPACE}/{WAITING_WORKFLOW}@1"
+            ):
+                raise ValueError("cancelled public readback has the wrong identity")
+            return {
+                "sha": os.environ["GITHUB_SHA"],
+                "runId": run_id,
+                "publicCancellationReadback": True,
+            }
+        if observed.get("status") in {"succeeded", "failed"}:
+            raise RuntimeError("cancellable Workflow ended without cancellation")
+        time.sleep(2)
+    raise RuntimeError("public cancellation readback never became terminal")
+
+
+async def private_cancellation(run_id: str, sha: str) -> dict[str, Any]:
+    """Exchange the configured account through the real Trigger sidecar, then invoke its RPC."""
+    import httpx
+    from custos_callctx.execution import load_execution_bindings
+    from custos_callctx.execution_client import ExecutionContextClient
+
+    bindings = load_execution_bindings(os.environ)
+    if bindings is None:
+        raise ValueError("private proof requires configured execution bindings")
+    identities = [
+        identity
+        for identity in bindings.identities
+        if identity.workspace_id == WORKSPACE
+        and identity.principal_id == OPERATOR
+        and identity.binding_id == "public-context-v1"
+    ]
+    if len(identities) != 1:
+        raise ValueError(
+            "private proof requires exactly its explicitly provisioned account"
+        )
+    async with httpx.AsyncClient(follow_redirects=False, timeout=70) as client:
+        execution = ExecutionContextClient.from_env(client, bindings, os.environ)
+        headers = await execution.headers(identities[0], "workflow-cancel")
+        response = await client.post(
+            f"http://{os.environ['DAPR_HTTP_HOST']}:{os.environ['DAPR_HTTP_PORT']}"
+            f"/v1.0/invoke/{os.environ['TRIGGER_WORKFLOW_APP_ID']}"
+            f"/method/internal/runs/{run_id}:cancel",
+            headers=headers,
+            json={
+                "workspaceId": WORKSPACE,
+                "reason": "disposable signed cancellation proof",
+            },
+        )
+        if response.status_code != 202:
+            raise RuntimeError(f"private cancellation: HTTP {response.status_code}")
+        payload = response.json()
+        if (
+            not isinstance(payload, dict)
+            or payload.get("runId") != run_id
+            or payload.get("workspaceId") != WORKSPACE
+            or payload.get("status") != "cancelled"
+        ):
+            raise ValueError(
+                "private cancellation did not confirm the requested terminal run"
+            )
+    return {"sha": sha, "runId": run_id, "privateCancellationVerified": True}
+
+
+async def runtime_termination(run_id: str, sha: str) -> dict[str, Any]:
+    """Read the actual Workflow sidecar through its production client, independently of metadata."""
+    from custos_workflow.runtime._common import GetRunStateRequest, RunStatus
+    from custos_workflow.runtime.dapr import WorkflowClient
+
+    client = WorkflowClient()
+    try:
+        async with asyncio.timeout(60):
+            state = await client.get_workflow_state(
+                GetRunStateRequest(instance_id=run_id, fetch_payloads=False)
+            )
+            if state is None or state.status != RunStatus.TERMINATED:
+                raise RuntimeError(
+                    "actual Workflow runtime did not retain terminated state"
+                )
+    finally:
+        await client.aclose()
+    return {"sha": sha, "runId": run_id, "runtimeTerminationVerified": True}
+
+
+def client_job(
+    public_pod: dict[str, Any], image: str, *, run_id: str | None = None
+) -> dict[str, Any]:
+    """Reuse only the chart's public identity for initial execution or final cancellation readback."""
+    pod = copy.deepcopy(
+        {
+            "metadata": {"labels": public_pod["metadata"]["labels"]},
+            "spec": public_pod["spec"],
+        }
+    )
     spec = pod["spec"]
     spec.pop("serviceAccountName", None)
     spec["automountServiceAccountToken"] = False
@@ -221,7 +368,17 @@ def client_job(public_pod: dict[str, Any], image: str) -> dict[str, Any]:
         {
             "name": "client",
             "image": image,
-            "command": ["python", "/smoke/public_workflow.py", "client"],
+            "command": (
+                ["python", "/smoke/public_workflow.py", "client"]
+                if run_id is None
+                else [
+                    "python",
+                    "/smoke/public_workflow.py",
+                    "readback",
+                    "--run-id",
+                    run_id,
+                ]
+            ),
             "env": [
                 {"name": "GITHUB_SHA", "value": os.environ["GITHUB_SHA"]},
                 {"name": "PYTHONDONTWRITEBYTECODE", "value": "1"},
@@ -249,13 +406,13 @@ def client_job(public_pod: dict[str, Any], image: str) -> dict[str, Any]:
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
-        "metadata": {"name": RESOURCE},
+        "metadata": {"name": RESOURCE if run_id is None else RESOURCE + "-readback"},
         "spec": {"backoffLimit": 0, "activeDeadlineSeconds": 300, "template": pod},
     }
 
 
-def report_from_logs(logs: str, sha: str) -> dict[str, Any]:
-    """Reject missing, duplicate, stale or incomplete evidence even after Job success."""
+def read_report(logs: str, sha: str) -> dict[str, Any]:
+    """Require one exact-tested-commit evidence record without promoting other log output."""
     reports = [
         json.loads(line.removeprefix(REPORT_PREFIX))
         for line in logs.splitlines()
@@ -264,6 +421,14 @@ def report_from_logs(logs: str, sha: str) -> dict[str, Any]:
     if len(reports) != 1 or not isinstance(reports[0], dict):
         raise ValueError("exactly one public Workflow evidence record is required")
     report: dict[str, Any] = reports[0]
+    if report.get("sha") != sha:
+        raise ValueError("public Workflow evidence is stale or incomplete")
+    return report
+
+
+def report_from_logs(logs: str, sha: str) -> dict[str, Any]:
+    """Reject missing effects or a missing cancellable run even after the public Job succeeds."""
+    report = read_report(logs, sha)
     if (
         report.get("sha") != sha
         or report.get("publicWorkflowCompleted") is not True
@@ -271,8 +436,88 @@ def report_from_logs(logs: str, sha: str) -> dict[str, Any]:
         or report.get("fullReceiverCertification") is not False
         or not isinstance(report.get("runId"), str)
         or not report["runId"]
+        or not isinstance(report.get("cancellationRunId"), str)
+        or re.fullmatch(r"[\w-]+", report["cancellationRunId"]) is None
     ):
         raise ValueError("public Workflow evidence is stale or incomplete")
+    return report
+
+
+def service_probe(service: str, phase: str, run_id: str, sha: str) -> dict[str, Any]:
+    """Exec only into a ready actual service container at the tested image, never an impersonator."""
+    import runtime as smoke
+
+    namespace = os.environ["NS"]
+    deployment = json.loads(
+        smoke.command(
+            [
+                "kubectl",
+                "-n",
+                namespace,
+                "get",
+                "deployment/custos-" + service,
+                "-o",
+                "json",
+            ]
+        )
+    )
+    labels = deployment["spec"]["selector"]["matchLabels"]
+    pods = json.loads(
+        smoke.command(
+            [
+                "kubectl",
+                "-n",
+                namespace,
+                "get",
+                "pods",
+                "-l",
+                ",".join(f"{key}={value}" for key, value in sorted(labels.items())),
+                "-o",
+                "json",
+            ]
+        )
+    )["items"]
+    expected_image = os.environ["IMAGE_PREFIX"] + "/" + service + ":" + sha
+    candidates = [
+        pod
+        for pod in pods
+        if not pod["metadata"].get("deletionTimestamp")
+        and any(
+            container["name"] == service and container["image"] == expected_image
+            for container in pod["spec"]["containers"]
+        )
+        and any(
+            status["name"] == service and status.get("ready") is True
+            for status in pod.get("status", {}).get("containerStatuses", [])
+        )
+    ]
+    if not candidates:
+        raise RuntimeError("no ready actual proof container at the tested image")
+    pod = min(candidates, key=lambda row: row["metadata"]["name"])
+    logs = smoke.command(
+        [
+            "kubectl",
+            "-n",
+            namespace,
+            "exec",
+            pod["metadata"]["name"],
+            "-c",
+            service,
+            "--",
+            "python",
+            "-c",
+            Path(__file__).read_text(),
+            phase,
+            "--run-id",
+            run_id,
+            "--sha",
+            sha,
+        ],
+        timeout=150,
+    )
+    report = read_report(logs, sha)
+    if report.get("runId") != run_id:
+        raise ValueError("private proof returned a different run")
     return report
 
 
@@ -401,7 +646,7 @@ def prepare(values: Path) -> None:
 
 
 def run(output: Path, values: Path) -> None:
-    """Require completion/readback from the public-only client after services are installed."""
+    """Require separate public completion, actual private termination and final public readback."""
     import runtime as smoke
 
     namespace, sha = os.environ["NS"], os.environ["GITHUB_SHA"]
@@ -414,23 +659,76 @@ def run(output: Path, values: Path) -> None:
     client = client_job(public, os.environ["IMAGE_PREFIX"] + "/api-gateway:" + sha)
     wait_job(client)
     logs = smoke.command(["kubectl", "-n", namespace, "logs", "job/" + RESOURCE])
-    output.write_text(json.dumps(report_from_logs(logs, sha), indent=2))
+    report = report_from_logs(logs, sha)
+    run_id = report["cancellationRunId"]
+    for service, phase, field in (
+        ("trigger-service", "cancel", "privateCancellationVerified"),
+        ("workflow-service", "runtime-state", "runtimeTerminationVerified"),
+    ):
+        proof = service_probe(service, phase, run_id, sha)
+        if proof.get(field) is not True:
+            raise ValueError("private proof did not confirm its required effect")
+        report[field] = True
+    readback = client_job(
+        public, os.environ["IMAGE_PREFIX"] + "/api-gateway:" + sha, run_id=run_id
+    )
+    wait_job(readback)
+    proof = read_report(
+        smoke.command(
+            ["kubectl", "-n", namespace, "logs", "job/" + RESOURCE + "-readback"]
+        ),
+        sha,
+    )
+    if (
+        proof.get("runId") != run_id
+        or proof.get("publicCancellationReadback") is not True
+    ):
+        raise ValueError("public proof did not confirm terminal cancellation")
+    report["publicCancellationReadback"] = True
+    output.write_text(json.dumps(report, indent=2))
     print(
-        "Real public Workflow start/completion/readback verified; receiver certification remains separate."
+        "Public completion/readback and actual private cancellation verified; receiver certification remains separate."
     )
 
 
 def main() -> None:
     """Select runner orchestration or the separate seed/public-client container program."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", choices=("seed", "client", "prepare", "run"))
+    parser.add_argument(
+        "phase",
+        choices=(
+            "seed",
+            "client",
+            "prepare",
+            "run",
+            "cancel",
+            "runtime-state",
+            "readback",
+        ),
+    )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--values", type=Path)
+    parser.add_argument("--run-id")
+    parser.add_argument("--sha")
     args = parser.parse_args()
     if args.phase == "seed":
         asyncio.run(seed())
     elif args.phase == "client":
         print(REPORT_PREFIX + json.dumps(exercise()), flush=True)
+    elif args.phase in {"cancel", "runtime-state", "readback"}:
+        if args.run_id is None or re.fullmatch(r"[\w-]+", args.run_id) is None:
+            parser.error("--run-id must be an opaque root run identifier")
+        if args.phase == "readback":
+            report = cancellation_readback(args.run_id)
+        else:
+            if args.sha is None or re.fullmatch(r"[a-f0-9]{40}", args.sha) is None:
+                parser.error("--sha must be the exact tested commit")
+            report = asyncio.run(
+                private_cancellation(args.run_id, args.sha)
+                if args.phase == "cancel"
+                else runtime_termination(args.run_id, args.sha)
+            )
+        print(REPORT_PREFIX + json.dumps(report), flush=True)
     elif args.phase == "prepare":
         if args.values is None:
             parser.error("--values is required for prepare")

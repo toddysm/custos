@@ -10,14 +10,14 @@ from uuid import uuid4
 
 import pytest
 from custos_spl.errors import BackendUnavailable
-from custos_spl.ids import PrincipalId, RoleBindingId, WorkspaceId
+from custos_spl.ids import PrincipalId, RoleBindingId, RoleId, WorkspaceId
 from custos_spl.interfaces.auth_store import RoleBinding, WorkspaceScope
 from custos_spl.interfaces.metadata_store import AuditEvent
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from custos_auth.callctx_signer import decode_claims_unverified
-from custos_auth.roles import ROLE_WORKSPACE_EXECUTOR
+from custos_auth.roles import ROLE_WORKSPACE_EXECUTOR, ROLE_WORKSPACE_OPERATOR
 from custos_auth.settings import SettingsError
 from custos_auth.tokens import mint_token
 from tests._fakes import FakeAuthAdapter, FakeMetadataAdapter
@@ -43,7 +43,9 @@ def configured(client: TestClient, app: FastAPI) -> TestClient:
     return client
 
 
-def credential(store: FakeAuthAdapter, *, grant: bool = True) -> tuple[str, str]:
+def credential(
+    store: FakeAuthAdapter, *, grant: bool = True, role: RoleId = ROLE_WORKSPACE_EXECUTOR
+) -> tuple[str, str]:
     """Provision a real hashed service credential and an explicit workspace execution grant."""
     _seed_workspace(store)
     _seed_sa(store)
@@ -54,7 +56,7 @@ def credential(store: FakeAuthAdapter, *, grant: bool = True) -> tuple[str, str]
         store.role_bindings[identifier] = RoleBinding(
             identifier,
             PrincipalId(SA),
-            ROLE_WORKSPACE_EXECUTOR,
+            role,
             WorkspaceScope(WorkspaceId(WORKSPACE)),
             datetime.now(UTC),
             PrincipalId("operator"),
@@ -79,6 +81,7 @@ def body(token: str) -> dict[str, str]:
         ("catalog-activity-read", "catalog:activity-types:read", "workflow-service"),
         ("catalog-activity-read", "catalog:activity-types:read", "activity-runtime-manager"),
         ("connector-credentials", "connector:bind", "activity-runtime-manager"),
+        ("workflow-cancel", "run:cancel", "trigger-service"),
     ],
 )
 def test_exchange_issues_one_verified_grant_and_a_fresh_context(
@@ -89,7 +92,10 @@ def test_exchange_issues_one_verified_grant_and_a_fresh_context(
     caller: str,
 ) -> None:
     """The actual signer/verifier round trip binds scope, principal, operation and short expiry."""
-    token, _ = credential(fake_auth_store)
+    token, _ = credential(
+        fake_auth_store,
+        role=ROLE_WORKSPACE_OPERATOR if operation == "workflow-cancel" else ROLE_WORKSPACE_EXECUTOR,
+    )
     issued = []
     for _ in range(2):
         response = configured.post(
@@ -189,14 +195,20 @@ def test_exchange_rejects_asserted_grants(
     assert response.status_code == 422 and token not in response.text
 
 
+@pytest.mark.parametrize("operation", ["connector-bind", "workflow-cancel"])
 @pytest.mark.parametrize("failure", ["no-grant", "revoked", "expired", "disabled"])
 def test_invalid_or_unprivileged_account_is_not_signed(
     configured: TestClient,
     fake_auth_store: FakeAuthAdapter,
     failure: str,
+    operation: str,
 ) -> None:
     """Negative credential/grant state is enforced before the first cache entry can be accepted."""
-    token, identifier = credential(fake_auth_store, grant=failure != "no-grant")
+    token, identifier = credential(
+        fake_auth_store,
+        grant=failure != "no-grant",
+        role=ROLE_WORKSPACE_OPERATOR if operation == "workflow-cancel" else ROLE_WORKSPACE_EXECUTOR,
+    )
     row = fake_auth_store.service_tokens[identifier]
     if failure == "revoked":
         fake_auth_store.service_tokens[identifier] = replace(row, revoked_at=datetime.now(UTC))
@@ -209,8 +221,39 @@ def test_invalid_or_unprivileged_account_is_not_signed(
             fake_auth_store.principals[SA],
             disabled_at=datetime.now(UTC),
         )
-    response = configured.post(PATH, json=body(token), headers=HEADERS)
+    response = configured.post(
+        PATH,
+        json={**body(token), "operation": operation},
+        headers={
+            **HEADERS,
+            "dapr-caller-app-id": (
+                "trigger-service" if operation == "workflow-cancel" else "workflow-service"
+            ),
+        },
+    )
     assert response.status_code == (403 if failure == "no-grant" else 401)
+    assert token not in response.text
+
+
+@pytest.mark.parametrize(
+    "caller,operator", [("trigger-service", False), ("workflow-service", True)]
+)
+def test_cancellation_requires_both_explicit_grant_and_trigger_caller(
+    configured: TestClient,
+    fake_auth_store: FakeAuthAdapter,
+    caller: str,
+    operator: bool,
+) -> None:
+    """Neither an executor grant nor a privileged account at another mesh app can cancel."""
+    token, _ = credential(
+        fake_auth_store, role=ROLE_WORKSPACE_OPERATOR if operator else ROLE_WORKSPACE_EXECUTOR
+    )
+    response = configured.post(
+        PATH,
+        json={**body(token), "operation": "workflow-cancel"},
+        headers={**HEADERS, "dapr-caller-app-id": caller},
+    )
+    assert response.status_code == 403
     assert token not in response.text
 
 

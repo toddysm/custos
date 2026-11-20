@@ -20,6 +20,7 @@ from typing import Literal
 ExecutionOperation = Literal[
     "workflow-start",
     "workflow-resume",
+    "workflow-cancel",
     "catalog-read",
     "catalog-activity-read",
     "connector-bind",
@@ -30,6 +31,7 @@ EXECUTION_PERMISSIONS: Mapping[str, str] = MappingProxyType(
     {
         "workflow-start": "workflow:execute",
         "workflow-resume": "workflow:execute",
+        "workflow-cancel": "run:cancel",
         "catalog-read": "catalog:workflows:read",
         "catalog-activity-read": "catalog:activity-types:read",
         "connector-bind": "connector:bind",

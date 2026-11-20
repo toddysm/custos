@@ -40,7 +40,8 @@ from custos_gateway.routes._forwarding import response_snapshot
 from custos_gateway.routes.registry import registry_required_permissions
 from custos_gateway.settings import Settings
 
-WRITE_PATH = "/v1/workspaces/ws-1/runs"
+# Cancellation remains an ordinary write; starts delegate to durable Workflow recovery.
+WRITE_PATH = "/v1/workspaces/ws-1/runs/run-1:cancel"
 READ_PATH = "/v1/workspaces/ws-1/runs"
 AUTH_HEADERS = {"authorization": "Bearer token-123"}
 
@@ -266,6 +267,138 @@ def test_recovery_binding_outage_fails_closed(
         )
     assert response.status_code == 503 and not calls
     assert "private" not in response.text
+
+
+@pytest.mark.parametrize(
+    "body_key,header_key,effective",
+    [
+        (None, "header-key", "header-key"),
+        ("body-key", "ignored", "body-key"),
+        ("body-key", None, "body-key"),
+        ("  body-key  ", " ignored ", "body-key"),
+        (" ", " header-key ", "header-key"),
+        ("", "header-key", "header-key"),
+    ],
+)
+def test_workflow_start_reconciles_and_forwards_its_effective_key(
+    settings: Settings, body_key: str | None, header_key: str | None, effective: str
+) -> None:
+    """A transient start can reach durable recovery using body-preferred, never generated keys."""
+    statuses = iter((503, 202))
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Return a transient domain response followed by recovered acceptance."""
+        calls.append(request)
+        return httpx.Response(next(statuses), json={"runId": "accepted"})
+
+    store = _BindingStore()
+    app = create_app(
+        settings=settings,
+        auth_client=_auth_client(),
+        downstream_router=DownstreamRouter(
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        ),
+        metadata_store=store,
+    )
+    payload = {"workflowVersionId": "ws-1/example@1"}
+    headers = dict(AUTH_HEADERS)
+    if body_key is not None:
+        payload["idempotencyKey"] = body_key
+    if header_key is not None:
+        headers["idempotency-key"] = header_key
+    with TestClient(app) as client:
+        responses = [
+            client.post("/v1/workspaces/ws-1/runs", json=payload, headers=headers) for _ in range(2)
+        ]
+    assert [response.status_code for response in responses] == [503, 202]
+    assert [call.headers.get("idempotency-key") for call in calls] == [effective, effective]
+    assert len(store.bindings) == 1 and not store.complete_calls
+    assert all(call[3] == effective for call in store.reserve_calls)
+
+
+@pytest.mark.parametrize("blank_key", [None, "", "   "])
+def test_workflow_keyless_start_does_not_invent_a_gateway_key(
+    settings: Settings, blank_key: str | None
+) -> None:
+    """Keyless requests retain Workflow UUIDv4 semantics without a hidden generated key."""
+    router, calls = _recording_router(status_code=202)
+    store = _BindingStore()
+    app = create_app(
+        settings=settings,
+        auth_client=_auth_client(),
+        downstream_router=router,
+        metadata_store=store,
+    )
+    headers = dict(AUTH_HEADERS)
+    payload = {"workflowVersionId": "ws-1/example@1"}
+    if blank_key is not None:
+        headers["idempotency-key"] = blank_key
+        payload["idempotencyKey"] = blank_key
+    with TestClient(app) as client:
+        for _ in range(2):
+            assert (
+                client.post(
+                    "/v1/workspaces/ws-1/runs",
+                    json=payload,
+                    headers=headers,
+                ).status_code
+                == 202
+            )
+    assert len(calls) == 2 and not store.reserve_calls
+    assert all("idempotency-key" not in call.headers for call in calls)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [b"{", b'{"idempotencyKey": 3}', b"[" * 1100 + b"]" * 1100, b"1" * 5000],
+)
+def test_workflow_body_validation_remains_with_the_downstream_owner(
+    settings: Settings, body: bytes
+) -> None:
+    """Keep domain validation and parser-limit handling with Workflow, not the transport seam."""
+    router, calls = _recording_router(status_code=422)
+    app = create_app(
+        settings=settings,
+        auth_client=_auth_client(),
+        downstream_router=router,
+        metadata_store=_BindingStore(),
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/workspaces/ws-1/runs",
+            content=body,
+            headers={
+                **AUTH_HEADERS,
+                "content-type": "application/json",
+                "idempotency-key": "supplied",
+            },
+        )
+    assert response.status_code == 422
+    assert len(calls) == 1 and calls[0].content == body
+    assert calls[0].headers["idempotency-key"] == "supplied"
+
+
+def test_workflow_body_key_overrides_the_gateway_header_binding(settings: Settings) -> None:
+    """Two distinct body keys cannot conflict merely because an ignored header was reused."""
+    router, calls = _recording_router(status_code=202)
+    app = create_app(
+        settings=settings,
+        auth_client=_auth_client(),
+        downstream_router=router,
+        metadata_store=_BindingStore(),
+    )
+    with TestClient(app) as client:
+        for body_key in ("first", "second"):
+            assert (
+                client.post(
+                    "/v1/workspaces/ws-1/runs",
+                    json={"workflowVersionId": "ws-1/example@1", "idempotencyKey": body_key},
+                    headers={**AUTH_HEADERS, "idempotency-key": "ignored"},
+                ).status_code
+                == 202
+            )
+    assert [call.headers["idempotency-key"] for call in calls] == ["first", "second"]
 
 
 def test_write_pipeline_forwards_and_records_each_stage(settings: Settings) -> None:

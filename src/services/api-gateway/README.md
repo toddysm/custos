@@ -76,10 +76,19 @@ timeout for Trigger's bounded 60-second command; connection/write/pool timeouts
 and unrelated routes are unchanged. Their idempotency keys bind the concrete
 path/body but do not cache outcomes: identical retries reconcile the authoritative
 per-entry claim after contention or outage. Divergent key reuse still conflicts.
-Other writes retain response-snapshot idempotency. See the
+Other ordinary writes retain response-snapshot idempotency. See the
 [recovery contract](../../../docs/developers/trigger-api.md#dead-letter-administration).
 Recovery writes fail closed with 503 when the Gateway metadata binding store is
 absent or unavailable; they never fall back to unbound forwarding.
+
+Public Workflow starts are a separate reconciliation path: Gateway matches
+Workflow's trimmed, nonempty body-key-over-header precedence and forwards that
+key without caching HTTP outcomes or blocking identical retries in flight.
+Retries after scheduling failure or a lost response reach durable Workflow
+acceptance. No missing key is generated: genuinely keyless requests retain
+UUIDv4 behavior. With no Gateway store, Workflow still owns durable keyed
+acceptance; configured store failures remain503. Starts use the same bounded
+70-second downstream read budget. Domain validation remains with Workflow.
 
 The anonymous Webhook
 Pass-through ([webhook.py](src/custos_gateway/routes/webhook.py) mounts

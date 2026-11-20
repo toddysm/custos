@@ -34,7 +34,13 @@ token and never database, Kubernetes, mesh or server-side execution credentials.
 Before installation, the fixture explicitly enables caller-bound public starts
 and provisions a matching binding with a separate execution credential for the
 same workspace account; it does not borrow the background executor.
-Completion evidence
+It also seeds a bounded waiting Workflow. The owned runner invokes the
+production execution client inside the actual Trigger container/sidecar,
+using the explicitly provisioned operator's `run:cancel` grant. A separate
+Workflow-container production client must observe actual runtime termination,
+and a second public-only Job must read back `cancelled`, not merely `cancelling`.
+No caller headers are fabricated in this deployed proof and no private
+credential is added to the public client. Completion/cancellation evidence
 is tied to the tested commit, not merely HTTP acceptance. This does not certify
 receiver effects, activity execution or the legacy protected Auth administration
 routes. Workflow's managed configuration sets `WF_GATEWAY_NAMESPACE` to the

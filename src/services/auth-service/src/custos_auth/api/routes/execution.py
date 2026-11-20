@@ -1,4 +1,4 @@
-"""Credential-backed, operation-scoped context exchange for background execution.
+"""Credential-backed, operation-scoped exchange for private workflow and background operations.
 
 Unlike the legacy signing RPC, the request cannot assert an arbitrary grant,
 audience, caller or lifetime. The account credential and current authorization
@@ -79,7 +79,7 @@ def execution_caller(request: Request, settings: Settings, operation: ExecutionO
         raise ExecutionUnavailable("execution context exchange is not enabled")
     caller = (
         settings.execution_trigger_app_id
-        if operation in ("workflow-start", "workflow-resume")
+        if operation in ("workflow-start", "workflow-resume", "workflow-cancel")
         else settings.execution_workflow_app_id
     )
     if operation == "connector-credentials" or (

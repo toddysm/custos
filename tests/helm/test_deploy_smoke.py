@@ -515,8 +515,10 @@ def test_public_preparation_preserves_dsn_and_separates_credentials(
     ]
 
 
+@pytest.mark.parametrize("run_id", [None, "cancelled-root"])
 def test_public_workflow_client_inherits_only_public_policy_identity(
     monkeypatch: pytest.MonkeyPatch,
+    run_id: str | None,
 ) -> None:
     """The lifecycle probe has no seed/mesh authority despite using a production image."""
     monkeypatch.setenv("GITHUB_SHA", TAG)
@@ -525,8 +527,9 @@ def test_public_workflow_client_inherits_only_public_policy_identity(
         for row in managed_render()
         if row["kind"] == "Pod" and row["metadata"]["name"] == "custos-smoke-test"
     )
-    job = public.client_job(original, "public-client:" + TAG)
+    job = public.client_job(original, "public-client:" + TAG, run_id=run_id)
     pod = job["spec"]["template"]
+    assert set(pod) == {"metadata", "spec"}
     assert pod["metadata"] == {"labels": original["metadata"]["labels"]}
     spec = pod["spec"]
     assert spec["automountServiceAccountToken"] is False
@@ -549,7 +552,11 @@ def test_public_start_acceptance_does_not_count_as_runtime_completion(
         """Return HTTP-shaped acceptance and pending state without real completion."""
         nonlocal calls
         calls += 1
-        return {"runId": "synthetic-run"} if method == "POST" else {"status": "pending"}
+        return (
+            {"runId": "074171de-bc84-5ea4-b636-1135477620e1"}
+            if method == "POST"
+            else {"status": "pending"}
+        )
 
     monkeypatch.setitem(public.exercise.__globals__, "request", request)
     times = iter((0.0, 121.0))
@@ -571,6 +578,7 @@ def test_public_start_acceptance_does_not_count_as_runtime_completion(
         ("publicReadbackVerified", False),
         ("fullReceiverCertification", True),
         ("runId", None),
+        ("cancellationRunId", None),
     ],
 )
 def test_public_lifecycle_evidence_rejects_stale_or_incomplete_reports(
@@ -584,7 +592,113 @@ def test_public_lifecycle_evidence_rejects_stale_or_incomplete_reports(
         "publicReadbackVerified": True,
         "fullReceiverCertification": False,
         "runId": "synthetic",
+        "cancellationRunId": "synthetic-waiting",
     }
     report[field] = value
     with pytest.raises(ValueError, match="stale or incomplete"):
         public.report_from_logs(public.REPORT_PREFIX + json.dumps(report), TAG)
+
+
+@pytest.mark.parametrize("status", ["cancelled", "cancelling"])
+def test_private_probe_uses_real_execution_client_and_requires_terminal_cancellation(
+    monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    """Keep actual credential exchange and reject in-progress cancellation without forging peers."""
+    import time
+
+    import httpx
+
+    trigger = next(
+        row
+        for row in managed_render(public_execution=True)
+        if row["kind"] == "Deployment"
+        and row["metadata"]["name"] == "custos-trigger-service"
+    )
+    for row in trigger["spec"]["template"]["spec"]["containers"][0]["env"]:
+        if "value" in row:
+            monkeypatch.setenv(row["name"], row["value"])
+    monkeypatch.setenv("DAPR_API_TOKEN", "synthetic-sidecar-api-token")
+    calls: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        """Double only local Dapr I/O; no caller app/namespace headers may originate in the client."""
+        calls.append(request)
+        assert request.url.host == "127.0.0.1"
+        assert request.headers["dapr-api-token"] == "synthetic-sidecar-api-token"
+        assert "dapr-caller-app-id" not in request.headers
+        assert "dapr-caller-namespace" not in request.headers
+        if request.method == "GET":
+            assert public.EXECUTION_RESOURCE in request.url.path
+            return httpx.Response(200, json={"token": "synthetic-server-credential"})
+        if request.url.path.endswith("/rpc/callctx.exchangeExecution"):
+            assert json.loads(request.content) == {
+                "token": "synthetic-server-credential",
+                "workspaceId": public.WORKSPACE,
+                "principalId": public.OPERATOR,
+                "operation": "workflow-cancel",
+            }
+            now = int(time.time())
+            return httpx.Response(
+                200,
+                json={"token": "e30.e30.test", "iat": now, "exp": now + 300},
+            )
+        assert request.url.path.endswith("/internal/runs/root:cancel")
+        return httpx.Response(
+            202,
+            json={"runId": "root", "workspaceId": public.WORKSPACE, "status": status},
+        )
+
+    original = httpx.AsyncClient
+
+    def client(**kwargs: Any) -> httpx.AsyncClient:
+        """Retain the production client's ownership/timeouts while replacing only its sockets."""
+        return original(transport=httpx.MockTransport(respond), **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+    if status == "cancelling":
+        with pytest.raises(ValueError, match="terminal run"):
+            asyncio.run(public.private_cancellation("root", TAG))
+    else:
+        result = asyncio.run(public.private_cancellation("root", TAG))
+        assert result["privateCancellationVerified"] is True
+    assert len(calls) == 3
+
+
+def test_private_proof_executes_only_in_an_actual_ready_tested_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wrong images fail before exec; the valid program is Python source, not a quoted JSON input."""
+    monkeypatch.setenv("NS", "custos-system")
+    monkeypatch.setenv("IMAGE_PREFIX", "localhost:5001/custos")
+    image = "localhost:5001/custos/trigger-service:" + TAG
+    pod: dict[str, Any] = {
+        "metadata": {"name": "actual-trigger"},
+        "spec": {"containers": [{"name": "trigger-service", "image": "unreviewed"}]},
+        "status": {"containerStatuses": [{"name": "trigger-service", "ready": True}]},
+    }
+    executed: list[list[str]] = []
+
+    def command(args: list[str], payload: object = None, *, timeout: int = 360) -> str:
+        """Serve deployment/pod discovery and inspect the bounded exact-container exec."""
+        if "deployment/custos-trigger-service" in args:
+            return json.dumps(
+                {"spec": {"selector": {"matchLabels": {"app": "trigger"}}}}
+            )
+        if "pods" in args:
+            return json.dumps({"items": [pod]})
+        assert payload is None and timeout == 150
+        assert args[3:7] == ["exec", "actual-trigger", "-c", "trigger-service"]
+        compile(args[args.index("--") + 3], "<actual-container-proof>", "exec")
+        executed.append(args)
+        return f"{public.REPORT_PREFIX}{json.dumps({'sha': TAG, 'runId': 'root'})}"
+
+    monkeypatch.setitem(sys.modules, "runtime", SimpleNamespace(command=command))
+    with pytest.raises(RuntimeError, match="no ready actual"):
+        public.service_probe("trigger-service", "cancel", "root", TAG)
+    assert not executed
+    pod["spec"]["containers"][0]["image"] = image
+    assert (
+        public.service_probe("trigger-service", "cancel", "root", TAG)["runId"]
+        == "root"
+    )
+    assert len(executed) == 1

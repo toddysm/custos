@@ -47,7 +47,8 @@ from custos_gateway.router import DownstreamRouter
 from custos_gateway.routes.registry import registry_required_permissions
 from custos_gateway.settings import Settings
 
-WRITE_PATH = "/v1/workspaces/ws-1/runs"
+# Ordinary writes keep cached replay/in-flight protection; starts now reconcile downstream.
+WRITE_PATH = "/v1/workspaces/ws-1/runs/run-1:cancel"
 READ_PATH = "/v1/workspaces/ws-1/runs"
 AUTH_HEADERS: dict[str, str] = {"authorization": "Bearer token-123"}
 JSON_WRITE_HEADERS: dict[str, str] = {**AUTH_HEADERS, "content-type": "application/json"}
