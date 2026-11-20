@@ -7,8 +7,27 @@ cluster** — either [`kind`](https://kind.sigs.k8s.io/) or **Docker Desktop
 Kubernetes** — using images you build locally. It is the fastest way to try the
 platform on a laptop.
 
-It follows the same `connected-eval` profile as the project's deployment
+It starts from the same `connected-eval` profile as the project's deployment
 regression gate ([`.github/workflows/deploy-smoke.yml`](../../../.github/workflows/deploy-smoke.yml)).
+The hosted gate additionally opts into the managed runtime using
+[`runtime.py`](../../../tests/helm/smoke/runtime.py): commit-tagged real service
+images, digest-pinned sandbox helpers, a CSI artifact claim, private TLS, named
+Secrets and a workspace-scoped execution account. It runs the real migration
+and bootstrap code before service admission; ordinary Helm hooks still run.
+This ordering avoids waiting for a scheduler whose execution account would
+otherwise only be seeded by a post-install hook after readiness.
+
+The base profile deliberately leaves runtime activation off. An unconfigured
+Activity Runtime Manager returns **503**, even in evaluation mode; do not
+disable its readiness probe or set an artificial ready flag. The hosted overlay
+is a disposable test fixture, not a replacement for provisioning the
+[managed execution prerequisites](../../operations/execution-bindings.md).
+Its readiness/Helm-test evidence does not certify receiver effects, activity
+execution, or enforced network isolation; those remain separate certification.
+The authentication exercised here is the credential-backed execution exchange,
+not the legacy protected Auth administration routes.
+With managed deny-all policies, the Helm test client receives only DNS and
+public Gateway access, not controller mesh, database or Kubernetes API access.
 For a managed/remote cluster, follow
 [Install — connected](install-connected.md) instead; this page is the local
 variant of the same flow.
